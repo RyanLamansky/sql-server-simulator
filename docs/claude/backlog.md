@@ -377,6 +377,14 @@ Uncovered code here has consistently meant *wrong* code, not just unwatched code
 
 ## Design choices to revisit
 
+Queued structural refactors (behavior-neutral, one per commit, each proven by the full gate plus a timing A/B; measured 2026-09-29, when simulator source had grown from 193k to 276k lines over five days):
+
+- **`ParserContext`'s position flags → scoped guards.** 53 fields, 25 of them bools saying where the parse is (`InOverBody`, `NextValueForRejection`, `AllowNextValueForInFromClause`, `ScalarOnlyOperand` …), managed by 75 hand-written save / `try` / `finally` restore sites; `using`-scoped guards (and grouping the positional bits) remove the missed-restore bug class, and an SSS analyzer could then enforce the shape.
+- **Context scope audit.** `BatchContext` (66 fields) and `StatementContext` (27) absorbed Query Store, `STATISTICS IO`, identity scopes, the module-database scope and DML plans; confirm each field sits in the scope its lifetime matches, per CLAUDE.md's context layering.
+- **The statement dispatcher's cross-cutting phases.** `DispatchOneStatementCore` (724 lines) and `DispatchFramedStatement` (632) carry DONE tokens, Query Store capture, `STATISTICS IO / TIME`, implicit transactions, the `XACT_STATE` mark, plan and DML-plan replay and error attribution inline; an explicit per-statement before / run / after frame would take new cross-cutting features without growing them — message and error ordering is probe-pinned, so this one needs the widest differential battery.
+- **One DML-target layer for INSERT / UPDATE / DELETE / MERGE.** Each routes its target separately across table, view, join view, INSTEAD OF, remote and OUTPUT paths (`Simulation.Merge.cs` alone names views 203 times); resolving the target kind once and dispatching would make DML fidelity work cheaper.
+- **`Selection`'s long phases** (`ParseSingleFromSourceCore` 735 lines, `ParseQueryBlock` 675, `BuildSqlProjection` 703, the aggregate builder 703) split opportunistically, when feature work next touches them — they sit on measured hot paths, so each extraction takes a perf A/B.
+
 Shipped intentionally and correct under their documented contract, but the original rationale may have aged.
 Worth a look before re-affirming or changing.
 (Rationale lives in [`scalars.md`](scalars.md)'s divergence notes and CLAUDE.md's Quirks.)
