@@ -774,16 +774,9 @@ internal sealed partial class Selection
     /// </summary>
     private static Selection ParseUnionExceptChain(ParserContext context, QueryScope scope)
     {
-        var savedRejection = context.NextValueForRejection;
+        using var rejection = ParserScope.Save(ref context.NextValueForRejection);
         var sequenceDrawsBefore = context.SequenceDrawsParsed;
-        try
-        {
-            return ParseUnionExceptChainCore(context, scope, sequenceDrawsBefore);
-        }
-        finally
-        {
-            context.NextValueForRejection = savedRejection;
-        }
+        return ParseUnionExceptChainCore(context, scope, sequenceDrawsBefore);
     }
 
     private static Selection ParseUnionExceptChainCore(ParserContext context, QueryScope scope, int sequenceDrawsBefore)
@@ -831,7 +824,7 @@ internal sealed partial class Selection
     {
         if (context.SequenceDrawsParsed > sequenceDrawsBefore)
             throw SimulatedSqlException.NextValueForNotAllowedWithDedup();
-        _ = context.EnterNextValueForScope(NextValueForScope.Deduplicating);
+        context.RaiseNextValueForFloor(NextValueForScope.Deduplicating);
     }
 
     /// <summary>
@@ -858,16 +851,9 @@ internal sealed partial class Selection
     /// </summary>
     internal static Selection ParseIntersectChain(ParserContext context, QueryScope scope, bool isFirstBranch)
     {
-        var savedRejection = context.NextValueForRejection;
+        using var rejection = ParserScope.Save(ref context.NextValueForRejection);
         var sequenceDrawsBefore = context.SequenceDrawsParsed;
-        try
-        {
-            return ParseIntersectChainCore(context, scope, isFirstBranch, sequenceDrawsBefore);
-        }
-        finally
-        {
-            context.NextValueForRejection = savedRejection;
-        }
+        return ParseIntersectChainCore(context, scope, isFirstBranch, sequenceDrawsBefore);
     }
 
     private static Selection ParseIntersectChainCore(ParserContext context, QueryScope scope, bool isFirstBranch, int sequenceDrawsBefore)
@@ -934,44 +920,20 @@ internal sealed partial class Selection
     /// </summary>
     internal static Selection ParseSingleSelectStatement(ParserContext context, QueryScope scope, bool allowOrderBy)
     {
-        // Save / restore the parser's aggregate and window collectors so
-        // each branch gets its own scope. Aggregates and window functions
-        // parsed inside the projection / HAVING register into the
-        // respective lists; the executor uses the populated lists to
-        // switch into aggregate or windowed-projection mode.
-        var savedAggregateCollector = context.AggregateCollector;
-        var savedWindowCollector = context.WindowCollector;
-        // ParseInner installs this scope's FROM sources as the outer resolver
-        // so the select list can bind against them; restoring it here keeps
-        // the enclosing scope intact on every exit path, including throws.
-        var savedOuterTypeResolver = context.OuterTypeResolver;
-        var savedOuterMaskResolver = context.OuterMaskResolver;
-        // The full-text predicates and the spatial property form bind against
-        // this scope's own sources; a nested query installs its own and the
-        // enclosing one comes back here.
-        var savedScopeSources = context.ScopeSources;
-        // A nested query body owns its own name scope, so its column references
-        // are not the enclosing FROM source's arguments — suspend the sibling
-        // collector for its duration.
-        var savedFromSourceColumnSink = context.FromSourceColumnSink;
-        context.FromSourceColumnSink = null;
-        // DISTINCT / TOP raise the branch's NEXT VALUE FOR refusal floor
-        // inside ParseInner; the frame that installed it comes back here.
-        var savedNextValueForRejection = context.NextValueForRejection;
+        // Each branch gets its own collector scope: aggregates and window
+        // functions parsed inside the projection / HAVING register into these
+        // lists, and the executor uses the populated lists to switch into
+        // aggregate or windowed-projection mode. ParseInner installs this
+        // scope's FROM sources as the outer resolvers and scope sources and
+        // raises the branch's NEXT VALUE FOR floor for DISTINCT / TOP; the
+        // frame puts all of them back for the enclosing scope on every exit
+        // path. A nested query body owns its own name scope, so the frame also
+        // suspends an enclosing FROM source's sibling collector.
         var aggregates = new List<AggregateExpression>();
         var windows = new List<WindowExpression>();
-        var savedGraphPathAggregates = context.GraphPathAggregates;
-        context.GraphPathAggregates = [];
-        var savedEnclosingAggregateCollector = context.EnclosingAggregateCollector;
-        context.EnclosingAggregateCollector = savedAggregateCollector;
-        context.AggregateCollector = aggregates;
-        context.WindowCollector = windows;
+        using var queryBlock = context.EnterQueryBlock(aggregates, windows);
         var bindErrors = context.Batch.BindErrors;
         bindErrors?.OpenScope(context.Token);
-        var savedDeferNextValueFor = context.DeferNextValueRefusals;
-        var savedDeferredNextValueRefs = context.DeferredNextValueRefs;
-        context.DeferNextValueRefusals = true;
-        context.DeferredNextValueRefs = null;
         try
         {
             var parsed = ParseInner(context, scope, aggregates, windows, allowOrderBy);
@@ -982,18 +944,7 @@ internal sealed partial class Selection
         }
         finally
         {
-            context.DeferNextValueRefusals = savedDeferNextValueFor;
-            context.DeferredNextValueRefs = savedDeferredNextValueRefs;
             bindErrors?.CloseScope(context.Token);
-            context.AggregateCollector = savedAggregateCollector;
-            context.WindowCollector = savedWindowCollector;
-            context.GraphPathAggregates = savedGraphPathAggregates;
-            context.EnclosingAggregateCollector = savedEnclosingAggregateCollector;
-            context.OuterTypeResolver = savedOuterTypeResolver;
-            context.OuterMaskResolver = savedOuterMaskResolver;
-            context.ScopeSources = savedScopeSources;
-            context.FromSourceColumnSink = savedFromSourceColumnSink;
-            context.NextValueForRejection = savedNextValueForRejection;
         }
     }
 
@@ -1291,14 +1242,9 @@ internal sealed partial class Selection
         // parenthesized expression (numeric, arithmetic, @variable, or a
         // parenthesized scalar subquery) and land on the following token.
         Expression expression;
-        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Clause);
-        try
+        using (context.EnterNextValueForScope(NextValueForScope.Clause))
         {
             expression = Expression.Parse(context);
-        }
-        finally
-        {
-            context.NextValueForRejection = savedRejection;
         }
         var percent = false;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Percent })
@@ -1366,19 +1312,9 @@ internal sealed partial class Selection
         // A query block owns its named windows, and its select list takes a
         // windowed function wherever the block itself sits — a subquery in an
         // enclosing WHERE included (probed 2026-09-29 against SQL Server 2025).
-        var savedWindowScope = context.NamedWindowScope;
-        var savedAllowsWindows = context.AllowsWindowExpressions;
-        context.NamedWindowScope = (context.PendingNamedWindows.Count, context.NamedWindowDefinitions.Count);
-        context.AllowsWindowExpressions = true;
-        try
-        {
-            return ParseQueryBlock(context, scope, aggregates, windows, allowOrderBy);
-        }
-        finally
-        {
-            context.NamedWindowScope = savedWindowScope;
-            context.AllowsWindowExpressions = savedAllowsWindows;
-        }
+        using var windowScope = ParserScope.Enter(ref context.NamedWindowScope, (context.PendingNamedWindows.Count, context.NamedWindowDefinitions.Count));
+        using var allowsWindows = ParserScope.Enter(ref context.AllowsWindowExpressions, true);
+        return ParseQueryBlock(context, scope, aggregates, windows, allowOrderBy);
     }
 
     private static Selection ParseQueryBlock(ParserContext context, QueryScope scope, List<AggregateExpression> aggregates, List<WindowExpression> windows, bool allowOrderBy)
@@ -1413,7 +1349,7 @@ internal sealed partial class Selection
 
         // A DISTINCT statement's Msg 11721 outranks the TOP count's own clause refusal.
         if (distinct)
-            _ = context.EnterNextValueForScope(NextValueForScope.Deduplicating);
+            context.RaiseNextValueForFloor(NextValueForScope.Deduplicating);
 
         if (firstToken is ReservedKeyword { Keyword: Keyword.Top })
         {
@@ -1430,21 +1366,25 @@ internal sealed partial class Selection
             // Rejecting the prefix here also keeps ParsePrimary on its
             // stops-before-any-binary-operator path — a sign would otherwise
             // absorb the following multiplicative chain, star included.
-            var savedRejectInTop = context.EnterNextValueForScope(NextValueForScope.Clause);
-            context.InTopCount = true;
-            try
+            using (context.EnterNextValueForScope(NextValueForScope.Clause))
             {
-                context.RecursiveBranchConstructs.TopOrOffset = true;
-                // A string literal is no legacy count either (`TOP '1'`, Msg 102
-                // near it; probed 2026-09-24).
-                if (context.MoveNextRequiredReturnSelf().Token is Operator { Character: '+' or '-' or '~' } or Literal { Value.Type.Category: SqlTypeCategory.String })
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                topExpression = Expression.ParsePrimary(context);
-            }
-            finally
-            {
-                context.InTopCount = false;
-                context.NextValueForRejection = savedRejectInTop;
+                // InTopCount goes back to false rather than to its entry value,
+                // so a TOP inside a subquery of this count clears it for the
+                // rest of this count; a guard would restore true there.
+                context.InTopCount = true;
+                try
+                {
+                    context.RecursiveBranchConstructs.TopOrOffset = true;
+                    // A string literal is no legacy count either (`TOP '1'`, Msg 102
+                    // near it; probed 2026-09-24).
+                    if (context.MoveNextRequiredReturnSelf().Token is Operator { Character: '+' or '-' or '~' } or Literal { Value.Type.Category: SqlTypeCategory.String })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    topExpression = Expression.ParsePrimary(context);
+                }
+                finally
+                {
+                    context.InTopCount = false;
+                }
             }
             // `TOP n PERCENT` — cap becomes ceil(n% × rowcount). PERCENT is a
             // reserved keyword.
@@ -1486,9 +1426,9 @@ internal sealed partial class Selection
         // set, or the query contains TOP or OFFSET") and refuses on the
         // option alone (probe-confirmed).
         if (distinct)
-            _ = context.EnterNextValueForScope(NextValueForScope.Deduplicating);
+            context.RaiseNextValueForFloor(NextValueForScope.Deduplicating);
         else if (topExpression is not null || context.Connection.RowCountLimit > 0)
-            _ = context.EnterNextValueForScope(NextValueForScope.RowLimited);
+            context.RaiseNextValueForFloor(NextValueForScope.RowLimited);
 
         // Msg 11723 is a property of the finished statement rather than of the
         // reference's own position, so it is settled below against this
@@ -2370,8 +2310,7 @@ internal sealed partial class Selection
         context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
         var sources = new List<FromSource>();
         var joins = new List<JoinSpec>();
-        var savedAllowNextValueFor = context.AllowNextValueForInFromClause;
-        context.AllowNextValueForInFromClause = true;
+        using var mutationFrom = ParserScope.Enter(ref context.AllowNextValueForInFromClause, true);
         try
         {
             ParseSourcesAndJoins(context, QueryScope.Statement, sources, joins);
@@ -2383,7 +2322,6 @@ internal sealed partial class Selection
         }
         finally
         {
-            context.AllowNextValueForInFromClause = savedAllowNextValueFor;
             context.RestoreCheckpoint(atSet);
         }
     }
@@ -2696,15 +2634,8 @@ internal sealed partial class Selection
     private static BooleanExpression ParseJoinOn(ParserContext context, QueryScope scope, List<FromSource> sources, int scopeStart)
     {
         context.MoveNextRequired();
-        var savedRejectInOn = context.EnterNextValueForScope(NextValueForScope.Clause);
-        try
-        {
-            return ParseOnPredicateWithScope(context, sources, scopeStart, scope.OuterTypeResolver);
-        }
-        finally
-        {
-            context.NextValueForRejection = savedRejectInOn;
-        }
+        using var rejection = context.EnterNextValueForScope(NextValueForScope.Clause);
+        return ParseOnPredicateWithScope(context, sources, scopeStart, scope.OuterTypeResolver);
     }
 
     /// <summary>
@@ -2727,43 +2658,25 @@ internal sealed partial class Selection
     {
         if (scope.OuterTypeResolver is null)
             return parse();
-        var saved = context.OuterTypeResolver;
-        context.OuterTypeResolver = scope.OuterTypeResolver;
-        try
-        {
-            return parse();
-        }
-        finally
-        {
-            context.OuterTypeResolver = saved;
-        }
+        using var outer = ParserScope.Enter(ref context.OuterTypeResolver, scope.OuterTypeResolver);
+        return parse();
     }
 
     private static BooleanExpression ParseOnPredicateWithScope(ParserContext context, List<FromSource> sources, int scopeStart, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         var scope = sources.GetRange(scopeStart, sources.Count - scopeStart).ToArray();
-        var saved = context.OuterTypeResolver;
-        var savedMatchScope = context.MatchScope;
-        context.OuterTypeResolver = name => ResolveColumnTypeAcrossSources(scope, name, outerTypeResolver);
-        // A MATCH in an ON binds too, against the ON's own sources, every one
-        // of them joined (Msg 13920).
-        context.MatchScope = new Expressions.MatchScope { Sources = scope, AllJoined = true };
         // An aggregate the ON would own — written there, or moved there from a
         // subquery reading only the join's columns — is Msg 1015; one reading
         // only an enclosing query's columns belongs to that query.
-        var savedCollector = context.AggregateCollector;
         var onAggregates = new List<AggregateExpression>();
-        context.AggregateCollector = onAggregates;
         BooleanExpression predicate;
-        try
+        using (ParserScope.Enter(ref context.OuterTypeResolver, name => ResolveColumnTypeAcrossSources(scope, name, outerTypeResolver)))
+        // A MATCH in an ON binds too, against the ON's own sources, every one
+        // of them joined (Msg 13920).
+        using (ParserScope.Enter(ref context.MatchScope, new Expressions.MatchScope { Sources = scope, AllJoined = true }))
+        using (ParserScope.Enter(ref context.AggregateCollector, onAggregates))
         {
             predicate = BooleanExpression.SimplifyForFilter(BooleanExpression.Parse(context), context);
-        }
-        finally
-        {
-            context.OuterTypeResolver = saved;
-            context.MatchScope = savedMatchScope;
-            context.AggregateCollector = savedCollector;
         }
         RehomeAggregatesOverOuterScope(context.Batch, [.. sources], onAggregates, outerTypeResolver);
         RefuseClauseAggregates(context.Batch, onAggregates, SimulatedSqlException.AggregateInOnClause());
@@ -2832,17 +2745,10 @@ internal sealed partial class Selection
         ParserContext context,
         QueryScope scope)
     {
-        var saved = context.NextValueForRejection;
+        using var rejection = ParserScope.Save(ref context.NextValueForRejection);
         if (!context.AllowNextValueForInFromClause)
-            _ = context.EnterNextValueForScope(NextValueForScope.Nested);
-        try
-        {
-            return Selection.Parse(context, scope);
-        }
-        finally
-        {
-            context.NextValueForRejection = saved;
-        }
+            context.RaiseNextValueForFloor(NextValueForScope.Nested);
+        return Selection.Parse(context, scope);
     }
 
     /// <summary>
@@ -2861,9 +2767,8 @@ internal sealed partial class Selection
         List<FromSource> sourcesSoFar,
         List<Reference> siblingCandidates)
     {
-        var saved = context.FromSourceColumnSink;
         var collectedBefore = siblingCandidates.Count;
-        context.FromSourceColumnSink = siblingCandidates;
+        using var sink = ParserScope.Enter(ref context.FromSourceColumnSink, siblingCandidates);
         try
         {
             return ParseSingleFromSource(context, scope);
@@ -2879,10 +2784,6 @@ internal sealed partial class Selection
             RejectSiblingReferences(siblingCandidates.GetRange(collectedBefore, siblingCandidates.Count - collectedBefore),
                 sourcesSoFar, scope.OuterTypeResolver);
             throw;
-        }
-        finally
-        {
-            context.FromSourceColumnSink = saved;
         }
     }
 
@@ -3066,16 +2967,10 @@ internal sealed partial class Selection
             {
                 // An argument reading the left side's masked column masks the function's columns.
                 var tvfOuterMask = context.OuterMaskResolver;
+                using var outerMask = ParserScope.Save(ref context.OuterMaskResolver);
                 if (context.Batch.Connection.Simulation.DeclaresDataMasks)
                     context.OuterMaskResolver = name => ScopedColumnMask(leftSnapshotForName, name, tvfOuterMask);
-                try
-                {
-                    return AcrossApplyBoundary(context, leftSnapshotForName, () => ParseSingleFromSource(context, scope.WithOuter(chainedResolverForName)));
-                }
-                finally
-                {
-                    context.OuterMaskResolver = tvfOuterMask;
-                }
+                return AcrossApplyBoundary(context, leftSnapshotForName, () => ParseSingleFromSource(context, scope.WithOuter(chainedResolverForName)));
             }
             // A function-call shape that didn't resolve to a known TVF is a
             // deferred name-resolution error (Msg 208), not a syntax error:
@@ -3116,16 +3011,10 @@ internal sealed partial class Selection
         {
             // A cell reading the left side's masked column masks the column it feeds.
             var valuesOuterMask = context.OuterMaskResolver;
+            using var outerMask = ParserScope.Save(ref context.OuterMaskResolver);
             if (context.Batch.Connection.Simulation.DeclaresDataMasks)
                 context.OuterMaskResolver = name => ScopedColumnMask(leftSnapshot, name, valuesOuterMask);
-            try
-            {
-                return AcrossApplyBoundary(context, leftSnapshot, () => ParseValuesDerivedTable(context, chainedResolver));
-            }
-            finally
-            {
-                context.OuterMaskResolver = valuesOuterMask;
-            }
+            return AcrossApplyBoundary(context, leftSnapshot, () => ParseValuesDerivedTable(context, chainedResolver));
         }
 
         if (afterApplyParen is not ReservedKeyword { Keyword: Keyword.Select })
@@ -3133,16 +3022,12 @@ internal sealed partial class Selection
 
         // The body projects the left side's masked columns as its own.
         var savedOuterMask = context.OuterMaskResolver;
-        if (context.Batch.Connection.Simulation.DeclaresDataMasks)
-            context.OuterMaskResolver = name => ScopedColumnMask(leftSnapshot, name, savedOuterMask);
         Selection lateralPlan;
-        try
+        using (ParserScope.Save(ref context.OuterMaskResolver))
         {
+            if (context.Batch.Connection.Simulation.DeclaresDataMasks)
+                context.OuterMaskResolver = name => ScopedColumnMask(leftSnapshot, name, savedOuterMask);
             lateralPlan = AcrossApplyBoundary(context, leftSnapshot, () => ParseNestedQueryRejectingNextValueFor(context, QueryScope.Nested(QueryPosition.Derived, chainedResolver)));
-        }
-        finally
-        {
-            context.OuterMaskResolver = savedOuterMask;
         }
 
         var schema = lateralPlan.Schema;
@@ -3176,17 +3061,11 @@ internal sealed partial class Selection
     /// </summary>
     private static T AcrossApplyBoundary<T>(ParserContext context, FromSource[] leftSources, Func<T> parse)
     {
-        var savedCollector = context.AggregateCollector;
-        var boundary = new ApplyAggregateBoundary(leftSources, savedCollector);
-        context.AggregateCollector = boundary;
+        var boundary = new ApplyAggregateBoundary(leftSources, context.AggregateCollector);
         T parsed;
-        try
+        using (ParserScope.Enter(ref context.AggregateCollector, boundary))
         {
             parsed = parse();
-        }
-        finally
-        {
-            context.AggregateCollector = savedCollector;
         }
         foreach (var aggregate in boundary)
         {
@@ -4064,17 +3943,10 @@ internal sealed partial class Selection
         // after the last tuple's ')', which must be the (VALUES …) wrapper's
         // closing ')'. A subquery in a cell reads the same scope a bare cell
         // reference does — under APPLY, the left side.
-        var savedOuter = context.OuterTypeResolver;
-        if (outerTypeResolver is not null)
-            context.OuterTypeResolver = outerTypeResolver;
         List<Expression[]> tuples;
-        try
+        using (ParserScope.Enter(ref context.OuterTypeResolver, outerTypeResolver ?? context.OuterTypeResolver))
         {
             tuples = Simulation.ParseValuesTuples(context);
-        }
-        finally
-        {
-            context.OuterTypeResolver = savedOuter;
         }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -4461,24 +4333,12 @@ internal sealed partial class Selection
     {
         SqlType MyResolver(MultiPartName name) => ResolveColumnTypeAcrossSources(sources, name, scope.OuterTypeResolver);
 
-        var saved = context.OuterTypeResolver;
-        var savedScopeSources = context.ScopeSources;
-        var savedScopeJoins = context.ScopeJoins;
-        context.OuterTypeResolver = MyResolver;
+        using var outer = ParserScope.Enter(ref context.OuterTypeResolver, MyResolver);
         // A WHERE-clause CONTAINS / FREETEXT binds its column specification
         // against these same sources, as does a MATCH, which reads the joins too.
-        context.ScopeSources = sources;
-        context.ScopeJoins = joins;
-        try
-        {
-            ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope);
-        }
-        finally
-        {
-            context.OuterTypeResolver = saved;
-            context.ScopeSources = savedScopeSources;
-            context.ScopeJoins = savedScopeJoins;
-        }
+        using var scopeSources = ParserScope.Enter(ref context.ScopeSources, sources);
+        using var scopeJoins = ParserScope.Enter(ref context.ScopeJoins, joins);
+        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope);
     }
 
     /// <summary>
@@ -4582,16 +4442,12 @@ internal sealed partial class Selection
         // NEXT VALUE FOR (Msg 11720). Toggle the parser-context flags for the
         // duration of those parses; ORDER BY (which DOES allow windows but
         // rejects NEXT VALUE FOR) handled separately below.
-        var savedAllowsWindows = context.AllowsWindowExpressions;
-        var savedRejectNextValueFor = context.NextValueForRejection;
-        context.AllowsWindowExpressions = false;
-        _ = context.EnterNextValueForScope(NextValueForScope.Clause);
-        try
+        using (ParserScope.Enter(ref context.AllowsWindowExpressions, false))
+        using (context.EnterNextValueForScope(NextValueForScope.Clause))
         {
             var collector = context.AggregateCollector;
             var aggregatesBefore = collector?.Count ?? 0;
-            var savedMatchScope = context.MatchScope;
-            try
+            using (ParserScope.Save(ref context.MatchScope))
             {
                 while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
                 {
@@ -4603,10 +4459,6 @@ internal sealed partial class Selection
                     if (context.MatchScope.Edges.Count > 0 || context.MatchScope.ShortestPath is not null)
                         fromClause.Match = context.MatchScope;
                 }
-            }
-            finally
-            {
-                context.MatchScope = savedMatchScope;
             }
             if (collector is not null && collector.Count > aggregatesBefore)
                 fromClause.WhereAggregates = collector.GetRange(aggregatesBefore, collector.Count - aggregatesBefore);
@@ -4630,11 +4482,6 @@ internal sealed partial class Selection
                     BooleanExpression.Parse(context.MoveNextRequiredReturnSelf()).SettleFoldedNullComparisons(context), context);
             }
         }
-        finally
-        {
-            context.AllowsWindowExpressions = savedAllowsWindows;
-            context.NextValueForRejection = savedRejectNextValueFor;
-        }
 
         // Optional trailing WINDOW clause (SQL Server 2022+), between HAVING and
         // ORDER BY: `WINDOW name AS (<over-body>) [, name AS (…)]*`. Defines
@@ -4655,14 +4502,9 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             // ORDER BY rejects NEXT VALUE FOR (Msg 11720), but allows windowed
             // functions. Toggle just the sequence flag for the duration.
-            _ = context.EnterNextValueForScope(NextValueForScope.Clause);
-            try
+            using (context.EnterNextValueForScope(NextValueForScope.Clause))
             {
                 ParseOrderByItems(context, fromClause.OrderBy);
-            }
-            finally
-            {
-                context.NextValueForRejection = savedRejectNextValueFor;
             }
             ConsumeOffsetFetch(context, fromClause);
         }
@@ -5186,16 +5028,8 @@ internal sealed partial class Selection
     private static void ParseOrderByItems(ParserContext context, List<OrderBySpec> orderBy)
     {
         // A reference in an ORDER BY item is refused where it parses.
-        var savedDeferNextValueFor = context.DeferNextValueRefusals;
-        context.DeferNextValueRefusals = false;
-        try
-        {
-            ParseOrderByItemsCore(context, orderBy);
-        }
-        finally
-        {
-            context.DeferNextValueRefusals = savedDeferNextValueFor;
-        }
+        using var deferral = ParserScope.Enter(ref context.DeferNextValueRefusals, false);
+        ParseOrderByItemsCore(context, orderBy);
     }
 
     private static void ParseOrderByItemsCore(ParserContext context, List<OrderBySpec> orderBy)

@@ -320,14 +320,6 @@ internal sealed class BatchContext
     public bool CalledFunctionBody;
 
     /// <summary>
-    /// Set while <c>CREATE VIEW</c> / <c>ALTER VIEW</c> parses its body on the
-    /// statement's own batch — a module definition binding outside a
-    /// <see cref="CreateTimeBinding"/> batch, which the line a missing object
-    /// reports at depends on (see <see cref="UnresolvableObjectName"/>).
-    /// </summary>
-    public bool BindingViewDefinition;
-
-    /// <summary>
     /// Set while a DML statement through a windowed view or CTE runs the body
     /// to pair its rows, in order, with the base rows they came from, so the
     /// window stage yields them in arrival order rather than in the order
@@ -460,13 +452,6 @@ internal sealed class BatchContext
     public bool? QuotedIdentifiersAfterParse;
 
     /// <summary>
-    /// Depth of <c>IF</c> / <c>WHILE</c> conditions being parsed, which open no
-    /// implicit transaction whatever they read (see
-    /// <see cref="BeginImplicitTransaction"/>).
-    /// </summary>
-    public int ConditionDepth;
-
-    /// <summary>
     /// Opens the transaction <c>SET IMPLICIT_TRANSACTIONS ON</c> gives a
     /// statement that reads or writes an object when none is open — called by
     /// the sites that meet one: a FROM source naming a table, view, table
@@ -484,7 +469,7 @@ internal sealed class BatchContext
         if (!connection.ImplicitTransactions
             || connection.CurrentTransaction is not null
             || this.IsSkipping
-            || this.ConditionDepth > 0
+            || this.Parser.ConditionDepth > 0
             || this.UdfFrame is not null
             || connection.TriggerStatementUndoLog is not null)
         {
@@ -869,18 +854,10 @@ internal sealed class BatchContext
     /// The start line of the last statement this frame ran that real counts
     /// as run — not a bare <c>BEGIN</c>, nor a <c>DECLARE</c> that neither
     /// initializes a variable nor declares a cursor — or 0 before any, and -1
-    /// right after a statement failed. <see cref="PriorStatementLine"/> takes
-    /// it as each statement starts.
+    /// right after a statement failed. <see cref="StatementContext.PriorStatementLine"/>
+    /// takes it as each statement starts.
     /// </summary>
     public int CountedStatementLine;
-
-    /// <summary>
-    /// <see cref="CountedStatementLine"/> as the running statement began: the
-    /// line real reports an <c>OPEN</c> or <c>FETCH</c> of a missing cursor
-    /// or an unallocated cursor variable at (probed 2026-09-29 against SQL
-    /// Server 2025).
-    /// </summary>
-    public int PriorStatementLine;
 
     /// <summary>
     /// Schema-qualified name of the procedure whose body this batch executes
@@ -3271,7 +3248,7 @@ internal sealed class BatchContext
         if (this.TryResolveSynonym(name, out var synonym))
             return SimulatedSqlException.SynonymRefersToInvalidObject(name.ToString(), this.TryResolveSynonymBase(synonym, out _) ? (byte)224 : (byte)1);
         var error = SimulatedSqlException.InvalidObjectName(name);
-        if (!this.CreateTimeBinding && !this.BindingViewDefinition)
+        if (!this.CreateTimeBinding && !this.Parser.BindingViewDefinition)
             return error;
         if (name.Count >= 2)
             return error.PinLine(12);

@@ -278,15 +278,10 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         var predicateStart = context.Token.StartIndex;
-        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Nested);
         BooleanExpression predicate;
-        try
+        using (context.EnterNextValueForScope(NextValueForScope.Nested))
         {
             predicate = BooleanExpression.Parse(context);
-        }
-        finally
-        {
-            context.NextValueForRejection = savedRejection;
         }
 
         if (context.Token is not Operator { Character: ')' })

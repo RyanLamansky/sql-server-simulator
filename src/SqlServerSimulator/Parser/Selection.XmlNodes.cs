@@ -58,18 +58,12 @@ internal sealed partial class Selection
         // The xml target names a column of the APPLY's left side, so install
         // that scope for the target's parse — which is what lets the method
         // call find the column's xml(<collection>) binding and stay typed.
-        var savedScopeSources = context.ScopeSources;
-        context.ScopeSources = leftSources;
         XmlMethodCall nodesCall;
-        try
+        using (ParserScope.Enter(ref context.ScopeSources, leftSources))
         {
             if (Expression.Parse(context) is not XmlMethodCall { IsNodes: true } parsed)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             nodesCall = parsed;
-        }
-        finally
-        {
-            context.ScopeSources = savedScopeSources;
         }
 
         var (alias, columnName) = ConsumeNodesAlias(context);

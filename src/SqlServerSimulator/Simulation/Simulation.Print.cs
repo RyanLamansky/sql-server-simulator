@@ -33,25 +33,15 @@ partial class Simulation
         // (Msg 11738, probe-confirmed) rather than any of the query-shaped
         // ones — though a CASE wrapped around the reference still reports
         // Msg 11741, which is what makes this a floor rather than a set.
-        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Unsupported);
-        var savedScalarOnly = context.ScalarOnlyOperand;
-        var savedScalarOnlyReference = context.ScalarOnlyColumnReference;
-        context.ScalarOnlyOperand = true;
-        context.ScalarOnlyColumnReference = null;
         Expression expression;
-        try
+        using (context.EnterNextValueForScope(NextValueForScope.Unsupported))
+        using (context.EnterScalarOnlyOperand())
         {
             expression = Expression.Parse(context);
             if (context.ScalarOnlyColumnReference is not null)
                 throw Expression.ScalarOnlyOperandError(context);
             if (Parser.Expressions.XmlMethodCall.AppearsIn(expression))
                 throw SimulatedSqlException.XmlMethodNotAllowedInContext();
-        }
-        finally
-        {
-            context.NextValueForRejection = savedRejection;
-            context.ScalarOnlyOperand = savedScalarOnly;
-            context.ScalarOnlyColumnReference = savedScalarOnlyReference;
         }
 
         if (batch.IsSkipping)

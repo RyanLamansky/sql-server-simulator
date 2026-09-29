@@ -120,7 +120,7 @@ partial class Simulation
         // `CREATE PROCEDURE p AS SELECT NEXT VALUE FOR s` and the proc draws a
         // value per call.
         if (rejectsNextValueFor)
-            _ = bindBatch.Parser.EnterNextValueForScope(NextValueForScope.Nested);
+            bindBatch.Parser.RaiseNextValueForFloor(NextValueForScope.Nested);
 
         var walkedToEnd = this.BindWithoutRunning(bindBatch, bindErrors);
 

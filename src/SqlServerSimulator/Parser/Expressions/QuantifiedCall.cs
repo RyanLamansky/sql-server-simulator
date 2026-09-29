@@ -119,16 +119,10 @@ internal static class QuantifiedCall
         // One operand, then the closing paren: a second argument, a
         // JSON_OBJECTAGG key's colon or an in-paren ORDER BY is a syntax error
         // at that token.
-        var savedFlag = context.StopExpressionAtBareColon;
-        context.StopExpressionAtBareColon = kind == AggregateKind.JsonObjectAgg;
-        try
+        using (ParserScope.Enter(ref context.StopExpressionAtBareColon, kind == AggregateKind.JsonObjectAgg))
         {
             context.MoveNextRequired();
             _ = Expression.Parse(context);
-        }
-        finally
-        {
-            context.StopExpressionAtBareColon = savedFlag;
         }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);

@@ -314,16 +314,10 @@ internal sealed class JsonObject : Expression
         while (true)
         {
             // Key parse: temporarily redirect bare ':' to end-of-expression.
-            var savedFlag = context.StopExpressionAtBareColon;
-            context.StopExpressionAtBareColon = true;
             Expression key;
-            try
+            using (ParserScope.Enter(ref context.StopExpressionAtBareColon, true))
             {
                 key = Parse(context);
-            }
-            finally
-            {
-                context.StopExpressionAtBareColon = savedFlag;
             }
             if (context.Token is not Operator { Character: ':' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);

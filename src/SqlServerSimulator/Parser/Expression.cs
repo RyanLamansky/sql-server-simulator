@@ -1556,15 +1556,8 @@ internal abstract class Expression : ExpressionNode
     /// </summary>
     private static Expression ParseConditional(ParserContext context, Func<ParserContext, Expression> parse)
     {
-        var saved = context.EnterNextValueForScope(NextValueForScope.Conditional);
-        try
-        {
-            return parse(context);
-        }
-        finally
-        {
-            context.NextValueForRejection = saved;
-        }
+        using var rejection = context.EnterNextValueForScope(NextValueForScope.Conditional);
+        return parse(context);
     }
 
     /// <summary>
@@ -1588,15 +1581,10 @@ internal abstract class Expression : ExpressionNode
             throw ScalarOnlyOperandError(context);
         if (context.InOutputItem)
             throw SimulatedSqlException.SubqueryInOutputClause();
-        var saved = context.EnterNextValueForScope(NextValueForScope.Nested);
         Selection subquery;
-        try
+        using (context.EnterNextValueForScope(NextValueForScope.Nested))
         {
             subquery = Selection.Parse(context, QueryScope.Nested(position, context.OuterTypeResolver));
-        }
-        finally
-        {
-            context.NextValueForRejection = saved;
         }
 
         // Msg 1033: a subquery is one of the five constructs the message names,
@@ -1869,19 +1857,11 @@ internal abstract class Expression : ExpressionNode
 
         // A folded call's arguments parse inside its own frame: the flag comes
         // back false the moment any of them isn't a written constant.
-        var savedFoldableArguments = context.FoldableArguments;
-        context.FoldableArguments = true;
-        try
-        {
-            var call = ResolveBuiltInCore(uppercaseName, name, context);
-            if (context.FoldableArguments)
-                call.FoldedOverConstantArguments = true;
-            return call;
-        }
-        finally
-        {
-            context.FoldableArguments = savedFoldableArguments;
-        }
+        using var foldable = ParserScope.Enter(ref context.FoldableArguments, true);
+        var call = ResolveBuiltInCore(uppercaseName, name, context);
+        if (context.FoldableArguments)
+            call.FoldedOverConstantArguments = true;
+        return call;
     }
 
     /// <summary>

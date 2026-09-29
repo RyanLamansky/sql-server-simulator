@@ -1287,16 +1287,8 @@ partial class Simulation
         if (!context.Simulation.EnableClr)
             return ParseColumnListBody(context, tableName, isTableVariable, isTableType, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints);
         var collation = context.CurrentDatabase.Collation;
-        var saved = context.DeclaredColumnTypes;
-        context.DeclaredColumnTypes = name => name.Count == 1 ? heapColumns.Find(column => column is not null && collation.Equals(column.Name, name.Leaf))?.Type : null;
-        try
-        {
-            return ParseColumnListBody(context, tableName, isTableVariable, isTableType, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints);
-        }
-        finally
-        {
-            context.DeclaredColumnTypes = saved;
-        }
+        using var declaredColumns = ParserScope.Enter(ref context.DeclaredColumnTypes, name => name.Count == 1 ? heapColumns.Find(column => column is not null && collation.Equals(column.Name, name.Leaf))?.Type : null);
+        return ParseColumnListBody(context, tableName, isTableVariable, isTableType, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints);
     }
 
     private static bool ParseColumnListBody(
@@ -1523,15 +1515,10 @@ partial class Simulation
             context.MoveNextRequired();
             var computedStart = context.Token.StartIndex;
             // A computed column is another construct Msg 11719 names.
-            var savedComputedRejection = context.EnterNextValueForScope(NextValueForScope.Nested);
             Expression computed;
-            try
+            using (context.EnterNextValueForScope(NextValueForScope.Nested))
             {
                 computed = Expression.Parse(context);
-            }
-            finally
-            {
-                context.NextValueForRejection = savedComputedRejection;
             }
 
             var computedDefinition = context.CanonicalDefinitionFrom(computedStart, predicate: false) ?? EnsureParenthesized(context.SourceTextFrom(computedStart));
@@ -2233,15 +2220,10 @@ partial class Simulation
         var predicateStart = context.Token.StartIndex;
         // A CHECK constraint is the first construct real's Msg 11719 names
         // (probe-confirmed 2026-08-05 for the inline column form).
-        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Nested);
         BooleanExpression predicate;
-        try
+        using (context.EnterNextValueForScope(NextValueForScope.Nested))
         {
             predicate = BooleanExpression.Parse(context);
-        }
-        finally
-        {
-            context.NextValueForRejection = savedRejection;
         }
 
         if (context.Token is not Operator { Character: ')' })
@@ -3831,24 +3813,12 @@ partial class Simulation
     /// </remarks>
     private static Expression ParseDefaultClauseExpression(ParserContext context)
     {
-        var savedScalarOnly = context.ScalarOnlyOperand;
-        var savedScalarOnlyReference = context.ScalarOnlyColumnReference;
-        context.InDefaultClause = true;
-        context.ScalarOnlyOperand = true;
-        context.ScalarOnlyColumnReference = null;
-        try
-        {
-            var expression = Expression.Parse(context);
-            return context.ScalarOnlyColumnReference is null
-                ? expression
-                : throw Expression.ScalarOnlyOperandError(context);
-        }
-        finally
-        {
-            context.InDefaultClause = false;
-            context.ScalarOnlyOperand = savedScalarOnly;
-            context.ScalarOnlyColumnReference = savedScalarOnlyReference;
-        }
+        using var defaultClause = ParserScope.Enter(ref context.InDefaultClause, true);
+        using var scalarOnly = context.EnterScalarOnlyOperand();
+        var expression = Expression.Parse(context);
+        return context.ScalarOnlyColumnReference is null
+            ? expression
+            : throw Expression.ScalarOnlyOperandError(context);
     }
 
     /// <summary>

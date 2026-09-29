@@ -43,24 +43,15 @@ partial class Simulation
         BooleanExpression? rulePredicate = null;
         if (isRule)
         {
-            var savedScalarOnly = context.ScalarOnlyOperand;
-            var savedScalarOnlyReference = context.ScalarOnlyColumnReference;
-            context.ScalarOnlyOperand = true;
-            context.ScalarOnlyColumnReference = null;
-            context.RuleVariables = [];
-            try
+            var ruleVariables = new List<string>();
+            using (context.EnterScalarOnlyOperand())
+            using (ParserScope.Enter(ref context.RuleVariables, ruleVariables))
             {
                 rulePredicate = BooleanExpression.Parse(context);
                 if (context.ScalarOnlyColumnReference is not null)
                     throw Expression.ScalarOnlyOperandError(context);
-                if (context.RuleVariables.Count != 1)
-                    throw context.RuleVariables.Count == 0 ? SimulatedSqlException.RuleHasNoVariable() : SimulatedSqlException.RuleHasSeveralVariables();
-            }
-            finally
-            {
-                context.ScalarOnlyOperand = savedScalarOnly;
-                context.ScalarOnlyColumnReference = savedScalarOnlyReference;
-                context.RuleVariables = null;
+                if (ruleVariables.Count != 1)
+                    throw ruleVariables.Count == 0 ? SimulatedSqlException.RuleHasNoVariable() : SimulatedSqlException.RuleHasSeveralVariables();
             }
         }
         else

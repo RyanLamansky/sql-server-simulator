@@ -133,7 +133,7 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// <see cref="ConstantFolding.IsFoldedBuiltIn"/>'s built-ins, or a
     /// <c>CASE</c> — has been a written constant. The construct's parser sets
     /// it on entry, reads it to decide whether the node folds, and restores
-    /// the enclosing construct's value in a <c>finally</c>;
+    /// the enclosing construct's value on exit;
     /// <see cref="Expression.Parse"/> clears it for a non-constant return.
     /// False outside any such construct.
     /// </summary>
@@ -229,14 +229,30 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
 
     /// <summary>
     /// True while an <c>Expression.Parse</c> call is running for a
-    /// <c>CREATE TABLE</c> column's <c>DEFAULT</c> clause. Set by the
+    /// <c>CREATE TABLE</c> column's <c>DEFAULT</c> clause. Held by the
     /// CREATE-TABLE parser around the call to
-    /// <see cref="Expression.Parse(ParserContext)"/> and cleared in
-    /// <c>finally</c>. Built-in functions whose grammar restricts them to
-    /// DEFAULT clauses (currently <c>NEWSEQUENTIALID</c>) inspect this flag
-    /// and raise Msg 302 when it isn't set.
+    /// <see cref="Expression.Parse(ParserContext)"/>. Built-in functions whose
+    /// grammar restricts them to DEFAULT clauses (currently
+    /// <c>NEWSEQUENTIALID</c>) inspect this flag and raise Msg 302 when it
+    /// isn't set.
     /// </summary>
     public bool InDefaultClause;
+
+    /// <summary>
+    /// Set while <c>CREATE VIEW</c> / <c>ALTER VIEW</c> parses its body on the
+    /// statement's own batch — a module definition binding outside a
+    /// <see cref="BatchContext.CreateTimeBinding"/> batch, which the line a
+    /// missing object reports at depends on (see
+    /// <see cref="BatchContext.UnresolvableObjectName"/>).
+    /// </summary>
+    public bool BindingViewDefinition;
+
+    /// <summary>
+    /// Depth of <c>IF</c> / <c>WHILE</c> conditions being parsed, which open no
+    /// implicit transaction whatever they read (see
+    /// <see cref="BatchContext.BeginImplicitTransaction"/>).
+    /// </summary>
+    public int ConditionDepth;
 
     /// <summary>
     /// When non-null, every <see cref="Expressions.AggregateExpression"/>
@@ -256,6 +272,13 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// columns. Null at the outermost SELECT.
     /// </summary>
     public List<Expressions.AggregateExpression>? EnclosingAggregateCollector;
+
+    /// <summary>
+    /// Opens the frame one query specification parses in, collecting its
+    /// aggregates into <paramref name="aggregates"/> and its windowed functions
+    /// into <paramref name="windows"/> until the returned guard is disposed.
+    /// </summary>
+    public QueryBlockScope EnterQueryBlock(List<Expressions.AggregateExpression> aggregates, List<Expressions.WindowExpression> windows) => new(this, aggregates, windows);
 
     /// <summary>
     /// Monotonic parse-time occurrence counters, bumped once per node of the
@@ -320,6 +343,12 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// subquery met later reports this name instead of its own error.
     /// </summary>
     public Expressions.Reference? ScalarOnlyColumnReference;
+
+    /// <summary>
+    /// Arms <see cref="ScalarOnlyOperand"/> with no column reference recorded
+    /// yet, until the returned guard is disposed.
+    /// </summary>
+    public ScalarOnlyOperandScope EnterScalarOnlyOperand() => new(this);
 
     /// <summary>
     /// Non-null while a <c>CREATE RULE</c> predicate is parsed: each variable
@@ -408,16 +437,22 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// Applies <paramref name="scope"/> to <see cref="NextValueForRejection"/>
     /// as a <em>floor</em> — it takes effect only when nothing stricter is
     /// already in force, since <see cref="NextValueForScope"/> declares its
-    /// arms in real's own precedence order. Returns the previous value for the
-    /// caller to restore in a <c>finally</c>.
+    /// arms in real's own precedence order — until the returned guard is
+    /// disposed.
     /// </summary>
-    public NextValueForScope EnterNextValueForScope(NextValueForScope scope)
-    {
-        var saved = this.NextValueForRejection;
-        if (saved == NextValueForScope.Allowed || scope < saved)
-            this.NextValueForRejection = scope;
-        return saved;
-    }
+    public ParserScope<NextValueForScope> EnterNextValueForScope(NextValueForScope scope) =>
+        ParserScope.Enter(ref this.NextValueForRejection, this.NextValueForFloor(scope));
+
+    /// <summary>
+    /// Applies <paramref name="scope"/> as <see cref="EnterNextValueForScope"/>
+    /// does, for the rest of a frame an enclosing guard already restores
+    /// (<see cref="ParserScope.Save"/> on <see cref="NextValueForRejection"/>,
+    /// or <see cref="EnterQueryBlock"/>).
+    /// </summary>
+    public void RaiseNextValueForFloor(NextValueForScope scope) => this.NextValueForRejection = this.NextValueForFloor(scope);
+
+    private NextValueForScope NextValueForFloor(NextValueForScope scope) =>
+        this.NextValueForRejection == NextValueForScope.Allowed || scope < this.NextValueForRejection ? scope : this.NextValueForRejection;
 
     /// <summary>
     /// How many <c>NEXT VALUE FOR</c> references have been parsed in a
@@ -518,8 +553,8 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// loop treats a bare <c>:</c> (not followed by a second <c>:</c>) as
     /// end-of-expression rather than a syntax error. Lets the
     /// <c>JSON_OBJECT(key : value, ...)</c> grammar parse a key expression
-    /// that stops at the <c>:</c> separator. Callers save the prior value
-    /// and restore in a <c>finally</c> so nested key parses (e.g. a
+    /// that stops at the <c>:</c> separator. Callers hold it with a
+    /// <see cref="ParserScope"/> guard so nested key parses (e.g. a
     /// JSON_OBJECT used as a value inside another JSON_OBJECT's key) don't
     /// leak the flag outside their immediate scope. The <c>::</c>
     /// type-prefix postfix (<c>hierarchyid::Parse(...)</c> etc.) still

@@ -317,8 +317,7 @@ internal sealed class CaseExpression : Expression
         // `ORDER BY CASE WHEN 1 = 1 THEN 1 ELSE 2 END` is Msg 408 while any
         // column, variable or subquery inside it sorts (probe-confirmed).
         // IIF reaches the same treatment through the built-in dispatcher.
-        var savedFoldableArguments = context.FoldableArguments;
-        context.FoldableArguments = true;
+        using var foldable = ParserScope.Enter(ref context.FoldableArguments, true);
         try
         {
             var parsed = ParseCaseBody(context);
@@ -328,7 +327,6 @@ internal sealed class CaseExpression : Expression
         }
         finally
         {
-            context.FoldableArguments = savedFoldableArguments;
             context.CaseDepth--;
         }
     }

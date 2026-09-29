@@ -53,24 +53,17 @@ partial class Simulation
         // A view or function body is one of the constructs real names in
         // Msg 11719, and it refuses the CREATE rather than the later reference
         // (probe-confirmed, with the error attributed to the module).
-        var savedRejection = context.NextValueForRejection;
+        using var rejection = ParserScope.Save(ref context.NextValueForRejection);
         if (rejectsNextValueFor)
-            _ = context.EnterNextValueForScope(NextValueForScope.Nested);
-        try
-        {
-            if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-                ParseCteBindings(context);
-            // The body is a query: anything else opening it is the syntax
-            // error at that token (`AS selec 1`, `AS VALUES (1)`; probed
-            // 2026-09-25 against SQL Server 2025).
-            if (context.Token is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            return Selection.Parse(context, new QueryScope(position, null));
-        }
-        finally
-        {
-            context.NextValueForRejection = savedRejection;
-        }
+            context.RaiseNextValueForFloor(NextValueForScope.Nested);
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+            ParseCteBindings(context);
+        // The body is a query: anything else opening it is the syntax
+        // error at that token (`AS selec 1`, `AS VALUES (1)`; probed
+        // 2026-09-25 against SQL Server 2025).
+        if (context.Token is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        return Selection.Parse(context, new QueryScope(position, null));
     }
 
     /// <summary>
@@ -242,37 +235,22 @@ partial class Simulation
     /// </summary>
     private static Selection ParseCteBodyRecordingReads(ParserContext context, CteBinding binding, string[]? renameList)
     {
-        var outerSecurables = context.SecurableSink;
-        var outerReadColumns = context.ReadColumnSink;
-        context.SecurableSink = [];
-        context.ReadColumnSink = [];
-        try
+        using var securables = ParserScope.Enter(ref context.SecurableSink, []);
+        using var readColumns = ParserScope.Enter(ref context.ReadColumnSink, []);
+        // Real refuses NEXT VALUE FOR inside a common table expression by
+        // name (Msg 11719, probe-confirmed) — over the body's whole parse,
+        // not merely its clauses.
+        Selection body;
+        using (context.EnterNextValueForScope(NextValueForScope.Nested))
         {
-            // Real refuses NEXT VALUE FOR inside a common table expression by
-            // name (Msg 11719, probe-confirmed) — over the body's whole parse,
-            // not merely its clauses.
-            var savedRejection = context.EnterNextValueForScope(NextValueForScope.Nested);
-            Selection body;
-            try
-            {
-                body = ParseCteBody(context, binding, renameList);
-            }
-            finally
-            {
-                context.NextValueForRejection = savedRejection;
-            }
+            body = ParseCteBody(context, binding, renameList);
+        }
 
-            if (context.SecurableSink is { Count: > 0 } bodySecurables)
-                body.ReferencedSecurables = bodySecurables;
-            if (context.ReadColumnSink is { Count: > 0 } bodyReadColumns)
-                body.ReadColumnsByObject = bodyReadColumns;
-            return body;
-        }
-        finally
-        {
-            context.SecurableSink = outerSecurables;
-            context.ReadColumnSink = outerReadColumns;
-        }
+        if (context.SecurableSink is { Count: > 0 } bodySecurables)
+            body.ReferencedSecurables = bodySecurables;
+        if (context.ReadColumnSink is { Count: > 0 } bodyReadColumns)
+            body.ReadColumnsByObject = bodyReadColumns;
+        return body;
     }
 
     /// <summary>

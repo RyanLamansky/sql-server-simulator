@@ -158,6 +158,14 @@ internal sealed class StatementContext
     public int StartLine;
 
     /// <summary>
+    /// <see cref="BatchContext.CountedStatementLine"/> as this statement began:
+    /// the line real reports an <c>OPEN</c> or <c>FETCH</c> of a missing cursor
+    /// or an unallocated cursor variable at (probed 2026-09-29 against SQL
+    /// Server 2025).
+    /// </summary>
+    public int PriorStatementLine;
+
+    /// <summary>
     /// Per table, the row and key locks this statement has taken there, which
     /// is what real's lock escalation counts: a statement, not a transaction,
     /// crossing the threshold escalates (probed 2026-09-28 against SQL Server

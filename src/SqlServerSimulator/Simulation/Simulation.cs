@@ -1524,15 +1524,8 @@ public sealed partial class Simulation
     // Parses a SELECT statement's query, as a browse statement when asked.
     private static Selection ParseSelectStatement(ParserContext context, bool browse)
     {
-        context.BrowseStatement = browse;
-        try
-        {
-            return Selection.Parse(context, QueryScope.Statement).AsStatementResult();
-        }
-        finally
-        {
-            context.BrowseStatement = false;
-        }
+        using var browseStatement = ParserScope.Enter(ref context.BrowseStatement, browse);
+        return Selection.Parse(context, QueryScope.Statement).AsStatementResult();
     }
 
     private static PlanCacheKey? TryBuildPlanCacheKey(SimulatedDbCommand command)
@@ -2176,7 +2169,7 @@ public sealed partial class Simulation
         batch.CurrentStatement.StartIndex = batch.Parser.Token?.StartIndex ?? 0;
         if (!batch.IsSkipping)
         {
-            batch.PriorStatementLine = batch.CountedStatementLine;
+            batch.CurrentStatement.PriorStatementLine = batch.CountedStatementLine;
             if (batch.Parser.Token is not ReservedKeyword { Keyword: Keyword.Declare } && !AtBareBeginBlock(batch.Parser))
                 batch.CountedStatementLine = batch.CurrentStatement.StartLine;
         }

@@ -1032,21 +1032,12 @@ internal sealed class WindowExpression : Expression
 
         // An OVER body rejects NEXT VALUE FOR (Msg 11720) — real names OVER
         // alongside WHERE / ORDER BY / the rest in that message.
-        var saved = context.EnterNextValueForScope(NextValueForScope.Clause);
-        var savedInOver = context.InOverBody;
-        context.InOverBody = true;
-        try
-        {
-            var keys = ParseExpressionList(context);
-            for (var i = 0; i < keys.Length; i++)
-                keys[i] = ConstantFolding.SettleWindowPartitionTerm(keys[i], context);
-            return keys;
-        }
-        finally
-        {
-            context.InOverBody = savedInOver;
-            context.NextValueForRejection = saved;
-        }
+        using var rejection = context.EnterNextValueForScope(NextValueForScope.Clause);
+        using var overBody = ParserScope.Enter(ref context.InOverBody, true);
+        var keys = ParseExpressionList(context);
+        for (var i = 0; i < keys.Length; i++)
+            keys[i] = ConstantFolding.SettleWindowPartitionTerm(keys[i], context);
+        return keys;
     }
 
     /// <summary>
@@ -1249,18 +1240,9 @@ internal sealed class WindowExpression : Expression
     {
         // Same Msg 11720 rejection as PARTITION BY — this list is only ever an
         // OVER body's ORDER BY, and real names OVER in that message.
-        var saved = context.EnterNextValueForScope(NextValueForScope.Clause);
-        var savedInOver = context.InOverBody;
-        context.InOverBody = true;
-        try
-        {
-            return ParseOrderByListCore(context);
-        }
-        finally
-        {
-            context.InOverBody = savedInOver;
-            context.NextValueForRejection = saved;
-        }
+        using var rejection = context.EnterNextValueForScope(NextValueForScope.Clause);
+        using var overBody = ParserScope.Enter(ref context.InOverBody, true);
+        return ParseOrderByListCore(context);
     }
 
     /// <summary>Body of <see cref="ParseOrderByList"/>.</summary>

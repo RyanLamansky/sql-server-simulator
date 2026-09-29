@@ -109,16 +109,9 @@ partial class Simulation
 
         // An OUTPUT clause rejects NEXT VALUE FOR (Msg 11720), one of the
         // clauses real names in that message.
-        var savedRejectNextValueFor = context.EnterNextValueForScope(NextValueForScope.Clause);
+        using var rejection = context.EnterNextValueForScope(NextValueForScope.Clause);
         context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Output);
-        try
-        {
-            return ParseOutputClauseBody(context, table, allowInserted, allowDeleted, view);
-        }
-        finally
-        {
-            context.NextValueForRejection = savedRejectNextValueFor;
-        }
+        return ParseOutputClauseBody(context, table, allowInserted, allowDeleted, view);
     }
 
     /// <summary>Body of <see cref="TryParseOutputClauseForMutation"/>.</summary>
@@ -211,15 +204,8 @@ partial class Simulation
     /// <summary>Parses one <c>OUTPUT</c> item, where a subquery is Msg 10705.</summary>
     private static Expression ParseOutputItem(ParserContext context)
     {
-        context.InOutputItem = true;
-        try
-        {
-            return Expression.Parse(context);
-        }
-        finally
-        {
-            context.InOutputItem = false;
-        }
+        using var outputItem = ParserScope.Enter(ref context.InOutputItem, true);
+        return Expression.Parse(context);
     }
 
     /// <summary>
@@ -439,16 +425,9 @@ partial class Simulation
             return null;
 
         // Msg 11720, as on the mutation-side OUTPUT entry above.
-        var savedRejectNextValueFor = context.EnterNextValueForScope(NextValueForScope.Clause);
+        using var rejection = context.EnterNextValueForScope(NextValueForScope.Clause);
         context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Output);
-        try
-        {
-            return ParseInsertOutputClauseBody(context, destinationTable, sourceColumnNames, view);
-        }
-        finally
-        {
-            context.NextValueForRejection = savedRejectNextValueFor;
-        }
+        return ParseInsertOutputClauseBody(context, destinationTable, sourceColumnNames, view);
     }
 
     /// <summary>Body of <see cref="TryParseOutputClause"/>.</summary>

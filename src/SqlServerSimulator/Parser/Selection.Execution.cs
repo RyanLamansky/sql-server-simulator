@@ -661,31 +661,20 @@ internal sealed partial class Selection
     /// </summary>
     internal static BooleanExpression ParseAndBindPredicate(ParserContext context, Func<MultiPartName, SqlType> resolveColumnType, FromSource[]? matchSources = null, JoinSpec[]? matchJoins = null)
     {
+        // An aggregate the WHERE registers at its own level — one an enclosing
+        // subquery moved here included — has no query to aggregate in: Msg 147.
+        var whereAggregates = new List<AggregateExpression>();
+        BooleanExpression predicate;
         // A joined UPDATE / DELETE's WHERE takes a MATCH over its FROM sources.
-        var savedMatchScope = context.MatchScope;
-        context.MatchScope = matchSources is null ? null : new MatchScope { Sources = matchSources, Joins = matchJoins };
-        var saved = context.OuterTypeResolver;
-        context.OuterTypeResolver = resolveColumnType;
+        using (ParserScope.Enter(ref context.MatchScope, matchSources is null ? null : new MatchScope { Sources = matchSources, Joins = matchJoins }))
+        using (ParserScope.Enter(ref context.OuterTypeResolver, resolveColumnType))
         // A DML WHERE is one of the eight clauses real's Msg 11720 names, and
         // it says so for an UPDATE / DELETE / MERGE as readily as for a SELECT
         // (probe-confirmed 2026-08-05: `DELETE FROM t WHERE n = NEXT VALUE FOR s`).
-        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Clause);
-        // An aggregate the WHERE registers at its own level — one an enclosing
-        // subquery moved here included — has no query to aggregate in: Msg 147.
-        var savedCollector = context.AggregateCollector;
-        var whereAggregates = new List<AggregateExpression>();
-        context.AggregateCollector = whereAggregates;
-        BooleanExpression predicate;
-        try
+        using (context.EnterNextValueForScope(NextValueForScope.Clause))
+        using (ParserScope.Enter(ref context.AggregateCollector, whereAggregates))
         {
             predicate = BooleanExpression.Parse(context);
-        }
-        finally
-        {
-            context.OuterTypeResolver = saved;
-            context.NextValueForRejection = savedRejection;
-            context.AggregateCollector = savedCollector;
-            context.MatchScope = savedMatchScope;
         }
         RefuseClauseAggregates(context.Batch, whereAggregates, SimulatedSqlException.AggregateInWhereClause());
         predicate.BindCarryingTypeChecks(context.Batch, resolveColumnType);

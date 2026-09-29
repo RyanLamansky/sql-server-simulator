@@ -986,16 +986,10 @@ partial class Simulation
             // FROM-clause derived table, where every other derived table refuses it
             // (probe-confirmed 2026-08-05, both spellings, against the Msg 11719
             // the SELECT / INSERT … SELECT / MERGE … USING forms take).
-            var savedAllowNextValueFor = context.AllowNextValueForInFromClause;
-            context.AllowNextValueForInFromClause = true;
-            context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
-            try
+            using (ParserScope.Enter(ref context.AllowNextValueForInFromClause, true))
             {
+                context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
                 Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourcesList, joinsList);
-            }
-            finally
-            {
-                context.AllowNextValueForInFromClause = savedAllowNextValueFor;
             }
         }
         if (ReadJoinedTailPastMissingTarget(context, sourcesList, joinsList, leadingIdent, leadingTable))

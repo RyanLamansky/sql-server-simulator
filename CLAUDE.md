@@ -191,6 +191,7 @@ Write to them up front to save a build round trip:
 - **SSS008**: a `static readonly` collection is an array or a `Frozen*` type.
 - **SSS009**: a non-public type is not a `record`; use a plain class or struct with readonly fields, implementing `IEquatable<T>` if it is a key (`Simulation.PlanCacheKey`).
 - **SSS012**: never read a `ConcurrentDictionary`'s `.Values` / `.Keys` (a lock sweep and a full copy per read); enumerate the dictionary (`foreach (var (_, v) in dict)`, `dict.EnumerateValues()`), and take `dict.ToArray()` where a point-in-time snapshot is the point.
+- **SSS013**: hold a `ParserContext` field for a lexical scope with a guard — `using var x = ParserScope.Enter(ref context.Field, value);`, `ParserScope.Save`, or an `Enter*` method on `ParserContext` for a grouped position — never a saved local restored in a `finally`.
 - A deliberate exception takes `#pragma warning disable SSSnnn` plus a one-line rationale.
 - **MSTEST0049**: async tests thread `TestContext.CancellationToken` (`public TestContext TestContext { get; set; } = null!;`).
 - **MSTEST0037**: prefer `Assert.IsEmpty(values)` and typed asserts over generic ones.

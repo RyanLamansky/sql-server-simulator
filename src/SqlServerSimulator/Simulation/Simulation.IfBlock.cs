@@ -134,14 +134,14 @@ partial class Simulation
     /// </summary>
     private static BooleanExpression ParseCondition(BatchContext batch)
     {
-        batch.ConditionDepth++;
+        batch.Parser.ConditionDepth++;
         try
         {
             return BooleanExpression.Parse(batch.Parser);
         }
         finally
         {
-            batch.ConditionDepth--;
+            batch.Parser.ConditionDepth--;
         }
     }
 

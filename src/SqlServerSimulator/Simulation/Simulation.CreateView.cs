@@ -133,9 +133,9 @@ partial class Simulation
         var commandText = context.Command.CommandText;
         var bodyStart = context.Token?.StartIndex
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.Batch.BindingViewDefinition = true;
+        context.BindingViewDefinition = true;
         var bodySelection = ParseBodyQuery(context, rejectsNextValueFor: true, bodyParens > 0 ? QueryPosition.ParenthesizedModuleBody : QueryPosition.Statement);
-        context.Batch.BindingViewDefinition = false;
+        context.BindingViewDefinition = false;
         var bodyEnd = context.Token?.StartIndex ?? commandText.Length;
         var bodyText = commandText[bodyStart..bodyEnd];
         for (; bodyParens > 0; bodyParens--)

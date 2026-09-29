@@ -415,16 +415,10 @@ partial class Simulation
         {
             // Collect the sequences the tuples reference so the Msg 11731 gate
             // below can compare them against the target's DEFAULT clauses.
-            var savedCollector = context.SequenceCollector;
             var tupleSequences = new List<Schemas.Sequence>();
-            context.SequenceCollector = tupleSequences;
-            try
+            using (ParserScope.Enter(ref context.SequenceCollector, tupleSequences))
             {
                 valueTuples = ParseValuesTuples(context, allowDefault: true);
-            }
-            finally
-            {
-                context.SequenceCollector = savedCollector;
             }
 
             RejectTooManyValueRows(valueTuples);

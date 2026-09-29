@@ -425,49 +425,42 @@ internal sealed class AggregateExpression : Expression
     internal static AggregateExpression ParseClr(Schemas.ClrAggregateFunction function, MultiPartName written, ParserContext context)
     {
         context.SecurableSink?.Add(new ReferencedSecurable(function.Schema.Database, function.ObjectId, function.SchemaId, function.Name, function.Schema.Name, "EXECUTE"));
-        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Aggregate);
-        try
+        using var rejection = context.EnterNextValueForScope(NextValueForScope.Aggregate);
+        var distinct = false;
+        switch (context.Token)
         {
-            var distinct = false;
-            switch (context.Token)
-            {
-                case ReservedKeyword { Keyword: Keyword.Distinct }:
-                    distinct = true;
-                    context.MoveNextRequired();
-                    break;
-                case ReservedKeyword { Keyword: Keyword.All }:
-                    context.MoveNextRequired();
-                    break;
-            }
+            case ReservedKeyword { Keyword: Keyword.Distinct }:
+                distinct = true;
+                context.MoveNextRequired();
+                break;
+            case ReservedKeyword { Keyword: Keyword.All }:
+                context.MoveNextRequired();
+                break;
+        }
 
-            var aggregatesBefore = context.AggregatesParsed;
-            var subqueriesBefore = context.SubqueriesParsed;
-            List<Expression> arguments = [];
-            if (context.Token is not Operator { Character: ')' })
-            {
-                while (true)
-                {
-                    arguments.Add(Expression.Parse(context));
-                    if (context.Token is not Operator { Character: ',' })
-                        break;
-                    context.MoveNextRequired();
-                }
-            }
-            if (context.Token is not Operator { Character: ')' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            if (arguments.Count != function.Parameters.Length)
-                throw SimulatedSqlException.FunctionRequiresNArguments(written.ToString(), function.Parameters.Length);
-            ValidateOperand(context, AggregateKind.ClrAggregate, arguments[0], aggregatesBefore, subqueriesBefore);
-            return Register(context, new AggregateExpression(AggregateKind.ClrAggregate, arguments[0], distinct, separator: null)
-            {
-                ClrFunction = function,
-                ClrArguments = [.. arguments],
-            });
-        }
-        finally
+        var aggregatesBefore = context.AggregatesParsed;
+        var subqueriesBefore = context.SubqueriesParsed;
+        List<Expression> arguments = [];
+        if (context.Token is not Operator { Character: ')' })
         {
-            context.NextValueForRejection = savedRejection;
+            while (true)
+            {
+                arguments.Add(Expression.Parse(context));
+                if (context.Token is not Operator { Character: ',' })
+                    break;
+                context.MoveNextRequired();
+            }
         }
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (arguments.Count != function.Parameters.Length)
+            throw SimulatedSqlException.FunctionRequiresNArguments(written.ToString(), function.Parameters.Length);
+        ValidateOperand(context, AggregateKind.ClrAggregate, arguments[0], aggregatesBefore, subqueriesBefore);
+        return Register(context, new AggregateExpression(AggregateKind.ClrAggregate, arguments[0], distinct, separator: null)
+        {
+            ClrFunction = function,
+            ClrArguments = [.. arguments],
+        });
     }
 
     /// <summary>
@@ -479,37 +472,30 @@ internal sealed class AggregateExpression : Expression
     /// </summary>
     internal static AggregateExpression ParseSpatial(SpatialSqlType type, SpatialAggregateMethod method, string written, ParserContext context)
     {
-        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Aggregate);
-        try
+        using var rejection = context.EnterNextValueForScope(NextValueForScope.Aggregate);
+        var aggregatesBefore = context.AggregatesParsed;
+        var subqueriesBefore = context.SubqueriesParsed;
+        List<Expression> arguments = [];
+        if (context.Token is not Operator { Character: ')' })
         {
-            var aggregatesBefore = context.AggregatesParsed;
-            var subqueriesBefore = context.SubqueriesParsed;
-            List<Expression> arguments = [];
-            if (context.Token is not Operator { Character: ')' })
+            while (true)
             {
-                while (true)
-                {
-                    arguments.Add(Expression.Parse(context));
-                    if (context.Token is not Operator { Character: ',' })
-                        break;
-                    context.MoveNextRequired();
-                }
+                arguments.Add(Expression.Parse(context));
+                if (context.Token is not Operator { Character: ',' })
+                    break;
+                context.MoveNextRequired();
             }
-            if (context.Token is not Operator { Character: ')' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            if (arguments.Count != 1)
-                throw SimulatedSqlException.FunctionRequiresNArguments(written, 1);
-            ValidateOperand(context, AggregateKind.SpatialAggregate, arguments[0], aggregatesBefore, subqueriesBefore);
-            return Register(context, new AggregateExpression(AggregateKind.SpatialAggregate, arguments[0], distinct: false, separator: null)
-            {
-                SpatialMethod = method,
-                SpatialType = type,
-            });
         }
-        finally
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (arguments.Count != 1)
+            throw SimulatedSqlException.FunctionRequiresNArguments(written, 1);
+        ValidateOperand(context, AggregateKind.SpatialAggregate, arguments[0], aggregatesBefore, subqueriesBefore);
+        return Register(context, new AggregateExpression(AggregateKind.SpatialAggregate, arguments[0], distinct: false, separator: null)
         {
-            context.NextValueForRejection = savedRejection;
-        }
+            SpatialMethod = method,
+            SpatialType = type,
+        });
     }
 
     /// <summary>
@@ -755,21 +741,12 @@ internal sealed class AggregateExpression : Expression
         // A windowed call is the exception: its trailing OVER makes the
         // reference one of the clauses Msg 11720 names (probed 2026-09-29).
         var windowed = IsWindowedCall(context);
-        var savedRejection = context.EnterNextValueForScope(windowed ? NextValueForScope.Clause : NextValueForScope.Aggregate);
-        var savedInOver = context.InOverBody;
-        context.InOverBody |= windowed;
-        try
-        {
-            var aggregate = ParseArguments(context, kind, out var allWritten);
-            if (kind == AggregateKind.ApproxCountDistinct && !allWritten)
-                aggregate.RefusedWindowName = writtenName;
-            return aggregate;
-        }
-        finally
-        {
-            context.InOverBody = savedInOver;
-            context.NextValueForRejection = savedRejection;
-        }
+        using var rejection = context.EnterNextValueForScope(windowed ? NextValueForScope.Clause : NextValueForScope.Aggregate);
+        using var overBody = ParserScope.Enter(ref context.InOverBody, context.InOverBody | windowed);
+        var aggregate = ParseArguments(context, kind, out var allWritten);
+        if (kind == AggregateKind.ApproxCountDistinct && !allWritten)
+            aggregate.RefusedWindowName = writtenName;
+        return aggregate;
     }
 
     /// <summary>
@@ -900,16 +877,10 @@ internal sealed class AggregateExpression : Expression
         // Key parse: redirect a bare ':' to end-of-expression so the colon is
         // seen by this parser rather than swallowed as a type-cast prefix
         // (mirrors JsonObject's key handling).
-        var savedFlag = context.StopExpressionAtBareColon;
-        context.StopExpressionAtBareColon = true;
         Expression key;
-        try
+        using (ParserScope.Enter(ref context.StopExpressionAtBareColon, true))
         {
             key = Expression.Parse(context);
-        }
-        finally
-        {
-            context.StopExpressionAtBareColon = savedFlag;
         }
 
         if (context.Token is not Operator { Character: ':' })

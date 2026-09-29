@@ -131,15 +131,10 @@ partial class Simulation
         reqStatic |= (options & CursorOptions.Static) != 0;
 
         context.MoveNextRequired(); // consume FOR
-        context.CursorStatement = true;
         Selection selection;
-        try
+        using (ParserScope.Enter(ref context.CursorStatement, true))
         {
             selection = ParseBodyQuery(context);
-        }
-        finally
-        {
-            context.CursorStatement = false;
         }
 
         // Trailing SQL-92 updatability clause: FOR READ ONLY | FOR UPDATE [OF cols].
@@ -668,12 +663,12 @@ partial class Simulation
     /// </summary>
     private static SimulatedSqlException AtPriorStatementLine(BatchContext batch, SimulatedSqlException error)
     {
-        if (batch.PriorStatementLine < 0)
+        if (batch.CurrentStatement.PriorStatementLine < 0)
             return error;
-        if (batch.PriorStatementLine == 0)
+        if (batch.CurrentStatement.PriorStatementLine == 0)
             return error.PinLine(0);
         foreach (var entry in error.Errors)
-            entry.LineNumber = batch.PriorStatementLine;
+            entry.LineNumber = batch.CurrentStatement.PriorStatementLine;
         return error;
     }
 

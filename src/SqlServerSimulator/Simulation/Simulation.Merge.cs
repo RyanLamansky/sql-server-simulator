@@ -199,24 +199,15 @@ partial class Simulation
 
         // Walk the ON's expression tree with the two-sided resolver so any
         // column reference type-checks correctly at parse time.
-        var prevResolver = context.OuterTypeResolver;
-        context.OuterTypeResolver = ResolveTypeBoth;
+        var onAggregates = new List<AggregateExpression>();
+        BooleanExpression onPredicate;
+        using (ParserScope.Enter(ref context.OuterTypeResolver, ResolveTypeBoth))
         // ON is one of the eight clauses Msg 11720 names, and a MERGE's ON
         // takes it like a join's (probe-confirmed).
-        var savedRejection = context.EnterNextValueForScope(NextValueForScope.Clause);
-        var savedCollector = context.AggregateCollector;
-        var onAggregates = new List<AggregateExpression>();
-        context.AggregateCollector = onAggregates;
-        BooleanExpression onPredicate;
-        try
+        using (context.EnterNextValueForScope(NextValueForScope.Clause))
+        using (ParserScope.Enter(ref context.AggregateCollector, onAggregates))
         {
             onPredicate = BooleanExpression.Parse(context);
-        }
-        finally
-        {
-            context.OuterTypeResolver = prevResolver;
-            context.NextValueForRejection = savedRejection;
-            context.AggregateCollector = savedCollector;
         }
         Selection.RefuseClauseAggregates(context.Batch, onAggregates, SimulatedSqlException.AggregateInOnClause());
 
@@ -565,15 +556,10 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNearKeyword(withKeyword);
             // A MERGE's USING source is one of the derived-table shapes real
             // refuses NEXT VALUE FOR in (Msg 11719, probe-confirmed).
-            var savedRejection = context.EnterNextValueForScope(NextValueForScope.Nested);
             Selection selection;
-            try
+            using (context.EnterNextValueForScope(NextValueForScope.Nested))
             {
                 selection = Selection.Parse(context, QueryScope.Nested(QueryPosition.Derived, null));
-            }
-            finally
-            {
-                context.NextValueForRejection = savedRejection;
             }
 
             sourceSchema = selection.Schema;
@@ -961,19 +947,11 @@ partial class Simulation
             if (context.Token is ReservedKeyword { Keyword: Keyword.And })
             {
                 context.MoveNextRequired();
-                var prevResolver = context.OuterTypeResolver;
-                context.OuterTypeResolver = conditionResolver;
-                var savedCollector = context.AggregateCollector;
                 var conditionAggregates = new List<AggregateExpression>();
-                context.AggregateCollector = conditionAggregates;
-                try
+                using (ParserScope.Enter(ref context.OuterTypeResolver, conditionResolver))
+                using (ParserScope.Enter(ref context.AggregateCollector, conditionAggregates))
                 {
                     searchCondition = BooleanExpression.Parse(context);
-                }
-                finally
-                {
-                    context.OuterTypeResolver = prevResolver;
-                    context.AggregateCollector = savedCollector;
                 }
                 Selection.RefuseClauseAggregates(context.Batch, conditionAggregates, SimulatedSqlException.AggregateInMergeWhenClause());
                 searchCondition.BindCarryingTypeChecks(context.Batch, conditionResolver);
@@ -1035,15 +1013,13 @@ partial class Simulation
         // NEXT VALUE FOR at all. Probe-confirmed for both the UPDATE SET list
         // and the INSERT VALUES tuple — and a CASE around the reference still
         // reports Msg 11741, which is why this is a floor rather than a set.
-        var savedRejection = context.EnterNextValueForScope(NextValueForScope.MergeAction);
         // An action owns no aggregate: its SET list is Msg 157 as an UPDATE's
         // is, its VALUES list Msg 5310 as an INSERT's is.
-        var savedCollector = context.AggregateCollector;
         var actionAggregates = new List<AggregateExpression>();
-        context.AggregateCollector = actionAggregates;
         var isInsert = context.Token is ReservedKeyword { Keyword: Keyword.Insert };
         WhenClause clause;
-        try
+        using (context.EnterNextValueForScope(NextValueForScope.MergeAction))
+        using (ParserScope.Enter(ref context.AggregateCollector, actionAggregates))
         {
             clause = context.Token switch
             {
@@ -1052,11 +1028,6 @@ partial class Simulation
                 ReservedKeyword { Keyword: Keyword.Delete } => ParseMergeDeleteAction(context, kind, searchCondition),
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
-        }
-        finally
-        {
-            context.NextValueForRejection = savedRejection;
-            context.AggregateCollector = savedCollector;
         }
         Selection.RefuseClauseAggregates(
             context.Batch,
@@ -1133,9 +1104,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var insertValues = new List<Expression>();
-        var prevResolver = context.OuterTypeResolver;
-        context.OuterTypeResolver = resolveType;
-        try
+        using (ParserScope.Enter(ref context.OuterTypeResolver, resolveType))
         {
             while (true)
             {
@@ -1146,10 +1115,6 @@ partial class Simulation
                 if (context.Token is not Operator { Character: ',' })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
             }
-        }
-        finally
-        {
-            context.OuterTypeResolver = prevResolver;
         }
         context.MoveNextOptional();
 
@@ -1225,9 +1190,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var assignments = new List<(int Ordinal, Expression Expr)>();
-        var prevResolver = context.OuterTypeResolver;
-        context.OuterTypeResolver = resolveType;
-        try
+        using (ParserScope.Enter(ref context.OuterTypeResolver, resolveType))
         {
             while (true)
             {
@@ -1308,10 +1271,6 @@ partial class Simulation
                 if (context.Token is not Operator { Character: ',' })
                     break;
             }
-        }
-        finally
-        {
-            context.OuterTypeResolver = prevResolver;
         }
 
         return new WhenClause(kind, MergeActionKind.Update, searchCondition, assignments: assignments, insertColumns: null, insertValues: null);
@@ -2417,23 +2376,18 @@ partial class Simulation
     {
         // A table value constructor owns no aggregate (Msg 5310), but one
         // reading only an enclosing query's columns is that query's.
-        var savedCollector = context.AggregateCollector;
+        var enclosingCollector = context.AggregateCollector;
         var valuesAggregates = new List<AggregateExpression>();
-        context.AggregateCollector = valuesAggregates;
         List<Expression[]> tuples;
-        try
+        using (ParserScope.Enter(ref context.AggregateCollector, valuesAggregates))
         {
             tuples = ParseValuesTupleList(context, allowDefault);
-        }
-        finally
-        {
-            context.AggregateCollector = savedCollector;
         }
         foreach (var aggregate in valuesAggregates)
         {
             var readsColumn = false;
             aggregate.Operand?.VisitColumnReferences(_ => readsColumn = true);
-            if (!readsColumn || !Selection.MoveToEnclosingQuery(context.Batch, aggregate, savedCollector))
+            if (!readsColumn || !Selection.MoveToEnclosingQuery(context.Batch, aggregate, enclosingCollector))
             {
                 Selection.RefuseAggregatePlacement(context.Batch, aggregate, SimulatedSqlException.AggregateInValuesList());
                 break;
