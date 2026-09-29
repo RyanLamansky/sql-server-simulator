@@ -367,11 +367,10 @@ One hand-adjustment in the data: the legacy varchar CI_AI form classifies cedill
 Strings with a character outside the active repertoire (CP1252, plus Thai for nvarchar) fall back to the inner `CultureCollation`'s `CompareInfo` two-pass (below) — close for arbitrary Unicode, exact for CP1252 and the Thai block.
 Adding the Thai block re-baked the nvarchar tables on the unified scale (`ushort` — the union pushes the max rank past 255); the CP1252-only relative order is unchanged (`DENSE_RANK` is monotonic) and the 138k-pair fuzz stays at zero divergence.
 
-**Known gap — trailing-space MAX/MIN representative.**
-This body sorts by collation weight, where SPACE is the lowest non-zero primary weight, so a trailing space makes a string sort *after* its trimmed form.
-Real SQL Server's sort instead treats trailing-space variants as *equal* (they interleave under `ORDER BY`), and `MAX`/`MIN` then returns a scan-order-dependent representative (empirically the last-seen of the equal group, vs. the aggregate `MinMaxAggregator`'s keep-first).
-So `MAX` over a column holding both `'ก'` and `'ก '` can return the other byte-variant than SQL Server.
-Surfaces on three AdventureWorks XML-demographic metrics (`vJobCandidateEducation` / `vJobCandidateEmployment` country/state); deferred — matching it needs trailing-space-insensitive compare *plus* SQL Server's unspecified MAX-tie + physical-scan-order semantics, for synthetic data.
+**Which spelling `MIN` / `MAX` / a group key reports.**
+Among values the collation calls equal — trailing spaces, case under `_CI_`, `'ก'` beside `'ก '` — real reports the **first one its operator reads**, for `MIN`, `MAX`, a `GROUP BY` key, `DISTINCT` and a window's `MAX … OVER`, serial stream or hash aggregate alike; the simulator's aggregators keep the first too (probed 2026-09-29 against SQL Server 2025 over heaps, clustered and indexed tables in four collations and four string types).
+So the spelling is decided by the order rows reach the operator, and wherever real's plan sorts first, by its **Sort operator's order among ties**, which isn't stable: `ORDER BY g` over a heap whose `g` values run `1, 0, 1, 0, 0, 1, 1, 1, 1` returns the first `1` row last.
+That tie order isn't modeled yet (see [`query.md`](query.md#row-order-without-order-by)), so a grouped `MAX` over tied spellings can report another one than real's; a parallel plan's choice is nondeterministic on real itself.
 
 Implementation: this is the engine's hottest string path (it backs `Baseline`), so `Compare` / `GetHashCode` stream each operand's weights through a `WeightCursor` `ref struct` — one element per `MoveNext`, ignorables skipped and ligatures expanded inline — rather than materializing weight lists.
 A comparison walks the cursors at the primary level, dropping to a second walk only on a primary tie and a third only on a secondary tie; the common case resolves in one pass with **zero allocation**.
@@ -434,6 +433,21 @@ Pick by the semantics the site needs, then keep the shape simple, because the me
 
 These compares sit behind the memo layers (`SourceColumnMemo`, the plan cache), so none of it moves a realistic query measurably; treat it as allocation and clarity work, not throughput work.
 
+## Characters real gives no weight, by collation version
+
+A code point real's weight table has nothing for is **ignorable**: `N'a' + NCHAR(0x0378) + N'b' = N'ab'` under every non-binary collation.
+Which code points those are depends on the collation's **version alone** — the unversioned names (the `SQL_*` family included), `_90`, `_100` and `_140` — and not on language, case, kana or width; an accent-insensitive name adds the marks it folds (probed 2026-09-29 against SQL Server 2025 by testing all 65,536 BMP code units under 31 names).
+The sets shrink as the tables grow: 21,229 code units under the unversioned names, 13,414 under `_90`, 5,838 under `_100` and 3,373 under `_140`, so `N'Ә'` (U+04D8) is ignorable before `_90` and `N'Ͱ'` (U+0370) before `_140`.
+Surrogates split the same way: an unversioned name ignores every surrogate code unit, a supplementary character included, while `_90` and later weigh every surrogate **pair** — unassigned planes and tag characters too — and ignore only a lone high surrogate in U+D880..U+DB7F.
+
+`WeightlessCharacters` (`Collation.Weightless.cs`) carries the sets as ranges (6.2 KB) and reconciles them with `CompareInfo` in both directions:
+- **What real ignores and `CompareInfo` weighs** is removed before comparing and hashing, and replaced by a word joiner where a search needs its positions, so `CHARINDEX` of such a needle is 0 and `REPLACE` / `STRING_SPLIT` see through it.
+- **What `CompareInfo` ignores and real weighs** — the C0 and C1 controls, U+200B, U+00AD before `_100`, the Hebrew accents — joins hyphen and apostrophe in the minimal treatment: no primary weight, a final-level weight that keeps `N'x' + NCHAR(1) = N'x'` false and sorts the copy carrying it after the copy without (`'a' < 'a' + CHAR(1) < 'ab' < 'a' + CHAR(1) + 'b'`), and a private-use stand-in wherever a search runs, so `CHARINDEX(NCHAR(1), N'a' + NCHAR(1))` is 2.
+
+`LIKE`'s `_` doesn't count an ignorable character as one of its own: it rides with the character before it, or at the start with the one after, so `N'a' + NCHAR(0x0378) + N'b' LIKE N'a_b'` is false and `LIKE N'ab'` true, `NCHAR(0x0378) + N'b' LIKE N'_b'` is false, and `N'a' + NCHAR(0x0378) LIKE N'a'` true — the same for U+200D and for a NUL in Unicode data, while a minimal-weight `NCHAR(1)` is a character (`LIKE N'a_b'` true).
+
+Measured by the probe itself: the simulator's ignorable set disagreed with real's on 21,096 of the 65,536 code units under `Latin1_General_CI_AS` and 5,841 under `Latin1_General_100_CI_AS`, and matches it exactly under all 31 names.
+
 ## Symbol sort weighting (other SQL_\* / Windows / locale families)
 
 `CultureCollation.Compare` (the `CompareInfo`-routed comparer behind every collation **other than the default**) gives hyphen (`-`) and apostrophe (`'`) the **minimal-weight** treatment SQL Server applies, while every other symbol keeps a real primary weight:
@@ -448,25 +462,33 @@ The same approach could extend to other heavily-used names if a divergence surfa
 
 ## Locale-comparer sort-parity gap
 
-Probed against SQL Server 2025 with a hard word set per locale (Turkish `İ`/`ı`/`i`, `ğ`, `ş`, `â` plus case variants; hiragana / full-width and half-width katakana, voiced marks, prolonged sound marks; CJK including mixed-script strings).
-Scored **tie-robustly**: every adjacent pair in real's `ORDER BY` output must compare `<=` under `CompareInfo`.
-That distinction matters — under a CI collation `'çay'` and `'Çay'` compare *equal*, so their relative order is unspecified on real too, and a position-by-position diff counts such ties as divergences that aren't.
+The East Asian families order their scripts and ideographs by tables `CompareInfo` doesn't reproduce: ICU's `zh-CN` ranks Han before Latin where real ranks it after (`az` < `a中`, `Zebra` < `安徽`), reads polyphonic ideographs its own way (real reads 重 as *zhòng* and 长 as *cháng*), and each family interleaves Han with kana, Hangul and the compatibility blocks in an order of its own (`Korean_Wansung_CI_AS` puts Hangul before Latin).
+The rank is interleaved rather than layered — a string-level script class, script-run segmentation and a class-vector prefix were each tried and fail on `az` against `a中` — so the fix is a per-character primary table.
 
-| Collation | Adjacent pairs consistent | Divergence shape |
+`CjkPrimaryOrder` (`Collation.CjkPrimary.cs`) carries real's dense primary rank of every BMP code unit for six families — `Chinese_PRC`, `Chinese_PRC_Stroke`, `Chinese_Taiwan_Stroke`, `Japanese`, `Japanese_Unicode` and `Korean_Wansung` — read as `DENSE_RANK() OVER (ORDER BY NCHAR(n) + N'a' COLLATE <family>_CI_AI)` (the suffix keeps a space from reading as trailing), with the family's ignorable set at rank 0 (probed 2026-09-29 against SQL Server 2025).
+Each table is stored as the code units' ascending runs in sort order, deflated, in `Collation.CjkPrimary.txt` (245 KB of base64 for the six).
+A comparison that reaches past U+2E80 and that `CompareInfo` doesn't call equal walks the two strings' primary ranks, skipping the minimal-weight characters; a primary tie falls back to `CompareInfo` for the accent, case, kana and width levels, and equality and hashing stay `CompareInfo`'s, so `Compare == 0` exactly when `Equals`.
+A versioned family borrows the unversioned table its ideograph order descends from (`Chinese_PRC_90` and `Chinese_Simplified_Pinyin_100` read `Chinese_PRC`'s, `Japanese_XJIS_140` reads `Japanese`'s, the bopomofo and Hong Kong families read `Chinese_Taiwan_Stroke`'s), which places the scripts right and most ideographs.
+
+Measured as pairwise order agreement with real over 1,500 random strings mixing Latin, kana, common and random ideographs, Hangul, fullwidth forms and bopomofo (1.1 million pairs per collation):
+
+| Collation | Before | After |
 |---|---|---|
-| `Turkish_CI_AS` | **30 / 30** | None found. The Turkish-specific `ı` &lt; `i` &lt; `İ` cluster, `ğ` after `g`, `ş` after `s`, `ö` after `o`, `ü` after `u` all match. |
-| `Japanese_XJIS_140_CI_AS` | **27 / 28** | One: `らーめん` vs `ﾗｰﾒﾝ`, which kana-type + width insensitivity should make equal — the half-width prolonged sound mark (U+FF70) doesn't fold onto U+30FC in `CompareInfo`. |
-| `Chinese_PRC_CI_AS` | 13 / 18 | Two kinds. **Script order**: `zh-CN` ranks CJK *before* Latin, real ranks it after (`az` &lt; `a中`, `Zebra` &lt; `安徽`). **Polyphonic readings**: real reads 重 as *zhòng* and 长 as *cháng*, `zh-CN` picks the other reading, so `重庆` and `长沙` land in different places. |
+| `Chinese_PRC_CI_AS` / `_CS_AS` | 56.0% | 99.999% |
+| `Chinese_PRC_Stroke_CI_AS` | 51.2% | 99.999% |
+| `Chinese_Taiwan_Stroke_CI_AS` | 51.3% | 99.998% |
+| `Japanese_CI_AS` / `_CS_AS` | 86.8% | 99.999% |
+| `Korean_Wansung_CI_AS` | 99.2% | 99.998% |
+| `Chinese_PRC_90_CI_AS` | 53.4% | 97.4% |
+| `Chinese_Simplified_Pinyin_100_CI_AS` | 61.4% | 93.9% |
+| `Chinese_Taiwan_Bopomofo_CI_AS` | 47.9% | 84.6% |
+| `Chinese_Hong_Kong_Stroke_90_CI_AS` | 47.2% | 95.9% |
+| `Japanese_XJIS_140_CI_AS` | 86.2% | 99.2% |
+| `Korean_90_CI_AS` / `Korean_100_CI_AS` | 82.8% / 50.8% | 83.6% / 51.3% |
 
-**Equality, CI/CS / KS / WS folding, grouping and LIKE all align** for the inputs probed.
-Only ordering diverges, and only for Chinese in any material way.
-
-Closing the Chinese gap needs a per-character primary-rank table of the kind [the default collation's body](#sql_latin1_general_cp1_ci_as--byte-exact-sort) carries, because the rank is interleaved rather than layered: real compares a single primary scale where a character's script class is the high bits and its own rank the low bits.
-Three cheaper approximations were tried and **verified to fail** — first-character script class, script-run segmentation, and class-vector-prefix comparison all get `az` vs `a中` or `a中` vs `z` wrong.
-Neither the invariant nor `en-US` comparer is a shortcut: they order the scripts correctly but lose pinyin inside CJK (`上海 | 中国 | 北京 | 安徽 | 广州` instead of `安徽 | 北京 | 广州 | 上海 | 中国`), which is the half `zh-CN` gets right.
-
-Sort parity is now the *whole* of this gap: `varchar` under these collations stores its own code page (see [Storage code page](#storage-code-page)), so it orders as well as `nvarchar` does.
-Before that, varchar under any non-CP1252 collation replaced every character with `?`, which destroyed the data before it could be compared — the earlier "2 of 21 positions align" reading of Japanese varchar was measuring that, not a sort-table difference.
+What's left in a shipped family is kana a `CompareInfo` tie equates where real doesn't (`け` / `ヶ`) and the prolonged sound mark `ー`, whose weight real takes from the kana before it.
+A table of each family's own costs 25–80 KB deflated apiece; the versioned Korean families and the bopomofo ones are the ones borrowing worst.
+**Equality, CI/CS / KS / WS folding, grouping and LIKE** keep `CompareInfo`'s answers.
 
 ## Binary collation storage-aware dispatch
 
@@ -711,11 +733,9 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
   The expansion reaches every consumer real drives through the collation — `=`, `<`, `BETWEEN`, `IN`, `DISTINCT`, `GROUP BY`, `ORDER BY` (where the ligature ties with its expansion), `LIKE` and `PATINDEX` literal runs, and the [character-matching scalars](#the-character-matching-string-scalars-search-under-the-collation-too) — but **not** `LIKE`'s `_` or a character class, where a ligature is one character and half of it matches nothing (`N'ß' LIKE N'[s]'` is 0 on real).
   Storage family decides for the default collation: `SQL_Latin1_General_CP1_CI_AS` expands for `nvarchar` everywhere and for `varchar` **nowhere** (its varchar sort order 52 gives the ligature a tertiary instead, so `'ss' < 'ß'`), and the simulator's [byte-exact body](#sql_latin1_general_cp1_ci_as--byte-exact-sort) already reproduces that for `=` / sort / hash — which is why the default collation's `=` and its `LIKE` disagree on `N'ß'` today while `Latin1_General_CI_AS` has them agreeing with each other and both wrong.
   Closing it wants an expansion pre-pass under `Collation.Compare` / `Equals` / `GetHashCode` **and** under the matching seam, with the search's endpoints required to land on source-character boundaries so half a ligature still matches nothing; the hash has to move with the equality or the seek caches break.
-- **A character real gives a weight to that `CompareInfo` ignores.**
-  `N'x' + NCHAR(0x00AD) = N'x'` (soft hyphen) is false on real and true here, and so is the whole family — the C0 controls U+0001..U+001F, U+200B, U+2007, U+00A0, U+2028, U+2029 and U+E0001, plus U+00AD and U+200C on the pre-100 names only (`Latin1_General_100_CI_AS` ignores both, as `CompareInfo` does).
-  The ones real ignores too, so both engines agree: U+034F, U+0488, U+180B, U+200D, U+200E, U+200F, U+202A, U+202D, U+202F, U+2060, U+2061, U+FE00, U+FEFF.
-  The reverse direction exists as well: real holds `N'x' + NCHAR(0x00A0)` apart from `N'x '` and `CompareInfo` folds them, so a `TRIM(N' ' FROM …)` here removes an NBSP real keeps.
-  Every consumer the collation drives sees it — `=`, `LIKE`, and the [character-matching scalars](#the-character-matching-string-scalars-search-under-the-collation-too) alike; `LIKE`'s `_` is unaffected, since it counts characters (`N'x' + NCHAR(0x00AD) LIKE N'x'` answers no in both).
+- **A no-break space is a space to `CompareInfo`.**
+  Real holds `NCHAR(0x00A0)` apart from U+0020, so `TRIM(N' ' FROM N'x' + NCHAR(0x00A0))` keeps the NBSP on real and strips it here (probed 2026-09-29).
+  The rest of the family `CompareInfo` ignores where real weighs it is modeled — see [Characters real gives no weight](#characters-real-gives-no-weight-by-collation-version) — with one approximation: real gives some of those characters (U+200B, U+200C, the Syriac and Arabic format marks) a low primary weight and the Hebrew accents a diacritic one, which the simulator weighs at the final level with the rest, so their order against other characters can differ while equality matches.
 - **A standalone combining mark matches any other standalone mark on real.**
   `TRANSLATE(NCHAR(0x0308) + …, NCHAR(0x0301), N'd')` substitutes on real and doesn't here, and the same equivalence shows up in `TRIM`'s character set, in `REPLACE`'s pattern and in a `STRING_SPLIT` separator — real appears to compare the marks at a weight level `CompareInfo` doesn't expose, since a mark attached to a base letter stays distinct in both engines.
   A differential fuzz of the five scalars against live (3,000 random cases per seed over an alphabet holding three bare marks) puts the whole class at ~1% of cases; with the marks removed from the alphabet the same fuzz is 0.2%, and every remaining case is the ligature or zero-weight entry above.

@@ -304,7 +304,7 @@ internal static class WideNumericFormat
         var section = SelectSection(format, value.IsZero, value.IsNegative, out var negatedBySection);
         var parsed = ParsePattern(section);
         if (parsed.HasExponent)
-            throw new NotSupportedException("FORMAT with a scientific custom pattern over a value wider than a decimal isn't modeled.");
+            return ScientificPattern(value, parsed, info, negatedBySection);
 
         // A pattern with no digit placeholder writes its literal text and
         // nothing of the value — FORMAT(…, 'qq qq') is 'qq qq'.
@@ -324,6 +324,50 @@ internal static class WideNumericFormat
 
         var text = parsed.Prefix + body + parsed.Suffix;
         return negative && !negatedBySection ? info.NegativeSign + text : text;
+    }
+
+    /// <summary>
+    /// A custom pattern with an exponent (<c>0.00E+00</c>): the integer
+    /// placeholders take that many leading significant digits, the value
+    /// rounds half away from zero to those plus the fraction placeholders, and
+    /// the exponent is what's left — as .NET lays out a narrower value.
+    /// </summary>
+    private static string ScientificPattern(in Decimal38 value, PatternShape parsed, NumberFormatInfo info, bool negatedBySection)
+    {
+        var integerCount = Math.Max(1, parsed.IntegerPlaceholders);
+        var (negative, integerDigits, fractionDigits) = Rounded(value, value.Scale, 0);
+        var digits = (integerDigits + fractionDigits).TrimStart('0');
+        var exponent = 0;
+        string mantissa;
+        if (digits.Length == 0)
+        {
+            mantissa = new string('0', integerCount + parsed.MaxFractionDigits);
+        }
+        else
+        {
+            // value = 0.digits × 10^pointPosition
+            var pointPosition = integerDigits.TrimStart('0').Length > 0 ? integerDigits.TrimStart('0').Length : -(fractionDigits.Length - fractionDigits.TrimStart('0').Length);
+            var (carried, rounded) = RoundDigits(digits, integerCount + parsed.MaxFractionDigits);
+            if (carried)
+                pointPosition++;
+            mantissa = rounded.PadRight(integerCount + parsed.MaxFractionDigits, '0');
+            exponent = pointPosition - integerCount;
+        }
+
+        var fraction = mantissa[integerCount..];
+        while (fraction.Length > parsed.MinFractionDigits && fraction.EndsWith('0'))
+            fraction = fraction[..^1];
+        var integerPart = mantissa[..integerCount];
+        var body = new StringBuilder(parsed.Prefix).Append(parsed.Grouped ? Group(integerPart, info.NumberGroupSizes, info.NumberGroupSeparator) : integerPart);
+        if (fraction.Length > 0)
+            _ = body.Append(info.NumberDecimalSeparator).Append(fraction);
+        _ = body.Append(parsed.ExponentMarker);
+        if (exponent < 0)
+            _ = body.Append(info.NegativeSign);
+        else if (parsed.ExponentAlwaysSigned)
+            _ = body.Append(info.PositiveSign);
+        _ = body.Append(Math.Abs(exponent).ToString(CultureInfo.InvariantCulture).PadLeft(parsed.ExponentDigits, '0')).Append(parsed.Suffix);
+        return negative && !negatedBySection ? info.NegativeSign + body : body.ToString();
     }
 
     /// <summary>
@@ -390,6 +434,10 @@ internal static class WideNumericFormat
         public bool Grouped;
         public bool HasExponent;
         public bool HasPlaceholder;
+        public int IntegerPlaceholders;
+        public char ExponentMarker;
+        public bool ExponentAlwaysSigned;
+        public int ExponentDigits;
     }
 
     private static PatternShape ParsePattern(string pattern)
@@ -460,9 +508,23 @@ internal static class WideNumericFormat
                     shape.PowerOfTen += 3;
                     _ = (seenPlaceholder ? suffix : prefix).Append(pattern[i]);
                     break;
-                case 'E':
-                case 'e':
+                // An exponent marker is an E followed by its digits, optionally
+                // signed; any other E is a literal.
+                case 'E' or 'e' when seenPlaceholder && !shape.HasExponent
+                    && (pattern.AsSpan(i + 1).StartsWith("0") || pattern.AsSpan(i + 1).StartsWith("+0") || pattern.AsSpan(i + 1).StartsWith("-0")):
                     shape.HasExponent = true;
+                    shape.ExponentMarker = c;
+                    if (pattern[i + 1] is '+' or '-')
+                        shape.ExponentAlwaysSigned = pattern[++i] == '+';
+                    while (i + 1 < pattern.Length && pattern[i + 1] == '0')
+                    {
+                        shape.ExponentDigits++;
+                        i++;
+                    }
+
+                    // What follows the exponent is literal text.
+                    seenPlaceholder = true;
+                    afterPoint = true;
                     break;
                 default:
                     _ = (seenPlaceholder ? suffix : prefix).Append(c);
@@ -481,6 +543,7 @@ internal static class WideNumericFormat
         // "#,##0" writes one leading digit and "0000" writes four.
         shape.MinIntegerDigits = firstZeroPlaceholder < 0 ? 0 : integerPlaceholders - firstZeroPlaceholder + 1;
         shape.HasPlaceholder = seenPlaceholder;
+        shape.IntegerPlaceholders = integerPlaceholders;
         return shape;
     }
 }

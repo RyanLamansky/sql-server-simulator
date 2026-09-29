@@ -151,8 +151,24 @@ internal abstract partial class Collation
         matchLength = 0;
         if (this.LinguisticMatching is not { } linguistic)
             return false;
+        // A character real gives no weight stands aside as one CompareInfo
+        // ignores too, keeping every position.
+        var weightless = this.Weightless;
+        var original = subject;
+        if (weightless is not null)
+        {
+            subject = weightless.ForSearch(subject);
+            run = weightless.ForSearch(run);
+        }
         if (!linguistic.Info.IsPrefix(subject, run, linguistic.Options, out var length))
             return false;
+        // What real gives no weight right after the run rides with its last
+        // character (`N'a' + NCHAR(0x0378) LIKE N'a'` is true).
+        if (weightless is not null)
+        {
+            while (length < original.Length && (original[length] != '\0' || !this.WeightsNul) && weightless.IsWeightlessAt(original, length))
+                length++;
+        }
         // CompareInfo swallows a trailing CHAR(0) it gives no weight; where the
         // collation weights it, the run stops short of it.
         if (this.WeightsNul && !run.EndsWith('\0'))
@@ -218,6 +234,12 @@ internal abstract partial class Collation
                 return -1;
             matchLength = needle.Length;
             return fast;
+        }
+
+        if (this.Weightless is { } weightless)
+        {
+            window = weightless.ForSearch(window);
+            needle = weightless.ForSearch(needle);
         }
 
         var offset = 0;

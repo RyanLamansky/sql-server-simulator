@@ -289,18 +289,35 @@ A scalar UDF that patindexes its own `varchar` parameter is the shape that meets
 - **`SPACE(count)`** always returns `varchar` (never nvarchar), truncated to 8000 chars.
   NULL / negative count → NULL.
 - **`FORMAT(value, format [, culture])`** returns `nvarchar`.
-  Implementation routes through .NET's `IFormattable.ToString(format, culture)` on the underlying CLR value, matching SQL Server's CLR-passthrough shape.
   Accepted value types: numeric (integer / decimal / float / real / money / smallmoney) and date-time family (date / datetime / smalldatetime / datetime2 / datetimeoffset / time).
   Strings, bit, binary, uniqueidentifier, rowversion → Msg 8116 at runtime.
   NULL value → NULL; a bare NULL format → Msg 8116, while a typed NULL one formats as no format string would; the format and the culture take a string and nothing else, a legacy LOB included (Msg 8116 while compiling).
-  Culture defaults to en-US; a name Windows parses but doesn't know (`qq-QQ`, `en_US`, a private-use `x-…`) falls back to en-US, while one it can't parse — NULL, typed or not — is Msg 9818, judged before a NULL value answers NULL (probed 2026-09-26 against SQL Server 2025).
-  .NET `FormatException` (e.g. `decimal.ToString("D5")`) → NULL; unrecognized custom-format tokens that .NET passes through (e.g. `int.ToString("qq qq")`) are echoed verbatim.
-  An exact-numeric value **wider than a .NET `decimal`** lays its digits out directly (`Parser/Expressions/WideNumericFormat.cs`) instead of crossing to a narrower type, so real's full 38-digit rendering comes back: `FORMAT(CAST(12345678901234567890123456789012345678 AS decimal(38, 0)), 'N0')` groups every digit, `'N40'` of a `decimal(38, 38)` writes forty fractional ones, and `'#,##0.00'` / `'0.###'` / `'E4'` / `'C'` / `'G'` all answer.
-  The culture's separators, group sizes and default digit counts come off its `NumberFormatInfo`, and the decoration around the digits — currency symbol, percent sign, the sign patterns — comes from asking .NET to format `1` and `-1` under the same specifier, so the wide path carries whatever the narrow path would have written around it.
-  `D` / `X` / `R` raise the `FormatException` .NET raises and answer NULL; a custom pattern carrying scientific notation over a wide value raises `NotSupportedException`.
+  A .NET `FormatException` (`'D5'` over a decimal) and a date outside the culture calendar's range (`0001-01-01` under `ar-SA`) answer NULL; unrecognized custom-format tokens are echoed verbatim.
+  An exact-numeric value **wider than a .NET `decimal`** lays its digits out directly (`Parser/Expressions/WideNumericFormat.cs`), the standard specifiers and every custom pattern — scientific ones included — at real's full 38-digit width.
 
-  SQL Server's FORMAT runs on Windows' NLS culture data where the simulator runs on .NET's ICU data; `Format.WithWindowsDecimalDigits` patches the number-format cells known to differ (default digits, the no-break group separator, the yen sign, en-US's parenthesized negative currency), which both paths read.
-  **Divergence**: `FORMAT(CAST(0 AS decimal(5, 0)), 'P')` is `0.00%` against real's `000.00%` (probed 2026-09-24).
+### FORMAT's culture data and runtime
+
+SQL Server's `FORMAT` is the .NET Framework's formatter on Windows' NLS culture data, and both halves differ from the .NET-on-ICU the simulator runs on.
+Both are modeled, and each was read off `FORMAT`'s own output rather than any Windows file (probed 2026-09-29 against SQL Server 2025).
+
+**The culture data** ships as `Parser/Expressions/FormatCultures.tsv`: 929 culture names — every name .NET's ICU lists plus the Windows-only ones (`zh-CHS`, `ca-ES-valencia`, `sr-Latn-CS`, `qps-ploc`, …) — each with its separators, group sizes, currency / percent / negative patterns and digits, calendar, date and time patterns, AM / PM designators, month and day names (genitive forms included) and era text, plus a currency symbol per region; 206 KB, a row written as its nearest earlier row's differences.
+The fields were derived by parsing real's outputs over a battery of 1,122 `FORMAT` calls per culture and re-rendering each candidate through .NET until it reproduced them; `FormatCulture` applies a row over a .NET culture clone once per name and caches it, so a call costs a dictionary read.
+A name the table lacks resolves as Windows synthesizes it: the longest known prefix of language, script and region supplies the data, and the region supplies the currency symbol — `de-US` is German with `$`, `fr-QQ` French with `¤`, and a language Windows doesn't know takes the generic data `qq-QQ` gets (`¤`, `%` spaced from the number).
+An unknown name therefore matches `en-US` in its number format and nowhere else.
+Msg 9818 follows Windows' own name grammar: a two- or three-letter language, an optional script, then nothing, a region followed by any subtags of up to eight characters, or a singleton followed by at least one more (`en-US-POSIX`, `en-u-nu-thai`, `ab-cd-ef-gh` pass; `en-POSIX`, `en-aaa`, `en-A` don't) — and a name Windows knows outright passes whatever its shape.
+
+**The Framework's formatting rules** that differ from .NET's are in `Format.Framework.cs`, each with its probe:
+- A `float` rounds to 15 significant digits (a `real` to 7) before any specifier sees it, then half away from zero: `'N2'` of 0.125 is `0.13`, a large value pads with zeros past the fifteenth digit, a value rounding to zero drops its sign, and `'R'` is `G15` unless that doesn't read back.
+- A decimal zero keeps one phantom digit its scale positions (`'P'` of a `decimal(5, 0)` zero is `000.00%`), and a custom pattern over a decimal or money value stops at its first quoted literal and copies the rest of the format verbatim (`'0''x''0.00'` of 123.456 is `12x0.00`).
+- Integers keep their width (`'X'` of `CAST(-1234567 AS int)` is `FFED2979`), and `'R'` is refused for everything but the floating-point types.
+- A `date` formats as a midnight `DateTime`, a `datetime` rounds its 1/300-second ticks to the millisecond as `SqlDateTime` does, `'U'` of a culture on a non-Gregorian calendar switches to that culture's Gregorian pattern and month names, and a `time`'s `'g'` writes the culture's decimal separator.
+
+Measured over all 929 names: the battery the data was derived from went from 74.30% of cells matching real to 99.99%, and a held-out battery of 547 other calls (other values, types and patterns) from 66.87% to 99.99%.
+
+#### Divergences
+
+- `'U'` under seven Persian- and Pashto-family cultures (`ckb-IR`, `lrc`, `lrc-IR`, `mzn`, `mzn-IR`, `ps`, `ps-AF`) keeps the culture's own calendar pattern, where real switches to a Gregorian one whose day names the derivation couldn't isolate.
+- A `float` beyond 10^38 in magnitude, or one with digits below 10^-38, formats through .NET's own rounding.
 
 ## Argument counts
 

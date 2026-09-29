@@ -39,12 +39,17 @@ public class LikeTests
     [DataRow("'   ' like ' '", 1)]
     public void TrailingSpaces(string condition, int expectedRows) => AssertRowCount(condition, expectedRows);
 
-    /// <summary>Only literal U+0020 counts as a trailing blank.</summary>
+    /// <summary>
+    /// Only literal U+0020 counts as a trailing blank; a NUL weighs nothing in
+    /// Unicode data, so it rides with the character before it
+    /// (<c>N'abc' + NCHAR(0) LIKE N'abc'</c> is true, probed 2026-09-29 against
+    /// SQL Server 2025).
+    /// </summary>
     [TestMethod]
     [DataRow("abc\t", "abc", 0)]
     [DataRow("abc\n", "abc", 0)]
     [DataRow("abc\r", "abc", 0)]
-    [DataRow("abc\0", "abc", 0)]
+    [DataRow("abc\0", "abc", 1)]
     [DataRow("abc\t", "abc%", 1)]
     public void TrailingWhitespace_OnlySpaceCounts(string subject, string pattern, int expectedRows)
         => AssertParameterizedRowCount(subject, pattern, expectedRows);

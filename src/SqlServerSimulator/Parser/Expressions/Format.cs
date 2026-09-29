@@ -1,4 +1,3 @@
-using System.Globalization;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -8,7 +7,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// Returns <c>nvarchar(4000)</c>. The implementation routes through
 /// <see cref="IFormattable"/>'s <c>ToString(format, culture)</c> on the
 /// underlying CLR value, matching SQL Server's documented CLR-passthrough
-/// shape.
+/// shape, over real's culture data (<see cref="FormatCulture"/>) and with the
+/// .NET Framework's rules where they differ (<c>Format.Framework.cs</c>).
 /// </summary>
 /// <remarks>
 /// Probe-confirmed behavior (SQL Server 2025):
@@ -17,12 +17,12 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <item><description>Rejected types raise <strong>Msg 8116</strong>: <c>varchar</c>, <c>nvarchar</c>, <c>char</c>, <c>nchar</c>, <c>bit</c>, <c>binary</c>, etc.</description></item>
 /// <item><description>NULL value → NULL output. A bare NULL format → Msg 8116; a typed NULL one formats as no format string would.</description></item>
 /// <item><description>The format string and culture take a string and nothing else (Msg 8116, xml and the legacy LOB types included).</description></item>
-/// <item><description>Culture defaults to <c>en-US</c>. A culture name Windows can't parse — NULL included, and whatever the value — is Msg 9818; one it parses but doesn't know (<c>'qq-QQ'</c>) formats as <c>en-US</c> (probed 2026-09-26 against SQL Server 2025).</description></item>
+/// <item><description>Culture defaults to <c>en-US</c>. A culture name Windows can't parse — NULL included, and whatever the value — is Msg 9818; one it parses but doesn't know (<c>'qq-QQ'</c>) takes what Windows synthesizes for it (probed 2026-09-29 against SQL Server 2025).</description></item>
 /// <item><description>Unrecognized .NET format token: passthrough (probe: <c>FORMAT(1234, 'qq qq')</c> → <c>'qq qq'</c>); .NET <see cref="FormatException"/> (e.g. <c>FORMAT(decimal, 'D5')</c>) → NULL.</description></item>
 /// </list>
 /// </remarks>
 /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/format-transact-sql</remarks>
-internal sealed class Format : Expression
+internal sealed partial class Format : Expression
 {
     private readonly Expression value;
     private readonly Expression format;
@@ -46,7 +46,7 @@ internal sealed class Format : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         // The culture is judged before a NULL value answers NULL.
-        var culture = WithWindowsDecimalDigits(this.culture is null ? CultureInfo.GetCultureInfo("en-US") : ResolveCulture(this.culture.Run(runtime)));
+        var culture = this.culture is null ? FormatCulture.Default : ResolveCulture(this.culture.Run(runtime));
         var formatValue = this.format.Run(runtime);
         var valueValue = this.value.Run(runtime);
         RejectUnsupportedValueType(valueValue.Type);
@@ -64,6 +64,12 @@ internal sealed class Format : Expression
         {
             return SqlValue.Null(SqlType.NVarchar);
         }
+        catch (ArgumentOutOfRangeException)
+        {
+            // A date outside the culture calendar's range (0001-01-01 under
+            // ar-SA's Umm al-Qura) answers NULL as a FormatException does.
+            return SqlValue.Null(SqlType.NVarchar);
+        }
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
@@ -79,135 +85,90 @@ internal sealed class Format : Expression
     }
 
     /// <summary>
-    /// SQL Server formats through Windows' culture data, which differs from
-    /// ICU's in a few number-format cells: two default number and percent
-    /// digits where ICU has three (probe-confirmed 2026-09-23 for en-US,
-    /// de-DE, fr-FR, ja-JP and ar-SA: <c>FORMAT(1234.5, 'N')</c> is
-    /// <c>1,234.50</c>), a no-break space (U+00A0) as the group separator
-    /// where ICU has the narrow one (U+202F, fr-FR / fr-CH), the yen sign as
-    /// U+00A5 where ICU has the fullwidth U+FFE5, and en-US's negative
-    /// currency in parentheses (<c>($1,234.50)</c>) — the last three probed
-    /// 2026-09-24 against SQL Server 2025.
+    /// Picks the culture data for the formatter. A name Windows can't parse —
+    /// NULL included — is Msg 9818; any other resolves through
+    /// <see cref="FormatCulture.Resolve"/>, a known name to its own data and an
+    /// unknown one to what Windows synthesizes for it.
     /// </summary>
-    private static CultureInfo WithWindowsDecimalDigits(CultureInfo culture)
-    {
-        var format = culture.NumberFormat;
-        var parenthesizedCurrency = culture.Name == "en-US" && format.CurrencyNegativePattern != 0;
-        if (format.NumberDecimalDigits == 2 && format.PercentDecimalDigits == 2
-            && format.NumberGroupSeparator != NarrowNoBreakSpace && format.CurrencyGroupSeparator != NarrowNoBreakSpace
-            && format.PercentGroupSeparator != NarrowNoBreakSpace && format.CurrencySymbol != FullwidthYen
-            && !parenthesizedCurrency)
-        {
-            return culture;
-        }
-
-        var adjusted = (CultureInfo)culture.Clone();
-        var adjustedFormat = adjusted.NumberFormat;
-        adjustedFormat.NumberDecimalDigits = 2;
-        adjustedFormat.PercentDecimalDigits = 2;
-        adjustedFormat.NumberGroupSeparator = adjustedFormat.NumberGroupSeparator.Replace(NarrowNoBreakSpace, "\u00A0", StringComparison.Ordinal);
-        adjustedFormat.CurrencyGroupSeparator = adjustedFormat.CurrencyGroupSeparator.Replace(NarrowNoBreakSpace, "\u00A0", StringComparison.Ordinal);
-        adjustedFormat.PercentGroupSeparator = adjustedFormat.PercentGroupSeparator.Replace(NarrowNoBreakSpace, "\u00A0", StringComparison.Ordinal);
-        adjustedFormat.CurrencySymbol = adjustedFormat.CurrencySymbol.Replace(FullwidthYen, "\u00A5", StringComparison.Ordinal);
-        if (parenthesizedCurrency)
-            adjustedFormat.CurrencyNegativePattern = 0;
-        return adjusted;
-    }
-
-    private const string NarrowNoBreakSpace = "\u202F";
-
-    private const string FullwidthYen = "\uFFE5";
-
-    /// <summary>
-    /// Picks the CLR culture for the formatter. A non-string argument
-    /// or an unrecognized culture name silently falls back to <c>en-US</c>
-    /// — probe-confirmed (<c>FORMAT(1234, 'N0', 'qq-QQ')</c> formatted as
-    /// en-US-style <c>"1,234"</c> rather than raising). The <c>predefinedOnly:
-    /// true</c> overload is load-bearing for cross-platform determinism: on
-    /// some ICU builds (notably GitHub Actions Linux runners), the default
-    /// <see cref="CultureInfo.GetCultureInfo(string)"/> silently synthesizes
-    /// a culture from any well-formed BCP-47 tag rather than throwing,
-    /// producing an invariant-like formatter (no thousands separator) instead
-    /// of the expected fallback. <c>predefinedOnly</c> rejects synthesized
-    /// cultures and forces the catch block to fire.
-    /// </summary>
-    private static CultureInfo ResolveCulture(SqlValue cultureValue)
+    private static FormatCulture ResolveCulture(SqlValue cultureValue)
     {
         var name = cultureValue.IsNull ? null : cultureValue.AsString;
-        if (name is null || !IsWellFormedCultureName(name))
-            throw SimulatedSqlException.CultureNotSupported(name ?? "NULL");
-        // A private-use tag names no culture ICU knows, and asking for one
-        // yields a culture whose number format is incomplete.
-        if (name[1] is '-' or '_')
-            return CultureInfo.GetCultureInfo("en-US");
-        try
-        {
-            return CultureInfo.GetCultureInfo(name.Replace('_', '-'), predefinedOnly: true);
-        }
-        catch (CultureNotFoundException)
-        {
-            return CultureInfo.GetCultureInfo("en-US");
-        }
+        return name is null || !(IsWellFormedCultureName(name) || FormatCulture.IsKnown(name))
+            ? throw SimulatedSqlException.CultureNotSupported(name ?? "NULL")
+            : FormatCulture.Resolve(name);
     }
 
     /// <summary>
     /// Whether Windows parses <paramref name="name"/> as a culture name at
-    /// all, known or not: a two- or three-letter language, then subtags of two
-    /// letters (a region), three digits or four letters (a script), joined by
-    /// <c>-</c> or <c>_</c>; or a private-use <c>x-</c> / <c>i-</c> tag. Read off
-    /// real's answers (probed 2026-09-26 against SQL Server 2025: <c>qq-QQ</c>,
-    /// <c>en_US</c>, <c>zh-Hans</c>, <c>x-y</c> pass; <c>x</c>, the empty string,
-    /// <c>' en-US'</c>, <c>abc-DEFGH</c> are Msg 9818) rather than from a
-    /// specification, so a tag outside those shapes may be judged otherwise.
+    /// all, known or not: a two- or three-letter language, an optional
+    /// four-letter script, then either nothing, a region (two letters or three
+    /// digits) followed by any subtags of one to eight letters or digits, or a
+    /// singleton followed by at least one more; or a private-use <c>x-</c> /
+    /// <c>i-</c> tag; <c>-</c> and <c>_</c> both separate. Read off real's
+    /// answers (probed 2026-09-29 against SQL Server 2025: <c>en-US-POSIX</c>,
+    /// <c>en_US</c>, <c>zh-Hans</c>, <c>en-u-nu-thai</c>, <c>ab-cd-ef-gh</c>,
+    /// <c>x-y</c> pass; <c>en-POSIX</c>, <c>en-aaa</c>, <c>en-A</c>,
+    /// <c>en-US-ABCDEFGHI</c>, <c>abc-DEFGH</c>, <c>x</c>, the empty string and
+    /// <c>' en-US'</c> are Msg 9818). A name Windows knows outright passes
+    /// whatever its shape (<c>zh-CHS</c>, <c>qps-plocm</c>).
     /// </summary>
     private static bool IsWellFormedCultureName(string name)
     {
         var parts = name.Split('-', '_');
-        if (parts[0].Length == 1 && parts[0][0] is 'x' or 'X' or 'i' or 'I')
-            return parts.Length > 1 && Array.TrueForAll(parts[1..], static part => part.Length is >= 1 and <= 8 && part.All(char.IsAsciiLetterOrDigit));
+        if (Array.Exists(parts, static part => part.Length is 0 or > 8 || !part.All(char.IsAsciiLetterOrDigit)))
+            return false;
+        if (parts[0].Length == 1)
+            return parts[0][0] is 'x' or 'X' or 'i' or 'I' && parts.Length > 1;
         if (parts[0].Length is < 2 or > 3 || !parts[0].All(char.IsAsciiLetter))
             return false;
-        for (var i = 1; i < parts.Length; i++)
-        {
-            var part = parts[i];
-            var wellFormed = part.Length switch
-            {
-                2 or 4 => part.All(char.IsAsciiLetter),
-                3 => part.All(char.IsAsciiDigit),
-                _ => false,
-            };
-            if (!wellFormed)
-                return false;
-        }
-        return true;
+        var i = 1;
+        if (i < parts.Length && parts[i].Length == 4 && parts[i].All(char.IsAsciiLetter))
+            i++;
+        if (i == parts.Length)
+            return true;
+        var next = parts[i];
+        // A region opens the tail to any subtag; a singleton needs one after it.
+        return (next.Length == 2 && next.All(char.IsAsciiLetter)) || (next.Length == 3 && next.All(char.IsAsciiDigit))
+            || (next.Length == 1 && i + 1 < parts.Length);
     }
 
     /// <summary>
-    /// Bridges <see cref="SqlValue"/> to the underlying CLR
-    /// <see cref="IFormattable"/> so <c>ToString(format, culture)</c> drives
-    /// the actual output. Integer types widen to <see cref="long"/> so a
-    /// single switch arm handles all of tinyint/smallint/int/bigint, money
-    /// flattens to <see cref="decimal"/>, and the various date/time families
-    /// route to their CLR counterparts.
+    /// Bridges <see cref="SqlValue"/> to the CLR value SQL Server's .NET
+    /// Framework formatter would have seen, then formats it the way that
+    /// runtime did where it differs from the .NET this simulator runs on (see
+    /// <c>Format.Framework.cs</c>). Each integer type keeps its own width, so
+    /// <c>'X'</c> of a negative <c>int</c> writes eight digits and of a
+    /// <c>smallint</c> four; a <c>date</c> is a midnight <see cref="DateTime"/>,
+    /// which is what lets time specifiers answer for it.
     /// </summary>
-    private static string FormatValue(SqlValue v, string? format, CultureInfo culture) => v.Type switch
+    private static string FormatValue(SqlValue v, string? format, FormatCulture formatCulture)
     {
-        TinyIntSqlType or SmallIntSqlType or Int32SqlType or BigIntSqlType => v.CoerceTo(SqlType.BigInt).AsInt64.ToString(format, culture),
-        // A value a .NET decimal holds formats through .NET's own engine; a
-        // wider one lays its digits out directly, which is what lets real's
-        // full-38-digit rendering come back.
-        DecimalSqlType when Decimal38.TryToDotNetDecimal(v.AsDecimal38, out var narrow) => narrow.ToString(format, culture),
-        DecimalSqlType => WideNumericFormat.Render(v.AsDecimal38, format ?? "G", culture),
-        MoneySqlType or SmallMoneySqlType => v.AsMoney.ToString(format, culture),
-        FloatSqlType => WithoutNegativeZero(v.AsDouble).ToString(format, culture),
-        RealSqlType => WithoutNegativeZero(v.AsSingle).ToString(format, culture),
-        DateSqlType => v.AsDate.ToString(format, culture),
-        DateTimeSqlType or SmallDateTimeSqlType => v.AsDateTime.ToString(format, culture),
-        DateTime2SqlType => v.AsDateTime2.ToString(format, culture),
-        DateTimeOffsetSqlType => v.AsDateTimeOffset.ToString(format, culture),
-        TimeSqlType => v.AsTime.ToString(format, culture),
-        _ => throw new NotSupportedException($"FORMAT for value type {v.Type} not modeled."),
-    };
+        var culture = formatCulture.Culture;
+        return v.Type switch
+        {
+            TinyIntSqlType => FormatInteger((byte)v.CoerceTo(SqlType.BigInt).AsInt64, format, culture),
+            SmallIntSqlType => FormatInteger((short)v.CoerceTo(SqlType.BigInt).AsInt64, format, culture),
+            Int32SqlType => FormatInteger((int)v.CoerceTo(SqlType.BigInt).AsInt64, format, culture),
+            BigIntSqlType => FormatInteger(v.AsInt64, format, culture),
+            // A value a .NET decimal holds formats through .NET's own engine; a
+            // wider one lays its digits out directly, which is what lets real's
+            // full-38-digit rendering come back.
+            DecimalSqlType when Decimal38.TryToDotNetDecimal(v.AsDecimal38, out var narrow) => FormatDecimal(narrow, format, culture),
+            DecimalSqlType => WideNumericFormat.Render(v.AsDecimal38, format ?? "G", culture),
+            MoneySqlType or SmallMoneySqlType => FormatDecimal(v.AsMoney, format, culture),
+            FloatSqlType => FormatFloating(WithoutNegativeZero(v.AsDouble), single: false, format, culture),
+            RealSqlType => FormatFloating(WithoutNegativeZero(v.AsSingle), single: true, format, culture),
+            DateSqlType => FormatDateTime(v.AsDate.ToDateTime(TimeOnly.MinValue), format, formatCulture),
+            // A datetime crosses to the CLR as SqlDateTime does, its 1/300-second
+            // ticks rounded to the millisecond (.997 reads .9970000 under 'O').
+            DateTimeSqlType => FormatDateTime(new DateTime((v.AsDateTime.Ticks + (TimeSpan.TicksPerMillisecond / 2)) / TimeSpan.TicksPerMillisecond * TimeSpan.TicksPerMillisecond), format, formatCulture),
+            SmallDateTimeSqlType => FormatDateTime(v.AsSmallDateTime, format, formatCulture),
+            DateTime2SqlType => FormatDateTime(v.AsDateTime2, format, formatCulture),
+            DateTimeOffsetSqlType => v.AsDateTimeOffset.ToString(WithEra(format, formatCulture, v.AsDateTimeOffset.DateTime), culture),
+            TimeSqlType => FormatTime(v.AsTime, format, culture),
+            _ => throw new NotSupportedException($"FORMAT for value type {v.Type} not modeled."),
+        };
+    }
 
     /// <summary>
     /// Drops the sign of an IEEE 754 negative zero. FORMAT is the one string

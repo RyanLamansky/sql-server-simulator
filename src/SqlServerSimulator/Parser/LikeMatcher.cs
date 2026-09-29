@@ -72,6 +72,9 @@ internal sealed class LikeMatcher
 
     private readonly SurrogateMatching surrogates;
 
+    /// <summary>The characters the collation gives no weight, which ride along with the character before them.</summary>
+    private readonly WeightlessCharacters? weightless;
+
     private readonly bool caseSensitive;
 
     /// <summary>
@@ -103,6 +106,7 @@ internal sealed class LikeMatcher
         this.collation = collation;
         this.compareInfo = collation.LinguisticMatching?.Info;
         this.surrogates = collation.SurrogateMatching;
+        this.weightless = collation.Weightless;
         this.caseSensitive = collation.CaseSensitive;
         this.asciiEligible = asciiEligible;
         for (var i = 0; asciiEligible && i + 1 < segments.Length; i++)
@@ -274,6 +278,20 @@ internal sealed class LikeMatcher
         if (ascii)
             return 1;
 
+        // A run of characters real gives no weight isn't a character of its
+        // own: at the start it rides with the character after it, anywhere
+        // else with the one before (see TrailingMarks).
+        var lead = 0;
+        while (pos + lead < s.Length && this.IsWeightlessAt(s, pos + lead))
+            lead++;
+        if (lead > 0)
+        {
+            if (pos + lead == s.Length)
+                return lead;
+            var rest = this.ElementLength(s, pos + lead, ascii);
+            return rest < 0 ? rest : lead + rest;
+        }
+
         var c = s[pos];
         if (char.IsSurrogate(c))
         {
@@ -282,14 +300,14 @@ internal sealed class LikeMatcher
             {
                 SurrogateMatching.Unmatchable => -1,
                 SurrogateMatching.CodeUnits => 1,
-                _ => pairs ? 2 + TrailingMarks(s, pos + 2) : 1,
+                _ => pairs ? 2 + this.TrailingMarks(s, pos + 2) : 1,
             };
         }
 
         // A binary collation compares code units and groups nothing, which is
         // what its `_` does too (probe-confirmed on Latin1_General_BIN2:
         // `N'e' + NCHAR(0x0301) LIKE N'__'` answers yes).
-        return this.compareInfo is null ? 1 : 1 + TrailingMarks(s, pos + 1);
+        return this.compareInfo is null ? 1 : 1 + this.TrailingMarks(s, pos + 1);
     }
 
     /// <summary>
@@ -333,13 +351,17 @@ internal sealed class LikeMatcher
         i >= s.Length
         || !(IsCombiningMark(s[i]) || (i > 0 && char.IsHighSurrogate(s[i - 1]) && char.IsLowSurrogate(s[i])));
 
-    private static int TrailingMarks(ReadOnlySpan<char> s, int from)
+    private int TrailingMarks(ReadOnlySpan<char> s, int from)
     {
         var count = 0;
-        while (from + count < s.Length && IsCombiningMark(s[from + count]))
+        while (from + count < s.Length && (IsCombiningMark(s[from + count]) || this.IsWeightlessAt(s, from + count)))
             count++;
         return count;
     }
+
+    // Surrogates keep the collation-vintage rule of ElementLength.
+    private bool IsWeightlessAt(ReadOnlySpan<char> s, int i) =>
+        this.weightless is { } weightless && !char.IsSurrogate(s[i]) && (s[i] != '\0' || !this.collation.WeightsNul) && weightless.IsWeightlessAt(s, i);
 
     /// <summary>
     /// The code units that attach to the character before them. The Unicode

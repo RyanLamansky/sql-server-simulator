@@ -382,6 +382,8 @@ internal abstract partial class Collation
 
         internal override SurrogateMatching SurrogateMatching => this.inner.SurrogateMatching;
 
+        internal override WeightlessCharacters Weightless => this.inner.Weightless;
+
         internal override Encoding StorageEncoding => this.inner.StorageEncoding;
 
         internal override Collation ForVarcharStorage() => this.varcharBody ?? this;
@@ -532,7 +534,8 @@ internal abstract partial class Collation
         // inner hash covers string pairs built from them.
         private static string? ComputeRuneFold(int rune, SqlLatin1Cp1CiAsCollation self)
         {
-            var s = char.ConvertFromUtf32(rune);
+            // A lone surrogate half reaches here as its own code unit.
+            var s = rune <= char.MaxValue ? ((char)rune).ToString() : char.ConvertFromUtf32(rune);
             if (self.inner.Equals(s, string.Empty))
                 return string.Empty;
 

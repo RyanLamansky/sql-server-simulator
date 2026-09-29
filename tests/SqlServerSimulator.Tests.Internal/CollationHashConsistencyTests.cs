@@ -55,26 +55,27 @@ public sealed class CollationHashConsistencyTests
             AssertEqualAndHashEqual(collation, "café", "cafe\u0301");
     }
 
+    // U+1E9E postdates the default collation's weight table, so it weighs
+    // nothing there (probed 2026-09-29 against SQL Server 2025).
     [TestMethod]
-    public void CapitalSharpS_HashesLikeSharpS()
+    public void CapitalSharpS_HashesLikeAbsent()
     {
         foreach (var collation in (Collation[])[Nvarchar, Varchar])
-            AssertEqualAndHashEqual(collation, "straße", "straẞe");
+            AssertEqualAndHashEqual(collation, "strae", "stra\u1E9Ee");
     }
 
     [TestMethod]
-    public void IcuIgnorableCharacters_HashLikeAbsent()
+    public void WeightlessCharacters_HashLikeAbsent()
     {
         foreach (var collation in (Collation[])[Nvarchar, Varchar])
         {
-            AssertEqualAndHashEqual(collation, "ab", "a\u200Bb");
             AssertEqualAndHashEqual(collation, "ab", "a\uFEFFb");
-            // A control character is in-repertoire, so a pure-CP1252 pair
-            // stays weight-compared (unequal); ICU ignores it only where
-            // equality routes through the inner collation. The all-CP1252
-            // spelling still shares the hash — a legal collision the
-            // fullwidth triangle requires.
-            AssertEqualAndHashEqual(collation, "a\u0001ｂ", "aｂ");
+            AssertEqualAndHashEqual(collation, "ab", "a\u0378b");
+            AssertEqualAndHashEqual(collation, "ab", "a\uD83D\uDE00b");
+            AssertEqualAndHashEqual(collation, "aｂ", "a\u0378ｂ");
+            // ICU ignores these; real weighs them.
+            IsFalse(collation.Equals("ab", "a\u200Bb"));
+            IsFalse(collation.Equals("aｂ", "a\u0001ｂ"));
             AreEqual(collation.GetHashCode("a\u0001b"), collation.GetHashCode("ab"));
         }
     }

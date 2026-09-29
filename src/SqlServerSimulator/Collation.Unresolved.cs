@@ -178,6 +178,8 @@ internal sealed class UnresolvedCollation(Collation inner, string rightName, str
 
     internal override bool IsSupplementaryCharacterAware => this.inner.IsSupplementaryCharacterAware;
 
+    internal override WeightlessCharacters? Weightless => this.inner.Weightless;
+
     internal override (System.Globalization.CompareInfo Info, System.Globalization.CompareOptions Options)? LinguisticMatching => this.inner.LinguisticMatching;
 
     internal override SurrogateMatching SurrogateMatching => this.inner.SurrogateMatching;

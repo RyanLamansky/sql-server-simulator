@@ -43,6 +43,8 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Parser/FullText/SystemStopwords.tsv" LogicalName="SqlServerSimulator.FullText.SystemStopwords.tsv" />
+    <EmbeddedResource Include="Parser/Expressions/FormatCultures.tsv" LogicalName="SqlServerSimulator.Format.Cultures.tsv" />
+    <EmbeddedResource Include="Collation.CjkPrimary.txt" LogicalName="SqlServerSimulator.Collation.CjkPrimary.txt" />
   </ItemGroup>
 
   <Target Name="EmbedClrShimAssembly" AfterTargets="ResolveProjectReferences">

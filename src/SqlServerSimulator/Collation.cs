@@ -556,14 +556,33 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         private readonly CultureCollation? varcharBody;
 
+        // The name's version (80 for an unversioned one), which decides the
+        // characters real gives no weight.
+        private readonly int version;
+
+        private WeightlessCharacters? weightless;
+
+        // The family whose primary order ships as a table (see CjkPrimaryOrder),
+        // resolved on first comparison.
+        private readonly string? primaryFamily;
+
+        private readonly int? primaryVersion;
+
+        private CjkPrimaryOrder? primaryOrder;
+
+        private volatile bool primaryResolved;
+
         // weightsNul builds the sibling a SQL_ name's varchar data takes,
         // which weights CHAR(0) (see WeightsNul).
-        internal CultureCollation(string name, string description, string cultureName, bool caseSensitive, bool accentInsensitive, bool kanaTypeSensitive, bool widthSensitive, Encoding storageEncoding, int ansiCodePage, bool isSupplementaryCharacterAware, SurrogateMatching surrogateMatching, bool weightsNul = false)
+        internal CultureCollation(string name, string description, string cultureName, bool caseSensitive, bool accentInsensitive, bool kanaTypeSensitive, bool widthSensitive, Encoding storageEncoding, int ansiCodePage, bool isSupplementaryCharacterAware, SurrogateMatching surrogateMatching, int version, bool weightsNul = false, string? primaryFamily = null, int? primaryVersion = null)
         {
+            this.primaryFamily = primaryFamily;
+            this.primaryVersion = primaryVersion;
             this.name = name;
             this.weightsNul = weightsNul;
             if (!weightsNul && name.StartsWith("SQL_", StringComparison.OrdinalIgnoreCase))
-                this.varcharBody = new CultureCollation(name, description, cultureName, caseSensitive, accentInsensitive, kanaTypeSensitive, widthSensitive, storageEncoding, ansiCodePage, isSupplementaryCharacterAware, surrogateMatching, weightsNul: true);
+                this.varcharBody = new CultureCollation(name, description, cultureName, caseSensitive, accentInsensitive, kanaTypeSensitive, widthSensitive, storageEncoding, ansiCodePage, isSupplementaryCharacterAware, surrogateMatching, version, weightsNul: true, primaryFamily, primaryVersion);
+            this.version = version;
             this.surrogateMatching = surrogateMatching;
             this.description = description;
             this.caseSensitive = caseSensitive;
@@ -608,6 +627,9 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         internal override Collation ForVarcharStorage() => this.varcharBody ?? this;
 
+        internal override WeightlessCharacters Weightless =>
+            this.weightless ??= WeightlessCharacters.For(this.version, this.compareInfo, this.equalityOptions);
+
         public override int Compare(string? x, string? y)
         {
             if (x is null)
@@ -621,79 +643,66 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
 
         private int CompareIgnoringNul(string x, string y)
         {
-
             // Hyphen and apostrophe are the two marks SQL Server's collations
-            // weight only at a secondary level: at the primary level they sort
-            // as if absent (so "co-op" ranks beside "coop", "'Aiea" beside
+            // weight only at a final level: at the primary level they sort as
+            // if absent (so "co-op" ranks beside "coop", "'Aiea" beside
             // "Aiea"), while every other symbol keeps a real primary weight
             // that sorts ahead of digits and letters. .NET exposes neither
             // knob granularly — IgnoreSymbols drops *all* punctuation, the
-            // default keeps it all — so the two minimal marks are stripped for
-            // the primary pass and consulted only to break an otherwise-exact
-            // tie (the copy carrying one sorts after: "coop" < "co-op").
-            if (!ContainsMinimalPunctuation(x) && !ContainsMinimalPunctuation(y))
-                return this.compareInfo.Compare(x, y, this.equalityOptions);
-            var primary = this.compareInfo.Compare(
-                StripMinimalPunctuation(x), StripMinimalPunctuation(y), this.equalityOptions);
-            return primary != 0 ? primary : MinimalPunctuationTiebreak(x, y);
-        }
-
-        private static bool IsMinimalPunctuation(char c) => c is '-' or '\'';
-
-        private static bool ContainsMinimalPunctuation(string s)
-        {
-            foreach (var c in s)
+            // default keeps it all — so the minimal marks are stripped for the
+            // primary pass and consulted only to break an otherwise-exact tie.
+            // The characters CompareInfo ignores where real weighs them join
+            // the two, and the ones real ignores where CompareInfo weighs them
+            // are removed first (see WeightlessCharacters).
+            var weightless = this.Weightless;
+            int result;
+            if (!weightless.IsSpecial(x) && !weightless.IsSpecial(y))
             {
-                if (IsMinimalPunctuation(c))
-                    return true;
+                result = this.compareInfo.Compare(x, y, this.equalityOptions);
+            }
+            else
+            {
+                x = weightless.RemoveDropped(x);
+                y = weightless.RemoveDropped(y);
+                var primary = this.compareInfo.Compare(weightless.StripMinimal(x), weightless.StripMinimal(y), this.equalityOptions);
+                result = primary != 0 ? primary : weightless.MinimalTiebreak(x, y);
             }
 
-            return false;
-        }
-
-        private static string StripMinimalPunctuation(string s)
-        {
-            var buffer = s.Length <= 256 ? stackalloc char[s.Length] : new char[s.Length];
-            var count = 0;
-            foreach (var c in s)
+            // An East Asian family orders its scripts and ideographs by real's
+            // own primary table; CompareInfo keeps equality and breaks the ties
+            // below the primary level.
+            if (result == 0 || this.primaryFamily is null || !(CjkPrimaryOrder.Reaches(x) || CjkPrimaryOrder.Reaches(y)))
+                return result;
+            if (!this.primaryResolved)
             {
-                if (!IsMinimalPunctuation(c))
-                    buffer[count++] = c;
+                this.primaryOrder = CjkPrimaryOrder.For(this.primaryFamily, this.primaryVersion);
+                this.primaryResolved = true;
             }
 
-            return new string(buffer[..count]);
+            var table = this.primaryOrder?.ComparePrimary(x, y, weightless) ?? 0;
+            return table != 0 ? table : result;
         }
 
-        // Primary-equal strings differ only in their hyphen / apostrophe
-        // content; the copy carrying such a mark where the other has a real
-        // character (or its end) sorts later, matching "coop" &lt; "co-op",
-        // "cant" &lt; "can't", "A" &lt; "'A".
-        private static int MinimalPunctuationTiebreak(string x, string y)
+        public override bool Equals(string? x, string? y)
         {
-            var i = 0;
-            var j = 0;
-            while (i < x.Length && j < y.Length)
-            {
-                var xMinimal = IsMinimalPunctuation(x[i]);
-                var yMinimal = IsMinimalPunctuation(y[j]);
-                if (xMinimal != yMinimal)
-                    return xMinimal ? 1 : -1;
-                i++;
-                j++;
-            }
-
-            return (x.Length - i).CompareTo(y.Length - j);
+            if (x is null)
+                return y is null;
+            if (y is null)
+                return false;
+            if (this.weightsNul && (x.Contains('\0', StringComparison.Ordinal) || y.Contains('\0', StringComparison.Ordinal)))
+                return CompareNulWeighted(x, y, this.CompareIgnoringNul) == 0;
+            var weightless = this.Weightless;
+            return !weightless.IsSpecial(x) && !weightless.IsSpecial(y)
+                ? this.compareInfo.Compare(x, y, this.equalityOptions) == 0
+                : this.CompareIgnoringNul(x, y) == 0;
         }
 
-        public override bool Equals(string? x, string? y) =>
-            x is null
-                ? y is null
-                : y is not null && (this.weightsNul && (x.Contains('\0', StringComparison.Ordinal) || y.Contains('\0', StringComparison.Ordinal))
-                    ? CompareNulWeighted(x, y, (a, b) => this.compareInfo.Compare(a, b, this.equalityOptions)) == 0
-                    : this.compareInfo.Compare(x, y, this.equalityOptions) == 0);
-
+        // A minimal-weight character CompareInfo ignores is left in: two
+        // strings differing only there hash alike and compare unequal, which
+        // the contract allows.
         public override int GetHashCode(string obj)
         {
+            obj = this.Weightless.RemoveDropped(obj);
             if (!this.weightsNul || !obj.Contains('\0', StringComparison.Ordinal))
                 return this.compareInfo.GetHashCode(obj, this.equalityOptions);
             var hash = new HashCode();

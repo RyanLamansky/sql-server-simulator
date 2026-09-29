@@ -408,7 +408,7 @@ internal abstract partial class Collation
         var surrogateMatching = scAware ? SurrogateMatching.CodePoint
             : version is not null ? SurrogateMatching.CodeUnits
             : SurrogateMatching.Unmatchable;
-        var cultureBody = new CultureCollation(name, description, prefixInfo.CultureName, caseSensitive, accentInsensitive, kanaSensitive, widthSensitive, storageEncoding, ansiCodePage, scAware, surrogateMatching);
+        var cultureBody = new CultureCollation(name, description, prefixInfo.CultureName, caseSensitive, accentInsensitive, kanaSensitive, widthSensitive, storageEncoding, ansiCodePage, scAware, surrogateMatching, version ?? 80, primaryFamily: prefix.StartsWith("Chinese", StringComparison.Ordinal) || prefix.StartsWith("Japanese", StringComparison.Ordinal) || prefix.StartsWith("Korean", StringComparison.Ordinal) ? prefix : null, primaryVersion: version);
 
         // The default collation gets a byte-exact sort body wrapping the
         // generic culture comparer (which still supplies metadata + the
