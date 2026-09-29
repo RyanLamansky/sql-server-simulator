@@ -1104,17 +1104,47 @@ internal sealed partial class Selection
             List<MultiPartName>? unresolved = null;
             try
             {
-                operand.VisitColumnReferences(name =>
+                void Visit(MultiPartName name)
                 {
                     referenced++;
                     if (FindSourceColumn(sources, name).SourceIndex >= 0)
                         resolvedHere++;
                     else
                         (unresolved ??= []).Add(name);
-                });
+                }
+                operand.VisitColumnReferences(Visit);
+
+                // An approximate percentile's fraction is part of what it
+                // aggregates: an enclosing query's column there beside a column
+                // of this scope is Msg 8124, and a column of the scope that owns
+                // the call Msg 8726 — unless its source is one constant row,
+                // which real folds to a constant first (probed 2026-09-29
+                // against SQL Server 2025).
+                var fractionVaries = false;
+                if (aggregate.Kind is AggregateKind.ApproxPercentileCont or AggregateKind.ApproxPercentileDisc)
+                {
+                    aggregate.Separator?.VisitColumnReferences(name =>
+                    {
+                        Visit(name);
+                        var sourceIndex = FindSourceColumn(sources, name).SourceIndex;
+                        if (sourceIndex >= 0 && sources[sourceIndex].LateralPlan is not { IsSingleConstantRow: true })
+                            fractionVaries = true;
+                    });
+                }
 
                 if (unresolved is null)
+                {
+                    // Real settles it after the rest of the statement has
+                    // bound, so any other binder error outranks it.
+                    if (fractionVaries)
+                    {
+                        var notConstant = SimulatedSqlException.PercentileInputNotConstant(aggregate.Kind == AggregateKind.ApproxPercentileCont ? "APPROX_PERCENTILE_CONT" : "APPROX_PERCENTILE_DISC");
+                        if (parseBatch.Parser.SecurableSink is null)
+                            throw notConstant;
+                        parseBatch.Parser.PendingBindError ??= notConstant;
+                    }
                     continue;
+                }
 
                 // Resolve the outer scope chain before concluding anything: with no
                 // enclosing scope at all, or with one that doesn't know the name,

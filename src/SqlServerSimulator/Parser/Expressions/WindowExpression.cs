@@ -753,7 +753,20 @@ internal sealed class WindowExpression : Expression
 
     public static WindowExpression WrapAggregate(AggregateExpression aggregate, ParserContext context)
     {
-        if (aggregate.Distinct)
+        var window = WrapAggregateCore(aggregate, context);
+
+        // Refused only once the window clause has parsed, so a syntax error
+        // inside the clause wins (probed 2026-09-29 against SQL Server 2025).
+        return aggregate.RefusedWindowName is { } refused
+            ? throw SimulatedSqlException.FunctionNotValidForOver(refused, state: 5)
+            : window;
+    }
+
+    private static WindowExpression WrapAggregateCore(AggregateExpression aggregate, ParserContext context)
+    {
+        // APPROX_COUNT_DISTINCT counts distinct values without a DISTINCT
+        // written, so its window is judged by RefusedWindowName instead.
+        if (aggregate.Distinct && aggregate.Kind != AggregateKind.ApproxCountDistinct)
             throw SimulatedSqlException.DistinctNotAllowedInOver();
         if (aggregate.Kind == AggregateKind.StringAgg)
             throw SimulatedSqlException.FunctionNotValidForOver("string_agg");

@@ -333,7 +333,9 @@ partial class SimulatedSqlException
     /// <c>_DISC</c> fraction written with a <c>DISTINCT</c> / <c>ALL</c>
     /// quantifier and no <c>WITHIN GROUP</c>, which real refuses as a
     /// non-constant input even when the fraction is a literal (probed
-    /// 2026-09-27 against SQL Server 2025).
+    /// 2026-09-27 against SQL Server 2025), or a fraction reading a column of
+    /// the aggregate's own query, a binding error a dead branch still raises
+    /// (probed 2026-09-29).
     /// </summary>
     internal static SimulatedSqlException PercentileInputNotConstant(string upperName) =>
         new($"Input parameter of {upperName} function must be a constant.", 8726, 16, 1);
@@ -874,8 +876,9 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server's Msg 4113 — an aggregate that has no windowed form
-    /// (<c>STRING_AGG</c> at state 4, the <c>APPROX_PERCENTILE</c> pair at
-    /// state 8) was used with <c>OVER</c>.
+    /// (<c>STRING_AGG</c> at state 4, <c>APPROX_COUNT_DISTINCT</c> without
+    /// <c>ALL</c> at state 5, named as written, the <c>APPROX_PERCENTILE</c>
+    /// pair at state 8) was used with <c>OVER</c>.
     /// </summary>
     internal static SimulatedSqlException FunctionNotValidForOver(string functionLowerName, byte state = 4) =>
         new($"The function '{functionLowerName}' is not a valid windowing function, and cannot be used with the OVER clause.", 4113, 15, state);

@@ -433,9 +433,8 @@ Worth a look before re-affirming or changing.
 (Rationale lives in [`scalars.md`](scalars.md)'s divergence notes and CLAUDE.md's Quirks.)
 
 - **APPROX_COUNT_DISTINCT** implemented as exact `COUNT(DISTINCT)`.
-  Original rationale: same semantic guarantee, no HyperLogLog dependency.
-  Review: is the perf gap visible against in-process workloads?
-  If not, the simpler form stays defensible.
+  Real's answer is a 4096-register HyperLogLog estimate that parts from the exact count as soon as two values share a register (51 for the integers 1 to 52), but its hash isn't identifiable from query outputs and its answer also varies with batch- versus row-mode execution — see [`query.md`](query.md#the-approximate-aggregates) for the corpus and the hypotheses ruled out.
+  Revisit if a public description of real's hash surfaces; until then exact is the one answer that is right wherever real is.
 
 ## Won't-model / explicitly excluded
 

@@ -529,6 +529,7 @@ internal sealed partial class Selection
             // list is a constant scan whose values are drawn once each (probed
             // 2026-09-28 against SQL Server 2025).
             VolatileColumns = VolatileProjection.Of([.. tuples.SelectMany(tuple => tuple)], fixesValues: tuples.Count > 1),
+            IsSingleConstantRow = tuples.Count == 1,
         };
 
     private static IEnumerable<byte[]> EnumerateValuesRows(SqlType[] schema, List<Expression[]> tuples, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
@@ -5119,6 +5120,8 @@ internal sealed partial class Selection
             }
         }
 
+        var isBareConstantRow = !containsSubquery && topCount is null && offsetCount is null && fetchCount is null
+            && excluders.TrueForAll(excluder => ConstantFolding.TryFoldPredicate(excluder, parseBatch.Parser, out var folded) && folded == true);
         return new Selection(schema, columnNames,
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topCount.HasValue || offsetCount.HasValue || fetchCount.HasValue,
@@ -5167,8 +5170,8 @@ internal sealed partial class Selection
         {
             ProjectionExpressions = [.. expressions],
             VolatileColumns = VolatileProjection.Of(expressions, fixesValues: false),
-            IsBareConstantRow = !containsSubquery && topCount is null && offsetCount is null && fetchCount is null
-                && excluders.TrueForAll(excluder => ConstantFolding.TryFoldPredicate(excluder, parseBatch.Parser, out var folded) && folded == true),
+            IsBareConstantRow = isBareConstantRow,
+            IsSingleConstantRow = isBareConstantRow,
             // An empty scope, not an unknown one: as the first branch of a
             // set-op chain this projects output aliases and nothing else, so a
             // trailing ORDER BY naming anything but one of them is Msg 207 on

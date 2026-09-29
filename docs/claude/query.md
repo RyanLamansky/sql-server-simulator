@@ -459,7 +459,7 @@ Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKe
 
 ## Aggregates
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT)` / `COUNT_BIG`, `SUM` / `AVG`, `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`, and SQL Server 2025's `PRODUCT` (SUM's result types, save a fractional decimal multiplying at scale 6; `ProductAggregator`).
-`APPROX_PERCENTILE_CONT` / `APPROX_PERCENTILE_DISC` compute the **exact** percentile (`PercentileAggregator`), which is what real's sketch answers over any set small enough to compare; over a large one real's approximation can drift from it — a divergence in the same spirit as `APPROX_COUNT_DISTINCT` counting exactly.
+`APPROX_COUNT_DISTINCT` counts exactly and `APPROX_PERCENTILE_CONT` / `APPROX_PERCENTILE_DISC` compute the exact percentile — see [the approximate aggregates](#the-approximate-aggregates) for where real's sketches part from that and why neither is reproduced.
 `AVG(int)` truncates; `AVG(decimal(p,s))` widens to `decimal(38, max(s,6))`.
 `SUM` / `AVG` also widen `real` to `float` and `smallmoney` to `money`, where `MIN` / `MAX` keep the operand's type — see [`arithmetic.md`](arithmetic.md#the-approximate-family-float--real).
 
@@ -472,7 +472,7 @@ Real's grammar reads `name(DISTINCT expr)` and `name(ALL expr)` as an aggregate 
 - Any other one-part name takes exactly one operand, so a second argument is Msg 102 at its comma (`group_concat(DISTINCT x, ':')`, `STRING_AGG(DISTINCT x, ',')`, `ISNULL(DISTINCT x, 1)`), a `WITHIN GROUP` after the call is Msg 102 at `WITHIN`, and `CAST(DISTINCT x AS int)` is Msg 156 at the `AS`.
 - A scalar built-in or an unknown name is **Msg 195** "is not a recognized aggregate function", named as written, raised while parsing — so it outranks a later syntax error and fires in a dead branch — but only after any `OVER` clause has parsed.
 - `STRING_AGG` and the two JSON aggregates are Msg 313 state 2 and the approximate percentiles Msg 8726, both binding errors held in `ParserContext.PendingBindError`, so a later syntax error or the FROM clause's Msg 208 outranks them; with `DISTINCT` and an `OVER` they are Msg 10759 instead.
-- `APPROX_COUNT_DISTINCT(DISTINCT x)` is Msg 16200 while parsing; its `ALL` is harmless.
+- `APPROX_COUNT_DISTINCT(DISTINCT x)` is Msg 16200 while parsing; its `ALL` is harmless, and is what admits an `OVER` clause.
 - A schema-qualified name is a user-defined aggregate, which takes a whole argument list and is Msg 208 state 214 when absent — even when the name is a scalar UDF — deferred like any missing object, so a dead branch compiles.
   With `DISTINCT` and an `OVER` it is Msg 102 near `'distinct'`, in lowercase.
 
@@ -480,6 +480,35 @@ Real's grammar reads `name(DISTINCT expr)` and `name(ALL expr)` as an aggregate 
 The skipped `OVER` clause is checked only for balanced parentheses, so a syntax error inside one (`OVER (ORDER BY x x)`) is Msg 195 here.
 A held Msg 313 is dropped when the same statement also has a binder report (`STRING_AGG(DISTINCT s), nosuchcol` reports only the Msg 207 here, where real reports both).
 `APPROX_PERCENTILE_DISC(ALL 0.5) OVER ()` kills the session on real (severity 21, probed 2026-09-27); here it is Msg 8726.
+
+### The approximate aggregates
+
+`APPROX_COUNT_DISTINCT` is `CountAggregator` in its distinct form and the `APPROX_PERCENTILE` pair is `PercentileAggregator`, both exact.
+Real's answers are reproducible neither way, for different reasons (probed 2026-09-29 against SQL Server 2025, from query outputs alone):
+
+- **`APPROX_COUNT_DISTINCT`** is a HyperLogLog sketch (Microsoft's docs name the algorithm) of 4096 registers: over the integer prefixes up to 400 values every answer matches linear counting, `round(4096 · ln(4096 / V))` over `V` empty registers, exactly, and the spread of its errors over thirty disjoint 100,000-value ranges (σ ≈ 1.8%) fits that register count.
+  So real is exact only while no two values share a register, and consecutive integers first share one at 52 values: `generate_series(1, 52)` answers 51.
+  Which register a value lands in depends on a hash the outputs don't identify.
+  Pairwise collisions among the integers 1 to 400 were compared with Murmur3 (32- and 128-bit), xxHash32 / 64, FNV-1 / 1a (32- and 64-bit), CRC-32, MD5, SHA-1 / 256 / 512, MurmurHash2 (32 and 64A), SplitMix64 and the Murmur finalizers, over 4- and 8-byte little- and big-endian encodings, the decimal text and UTF-16 text, 25 common seeds and every 12-bit window of the hash, with no match.
+  Any CRC, or any other hash affine over GF(2), is ruled out outright: real's collision between 41 and 52 would force one between 1 and 28, which real doesn't show.
+  Every integer type hashes a value alike (`tinyint` through `bigint` collide on the same pairs), while `decimal`, `float`, `real`, `money` and the string and binary types don't share those collisions.
+  The answer also depends on the plan: over one input, real's batch-mode hash aggregate and its row-mode one disagree (`generate_series(1, 50000)` is 50,639 in batch mode and 49,570 under `DISALLOW_BATCH_MODE`), so a reproduced sketch would also have to follow real's choice of execution mode.
+  Equality is the operand's own, as for `COUNT(DISTINCT)`: a case-insensitive collation folds `'a'` with `'A'`, trailing spaces don't count, `N'ß'` equals `N'ss'` under the default collation and `-0e0` equals `0e0`.
+  Microsoft's page for the function says collation-sensitive strings match as under a `BIN` collation; the server folds them as above.
+- **`APPROX_PERCENTILE_CONT` / `_DISC`** answer the exact percentile for up to 977 non-NULL values in a group, whatever the type.
+  From 978 on real compacts its sketch, and the answer changes between executions of one statement — the 1.3th percentile of a fixed 978 values was 1,304 on some runs and 1,416 on others — while every group of one execution agrees.
+  A randomized compaction is nothing a query output can predict, so the exact percentile stands in as the deterministic answer.
+
+**Clauses.**
+- `APPROX_COUNT_DISTINCT(x) OVER (…)` is Msg 4113 state 5, naming the function as written.
+  It is raised once the window clause has parsed, so a syntax error inside the clause wins, and ahead of binding, so a dead branch raises it and a missing table doesn't preempt it.
+- `APPROX_COUNT_DISTINCT(ALL x) OVER (…)` is accepted and counts distinct values over the window: partitions, running counts and sliding frames all apply.
+- An approximate percentile's fraction is part of what the call aggregates.
+  An aggregate or subquery there is Msg 130, an enclosing query's column beside a column of the call's own scope is Msg 8124, and a column of the scope that owns the call is Msg 8726.
+  The Msg 8726 is settled after the rest of the statement has bound, so a Msg 207 elsewhere wins, and a dead branch raises it.
+  A column of a one-row constant source — a FROM-less derived `SELECT`, a one-row `VALUES` — folds to a constant first and is accepted (`Selection.IsSingleConstantRow`), where a two-row one, a table's column or a `UNION ALL` of constants is refused.
+
+Oracle: `ApproxAggregateTests`.
 
 ### Streaming accumulation, and where an error surfaces
 
@@ -807,7 +836,7 @@ Cross-aggregate Msg 8711 isn't modeled (EF doesn't emit).
   `PERCENTILE_CONT` returns `float` and linearly interpolates at `rank = p·(n−1)` between the floor/ceil values; `PERCENTILE_DISC` returns the **sort expression's own type** and picks the smallest value whose CUME_DIST ≥ p (index `ceil(p·n) − 1`, clamped).
   The fraction `p` is evaluated once per query (constant, variable, or parameter); NULL or a value outside `[0, 1]` → Msg 8727 at runtime.
   `DESC` reverses the sort.
-- Aggregate windows: `SUM`/`AVG`/`COUNT`/`COUNT_BIG`/`MIN`/`MAX`/`STDEV*`/`VAR*`/`CHECKSUM_AGG`/`APPROX_COUNT_DISTINCT`/`PRODUCT(expr) OVER ([PARTITION BY ...] [ORDER BY ...] [frame])`.
+- Aggregate windows: `SUM`/`AVG`/`COUNT`/`COUNT_BIG`/`MIN`/`MAX`/`STDEV*`/`VAR*`/`CHECKSUM_AGG`/`PRODUCT(expr) OVER ([PARTITION BY ...] [ORDER BY ...] [frame])`, and `APPROX_COUNT_DISTINCT(ALL expr)` — only with its `ALL` written (see [the approximate aggregates](#the-approximate-aggregates)).
   Default frame without ORDER BY = whole partition; with ORDER BY = `RANGE UNBOUNDED PRECEDING TO CURRENT ROW` (running total with peer-tie grouping).
 - Explicit frame specs: `ROWS BETWEEN <start> AND <end>` and `RANGE BETWEEN <start> AND <end>`, plus the single-bound shorthand `ROWS <start>` ≡ `ROWS BETWEEN <start> AND CURRENT ROW`.
   `ROWS` accepts the full bound family: `UNBOUNDED PRECEDING`, `N PRECEDING`, `CURRENT ROW`, `N FOLLOWING`, `UNBOUNDED FOLLOWING`.

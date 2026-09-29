@@ -72,6 +72,16 @@ internal sealed class AggregateExpression : Expression
     public readonly bool Distinct;
 
     /// <summary>
+    /// <c>APPROX_COUNT_DISTINCT</c>'s window gate and the name its refusal
+    /// quotes. Real reads <c>APPROX_COUNT_DISTINCT(ALL x) OVER (…)</c> as a
+    /// windowed distinct count — frames, running totals and partitions all
+    /// apply — while the unquantified call with an <c>OVER</c> is Msg 4113
+    /// naming the function as written (probed 2026-09-29 against SQL Server
+    /// 2025). Null for every other kind, and for the <c>ALL</c> form.
+    /// </summary>
+    internal string? RefusedWindowName;
+
+    /// <summary>
     /// Set by the projection planner when real reduces this
     /// <c>COUNT</c> / <c>COUNT_BIG</c> to <c>COUNT(*)</c> and never evaluates
     /// the argument — see <c>Selection.ReduceConstantCounts</c> for the rule
@@ -645,6 +655,10 @@ internal sealed class AggregateExpression : Expression
     internal static AggregateExpression ParseApproxPercentile(ParserContext context, AggregateKind kind)
     {
         var name = LowerNameOf(kind);
+        // The fraction is part of what the call aggregates, so an aggregate or
+        // subquery there is Msg 130 as in the ordering (probed 2026-09-29).
+        var aggregatesBefore = context.AggregatesParsed;
+        var subqueriesBefore = context.SubqueriesParsed;
         var fraction = Expression.Parse(context);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -659,8 +673,6 @@ internal sealed class AggregateExpression : Expression
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        var aggregatesBefore = context.AggregatesParsed;
-        var subqueriesBefore = context.SubqueriesParsed;
         var value = Expression.Parse(context);
         ValidateOperand(context, kind, value, aggregatesBefore, subqueriesBefore);
         var descending = false;
@@ -735,7 +747,7 @@ internal sealed class AggregateExpression : Expression
     /// <c>DISTINCT</c> qualifier, two-arg <c>STRING_AGG</c>. Leaves the token at the closing
     /// <c>)</c>; the caller advances past it.
     /// </summary>
-    public static AggregateExpression Parse(ParserContext context, AggregateKind kind)
+    public static AggregateExpression Parse(ParserContext context, AggregateKind kind, string? writtenName = null)
     {
         // Real refuses NEXT VALUE FOR anywhere in an aggregate's arguments
         // with its own message (Msg 11725), ahead of the DISTINCT, TOP and
@@ -743,7 +755,10 @@ internal sealed class AggregateExpression : Expression
         var savedRejection = context.EnterNextValueForScope(NextValueForScope.Aggregate);
         try
         {
-            return ParseArguments(context, kind);
+            var aggregate = ParseArguments(context, kind, out var allWritten);
+            if (kind == AggregateKind.ApproxCountDistinct && !allWritten)
+                aggregate.RefusedWindowName = writtenName;
+            return aggregate;
         }
         finally
         {
@@ -751,8 +766,9 @@ internal sealed class AggregateExpression : Expression
         }
     }
 
-    private static AggregateExpression ParseArguments(ParserContext context, AggregateKind kind)
+    private static AggregateExpression ParseArguments(ParserContext context, AggregateKind kind, out bool allWritten)
     {
+        allWritten = false;
         if (kind == AggregateKind.StringAgg)
             return ParseStringAgg(context);
         if (kind == AggregateKind.JsonArrayAgg)
@@ -778,6 +794,7 @@ internal sealed class AggregateExpression : Expression
             case ReservedKeyword { Keyword: Keyword.All }:
                 // ALL is the grammar's explicit spelling of the default
                 // (COUNT(ALL x) = COUNT(x)); consumed with no effect.
+                allWritten = true;
                 context.MoveNextRequired();
                 break;
         }

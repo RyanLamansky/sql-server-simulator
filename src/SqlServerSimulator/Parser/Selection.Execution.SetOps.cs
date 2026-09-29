@@ -58,6 +58,13 @@ internal sealed partial class Selection
     /// </summary>
     internal bool IsBareConstantRow;
 
+    /// <summary>
+    /// One row of constants — a FROM-less select list that <see cref="IsBareConstantRow"/>
+    /// describes, or a one-row <c>VALUES</c> — whose columns real folds to
+    /// constants when this plan is a derived table.
+    /// </summary>
+    internal bool IsSingleConstantRow;
+
     /// <summary>The browse-mode metadata the statement's result carries; see <see cref="SimulatedQueryResult.Browse"/>.</summary>
     internal BrowseInfo? Browse;
 

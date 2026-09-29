@@ -2202,7 +2202,7 @@ internal abstract class Expression : ExpressionNode
             },
             21 => uppercaseName switch
             {
-                "APPROX_COUNT_DISTINCT" => AggregateExpression.Parse(context, AggregateKind.ApproxCountDistinct),
+                "APPROX_COUNT_DISTINCT" => AggregateExpression.Parse(context, AggregateKind.ApproxCountDistinct, name),
                 "DATABASE_PRINCIPAL_ID" => new PrincipalIdLookup(context, PrincipalIdKind.DatabasePrincipalId),
                 "GRAPH_ID_FROM_EDGE_ID" => new GraphIdPart(context, GraphIdPartKind.GraphIdFromEdge),
                 "GRAPH_ID_FROM_NODE_ID" => new GraphIdPart(context, GraphIdPartKind.GraphIdFromNode),

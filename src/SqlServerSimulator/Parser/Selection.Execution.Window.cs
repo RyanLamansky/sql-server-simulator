@@ -846,9 +846,9 @@ internal sealed partial class Selection
                             var startAdvances = win.Frame is { } frame && frame.Start.Kind != FrameBoundKind.UnboundedPreceding;
                             var slider = Aggregator.Create(aggregate, operandType, resultType, removable: startAdvances, batch: batch);
 
-                            // DISTINCT forms can't undo an Add (illegal with OVER
-                            // anyway): re-aggregate each frame, but off the
-                            // once-evaluated operands.
+                            // A distinct count (APPROX_COUNT_DISTINCT(ALL x), the
+                            // one real windows) can't undo an Add: re-aggregate
+                            // each frame, but off the once-evaluated operands.
                             if (startAdvances && !slider.CanRemove)
                             {
                                 for (var i = 0; i < count; i++)
