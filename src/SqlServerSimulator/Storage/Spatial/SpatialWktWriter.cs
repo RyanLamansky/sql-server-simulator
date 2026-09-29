@@ -78,6 +78,9 @@ internal static class SpatialWktWriter
             case SpatialShapeType.CircularString:
                 AppendFigure(builder, shape.Figures[0], includeZM);
                 return;
+            case SpatialShapeType.CompoundCurve:
+                AppendCompoundElements(builder, shape, 0, includeZM);
+                return;
             case SpatialShapeType.Polygon:
             case SpatialShapeType.CurvePolygon:
                 _ = builder.Append('(');
@@ -85,7 +88,20 @@ internal static class SpatialWktWriter
                 {
                     if (i > 0)
                         _ = builder.Append(", ");
-                    AppendFigure(builder, shape.Figures[i], includeZM);
+                    switch (shape.FigureType(i))
+                    {
+                        case SpatialFigureType.Arc:
+                            _ = builder.Append("CIRCULARSTRING ");
+                            AppendFigure(builder, shape.Figures[i], includeZM);
+                            break;
+                        case SpatialFigureType.Composite:
+                            _ = builder.Append("COMPOUNDCURVE ");
+                            AppendCompoundElements(builder, shape, i, includeZM);
+                            break;
+                        default:
+                            AppendFigure(builder, shape.Figures[i], includeZM);
+                            break;
+                    }
                 }
                 _ = builder.Append(')');
                 return;
@@ -110,6 +126,28 @@ internal static class SpatialWktWriter
     /// only empty members still prints its members.
     /// </summary>
     private static bool IsWrittenEmpty(SpatialShape shape) => shape.Figures.Length == 0 && shape.Children.Length == 0;
+
+    /// <summary>
+    /// A composite figure as the elements it was written as: each run the
+    /// segment table opens with a <c>First</c> kind is one element, a bare
+    /// <c>(…)</c> for lines and a labelled <c>CIRCULARSTRING (…)</c> for arcs,
+    /// consecutive elements repeating the point they share.
+    /// </summary>
+    private static void AppendCompoundElements(StringBuilder builder, SpatialShape shape, int index, bool includeZM)
+    {
+        _ = builder.Append('(');
+        var first = true;
+        foreach (var (isArc, points) in SpatialCurves.Elements(shape, index))
+        {
+            if (!first)
+                _ = builder.Append(", ");
+            first = false;
+            if (isArc)
+                _ = builder.Append("CIRCULARSTRING ");
+            AppendFigure(builder, points, includeZM);
+        }
+        _ = builder.Append(')');
+    }
 
     private static void AppendFigure(StringBuilder builder, SpatialCoordinate[] points, bool includeZM)
     {

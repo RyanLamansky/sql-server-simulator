@@ -374,14 +374,29 @@ internal static class SpatialOverlay
     /// </summary>
     private static List<Segment> Node(List<Segment> segments, List<GridPoint> splitters, SpatialPrecisionGrid grid)
     {
-        var vertices = new HashSet<GridPoint>(splitters);
-        foreach (var segment in segments)
-        {
-            _ = vertices.Add(segment.A);
-            _ = vertices.Add(segment.B);
-        }
-
+        // Re-routing a piece through a crossing's grid point moves it by up to
+        // half a step, which can carry it across a vertex it passed a hair
+        // from before — a crossing no pass over the written segments sees.
+        // Left in, that piece is labelled by one midpoint while its two ends
+        // lie on different sides of the other operand, and the result's
+        // boundary stops closing. So noding repeats until no two pieces cross.
         var crossings = new HashSet<GridPoint>();
+        for (var pass = 0; pass < MaxNodingPasses; pass++)
+        {
+            if (!CollectCrossings(segments, grid, crossings) && pass > 0)
+                break;
+            segments = Route(segments, splitters, crossings);
+        }
+        return segments;
+    }
+
+    /// <summary>A bound on <see cref="Node"/>'s passes, each settling the crossings the previous one's rounding introduced.</summary>
+    private const int MaxNodingPasses = 8;
+
+    /// <summary>Adds every proper crossing among <paramref name="segments"/> to <paramref name="crossings"/>, returning whether any was new.</summary>
+    private static bool CollectCrossings(List<Segment> segments, SpatialPrecisionGrid grid, HashSet<GridPoint> crossings)
+    {
+        var added = false;
         var order = new int[segments.Count];
         for (var i = 0; i < order.Length; i++)
             order[i] = i;
@@ -409,12 +424,27 @@ internal static class SpatialOverlay
                 if (ProperlyCross(si, sj))
                 {
                     var crossing = Crossing(si.A, si.B, sj.A, sj.B);
-                    grid.RecordComputed(crossing, ApproximateCrossing(si, sj));
-                    _ = crossings.Add(crossing);
+                    if (crossings.Add(crossing))
+                    {
+                        grid.RecordComputed(crossing, ApproximateCrossing(si, sj));
+                        added = true;
+                    }
                 }
             }
             active.RemoveRange(write, active.Count - write);
             active.Add(i);
+        }
+        return added;
+    }
+
+    /// <summary>Splits each segment at the vertices lying exactly on it and re-routes it through every crossing pixel it passes.</summary>
+    private static List<Segment> Route(List<Segment> segments, List<GridPoint> splitters, HashSet<GridPoint> crossings)
+    {
+        var vertices = new HashSet<GridPoint>(splitters);
+        foreach (var segment in segments)
+        {
+            _ = vertices.Add(segment.A);
+            _ = vertices.Add(segment.B);
         }
 
         var hot = Sorted(crossings);

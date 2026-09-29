@@ -540,6 +540,18 @@ public sealed class SpatialConstructiveTests
         Assert.StartsWith("POLYGON ((5 15, ", text);
         AreEqual(7, (int)Eval($"geography::Parse('{text}').STNumPoints()")!);
         AreEqual(2, Eval("geography::Parse('POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))').STIntersection(geography::Parse('POLYGON((20 20, 20 30, 30 30, 30 20, 20 20))')).NumRings()"));
-        _ = Throws<NotSupportedException>(() => Eval("geography::Parse('POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))').STUnion(geography::Parse('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))')).ToString()"));
+        // A square and its complement union to the whole globe.
+        AreEqual("FULLGLOBE", Text("geography::Parse('POLYGON((0 0, 0 10, 10 10, 10 0, 0 0))').STUnion(geography::Parse('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'))"));
     }
+
+    /// <summary>
+    /// A crossing's rounding can carry a noded piece across a vertex it passed
+    /// a hair from, which one noding pass leaves as an unbalanced boundary;
+    /// noding repeats until nothing crosses.
+    /// </summary>
+    [TestMethod]
+    public void Geography_Difference_NodesAgainAfterRounding() =>
+        Assert.StartsWith("MULTIPOLYGON (((11 13.1, 12 10.1, 15 10.1, 15 13.1, 11 13.1)), ((5 8.1, 5 5.1, ",
+            Text("geography::Parse('MULTIPOLYGON(((8 8.1, 5 8.1, 5 5.1, 8 5.1, 8 8.1)),((15 10.1, 15 13.1, 11 13.1, 12 10.1, 15 10.1)))')"
+                + ".STDifference(geography::Parse('POLYGON((8 7.8, 7 7.8, 7 3.5, 12.8 3.5, 12.8 4.5, 8 4.5, 8 7.8))'))"));
 }

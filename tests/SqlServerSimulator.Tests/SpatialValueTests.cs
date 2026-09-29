@@ -377,13 +377,6 @@ public sealed class SpatialValueTests
             Eval("geography::Parse('POLYGON((0 0,1 0,1 1,0 1,0 0))').ReorientObject().ToString()"));
 
     /// <summary>Real accepts the curved kinds; the simulator names them as unbuilt rather than rejecting them as unknown labels.</summary>
-    [TestMethod]
-    public void CurvedShapes_ReportUnmodeled()
-    {
-        var ex = Throws<NotSupportedException>(() => Eval("geometry::Parse('CIRCULARSTRING(0 0, 1 1, 2 0)').ToString()"));
-        Assert.Contains("CircularString", ex.Message);
-    }
-
     /// <summary>
     /// Planar <c>STArea()</c> and <c>STLength()</c> over every shape kind.
     /// Probe-confirmed against SQL Server 2025 (2026-07-31); a polygon's

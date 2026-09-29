@@ -34,6 +34,7 @@ internal static class SpatialBinaryCodec
     private const byte IsValid = 0x04;
     private const byte IsSinglePoint = 0x08;
     private const byte IsSingleLineSegment = 0x10;
+    private const byte IsLargerThanAHemisphere = 0x20;
 
     private const byte FigureStroke = 0x01;
     private const byte FigureExteriorRing = 0x02;
@@ -51,7 +52,7 @@ internal static class SpatialBinaryCodec
         {
             return Decode(bytes, isGeography);
         }
-        catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException or ArgumentOutOfRangeException or IndexOutOfRangeException)
+        catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException or ArgumentOutOfRangeException or IndexOutOfRangeException or InvalidOperationException)
         {
             return null;
         }
@@ -87,7 +88,7 @@ internal static class SpatialBinaryCodec
             return new SpatialGeometry(srid, SpatialShape.Leaf(SpatialShapeType.LineString, [inline]));
         }
 
-        return new SpatialGeometry(srid, DecodeFull(bytes, hasZ, hasM, isGeography));
+        return new SpatialGeometry(srid, DecodeFull(bytes, version, hasZ, hasM, isGeography));
     }
 
     /// <summary>
@@ -117,7 +118,7 @@ internal static class SpatialBinaryCodec
     /// <summary>NaN is the format's "this point has no value here" marker within an otherwise Z- or M-bearing instance.</summary>
     private static double? Defined(double? value) => value is { } v && !double.IsNaN(v) ? v : null;
 
-    private static SpatialShape DecodeFull(ReadOnlySpan<byte> bytes, bool hasZ, bool hasM, bool isGeography)
+    private static SpatialShape DecodeFull(ReadOnlySpan<byte> bytes, byte version, bool hasZ, bool hasM, bool isGeography)
     {
         var at = 6;
         var pointCount = ReadInt32(bytes, ref at);
@@ -140,9 +141,12 @@ internal static class SpatialBinaryCodec
         if (figureCount < 0)
             throw SimulatedSqlException.SpatialUnexpectedEndOfInput(isGeography);
         var figureStart = new int[figureCount];
+        var figureAttributes = new byte[figureCount];
         for (var i = 0; i < figureCount; i++)
         {
-            at++; // figure attribute — the owning shape's kind and the figure's position already determine its role
+            // Version 1's attribute only restates the owning shape's kind and the
+            // figure's position; version 2's names the figure's own type.
+            figureAttributes[i] = bytes[at++];
             figureStart[i] = ReadInt32(bytes, ref at);
         }
 
@@ -157,7 +161,16 @@ internal static class SpatialBinaryCodec
             shapes[i].Type = bytes[at++];
         }
 
-        return BuildShape(0, shapes, figureStart, points);
+        // Version 2 closes with the segment table when a composite figure needs one.
+        var segments = new Queue<SpatialSegmentType>();
+        if (version == 2 && at + 4 <= bytes.Length)
+        {
+            var segmentCount = ReadInt32(bytes, ref at);
+            for (var i = 0; i < segmentCount; i++)
+                segments.Enqueue((SpatialSegmentType)bytes[at++]);
+        }
+
+        return BuildShape(0, shapes, figureStart, version == 2 ? figureAttributes : null, segments, points);
     }
 
     private static double[]? ReadOrdinateArray(ReadOnlySpan<byte> bytes, ref int at, int count, bool present)
@@ -174,6 +187,8 @@ internal static class SpatialBinaryCodec
         int index,
         (int Parent, int Figure, byte Type)[] shapes,
         int[] figureStart,
+        byte[]? figureAttributes,
+        Queue<SpatialSegmentType> segments,
         SpatialCoordinate[] points)
     {
         var (_, figure, rawType) = shapes[index];
@@ -185,7 +200,7 @@ internal static class SpatialBinaryCodec
         for (var i = index + 1; i < shapes.Length; i++)
         {
             if (shapes[i].Parent == index)
-                children.Add(BuildShape(i, shapes, figureStart, points));
+                children.Add(BuildShape(i, shapes, figureStart, figureAttributes, segments, points));
         }
         if (children.Count > 0)
             return SpatialShape.Collection(type, [.. children]);
@@ -212,7 +227,28 @@ internal static class SpatialBinaryCodec
             var stop = f + 1 < figureStart.Length ? figureStart[f + 1] : points.Length;
             figures[f - figure] = points[start..stop];
         }
-        return SpatialShape.Leaf(type, figures);
+        if (type is not (SpatialShapeType.CircularString or SpatialShapeType.CompoundCurve or SpatialShapeType.CurvePolygon))
+            return SpatialShape.Leaf(type, figures);
+
+        var types = new SpatialFigureType[figures.Length];
+        var runs = new SpatialSegmentType[]?[figures.Length];
+        for (var f = 0; f < figures.Length; f++)
+        {
+            types[f] = figureAttributes is null ? SpatialFigureType.Line : (SpatialFigureType)figureAttributes[figure + f];
+            if (types[f] != SpatialFigureType.Composite)
+                continue;
+            // A composite figure owns the segments that use up its points: a
+            // line segment one point past its start, an arc two.
+            var run = new List<SpatialSegmentType>();
+            for (var remaining = figures[f].Length - 1; remaining > 0;)
+            {
+                var segment = segments.Dequeue();
+                run.Add(segment);
+                remaining -= segment is SpatialSegmentType.Arc or SpatialSegmentType.FirstArc ? 2 : 1;
+            }
+            runs[f] = [.. run];
+        }
+        return SpatialShape.Curve(type, figures, types, runs);
     }
 
     private static int ReadInt32(ReadOnlySpan<byte> bytes, ref int at)
@@ -235,27 +271,35 @@ internal static class SpatialBinaryCodec
     /// one documented byte-level divergence from real (see
     /// <c>docs/claude/spatial.md</c>).
     /// </summary>
+    /// <remarks>
+    /// Real writes version 2 exactly when version 1 can't say what the
+    /// instance is: a curved member anywhere, or — for <c>geography</c> — an
+    /// instance no cap below a hemisphere holds, which also sets the
+    /// larger-than-a-hemisphere property bit. Version 2 gives every figure its
+    /// own type attribute in place of version 1's ring roles, and closes with
+    /// the segment table when a composite figure needs one.
+    /// </remarks>
     public static byte[] Encode(SpatialGeometry geometry, bool isGeography)
     {
         var root = geometry.Root;
-        if (root.Type >= SpatialShapeType.CircularString)
-            throw new NotSupportedException($"Encoding the spatial shape {root.Type} is not modeled.");
-
         var hasZ = root.AnyHasZ;
         var hasM = root.AnyHasM;
-        var properties = (byte)(IsValid | (hasZ ? HasZ : 0) | (hasM ? HasM : 0));
+        var larger = isGeography && SpatialEnvelope.IsLargerThanAHemisphere(root);
+        var version2 = larger || root.IsCurved;
+        var properties = (byte)(IsValid | (hasZ ? HasZ : 0) | (hasM ? HasM : 0) | (larger ? IsLargerThanAHemisphere : 0));
 
-        if (root.SinglePoint is { } single)
+        if (!version2 && root.SinglePoint is { } single)
             return EncodeShortcut(geometry.Srid, (byte)(properties | IsSinglePoint), [single], hasZ, hasM, isGeography);
-        if (root.Type == SpatialShapeType.LineString && root.Figures.Length == 1 && root.Figures[0].Length == 2)
+        if (!version2 && root.Type == SpatialShapeType.LineString && root.Figures.Length == 1 && root.Figures[0].Length == 2)
             return EncodeShortcut(geometry.Srid, (byte)(properties | IsSingleLineSegment), root.Figures[0], hasZ, hasM, isGeography);
 
         var points = new List<SpatialCoordinate>();
         var figures = new List<(byte Attribute, int Start)>();
         var shapes = new List<(int Parent, int Figure, byte Type)>();
-        Flatten(root, parent: -1, points, figures, shapes);
+        var segments = new List<SpatialSegmentType>();
+        Flatten(root, parent: -1, version2, points, figures, shapes, segments);
 
-        var writer = new SpatialByteWriter(geometry.Srid, properties);
+        var writer = new SpatialByteWriter(geometry.Srid, version2 ? (byte)2 : (byte)1, properties);
         writer.WriteInt32(points.Count);
         foreach (var point in points)
             writer.WritePair(point, isGeography);
@@ -282,12 +326,18 @@ internal static class SpatialBinaryCodec
             writer.WriteInt32(figure);
             writer.WriteByte(type);
         }
+        if (segments.Count > 0)
+        {
+            writer.WriteInt32(segments.Count);
+            foreach (var segment in segments)
+                writer.WriteByte((byte)segment);
+        }
         return writer.ToArray();
     }
 
     private static byte[] EncodeShortcut(int srid, byte properties, SpatialCoordinate[] points, bool hasZ, bool hasM, bool isGeography)
     {
-        var writer = new SpatialByteWriter(srid, properties);
+        var writer = new SpatialByteWriter(srid, 1, properties);
         foreach (var point in points)
         {
             writer.WritePair(point, isGeography);
@@ -307,23 +357,30 @@ internal static class SpatialBinaryCodec
     private static void Flatten(
         SpatialShape shape,
         int parent,
+        bool version2,
         List<SpatialCoordinate> points,
         List<(byte Attribute, int Start)> figures,
-        List<(int Parent, int Figure, byte Type)> shapes)
+        List<(int Parent, int Figure, byte Type)> shapes,
+        List<SpatialSegmentType> segments)
     {
         var index = shapes.Count;
         var firstFigure = figures.Count;
         shapes.Add((parent, firstFigure, (byte)shape.Type));
 
-        var isPolygon = shape.Type is SpatialShapeType.Polygon or SpatialShapeType.CurvePolygon;
+        var isPolygon = shape.Type == SpatialShapeType.Polygon;
         for (var i = 0; i < shape.Figures.Length; i++)
         {
-            figures.Add((isPolygon ? (i == 0 ? FigureExteriorRing : FigureInteriorRing) : FigureStroke, points.Count));
+            var attribute = version2
+                ? (byte)shape.FigureType(i)
+                : isPolygon ? (i == 0 ? FigureExteriorRing : FigureInteriorRing) : FigureStroke;
+            figures.Add((attribute, points.Count));
             points.AddRange(shape.Figures[i]);
+            if (shape.FigureType(i) == SpatialFigureType.Composite)
+                segments.AddRange(shape.Segments![i]!);
         }
 
         foreach (var child in shape.Children)
-            Flatten(child, index, points, figures, shapes);
+            Flatten(child, index, version2, points, figures, shapes, segments);
 
         if (figures.Count == firstFigure)
             shapes[index] = (parent, -1, (byte)shape.Type);
@@ -334,11 +391,11 @@ internal static class SpatialBinaryCodec
     {
         private readonly List<byte> bytes;
 
-        public SpatialByteWriter(int srid, byte properties)
+        public SpatialByteWriter(int srid, byte version, byte properties)
         {
             this.bytes = new List<byte>(64);
             WriteInt32(srid);
-            WriteByte(1);
+            WriteByte(version);
             WriteByte(properties);
         }
 

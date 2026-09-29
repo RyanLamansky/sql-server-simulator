@@ -322,6 +322,24 @@ internal static class SpatialGeodeticBuffer
 
     private static double Square(double value) => value * value;
 
+    /// <summary>
+    /// <c>BufferWithCurves</c> of a point: the curve polygon real linearizes
+    /// for <c>STBuffer</c> — two half circles through the control points at
+    /// 45°, 135°, 225° and 315° about the point, starting at the north-east one.
+    /// </summary>
+    public static SpatialShape CurveCircle(SpatialCoordinate point, double distance)
+    {
+        var frame = new LocalFrame(point, distance) { Limit = Math.PI / 2 };
+        var northern = frame.Reach(Math.PI / 4);
+        var southern = frame.Reach(5 * Math.PI / 4);
+        SpatialCoordinate[] ring =
+        [
+            frame.At(northern, Math.PI / 4), frame.At(northern, 3 * Math.PI / 4),
+            frame.At(southern, 5 * Math.PI / 4), frame.At(southern, 7 * Math.PI / 4), frame.At(northern, Math.PI / 4),
+        ];
+        return SpatialShape.Curve(SpatialShapeType.CurvePolygon, [ring], [SpatialFigureType.Arc], [null]);
+    }
+
     private static SpatialShape Circle(SpatialCoordinate point, double distance, double tolerance, bool relative)
     {
         var frame = new LocalFrame(point, distance);
@@ -378,6 +396,11 @@ internal static class SpatialGeodeticBuffer
             return new SpatialVector(Math.Cos(lat) * Math.Cos(lon), Math.Cos(lat) * Math.Sin(lon), Math.Sin(lat));
         }
 
+        private const double ScaledReachBelow = 1000;
+
+        /// <summary>The widest reach this frame answers before refusing it as unmodeled.</summary>
+        public double Limit = MaximumAngle;
+
         public SpatialCoordinate At(double angle, double bearing)
         {
             var direction = (this.center * Math.Cos(angle)) + (((this.east * Math.Cos(bearing)) + (this.north * Math.Sin(bearing))) * Math.Sin(angle));
@@ -393,6 +416,12 @@ internal static class SpatialGeodeticBuffer
         /// </summary>
         public double Reach(double bearing)
         {
+            // At small distances the distance's own rounding swamps the search;
+            // the reach is proportional to the distance there, so it scales
+            // from a kilometre's.
+            if (this.distance < ScaledReachBelow)
+                return new LocalFrame(this.Origin, ScaledReachBelow) { Limit = this.Limit }.Reach(bearing) * (this.distance / ScaledReachBelow);
+
             double low = 0, high = Math.Min(this.distance / SpatialEllipsoid.SemiMinor * 2, Math.PI);
             for (var i = 0; i < 200 && high - low > high * 1e-16; i++)
             {
@@ -404,7 +433,7 @@ internal static class SpatialGeodeticBuffer
                     high = mid;
             }
             var reach = (low + high) / 2;
-            return reach > MaximumAngle
+            return reach > this.Limit
                 ? throw new NotSupportedException("geography '.STBuffer' reaching 80° or more from the instance is not modeled.")
                 : reach;
         }
@@ -451,54 +480,85 @@ internal static class SpatialGeodeticArc
     /// </summary>
     public static SpatialCoordinate[] Linearize(SpatialCoordinate start, SpatialCoordinate middle, SpatialCoordinate end, int steps)
     {
-        var a = Spherical(start);
-        var b = Spherical(middle);
-        var c = Spherical(end);
-        var ab = b - a;
-        var ac = c - a;
-        var normal = ab.Cross(ac);
-        var circumcentre = a + (((normal.Cross(ab) * ac.SquaredLength) + (ac.Cross(normal) * ab.SquaredLength)) * (1 / (2 * normal.SquaredLength)));
-        var axis = new SpatialVector(circumcentre.X, circumcentre.Y, circumcentre.Z / (1 - SpatialEllipsoid.EccentricitySquared)).Normalized;
-        var east = new SpatialVector(0, 0, 1).Cross(axis);
-        east = east.Length < 1e-12 ? new SpatialVector(0, 1, 0) : east.Normalized;
-        var north = axis.Cross(east);
-
-        (double X, double Y) Project(SpatialCoordinate point)
-        {
-            var direction = Geocentric(point);
-            var scale = 1 / direction.Dot(axis);
-            return (direction.Dot(east) * scale, direction.Dot(north) * scale);
-        }
-
-        var (ax, ay) = Project(start);
-        var (bx, by) = Project(middle);
-        var (cx, cy) = Project(end);
-        var d = 2 * ((ax * (by - cy)) + (bx * (cy - ay)) + (cx * (ay - by)));
-        var aa = (ax * ax) + (ay * ay);
-        var bb = (bx * bx) + (by * by);
-        var cc = (cx * cx) + (cy * cy);
-        var ux = ((aa * (by - cy)) + (bb * (cy - ay)) + (cc * (ay - by))) / d;
-        var uy = ((aa * (cx - bx)) + (bb * (ax - cx)) + (cc * (bx - ax))) / d;
-        var radius = Math.Sqrt(((ax - ux) * (ax - ux)) + ((ay - uy) * (ay - uy)));
-        var from = Math.Atan2(ay - uy, ax - ux);
-        var to = Math.Atan2(cy - uy, cx - ux);
-        var counterClockwise = ((bx - ax) * (cy - ay)) - ((by - ay) * (cx - ax)) > 0;
-        var sweep = counterClockwise ? Wrap(to - from) : -Wrap(from - to);
-
+        var frame = new Frame(start, middle, end);
         var points = new SpatialCoordinate[steps + 1];
         points[0] = new SpatialCoordinate(start.X, start.Y);
         for (var i = 1; i < steps; i++)
+            points[i] = frame.At(frame.From + (i * frame.Sweep / steps));
+        points[steps] = new SpatialCoordinate(end.X, end.Y);
+        return points;
+    }
+
+    /// <summary>
+    /// The arc's radius in metres — its radius on the gnomonic plane, which
+    /// touches the unit sphere, scaled by the semi-major axis — and the angle
+    /// it sweeps about its centre there.
+    /// </summary>
+    public static (double Radius, double Sweep) Measure(SpatialCoordinate start, SpatialCoordinate middle, SpatialCoordinate end)
+    {
+        var frame = new Frame(start, middle, end);
+        return (frame.Radius * SpatialEllipsoid.SemiMajor, Math.Abs(frame.Sweep));
+    }
+
+    /// <summary>The gnomonic plane an arc is drawn in, and the circle it is on there.</summary>
+    private readonly struct Frame
+    {
+        private readonly SpatialVector axis;
+        private readonly SpatialVector east;
+        private readonly SpatialVector north;
+        private readonly double centerX;
+        private readonly double centerY;
+        public readonly double Radius;
+        public readonly double From;
+        public readonly double Sweep;
+
+        public Frame(SpatialCoordinate start, SpatialCoordinate middle, SpatialCoordinate end)
         {
-            var angle = from + (i * sweep / steps);
-            var x = ux + (radius * Math.Cos(angle));
-            var y = uy + (radius * Math.Sin(angle));
-            var direction = axis + (east * x) + (north * y);
-            points[i] = new SpatialCoordinate(
+            var a = Spherical(start);
+            var b = Spherical(middle);
+            var c = Spherical(end);
+            var ab = b - a;
+            var ac = c - a;
+            var normal = ab.Cross(ac);
+            var circumcentre = a + (((normal.Cross(ab) * ac.SquaredLength) + (ac.Cross(normal) * ab.SquaredLength)) * (1 / (2 * normal.SquaredLength)));
+            this.axis = new SpatialVector(circumcentre.X, circumcentre.Y, circumcentre.Z / (1 - SpatialEllipsoid.EccentricitySquared)).Normalized;
+            var east = new SpatialVector(0, 0, 1).Cross(this.axis);
+            this.east = east.Length < 1e-12 ? new SpatialVector(0, 1, 0) : east.Normalized;
+            this.north = this.axis.Cross(this.east);
+
+            var (ax, ay) = this.Project(start);
+            var (bx, by) = this.Project(middle);
+            var (cx, cy) = this.Project(end);
+            var d = 2 * ((ax * (by - cy)) + (bx * (cy - ay)) + (cx * (ay - by)));
+            var aa = (ax * ax) + (ay * ay);
+            var bb = (bx * bx) + (by * by);
+            var cc = (cx * cx) + (cy * cy);
+            this.centerX = ((aa * (by - cy)) + (bb * (cy - ay)) + (cc * (ay - by))) / d;
+            this.centerY = ((aa * (cx - bx)) + (bb * (ax - cx)) + (cc * (bx - ax))) / d;
+            this.Radius = Math.Sqrt(((ax - this.centerX) * (ax - this.centerX)) + ((ay - this.centerY) * (ay - this.centerY)));
+            this.From = Math.Atan2(ay - this.centerY, ax - this.centerX);
+            var to = Math.Atan2(cy - this.centerY, cx - this.centerX);
+            var counterClockwise = ((bx - ax) * (cy - ay)) - ((by - ay) * (cx - ax)) > 0;
+            this.Sweep = counterClockwise ? Wrap(to - this.From) : -Wrap(this.From - to);
+        }
+
+        private (double X, double Y) Project(SpatialCoordinate point)
+        {
+            var direction = Geocentric(point);
+            var scale = 1 / direction.Dot(this.axis);
+            return (direction.Dot(this.east) * scale, direction.Dot(this.north) * scale);
+        }
+
+        /// <summary>The point on the circle at <paramref name="angle"/> about its centre.</summary>
+        public SpatialCoordinate At(double angle)
+        {
+            var x = this.centerX + (this.Radius * Math.Cos(angle));
+            var y = this.centerY + (this.Radius * Math.Sin(angle));
+            var direction = this.axis + (this.east * x) + (this.north * y);
+            return new SpatialCoordinate(
                 Math.Atan2(direction.Y, direction.X) * SpatialEllipsoid.DegreesPerRadian,
                 SpatialEllipsoid.GeodeticLatitude(direction) * SpatialEllipsoid.DegreesPerRadian);
         }
-        points[steps] = new SpatialCoordinate(end.X, end.Y);
-        return points;
     }
 
     /// <summary>An angle folded into (0, 2π].</summary>

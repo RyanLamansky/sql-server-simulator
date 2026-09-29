@@ -66,13 +66,29 @@ internal sealed class SpatialMethodCall : Expression
         Required,
     }
 
-    private readonly struct Member(MemberForm form, MemberScope scope, ResultKind result, ValidityGate gate = ValidityGate.Tolerant)
+    /// <summary>
+    /// Whether a member reads a curved instance as written. The rest read its
+    /// linearization (<see cref="SpatialCurves.ForOperations"/>), which is what
+    /// real's own operations do for every member without a curve path.
+    /// </summary>
+    private enum CurveReading
+    {
+        Linearized,
+        AsWritten,
+    }
+
+    private readonly struct Member(MemberForm form, MemberScope scope, ResultKind result, ValidityGate gate = ValidityGate.Tolerant, CurveReading curves = CurveReading.Linearized)
     {
         public readonly MemberForm Form = form;
         public readonly MemberScope Scope = scope;
         public readonly ResultKind Result = result;
         public readonly ValidityGate Gate = gate;
+        public readonly CurveReading Curves = curves;
     }
+
+    private const ValidityGate Tolerant = ValidityGate.Tolerant;
+    private const ValidityGate Required = ValidityGate.Required;
+    private const CurveReading AsWritten = CurveReading.AsWritten;
 
     /// <summary>
     /// Every member the spatial types expose, with the form and owning type
@@ -83,80 +99,84 @@ internal sealed class SpatialMethodCall : Expression
     private static readonly FrozenDictionary<string, Member> Members = new Dictionary<string, Member>(StringComparer.Ordinal)
     {
         // Properties.
-        ["HasM"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Boolean),
-        ["HasZ"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Boolean),
-        ["Lat"] = new(MemberForm.Property, MemberScope.GeographyOnly, ResultKind.Float),
-        ["Long"] = new(MemberForm.Property, MemberScope.GeographyOnly, ResultKind.Float),
-        ["M"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Float),
-        ["STSrid"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Integer),
-        ["STX"] = new(MemberForm.Property, MemberScope.GeometryOnly, ResultKind.Float),
-        ["STY"] = new(MemberForm.Property, MemberScope.GeometryOnly, ResultKind.Float),
-        ["Z"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Float),
+        ["HasM"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Boolean, Tolerant, AsWritten),
+        ["HasZ"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Boolean, Tolerant, AsWritten),
+        ["Lat"] = new(MemberForm.Property, MemberScope.GeographyOnly, ResultKind.Float, Tolerant, AsWritten),
+        ["Long"] = new(MemberForm.Property, MemberScope.GeographyOnly, ResultKind.Float, Tolerant, AsWritten),
+        ["M"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Float, Tolerant, AsWritten),
+        ["STSrid"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Integer, Tolerant, AsWritten),
+        ["STX"] = new(MemberForm.Property, MemberScope.GeometryOnly, ResultKind.Float, Tolerant, AsWritten),
+        ["STY"] = new(MemberForm.Property, MemberScope.GeometryOnly, ResultKind.Float, Tolerant, AsWritten),
+        ["Z"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Float, Tolerant, AsWritten),
 
         // Methods — structural.
-        ["AsBinaryZM"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Binary),
-        ["AsTextZM"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
-        ["EnvelopeAngle"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Float, ValidityGate.Required),
-        ["EnvelopeCenter"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Spatial, ValidityGate.Required),
-        ["InstanceOf"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
-        ["MinDbCompatibilityLevel"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer),
-        ["NumRings"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Integer, ValidityGate.Required),
-        ["ReorientObject"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Spatial, ValidityGate.Required),
-        ["RingN"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Spatial, ValidityGate.Required),
-        ["STAsBinary"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Binary),
-        ["STAsText"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
-        ["STCentroid"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, ValidityGate.Required),
-        ["STDimension"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer, ValidityGate.Required),
-        ["STDistance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float, ValidityGate.Required),
-        ["STEndPoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["STExteriorRing"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, ValidityGate.Required),
-        ["STGeometryN"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["STGeometryType"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text, ValidityGate.Required),
-        ["STInteriorRingN"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, ValidityGate.Required),
-        ["STIsClosed"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
-        ["STIsEmpty"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
-        ["STIsRing"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean),
-        ["STIsSimple"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, ValidityGate.Required),
-        ["STNumGeometries"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer, ValidityGate.Required),
-        ["STNumInteriorRing"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Integer, ValidityGate.Required),
-        ["STNumPoints"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer, ValidityGate.Required),
-        ["STPointN"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["STPointOnSurface"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, ValidityGate.Required),
-        ["STStartPoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["ToString"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
+        ["AsBinaryZM"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Binary, Tolerant, AsWritten),
+        ["AsTextZM"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text, Tolerant, AsWritten),
+        ["EnvelopeAngle"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Float, Required),
+        ["EnvelopeCenter"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Spatial, Required),
+        ["InstanceOf"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, Required, AsWritten),
+        ["IsValidDetailed"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text, Tolerant, AsWritten),
+        ["MinDbCompatibilityLevel"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer, Tolerant, AsWritten),
+        ["NumRings"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Integer, Required, AsWritten),
+        ["ReorientObject"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Spatial, Required, AsWritten),
+        ["RingN"] = new(MemberForm.Method, MemberScope.GeographyOnly, ResultKind.Spatial, Required, AsWritten),
+        ["STAsBinary"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Binary, Tolerant, AsWritten),
+        ["STAsText"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text, Tolerant, AsWritten),
+        ["STCentroid"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, Required),
+        ["STCurveN"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required, AsWritten),
+        ["STCurveToLine"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required, AsWritten),
+        ["STDimension"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer, Required, AsWritten),
+        ["STDistance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float, Required, AsWritten),
+        ["STEndPoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required, AsWritten),
+        ["STExteriorRing"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, Required, AsWritten),
+        ["STGeometryN"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required, AsWritten),
+        ["STGeometryType"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text, Required, AsWritten),
+        ["STInteriorRingN"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, Required, AsWritten),
+        ["STIsClosed"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, Required, AsWritten),
+        ["STIsEmpty"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, Tolerant, AsWritten),
+        ["STIsRing"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, Tolerant, AsWritten),
+        ["STIsSimple"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, Required),
+        ["STNumCurves"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer, Required, AsWritten),
+        ["STNumGeometries"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer, Required, AsWritten),
+        ["STNumInteriorRing"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Integer, Required, AsWritten),
+        ["STNumPoints"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Integer, Required, AsWritten),
+        ["STPointN"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required, AsWritten),
+        ["STPointOnSurface"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, Required),
+        ["STStartPoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required, AsWritten),
+        ["ToString"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text, Tolerant, AsWritten),
 
         // Methods — topological predicates and validity.
-        ["STContains"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
-        ["STCrosses"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, ValidityGate.Required),
-        ["STDisjoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
-        ["STEquals"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
-        ["STIntersects"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
-        ["STIsValid"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean),
-        ["STOverlaps"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
-        ["STRelate"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, ValidityGate.Required),
-        ["STTouches"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, ValidityGate.Required),
-        ["STWithin"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
+        ["STContains"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, Required),
+        ["STCrosses"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, Required),
+        ["STDisjoint"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, Required),
+        ["STEquals"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, Required),
+        ["STIntersects"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, Required),
+        ["STIsValid"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, Tolerant, AsWritten),
+        ["STOverlaps"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, Required),
+        ["STRelate"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, Required),
+        ["STTouches"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Boolean, Required),
+        ["STWithin"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, Required),
 
         // Methods — the constructive operations, and the members that only parse.
         ["AsGml"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
-        ["BufferWithCurves"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["BufferWithTolerance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["CurveToLineWithTolerance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["Filter"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, ValidityGate.Required),
-        ["MakeValid"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial),
-        ["Reduce"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["STArea"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float, ValidityGate.Required),
+        ["BufferWithCurves"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required, AsWritten),
+        ["BufferWithTolerance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required, AsWritten),
+        ["CurveToLineWithTolerance"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required, AsWritten),
+        ["Filter"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Boolean, Required),
+        ["MakeValid"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Tolerant, AsWritten),
+        ["Reduce"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required, AsWritten),
+        ["STArea"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float, Required, AsWritten),
         ["STAsGML"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Text),
-        ["STBoundary"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, ValidityGate.Required),
-        ["STBuffer"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["STConvexHull"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["STDifference"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["STEnvelope"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, ValidityGate.Required),
-        ["STIntersection"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["STLength"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float),
-        ["STSymDifference"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["STUnion"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
-        ["ShortestLineTo"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, ValidityGate.Required),
+        ["STBoundary"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, Required),
+        ["STBuffer"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required, AsWritten),
+        ["STConvexHull"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required),
+        ["STDifference"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required),
+        ["STEnvelope"] = new(MemberForm.Method, MemberScope.GeometryOnly, ResultKind.Spatial, Required, AsWritten),
+        ["STIntersection"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required),
+        ["STLength"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Float, Tolerant, AsWritten),
+        ["STSymDifference"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required),
+        ["STUnion"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required),
+        ["ShortestLineTo"] = new(MemberForm.Method, MemberScope.Both, ResultKind.Spatial, Required),
     }.ToFrozenDictionary(StringComparer.Ordinal);
 
     private readonly Expression target;
@@ -301,14 +321,22 @@ internal sealed class SpatialMethodCall : Expression
 
     private SqlValue Evaluate(RuntimeContext runtime, SpatialGeometry value, SpatialSqlType type, Member member)
     {
-        var root = value.Root;
         var geography = type.IsGeography;
+        if (AnswersBeforeValidity(runtime, value.Root, geography) is { } early)
+            return early;
+        if (geography && this.FullGlobeAnswer(runtime, value) is { } whole)
+            return whole;
         RequireValidInstance(member, value, geography);
+        if (member.Curves == CurveReading.Linearized && value.Root.IsCurved)
+            value = new SpatialGeometry(value.Srid, SpatialCurves.ForOperations(value.Root, geography));
+        var root = value.Root;
         return this.memberName switch
         {
             "AsBinaryZM" => SqlValue.FromVarbinary(SpatialWkb.Write(value, includeZM: true)),
             "AsTextZM" => Text(runtime, SpatialWktWriter.Write(value, includeZM: true)),
+            "BufferWithCurves" => this.EvaluateBufferWithCurves(runtime, value, type),
             "BufferWithTolerance" => this.EvaluateBuffer(runtime, value, type, withTolerance: true),
+            "CurveToLineWithTolerance" => this.EvaluateCurveToLine(runtime, value, type),
             "EnvelopeAngle" => SpatialEnvelope.Angle(root) is { } angle ? SqlValue.FromDouble(angle) : SqlValue.Null(SqlType.Float),
             "EnvelopeCenter" => Component(value, type, PointOf(SpatialEnvelope.Center(root))),
             // Without a spatial index, Filter is STIntersects (Microsoft's documented contract).
@@ -316,22 +344,28 @@ internal sealed class SpatialMethodCall : Expression
             "HasM" => SqlValue.FromBoolean(root.AnyHasM),
             "HasZ" => SqlValue.FromBoolean(root.AnyHasZ),
             "InstanceOf" => EvaluateInstanceOf(runtime, root, geography),
+            // Real's report names the rule an invalid instance breaks; only the valid answer is modeled.
+            "IsValidDetailed" => value.IsValidFor(geography)
+                ? Text(runtime, "24400: Valid")
+                : throw new NotSupportedException("IsValidDetailed's report for an invalid instance is not modeled."),
             "Lat" => Ordinate(root, static p => p.Y),
             "Long" => Ordinate(root, static p => p.X),
             "M" => Ordinate(root, static p => p.M),
-            // Real reports the lowest database compatibility level that can
-            // read the instance; 100 for every shape the simulator models.
             "MakeValid" => value.IsValidFor(geography)
                 ? SqlValue.FromSpatial(value, geography)
                 : geography
-                    ? SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialGeodeticConstructive.MakeValid(root)), isGeography: true)
-                    : Constructed(value, SpatialSimplify.MakeValid(root)),
-            "MinDbCompatibilityLevel" => SqlValue.FromInt32(100),
-            "NumRings" => root.Type == SpatialShapeType.Polygon ? SqlValue.FromInt32(root.Figures.Length) : SqlValue.Null(SqlType.Int32),
+                    ? SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialGeodeticConstructive.MakeValid(SpatialCurves.ForOperations(root, geography))), isGeography: true)
+                    : Constructed(value, SpatialSimplify.MakeValid(SpatialCurves.ForOperations(root, geography))),
+            // Real reports the lowest database compatibility level that can
+            // read the instance: 110 for anything version 1 of the
+            // serialization can't hold, 100 otherwise.
+            "MinDbCompatibilityLevel" => SqlValue.FromInt32(root.IsCurved || (geography && SpatialEnvelope.IsLargerThanAHemisphere(root)) ? 110 : 100),
+            "NumRings" => root.Type is SpatialShapeType.Polygon or SpatialShapeType.CurvePolygon ? SqlValue.FromInt32(root.Figures.Length) : SqlValue.Null(SqlType.Int32),
             "Reduce" => this.EvaluateReduce(runtime, value, type),
             "ReorientObject" => SqlValue.FromSpatial(new SpatialGeometry(value.Srid, Reorient(root)), geography),
             "RingN" => Component(value, type, RingAt(root, Index(runtime, geography, IndexKind.Ring), interiorOnly: false)),
-            "STArea" => SqlValue.FromDouble(geography ? SpatialMeasures.GeographyArea(root) : SpatialMeasures.Area(root)),
+            "STArea" => SqlValue.FromDouble(!geography ? SpatialMeasures.Area(root)
+                : root.IsCurved ? SpatialCurves.GeographyMeasure(root, area: true) : SpatialMeasures.GeographyArea(root)),
             "STAsBinary" => SqlValue.FromVarbinary(SpatialWkb.Write(value, includeZM: false)),
             "STAsText" => Text(runtime, SpatialWktWriter.Write(value, includeZM: false)),
             "STBoundary" => Constructed(value, SpatialConstructive.Boundary(root)),
@@ -342,12 +376,14 @@ internal sealed class SpatialMethodCall : Expression
                 ? SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialGeodeticConstructive.ConvexHull(root)), isGeography: true)
                 : Constructed(value, SpatialConstructive.ConvexHull(root)),
             "STCrosses" => Predicate(runtime, value, geography, SpatialPredicateKind.Crosses),
+            "STCurveN" => Component(value, type, CurveAt(root, Index(runtime, geography, IndexKind.Curve))),
+            "STCurveToLine" => CurveToLine(value, type, 0.001, relative: true),
             "STDifference" => this.EvaluateOverlay(runtime, value, type, SpatialOverlayOperation.Difference),
             "STDimension" => SqlValue.FromInt32(root.Dimension),
             "STDisjoint" => Predicate(runtime, value, geography, SpatialPredicateKind.Disjoint),
             "STDistance" => EvaluateDistance(runtime, value, geography),
             "STEndPoint" => Component(value, type, EndpointOf(root, first: false)),
-            "STEnvelope" => Constructed(value, SpatialConstructive.Envelope(root)),
+            "STEnvelope" => Constructed(value, root.IsCurved ? SpatialCurves.Envelope(root) : SpatialConstructive.Envelope(root)),
             "STEquals" => Predicate(runtime, value, geography, SpatialPredicateKind.Equals),
             "STExteriorRing" => Component(value, type, RingAt(root, 1, interiorOnly: false)),
             "STGeometryN" => Component(value, type, GeometryAt(root, Index(runtime, geography, IndexKind.Geometry))),
@@ -357,16 +393,22 @@ internal sealed class SpatialMethodCall : Expression
             "STIntersects" => Predicate(runtime, value, geography, SpatialPredicateKind.Intersects),
             "STIsClosed" => SqlValue.FromBoolean(IsClosed(root)),
             "STIsEmpty" => SqlValue.FromBoolean(root.IsEmpty),
-            "STIsRing" => root.Type == SpatialShapeType.LineString
-                ? SqlValue.FromBoolean(IsClosed(root) && IsSimpleRing(root))
-                : SqlValue.Null(SqlType.Bit),
+            "STIsRing" => root.Type switch
+            {
+                SpatialShapeType.LineString => SqlValue.FromBoolean(IsClosed(root) && IsSimpleRing(root)),
+                SpatialShapeType.CircularString or SpatialShapeType.CompoundCurve => SqlValue.FromBoolean(
+                    IsClosed(root) && value.IsPlanarValid && SpatialSimplicity.IsSimple(SpatialCurves.ForOperations(root, isGeography: false))),
+                _ => SqlValue.Null(SqlType.Bit),
+            },
             "STIsSimple" => SqlValue.FromBoolean(SpatialSimplicity.IsSimple(root)),
             "STIsValid" => SqlValue.FromBoolean(value.IsValidFor(geography)),
-            "STLength" => SqlValue.FromDouble(geography
-                ? SpatialMeasures.GeographyLength(root)
-                : SpatialMeasures.Length(root)),
+            "STLength" => SqlValue.FromDouble(!geography ? SpatialMeasures.Length(root)
+                : root.IsCurved ? SpatialCurves.GeographyMeasure(root, area: false) : SpatialMeasures.GeographyLength(root)),
+            "STNumCurves" => SpatialCurves.Curves(root) is { } curves ? SqlValue.FromInt32(curves.Length) : SqlValue.Null(SqlType.Int32),
             "STNumGeometries" => SqlValue.FromInt32(GeometryCount(root)),
-            "STNumInteriorRing" => SqlValue.FromInt32(root.Type == SpatialShapeType.Polygon ? Math.Max(0, root.Figures.Length - 1) : 0),
+            "STNumInteriorRing" => root.Type is SpatialShapeType.Polygon or SpatialShapeType.CurvePolygon
+                ? SqlValue.FromInt32(Math.Max(0, root.Figures.Length - 1))
+                : SqlValue.Null(SqlType.Int32),
             "STNumPoints" => SqlValue.FromInt32(root.PointCount),
             "STOverlaps" => Predicate(runtime, value, geography, SpatialPredicateKind.Overlaps),
             "STPointN" => Component(value, type, PointAt(root, Index(runtime, geography, IndexKind.Point))),
@@ -386,6 +428,137 @@ internal sealed class SpatialMethodCall : Expression
             _ => throw new NotSupportedException(
                 $"Spatial instance {(member.Form == MemberForm.Method ? "method" : "property")} '.{this.memberName}' is not modeled."),
         };
+    }
+
+    /// <summary>
+    /// The answers real settles from the instance's kind or the arguments
+    /// before it asks whether the instance is valid: the ring and centroid
+    /// members are NULL on a kind without rings, and <c>STCurveN</c> checks
+    /// its index first. A curved instance's <c>STIsRing</c>, unlike a
+    /// <c>LINESTRING</c>'s, is gated.
+    /// </summary>
+    private SqlValue? AnswersBeforeValidity(RuntimeContext runtime, SpatialShape root, bool isGeography)
+    {
+        var areal = root.Type is SpatialShapeType.Polygon or SpatialShapeType.CurvePolygon;
+        switch (this.memberName)
+        {
+            case "STCentroid":
+                return areal || root.Type == SpatialShapeType.MultiPolygon ? null : SqlValue.Null(SqlType.Geometry);
+            case "STCurveN":
+                _ = this.Index(runtime, isGeography, IndexKind.Curve);
+                return null;
+            case "STExteriorRing":
+            case "STInteriorRingN":
+                return areal ? null : SqlValue.Null(isGeography ? SqlType.Geography : SqlType.Geometry);
+            case "STIsRing":
+                return root.IsCurved && !root.IsEmpty && !SpatialCurves.IsPlanarValid(root)
+                    ? throw SimulatedSqlException.SpatialInstanceNotValid(isGeography)
+                    : null;
+            case "STNumInteriorRing":
+                return areal ? null : SqlValue.Null(SqlType.Int32);
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// The members whose answer <c>FULLGLOBE</c> settles, as receiver or
+    /// argument, all probed 2026-09-29 against SQL Server 2025: the whole globe
+    /// has real's area constant and no length, buffers and hulls to itself,
+    /// meets and contains every non-empty instance and lies within only
+    /// itself, answers a union with itself, an intersection with the other
+    /// operand and a difference with the other's complement.
+    /// </summary>
+    private SqlValue? FullGlobeAnswer(RuntimeContext runtime, SpatialGeometry value)
+    {
+        var root = value.Root;
+        var receiverIsGlobe = root.Type == SpatialShapeType.FullGlobe;
+        switch (GlobeRoleOf(this.memberName))
+        {
+            case GlobeRole.None:
+                return null;
+            case GlobeRole.Area:
+                return receiverIsGlobe ? SqlValue.FromDouble(FullGlobeArea) : null;
+            case GlobeRole.Length:
+                return receiverIsGlobe ? SqlValue.FromDouble(0) : null;
+            case GlobeRole.Itself:
+                return receiverIsGlobe ? SqlValue.FromSpatial(value, isGeography: true) : null;
+            default:
+                break;
+        }
+        if (Operand(runtime, 0, value, isGeography: true, asWritten: true) is not { } argument)
+            return null;
+        var other = argument.Root;
+        var argumentIsGlobe = other.Type == SpatialShapeType.FullGlobe;
+        if (!receiverIsGlobe && !argumentIsGlobe)
+            return null;
+        var globe = SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialShape.Empty(SpatialShapeType.FullGlobe)), isGeography: true);
+        var both = receiverIsGlobe && argumentIsGlobe;
+        var meets = !root.IsEmpty && !other.IsEmpty;
+        return this.memberName switch
+        {
+            "Filter" or "STIntersects" => SqlValue.FromBoolean(meets),
+            "STDisjoint" => SqlValue.FromBoolean(!meets),
+            "STContains" => SqlValue.FromBoolean(meets && receiverIsGlobe),
+            "STWithin" => SqlValue.FromBoolean(meets && argumentIsGlobe),
+            "STEquals" => SqlValue.FromBoolean(both),
+            "STOverlaps" => SqlValue.FromBoolean(false),
+            "STDistance" => meets ? SqlValue.FromDouble(0) : SqlValue.Null(SqlType.Float),
+            "STUnion" => globe,
+            "STIntersection" => receiverIsGlobe ? SqlValue.FromSpatial(new SpatialGeometry(value.Srid, other), isGeography: true) : SqlValue.FromSpatial(value, isGeography: true),
+            _ when !receiverIsGlobe || both => SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialShape.Empty(SpatialShapeType.GeometryCollection)), isGeography: true),
+            _ => SqlValue.FromSpatial(new SpatialGeometry(value.Srid, Complement(other)), isGeography: true),
+        };
+    }
+
+    /// <summary>How a member treats <c>FULLGLOBE</c>.</summary>
+    private enum GlobeRole
+    {
+        None,
+        Area,
+        Length,
+        Itself,
+        Binary,
+    }
+
+    private static GlobeRole GlobeRoleOf(string member) => member switch
+    {
+        "BufferWithCurves" => GlobeRole.Itself,
+        "BufferWithTolerance" => GlobeRole.Itself,
+        "Filter" => GlobeRole.Binary,
+        "Reduce" => GlobeRole.Itself,
+        "STArea" => GlobeRole.Area,
+        "STBuffer" => GlobeRole.Itself,
+        "STContains" => GlobeRole.Binary,
+        "STConvexHull" => GlobeRole.Itself,
+        "STDifference" => GlobeRole.Binary,
+        "STDisjoint" => GlobeRole.Binary,
+        "STDistance" => GlobeRole.Binary,
+        "STEquals" => GlobeRole.Binary,
+        "STIntersection" => GlobeRole.Binary,
+        "STIntersects" => GlobeRole.Binary,
+        "STLength" => GlobeRole.Length,
+        "STOverlaps" => GlobeRole.Binary,
+        "STSymDifference" => GlobeRole.Binary,
+        "STUnion" => GlobeRole.Binary,
+        "STWithin" => GlobeRole.Binary,
+        _ => GlobeRole.None,
+    };
+
+    /// <summary>Real's <c>STArea()</c> for <c>FULLGLOBE</c>, probed 2026-09-29.</summary>
+    private const double FullGlobeArea = 510065621710996.44;
+
+    /// <summary>
+    /// What the whole globe less an instance leaves: the globe itself when the
+    /// instance holds no area, and the reversed ring of a single-ring polygon.
+    /// </summary>
+    private static SpatialShape Complement(SpatialShape shape)
+    {
+        if (shape.Dimension < 2)
+            return SpatialShape.Empty(SpatialShapeType.FullGlobe);
+        return shape.Type is SpatialShapeType.Polygon or SpatialShapeType.CurvePolygon && shape.Figures.Length == 1
+            ? Reorient(shape)
+            : throw new NotSupportedException("The complement of a geography instance other than a single-ring polygon is not modeled.");
     }
 
     /// <summary>
@@ -457,7 +630,7 @@ internal sealed class SpatialMethodCall : Expression
     /// argument raises 24144 the way an invalid receiver does, judged by the
     /// receiver's own spatial type.
     /// </summary>
-    private SpatialGeometry? Operand(RuntimeContext runtime, int position, SpatialGeometry receiver, bool isGeography)
+    private SpatialGeometry? Operand(RuntimeContext runtime, int position, SpatialGeometry receiver, bool isGeography, bool asWritten = false)
     {
         if (this.arguments.Length <= position)
             return null;
@@ -468,9 +641,11 @@ internal sealed class SpatialMethodCall : Expression
         var spatial = argument.Type is SpatialSqlType
             ? argument.AsSpatial
             : SpatialWktReader.Read(argument.AsString, SpatialGeometry.DefaultSridFor(isGeography), isGeography);
-        return spatial.Srid != receiver.Srid
-            ? null
-            : spatial.IsValidFor(isGeography) ? spatial : throw SimulatedSqlException.SpatialInstanceNotValid(isGeography);
+        if (spatial.Srid != receiver.Srid)
+            return null;
+        if (!spatial.IsValidFor(isGeography))
+            throw SimulatedSqlException.SpatialInstanceNotValid(isGeography);
+        return spatial.Root.IsCurved && !asWritten ? new SpatialGeometry(spatial.Srid, SpatialCurves.ForOperations(spatial.Root, isGeography)) : spatial;
     }
 
     /// <summary>
@@ -482,15 +657,17 @@ internal sealed class SpatialMethodCall : Expression
     /// </summary>
     private SqlValue EvaluateDistance(RuntimeContext runtime, SpatialGeometry value, bool isGeography)
     {
-        if (Operand(runtime, 0, value, isGeography) is not { } other)
+        if (Operand(runtime, 0, value, isGeography, asWritten: true) is not { } other)
             return SqlValue.Null(SqlType.Float);
         var root = value.Root;
         var otherRoot = other.Root;
-        return root.IsEmpty || otherRoot.IsEmpty
-            ? SqlValue.Null(SqlType.Float)
-            : SqlValue.FromDouble(isGeography
-                ? SpatialMeasures.GeographyDistance(root, otherRoot)
-                : SpatialMeasures.PlanarDistance(root, otherRoot));
+        if (root.IsEmpty || otherRoot.IsEmpty)
+            return SqlValue.Null(SqlType.Float);
+        if (isGeography)
+            return SqlValue.FromDouble(SpatialMeasures.GeographyDistance(SpatialCurves.ForOperations(root, isGeography), SpatialCurves.ForOperations(otherRoot, isGeography)));
+        return SqlValue.FromDouble(root.IsCurved || otherRoot.IsCurved
+            ? SpatialCurves.PlanarDistance(root, otherRoot)
+            : SpatialMeasures.PlanarDistance(root, otherRoot));
     }
 
     /// <summary>
@@ -511,9 +688,40 @@ internal sealed class SpatialMethodCall : Expression
             if (!(tolerance > 0))
                 throw SimulatedSqlException.SpatialBufferToleranceNotValid(type.IsGeography, tolerance);
         }
-        return type.IsGeography
-            ? SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialGeodeticBuffer.Buffer(value.Root, distance, tolerance, relative)), isGeography: true)
-            : Constructed(value, SpatialBuffer.Buffer(value.Root, distance, tolerance, relative));
+        return Buffered(value, type, distance, tolerance, relative);
+    }
+
+    /// <summary>
+    /// The linearized buffer. A curved <c>geometry</c> instance is swept arc by
+    /// arc, as real sweeps it; a curved <c>geography</c> one is read at the
+    /// buffer's own tolerance rather than the operations' fine one.
+    /// </summary>
+    private static SqlValue Buffered(SpatialGeometry value, SpatialSqlType type, double distance, double tolerance, bool relative)
+    {
+        var root = value.Root;
+        if (!type.IsGeography)
+            return Constructed(value, SpatialBuffer.Buffer(root, distance, tolerance, relative));
+        if (root.IsCurved)
+            root = SpatialCurves.GeographyCurveToLine(root, relative ? tolerance * Math.Abs(distance) : tolerance, relative: false);
+        return SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialGeodeticBuffer.Buffer(root, distance, tolerance, relative)), isGeography: true);
+    }
+
+    /// <summary>
+    /// <c>BufferWithCurves(distance)</c>. A point's buffer is the curve
+    /// polygon real answers; anything else answers the linearized buffer at
+    /// <c>STBuffer</c>'s tolerance, where real's own answer is a curve polygon
+    /// of the same outline. A NULL distance is Msg 6569.
+    /// </summary>
+    private SqlValue EvaluateBufferWithCurves(RuntimeContext runtime, SpatialGeometry value, SpatialSqlType type)
+    {
+        var distance = this.RequiredArgument(runtime, 0, type).CoerceTo(SqlType.Float).AsDouble;
+        if (distance > 0 && value.Root.SinglePoint is { } point)
+        {
+            return SqlValue.FromSpatial(
+                new SpatialGeometry(value.Srid, type.IsGeography ? SpatialGeodeticBuffer.CurveCircle(point, distance) : SpatialBuffer.CurveCircle(point, distance)),
+                type.IsGeography);
+        }
+        return Buffered(value, type, distance, 0.001, relative: true);
     }
 
     /// <summary>
@@ -530,13 +738,56 @@ internal sealed class SpatialMethodCall : Expression
         return line is null ? SqlValue.Null(type) : SqlValue.FromSpatial(new SpatialGeometry(value.Srid, line), type.IsGeography);
     }
 
+    /// <summary>
+    /// <c>CurveToLineWithTolerance(tolerance, relative)</c>: a NULL argument is
+    /// Msg 6569 and a tolerance that isn't positive 24152.
+    /// </summary>
+    private SqlValue EvaluateCurveToLine(RuntimeContext runtime, SpatialGeometry value, SpatialSqlType type)
+    {
+        var tolerance = this.RequiredArgument(runtime, 0, type).CoerceTo(SqlType.Float).AsDouble;
+        var relative = this.RequiredArgument(runtime, 1, type).CoerceTo(SqlType.Bit).AsBoolean;
+        return !(tolerance > 0)
+            ? throw SimulatedSqlException.SpatialCurveToleranceNotValid(type.IsGeography, tolerance)
+            : CurveToLine(value, type, tolerance, relative);
+    }
+
+    /// <summary>
+    /// The instance with every arc linearized at <paramref name="tolerance"/>.
+    /// Nothing left is <c>GEOMETRYCOLLECTION EMPTY</c>, and a linearization
+    /// coarse enough to fold a ring onto itself comes back through
+    /// <c>MakeValid</c>, as real's does.
+    /// </summary>
+    private static SqlValue CurveToLine(SpatialGeometry value, SpatialSqlType type, double tolerance, bool relative)
+    {
+        var shape = type.IsGeography
+            ? SpatialCurves.GeographyCurveToLine(value.Root, tolerance, relative)
+            : SpatialCurves.CurveToLine(value.Root, tolerance, relative);
+        if (shape.IsEmpty)
+            return SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialShape.Empty(SpatialShapeType.GeometryCollection)), type.IsGeography);
+        var line = new SpatialGeometry(value.Srid, shape);
+        if (!line.IsValidFor(type.IsGeography))
+        {
+            line = new SpatialGeometry(value.Srid, type.IsGeography
+                ? SpatialGeodeticConstructive.MakeValid(shape)
+                : SpatialSimplify.MakeValid(shape));
+        }
+        return SqlValue.FromSpatial(line, type.IsGeography);
+    }
+
+    /// <summary><c>STCurveN(n)</c>: the <paramref name="index"/>-th curve, or null past the count or on a kind without curves.</summary>
+    private static SpatialShape? CurveAt(SpatialShape root, int index) =>
+        SpatialCurves.Curves(root) is { } curves && index <= curves.Length ? curves[index - 1] : null;
+
     /// <summary><c>Reduce(tolerance)</c>: NULL is Msg 6569 and a negative tolerance 24125.</summary>
     private SqlValue EvaluateReduce(RuntimeContext runtime, SpatialGeometry value, SpatialSqlType type)
     {
         var tolerance = this.RequiredArgument(runtime, 0, type).CoerceTo(SqlType.Float).AsDouble;
         if (!(tolerance >= 0))
             throw SimulatedSqlException.SpatialReduceToleranceNotValid(type.IsGeography, tolerance);
-        return SqlValue.FromSpatial(new SpatialGeometry(value.Srid, SpatialSimplify.Reduce(value.Root, tolerance, type.IsGeography)), type.IsGeography);
+        var reduced = value.Root.IsCurved
+            ? SpatialCurves.Reduce(value.Root, tolerance, type.IsGeography)
+            : SpatialSimplify.Reduce(value.Root, tolerance, type.IsGeography);
+        return SqlValue.FromSpatial(new SpatialGeometry(value.Srid, reduced), type.IsGeography);
     }
 
     /// <summary>An argument real refuses as NULL with Msg 6569, numbered from 1.</summary>
@@ -573,6 +824,7 @@ internal sealed class SpatialMethodCall : Expression
         Point,
         Geometry,
         Ring,
+        Curve,
     }
 
     /// <summary>
@@ -587,6 +839,7 @@ internal sealed class SpatialMethodCall : Expression
         {
             IndexKind.Point => SimulatedSqlException.SpatialPointIndexTooSmall(isGeography, index),
             IndexKind.Geometry => SimulatedSqlException.SpatialGeometryIndexTooSmall(isGeography, index),
+            IndexKind.Curve => SimulatedSqlException.SpatialCurveIndexTooSmall(isGeography, index),
             _ => SimulatedSqlException.SpatialRingIndexTooSmall(isGeography, index),
         };
     }
@@ -633,7 +886,7 @@ internal sealed class SpatialMethodCall : Expression
         SpatialShapeType.CompoundCurve => ["CompoundCurve", "Curve", "Geometry"],
         SpatialShapeType.Polygon => ["Polygon", "Surface", "Geometry"],
         SpatialShapeType.CurvePolygon => ["CurvePolygon", "Surface", "Geometry"],
-        SpatialShapeType.FullGlobe => ["FullGlobe", "Surface", "Geometry"],
+        SpatialShapeType.FullGlobe => ["FullGlobe", "Geometry"],
         SpatialShapeType.MultiPoint => ["MultiPoint", "GeometryCollection", "Geometry"],
         SpatialShapeType.MultiLineString => ["MultiLineString", "MultiCurve", "GeometryCollection", "Geometry"],
         SpatialShapeType.MultiPolygon => ["MultiPolygon", "MultiSurface", "GeometryCollection", "Geometry"],
@@ -694,17 +947,33 @@ internal sealed class SpatialMethodCall : Expression
     /// </summary>
     private static SpatialShape? RingAt(SpatialShape root, int index, bool interiorOnly)
     {
-        return root.Type != SpatialShapeType.Polygon || index > root.Figures.Length || (interiorOnly && index < 2)
-            ? null
-            : SpatialShape.Leaf(SpatialShapeType.LineString, [root.Figures[index - 1]]);
+        if (root.Type is not (SpatialShapeType.Polygon or SpatialShapeType.CurvePolygon) || index > root.Figures.Length || (interiorOnly && index < 2))
+            return null;
+        // A curve polygon's ring comes back as the curve it was written as.
+        var ring = root.Figures[index - 1];
+        return root.FigureType(index - 1) switch
+        {
+            SpatialFigureType.Arc => SpatialShape.Curve(SpatialShapeType.CircularString, [ring], [SpatialFigureType.Arc], [null]),
+            SpatialFigureType.Composite => SpatialShape.Curve(SpatialShapeType.CompoundCurve, [ring], [SpatialFigureType.Composite], [root.Segments![index - 1]]),
+            _ => SpatialShape.Leaf(SpatialShapeType.LineString, [ring]),
+        };
     }
 
+    /// <summary>
+    /// <c>STStartPoint()</c> / <c>STEndPoint()</c>: the instance's first or last
+    /// point in <c>STPointN</c> order, whatever its kind — a collection's
+    /// included.
+    /// </summary>
     private static SpatialShape? EndpointOf(SpatialShape root, bool first)
     {
-        if (root.Figures.Length == 0 || root.Figures[0].Length == 0)
-            return null;
-        var figure = first ? root.Figures[0] : root.Figures[^1];
-        return SpatialShape.Leaf(SpatialShapeType.Point, [[first ? figure[0] : figure[^1]]]);
+        SpatialCoordinate? found = null;
+        foreach (var point in root.Coordinates())
+        {
+            found = point;
+            if (first)
+                break;
+        }
+        return found is { } coordinate ? SpatialShape.Leaf(SpatialShapeType.Point, [[coordinate]]) : null;
     }
 
     /// <summary>
@@ -746,22 +1015,37 @@ internal sealed class SpatialMethodCall : Expression
         return true;
     }
 
-    /// <summary>Reverses every figure's point order — geography's <c>ReorientObject()</c>, which flips ring orientation.</summary>
+    /// <summary>
+    /// <c>ReorientObject()</c>: every polygon ring reversed, which flips the
+    /// region it names. Lines and points come back as written, as on real.
+    /// </summary>
     private static SpatialShape Reorient(SpatialShape shape)
     {
-        var figures = new SpatialCoordinate[shape.Figures.Length][];
-        for (var i = 0; i < shape.Figures.Length; i++)
+        if (shape.Type is SpatialShapeType.Polygon or SpatialShapeType.CurvePolygon)
         {
-            var source = shape.Figures[i];
-            var reversed = new SpatialCoordinate[source.Length];
-            for (var j = 0; j < source.Length; j++)
-                reversed[j] = source[source.Length - 1 - j];
-            figures[i] = reversed;
+            var figures = new SpatialCoordinate[shape.Figures.Length][];
+            var segments = shape.Segments is null ? null : new SpatialSegmentType[]?[shape.Figures.Length];
+            for (var i = 0; i < shape.Figures.Length; i++)
+            {
+                if (shape.FigureType(i) == SpatialFigureType.Composite)
+                {
+                    var elements = SpatialCurves.Elements(shape, i);
+                    elements.Reverse();
+                    for (var e = 0; e < elements.Count; e++)
+                        elements[e] = (elements[e].IsArc, [.. elements[e].Points.Reverse()]);
+                    (figures[i], segments![i]) = SpatialCurves.Compose(elements);
+                    continue;
+                }
+                figures[i] = [.. shape.Figures[i].Reverse()];
+            }
+            return new SpatialShape(shape.Type, figures, shape.Children, shape.FigureTypes, segments);
         }
+        if (shape.Children.Length == 0)
+            return shape;
         var children = new SpatialShape[shape.Children.Length];
         for (var i = 0; i < shape.Children.Length; i++)
             children[i] = Reorient(shape.Children[i]);
-        return new SpatialShape(shape.Type, figures, children);
+        return SpatialShape.Collection(shape.Type, children);
     }
 
     /// <summary>

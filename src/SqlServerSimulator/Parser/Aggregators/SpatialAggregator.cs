@@ -31,6 +31,8 @@ internal sealed class SpatialAggregator(SpatialAggregateMethod method, SpatialSq
 {
     private readonly List<SpatialShape> members = [];
     private SpatialShape? union;
+    private (SpatialVector Center, double Radius)? cap;
+    private bool globe;
     private int? srid;
     private bool mixedSrid;
 
@@ -54,8 +56,16 @@ internal sealed class SpatialAggregator(SpatialAggregateMethod method, SpatialSq
             case SpatialAggregateMethod.Union:
                 var sofar = this.union ?? SpatialShape.Empty(SpatialShapeType.GeometryCollection);
                 this.union = isGeography
-                    ? SpatialGeodeticConstructive.Overlay(SpatialOverlayOperation.Union, sofar, instance.Root)
-                    : SpatialConstructive.Overlay(SpatialOverlayOperation.Union, sofar, instance.Root);
+                    ? SpatialGeodeticConstructive.Overlay(SpatialOverlayOperation.Union, sofar, SpatialCurves.ForOperations(instance.Root, isGeography))
+                    : SpatialConstructive.Overlay(SpatialOverlayOperation.Union, sofar, SpatialCurves.ForOperations(instance.Root, isGeography));
+                break;
+            case SpatialAggregateMethod.Envelope when isGeography:
+                if (!this.globe && !instance.Root.IsEmpty)
+                {
+                    var merged = SpatialEnvelope.MergeCap(this.cap, SpatialCurves.ForOperations(instance.Root, isGeography));
+                    this.globe = merged is null;
+                    this.cap = merged;
+                }
                 break;
             case SpatialAggregateMethod.Collection:
                 if (instance.Root.Type == SpatialShapeType.GeometryCollection)
@@ -64,10 +74,7 @@ internal sealed class SpatialAggregator(SpatialAggregateMethod method, SpatialSq
                     this.members.Add(instance.Root);
                 break;
             default:
-                // geography's envelope is a curve polygon, which no operation models.
-                if (isGeography && method == SpatialAggregateMethod.Envelope)
-                    throw new NotSupportedException("geography::EnvelopeAggregate is not modeled.");
-                this.members.Add(instance.Root);
+                this.members.Add(SpatialCurves.ForOperations(instance.Root, isGeography));
                 break;
         }
     }
@@ -88,11 +95,35 @@ internal sealed class SpatialAggregator(SpatialAggregateMethod method, SpatialSq
         {
             SpatialAggregateMethod.Union => this.union!,
             SpatialAggregateMethod.Collection => SpatialShape.Collection(SpatialShapeType.GeometryCollection, [.. this.members]),
+            SpatialAggregateMethod.Envelope when type.IsGeography => this.GeographyEnvelope(),
             SpatialAggregateMethod.Envelope => SpatialConstructive.Envelope(All()),
             _ => type.IsGeography ? SpatialGeodeticConstructive.ConvexHull(All()) : SpatialConstructive.ConvexHull(All()),
         };
         return SqlValue.FromSpatial(new SpatialGeometry(resultSrid, shape), type.IsGeography);
     }
+
+    /// <summary>
+    /// <c>geography::EnvelopeAggregate</c>: a curve polygon of two half
+    /// circles through four control points about the merged cap's centre, at
+    /// the cap's angle scaled by the polar radius of curvature <c>a²/b</c> as a
+    /// great elliptic distance — <c>BufferWithCurves</c>'s construction — with
+    /// a floor of √3·10⁻⁹ radians, which is what a lone point answers.
+    /// A cap reaching a hemisphere answers <c>FULLGLOBE</c> (fitted against
+    /// SQL Server 2025, 2026-09-29).
+    /// </summary>
+    private SpatialShape GeographyEnvelope()
+    {
+        if (this.globe)
+            return SpatialShape.Empty(SpatialShapeType.FullGlobe);
+        if (this.cap is not { } merged)
+            return SpatialShape.Empty(SpatialShapeType.GeometryCollection);
+        var radius = Math.Max(merged.Radius, MinimumCapRadius);
+        return SpatialGeodeticBuffer.CurveCircle(SpatialEnvelope.ToCoordinate(merged.Center), radius * PolarCurvatureRadius);
+    }
+
+    private static readonly double MinimumCapRadius = Math.Sqrt(3) * 1e-9;
+
+    private const double PolarCurvatureRadius = SpatialEllipsoid.SemiMajor * SpatialEllipsoid.SemiMajor / SpatialEllipsoid.SemiMinor;
 
     private SpatialShape All() => SpatialShape.Collection(SpatialShapeType.GeometryCollection, [.. this.members]);
 }

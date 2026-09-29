@@ -28,8 +28,6 @@ internal static class SpatialWkb
     public static byte[] Write(SpatialGeometry geometry, bool includeZM)
     {
         var root = geometry.Root;
-        if (root.Type >= SpatialShapeType.CircularString)
-            throw new NotSupportedException($"Encoding the spatial shape {root.Type} as well-known binary is not modeled.");
         var hasZ = includeZM && root.AnyHasZ;
         var hasM = includeZM && root.AnyHasM;
         var bytes = new List<byte>(64);
@@ -37,10 +35,36 @@ internal static class SpatialWkb
         return [.. bytes];
     }
 
-    private static void WriteShape(List<byte> bytes, SpatialShape shape, bool hasZ, bool hasM)
+    private static void WriteHeader(List<byte> bytes, SpatialShapeType type, bool hasZ, bool hasM)
     {
         bytes.Add(0x01);
-        WriteUInt32(bytes, (uint)shape.Type + (hasZ ? ZOffset : 0) + (hasM ? MOffset : 0));
+        WriteUInt32(bytes, (uint)type + (hasZ ? ZOffset : 0) + (hasM ? MOffset : 0));
+    }
+
+    /// <summary>A composite figure's elements, each a LineString or CircularString record repeating the point it shares with the previous.</summary>
+    private static void WriteElements(List<byte> bytes, SpatialShape shape, int index, bool hasZ, bool hasM)
+    {
+        var elements = SpatialCurves.Elements(shape, index);
+        WriteUInt32(bytes, (uint)elements.Count);
+        foreach (var (isArc, points) in elements)
+        {
+            WriteHeader(bytes, isArc ? SpatialShapeType.CircularString : SpatialShapeType.LineString, hasZ, hasM);
+            WriteFigure(bytes, points, hasZ, hasM);
+        }
+    }
+
+    /// <summary>The well-known binary type code real gives the whole globe, which has no body.</summary>
+    private const uint FullGlobeCode = 126;
+
+    private static void WriteShape(List<byte> bytes, SpatialShape shape, bool hasZ, bool hasM)
+    {
+        if (shape.Type == SpatialShapeType.FullGlobe)
+        {
+            bytes.Add(0x01);
+            WriteUInt32(bytes, FullGlobeCode);
+            return;
+        }
+        WriteHeader(bytes, shape.Type, hasZ, hasM);
 
         switch (shape.Type)
         {
@@ -48,7 +72,36 @@ internal static class SpatialWkb
                 WritePoint(bytes, shape.Figures.Length == 1 && shape.Figures[0].Length == 1 ? shape.Figures[0][0] : EmptyPoint, hasZ, hasM);
                 return;
             case SpatialShapeType.LineString:
+            case SpatialShapeType.CircularString:
                 WriteFigure(bytes, shape.Figures.Length == 1 ? shape.Figures[0] : [], hasZ, hasM);
+                return;
+            case SpatialShapeType.CompoundCurve:
+                if (shape.Figures.Length == 0)
+                {
+                    WriteUInt32(bytes, 0);
+                    return;
+                }
+                WriteElements(bytes, shape, 0, hasZ, hasM);
+                return;
+            case SpatialShapeType.CurvePolygon:
+                // Each ring is a record of its own kind: a plain ring a
+                // LineString, an arc ring a CircularString, a composite one a
+                // CompoundCurve.
+                WriteUInt32(bytes, (uint)shape.Figures.Length);
+                for (var i = 0; i < shape.Figures.Length; i++)
+                {
+                    var kind = shape.FigureType(i) switch
+                    {
+                        SpatialFigureType.Arc => SpatialShapeType.CircularString,
+                        SpatialFigureType.Composite => SpatialShapeType.CompoundCurve,
+                        _ => SpatialShapeType.LineString,
+                    };
+                    WriteHeader(bytes, kind, hasZ, hasM);
+                    if (kind == SpatialShapeType.CompoundCurve)
+                        WriteElements(bytes, shape, i, hasZ, hasM);
+                    else
+                        WriteFigure(bytes, shape.Figures[i], hasZ, hasM);
+                }
                 return;
             case SpatialShapeType.Polygon:
                 WriteUInt32(bytes, (uint)shape.Figures.Length);
@@ -123,9 +176,11 @@ internal static class SpatialWkb
         var code = ReadUInt32(bytes, ref at, littleEndian, isGeography);
         var hasZ = code / ZOffset % 2 == 1;
         var hasM = code >= MOffset && code / MOffset % 2 == 1;
+        if (code == FullGlobeCode && isGeography)
+            return SpatialShape.Empty(SpatialShapeType.FullGlobe);
         var kind = code % ZOffset;
-        if (kind is < 1 or > 7)
-            throw new NotSupportedException($"Well-known binary shape type {code} is not modeled.");
+        if (kind is < 1 or > 10)
+            throw SimulatedSqlException.SpatialWkbNotValid(isGeography);
         var type = (SpatialShapeType)kind;
 
         switch (type)
@@ -137,6 +192,25 @@ internal static class SpatialWkb
                     : SpatialShape.Leaf(type, [[point]]);
             case SpatialShapeType.LineString:
                 return SpatialShape.Leaf(type, [ReadFigure(bytes, ref at, littleEndian, hasZ, hasM, isGeography)]);
+            case SpatialShapeType.CircularString:
+                var arcs = ReadFigure(bytes, ref at, littleEndian, hasZ, hasM, isGeography);
+                return arcs.Length == 0 ? SpatialShape.Empty(type) : SpatialShape.Curve(type, [arcs], [SpatialFigureType.Arc], [null]);
+            case SpatialShapeType.CompoundCurve:
+                var (compound, run) = ReadElements(bytes, ref at, littleEndian, isGeography);
+                return compound.Length == 0 ? SpatialShape.Empty(type) : SpatialShape.Curve(type, [compound], [SpatialFigureType.Composite], [run]);
+            case SpatialShapeType.CurvePolygon:
+                var curveRingCount = (int)ReadUInt32(bytes, ref at, littleEndian, isGeography);
+                var curveRings = new SpatialCoordinate[curveRingCount][];
+                var figureTypes = new SpatialFigureType[curveRingCount];
+                var runs = new SpatialSegmentType[]?[curveRingCount];
+                for (var i = 0; i < curveRingCount; i++)
+                {
+                    var ring = ReadShape(bytes, ref at, isGeography);
+                    curveRings[i] = ring.Figures.Length == 0 ? [] : ring.Figures[0];
+                    figureTypes[i] = ring.Figures.Length == 0 ? SpatialFigureType.Line : ring.FigureType(0);
+                    runs[i] = ring.Segments?[0];
+                }
+                return curveRingCount == 0 ? SpatialShape.Empty(type) : SpatialShape.Curve(type, curveRings, figureTypes, runs);
             case SpatialShapeType.Polygon:
                 var ringCount = (int)ReadUInt32(bytes, ref at, littleEndian, isGeography);
                 var rings = new SpatialCoordinate[ringCount][];
@@ -150,6 +224,21 @@ internal static class SpatialWkb
                     children[i] = ReadShape(bytes, ref at, isGeography);
                 return SpatialShape.Collection(type, children);
         }
+    }
+
+    /// <summary>A CompoundCurve record's elements, each a LineString or CircularString record continuing from the previous one's end.</summary>
+    private static (SpatialCoordinate[] Points, SpatialSegmentType[] Segments) ReadElements(ReadOnlySpan<byte> bytes, ref int at, bool littleEndian, bool isGeography)
+    {
+        var count = (int)ReadUInt32(bytes, ref at, littleEndian, isGeography);
+        var elements = new List<(bool IsArc, SpatialCoordinate[] Points)>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var element = ReadShape(bytes, ref at, isGeography);
+            if (element.Type is not (SpatialShapeType.LineString or SpatialShapeType.CircularString) || element.Figures.Length == 0)
+                throw new NotSupportedException("A CompoundCurve element that isn't a non-empty LineString or CircularString is not modeled.");
+            elements.Add((element.Type == SpatialShapeType.CircularString, element.Figures[0]));
+        }
+        return elements.Count == 0 ? ([], []) : SpatialCurves.Compose(elements);
     }
 
     private static SpatialCoordinate[] ReadFigure(ReadOnlySpan<byte> bytes, ref int at, bool littleEndian, bool hasZ, bool hasM, bool isGeography)

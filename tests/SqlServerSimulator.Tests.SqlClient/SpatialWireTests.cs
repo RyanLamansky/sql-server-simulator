@@ -87,6 +87,34 @@ public sealed class SpatialWireTests
     }
 
     /// <summary>
+    /// Curved instances and <c>FULLGLOBE</c> travel as version 2 of the
+    /// serialization — figure types, the segment table, the
+    /// larger-than-a-hemisphere bit — byte for byte as SQL Server 2025 wrote
+    /// them (probed 2026-09-29).
+    /// </summary>
+    [TestMethod]
+    public async Task CurvedAndWholeGlobeColumns_ReadAsVersionTwoBytes()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, """
+            create table Curves (id int not null, g geometry null, h geography null);
+            insert Curves (id, g, h) values
+                (1, geometry::Parse('COMPOUNDCURVE((0 0, 1 1), CIRCULARSTRING(1 1, 2 2, 3 1), (3 1, 4 0))'), geography::Parse('FULLGLOBE'))
+            """);
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("select g, h from Curves", connection);
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual(
+            "0000000002040500000000000000000000000000000000000000000000000000F03F000000000000F03F000000000000004000000000000000400000000000000840000000000000F03F0000000000001040000000000000000001000000030000000001000000FFFFFFFF000000000903000000020302",
+            ReadUdtHex(reader, 0));
+        AreEqual("E61000000224000000000000000001000000FFFFFFFFFFFFFFFF0B", ReadUdtHex(reader, 1));
+    }
+
+    /// <summary>
     /// Reads a UDT cell the DacFx way — <c>GetSqlBytes</c> (assembly-independent,
     /// unlike <c>GetValue</c> which needs the CLR type) — and returns it as hex.
     /// Cross-checks the length-only <c>GetBytes</c> probe used by bulk readers.

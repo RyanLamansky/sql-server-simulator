@@ -4,8 +4,9 @@ Spatial values are parsed instances, stored in SQL Server's own UDT serializatio
 WKT parsing (with real's validation failures), canonical WKT rendering, per-value SRID, Z / M ordinates, EMPTY instances, the OGC binary encodings, the constructor family and the whole structural member surface all ship.
 So do all three measures for both spatial types — area, length and distance, planar and round-earth — and the whole topological surface of both: `geometry`'s eight predicates plus `STRelate`, `geography`'s six, `STIsValid` for each, and the Msg 24144 gate an invalid instance puts on most instance methods.
 So do the derived-point members each type carries alone — `geometry`'s `STCentroid` / `STPointOnSurface` / `STIsSimple` and `geography`'s `EnvelopeAngle` / `EnvelopeCenter`.
-So do the [constructive operations](#constructive-operations): the four set operations, the buffers, `ShortestLineTo`, `Reduce` and `MakeValid` for both types, `geometry`'s envelope, hull and boundary, `geography`'s hull, and the four spatial aggregates but `geography`'s `EnvelopeAggregate`.
-The rest — that aggregate, the curve forms and a handful of members — parse cleanly and raise `NotSupportedException` at execute; see [Not modeled yet](#not-modeled-yet).
+So do the [constructive operations](#constructive-operations): the four set operations, the buffers, `ShortestLineTo`, `Reduce` and `MakeValid` for both types, `geometry`'s envelope, hull and boundary, `geography`'s hull, and the four spatial aggregates.
+So do the [curved kinds](#curved-shapes) — `CIRCULARSTRING`, `COMPOUNDCURVE` and `CURVEPOLYGON` for both types — with their linearization, and [`FULLGLOBE`](#fullglobe).
+The rest — GML, `IsValidDetailed`'s report on an invalid instance and a handful of members — parse cleanly and raise `NotSupportedException` at execute; see [Not modeled yet](#not-modeled-yet).
 
 The sole AW spatial column (`Person.Address.SpatialLocation`, geography) loads as a first-class spatial-typed column rather than degrading to `varbinary(MAX)`.
 
@@ -34,6 +35,7 @@ Instance members read the tree directly; the byte form is materialized only at t
   Negative zero folds onto positive zero at construction, matching real.
 - `SpatialShape` — `Type` + `Figures` (point runs: one per polygon ring, exterior first) + `Children` (members of Multi\* / GeometryCollection).
   The split mirrors the figure and shape tables of the binary form, so the codec walks the tree without an intermediate representation.
+  A curved leaf also carries each figure's `SpatialFigureType` (line, arc or composite) and a composite figure's `SpatialSegmentType` run, which are the version 2 serialization's figure attributes and segment table; a `COMPOUNDCURVE` stores the point two elements share once.
   Carries `IsEmpty` (recursive, matching `STIsEmpty()`), `PointCount`, `Dimension` and `Coordinates()` (the order `STPointN()` indexes).
 - `SpatialGeometry` — `Srid` + `Root`, plus `WithSrid` for the settable `STSrid` and `ValidateSrid` for the 0..999999 domain (Msg 24100 outside it).
 
@@ -42,7 +44,7 @@ Instance members read the tree directly; the byte form is materialized only at t
 
 ## WKT — `Storage/Spatial/SpatialWktReader.cs` + `SpatialWktWriter.cs`
 
-The reader accepts the full 2D/Z/M grammar: all seven shape kinds, `EMPTY` at any level, both MULTIPOINT spellings (`(0 0, 1 1)` and `((0 0), (1 1))`, with the first element fixing the form for the rest), a literal `NULL` in the Z slot, and case-insensitive labels.
+The reader accepts the full 2D/Z/M grammar: all eleven shape kinds, `EMPTY` at any level, both MULTIPOINT spellings (`(0 0, 1 1)` and `((0 0), (1 1))`, with the first element fixing the form for the rest), a literal `NULL` in the Z slot, and case-insensitive labels.
 Labels match as a **prefix**, not as a greedy word — which is why `POINTX(1 2)` reports a missing `(` rather than an unknown label, exactly as real does.
 
 The writer emits real's canonical spelling: a space between label and body (`POINT (1 2)`), `", "` between coordinates and between members, `EMPTY` for a shape with no coordinates, and Multi\* members without their own label.
@@ -69,12 +71,21 @@ Every one is real's own, wrapped in Msg 6522 (see [The Msg 6522 wrapper](#the-ms
 | 24201 | a `geography` latitude outside ±90 (longitude has no equivalent check; real accepts any value) |
 | 24209 | the input stopped mid-shape |
 | 24303 | `FULLGLOBE` on `geometry`, which real rejects as an invalid OpenGis type |
+| 24305 / 24306 | a `geography` polygon ring with fewer than four points / whose ends differ — `geography` numbers every ring from 1 where `geometry` names the exterior one; a `CURVEPOLYGON` ring written `EMPTY` still reports `geometry`'s 24118 / 24120 on both types |
+| 24212 | a `CIRCULARSTRING` of a single point |
+| 24214 | an arc whose three points disagree on Z, a missing Z included |
+| 24134 | a `COMPOUNDCURVE` element that doesn't start exactly where the previous one ended, Z and M included |
+| 24300 / 24301 | a `CURVEPOLYGON` ring written `CIRCULARSTRING EMPTY` / `COMPOUNDCURVE EMPTY` — real's builder reporting a missing figure / segment |
+| 24150 | `FULLGLOBE` as a `GEOMETRYCOLLECTION` member |
 
 Two of these carry probe-derived position arithmetic that isn't worth deriving from first principles:
 
 - **24141** reports the index *after* the offending token when the reader consumed one (`POINT(1 X)` → position 9), and the index *of* the character when it's a delimiter the reader didn't consume (`POINT(1)` → position 7).
 - **24142** reports the offset itself for a single-character expectation, and one past it for a label expectation whenever the remaining input is longer than the label.
   The echoed text is the label's width of input when that much remains, and a single character when it doesn't (`STPointFromText('PO')` → `at position 0. The input has "P"`).
+
+The curved kinds read with real's grammar (probed 2026-09-29): a `CIRCULARSTRING` reads its points in pairs after the first, so `CIRCULARSTRING(0 0, 1 1)` is 24142 expecting the `,` of the second pair; a `COMPOUNDCURVE` or `CURVEPOLYGON` element opening with a `C` must be a labelled `CIRCULARSTRING` (or, for a ring, `COMPOUNDCURVE`) and anything else must be a bare `(`, which is why `COMPOUNDCURVE(LINESTRING(…))` expects `(` and `COMPOUNDCURVE(COMPOUNDCURVE(…))` expects `CIRCULARSTRING`.
+The Multi\* kinds take no curved member.
 
 ## Binary encodings
 
@@ -95,6 +106,12 @@ Byte parity was probe-anchored against SQL Server 2025 for every 2D shape class 
 - `0x01` / `0x02` add Z / M. The shortcut bodies interleave the extra ordinates per point; the full layout stores them as separate per-ordinate arrays after the coordinate pairs.
 
 **Figure attributes (version 1)**: point / line figures `0x01`; a polygon's exterior (first) ring `0x02`, interior rings `0x00`.
+
+**Version 2** (the MS-SSCLRT serialization spec's layout, byte-checked against SQL Server 2025 on 2026-09-29) is what real writes exactly when version 1 can't hold the instance: any curved member anywhere, `FULLGLOBE`, or a `geography` instance no cap below a hemisphere holds.
+The last also sets property bit `0x20` (larger than a hemisphere) — so a clockwise `geography` square serializes as version 2 with properties `0x24`, as does a line reaching 90° from its points' summed direction — and every version 2 instance reports `MinDbCompatibilityLevel()` 110.
+Its figure attribute is the figure's own type — `0x01` line (a point figure and every plain polygon ring included), `0x02` arc, `0x03` composite — and when a composite figure exists the shape table is followed by a segment count and one byte per segment: `0x00` line, `0x01` arc, `0x02` a line opening a written element, `0x03` an arc opening one.
+The shortcut bodies are version 1 only.
+`FULLGLOBE` is a shape of type `0x0B` with no figures.
 **Shapes** are laid out depth-first; a shape's `figureOffset` is the index of the first figure anywhere in its subtree, and `-1` when its subtree has none — which is how an EMPTY instance is expressed.
 The root's parent offset is `-1`.
 **Axis order**: geography binary stores `(lat, long)` while the model and WKT hold `(long lat)`; geometry stores `(x, y)` throughout.
@@ -110,6 +127,8 @@ What `STAsBinary()` / `AsBinaryZM()` produce and the `ST<Kind>FromWKB` construct
 Every record is `[1-byte byte order][4-byte type]` plus a body; the simulator writes little-endian and reads either.
 Z and M ride the ISO type codes (`+1000` / `+2000` / `+3000`), which is what `AsBinaryZM()` emits — `STAsBinary()` drops them and writes the plain 2D codes.
 Coordinates are in WKT axis order for both spatial types, so a geography point writes (longitude, latitude) even though it stores the reverse.
+A curve writes as the ISO records: a `CIRCULARSTRING` (type 8) like a `LINESTRING`, a `COMPOUNDCURVE` (9) as a count of `LINESTRING` / `CIRCULARSTRING` element records each repeating the point it shares, and a `CURVEPOLYGON` (10) as a count of ring records of whichever of the three kinds each ring is.
+`FULLGLOBE` is the bodiless type code 126; its shape-table code 11 read as well-known binary is 24115, like any code naming no shape.
 
 ## Members — `Parser/Expressions/SpatialMethodCall.cs`
 
@@ -136,9 +155,11 @@ Semantics worth pinning, all probe-confirmed:
 - **`STIsEmpty()`** is recursive — `GEOMETRYCOLLECTION(POINT EMPTY)` is empty; adding one non-empty member makes it not.
 - **Ordinate properties** are defined only on a non-empty Point; everything else reads NULL.
 - **`STIsClosed()`** is false for a Point, a MultiPoint, an EMPTY instance and a mixed GeometryCollection; otherwise every figure must start and end at the same point.
-- **`InstanceOf`** matches case-insensitively against the instance's own kind plus its supertypes, where the root is **`Geometry` for both spatial types** — `Geography` is not a name real recognizes.
+- **`InstanceOf`** matches case-insensitively against the instance's own kind plus its supertypes, where the root is **`Geometry` for both spatial types** — `Geography` is not a name real recognizes — and `FullGlobe` is not a `Surface`.
   A name outside the OGC hierarchy raises **Msg 24105** rather than answering false, and `FullGlobe` is outside it on `geometry` specifically.
-- **`MinDbCompatibilityLevel()`** returns 100 for every shape the simulator models.
+- **`MinDbCompatibilityLevel()`** is 110 for an instance that needs [version 2](#spatialbinarycodec--the-udt-serialization) of the serialization and 100 otherwise.
+- **`STStartPoint()` / `STEndPoint()`** are the instance's first and last points in `STPointN` order whatever its kind, a collection's included; **`STNumInteriorRing()`** is NULL on anything but a polygon.
+- **`ReorientObject()`** reverses polygon rings and leaves lines and points as written.
 - A **NULL receiver** yields NULL from every member rather than raising.
 
 **`STSrid` is settable**: `SET @g.STSrid = 4326` re-stamps the instance, parsed in `Simulation.Set.cs`.
@@ -370,8 +391,11 @@ Three rules ride on top, all probe-derived:
 
 - A **closed figure's repeated last point** takes no part in the sum, while an ordinary repeated vertex does: `LINESTRING(0 0, 0 0, 10 0)` centres a third of the way along at longitude `3.3295630553023212`, and the retraced triangle `LINESTRING(0 0, 10 0, 10 10, 0 0)` centres on its three distinct vertices.
 - An instance whose greatest angle **reaches 90°** reports the angle as **180** — real's way of saying no cap below a hemisphere holds it — while the centre still reports the bearing it found.
+  A polygon naming more than half the globe — a ring wound clockwise round a small region — reports 180 too, centred on the north pole (probed 2026-09-29).
 - A summed direction that **cancels** leaves no bearing at all, and real answers `POINT (0 90)`, the north pole.
   The fold is a tolerance rather than exact cancellation: two points 1.75e-8 apart in summed magnitude still answer with their own bearing, and 1.75e-9 apart answer the pole, so the simulator folds below 1e-8.
+
+Each angle is taken from the cross and dot products together, since an arccosine alone reads a point at the centre as 1.5e-8 radians away where real answers 0.
 
 An **empty** instance reads NULL from both.
 Over a 20-shape sweep against SQL Server 2025 (2026-08-02) all 40 cells agree, the worst absolute difference being 2e-12.
@@ -589,6 +613,8 @@ Nodes are visited from the top of the sweep order down, and each run of edges gr
 
 The rule reproduces the direction of all 122 untouched polylines in a random sweep, including the ones whose direction no endpoint or orientation rule explains, and the pairing at crossings.
 
+Noding repeats until no two pieces cross: re-routing a piece through a crossing's grid point moves it by up to half a step, which can carry it across a vertex it passed a hair from, and a piece left crossing is labelled by one midpoint while its ends lie on different sides of the other operand — the boundary then stops closing, which surfaced as a crash on one `geography` difference of the randomized corpus.
+
 ### Envelope, hull and boundary
 
 `STEnvelope()` is the bounding rectangle from its lower-left corner, counter-clockwise.
@@ -666,7 +692,15 @@ Real writes both ends through a unit vector and back, reading latitude as a sphe
 
 `geometry::UnionAggregate(col)` and its siblings parse as aggregates — a static method name followed by one argument — and bind like a CLR parameter of the type, so a string converts and an `int` is **Msg 206**.
 They skip NULL without the Msg 8153 warning, answer NULL for a group with no non-NULL row or whose rows don't share one SRID, and refuse an invalid row with Msg 6522 naming the aggregate's own class (`GeometryUnionAggregate`) rather than the type.
-`UnionAggregate` folds `STUnion` over the rows in arrival order, so a lone row still comes back normalized; `EnvelopeAggregate` and `ConvexHullAggregate` read every row's vertices at once; `CollectionAggregate` gathers the rows as members, flattening a collection row by one level.
+`UnionAggregate` folds `STUnion` over the rows in arrival order, so a lone row still comes back normalized; `geometry`'s `EnvelopeAggregate` and both `ConvexHullAggregate`s read every row's vertices at once; `CollectionAggregate` gathers the rows as members, flattening a collection row by one level.
+
+`geography`'s `EnvelopeAggregate` is a curve polygon — `BufferWithCurves`'s two half circles through control points at 45°, 135°, 225° and 315° — about a cap merged row by row (fitted 2026-09-29 against SQL Server 2025):
+
+- Each row's cap is its `EnvelopeCenter()` and `EnvelopeAngle()`, and the running cap merges with it into the smallest cap holding both, in arrival order; with that centre all four of real's control points sit at one great elliptic distance, which the vector mean of every row's points misses by up to a quarter of the radius.
+- The distance is the cap's angle times `a²/b`, the polar radius of curvature — the ratio to `a` is 1.00336409 on every case larger than a few metres — with a floor of √3·10⁻⁹ radians, which is what a lone point answers (0.0110844 m).
+- A cap reaching a hemisphere, a clockwise polygon's included, answers `FULLGLOBE`, and nothing but empty rows answers `GEOMETRYCOLLECTION EMPTY`.
+
+43 of 66 random groups agree within 1e-9 of the coordinates and the rest within about 1e-7 relative, real's control points carrying its own great elliptic distance residual.
 
 ### Round earth
 
@@ -708,6 +742,70 @@ The exact line and polygon buffers are the negative ones that erode to nothing; 
 
 Nearly every case outside tolerance falls in a class under [Divergences](#divergences-1).
 
+## Curved shapes
+
+`CIRCULARSTRING`, `COMPOUNDCURVE` and `CURVEPOLYGON` hold circular arcs, each through three points, beside straight segments; `Storage/Spatial/SpatialCurves.cs` walks, measures and linearizes them.
+Every rule below was probed against SQL Server 2025 on 2026-09-29.
+
+### Reading a curve as written
+
+A `CIRCULARSTRING` of 2n + 1 points is n arcs sharing endpoints; a `COMPOUNDCURVE`'s segments are its elements' line segments and arcs; a `CURVEPOLYGON`'s rings are any of the three figure kinds.
+`STNumCurves()` counts a `CIRCULARSTRING`'s arcs and a `COMPOUNDCURVE`'s or a `LINESTRING`'s segments (NULL on the other kinds), and `STCurveN(n)` returns one as a three-point `CIRCULARSTRING` or a two-point `LINESTRING` — checking its index (24151) before the instance's validity, as the ring members answer NULL for a ringless kind before it.
+The point members (`STNumPoints`, `STPointN`, `STStartPoint`, `STEndPoint`), `STIsClosed`, `STDimension`, `STGeometryType`, `InstanceOf` and the ring members read the written points; a `CURVEPOLYGON`'s ring comes back as the kind it was written as.
+
+Control points that fix no circle — collinear, or two of them coinciding — make a straight segment from the first to the third.
+An arc ending where it starts is a point: `geometry` reports it invalid (and its `STLength` 0), `geography` accepts it.
+
+### Measures
+
+`geometry`'s `STLength()` sums `r·θ` over the arcs and `STArea()` adds each arc's segment of the circle, `r²(θ − sin θ)/2`, to the shoelace sum over the segment ends; 600 of 600 random cases agree with real within 1e-9, the rest being real's own last-digit noise — it reports a circle of radius 2 two units in the last place above 4π.
+`STDistance` measures to the arcs themselves — zero where the linearization meets or contains, else the least over pairs of points, segments and arcs — which is what real answers: `√26 − 2` from `POINT(1 5)` to the circle of radius 2 about (2, 0), where a linearization would be long by its sagitta.
+
+`geography`'s arc is real's circle in a gnomonic plane (see [`geography` buffers](#geography-buffers)).
+Its measures come from two linearizations, 2,048 and 1,024 steps an arc, extrapolated to cancel the step's square (Richardson), which lands within about 5e-9 of real's length and area — the order of real's own great elliptic residual.
+
+### Linearization
+
+`CurveToLineWithTolerance(tolerance, relative)` cuts each arc into the fewest power-of-two equal steps whose deviation *estimate* `r·θ²/8` stays within the tolerance — the rule the buffers follow — and a relative tolerance scales by the larger side of the instance's true bounding box (arcs' bulges included).
+`STCurveToLine()` is the relative tolerance 0.001, so a half circle alone is 32 steps while one sharing a collection with a far point is coarser.
+Those rules reproduce 400 of 400 random step counts; the vertices agree within 1e-9 and to the last digit on 19 of 150 arcs, real's rotation arithmetic not pinned.
+A tolerance that isn't positive is 24152, a NULL argument Msg 6569.
+Z and M are dropped, nothing left is `GEOMETRYCOLLECTION EMPTY`, and a tolerance coarse enough to fold a ring onto itself comes back through `MakeValid`, as real's does.
+
+On `geography` the estimate uses the arc's radius in metres on its gnomonic plane, never more than 2,048 steps, and a relative tolerance scales by the instance's `EnvelopeAngle()` as a distance along the equator: 374 of 380 step counts agree, the rest where real's own `EnvelopeAngle` of a curve — a few percent off its linearization's, by a rule the probes didn't pin — tips the scale.
+
+### What the operations read
+
+Every member without a curve path of its own reads a linearization of **2,048 steps an arc**, whatever the arc's size: `STPointOnSurface` answers from the first of 2,048 steps on a 1° arc and a 350° one alike.
+So the predicates, set operations, hull, boundary, centroid, validity and the envelope-cap members work on that polyline, and a quarter turn landing on a step lands exactly, which keeps an axis-aligned middle control point on it — `CIRCULARSTRING(0 0, 1 1, 2 0)` meets `POINT(1 1)`, while a point on the circle between steps, `POINT(1.6 0.8)`, doesn't, on real as here.
+
+`STEnvelope()` of a curved instance is its true bounding box with each arc's extent scaled away from zero by one part in 10¹² and padded on every side by a millionth of the box's larger side — even for a `CURVEPOLYGON` whose rings are all straight (`(-4E-06 -4E-06, 4.000004 …)` for a 4-unit square).
+`Reduce` keeps every genuine arc as written and reduces only what is straight: a curve with no genuine arc left comes back as its plain kind (`CIRCULARSTRING(0 0, 1 1, 2 2)` → `LINESTRING (0 0, 2 2)`), a `COMPOUNDCURVE` of arcs alone as a `CIRCULARSTRING`, and a collection keeps its members' kinds.
+
+`STBuffer` sweeps a `geometry` curve arc by arc — the ring between the circles the distance inside and outside each arc, bands along its straight segments and fans where the direction turns — so the outline has real's density (261 points to real's 265 for a half circle) and its area agrees to 1e-5; a `geography` curve is read at the buffer's own tolerance.
+`BufferWithCurves` of a point is the curve polygon real answers — two half circles through the bottom, right, top and left for `geometry`, through the buffer's control points at 45°, 135°, 225° and 315° for `geography` — and of anything else the linearized buffer (see [Divergences](#divergences-1)).
+
+### Agreement with real
+
+Probed 2026-09-29 against SQL Server 2025, counting an exact text match and a match within 1e-9 of the largest coordinate:
+
+| Corpus | Exact | Within tolerance |
+| --- | --- | --- |
+| 1,120 member calls over 20 `geometry` curves, collections and empties | 87.7% | 94.5% |
+| 510 parse, validity and serialization cases on both types | 93.3% | 94.9% |
+| 400 `CurveToLineWithTolerance` step counts | 100% | 100% |
+| 600 curve lengths and areas | 16.5% | 100% |
+| 380 `geography` linearization step counts | 98.4% | 98.4% |
+
+The member calls outside tolerance are all real's curve-producing outputs — `BufferWithCurves` of a line or polygon, `STConvexHull`, `STBoundary` and the set operations, which real answers with arcs — and the buffers' point counts; the parse cases are `IsValidDetailed`'s report and `MakeValid` over an invalid curve, and the `isValid` bit.
+
+## FULLGLOBE
+
+`FULLGLOBE` is the whole-earth `geography` instance, with no points: version 2 of the serialization with a bodiless shape of type `0x0B`, well-known binary type 126, `STArea()` real's constant `510065621710996.44`, `STLength()` and `STNumPoints()` 0, `STIsEmpty()` false, `STDimension()` 2, `EnvelopeAngle()` 180, and `InstanceOf('Surface')` false (probed 2026-09-29).
+It contains and intersects every non-empty instance and lies within only itself; it buffers, hulls and reduces to itself; its union with anything is itself, its intersection the other operand, and its difference with a single-ring polygon that polygon reversed, while anything less `FULLGLOBE` is empty.
+A set operation whose result covers the globe — a square and its clockwise complement — answers it, and so does `EnvelopeAggregate` once its cap reaches a hemisphere.
+37 of 37 probed cases agree.
+
 ## Where a spatial column can't go
 
 Neither type is comparable, so both are refused in every slot that orders, groups or dedups: **Msg 249** in `ORDER BY` / `GROUP BY` (the one message in the family that names the offending clause), **Msg 421** under `DISTINCT`, **Msg 5335** as an operand of `UNION` / `INTERSECT` / `EXCEPT`, and **Msg 6210** followed by **Msg 8117** from `MAX` / `MIN`.
@@ -734,12 +832,11 @@ A dotted name that binds neither way reports **Msg 207** where real reports **Ms
 
 - **`STRelate`'s matrix on `geography`** — the round-earth engine computes the nine cells but nothing reads them out, since real exposes no `STRelate` there to compare a matrix against.
   The six predicates are masks over it; a `geography`-shaped `STRelate` would need a probe oracle that doesn't exist.
-- **The remaining constructive members** — `geography`'s `EnvelopeAggregate` and the curve-producing `BufferWithCurves` and `CurveToLineWithTolerance` for both types.
-  Real's `EnvelopeAggregate` answers a `CURVEPOLYGON` of one `CIRCULARSTRING` through four control points at 45°, 135°, 225° and 315° about the `EnvelopeCenter`, a little further out than the `EnvelopeAngle` — about 0.67% at half a degree, 0.64% at 25° — so that real's own arc through them holds the instance; the exact placement wasn't pinned (probed 2026-09-29), and the value model holds no curve.
-- **`geography` constructive operations spanning a hemisphere** — operands that no cap narrower than 89.5° holds, other than through a single polygon larger than a hemisphere, raise `NotSupportedException`, and so does a result real writes as `FULLGLOBE`.
-  A buffer reaching 80° from its instance does too.
+- **Curve-producing results** — real answers `STConvexHull`, `STBoundary`, the set operations and `MakeValid` over a curved instance, and `BufferWithCurves` of anything but a point, with arcs of its own (`STUnion` of a `CIRCULARSTRING` and a point keeps the arc, reversed); the simulator answers the linearization, which matches real's area and extent but not its text.
+- **`IsValidDetailed()` on an invalid instance** — a valid one answers real's `24400: Valid`, but the 24400-series reason an invalid one reports (`24406: Not valid because curve (1) degenerates to a point.`, `24413: … two overlapping edges …`) raises `NotSupportedException`.
+- **`geography` constructive operations spanning a hemisphere** — operands that no cap narrower than 89.5° holds, other than through a single polygon larger than a hemisphere or `FULLGLOBE`, raise `NotSupportedException`.
+  A buffer reaching 80° from its instance does too, and so does the complement of anything but a single-ring polygon taken from `FULLGLOBE`.
 - **A spatial column's property form outside a query scope** — see [The property form of a spatial column](#the-property-form-of-a-spatial-column) for what ships and what an UPDATE's SET list, a CHECK constraint and a computed column still read as a two-part column name.
-- **Curved shapes and FULLGLOBE** — `CIRCULARSTRING` / `COMPOUNDCURVE` / `CURVEPOLYGON` / `FULLGLOBE` are recognized labels (real accepts them, so reporting them as unknown would be the wrong error) that raise `NotSupportedException` naming the kind.
 - **GML** — `AsGml` / `STAsGML`, and the `GeomFromGml` constructors.
 - **SRID-aware operations** — the SRID is tracked per value, reported, and compared between two operands (a mismatch reads NULL, as on real), but nothing transforms between reference systems and every `geography` SRID measures on WGS 84.
   Real carries a per-SRID ellipsoid, so the same polygon under SRID 104001 (the unit sphere) measures in radians squared there and in metres squared here.
@@ -773,7 +870,7 @@ A dotted name that binds neither way reports **Msg 207** where real reports **Ms
 - **A self-touching ring is valid on `geography` and not on `geometry`.**
   Real accepts one on **both** types when the second lobe nests inside the first with the opposite winding — the arrangement one WideWorldImporters border carries — and the round-earth validator splits the ring into lobes to match it, while the planar validator still rejects any ring that meets itself.
   The two disagree on such a ring until the lobe split reaches `SpatialValidator` as well.
-- **The serialized `isValid` property bit is always set.**
+- **The serialized `isValid` property bit is always set** — a curve that degenerates to a point included.
   Real clears it for a stored-but-invalid instance — a bowtie polygon serializes with properties `0x00` where a square gets `0x04` — and the encoder doesn't, so an invalid instance's bytes differ from real's in that one bit.
   `STIsValid()` and the Msg 24144 gate read the shape tree rather than the bit, so behavior on such an instance is right; only the byte form isn't.
   Quantified end-to-end by importing a simulator-exported WWI-Standard bacpac into the live reference and byte-comparing against the original database: **189 of 190 `Countries.Border` values byte-identical**, the single divergent row being WWI's one stored-invalid Border.
@@ -796,6 +893,11 @@ A dotted name that binds neither way reports **Msg 207** where real reports **Ms
 - **`geography` `ShortestLineTo`'s foot points** carry real's distance residual too: real's foot sits where its own slightly-off distance is least, up to about 1e-8 degrees from the exact one on a long edge.
 - **Near-retrace validity.**
   A handful of lines retracing themselves to within a grid step are valid on real in a way neither the size nor the sign of the snapped offset predicts, so an operation real answers over one can raise 24144 here.
+- **A curve's linearized vertices and a curve envelope's last digits.**
+  Real's arc arithmetic isn't pinned: the step counts match everywhere, and the vertices and the scaled extents a curve's `STEnvelope` pads carry real's rounding a few units in the last place differently.
+- **`ReorientObject` of a curve polygon** reverses each ring as written, where real also restarts an arc ring at a different arc — no rule was found over three probes — and real regroups a polygon's rings into separate polygons, which neither curved nor plain rings reproduce here.
+- **`geography` curves' `EnvelopeAngle` and `EnvelopeAggregate`** read the linearization's bounding cap, where real's for a curve differs by a few percent — which is also what tips the relative `CurveToLineWithTolerance` step counts that disagree.
+  `EnvelopeAggregate`'s control points carry real's great elliptic distance residual, about 1e-7 relative.
 - **Msg 6522 omits the .NET stack-frame block** — see [The Msg 6522 wrapper](#the-msg-6522-wrapper).
 - **The in-process reader surfaces a spatial column as its WKT** (`SqlType.ClrType` is `string`), where real SqlClient hands back the UDT bytes (or a `SqlGeography` when `Microsoft.SqlServer.Types` is loaded).
   The TDS path is faithful — it writes the serialization.

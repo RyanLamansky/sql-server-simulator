@@ -37,7 +37,7 @@ internal static class SpatialBuffer
             return SpatialShape.Empty(SpatialShapeType.GeometryCollection);
         var radius = Math.Abs(distance);
         var allowance = relative ? tolerance * radius : tolerance;
-        var (minX, maxX, minY, maxY) = SpatialConstructive.Extent(shape);
+        var (minX, maxX, minY, maxY) = shape.IsCurved ? SpatialCurves.Extent(shape) : SpatialConstructive.Extent(shape);
         var reach = Math.Max(Math.Max(Math.Abs(minX - radius), Math.Abs(maxX + radius)), Math.Max(Math.Abs(minY - radius), Math.Abs(maxY + radius)));
         var builder = new PieceBuilder(radius, allowance, CapGap(reach / radius));
         var areas = new List<SpatialShape>();
@@ -74,6 +74,21 @@ internal static class SpatialBuffer
             result = SpatialOverlay.Overlay(area, swept, SpatialOverlayOperation.Difference, grid);
         }
         return SpatialResultBuilder.Build(result, grid);
+    }
+
+    /// <summary>
+    /// <c>BufferWithCurves</c> of a point: a curve polygon of two half circles
+    /// through the bottom, right, top and left of the circle, starting at the
+    /// bottom — the outline <see cref="Buffer"/> linearizes.
+    /// </summary>
+    public static SpatialShape CurveCircle(SpatialCoordinate point, double distance)
+    {
+        SpatialCoordinate[] ring =
+        [
+            new(point.X, point.Y - distance), new(point.X + distance, point.Y), new(point.X, point.Y + distance),
+            new(point.X - distance, point.Y), new(point.X, point.Y - distance),
+        ];
+        return SpatialShape.Curve(SpatialShapeType.CurvePolygon, [ring], [SpatialFigureType.Arc], [null]);
     }
 
     /// <summary>The cap's short angle δ for a buffer reaching <paramref name="reach"/> distances from the origin.</summary>
@@ -170,6 +185,20 @@ internal static class SpatialBuffer
                         this.Line(ring, closed: true);
                     }
                     break;
+                case SpatialShapeType.CircularString:
+                case SpatialShapeType.CompoundCurve:
+                    if (grow && !shape.IsEmpty)
+                        this.Curve(shape, 0, closed: false);
+                    break;
+                case SpatialShapeType.CurvePolygon:
+                    if (shape.IsEmpty)
+                        break;
+                    // The area itself joins the pieces at the buffer's own
+                    // tolerance; each ring is swept arc by arc.
+                    areas.Add(SpatialCurves.Linearize(shape, SpatialCurves.Planar(arc => this.StepsAt(arc.Radius, arc.Sweep))));
+                    for (var i = 0; i < shape.Figures.Length; i++)
+                        this.Curve(shape, i, closed: true);
+                    break;
                 default:
                     foreach (var child in shape.Children)
                         this.Collect(child, areas, grow);
@@ -188,12 +217,145 @@ internal static class SpatialBuffer
             return points;
         }
 
-        private int Steps(double sweep)
+        private int Steps(double sweep) => this.StepsAt(radius, sweep);
+
+        public int StepsAt(double arcRadius, double sweep)
         {
             var steps = 1;
-            while (steps < 1 << 20 && radius * Square(sweep / steps) / 8 > allowance)
+            while (steps < 1 << 20 && arcRadius * Square(sweep / steps) / 8 > allowance)
                 steps *= 2;
             return steps;
+        }
+
+        /// <summary>
+        /// Sweeps one curve figure segment by segment, the way real sweeps a
+        /// curve rather than its linearization: a straight segment contributes
+        /// its band, an arc the ring between the circles the distance inside
+        /// and outside it — reaching the arc's centre once the distance passes
+        /// its radius — and each vertex where the direction turns its fan,
+        /// with caps at an open figure's ends.
+        /// </summary>
+        private void Curve(SpatialShape shape, int index, bool closed)
+        {
+            var figure = shape.Figures[index];
+            var pieces = new List<(SpatialCoordinate Start, SpatialCoordinate End, double InX, double InY, double OutX, double OutY)>();
+            foreach (var segment in SpatialCurves.Segments(shape, index))
+            {
+                if (!segment.IsArc)
+                {
+                    var (a, b) = (figure[segment.Start], figure[segment.Start + 1]);
+                    if (a.X == b.X && a.Y == b.Y)
+                        continue;
+                    this.Band(a, b);
+                    pieces.Add((a, b, b.X - a.X, b.Y - a.Y, b.X - a.X, b.Y - a.Y));
+                    continue;
+                }
+                var arc = SpatialCurves.ArcOf(figure, segment);
+                if (arc.IsPoint)
+                    continue;
+                if (arc.IsStraight)
+                {
+                    this.Band(arc.Start, arc.End);
+                    pieces.Add((arc.Start, arc.End, arc.End.X - arc.Start.X, arc.End.Y - arc.Start.Y, arc.End.X - arc.Start.X, arc.End.Y - arc.Start.Y));
+                    continue;
+                }
+                this.ArcBand(arc);
+                var sign = Math.Sign(arc.Sweep);
+                var endAngle = arc.StartAngle + arc.Sweep;
+                pieces.Add((arc.Start, arc.End,
+                    -sign * Math.Sin(arc.StartAngle), sign * Math.Cos(arc.StartAngle),
+                    -sign * Math.Sin(endAngle), sign * Math.Cos(endAngle)));
+            }
+            if (pieces.Count == 0)
+            {
+                if (!closed)
+                    this.Circle(new SpatialCoordinate(figure[0].X, figure[0].Y));
+                return;
+            }
+            for (var i = closed ? 0 : 1; i < pieces.Count; i++)
+            {
+                var (_, _, _, _, arrivingX, arrivingY) = pieces[(i - 1 + pieces.Count) % pieces.Count];
+                var (at, _, leavingX, leavingY, _, _) = pieces[i];
+                this.JoinDirections(at, arrivingX, arrivingY, leavingX, leavingY);
+            }
+            if (!closed)
+            {
+                var (_, end, _, _, endX, endY) = pieces[^1];
+                var (start, _, startX, startY, _, _) = pieces[0];
+                this.CapDirection(end, endX, endY);
+                this.CapDirection(start, -startX, -startY);
+            }
+        }
+
+        /// <summary>The band either side of a straight segment, its short sides through the segment's ends.</summary>
+        private void Band(SpatialCoordinate a, SpatialCoordinate b)
+        {
+            a = new SpatialCoordinate(a.X, a.Y);
+            b = new SpatialCoordinate(b.X, b.Y);
+            var (nx, ny) = Normal(a, b);
+            SpatialCoordinate[] band =
+            [
+                Offset(a, nx, ny, radius), Offset(b, nx, ny, radius), b, Offset(b, nx, ny, -radius), Offset(a, nx, ny, -radius), a, Offset(a, nx, ny, radius),
+            ];
+            foreach (var corner in band)
+                this.NoteCorner(corner);
+            this.Pieces.Add(band);
+        }
+
+        /// <summary>The ring an arc sweeps: its circle's outer and inner offsets, joined along the radii through its ends.</summary>
+        private void ArcBand(SpatialArc arc)
+        {
+            var center = new SpatialCoordinate(arc.CenterX, arc.CenterY);
+            var ring = new List<SpatialCoordinate>();
+            var outer = arc.Radius + radius;
+            var outerSteps = this.StepsAt(outer, arc.Sweep);
+            for (var i = 0; i <= outerSteps; i++)
+                ring.Add(OnCircle(center, outer, arc.StartAngle + (arc.Sweep * i / outerSteps)));
+            ring.Add(new SpatialCoordinate(arc.End.X, arc.End.Y));
+            var inner = arc.Radius - radius;
+            if (inner > 0)
+            {
+                var innerSteps = this.StepsAt(inner, arc.Sweep);
+                for (var i = innerSteps; i >= 0; i--)
+                    ring.Add(OnCircle(center, inner, arc.StartAngle + (arc.Sweep * i / innerSteps)));
+            }
+            else
+            {
+                ring.Add(center);
+            }
+            ring.Add(new SpatialCoordinate(arc.Start.X, arc.Start.Y));
+            ring.Add(ring[0]);
+            foreach (var corner in ring)
+                this.NoteCorner(corner);
+            this.Pieces.Add([.. ring]);
+        }
+
+        private static SpatialCoordinate OnCircle(SpatialCoordinate center, double circleRadius, double angle) =>
+            new(center.X + (circleRadius * Math.Cos(angle)), center.Y + (circleRadius * Math.Sin(angle)));
+
+        /// <summary>The fan filling the outside of a turn from direction <c>in</c> to direction <c>out</c> at <paramref name="at"/>.</summary>
+        private void JoinDirections(SpatialCoordinate at, double inX, double inY, double outX, double outY)
+        {
+            at = new SpatialCoordinate(at.X, at.Y);
+            var turn = Math.Atan2((inX * outY) - (inY * outX), (inX * outX) + (inY * outY));
+            if (Math.Abs(turn) < 1e-12)
+                return;
+            var length = Math.Sqrt((inX * inX) + (inY * inY));
+            var (n1x, n1y) = (-inY / length, inX / length);
+            var start = turn > 0 ? Math.Atan2(-n1y, -n1x) : Math.Atan2(n1y, n1x);
+            var fan = new List<SpatialCoordinate> { at };
+            this.Arc(fan, at, start, turn, includeStart: true, anchor: start, lattice: turn / 256);
+            fan.Add(at);
+            if (fan.Count >= 4)
+                this.Pieces.Add([.. fan]);
+        }
+
+        /// <summary>The rounded end past <paramref name="end"/> for a figure arriving in direction (<paramref name="dx"/>, <paramref name="dy"/>).</summary>
+        private void CapDirection(SpatialCoordinate end, double dx, double dy)
+        {
+            end = new SpatialCoordinate(end.X, end.Y);
+            var length = Math.Sqrt((dx * dx) + (dy * dy));
+            this.Cap(new SpatialCoordinate(end.X - (dx / length), end.Y - (dy / length)), end);
         }
 
         /// <summary>

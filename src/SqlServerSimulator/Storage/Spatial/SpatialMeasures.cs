@@ -30,7 +30,11 @@ internal static class SpatialMeasures
         {
             for (var i = 0; i < shape.Figures.Length; i++)
             {
-                var ring = Math.Abs(SignedRingArea(shape.Figures[i]));
+                // A curve polygon's ring adds each arc's segment of the circle
+                // beyond its chord to the shoelace sum.
+                var ring = Math.Abs(shape.FigureType(i) == SpatialFigureType.Line
+                    ? SignedRingArea(shape.Figures[i])
+                    : SpatialCurves.SignedFigureArea(shape, i));
                 total += i == 0 ? ring : -ring;
             }
         }
@@ -65,8 +69,12 @@ internal static class SpatialMeasures
         var total = 0.0;
         if (shape.Type is not (SpatialShapeType.Point or SpatialShapeType.MultiPoint))
         {
-            foreach (var figure in shape.Figures)
-                total += FigureLength(figure);
+            for (var i = 0; i < shape.Figures.Length; i++)
+            {
+                total += shape.FigureType(i) == SpatialFigureType.Line
+                    ? FigureLength(shape.Figures[i])
+                    : SpatialCurves.FigureLength(shape, i);
+            }
         }
         foreach (var child in shape.Children)
             total += Length(child);

@@ -32,8 +32,37 @@ internal static class SpatialEnvelope
     /// <summary>The angle at which real stops reporting a cap and answers 180 instead.</summary>
     private const double HemisphereDegrees = 90;
 
+    /// <summary>
+    /// Whether no cap below a hemisphere holds the instance — its points reach
+    /// 90° from their summed direction, or a polygon names more than half the
+    /// globe, which a ring wound clockwise around a small region does. Real
+    /// stores such an instance in serialization version 2 with its own
+    /// property bit, answers <c>EnvelopeAngle()</c> 180 and centres it on the
+    /// north pole (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    public static bool IsLargerThanAHemisphere(SpatialShape shape) =>
+        !shape.IsEmpty && (PointAngle(shape) >= HemisphereDegrees || HasLargePolygon(shape));
+
+    private static bool HasLargePolygon(SpatialShape shape)
+    {
+        if (shape.Type == SpatialShapeType.FullGlobe)
+            return true;
+        if (shape.Type is SpatialShapeType.Polygon or SpatialShapeType.CurvePolygon)
+            return shape.Figures.Length > 0 && SpatialMeasures.GeographyArea(shape) > SpatialEllipsoid.SurfaceArea / 2;
+        foreach (var child in shape.Children)
+        {
+            if (HasLargePolygon(child))
+                return true;
+        }
+        return false;
+    }
+
     /// <summary><c>EnvelopeCenter()</c>, or null for an empty instance.</summary>
-    public static SpatialCoordinate? Center(SpatialShape shape)
+    public static SpatialCoordinate? Center(SpatialShape shape) =>
+        HasLargePolygon(shape) ? new SpatialCoordinate(0, 90) : SummedDirection(shape);
+
+    /// <summary>The normalized sum of the instance's points as unit vectors, or the north pole where they cancel.</summary>
+    private static SpatialCoordinate? SummedDirection(SpatialShape shape)
     {
         if (Sum(shape) is not { } sum)
             return null;
@@ -47,17 +76,25 @@ internal static class SpatialEnvelope
     }
 
     /// <summary><c>EnvelopeAngle()</c>, or null for an empty instance.</summary>
-    public static double? Angle(SpatialShape shape)
+    public static double? Angle(SpatialShape shape) =>
+        shape.IsEmpty ? null : HasLargePolygon(shape) ? 180 : PointAngle(shape);
+
+    /// <summary>The greatest angle from the summed direction to any point, or 180 once that reaches a hemisphere.</summary>
+    private static double PointAngle(SpatialShape shape)
     {
-        if (Center(shape) is not { } center)
-            return null;
+        if (SummedDirection(shape) is not { } center)
+            return 0;
         var (cx, cy, cz) = UnitVector(center);
         var widest = 0.0;
         foreach (var point in Points(shape))
         {
             var (x, y, z) = UnitVector(point);
-            var cosine = Math.Clamp((cx * x) + (cy * y) + (cz * z), -1, 1);
-            widest = Math.Max(widest, double.RadiansToDegrees(Math.Acos(cosine)));
+            // The angle from the cross and dot products together: an arccosine
+            // alone reads a point at the centre as 1.5e-8 radians away, where
+            // real answers 0 for a lone point.
+            var dot = (cx * x) + (cy * y) + (cz * z);
+            var cross = new SpatialVector(cx, cy, cz).Cross(new SpatialVector(x, y, z)).Length;
+            widest = Math.Max(widest, double.RadiansToDegrees(Math.Atan2(cross, dot)));
         }
         return widest >= HemisphereDegrees ? 180 : widest;
     }
@@ -100,6 +137,44 @@ internal static class SpatialEnvelope
                 yield return point;
         }
     }
+
+    /// <summary>
+    /// Folds one row into <c>geography::EnvelopeAggregate</c>'s running cap:
+    /// each row's own bounding cap — its <see cref="Center"/> and
+    /// <see cref="Angle"/> — merges with the cap so far into the smallest cap
+    /// holding both, in the order the rows arrive (fitted against SQL Server
+    /// 2025, 2026-09-29, where the merged centre puts all four of real's
+    /// control points at one distance). Null once a cap reaches a hemisphere.
+    /// </summary>
+    public static (SpatialVector Center, double Radius)? MergeCap((SpatialVector Center, double Radius)? sofar, SpatialShape row)
+    {
+        if (row.IsEmpty)
+            return sofar;
+        if (Angle(row) is not { } degrees || degrees >= HemisphereDegrees || Center(row) is not { } center)
+            return null;
+        var (x, y, z) = UnitVector(center);
+        var cap = (Center: new SpatialVector(x, y, z), Radius: double.DegreesToRadians(degrees));
+        if (sofar is not { } previous)
+            return cap;
+        var between = Math.Atan2(previous.Center.Cross(cap.Center).Length, previous.Center.Dot(cap.Center));
+        if (between + cap.Radius <= previous.Radius)
+            return previous;
+        if (between + previous.Radius <= cap.Radius)
+            return cap;
+        var radius = (between + previous.Radius + cap.Radius) / 2;
+        var turn = radius - previous.Radius;
+        var axis = previous.Center.Cross(cap.Center);
+        if (axis.Length == 0)
+            return (previous.Center, radius);
+        var toward = axis.Normalized.Cross(previous.Center);
+        var merged = (previous.Center * Math.Cos(turn)) + (toward * Math.Sin(turn));
+        return radius >= Math.PI / 2 ? null : (merged, radius);
+    }
+
+    /// <summary>The (longitude, latitude) of a unit vector, reading latitude as a spherical angle.</summary>
+    public static SpatialCoordinate ToCoordinate(SpatialVector direction) => new(
+        double.RadiansToDegrees(Math.Atan2(direction.Y, direction.X)),
+        double.RadiansToDegrees(Math.Asin(Math.Clamp(direction.Z, -1, 1))));
 
     /// <summary>The unit vector of a (longitude, latitude) pair read as spherical angles.</summary>
     private static (double X, double Y, double Z) UnitVector(SpatialCoordinate point)

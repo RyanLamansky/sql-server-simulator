@@ -15,19 +15,49 @@ internal enum SpatialShapeType : byte
     MultiPolygon = 6,
     GeometryCollection = 7,
 
-    /// <summary>Curved shape — recognized so the WKT label list and the
-    /// binary reader name it, but no operation evaluates one.</summary>
+    /// <summary>A run of circular arcs, each through three points, consecutive arcs sharing an endpoint.</summary>
     CircularString = 8,
 
-    /// <inheritdoc cref="CircularString"/>
+    /// <summary>A chain of line and arc segments; its one figure is <see cref="SpatialFigureType.Composite"/>.</summary>
     CompoundCurve = 9,
 
-    /// <inheritdoc cref="CircularString"/>
+    /// <summary>A polygon whose rings may be line, arc or composite figures.</summary>
     CurvePolygon = 10,
 
     /// <summary>The whole-earth <c>geography</c> instance. Recognized like
     /// the curved shapes above; no operation evaluates one.</summary>
     FullGlobe = 11,
+}
+
+/// <summary>
+/// What one figure's points trace. Values are the figure-attribute byte of the
+/// version 2 serialization; version 1 writes its own polygon-ring attributes
+/// instead, which is why a plain instance never needs this.
+/// </summary>
+internal enum SpatialFigureType : byte
+{
+    /// <summary>Straight segments between consecutive points — also a point figure.</summary>
+    Line = 1,
+
+    /// <summary>Circular arcs, each through three points, consecutive arcs sharing an endpoint.</summary>
+    Arc = 2,
+
+    /// <summary>A mix of both, spelled out by the figure's <see cref="SpatialSegmentType"/> run.</summary>
+    Composite = 3,
+}
+
+/// <summary>
+/// One segment of a composite figure, as the version 2 serialization's segment
+/// table writes it. A line segment consumes one further point and an arc two;
+/// the <c>First</c> kinds open each run written as its own WKT element, which is
+/// what lets a <c>COMPOUNDCURVE</c> print back as it was written.
+/// </summary>
+internal enum SpatialSegmentType : byte
+{
+    Line = 0,
+    Arc = 1,
+    FirstLine = 2,
+    FirstArc = 3,
 }
 
 /// <summary>
@@ -85,7 +115,12 @@ internal readonly struct SpatialCoordinate(double x, double y, double? z = null,
 /// binary form, so <see cref="SpatialBinaryCodec"/> walks the tree without an
 /// intermediate representation.</para>
 /// </remarks>
-internal sealed class SpatialShape(SpatialShapeType type, SpatialCoordinate[][] figures, SpatialShape[] children)
+internal sealed class SpatialShape(
+    SpatialShapeType type,
+    SpatialCoordinate[][] figures,
+    SpatialShape[] children,
+    SpatialFigureType[]? figureTypes = null,
+    SpatialSegmentType[]?[]? segments = null)
 {
     public static readonly SpatialCoordinate[][] NoFigures = [];
 
@@ -97,7 +132,45 @@ internal sealed class SpatialShape(SpatialShapeType type, SpatialCoordinate[][] 
 
     public readonly SpatialShape[] Children = children;
 
+    /// <summary>
+    /// Each figure's <see cref="SpatialFigureType"/>, parallel to
+    /// <see cref="Figures"/>; null when every figure is a plain
+    /// <see cref="SpatialFigureType.Line"/>, which is every figure of the seven
+    /// plain kinds.
+    /// </summary>
+    public readonly SpatialFigureType[]? FigureTypes = figureTypes;
+
+    /// <summary>A <see cref="SpatialFigureType.Composite"/> figure's segment run, parallel to <see cref="Figures"/>; null elsewhere.</summary>
+    public readonly SpatialSegmentType[]?[]? Segments = segments;
+
     public static SpatialShape Leaf(SpatialShapeType type, SpatialCoordinate[][] figures) => new(type, figures, NoChildren);
+
+    /// <summary>A curved leaf: a <c>CIRCULARSTRING</c>, <c>COMPOUNDCURVE</c> or <c>CURVEPOLYGON</c> with its figures' types.</summary>
+    public static SpatialShape Curve(SpatialShapeType type, SpatialCoordinate[][] figures, SpatialFigureType[] figureTypes, SpatialSegmentType[]?[] segments) =>
+        new(type, figures, NoChildren, figureTypes, segments);
+
+    /// <summary>The type of figure <paramref name="index"/>.</summary>
+    public SpatialFigureType FigureType(int index) => this.FigureTypes?[index] ?? SpatialFigureType.Line;
+
+    /// <summary>
+    /// True when this shape or any member is one of the three curved kinds —
+    /// what sends an operation through <see cref="SpatialCurves.Linearize"/>
+    /// and the serialization to version 2, whether or not a figure holds an arc.
+    /// </summary>
+    public bool IsCurved
+    {
+        get
+        {
+            if (this.Type is SpatialShapeType.CircularString or SpatialShapeType.CompoundCurve or SpatialShapeType.CurvePolygon)
+                return true;
+            foreach (var child in this.Children)
+            {
+                if (child.IsCurved)
+                    return true;
+            }
+            return false;
+        }
+    }
 
     public static SpatialShape Collection(SpatialShapeType type, SpatialShape[] children) => new(type, NoFigures, children);
 
@@ -253,14 +326,15 @@ internal sealed class SpatialGeometry(int srid, SpatialShape root)
     /// from. Computed once per instance because a stored value is decoded once
     /// and read many times.
     /// </summary>
-    public bool IsPlanarValid => this.planarValidity ??= SpatialValidator.IsValid(this.Root);
+    public bool IsPlanarValid => this.planarValidity ??= this.Root.IsCurved ? SpatialCurves.IsPlanarValid(this.Root) : SpatialValidator.IsValid(this.Root);
 
     /// <summary>
     /// The same question on the round earth, where the edges are great elliptic
     /// arcs and a ring's written direction decides which side its interior is
     /// on. Cached for the same reason.
     /// </summary>
-    public bool IsGeodeticValid => this.geodeticValidity ??= SpatialGeodeticValidator.IsValid(this.Root);
+    public bool IsGeodeticValid => this.geodeticValidity ??= this.Root.Type == SpatialShapeType.FullGlobe
+        || (this.Root.IsCurved ? SpatialCurves.IsGeodeticValid(this.Root) : SpatialGeodeticValidator.IsValid(this.Root));
 
     /// <summary>Validity in the terms of whichever spatial type owns the value.</summary>
     public bool IsValidFor(bool isGeography) => isGeography ? this.IsGeodeticValid : this.IsPlanarValid;

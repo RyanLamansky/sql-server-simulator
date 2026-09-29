@@ -14,12 +14,14 @@ namespace SqlServerSimulator.Storage.Spatial;
 /// greedy word, which is what makes <c>POINTX(1 2)</c> report a missing
 /// <c>(</c> (Msg 24142) instead of an unknown label — real behaves the same
 /// way.</para>
-/// <para>The curved kinds (<c>CIRCULARSTRING</c> / <c>COMPOUNDCURVE</c> /
-/// <c>CURVEPOLYGON</c>) and <c>FULLGLOBE</c> are recognized labels: real
-/// accepts them, so treating them as unknown would be the wrong error. They
-/// raise <see cref="NotSupportedException"/> instead, except
-/// <c>FULLGLOBE</c> on <c>geometry</c>, which real itself rejects with
-/// 24303.</para>
+/// <para>The curved kinds read with real's own grammar and checks: a
+/// <c>CIRCULARSTRING</c> reads its points in pairs after the first, a
+/// <c>COMPOUNDCURVE</c> element is a bare line or a labelled
+/// <c>CIRCULARSTRING</c> continuing from the previous element's end, and a
+/// <c>CURVEPOLYGON</c> ring may be any of the three figure kinds.
+/// <c>FULLGLOBE</c> is the whole-earth <c>geography</c> instance, with no
+/// body; <c>geometry</c> refuses it with real's own 24303, and a collection
+/// may not hold it (24150).</para>
 /// </remarks>
 internal sealed class SpatialWktReader
 {
@@ -87,7 +89,7 @@ internal sealed class SpatialWktReader
         _ => "FullGlobe",
     };
 
-    private SpatialShape ReadTaggedText(string? matchedLabel)
+    private SpatialShape ReadTaggedText(string? matchedLabel, bool inCollection = false)
     {
         SkipWhitespace();
         var type = matchedLabel is null ? ReadLabel() : LabelType(matchedLabel);
@@ -96,8 +98,11 @@ internal sealed class SpatialWktReader
         // planar type rather than reporting it as an unknown label.
         if (type == SpatialShapeType.FullGlobe && !this.isGeography)
             throw SimulatedSqlException.SpatialInvalidOpenGisType(this.isGeography, OpenGisName(type));
-        if (type >= SpatialShapeType.CircularString)
-            throw new NotSupportedException($"The spatial shape {OpenGisName(type)} is not modeled.");
+        if (type == SpatialShapeType.FullGlobe)
+        {
+            // The whole globe has no body, and no collection may hold it.
+            return !inCollection ? SpatialShape.Empty(type) : throw SimulatedSqlException.SpatialFullGlobeInCollection();
+        }
 
         SkipWhitespace();
         return TryConsumeKeyword("EMPTY") ? SpatialShape.Empty(type) : type switch
@@ -108,7 +113,10 @@ internal sealed class SpatialWktReader
             SpatialShapeType.MultiPoint => SpatialShape.Collection(type, ReadMultiPointBody()),
             SpatialShapeType.MultiLineString => SpatialShape.Collection(type, ReadRepeated(static r => SpatialShape.Leaf(SpatialShapeType.LineString, [r.ReadLineStringBody()]))),
             SpatialShapeType.MultiPolygon => SpatialShape.Collection(type, ReadRepeated(static r => SpatialShape.Leaf(SpatialShapeType.Polygon, r.ReadPolygonBody()))),
-            _ => SpatialShape.Collection(type, ReadRepeated(static r => r.ReadTaggedText(null))),
+            SpatialShapeType.CircularString => SpatialShape.Curve(type, [ReadCircularStringBody()], [SpatialFigureType.Arc], [null]),
+            SpatialShapeType.CompoundCurve => ReadCompoundCurveBody(),
+            SpatialShapeType.CurvePolygon => ReadCurvePolygonBody(),
+            _ => SpatialShape.Collection(type, ReadRepeated(static r => r.ReadTaggedText(null, inCollection: true))),
         };
     }
 
@@ -216,11 +224,146 @@ internal sealed class SpatialWktReader
         while (TryConsumeSeparator())
             points.Add(ReadCoordinate());
         ExpectLiteral(")");
-        return points.Count < 4
-            ? throw SimulatedSqlException.SpatialRingTooFewPoints(this.isGeography, interiorRingNumber)
+        return CheckRing([.. points], interiorRingNumber);
+    }
+
+    /// <summary>
+    /// A ring needs four points and must end where it starts. <c>geometry</c>
+    /// names the exterior ring apart from a numbered interior one, while
+    /// <c>geography</c> numbers every ring from 1 — except a <c>CURVEPOLYGON</c>
+    /// ring written <c>EMPTY</c>, which real reports in <c>geometry</c>'s terms
+    /// on both types.
+    /// </summary>
+    private SpatialCoordinate[] CheckRing(SpatialCoordinate[] points, int interiorRingNumber) =>
+        points.Length < 4
+            ? throw SimulatedSqlException.SpatialRingTooFewPoints(this.isGeography, interiorRingNumber, planarNumbering: points.Length == 0)
             : points[0].X.Equals(points[^1].X) && points[0].Y.Equals(points[^1].Y)
-                ? [.. points]
+                ? points
                 : throw SimulatedSqlException.SpatialRingNotClosed(this.isGeography, interiorRingNumber);
+
+    /// <summary>
+    /// A <c>CIRCULARSTRING</c>'s parenthesized points. After the first they
+    /// come in pairs — each arc adds a point on it and its end — so an input
+    /// stopping after an odd number is Msg 24142 expecting the <c>,</c> of the
+    /// pair, and a lone point is 24212. Each arc's three points must agree on
+    /// Z (24214).
+    /// </summary>
+    private SpatialCoordinate[] ReadCircularStringBody()
+    {
+        ExpectLiteral("(");
+        var points = new List<SpatialCoordinate> { ReadCoordinate() };
+        while (TryConsumeSeparator())
+        {
+            points.Add(ReadCoordinate());
+            ExpectLiteral(",");
+            points.Add(ReadCoordinate());
+        }
+        ExpectLiteral(")");
+        if (points.Count < 3)
+            throw SimulatedSqlException.SpatialCircularStringTooFewPoints(this.isGeography);
+        for (var i = 0; i + 2 < points.Count; i += 2)
+        {
+            if (!Nullable.Equals(points[i].Z, points[i + 1].Z) || !Nullable.Equals(points[i].Z, points[i + 2].Z))
+                throw SimulatedSqlException.SpatialArcZNotEqual(this.isGeography);
+        }
+        return [.. points];
+    }
+
+    /// <summary>
+    /// A <c>COMPOUNDCURVE</c>'s elements: a bare <c>(…)</c> line, or — when
+    /// the element opens with a <c>C</c> — a labelled <c>CIRCULARSTRING</c>.
+    /// Each element must start exactly where the previous one ended (24134),
+    /// and that shared point is stored once.
+    /// </summary>
+    private SpatialShape ReadCompoundCurveBody()
+    {
+        var (points, segments) = ReadCompoundElements();
+        return SpatialShape.Curve(SpatialShapeType.CompoundCurve, [points], [SpatialFigureType.Composite], [segments]);
+    }
+
+    private (SpatialCoordinate[] Points, SpatialSegmentType[] Segments) ReadCompoundElements()
+    {
+        ExpectLiteral("(");
+        var elements = new List<(bool IsArc, SpatialCoordinate[] Points)>();
+        do
+        {
+            var isArc = NextStartsLabel();
+            if (isArc)
+                ExpectLiteral("CIRCULARSTRING");
+            var element = isArc ? ReadCircularStringBody() : ReadLineStringBody();
+            if (elements.Count > 0 && elements[^1].Points[^1] != element[0])
+                throw SimulatedSqlException.SpatialCompoundCurveNotContinuous(this.isGeography);
+            elements.Add((isArc, element));
+        }
+        while (TryConsumeSeparator());
+        ExpectLiteral(")");
+        return SpatialCurves.Compose(elements);
+    }
+
+    /// <summary>
+    /// A <c>CURVEPOLYGON</c>'s rings, each a bare <c>(…)</c> line ring, a
+    /// labelled <c>CIRCULARSTRING</c> or a labelled <c>COMPOUNDCURVE</c>,
+    /// held to the same ring rules as a <c>POLYGON</c>'s.
+    /// </summary>
+    private SpatialShape ReadCurvePolygonBody()
+    {
+        ExpectLiteral("(");
+        var rings = new List<SpatialCoordinate[]>();
+        var types = new List<SpatialFigureType>();
+        var segments = new List<SpatialSegmentType[]?>();
+        do
+        {
+            SpatialCoordinate[] ring;
+            SpatialFigureType type;
+            SpatialSegmentType[]? run = null;
+            SkipWhitespace();
+            if (NextStartsLabel() && MatchesAt("COMPOUNDCURVE"))
+            {
+                this.position += "COMPOUNDCURVE".Length;
+                SkipWhitespace();
+                if (TryConsumeKeyword("EMPTY"))
+                    throw SimulatedSqlException.SpatialCompoundCurveRingEmpty(this.isGeography);
+                (ring, run) = ReadCompoundElements();
+                type = SpatialFigureType.Composite;
+            }
+            else if (NextStartsLabel())
+            {
+                ExpectLiteral("CIRCULARSTRING");
+                SkipWhitespace();
+                if (TryConsumeKeyword("EMPTY"))
+                    throw SimulatedSqlException.SpatialCircularStringRingEmpty(this.isGeography);
+                ring = ReadCircularStringBody();
+                type = SpatialFigureType.Arc;
+            }
+            else if (TryConsumeKeyword("EMPTY"))
+            {
+                ring = [];
+                type = SpatialFigureType.Line;
+            }
+            else
+            {
+                ExpectLiteral("(");
+                var points = new List<SpatialCoordinate> { ReadCoordinate() };
+                while (TryConsumeSeparator())
+                    points.Add(ReadCoordinate());
+                ExpectLiteral(")");
+                ring = [.. points];
+                type = SpatialFigureType.Line;
+            }
+            rings.Add(CheckRing(ring, rings.Count));
+            types.Add(type);
+            segments.Add(run);
+        }
+        while (TryConsumeSeparator());
+        ExpectLiteral(")");
+        return SpatialShape.Curve(SpatialShapeType.CurvePolygon, [.. rings], [.. types], [.. segments]);
+    }
+
+    /// <summary>Whether the next non-whitespace character opens a label rather than a <c>(</c> — how real tells a labelled curve element from a bare line.</summary>
+    private bool NextStartsLabel()
+    {
+        SkipWhitespace();
+        return this.position < this.text.Length && this.text[this.position] is 'C' or 'c';
     }
 
     /// <summary>

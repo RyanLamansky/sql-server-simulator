@@ -110,19 +110,73 @@ partial class SimulatedSqlException
         isGeography, SpatialFormat, 24117,
         "The LineString input is not valid because it does not have enough points. A LineString must have at least two points.");
 
-    /// <summary>24118 / 24120 — a polygon ring with fewer than four points. Real names the exterior ring differently from a numbered interior one.</summary>
-    internal static SimulatedSqlException SpatialRingTooFewPoints(bool isGeography, int interiorRingNumber) => interiorRingNumber == 0
-        ? SpatialFailure(isGeography, SpatialFormat, 24118,
-            "The Polygon input is not valid because the exterior ring does not have enough points. Each ring of a polygon must contain at least four points.")
-        : SpatialFailure(isGeography, SpatialFormat, 24120,
-            $"The Polygon input is not valid because the interior ring number {interiorRingNumber.ToString(CultureInfo.InvariantCulture)} does not have enough points. Each ring of a polygon must contain at least four points.");
+    /// <summary>
+    /// 24118 / 24120 — a polygon ring with fewer than four points. <c>geometry</c>
+    /// names the exterior ring differently from a numbered interior one;
+    /// <c>geography</c> numbers every ring from 1 under 24305.
+    /// </summary>
+    internal static SimulatedSqlException SpatialRingTooFewPoints(bool isGeography, int interiorRingNumber, bool planarNumbering = false) => isGeography && !planarNumbering
+        ? SpatialFailure(isGeography, SpatialFormat, 24305,
+            $"The Polygon input is not valid because the ring number {(interiorRingNumber + 1).ToString(CultureInfo.InvariantCulture)} does not have enough points. Each ring of a polygon must contain at least four points.")
+        : interiorRingNumber == 0
+            ? SpatialFailure(isGeography, SpatialFormat, 24118,
+                "The Polygon input is not valid because the exterior ring does not have enough points. Each ring of a polygon must contain at least four points.")
+            : SpatialFailure(isGeography, SpatialFormat, 24120,
+                $"The Polygon input is not valid because the interior ring number {interiorRingNumber.ToString(CultureInfo.InvariantCulture)} does not have enough points. Each ring of a polygon must contain at least four points.");
 
-    /// <summary>24119 / 24121 — a polygon ring whose first and last points differ.</summary>
-    internal static SimulatedSqlException SpatialRingNotClosed(bool isGeography, int interiorRingNumber) => interiorRingNumber == 0
-        ? SpatialFailure(isGeography, SpatialFormat, 24119,
-            "The Polygon input is not valid because the start and end points of the exterior ring are not the same. Each ring of a polygon must have the same start and end points.")
-        : SpatialFailure(isGeography, SpatialFormat, 24121,
-            $"The Polygon input is not valid because the start and end points of the interior ring number {interiorRingNumber.ToString(CultureInfo.InvariantCulture)} are not the same. Each ring of a polygon must have the same start and end points.");
+    /// <summary>24119 / 24121 — a polygon ring whose first and last points differ; <c>geography</c>'s is 24306, numbering every ring from 1.</summary>
+    internal static SimulatedSqlException SpatialRingNotClosed(bool isGeography, int interiorRingNumber) => isGeography
+        ? SpatialFailure(isGeography, SpatialFormat, 24306,
+            $"The Polygon input is not valid because the start and end points of the ring number {(interiorRingNumber + 1).ToString(CultureInfo.InvariantCulture)} are not the same. Each ring of a polygon must have the same start and end points.")
+        : interiorRingNumber == 0
+            ? SpatialFailure(isGeography, SpatialFormat, 24119,
+                "The Polygon input is not valid because the start and end points of the exterior ring are not the same. Each ring of a polygon must have the same start and end points.")
+            : SpatialFailure(isGeography, SpatialFormat, 24121,
+                $"The Polygon input is not valid because the start and end points of the interior ring number {interiorRingNumber.ToString(CultureInfo.InvariantCulture)} are not the same. Each ring of a polygon must have the same start and end points.");
+
+    /// <summary>24150 — a <c>FULLGLOBE</c> member of a <c>GEOMETRYCOLLECTION</c>.</summary>
+    internal static SimulatedSqlException SpatialFullGlobeInCollection() => SpatialFailure(
+        isGeography: true, SpatialFormat, 24150,
+        "FullGlobe instances cannot be objects in the GeometryCollection. GeometryCollections can contain the following instances: Points, MultiPoints, "
+        + "LineStrings, MultiLineStrings, Polygons, MultiPolygons, CircularStrings, CompoundCurves, CurvePolygons and GeometryCollections.");
+
+    /// <summary>24115 — a well-known binary record whose type code names no shape, <c>FULLGLOBE</c>'s shape-table code 11 included.</summary>
+    internal static SimulatedSqlException SpatialWkbNotValid(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 24115, "The well-known binary (WKB) input is not valid.");
+
+    /// <summary>24212 — a <c>CIRCULARSTRING</c> with a single point.</summary>
+    internal static SimulatedSqlException SpatialCircularStringTooFewPoints(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 24212,
+        "The CircularString input is not valid because it does not have enough points. A CircularString must have at least three points.");
+
+    /// <summary>24214 — an arc whose three points disagree on Z, a missing Z included.</summary>
+    internal static SimulatedSqlException SpatialArcZNotEqual(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 24214, "Circular arc segments with Z values must have equal Z value for all 3 points.");
+
+    /// <summary>24134 — a <c>COMPOUNDCURVE</c> element that doesn't start where the previous one ended.</summary>
+    internal static SimulatedSqlException SpatialCompoundCurveNotContinuous(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 24134,
+        "Sequential parts of a compound curve must have one common endpoint. Add a common endpoint. All coordinates, including optional Z and M, must be equal.");
+
+    /// <summary>24300 — a <c>CURVEPOLYGON</c> ring written <c>CIRCULARSTRING EMPTY</c>, which real's builder reports as a missing figure.</summary>
+    internal static SimulatedSqlException SpatialCircularStringRingEmpty(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 24300, $"Expected a call to BeginFigure, but {(isGeography ? "EndGeography" : "EndGeometry")} was called.");
+
+    /// <summary>24301 — a <c>CURVEPOLYGON</c> ring written <c>COMPOUNDCURVE EMPTY</c>, which real's builder reports as a missing segment.</summary>
+    internal static SimulatedSqlException SpatialCompoundCurveRingEmpty(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 24301, $"Expected a call to AddSegmentLine or AddSegmentArc, but {(isGeography ? "EndGeography" : "EndGeometry")} was called.");
+
+    /// <summary>24151 — <c>STCurveN</c> index below 1.</summary>
+    internal static SimulatedSqlException SpatialCurveIndexTooSmall(bool isGeography, int n) => SpatialFailure(
+        isGeography, SpatialOutOfRange, 24151,
+        $"The curve index n ({n.ToString(CultureInfo.InvariantCulture)}) passed to STCurveN is less than 1. This number must be greater than or equal to 1 and less than or equal to the number of curves returned by STNumCurves.",
+        "n");
+
+    /// <summary>24152 — a <c>CurveToLineWithTolerance</c> tolerance that isn't positive.</summary>
+    internal static SimulatedSqlException SpatialCurveToleranceNotValid(bool isGeography, double tolerance) => SpatialFailure(
+        isGeography, SpatialOutOfRange, 24152,
+        $"The tolerance ({Storage.Spatial.SpatialWktWriter.Format(tolerance)}) passed to CurveToLineWithTolerance is not valid. Tolerances must be positive numbers.",
+        "tolerance");
 
     /// <summary>24201 — a <c>geography</c> coordinate outside the latitude domain. Longitude has no equivalent check; real accepts any value there.</summary>
     internal static SimulatedSqlException SpatialLatitudeOutOfRange() => SpatialFailure(

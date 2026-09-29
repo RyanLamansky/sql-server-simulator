@@ -27,6 +27,9 @@ namespace SqlServerSimulator.Storage.Spatial;
 /// </remarks>
 internal sealed class SpatialGeodeticConstructive
 {
+    /// <summary>The whole globe — what real answers for the complement of nothing (probed 2026-09-29).</summary>
+    private static readonly SpatialShape FullGlobe = SpatialShape.Empty(SpatialShapeType.FullGlobe);
+
     /// <summary>The largest angle from the projection centre a vertex may sit at: cos 89.5°.</summary>
     private const double MinimumCosine = 0.0087265354983739347;
 
@@ -262,7 +265,7 @@ internal sealed class SpatialGeodeticConstructive
     {
         var (areal, _) = Split(areas);
         if (areal is null)
-            throw new NotSupportedException("geography results covering the whole globe (FULLGLOBE) are not modeled.");
+            return FullGlobe;
         var shells = new List<SpatialCoordinate[]>();
         var holes = new List<SpatialShape>();
         foreach (var polygon in areal.Children)
