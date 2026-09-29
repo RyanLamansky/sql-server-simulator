@@ -275,6 +275,8 @@ internal sealed class Cast : Expression
     /// </summary>
     internal static SqlType RejectIllegalConversion(Expression source, SqlType sourceType, SqlType targetType, bool targetReportsNumeric, BatchContext batch) =>
         UndeclaredParameterDeduction.NoteExact(source, targetType) ? ResultStringType(targetType, targetType, batch.CurrentDatabase.Collation) ?? targetType
+        : sourceType is VectorSqlType sourceVector && targetType is VectorSqlType targetVector && sourceVector.IsFloat16 != targetVector.IsFloat16
+            ? throw SimulatedSqlException.VectorBaseTypeConversion(sourceVector.BaseTypeName, targetVector.BaseTypeName)
         : source is not Value { IsUntypedNull: true } && IsIllegalExplicitConversion(sourceType, targetType)
             ? throw SimulatedSqlException.ExplicitConversionNotAllowed(
                 ConversionName(sourceType, source, batch),

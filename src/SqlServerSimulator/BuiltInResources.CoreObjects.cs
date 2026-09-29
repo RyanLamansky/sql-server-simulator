@@ -568,6 +568,8 @@ internal static partial class BuiltInResources
         // A vector column's element type: float32, id 0 (probed 2026-09-26).
         var float32Desc = SqlValue.FromString(NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), "float32");
         var float32Id = SqlValue.FromByte(0);
+        var float16Desc = SqlValue.FromString(NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), "float16");
+        var float16Id = SqlValue.FromByte(1);
         // generated_always_type_desc mirrors generated_always_type's enum text;
         // ordinary (non-temporal) columns report NOT_APPLICABLE.
         SqlValue GeneratedAlwaysDescFor(HeapColumn c) =>
@@ -638,7 +640,7 @@ internal static partial class BuiltInResources
                 falseBit,
                 falseBit,
                 col.Type is VectorSqlType dimensioned ? SqlValue.FromInt32(dimensioned.dimensions) : nullInt,
-                col.Type is VectorSqlType ? float32Desc : nullVectorBaseType,
+                col.Type is VectorSqlType { IsFloat16: true } ? float16Desc : col.Type is VectorSqlType ? float32Desc : nullVectorBaseType,
                 nullInt,
                 nullLedgerViewColumnTypeDesc,
                 AnsiPaddedFor(col),
@@ -662,7 +664,7 @@ internal static partial class BuiltInResources
                 nullSysName,
                 GraphColumns.Describe(col.GraphKind) is { } graphTypeDesc ? SqlValue.FromString(nvarchar60Catalog, graphTypeDesc) : nullGraphTypeDesc,
                 falseBit,
-                col.Type is VectorSqlType ? float32Id : nullVectorBaseTypeId,
+                col.Type is VectorSqlType { IsFloat16: true } ? float16Id : col.Type is VectorSqlType ? float32Id : nullVectorBaseTypeId,
             ];
         }
 

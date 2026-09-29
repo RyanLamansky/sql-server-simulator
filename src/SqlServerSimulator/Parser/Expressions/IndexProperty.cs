@@ -119,6 +119,11 @@ internal sealed class IndexProperty : Expression
             if (Collation.Baseline.Equals(jsonIndex.Name, name))
                 return Auxiliary(jsonIndex.IndexId);
         }
+        foreach (var vectorIndex in table.VectorIndexes)
+        {
+            if (Collation.Baseline.Equals(vectorIndex.Name, name))
+                return Auxiliary(vectorIndex.IndexId);
+        }
         foreach (var statistic in table.UserStatistics)
         {
             if (Collation.Baseline.Equals(statistic.Name, name))

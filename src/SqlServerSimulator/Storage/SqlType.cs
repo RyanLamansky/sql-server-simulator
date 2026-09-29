@@ -927,9 +927,9 @@ internal abstract partial class SqlType
 
     private static VectorSqlType ResolveVector(Name name, int? dimensions, int? baseType, int index, TypeSpecSite site, string? columnName)
     {
-        if (baseType is not (null or VectorSqlType.Float32BaseType) && baseType > dimensions)
+        if (baseType is not (null or VectorSqlType.Float32BaseType or VectorSqlType.Float16BaseType) && baseType > dimensions)
             throw SimulatedSqlException.ScaleExceedsPrecision();
-        if (dimensions is null or MaxLengthSentinel || baseType is not (null or VectorSqlType.Float32BaseType))
+        if (dimensions is null or MaxLengthSentinel || baseType is not (null or VectorSqlType.Float32BaseType or VectorSqlType.Float16BaseType))
         {
             throw site != TypeSpecSite.Cast
                 ? SimulatedSqlException.CannotFindDataType(name.Span, index)
@@ -938,8 +938,9 @@ internal abstract partial class SqlType
         return dimensions switch
         {
             < 1 => throw SimulatedSqlException.LengthOrPrecisionSpecificationInvalid(dimensions.Value, name.LineNumber),
-            > VectorSqlType.MaxDimensions => throw SimulatedSqlException.VectorSizeExceedsMaximum(dimensions.Value, site == TypeSpecSite.Column ? columnName : null),
-            _ => VectorSqlType.Get(dimensions.Value),
+            > VectorSqlType.MaxFloat16Dimensions when baseType == VectorSqlType.Float16BaseType => throw SimulatedSqlException.VectorSizeExceedsMaximum(dimensions.Value, site == TypeSpecSite.Column ? columnName : null, float16: true),
+            > VectorSqlType.MaxDimensions when baseType != VectorSqlType.Float16BaseType => throw SimulatedSqlException.VectorSizeExceedsMaximum(dimensions.Value, site == TypeSpecSite.Column ? columnName : null),
+            _ => VectorSqlType.Get(dimensions.Value, float16: baseType == VectorSqlType.Float16BaseType),
         };
     }
 

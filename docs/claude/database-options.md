@@ -343,7 +343,8 @@ Probed 2026-09-27 against SQL Server 2025.
 - **Refusals by phase.** The value and replica refusals above are raised compiling the batch.
   Running, a caller without `ALTER` on the database gets Msg 15247 state 13, a read-only database Msg 3906 for `SET` (`CLEAR` still succeeds), a plan handle Msg 12117 (the plan cache hands none out), a ledger endpoint Msg 12136 unless it is an `https://…blob.core.windows.net` URL and then Msg 37531, there being no credential to reach it, and the Synapse-only `DW_COMPATIBILITY_LEVEL` a class-16 Msg 102; each ends the batch, and a `TRY` catches it.
   Inside a user transaction the statement is Msg 226 state 7, which acts as under `XACT_ABORT` ([`transactions.md`](transactions.md)).
-- **What a value drives.** Only `VERBOSE_TRUNCATION_WARNINGS` changes behavior: with it on, a compatibility level of 150 or more selects the verbose Msg 2628 for string truncation over Msg 8152, and trace flag 460 selects it whatever the option and level say.
+- **What a value drives.** `PREVIEW_FEATURES` admits SQL Server 2025's preview vector surface — the `float16` base type, `CREATE VECTOR INDEX` and `VECTOR_SEARCH` ([`vector.md`](vector.md)) — read from the database compiling the statement.
+  `VERBOSE_TRUNCATION_WARNINGS` is the other one that changes behavior: with it on, a compatibility level of 150 or more selects the verbose Msg 2628 for string truncation over Msg 8152, and trace flag 460 selects it whatever the option and level say.
   `CLEAR PROCEDURE_CACHE` drops the plans cached for the session's database ([`plan-cache.md`](plan-cache.md#clearing-dbcc-freeproccache)).
 - **Where values come from.** A new database copies `model`'s configuration, as real's does; the four system databases don't list `PREVIEW_FEATURES`.
 - Every success raises the `ALTER_DATABASE_SCOPED_CONFIGURATION` DDL event, whose `EVENTDATA()` carries no `ObjectName` / `ObjectType`.
@@ -355,7 +356,7 @@ Probed 2026-09-27 against SQL Server 2025.
 
 ### Not modeled yet
 
-- Every option but `VERBOSE_TRUNCATION_WARNINGS` is recorded without effect — `IDENTITY_CACHE = OFF`, `GLOBAL_TEMPORARY_TABLE_AUTO_DROP = OFF` and the rest change nothing the simulator does.
+- Every option but `VERBOSE_TRUNCATION_WARNINGS` and `PREVIEW_FEATURES` is recorded without effect — `IDENTITY_CACHE = OFF`, `GLOBAL_TEMPORARY_TABLE_AUTO_DROP = OFF` and the rest change nothing the simulator does.
 
 ## Bacpac loader context
 

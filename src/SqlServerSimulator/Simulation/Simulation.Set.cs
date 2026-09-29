@@ -840,6 +840,11 @@ partial class Simulation
             var read = DataMask.Of(rhs, static _ => null, typeOf: null);
             slot.Mask = assignOp == '=' ? read : DataMask.Merge(slot.Mask, read);
         }
+        // One vector variable assigned to another of a different base type or
+        // dimension count is refused compiling the batch (probed 2026-09-29
+        // against SQL Server 2025).
+        if (context.Batch.IsSkipping && assignOp == '=' && slot.DeclaredType is VectorSqlType && rhs is VariableReference)
+            AssignmentRules.RequireAssignable(rhs, rhs.GetSqlType(context.Batch, NoColumnTypeResolver), slot.DeclaredType);
         if (context.Batch.IsSkipping)
             return true;
         var assignedExpr = assignOp == '='

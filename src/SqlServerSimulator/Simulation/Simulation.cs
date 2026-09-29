@@ -3820,6 +3820,7 @@ public sealed partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):
             case ReservedKeyword { Keyword: Keyword.Drop } when RejectingTrailingToken(context, TryParseDrop(context)):
             case ReservedKeyword { Keyword: Keyword.Alter } when TryParseAlter(context):
+                batch.WalkMetDdl |= batch.CompilingForRun;
                 // DDL invalidates every cached plan parsed under the prior
                 // schema version. Skip-mode statements don't actually execute
                 // the DDL (their parse-only walk has no schema effect), so the

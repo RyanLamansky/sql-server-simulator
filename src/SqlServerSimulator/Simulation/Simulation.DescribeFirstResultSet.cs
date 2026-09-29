@@ -147,6 +147,22 @@ partial class Simulation
         return rows;
     }
 
+    private static readonly VarcharSqlType Float16DescribeType = VarcharSqlType.Get(-1, Collation.Get("Latin1_General_100_BIN2_UTF8"), Coercibility.Implicit);
+
+    /// <summary>
+    /// <c>tds_collation_id</c>: the wire's collation word, except that a
+    /// <c>_BIN2_UTF8</c> collation keeps the binary-sort bit the wire drops,
+    /// as <c>COLLATIONPROPERTY</c>'s form does (probed 2026-09-29 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static int DescribedCollationInfo(Network.TdsCollationCodec codec, Collation collation)
+    {
+        if (!collation.Name.EndsWith("_BIN2_UTF8", StringComparison.OrdinalIgnoreCase))
+            return (int)codec.Info;
+        var property = codec.PropertyBytes(binary2: true);
+        return System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(property);
+    }
+
     private static SqlValue[] DescribeColumn(SimulatedQueryResult result, int index)
     {
         // An unsized string result describes as the width the wire reports
@@ -155,6 +171,9 @@ partial class Simulation
         {
             NVarcharSqlType { length: 0 } unsized => NVarcharSqlType.Get(4000, unsized.Collation, unsized.Coercibility),
             VarcharSqlType { length: 0 } unsized => VarcharSqlType.Get(8000, unsized.Collation, unsized.Coercibility),
+            // A float16 vector describes as the varchar(max) text real sends
+            // every client for it (probed 2026-09-29 against SQL Server 2025).
+            VectorSqlType { IsFloat16: true } => Float16DescribeType,
             var declared => declared,
         };
         var numeric = type is DecimalSqlType && result.ColumnReportsNumeric is { } spelled && spelled[index];
@@ -207,7 +226,7 @@ partial class Simulation
             nullSmall, SqlValue.Null(SqlType.Bit), nullSmall,
             SqlValue.FromInt32(tdsType),
             SqlValue.FromInt32(tdsLength),
-            codec is null ? nullInt : SqlValue.FromInt32((int)codec.Info),
+            codec is null ? nullInt : SqlValue.FromInt32(DescribedCollationInfo(codec, collation!)),
             codec is null ? SqlValue.Null(SqlType.TinyInt) : SqlValue.FromByte(codec.SortId),
         ];
     }

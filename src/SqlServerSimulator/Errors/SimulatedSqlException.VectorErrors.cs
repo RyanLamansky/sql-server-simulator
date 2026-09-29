@@ -8,21 +8,24 @@ partial class SimulatedSqlException
 {
     /// <summary>
     /// Msg 195: the second argument of a <c>vector(n, …)</c> type spec names a
-    /// base type other than <c>float32</c> — <c>float16</c> included, which
-    /// real gates behind a preview switch.
+    /// base type other than <c>float32</c> — <c>float16</c> included unless
+    /// the database's <c>PREVIEW_FEATURES</c> is on.
     /// </summary>
     internal static SimulatedSqlException VectorBaseTypeNotRecognized(string baseType) =>
         new($"'{baseType}' is not a recognized vector base type.", 195, 15, 1);
 
     /// <summary>
-    /// Msg 2717: a <c>vector</c> declared wider than 1998 dimensions, naming
-    /// the column at state 4 in a column declaration and the type at state 3
-    /// everywhere else.
+    /// Msg 2717: a <c>vector</c> declared wider than 1998 dimensions — 3996
+    /// for a <c>float16</c> one — naming the column at state 4 (5) in a column
+    /// declaration and the type at state 3 (2) everywhere else.
     /// </summary>
-    internal static SimulatedSqlException VectorSizeExceedsMaximum(int requested, string? columnName) =>
-        columnName is not null
-            ? new($"The size ({requested.ToString(CultureInfo.InvariantCulture)}) given to the column '{columnName}' exceeds the maximum allowed (1998).", 2717, 15, 4)
-            : new($"The size ({requested.ToString(CultureInfo.InvariantCulture)}) given to the type 'vector' exceeds the maximum allowed (1998).", 2717, 15, 3);
+    internal static SimulatedSqlException VectorSizeExceedsMaximum(int requested, string? columnName, bool float16 = false)
+    {
+        var maximum = float16 ? "3996" : "1998";
+        return columnName is not null
+            ? new($"The size ({requested.ToString(CultureInfo.InvariantCulture)}) given to the column '{columnName}' exceeds the maximum allowed ({maximum}).", 2717, 15, float16 ? (byte)5 : (byte)4)
+            : new($"The size ({requested.ToString(CultureInfo.InvariantCulture)}) given to the type 'vector' exceeds the maximum allowed ({maximum}).", 2717, 15, float16 ? (byte)2 : (byte)3);
+    }
 
     /// <summary>
     /// Msg 42204: two vectors of different dimension counts met. The state
@@ -53,9 +56,30 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException VectorJsonMalformed(char character, int position) =>
         JsonInvalidText(character, position, state: 9);
 
-    /// <summary>Msg 42241: an element of text converted to a vector lies outside float32's range.</summary>
-    internal static SimulatedSqlException VectorElementOutOfRange() =>
-        new("Input JSON contains out-of-range values for float32.", 42241, 16, 1);
+    /// <summary>
+    /// Msg 42241: an element of text converted to a vector lies outside
+    /// float32's range (state 1), or inside it but outside half precision's
+    /// for a <c>float16</c> vector (state 2); the message names the target's
+    /// base type either way.
+    /// </summary>
+    internal static SimulatedSqlException VectorElementOutOfRange(bool float16 = false, byte state = 1) =>
+        new($"Input JSON contains out-of-range values for {(float16 ? "float16" : "float32")}.", 42241, 16, state);
+
+    /// <summary>
+    /// Msg 42238: a vector converted to one of the other base type — a
+    /// <c>CAST</c>, an assignment, or two arms unified, which settle on
+    /// float32.
+    /// </summary>
+    internal static SimulatedSqlException VectorBaseTypeConversion(string from, string to) =>
+        new($"Conversion of vector from data type {from} to {to} is not allowed.", 42238, 16, 1);
+
+    /// <summary>Msg 42243: <c>VECTOR_DISTANCE</c> (or <c>VECTOR_SEARCH</c>) over a float16 and a float32 vector, raised as the statement runs and ending the batch.</summary>
+    internal static SimulatedSqlException VectorDistanceBaseTypesDiffer() =>
+        new("VECTOR_DISTANCE function does not support different base types for vector arguments.", 42243, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>Msg 42246: <c>VECTOR_NORM</c> or <c>VECTOR_NORMALIZE</c> over a float16 vector.</summary>
+    internal static SimulatedSqlException VectorNormFloat16(string functionName) =>
+        new($"{functionName} function does not support vector with base type float16.", 42246, 16, 1);
 
     /// <summary>
     /// Msg 42211: a vector's text form is longer than the character type it

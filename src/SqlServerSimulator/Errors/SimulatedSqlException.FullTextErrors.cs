@@ -113,9 +113,13 @@ partial class SimulatedSqlException
     // The full-text DDL refusals below were probed 2026-09-26 against SQL
     // Server 2025; each names what real's does.
 
-    /// <summary>Msg 574: full-text DDL or <c>DROP DATABASE</c> inside a user transaction, naming the statement (<c>ALTER FULLTEXT INDEX</c>…).</summary>
-    internal static SimulatedSqlException StatementInsideUserTransaction(string statement) =>
-        new($"{statement} statement cannot be used inside a user transaction.", 574, 16, 0);
+    /// <summary>
+    /// Msg 574: full-text DDL, <c>DROP DATABASE</c> or <c>CREATE VECTOR
+    /// INDEX</c> (state 31) inside a user transaction, naming the statement
+    /// (<c>ALTER FULLTEXT INDEX</c>…).
+    /// </summary>
+    internal static SimulatedSqlException StatementInsideUserTransaction(string statement, byte state = 0) =>
+        new($"{statement} statement cannot be used inside a user transaction.", 574, 16, state);
 
     /// <summary>Msg 7658: <c>ALTER</c> (state 2) or <c>DROP</c> (state 5) of a full-text index on a table that has none.</summary>
     internal static SimulatedSqlException FullTextIndexMissing(string tableName, byte state) =>

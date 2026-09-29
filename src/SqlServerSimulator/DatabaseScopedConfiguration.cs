@@ -55,7 +55,7 @@ internal sealed class ScopedConfigurationOption(int id, string name, ScopedConfi
 /// every option <c>sys.database_scoped_configurations</c> lists, as the text
 /// real reports (<c>"1"</c>, <c>"WHEN_SUPPORTED"</c>), a null secondary
 /// meaning the primary's value applies. Only
-/// <c>VERBOSE_TRUNCATION_WARNINGS</c> drives behavior; the rest are recorded
+/// <c>VERBOSE_TRUNCATION_WARNINGS</c> and <c>PREVIEW_FEATURES</c> drive behavior; the rest are recorded
 /// for the catalog.
 /// </summary>
 internal sealed class DatabaseScopedConfiguration
@@ -166,6 +166,15 @@ internal sealed class DatabaseScopedConfiguration
     /// 150 or more selects Msg 2628 over Msg 8152 for string truncation.
     /// </summary>
     public bool VerboseTruncationWarnings => this.primary[VerboseTruncationWarningsIndex] == "1";
+
+    private static readonly int PreviewFeaturesIndex = IndexOf("PREVIEW_FEATURES");
+
+    /// <summary>
+    /// <c>PREVIEW_FEATURES</c>, which admits SQL Server 2025's preview
+    /// surface: vector indexes, <c>VECTOR_SEARCH</c> and the <c>float16</c>
+    /// vector base type.
+    /// </summary>
+    public bool PreviewFeatures => this.primary[PreviewFeaturesIndex] == "1";
 
     /// <summary>
     /// The <c>sql_variant</c> inner value <c>sys.database_scoped_configurations</c>

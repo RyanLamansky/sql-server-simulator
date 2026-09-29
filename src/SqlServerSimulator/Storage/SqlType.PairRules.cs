@@ -264,10 +264,19 @@ partial class SqlType
         if (operation == TypePairOperation.Unify && leftType == rightType)
             return null;
 
-        // Two vectors unify and assign only at one dimension count (probed
-        // 2026-09-26 against SQL Server 2025).
+        // Two vectors unify and assign only at one dimension count and base
+        // type; arms of both base types settle on float32, and an assignment
+        // converts the source to the target's (probed 2026-09-26 and
+        // 2026-09-29 against SQL Server 2025).
         if (operation is TypePairOperation.Unify or TypePairOperation.Assign && leftType is VectorSqlType leftVector && rightType is VectorSqlType rightVector)
-            return leftVector == rightVector ? null : SimulatedSqlException.VectorDimensionsMismatch(leftVector.dimensions, rightVector.dimensions, 1);
+        {
+            return leftVector == rightVector ? null
+                : leftVector.IsFloat16 != rightVector.IsFloat16
+                    ? operation == TypePairOperation.Unify
+                        ? SimulatedSqlException.VectorBaseTypeConversion("float16", "float32")
+                        : SimulatedSqlException.VectorBaseTypeConversion(leftVector.BaseTypeName, rightVector.BaseTypeName)
+                : SimulatedSqlException.VectorDimensionsMismatch(leftVector.dimensions, rightVector.dimensions, 1);
+        }
 
         if ((leftType is ClrUdtSqlType || rightType is ClrUdtSqlType) && ClrUdtPairError(operation, left, right, operatorName) is { } udtError)
             return udtError;

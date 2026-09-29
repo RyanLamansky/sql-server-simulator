@@ -887,6 +887,8 @@ partial class Simulation
                 throw SimulatedSqlException.PrimaryKeyDropBlockedByXmlOrSpatialIndex(action.Key.Name);
             if (action.Key is { Kind: KeyConstraintKind.PrimaryKey } && table.JsonIndexes.Count > 0)
                 throw SimulatedSqlException.PrimaryKeyDropBlockedByJsonIndex(action.Key.Name);
+            if (action.Key is { Kind: KeyConstraintKind.PrimaryKey } && table.VectorIndexes.Count > 0)
+                throw SimulatedSqlException.PrimaryKeyDropBlockedByVectorIndex(action.Key.Name);
             if (withOptions && action.Family == DropConstraintFamily.Key && !action.Key!.IsClustered)
                 throw SimulatedSqlException.DropNonClusteredWithClusteredClause(action.Key.Name);
             planned.Add(action);

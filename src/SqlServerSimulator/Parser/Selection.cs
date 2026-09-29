@@ -2517,6 +2517,8 @@ internal sealed partial class Selection
         // joins splice directly into this chain with no group marker.
         if (NextSourceIsJoinGroup(context))
             ParseJoinGroup(context, scope, sources, joins, siblingCandidates);
+        else if (NextSourceIsVectorSearch(context))
+            AddVectorSearch(context, sources, joins, scope.OuterTypeResolver);
         else
             AddSource(context, sources, ParseSourceCollectingColumnReads(context, scope, sources, siblingCandidates));
 
@@ -2547,8 +2549,15 @@ internal sealed partial class Selection
         {
             if (kind is JoinKind.CrossApply or JoinKind.OuterApply)
             {
-                AddSource(context, sources, ParseLateralFromSource(context, scope, sources));
-                joins.Add(new JoinSpec(kind, onPredicate: null));
+                if (NextSourceIsVectorSearch(context))
+                {
+                    AddAppliedVectorSearch(context, sources, joins, kind, scope);
+                }
+                else
+                {
+                    AddSource(context, sources, ParseLateralFromSource(context, scope, sources));
+                    joins.Add(new JoinSpec(kind, onPredicate: null));
+                }
                 if (context.Token is ReservedKeyword { Keyword: Keyword.On } onToken)
                 {
                     if (nested)
@@ -2566,6 +2575,35 @@ internal sealed partial class Selection
             // sources / joins are spliced by ParseJoinGroup; the connecting
             // JoinSpec (carrying GroupCount) is inserted at the group's leading
             // slot, ahead of the interior joins ParseJoinGroup appended.
+            // A VECTOR_SEARCH is a two-member group of its own: the ON joins
+            // the spine against the distance rowset and the table together.
+            if (NextSourceIsVectorSearch(context))
+            {
+                var searchJoinIndex = joins.Count;
+                AddVectorSearch(context, sources, joins, scope.OuterTypeResolver);
+                BooleanExpression? searchOn = null;
+                if (kind == JoinKind.Cross)
+                {
+                    if (context.Token is ReservedKeyword { Keyword: Keyword.On } searchOnToken)
+                    {
+                        if (nested)
+                        {
+                            joins.Insert(searchJoinIndex, new JoinSpec(kind, null) { GroupCount = 2 });
+                            return;
+                        }
+                        throw SimulatedSqlException.SyntaxErrorNearKeyword(searchOnToken);
+                    }
+                }
+                else
+                {
+                    if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    searchOn = ParseJoinOn(context, scope, sources, scopeStart);
+                }
+                joins.Insert(searchJoinIndex, new JoinSpec(kind, searchOn) { GroupCount = 2, ScopeStart = scopeStart, ScopeEnd = sources.Count });
+                continue;
+            }
+
             if (NextSourceIsJoinGroup(context))
             {
                 var groupStart = sources.Count;

@@ -1183,7 +1183,8 @@ internal static partial class BuiltInResources
         var nullVectorDesc = SqlValue.Null(SqlType.NVarchar);
         var float32Desc = SqlValue.FromString(NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), "float32");
         SqlValue VectorDims(SqlType type) => type is VectorSqlType vector ? SqlValue.FromInt32(vector.dimensions) : nullVectorDims;
-        SqlValue VectorDesc(SqlType type) => type is VectorSqlType ? float32Desc : nullVectorDesc;
+        var float16Desc = SqlValue.FromString(NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), "float16");
+        SqlValue VectorDesc(SqlType type) => type is VectorSqlType vector ? vector.IsFloat16 ? float16Desc : float32Desc : nullVectorDesc;
         foreach (var (_, schema) in database.Schemas)
         {
             foreach (var proc in schema.Procedures.EnumerateValues().OrderBy(p => p.ObjectId))

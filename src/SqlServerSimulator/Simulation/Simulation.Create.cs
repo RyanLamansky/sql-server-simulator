@@ -59,6 +59,8 @@ partial class Simulation
                 return Simulation.TryParseCreateXml(context);
             case Name jsonWord when jsonWord.Value.Equals("JSON", StringComparison.OrdinalIgnoreCase):
                 return Simulation.TryParseCreateJsonIndex(context);
+            case Name vectorWord when vectorWord.Value.Equals("VECTOR", StringComparison.OrdinalIgnoreCase):
+                return Simulation.TryParseCreateVectorIndex(context);
             case ReservedKeyword { Keyword: Keyword.Primary }:
                 return Simulation.TryParseCreatePrimaryXml(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Spatial }:

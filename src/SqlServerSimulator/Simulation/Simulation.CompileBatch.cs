@@ -74,6 +74,8 @@ partial class Simulation
             report.CatchReadsFirstEntry = true;
             return report;
         }
+        if (compileBatch.DeferredOptimizerError is { } optimizerError && !compileBatch.WalkMetDdl)
+            return optimizerError;
 
         if (key is { } compiled && !compileBatch.ResolvedTempTable)
         {

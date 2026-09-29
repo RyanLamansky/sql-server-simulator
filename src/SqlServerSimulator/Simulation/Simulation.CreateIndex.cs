@@ -175,8 +175,11 @@ partial class Simulation
             if (context.Batch.CurrentDatabase.Collation.Equals(kc.Name, indexName))
                 replacedConstraint = indexOptions.DropExisting ? kc : throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString());
         }
-        if (table.JsonIndexes.Exists(json => context.Batch.CurrentDatabase.Collation.Equals(json.Name, indexName)))
+        if (table.JsonIndexes.Exists(json => context.Batch.CurrentDatabase.Collation.Equals(json.Name, indexName))
+            || table.VectorIndexes.Exists(vector => context.Batch.CurrentDatabase.Collation.Equals(vector.Name, indexName)))
+        {
             throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString());
+        }
         if (indexOptions.DropExisting)
         {
             if (replaced is null && replacedConstraint is null)

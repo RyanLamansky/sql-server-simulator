@@ -256,6 +256,7 @@ An error that ends a procedure's or dynamic SQL's batch — a compile error, or 
 
 - **The walk stops at a deferred DML target** (`INSERT INTO <missing>`), since the recovery scan can't tell where that statement ends; real keeps compiling the statements after it, so an error past one surfaces here only when its statement runs — after the statements ahead of it have run.
   A syntax error (Msg 102 / 156) surfacing that way at least ends the batch (`EndsBatch`), as real's refusal would have, rather than the dispatch resuming inside the broken statement's tail.
+  One visible instance: a batch that creates a table, inserts into it and then creates a vector index on it is Msg 343 on real before anything runs when `PREVIEW_FEATURES` was off as the batch began (setting it inside the batch doesn't count), where the simulator runs the batch (probed 2026-09-29 against SQL Server 2025).
 - **A procedure body compiles only at `CREATE`**; real compiles it again as a whole at its first execution, so a body statement naming a table created after the procedure fails there before the body's first statement runs.
 - **An `INSERT … EXEC` body stops at its first error**, since the statement collects the body's rows rather than forwarding its outcomes; real runs that body on too, inserting what its later statements return (probed 2026-09-24).
 

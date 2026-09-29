@@ -955,6 +955,8 @@ partial class Simulation
                     throw SimulatedSqlException.XmlIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
                 if (FindJsonIndex(context, compiled, indexName) is not null)
                     throw SimulatedSqlException.JsonIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
+                if (FindVectorIndex(context, compiled, indexName) is not null)
+                    throw SimulatedSqlException.VectorIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
             }
             return;
         }
@@ -1013,9 +1015,28 @@ partial class Simulation
             return;
         }
 
+        // A vector index likewise (Msg 3766 state 1, probed 2026-09-29
+        // against SQL Server 2025); dropping one makes the table writable
+        // again.
+        if (FindVectorIndex(context, table, indexName) is { } vectorIndex)
+        {
+            if (oldSyntax)
+                throw SimulatedSqlException.VectorIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
+            table.OwningDatabase?.RejectWriteWhenReadOnly();
+            _ = table.VectorIndexes.Remove(vectorIndex);
+            RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
+            return;
+        }
+
         if (ifExists)
             return;
         throw SimulatedSqlException.CannotDropIndexDoesNotExist(tableName.ToString(), indexName, state: 7);
+    }
+
+    private static Schemas.VectorIndex? FindVectorIndex(ParserContext context, HeapTable table, string indexName)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        return table.VectorIndexes.Find(candidate => collation.Equals(candidate.Name, indexName));
     }
 
     /// <summary>

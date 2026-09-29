@@ -62,32 +62,33 @@ internal static class VectorArguments
 
     /// <summary>
     /// Real's distance kernel, reverse-engineered from cancellation probes and
-    /// fitted to probed results (probed 2026-09-26 against SQL Server 2025):
-    /// eight float32 lanes with fused multiply-adds, <paramref name="accumulators"/>
-    /// sets of them taking successive blocks of eight in turn and then combined
-    /// pairwise, the remaining whole blocks of eight added to the combined
-    /// lanes, and then one of two finishes. The block finish adds the last
-    /// partial block into the low lanes and halves the lanes into each other
-    /// (lane i with lane i + 4, then + 2, then + 1); the scalar finish, which
-    /// only the cosine's cross product takes, sums the lanes in order and
-    /// multiply-adds the leftover elements onto that. The term is
-    /// <c>x·y</c>, or <c>(x − y)²</c> with the difference rounded first.
+    /// fitted to probed results (probed 2026-09-26 and 2026-09-29 against SQL
+    /// Server 2025): eight float32 lanes with fused multiply-adds, a main loop
+    /// taking <paramref name="strideBlocks"/> blocks of eight at a time with
+    /// block k going to accumulator set k mod <paramref name="sets"/>, the sets
+    /// then combined pairwise, the remaining whole blocks of eight added to the
+    /// combined lanes, the last partial block into the low lanes, and the
+    /// lanes halved into each other (lane i with lane i + 4, then + 2, then
+    /// + 1). The term is <c>x·y</c>, or <c>(x − y)²</c> with the difference
+    /// rounded first.
     /// </summary>
-    public static float FusedSum(float[] x, float[] y, int accumulators, bool difference, bool scalarFinish = false)
+    public static float FusedSum(float[] x, float[] y, int strideBlocks, int sets, bool difference)
     {
         const int Lanes = 8;
-        System.Diagnostics.Debug.Assert(accumulators is 1 or 2 or 4, "The accumulator sets combine pairwise.");
-        Span<float> sets = stackalloc float[Lanes * 4];
-        var lanes = sets[..(Lanes * accumulators)];
+        System.Diagnostics.Debug.Assert(sets is 1 or 2 or 4 && strideBlocks % sets == 0, "The accumulator sets combine pairwise.");
+        Span<float> lanes = stackalloc float[Lanes * 4];
         lanes.Clear();
         var n = x.Length;
         var i = 0;
-        for (; i + (Lanes * accumulators) <= n; i += Lanes * accumulators)
+        for (; i + (Lanes * strideBlocks) <= n; i += Lanes * strideBlocks)
         {
-            for (var j = 0; j < Lanes * accumulators; j++)
-                lanes[j] = Term(x[i + j], y[i + j], lanes[j], difference);
+            for (var j = 0; j < Lanes * strideBlocks; j++)
+            {
+                var slot = (j / Lanes % sets * Lanes) + (j % Lanes);
+                lanes[slot] = Term(x[i + j], y[i + j], lanes[slot], difference);
+            }
         }
-        for (var width = accumulators; width > 1; width /= 2)
+        for (var width = sets; width > 1; width /= 2)
         {
             for (var j = 0; j < Lanes * (width / 2); j++)
             {
@@ -100,15 +101,6 @@ internal static class VectorArguments
         {
             for (var j = 0; j < Lanes; j++)
                 acc[j] = Term(x[i + j], y[i + j], acc[j], difference);
-        }
-        if (scalarFinish)
-        {
-            var sum = 0f;
-            foreach (var lane in acc)
-                sum += lane;
-            for (; i < n; i++)
-                sum = Term(x[i], y[i], sum, difference);
-            return sum;
         }
         for (var j = 0; i + j < n; j++)
             acc[j] = Term(x[i + j], y[i + j], acc[j], difference);
@@ -169,7 +161,7 @@ internal sealed class VectorDistance : Expression
         VectorArguments.RequireName(this.metric, batch, resolveColumnType, "vector_distance", 1);
         var a = VectorArguments.RequireVector(this.first, batch, resolveColumnType, "vector_distance", 2);
         var b = VectorArguments.RequireVector(this.second, batch, resolveColumnType, "vector_distance", 3);
-        return a is not null && b is not null && a != b
+        return a is not null && b is not null && a.dimensions != b.dimensions
             ? throw SimulatedSqlException.VectorDimensionsMismatch(a.dimensions, b.dimensions, 3)
             : SqlType.Float;
     }
@@ -182,39 +174,51 @@ internal sealed class VectorDistance : Expression
         if (metric.IsNull || first.IsNull || second.IsNull)
             return SqlValue.Null(SqlType.Float);
         var name = metric.AsString;
+        if (VectorSqlType.IsFloat16Bytes(first.AsVectorBytes) != VectorSqlType.IsFloat16Bytes(second.AsVectorBytes))
+            throw SimulatedSqlException.VectorDistanceBaseTypesDiffer();
         var a = VectorSqlType.Elements(first.AsVectorBytes);
         var b = VectorSqlType.Elements(second.AsVectorBytes);
         if (a.Length != b.Length)
             throw SimulatedSqlException.VectorDimensionsMismatch(a.Length, b.Length, 3);
-        var distance = VectorArguments.Choice(name, Metrics) switch
-        {
-            0 => Cosine(a, b),
-            1 => -Dot(a, b),
-            2 => Euclidean(a, b),
-            _ => throw SimulatedSqlException.VectorDistanceMetricNotSupported(name),
-        };
+        var metricIndex = VectorArguments.Choice(name, Metrics);
+        if (metricIndex < 0)
+            throw SimulatedSqlException.VectorDistanceMetricNotSupported(name);
+        var distance = Compute(metricIndex, a, b);
         return float.IsInfinity(distance) ? throw SimulatedSqlException.ArithmeticOverflow("float") : SqlValue.FromDouble(distance);
     }
 
-    private static float Dot(float[] a, float[] b) => VectorArguments.FusedSum(a, b, accumulators: 4, difference: false);
+    /// <summary>
+    /// The distance by the metric at <paramref name="metricIndex"/> —
+    /// <c>cosine</c>, <c>dot</c>, <c>euclidean</c> in that order — which
+    /// <c>VECTOR_SEARCH</c> computes exactly as this function does.
+    /// </summary>
+    internal static float Compute(int metricIndex, float[] a, float[] b) => metricIndex switch
+    {
+        0 => Cosine(a, b),
+        1 => -Dot(a, b),
+        _ => Euclidean(a, b),
+    };
 
-    private static float Euclidean(float[] a, float[] b) => MathF.Sqrt(VectorArguments.FusedSum(a, b, accumulators: 4, difference: true));
+    private static float Dot(float[] a, float[] b) => VectorArguments.FusedSum(a, b, strideBlocks: 4, sets: 4, difference: false);
+
+    private static float Euclidean(float[] a, float[] b) => MathF.Sqrt(VectorArguments.FusedSum(a, b, strideBlocks: 4, sets: 4, difference: true));
 
     /// <summary>
-    /// One less the similarity, whose cross product real sums with two
-    /// accumulator sets and the scalar finish, and whose norms as the dot
-    /// kernel does. The
-    /// similarity is clamped to [-1, 1] with an undefined one (both norms
-    /// overflowing) read as 1, which is how real answers 0 for two vectors
-    /// whose norms overflow; a zero vector is at distance 1 from anything.
+    /// One less the similarity, whose cross product and two norms real sums
+    /// in one loop of four blocks alternating between two accumulator sets —
+    /// fitted to 700 random pairs of 1 to 1998 dimensions, every one of which
+    /// matches (probed 2026-09-29 against SQL Server 2025). The similarity is
+    /// clamped to [-1, 1] with an undefined one (both norms overflowing) read
+    /// as 1, which is how real answers 0 for two vectors whose norms overflow;
+    /// a zero vector is at distance 1 from anything.
     /// </summary>
     private static float Cosine(float[] a, float[] b)
     {
-        var aa = VectorArguments.FusedSum(a, a, accumulators: 4, difference: false);
-        var bb = VectorArguments.FusedSum(b, b, accumulators: 4, difference: false);
+        var aa = VectorArguments.FusedSum(a, a, strideBlocks: 4, sets: 2, difference: false);
+        var bb = VectorArguments.FusedSum(b, b, strideBlocks: 4, sets: 2, difference: false);
         if (aa == 0 || bb == 0)
             return 1;
-        var similarity = VectorArguments.FusedSum(a, b, accumulators: 2, difference: false, scalarFinish: true) / (MathF.Sqrt(aa) * MathF.Sqrt(bb));
+        var similarity = VectorArguments.FusedSum(a, b, strideBlocks: 4, sets: 2, difference: false) / (MathF.Sqrt(aa) * MathF.Sqrt(bb));
         similarity = float.IsNaN(similarity) ? 1 : Math.Clamp(similarity, -1f, 1f);
         return 1 - similarity;
     }
@@ -253,6 +257,10 @@ internal sealed class VectorNorm : Expression
     {
         var type = VectorArguments.RequireVector(this.vector, batch, resolveColumnType, this.FunctionName, 1);
         VectorArguments.RequireName(this.norm, batch, resolveColumnType, this.FunctionName, 2);
+        // Neither function takes a float16 vector, which real settles
+        // compiling (probed 2026-09-29 against SQL Server 2025).
+        if (type is { IsFloat16: true })
+            throw SimulatedSqlException.VectorNormFloat16(this.FunctionName);
         // A bare NULL normalizes to a NULL vector; the simulator has to give
         // it some dimension count, and gives it one.
         return !this.normalize ? SqlType.Float : type ?? VectorSqlType.Get(1);
@@ -363,7 +371,7 @@ internal sealed class VectorProperty : Expression
         return value.IsNull || property.IsNull ? SqlValue.Null(SqlType.SqlVariant)
             : VectorArguments.Choice(property.AsString, Properties) switch
             {
-                0 => SqlValue.FromVariant(SqlValue.FromNVarchar(NVarcharSqlType.Get(128, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault), "float32")),
+                0 => SqlValue.FromVariant(SqlValue.FromNVarchar(NVarcharSqlType.Get(128, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault), ((VectorSqlType)value.Type).BaseTypeName)),
                 1 => SqlValue.FromVariant(SqlValue.FromInt16((short)((VectorSqlType)value.Type).dimensions)),
                 _ => SqlValue.Null(SqlType.SqlVariant),
             };

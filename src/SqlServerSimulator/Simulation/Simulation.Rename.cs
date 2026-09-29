@@ -368,8 +368,23 @@ partial class Simulation
             if (collation.Equals(jsonIndex.Name, indexName))
                 jsonTarget = jsonIndex;
         }
-        if (target is null && jsonTarget is null)
+        Schemas.VectorIndex? vectorTarget = null;
+        foreach (var vectorIndex in table.VectorIndexes)
+        {
+            if (collation.Equals(vectorIndex.Name, newName))
+                throw SimulatedSqlException.RenameDuplicateName(newName, "INDEX");
+            if (collation.Equals(vectorIndex.Name, indexName))
+                vectorTarget = vectorIndex;
+        }
+        if (target is null && jsonTarget is null && vectorTarget is null)
             throw SimulatedSqlException.RenameAmbiguousOrWrongType("INDEX");
+        // A vector index keeps its name (probed 2026-09-29 against SQL Server
+        // 2025).
+        if (vectorTarget is not null)
+        {
+            QueueRenameCaution(batch);
+            throw SimulatedSqlException.VectorIndexRename();
+        }
 
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);

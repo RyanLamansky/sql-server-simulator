@@ -277,7 +277,7 @@ Blocked on a larger unmodeled parent feature (shipping a function here implies t
   A broad surface — each proc is its own result-shape contract over the catalog views.
   Ships piecemeal by popularity, not as a bundle.
 
-- **SQL Server 2025's vector search** — vector indexes (`CREATE VECTOR INDEX`), `VECTOR_SEARCH`, the `float16` base type, and the binary vector TDS type a vector-aware client negotiates (the `vector` type and its four functions ship — see [`vector.md`](vector.md)).
+- **SQL Server 2025's vector residue** — the binary vector TDS type a vector-aware client negotiates, and the smaller gaps [`vector.md`](vector.md#not-modeled-yet) lists (the type, its functions, the `float16` base type, vector indexes and `VECTOR_SEARCH` ship; the search is exact where real's DiskANN approximates).
 - **SQL Server 2025's `json` residue** — the native json TDS type a json-aware client negotiates, a JSON index's internal table (`sys.objects` / `sys.internal_tables`), and the smaller gaps [`json-type.md`](json-type.md#not-modeled-yet) lists (the type, `JSON_CONTAINS`, the advanced array accessors, `JSON_VALUE … RETURNING`, the `modify` method and `CREATE JSON INDEX` ship).
 
 Low priority / niche — simulatable (as placeholder constants or a small model) but rarely hit, so not worth attention yet:

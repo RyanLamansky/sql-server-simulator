@@ -103,6 +103,7 @@ partial class Simulation
             RejectDisabledClusteredIndex(leadingTable);
             RejectIncorrectSetOptionsForWrite(leadingTable, context.Batch, "DELETE");
             _ = context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
+            context.Batch.RejectReferentialDeleteIntoVectorIndex(leadingTable);
         }
 
         // OUTPUT requires a known target. INSERTED isn't a valid qualifier
@@ -440,6 +441,7 @@ partial class Simulation
         // mutation site below.
         RejectIncorrectSetOptionsForWrite(table, context.Batch, "DELETE");
         _ = context.Batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
+        context.Batch.RejectReferentialDeleteIntoVectorIndex(table);
 
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })

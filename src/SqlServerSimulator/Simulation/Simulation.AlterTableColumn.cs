@@ -608,6 +608,8 @@ partial class Simulation
         }
         foreach (var jsonIndex in table.JsonIndexes)
             jsonIndex.ColumnOrdinal = oldFullToNew[jsonIndex.ColumnOrdinal];
+        foreach (var vectorIndex in table.VectorIndexes)
+            vectorIndex.ColumnOrdinal = oldFullToNew[vectorIndex.ColumnOrdinal];
         foreach (var fk in table.OutgoingForeignKeys)
         {
             for (var i = 0; i < fk.ChildColumnOrdinals.Length; i++)
@@ -814,6 +816,8 @@ partial class Simulation
         // (probed 2026-09-27 against SQL Server 2025).
         if (table.JsonIndexes.Find(index => index.ColumnOrdinal == ordinal) is { } jsonIndex)
             throw SimulatedSqlException.ColumnHasDependencies("ALTER COLUMN", columnName, [(jsonIndex.Name, SimulatedSqlException.AlterColumnBlockerKind.Index)]);
+        if (table.VectorIndexes.Find(index => index.ColumnOrdinal == ordinal) is { } vectorIndex)
+            throw SimulatedSqlException.ColumnHasDependencies("ALTER COLUMN", columnName, [(vectorIndex.Name, SimulatedSqlException.AlterColumnBlockerKind.Index)]);
         if ((existingCol.Type is VectorSqlType or JsonSqlType || newType is VectorSqlType or JsonSqlType)
             && SqlType.PairError(TypePairOperation.Assign, existingCol.Type, newType, "") is { } vectorError)
         {
@@ -1005,6 +1009,11 @@ partial class Simulation
         {
             if (jsonIndex.ColumnOrdinal == ordinal)
                 blockers.Add((jsonIndex.Name, SimulatedSqlException.AlterColumnBlockerKind.Index, 5, int.MaxValue));
+        }
+        foreach (var vectorIndex in table.VectorIndexes)
+        {
+            if (vectorIndex.ColumnOrdinal == ordinal)
+                blockers.Add((vectorIndex.Name, SimulatedSqlException.AlterColumnBlockerKind.Index, 5, int.MaxValue));
         }
         foreach (var fk in table.OutgoingForeignKeys)
         {

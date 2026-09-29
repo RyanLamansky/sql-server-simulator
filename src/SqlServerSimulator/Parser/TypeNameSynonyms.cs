@@ -50,16 +50,19 @@ internal static class TypeNameSynonyms
     /// the cursor on it: an integer (a <c>decimal</c>'s scale), or for
     /// <c>vector</c> an unquoted base-type name, which reads as
     /// <see cref="Storage.VectorSqlType.Float32BaseType"/> when it is
-    /// <c>float32</c> and raises real's Msg 195 when it names anything else.
+    /// <c>float32</c>, as <see cref="Storage.VectorSqlType.Float16BaseType"/>
+    /// when it is <c>float16</c> and the database's <c>PREVIEW_FEATURES</c>
+    /// is on, and raises real's Msg 195 when it names anything else.
     /// A name after any other type is real's Msg 102 near the type's name.
     /// </summary>
     internal static int ReadSecondTypeArgument(ParserContext context, Name typeName) => context.Token switch
     {
         Numeric { Value: { IsNull: false } scale } => scale.AsInt32,
         UnquotedString when !string.Equals(typeName.Value, "vector", StringComparison.OrdinalIgnoreCase) => throw SimulatedSqlException.SyntaxErrorNear(typeName),
-        UnquotedString baseType => string.Equals(baseType.Value, "float32", StringComparison.OrdinalIgnoreCase)
-            ? Storage.VectorSqlType.Float32BaseType
-            : throw SimulatedSqlException.VectorBaseTypeNotRecognized(baseType.Value),
+        UnquotedString baseType when string.Equals(baseType.Value, "float32", StringComparison.OrdinalIgnoreCase) => Storage.VectorSqlType.Float32BaseType,
+        UnquotedString baseType when string.Equals(baseType.Value, "float16", StringComparison.OrdinalIgnoreCase)
+            && context.Batch.CurrentDatabase.ScopedConfiguration.PreviewFeatures => Storage.VectorSqlType.Float16BaseType,
+        UnquotedString baseType => throw SimulatedSqlException.VectorBaseTypeNotRecognized(baseType.Value),
         _ => throw SimulatedSqlException.SyntaxErrorNear(context),
     };
 

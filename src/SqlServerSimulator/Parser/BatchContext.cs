@@ -277,6 +277,39 @@ internal sealed class BatchContext
     public bool CompilingForRun;
 
     /// <summary>
+    /// Set when the compile walk (<see cref="CompilingForRun"/>) meets a
+    /// <c>CREATE</c>, <c>ALTER</c> or <c>DROP</c>: real then optimizes each
+    /// statement only as it runs, so a refusal its optimizer raises —
+    /// <see cref="DeferredOptimizerError"/> — waits for its statement.
+    /// </summary>
+    public bool WalkMetDdl;
+
+    /// <summary>
+    /// The first refusal the compile walk met that real raises optimizing a
+    /// statement rather than binding it (a write to a vector-indexed table),
+    /// which ends the batch before it runs unless <see cref="WalkMetDdl"/>.
+    /// </summary>
+    public SimulatedSqlException? DeferredOptimizerError;
+
+    /// <summary>
+    /// Raises a write refusal settled while optimizing the writing statement:
+    /// when it runs, or — recorded for the end of the walk — while the batch
+    /// compiles; a statement skipped as it runs, or a module body binding at
+    /// <c>CREATE</c>, raises nothing (probed 2026-09-29 against SQL Server
+    /// 2025).
+    /// </summary>
+    private void RejectOptimizedWrite(SimulatedSqlException refusal)
+    {
+        if (!this.IsSkipping)
+            throw refusal;
+        if (this.CompilingForRun && this.DeferredOptimizerError is null)
+        {
+            refusal.ResolveDiagnostics(this.CurrentStatement.StartLine, this.LineOffset, this.ErrorProcedureName);
+            this.DeferredOptimizerError = refusal;
+        }
+    }
+
+    /// <summary>
     /// Set on the batch a scalar function's or multi-statement TVF's body runs
     /// in when called: like a procedure's, it is as far as a batch-aborting
     /// name-resolution error reaches, so the calling statement fails and its
@@ -1139,6 +1172,21 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// Msg 42231 state 3: a <c>DELETE</c> whose foreign keys would cascade,
+    /// or set NULL or a default, into a table that carries a vector index —
+    /// settled compiling the statement, as its own target is (probed
+    /// 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    public void RejectReferentialDeleteIntoVectorIndex(HeapTable table)
+    {
+        foreach (var foreignKey in table.IncomingForeignKeys)
+        {
+            if (foreignKey.DeleteAction != ReferentialAction.NoAction && foreignKey.ChildTable.VectorIndexes.Count > 0)
+                this.RejectOptimizedWrite(SimulatedSqlException.VectorIndexedTableIsReadOnly(foreignKey.ChildTable.Name, state: 3));
+        }
+    }
+
+    /// <summary>
     /// Phase-1b entry point: acquire the appropriate table-level data lock
     /// (IS / IX / SIX / S / U / X) on <paramref name="table"/> and return a
     /// <see cref="DataLockPlan"/> describing what per-row lock the caller
@@ -1193,6 +1241,12 @@ internal sealed class BatchContext
     /// </remarks>
     public DataLockPlan AcquireDataLockIfApplicable(HeapTable table, Selection.TableHintInfo hints, bool isWrite)
     {
+        // A vector index makes its table read-only, which real settles
+        // optimizing the writing statement — an un-taken branch included
+        // when the batch compiles before it runs — and which ends the batch.
+        if (isWrite && table.VectorIndexes.Count > 0)
+            this.RejectOptimizedWrite(SimulatedSqlException.VectorIndexedTableIsReadOnly(table.Name));
+
         // A skipped statement — an un-taken branch, or a batch compiling before
         // it runs — touches no rows, and a transaction-scoped lock taken for it
         // would outlive it.

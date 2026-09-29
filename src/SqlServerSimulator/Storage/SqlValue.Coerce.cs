@@ -2216,10 +2216,12 @@ internal readonly partial struct SqlValue
         {
             return this.Type switch
             {
+                VectorSqlType sourceVector when sourceVector.IsFloat16 != targetVector.IsFloat16 =>
+                    throw SimulatedSqlException.VectorBaseTypeConversion(sourceVector.BaseTypeName, targetVector.BaseTypeName),
                 VectorSqlType sourceVector => sourceVector.dimensions == targetVector.dimensions
                     ? FromVector(targetVector, this.AsVectorBytes)
                     : throw SimulatedSqlException.VectorDimensionsMismatch(sourceVector.dimensions, targetVector.dimensions, 1),
-                _ when SqlType.IsCollatedString(this.Type) && !this.Type.IsLegacyLob => FromVector(targetVector, VectorSqlType.Parse(this.AsString, targetVector.dimensions)),
+                _ when SqlType.IsCollatedString(this.Type) && !this.Type.IsLegacyLob => FromVector(targetVector, VectorSqlType.Parse(this.AsString, targetVector.dimensions, float16: targetVector.IsFloat16)),
                 _ => throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target),
             };
         }
@@ -2262,7 +2264,7 @@ internal readonly partial struct SqlValue
         {
             return text.StartsWith('{')
                 ? throw SimulatedSqlException.VectorJsonInvalid("Key-Value Not Supported", 20)
-                : FromVector(vector, VectorSqlType.Parse(text, vector.dimensions, mismatchState: 2));
+                : FromVector(vector, VectorSqlType.Parse(text, vector.dimensions, mismatchState: 2, float16: vector.IsFloat16));
         }
         if (!SqlType.IsCollatedString(target) || target.IsLegacyLob)
             throw SimulatedSqlException.ExplicitConversionNotAllowed(this.Type, target);

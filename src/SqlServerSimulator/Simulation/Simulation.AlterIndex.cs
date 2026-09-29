@@ -225,6 +225,11 @@ partial class Simulation
                 }
             }
 
+            // Real takes no ALTER INDEX form on a vector index (probed
+            // 2026-09-29 against SQL Server 2025).
+            if (table.VectorIndexes.Exists(vectorIndex => collation.Equals(vectorIndex.Name, indexName)))
+                throw SimulatedSqlException.VectorIndexAlterUnsupported();
+
             throw SimulatedSqlException.CannotFindIndex(indexName!);
         }
 
@@ -233,6 +238,10 @@ partial class Simulation
         // index at all (probe-confirmed on a bare heap).
         if (form is AlterIndexForm.Resume or AlterIndexForm.Pause or AlterIndexForm.Abort)
             throw SimulatedSqlException.NoPendingResumableIndexOperationForAll(FormName(form), table.Name);
+
+        // ALTER INDEX ALL reaches a table's vector index too, and refuses it.
+        if (table.VectorIndexes.Count > 0)
+            throw SimulatedSqlException.VectorIndexAlterUnsupported();
         if (namedPartition)
         {
             // Real names the first index the statement would have touched —

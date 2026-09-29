@@ -367,6 +367,32 @@ internal static partial class BuiltInResources
             new("auto_created", SqlType.Bit, null, true),
             new("optimize_for_array_search", SqlType.Bit, null, true),
         ], EnumerateSysJsonIndexes);
+        Sys("vector_indexes",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("index_id", SqlType.Int32, null, false),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("is_unique", SqlType.Bit, null, true),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("ignore_dup_key", SqlType.Bit, null, true),
+            new("is_primary_key", SqlType.Bit, null, true),
+            new("is_unique_constraint", SqlType.Bit, null, true),
+            new("fill_factor", SqlType.TinyInt, null, false),
+            new("is_padded", SqlType.Bit, null, true),
+            new("is_disabled", SqlType.Bit, null, true),
+            new("is_hypothetical", SqlType.Bit, null, true),
+            new("is_ignored_in_optimization", SqlType.Bit, null, true),
+            new("allow_row_locks", SqlType.Bit, null, true),
+            new("allow_page_locks", SqlType.Bit, null, true),
+            new("has_filter", SqlType.Bit, null, false),
+            new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("auto_created", SqlType.Bit, null, true),
+            new("vector_index_type", nvarchar60Catalog, 60, true),
+            new("distance_metric", nvarchar60Catalog, 60, true),
+            new("build_parameters", VectorIndexBuildParametersType, 4000, true),
+        ], EnumerateSysVectorIndexes);
         Sys("index_resumable_operations",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -434,32 +460,6 @@ internal static partial class BuiltInResources
             new("is_default_uri", SqlType.Bit, null, true),
             new("uri", SqlType.NVarchar, 4000, true),
             new("prefix", SqlType.SystemName, 128, true),
-        ], static (_, _) => EmptyCatalogRows);
-        Sys("vector_indexes",
-        [
-            new("object_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, true),
-            new("index_id", SqlType.Int32, null, false),
-            new("type", SqlType.TinyInt, null, false),
-            new("type_desc", nvarchar60Catalog, 60, true),
-            new("is_unique", SqlType.Bit, null, true),
-            new("data_space_id", SqlType.Int32, null, false),
-            new("ignore_dup_key", SqlType.Bit, null, true),
-            new("is_primary_key", SqlType.Bit, null, true),
-            new("is_unique_constraint", SqlType.Bit, null, true),
-            new("fill_factor", SqlType.TinyInt, null, false),
-            new("is_padded", SqlType.Bit, null, true),
-            new("is_disabled", SqlType.Bit, null, true),
-            new("is_hypothetical", SqlType.Bit, null, true),
-            new("is_ignored_in_optimization", SqlType.Bit, null, true),
-            new("allow_row_locks", SqlType.Bit, null, true),
-            new("allow_page_locks", SqlType.Bit, null, true),
-            new("has_filter", SqlType.Bit, null, false),
-            new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
-            new("auto_created", SqlType.Bit, null, true),
-            new("vector_index_type", nvarchar60Catalog, 60, true),
-            new("distance_metric", nvarchar60Catalog, 60, true),
-            new("build_parameters", NVarcharSqlType.Get(4000, Collation.Get("Latin1_General_100_BIN2_UTF8"), Coercibility.Implicit), 4000, true),
         ], static (_, _) => EmptyCatalogRows);
 
         // The partitioning catalog: one row per partition function, scheme,
@@ -684,6 +684,8 @@ internal static partial class BuiltInResources
                     yield return AuxiliaryRow(tableObjectId, spatialIndex.Name, spatialIndex.IndexId, 4, spatialDesc);
                 foreach (var jsonIndex in table.JsonIndexes.OrderBy(index => index.IndexId))
                     yield return JsonIndexRow(tableObjectId, jsonIndex, trueBit, falseBit);
+                foreach (var vectorIndex in table.VectorIndexes.OrderBy(index => index.IndexId))
+                    yield return VectorIndexRow(tableObjectId, vectorIndex, trueBit, falseBit, vectorIndexesShape: false);
             }
             // Indexed views: one row per index the view carries (no HEAP row —
             // an ordinary view contributes nothing, probe-confirmed). The
@@ -1578,6 +1580,23 @@ internal static partial class BuiltInResources
                         zeroByte,
                     ];
                 }
+                // So does a vector index (probed 2026-09-29 against SQL Server
+                // 2025).
+                foreach (var vectorIndex in table.VectorIndexes)
+                {
+                    yield return [
+                        tableObjectId,
+                        SqlValue.FromInt32(vectorIndex.IndexId),
+                        SqlValue.FromInt32(1),
+                        SqlValue.FromInt32(FullOrdinalToColumnId(table, vectorIndex.ColumnOrdinal)),
+                        zeroByte,
+                        zeroByte,
+                        falseBit,
+                        falseBit,
+                        zeroByte,
+                        zeroByte,
+                    ];
+                }
                 // A spatial index lists its one column the same way (probed
                 // 2026-09-26 against SQL Server 2025).
                 foreach (var spatialIndex in table.SpatialIndexes)
@@ -1858,6 +1877,72 @@ internal static partial class BuiltInResources
                 var objectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var index in table.JsonIndexes.OrderBy(static index => index.IndexId))
                     yield return JsonIndexRow(objectId, index, trueBit, falseBit, jsonIndexesShape: true);
+            }
+        }
+    }
+
+    /// <summary><c>sys.vector_indexes.build_parameters</c>: an <c>nvarchar(4000)</c> under a UTF-8 binary collation, as real declares it.</summary>
+    private static readonly NVarcharSqlType VectorIndexBuildParametersType = NVarcharSqlType.Get(4000, Collation.Get("Latin1_General_100_BIN2_UTF8"), Coercibility.Implicit);
+
+    /// <summary>
+    /// A vector index's row in the shape <c>sys.indexes</c> and
+    /// <c>sys.vector_indexes</c> share up to <c>filter_definition</c>: type 8
+    /// <c>VECTOR</c> with every option at its default (probed 2026-09-29
+    /// against SQL Server 2025). <c>sys.vector_indexes</c> then carries the
+    /// algorithm, the metric and the build parameters.
+    /// </summary>
+    private static SqlValue[] VectorIndexRow(SqlValue objectId, VectorIndex index, SqlValue trueBit, SqlValue falseBit, bool vectorIndexesShape)
+    {
+        var row = new List<SqlValue>
+        {
+            objectId,
+            SqlValue.FromSystemName(index.Name),
+            SqlValue.FromInt32(index.IndexId),
+            SqlValue.FromByte(8),
+            SqlValue.FromNVarchar("VECTOR"),
+            falseBit, // is_unique
+            SqlValue.FromInt32(1), // data_space_id
+            falseBit, // ignore_dup_key
+            falseBit, // is_primary_key
+            falseBit, // is_unique_constraint
+            SqlValue.FromByte(0), // fill_factor
+            falseBit, // is_padded
+            falseBit, // is_disabled
+            falseBit, // is_hypothetical
+            falseBit, // is_ignored_in_optimization
+            trueBit, // allow_row_locks
+            trueBit, // allow_page_locks
+            falseBit, // has_filter
+            SqlValue.Null(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)),
+        };
+        if (vectorIndexesShape)
+        {
+            row.Add(falseBit); // auto_created
+            row.Add(SqlValue.FromNVarchar("DiskANN"));
+            row.Add(SqlValue.FromNVarchar(index.Metric));
+            row.Add(SqlValue.FromNVarchar(VectorIndexBuildParametersType, index.BuildParameters));
+        }
+        else
+        {
+            row.Add(SqlValue.Null(SqlType.Int32)); // compression_delay
+            row.Add(falseBit); // suppress_dup_key_messages
+            row.Add(falseBit); // auto_created
+            row.Add(falseBit); // optimize_for_sequential_key
+        }
+        return [.. row];
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateSysVectorIndexes(Parser.BatchContext batch, Database database)
+    {
+        var trueBit = SqlValue.FromBoolean(true);
+        var falseBit = SqlValue.FromBoolean(false);
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var table in CatalogTables(schema, batch))
+            {
+                var objectId = SqlValue.FromInt32(table.ObjectId);
+                foreach (var index in table.VectorIndexes.OrderBy(static index => index.IndexId))
+                    yield return VectorIndexRow(objectId, index, trueBit, falseBit, vectorIndexesShape: true);
             }
         }
     }
