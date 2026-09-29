@@ -768,7 +768,7 @@ internal static partial class BuiltInResources
         {
             rows.Add((login.PrincipalId, [
                 SqlValue.FromSystemName(login.Name), SqlValue.FromInt32(login.PrincipalId), SqlValue.FromVarbinary(DeriveLoginSid(login.Name)),
-                loginType, sqlLogin, falseBit, SqlValue.FromDateTime(login.CreateDate), SqlValue.FromDateTime(login.PasswordLastSetTime),
+                loginType, sqlLogin, login.IsDisabled ? trueBit : falseBit, SqlValue.FromDateTime(login.CreateDate), SqlValue.FromDateTime(login.PasswordLastSetTime),
                 master, usEnglish, nullCredentialId, nullOwningId, falseBit, zeroTenant,
             ]));
         }
@@ -809,15 +809,55 @@ internal static partial class BuiltInResources
         return id => simulation.CanViewServerPrincipal(login, id);
     }
 
-    /// <summary>Projects <c>sys.server_role_members</c> over <see cref="Simulation.ServerRoleMembers"/>.</summary>
+    /// <summary>
+    /// The <c>(role, member name, member sid)</c> triples
+    /// <c>sp_helpsrvrolemember</c> reports — its join of
+    /// <c>sys.server_role_members</c> to <c>sys.server_principals</c>, so a
+    /// restricted session sees exactly what those two views show it — for the
+    /// role <paramref name="onlyRoleId"/>, or every fixed role when null, in
+    /// role then member id order.
+    /// </summary>
+    internal static List<(string Role, string Member, byte[] Sid)> ServerRoleMemberRows(Parser.BatchContext batch, int? onlyRoleId)
+    {
+        var principals = new Dictionary<int, (string Name, byte[] Sid)>();
+        foreach (var row in EnumerateSysServerPrincipals(batch, batch.CurrentDatabase))
+            principals[row[1].AsInt32] = (row[0].AsString, row[2].AsBytes);
+        var memberships = new List<(int RoleId, int MemberId)>();
+        foreach (var row in EnumerateSysServerRoleMembers(batch, batch.CurrentDatabase))
+        {
+            var roleId = row[0].AsInt32;
+            if (onlyRoleId is { } only ? roleId == only : roleId is >= Simulation.SysadminRoleId and <= Simulation.FixedServerPrincipalIdMax)
+                memberships.Add((roleId, row[1].AsInt32));
+        }
+        memberships.Sort();
+        var result = new List<(string, string, byte[])>();
+        foreach (var (roleId, memberId) in memberships)
+        {
+            if (principals.TryGetValue(memberId, out var member) && principals.TryGetValue(roleId, out var role))
+                result.Add((role.Name, member.Name, member.Sid));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Projects <c>sys.server_role_members</c> over
+    /// <see cref="Simulation.ServerRoleMembers"/>. A restricted session sees
+    /// every fixed role's memberships, whoever the member, and a custom role's
+    /// only where it can see both the role and the member (probed 2026-09-29
+    /// against SQL Server 2025).
+    /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysServerRoleMembers(Parser.BatchContext batch, Database database)
     {
         (int RoleId, int MemberId)[] snapshot;
         var members = batch.Connection.Simulation.ServerRoleMembers;
         lock (members)
             snapshot = [.. members];
+        var visibility = ServerPrincipalVisibility(batch);
         foreach (var (roleId, memberId) in snapshot)
-            yield return [SqlValue.FromInt32(roleId), SqlValue.FromInt32(memberId)];
+        {
+            if (visibility is null || roleId <= Simulation.FixedServerPrincipalIdMax || (visibility(roleId) && visibility(memberId)))
+                yield return [SqlValue.FromInt32(roleId), SqlValue.FromInt32(memberId)];
+        }
     }
 
     /// <summary>
@@ -825,7 +865,8 @@ internal static partial class BuiltInResources
     /// <see cref="Simulation.ServerPermissions"/>: class 100 / <c>SERVER</c> /
     /// major 0 for the ON-less and <c>ON SERVER::</c> forms, class 101 /
     /// <c>SERVER_PRINCIPAL</c> / major = the target login's
-    /// <c>principal_id</c> for <c>ON LOGIN::</c>.
+    /// <c>principal_id</c> for <c>ON LOGIN::</c>. A restricted session sees
+    /// only the rows whose grantee it can see.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysServerPermissions(Parser.BatchContext batch, Database database)
     {
@@ -838,8 +879,14 @@ internal static partial class BuiltInResources
         var permissions = batch.Connection.Simulation.ServerPermissions;
         lock (permissions)
             snapshot = [.. permissions];
+        // A restricted session sees the rows granted to a principal it can
+        // see — sa's, public's and its own for a bare login (probed 2026-09-29
+        // against SQL Server 2025).
+        var visibility = ServerPrincipalVisibility(batch);
         foreach (var perm in snapshot)
         {
+            if (visibility is not null && !visibility(perm.GranteeId))
+                continue;
             var isPrincipalClass = perm.Class == PermissionChecker.ClassServerPrincipal;
             yield return [
                 SqlValue.FromByte(perm.Class),
@@ -904,7 +951,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromVarbinary(DeriveLoginSid(login.Name)),
                 loginType,
                 sqlLogin,
-                falseBit,
+                login.IsDisabled ? trueBit : falseBit,
                 SqlValue.FromDateTime(login.CreateDate),
                 SqlValue.FromDateTime(login.PasswordLastSetTime),
                 master,

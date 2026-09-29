@@ -46,9 +46,13 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CheckpointPermissionDenied(string databaseName) =>
         new($"Only the owner of database \"{databaseName}\" or someone with relevant permissions can run the CHECKPOINT statement.", 3505, 14, 4);
 
-    /// <summary>Msg 297: <c>DBCC SQLPERF</c> without <c>VIEW SERVER STATE</c>.</summary>
+    /// <summary>
+    /// Msg 297: <c>DBCC SQLPERF</c> without the server permission its form
+    /// takes. Uncaught it ends the batch and rolls the transaction back, and a
+    /// <c>TRY</c> catches it (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
     internal static SimulatedSqlException UserLacksPermissionForAction() =>
-        new("The user does not have permission to perform this action.", 297, 16, 10);
+        new("The user does not have permission to perform this action.", 297, 16, 10) { AbortsAsUnderXactAbort = true };
 
     /// <summary>Msg 8987: <c>DBCC HELP</c> naming a command with no help text — state 1 for an undocumented command real knows, 2 for a word it doesn't.</summary>
     internal static SimulatedSqlException DbccNoHelpAvailable(string statement, byte state) =>

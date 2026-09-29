@@ -1158,8 +1158,11 @@ internal static partial class BuiltInResources
         // Ordered by database_id via DatabasesWithIds (master = 1, system
         // databases 2-4, user databases from 5) — matching real SQL Server's
         // sys.databases ordering by database_id.
-        foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation))
+        var connection = batch.Connection;
+        foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(connection.Simulation))
         {
+            if (!connection.Simulation.CanSeeDatabase(connection, db))
+                continue;
             var snapshotOn = db.AllowSnapshotIsolation;
             // Service Broker is enabled everywhere but master and model
             // (probe-confirmed: tempdb, msdb and a freshly created user

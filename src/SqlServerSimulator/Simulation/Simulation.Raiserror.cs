@@ -142,12 +142,13 @@ partial class Simulation
         if (batch.IsSkipping)
             return;
 
-        // WITH LOG without sysadmin: probe-confirmed Msg 2778, fires even
+        // WITH LOG without sysadmin or ALTER TRACE: probe-confirmed Msg 2778
+        // (whose wording names only the System Administrator), fired even
         // before severity validation (probe shows it from sev=10). The
         // in-process default's dbo passes, as it does every server-scope gate.
         var security = batch.Connection.Security;
         var isSysadmin = security.EffectiveIsDbo || batch.Connection.Simulation.IsLoginSysadmin(security.Effective.LoginName);
-        if (withLog && !isSysadmin)
+        if (withLog && !isSysadmin && !batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.AlterTrace))
             throw SimulatedSqlException.RaiserrorLogRequiresSysadmin();
 
         // Severity: NULL or negative → 0 (informational, no error).

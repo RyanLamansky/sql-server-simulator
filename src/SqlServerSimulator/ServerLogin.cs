@@ -7,7 +7,7 @@ namespace SqlServerSimulator;
 /// verified by the TDS endpoint at LOGIN7 time. Instances are immutable;
 /// <c>ALTER LOGIN … WITH PASSWORD</c> swaps in a replacement entry.
 /// </summary>
-internal sealed class ServerLogin(int principalId, string name, byte[] passwordHash, DateTime createDate, DateTime passwordLastSetTime)
+internal sealed class ServerLogin(int principalId, string name, byte[] passwordHash, DateTime createDate, DateTime passwordLastSetTime, bool isDisabled = false)
 {
     /// <summary>
     /// Server-level principal id, allocated once at <c>CREATE LOGIN</c> and
@@ -33,4 +33,12 @@ internal sealed class ServerLogin(int principalId, string name, byte[] passwordH
 
     /// <summary>Read back by <c>LOGINPROPERTY(name, 'PasswordLastSetTime')</c>.</summary>
     public readonly DateTime PasswordLastSetTime = passwordLastSetTime;
+
+    /// <summary>
+    /// Set by <c>ALTER LOGIN … DISABLE</c> and cleared by <c>… ENABLE</c>:
+    /// the login's correct password then fails with Msg 18470 at both front
+    /// doors, while <c>EXECUTE AS LOGIN</c> still reaches it (probed 2026-09-29
+    /// against SQL Server 2025). Projected as <c>is_disabled</c>.
+    /// </summary>
+    public readonly bool IsDisabled = isDisabled;
 }

@@ -130,6 +130,14 @@ partial class SimulatedSqlException
         new($"'{loginName}' is not a valid login or you do not have permission.", 15007, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 15412 — <c>sp_helpsrvrolemember</c> /
+    /// <c>sp_helpsrvrole</c> given a name that is no fixed server role (a
+    /// custom server role included, for the first).
+    /// </summary>
+    internal static SimulatedSqlException NotAKnownFixedRole(string name) =>
+        new($"'{name}' is not a known fixed role.", 15412, 11, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 15198 — <c>sp_helpuser</c>'s <c>@name_in_db</c>
     /// argument matching neither a database user nor a database role.
     /// </summary>

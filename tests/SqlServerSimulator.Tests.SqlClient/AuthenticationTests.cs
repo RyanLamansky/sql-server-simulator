@@ -229,4 +229,83 @@ public sealed class AuthenticationTests
         await AssertLoginSucceeds(listener, "app2", "Pass!Two2", TestContext.CancellationToken);
         _ = await AssertLoginFails(listener, "app1", "Pass!Two2", TestContext.CancellationToken);
     }
+
+    // ---- Server-permission gate at login (probed 2026-09-29 against SQL Server 2025) ----
+
+    [TestMethod]
+    public async Task DeniedConnectSql_Fails18456()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = 'S3cret!Pass'; use master; DENY CONNECT SQL TO app");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        _ = await AssertLoginFails(listener, "app", "S3cret!Pass", TestContext.CancellationToken);
+    }
+
+    [TestMethod]
+    public async Task RevokedConnectSql_Fails18456_UntilARoleGrantsIt()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = 'S3cret!Pass'; use master; REVOKE CONNECT SQL FROM app");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        _ = await AssertLoginFails(listener, "app", "S3cret!Pass", TestContext.CancellationToken);
+        Wire.ExecInProc(simulation, "use master; CREATE SERVER ROLE connectors; ALTER SERVER ROLE connectors ADD MEMBER app; GRANT CONNECT SQL TO connectors");
+        await AssertLoginSucceeds(listener, "app", "S3cret!Pass", TestContext.CancellationToken);
+    }
+
+    [TestMethod]
+    public async Task SysadminMember_ConnectsWhateverItIsDenied()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = 'S3cret!Pass'; use master; ALTER SERVER ROLE sysadmin ADD MEMBER app; DENY CONNECT SQL TO app");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await AssertLoginSucceeds(listener, "app", "S3cret!Pass", TestContext.CancellationToken);
+    }
+
+    [TestMethod]
+    public async Task DisabledLogin_Fails18470_OnlyForTheRightPassword()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = 'S3cret!Pass'; ALTER LOGIN app DISABLE");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        var ex = await Assert.ThrowsAsync<SqlException>(async () =>
+        {
+            await using var connection = new SqlConnection(CredentialConnectionString(listener, "app", "S3cret!Pass"));
+            await connection.OpenAsync(TestContext.CancellationToken);
+        });
+        AreEqual(18470, ex.Number);
+        AreEqual(14, ex.Class);
+        AreEqual(1, ex.State);
+        AreEqual("Login failed for user 'app'. Reason: The account is disabled.", ex.Message);
+        _ = await AssertLoginFails(listener, "app", "wrong", TestContext.CancellationToken);
+        Wire.ExecInProc(simulation, "ALTER LOGIN app ENABLE");
+        await AssertLoginSucceeds(listener, "app", "S3cret!Pass", TestContext.CancellationToken);
+    }
+
+    [TestMethod]
+    public async Task ConnectAnyDatabase_OpensAUserDatabaseAsTheLoginsOwnName()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "CREATE DATABASE app_db; CREATE LOGIN app WITH PASSWORD = 'S3cret!Pass'; use master; GRANT CONNECT ANY DATABASE TO app");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = new SqlConnection(CredentialConnectionString(listener, "app", "S3cret!Pass") + ";Database=app_db");
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await using var command = new SqlCommand("select user_name() + '/' + cast(user_id() as varchar(10))", connection);
+        AreEqual("app/0", await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    [TestMethod]
+    public async Task DropLoginAfterAStatement_ClosesTheBatch()
+    {
+        // DROP LOGIN sends two RETURNSTATUS tokens and no DONE of its own, so
+        // the batch closes with a DONE of its own even after a statement that
+        // sent one.
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var create = new SqlCommand("CREATE LOGIN gone WITH PASSWORD = 'S3cret!Pass'", connection);
+        _ = await create.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        await using var command = new SqlCommand("select 1; DROP LOGIN gone", connection) { CommandTimeout = 10 };
+        AreEqual(1, await command.ExecuteScalarAsync(TestContext.CancellationToken));
+        AreEqual(0, Wire.ReadAllInProc(simulation, "select count(*) from sys.server_principals where name = 'gone'")[0][0]);
+    }
 }

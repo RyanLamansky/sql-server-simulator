@@ -132,7 +132,7 @@ internal sealed class ObjectId : Expression
         // included).
         SqlValue GateAs(Database database, int resultId, int governObjectId, int governSchemaId) =>
             PermissionEnforcement.MetadataVisibilityPrincipal(runtime.Batch, database) is not { } principalId
-            || PermissionChecker.CanViewMetadata(database, principalId, governObjectId, governSchemaId)
+            || PermissionChecker.CanViewMetadata(database, principalId, governObjectId, governSchemaId, ServerLoginRights.For(runtime.Batch.Connection))
                 ? SqlValue.FromInt32(resultId)
                 : SqlValue.Null(SqlType.Int32);
         SqlValue Gate(SchemaObject resolved) =>

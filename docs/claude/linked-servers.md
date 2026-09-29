@@ -7,6 +7,7 @@ Activation is two-step:
 2. SQL text calls `EXEC sp_addlinkedserver @server = 'name'` to activate SQL-visible routing.
 
 Both steps are required — a bare `AddRemoteSimulation` is silent until `sp_addlinkedserver` reads from `Simulation.AvailableRemotes` and stamps an entry into `Simulation.ActiveLinkedServers`.
+`sp_addlinkedserver` and its sibling procedures take `ALTER ANY LINKED SERVER` — see [`permissions.md`](permissions.md#statement-gates).
 A `Simulation` may name itself, which is a **loopback** and behaves as real's loopback linked server does where the two differ (the transaction refusal below).
 
 The public API expansion is one method: `Simulation.AddRemoteSimulation(string, Simulation)`.

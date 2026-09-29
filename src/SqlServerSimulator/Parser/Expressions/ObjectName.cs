@@ -79,7 +79,7 @@ internal sealed class ObjectName : Expression
                 var (governObjectId, governSchemaId) = obj is Trigger trigger
                     ? (trigger.Parent.ObjectId, trigger.Parent.SchemaId)
                     : (obj.ObjectId, obj.SchemaId);
-                return principalId is { } filter && !PermissionChecker.CanViewMetadata(targetDb, filter, governObjectId, governSchemaId)
+                return principalId is { } filter && !PermissionChecker.CanViewMetadata(targetDb, filter, governObjectId, governSchemaId, ServerLoginRights.For(runtime.Batch.Connection))
                     ? SqlValue.Null(MetadataNameType(runtime.Batch))
                     : SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), obj.Name);
             }
@@ -106,7 +106,7 @@ internal sealed class ObjectName : Expression
         // above can't reach one).
         return ConstraintLookup.TryResolveById(targetDb, id, out var constraint)
             && (principalId is not { } constraintFilter
-                || PermissionChecker.CanViewMetadata(targetDb, constraintFilter, constraint.Table.ObjectId, constraint.Table.SchemaId))
+                || PermissionChecker.CanViewMetadata(targetDb, constraintFilter, constraint.Table.ObjectId, constraint.Table.SchemaId, ServerLoginRights.For(runtime.Batch.Connection)))
             ? SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), constraint.Name)
             : SqlValue.Null(MetadataNameType(runtime.Batch));
     }

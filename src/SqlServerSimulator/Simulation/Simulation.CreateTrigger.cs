@@ -592,10 +592,11 @@ partial class Simulation
         RejectClrTriggerKindChange(existing, clrEntry, triggerName);
         // A database-scope DDL trigger is gated on ALTER ANY DATABASE DDL
         // TRIGGER instead of a parent object's ALTER, and a server-scope one on
-        // CONTROL SERVER, which only a sysadmin holds here (probed 2026-09-28
-        // against SQL Server 2025: a db_owner is refused with Msg 2104).
+        // CONTROL SERVER (probed 2026-09-28 against SQL Server 2025: a db_owner
+        // is refused with Msg 2104; 2026-09-29: a CONTROL SERVER grantee
+        // creates and drops one).
         var permitted = serverScope
-            ? simulation.IsLoginSysadmin(context.Connection.Security.Effective.LoginName)
+            ? simulation.SessionHoldsServerPermission(context.Connection, Permission.ControlServer)
             : PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyDatabaseDdlTrigger);
         if (!permitted)
         {

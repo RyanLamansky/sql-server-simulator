@@ -45,7 +45,8 @@ public sealed class ServerRoleAndScopeTests
         AreEqual(1, sim.ExecuteScalar(
             "select count(*) from sys.server_role_members where role_principal_id = 3 and member_principal_id = 258"));
         _ = sim.ExecuteNonQuery("alter server role sysadmin drop member srvlogin");
-        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.server_role_members"));
+        // sa's own sysadmin membership, which every instance lists, remains.
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_role_members"));
     }
 
     [TestMethod]
@@ -178,7 +179,7 @@ public sealed class ServerRoleAndScopeTests
         _ = sim.ExecuteNonQuery("use master; revoke view server state from app");
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.server_permissions where type = 'VWSS'"));
         // The auto-seeded CONNECT SQL row survives an unrelated revoke.
-        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_permissions where type = 'COSQ'"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_permissions where grantee_principal_id = 258 and type = 'COSQ'"));
     }
 
     [TestMethod]

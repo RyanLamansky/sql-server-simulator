@@ -363,7 +363,7 @@ partial class Simulation
                     return;
                 throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
             }
-            if (!context.Simulation.IsLoginSysadmin(context.Connection.Security.Effective.LoginName))
+            if (!context.Simulation.SessionHoldsServerPermission(context.Connection, Permission.ControlServer))
                 throw SimulatedSqlException.DropObjectPermissionDenied("trigger", name.Leaf);
             context.Batch.AcquireStatementLock(existingServer.SchemaLock, LockMode.SchemaModification);
             if (registry.Remove(name.Leaf, out var removedServer) && removedServer is not null)

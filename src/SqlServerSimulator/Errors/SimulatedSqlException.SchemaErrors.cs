@@ -2884,11 +2884,21 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 18456: an in-process connection-string login
     /// (<c>User ID=</c>) failed to authenticate against the <c>CREATE LOGIN</c>
-    /// registry. Same severity-14 / state-1 shape the TDS endpoint writes
-    /// (which emits the token directly rather than through this factory).
+    /// registry, or it holds no <c>CONNECT SQL</c> — a <c>DENY</c>, or a
+    /// revoked grant, which real reports identically (probed 2026-09-29
+    /// against SQL Server 2025). Both front doors raise it through
+    /// <see cref="Simulation.RefuseLogin"/>.
     /// </summary>
     internal static SimulatedSqlException LoginFailed(string userName) =>
         new($"Login failed for user '{userName}'.", 18456, 14, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 18470: the right password for a login
+    /// <c>ALTER LOGIN … DISABLE</c> turned off — a wrong one is still the
+    /// plain Msg 18456 (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException LoginDisabled(string userName) =>
+        new($"Login failed for user '{userName}'. Reason: The account is disabled.", 18470, 14, 1);
 
     /// <summary>
     /// Mimics SQL Server error 4060: a login couldn't open the requested

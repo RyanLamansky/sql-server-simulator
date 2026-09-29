@@ -57,80 +57,75 @@ partial class Simulation
 
     /// <summary>
     /// Server-role membership records: each entry is a (role_principal_id,
-    /// member_principal_id) pair. Populated by <c>ALTER SERVER ROLE … ADD
+    /// member_principal_id) pair, seeded with <c>sa</c>'s <c>sysadmin</c>
+    /// membership real lists. Populated by <c>ALTER SERVER ROLE … ADD
     /// MEMBER</c>; drained by <c>… DROP MEMBER</c>; surfaced by
     /// <c>sys.server_role_members</c>.
     /// </summary>
-    internal readonly List<(int RoleId, int MemberId)> ServerRoleMembers = [];
+    internal readonly List<(int RoleId, int MemberId)> ServerRoleMembers = [(SysadminRoleId, 1)];
 
     /// <summary>
-    /// Server-scope permission grants / denies (class 100). Populated by
-    /// server-scope <c>GRANT</c> / <c>DENY</c> and <c>CREATE LOGIN</c>'s
-    /// auto-seeded <c>CONNECT SQL</c>; drained by <c>REVOKE</c>; surfaced by
-    /// <c>sys.server_permissions</c>. Server scope outlives any database, hence
-    /// the <see cref="Simulation"/>-level home.
+    /// Server-scope permission grants / denies (class 100) and <c>ON LOGIN::</c>
+    /// ones (class 101). Seeded with the two class-100 rows every instance
+    /// starts with — <c>sa</c>'s <c>CONNECT SQL</c> and <c>public</c>'s
+    /// <c>VIEW ANY DATABASE</c> (probed 2026-09-29 against SQL Server 2025;
+    /// its per-endpoint <c>CONNECT</c> rows name endpoints the simulator
+    /// doesn't carry); extended by server-scope <c>GRANT</c> / <c>DENY</c> and
+    /// <c>CREATE LOGIN</c>'s auto-seeded <c>CONNECT SQL</c>; drained by
+    /// <c>REVOKE</c>; surfaced by <c>sys.server_permissions</c>. Server scope
+    /// outlives any database, hence the <see cref="Simulation"/>-level home.
     /// </summary>
-    internal readonly List<ServerPermission> ServerPermissions = [];
+    internal readonly List<ServerPermission> ServerPermissions =
+    [
+        new(1, 1, "CONNECT SQL", Permission.ConnectSql.CanonicalTypeCode, PermissionState.Grant),
+        new(2, 1, "VIEW ANY DATABASE", Permission.ViewAnyDatabase.CanonicalTypeCode, PermissionState.Grant),
+    ];
 
     /// <summary>
-    /// Canonical server-permission name → 4-char <c>type</c> code, imported from
-    /// the SERVER-class rows of <c>sys.fn_builtin_permissions</c>. The set the
-    /// server-scope GRANT path recognizes; an off-table name falls back to the
-    /// first-letter-of-each-word heuristic. Keyed by <see cref="BuiltInToken.Comparer"/>.
+    /// The server permissions each fixed server role carries, indexed by
+    /// <c>principal_id</c> − 3 (<see cref="FixedServerRoles"/>' order). Real
+    /// keeps them out of <c>sys.server_permissions</c>; these are the direct
+    /// grants whose covering closure reproduces what <c>fn_my_permissions(NULL,
+    /// 'SERVER')</c> lists for a member of each role (probed 2026-09-29 against
+    /// SQL Server 2025) — <c>serveradmin</c>'s <c>ALTER SERVER STATE</c>, for
+    /// one, brings the three <c>VIEW SERVER … STATE</c> permissions with it.
     /// </summary>
-    private static readonly FrozenDictionary<string, string> ServerPermissionCodes =
-        new Dictionary<string, string>(BuiltInToken.Comparer)
-        {
-            ["ADMINISTER BULK OPERATIONS"] = "ADBO",
-            ["ALTER ANY CONNECTION"] = "ALCO",
-            ["ALTER ANY CREDENTIAL"] = "ALCD",
-            ["ALTER ANY DATABASE"] = "ALDB",
-            ["ALTER ANY ENDPOINT"] = "ALHE",
-            ["ALTER ANY EVENT NOTIFICATION"] = "ALES",
-            ["ALTER ANY LINKED SERVER"] = "ALLS",
-            ["ALTER ANY LOGIN"] = "ALLG",
-            ["ALTER ANY SERVER AUDIT"] = "ALAA",
-            ["ALTER ANY SERVER ROLE"] = "ALSR",
-            ["ALTER RESOURCES"] = "ALRS",
-            ["ALTER SERVER STATE"] = "ALSS",
-            ["ALTER SETTINGS"] = "ALST",
-            ["ALTER TRACE"] = "ALTR",
-            ["AUTHENTICATE SERVER"] = "AUTH",
-            ["CONNECT ANY DATABASE"] = "CADB",
-            ["CONNECT SQL"] = "COSQ",
-            ["CONTROL SERVER"] = "CL",
-            ["CREATE ANY DATABASE"] = "CRDB",
-            ["CREATE DDL EVENT NOTIFICATION"] = "CRDE",
-            ["CREATE ENDPOINT"] = "CRHE",
-            ["CREATE LOGIN"] = "CRLG",
-            ["CREATE SERVER ROLE"] = "CRSR",
-            ["CREATE TRACE EVENT NOTIFICATION"] = "CRTE",
-            ["EXTERNAL ACCESS ASSEMBLY"] = "XA",
-            ["IMPERSONATE ANY LOGIN"] = "IAL",
-            ["SELECT ALL USER SECURABLES"] = "SUS",
-            ["SHUTDOWN"] = "SHDN",
-            ["UNSAFE ASSEMBLY"] = "XU",
-            ["VIEW ANY CRYPTOGRAPHICALLY SECURED DEFINITION"] = "VACD",
-            ["VIEW ANY DATABASE"] = "VWDB",
-            ["VIEW ANY DEFINITION"] = "VWAD",
-            ["VIEW ANY ERROR LOG"] = "VEL",
-            ["VIEW ANY PERFORMANCE DEFINITION"] = "VAP",
-            ["VIEW ANY SECURITY DEFINITION"] = "VAS",
-            ["VIEW SERVER PERFORMANCE STATE"] = "VSP",
-            ["VIEW SERVER SECURITY STATE"] = "VSS",
-            ["VIEW SERVER STATE"] = "VWSS",
-        }.ToFrozenDictionary(BuiltInToken.Comparer);
+    private static readonly Permission[][] FixedServerRoleGrants =
+    [
+        [Permission.ControlServer],                                                  // sysadmin
+        [Permission.AlterAnyLogin],                                                  // securityadmin
+        [Permission.AlterAnyEndpoint, Permission.AlterResources, Permission.AlterServerState, Permission.AlterSettings, Permission.Shutdown], // serveradmin
+        [Permission.AlterAnyLinkedServer],                                           // setupadmin
+        [Permission.AlterAnyConnection, Permission.AlterServerState],                // processadmin
+        [Permission.AlterResources],                                                 // diskadmin
+        [Permission.CreateAnyDatabase],                                              // dbcreator
+        [Permission.AdministerBulkOperations],                                       // bulkadmin
+        [Permission.ViewServerState],                                                // ##MS_ServerStateReader##
+        [Permission.AlterServerState],                                               // ##MS_ServerStateManager##
+        [Permission.ViewAnyDatabase, Permission.ViewAnyDefinition],                  // ##MS_DefinitionReader##
+        [Permission.ConnectAnyDatabase],                                             // ##MS_DatabaseConnector##
+        [Permission.AlterAnyDatabase],                                               // ##MS_DatabaseManager##
+        [Permission.AlterAnyLogin],                                                  // ##MS_LoginManager##
+        [Permission.ViewAnySecurityDefinition, Permission.ViewAnyCryptographicallySecuredDefinition], // ##MS_SecurityDefinitionReader##
+        [Permission.ViewAnyPerformanceDefinition],                                   // ##MS_PerformanceDefinitionReader##
+        [Permission.ViewServerSecurityState],                                        // ##MS_ServerSecurityStateReader##
+        [Permission.ViewServerPerformanceState],                                     // ##MS_ServerPerformanceStateReader##
+    ];
 
-    /// <summary>Whether <paramref name="name"/> is a recognized server-scope permission (routes an ON-less GRANT to the server-scope path).</summary>
-    internal static bool IsServerScopePermission(string name) => ServerPermissionCodes.ContainsKey(name.Trim());
+    /// <summary>
+    /// Whether a server-scope <c>GRANT</c> / <c>DENY</c> / <c>REVOKE</c> with no
+    /// <c>ON</c> clause names <paramref name="name"/> as a SERVER-class
+    /// permission, which routes the statement to <see cref="ServerPermissions"/>.
+    /// </summary>
+    internal static bool IsServerScopePermission(string name) => Permission.Resolve(name).IsServerClass;
 
-    /// <summary>The 4-char <c>type</c> code for a server permission — the catalog value, else a first-letter-of-each-word heuristic (space-padded to 4).</summary>
+    /// <summary>The 4-char <c>type</c> code for a server permission — the catalog value, else a first-letter-of-each-word heuristic.</summary>
     private static string ServerPermissionTypeCode(string name)
     {
-        var trimmed = name.Trim();
-        if (ServerPermissionCodes.TryGetValue(trimmed, out var code))
-            return code;
-        var initials = new string([.. trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(w => char.ToUpperInvariant(w[0]))]);
+        var resolved = Permission.Resolve(name);
+        if (resolved != Permission.Other)
+            return resolved.CanonicalTypeCode;
+        var initials = new string([.. name.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(w => char.ToUpperInvariant(w[0]))]);
         return initials.Length >= 4 ? initials[..4] : initials;
     }
 
@@ -226,12 +221,12 @@ partial class Simulation
     /// Whether <paramref name="loginName"/> holds <paramref name="permission"/> at
     /// server scope. The server-scope counterpart to
     /// <see cref="PermissionChecker.IsGranted"/>: a <c>sysadmin</c> bypass (incl.
-    /// <c>sa</c>; sysadmin logins already map to <c>dbo</c> and never reach a gate,
-    /// so this is belt-and-suspenders), then a DENY-first / GRANT scan over the
-    /// login's <see cref="BuildServerPrincipalClosure">server-principal closure</see>
-    /// with the server-scope covering graph — a stored grant satisfies the request
-    /// when it <c>Covers</c> it (so <c>VIEW SERVER STATE</c> answers a <c>VIEW
-    /// SERVER PERFORMANCE STATE</c> requirement).
+    /// <c>sa</c>), then a DENY-first / GRANT scan over the login's
+    /// <see cref="BuildServerPrincipalClosure">server-principal closure</see>
+    /// with the server-scope covering graph — a stored grant, or a fixed role's
+    /// (<see cref="FixedServerRoleGrants"/>), satisfies the request when it
+    /// <c>Covers</c> it (so <c>VIEW SERVER STATE</c> answers a <c>VIEW SERVER
+    /// PERFORMANCE STATE</c> requirement, and <c>CONTROL SERVER</c> every one).
     /// </summary>
     internal bool HoldsServerPermission(string loginName, Permission permission) =>
         this.HoldsServerPrincipalPermission(loginName, targetPrincipalId: 0, permission, blanketEquivalent: permission);
@@ -243,7 +238,7 @@ partial class Simulation
     /// target satisfies it, and so does a class-100 row for
     /// <paramref name="blanketEquivalent"/> — the server-wide permission that
     /// covers every login (<c>IMPERSONATE</c> ← <c>IMPERSONATE ANY LOGIN</c>,
-    /// <c>VIEW DEFINITION</c> ← <c>VIEW ANY DEFINITION</c>, <c>ALTER</c> ←
+    /// <c>VIEW DEFINITION</c> ← <c>VIEW ANY SECURITY DEFINITION</c>, <c>ALTER</c> ←
     /// <c>ALTER ANY LOGIN</c>). DENY over either class binds first, so a
     /// <c>DENY IMPERSONATE ON LOGIN::x</c> beats a server-wide
     /// <c>GRANT IMPERSONATE ANY LOGIN</c> (probe-confirmed).
@@ -256,7 +251,9 @@ partial class Simulation
         var closure = this.BuildServerPrincipalClosure(loginName);
         lock (this.ServerPermissions)
         {
-            // DENY binds first, over both classes.
+            // DENY binds first, over both classes — CONTROL SERVER included
+            // (probe-confirmed: a DENY VIEW SERVER STATE refuses a CONTROL
+            // SERVER grantee the DMVs); a fixed role's grants can't be denied.
             foreach (var row in this.ServerPermissions)
             {
                 if (row.State == PermissionState.Deny && closure.Contains(row.GranteeId)
@@ -275,7 +272,37 @@ partial class Simulation
                 }
             }
         }
+        foreach (var roleId in closure)
+        {
+            if (roleId is < SysadminRoleId or > FixedServerPrincipalIdMax)
+                continue;
+            foreach (var granted in FixedServerRoleGrants[roleId - SysadminRoleId])
+            {
+                if (granted.Covers(blanketEquivalent, PermissionChecker.ClassServer))
+                    return true;
+            }
+        }
         return false;
+    }
+
+    /// <summary>
+    /// Whether the session's effective identity holds the server permission
+    /// <paramref name="permission"/> — the gate every server-scope statement
+    /// asks. An identity minted inside one database (<c>EXECUTE AS USER</c>, a
+    /// module's own frame, an application role) carries no server permission
+    /// at all (probe-confirmed: a <c>CONTROL SERVER</c> login's user, reached
+    /// through <c>EXECUTE AS USER</c>, reads nothing it doesn't hold in the
+    /// database); the empty-registry dev mode, where every connection is
+    /// <c>dbo</c> everywhere, holds everything. A <c>sa</c> session answers
+    /// on one name compare.
+    /// </summary>
+    internal bool SessionHoldsServerPermission(SimulatedDbConnection connection, Permission permission)
+    {
+        var effective = connection.Security.Effective;
+        return !effective.IsDatabaseScoped
+            && (BuiltInToken.Comparer.Equals(effective.LoginName, "sa")
+                || this.Logins.IsEmpty
+                || this.HoldsServerPermission(effective.LoginName, permission));
     }
 
     /// <summary>
@@ -289,6 +316,30 @@ partial class Simulation
         row.Class == PermissionChecker.ClassServerPrincipal
             ? targetPrincipalId != 0 && row.MajorId == targetPrincipalId && row.Permission.Covers(permission, PermissionChecker.ClassObject)
             : row.Permission.Covers(blanketEquivalent, PermissionChecker.ClassServer);
+
+    /// <summary>
+    /// Whether the session sees <paramref name="database"/>'s row in
+    /// <c>sys.databases</c> and gets an answer from <c>DB_ID</c> / <c>DB_NAME</c>
+    /// for it: always for <c>master</c>, <c>tempdb</c>, the session's current
+    /// database and a database its login owns, and otherwise only with <c>VIEW
+    /// ANY DATABASE</c> — which <c>public</c> holds from the start, so what
+    /// hides a database is a <c>DENY</c> of it, or an identity minted inside
+    /// one database, which holds no server permission (probed 2026-09-29
+    /// against SQL Server 2025: an <c>EXECUTE AS USER</c> frame sees three
+    /// rows, <c>DB_ID('msdb')</c> NULL).
+    /// </summary>
+    internal bool CanSeeDatabase(SimulatedDbConnection connection, Database database)
+    {
+        if (ReferenceEquals(database, connection.CurrentDatabase)
+            || BuiltInToken.Comparer.Equals(database.Name, MasterDatabaseName)
+            || BuiltInToken.Comparer.Equals(database.Name, TempdbDatabaseName)
+            || this.SessionHoldsServerPermission(connection, Permission.ViewAnyDatabase))
+        {
+            return true;
+        }
+        var effective = connection.Security.Effective;
+        return !effective.IsDatabaseScoped && BuiltInToken.Comparer.Equals(database.OwnerLoginName, effective.LoginName);
+    }
 
     /// <summary>
     /// Whether a <em>restricted</em> session's login may see the
@@ -308,7 +359,7 @@ partial class Simulation
             return true;
         // A server role the login belongs to is visible through that membership.
         return this.IsServerPrincipalInRole(selfId, targetPrincipalId)
-            || this.HoldsServerPrincipalPermission(loginName, targetPrincipalId, Permission.ViewDefinition, Permission.ViewAnyDefinition)
+            || this.HoldsServerPrincipalPermission(loginName, targetPrincipalId, Permission.ViewDefinition, Permission.ViewAnySecurityDefinition)
             || this.HoldsServerPrincipalPermission(loginName, targetPrincipalId, Permission.Alter, Permission.AlterAnyLogin)
             || this.HoldsServerPrincipalPermission(loginName, targetPrincipalId, Permission.Impersonate, Permission.ImpersonateAnyLogin);
     }
@@ -336,8 +387,10 @@ partial class Simulation
             ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
-        RecordServerSecurityUndo(context.Batch);
         var simulation = context.Batch.Connection.Simulation;
+        if (!simulation.SessionHoldsServerPermission(context.Connection, Permission.CreateServerRole))
+            throw SimulatedSqlException.UserDoesNotHavePermission();
+        RecordServerSecurityUndo(context.Batch);
         if (simulation.TryResolveServerPrincipalId(name, out _))
             throw SimulatedSqlException.ServerPrincipalAlreadyExists(name);
         _ = simulation.ServerRoles.TryAdd(name,
@@ -378,8 +431,11 @@ partial class Simulation
             return true;
         RecordServerSecurityUndo(context.Batch);
         var simulation = context.Batch.Connection.Simulation;
-        if (!simulation.TryResolveServerRole(roleName, out var roleId, out _))
+        if (!simulation.TryResolveServerRole(roleName, out var roleId, out var isFixed)
+            || !simulation.MayChangeServerRoleMembers(context.Connection, roleId, isFixed))
+        {
             throw SimulatedSqlException.CannotAlterServerRole(roleName);
+        }
         if (!simulation.TryResolveServerPrincipalId(memberName, out var memberId))
             throw SimulatedSqlException.CannotAddServerPrincipal(memberName);
         lock (simulation.ServerRoleMembers)
@@ -426,11 +482,34 @@ partial class Simulation
         var simulation = context.Batch.Connection.Simulation;
         if (FixedServerRoleIds.ContainsKey(name))
             throw SimulatedSqlException.CannotDropFixedServerRole(name);
+        if (simulation.ServerRoles.ContainsKey(name) && !simulation.SessionHoldsServerPermission(context.Connection, Permission.AlterAnyServerRole))
+            throw SimulatedSqlException.CannotDropServerRole(name);
         if (!simulation.ServerRoles.TryRemove(name, out var removed))
             return ifExists ? true : throw SimulatedSqlException.CannotDropServerRole(name);
         lock (simulation.ServerRoleMembers)
             _ = simulation.ServerRoleMembers.RemoveAll(m => m.RoleId == removed.PrincipalId || m.MemberId == removed.PrincipalId);
         return true;
+    }
+
+    /// <summary>
+    /// Whether the session may add members to, or drop them from, the server
+    /// role <paramref name="roleId"/>: a custom role takes <c>ALTER ANY SERVER
+    /// ROLE</c>, while a fixed role is closed to everything short of
+    /// <c>sysadmin</c> except its own members — neither <c>CONTROL SERVER</c>
+    /// nor <c>ALTER ANY SERVER ROLE</c> nor <c>securityadmin</c> adds a
+    /// member to one, and a <c>dbcreator</c> member adds to <c>dbcreator</c>
+    /// (probed 2026-09-29 against SQL Server 2025). A refusal is the same
+    /// Msg 15151 a missing role earns.
+    /// </summary>
+    private bool MayChangeServerRoleMembers(SimulatedDbConnection connection, int roleId, bool isFixed)
+    {
+        var effective = connection.Security.Effective;
+        if (!isFixed)
+            return this.SessionHoldsServerPermission(connection, Permission.AlterAnyServerRole);
+        return !effective.IsDatabaseScoped
+            && (this.Logins.IsEmpty
+                || this.IsLoginSysadmin(effective.LoginName)
+                || this.IsLoginInServerRole(effective.LoginName, roleId));
     }
 
     /// <summary>Resolves a server-role name (fixed or custom) to its id, reporting whether it's a fixed role; false for a non-role name.</summary>

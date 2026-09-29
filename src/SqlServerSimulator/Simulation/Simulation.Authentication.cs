@@ -5,17 +5,27 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Validates SQL-authentication credentials against <see cref="Logins"/>.
-    /// An empty registry accepts anything (the zero-configuration default the
-    /// TDS endpoint and the whole test corpus rely on); once
-    /// <c>CREATE LOGIN</c> has populated it, the name must resolve and the
-    /// password must verify. Shared by the in-process connection-string login
-    /// path; the TDS endpoint keeps its own equivalent that reads the
-    /// wire-de-obfuscated password.
+    /// The refusal a SQL-authentication login meets at either front door, or
+    /// <see langword="null"/> when it may connect. An empty registry accepts
+    /// anything (the zero-configuration default the TDS endpoint and the whole
+    /// test corpus rely on); once <c>CREATE LOGIN</c> has populated it, the
+    /// name must resolve and the password verify (Msg 18456), the login must
+    /// be enabled (Msg 18470, reported only for the right password) and it
+    /// must hold <c>CONNECT SQL</c> — from its own grant, a server role's, or
+    /// <c>CONTROL SERVER</c>; a <c>sysadmin</c> member connects whatever it
+    /// is denied (all probed 2026-09-29 against SQL Server 2025, whose client
+    /// sees state 1 for every 18456 cause).
     /// </summary>
-    internal bool ValidateLoginCredentials(string userName, string password) =>
-        this.Logins.IsEmpty
-        || (this.Logins.TryGetValue(userName, out var login) && PasswordHash.Verify(password, login.PasswordHash));
+    internal SimulatedSqlException? RefuseLogin(string userName, string password)
+    {
+        if (this.Logins.IsEmpty)
+            return null;
+        if (!this.Logins.TryGetValue(userName, out var login) || !PasswordHash.Verify(password, login.PasswordHash))
+            return SimulatedSqlException.LoginFailed(userName);
+        if (login.IsDisabled)
+            return SimulatedSqlException.LoginDisabled(userName);
+        return this.HoldsServerPermission(userName, Permission.ConnectSql) ? null : SimulatedSqlException.LoginFailed(userName);
+    }
 
     /// <summary>
     /// Resolves the database user a login runs as in <paramref name="target"/>,
@@ -36,6 +46,9 @@ partial class Simulation
     /// (<see cref="Database.OwnerLoginName"/>) → <c>dbo</c> there.</item>
     /// <item>An explicit mapped user (<c>CREATE USER … FOR LOGIN</c>) in the
     /// target database → that (restricted) user.</item>
+    /// <item>A login holding <c>CONNECT ANY DATABASE</c> → a user of its own
+    /// name at principal id 0, carrying only <c>public</c>'s grants and what
+    /// its server permissions imply.</item>
     /// <item><c>guest</c> where it is accessible (<c>master</c> / <c>tempdb</c> /
     /// <c>msdb</c>, aligned with <c>HAS_DBACCESS</c>; not <c>model</c>, not user
     /// databases) → the <c>guest</c> principal (id 2, a genuinely restricted
@@ -70,6 +83,17 @@ partial class Simulation
                 principal = candidate;
                 return true;
             }
+        }
+
+        // CONNECT ANY DATABASE (CONTROL SERVER covers it) opens every database
+        // to a login with no user there, even master where guest would do:
+        // it runs as a user named for the login with principal id 0, which
+        // USER_ID() reports and whose grants are public's (probed 2026-09-29
+        // against SQL Server 2025).
+        if (simulation.HoldsServerPermission(loginName, Permission.ConnectAnyDatabase))
+        {
+            principal = new DatabasePrincipal(Database.PublicPrincipalId, loginName, "S", "SQL_USER", isFixedRole: false, target.Principals["public"].CreateDate, loginName);
+            return true;
         }
 
         // An unmapped login runs as guest where guest is accessible, else the

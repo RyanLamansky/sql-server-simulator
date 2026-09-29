@@ -5,7 +5,6 @@ using System.Runtime.ExceptionServices;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
-using SqlServerSimulator.Parser.Expressions;
 
 namespace SqlServerSimulator.Network;
 
@@ -132,13 +131,14 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 transport.PacketSize = login.PacketSize;
 
             writer = new TdsTokenWriter(transport);
-            if (!ValidateCredentials(simulation, login))
+            if (simulation.RefuseLogin(login.UserName, login.Password) is { } refusal)
             {
-                // Probe-confirmed shape: Msg 18456 severity 14 state 1 with
-                // identical wording for wrong-password / unknown-login /
-                // empty-password (the real server masks the detailed state
-                // from clients), then the connection closes.
-                writer.WriteErrorOrInfo(Tds.TokenError, 18456, 1, 14, $"Login failed for user '{login.UserName}'.", "SIMULATED", "", 1);
+                // Probe-confirmed shape: one error at severity 14 state 1 — Msg
+                // 18456 with identical wording for a wrong password, an unknown
+                // login, an empty password and a login without CONNECT SQL (the
+                // real server masks the detailed state from clients), Msg 18470
+                // for a disabled one — then the connection closes.
+                writer.WriteErrorOrInfo(Tds.TokenError, refusal.Number, refusal.State, refusal.Class, refusal.Message, "SIMULATED", "", 1);
                 writer.WriteDone(Tds.DoneError, 0);
                 await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
                 return;
@@ -399,18 +399,6 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // The connection is already going away; the backstop is best-effort.
         }
     }
-
-    /// <summary>
-    /// Enforces SQL-authentication credentials against
-    /// <see cref="Simulation.Logins"/>. An empty registry accepts anything
-    /// (the zero-configuration default); once <c>CREATE LOGIN</c> has
-    /// populated it, the LOGIN7 username must resolve and the de-obfuscated
-    /// password must verify against the stored PWDENCRYPT-format hash.
-    /// </summary>
-    private static bool ValidateCredentials(Simulation simulation, Login7Request login) =>
-        simulation.Logins.IsEmpty
-        || (simulation.Logins.TryGetValue(login.UserName, out var serverLogin)
-            && PasswordHash.Verify(login.Password, serverLogin.PasswordHash));
 
     private bool TryOpenConnection(Login7Request login, TdsTokenWriter writer)
     {
@@ -989,11 +977,16 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             this.WriteTransactionEnvChanges(writer, this.TransactionEventsAheadOf(outcome));
             _ = this.FlushInfoMessages(writer);
 
-            // A return status sent ahead of the error that closes its scope.
+            // A return status sent ahead of the error that closes its scope,
+            // or on its own (DROP LOGIN's pair), which leaves the batch to
+            // close with a DONE of its own.
             if (outcome is SimulatedReturnStatus returned)
             {
                 if (!rendered.InProc)
+                {
                     writer.WriteReturnStatus(returned.Status);
+                    closed = false;
+                }
                 hasOutcome = Advance();
                 continue;
             }

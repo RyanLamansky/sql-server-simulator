@@ -176,7 +176,33 @@ partial class Simulation
     private static void RequireDbccSysadmin(BatchContext batch, string command, byte state)
     {
         if (!IsSysadminSession(batch))
-            throw SimulatedSqlException.DbccPermissionDenied(batch.Connection.Security.Effective.DatabasePrincipalName, command, state);
+            throw DbccPermissionDenied(batch, command, state);
+    }
+
+    /// <summary>
+    /// Raises Msg 2571 unless the session holds the server permission
+    /// <paramref name="permission"/> — <c>ALTER SERVER STATE</c> for the cache
+    /// commands, which a <c>serveradmin</c> / <c>processadmin</c> member and a
+    /// <c>CONTROL SERVER</c> grantee hold (probed 2026-09-29 against SQL
+    /// Server 2025, where the trace-flag, log and help commands stay
+    /// <c>sysadmin</c>'s alone even for <c>CONTROL SERVER</c>).
+    /// </summary>
+    private static void RequireDbccServerPermission(BatchContext batch, string command, byte state, Permission permission)
+    {
+        if (!batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, permission))
+            throw DbccPermissionDenied(batch, command, state);
+    }
+
+    /// <summary>
+    /// Msg 2571, naming the database user as <c>USER_NAME()</c> reports it —
+    /// <c>public</c> for a login that reached the database through <c>CONNECT
+    /// ANY DATABASE</c>, whose principal id is 0 (probe-confirmed).
+    /// </summary>
+    private static SimulatedSqlException DbccPermissionDenied(BatchContext batch, string command, byte state)
+    {
+        var effective = batch.Connection.Security.Effective;
+        return SimulatedSqlException.DbccPermissionDenied(
+            effective.DatabasePrincipalId == Database.PublicPrincipalId ? "public" : effective.DatabasePrincipalName, command, state);
     }
 
     /// <summary>
@@ -307,7 +333,7 @@ partial class Simulation
     {
         dbcc.AllowOptions(DbccOptions.NoInfoMessages);
         dbcc.RequireArgumentCount(0, 1);
-        RequireDbccSysadmin(batch, "freeproccache", 9);
+        RequireDbccServerPermission(batch, "freeproccache", 9, Permission.AlterServerState);
         var simulation = batch.Connection.Simulation;
         if (dbcc.Arguments.Count == 0)
         {
@@ -344,7 +370,7 @@ partial class Simulation
     {
         dbcc.AllowOptions(DbccOptions.NoInfoMessages);
         dbcc.RequireArgumentCount(0, 0);
-        RequireDbccSysadmin(batch, "dropcleanbuffers", 16);
+        RequireDbccServerPermission(batch, "dropcleanbuffers", 16, Permission.AlterServerState);
         return DbccCompleted(batch, dbcc, []);
     }
 
@@ -387,7 +413,7 @@ partial class Simulation
     {
         dbcc.AllowOptions(DbccOptions.NoInfoMessages | DbccOptions.MarkInUseForRemoval);
         dbcc.RequireArgumentCount(1, 2);
-        RequireDbccSysadmin(batch, "freesystemcache", 11);
+        RequireDbccServerPermission(batch, "freesystemcache", 11, Permission.AlterServerState);
         var simulation = batch.Connection.Simulation;
         var store = dbcc.StringArgument(batch, 0) ?? throw SimulatedSqlException.DbccParameterIsIncorrect(1);
         if (dbcc.Arguments.Count == 2
@@ -598,17 +624,14 @@ partial class Simulation
         {
             if (dbcc.Arguments.Count != 2 || dbcc.Arguments[1] is not { Kind: DbccArgumentKind.Name, Name.Leaf: var clear } || !BuiltInToken.Equals(clear, "CLEAR"))
                 throw SimulatedSqlException.DbccStatementIncorrect(15);
-            if (!IsSysadminSession(batch))
+            if (!batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.AlterServerState))
                 throw SimulatedSqlException.UserLacksPermissionForAction();
             return DbccCompleted(batch, dbcc, []);
         }
         if (!BuiltInToken.Equals(keyword, "LOGSPACE") || dbcc.Arguments.Count != 1)
             throw SimulatedSqlException.DbccStatementIncorrect(12);
-        if (!IsSysadminSession(batch)
-            && !batch.Connection.Simulation.HoldsServerPermission(batch.Connection.Security.Effective.LoginName, Permission.ViewServerState))
-        {
+        if (!batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.ViewServerState))
             throw SimulatedSqlException.UserLacksPermissionForAction();
-        }
 
         SqlType[] schema = [NVarcharSqlType.Get(128, batch.CurrentDatabase.Collation, Coercibility.Implicit), SqlType.Real, SqlType.Real, SqlType.Int32];
         var rows = new List<SqlValue[]>();

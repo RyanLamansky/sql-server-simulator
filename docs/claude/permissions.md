@@ -5,7 +5,7 @@
 **Session identity is real**: a per-connection principal (original login + database user + impersonation stack) drives the identity scalars, `EXECUTE AS` / `REVERT`, module `WITH EXECUTE AS`, connection-string / TDS authentication, and the per-database identity a cross-database reference or a `USE` resolves through.
 A session that never authenticates and never runs `EXECUTE AS` is the `sa` login — what `SYSTEM_USER` / `SUSER_SNAME()` / `ORIGINAL_LOGIN()` report, and a `sysadmin` to `IS_SRVROLEMEMBER`, as a default real connection is — mapped to `dbo` in every database, and **dbo bypasses every check** — the enforcement layer short-circuits on `SessionSecurityContext.EffectiveIsDbo` before any allocation, so existing (dbo) consumers see byte-identical behavior.
 (The one `dbo` that doesn't bypass everything is a database-scoped frame — `EXECUTE AS USER = 'dbo'`, or a module's `WITH EXECUTE AS OWNER` / `SELF` that resolves to `dbo` — whose privilege stops at the database boundary — see [Cross-database references](#cross-database-references).)
-Logins are enforced as connection credentials at both front doors (TDS endpoint — see [`tds-endpoint.md`](tds-endpoint.md) — and in-process `User ID=` connection strings).
+Logins are enforced as connection credentials at both front doors (TDS endpoint — see [`tds-endpoint.md`](tds-endpoint.md) — and in-process `User ID=` connection strings), and the server permissions they hold gate the server-scope statements and reach into every database — see [Server permissions and the fixed server roles](#server-permissions-and-the-fixed-server-roles).
 
 ## Storage
 
@@ -79,9 +79,11 @@ An unauthenticated in-process connection uses `CreateDefault()` — dbo as login
 The mapping is faithful (probe-confirmed against SQL Server 2025, PROBE_NOTES_HARDENING bundle 1) — resolution order for an authenticated login `l` in database `D`:
 1. **Empty login registry ⇒ open dev mode.** When `Simulation.Logins.IsEmpty` the front doors accept any credentials and the session is **dbo** in every `D` — the honest "no authentication configured ⇒ open" default and the back-compat invariant the whole no-login test corpus rides on. The strict path below engages only once the registry is non-empty.
 2. A **sysadmin-member login** (`sa`, or any login added to the `sysadmin` fixed server role) → **dbo** in every `D`, overriding any `FOR LOGIN` mapping (the dbo effective principal then bypasses every check, including explicit DENY).
+   The login that owns `D` is its `dbo` too.
 3. An explicit `CREATE USER … FOR LOGIN l` user in `D` → **that (restricted) user**.
-4. **`guest` where accessible** — `master` / `tempdb` / `msdb` (aligned with `HAS_DBACCESS`; not `model`, not user databases) → the **guest** principal (id 2, a genuinely restricted principal whose effective rights flow through the normal checker: CONNECT + anything granted to `guest` / `public`).
-5. Otherwise **refuse** — the login cannot open `D`: at connect, the Msg 4060 shape (`Cannot open database "<D>" requested by the login. The login failed.`, on the wire followed by Msg 18456 `Login failed for user '<l>'.`, then the connection closes); the session never opens on `D`.
+4. A login holding **`CONNECT ANY DATABASE`** (which `CONTROL SERVER` covers) → a user of the login's own name at **principal id 0**, which `USER_ID()` and `DATABASE_PRINCIPAL_ID()` report and whose grants are `public`'s — in `master` too, ahead of `guest` (probed 2026-09-29 against SQL Server 2025).
+5. **`guest` where accessible** — `master` / `tempdb` / `msdb` (aligned with `HAS_DBACCESS`; not `model`, not user databases) → the **guest** principal (id 2, a genuinely restricted principal whose effective rights flow through the normal checker: CONNECT + anything granted to `guest` / `public`).
+6. Otherwise **refuse** — the login cannot open `D`: at connect, the Msg 4060 shape (`Cannot open database "<D>" requested by the login. The login failed.`, on the wire followed by Msg 18456 `Login failed for user '<l>'.`, then the connection closes); the session never opens on `D`.
 There is **no permissive dbo fallback** for an authenticated login once the registry is non-empty — an unmapped login lands on `guest` where accessible or is refused, matching real SQL Server.
 The unauthenticated in-process path (`CreateDbConnection()` with no `User ID=`) stays **dbo** always — the trusted in-process front door EF Core rides.
 The same mapping answers `USE` / `ChangeDatabase` mid-session — see [Cross-database references](#cross-database-references).
@@ -131,9 +133,11 @@ Algorithm:
 3. **GRANT test** — a `G`/`W` row (or a grant-role) matching the permission or a covering permission at object → schema → database scope.
    Grant-roles: `db_owner` → everything, `db_datareader` → SELECT, `db_datawriter` → IUD, `db_ddladmin` → DDL (ALTER / CREATE TABLE).
 4. **Covering / scope** — the covering graph is imported from `sys.fn_builtin_permissions` for the OBJECT / SCHEMA / DATABASE classes: OBJECT SELECT ← RECEIVE ← CONTROL, DATABASE CREATE TABLE ← ALTER ← CONTROL, everything else ← CONTROL; each scope's permission maps same-name up (object SELECT → schema SELECT → database SELECT).
+5. **Server permissions** — a request no database row granted or denied asks the login's server permissions (`ServerLoginRights`): its database covering chain, each link answered by the SERVER-class permission `sys.fn_builtin_permissions` names as its parent, so `CONTROL SERVER` implies everything, `ALTER ANY DATABASE` each database's `ALTER` and what that covers, `VIEW ANY DEFINITION` its `VIEW DEFINITION`, and `SELECT ALL USER SECURABLES` every user object's `SELECT`.
+   A database `DENY` binds first even for a `CONTROL SERVER` grantee, and an identity minted inside one database — `EXECUTE AS USER`, a module frame, an application role — draws on none of it (probed 2026-09-29 against SQL Server 2025).
 
 Denial is **Msg 229** (`The <PERM> permission was denied on the object '<name>', database '<db>', schema '<schema>'.`), except TRUNCATE (**Msg 1088**, its own double-quoted shape) and the CREATE gates (**Msg 262** / **2760** / **15247**).
-A CREATE gate's Msg 262 ends the batch — through an `EXEC` too — and rolls the transaction back as under `SET XACT_ABORT ON`, catchable by a TRY; `EXECUTE AS LOGIN` for a login with no way into the current database is Msg 916 state 4 with the same reach (probed 2026-09-27 against SQL Server 2025).
+A database-scope CREATE gate's Msg 262 ends the batch — through an `EXEC` too — and rolls the transaction back as under `SET XACT_ABORT ON`, catchable by a TRY; `EXECUTE AS LOGIN` for a login with no way into the current database is Msg 916 state 4 with the same reach (probed 2026-09-27 against SQL Server 2025).
 Existence leaks: SELECT on a missing object is plain Msg 208; Msg 229 fires only for existing objects.
 
 Wiring:
@@ -180,7 +184,7 @@ Two shapes recur, and the difference between them is load-bearing:
 | `CREATE OR ALTER` over a free name | the plain-CREATE gate for that kind | **Msg 262** state 18 |
 | `CREATE` / `ALTER` / `DROP TRIGGER` (DML) | ALTER-shaped, on the **parent table / view** — a DML trigger is not its own securable | **Msg 2104** sev 14 state 1 on create (name echoed *as written*); **Msg 3701** state 20 on alter / drop (leaf) |
 | `CREATE` / `ALTER` / `DROP TRIGGER … ON DATABASE` | db-scope `ALTER ANY DATABASE DDL TRIGGER` | same 2104 / 3701 pair |
-| `CREATE` / `ALTER` / `DROP TRIGGER … ON ALL SERVER` | a sysadmin login — real's `CONTROL SERVER`, which isn't modeled as a grantable permission; a `db_owner` is refused (probed 2026-09-28) | same 2104 / 3701 pair |
+| `CREATE` / `ALTER` / `DROP TRIGGER … ON ALL SERVER` | server-scope `CONTROL SERVER`; a `db_owner` is refused (probed 2026-09-28), a `CONTROL SERVER` grantee admitted (probed 2026-09-29) | same 2104 / 3701 pair |
 | `CREATE INDEX` | ALTER-shaped, on the table (or the view, for an indexed view) | **Msg 1088** sev 16 **state 12**, double-quoted table name *as written* |
 | `ALTER INDEX` | ALTER-shaped, on the table | **Msg 1088** **state 9**, table name as written |
 | `DROP INDEX` | ALTER-shaped, on the table | **Msg 1088** **state 9**, `"<table as written>.<index>"` |
@@ -198,8 +202,8 @@ Two shapes recur, and the difference between them is load-bearing:
 | `DROP USER` | `db_owner` only (no ALTER ANY USER model) | **Msg 15151** |
 | `ALTER DATABASE … SET` / `COLLATE` | db-scope `ALTER` (or CONTROL) on the target | **Msg 5011** sev 14 **state 9** — same wording as the state-5 unknown-database record, so nothing leaks |
 | `sp_rename` | ALTER-shaped, on the object | **Msg 15225** sev 11 state 1 — the same not-found record a missing object earns |
-| `CREATE DATABASE` | **server** scope: `CREATE ANY DATABASE` (covered by `ALTER ANY DATABASE`), or `dbcreator` membership | **Msg 262** state 1, naming **`master`** whatever the current database is |
-| `DROP DATABASE` | **server** scope: `ALTER ANY DATABASE`, or `dbcreator` membership | **Msg 3701** **sev 11 state 2** — a different shape from every object drop |
+| `CREATE DATABASE` | **server** scope: `CREATE ANY DATABASE` (covered by `ALTER ANY DATABASE`, carried by `dbcreator` and `##MS_DatabaseManager##`) | **Msg 262** state 1, naming **`master`** whatever the current database is, and ending only the statement (probed 2026-09-29) |
+| `DROP DATABASE` | **server** scope: `ALTER ANY DATABASE` (`##MS_DatabaseManager##` carries it), or `dbcreator` membership | **Msg 3701** **sev 11 state 2** — a different shape from every object drop |
 
 **Fixed-role coverage.**
 `db_owner` passes everything.
@@ -350,9 +354,8 @@ The `OBJECT_ID` / `OBJECT_NAME` / `OBJECT_SCHEMA_NAME` scalars read the same sea
 The dbo / full-visibility fast path short-circuits on the session principal before any allocation, so existing (dbo) and SMO-as-sysadmin consumers pay one bool read and are unaffected.
 Each filtered view carries a `CatalogView.MetadataVisibilityKey` (set once at registration in `BuiltInResources.MetadataVisibility.cs`) naming the row column that governs visibility: the object-id-keyed `sys.*` views key on the row's `object_id` (or `parent_object_id`), the name-keyed `INFORMATION_SCHEMA.*` object views on the owning schema + object name.
 Filtered views: `sys.objects` / `all_objects` / `tables` / `views` / `all_views` / `procedures` / `columns` / `all_columns` / `parameters` / `all_parameters` / `sql_modules` / `all_sql_modules` / `indexes` / `index_columns` / `foreign_keys` / `foreign_key_columns` / `check_constraints` / `default_constraints` / `key_constraints` / `triggers` / `identity_columns` / `computed_columns` / `sequences` / `synonyms`, and `INFORMATION_SCHEMA.TABLES` / `COLUMNS` / `VIEWS` / `ROUTINES` / `PARAMETERS`.
-Deliberately unfiltered (probe-confirmed broadly visible to a restricted principal): `sys.database_principals` / `sys.schemas` / `sys.database_permissions` / `sys.database_role_members` / `sys.types` / `sys.databases` and the DMVs.
-`sys.server_principals` / `sys.sql_logins` carry their own server-scope filter — see [Server-principal metadata visibility](#server-principal-metadata-visibility).
-`sys.databases` stays unfiltered because real grants `VIEW ANY DATABASE` to `public` by default, so a plain login does see every database (probe-confirmed); the seeded `public` grant row itself isn't modeled.
+Deliberately unfiltered (probe-confirmed broadly visible to a restricted principal): `sys.database_principals` / `sys.schemas` / `sys.database_permissions` / `sys.database_role_members` / `sys.types` and the DMVs.
+`sys.server_principals` / `sys.sql_logins` / `sys.server_permissions` / `sys.server_role_members` carry their own server-scope filter — see [Server-principal metadata visibility](#server-principal-metadata-visibility) — and `sys.databases` follows `VIEW ANY DATABASE`, which `public` holds from the start — see [Database visibility](#database-visibility).
 `db_datareader` slightly over-reveals procedure metadata; a column-scope grant (`minor_id > 0`) reveals its object object-grain — `sys.columns` shows every column of a column-granted object, including the ungranted / denied ones (probe Q2).
 
 #### Cross-database metadata visibility
@@ -376,7 +379,7 @@ The guest rule follows the data path: `master` / `tempdb` / `msdb` resolve to `g
 A registered catalog view (`other.sys.tables`) answers its id ungated — real reveals the system views to everyone.
 
 `OBJECT_NAME(id, database_id)` and `OBJECT_SCHEMA_NAME(id, database_id)` ask the visibility question **alone** and never raise: a database the login has no user in simply reveals nothing, so the answer is NULL.
-Their bypass is the plain effective-`dbo` one rather than the boundary-aware `Bypasses`, which is real's own asymmetry — the `WITH EXECUTE AS OWNER` body that gets Msg 916 for `other.sys.tables` still reads `OBJECT_NAME(id, db_id('other'))`.
+The same goes for a database-scoped frame out of a non-`TRUSTWORTHY` database: the `WITH EXECUTE AS OWNER` body that gets Msg 916 for `other.sys.tables` reads NULL for `OBJECT_NAME(id, <other's id>)`, and `DB_ID('other')` is NULL there to begin with (probed 2026-09-29 against SQL Server 2025).
 `OBJECT_DEFINITION` takes no database argument, so it has no cross-database path at all (real's Msg 916 in that shape comes from the `OBJECT_ID` feeding it).
 
 ### Principal DDL
@@ -453,11 +456,11 @@ In-process connections never authenticate — login DDL through one is how the r
   `FROM WINDOWS` / certificate / asymmetric-key / external-provider forms and `PASSWORD = 0x… HASHED` raise `NotSupportedException`.
   A password over SQL Server's documented **128-character cap** raises Msg 6607 (CREATE and ALTER alike) — **approximate**: 6607 is the password-machinery error probe-confirmed on the `PWDENCRYPT` cap, but real's CREATE LOGIN rejection shape is unverifiable from the reference instance (its login hits the Msg 15247 permission wall before password validation).
 - `ALTER LOGIN name WITH PASSWORD = '…'` re-hashes and stamps `PasswordLastSetTime` (readable via `LOGINPROPERTY`).
-  Every other ALTER form (ENABLE / DISABLE / other WITH options) parses-and-discards after the existence check — DISABLE does **not** block endpoint logins.
+  `ALTER LOGIN name DISABLE` / `ENABLE` set the login's `IsDisabled`, which `is_disabled` projects and the [login gate](#the-login-gate) refuses; the other `WITH` options parse-and-discard after the existence check.
 - `DROP LOGIN name` — **no `IF EXISTS` clause**: real SQL Server's DROP LOGIN grammar rejects it (probe-confirmed Msg 156 near 'IF'), reproduced verbatim — a reserved keyword in any of the three login-name positions raises the keyword-flavored Msg 156, not the generic Msg 102.
 - **`sa` resolves without being in the registry.**
   The registry has to stay *empty* in a simulation nobody created a login in, because the TDS endpoint reads an empty registry as "accept any credentials" — so `sa` is a fixed login the catalog views synthesize rather than a `Logins` entry, the way `EXECUTE AS`, the GRANT family, `sp_addsrvrolemember` and the server-role paths already resolve it by name.
-  `ALTER LOGIN [sa]` therefore resolves by name too (real accepts it — probe-confirmed with `DEFAULT_LANGUAGE`), and since every option but PASSWORD parses and discards, there is nothing to record.
+  `ALTER LOGIN [sa]` therefore resolves by name too (real accepts it — probe-confirmed with `DEFAULT_LANGUAGE`), and every option parses and discards for it, `DISABLE` included.
   `ALTER LOGIN [sa] WITH PASSWORD` raises `NotSupportedException`: recording it would mean adding `sa` to the registry, which flips the endpoint from accepting any credentials to enforcing them — a large behavioural change to fall out of a password change.
   `CREATE LOGIN` collides against every *server principal*, not just a previously created login, so `CREATE LOGIN [sa]` / `[public]` / a fixed server-role name is Msg 15025 rather than a second row the catalog views would project alongside the built-in.
   `DROP LOGIN [sa]` stays Msg 15151; real refuses it too, but the exact message is unprobed — running it against the reference instance risks the account the harness connects with.
@@ -472,16 +475,17 @@ In-process connections never authenticate — login DDL through one is how the r
 Server scope outlives any database, so its registries live on `Simulation`.
 - **Fixed server roles** (`Simulation.FixedServerRoles`, probe6 N1) seed `sys.server_principals` at their real ids 3–20 (`sysadmin`=3 … `##MS_ServerPerformanceStateReader##`=20; `public` stays id 2 with `is_fixed_role 0`). User server principals — created logins **and** custom server roles — take ids from **258** via `AllocatePrincipalId` (real reserves the block past the fixed roles; observed 258+).
 - `CREATE SERVER ROLE x` (→ `Simulation.ServerRoles`, `type R`, `is_fixed 0`), `ALTER SERVER ROLE r { ADD | DROP } MEMBER l` (→ `Simulation.ServerRoleMembers`, works for fixed and custom roles), `DROP SERVER ROLE x` (dropping a fixed role → **Msg 15150**). `SERVER` isn't a reserved keyword, so the CREATE / ALTER / DROP dispatchers match a `Name`-guard case. Errors are the 15151 family: unknown role `Cannot alter the server role '<r>'…`; unknown member `Cannot add the server principal '<l>'…`; unknown grantee login `Cannot find the login '<l>'…`.
-- **sysadmin semantics** (probe6 N3): a sysadmin-member login (incl. `sa`) maps to dbo in every database (see [Authentication](#session-principal--impersonation)); `IsLoginSysadmin` walks the `ServerRoleMembers` closure.
+- **sysadmin semantics** (probe6 N3): a sysadmin-member login (incl. `sa`) maps to dbo in every database (see [Authentication](#session-principal--impersonation)); `IsLoginSysadmin` walks the `ServerRoleMembers` closure, which starts with `sa`'s own `sysadmin` row as real's does.
+  What every other fixed role carries is in [Server permissions and the fixed server roles](#server-permissions-and-the-fixed-server-roles).
 - **`IS_SRVROLEMEMBER`** reads the registry: `public` → 1; a sysadmin member → 1 for **every fixed** server role (N2); real membership → 1/0; a non-role name → NULL; the 2-arg form looks up the named login (an unknown named login → NULL).
 - **Server-scope GRANT / DENY / REVOKE** — three routes into `ApplyServerScopeGrant`: an ON-less GRANT whose permissions are all recognized SERVER-class names (`CONNECT SQL`, `VIEW SERVER STATE`, …), an explicit `ON SERVER::<name>`, or an `ON LOGIN::<name>`.
-  Legal only when the current database is `master` (**Msg 4621**, severity 16 **state 10**, no trailing period — elsewhere), stored in `Simulation.ServerPermissions`.
+  Legal only when the current database is `master` (**Msg 4621**, severity 16 **state 10**, no trailing period — elsewhere), stored in `Simulation.ServerPermissions`, which starts with real's two class-100 rows, `sa`'s `CONNECT SQL` and `public`'s `VIEW ANY DATABASE`.
   `CREATE LOGIN` auto-seeds a `CONNECT SQL` G row (N4b).
   **Server-scope DENY replaces the prior G row** (N4 — divergent from database scope, where G + D coexist); REVOKE removes the rows.
-  Beyond catalog truth + `IS_SRVROLEMEMBER` + the sysadmin mapping, the `VIEW …STATE` server permissions **gate the modeled DMVs** — see [DMV server-state gating](#dmv-server-state-gating).
+  Every stored row is enforced — see [Server permissions and the fixed server roles](#server-permissions-and-the-fixed-server-roles).
   - **Class 100** (`class_desc` `SERVER`, `major_id` 0) — the ON-less and `ON SERVER::` forms.
     `ON SERVER::<name>` is an **alias of the ON-less form and its name is ignored** (probe-confirmed: real accepts any name there and stores the same row).
-    Type codes come from the `ServerPermissionCodes` table (`CONNECT SQL`→`COSQ`, `VIEW SERVER STATE`→`VWSS`, …).
+    Type codes come from `PermissionCatalog`, which carries all 51 SERVER-class permissions (`CONNECT SQL`→`COSQ`, `VIEW SERVER STATE`→`VWSS`, …).
   - **Class 101** (`class_desc` `SERVER_PRINCIPAL`, `major_id` = the target login's `principal_id`) — the `ON LOGIN::` form; see below.
     An unknown login there raises the Msg 15151 `CannotFindLogin` variant.
   - A permission name in `PermissionCatalog` projects its **canonical uppercase spelling** regardless of the GRANT's casing (matching real, and matching the database-scope path); an off-catalog name keeps its raw text.
@@ -497,13 +501,13 @@ It is the same DENY-first / GRANT scan over the login's server-principal closure
 | Per-login (class 101) | Blanket equivalent (class 100) |
 |---|---|
 | `IMPERSONATE` | `IMPERSONATE ANY LOGIN` |
-| `VIEW DEFINITION` | `VIEW ANY DEFINITION` |
+| `VIEW DEFINITION` | `VIEW ANY SECURITY DEFINITION` (which `VIEW ANY DEFINITION` covers) |
 | `ALTER` | `ALTER ANY LOGIN` |
 
-A class-101 row answers only when it names the same target, and covers through the **object-class** graph (so `CONTROL ON LOGIN::x` covers all three); a class-100 row answers through the server-class graph.
+A class-101 row answers only when it names the same target, and covers through the **object-class** graph (so `CONTROL ON LOGIN::x` covers all three); a class-100 row answers through the server-class graph, so `CONTROL SERVER` covers every blanket.
 **DENY over either class binds first**, so `DENY IMPERSONATE ON LOGIN::x` beats `GRANT IMPERSONATE ANY LOGIN` (probe-confirmed).
 
-Three gates consume it: `EXECUTE AS LOGIN` (IMPERSONATE), [server-principal metadata visibility](#server-principal-metadata-visibility) (VIEW DEFINITION / ALTER / IMPERSONATE), and [login DDL](#login-ddl-gating) (ALTER).
+Three gates consume it: `EXECUTE AS LOGIN` (IMPERSONATE — a login may always impersonate itself, probed 2026-09-29), [server-principal metadata visibility](#server-principal-metadata-visibility) (VIEW DEFINITION / ALTER / IMPERSONATE), and [login DDL](#login-ddl-gating) (ALTER); `HAS_PERMS_BY_NAME(<login>, 'LOGIN', …)` and `fn_my_permissions(<login>, 'LOGIN')` read it too.
 
 ### Server-principal metadata visibility
 
@@ -518,6 +522,8 @@ A **restricted** session (non-`dbo` effective principal; dbo / sysadmin short-ci
 Probe-confirmed: a freshly created login sees only itself past the fixed block; `ALTER ON LOGIN::x` reveals x; `VIEW ANY DEFINITION` reveals every login; and a `DENY VIEW DEFINITION ON LOGIN::x` **re-hides x under a blanket grant** — DENY hides at server scope, unlike the database-scope grant-only scan (which is documented as an unprobed assumption).
 
 The filter is `BuiltInResources.ServerPrincipalVisibility(batch)`, returning `null` for the full-visibility fast path and a per-`principal_id` predicate otherwise; both row generators apply it.
+`sys.server_permissions` shows the rows whose grantee it can see — `sa`'s, `public`'s and its own for a bare login — and `sys.server_role_members` every fixed role's memberships whoever the member, a custom role's only where both the role and the member are visible (probed 2026-09-29 against SQL Server 2025).
+`sp_helpsrvrolemember` reads through the same two views.
 
 ### Login DDL gating
 
@@ -525,7 +531,7 @@ Login DDL is server-scope, so a restricted session needs `ALTER ANY LOGIN` (clas
 
 | Statement | Gate | Denial |
 |---|---|---|
-| `CREATE LOGIN` | server-wide `ALTER ANY LOGIN` (there is no per-login target) | **Msg 15247** `User does not have permission to perform this action.` |
+| `CREATE LOGIN` | server-wide `CREATE LOGIN`, which `ALTER ANY LOGIN` covers (there is no per-login target); the creator gets no `ALTER` on the login it made (probed 2026-09-29) | **Msg 15247** `User does not have permission to perform this action.` |
 | `ALTER LOGIN <l>` | `ALTER` on `l` | **Msg 15151** — the *same* `Cannot alter the login '<l>'…` wording a missing login gets, leaking nothing |
 | `DROP LOGIN <l>` | `ALTER` on `l` | **Msg 15151** `Cannot drop the login '<l>'…` |
 
@@ -580,7 +586,7 @@ The `VIEW …STATE` permission enum, type codes (`VIEW SERVER STATE`→`VWSS`, `
 
 `ServerPermissionChecker.Holds(simulation, login, permission)` is the server-scope counterpart to `PermissionChecker` — sysadmin bypass, then a DENY-first / GRANT scan over the login's server-principal closure (`Simulation.BuildServerPrincipalClosure`: the login's server-principal id + its transitive server-role memberships + `public`) with the server-scope covering graph, over `Simulation.ServerPermissions`.
 It also answers the cross-scope database-state requirement (a database `VIEW …STATE` need met by a covering server permission), so the DMV gate consults one method for both.
-(`CONTROL SERVER` isn't modeled separately — sysadmin-only in practice, so it's folded into the bypass.)
+The fixed server roles and `CONTROL SERVER` feed it like any grant, so a `##MS_ServerStateReader##` member reads every session and a `CONTROL SERVER` grantee the server DMVs — unless a `DENY` binds, which beats `CONTROL SERVER` (probed 2026-09-29 against SQL Server 2025).
 
 The gate hangs off a per-DMV `CatalogView.DmvGate` descriptor (`DmvGateKind`), set once at registration in `BuiltInResources.DmvGating.cs` (analogous to bundle 2's `MetadataVisibilityKey`), and is applied in `BuiltInResources.ApplyDmvGate` from both `Selection.ForCatalogView` overloads.
 The `dbo` / sysadmin fast path short-circuits on `SessionSecurityContext.EffectiveIsDbo` before any allocation, so existing in-process DMV reads pay one bool read and are byte-identical.
@@ -600,6 +606,81 @@ Real also raises a trailing **Msg 297** after the 300 / 262; the simulator surfa
 |---|---|
 | 15150 | `DROP SERVER ROLE` on a fixed role: `Cannot drop the server role 'sysadmin'.` |
 | 4621 | Server-scope GRANT / DENY / REVOKE outside `master`. |
+
+### Server permissions and the fixed server roles
+
+Every stored server permission is enforced for a login that isn't `sysadmin`, and the fixed server roles carry what real's carry.
+All probed 2026-09-29 against SQL Server 2025 with dedicated probe logins; the differential cases (`.vs/edge-probe`, `p_srvperm.sql`) match real save for the environmental and documented residue below.
+
+**The model.**
+`PermissionCatalog` carries all 51 SERVER-class permissions with the covering graph `sys.fn_builtin_permissions('SERVER')` lists — `CONTROL SERVER` at the top, `VIEW SERVER STATE` under `ALTER SERVER STATE`, `CREATE ANY DATABASE` under `ALTER ANY DATABASE`, `EXTERNAL ACCESS ASSEMBLY` under `UNSAFE ASSEMBLY`, the `VIEW ANY …` family under `VIEW ANY DEFINITION`.
+`Simulation.HoldsServerPermission` answers for a login: `sysadmin` passes, then a `DENY` anywhere in the login's server-principal closure binds — `CONTROL SERVER` included — then a grant, then a fixed role's own grants (`Simulation.FixedServerRoleGrants`), whose covering closure is exactly what `fn_my_permissions(NULL, 'SERVER')` lists for a member of each role.
+Real keeps those role grants out of `sys.server_permissions`, and so does the simulator.
+The quirks that closure preserves: `securityadmin` carries only `ALTER ANY LOGIN` (and `CREATE LOGIN` under it), `serveradmin`'s `ALTER SERVER STATE` brings the three `VIEW SERVER … STATE` permissions, and `##MS_DefinitionReader##` gets no `VIEW ANY CRYPTOGRAPHICALLY SECURED DEFINITION`, whose cover is `CONTROL SERVER` alone.
+
+`Simulation.SessionHoldsServerPermission` is the question every server-scope statement asks of the session: an identity minted inside one database (`EXECUTE AS USER`, a module's own frame, an application role) holds no server permission at all, the empty-registry dev mode holds every one, and a `sa` session answers on one name compare.
+
+**Into the databases.**
+A server permission implies database permissions through each one's parent in `sys.fn_builtin_permissions`, which the checker's fifth step reads (`ServerLoginRights`; see [Enforcement](#enforcement-execution-time)): `CONTROL SERVER` reads, writes and runs DDL everywhere a user of the login's reaches, `ALTER ANY DATABASE` alters each database, `VIEW ANY DEFINITION` reveals every catalog, and `SELECT ALL USER SECURABLES` reads and reveals every user object without writing one.
+Only `CONNECT ANY DATABASE` (and `CONTROL SERVER` over it) gets a login with no user into a database, as the principal-id-0 user the [authentication order](#session-principal--impersonation) describes; a `SELECT ALL USER SECURABLES` login without a user there is still Msg 916.
+A `CONTROL SERVER` grantee is not `sysadmin` — `IS_SRVROLEMEMBER('sysadmin')` is 0, a database `DENY` binds it, and the `sysadmin`-only commands below refuse it — though it can `EXECUTE AS LOGIN = 'sa'` and become one.
+The trustworthy-crossing authenticator counts `AUTHENTICATE SERVER` as its database `AUTHENTICATE`.
+
+#### The login gate
+
+`Simulation.RefuseLogin` is the one check both front doors run once a login exists: an unknown login or a wrong password is Msg 18456, a disabled one Msg 18470 (`Login failed for user '<l>'. Reason: The account is disabled.`, and only for the right password — a wrong one is still 18456), and a login holding no `CONNECT SQL` Msg 18456 again, whether it was denied or its grant revoked.
+A server role's grant or `CONTROL SERVER` supplies `CONNECT SQL`, and a `sysadmin` member connects however it is denied.
+The client sees state 1 for every cause.
+`EXECUTE AS LOGIN` reaches a disabled or connect-denied login all the same.
+
+#### Database visibility
+
+`sys.databases`, `DB_ID(name)` and `DB_NAME(id)` show a database to a session only when it holds `VIEW ANY DATABASE`, or the database is `master`, `tempdb`, the current one or one its login owns (`Simulation.CanSeeDatabase`).
+Since `public` holds `VIEW ANY DATABASE` from the start, a `DENY` of it is what hides the others — `DB_ID('msdb')` then answers NULL — and so does an identity minted inside one database, which sees `master`, `tempdb` and its own database.
+A `DENY` binds even a login that also holds `ALTER ANY DATABASE`.
+
+#### Statement gates
+
+| Statement | Server permission | Refusal |
+|---|---|---|
+| `sp_configure` with a value | `ALTER SETTINGS` (`serveradmin`); reading takes nothing | **Msg 15247**, attributed to `sp_configure` line 105, ahead of the value's range check |
+| `RECONFIGURE [WITH OVERRIDE]` | `ALTER SETTINGS` | **Msg 5812** sev 14 |
+| `sp_addlinkedserver` / `sp_dropserver` / `sp_serveroption` / `sp_addlinkedsrvlogin` / `sp_droplinkedsrvlogin` | `ALTER ANY LINKED SERVER` (`setupadmin`) | **Msg 15247** once the arguments bind, at each procedure's own line — `sp_addlinkedserver`'s from `sys.sp_MSaddserver_internal` |
+| `DBCC FREEPROCCACHE` / `DROPCLEANBUFFERS` / `FREESYSTEMCACHE` | `ALTER SERVER STATE` (`serveradmin`, `processadmin`, `##MS_ServerStateManager##`) | **Msg 2571** |
+| `DBCC SQLPERF(LOGSPACE)` / `SQLPERF(<wait or latch DMV>, CLEAR)` | `VIEW SERVER STATE` / `ALTER SERVER STATE` | **Msg 297**, ending the batch and rolling the transaction back, catchable by a `TRY` |
+| `DBCC FREESESSIONCACHE` / `TRACEON` / `TRACEOFF` / `LOGINFO` / `HELP` | `sysadmin` alone — neither `CONTROL SERVER` nor `ALTER SERVER STATE` / `ALTER TRACE` | **Msg 2571**, naming the user as `USER_NAME()` does — `public` for a login in through `CONNECT ANY DATABASE` |
+| `RAISERROR … WITH LOG` | `ALTER TRACE` | **Msg 2778** |
+| `CREATE` / `ALTER` / `DROP TRIGGER … ON ALL SERVER` | `CONTROL SERVER` | see [DDL statement gates](#ddl-statement-gates) |
+| `CREATE SERVER ROLE` | `CREATE SERVER ROLE` (under `ALTER ANY SERVER ROLE`) | **Msg 15247** |
+| `ALTER SERVER ROLE <custom> ADD` / `DROP MEMBER`, `DROP SERVER ROLE` | `ALTER ANY SERVER ROLE` | **Msg 15151**, the missing-role wording |
+| `ALTER SERVER ROLE <fixed> ADD` / `DROP MEMBER` | `sysadmin`, or a member of that same role — `CONTROL SERVER`, `ALTER ANY SERVER ROLE` and `securityadmin` are all refused | **Msg 15151** |
+| `CREATE LOGIN`, `ALTER` / `DROP LOGIN` | see [Login DDL gating](#login-ddl-gating) | |
+| `CREATE` / `DROP DATABASE` | see [DDL statement gates](#ddl-statement-gates) | |
+| `EXECUTE AS LOGIN` | see [`ON LOGIN::` securables](#on-login-securables) | |
+
+
+#### Scalars and functions
+
+- `HAS_PERMS_BY_NAME(NULL, NULL, <p>)` asks the server: a SERVER-class permission answers the session's holding of it, anything else — `CREATE TABLE`, `CONNECT`, a name real doesn't know — is NULL, even for `sa`.
+  The `SERVER` class answers the same for any non-NULL securable and NULL for a NULL one.
+  The `LOGIN` class answers `IMPERSONATE` / `VIEW DEFINITION` / `ALTER` / `CONTROL` on the named login, 0 for a name that is no login and NULL for another permission.
+- `fn_my_permissions(NULL, 'SERVER')` lists the session's server permissions (`entity_name` `server`, an empty `subentity_name`) and `fn_my_permissions(<login>, 'LOGIN')` the four on a login, both in `fn_builtin_permissions`' order, bare or `sys.`-qualified.
+- `sys.fn_builtin_permissions` projects real's 301 rows verbatim (`BuiltInResources.BuiltinPermissions`): every class for `DEFAULT`, NULL or `''`, one class for its name in any casing, nothing for an unknown one.
+- `sp_helpsrvrolemember [@srvrolename]` reports the fixed roles' members (`ServerRole` / `MemberName` / `MemberSID`) through `sys.server_role_members` and `sys.server_principals`, so a restricted session sees what those views show it; `sp_helpsrvrole [@srvrolename]` lists the 18 fixed roles with real's descriptions.
+  A name that is no fixed role — a custom one included — is **Msg 15412** at line 10 of each.
+- `IS_SRVROLEMEMBER` reads the same membership (a `sysadmin` member is 1 for every fixed role, a `##MS_…##` one included).
+
+#### Divergences
+
+- A `sp_helpsrvrolemember` `MemberSID` is the simulator's synthetic login SID (see `sys.server_principals`).
+- Real follows the DMV Msg 300 with a Msg 297; the simulator raises the Msg 300 alone (see [DMV server-state gating](#dmv-server-state-gating)).
+
+#### Not modeled yet
+
+- The permissions whose statements the simulator doesn't have stay catalog truth: `SHUTDOWN`, `ALTER ANY CONNECTION` (`KILL`), `ADMINISTER BULK OPERATIONS` (`BULK INSERT`, `OPENROWSET(BULK …)`), `ALTER ANY CREDENTIAL`, the endpoint, event-session, event-notification, audit and availability-group families, `ALTER TRACE` past `RAISERROR … WITH LOG`, `ALTER RESOURCES` and `VIEW ANY ERROR LOG`.
+- `UNSAFE ASSEMBLY` / `EXTERNAL ACCESS ASSEMBLY` for `CREATE ASSEMBLY`, which waits on `clr strict security` itself (see [`backlog.md`](backlog.md)).
+- `fn_my_permissions` for the database-scope classes lists more permissions than the checker models, so it raises `NotSupportedException` rather than answer partially; `HAS_PERMS_BY_NAME`'s `SERVER ROLE` class answers only for a `dbo` session.
+- `ALTER LOGIN [sa] DISABLE` is discarded, since `sa` isn't in the registry.
 
 ## Permission type-code derivation
 
@@ -648,6 +729,7 @@ A restricted principal's read of one is refused with Msg 229 naming the view in 
 **`sys.server_principals`** (14-col full probe-confirmed shape): `name` / `principal_id` / `sid` / `type` / `type_desc` / `is_disabled` / `create_date` / `modify_date` / `default_database_name` / `default_language_name` / `credential_id` / `owning_principal_id` / `is_fixed_role` / `tenant_id`.
 Projects the synthetic fixed rows — `sa` (id 1, sid `0x01`, `SQL_LOGIN`, default db `master`), `public` (id 2, sid `0x02`, `SERVER_ROLE`, `owning_principal_id` 1, `is_fixed_role` **0** — probe-confirmed quirk), and the 18 fixed server roles (ids 3–20, `SERVER_ROLE`, `is_fixed_role 1`) — plus one row per `Simulation.Logins` entry and per `Simulation.ServerRoles` (custom-role) entry (user ids from 258 via `Simulation.AllocatePrincipalId`; `modify_date` = password-last-set; `tenant_id` all-zero GUID matching real's SQL-login rows). Rows emit in principal_id order.
 Created-login `sid`s are deterministic synthetic 16-byte values (FNV-derived from the name) — unique and stable, but won't byte-match real.
+A created login's `is_disabled` follows `ALTER LOGIN … DISABLE` / `ENABLE`, here and in `sys.sql_logins`.
 Rows are **filtered for a restricted session** — see [Server-principal metadata visibility](#server-principal-metadata-visibility); a dbo / sysadmin reader sees everything and pays one bool read.
 
 **`sys.sql_logins`** (14-col full probe-confirmed shape): the first 10 `server_principals` columns plus `credential_id` / `is_policy_checked` / `is_expiration_checked` / `password_hash`.
@@ -656,8 +738,8 @@ Rows are the type-`S` subset (`sa` + created logins, not `public`).
 `is_policy_checked` is always 1 (real's default when `CHECK_POLICY` is unspecified; the simulator parse-and-discards the option, so a login created with `CHECK_POLICY = OFF` diverges).
 Rows carry the same restricted-session filter as `sys.server_principals`.
 
-**`sys.server_permissions`** (10-col, `sys.database_permissions` shape) projects `Simulation.ServerPermissions` — class 100 / `class_desc` `SERVER` / `major_id` 0 for the ON-less and `ON SERVER::` forms, class 101 / `class_desc` `SERVER_PRINCIPAL` / `major_id` = the target login's `principal_id` for `ON LOGIN::` — with canonical type codes and canonical uppercase `permission_name`s.
-**`sys.server_role_members`** (2-col) projects `Simulation.ServerRoleMembers` (`role_principal_id` / `member_principal_id`).
+**`sys.server_permissions`** (10-col, `sys.database_permissions` shape) projects `Simulation.ServerPermissions` — class 100 / `class_desc` `SERVER` / `major_id` 0 for the ON-less and `ON SERVER::` forms, class 101 / `class_desc` `SERVER_PRINCIPAL` / `major_id` = the target login's `principal_id` for `ON LOGIN::` — with canonical type codes and canonical uppercase `permission_name`s, starting with `sa`'s `CONNECT SQL` and `public`'s `VIEW ANY DATABASE`; a restricted session sees only the rows whose grantee it can see.
+**`sys.server_role_members`** (2-col) projects `Simulation.ServerRoleMembers` (`role_principal_id` / `member_principal_id`), which starts with `sa`'s `sysadmin` row.
 
 **Empty encryption-key views** (full probe-confirmed SQL Server 2025 shape, zero rows — no principal-security key model): `sys.asymmetric_keys` (16-col), `sys.certificates` (17-col), `sys.credentials` (7-col).
 SMO's Login / User property-bag and Script queries `LEFT JOIN` these — the User bag joins `sys.certificates` / `sys.asymmetric_keys` on `sid`; the Login bag joins `sys.credentials` on `credential_id`, `sys.server_permissions` on `grantee_principal_id`, and (as `master.sys.*`) certificates / asymmetric_keys on `sid`; Login scripting `INNER JOIN`s `sys.server_role_members` to enumerate fixed-server-role memberships.
@@ -671,7 +753,7 @@ Registered in `BuiltInResources.Security.cs` via the shared `EmptyCatalogRows`.
 | 15151 | Unknown principal in GRANT/REVOKE/DENY/ALTER ROLE / ALTER APPLICATION ROLE; unknown securable object / missing grant authority (object-variant `CannotFindObject`); DROP USER by a non-`db_owner`; ALTER/DROP SERVER ROLE / server-scope grant / `ON LOGIN::` securable naming a missing role / member / login; `ALTER` / `DROP LOGIN` without `ALTER ANY LOGIN` (same wording as a missing login); and the DDL gates that reuse a not-found wording — ALTER SEQUENCE, DROP XML SCHEMA COLLECTION, DROP SCHEMA, DROP ROLE (state 1) / ALTER ROLE (**state 2**), and the `ALTER SCHEMA … TRANSFER` pair (`Cannot alter the schema` then `Cannot transfer the object`). |
 | 15150 | DROP SERVER ROLE on a fixed server role. |
 | 15023 | Duplicate `CREATE USER` / `CREATE ROLE` name. |
-| 15247 | CREATE SEQUENCE / ROLE / USER / SCHEMA / APPLICATION ROLE by a principal lacking `db_ddladmin` / `db_owner`; `CREATE LOGIN` by a principal lacking server-scope `ALTER ANY LOGIN`. |
+| 15247 | CREATE SEQUENCE / ROLE / USER / SCHEMA / APPLICATION ROLE by a principal lacking `db_ddladmin` / `db_owner`; `CREATE LOGIN` / `CREATE SERVER ROLE`, an `sp_configure` write and the linked-server procedures without their server permission. |
 | 218 | DROP TYPE without schema ALTER — the same record a missing type earns, naming the type as written. |
 | 2104 | CREATE TRIGGER without ALTER on the parent object (DML) or `ALTER ANY DATABASE DDL TRIGGER` (database-scope), sev 14 state 1. |
 | 5011 | ALTER DATABASE without database ALTER — **state 9**, the permission sibling of the state-5 unknown-database record. |
@@ -696,6 +778,10 @@ Registered in `BuiltInResources.Security.cs` via the shared `EmptyCatalogRows`.
 | 505 | `USE` / `ChangeDatabase` while an application role is active. |
 | 4624 | GRANT / DENY / REVOKE to sa / dbo / sys / INFORMATION_SCHEMA / self — **info channel**, not raised. |
 | 15182 | `REVOKE` / `DENY` of `CONNECT` from `guest` in `master` or `tempdb`. |
+| 18456 / 18470 | The [login gate](#the-login-gate): bad credentials or no `CONNECT SQL` / a disabled login. |
+| 5812 | `RECONFIGURE` without `ALTER SETTINGS`. |
+| 297 | `DBCC SQLPERF` without its server permission — ends the batch. |
+| 15412 | `sp_helpsrvrolemember` / `sp_helpsrvrole` naming no fixed server role. |
 
 All probe-confirmed against SQL Server 2025.
 
@@ -730,9 +816,9 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 - `DATABASE_PRINCIPAL_ID([name])` — alias of `USER_ID` with the same lookup behavior; real SQL Server exposes both names against the same backing lookup.
 
 **Permission-check placeholders**:
-- `HAS_PERMS_BY_NAME(securable, securable_class, permission [, …])` returns NULL for a NULL `permission`, `1` for a dbo session on whatever exists (preserving the DacFx bacpac-export gate `HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')` = 1), and otherwise the real checker result (1/0) for a `DATABASE` / `OBJECT` / `SCHEMA` securable_class.
+- `HAS_PERMS_BY_NAME(securable, securable_class, permission [, …])` returns NULL for a NULL `permission`, `1` for a dbo session on whatever exists (preserving the DacFx bacpac-export gate `HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')` = 1), and otherwise the real checker result (1/0) for a `DATABASE` / `OBJECT` / `SCHEMA` securable_class; the server forms — a NULL class, `SERVER` and `LOGIN` — are in [Scalars and functions](#scalars-and-functions).
   Even for dbo, real answers 0 for an object, schema or column that isn't there and NULL for a class it doesn't know or a NULL object (probed 2026-09-26 against SQL Server 2025); an unknown permission name is NULL on real but still 1 here, since the permission catalog covers only the modeled names.
-  A NULL securable_class is the ambiguous "current server or database" request the simulator returns NULL for; an unresolvable OBJECT / SCHEMA securable or an unrecognized class returns NULL.
+  An unresolvable OBJECT / SCHEMA securable or an unrecognized class returns NULL.
 - `IS_MEMBER(group_or_role)` — `public` → 1; the effective principal's transitive membership (nested roles + fixed roles via the checker's role closure) → 1/0; dbo → 1 for `db_owner`; any non-role / unknown name → NULL.
 - `IS_ROLEMEMBER(role [, principal])` — same shape as `IS_MEMBER`; a named principal is resolved first (a missing one is NULL even for `public`), counts as a member of itself, and follows nested roles (probed 2026-09-25).
 - `IS_SRVROLEMEMBER(role [, login])` — `public` → 1; real membership from `Simulation.ServerRoleMembers` (1/0); a sysadmin-member login → 1 for **every fixed** server role; a non-role name → NULL; NULL → NULL. The 1-arg form checks the session's effective login; the 2-arg form looks up the named login (an unknown named login → NULL).
@@ -740,11 +826,9 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 ## Known gaps
 
 - **Column-level grants** ship for SELECT / UPDATE / REFERENCES reads and writes, on tables and views alike — see [Column-level grants](#column-level-grants). Residual gaps: **column-level INSERT** grants (INSERT stays object-grain) and the structural-visitor coverage gap for columns buried in some non-arithmetic function containers.
-- **Server-permission enforcement beyond the four gated points** — the `VIEW …STATE` permissions gate the modeled DMVs ([DMV server-state gating](#dmv-server-state-gating)), `IMPERSONATE` gates `EXECUTE AS LOGIN`, `VIEW DEFINITION` / `ALTER` / `IMPERSONATE` gate [server-principal metadata visibility](#server-principal-metadata-visibility), and `ALTER ANY LOGIN` gates [login DDL](#login-ddl-gating).
-  Other server permissions (`CONNECT SQL` as a connect-time gate, `ALTER ANY DATABASE`, `CREATE ANY DATABASE`, …) are stored and projected but not separately enforced; `CONTROL SERVER` isn't modeled as its own permission (folded into the sysadmin bypass).
+- **Server permissions whose statements aren't built** — `SHUTDOWN`, `KILL`, bulk operations, credentials, endpoints, event sessions, audits, traces, the error log, and `CREATE ASSEMBLY`'s `UNSAFE ASSEMBLY`; every modeled server-scope statement is gated — see [Server permissions and the fixed server roles](#not-modeled-yet).
 - **`master`'s and `msdb`'s own seeded grants** — `EXECUTE` on the system procedures and the grants to principals the simulator doesn't carry; a grant naming a system procedure is refused in a user database on real and unresolved here.
-- **`sys.server_permissions` default rows** — real seeds `public` with `VIEW ANY DATABASE` (class 100) and per-endpoint `CONNECT` (class 105); the simulator seeds neither, and models no endpoint class.
-  The observable behavior still matches, since `sys.databases` is unfiltered either way.
+- **`sys.server_permissions` endpoint rows** — real seeds `public` with per-endpoint `CONNECT` (class 105) alongside the class-100 rows the simulator seeds; the simulator models no endpoint class.
 - **Application-role edges** — DDL is gated on the `db_owner` / `db_ddladmin` capability rather than `ALTER ANY APPLICATION ROLE`; a pooled TDS reset clears the role instead of killing the session (real's Msg 596).
   See [Application roles](#application-roles).
 - **DDL statement gates** cover every modeled CREATE / ALTER / DROP — see [DDL statement gates](#ddl-statement-gates). Residue: three securable classes real accepts a grant on have no GRANT surface here, so the alternative each offers isn't honored — `CONTROL ON TYPE::t` (DROP TYPE takes schema ALTER only), `CONTROL ON XML SCHEMA COLLECTION::c` (same), and `CONTROL` on a full-text catalog (DROP FULLTEXT CATALOG takes `ALTER ANY FULLTEXT CATALOG` only). The simulator is the stricter side in all three.
@@ -755,4 +839,4 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 - **`ALTER TABLE ADD`-column SET-reads detection** on the joined form isn't distinguished — a joined UPDATE / DELETE SELECT-checks all backing-table sources unconditionally.
 - **Guest enable/disable**, **`CREATE USER … FROM EXTERNAL PROVIDER`** + the `WITH` option tail — parse-and-discard.
 - **Grammar residue** — `DENY … CASCADE` is Msg 156 here where real accepts it and cascades the denial to the grantee's own grantees, `GRANT ALL` omits real's class-0 **Msg 4628** deprecation notice, and the `TYPE::`, `XML SCHEMA COLLECTION::` and `APPLICATION ROLE::` securable classes aren't parsed (probed 2026-09-28 against SQL Server 2025).
-- **Login-model edges** — login DDL itself is permission-unchecked (the reference login can't reach those checks anyway); DISABLE / password policy / lockout not enforced.
+- **Login-model edges** — password policy (`CHECK_POLICY` / expiration / lockout) is not enforced.

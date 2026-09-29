@@ -96,6 +96,7 @@ partial class Simulation
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_addlinkedserver", "server");
         if (string.IsNullOrEmpty(server))
             throw SimulatedSqlException.NameCannotBeNull();
+        RequireAlterAnyLinkedServer(batch);
 
         var simulation = batch.Connection.Simulation;
         if (!simulation.AvailableRemotes.TryGetValue(server, out var target))
@@ -154,6 +155,7 @@ partial class Simulation
         if (!serverSupplied)
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_dropserver", "server");
         server ??= "(null)";
+        RequireAlterAnyLinkedServer(batch);
 
         if (!batch.Connection.Simulation.ActiveLinkedServers.TryRemove(server, out _))
             throw SimulatedSqlException.LinkedServerDoesNotExist(server);
@@ -208,6 +210,7 @@ partial class Simulation
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_serveroption", "optname");
         if (optionValue is null)
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_serveroption", "optvalue");
+        RequireAlterAnyLinkedServer(batch);
 
         var serverName = server.Value.IsNull ? "(null)" : server.Value.CoerceTo(SqlType.SystemName).AsString;
         if (!batch.Connection.Simulation.ActiveLinkedServers.TryGetValue(serverName, out var linkedServer))
@@ -261,6 +264,19 @@ partial class Simulation
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpLinkedServerNoOp(BatchContext batch)
     {
         _ = ParseExecArguments(batch.Parser, batch);
+        if (!batch.IsSkipping)
+            RequireAlterAnyLinkedServer(batch);
         yield break;
+    }
+
+    /// <summary>
+    /// The linked-server procedures' gate: <c>ALTER ANY LINKED SERVER</c>,
+    /// which <c>setupadmin</c> carries, else Msg 15247 once the arguments have
+    /// bound (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    private static void RequireAlterAnyLinkedServer(BatchContext batch)
+    {
+        if (!batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.AlterAnyLinkedServer))
+            throw SimulatedSqlException.UserDoesNotHavePermission();
     }
 }

@@ -242,6 +242,8 @@ internal static class CatalogViewObjectIds
         ["sp_helpfile"] = -669885142,
         ["sp_helpindex"] = -484505828,
         ["sp_helprotect"] = -655964121,
+        ["sp_helpsrvrole"] = -906683713,
+        ["sp_helpsrvrolemember"] = -93184835,
         ["sp_helpstats"] = -892891760,
         ["sp_helptext"] = -903712576,
         ["sp_helptrigger"] = -469610141,

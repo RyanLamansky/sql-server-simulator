@@ -40,8 +40,8 @@ internal static class DataMasking
             else
                 return true;
             var unmasked = table.IsTableVariable
-                ? PermissionChecker.IsGranted(database, principalId, Permission.Unmask, PermissionChecker.ClassDatabase, 0, 0)
-                : PermissionChecker.IsColumnGranted(database, principalId, Permission.Unmask, table.ObjectId, table.SchemaId, source.ColumnOrdinal);
+                ? PermissionChecker.IsGranted(database, principalId, Permission.Unmask, PermissionChecker.ClassDatabase, 0, 0, ServerLoginRights.For(connection))
+                : PermissionChecker.IsColumnGranted(database, principalId, Permission.Unmask, table.ObjectId, table.SchemaId, source.ColumnOrdinal, ServerLoginRights.For(connection));
             if (!unmasked)
                 return true;
         }

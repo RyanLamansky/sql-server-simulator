@@ -141,10 +141,20 @@ public sealed partial class SimulatedSqlException
     /// Mimics SQL Server error 15247: a DDL statement the simulator doesn't model
     /// as a named permission (<c>CREATE SEQUENCE</c> / <c>CREATE ROLE</c> /
     /// <c>CREATE USER</c> / <c>CREATE SCHEMA</c>) attempted by a non-privileged
-    /// principal. Severity 16, state 1, probe-confirmed wording.
+    /// principal, and the server-scope refusals real words the same way —
+    /// <c>CREATE LOGIN</c>, <c>CREATE SERVER ROLE</c>, an <c>sp_configure</c>
+    /// write and the linked-server procedures. Severity 16, state 1,
+    /// probe-confirmed wording.
     /// </summary>
     internal static SimulatedSqlException UserDoesNotHavePermission() =>
         new("User does not have permission to perform this action.", 15247, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5812: <c>RECONFIGURE</c> by a session without
+    /// <c>ALTER SETTINGS</c> (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ReconfigurePermissionDenied() =>
+        new("You do not have permission to run the RECONFIGURE statement.", 5812, 14, 1);
 
     /// <summary>
     /// Mimics SQL Server error 1088 for an <c>ALTER TABLE</c> denied by a missing

@@ -14,7 +14,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// model = 3, msdb = 4), and user databases carry the stored id assigned at
 /// registration (smallest free id ≥ 5, in creation order with dropped ids
 /// reused) — the same value projected by <c>sys.databases.database_id</c>.
-/// Unknown name returns NULL; NULL argument returns NULL.
+/// Unknown name returns NULL; NULL argument returns NULL, and so does a
+/// database the session can't see (<see cref="Simulation.CanSeeDatabase"/>).
 /// </remarks>
 internal sealed class DbId : Expression
 {
@@ -34,10 +35,11 @@ internal sealed class DbId : Expression
         var targetName = this.nameArg is null ? runtime.Batch.CurrentDatabase.Name : ResolveNameArgument(runtime);
         if (targetName is null)
             return SqlValue.Null(SqlType.SmallInt);
-        foreach (var (db, id) in DatabasesWithIds(runtime.Batch.Connection.Simulation))
+        var connection = runtime.Batch.Connection;
+        foreach (var (db, id) in DatabasesWithIds(connection.Simulation))
         {
             if (BuiltInToken.Comparer.Equals(db.Name, targetName))
-                return SqlValue.FromInt16(id);
+                return connection.Simulation.CanSeeDatabase(connection, db) ? SqlValue.FromInt16(id) : SqlValue.Null(SqlType.SmallInt);
         }
         return SqlValue.Null(SqlType.SmallInt);
     }
@@ -94,8 +96,9 @@ internal sealed class DbId : Expression
 /// <summary>
 /// SQL <c>DB_NAME([id])</c>: returns the database name for the given
 /// <c>database_id</c>, or the current database's name when called with
-/// no argument. NULL argument or unknown id returns NULL. Result type
-/// is <see cref="Expression.MetadataNameType"/>.
+/// no argument. NULL argument, unknown id, or the id of a database the session
+/// can't see returns NULL. Result type is
+/// <see cref="Expression.MetadataNameType"/>.
 /// </summary>
 internal sealed class DbName : Expression
 {
@@ -118,10 +121,15 @@ internal sealed class DbName : Expression
         if (v.IsNull)
             return SqlValue.Null(MetadataNameType(runtime.Batch));
         var requested = ScalarArguments.CoerceToInt(v);
-        foreach (var (db, id) in DbId.DatabasesWithIds(runtime.Batch.Connection.Simulation))
+        var connection = runtime.Batch.Connection;
+        foreach (var (db, id) in DbId.DatabasesWithIds(connection.Simulation))
         {
             if (id == requested)
-                return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), db.Name);
+            {
+                return connection.Simulation.CanSeeDatabase(connection, db)
+                    ? SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), db.Name)
+                    : SqlValue.Null(MetadataNameType(runtime.Batch));
+            }
         }
         return SqlValue.Null(MetadataNameType(runtime.Batch));
     }

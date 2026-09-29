@@ -36,7 +36,7 @@ partial class Simulation
         "sp_column_privileges" or "sp_columns" or "sp_columns_100" or "sp_databases" or "sp_datatype_info"
         or "sp_datatype_info_100" or "sp_depends" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters"
         or "sp_executesql" or "sp_fkeys" or "sp_getapplock" or "sp_help" or "sp_helpconstraint" or "sp_helpdb"
-        or "sp_helpfile" or "sp_helpindex" or "sp_helprotect" or "sp_helpstats" or "sp_helptext" or "sp_helptrigger"
+        or "sp_helpfile" or "sp_helpindex" or "sp_helprotect" or "sp_helpsrvrole" or "sp_helpsrvrolemember" or "sp_helpstats" or "sp_helptext" or "sp_helptrigger"
         or "sp_helpuser" or "sp_MSforeachdb" or "sp_MSforeachtable" or "sp_pkeys" or "sp_releaseapplock"
         or "sp_server_info" or "sp_set_session_context" or "sp_spaceused" or "sp_special_columns"
         or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_100" or "sp_statistics"
@@ -263,6 +263,8 @@ partial class Simulation
             "sp_helpfile" => Uncounted(InvokeSpHelpFile(batch)),
             "sp_helpindex" => Uncounted(InvokeSpHelpIndex(batch, CalledName(procName))),
             "sp_helprotect" => InvokeSpHelpProtect(batch),
+            "sp_helpsrvrole" => Uncounted(InvokeSpHelpSrvRole(batch)),
+            "sp_helpsrvrolemember" => Uncounted(InvokeSpHelpSrvRoleMember(batch)),
             "sp_helpstats" => Uncounted(InvokeSpHelpStats(batch)),
             "sp_helptext" => Uncounted(InvokeSpHelpText(batch)),
             "sp_helptrigger" => InvokeSpHelpTrigger(batch),

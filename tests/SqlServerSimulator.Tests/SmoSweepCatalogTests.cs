@@ -58,8 +58,9 @@ public sealed class SmoSweepCatalogTests
     }
 
     /// <summary>
-    /// The encryption-key / server-permission / role-membership / numbered-proc
-    /// views resolve and are always empty (unmodeled features). SMO's Login /
+    /// The encryption-key / numbered-proc views resolve and start empty, and
+    /// server_permissions and server_role_members hold only the rows every
+    /// instance starts with. SMO's Login /
     /// User bags LEFT JOIN certificates / asymmetric_keys / credentials /
     /// server_permissions / server_role_members; sys.endpoints backs
     /// Server.Endpoints.
@@ -70,12 +71,14 @@ public sealed class SmoSweepCatalogTests
         var sim = new Simulation();
         foreach (var view in new[]
         {
-            "asymmetric_keys", "certificates", "credentials", "server_permissions",
-            "server_role_members", "numbered_procedures", "endpoints",
+            "asymmetric_keys", "certificates", "credentials",
+            "numbered_procedures", "endpoints",
         })
         {
             AreEqual(0, sim.ExecuteScalar($"select count(*) from sys.{view}"), view);
         }
+        AreEqual(2, sim.ExecuteScalar("select count(*) from sys.server_permissions"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.server_role_members"));
         // Login / User scripting reaches certificates / asymmetric_keys through
         // three-part master.sys names too.
         AreEqual(0, sim.ExecuteScalar("select count(*) from master.sys.certificates"));

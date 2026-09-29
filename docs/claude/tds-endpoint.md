@@ -30,8 +30,9 @@ The knob is T-SQL, not API: `CREATE LOGIN name WITH PASSWORD = '…'` (run throu
 While the registry is empty — the zero-configuration default — any LOGIN7 credentials are accepted.
 Once at least one login exists, the LOGIN7 username must resolve in the registry (keyed case-insensitively, `BuiltInToken.Comparer` like the sibling server-scope dicts) and the password must verify against the stored hash (`PasswordHash.Verify`).
 The registry stores the legacy `0x0200` single-pass-SHA-512 format rather than PWDENCRYPT's `0x0300` PBKDF2 — the hashes never leave the simulation's memory, so 100k PBKDF2 iterations would be pure per-connection-open cost; verification dispatches on the version tag so either form verifies.
-Failure — wrong password, unknown login, empty password alike — writes ERROR **Msg 18456 severity 14 state 1**, message `Login failed for user '<name>'.`, then DONE with `DONE_ERROR` and closes the connection.
-Shape probe-confirmed against SQL Server 2025: the real server masks the detailed state, so all three failure causes are client-indistinguishable.
+Failure — wrong password, unknown login, empty password, a login holding no `CONNECT SQL` alike — writes ERROR **Msg 18456 severity 14 state 1**, message `Login failed for user '<name>'.`, then DONE with `DONE_ERROR` and closes the connection; a disabled login given its right password gets **Msg 18470** in the same shape instead.
+Shape probe-confirmed against SQL Server 2025: the real server masks the detailed state, so the 18456 causes are client-indistinguishable.
+`Simulation.RefuseLogin` is the check, shared with the in-process front door — see [`permissions.md`](permissions.md#the-login-gate).
 
 The LOGIN7 password field de-obfuscates per MS-TDS (each byte XOR 0xA5 then nibble-swap, inverting the client's swap-then-XOR) and its length pair is **char-counted like every other LOGIN7 field** — oracle-confirmed with a surrogate-pair password, where a byte-counted read would overrun.
 `ALTER LOGIN … WITH PASSWORD` / `DROP LOGIN` update the registry live (entries are immutable and replaced wholesale, so a concurrent login sees a consistent hash); dropping the last login reverts the endpoint to accept-anything.
@@ -521,7 +522,7 @@ A real build number is load-bearing for SSMS's per-build client feature gates (A
 
 - Login INFO states are approximations.
 - MARS and TDS 8.0 / `Encrypt=Strict` ship (see [MARS](#mars-multiple-active-result-sets) below and the strict paragraph up top); no plaintext sessions, no integrated auth (an SSPI/FedAuth login presents an empty SQL username, which under a non-empty registry fails as Msg 18456 rather than negotiating).
-- Credential-enforcement edges not modeled: `ALTER LOGIN … DISABLE` parses but doesn't block login; password policy (`CHECK_POLICY` / expiration / lockout) never enforced; no login auditing.
+- Credential-enforcement edges not modeled: password policy (`CHECK_POLICY` / expiration / lockout) never enforced; no login auditing.
 - RPC parameters are gap-free in both directions: every input TYPE_INFO is accepted — TVP / UDT / `sql_variant` / `text` / `ntext` / `image` — every client value-stream column type (bulk / TVP) decodes through the shared `TdsWireValue` / `TdsColumnDecoder`, and output-direction UDT / `sql_variant` parameters write back as RETURNVALUE tokens (see [CLR-UDT / sql_variant parameters](#clr-udt--sql_variant-parameters)).
   Non-cursor well-known ProcIDs beyond the sp_execute/sp_prepare family are rejected with ERROR 50000 naming the id.
 - Mid-stream attention (cancel) ships — see below.

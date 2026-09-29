@@ -225,13 +225,11 @@ internal sealed class Permissions : Expression
 /// <summary>
 /// SQL <c>HAS_PERMS_BY_NAME(securable, securable_class, permission [, ...])</c>:
 /// returns 1 when the current principal has the given permission, 0
-/// otherwise. The simulator doesn't enforce permissions (GRANT/REVOKE
-/// modify metadata only), so this returns 1 for any non-NULL
-/// <c>permission</c>. A NULL <c>permission</c> returns NULL; NULL
-/// <c>securable</c> / <c>securable_class</c> are legal (real reads them as
-/// "the current server or database" — DacFx's export permission gate sends
-/// <c>HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')</c>) and
-/// don't affect the result.
+/// otherwise, through the same checkers the enforcement gates use — the
+/// database one for <c>DATABASE</c> / <c>OBJECT</c> / <c>SCHEMA</c>, the
+/// server one for a NULL class (the server) and <c>LOGIN</c>. A NULL
+/// <c>permission</c> returns NULL, and so does a class or securable real
+/// doesn't answer for.
 /// </summary>
 internal sealed class HasPermsByName : Expression
 {
@@ -258,6 +256,23 @@ internal sealed class HasPermsByName : Expression
             return SqlValue.Null(SqlType.Int32);
 
         var connection = runtime.Batch.Connection;
+        // A NULL class is the server, which only a NULL securable names and
+        // only a SERVER-class permission is asked of — anything else is NULL
+        // (probed 2026-09-29 against SQL Server 2025: CREATE TABLE and CONNECT
+        // there answer NULL even for sa). The server answer reads the same
+        // model the server-scope gates do.
+        // The SERVER class answers the same question for any non-NULL
+        // securable, and NULL for a NULL one.
+        var serverClass = !classVal.IsNull && string.Equals(classVal.CoerceTo(SqlType.NVarchar).AsString.Trim(), "SERVER", StringComparison.OrdinalIgnoreCase);
+        if (classVal.IsNull || serverClass)
+        {
+            return securableVal.IsNull == !serverClass && Permission.Resolve(permissionVal.CoerceTo(SqlType.NVarchar).AsString) is var serverPermission && serverPermission.IsServerClass
+                ? SqlValue.FromInt32(connection.Simulation.SessionHoldsServerPermission(connection, serverPermission) ? 1 : 0)
+                : SqlValue.Null(SqlType.Int32);
+        }
+        if (string.Equals(classVal.CoerceTo(SqlType.NVarchar).AsString.Trim(), "LOGIN", StringComparison.OrdinalIgnoreCase))
+            return LoginAnswer(connection, securableVal, permissionVal.CoerceTo(SqlType.NVarchar).AsString);
+
         // dbo holds every permission on whatever exists — DacFx's bacpac-export
         // gate (HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')) reads 1
         // — but real still answers NULL for a class it doesn't know or a
@@ -265,12 +280,6 @@ internal sealed class HasPermsByName : Expression
         // 2026-09-26 against SQL Server 2025).
         if (connection.Security.EffectiveIsDbo)
             return this.DboAnswer(runtime, securableVal, classVal);
-
-        // A NULL securable_class is an ambiguous "current server or database"
-        // request the simulator can't disambiguate — return NULL (matches the
-        // probed (NULL, NULL, 'CONNECT') → NULL result).
-        if (classVal.IsNull)
-            return SqlValue.Null(SqlType.Int32);
 
         var permission = permissionVal.CoerceTo(SqlType.NVarchar).AsString;
         var className = classVal.CoerceTo(SqlType.NVarchar).AsString;
@@ -318,15 +327,48 @@ internal sealed class HasPermsByName : Expression
         }
 
         return SqlValue.FromInt32(
-            PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), securableClass, majorId, schemaId) ? 1 : 0);
+            PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), securableClass, majorId, schemaId, ServerLoginRights.For(connection)) ? 1 : 0);
+    }
+
+    /// <summary>
+    /// The <c>LOGIN</c> class: <paramref name="permissionName"/> on the named
+    /// login, answered by its <c>ON LOGIN::</c> grants and the server-wide
+    /// permission each implies (<c>IMPERSONATE ANY LOGIN</c>, <c>VIEW ANY
+    /// SECURITY DEFINITION</c>, <c>ALTER ANY LOGIN</c>, <c>CONTROL SERVER</c>)
+    /// — the model <c>EXECUTE AS LOGIN</c> and the login DDL gates read. A
+    /// NULL securable, or a permission the class doesn't carry, is NULL; a
+    /// name that is no login is 0 (probed 2026-09-29 against SQL Server 2025).
+    /// </summary>
+    private static SqlValue LoginAnswer(SimulatedDbConnection connection, SqlValue securableVal, string permissionName)
+    {
+        var simulation = connection.Simulation;
+        var permission = Permission.Resolve(permissionName);
+        Permission? blanket = permission switch
+        {
+            Permission.Alter => Permission.AlterAnyLogin,
+            Permission.Control => Permission.ControlServer,
+            Permission.Impersonate => Permission.ImpersonateAnyLogin,
+            Permission.ViewDefinition => Permission.ViewAnySecurityDefinition,
+            _ => null,
+        };
+        if (blanket is not { } serverWide || securableVal.IsNull)
+            return SqlValue.Null(SqlType.Int32);
+        var loginName = securableVal.CoerceTo(SqlType.NVarchar).AsString;
+        if (!(BuiltInToken.Comparer.Equals(loginName, "sa") || simulation.Logins.ContainsKey(loginName))
+            || !simulation.TryResolveServerPrincipalId(loginName, out var targetId))
+        {
+            return SqlValue.FromInt32(0);
+        }
+        var effective = connection.Security.Effective;
+        var holds = !effective.IsDatabaseScoped
+            && (simulation.Logins.IsEmpty
+                || simulation.HoldsServerPrincipalPermission(effective.LoginName, targetId, permission, serverWide));
+        return SqlValue.FromInt32(holds ? 1 : 0);
     }
 
     private SqlValue DboAnswer(RuntimeContext runtime, SqlValue securableVal, SqlValue classVal)
     {
         var batch = runtime.Batch;
-        // A NULL class means the server, which only a NULL securable names.
-        if (classVal.IsNull)
-            return securableVal.IsNull ? SqlValue.FromInt32(1) : SqlValue.Null(SqlType.Int32);
         var className = classVal.CoerceTo(SqlType.NVarchar).AsString.Trim();
         if (!IsSecurableClass(className))
             return SqlValue.Null(SqlType.Int32);

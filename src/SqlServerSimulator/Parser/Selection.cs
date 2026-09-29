@@ -3122,6 +3122,16 @@ internal sealed partial class Selection
                     return BuiltInRowsetSource(context, ParseVirtualFileStats(context, objectName.ToString()));
                 }
 
+                // The two permission functions take the same bare or `sys.`
+                // forms.
+                if (objectName.Count == 1 || (objectName.Count == 2 && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys")))
+                {
+                    if (BuiltInToken.Equals(objectName.Leaf, "fn_builtin_permissions"))
+                        return BuiltInRowsetSource(context, ParseBuiltinPermissions(context, objectName.Leaf));
+                    if (BuiltInToken.Equals(objectName.Leaf, "fn_my_permissions"))
+                        return BuiltInRowsetSource(context, ParseMyPermissions(context, objectName.Leaf));
+                }
+
                 // The dependency DMVs, the describe DMV, dm_exec_sql_text and
                 // dm_exec_input_buffer are system TVFs, `sys.`-qualified like
                 // fn_virtualfilestats and dispatched on the same terms.

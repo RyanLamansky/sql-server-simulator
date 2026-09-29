@@ -90,9 +90,9 @@ partial class Simulation
     /// only <c>nested triggers</c> carries behavior. The two CLR rows are the
     /// exception — they keep reporting the <see cref="EnableClr"/> host opt-in,
     /// which is the simulator's actual gate on assembly registration.
-    /// Real SQL Server also requires ALTER SETTINGS permission and returns a
-    /// <c>duplicate_options</c> result set alongside Msg 15124; neither is
-    /// modeled.
+    /// A write by a session without <c>ALTER SETTINGS</c> is Msg 15247.
+    /// Real also returns a <c>duplicate_options</c> result set alongside
+    /// Msg 15124, which isn't modeled.
     /// </para>
     /// </remarks>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpConfigure(BatchContext batch, string procedureName)
@@ -117,6 +117,10 @@ partial class Simulation
             yield break;
         }
 
+        // A write takes ALTER SETTINGS (serveradmin carries it); reading
+        // takes nothing (probed 2026-09-29 against SQL Server 2025).
+        if (!simulation.SessionHoldsServerPermission(batch.Connection, Permission.AlterSettings))
+            throw SimulatedSqlException.UserDoesNotHavePermission();
         if (requested < option.Minimum || requested > option.Maximum)
             throw SimulatedSqlException.InvalidConfigurationValue(requested, option.Name);
 
@@ -137,7 +141,8 @@ partial class Simulation
     /// <c>run_value</c>. Real validates the staged values against the running
     /// server's state and <c>WITH OVERRIDE</c> waives that check; the simulator
     /// validates at <c>sp_configure</c> time only, so the clause parses and
-    /// makes no difference.
+    /// makes no difference. A session without <c>ALTER SETTINGS</c> gets
+    /// Msg 5812.
     /// </summary>
     private static void ParseReconfigureStatement(BatchContext batch)
     {
@@ -151,6 +156,8 @@ partial class Simulation
 
         if (batch.IsSkipping)
             return;
+        if (!batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.AlterSettings))
+            throw SimulatedSqlException.ReconfigurePermissionDenied();
 
         var configuration = batch.Connection.Simulation.ServerConfiguration;
         foreach (var entry in configuration)

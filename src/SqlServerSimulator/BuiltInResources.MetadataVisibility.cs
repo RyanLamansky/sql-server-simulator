@@ -120,8 +120,8 @@ internal static partial class BuiltInResources
         Database targetDatabase,
         IEnumerable<SqlValue[]> rows) =>
         FilteringPrincipal(view, batch, targetDatabase) is not { } principalId || view.MetadataKey is not { } key ? rows
-            : key.IsNameKeyed ? FilterByName(rows, key, targetDatabase, principalId)
-            : FilterByObjectId(rows, key, targetDatabase, principalId);
+            : key.IsNameKeyed ? FilterByName(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection))
+            : FilterByObjectId(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection));
 
     /// <summary>
     /// Whether <see cref="ApplyMetadataFilter"/> would hand this read every row
@@ -144,9 +144,10 @@ internal static partial class BuiltInResources
         IEnumerable<SqlValue[]> rows,
         MetadataVisibilityKey key,
         Database database,
-        int principalId)
+        int principalId,
+        ServerLoginRights server)
     {
-        var visible = BuildVisibleObjectIds(database, principalId);
+        var visible = BuildVisibleObjectIds(database, principalId, server);
         foreach (var row in rows)
         {
             var idCell = row[key.ObjectIdOrdinal];
@@ -159,9 +160,10 @@ internal static partial class BuiltInResources
         IEnumerable<SqlValue[]> rows,
         MetadataVisibilityKey key,
         Database database,
-        int principalId)
+        int principalId,
+        ServerLoginRights server)
     {
-        var visible = BuildVisibleObjectNames(database, principalId);
+        var visible = BuildVisibleObjectNames(database, principalId, server);
         foreach (var row in rows)
         {
             var schemaCell = row[key.SchemaNameOrdinal];
@@ -179,7 +181,7 @@ internal static partial class BuiltInResources
     // constraint ids (which appear in sys.objects / the constraint views keyed
     // by their own id). Table types are metadata containers, not grantable
     // securables, so their ids are always included.
-    private static HashSet<int> BuildVisibleObjectIds(Database database, int principalId)
+    private static HashSet<int> BuildVisibleObjectIds(Database database, int principalId, ServerLoginRights server)
     {
         var closure = PermissionChecker.BuildPrincipalClosure(database, principalId);
         var visible = new HashSet<int>();
@@ -188,7 +190,7 @@ internal static partial class BuiltInResources
             foreach (var obj in schema.SchemaObjects())
             {
                 var (governingId, governingSchema) = GoverningObject(obj);
-                if (!PermissionChecker.CanViewMetadata(database, closure, governingId, governingSchema))
+                if (!PermissionChecker.CanViewMetadata(database, closure, governingId, governingSchema, server))
                     continue;
                 _ = visible.Add(obj.ObjectId);
                 if (obj is HeapTable table)
@@ -200,7 +202,7 @@ internal static partial class BuiltInResources
         return visible;
     }
 
-    private static HashSet<string> BuildVisibleObjectNames(Database database, int principalId)
+    private static HashSet<string> BuildVisibleObjectNames(Database database, int principalId, ServerLoginRights server)
     {
         var closure = PermissionChecker.BuildPrincipalClosure(database, principalId);
         var visible = new HashSet<string>(BuiltInToken.Comparer);
@@ -209,7 +211,7 @@ internal static partial class BuiltInResources
             foreach (var obj in schema.SchemaObjects())
             {
                 var (governingId, governingSchema) = GoverningObject(obj);
-                if (PermissionChecker.CanViewMetadata(database, closure, governingId, governingSchema))
+                if (PermissionChecker.CanViewMetadata(database, closure, governingId, governingSchema, server))
                     _ = visible.Add(QualifiedName(schema.Name, obj.Name));
             }
         }

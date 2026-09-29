@@ -280,15 +280,16 @@ public sealed class CrossDatabasePermissionTests
     }
 
     [TestMethod]
-    public void ModuleOwnerFrame_ObjectNameIdForm_StillAnswers()
+    public void ModuleOwnerFrame_ObjectNameIdForm_AnswersNull()
     {
-        // The asymmetry real draws: the same frame that can't reach the away
-        // catalog still reads a foreign id's name, because the id form asks only
-        // the visibility question and a dbo frame sees everything.
+        // The frame that can't reach the away catalog reads no foreign id's
+        // name either — by a written database id, or through DB_ID, which is
+        // NULL for a database the frame can't see (probed 2026-09-29).
         var sim = TwoDatabaseFixture();
         var id = (int)sim.ExecuteScalar("use away; select object_id('dbo.remote')")!;
-        sim.ExecuteBatches("use home", $"create procedure dbo.p_oname with execute as owner as select object_name({id}, db_id('away'))");
-        AreEqual("remote", sim.ExecuteScalar("use home; exec dbo.p_oname"));
+        var away = (short)sim.ExecuteScalar("select db_id('away')")!;
+        sim.ExecuteBatches("use home", $"create procedure dbo.p_oname with execute as owner as select object_name({id}, {away}), db_id('away')");
+        AreEqual(DBNull.Value, sim.ExecuteScalar("use home; exec dbo.p_oname"));
     }
 
     [TestMethod]

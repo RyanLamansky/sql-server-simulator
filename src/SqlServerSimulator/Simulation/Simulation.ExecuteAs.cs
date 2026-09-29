@@ -139,8 +139,13 @@ partial class Simulation
     private static void RequireImpersonateLoginPermission(SimulatedDbConnection connection, string targetName)
     {
         var security = connection.Security;
-        if (security.EffectiveIsDbo)
+        // A login may always impersonate itself (probed 2026-09-29 against
+        // SQL Server 2025, as the USER form's rule).
+        if (security.EffectiveIsDbo
+            || (!security.Effective.IsDatabaseScoped && BuiltInToken.Comparer.Equals(security.Effective.LoginName, targetName)))
+        {
             return;
+        }
         var simulation = connection.Simulation;
         if (!simulation.TryResolveServerPrincipalId(targetName, out var targetId)
             || !simulation.HoldsServerPrincipalPermission(

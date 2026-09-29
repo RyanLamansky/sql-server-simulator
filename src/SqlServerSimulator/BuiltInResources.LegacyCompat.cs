@@ -156,6 +156,10 @@ internal static partial class BuiltInResources
         // or indexed view's statistics.
         "sp_helprotect",
         "sp_helpstats",
+        // sp_helpsrvrole / sp_helpsrvrolemember: the fixed server roles and
+        // their members, over sys.server_role_members.
+        "sp_helpsrvrole",
+        "sp_helpsrvrolemember",
         // sp_depends: the deprecated dependency report, over the same analysis
         // sys.sql_expression_dependencies and the dm_sql_referen*_entities pair
         // project. See docs/claude/catalog-views.md.

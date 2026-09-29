@@ -164,6 +164,9 @@ internal static class PermissionEnforcement
         return effective.DatabasePrincipalId == Database.DboPrincipalId && !effective.IsDatabaseScoped;
     }
 
+    /// <summary>The server permissions the session's effective identity lends a database check — none for a database-scoped identity.</summary>
+    private static ServerLoginRights Rights(BatchContext batch) => ServerLoginRights.For(batch.Connection);
+
     /// <summary>
     /// Resolves the principal that answers for a reference into
     /// <paramref name="target"/> and reports whether it needs checking at all.
@@ -297,7 +300,8 @@ internal static class PermissionEnforcement
         source.Trustworthy
         && Simulation.TryMapLoginToDatabaseUser(simulation, target, source.OwnerLoginName, out var authenticator)
         && (authenticator.PrincipalId == Database.DboPrincipalId
-            || PermissionChecker.IsGranted(target, authenticator.PrincipalId, Permission.Authenticate, PermissionChecker.ClassDatabase, 0, 0));
+            || PermissionChecker.IsGranted(target, authenticator.PrincipalId, Permission.Authenticate, PermissionChecker.ClassDatabase, 0, 0,
+                ServerLoginRights.ForLogin(simulation, source.OwnerLoginName)));
 
     /// <summary>
     /// The principal a catalog-view read of <paramref name="target"/> filters
@@ -316,7 +320,7 @@ internal static class PermissionEnforcement
         var principalId = ReferenceEquals(target, batch.CurrentDatabase)
             ? batch.Connection.Security.Effective.DatabasePrincipalId
             : ResolveCrossDatabasePrincipal(batch.Connection, target).PrincipalId;
-        return FilteringPrincipal(target, principalId);
+        return FilteringPrincipal(target, principalId, Rights(batch));
     }
 
     /// <summary>
@@ -325,32 +329,32 @@ internal static class PermissionEnforcement
     /// <paramref name="target"/> at all, where the throwing form raises Msg 916.
     /// The id-form <c>OBJECT_NAME</c> / <c>OBJECT_SCHEMA_NAME</c> ask the
     /// visibility question alone — a database their login has no user in reveals
-    /// nothing and they answer NULL — and the bypass is the plain effective-
-    /// <c>dbo</c> one rather than <see cref="Bypasses"/>, since a database-scoped
-    /// <c>dbo</c> frame still reads a foreign id's name (probe-confirmed: a
-    /// <c>WITH EXECUTE AS OWNER</c> body that gets Msg 916 for the same
-    /// database's catalog still answers <c>OBJECT_NAME(id, db_id('other'))</c>).
+    /// nothing and they answer NULL, and so does one a database-scoped frame
+    /// can't reach (probed 2026-09-29 against SQL Server 2025: a <c>WITH
+    /// EXECUTE AS OWNER</c> body answers NULL for a foreign id, whether the
+    /// database id is written or read through <c>DB_ID</c>, which is NULL
+    /// there itself).
     /// </summary>
     internal static bool TryMetadataVisibilityPrincipal(BatchContext batch, Database target, out int? principalId)
     {
         principalId = null;
         var security = batch.Connection.Security;
-        if (security.EffectiveIsDbo)
+        if (Bypasses(batch.Connection, target))
             return true;
         if (ReferenceEquals(target, batch.CurrentDatabase))
         {
-            principalId = FilteringPrincipal(target, security.Effective.DatabasePrincipalId);
+            principalId = FilteringPrincipal(target, security.Effective.DatabasePrincipalId, Rights(batch));
             return true;
         }
         if (!TryResolveCrossDatabasePrincipal(batch.Connection, target, out var principal))
             return false;
-        principalId = FilteringPrincipal(target, principal.PrincipalId);
+        principalId = FilteringPrincipal(target, principal.PrincipalId, Rights(batch));
         return true;
     }
 
     /// <summary>The principal a catalog read of <paramref name="database"/> filters by, or <see langword="null"/> when <paramref name="principalId"/> sees everything there.</summary>
-    private static int? FilteringPrincipal(Database database, int principalId) =>
-        principalId == Database.DboPrincipalId || PermissionChecker.HasFullMetadataVisibility(database, principalId)
+    private static int? FilteringPrincipal(Database database, int principalId, ServerLoginRights server) =>
+        principalId == Database.DboPrincipalId || PermissionChecker.HasFullMetadataVisibility(database, principalId, server)
             ? null
             : principalId;
 
@@ -413,10 +417,10 @@ internal static class PermissionEnforcement
             // Column-grain path: a SELECT read with tracked columns.
             if (permission == Permission.Select && readColumns is not null && readColumns.TryGetValue(s.ObjectId, out var target))
             {
-                CheckColumnGrants(database, principalId, Permission.Select, target);
+                CheckColumnGrants(database, principalId, Permission.Select, target, Rights(batch));
                 continue;
             }
-            if (!PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
+            if (!PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, s.ObjectId, s.SchemaId, Rights(batch)))
                 throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, database.Name, s.SchemaName);
             // A passed EXECUTE check on a scalar UDF invoked in this query memos
             // the object so the per-row invocation seam skips the re-check.
@@ -475,7 +479,7 @@ internal static class PermissionEnforcement
             var principalId = ResolveCrossDatabasePrincipal(batch.Connection, s.Database).PrincipalId;
             if (principalId != Database.DboPrincipalId
                 && !ChainsAcross(moduleDatabase, moduleOwnerId, s.Database, s.ObjectId)
-                && !PermissionChecker.IsGranted(s.Database, principalId, Permission.Resolve(s.Permission), PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
+                && !PermissionChecker.IsGranted(s.Database, principalId, Permission.Resolve(s.Permission), PermissionChecker.ClassObject, s.ObjectId, s.SchemaId, Rights(batch)))
             {
                 throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, s.Database.Name, s.SchemaName);
             }
@@ -514,10 +518,10 @@ internal static class PermissionEnforcement
             var permission = Permission.Resolve(s.Permission);
             if (permission == Permission.Select && body.ReadColumnsByObject is { } readColumns && readColumns.TryGetValue(s.ObjectId, out var target))
             {
-                CheckColumnGrants(moduleDatabase, principalId, Permission.Select, target);
+                CheckColumnGrants(moduleDatabase, principalId, Permission.Select, target, Rights(batch));
                 continue;
             }
-            if (!PermissionChecker.IsGranted(moduleDatabase, principalId, permission, PermissionChecker.ClassObject, s.ObjectId, s.SchemaId))
+            if (!PermissionChecker.IsGranted(moduleDatabase, principalId, permission, PermissionChecker.ClassObject, s.ObjectId, s.SchemaId, Rights(batch)))
                 throw SimulatedSqlException.PermissionDenied(s.Permission.ToUpperInvariant(), s.ObjectName, moduleDatabase.Name, s.SchemaName);
         }
     }
@@ -532,7 +536,7 @@ internal static class PermissionEnforcement
     internal static void CheckBrokenChainWrite(BatchContext batch, string permission, Schemas.SchemaObject module, Schemas.SchemaObject target)
     {
         if (TryResolveBrokenChain(batch, module, target, out var database, out var principalId)
-            && !PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), PermissionChecker.ClassObject, target.ObjectId, target.SchemaId))
+            && !PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), PermissionChecker.ClassObject, target.ObjectId, target.SchemaId, Rights(batch)))
         {
             throw SimulatedSqlException.PermissionDenied(permission, target.Name, database.Name, SchemaNameFor(database, target.SchemaId));
         }
@@ -568,7 +572,7 @@ internal static class PermissionEnforcement
             if (baseColumns.Ordinals.Count == 0)
                 return;
         }
-        CheckColumnGrants(database, principalId, permission, baseColumns);
+        CheckColumnGrants(database, principalId, permission, baseColumns, Rights(batch));
     }
 
     /// <summary>
@@ -580,7 +584,7 @@ internal static class PermissionEnforcement
     internal static void CheckBrokenChainTableColumns(BatchContext batch, Permission permission, Schemas.View view, ColumnReadTarget columns)
     {
         if (columns.Ordinals.Count > 0 && TryResolveBrokenChain(batch, view, columns.Securable, out var database, out var principalId))
-            CheckColumnGrants(database, principalId, permission, columns);
+            CheckColumnGrants(database, principalId, permission, columns, Rights(batch));
     }
 
     /// <summary>
@@ -617,7 +621,7 @@ internal static class PermissionEnforcement
             return;
         var database = batch.DatabaseFor(target.Securable);
         if (TryResolveScope(batch, database, target.Securable.ObjectId, out var principalId))
-            CheckColumnGrants(database, principalId, permission, target);
+            CheckColumnGrants(database, principalId, permission, target, Rights(batch));
     }
 
     /// <summary>
@@ -627,7 +631,7 @@ internal static class PermissionEnforcement
     /// Msg 229; otherwise each column is checked in ascending ordinal order and
     /// the first inaccessible one raises Msg 230.
     /// </summary>
-    private static void CheckColumnGrants(Database database, int principalId, Permission permission, ColumnReadTarget target)
+    private static void CheckColumnGrants(Database database, int principalId, Permission permission, ColumnReadTarget target, ServerLoginRights server)
     {
         // Object-level Msg 229 when the object is inaccessible at object grain
         // (no grant, or an object / schema / db DENY overriding the grant) AND
@@ -635,12 +639,12 @@ internal static class PermissionEnforcement
         // is partially accessible and an inaccessible column raises Msg 230.
         var securable = target.Securable;
         var schemaName = SchemaNameFor(database, securable.SchemaId);
-        var objectAccessible = PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, securable.ObjectId, securable.SchemaId);
+        var objectAccessible = PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, securable.ObjectId, securable.SchemaId, server);
         if (!objectAccessible && !PermissionChecker.HasColumnLevelGrant(database, principalId, permission, securable.ObjectId))
             throw SimulatedSqlException.PermissionDenied(permission.CanonicalName, securable.Name, database.Name, schemaName);
         foreach (var ordinal in target.OrdinalsToCheck())
         {
-            if (!PermissionChecker.IsColumnGranted(database, principalId, permission, securable.ObjectId, securable.SchemaId, ordinal))
+            if (!PermissionChecker.IsColumnGranted(database, principalId, permission, securable.ObjectId, securable.SchemaId, ordinal, server))
                 throw SimulatedSqlException.ColumnPermissionDenied(permission.CanonicalName, target.Columns[ordinal - 1].Name, securable.Name, database.Name, schemaName);
         }
     }
@@ -661,7 +665,7 @@ internal static class PermissionEnforcement
         var checkedIds = batch.ExecuteCheckedFunctionIds ??= [];
         if (!checkedIds.Add(function.ObjectId))
             return;
-        if (!PermissionChecker.IsGranted(database, principalId, Permission.Execute, PermissionChecker.ClassObject, function.ObjectId, function.SchemaId))
+        if (!PermissionChecker.IsGranted(database, principalId, Permission.Execute, PermissionChecker.ClassObject, function.ObjectId, function.SchemaId, Rights(batch)))
             throw SimulatedSqlException.PermissionDenied("EXECUTE", function.Name, database.Name, function.Schema.Name);
     }
 
@@ -670,7 +674,7 @@ internal static class PermissionEnforcement
     {
         if (!TryResolveScope(batch, database, objectId, out var principalId))
             return;
-        if (!PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), PermissionChecker.ClassObject, objectId, schemaId))
+        if (!PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), PermissionChecker.ClassObject, objectId, schemaId, Rights(batch)))
             throw SimulatedSqlException.PermissionDenied(permission.ToUpperInvariant(), objectName, database.Name, schemaName, procedure);
     }
 
@@ -721,17 +725,20 @@ internal static class PermissionEnforcement
     /// <summary>Whether the effective principal may run any DDL in <paramref name="database"/> (a <c>db_owner</c> / <c>db_ddladmin</c> member) — the gate for the statements that raise Msg 15247 (CREATE SEQUENCE / ROLE / USER / SCHEMA). True for dbo / module bodies.</summary>
     internal static bool HasDdlAdminCapability(BatchContext batch, Database database) =>
         !TryResolveScope(batch, database, out var principalId)
-        || PermissionChecker.IsDdlAdminOrOwner(database, principalId);
+        || PermissionChecker.IsDdlAdminOrOwner(database, principalId)
+        || Rights(batch).Implies(Permission.Control, PermissionChecker.ClassDatabase);
 
     /// <summary>Whether the effective principal is a <c>db_owner</c> member of <paramref name="database"/> (the DROP USER gate). True for dbo / module bodies.</summary>
     internal static bool IsOwner(BatchContext batch, Database database) =>
         !TryResolveScope(batch, database, out var principalId)
-        || PermissionChecker.IsOwner(database, principalId);
+        || PermissionChecker.IsOwner(database, principalId)
+        || Rights(batch).Implies(Permission.Control, PermissionChecker.ClassDatabase);
 
     /// <summary>Whether the effective principal is a <c>db_owner</c> or <c>db_backupoperator</c> member of <paramref name="database"/> (the <c>CHECKPOINT</c> gate). True for dbo / module bodies.</summary>
     internal static bool IsOwnerOrBackupOperator(BatchContext batch, Database database) =>
         !TryResolveScope(batch, database, out var principalId)
-        || PermissionChecker.IsOwnerOrBackupOperator(database, principalId);
+        || PermissionChecker.IsOwnerOrBackupOperator(database, principalId)
+        || Rights(batch).Implies(Permission.Control, PermissionChecker.ClassDatabase);
 
     /// <summary>Whether the effective principal holds a database-scope permission in <paramref name="database"/> (CREATE TABLE gate, CONNECT, etc.). Always true for dbo / module bodies.</summary>
     internal static bool HasDatabasePermission(BatchContext batch, Database database, string permission) =>
@@ -740,7 +747,7 @@ internal static class PermissionEnforcement
     /// <summary>Typed form of <see cref="HasDatabasePermission(BatchContext, Database, string)"/> — the DDL gates that name a catalog permission directly.</summary>
     internal static bool HasDatabasePermission(BatchContext batch, Database database, Permission permission) =>
         !TryResolveScope(batch, database, out var principalId)
-        || PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassDatabase, 0, 0);
+        || PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassDatabase, 0, 0, Rights(batch));
 
     /// <summary>
     /// Whether the effective principal holds CONTROL on <paramref name="schema"/>
@@ -751,7 +758,7 @@ internal static class PermissionEnforcement
     internal static bool HasSchemaControl(BatchContext batch, Schema schema) =>
         !TryResolveScope(batch, schema.Database, out var principalId)
         || PermissionChecker.IsGranted(schema.Database, principalId,
-            Permission.Control, PermissionChecker.ClassSchema, schema.SchemaId, 0);
+            Permission.Control, PermissionChecker.ClassSchema, schema.SchemaId, 0, Rights(batch));
 
     /// <summary>
     /// Whether the effective principal may <c>DROP</c> an object in
@@ -767,7 +774,7 @@ internal static class PermissionEnforcement
     /// <summary>Whether the effective principal holds CONTROL on the given object (the DROP alternative and the <c>ALTER SCHEMA … TRANSFER</c> source gate). True for dbo / module bodies.</summary>
     internal static bool HasObjectControl(BatchContext batch, Database database, int objectId, int schemaId) =>
         !TryResolveScope(batch, database, out var principalId)
-        || PermissionChecker.IsGranted(database, principalId, Permission.Control, PermissionChecker.ClassObject, objectId, schemaId);
+        || PermissionChecker.IsGranted(database, principalId, Permission.Control, PermissionChecker.ClassObject, objectId, schemaId, Rights(batch));
 
     /// <summary>
     /// Whether the effective principal holds <paramref name="permission"/> on the
@@ -776,7 +783,7 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static bool HoldsPermission(BatchContext batch, Database database, Permission permission, byte securableClass, int majorId, int schemaId) =>
         !TryResolveScope(batch, database, out var principalId)
-        || PermissionChecker.IsGranted(database, principalId, permission, securableClass, majorId, schemaId);
+        || PermissionChecker.IsGranted(database, principalId, permission, securableClass, majorId, schemaId, Rights(batch));
 
     /// <summary>
     /// Whether the effective principal may name <paramref name="targetPrincipalId"/>
@@ -786,7 +793,7 @@ internal static class PermissionEnforcement
     internal static bool MayActAs(BatchContext batch, Database database, int targetPrincipalId) =>
         !TryResolveScope(batch, database, out var principalId)
         || PermissionChecker.BuildPrincipalClosure(database, principalId).Contains(targetPrincipalId)
-        || PermissionChecker.IsGranted(database, principalId, Permission.Impersonate, PermissionChecker.ClassDatabasePrincipal, targetPrincipalId, 0);
+        || PermissionChecker.IsGranted(database, principalId, Permission.Impersonate, PermissionChecker.ClassDatabasePrincipal, targetPrincipalId, 0, Rights(batch));
 
     /// <summary>
     /// Whether the effective principal may create or drop a database — the one
@@ -817,7 +824,7 @@ internal static class PermissionEnforcement
     internal static bool HasSchemaAlter(BatchContext batch, Schema schema) =>
         !TryResolveScope(batch, schema.Database, out var principalId)
         || PermissionChecker.IsGranted(schema.Database, principalId,
-            Permission.Alter, PermissionChecker.ClassSchema, schema.SchemaId, 0);
+            Permission.Alter, PermissionChecker.ClassSchema, schema.SchemaId, 0, Rights(batch));
 
     /// <summary>
     /// Whether the effective principal holds ALTER on the given object (the DDL
@@ -827,7 +834,7 @@ internal static class PermissionEnforcement
     internal static bool HasObjectAlter(BatchContext batch, Database database, int objectId, int schemaId) =>
         !TryResolveScope(batch, database, out var principalId)
         || PermissionChecker.IsGranted(database, principalId,
-            Permission.Alter, PermissionChecker.ClassObject, objectId, schemaId);
+            Permission.Alter, PermissionChecker.ClassObject, objectId, schemaId, Rights(batch));
 
     /// <summary>
     /// The dual DDL gate for <c>CREATE VIEW</c> / <c>PROCEDURE</c> /
@@ -922,7 +929,7 @@ internal static class PermissionChecker
     }
 
     /// <summary>Whether the effective principal holds <paramref name="permission"/> on the described securable. An off-catalog (<see cref="Permission.Other"/>) request is never satisfied.</summary>
-    internal static bool IsGranted(Database database, int principalId, Permission permission, byte securableClass, int majorId, int schemaId)
+    internal static bool IsGranted(Database database, int principalId, Permission permission, byte securableClass, int majorId, int schemaId, ServerLoginRights server = default)
     {
         if (permission == Permission.Other)
             return false;
@@ -947,7 +954,8 @@ internal static class PermissionChecker
             || (permission.Category == PermissionCategory.Write && closure.Contains(DbDataWriter))
             || (permission.Category == PermissionCategory.Ddl
                 && closure.Contains(DbDdlAdmin)
-                && !IsBlanketDatabaseAlter(permission, securableClass));
+                && !IsBlanketDatabaseAlter(permission, securableClass))
+            || server.Implies(permission, securableClass);
     }
 
     /// <summary>
@@ -1003,7 +1011,7 @@ internal static class PermissionChecker
     /// scopes: a column DENY overrides a table GRANT, and a column GRANT stands
     /// in for an absent table GRANT (probe-confirmed against SQL Server 2025).
     /// </summary>
-    internal static bool IsColumnGranted(Database database, int principalId, Permission permission, int objectId, int schemaId, int columnOrdinal)
+    internal static bool IsColumnGranted(Database database, int principalId, Permission permission, int objectId, int schemaId, int columnOrdinal, ServerLoginRights server = default)
     {
         if (permission == Permission.Other)
             return false;
@@ -1025,7 +1033,8 @@ internal static class PermissionChecker
         return HasMatchingRow(database, closure, satisfiers, deny: false)
             || closure.Contains(DbOwner)
             || (permission.Category == PermissionCategory.Read && closure.Contains(DbDataReader))
-            || (permission.Category == PermissionCategory.Write && closure.Contains(DbDataWriter));
+            || (permission.Category == PermissionCategory.Write && closure.Contains(DbDataWriter))
+            || server.Implies(permission, ClassObject);
     }
 
     /// <summary>
@@ -1092,13 +1101,16 @@ internal static class PermissionChecker
     /// (probe-confirmed against SQL Server 2025), or a holder of <c>CONTROL</c> /
     /// <c>VIEW DEFINITION</c> granted at database scope.
     /// </summary>
-    internal static bool HasFullMetadataVisibility(Database database, int principalId) =>
-        HasFullMetadataVisibility(database, BuildClosure(database, principalId));
+    internal static bool HasFullMetadataVisibility(Database database, int principalId, ServerLoginRights server = default) =>
+        HasFullMetadataVisibility(database, BuildClosure(database, principalId), server);
 
-    private static bool HasFullMetadataVisibility(Database database, HashSet<int> closure)
+    private static bool HasFullMetadataVisibility(Database database, HashSet<int> closure, ServerLoginRights server)
     {
-        if (closure.Contains(DbOwner) || closure.Contains(DbDdlAdmin) || closure.Contains(DbSecurityAdmin))
+        if (closure.Contains(DbOwner) || closure.Contains(DbDdlAdmin) || closure.Contains(DbSecurityAdmin)
+            || server.Implies(Permission.ViewDefinition, ClassDatabase))
+        {
             return true;
+        }
         foreach (var row in database.Permissions)
         {
             if (row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption
@@ -1116,7 +1128,7 @@ internal static class PermissionChecker
     /// Whether the principal may see the metadata (catalog-view rows,
     /// <c>OBJECT_ID</c> / <c>OBJECT_NAME</c> / <c>OBJECT_SCHEMA_NAME</c> results)
     /// of the object with the given id / schema. True under the full-visibility
-    /// bypass (<see cref="HasFullMetadataVisibility(Database,int)"/>), or when the
+    /// bypass (<see cref="HasFullMetadataVisibility(Database,int,ServerLoginRights)"/>), or when the
     /// principal (or any role in its closure) holds any object-applicable
     /// permission reaching the object — a direct object-scope grant (any
     /// permission, any column via <c>minor_id</c>), a schema-scope grant, an
@@ -1124,13 +1136,22 @@ internal static class PermissionChecker
     /// <c>db_datawriter</c> fixed roles. DENY does not hide metadata (grant-only
     /// scan — probe-scoped assumption: metadata-hiding by DENY was not observed).
     /// </summary>
-    internal static bool CanViewMetadata(Database database, int principalId, int objectId, int schemaId) =>
-        CanViewMetadata(database, BuildClosure(database, principalId), objectId, schemaId);
+    internal static bool CanViewMetadata(Database database, int principalId, int objectId, int schemaId, ServerLoginRights server = default) =>
+        CanViewMetadata(database, BuildClosure(database, principalId), objectId, schemaId, server);
 
-    internal static bool CanViewMetadata(Database database, HashSet<int> closure, int objectId, int schemaId)
+    internal static bool CanViewMetadata(Database database, HashSet<int> closure, int objectId, int schemaId, ServerLoginRights server = default)
     {
-        if (HasFullMetadataVisibility(database, closure) || OwnsSecurable(database, closure, ClassObject, objectId, schemaId))
+        // A server permission that grants something on every user object
+        // reveals it as a database grant would: SELECT ALL USER SECURABLES,
+        // and ALTER ANY DATABASE through each database's ALTER (probed
+        // 2026-09-29 against SQL Server 2025).
+        if (HasFullMetadataVisibility(database, closure, server)
+            || OwnsSecurable(database, closure, ClassObject, objectId, schemaId)
+            || server.Holds(Permission.SelectAllUserSecurables)
+            || server.Holds(Permission.AlterAnyDatabase))
+        {
             return true;
+        }
         foreach (var row in database.Permissions)
         {
             if (row.State is not (PermissionState.Grant or PermissionState.GrantWithGrantOption)

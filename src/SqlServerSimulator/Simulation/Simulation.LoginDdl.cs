@@ -64,8 +64,10 @@ partial class Simulation
     /// Parses <c>ALTER LOGIN name { WITH PASSWORD = '…' [option …] | ENABLE |
     /// DISABLE | WITH &lt;other options&gt; }</c>. A password change replaces
     /// the <see cref="Logins"/> entry wholesale (entries are immutable) and
-    /// stamps the password-last-set time <c>LOGINPROPERTY</c> reports; every
-    /// other form parses-and-discards after the existence check. A missing
+    /// stamps the password-last-set time <c>LOGINPROPERTY</c> reports, and
+    /// <c>ENABLE</c> / <c>DISABLE</c> replace it with the flag flipped; the
+    /// other <c>WITH</c> options parse and discard after the existence check,
+    /// as every form does for <c>sa</c>. A missing
     /// login raises Msg 15151 with the probe-confirmed "Cannot alter the
     /// login" wording.
     /// </summary>
@@ -74,6 +76,10 @@ partial class Simulation
         context.MoveNextRequired();
         var name = ParseLoginName(context);
         var password = ParseLoginPasswordClause(context, required: false, out var passwordStart, out var passwordEnd);
+        bool? disable = password is null && context.Token is UnquotedString { Value: var word }
+            ? word.Equals("DISABLE", StringComparison.OrdinalIgnoreCase) ? true
+                : word.Equals("ENABLE", StringComparison.OrdinalIgnoreCase) ? false : null
+            : null;
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
@@ -111,7 +117,12 @@ partial class Simulation
                 throw SimulatedSqlException.PasswordEncryptionInvalidValue();
             simulation.Logins[name] = new ServerLogin(
                 existing.PrincipalId, existing.Name, PasswordHash.EncryptLegacy(password), existing.CreateDate,
-                context.Batch.CurrentStatement.UtcNow);
+                context.Batch.CurrentStatement.UtcNow, existing.IsDisabled);
+        }
+        else if (disable is bool isDisabled)
+        {
+            simulation.Logins[name] = new ServerLogin(
+                existing.PrincipalId, existing.Name, existing.PasswordHash, existing.CreateDate, existing.PasswordLastSetTime, isDisabled);
         }
         RecordServerDdlEvent(context, "ALTER_LOGIN", databaseName: null, name, passwordStart, passwordEnd);
         return true;
@@ -173,16 +184,18 @@ partial class Simulation
 
     /// <summary>
     /// The <c>CREATE LOGIN</c> gate, which has no per-login target: a
-    /// restricted session needs the server-wide <c>ALTER ANY LOGIN</c>, else
-    /// Msg 15247 (probe-confirmed — real reports the generic
-    /// permission wording, not the 15151 family the ALTER / DROP forms use).
+    /// restricted session needs the server-wide <c>CREATE LOGIN</c> (which
+    /// <c>ALTER ANY LOGIN</c> covers), else Msg 15247 (probe-confirmed — real
+    /// reports the generic permission wording, not the 15151 family the ALTER
+    /// / DROP forms use; probed 2026-09-29 against SQL Server 2025 that the
+    /// creator gets no ALTER on the login it made).
     /// </summary>
     private static void RequireCreateLoginPermission(ParserContext context)
     {
         var security = context.Connection.Security;
         if (security.EffectiveIsDbo)
             return;
-        if (!context.Batch.Connection.Simulation.HoldsServerPermission(security.Effective.LoginName, Permission.AlterAnyLogin))
+        if (!context.Batch.Connection.Simulation.HoldsServerPermission(security.Effective.LoginName, Permission.CreateLogin))
             throw SimulatedSqlException.UserDoesNotHavePermission();
     }
 

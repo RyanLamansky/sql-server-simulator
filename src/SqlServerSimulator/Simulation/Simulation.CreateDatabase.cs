@@ -113,9 +113,11 @@ partial class Simulation
         // CREATE DATABASE answers at server scope: the CREATE ANY DATABASE
         // permission (or the ALTER ANY DATABASE that covers it), or dbcreator
         // membership. Real reports Msg 262 naming 'master' whatever the current
-        // database is (probe-confirmed).
+        // database is (probe-confirmed), and unlike the database-scope CREATE
+        // gates' Msg 262 it ends only the statement (probed 2026-09-29 against
+        // SQL Server 2025).
         if (!PermissionEnforcement.HasDatabaseDdlAuthority(context.Batch, Permission.CreateAnyDatabase))
-            throw SimulatedSqlException.DatabasePermissionDenied("CREATE DATABASE", "master");
+            throw SimulatedSqlException.DatabasePermissionDenied("CREATE DATABASE", "master", aborts: false);
 
         var collation = collationName is null
             ? this.ServerCollation

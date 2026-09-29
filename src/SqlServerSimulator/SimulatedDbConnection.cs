@@ -1459,8 +1459,8 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     private void AuthenticateConnectionStringLogin(string userId, string password, string? initialCatalog)
     {
-        if (!this.Simulation.ValidateLoginCredentials(userId, password))
-            throw SimulatedSqlException.LoginFailed(userId);
+        if (this.Simulation.RefuseLogin(userId, password) is { } refusal)
+            throw refusal;
 
         var target = this.CurrentDatabase;
         if (initialCatalog is { Length: > 0 })
