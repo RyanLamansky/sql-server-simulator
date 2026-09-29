@@ -10,14 +10,10 @@ namespace SqlServerSimulator.Schemas;
 /// namespace with table types and alias types — Msg 219 on duplicate).
 /// </summary>
 /// <remarks>
-/// The simulator doesn't parse the XSD or validate xml values against it —
-/// the source text is stored verbatim for catalog-view round-trip via
-/// <c>sys.xml_schema_collections</c> and for the per-column <c>xml(name)</c>
-/// binding (which itself only records the reference; no shape validation
-/// is performed). AW's 6 schema collections load end-to-end through this
-/// path; apps that exercise xml-method validation hit the
-/// <see cref="NotSupportedException"/> raised by <see cref="Storage.XmlSqlType"/>'s
-/// method dispatch.
+/// The source text is stored verbatim — <c>ALTER … ADD</c> appends to it —
+/// and everything the simulator reads out of it is derived and cached against
+/// that text: the compiled schema set a typed write validates against, and
+/// the static typing an XQuery expression over a bound value compiles with.
 /// </remarks>
 internal sealed class XmlSchemaCollection(
     int id,
@@ -40,9 +36,9 @@ internal sealed class XmlSchemaCollection(
     public int? PrincipalId = principalId;
 
     /// <summary>
-    /// Raw XSD source text passed to <c>AS '…'</c>. Kept verbatim; the only
-    /// thing read out of it is <see cref="GetSingletonElementNames"/>, whose
-    /// cache re-reads when this is reassigned.
+    /// Raw XSD source text passed to <c>AS '…'</c>, with each
+    /// <c>ALTER … ADD</c>'s documents appended. Every view derived from it is
+    /// cached against this reference, so reassigning it re-reads them.
     /// </summary>
     public string XsdText = xsdText;
 
@@ -56,6 +52,28 @@ internal sealed class XmlSchemaCollection(
     private FrozenSet<string>? simpleContentElementNames;
     private string? compiledReadFrom;
     private System.Xml.Schema.XmlSchemaSet? compiledSchemas;
+    private string? typingReadFrom;
+    private Storage.XmlStaticTyping? staticTyping;
+
+    /// <summary>
+    /// What an XQuery expression over a value bound to this collection is
+    /// typed by: the singleton element names (see
+    /// <see cref="GetSingletonElementNames"/>) plus the declared simple type of
+    /// each element and attribute name the compiled schemas type
+    /// consistently, which is what makes <c>/r/d</c> over an
+    /// <c>xs:decimal</c> element compare, add and report as
+    /// <c>xs:decimal</c> rather than <c>xdt:untypedAtomic</c>.
+    /// </summary>
+    public Storage.XmlStaticTyping GetStaticTyping()
+    {
+        if (!ReferenceEquals(this.typingReadFrom, this.XsdText))
+        {
+            this.typingReadFrom = this.XsdText;
+            this.staticTyping = Storage.XmlStaticTyping.From(this.GetSingletonElementNames(), this.GetCompiledSchemas());
+        }
+
+        return this.staticTyping!;
+    }
 
     /// <summary>
     /// The element names this collection declares at most once wherever they
@@ -188,6 +206,86 @@ internal sealed class XmlSchemaCollection(
     }
 
     private const string XsdNamespace = "http://www.w3.org/2001/XMLSchema";
+
+    /// <summary>
+    /// Msg 9336 for the XSD constructs SQL Server's schema collections refuse
+    /// outright — the identity constraints <c>unique</c>, <c>key</c> and
+    /// <c>keyref</c> — naming the first one in document order (probed
+    /// 2026-09-28 against SQL Server 2025). Text the reader can't get through
+    /// is left to whatever reads it next.
+    /// </summary>
+    public static void RejectUnsupportedSyntax(string xsdText)
+    {
+        try
+        {
+            var settings = new XmlReaderSettings { ConformanceLevel = ConformanceLevel.Fragment };
+            using var reader = XmlReader.Create(new System.IO.StringReader(xsdText), settings);
+            while (reader.Read())
+            {
+                if (reader.NodeType == XmlNodeType.Element
+                    && reader.NamespaceURI == XsdNamespace
+                    && reader.LocalName is "key" or "keyref" or "unique")
+                {
+                    throw SimulatedSqlException.XmlSchemaSyntaxNotSupported(reader.LocalName);
+                }
+            }
+        }
+        catch (XmlException)
+        {
+            // Not readable as XML: the parse that follows reports it.
+        }
+    }
+
+    /// <summary>
+    /// Checks the schema documents an <c>ALTER … ADD</c> brings: text that
+    /// holds no <c>xsd:schema</c> document is Msg 2378, and a global element,
+    /// type or attribute this collection already declares in the same
+    /// namespace is Msg 6310.
+    /// </summary>
+    public void RejectRedeclaredComponents(string addedText)
+    {
+        var added = new List<System.Xml.Schema.XmlSchema>();
+        try
+        {
+            var settings = new XmlReaderSettings { ConformanceLevel = ConformanceLevel.Fragment };
+            using var reader = XmlReader.Create(new System.IO.StringReader(addedText), settings);
+            while (reader.Read())
+            {
+                if (reader.NodeType != XmlNodeType.Element)
+                    continue;
+                if (reader.NamespaceURI != XsdNamespace || reader.LocalName != "schema")
+                    throw SimulatedSqlException.XmlSchemaDocumentExpected();
+                if (System.Xml.Schema.XmlSchema.Read(reader.ReadSubtree(), null) is { } schema)
+                    added.Add(schema);
+            }
+        }
+        catch (Exception e) when (e is XmlException or System.Xml.Schema.XmlSchemaException)
+        {
+            throw SimulatedSqlException.XmlSchemaDocumentExpected();
+        }
+        if (added.Count == 0)
+            throw SimulatedSqlException.XmlSchemaDocumentExpected();
+
+        var existing = this.GetCompiledSchemas();
+        if (existing is null)
+            return;
+        foreach (var schema in added)
+        {
+            var targetNamespace = schema.TargetNamespace ?? string.Empty;
+            foreach (var item in schema.Items)
+            {
+                var (componentName, kind, table) = item switch
+                {
+                    System.Xml.Schema.XmlSchemaElement element => (element.Name, "ELEMENT", existing.GlobalElements),
+                    System.Xml.Schema.XmlSchemaAttribute attribute => (attribute.Name, "ATTRIBUTE", existing.GlobalAttributes),
+                    System.Xml.Schema.XmlSchemaType type => (type.Name, "TYPE", existing.GlobalTypes),
+                    _ => (null, string.Empty, null),
+                };
+                if (componentName is not null && table!.Contains(new XmlQualifiedName(componentName, targetNamespace)))
+                    throw SimulatedSqlException.XmlSchemaComponentExists(targetNamespace, componentName, kind);
+            }
+        }
+    }
 
     /// <summary>
     /// Scans the (possibly multi-document) XSD text for element declarations

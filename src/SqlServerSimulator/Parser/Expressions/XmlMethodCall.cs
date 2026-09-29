@@ -78,8 +78,15 @@ internal sealed class XmlMethodCall : Expression
     private readonly SqlType valueType;
     private readonly int? valueMaxLength;
 
-    private XmlMethodCall(Expression target, string methodName, XmlMethod method, string? xqueryText, XmlQueryExpr? xquery, SqlType valueType, int? valueMaxLength, XmlSchemaCollection? targetSchemaCollection, string receiverName)
+    /// <summary>
+    /// The <c>sql:variable</c> / <c>sql:column</c> accessors the expression
+    /// names, each with the slot its value fills before evaluation.
+    /// </summary>
+    private readonly XmlSqlAccessorRef[] accessors;
+
+    private XmlMethodCall(Expression target, string methodName, XmlMethod method, string? xqueryText, XmlQueryExpr? xquery, SqlType valueType, int? valueMaxLength, XmlSchemaCollection? targetSchemaCollection, string receiverName, XmlSqlAccessorRef[] accessors)
     {
+        this.accessors = accessors;
         this.Target = target;
         this.ReceiverName = receiverName;
         this.methodName = methodName;
@@ -188,20 +195,76 @@ internal sealed class XmlMethodCall : Expression
         // static cardinality rules read out of the binding.
         var collection = ResolveTargetSchemaCollection(target, context);
         var receiverName = ResolveReceiverName(target, context);
+        var display = DisplayMethod(receiverName, methodName);
+        var accessorScope = new XmlSqlAccessorScope((isColumn, name) => ResolveAccessorType(isColumn, name, context, display));
         var xquery = xqueryText is null
             ? null
-            : XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetSingletonElementNames(), DisplayMethod(receiverName, methodName));
-        return new XmlMethodCall(target, methodName, method, xqueryText, xquery, valueType, valueMaxLength, collection, receiverName);
+            : XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetStaticTyping(), display, accessorScope);
+        return new XmlMethodCall(target, methodName, method, xqueryText, xquery, valueType, valueMaxLength, collection, receiverName, [.. accessorScope.Accessors]);
     }
 
     /// <summary>
-    /// Finds the XML schema collection the receiver is bound to, or null for
-    /// an untyped receiver. Two receivers carry a binding: a column of a
-    /// source in scope (including the node column a <c>.nodes()</c> source
-    /// produced, which inherits its own target's binding), and a local
-    /// variable declared <c>xml(&lt;collection&gt;)</c>. Everything else —
-    /// a literal, a CAST, an expression — is untyped, as it is on real.
+    /// Binds one <c>sql:variable</c> / <c>sql:column</c> while the expression
+    /// compiles and answers the XQuery type its value carries — <c>xs:int</c>
+    /// for an <c>int</c>, <c>xs:string</c> for the character types — which is
+    /// what types a comparison or arithmetic over it (probed 2026-09-28
+    /// against SQL Server 2025). A name that isn't a variable (Msg 9519), a
+    /// variable never declared (Msg 9501), a column the scope doesn't hold
+    /// (Msg 207 / 107), an <c>xml</c> value (Msg 9342) and a type with no
+    /// mapping (Msg 9344) are all compile-time refusals.
     /// </summary>
+    private static string ResolveAccessorType(bool isColumn, string name, ParserContext context, string display)
+    {
+        SqlType type;
+        if (!isColumn)
+        {
+            if (name.Length < 2 || name[0] != '@')
+                throw SimulatedSqlException.XQuerySqlVariableNameInvalid(name);
+            if (!context.Batch.Variables.TryGetValue(name[1..], out var slot))
+                throw SimulatedSqlException.XQuerySqlVariableNotFound(name);
+            type = slot.DeclaredType;
+        }
+        else
+        {
+            var column = XmlDml.ColumnNameOf(name);
+            if (context.ScopeSources is not { } sources)
+                throw SimulatedSqlException.InvalidColumnName(column);
+            var (sourceIndex, columnIndex) = Selection.FindSourceColumn(sources, column);
+            if (sourceIndex < 0)
+            {
+                throw column.ImmediateQualifier is { } qualifier
+                    && !Array.Exists(sources, source => source.Qualifier is { } written && BuiltInToken.Equals(written, qualifier))
+                    ? SimulatedSqlException.ColumnPrefixDoesNotMatch(qualifier)
+                    : SimulatedSqlException.InvalidColumnName(column);
+            }
+            type = sources[sourceIndex].Columns[columnIndex].Type;
+        }
+
+        if (type is XmlSqlType)
+            throw SimulatedSqlException.XQuerySqlAccessorXmlNotAllowed(display);
+        return XmlAtomicTypes.SqlTypeName(type) ?? throw SimulatedSqlException.XQuerySqlAccessorTypeNotSupported(display, type.SqlServerName);
+    }
+
+    /// <summary>
+    /// Reads each accessor's value for the current row into a fresh scope, or
+    /// null when the expression names none. A NULL value binds the empty
+    /// sequence.
+    /// </summary>
+    internal XmlVariableScope? BuildAccessorScope(RuntimeContext runtime)
+    {
+        if (this.accessors.Length == 0)
+            return null;
+        var scope = new XmlVariableScope();
+        foreach (var accessor in this.accessors)
+        {
+            var value = accessor.IsColumn
+                ? runtime.ResolveColumn(XmlDml.ColumnNameOf(accessor.Name))
+                : runtime.Batch.Variables[accessor.Name[1..]].Value;
+            scope.Write(accessor.Slot, value.IsNull ? [] : [XmlAtomicTypes.FromSql(value)]);
+        }
+        return scope;
+    }
+
     /// <summary>
     /// What real writes between the brackets of an XQuery diagnostic raised by
     /// a method call on <paramref name="target"/>: the receiver's dotted name
@@ -240,10 +303,26 @@ internal sealed class XmlMethodCall : Expression
     internal static string DisplayMethod(string receiverName, string method) =>
         receiverName.Length == 0 ? method : $"{receiverName}.{method}";
 
+    /// <summary>
+    /// Finds the XML schema collection the receiver is bound to, or null for
+    /// an untyped receiver. Three receivers carry a binding: a column of a
+    /// source in scope (including the node column a <c>.nodes()</c> source
+    /// produced, which inherits its own target's binding), a local variable
+    /// declared <c>xml(&lt;collection&gt;)</c>, and a <c>CAST</c> /
+    /// <c>CONVERT</c> to one. Everything else — a literal, a conversion to
+    /// plain <c>xml</c>, an expression — is untyped, as it is on real.
+    /// </summary>
     internal static XmlSchemaCollection? ResolveTargetSchemaCollection(Expression target, ParserContext context)
     {
-        if (target is VariableReference variable)
-            return context.Batch.GetVariableSlot(variable.VariableName).XmlSchemaCollection;
+        switch (target)
+        {
+            case VariableReference variable:
+                return context.Batch.GetVariableSlot(variable.VariableName).XmlSchemaCollection;
+            case Cast { TargetCollection: { } castCollection }:
+                return castCollection;
+            case ConvertExpression { TargetCollection: { } convertCollection }:
+                return convertCollection;
+        }
         if (target is not Reference reference || context.ScopeSources is not { } sources)
             return null;
         var (sourceIndex, columnIndex) = Selection.FindSourceColumn(sources, reference.ReferencedName);
@@ -261,13 +340,13 @@ internal sealed class XmlMethodCall : Expression
         switch (this.method)
         {
             case XmlMethod.Exist:
-                return input.IsNull ? SqlValue.Null(SqlType.Bit) : SqlValue.FromBoolean(XmlQueryEngine.EvaluateExists(input.AsString, this.xquery!));
+                return input.IsNull ? SqlValue.Null(SqlType.Bit) : SqlValue.FromBoolean(XmlQueryEngine.EvaluateExists(input.AsString, this.xquery!, this.BuildAccessorScope(runtime), runtime.Batch.XmlNodeDocuments));
             case XmlMethod.Query:
-                return input.IsNull ? SqlValue.Null(SqlType.Xml) : SqlValue.FromXml(XmlQueryEngine.EvaluateQuery(input.AsString, this.xquery!));
+                return input.IsNull ? SqlValue.Null(SqlType.Xml) : SqlValue.FromXml(XmlQueryEngine.EvaluateQuery(input.AsString, this.xquery!, this.BuildAccessorScope(runtime), runtime.Batch.XmlNodeDocuments));
             default:
                 if (input.IsNull)
                     return SqlValue.Null(this.valueType);
-                var selected = XmlQueryEngine.EvaluateScalar(input.AsString, this.xquery!);
+                var selected = XmlQueryEngine.EvaluateScalar(input.AsString, this.xquery!, this.BuildAccessorScope(runtime), runtime.Batch.XmlNodeDocuments);
                 return selected is null
                     ? SqlValue.Null(this.valueType)
                     : Cast.ApplyCoercion(SqlValue.FromString(SqlType.NVarchar, selected), this.valueType, this.valueMaxLength);

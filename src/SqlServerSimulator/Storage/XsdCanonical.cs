@@ -212,7 +212,7 @@ internal static class XsdCanonical
     /// renders as a mantissa in <c>[1, 10)</c> carrying at least one fractional
     /// digit, an <c>E</c>, and an exponent with no <c>+</c> and no padding.
     /// </summary>
-    private static string RenderApproximate(string value, int significantDigits)
+    internal static string RenderApproximate(string value, int significantDigits)
     {
         if (value is "INF" or "-INF")
             return value;

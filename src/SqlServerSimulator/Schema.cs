@@ -129,9 +129,8 @@ internal sealed class Schema
     /// referenced by per-column <c>xml(collection_name)</c> type
     /// declarations. Shares the type-name namespace with
     /// <see cref="TableTypes"/> / <see cref="AliasTypes"/> (Msg 219 on
-    /// duplicate). The simulator does not parse the XSD or validate xml
-    /// payloads against it — the schema collection is metadata only,
-    /// stored for <c>sys.xml_schema_collections</c> round-trip.
+    /// duplicate). A value written to a bound column, variable or CAST
+    /// target validates against it.
     /// </summary>
     public readonly ConcurrentDictionary<string, XmlSchemaCollection> XmlSchemaCollections;
 

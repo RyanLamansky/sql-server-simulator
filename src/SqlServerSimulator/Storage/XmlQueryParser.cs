@@ -1,4 +1,3 @@
-using System.Collections.Frozen;
 using System.Globalization;
 using System.Text;
 
@@ -23,7 +22,7 @@ internal sealed class XmlQueryParser(
     string? defaultNamespace,
     Dictionary<string, string> prefixes,
     string method,
-    FrozenSet<string>? schemaSingletonElements = null,
+    XmlStaticTyping? typing = null,
     XmlSqlAccessorScope? sqlAccessors = null)
 {
     /// <summary>The XQuery namespace an unprefixed function name lives in.</summary>
@@ -35,12 +34,13 @@ internal sealed class XmlQueryParser(
     private readonly string method = method;
 
     /// <summary>
-    /// The element names the receiver's XML schema collection declares at
-    /// most once, or null for an untyped receiver. A named child step whose
-    /// name is in here is a singleton to the static type checker, which is
-    /// what makes <c>.value()</c> accept a schema-typed path real accepts.
+    /// The receiver's XML schema collection typing, or null for an untyped
+    /// receiver. A named child step the collection declares at most once is a
+    /// singleton to the static type checker — what makes <c>.value()</c>
+    /// accept a schema-typed path real accepts — and a step naming a simply
+    /// typed element or attribute carries that type.
     /// </summary>
-    private readonly FrozenSet<string>? schemaSingletonElements = schemaSingletonElements;
+    private readonly XmlStaticTyping? typing = typing;
 
     /// <summary>
     /// Where a <c>sql:</c> accessor records the slot it reads, or null in a
@@ -54,12 +54,6 @@ internal sealed class XmlQueryParser(
     private int index;
     private int slotCount;
     private int predicateDepth;
-
-    /// <summary>
-    /// Whether the body built a node rather than only selecting one, which is
-    /// what <c>value()</c> and <c>nodes()</c> refuse (Msg 2373).
-    /// </summary>
-    public bool ConstructsXml;
 
     /// <summary>Parses the whole body, rejecting anything left over.</summary>
     public XmlQueryExpr ParseBody()
@@ -261,7 +255,9 @@ internal sealed class XmlQueryParser(
                     : SimulatedSqlException.XQueryTokenExpected(this.method, "in");
             }
 
-            var binding = new XmlVariableBinding(name, this.slotCount++, this.ParseExprSingle(), perItem);
+            var source = this.ParseExprSingle();
+            RequireNotConstructed(source, $"'{keyword}'", this.method);
+            var binding = new XmlVariableBinding(name, this.slotCount++, source, perItem);
             bindings.Add(binding);
             this.scope.Add(binding);
 
@@ -289,6 +285,7 @@ internal sealed class XmlQueryParser(
         while (true)
         {
             var key = this.ParseExprSingle();
+            RequireNotConstructed(key, "data()", this.method);
             RequireSingleton(key, "order by", this.method);
             var descending = this.TryOperatorWord("descending");
             if (!descending)
@@ -351,18 +348,34 @@ internal sealed class XmlQueryParser(
     private XmlQueryExpr ParseComparison()
     {
         var left = this.ParseAdditive();
-        var (op, isValueComparison) = this.TryComparisonOperator();
+        var (op, form) = this.TryComparisonOperator();
         if (op is null)
             return left;
 
         var right = this.ParseAdditive();
-        if (isValueComparison)
+        if (form == XmlComparisonForm.Node)
+        {
+            // The node comparisons read identity and document order, so both
+            // operands are single nodes; the empty sequence is a type mismatch
+            // real names 'empty' (probe-confirmed).
+            if (left is XmlSequenceExpr { IsEmpty: true } || right is XmlSequenceExpr { IsEmpty: true })
+                throw SimulatedSqlException.XQueryOperatorTypeMismatch(this.method, op, left.NodeTypeName(), right.NodeTypeName());
+            if (IsPlural(left))
+                throw SimulatedSqlException.XQueryNotSingleton(this.method, op, left.NodeTypeName());
+            if (IsPlural(right))
+                throw SimulatedSqlException.XQueryNotSingleton(this.method, op, right.NodeTypeName());
+            return new XmlNodeComparisonExpr(left, right, op);
+        }
+
+        RequireNotConstructed(left, "data()", this.method);
+        RequireNotConstructed(right, "data()", this.method);
+        if (form == XmlComparisonForm.Value)
         {
             RequireSingleton(left, op, this.method);
             RequireSingleton(right, op, this.method);
         }
         RequireComparableTypes(left, right, op, this.method);
-        return new XmlComparisonExpr(left, right, op, isValueComparison);
+        return new XmlComparisonExpr(left, right, op, form == XmlComparisonForm.Value);
     }
 
     private XmlQueryExpr ParseAdditive()
@@ -375,31 +388,244 @@ internal sealed class XmlQueryParser(
                 return left;
             var op = this.Current;
             this.index++;
-            left = new XmlArithmeticExpr(left, this.ParseMultiplicative(), op);
+            left = this.Arithmetic(left, this.ParseMultiplicative(), op, op.ToString());
         }
     }
 
     private XmlQueryExpr ParseMultiplicative()
     {
-        var left = this.ParseUnary();
+        var left = this.ParseInstanceOf();
         while (true)
         {
             this.SkipWhitespace();
             if (this.Current == '*')
             {
                 this.index++;
-                left = new XmlArithmeticExpr(left, this.ParseUnary(), '*');
+                left = this.Arithmetic(left, this.ParseInstanceOf(), '*', "*");
                 continue;
             }
             if (this.TryOperatorWord("div"))
-                left = new XmlArithmeticExpr(left, this.ParseUnary(), '/');
-            else if (this.TryOperatorWord("idiv"))
-                left = new XmlArithmeticExpr(left, this.ParseUnary(), 'i');
+                left = this.Arithmetic(left, this.ParseInstanceOf(), '/', "div");
+            else if (this.AtWord("idiv"))
+                throw SimulatedSqlException.XQuerySyntaxNotSupported(this.method, "idiv");
             else if (this.TryOperatorWord("mod"))
-                left = new XmlArithmeticExpr(left, this.ParseUnary(), 'm');
+                left = this.Arithmetic(left, this.ParseInstanceOf(), 'm', "mod");
             else
                 return left;
         }
+    }
+
+    /// <summary>
+    /// Types one arithmetic operator: each operand must be numeric or untyped
+    /// (Msg 9308 otherwise, quoting the operand), a constructed operand is Msg
+    /// 2373 (atomization), and the result takes XQuery's promotion of the two.
+    /// </summary>
+    private XmlArithmeticExpr Arithmetic(XmlQueryExpr left, XmlQueryExpr? right, char op, string written)
+    {
+        var leftRank = this.ArithmeticRank(left, written);
+        var rightRank = right is null ? leftRank : this.ArithmeticRank(right, written);
+        var rank = Math.Max(leftRank, rightRank);
+        if (rank < 1)
+            rank = 4;
+        if (op == '/' && rank == 1)
+            rank = 2;
+        return new XmlArithmeticExpr(left, right, op, XmlAtomicTypes.RankTypeName(rank));
+    }
+
+    /// <summary>
+    /// An operand's promotion rank. A <c>sql:column</c> whose type the
+    /// statement couldn't supply while this compiled — a <c>.modify()</c>'s
+    /// <c>with</c> naming the FROM clause an UPDATE parses later — is neutral,
+    /// taking the other operand's type: real knows the column's type there,
+    /// and it is AdventureWorks' <c>data(…)[1] + sql:column("inserted.LineTotal")</c>
+    /// that must stay <c>xs:decimal</c>.
+    /// </summary>
+    private int ArithmeticRank(XmlQueryExpr operand, string written)
+    {
+        RequireNotConstructed(operand, "data()", this.method);
+        RequireSingleton(operand, written, this.method);
+        if (operand is XmlSqlAccessorExpr { TypeUnknown: true })
+            return 0;
+        var kind = operand.AtomizedKind();
+        if (kind == XmlStaticKind.Untyped)
+            return 4;
+        var rank = kind == XmlStaticKind.Number ? XmlAtomicTypes.NumericRank(operand.TypeName) : 0;
+        if (rank == 0 && kind == XmlStaticKind.Number)
+            rank = 2;
+        return rank > 0 ? rank : throw SimulatedSqlException.XQueryArithmeticOperandType(this.method, written, operand.AtomizedTypeName());
+    }
+
+    /// <summary>
+    /// Msg 2373: <paramref name="operand"/> may hold a constructed node, which
+    /// real can't feed to <paramref name="operation"/>.
+    /// </summary>
+    internal static void RequireNotConstructed(XmlQueryExpr operand, string operation, string method)
+    {
+        if (operand.Constructed)
+            throw SimulatedSqlException.XQueryConstructedXmlNotSupported(method, operation);
+    }
+
+    /// <summary>
+    /// <c>expr instance of SequenceType</c>, which XQuery places between the
+    /// multiplicative operators and <c>cast as</c>. Real requires a
+    /// statically singular operand whatever occurrence the type writes.
+    /// </summary>
+    private XmlQueryExpr ParseInstanceOf()
+    {
+        var operand = this.ParseCast();
+        if (!this.AtWord("instance") || !this.FollowedByWord("instance", "of"))
+            return operand;
+        this.index += "instance".Length;
+        _ = this.TryOperatorWord("of");
+
+        RequireNotConstructed(operand, "'instance of'", this.method);
+        if (IsPlural(operand))
+            throw SimulatedSqlException.XQueryNotSingleton(this.method, "instance of", operand.NodeTypeName());
+        return new XmlInstanceOfExpr(operand, this.ParseSequenceType());
+    }
+
+    private static bool IsPlural(XmlQueryExpr operand) => XmlQueryExpr.IsPlural(operand.Occurrence);
+
+    /// <summary>
+    /// A sequence type: <c>empty()</c>, or an item type — an atomic type name
+    /// or a kind test — with an optional occurrence indicator.
+    /// </summary>
+    private XmlSequenceType ParseSequenceType()
+    {
+        this.SkipWhitespace();
+        var name = this.PeekWord();
+        if (name.Length == 0)
+            throw this.SyntaxError();
+        this.index += name.Length;
+
+        XmlSequenceType type;
+        if (this.PeekIsOpenParen())
+        {
+            this.SkipWhitespace();
+            this.index++;
+            this.SkipWhitespace();
+            var argument = string.Empty;
+            if (this.Current == '*')
+            {
+                argument = "*";
+                this.index++;
+            }
+            else if (IsNameStart(this.Current))
+            {
+                argument = this.ReadWord();
+            }
+            this.SkipWhitespace();
+            if (this.Current == ',')
+            {
+                // element(name, type): the type half names a schema type, which
+                // an untyped instance never matches beyond xdt:untyped / xs:anyType.
+                this.index++;
+                this.SkipWhitespace();
+                _ = this.ReadWord();
+                this.SkipWhitespace();
+            }
+            if (this.Current != ')')
+                throw this.SyntaxError();
+            this.index++;
+            type = name switch
+            {
+                "attribute" => XmlSequenceType.KindTest(XmlSequenceKind.Attribute, argument is "*" ? string.Empty : this.ResolveName(argument, isAttribute: true).Local),
+                "comment" => XmlSequenceType.KindTest(XmlSequenceKind.Comment, string.Empty),
+                "document-node" => throw SimulatedSqlException.XQuerySyntaxNotSupported(this.method, "document-node()"),
+                "element" => XmlSequenceType.KindTest(XmlSequenceKind.Element, argument is "*" ? string.Empty : this.ResolveName(argument, isAttribute: false).Local),
+                "empty" => XmlSequenceType.KindTest(XmlSequenceKind.Empty, string.Empty),
+                "item" => XmlSequenceType.KindTest(XmlSequenceKind.Item, string.Empty),
+                "node" => XmlSequenceType.KindTest(XmlSequenceKind.Node, string.Empty),
+                "processing-instruction" => XmlSequenceType.KindTest(XmlSequenceKind.ProcessingInstruction, string.Empty),
+                "text" => XmlSequenceType.KindTest(XmlSequenceKind.Text, string.Empty),
+                _ => throw this.SyntaxError(),
+            };
+        }
+        else
+        {
+            type = XmlSequenceType.Atomic(name, this.ResolveAtomicType(name));
+        }
+
+        this.SkipWhitespace();
+        if (this.Current is '?' or '*' or '+' && type.Kind != XmlSequenceKind.Empty)
+        {
+            type = type.WithOccurrence(this.Current);
+            this.index++;
+        }
+        return type;
+    }
+
+    /// <summary>
+    /// Resolves an atomic type name — <c>xs:local</c> or <c>xdt:untypedAtomic</c>
+    /// — to its built-in simple type (null for the untyped atomic type), or Msg
+    /// 2232 when there is none.
+    /// </summary>
+    private System.Xml.Schema.XmlSchemaSimpleType? ResolveAtomicType(string name)
+    {
+        var colon = name.IndexOf(':', StringComparison.Ordinal);
+        var prefix = colon < 0 ? string.Empty : name[..colon];
+        var local = name[(colon + 1)..];
+        if (prefix == "xdt" && local == "untypedAtomic")
+            return null;
+        if (prefix == "xs" && XmlAtomicTypes.Resolve(local) is { } type)
+            return type;
+        if (prefix.Length > 0 && prefix is not ("xs" or "xdt") && !this.prefixes.ContainsKey(prefix))
+            throw SimulatedSqlException.XQueryUndeclaredNamespace(this.method, prefix);
+        throw SimulatedSqlException.XQueryUndefinedType(this.method, name);
+    }
+
+    /// <summary>
+    /// <c>expr cast as xs:type?</c>. Real accepts only the optional form (Msg
+    /// 9301 otherwise), types the operand as at most one item (Msg 2365
+    /// quoting it otherwise), and settles a literal operand while compiling.
+    /// </summary>
+    private XmlQueryExpr ParseCast()
+    {
+        var operand = this.ParseUnary();
+        if (!this.AtWord("cast") || !this.FollowedByWord("cast", "as"))
+            return operand;
+        this.index += "cast".Length;
+        _ = this.TryOperatorWord("as");
+        this.SkipWhitespace();
+        var name = this.PeekWord();
+        if (name.Length == 0)
+            throw this.SyntaxError();
+        this.index += name.Length;
+        var target = this.ResolveAtomicType(name);
+        this.SkipWhitespace();
+        if (this.Current != '?')
+            throw SimulatedSqlException.XQueryCastRequiresOptional(this.method);
+        this.index++;
+        return this.BuildCast(operand, name, target, $"{name} ?");
+    }
+
+    /// <summary>
+    /// The shared half of <c>cast as</c> and a constructor function: the
+    /// operand's static checks, and a literal operand converted — or refused
+    /// with Msg 9319 — right here.
+    /// </summary>
+    private XmlCastExpr BuildCast(XmlQueryExpr operand, string targetName, System.Xml.Schema.XmlSchemaSimpleType? target, string quotedTarget)
+    {
+        RequireNotConstructed(operand, "data()", this.method);
+        if (operand is XmlSequenceExpr { IsEmpty: true } || IsPlural(operand))
+            throw SimulatedSqlException.XQueryCannotConvert(this.method, operand.AtomizedTypeName(), quotedTarget);
+        if (target is { Datatype.TypeCode: System.Xml.Schema.XmlTypeCode.QName or System.Xml.Schema.XmlTypeCode.Notation })
+            throw SimulatedSqlException.XQueryCannotConvert(this.method, operand.AtomizedTypeName(), quotedTarget);
+
+        var cast = new XmlCastExpr(operand, target, targetName);
+        if (operand is XmlLiteralExpr literal && XmlCastExpr.Convert(literal.Value, target, targetName) is null)
+            throw SimulatedSqlException.XQueryStaticInvalidValue(this.method, XmlQueryValues.StringValue(literal.Value));
+        return cast;
+    }
+
+    /// <summary>Whether <paramref name="second"/> follows <paramref name="first"/> at the cursor as the next word.</summary>
+    private bool FollowedByWord(string first, string second)
+    {
+        var after = this.SkipSpaceFrom(this.index + first.Length);
+        if (!this.text.AsSpan(after).StartsWith(second, StringComparison.Ordinal))
+            return false;
+        var end = after + second.Length;
+        return end >= this.text.Length || !IsNameChar(this.text[end]);
     }
 
     private XmlQueryExpr ParseUnary()
@@ -410,7 +636,7 @@ internal sealed class XmlQueryParser(
         var negate = this.Current == '-';
         this.index++;
         var operand = this.ParseUnary();
-        return negate ? new XmlArithmeticExpr(operand, null, '-') : operand;
+        return negate ? this.Arithmetic(operand, null, '-', "-") : operand;
     }
 
     private XmlQueryExpr ParsePathExpr()
@@ -440,6 +666,9 @@ internal sealed class XmlQueryParser(
         else
         {
             start = this.ParsePrimary();
+            this.SkipWhitespace();
+            if (this.Current == '[')
+                RequireNotConstructed(start, "'[]'", this.method);
             var predicates = this.ParsePredicates();
             if (predicates.Length > 0)
                 start = new XmlFilterExpr(start, predicates);
@@ -448,13 +677,54 @@ internal sealed class XmlQueryParser(
         while (true)
         {
             this.SkipWhitespace();
-            if (!this.TryConsume('/'))
+            if (this.Current != '/')
                 break;
+            RequireNotConstructed(start, "'/'", this.method);
+            this.index++;
             if (this.TryConsume('/'))
                 steps.Add(DescendantOrSelfStep());
-            steps.Add(this.ParseStep());
+            var step = this.ParseStep();
+            this.RequireSelfStepPossible(start, steps, step);
+            this.RequireTextStepPossible(start, steps, step);
+            steps.Add(step);
         }
         return steps.Count == 0 ? start : new XmlPathExpr(start, [.. steps]);
+    }
+
+    /// <summary>
+    /// Msg 9312: a <c>text()</c> step under an element the schema types with
+    /// simple content — real keeps such an element's value as a typed value,
+    /// not a text node, so the step can never match.
+    /// </summary>
+    private void RequireTextStepPossible(XmlQueryExpr start, List<XmlStep> steps, XmlStep step)
+    {
+        if (step.TestKind != XmlNodeTestKind.Text || step.Axis != XmlAxis.Child || steps.Count == 0)
+            return;
+        var previous = steps[^1];
+        if (previous.Axis == XmlAxis.Attribute || previous.TypeName is null)
+            return;
+        var occurrence = start.Occurrence;
+        foreach (var earlier in steps)
+            occurrence = XmlQueryExpr.Combine(occurrence, earlier.Occurrence);
+        throw SimulatedSqlException.XQueryTextOnSimpleTypedElement(this.method, previous.NodeTypeBase() + XmlQueryExpr.OccurrenceSuffix(occurrence));
+    }
+
+    /// <summary>
+    /// Msg 2261: a <c>self::name</c> step after a step whose static type is an
+    /// element of a different name, which real settles from the types alone.
+    /// </summary>
+    private void RequireSelfStepPossible(XmlQueryExpr start, List<XmlStep> steps, XmlStep step)
+    {
+        if (step.Axis != XmlAxis.Self || step.TestKind != XmlNodeTestKind.Name || steps.Count == 0)
+            return;
+        var previous = steps[^1];
+        if (previous.Axis != XmlAxis.Child || previous.TestKind != XmlNodeTestKind.Name || previous.LocalName == step.LocalName)
+            return;
+        var occurrence = start.Occurrence;
+        foreach (var earlier in steps)
+            occurrence = XmlQueryExpr.Combine(occurrence, earlier.Occurrence);
+        throw SimulatedSqlException.XQueryNoSuchElementInType(
+            this.method, step.LocalName, previous.NodeTypeBase() + XmlQueryExpr.OccurrenceSuffix(occurrence));
     }
 
     /// <summary>The <c>descendant-or-self::node()</c> step <c>//</c> expands to.</summary>
@@ -478,7 +748,15 @@ internal sealed class XmlQueryParser(
         var word = this.PeekWord();
         if (this.StartsComputedConstructor(word))
             return false;
+        if (word.Contains("::", StringComparison.Ordinal))
+            return true;
         var after = this.index + word.Length;
+        if (word is "typeswitch" or "validate" or "ordered" or "unordered")
+        {
+            var next = this.SkipSpaceFrom(after);
+            if (next < this.text.Length && this.text[next] is '(' or '{')
+                return false;
+        }
         while (after < this.text.Length && char.IsWhiteSpace(this.text[after]))
             after++;
         return after >= this.text.Length || this.text[after] != '(' || NodeTestKind(word) is not null;
@@ -531,6 +809,11 @@ internal sealed class XmlQueryParser(
             this.index++;
             this.SkipWhitespace();
         }
+        else if (this.PeekWord() is var word && word.IndexOf("::", StringComparison.Ordinal) is var split and >= 0)
+        {
+            axis = this.ResolveAxis(word[..split]);
+            this.index += split + 2;
+        }
 
         if (this.Current == '*')
         {
@@ -545,11 +828,41 @@ internal sealed class XmlQueryParser(
             return new XmlStep(axis, nodeTest, string.Empty, string.Empty, this.ParsePredicates());
         }
 
+        // An axis written with space before its `::` isn't one; real stops at
+        // the word (probe-confirmed: `child :: x` is Msg 2209 near 'child').
+        var after = this.SkipSpaceFrom(this.index);
+        if (this.text.AsSpan(after).StartsWith("::", StringComparison.Ordinal))
+            throw SimulatedSqlException.XQuerySyntaxError(this.method, name);
+
         var (local, uri) = this.ResolveName(name, axis == XmlAxis.Attribute);
+        string? typeName = null;
+        _ = axis == XmlAxis.Attribute
+            ? this.typing?.AttributeTypes.TryGetValue(local, out typeName)
+            : this.typing?.ElementTypes.TryGetValue(local, out typeName);
         return new XmlStep(
             axis, XmlNodeTestKind.Name, local, uri, this.ParsePredicates(),
-            this.schemaSingletonElements?.Contains(local) == true);
+            axis == XmlAxis.Child && this.typing?.SingletonElements.Contains(local) == true,
+            typeName);
     }
+
+    /// <summary>
+    /// A named axis. Real evaluates the six forward-and-parent axes, parses the
+    /// reverse and sibling ones only to refuse them (Msg 9335), and reports
+    /// anything else — <c>namespace::</c> included — as no axis at all (Msg
+    /// 2392), all probe-confirmed.
+    /// </summary>
+    private XmlAxis ResolveAxis(string name) => name switch
+    {
+        "attribute" => XmlAxis.Attribute,
+        "child" => XmlAxis.Child,
+        "descendant" => XmlAxis.Descendant,
+        "descendant-or-self" => XmlAxis.DescendantOrSelf,
+        "parent" => XmlAxis.Parent,
+        "self" => XmlAxis.Self,
+        "ancestor" or "ancestor-or-self" or "following" or "following-sibling" or "preceding" or "preceding-sibling"
+            => throw SimulatedSqlException.XQuerySyntaxNotSupported(this.method, name),
+        _ => throw SimulatedSqlException.XQueryInvalidAxis(this.method, name),
+    };
 
     private XmlQueryExpr[] ParsePredicates()
     {
@@ -600,10 +913,18 @@ internal sealed class XmlQueryParser(
         }
         if (c is '"' or '\'')
             return new XmlLiteralExpr(this.ReadQuoted(c), XmlStaticKind.String, "xs:string");
-        if (char.IsAsciiDigit(c))
+        if (char.IsAsciiDigit(c) || (c == '.' && char.IsAsciiDigit(this.Peek(1))))
             return this.ReadNumber();
         if (c == '<')
+        {
+            if (this.text.AsSpan(this.index).StartsWith("<!--", StringComparison.Ordinal))
+                return this.ParseDirectComment();
+            if (this.text.AsSpan(this.index).StartsWith("<?", StringComparison.Ordinal))
+                return this.ParseDirectProcessingInstruction();
+            if (this.text.AsSpan(this.index).StartsWith("<!", StringComparison.Ordinal))
+                throw SimulatedSqlException.XQuerySyntaxError(this.method, "<!");
             return this.ParseElementConstructor();
+        }
         if (c == '$')
             return this.ResolveVariable(this.ReadVariableName());
         if (!IsNameStart(c))
@@ -612,6 +933,8 @@ internal sealed class XmlQueryParser(
         var word = this.PeekWord();
         if (this.StartsComputedConstructor(word))
             return this.ParseComputedConstructor(word);
+        if (word is "typeswitch" or "validate" or "ordered" or "unordered")
+            throw SimulatedSqlException.XQuerySyntaxNotSupported(this.method, word);
 
         var name = this.ReadWord();
         return this.PeekIsOpenParen() ? this.ParseFunctionCall(name) : throw this.SyntaxError();
@@ -623,7 +946,7 @@ internal sealed class XmlQueryParser(
     /// and refuses the comment and processing-instruction forms outright
     /// (Msg 9326 / 9325), in every XML method.
     /// </summary>
-    private XmlConstructedNodeExpr ParseComputedConstructor(string word)
+    private XmlQueryExpr ParseComputedConstructor(string word)
     {
         this.index += word.Length;
         this.SkipWhitespace();
@@ -632,7 +955,7 @@ internal sealed class XmlQueryParser(
             case "attribute":
                 if (this.Current == '{')
                     throw SimulatedSqlException.XQueryComputedNameNotConstant(this.method);
-                throw new NotSupportedException("A computed 'attribute name {…}' constructor in an XML query method is not modeled; write the attribute on a direct element constructor.");
+                return this.ParseComputedAttribute(this.ReadWord());
             case "comment":
                 throw SimulatedSqlException.XQueryComputedConstructorNotSupported(this.method, isComment: true);
             case "element":
@@ -642,8 +965,119 @@ internal sealed class XmlQueryParser(
             case "processing-instruction":
                 throw SimulatedSqlException.XQueryComputedConstructorNotSupported(this.method, isComment: false);
             default:
-                throw new NotSupportedException("A computed 'text {…}' constructor in an XML query method is not modeled.");
+                return this.ParseComputedText();
         }
+    }
+
+    /// <summary>
+    /// <c>attribute name { … }</c>. The name resolves through the prolog as an
+    /// attribute name does — a prefix must be declared (Msg 2229), an
+    /// unprefixed name takes no namespace — and <c>xmlns</c> is refused (Msg
+    /// 9316). The content is a whole expression, atomized; an empty body is the
+    /// empty string.
+    /// </summary>
+    private XmlComputedAttributeExpr ParseComputedAttribute(string name)
+    {
+        if (name == "xmlns" || name.StartsWith("xmlns:", StringComparison.Ordinal))
+            throw SimulatedSqlException.XQueryComputedAttributeXmlns(this.method);
+        var colon = name.IndexOf(':', StringComparison.Ordinal);
+        var prefix = colon < 0 ? string.Empty : name[..colon];
+        var (local, uri) = this.ResolveName(name, isAttribute: true);
+
+        this.SkipWhitespace();
+        if (this.Current != '{')
+            throw this.SyntaxError();
+        this.index++;
+        this.SkipWhitespace();
+        if (this.Current == '}')
+        {
+            this.index++;
+            return new XmlComputedAttributeExpr(prefix, local, uri, null);
+        }
+        var content = this.ParseExpr();
+        this.SkipWhitespace();
+        if (this.Current != '}')
+            throw SimulatedSqlException.XQueryTokenExpected(this.method, "}");
+        this.index++;
+        RequireNotConstructed(content, "data()", this.method);
+        return new XmlComputedAttributeExpr(prefix, local, uri, content);
+    }
+
+    /// <summary>
+    /// <c>text { … }</c>, whose body real takes as a single expression — a
+    /// comma there is Msg 2205 and an empty body Msg 2209 (probe-confirmed).
+    /// </summary>
+    private XmlComputedTextExpr ParseComputedText()
+    {
+        if (this.Current != '{')
+            throw this.SyntaxError();
+        this.index++;
+        this.SkipWhitespace();
+        if (this.Current == '}')
+            throw this.SyntaxError();
+        var content = this.ParseExprSingle();
+        this.SkipWhitespace();
+        if (this.Current != '}')
+            throw SimulatedSqlException.XQueryTokenExpected(this.method, "}");
+        this.index++;
+        RequireNotConstructed(content, "data()", this.method);
+        return new XmlComputedTextExpr(content);
+    }
+
+    /// <summary>
+    /// A direct comment constructor. Its text is literal — braces included —
+    /// and may carry neither <c>--</c> nor a trailing <c>-</c> (Msg 9322).
+    /// </summary>
+    private XmlDirectLeafExpr ParseDirectComment()
+    {
+        var comment = this.ScanComment();
+        return new XmlDirectLeafExpr(isComment: true, string.Empty, comment);
+    }
+
+    /// <summary>Scans <c>&lt;!-- … --&gt;</c> at the cursor, answering its text.</summary>
+    private string ScanComment()
+    {
+        var start = this.index + "<!--".Length;
+        var end = this.text.IndexOf("-->", start, StringComparison.Ordinal);
+        if (end < 0)
+            throw SimulatedSqlException.XQuerySyntaxError(this.method, "<eof>");
+        var comment = this.text[start..end];
+        if (comment.Contains("--", StringComparison.Ordinal) || comment.EndsWith('-'))
+            throw SimulatedSqlException.XQueryCommentDoubleHyphen(this.method);
+        this.index = end + "-->".Length;
+        return comment;
+    }
+
+    /// <summary>A direct processing-instruction constructor.</summary>
+    private XmlDirectLeafExpr ParseDirectProcessingInstruction()
+    {
+        var (target, data) = this.ScanProcessingInstruction();
+        return new XmlDirectLeafExpr(isComment: false, target, data);
+    }
+
+    /// <summary>
+    /// Scans <c>&lt;?target data?&gt;</c> at the cursor. The target must follow
+    /// the <c>&lt;?</c> directly (Msg 2278 names what did instead) and may not
+    /// be <c>xml</c> in any case (Msg 2294); the whitespace separating it from
+    /// the data isn't part of the data.
+    /// </summary>
+    private (string Target, string Data) ScanProcessingInstruction()
+    {
+        var start = this.index + "<?".Length;
+        var end = this.text.IndexOf("?>", start, StringComparison.Ordinal);
+        if (end < 0)
+            throw SimulatedSqlException.XQuerySyntaxError(this.method, "<eof>");
+        if (start < end && !IsNameStart(this.text[start]))
+            throw SimulatedSqlException.XQueryTagNameInvalidStart(this.method, this.text[start]);
+        var targetEnd = start;
+        while (targetEnd < end && IsNameChar(this.text[targetEnd]))
+            targetEnd++;
+        var target = this.text[start..targetEnd];
+        if (target.Equals("xml", StringComparison.OrdinalIgnoreCase))
+            throw SimulatedSqlException.XQueryProcessingInstructionTargetXml(this.method);
+        var data = this.text[targetEnd..end].TrimStart();
+        this.index = end + "?>".Length;
+        return (target, data);
     }
 
     /// <summary>
@@ -655,8 +1089,8 @@ internal sealed class XmlQueryParser(
     /// </summary>
     private XmlConstructedNodeExpr ParseComputedElement(string name)
     {
-        this.ConstructsXml = true;
         var declarations = this.ConstructorDeclarations(name);
+        string[] declared = declarations.Length == 0 ? [] : [name.Contains(':', StringComparison.Ordinal) ? name[..name.IndexOf(':', StringComparison.Ordinal)] : string.Empty];
         var local = name[(name.IndexOf(':', StringComparison.Ordinal) + 1)..];
 
         this.SkipWhitespace();
@@ -667,7 +1101,7 @@ internal sealed class XmlQueryParser(
         if (this.Current == '}')
         {
             this.index++;
-            return new XmlConstructedNodeExpr([$"<{name}{declarations}/>"], [], [], local);
+            return new XmlConstructedNodeExpr([$"<{name}{declarations}/>"], [], [], local, declared);
         }
 
         var content = this.ParseExpr();
@@ -675,7 +1109,7 @@ internal sealed class XmlQueryParser(
         if (this.Current != '}')
             throw SimulatedSqlException.XQuerySyntaxErrorExpecting(this.method, this.CurrentToken(), "}");
         this.index++;
-        return new XmlConstructedNodeExpr([$"<{name}{declarations}>", $"</{name}>"], [content], [false], local);
+        return new XmlConstructedNodeExpr([$"<{name}{declarations}>", $"</{name}>"], [content], [false], local, declared);
     }
 
     /// <summary>
@@ -703,10 +1137,29 @@ internal sealed class XmlQueryParser(
             fractional |= this.text[this.index] == '.';
             this.index++;
         }
+
+        // An exponent makes the literal an xs:double.
+        var exponent = false;
+        if (this.Current is 'e' or 'E')
+        {
+            var after = this.index + 1;
+            if (after < this.text.Length && this.text[after] is '+' or '-')
+                after++;
+            if (after < this.text.Length && char.IsAsciiDigit(this.text[after]))
+            {
+                exponent = true;
+                this.index = after;
+                while (this.index < this.text.Length && char.IsAsciiDigit(this.text[this.index]))
+                    this.index++;
+            }
+        }
+
         var span = this.text.AsSpan(start, this.index - start);
-        return double.TryParse(span, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
-            ? new XmlLiteralExpr(number, XmlStaticKind.Number, fractional ? "xs:decimal" : "xs:integer")
-            : throw this.SyntaxError();
+        if (!double.TryParse(span, NumberStyles.Float, CultureInfo.InvariantCulture, out var number))
+            throw this.SyntaxError();
+        return exponent
+            ? new XmlLiteralExpr(XmlAtomicTypes.Number(number, "xs:double"), XmlStaticKind.Number, "xs:double")
+            : new XmlLiteralExpr(number, XmlStaticKind.Number, fractional ? "xs:decimal" : "xs:integer");
     }
 
     private string ReadQuoted(char quote)
@@ -728,10 +1181,41 @@ internal sealed class XmlQueryParser(
                 this.index++;
                 return value.ToString();
             }
+            if (c == '&')
+            {
+                _ = value.Append(this.ReadEntityReference());
+                continue;
+            }
             _ = value.Append(c);
             this.index++;
         }
         throw this.SyntaxError();
+    }
+
+    /// <summary>
+    /// An entity or character reference inside a string literal — XQuery
+    /// reads <c>&amp;lt;</c> there as <c>&lt;</c> — or Msg 2282 for an
+    /// <c>&amp;</c> that opens neither (probe-confirmed).
+    /// </summary>
+    private string ReadEntityReference()
+    {
+        var end = this.text.IndexOf(';', this.index);
+        var name = end < 0 ? string.Empty : this.text[(this.index + 1)..end];
+        var replacement = name switch
+        {
+            "amp" => "&",
+            "apos" => "'",
+            "gt" => ">",
+            "lt" => "<",
+            "quot" => "\"",
+            _ when name.StartsWith("#x", StringComparison.Ordinal)
+                && int.TryParse(name.AsSpan(2), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var hex) => char.ConvertFromUtf32(hex),
+            _ when name.StartsWith('#')
+                && int.TryParse(name.AsSpan(1), NumberStyles.None, CultureInfo.InvariantCulture, out var code) => char.ConvertFromUtf32(code),
+            _ => throw SimulatedSqlException.XQueryInvalidEntityReference(this.method),
+        };
+        this.index = end + 1;
+        return replacement;
     }
 
     private XmlQueryExpr ParseFunctionCall(string name)
@@ -761,6 +1245,8 @@ internal sealed class XmlQueryParser(
     /// Maps a function name onto the built-in library, applying each
     /// parameter's own singleton rule. A prefixed name resolves through the
     /// prolog first, so an undeclared prefix is Msg 2229 rather than Msg 2395.
+    /// The <c>xs:</c> names are the constructor functions, each the cast to
+    /// its type, and <c>sql:</c> names the two accessors.
     /// </summary>
     private XmlQueryExpr ResolveFunction(string name, XmlQueryExpr[] arguments)
     {
@@ -776,8 +1262,12 @@ internal sealed class XmlQueryParser(
                     break;
                 case "sql":
                     return this.ResolveSqlAccessor(local, arguments);
+                case "xdt":
+                    if (local != "untypedAtomic")
+                        throw SimulatedSqlException.XQueryNoSuchFunction(this.method, XmlAtomicTypes.DataTypesNamespace, local);
+                    return this.ResolveConstructorFunction(name, null, XmlAtomicTypes.DataTypesNamespace, local, arguments);
                 case "xs":
-                    throw new NotSupportedException($"XQuery constructor function 'xs:{local}()' is not modeled.");
+                    return this.ResolveConstructorFunction(name, XmlAtomicTypes.Resolve(local), XmlAtomicTypes.SchemaNamespace, local, arguments);
                 default:
                     if (!this.prefixes.TryGetValue(prefix, out var uri))
                         throw SimulatedSqlException.XQueryUndeclaredNamespace(this.method, prefix);
@@ -794,54 +1284,108 @@ internal sealed class XmlQueryParser(
     }
 
     /// <summary>
+    /// <c>xs:type(expr)</c>: exactly one argument (Msg 2236 / 2238 name the
+    /// function without its parentheses), then the cast. A name XSD has no
+    /// atomic type for is Msg 2395 — <c>xs:untypedAtomic</c> included, the
+    /// untyped type living under <c>xdt:</c>.
+    /// </summary>
+    private XmlCastExpr ResolveConstructorFunction(string name, System.Xml.Schema.XmlSchemaSimpleType? type, string namespaceUri, string local, XmlQueryExpr[] arguments)
+    {
+        var untyped = namespaceUri == XmlAtomicTypes.DataTypesNamespace;
+        if (type is null && !untyped)
+            throw SimulatedSqlException.XQueryNoSuchFunction(this.method, namespaceUri, local);
+        if (arguments.Length == 0)
+            throw SimulatedSqlException.XQueryTooFewArgumentsBare(this.method, name);
+        if (arguments.Length > 1)
+            throw SimulatedSqlException.XQueryTooManyArgumentsBare(this.method, name);
+        return this.BuildCast(arguments[0], name, type, name);
+    }
+
+    /// <summary>
     /// Compiles <c>sql:variable("@v")</c> / <c>sql:column("c")</c> into a slot
-    /// the SQL side fills before evaluation. Only an expression compiled with a
-    /// <see cref="XmlSqlAccessorScope"/> — the XML-DML mutator's — admits them;
-    /// a read method (<c>.value()</c> / <c>.query()</c> / …) compiles without
-    /// one and keeps reporting the accessors as unmodeled.
+    /// the SQL side fills before evaluation. The scope's resolver — supplied
+    /// by the read methods — validates the name and answers the XQuery type the
+    /// value will carry; the <c>.modify()</c> value expression compiles with no
+    /// resolver and types the accessors untyped.
     /// </summary>
     private XmlSqlAccessorExpr ResolveSqlAccessor(string local, XmlQueryExpr[] arguments)
     {
-        if (this.sqlAccessors is not { } accessors)
-            throw new NotSupportedException($"XQuery accessor 'sql:{local}()' in a read method is not modeled.");
         if (local is not ("variable" or "column"))
-            throw SimulatedSqlException.XQueryNoSuchFunction(this.method, "sql", local);
-        if (arguments.Length != 1 || arguments[0] is not XmlLiteralExpr { Value: string name })
-            throw this.SyntaxError();
+            throw SimulatedSqlException.XQueryNoSuchFunction(this.method, XmlAtomicTypes.SqlNamespace, local);
+        if (this.sqlAccessors is not { } accessors)
+            throw new NotSupportedException($"XQuery accessor 'sql:{local}()' is not modeled here.");
+        if (arguments.Length == 0)
+            throw SimulatedSqlException.XQueryTooFewArgumentsBare(this.method, local);
+        if (arguments.Length > 1)
+            throw SimulatedSqlException.XQueryTooManyArgumentsBare(this.method, local);
+        if (arguments[0] is not XmlLiteralExpr { Value: string name })
+            throw SimulatedSqlException.XQueryStringLiteralExpected(this.method);
 
+        var isColumn = local[0] == 'c';
+        var typeName = accessors.Resolver?.Invoke(isColumn, name);
         var slot = this.slotCount++;
-        accessors.Add(local[0] == 'c', name, slot);
-        return new XmlSqlAccessorExpr(slot);
+        accessors.Add(isColumn, name, slot);
+        if (typeName is null)
+            return new XmlSqlAccessorExpr(slot);
+        var kind = typeName == "xs:boolean" ? XmlStaticKind.Boolean
+            : XmlAtomicTypes.NumericRank(typeName) > 0 ? XmlStaticKind.Number
+            : XmlStaticKind.String;
+        return new XmlSqlAccessorExpr(slot, kind, typeName);
+    }
+
+    /// <summary>
+    /// The type a numeric aggregate or rounding function computes in: its
+    /// argument's numeric type, an untyped or node argument counting as
+    /// <c>xs:double</c> (probe-confirmed: <c>max(/r/z)</c> renders
+    /// <c>1.234567E6</c>).
+    /// </summary>
+    private static string NumericTypeOf(XmlQueryExpr[] arguments, bool averaging = false)
+    {
+        if (arguments.Length == 0)
+            return "xs:double";
+        var argument = arguments[0];
+        var rank = argument.AtomizedKind() == XmlStaticKind.Untyped ? 4 : XmlAtomicTypes.NumericRank(argument.TypeName);
+        if (rank == 0)
+            rank = 4;
+        if (averaging && rank == 1)
+            rank = 2;
+        return XmlAtomicTypes.RankTypeName(rank);
     }
 
     /// <summary>Checks one call against the library's signature for that name.</summary>
     private XmlFunctionCallExpr BuildBuiltIn(string local, XmlQueryExpr[] arguments) =>
         local switch
         {
-            "avg" => this.Build(XmlFunctionId.Avg, arguments, local, 1, 1, XmlStaticKind.Number, "xs:decimal"),
-            "ceiling" => this.Build(XmlFunctionId.Ceiling, arguments, local, 1, 1, XmlStaticKind.Number, "xs:decimal", XmlArgumentRule.Atomic),
+            "avg" => this.Build(XmlFunctionId.Avg, arguments, local, 1, 1, XmlStaticKind.Number, NumericTypeOf(arguments, averaging: true)),
+            "ceiling" => this.Build(XmlFunctionId.Ceiling, arguments, local, 1, 1, XmlStaticKind.Number, NumericTypeOf(arguments), XmlArgumentRule.Atomic),
             "concat" => this.Build(XmlFunctionId.Concat, arguments, local, 2, int.MaxValue, XmlStaticKind.String, "xs:string", XmlArgumentRule.Atomic),
             "contains" => this.Build(XmlFunctionId.Contains, arguments, local, 2, 2, XmlStaticKind.Boolean, "xs:boolean", XmlArgumentRule.Atomic),
             "count" => this.Build(XmlFunctionId.Count, arguments, local, 1, 1, XmlStaticKind.Number, "xs:integer"),
-            "data" => this.Build(XmlFunctionId.Data, arguments, local, 1, 1, XmlStaticKind.Untyped, "xdt:untypedAtomic", occurrenceFromArgument: true),
+            "data" => this.Build(
+                XmlFunctionId.Data, arguments, local, 1, 1,
+                arguments.Length == 1 ? arguments[0].AtomizedKind() : XmlStaticKind.Untyped,
+                arguments.Length == 1 ? arguments[0].TypeName : "xdt:untypedAtomic",
+                occurrenceFromArgument: true),
             "distinct-values" => this.Build(XmlFunctionId.DistinctValues, arguments, local, 1, 1, XmlStaticKind.Untyped, "xdt:untypedAtomic", occurrence: XmlOccurrence.Many),
             "empty" => this.Build(XmlFunctionId.Empty, arguments, local, 1, 1, XmlStaticKind.Boolean, "xs:boolean"),
             "false" => this.Build(XmlFunctionId.False, arguments, local, 0, 0, XmlStaticKind.Boolean, "xs:boolean"),
-            "floor" => this.Build(XmlFunctionId.Floor, arguments, local, 1, 1, XmlStaticKind.Number, "xs:decimal", XmlArgumentRule.Atomic),
+            "floor" => this.Build(XmlFunctionId.Floor, arguments, local, 1, 1, XmlStaticKind.Number, NumericTypeOf(arguments), XmlArgumentRule.Atomic),
             "last" => this.Build(XmlFunctionId.Last, arguments, local, 0, 0, XmlStaticKind.Number, "xs:integer"),
             "local-name" => this.Build(XmlFunctionId.LocalName, arguments, local, 0, 1, XmlStaticKind.String, "xs:string", XmlArgumentRule.Item),
             "lower-case" => this.Build(XmlFunctionId.LowerCase, arguments, local, 1, 1, XmlStaticKind.String, "xs:string", XmlArgumentRule.Atomic),
-            "max" => this.Build(XmlFunctionId.Max, arguments, local, 1, 1, XmlStaticKind.Number, "xs:decimal"),
-            "min" => this.Build(XmlFunctionId.Min, arguments, local, 1, 1, XmlStaticKind.Number, "xs:decimal"),
+            "max" => this.Build(XmlFunctionId.Max, arguments, local, 1, 1, XmlStaticKind.Number, NumericTypeOf(arguments)),
+            "min" => this.Build(XmlFunctionId.Min, arguments, local, 1, 1, XmlStaticKind.Number, NumericTypeOf(arguments)),
             "namespace-uri" => this.Build(XmlFunctionId.NamespaceUri, arguments, local, 0, 1, XmlStaticKind.String, "xs:string", XmlArgumentRule.Item),
             "not" => this.Build(XmlFunctionId.Not, arguments, local, 1, 1, XmlStaticKind.Boolean, "xs:boolean", XmlArgumentRule.Condition),
-            "number" => this.Build(XmlFunctionId.Number, arguments, local, 0, 1, XmlStaticKind.Number, "xs:decimal", XmlArgumentRule.Atomic),
+            "number" => arguments.Length == 1 && arguments[0].Kind != XmlStaticKind.Node
+                ? throw SimulatedSqlException.XQueryNodeRequired(this.method, "number()")
+                : this.Build(XmlFunctionId.Number, arguments, local, 0, 1, XmlStaticKind.Number, "xs:double", XmlArgumentRule.Atomic),
             "position" => this.Build(XmlFunctionId.Position, arguments, local, 0, 0, XmlStaticKind.Number, "xs:integer"),
-            "round" => this.Build(XmlFunctionId.Round, arguments, local, 1, 1, XmlStaticKind.Number, "xs:decimal", XmlArgumentRule.Atomic),
+            "round" => this.Build(XmlFunctionId.Round, arguments, local, 1, 1, XmlStaticKind.Number, NumericTypeOf(arguments), XmlArgumentRule.Atomic),
             "string" => this.Build(XmlFunctionId.String, arguments, local, 0, 1, XmlStaticKind.String, "xs:string", XmlArgumentRule.Item),
-            "string-length" => this.Build(XmlFunctionId.StringLength, arguments, local, 0, 1, XmlStaticKind.Number, "xs:decimal", XmlArgumentRule.Atomic),
+            "string-length" => this.Build(XmlFunctionId.StringLength, arguments, local, 0, 1, XmlStaticKind.Number, "xs:integer", XmlArgumentRule.Atomic),
             "substring" => this.Build(XmlFunctionId.Substring, arguments, local, 2, 3, XmlStaticKind.String, "xs:string", XmlArgumentRule.Atomic),
-            "sum" => this.Build(XmlFunctionId.Sum, arguments, local, 1, 1, XmlStaticKind.Number, "xs:decimal"),
+            "sum" => this.Build(XmlFunctionId.Sum, arguments, local, 1, 1, XmlStaticKind.Number, NumericTypeOf(arguments)),
             "true" => this.Build(XmlFunctionId.True, arguments, local, 0, 0, XmlStaticKind.Boolean, "xs:boolean"),
             "upper-case" => this.Build(XmlFunctionId.UpperCase, arguments, local, 1, 1, XmlStaticKind.String, "xs:string", XmlArgumentRule.Atomic),
             _ => throw SimulatedSqlException.XQueryNoSuchFunction(this.method, FunctionNamespace, local),
@@ -850,7 +1394,8 @@ internal sealed class XmlQueryParser(
     /// <summary>
     /// Checks one call against its signature and builds it. Arity is part of
     /// the signature on real too, so too few arguments is Msg 2236 and too many
-    /// Msg 2238.
+    /// Msg 2238. Only a condition parameter (<c>not()</c>) may read a
+    /// constructed node; every other function is Msg 2373 over one.
     /// </summary>
     private XmlFunctionCallExpr Build(
         XmlFunctionId id,
@@ -871,6 +1416,8 @@ internal sealed class XmlQueryParser(
 
         foreach (var argument in arguments)
         {
+            if (rule != XmlArgumentRule.Condition)
+                RequireNotConstructed(argument, $"{name}()", this.method);
             switch (rule)
             {
                 case XmlArgumentRule.Atomic:
@@ -879,7 +1426,7 @@ internal sealed class XmlQueryParser(
                 case XmlArgumentRule.Condition:
                     this.RequireCondition(argument);
                     break;
-                case XmlArgumentRule.Item when argument.Occurrence == XmlOccurrence.Many:
+                case XmlArgumentRule.Item when XmlQueryExpr.IsPlural(argument.Occurrence):
                     // A parameter typed item()? quotes the node static type
                     // rather than the atomized one (probe-confirmed for
                     // string()).
@@ -902,7 +1449,7 @@ internal sealed class XmlQueryParser(
     /// </summary>
     internal static void RequireSingleton(XmlQueryExpr operand, string construct, string method)
     {
-        if (operand.Occurrence == XmlOccurrence.Many)
+        if (XmlQueryExpr.IsPlural(operand.Occurrence))
             throw SimulatedSqlException.XQueryNotSingleton(method, construct, operand.AtomizedTypeName());
     }
 
@@ -913,29 +1460,37 @@ internal sealed class XmlQueryParser(
     /// </summary>
     private static void RequireComparableTypes(XmlQueryExpr left, XmlQueryExpr right, string op, string method)
     {
-        if (left.Kind is XmlStaticKind.Node or XmlStaticKind.Untyped || right.Kind is XmlStaticKind.Node or XmlStaticKind.Untyped)
+        var leftKind = left.AtomizedKind();
+        var rightKind = right.AtomizedKind();
+        if (leftKind == XmlStaticKind.Untyped || rightKind == XmlStaticKind.Untyped)
             return;
-        if (left.Kind != right.Kind)
-            throw SimulatedSqlException.XQueryOperatorTypeMismatch(method, op, left.TypeName, right.TypeName);
+        if (leftKind != rightKind)
+            throw SimulatedSqlException.XQueryOperatorTypeMismatch(method, op, left.AtomizedTypeName(), right.AtomizedTypeName());
     }
 
-    private (string? Operator, bool IsValueComparison) TryComparisonOperator()
+    private (string? Operator, XmlComparisonForm Form) TryComparisonOperator()
     {
         this.SkipWhitespace();
         switch (this.Current)
         {
             case '!' when this.Peek(1) == '=':
                 this.index += 2;
-                return ("!=", false);
+                return ("!=", XmlComparisonForm.General);
+            case '<' when this.Peek(1) == '<':
+                this.index += 2;
+                return ("<<", XmlComparisonForm.Node);
             case '<':
                 this.index++;
-                return this.TryConsume('=') ? ("<=", false) : ("<", false);
+                return this.TryConsume('=') ? ("<=", XmlComparisonForm.General) : ("<", XmlComparisonForm.General);
             case '=':
                 this.index++;
-                return ("=", false);
+                return ("=", XmlComparisonForm.General);
+            case '>' when this.Peek(1) == '>':
+                this.index += 2;
+                return (">>", XmlComparisonForm.Node);
             case '>':
                 this.index++;
-                return this.TryConsume('=') ? (">=", false) : (">", false);
+                return this.TryConsume('=') ? (">=", XmlComparisonForm.General) : (">", XmlComparisonForm.General);
             default:
                 break;
         }
@@ -943,10 +1498,12 @@ internal sealed class XmlQueryParser(
         foreach (var word in ValueComparisonOperators)
         {
             if (this.TryOperatorWord(word))
-                return (word, true);
+                return (word, XmlComparisonForm.Value);
         }
+        if (this.TryOperatorWord("is"))
+            return ("is", XmlComparisonForm.Node);
         this.RejectUnsupportedSyntax();
-        return (null, false);
+        return (null, XmlComparisonForm.General);
     }
 
     /// <summary>The value-comparison operator words, in the order they're tried.</summary>
@@ -1067,85 +1624,177 @@ internal sealed class XmlQueryParser(
     /// a quoted attribute value is marked so it atomizes rather than splicing
     /// markup.
     /// </summary>
+    /// <remarks>
+    /// Three rules are real's own (probe-confirmed): <b>boundary whitespace</b>
+    /// — a run of content that is only whitespace, between tags and enclosed
+    /// expressions — is dropped, so <c>&lt;a&gt;  {1}  &lt;/a&gt;</c> is
+    /// <c>&lt;a&gt;1&lt;/a&gt;</c> while <c>  x  </c> survives; an attribute
+    /// value is either literal text or exactly one enclosed expression (Msg
+    /// 9313 otherwise); and comments, processing instructions and CDATA
+    /// sections inside the content are literal, braces included.
+    /// </remarks>
     private XmlConstructedNodeExpr ParseElementConstructor()
     {
-        this.ConstructsXml = true;
         var literals = new List<string>();
         var enclosed = new List<XmlQueryExpr>();
         var inAttribute = new List<bool>();
         var segment = new StringBuilder();
+        var content = new StringBuilder();
         var depth = 0;
         var inTag = false;
         var closingTag = false;
         var quote = '\0';
+        var valueExpressions = 0;
+        var valueHasText = false;
+
+        void FlushContent()
+        {
+            if (content.Length == 0)
+                return;
+            if (!string.IsNullOrWhiteSpace(content.ToString()))
+                _ = segment.Append(content);
+            _ = content.Clear();
+        }
+
         while (this.index < this.text.Length)
         {
             var c = this.text[this.index];
+            if (quote != '\0')
+            {
+                if (c is '{' or '}' && this.Peek(1) == c)
+                {
+                    _ = segment.Append(c);
+                    valueHasText = true;
+                    this.index += 2;
+                    continue;
+                }
+                if (c == '{')
+                {
+                    literals.Add(segment.ToString());
+                    _ = segment.Clear();
+                    this.index++;
+                    var expression = this.ParseExpr();
+                    RequireNotConstructed(expression, "data()", this.method);
+                    enclosed.Add(expression);
+                    inAttribute.Add(true);
+                    valueExpressions++;
+                    this.SkipWhitespace();
+                    if (this.Current != '}')
+                        throw SimulatedSqlException.XQuerySyntaxErrorExpecting(this.method, this.CurrentToken(), "}");
+                    this.index++;
+                    continue;
+                }
+                if (c == quote)
+                {
+                    if (valueExpressions > 1 || (valueExpressions == 1 && valueHasText))
+                        throw SimulatedSqlException.XQueryAttributeValueMixed(this.method);
+                    quote = '\0';
+                }
+                else
+                {
+                    valueHasText = true;
+                }
+                _ = segment.Append(c);
+                this.index++;
+                continue;
+            }
+            if (inTag)
+            {
+                if (c is '"' or '\'')
+                {
+                    quote = c;
+                    valueExpressions = 0;
+                    valueHasText = false;
+                    _ = segment.Append(c);
+                    this.index++;
+                    continue;
+                }
+                if (c == '/' && this.Peek(1) == '>')
+                {
+                    _ = segment.Append("/>");
+                    this.index += 2;
+                    inTag = false;
+                    if (depth == 0)
+                        return this.Finish(literals, enclosed, inAttribute, segment);
+                    continue;
+                }
+                if (c == '>')
+                {
+                    _ = segment.Append('>');
+                    this.index++;
+                    inTag = false;
+                    if (!closingTag)
+                    {
+                        depth++;
+                        continue;
+                    }
+                    depth--;
+                    if (depth == 0)
+                        return this.Finish(literals, enclosed, inAttribute, segment);
+                    continue;
+                }
+                _ = segment.Append(c);
+                this.index++;
+                continue;
+            }
+
+            // Element content.
+            if (c == '<')
+            {
+                FlushContent();
+                var rest = this.text.AsSpan(this.index);
+                if (rest.StartsWith("<!--", StringComparison.Ordinal))
+                {
+                    var start = this.index;
+                    _ = this.ScanComment();
+                    _ = segment.Append(this.text, start, this.index - start);
+                    continue;
+                }
+                if (rest.StartsWith("<![CDATA[", StringComparison.Ordinal))
+                {
+                    var end = this.text.IndexOf("]]>", this.index, StringComparison.Ordinal);
+                    if (end < 0)
+                        throw this.SyntaxError();
+                    _ = segment.Append(this.text, this.index, end + 3 - this.index);
+                    this.index = end + 3;
+                    continue;
+                }
+                if (rest.StartsWith("<?", StringComparison.Ordinal))
+                {
+                    var (target, data) = this.ScanProcessingInstruction();
+                    _ = segment.Append("<?").Append(target);
+                    if (data.Length > 0)
+                        _ = segment.Append(' ').Append(data);
+                    _ = segment.Append("?>");
+                    continue;
+                }
+                inTag = true;
+                closingTag = this.Peek(1) == '/';
+                _ = segment.Append(c);
+                this.index++;
+                continue;
+            }
             if (c is '{' or '}' && this.Peek(1) == c)
             {
-                _ = segment.Append(c);
+                _ = content.Append(c);
                 this.index += 2;
                 continue;
             }
             if (c == '{')
             {
+                FlushContent();
                 literals.Add(segment.ToString());
                 _ = segment.Clear();
                 this.index++;
                 enclosed.Add(this.ParseExpr());
-                inAttribute.Add(quote != '\0');
+                inAttribute.Add(false);
                 this.SkipWhitespace();
                 if (this.Current != '}')
                     throw SimulatedSqlException.XQuerySyntaxErrorExpecting(this.method, this.CurrentToken(), "}");
                 this.index++;
                 continue;
             }
-            if (quote != '\0')
-            {
-                if (c == quote)
-                    quote = '\0';
-                _ = segment.Append(c);
-                this.index++;
-                continue;
-            }
-            if (!inTag)
-            {
-                if (c == '<')
-                {
-                    inTag = true;
-                    closingTag = this.Peek(1) == '/';
-                }
-                _ = segment.Append(c);
-                this.index++;
-                continue;
-            }
-            if (c is '"' or '\'')
-                quote = c;
-            if (c == '/' && this.Peek(1) == '>')
-            {
-                _ = segment.Append("/>");
-                this.index += 2;
-                inTag = false;
-                if (depth == 0)
-                    return this.Finish(literals, enclosed, inAttribute, segment);
-                continue;
-            }
-            if (c == '>')
-            {
-                _ = segment.Append('>');
-                this.index++;
-                inTag = false;
-                if (!closingTag)
-                {
-                    depth++;
-                    continue;
-                }
-                depth--;
-                if (depth == 0)
-                    return this.Finish(literals, enclosed, inAttribute, segment);
-                continue;
-            }
-            _ = segment.Append(c);
+            _ = content.Append(c);
             this.index++;
         }
         throw this.SyntaxError();
@@ -1159,8 +1808,8 @@ internal sealed class XmlQueryParser(
     {
         literals.Add(segment.ToString());
         var name = ConstructedElementName(literals[0]);
-        literals[0] = this.DeclarePrologNamespaces(literals[0], name, literals);
-        return new XmlConstructedNodeExpr([.. literals], [.. enclosed], [.. inAttribute], name);
+        (literals[0], var declared) = this.DeclarePrologNamespaces(literals[0], name, literals);
+        return new XmlConstructedNodeExpr([.. literals], [.. enclosed], [.. inAttribute], name, declared);
     }
 
     /// <summary>
@@ -1170,20 +1819,32 @@ internal sealed class XmlQueryParser(
     /// prefix the markup actually writes (a declaration nothing uses is
     /// omitted, as real omits it).
     /// </summary>
-    private string DeclarePrologNamespaces(string opening, string name, List<string> literals)
+    private (string Opening, string[] Declared) DeclarePrologNamespaces(string opening, string name, List<string> literals)
     {
+        // A binding the constructor writes itself stays its own; the prolog
+        // only supplies what the tag doesn't.
+        var tagEnd = opening.IndexOf('>', StringComparison.Ordinal);
+        var tag = tagEnd < 0 ? opening : opening[..tagEnd];
         var declarations = new StringBuilder();
-        if (this.defaultNamespace is { } uri)
+        var declared = new List<string>();
+        if (this.defaultNamespace is { } uri && !tag.Contains("xmlns=", StringComparison.Ordinal))
+        {
             _ = declarations.Append(" xmlns=\"").Append(uri).Append('"');
+            declared.Add(string.Empty);
+        }
         foreach (var (prefix, mapped) in this.prefixes)
         {
-            if (literals.Exists(literal => literal.Contains(prefix + ":", StringComparison.Ordinal)))
+            if (literals.Exists(literal => literal.Contains(prefix + ":", StringComparison.Ordinal))
+                && !tag.Contains($"xmlns:{prefix}=", StringComparison.Ordinal))
+            {
                 _ = declarations.Append(" xmlns:").Append(prefix).Append("=\"").Append(mapped).Append('"');
+                declared.Add(prefix);
+            }
         }
         if (declarations.Length == 0)
-            return opening;
+            return (opening, []);
         var end = opening.IndexOf('<', StringComparison.Ordinal) + 1 + name.Length;
-        return opening[..end] + declarations.ToString() + opening[end..];
+        return (opening[..end] + declarations.ToString() + opening[end..], [.. declared]);
     }
 
     /// <summary>The constructed element's name, which its static type quotes.</summary>
@@ -1244,8 +1905,6 @@ internal sealed class XmlQueryParser(
         var word = this.PeekWord();
         if (word.Length == 0)
             throw this.SyntaxError();
-        if (word.Contains("::", StringComparison.Ordinal))
-            throw new NotSupportedException($"XQuery axis step '{word}' is not modeled.");
         this.index += word.Length;
         return word;
     }
@@ -1295,4 +1954,17 @@ internal sealed class XmlQueryParser(
         var word = this.PeekWord();
         return SimulatedSqlException.XQuerySyntaxError(this.method, word.Length > 0 ? word : this.text[this.index].ToString());
     }
+}
+
+/// <summary>Which of XQuery's three comparison families an operator belongs to.</summary>
+internal enum XmlComparisonForm
+{
+    /// <summary><c>=</c> <c>!=</c> <c>&lt;</c> …, existential over both sequences.</summary>
+    General,
+
+    /// <summary><c>eq</c> <c>ne</c> <c>lt</c> …, over singletons.</summary>
+    Value,
+
+    /// <summary><c>is</c> <c>&lt;&lt;</c> <c>&gt;&gt;</c>, node identity and order.</summary>
+    Node,
 }

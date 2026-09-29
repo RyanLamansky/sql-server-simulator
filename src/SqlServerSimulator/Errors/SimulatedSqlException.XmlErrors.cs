@@ -862,7 +862,7 @@ partial class SimulatedSqlException
     /// same name. Probe-confirmed wording against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException XmlDuplicateAttribute(string attributeName) =>
-        new($"XML well-formedness check: Duplicate attribute '{attributeName}'. Rewrite your XQuery so it returns well-formed XML.", 6308, 16, 1);
+        new($"XML well-formedness check: Duplicate attribute '{attributeName}'. Rewrite your XQuery so it returns well-formed XML.", 6308, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 6602 state 2: <c>sp_xml_preparedocument</c> couldn't parse its
@@ -908,7 +908,7 @@ partial class SimulatedSqlException
     /// attribute (probed against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException XmlValidationInvalidSimpleTypeValue(string value, string location) =>
-        new($"XML Validation: Invalid simple type value: '{value}'. Location: {location}", 6926, 16, 1);
+        new($"XML Validation: Invalid simple type value: '{value}'. Location: {location}", 6926, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 6965: an element appeared where the content model expected a
@@ -921,7 +921,10 @@ partial class SimulatedSqlException
             $"XML Validation: Invalid content. Expected element(s): '{expected}'. Found: element '{found}' instead. Location: {location}.",
             6965,
             16,
-            1);
+            1)
+        {
+            AbortsAsUnderXactAbort = true,
+        };
 
     /// <summary>
     /// Msg 6923: an element the content model allows, but more times than its
@@ -929,7 +932,7 @@ partial class SimulatedSqlException
     /// own ordinal.
     /// </summary>
     internal static SimulatedSqlException XmlValidationTooManyOccurrences(string name, string location) =>
-        new($"XML Validation: Unexpected element(s): {name}. Location: {location}", 6923, 16, 1);
+        new($"XML Validation: Unexpected element(s): {name}. Location: {location}", 6923, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 6911: a child an <c>xsd:all</c> group's member already took,
@@ -937,22 +940,22 @@ partial class SimulatedSqlException
     /// Probed 2026-09-25 against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException XmlValidationDuplicateInAll(string name, string location) =>
-        new($"XML Validation: Found duplicate element '{name}' in all content model. Location: {location}", 6911, 16, 1);
+        new($"XML Validation: Found duplicate element '{name}' in all content model. Location: {location}", 6911, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 6908: the content model still required an element when the parent
     /// ended. Named against the parent, not the missing child.
     /// </summary>
     internal static SimulatedSqlException XmlValidationIncompleteContent(string expected, string location) =>
-        new($"XML Validation: Invalid content. Expected element(s): '{expected}'. Location: {location}", 6908, 16, 1);
+        new($"XML Validation: Invalid content. Expected element(s): '{expected}'. Location: {location}", 6908, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>Msg 6905 state 3: an attribute the element's type doesn't declare.</summary>
     internal static SimulatedSqlException XmlValidationAttributeNotPermitted(string name, string location) =>
-        new($"XML Validation: Attribute '{name}' is not permitted in this context. Location: {location}", 6905, 16, 3);
+        new($"XML Validation: Attribute '{name}' is not permitted in this context. Location: {location}", 6905, 16, 3) { AbortsAsUnderXactAbort = true };
 
     /// <summary>Msg 6906: an attribute declared <c>use="required"</c> that the element didn't write.</summary>
     internal static SimulatedSqlException XmlValidationRequiredAttributeMissing(string name, string location) =>
-        new($"XML Validation: Required attribute '{name}' is missing. Location: {location}", 6906, 16, 1);
+        new($"XML Validation: Required attribute '{name}' is missing. Location: {location}", 6906, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 6913: no global element declaration matches the instance's own
@@ -962,7 +965,7 @@ partial class SimulatedSqlException
     /// <c>{uri}local</c>.
     /// </summary>
     internal static SimulatedSqlException XmlValidationDeclarationNotFound(string name, string location) =>
-        new($"XML Validation: Declaration not found for element '{name}'. Location: {location}", 6913, 16, 1);
+        new($"XML Validation: Declaration not found for element '{name}'. Location: {location}", 6913, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 6909: character data inside an element whose type declares element-only
@@ -975,5 +978,252 @@ partial class SimulatedSqlException
                 + location,
             6909,
             16,
-            1);
+            1)
+        {
+            AbortsAsUnderXactAbort = true,
+        };
+
+    /// <summary>
+    /// Msg 2396: a <c>.query()</c> whose result real types as attribute nodes
+    /// alone — <c>/r/@a</c>, a computed <c>attribute</c> constructor, a FLWOR
+    /// returning attributes. Settled statically, so it fires whatever the
+    /// instance holds.
+    /// </summary>
+    internal static SimulatedSqlException XQueryAttributeOutsideElement(string method) =>
+        new($"XQuery [{method}()]: Attribute may not appear outside of an element", 2396, 16, 1);
+
+    /// <summary>
+    /// Msg 6307: an attribute node lands where no element can take it — after an
+    /// element, comment or processing-instruction child of a constructed
+    /// element, or at the top level of a <c>.query()</c> result that also holds
+    /// other nodes.
+    /// </summary>
+    internal static SimulatedSqlException XmlAttributeAfterContent() =>
+        new("XML well-formedness check: Attribute cannot appear outside of element declaration. Rewrite your XQuery so it returns well-formed XML.", 6307, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 9322 state 1: a direct comment constructor whose text carries
+    /// <c>--</c> or ends in <c>-</c>. The XQuery form of the message carries
+    /// the method prefix the <c>FOR XML</c> one doesn't.
+    /// </summary>
+    internal static SimulatedSqlException XQueryCommentDoubleHyphen(string method) =>
+        new($"XQuery [{method}()]: Two consecutive '-' can only appear in a comment constructor if they are used to close the comment ('-->').", 9322, 16, 1);
+
+    /// <summary>
+    /// Msg 2294: a direct processing-instruction constructor whose target is
+    /// <c>xml</c> in any case.
+    /// </summary>
+    internal static SimulatedSqlException XQueryProcessingInstructionTargetXml(string method) =>
+        new($"XQuery [{method}()]: 'xml' is not allowed as a processing instruction target.", 2294, 16, 1);
+
+    /// <summary>
+    /// Msg 2278: a direct constructor's name starts with a character a name
+    /// can't — the space in <c>&lt;? p?&gt;</c>.
+    /// </summary>
+    internal static SimulatedSqlException XQueryTagNameInvalidStart(string method, char character) =>
+        new($"XQuery [{method}()]: A tag name may not start with the character '{character}'", 2278, 16, 1);
+
+    /// <summary>
+    /// Msg 9313: a direct constructor's attribute value mixing an enclosed
+    /// expression with literal text, or holding more than one.
+    /// </summary>
+    internal static SimulatedSqlException XQueryAttributeValueMixed(string method) =>
+        new($"XQuery [{method}()]: This version of the server does not support multiple expressions or expressions mixed with strings in an attribute constructor.", 9313, 16, 1);
+
+    /// <summary>Msg 9316: a computed attribute constructor named <c>xmlns</c>.</summary>
+    internal static SimulatedSqlException XQueryComputedAttributeXmlns(string method) =>
+        new($"XQuery [{method}()]: Cannot use 'xmlns' in the name expression of computed attribute constructor.", 9316, 16, 1);
+
+    /// <summary>
+    /// Msg 2282: an <c>&amp;</c> in a string literal that doesn't open one of
+    /// the five predefined entity references or a character reference.
+    /// </summary>
+    internal static SimulatedSqlException XQueryInvalidEntityReference(string method) =>
+        new($"XQuery [{method}()]: Invalid entity reference", 2282, 16, 1);
+
+    /// <summary>
+    /// Msg 9301: <c>cast as</c> without the <c>?</c> occurrence indicator, the
+    /// only form real accepts.
+    /// </summary>
+    internal static SimulatedSqlException XQueryCastRequiresOptional(string method) =>
+        new($"XQuery [{method}()]: In this version of the server, 'cast as <type>' is not available. Please use the 'cast as <type> ?' syntax.", 9301, 16, 1);
+
+    /// <summary>
+    /// Msg 2365: a <c>cast as</c> or constructor function whose operand real
+    /// types as more than one item — or as the empty sequence, which it names
+    /// <c>empty</c> — or whose source type has no conversion to the target.
+    /// </summary>
+    internal static SimulatedSqlException XQueryCannotConvert(string method, string sourceType, string targetType) =>
+        new($"XQuery [{method}()]: Cannot explicitly convert from '{sourceType}' to '{targetType}'", 2365, 16, 1);
+
+    /// <summary>
+    /// Msg 9319: a literal cast or constructor argument the target type
+    /// doesn't admit, settled while compiling. A value read from the instance
+    /// that won't convert answers the empty sequence instead.
+    /// </summary>
+    internal static SimulatedSqlException XQueryStaticInvalidValue(string method, string value) =>
+        new($"XQuery [{method}()]: Static simple type validation: Invalid simple type value '{value}'.", 9319, 16, 1);
+
+    /// <summary>Msg 2232: a sequence type naming an atomic type that doesn't exist.</summary>
+    internal static SimulatedSqlException XQueryUndefinedType(string method, string name) =>
+        new($"XQuery [{method}()]: The name \"{name}\" does not denote a defined type.", 2232, 16, 1);
+
+    /// <summary>Msg 2392: a named axis step whose axis XQuery doesn't have (<c>namespace::</c> included).</summary>
+    internal static SimulatedSqlException XQueryInvalidAxis(string method, string axis) =>
+        new($"XQuery [{method}()]: '{axis}::' is not a valid axis", 2392, 16, 1);
+
+    /// <summary>
+    /// Msg 2261: a <c>self::</c> step naming an element the preceding step's
+    /// static type says can't be there.
+    /// </summary>
+    internal static SimulatedSqlException XQueryNoSuchElementInType(string method, string name, string staticType) =>
+        new($"XQuery [{method}()]: There is no element named '{name}' in the type '{staticType}'.", 2261, 16, 1);
+
+    /// <summary>
+    /// Msg 9308: an arithmetic operand real types as neither numeric nor
+    /// untyped — a string or boolean, a <c>sql:variable</c> over a character
+    /// type included.
+    /// </summary>
+    internal static SimulatedSqlException XQueryArithmeticOperandType(string method, string op, string staticType) =>
+        new($"XQuery [{method}()]: The argument of '{op}' must be of a single numeric primitive type or 'http://www.w3.org/2004/07/xpath-datatypes#untypedAtomic'. Found argument of type '{staticType}'.", 9308, 16, 1);
+
+    /// <summary>
+    /// Msg 9342: a <c>sql:variable</c> / <c>sql:column</c> of type <c>xml</c>
+    /// anywhere but an <c>insert</c>'s direct content.
+    /// </summary>
+    internal static SimulatedSqlException XQuerySqlAccessorXmlNotAllowed(string method) =>
+        new($"XQuery [{method}()]: An XML instance is only supported as the direct source of an insert using sql:column/sql:variable.", 9342, 16, 1);
+
+    /// <summary>
+    /// Msg 9344: a <c>sql:variable</c> / <c>sql:column</c> over a type with no
+    /// XQuery mapping — <c>sql_variant</c>, <c>hierarchyid</c>, the CLR and
+    /// spatial types.
+    /// </summary>
+    internal static SimulatedSqlException XQuerySqlAccessorTypeNotSupported(string method, string sqlTypeName) =>
+        new($"XQuery [{method}()]: The SQL type '{sqlTypeName}' is not supported with sql:column() and sql:variable().", 9344, 16, 1);
+
+    /// <summary>
+    /// Msg 9501 state 2: a <c>sql:variable</c> naming a variable the batch
+    /// never declared. Real writes no method bracket on this one.
+    /// </summary>
+    internal static SimulatedSqlException XQuerySqlVariableNotFound(string name) =>
+        new($"XQuery: Unable to resolve sql:variable('{name}'). The variable must be declared as a scalar TSQL variable.", 9501, 16, 2);
+
+    /// <summary>Msg 9519: a <c>sql:variable</c> argument that doesn't start with <c>@</c>.</summary>
+    internal static SimulatedSqlException XQuerySqlVariableNameInvalid(string name) =>
+        new($"XQuery: The name supplied to sql:variable('{name}') is not a valid SQL variable name. Variable names must start with the '@' symbol followed by at least one character.", 9519, 16, 1);
+
+    /// <summary>Msg 2225: a <c>sql:</c> accessor whose argument isn't a string literal.</summary>
+    internal static SimulatedSqlException XQueryStringLiteralExpected(string method) =>
+        new($"XQuery [{method}()]: A string literal was expected", 2225, 16, 1);
+
+    /// <summary>
+    /// Msg 2236 for a constructor function or <c>sql:</c> accessor, which real
+    /// names without the parentheses a library function's message carries.
+    /// </summary>
+    internal static SimulatedSqlException XQueryTooFewArgumentsBare(string method, string name) =>
+        new($"XQuery [{method}()]: There are not enough actual arguments in the call to function \"{name}\".", 2236, 16, 1);
+
+    /// <summary>
+    /// Msg 2238 for a constructor function or <c>sql:</c> accessor, named
+    /// without parentheses.
+    /// </summary>
+    internal static SimulatedSqlException XQueryTooManyArgumentsBare(string method, string name) =>
+        new($"XQuery [{method}()]: Too many arguments in call to function '{name}'", 2238, 16, 1);
+
+    /// <summary>
+    /// Msg 6325: a <c>replace value of</c> whose <c>with</c> expression
+    /// evaluated to the empty sequence without being written <c>()</c>.
+    /// </summary>
+    internal static SimulatedSqlException XmlDmlReplaceWithEmptySequence() =>
+        new("XQuery: Replacing the value of a node with an empty sequence is allowed only if '()' is used as the new value expression. The new value expression evaluated to an empty sequence but it is not '()'.", 6325, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 2374: a function whose parameter real types as nodes given an
+    /// atomic argument — <c>number("12")</c>.
+    /// </summary>
+    internal static SimulatedSqlException XQueryNodeRequired(string method, string function) =>
+        new($"XQuery [{method}()]: A node or set of nodes is required for {function}", 2374, 16, 1);
+
+    /// <summary>
+    /// Msg 6320: a <c>replace value of</c> over an attribute or element whose
+    /// <c>with</c> expression evaluated to the empty sequence — only a text
+    /// node (or a nillable element) can take one.
+    /// </summary>
+    internal static SimulatedSqlException XmlDmlReplaceWithEmptyNotNillable() =>
+        new("XQuery: Only nillable elements or text nodes can be updated with empty sequence", 6320, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 9312: a <c>text()</c> step under an element a schema collection
+    /// types with simple content, whose value is typed rather than a text node.
+    /// </summary>
+    internal static SimulatedSqlException XQueryTextOnSimpleTypedElement(string method, string staticType) =>
+        new($"XQuery [{method}()]: 'text()' is not supported on simple typed or 'http://www.w3.org/2001/XMLSchema#anyType' elements, found '{staticType}'.", 9312, 16, 1);
+
+    /// <summary>
+    /// Msg 2247: the <c>with</c> value of a <c>replace value of</c> over a
+    /// typed node isn't of the node's declared type or one derived from it —
+    /// <c>xs:integer</c> into an <c>xs:int</c> attribute included, since the
+    /// derivation runs the other way.
+    /// </summary>
+    internal static SimulatedSqlException XmlDmlReplaceValueTypeMismatch(string method, string valueType, string expectedType) =>
+        new($"XQuery [{method}()]: The value is of type \"{valueType}\", which is not a subtype of the expected type \"{expectedType}\".", 2247, 16, 1);
+
+    /// <summary>Msg 6901: an <c>xml(DOCUMENT …)</c> target given something other than one top-level element.</summary>
+    internal static SimulatedSqlException XmlValidationNotADocument() =>
+        new("XML Validation: XML instance must be a document.", 6901, 16, 1)
+        {
+            AbortsAsUnderXactAbort = true,
+        };
+
+    /// <summary>
+    /// Msg 9336: an XSD construct SQL Server's schema collections refuse — the
+    /// identity constraints <c>key</c>, <c>keyref</c> and <c>unique</c>.
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaSyntaxNotSupported(string construct) =>
+        new($"The XML Schema syntax '{construct}' is not supported.", 9336, 16, 1);
+
+    /// <summary>Msg 6347: <c>ALTER XML SCHEMA COLLECTION</c> naming a collection that doesn't resolve or can't be altered.</summary>
+    internal static SimulatedSqlException XmlSchemaCollectionCannotBeAltered(string name) =>
+        new($"Specified collection '{name}' cannot be altered because it does not exist or you do not have permission.", 6347, 16, 1);
+
+    /// <summary>Msg 2378: an <c>ALTER XML SCHEMA COLLECTION … ADD</c> whose text isn't a schema document.</summary>
+    internal static SimulatedSqlException XmlSchemaDocumentExpected() =>
+        new("Expected XML schema document", 2378, 16, 1);
+
+    /// <summary>
+    /// Msg 6310: an <c>ALTER XML SCHEMA COLLECTION … ADD</c> redeclaring a
+    /// global component the collection already has. Real's text carries two
+    /// spaces after the first sentence.
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaComponentExists(string componentNamespace, string name, string kind) =>
+        new($"Altering existing schema components is not allowed.  There was an attempt to modify an existing XML Schema component, component namespace: '{componentNamespace}' component name: '{name}' component kind:{kind}", 6310, 16, 1);
+
+    /// <summary>Msg 6917: <c>xsi:nil="true"</c> on an element not declared <c>nillable</c> (or carrying a fixed value).</summary>
+    internal static SimulatedSqlException XmlValidationNilNotAllowed(string name, string location) =>
+        new($"XML Validation: Element '{name}' may not have xsi:nil=\"true\" because it was not defined as nillable or because it has a fixed value constraint. Location: {location}", 6917, 16, 1)
+        {
+            AbortsAsUnderXactAbort = true,
+        };
+
+    /// <summary>Msg 6918: a nil element that still has content.</summary>
+    internal static SimulatedSqlException XmlValidationNilWithContent(string name, string location) =>
+        new($"XML Validation: Element '{name}' must not have character or element children, because xsi:nil was set to true. Location: {location}", 6918, 16, 1)
+        {
+            AbortsAsUnderXactAbort = true,
+        };
+
+    /// <summary>Msg 6914: an <c>xsi:type</c> naming a type the collection doesn't define.</summary>
+    internal static SimulatedSqlException XmlValidationTypeNotFound(string type, string location) =>
+        new($"XML Validation: Type definition for type '{type}' was not found, type definition is required before use in a type cast. Location: {location}", 6914, 16, 1)
+        {
+            AbortsAsUnderXactAbort = true,
+        };
+
+    /// <summary>Msg 6936: an <c>xsi:type</c> naming a type that doesn't derive from the declared one.</summary>
+    internal static SimulatedSqlException XmlValidationInvalidTypeCast(string name, string fromType, string toType, string location) =>
+        new($"XML Validation: Invalid cast for element '{name}' from type '{fromType}' to type '{toType}'. Location: {location}", 6936, 16, 1)
+        {
+            AbortsAsUnderXactAbort = true,
+        };
 }

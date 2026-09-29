@@ -10,9 +10,8 @@ namespace SqlServerSimulator.Parser;
 /// <see cref="Selection"/> factory so the FROM-source machinery (alias /
 /// qualifier / lateral re-execution per outer row, CROSS / OUTER APPLY
 /// composition) reuses the existing derived-table codepath. Each yielded row
-/// carries one <c>xml</c> column whose value is the serialized outer XML of a
-/// matched node; a downstream <c>.value()</c> / nested <c>.nodes()</c> against
-/// that column re-parses the fragment (see <see cref="XmlQueryEngine"/>).
+/// carries one <c>xml</c> column whose value is a reference to a matched node
+/// (see <see cref="XmlInstance"/>), which a downstream method reads in place.
 /// </summary>
 internal sealed partial class Selection
 {
@@ -21,14 +20,14 @@ internal sealed partial class Selection
     /// <c>xmlexpr.nodes(...)</c>. <paramref name="columnName"/> is the column
     /// alias from the mandatory <c>AS table(column)</c> clause.
     /// </summary>
-    private static Selection FromXmlNodes(Expression target, XmlQueryExpr xquery, string columnName)
+    private static Selection FromXmlNodes(XmlMethodCall nodesCall, string columnName)
     {
         SqlType[] schema = [SqlType.Xml];
         string[] columnNames = [columnName];
         return new Selection(schema, columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            (batch, outerResolver) => EnumerateXmlNodesRows(target, xquery, schema, batch, outerResolver));
+            (batch, outerResolver) => EnumerateXmlNodesRows(nodesCall, schema, batch, outerResolver));
     }
 
     /// <summary>
@@ -74,7 +73,7 @@ internal sealed partial class Selection
         }
 
         var (alias, columnName) = ConsumeNodesAlias(context);
-        var plan = FromXmlNodes(nodesCall.Target, nodesCall.XQuery, columnName);
+        var plan = FromXmlNodes(nodesCall, columnName);
         // Each row's value is a node of the target instance, so it carries the
         // target's schema binding — real types a `.value()` against it the
         // same way it types one against the column itself.
@@ -123,17 +122,17 @@ internal sealed partial class Selection
     }
 
     private static IEnumerable<byte[]> EnumerateXmlNodesRows(
-        Expression target,
-        XmlQueryExpr xquery,
+        XmlMethodCall nodesCall,
         SqlType[] schema,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver)
     {
         var resolver = outerResolver ?? (n => throw SimulatedSqlException.InvalidColumnName(n));
-        var input = target.Run(new RuntimeContext(resolver, batch));
+        var runtime = new RuntimeContext(resolver, batch);
+        var input = nodesCall.Target.Run(runtime);
         if (input.IsNull)
             yield break;
-        foreach (var nodeXml in XmlQueryEngine.EvaluateNodes(input.AsString, xquery))
-            yield return RowEncoder.EncodeRow(schema, [SqlValue.FromXml(nodeXml)]);
+        foreach (var reference in XmlQueryEngine.EvaluateNodes(input.AsString, nodesCall.XQuery, nodesCall.BuildAccessorScope(runtime), batch.XmlNodeDocuments ??= new()))
+            yield return RowEncoder.EncodeRow(schema, [SqlValue.FromXml(reference)]);
     }
 }

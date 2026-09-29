@@ -56,6 +56,8 @@ partial class Simulation
                 return TryParseAlterFullText(context);
             case ReservedKeyword { Keyword: Keyword.Authorization }:
                 return TryParseAlterAuthorization(context);
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:
+                return TryParseAlterXmlSchemaCollection(context);
             case ReservedKeyword { Keyword: Keyword.Database }:
                 break;
             default:

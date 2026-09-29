@@ -63,10 +63,28 @@ internal static class XmlSchemaValidation
         {
             var declaration = GlobalElement(schemas, element.Name)
                 ?? throw SimulatedSqlException.XmlValidationDeclarationNotFound(QualifiedName(element.Name), LocationOf(element));
-            changed |= ValidateElement(element, declaration.ElementSchemaType, schemas);
+            changed |= ValidateElement(element, declaration, schemas);
         }
 
         return changed ? Reserialize(document) : xmlText;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="xmlText"/> is a document: exactly one top-level
+    /// element and no top-level text, which is what an <c>xml(DOCUMENT …)</c>
+    /// target admits.
+    /// </summary>
+    internal static bool IsDocument(string xmlText)
+    {
+        try
+        {
+            var root = XElement.Parse($"<{FragmentRoot}>{xmlText}</{FragmentRoot}>");
+            return root.Elements().Take(2).Count() == 1 && !root.Nodes().OfType<XText>().Any(text => !string.IsNullOrWhiteSpace(text.Value));
+        }
+        catch (XmlException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -77,19 +95,34 @@ internal static class XmlSchemaValidation
     private const string FragmentRoot = "sss-typed-xml-root";
 
     /// <summary>
-    /// Validates one element against <paramref name="type"/>, canonicalizing
+    /// Validates one element against <paramref name="declaration"/>'s type, canonicalizing
     /// every simple value it or its descendants carry. Returns whether any text
     /// changed, so an instance real would store verbatim keeps the bytes it
     /// arrived with.
     /// </summary>
-    private static bool ValidateElement(XElement element, XmlSchemaType? type, XmlSchemaSet schemas)
+    private static bool ValidateElement(XElement element, XmlSchemaElement? declaration, XmlSchemaSet schemas)
     {
         // No type means nothing placed this element — a wildcard matched it and
         // no global declaration answers its name. Real leaves such a subtree
         // alone, and so must this: refusing its attributes would reject the
         // instance real accepts.
-        if (type is null)
+        if (declaration?.ElementSchemaType is not { } type)
             return false;
+
+        // The instance may name a type derived from the declared one with
+        // xsi:type, which is then what the element is validated against, and
+        // may mark a nillable element nil, which leaves nothing to validate
+        // but its attributes (probed 2026-09-28 against SQL Server 2025).
+        if (element.Attribute(SchemaInstance + "type") is { } typeCast)
+            type = ResolveTypeCast(element, typeCast.Value, type, schemas);
+        if (element.Attribute(SchemaInstance + "nil") is { Value: var nil } && nil.Trim() is "true" or "1")
+        {
+            if (!declaration.IsNillable || declaration.FixedValue is not null)
+                throw SimulatedSqlException.XmlValidationNilNotAllowed(QualifiedName(element.Name), LocationOf(element));
+            if (element.HasElements || HasText(element))
+                throw SimulatedSqlException.XmlValidationNilWithContent(QualifiedName(element.Name), LocationOf(element));
+            return ValidateAttributes(element, type);
+        }
 
         var changed = ValidateAttributes(element, type);
         switch (type)
@@ -111,6 +144,29 @@ internal static class XmlSchemaValidation
         }
     }
 
+    /// <summary>The XML Schema instance namespace the <c>xsi:</c> attributes live in.</summary>
+    private static readonly XNamespace SchemaInstance = "http://www.w3.org/2001/XMLSchema-instance";
+
+    /// <summary>
+    /// The type an <c>xsi:type</c> names, which must exist (Msg 6914) and
+    /// derive from the declared type (Msg 6936).
+    /// </summary>
+    private static XmlSchemaType ResolveTypeCast(XElement element, string written, XmlSchemaType declared, XmlSchemaSet schemas)
+    {
+        var colon = written.IndexOf(':', StringComparison.Ordinal);
+        var prefix = colon < 0 ? string.Empty : written[..colon].Trim();
+        var local = written[(colon + 1)..].Trim();
+        var namespaceUri = (colon < 0 ? element.GetDefaultNamespace() : element.GetNamespaceOfPrefix(prefix))?.NamespaceName ?? string.Empty;
+        var qualified = new XmlQualifiedName(local, namespaceUri);
+        var cast = schemas.GlobalTypes[qualified] as XmlSchemaType
+            ?? XmlSchemaType.GetBuiltInSimpleType(qualified)
+            ?? throw SimulatedSqlException.XmlValidationTypeNotFound($"{{{namespaceUri}}}{local}", LocationOf(element));
+        return cast == declared || XmlSchemaType.IsDerivedFrom(cast, declared, XmlSchemaDerivationMethod.Empty)
+            ? cast
+            : throw SimulatedSqlException.XmlValidationInvalidTypeCast(
+                QualifiedName(element.Name), $"{{{declared.QualifiedName.Namespace}}}{declared.QualifiedName.Name}", $"{{{namespaceUri}}}{local}", LocationOf(element));
+    }
+
     /// <summary>
     /// Checks an element's attributes against its type's attribute uses and
     /// canonicalizes each declared one's value. An element whose type declares
@@ -123,8 +179,9 @@ internal static class XmlSchemaValidation
         var changed = false;
         foreach (var attribute in element.Attributes())
         {
-            // A namespace declaration is not an attribute to XSD.
-            if (attribute.IsNamespaceDeclaration)
+            // A namespace declaration is not an attribute to XSD, and neither
+            // is anything in the xsi namespace — real accepts an xsi:bogus.
+            if (attribute.IsNamespaceDeclaration || attribute.Name.Namespace == SchemaInstance)
                 continue;
             if (FindAttribute(uses, attribute.Name) is not { } declared)
             {
@@ -241,7 +298,7 @@ internal static class XmlSchemaValidation
                 throw SimulatedSqlException.XmlValidationDeclarationNotFound(QualifiedName(child.Name), LocationOf(child));
             }
 
-            changed |= ValidateElement(child, resolved?.ElementSchemaType, schemas);
+            changed |= ValidateElement(child, resolved, schemas);
         }
 
         return changed;

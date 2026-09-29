@@ -20,6 +20,13 @@ internal enum XmlOccurrence
 
     /// <summary>Any number of items — an element / <c>text()</c> step.</summary>
     Many,
+
+    /// <summary>
+    /// At least one item — a comma sequence of single items (<c>(1, 2)</c>),
+    /// which real writes <c>+</c>. Plural like <see cref="Many"/> everywhere
+    /// but the notation.
+    /// </summary>
+    OneOrMore,
 }
 
 /// <summary>
@@ -112,7 +119,7 @@ internal readonly struct XmlQueryFrame(XPathNavigator context, int position, int
 /// static on real (Msg 2203 / 2234 / 2389) fire while the statement parses
 /// rather than per row.
 /// </summary>
-internal abstract class XmlQueryExpr(XmlStaticKind kind, XmlOccurrence occurrence, string typeName)
+internal abstract class XmlQueryExpr(XmlStaticKind kind, XmlOccurrence occurrence, string typeName, bool constructed = false)
 {
     /// <summary>Static item kind.</summary>
     public readonly XmlStaticKind Kind = kind;
@@ -122,6 +129,38 @@ internal abstract class XmlQueryExpr(XmlStaticKind kind, XmlOccurrence occurrenc
 
     /// <summary>Atomized type name, without an occurrence indicator.</summary>
     public readonly string TypeName = typeName;
+
+    /// <summary>
+    /// Whether the expression's result may hold a node a constructor built.
+    /// Real treats constructed XML as opaque: it can be returned, nested in
+    /// another constructor, tested for existence or read as a condition, and
+    /// every other operation over it — a path step, a predicate, a function,
+    /// atomization, a binding — is Msg 2373 naming that operation.
+    /// </summary>
+    public readonly bool Constructed = constructed;
+
+    /// <summary>
+    /// The namespace bindings the query's prolog declared, set on the root of
+    /// a compiled read-method expression; <c>.query()</c> serializes its result
+    /// under them.
+    /// </summary>
+    public XmlProlog? Prolog;
+
+    /// <summary>
+    /// Whether real types the expression as attribute nodes alone, which a
+    /// <c>.query()</c> can't return (Msg 2396).
+    /// </summary>
+    public bool IsAttributeOnly => this.Kind == XmlStaticKind.Node && this.NodeTypeBase().StartsWith("attribute(", StringComparison.Ordinal);
+
+    /// <summary>
+    /// The kind the expression's items have once atomized: a node sequence's
+    /// is its schema type's — a path to an <c>xs:decimal</c> element compares
+    /// as a number — or untyped for untyped XML.
+    /// </summary>
+    public XmlStaticKind AtomizedKind() =>
+        this.Kind != XmlStaticKind.Node ? this.Kind
+        : this.TypeName.StartsWith("xs:", StringComparison.Ordinal) && XmlAtomicTypes.Resolve(this.TypeName[3..]) is { } type ? XmlAtomicTypes.KindOf(type)
+        : XmlStaticKind.Untyped;
 
     /// <summary>Appends this expression's result sequence to <paramref name="results"/>.</summary>
     public abstract void Evaluate(in XmlQueryFrame frame, List<object> results);
@@ -139,13 +178,13 @@ internal abstract class XmlQueryExpr(XmlStaticKind kind, XmlOccurrence occurrenc
     /// value-comparison and atomic-argument diagnostics quote
     /// (<c>xdt:untypedAtomic *</c>).
     /// </summary>
-    public string AtomizedTypeName() => this.TypeName + OccurrenceSuffix(this.Occurrence);
+    public string AtomizedTypeName() => this.TypeName == "empty" ? this.TypeName : this.TypeName + OccurrenceSuffix(this.Occurrence);
 
     /// <summary>
     /// Real's static-type notation without atomization — what a diagnostic over
     /// an <c>item()</c>-typed parameter quotes (<c>element(b,xdt:untyped) *</c>).
     /// </summary>
-    public string NodeTypeName() => this.NodeTypeBase() + OccurrenceSuffix(this.Occurrence);
+    public string NodeTypeName() => this.TypeName == "empty" ? this.TypeName : this.NodeTypeBase() + OccurrenceSuffix(this.Occurrence);
 
     /// <summary>The un-suffixed node-form type name; only paths have one of their own.</summary>
     public virtual string NodeTypeBase() => this.TypeName;
@@ -155,16 +194,52 @@ internal abstract class XmlQueryExpr(XmlStaticKind kind, XmlOccurrence occurrenc
     {
         XmlOccurrence.ExactlyOne => string.Empty,
         XmlOccurrence.ZeroOrOne => " ?",
+        XmlOccurrence.OneOrMore => " +",
         _ => " *",
     };
 
+    /// <summary>Whether <paramref name="occurrence"/> admits more than one item.</summary>
+    internal static bool IsPlural(XmlOccurrence occurrence) => occurrence >= XmlOccurrence.Many;
+
     /// <summary>Cardinality of a path whose two halves have the given cardinalities.</summary>
     internal static XmlOccurrence Combine(XmlOccurrence left, XmlOccurrence right) =>
-        left == XmlOccurrence.Many || right == XmlOccurrence.Many
-            ? XmlOccurrence.Many
+        IsPlural(left) || IsPlural(right)
+            ? left is XmlOccurrence.ExactlyOne or XmlOccurrence.OneOrMore && right is XmlOccurrence.ExactlyOne or XmlOccurrence.OneOrMore
+                ? XmlOccurrence.OneOrMore
+                : XmlOccurrence.Many
             : left == XmlOccurrence.ZeroOrOne || right == XmlOccurrence.ZeroOrOne
                 ? XmlOccurrence.ZeroOrOne
                 : XmlOccurrence.ExactlyOne;
+}
+
+/// <summary>
+/// Marks a namespace declaration a constructor took from the prolog rather
+/// than writing it, as an annotation on the declaring attribute.
+/// </summary>
+internal sealed class XmlPrologDeclaration
+{
+    /// <summary>The one instance.</summary>
+    public static readonly XmlPrologDeclaration Instance = new();
+
+    private XmlPrologDeclaration()
+    {
+    }
+}
+
+/// <summary>The namespace bindings an XQuery prolog declared, and whether the expression is typed.</summary>
+internal sealed class XmlProlog(string? defaultElementNamespace, Dictionary<string, string> prefixes, bool typed)
+{
+    /// <summary>
+    /// Whether the expression compiled against a schema collection, under
+    /// which an element marked <c>xsi:nil</c> has no value at all.
+    /// </summary>
+    public readonly bool Typed = typed;
+
+    /// <summary>The <c>declare default element namespace</c> URI, or null.</summary>
+    public readonly string? DefaultElementNamespace = defaultElementNamespace;
+
+    /// <summary>Each <c>declare namespace</c> prefix and the URI it binds.</summary>
+    public readonly Dictionary<string, string> Prefixes = prefixes;
 }
 
 /// <summary>A literal or otherwise constant single item.</summary>
@@ -189,13 +264,32 @@ internal sealed class XmlContextItemExpr() : XmlQueryExpr(XmlStaticKind.Node, Xm
         "document { (element(*,xdt:untyped) ? & text ? & comment ? & processing-instruction ?) * }";
 }
 
-/// <summary>A parenthesized sequence, <c>(a, b)</c> — <c>()</c> included.</summary>
+/// <summary>
+/// A parenthesized sequence, <c>(a, b)</c> — <c>()</c> included, which real
+/// types as <c>empty</c>.
+/// </summary>
 internal sealed class XmlSequenceExpr(XmlQueryExpr[] items)
     : XmlQueryExpr(
-        items.Length == 1 ? items[0].Kind : XmlStaticKind.Node,
-        items.Length == 1 ? items[0].Occurrence : XmlOccurrence.Many,
-        items.Length == 1 ? items[0].TypeName : "xdt:untypedAtomic")
+        items.Length == 1 ? items[0].Kind : items.Length > 1 && items[0].Kind != XmlStaticKind.Node ? items[0].Kind : XmlStaticKind.Node,
+        items.Length switch
+        {
+            0 => XmlOccurrence.ZeroOrOne,
+            1 => items[0].Occurrence,
+            _ => Array.TrueForAll(items, item => item.Occurrence is XmlOccurrence.ExactlyOne or XmlOccurrence.OneOrMore) ? XmlOccurrence.OneOrMore : XmlOccurrence.Many,
+        },
+        items.Length switch { 0 => "empty", 1 => items[0].TypeName, _ when items[0].Kind != XmlStaticKind.Node => SharedTypeName(items), _ => "xdt:untypedAtomic" },
+        Array.Exists(items, item => item.Constructed))
 {
+    /// <summary>
+    /// The atomic type a sequence of atomics reports: the one they share, or
+    /// real's <c>xdt:anyAtomicType</c> when they differ.
+    /// </summary>
+    private static string SharedTypeName(XmlQueryExpr[] items) =>
+        Array.TrueForAll(items, item => item.TypeName == items[0].TypeName) ? items[0].TypeName : "xdt:anyAtomicType";
+
+    /// <summary>Whether this is the empty sequence <c>()</c> as written.</summary>
+    public bool IsEmpty => this.items.Length == 0;
+
     private readonly XmlQueryExpr[] items = items;
 
     public override void Evaluate(in XmlQueryFrame frame, List<object> results)
@@ -204,7 +298,12 @@ internal sealed class XmlSequenceExpr(XmlQueryExpr[] items)
             item.Evaluate(frame, results);
     }
 
-    public override string NodeTypeBase() => this.items.Length == 1 ? this.items[0].NodeTypeBase() : base.NodeTypeBase();
+    public override string NodeTypeBase() => this.items.Length switch
+    {
+        1 => this.items[0].NodeTypeBase(),
+        > 1 when Array.TrueForAll(this.items, item => item.IsAttributeOnly) => "attribute(*,xdt:untypedAtomic)",
+        _ => base.NodeTypeBase(),
+    };
 }
 
 /// <summary>
@@ -241,7 +340,7 @@ internal sealed class XmlRootExpr() : XmlQueryExpr(XmlStaticKind.Node, XmlOccurr
 
 /// <summary>A path expression: an optional start expression followed by location steps.</summary>
 internal sealed class XmlPathExpr(XmlQueryExpr start, XmlStep[] steps)
-    : XmlQueryExpr(XmlStaticKind.Node, PathOccurrence(start, steps), "xdt:untypedAtomic")
+    : XmlQueryExpr(XmlStaticKind.Node, PathOccurrence(start, steps), steps.Length > 0 && steps[^1].TypeName is { } typed ? typed : "xdt:untypedAtomic")
 {
     private readonly XmlQueryExpr start = start;
     private readonly XmlStep[] steps = steps;
@@ -326,11 +425,21 @@ internal sealed class XmlStep(
     string localName,
     string namespaceUri,
     XmlQueryExpr[] predicates,
-    bool schemaSingleton = false)
+    bool schemaSingleton = false,
+    string? typeName = null)
 {
-    private readonly XmlAxis axis = axis;
-    private readonly XmlNodeTestKind testKind = testKind;
-    private readonly string localName = localName;
+    /// <summary>
+    /// The <c>xs:</c> type the receiver's schema collection declares the named
+    /// element or attribute with, or null when it is untyped.
+    /// </summary>
+    public readonly string? TypeName = typeName;
+
+    /// <summary>The step's axis.</summary>
+    public readonly XmlAxis Axis = axis;
+    /// <summary>What the node test matches.</summary>
+    public readonly XmlNodeTestKind TestKind = testKind;
+    /// <summary>The name test's local name; empty for the other tests.</summary>
+    public readonly string LocalName = localName;
     private readonly string namespaceUri = namespaceUri;
     private readonly XmlQueryExpr[] predicates = predicates;
 
@@ -369,18 +478,18 @@ internal sealed class XmlStep(
     }
 
     /// <summary>Real's static-type notation for what this step selects.</summary>
-    public string NodeTypeBase() => this.testKind switch
+    public string NodeTypeBase() => this.TestKind switch
     {
         XmlNodeTestKind.Comment => "comment",
         XmlNodeTestKind.Node => "node()",
         XmlNodeTestKind.ProcessingInstruction => "processing-instruction",
         XmlNodeTestKind.Text => "text",
-        XmlNodeTestKind.Wildcard => this.axis == XmlAxis.Attribute
+        XmlNodeTestKind.Wildcard => this.Axis == XmlAxis.Attribute
             ? "attribute(*,xdt:untypedAtomic)"
             : "element(*,xdt:untyped)",
-        _ => this.axis == XmlAxis.Attribute
-            ? $"attribute({this.localName},xdt:untypedAtomic)"
-            : $"element({this.localName},xdt:untyped)",
+        _ => this.Axis == XmlAxis.Attribute
+            ? $"attribute({this.LocalName},{this.TypeName ?? "xdt:untypedAtomic"})"
+            : $"element({this.LocalName},{this.TypeName ?? "xdt:untyped"})",
     };
 
     /// <summary>Runs the step over every item in <paramref name="context"/>.</summary>
@@ -492,7 +601,7 @@ internal sealed class XmlStep(
 
     private void Select(XPathNavigator node, List<object> matched)
     {
-        switch (this.axis)
+        switch (this.Axis)
         {
             case XmlAxis.Attribute:
                 var attribute = node.Clone();
@@ -516,7 +625,7 @@ internal sealed class XmlStep(
                 return;
             case XmlAxis.Descendant:
             case XmlAxis.DescendantOrSelf:
-                if (this.axis == XmlAxis.DescendantOrSelf && this.Matches(node))
+                if (this.Axis == XmlAxis.DescendantOrSelf && this.Matches(node))
                     matched.Add(node.Clone());
                 this.SelectDescendants(node, matched);
                 return;
@@ -548,7 +657,7 @@ internal sealed class XmlStep(
         while (child.MoveToNext());
     }
 
-    private bool Matches(XPathNavigator node) => this.testKind switch
+    private bool Matches(XPathNavigator node) => this.TestKind switch
     {
         XmlNodeTestKind.Comment => node.NodeType == XPathNodeType.Comment,
         XmlNodeTestKind.Node => true,
@@ -556,7 +665,7 @@ internal sealed class XmlStep(
         XmlNodeTestKind.Text => node.NodeType is XPathNodeType.Text or XPathNodeType.SignificantWhitespace or XPathNodeType.Whitespace,
         XmlNodeTestKind.Wildcard => node.NodeType is XPathNodeType.Element or XPathNodeType.Attribute,
         _ => node.NodeType is XPathNodeType.Element or XPathNodeType.Attribute
-            && string.Equals(node.LocalName, this.localName, StringComparison.Ordinal)
+            && string.Equals(node.LocalName, this.LocalName, StringComparison.Ordinal)
             && string.Equals(node.NamespaceURI, this.namespaceUri, StringComparison.Ordinal),
     };
 }
@@ -613,9 +722,16 @@ internal sealed class XmlLogicalExpr(XmlQueryExpr left, XmlQueryExpr right, bool
     }
 }
 
-/// <summary><c>+</c> / <c>-</c> / <c>*</c> / <c>div</c> / <c>idiv</c> / <c>mod</c>, and unary minus.</summary>
-internal sealed class XmlArithmeticExpr(XmlQueryExpr left, XmlQueryExpr? right, char op)
-    : XmlQueryExpr(XmlStaticKind.Number, XmlOccurrence.ExactlyOne, "xs:decimal")
+/// <summary>
+/// <c>+</c> / <c>-</c> / <c>*</c> / <c>div</c> / <c>mod</c>, and unary minus.
+/// The static result type is XQuery's promotion of the operand types — an
+/// untyped operand computes as <c>xs:double</c>, and <c>div</c> over two
+/// integers is <c>xs:decimal</c> — which is what decides how the result
+/// renders: <c>data(/r/z)[1] + 1</c> over <c>1234567</c> is <c>1.234568E6</c>
+/// where <c>1234567 + 1</c> is <c>1234568</c> (probe-confirmed).
+/// </summary>
+internal sealed class XmlArithmeticExpr(XmlQueryExpr left, XmlQueryExpr? right, char op, string typeName)
+    : XmlQueryExpr(XmlStaticKind.Number, Combine(left.Occurrence, right?.Occurrence ?? XmlOccurrence.ExactlyOne) is var o && IsPlural(o) ? XmlOccurrence.ZeroOrOne : o, typeName)
 {
     private readonly XmlQueryExpr left = left;
     private readonly XmlQueryExpr? right = right;
@@ -623,22 +739,47 @@ internal sealed class XmlArithmeticExpr(XmlQueryExpr left, XmlQueryExpr? right, 
 
     public override void Evaluate(in XmlQueryFrame frame, List<object> results)
     {
-        var leftValue = XmlQueryValues.SingleNumber(this.left.Evaluate(frame));
+        var leftItems = this.left.Evaluate(frame);
+        if (leftItems.Count == 0)
+            return;
+        var leftValue = XmlQueryValues.SingleNumber(leftItems);
         if (this.right is null)
         {
-            results.Add(-leftValue);
+            results.Add(XmlAtomicTypes.Number(-leftValue, this.TypeName));
             return;
         }
-        var rightValue = XmlQueryValues.SingleNumber(this.right.Evaluate(frame));
-        results.Add(this.op switch
+        var rightItems = this.right.Evaluate(frame);
+        if (rightItems.Count == 0)
+            return;
+        var rightValue = XmlQueryValues.SingleNumber(rightItems);
+        var value = this.op switch
         {
             '*' => leftValue * rightValue,
             '+' => leftValue + rightValue,
             '-' => leftValue - rightValue,
-            'i' => Math.Truncate(leftValue / rightValue),
             'm' => leftValue % rightValue,
             _ => leftValue / rightValue,
-        });
+        };
+
+        // Real computes xs:decimal in SQL Server's own numeric(38, s), whose
+        // scale reduction leaves a quotient or a product six fractional
+        // digits: `2 div 3` is 0.666666 (cut) and `1.23456789 * 1.1` is
+        // 1.358025 (rounded), and a zero divisor is a dynamic error, which is
+        // the empty sequence (all probe-confirmed).
+        if (this.TypeName == "xs:decimal")
+        {
+            if (this.op == '/')
+            {
+                if (rightValue == 0)
+                    return;
+                value = XmlAtomicTypes.TruncateDigits(value, 6);
+            }
+            else if (this.op == '*')
+            {
+                value = Math.Round(value, 6, MidpointRounding.AwayFromZero);
+            }
+        }
+        results.Add(XmlAtomicTypes.Number(value, this.TypeName));
     }
 }
 
@@ -701,8 +842,16 @@ internal sealed class XmlSqlAccessorRef(bool isColumn, string name, int slot)
 /// compiler is what admits the accessors at all — a read method compiles
 /// without one and keeps refusing them.
 /// </summary>
-internal sealed class XmlSqlAccessorScope
+internal sealed class XmlSqlAccessorScope(Func<bool, string, string?>? resolver = null)
 {
+    /// <summary>
+    /// Validates one accessor while the expression compiles — true for a
+    /// column — and answers the XQuery type its value will carry, or null to
+    /// type it untyped. Supplied by the read methods, whose accessors real
+    /// types by the SQL type; the <c>.modify()</c> value expression has none.
+    /// </summary>
+    public readonly Func<bool, string, string?>? Resolver = resolver;
+
     /// <summary>The accessors seen, in compile order.</summary>
     public readonly List<XmlSqlAccessorRef> Accessors = [];
 
@@ -716,10 +865,16 @@ internal sealed class XmlSqlAccessorScope
 /// what real reports, and untyped is the reading that takes its meaning from
 /// the other operand rather than refusing a comparison outright.
 /// </summary>
-internal sealed class XmlSqlAccessorExpr(int slot)
-    : XmlQueryExpr(XmlStaticKind.Untyped, XmlOccurrence.ZeroOrOne, "xdt:untypedAtomic")
+internal sealed class XmlSqlAccessorExpr(int slot, XmlStaticKind kind = XmlStaticKind.Untyped, string? typeName = null)
+    : XmlQueryExpr(kind, XmlOccurrence.ZeroOrOne, typeName ?? "xdt:untypedAtomic")
 {
     private readonly int slot = slot;
+
+    /// <summary>
+    /// Whether the compile had no SQL type for the accessor, which then reads
+    /// as untyped but takes no part in deciding an arithmetic result's type.
+    /// </summary>
+    public readonly bool TypeUnknown = typeName is null;
 
     public override void Evaluate(in XmlQueryFrame frame, List<object> results) =>
         results.AddRange(frame.Variables!.Read(this.slot));
@@ -751,7 +906,7 @@ internal sealed class XmlOrderSpec(XmlQueryExpr key, bool descending)
     /// code point — <c>"10"</c> sorts before <c>"2"</c> — and only a key it
     /// types as a number numerically (probe-confirmed).
     /// </summary>
-    public readonly bool Numeric = key.Kind == XmlStaticKind.Number;
+    public readonly bool Numeric = key.AtomizedKind() == XmlStaticKind.Number;
 }
 
 /// <summary>
@@ -781,7 +936,7 @@ internal sealed class XmlFlworExpr(
     XmlQueryExpr? where,
     XmlOrderSpec[] orderBy,
     XmlQueryExpr body)
-    : XmlQueryExpr(body.Kind, FlworOccurrence(bindings, body), body.TypeName)
+    : XmlQueryExpr(body.Kind, FlworOccurrence(bindings, body), body.TypeName, body.Constructed)
 {
     private readonly XmlVariableBinding[] bindings = bindings;
     private readonly XmlQueryExpr? where = where;
@@ -939,7 +1094,7 @@ internal sealed class XmlQuantifiedExpr(XmlVariableBinding[] bindings, XmlQueryE
 
 /// <summary><c>if (…) then … else …</c>; XQuery's <c>else</c> is mandatory.</summary>
 internal sealed class XmlConditionalExpr(XmlQueryExpr condition, XmlQueryExpr thenBranch, XmlQueryExpr elseBranch)
-    : XmlQueryExpr(thenBranch.Kind, Combine(thenBranch.Occurrence, elseBranch.Occurrence), thenBranch.TypeName)
+    : XmlQueryExpr(thenBranch.Kind, Combine(thenBranch.Occurrence, elseBranch.Occurrence), thenBranch.TypeName, thenBranch.Constructed || elseBranch.Constructed)
 {
     private readonly XmlQueryExpr condition = condition;
     private readonly XmlQueryExpr thenBranch = thenBranch;
@@ -955,29 +1110,45 @@ internal sealed class XmlConditionalExpr(XmlQueryExpr condition, XmlQueryExpr th
 }
 
 /// <summary>
-/// A direct element constructor, held as the literal markup segments the
-/// <c>{…}</c> enclosed expressions sit between. Each evaluation splices the
+/// A direct element constructor — and a computed <c>element name {…}</c>,
+/// which compiles to the same template — held as the literal markup segments
+/// the <c>{…}</c> enclosed expressions sit between. Each evaluation splices the
 /// evaluated sequences in — as markup in element content, as text in an
 /// attribute value — and parses the result, so the constructed node serializes
-/// like any other.
+/// like any other. An attribute item in element content is spliced as a marker
+/// and hoisted onto its element after the parse (see
+/// <see cref="XmlAttributeHoisting"/>).
 /// </summary>
-internal sealed class XmlConstructedNodeExpr(string[] literals, XmlQueryExpr[] enclosed, bool[] inAttribute, string elementName)
-    : XmlQueryExpr(XmlStaticKind.Node, XmlOccurrence.ExactlyOne, "xdt:untypedAtomic")
+internal sealed class XmlConstructedNodeExpr(string[] literals, XmlQueryExpr[] enclosed, bool[] inAttribute, string elementName, string[] prologDeclarations)
+    : XmlQueryExpr(XmlStaticKind.Node, XmlOccurrence.ExactlyOne, "xdt:untypedAtomic", constructed: true)
 {
     private readonly string[] literals = literals;
     private readonly XmlQueryExpr[] enclosed = enclosed;
     private readonly bool[] inAttribute = inAttribute;
     private readonly string elementName = elementName;
 
+    /// <summary>
+    /// The namespace bindings the prolog wrote onto the element (empty for the
+    /// default namespace), which an insert drops again wherever its position
+    /// already binds them — unlike a declaration the constructor wrote itself.
+    /// </summary>
+    private readonly string[] prologDeclarations = prologDeclarations;
+
     public override void Evaluate(in XmlQueryFrame frame, List<object> results)
     {
         var text = new System.Text.StringBuilder(this.literals[0]);
+        List<XPathNavigator>? attributes = null;
         for (var i = 0; i < this.enclosed.Length; i++)
         {
-            XmlQueryEngine.AppendSequence(text, this.enclosed[i].Evaluate(frame), this.inAttribute[i]);
+            XmlQueryEngine.AppendSequence(text, this.enclosed[i].Evaluate(frame), this.inAttribute[i], ref attributes);
             _ = text.Append(this.literals[i + 1]);
         }
-        results.Add(System.Xml.Linq.XDocument.Parse(text.ToString()).Root!.CreateNavigator());
+        var root = System.Xml.Linq.XDocument.Parse(text.ToString(), System.Xml.Linq.LoadOptions.PreserveWhitespace).Root!;
+        if (attributes is not null)
+            XmlAttributeHoisting.Hoist(root, attributes);
+        foreach (var prefix in this.prologDeclarations)
+            root.Attribute(prefix.Length == 0 ? "xmlns" : System.Xml.Linq.XNamespace.Xmlns + prefix)?.AddAnnotation(XmlPrologDeclaration.Instance);
+        results.Add(root.CreateNavigator());
     }
 
     public override string NodeTypeBase() => $"element({this.elementName},xdt:untyped)";
@@ -1095,10 +1266,15 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
             case XmlFunctionId.Avg:
                 var addends = this.Numbers(frame, 0);
                 if (addends.Count > 0)
-                    results.Add(addends.Sum() / addends.Count);
+                {
+                    // An exact average carries ten fractional digits, cut
+                    // rather than rounded: avg((1, 2, 2)) is 1.6666666666.
+                    var average = addends.Sum() / addends.Count;
+                    results.Add(XmlAtomicTypes.Number(this.TypeName == "xs:decimal" ? XmlAtomicTypes.TruncateDigits(average, 10) : average, this.TypeName));
+                }
                 return;
             case XmlFunctionId.Ceiling:
-                results.Add(Math.Ceiling(this.Number(frame, 0)));
+                this.AddNumber(results, frame, Math.Ceiling);
                 return;
             case XmlFunctionId.Concat:
                 var text = new System.Text.StringBuilder();
@@ -1133,7 +1309,7 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
                 results.Add(false);
                 return;
             case XmlFunctionId.Floor:
-                results.Add(Math.Floor(this.Number(frame, 0)));
+                this.AddNumber(results, frame, Math.Floor);
                 return;
             case XmlFunctionId.Last:
                 results.Add((double)frame.Size);
@@ -1149,12 +1325,12 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
             case XmlFunctionId.Max:
                 var maxima = this.Numbers(frame, 0);
                 if (maxima.Count > 0)
-                    results.Add(maxima.Max());
+                    results.Add(XmlAtomicTypes.Number(maxima.Max(), this.TypeName));
                 return;
             case XmlFunctionId.Min:
                 var minima = this.Numbers(frame, 0);
                 if (minima.Count > 0)
-                    results.Add(minima.Min());
+                    results.Add(XmlAtomicTypes.Number(minima.Min(), this.TypeName));
                 return;
             case XmlFunctionId.NamespaceUri:
                 results.Add(this.ContextOrArgumentNode(frame) is { } scoped ? scoped.NamespaceURI : string.Empty);
@@ -1163,15 +1339,17 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
                 results.Add(!XmlQueryValues.EffectiveBoolean(this.arguments[0].Evaluate(frame)));
                 return;
             case XmlFunctionId.Number:
-                results.Add(this.arguments.Length == 0
-                    ? XmlQueryValues.ToNumber(new XmlUntypedAtomic(frame.Context.Value))
-                    : this.Number(frame, 0));
+                results.Add(XmlAtomicTypes.Number(
+                    this.arguments.Length == 0 ? XmlQueryValues.ToNumber(new XmlUntypedAtomic(frame.Context.Value)) : this.Number(frame, 0),
+                    this.TypeName));
                 return;
             case XmlFunctionId.Position:
                 results.Add((double)frame.Position);
                 return;
             case XmlFunctionId.Round:
-                results.Add(Math.Round(this.Number(frame, 0), MidpointRounding.AwayFromZero));
+                // fn:round takes a half toward positive infinity: round(-2.5)
+                // is -2 (probe-confirmed).
+                this.AddNumber(results, frame, value => Math.Floor(value + 0.5));
                 return;
             case XmlFunctionId.String:
                 results.Add(this.arguments.Length == 0
@@ -1190,7 +1368,7 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
                     this.arguments.Length > 2 ? this.Number(frame, 2) : double.PositiveInfinity));
                 return;
             case XmlFunctionId.Sum:
-                results.Add(this.Numbers(frame, 0).Sum());
+                results.Add(XmlAtomicTypes.Number(this.Numbers(frame, 0).Sum(), this.TypeName));
                 return;
             case XmlFunctionId.True:
                 results.Add(true);
@@ -1231,6 +1409,17 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
         return null;
     }
 
+    /// <summary>
+    /// A rounding function over its argument: the empty sequence stays empty,
+    /// and the result keeps the argument's numeric type.
+    /// </summary>
+    private void AddNumber(List<object> results, in XmlQueryFrame frame, Func<double, double> operation)
+    {
+        var items = this.arguments[0].Evaluate(frame);
+        if (items.Count > 0)
+            results.Add(XmlAtomicTypes.Number(operation(XmlQueryValues.SingleNumber(items)), this.TypeName));
+    }
+
     private double Number(in XmlQueryFrame frame, int index) =>
         XmlQueryValues.SingleNumber(this.arguments[index].Evaluate(frame));
 
@@ -1258,10 +1447,31 @@ internal static class XmlQueryValues
     {
         XPathNavigator node => node.Value,
         XmlUntypedAtomic untyped => untyped.Text,
+        XmlTypedAtomic typed => typed.Text,
+        XmlEmptyTextNode => string.Empty,
         bool boolean => boolean ? "true" : "false",
-        double number => XmlConvert.ToString(number),
+        double number => XmlAtomicTypes.RenderExact(number),
         _ => (string)item,
     };
+
+    /// <summary>
+    /// The atomized items' string forms joined by a single space — how a
+    /// computed attribute or text constructor, and an enclosed expression in an
+    /// attribute value, read their content.
+    /// </summary>
+    public static string JoinAtomized(List<object> items)
+    {
+        if (items.Count == 1)
+            return StringValue(items[0]);
+        var text = new System.Text.StringBuilder();
+        foreach (var item in items)
+        {
+            if (text.Length > 0)
+                _ = text.Append(' ');
+            _ = text.Append(StringValue(item));
+        }
+        return text.ToString();
+    }
 
     /// <summary>The first item's string form; empty sequence answers the empty string.</summary>
     public static string SingleString(List<object> items) => items.Count == 0 ? string.Empty : StringValue(items[0]);
@@ -1278,8 +1488,12 @@ internal static class XmlQueryValues
     {
         bool boolean => boolean ? 1 : 0,
         double number => number,
+        XmlTypedAtomic { Kind: XmlStaticKind.Number } typed => typed.Number,
         _ => double.TryParse(StringValue(item), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) ? parsed : double.NaN,
     };
+
+    /// <summary>Whether an atomized item compares numerically.</summary>
+    private static bool IsNumeric(object item) => item is double or XmlTypedAtomic { Kind: XmlStaticKind.Number };
 
     /// <summary>XQuery's effective boolean value, as <c>and</c> / <c>or</c> / <c>not()</c> read it.</summary>
     public static bool EffectiveBoolean(List<object> items) => items.Count switch
@@ -1287,10 +1501,12 @@ internal static class XmlQueryValues
         0 => false,
         1 => items[0] switch
         {
-            XPathNavigator => true,
+            XPathNavigator or XmlEmptyTextNode => true,
             bool boolean => boolean,
             double number => number != 0 && !double.IsNaN(number),
             XmlUntypedAtomic untyped => untyped.Text.Length > 0,
+            XmlTypedAtomic { Kind: XmlStaticKind.Number } typed => typed.Number != 0 && !double.IsNaN(typed.Number),
+            XmlTypedAtomic typed => typed.Text.Length > 0,
             _ => ((string)items[0]).Length > 0,
         },
         _ => true,
@@ -1320,7 +1536,7 @@ internal static class XmlQueryValues
     {
         if (left is bool || right is bool)
             return Satisfies(EffectiveBoolean([left]).CompareTo(EffectiveBoolean([right])), op);
-        if (left is double || right is double)
+        if (IsNumeric(left) || IsNumeric(right))
         {
             var leftNumber = ToNumber(left);
             var rightNumber = ToNumber(right);

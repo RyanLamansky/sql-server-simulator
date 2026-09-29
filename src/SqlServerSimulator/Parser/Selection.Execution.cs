@@ -1395,8 +1395,27 @@ internal sealed partial class Selection
         // A .nodes() row column holds a node reference, which only the xml
         // methods and IS [NOT] NULL may read: selecting it is Msg 493, ahead of
         // any type rule its xml type would break.
+        // Every other clause is held to the same rule (probed 2026-09-28): a
+        // WHERE, GROUP BY, HAVING, ORDER BY or ON reading the column is Msg 493
+        // (525 for a conversion) too.
         foreach (var expression in expressions)
             RejectDirectNodesColumnRead(expression, sources);
+        foreach (var excluder in fromClause.Excluders)
+            RejectDirectNodesColumnRead(excluder, sources);
+        foreach (var groupingExpression in fromClause.AllGroupingExpressions)
+            RejectDirectNodesColumnRead(groupingExpression, sources);
+        if (fromClause.Having is { } having)
+            RejectDirectNodesColumnRead(having, sources);
+        foreach (var orderSpec in fromClause.OrderBy)
+        {
+            if (orderSpec.Expr is { } orderExpression)
+                RejectDirectNodesColumnRead(orderExpression, sources);
+        }
+        foreach (var join in joins)
+        {
+            if (join.OnPredicate is { } on)
+                RejectDirectNodesColumnRead(on, sources);
+        }
         for (var i = 0; i < expressions.Count; i++)
         {
             outputSchema[i] = expressions[i].TypeCarryingTypeChecks(parseBatch, readColumnSink is null ? ResolveColumnType : RecordingResolver);
@@ -2270,7 +2289,7 @@ internal sealed partial class Selection
     /// Raises Msg 493 for a <c>.nodes()</c> column <paramref name="expression"/>
     /// reads outside an xml method's receiver or an <c>IS [NOT] NULL</c> test.
     /// </summary>
-    private static void RejectDirectNodesColumnRead(Expression expression, FromSource[] sources) =>
+    private static void RejectDirectNodesColumnRead(ExpressionNode expression, FromSource[] sources) =>
         expression.Walk((node, shape) => node switch
         {
             Reference reference when ReadsNodesColumn(sources, reference)
@@ -2279,7 +2298,9 @@ internal sealed partial class Selection
             // (probed 2026-09-25) — its shape reports the type, then the source.
             Cast or ConvertExpression when shape.ChildNodes[0] is Reference converted && ReadsNodesColumn(sources, converted)
                 => throw SimulatedSqlException.NodesColumnCannotConvert((SqlType)shape.Locals[1]!),
-            XmlMethodCall or BooleanExpression.IsNullExpression or Reference => false,
+            // IS [NOT] NULL may test the column itself, not a conversion of it.
+            BooleanExpression.IsNullExpression when shape.ChildNodes[0] is Reference => false,
+            XmlMethodCall or Reference => false,
             _ => true,
         });
 

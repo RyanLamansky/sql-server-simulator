@@ -79,6 +79,50 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Parses the typed target of a <c>CAST</c> / <c>CONVERT</c> —
+    /// <c>xml([CONTENT | DOCUMENT] [schema.]collection)</c> — answering the
+    /// collection and whether <c>DOCUMENT</c> was written, or null (with the
+    /// cursor untouched) when <paramref name="typeName"/> isn't that form. On
+    /// success the cursor sits on the token after the closing <c>)</c>. A
+    /// collection that doesn't resolve is Msg 6314 here, where a column or
+    /// variable declaration reports Msg 208 (probed 2026-09-28 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static (XmlSchemaCollection Collection, bool Document)? TryParseXmlCastTarget(ParserContext context, Name typeName)
+    {
+        if (typeName is not UnquotedString || !typeName.Span.Equals("xml", StringComparison.OrdinalIgnoreCase))
+            return null;
+        var checkpoint = context.SaveCheckpoint();
+        context.MoveNextRequired();
+        if (context.Token is not Operator { Character: '(' } || !PeekIsXmlSchemaArgument(context))
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return null;
+        }
+
+        context.MoveNextRequired();
+        var document = false;
+        if (context.Token is UnquotedString { Value: var kind }
+            && (kind.Equals("CONTENT", StringComparison.OrdinalIgnoreCase) || kind.Equals("DOCUMENT", StringComparison.OrdinalIgnoreCase)))
+        {
+            document = kind.Equals("DOCUMENT", StringComparison.OrdinalIgnoreCase);
+            context.MoveNextRequired();
+        }
+        if (context.Token is not Name)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var collectionName = BatchContext.ParseObjectName(context);
+        if (context.GetNextRequired() is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+
+        var schemaName = collectionName.ImmediateQualifier ?? Database.DefaultSchemaName;
+        return context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var schema)
+            && schema.XmlSchemaCollections.TryGetValue(collectionName.Leaf, out var collection)
+            ? (collection, document)
+            : throw SimulatedSqlException.XmlSchemaCollectionNotInMetadata(collectionName.Leaf);
+    }
+
+    /// <summary>
     /// Parses <c>CREATE XML SCHEMA COLLECTION [schema.]name AS '&lt;xsd&gt;…'</c>.
     /// Cursor enters on the <c>XML</c> contextual keyword; caller has matched
     /// <c>CREATE</c>. The XSD text is stored verbatim; no XSD parsing or
@@ -185,13 +229,75 @@ partial class Simulation
             throw SimulatedSqlException.TypeAlreadyExists($"{schemaName}.{name.Leaf}");
         }
 
+        XmlSchemaCollection.RejectUnsupportedSyntax(xsdText);
         var id = context.CurrentDatabase.AllocateXmlCollectionId();
         ownerSchema.XmlSchemaCollections[name.Leaf] = new XmlSchemaCollection(
             id, name.Leaf, ownerSchema.SchemaId,
             principalId: null,
             xsdText: xsdText,
             createDate: context.Batch.CurrentStatement.UtcNow);
+        RecordSlotUndo<XmlSchemaCollection>(context, ownerSchema.XmlSchemaCollections, name.Leaf, null);
         RecordDdlEvent(context, "CREATE_XML_SCHEMA_COLLECTION", schemaName, name.Leaf, "XML SCHEMA COLLECTION");
+        return true;
+    }
+
+    /// <summary>
+    /// Parses <c>ALTER XML SCHEMA COLLECTION [schema.]name ADD '&lt;xsd&gt;…'</c>
+    /// (the text may be a variable). Cursor enters on the <c>XML</c>
+    /// contextual keyword; caller has matched <c>ALTER</c>.
+    /// </summary>
+    /// <remarks>
+    /// The added schema documents join the collection's existing ones. Real
+    /// admits only components the collection lacks — a global element, type or attribute the
+    /// collection already declares in that namespace is Msg 6310 — refuses
+    /// text that isn't a schema document with Msg 2378 and the identity
+    /// constraints with Msg 9336, takes an empty string as a no-op, and rolls
+    /// the change back with the transaction (all probed 2026-09-28 against SQL
+    /// Server 2025). A collection that doesn't resolve, or that the session
+    /// can't alter (ALTER on its schema), is Msg 6347 either way.
+    /// </remarks>
+    internal static bool TryParseAlterXmlSchemaCollection(ParserContext context)
+    {
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Schema })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Name { Value: var collectionWord } || !collectionWord.Equals("COLLECTION", StringComparison.OrdinalIgnoreCase))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.GetNextRequired() is not Name)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var name = BatchContext.ParseObjectName(context);
+        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Add })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        var textExpression = Expression.Parse(context);
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        var schemaName = name.ImmediateQualifier ?? Database.DefaultSchemaName;
+        if (!context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var ownerSchema)
+            || !ownerSchema.XmlSchemaCollections.TryGetValue(name.Leaf, out var collection)
+            || !PermissionEnforcement.HasSchemaAlter(context.Batch, ownerSchema))
+        {
+            throw SimulatedSqlException.XmlSchemaCollectionCannotBeAltered(name.Leaf);
+        }
+
+        var value = textExpression.Run(new RuntimeContext(missing => throw SimulatedSqlException.InvalidColumnName(missing), context.Batch));
+        var added = value.IsNull ? string.Empty : value.AsString;
+        if (added.Trim().Length == 0)
+            return true;
+        XmlSchemaCollection.RejectUnsupportedSyntax(added);
+        collection.RejectRedeclaredComponents(added);
+
+        var previousText = collection.XsdText;
+        var previousModified = collection.ModifyDate;
+        collection.XsdText = previousText + added;
+        collection.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        RecordDdlUndo(context, () =>
+        {
+            collection.XsdText = previousText;
+            collection.ModifyDate = previousModified;
+        });
+        RecordDdlEvent(context, "ALTER_XML_SCHEMA_COLLECTION", schemaName, name.Leaf, "XML SCHEMA COLLECTION");
         return true;
     }
 

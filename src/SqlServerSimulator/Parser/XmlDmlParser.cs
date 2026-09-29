@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 using SqlServerSimulator.Storage;
 
@@ -69,7 +68,7 @@ internal sealed class XmlDmlParser(
         var target = this.ParsePath(this.text.Length);
         return target.Kind == XmlDmlNodeKind.Document
             ? throw SimulatedSqlException.XmlDmlOnlyNodesDeletable(this.method, target.Describe())
-            : XmlDml.CreateDelete(target, this.defaultNamespace, this.prefixes, this.method);
+            : XmlDml.CreateDelete(target, this.method);
     }
 
     private XmlDml ParseReplaceValueOf()
@@ -98,10 +97,47 @@ internal sealed class XmlDmlParser(
         // rest of the text compiles through the read methods' own engine with
         // the `sql:` accessors admitted — which is what evaluates
         // `data(/IndividualSurvey/TotalPurchaseYTD)[1] + sql:column("inserted.LineTotal")`.
-        var accessors = new XmlSqlAccessorScope();
-        var value = XmlQueryEngine.CompileBody(this.text[this.index..], this.defaultNamespace, this.prefixes, this.method, accessors);
+        var accessors = new XmlSqlAccessorScope((isColumn, name) => isColumn ? null : this.ResolveContentAccessor(isColumn, name));
+        var value = XmlQueryEngine.CompileBody(this.text[this.index..], this.defaultNamespace, this.prefixes, this.method, accessors, this.Typing);
         this.ResolveAccessorNames(accessors);
-        return XmlDml.CreateReplaceValueOf(target, value, [.. accessors.Accessors], this.defaultNamespace, this.prefixes, this.method);
+        this.RequireValueOfDeclaredType(target, value);
+        var nillable = target.Kind == XmlDmlNodeKind.Element && this.Typing?.NillableElements.Contains(target.Name) == true;
+        return XmlDml.CreateReplaceValueOf(target, value, [.. accessors.Accessors], nillable, this.method);
+    }
+
+    /// <summary>The receiver's schema typing, or null for untyped <c>xml</c>.</summary>
+    private XmlStaticTyping? Typing => this.schemaCollection?.GetStaticTyping();
+
+    /// <summary>
+    /// Msg 2247: over a typed instance, a <c>replace value of</c> target the
+    /// schema types takes only a value of that type or one derived from it —
+    /// real checks the <c>with</c> expression's static type, so
+    /// <c>xs:integer</c> into an <c>xs:int</c> attribute and <c>xs:decimal</c>
+    /// into an <c>xs:double</c> element are both refused while an
+    /// <c>int</c> <c>sql:variable</c> into an <c>xs:decimal</c> element is
+    /// taken (probed 2026-09-28 against SQL Server 2025). An untyped value,
+    /// and the empty sequence, are left to the write.
+    /// </summary>
+    private void RequireValueOfDeclaredType(XmlDmlPath target, XmlQueryExpr value)
+    {
+        if (this.Typing is not { } typing || value is XmlSequenceExpr { IsEmpty: true })
+            return;
+        string? expected = null;
+        _ = target.Kind switch
+        {
+            XmlDmlNodeKind.Attribute => typing.AttributeTypes.TryGetValue(target.Name, out expected),
+            XmlDmlNodeKind.Element => typing.ElementTypes.TryGetValue(target.Name, out expected),
+            _ => false,
+        };
+        if (expected is null || value.AtomizedKind() == XmlStaticKind.Untyped)
+            return;
+
+        var plural = XmlQueryExpr.IsPlural(value.Occurrence);
+        if (plural || !XmlAtomicTypes.IsSubtype(value.TypeName, XmlAtomicTypes.Resolve(expected[3..]), targetIsUntyped: false))
+        {
+            throw SimulatedSqlException.XmlDmlReplaceValueTypeMismatch(
+                this.method, plural ? value.AtomizedTypeName() : value.TypeName, expected);
+        }
     }
 
     /// <summary>
@@ -121,12 +157,9 @@ internal sealed class XmlDmlParser(
         foreach (var accessor in accessors.Accessors)
         {
             if (!accessor.IsColumn)
-                _ = this.context.Batch.GetVariableSlot(BareVariableName(accessor.Name));
+                _ = this.VariableType(accessor.Name);
         }
     }
-
-    /// <summary>The variable name without the <c>@</c> the XQuery text writes; the Variables dict is keyed without it.</summary>
-    private static string BareVariableName(string name) => name.StartsWith('@') ? name[1..] : name;
 
     /// <summary>
     /// Whether <paramref name="target"/> selects an element the receiver's
@@ -142,7 +175,34 @@ internal sealed class XmlDmlParser(
 
     private XmlDml ParseInsert()
     {
-        var content = this.ParseContentSequence();
+        var positionAt = this.FindInsertPosition();
+        if (positionAt < 0)
+            throw this.SyntaxError();
+        var contentText = this.text[this.index..positionAt].Trim();
+
+        // The content is an XQuery expression like any other — a constructor,
+        // a path copying nodes out of the instance, a FLWOR — with one form of
+        // its own: a bare sql:variable / sql:column carrying an xml instance,
+        // which only this position admits (Msg 9342 anywhere else).
+        XmlDmlItem[] content = [];
+        XmlQueryExpr? contentExpression = null;
+        XmlSqlAccessorRef[] contentAccessors = [];
+        if (IsBareAccessor(contentText))
+        {
+            content = this.ParseContentSequence();
+            this.SkipWhitespace();
+            if (this.index != positionAt)
+                throw this.SyntaxError();
+        }
+        else
+        {
+            if (contentText.Length == 0)
+                throw this.SyntaxError();
+            var accessors = new XmlSqlAccessorScope(this.ResolveContentAccessor);
+            contentExpression = XmlQueryEngine.CompileBody(contentText, this.defaultNamespace, this.prefixes, this.method, accessors, this.Typing);
+            contentAccessors = [.. accessors.Accessors];
+            this.index = positionAt;
+        }
 
         XmlDmlPosition position;
         if (this.TryKeyword("as"))
@@ -170,18 +230,14 @@ internal sealed class XmlDmlParser(
             throw SimulatedSqlException.XmlDmlInsertTargetNotSingleton(this.method, target.Describe());
         foreach (var item in content)
         {
-            if (item.Kind == XmlDmlItemKind.Value && item.Enclosed[0][0].StaticType is { } staticType && staticType is not XmlSqlType)
-                throw SimulatedSqlException.XmlDmlOnlyNodesInsertable(this.method, XmlDml.XQueryTypeName(staticType, item.Enclosed[0][0].IsLiteral));
+            if (item.Term.StaticType is { } staticType && staticType is not XmlSqlType)
+                throw SimulatedSqlException.XmlDmlOnlyNodesInsertable(this.method, XmlDml.XQueryTypeName(staticType));
         }
+        if (contentExpression is not null && contentExpression.Kind != XmlStaticKind.Node)
+            throw SimulatedSqlException.XmlDmlOnlyNodesInsertable(this.method, contentExpression.AtomizedTypeName());
         var positional = position is XmlDmlPosition.Before or XmlDmlPosition.After;
-        if (positional)
-        {
-            foreach (var item in content)
-            {
-                if (item.Kind == XmlDmlItemKind.Attribute)
-                    throw SimulatedSqlException.XmlDmlAttributeInsertHasPosition(this.method, $"attribute({item.Name},xdt:untypedAtomic)");
-            }
-        }
+        if (positional && contentExpression is { IsAttributeOnly: true })
+            throw SimulatedSqlException.XmlDmlAttributeInsertHasPosition(this.method, contentExpression.NodeTypeBase());
         if (positional)
         {
             if (target.Kind is XmlDmlNodeKind.Attribute or XmlDmlNodeKind.Document)
@@ -192,24 +248,109 @@ internal sealed class XmlDmlParser(
             throw SimulatedSqlException.XmlDmlInsertIntoTargetKind(this.method, target.Describe());
         }
 
-        return XmlDml.CreateInsert(target, content, position, this.defaultNamespace, this.prefixes, this.method);
+        return XmlDml.CreateInsert(target, content, contentExpression, contentAccessors, position, this.method);
     }
 
     /// <summary>
-    /// Parses an <c>insert</c>'s content: either a parenthesized sequence of
-    /// items or a single item.
+    /// Whether an insert's content is one <c>sql:variable</c> /
+    /// <c>sql:column</c> accessor, or a parenthesized list of them — the form
+    /// that may carry a whole <c>xml</c> instance.
+    /// </summary>
+    private static bool IsBareAccessor(string content)
+    {
+        var body = content.StartsWith('(') && content.EndsWith(')') ? content[1..^1] : content;
+        foreach (var part in body.Split(','))
+        {
+            var trimmed = part.Trim();
+            if (!(trimmed.StartsWith("sql:variable", StringComparison.Ordinal) || trimmed.StartsWith("sql:column", StringComparison.Ordinal))
+                || !trimmed.EndsWith(')'))
+            {
+                return false;
+            }
+        }
+        return body.Length > 0;
+    }
+
+    /// <summary>
+    /// Types a <c>sql:</c> accessor inside an insert's content expression the
+    /// way a read method's are typed: a variable by its declared type (Msg
+    /// 9519 / 9501 for a bad or undeclared name), a column through the
+    /// statement's target-table scope where one exists, untyped otherwise. An
+    /// <c>xml</c> value is Msg 9342 — only the bare form carries one.
+    /// </summary>
+    private string? ResolveContentAccessor(bool isColumn, string name)
+    {
+        SqlType? type;
+        if (!isColumn)
+        {
+            type = this.VariableType(name);
+        }
+        else
+        {
+            type = this.resolveColumnType?.Invoke(name);
+        }
+        if (type is null)
+            return null;
+        if (type is XmlSqlType)
+            throw SimulatedSqlException.XQuerySqlAccessorXmlNotAllowed(this.method);
+        return XmlAtomicTypes.SqlTypeName(type) ?? throw SimulatedSqlException.XQuerySqlAccessorTypeNotSupported(this.method, type.SqlServerName);
+    }
+
+    /// <summary>
+    /// A <c>sql:variable</c>'s declared type: the name must carry its
+    /// <c>@</c> (Msg 9519) and name a declared variable (Msg 9501).
+    /// </summary>
+    private SqlType VariableType(string name)
+    {
+        if (name.Length < 2 || name[0] != '@')
+            throw SimulatedSqlException.XQuerySqlVariableNameInvalid(name);
+        return this.context.Batch.Variables.TryGetValue(name[1..], out var slot)
+            ? slot.DeclaredType
+            : throw SimulatedSqlException.XQuerySqlVariableNotFound(name);
+    }
+
+    /// <summary>
+    /// The start of an <c>insert</c>'s position clause — <c>into</c>,
+    /// <c>as first into</c> / <c>as last into</c>, <c>before</c> or
+    /// <c>after</c> — found outside quotes, brackets and markup.
+    /// </summary>
+    private int FindInsertPosition()
+    {
+        var found = -1;
+        foreach (var keyword in (ReadOnlySpan<string>)["after", "as", "before", "into"])
+        {
+            var at = this.FindKeyword(keyword);
+            while (at >= 0 && keyword == "as" && !this.FollowedByFirstOrLast(at))
+                at = this.FindKeyword(keyword, at + 1);
+            if (at >= 0 && (found < 0 || at < found))
+                found = at;
+        }
+        return found;
+    }
+
+    private bool FollowedByFirstOrLast(int asAt)
+    {
+        var after = asAt + 2;
+        while (after < this.text.Length && char.IsWhiteSpace(this.text[after]))
+            after++;
+        return this.text.AsSpan(after).StartsWith("first", StringComparison.Ordinal) || this.text.AsSpan(after).StartsWith("last", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Parses an <c>insert</c>'s bare-accessor content: either a
+    /// parenthesized sequence of accessors or a single one.
     /// </summary>
     private XmlDmlItem[] ParseContentSequence()
     {
         this.SkipWhitespace();
         if (this.Current != '(')
-            return [this.ParseContentItem()];
+            return [XmlDmlItem.Value(this.ParseTerm())];
 
         this.index++;
         var items = new List<XmlDmlItem>();
         while (true)
         {
-            items.Add(this.ParseContentItem());
+            items.Add(XmlDmlItem.Value(this.ParseTerm()));
             this.SkipWhitespace();
             if (this.Current == ',')
             {
@@ -223,281 +364,9 @@ internal sealed class XmlDmlParser(
         }
     }
 
-    private XmlDmlItem ParseContentItem()
-    {
-        this.SkipWhitespace();
-        var c = this.Current;
-        if (c == '<')
-            return this.ParseDirectConstructor();
-        if (c is '"' or '\'' || char.IsAsciiDigit(c) || c == '-')
-            return XmlDmlItem.Value(this.ParseTerms(terminator: '\0', single: true));
-
-        var word = this.PeekWord();
-        switch (word)
-        {
-            case "attribute":
-                this.index += word.Length;
-                return XmlDmlItem.Computed(XmlDmlItemKind.Attribute, this.ReadConstructorName(), this.ParseBracedTerms());
-            case "comment":
-                throw SimulatedSqlException.XQueryComputedConstructorNotSupported("modify", isComment: true);
-            case "element":
-                this.index += word.Length;
-                var elementName = this.ReadConstructorName();
-                this.ValidateConstructorPrefix(elementName);
-                return XmlDmlItem.Element(elementName, this.ParseBracedContent());
-            case "processing-instruction":
-                throw SimulatedSqlException.XQueryComputedConstructorNotSupported("modify", isComment: false);
-            case "text":
-                this.index += word.Length;
-                return XmlDmlItem.Computed(XmlDmlItemKind.Text, string.Empty, this.ParseBracedTerms());
-            default:
-                return XmlDmlItem.Value(this.ParseTerms(terminator: '\0', single: true));
-        }
-    }
-
-    /// <summary>
-    /// A computed <c>element</c> constructor's <c>{ … }</c> body: the same
-    /// content items an <c>insert</c> takes, so constructors nest
-    /// (<c>element n {element m {1}}</c>) and an empty body builds an empty
-    /// element.
-    /// </summary>
-    private XmlDmlItem[] ParseBracedContent()
-    {
-        this.SkipWhitespace();
-        if (this.Current != '{')
-            throw this.SyntaxError();
-        this.index++;
-        this.SkipWhitespace();
-        if (this.Current == '}')
-        {
-            this.index++;
-            return [];
-        }
-
-        var items = new List<XmlDmlItem>();
-        while (true)
-        {
-            items.Add(this.ParseContentItem());
-            this.SkipWhitespace();
-            if (this.Current == ',')
-            {
-                this.index++;
-                continue;
-            }
-            if (this.Current != '}')
-                throw this.SyntaxError();
-            this.index++;
-            return [.. items];
-        }
-    }
-
-    /// <summary>
-    /// A constructed element's prefix resolves through the prolog exactly as a
-    /// path step's does, so an undeclared one is Msg 2229.
-    /// </summary>
-    private void ValidateConstructorPrefix(string name)
-    {
-        var colon = name.IndexOf(':', StringComparison.Ordinal);
-        if (colon >= 0 && !this.prefixes.ContainsKey(name[..colon]))
-            throw SimulatedSqlException.XQueryUndeclaredNamespace("modify", name[..colon]);
-    }
-
-    /// <summary>
-    /// Scans a direct constructor — an element with arbitrary nesting, a
-    /// comment, or a processing instruction — keeping its markup as literal
-    /// segments interleaved with the enclosed <c>{…}</c> expressions. Doubled
-    /// braces are the XQuery escape for a literal brace.
-    /// </summary>
-    private XmlDmlItem ParseDirectConstructor()
-    {
-        if (this.text.AsSpan(this.index).StartsWith("<!--", StringComparison.Ordinal))
-            return this.ScanDelimited("-->");
-        if (this.text.AsSpan(this.index).StartsWith("<?", StringComparison.Ordinal))
-            return this.ScanDelimited("?>");
-
-        var literals = new List<string>();
-        var enclosed = new List<XmlDmlTerm[]>();
-        var inAttribute = new List<bool>();
-        var segment = new StringBuilder();
-        var depth = 0;
-        var inTag = false;
-        var closingTag = false;
-        var quote = '\0';
-        while (this.index < this.text.Length)
-        {
-            var c = this.text[this.index];
-            if (c == '{' && this.Peek(1) == '{')
-            {
-                _ = segment.Append('{');
-                this.index += 2;
-                continue;
-            }
-            if (c == '}' && this.Peek(1) == '}')
-            {
-                _ = segment.Append('}');
-                this.index += 2;
-                continue;
-            }
-            if (c == '{')
-            {
-                literals.Add(segment.ToString());
-                _ = segment.Clear();
-                this.index++;
-                enclosed.Add(this.ParseTerms(terminator: '}'));
-                inAttribute.Add(quote != '\0');
-                this.index++;
-                continue;
-            }
-            if (quote != '\0')
-            {
-                if (c == quote)
-                    quote = '\0';
-                _ = segment.Append(c);
-                this.index++;
-                continue;
-            }
-            if (!inTag)
-            {
-                if (c == '<')
-                {
-                    inTag = true;
-                    closingTag = this.Peek(1) == '/';
-                }
-                _ = segment.Append(c);
-                this.index++;
-                continue;
-            }
-            if (c is '"' or '\'')
-            {
-                quote = c;
-                _ = segment.Append(c);
-                this.index++;
-                continue;
-            }
-            if (c == '/' && this.Peek(1) == '>')
-            {
-                _ = segment.Append("/>");
-                this.index += 2;
-                inTag = false;
-                if (depth == 0)
-                    return Finish();
-                continue;
-            }
-            if (c == '>')
-            {
-                _ = segment.Append('>');
-                this.index++;
-                inTag = false;
-                if (closingTag)
-                {
-                    depth--;
-                    if (depth == 0)
-                        return Finish();
-                }
-                else
-                {
-                    depth++;
-                }
-                continue;
-            }
-            _ = segment.Append(c);
-            this.index++;
-        }
-        throw this.SyntaxError();
-
-        XmlDmlItem Finish()
-        {
-            literals.Add(segment.ToString());
-            return XmlDmlItem.Markup([.. literals], [.. enclosed], [.. inAttribute]);
-        }
-    }
-
-    /// <summary>
-    /// Scans a comment / processing-instruction constructor, whose body is
-    /// literal text up to its closing delimiter.
-    /// </summary>
-    private XmlDmlItem ScanDelimited(string terminator)
-    {
-        var end = this.text.IndexOf(terminator, this.index, StringComparison.Ordinal);
-        if (end < 0)
-            throw this.SyntaxError();
-        var markup = this.text[this.index..(end + terminator.Length)];
-        this.index = end + terminator.Length;
-        return XmlDmlItem.Markup([markup], [], []);
-    }
-
-    /// <summary>
-    /// Reads the constant QName of a computed <c>element</c> / <c>attribute</c>
-    /// constructor. Real takes only that form — a <c>{…}</c> name expression is
-    /// Msg 9315 whatever it holds, a string literal included.
-    /// </summary>
-    private string ReadConstructorName()
-    {
-        this.SkipWhitespace();
-        if (this.Current == '{')
-            throw SimulatedSqlException.XQueryComputedNameNotConstant("modify");
-        var start = this.index;
-        while (this.index < this.text.Length && (char.IsLetterOrDigit(this.text[this.index]) || this.text[this.index] is '_' or '-' or '.' or ':'))
-            this.index++;
-        return this.index == start ? throw this.SyntaxError() : this.text[start..this.index];
-    }
-
-    /// <summary>Reads a <c>{ terms }</c> body.</summary>
-    private XmlDmlTerm[] ParseBracedTerms()
-    {
-        this.SkipWhitespace();
-        if (this.Current != '{')
-            throw this.SyntaxError();
-        this.index++;
-        var terms = this.ParseTerms(terminator: '}');
-        this.index++;
-        return terms;
-    }
-
-    /// <summary>
-    /// Parses one or more value terms, optionally parenthesized as a sequence,
-    /// up to <paramref name="terminator"/> (or the end of the text when it is
-    /// <c>'\0'</c>). <paramref name="single"/> refuses the sequence form, which
-    /// is how a bare content item stays one item.
-    /// </summary>
-    private XmlDmlTerm[] ParseTerms(char terminator, bool single = false)
-    {
-        this.SkipWhitespace();
-        if (!single && this.Current == '(')
-        {
-            this.index++;
-            var sequence = new List<XmlDmlTerm> { this.ParseTerm() };
-            while (true)
-            {
-                this.SkipWhitespace();
-                if (this.Current == ',')
-                {
-                    this.index++;
-                    sequence.Add(this.ParseTerm());
-                    continue;
-                }
-                if (this.Current != ')')
-                    throw this.SyntaxError();
-                this.index++;
-                this.SkipWhitespace();
-                return terminator != '\0' && this.Current != terminator ? throw this.SyntaxError() : [.. sequence];
-            }
-        }
-
-        var term = this.ParseTerm();
-        this.SkipWhitespace();
-        return terminator != '\0' && this.Current != terminator ? throw this.SyntaxError() : [term];
-    }
-
     private XmlDmlTerm ParseTerm()
     {
         this.SkipWhitespace();
-        var c = this.Current;
-        if (c is '"' or '\'')
-            return XmlDmlTerm.FromLiteral(SqlValue.FromString(SqlType.NVarchar, this.ReadQuoted(c)));
-        if (char.IsAsciiDigit(c) || c == '-')
-            return XmlDmlTerm.FromLiteral(this.ReadNumber());
-
         var word = this.PeekWord();
         if (word is not ("sql:column" or "sql:variable"))
             throw this.SyntaxError();
@@ -508,22 +377,18 @@ internal sealed class XmlDmlParser(
         this.index++;
         this.SkipWhitespace();
         if (this.Current is not ('"' or '\''))
-            throw this.SyntaxError();
+            throw SimulatedSqlException.XQueryStringLiteralExpected(this.method);
         var name = this.ReadQuoted(this.Current);
         this.SkipWhitespace();
         if (this.Current != ')')
             throw this.SyntaxError();
         this.index++;
 
-        if (word[4] == 'v')
-        {
-            // The Variables dict is keyed without the '@' the XQuery text
-            // writes. The parse-time lookup validates the variable was declared
-            // (Msg 137) and supplies the static type Msg 2207 reports.
-            var bare = name.StartsWith('@') ? name[1..] : name;
-            return XmlDmlTerm.FromVariable(bare, this.context.Batch.GetVariableSlot(bare).DeclaredType);
-        }
-        return XmlDmlTerm.FromColumn(name, this.resolveColumnType?.Invoke(name));
+        // The Variables dict is keyed without the '@' the XQuery text writes;
+        // the lookup supplies the static type Msg 2207 reports.
+        return word[4] == 'v'
+            ? XmlDmlTerm.FromVariable(name[1..], this.VariableType(name))
+            : XmlDmlTerm.FromColumn(name, this.resolveColumnType?.Invoke(name));
     }
 
     private string ReadQuoted(char quote)
@@ -549,27 +414,6 @@ internal sealed class XmlDmlParser(
             this.index++;
         }
         throw this.SyntaxError();
-    }
-
-    private SqlValue ReadNumber()
-    {
-        var start = this.index;
-        if (this.Current == '-')
-            this.index++;
-        var fractional = false;
-        while (this.index < this.text.Length && (char.IsAsciiDigit(this.text[this.index]) || this.text[this.index] == '.'))
-        {
-            fractional |= this.text[this.index] == '.';
-            this.index++;
-        }
-        var span = this.text.AsSpan(start, this.index - start);
-        if (!fractional && int.TryParse(span, CultureInfo.InvariantCulture, out var integer))
-            return SqlValue.FromInt32(integer);
-        if (!decimal.TryParse(span, CultureInfo.InvariantCulture, out var number))
-            throw this.SyntaxError();
-        var digits = span.TrimStart('-');
-        var scale = digits.Length - digits.IndexOf('.') - 1;
-        return SqlValue.FromDecimal(DecimalSqlType.Get(Math.Max(digits.Length - 1, scale + 1), scale), number);
     }
 
     /// <summary>
@@ -603,9 +447,9 @@ internal sealed class XmlDmlParser(
             analyzed = analyzed[1..close].Trim();
         }
 
-        var compiled = XmlQueryEngine.CompileBody(body, this.defaultNamespace, this.prefixes, "modify");
+        var compiled = XmlQueryEngine.CompileBody(body, this.defaultNamespace, this.prefixes, "modify", this.Typing);
         if (analyzed == ".")
-            return new XmlDmlPath(body, compiled, XmlDmlNodeKind.Document, string.Empty, singleton);
+            return new XmlDmlPath(body, compiled, XmlDmlNodeKind.Document, string.Empty, singleton: true);
 
         var (kind, name) = ClassifyStep(LastStep(analyzed));
         return new XmlDmlPath(body, compiled, kind, name, singleton);
@@ -688,7 +532,7 @@ internal sealed class XmlDmlParser(
     /// parentheses and markup — how the <c>with</c> that splits
     /// <c>replace value of</c> is located.
     /// </summary>
-    private int FindKeyword(string word)
+    private int FindKeyword(string word, int from = -1)
     {
         var depth = 0;
         var quote = '\0';
@@ -716,7 +560,7 @@ internal sealed class XmlDmlParser(
                 depth--;
                 continue;
             }
-            if (depth != 0 || c != word[0] || !this.text.AsSpan(i).StartsWith(word, StringComparison.Ordinal))
+            if (depth != 0 || i < from || c != word[0] || !this.text.AsSpan(i).StartsWith(word, StringComparison.Ordinal))
                 continue;
             if ((i > 0 && IsWordChar(this.text[i - 1])) || (i + word.Length < this.text.Length && IsWordChar(this.text[i + word.Length])))
                 continue;

@@ -34,6 +34,16 @@ internal sealed class Cast : Expression
     private readonly bool tryMode;
     private readonly bool targetReportsNumeric;
 
+    /// <summary>
+    /// The schema collection an <c>xml(collection)</c> target names, or null:
+    /// the result is validated and canonicalized against it, and it types the
+    /// XQuery a method call on the result compiles.
+    /// </summary>
+    public readonly Schemas.XmlSchemaCollection? TargetCollection;
+
+    /// <summary>Whether the typed target wrote <c>DOCUMENT</c>, admitting one top-level element only.</summary>
+    private readonly bool targetDocument;
+
     /// <summary>The call's first argument, which a whole-statement bind error report places an illegal conversion at.</summary>
     private readonly Token? openToken;
 
@@ -49,7 +59,10 @@ internal sealed class Cast : Expression
             ?? context.Token as Name
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
         this.targetReportsNumeric = ReportsNumeric(typeName);
-        (this.targetType, this.targetMaxLength) = ParseTargetTypeSpec(context, typeName);
+        if (Simulation.TryParseXmlCastTarget(context, typeName) is var (collection, document))
+            (this.targetType, this.targetMaxLength, this.TargetCollection, this.targetDocument) = (SqlType.Xml, null, collection, document);
+        else
+            (this.targetType, this.targetMaxLength) = ParseTargetTypeSpec(context, typeName);
         // A CLR type opens the statement's transaction (probed 2026-09-28
         // against SQL Server 2025).
         if (this.targetType is HierarchyIdSqlType or SpatialSqlType or ClrUdtSqlType)
@@ -57,6 +70,22 @@ internal sealed class Cast : Expression
 
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
+    /// Validates a value converted to <c>xml(collection)</c> and answers its
+    /// canonical form, as every typed write does. <c>TRY_CAST</c> doesn't
+    /// soften a validation failure (probe-confirmed), and a <c>DOCUMENT</c>
+    /// target refuses anything but one top-level element with Msg 6901.
+    /// </summary>
+    internal static SqlValue ValidateTypedXml(SqlValue value, Schemas.XmlSchemaCollection? collection, bool document)
+    {
+        if (collection is null || value.IsNull)
+            return value;
+        if (document && !XmlSchemaValidation.IsDocument(value.AsString))
+            throw SimulatedSqlException.XmlValidationNotADocument();
+        var canonical = XmlSchemaValidation.ValidateAndNormalize(collection, value.AsString);
+        return ReferenceEquals(canonical, value.AsString) ? value : SqlValue.FromXml(canonical);
     }
 
     /// <summary>
@@ -143,7 +172,9 @@ internal sealed class Cast : Expression
 
         return this.targetType is SqlVariantSqlType
             ? SqlValue.NameVariantBase(sourceValue, coerced, this.source.ResultReportsNumeric)
-            : RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
+            : this.TargetCollection is not null
+                ? ValidateTypedXml(coerced, this.TargetCollection, this.targetDocument)
+                : RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
     }
 
     /// <summary>

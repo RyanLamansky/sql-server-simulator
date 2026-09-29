@@ -2220,6 +2220,16 @@ internal sealed class BatchContext
             | System.Globalization.CompareOptions.IgnoreWidth);
 
     /// <summary>
+    /// The documents behind this batch's <c>.nodes()</c> rows, allocated by the
+    /// first one. A row carries its node's position and this registry's number
+    /// for the document rather than a copy of the document, so shredding a
+    /// large instance stays linear; the reference can't leave the statement
+    /// that produced it (only the xml methods may read it), so the batch
+    /// outlives every reader.
+    /// </summary>
+    internal Storage.XmlDocumentRegistry? XmlNodeDocuments;
+
+    /// <summary>
     /// Per-batch variable store. Seeded with SqlClient parameters at
     /// construction; <c>DECLARE</c> adds entries; <c>SET</c> /
     /// <c>SELECT @v = expr</c> mutate them. Parameters and declared variables

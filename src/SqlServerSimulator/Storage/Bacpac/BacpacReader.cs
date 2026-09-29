@@ -306,11 +306,13 @@ internal static class BacpacReader
         // the rest — so one pair serves the whole stream.
         var wireValues = new SqlValue[decoders.Length];
         var full = new SqlValue[table.Columns.Length];
+        var typedXml = TypedXmlOrdinals(wireCols);
         byte[]? rowBytes = null;
         while (BcpRowReader.TryReadRow(bcpStream, decoders, wireValues))
         {
             if (identityOrdinal >= 0)
                 TrackIdentityMax(wireValues[identityOrdinal], ref identityMax);
+            ValidateTypedXml(wireCols, typedXml, wireValues);
             for (var w = 0; w < wireValues.Length; w++)
                 full[wireOrdinals[w]] = wireValues[w];
             Simulation.EvaluateComputedColumns(table, full, batch);
@@ -334,11 +336,13 @@ internal static class BacpacReader
         // into the row bytes, so no value outlives the iteration — and one
         // encoded-bytes buffer beside it, since Insert copies into the page.
         var values = new SqlValue[decoders.Length];
+        var typedXml = TypedXmlOrdinals(wireCols);
         byte[]? rowBytes = null;
         while (BcpRowReader.TryReadRow(bcpStream, decoders, values))
         {
             if (identityOrdinal >= 0)
                 TrackIdentityMax(values[identityOrdinal], ref identityMax);
+            ValidateTypedXml(wireCols, typedXml, values);
             var length = RowEncoder.EncodeRowInto(wireCols, values, table.Heap, ref rowBytes);
             _ = table.Heap.Insert(rowBytes.AsSpan(0, length));
             rowCount++;
@@ -347,6 +351,30 @@ internal static class BacpacReader
         if (identityOrdinal >= 0)
             ObserveIdentityMax(wireCols[identityOrdinal], identityMax);
         return rowCount;
+    }
+
+    /// <summary>The ordinals of <paramref name="columns"/>' <c>xml(collection)</c> columns.</summary>
+    private static int[] TypedXmlOrdinals(HeapColumn[] columns)
+    {
+        var ordinals = new List<int>();
+        for (var i = 0; i < columns.Length; i++)
+        {
+            if (columns[i].XmlSchemaCollection is not null)
+                ordinals.Add(i);
+        }
+        return [.. ordinals];
+    }
+
+    /// <summary>
+    /// Validates and canonicalizes each typed <c>xml</c> value of one row, as
+    /// the write path does for every assignment — so an import is held to the
+    /// same schema an <c>INSERT</c> is, and a value stored in a form real
+    /// wouldn't have written comes back canonical.
+    /// </summary>
+    private static void ValidateTypedXml(HeapColumn[] columns, int[] typedXml, SqlValue[] values)
+    {
+        foreach (var ordinal in typedXml)
+            values[ordinal] = Parser.Expressions.Cast.ValidateTypedXml(values[ordinal], columns[ordinal].XmlSchemaCollection, document: false);
     }
 
     /// <summary>

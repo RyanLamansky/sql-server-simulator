@@ -36,6 +36,12 @@ internal sealed class ConvertExpression : Expression
     private readonly bool tryMode;
     private readonly bool targetReportsNumeric;
 
+    /// <summary>The schema collection an <c>xml(collection)</c> target names, or null (see <see cref="Cast.TargetCollection"/>).</summary>
+    public readonly Schemas.XmlSchemaCollection? TargetCollection;
+
+    /// <summary>Whether the typed target wrote <c>DOCUMENT</c>.</summary>
+    private readonly bool targetDocument;
+
     /// <summary>The call's first argument, which a whole-statement bind error report places an illegal conversion at.</summary>
     private readonly Token? openToken;
 
@@ -50,7 +56,10 @@ internal sealed class ConvertExpression : Expression
             ?? context.Token as Name
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
         this.targetReportsNumeric = Cast.ReportsNumeric(typeName);
-        (this.targetType, this.targetMaxLength) = Cast.ParseTargetTypeSpec(context, typeName);
+        if (Simulation.TryParseXmlCastTarget(context, typeName) is var (collection, document))
+            (this.targetType, this.targetMaxLength, this.TargetCollection, this.targetDocument) = (SqlType.Xml, null, collection, document);
+        else
+            (this.targetType, this.targetMaxLength) = Cast.ParseTargetTypeSpec(context, typeName);
         // A CLR type opens the statement's transaction (probed 2026-09-28
         // against SQL Server 2025).
         if (this.targetType is HierarchyIdSqlType or SpatialSqlType or ClrUdtSqlType)
@@ -193,7 +202,9 @@ internal sealed class ConvertExpression : Expression
 
         return this.targetType is SqlVariantSqlType
             ? SqlValue.NameVariantBase(sourceValue, coerced, this.source.ResultReportsNumeric)
-            : Cast.RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
+            : this.TargetCollection is not null
+                ? Cast.ValidateTypedXml(coerced, this.TargetCollection, this.targetDocument)
+                : Cast.RecollateStringResult(coerced, this.targetType, sourceValue.Type, dbCollation);
     }
 
     /// <summary>

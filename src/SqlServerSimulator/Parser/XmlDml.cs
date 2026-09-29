@@ -59,52 +59,14 @@ internal enum XmlDmlNodeKind
     Document,
 }
 
-/// <summary>How an <c>insert</c> content item produces its nodes.</summary>
-internal enum XmlDmlItemKind
-{
-    /// <summary>A direct constructor — element, comment or processing instruction markup.</summary>
-    Markup,
-
-    /// <summary>A computed <c>attribute name {…}</c> constructor.</summary>
-    Attribute,
-
-    /// <summary>A computed <c>element name {…}</c> constructor.</summary>
-    Element,
-
-    /// <summary>A computed <c>text {…}</c> constructor.</summary>
-    Text,
-
-    /// <summary>A bare expression — legal only when it evaluates to <c>xml</c>.</summary>
-    Value,
-}
-
-/// <summary>Where a single XML-DML term reads its value from.</summary>
-internal enum XmlDmlTermKind
-{
-    /// <summary>A string or numeric literal written in the XQuery text.</summary>
-    Literal,
-
-    /// <summary><c>sql:variable("@v")</c>.</summary>
-    Variable,
-
-    /// <summary><c>sql:column("c")</c>.</summary>
-    Column,
-}
-
 /// <summary>
-/// One value-producing term of an XML-DML expression: a literal, a
-/// <c>sql:variable("@v")</c> or a <c>sql:column("c")</c>. A sequence of them
-/// atomizes to their string values joined by a single space, which is what
-/// real does for <c>with ("a","b")</c> and for a multi-term enclosed
-/// expression.
+/// A <c>sql:variable("@v")</c> or <c>sql:column("c")</c> accessor written as
+/// an insert's bare content — the one position an <c>xml</c> value may take.
 /// </summary>
 internal readonly struct XmlDmlTerm
 {
-    /// <summary>Which of the three forms this term is.</summary>
-    public readonly XmlDmlTermKind Kind;
-
-    /// <summary>The literal's value, for <see cref="XmlDmlTermKind.Literal"/>.</summary>
-    public readonly SqlValue Literal;
+    /// <summary>True for <c>sql:column</c>, false for <c>sql:variable</c>.</summary>
+    public readonly bool IsColumn;
 
     /// <summary>The variable (no <c>@</c>) or column name the term reads.</summary>
     public readonly string Name;
@@ -116,104 +78,36 @@ internal readonly struct XmlDmlTerm
     /// </summary>
     public readonly SqlType? StaticType;
 
-    private XmlDmlTerm(XmlDmlTermKind kind, SqlValue literal, string name, SqlType? staticType)
+    private XmlDmlTerm(bool isColumn, string name, SqlType? staticType)
     {
-        this.Kind = kind;
-        this.Literal = literal;
+        this.IsColumn = isColumn;
         this.Name = name;
         this.StaticType = staticType;
     }
 
-    /// <summary>Builds a literal term.</summary>
-    public static XmlDmlTerm FromLiteral(SqlValue value) => new(XmlDmlTermKind.Literal, value, string.Empty, value.Type);
-
     /// <summary>Builds a <c>sql:variable</c> term over an already-declared variable.</summary>
-    public static XmlDmlTerm FromVariable(string name, SqlType declaredType) => new(XmlDmlTermKind.Variable, default, name, declaredType);
+    public static XmlDmlTerm FromVariable(string name, SqlType declaredType) => new(isColumn: false, name, declaredType);
 
     /// <summary>Builds a <c>sql:column</c> term; <paramref name="staticType"/> is null when unresolvable at parse.</summary>
-    public static XmlDmlTerm FromColumn(string name, SqlType? staticType) => new(XmlDmlTermKind.Column, default, name, staticType);
+    public static XmlDmlTerm FromColumn(string name, SqlType? staticType) => new(isColumn: true, name, staticType);
 
     /// <summary>Reads the term's value for the row being mutated.</summary>
-    public SqlValue Evaluate(RuntimeContext runtime) => this.Kind switch
-    {
-        XmlDmlTermKind.Literal => this.Literal,
-        XmlDmlTermKind.Variable => runtime.Batch.Variables[this.Name].Value,
-        _ => runtime.ResolveColumn(XmlDml.ColumnNameOf(this.Name)),
-    };
-
-    /// <summary>
-    /// Whether a literal written directly in the XQuery text produced this
-    /// term. Real reports a literal's static type without an occurrence
-    /// indicator (<c>xs:string</c>) and a <c>sql:</c> accessor's with one
-    /// (<c>xs:string ?</c>).
-    /// </summary>
-    public bool IsLiteral => this.Kind == XmlDmlTermKind.Literal;
+    public SqlValue Evaluate(RuntimeContext runtime) =>
+        this.IsColumn ? runtime.ResolveColumn(XmlDml.ColumnNameOf(this.Name)) : runtime.Batch.Variables[this.Name].Value;
 }
 
 /// <summary>
-/// One item of an <c>insert</c> content sequence. A direct constructor keeps
-/// its markup as alternating literal segments and enclosed expressions
-/// (<c>&lt;n&gt;{sql:variable("@v")}&lt;/n&gt;</c>), spliced together and
-/// parsed at execution; the computed constructors keep only their value terms.
+/// One item of an <c>insert</c> whose content is a bare <c>sql:variable</c> /
+/// <c>sql:column</c> accessor — the one content form that may carry a whole
+/// <c>xml</c> instance. Every other content is an XQuery expression.
 /// </summary>
-internal sealed class XmlDmlItem
+internal sealed class XmlDmlItem(XmlDmlTerm term)
 {
-    /// <summary>Which constructor form produced this item.</summary>
-    public readonly XmlDmlItemKind Kind;
+    /// <summary>The accessor.</summary>
+    public readonly XmlDmlTerm Term = term;
 
-    /// <summary>The constructor's name (attribute / processing-instruction target); empty otherwise.</summary>
-    public readonly string Name;
-
-    /// <summary>
-    /// Literal markup segments of a <see cref="XmlDmlItemKind.Markup"/> item,
-    /// one more than <see cref="Enclosed"/> has entries.
-    /// </summary>
-    public readonly string[] Literals;
-
-    /// <summary>
-    /// Each enclosed expression of a markup item, or the single value
-    /// expression of a computed constructor / bare value.
-    /// </summary>
-    public readonly XmlDmlTerm[][] Enclosed;
-
-    /// <summary>
-    /// True for the enclosed expressions written inside an attribute value —
-    /// their substituted text takes attribute-value escaping rather than
-    /// element-content escaping.
-    /// </summary>
-    public readonly bool[] EnclosedInAttribute;
-
-    /// <summary>
-    /// A computed <c>element</c> constructor's own content items, which nest to
-    /// any depth (<c>element n {element m {1}}</c>); empty for every other kind.
-    /// </summary>
-    public readonly XmlDmlItem[] Children;
-
-    private XmlDmlItem(XmlDmlItemKind kind, string name, string[] literals, XmlDmlTerm[][] enclosed, bool[] enclosedInAttribute, XmlDmlItem[] children)
-    {
-        this.Kind = kind;
-        this.Name = name;
-        this.Literals = literals;
-        this.Enclosed = enclosed;
-        this.EnclosedInAttribute = enclosedInAttribute;
-        this.Children = children;
-    }
-
-    /// <summary>A direct constructor's markup template.</summary>
-    public static XmlDmlItem Markup(string[] literals, XmlDmlTerm[][] enclosed, bool[] enclosedInAttribute) =>
-        new(XmlDmlItemKind.Markup, string.Empty, literals, enclosed, enclosedInAttribute, []);
-
-    /// <summary>A computed <c>attribute</c> / <c>text</c> constructor.</summary>
-    public static XmlDmlItem Computed(XmlDmlItemKind kind, string name, XmlDmlTerm[] value) =>
-        new(kind, name, [], [value], [], []);
-
-    /// <summary>A computed <c>element name {…}</c> constructor over its content items.</summary>
-    public static XmlDmlItem Element(string name, XmlDmlItem[] children) =>
-        new(XmlDmlItemKind.Element, name, [], [], [], children);
-
-    /// <summary>A bare expression item, legal only when it evaluates to <c>xml</c>.</summary>
-    public static XmlDmlItem Value(XmlDmlTerm[] value) =>
-        new(XmlDmlItemKind.Value, string.Empty, [], [value], [], []);
+    /// <summary>Wraps one accessor.</summary>
+    public static XmlDmlItem Value(XmlDmlTerm term) => new(term);
 }
 
 /// <summary>
@@ -292,8 +186,17 @@ internal sealed class XmlDml
     /// <summary>The path naming the node the statement acts on.</summary>
     public readonly XmlDmlPath Target;
 
-    /// <summary>The content sequence of an <c>insert</c>; empty otherwise.</summary>
+    /// <summary>The bare-accessor content of an <c>insert</c>; empty otherwise.</summary>
     public readonly XmlDmlItem[] Content;
+
+    /// <summary>
+    /// The content expression of an <c>insert</c> that isn't a bare accessor,
+    /// evaluated against the instance before the edit — so a path copies nodes
+    /// out of it — with <see cref="contentAccessors"/> filled per row.
+    /// </summary>
+    private readonly XmlQueryExpr? contentExpression;
+
+    private readonly XmlSqlAccessorRef[] contentAccessors;
 
     /// <summary>The placement of an <c>insert</c>'s content.</summary>
     public readonly XmlDmlPosition Position;
@@ -315,15 +218,6 @@ internal sealed class XmlDml
     public readonly XmlSqlAccessorRef[] ValueAccessors;
 
     /// <summary>
-    /// The prolog's namespace scope. A direct element constructor resolves its
-    /// name through it just like a path step does, so
-    /// <c>declare default element namespace "urn:d"; insert &lt;b/&gt;</c>
-    /// builds a <c>urn:d</c> element (probe-confirmed).
-    /// </summary>
-    private readonly string? defaultElementNamespace;
-    private readonly Dictionary<string, string> prefixes;
-
-    /// <summary>
     /// What real writes between the brackets of this statement's own
     /// diagnostics — the method name behind the receiver that named it, so a
     /// column receiver's errors carry its <c>schema.table.column.</c> prefix.
@@ -336,41 +230,53 @@ internal sealed class XmlDml
         XmlDmlKind kind,
         XmlDmlPath target,
         XmlDmlItem[] content,
+        XmlQueryExpr? contentExpression,
+        XmlSqlAccessorRef[] contentAccessors,
         XmlDmlPosition position,
         XmlQueryExpr? value,
         XmlSqlAccessorRef[] valueAccessors,
-        string? defaultElementNamespace,
-        Dictionary<string, string> prefixes,
         string method)
     {
         this.Kind = kind;
         this.Target = target;
         this.Content = content;
+        this.contentExpression = contentExpression;
+        this.contentAccessors = contentAccessors;
         this.Position = position;
         this.Value = value;
         this.ValueAccessors = valueAccessors;
-        this.defaultElementNamespace = defaultElementNamespace;
-        this.prefixes = prefixes;
         this.method = method;
     }
 
     /// <summary>Builds a parsed <c>delete</c>.</summary>
-    public static XmlDml CreateDelete(XmlDmlPath target, string? defaultElementNamespace, Dictionary<string, string> prefixes, string method) =>
-        new(XmlDmlKind.Delete, target, [], XmlDmlPosition.Into, null, [], defaultElementNamespace, prefixes, method);
+    public static XmlDml CreateDelete(XmlDmlPath target, string method) =>
+        new(XmlDmlKind.Delete, target, [], null, [], XmlDmlPosition.Into, null, [], method);
 
     /// <summary>Builds a parsed <c>insert</c>.</summary>
-    public static XmlDml CreateInsert(XmlDmlPath target, XmlDmlItem[] content, XmlDmlPosition position, string? defaultElementNamespace, Dictionary<string, string> prefixes, string method) =>
-        new(XmlDmlKind.Insert, target, content, position, null, [], defaultElementNamespace, prefixes, method);
+    public static XmlDml CreateInsert(
+        XmlDmlPath target,
+        XmlDmlItem[] content,
+        XmlQueryExpr? contentExpression,
+        XmlSqlAccessorRef[] contentAccessors,
+        XmlDmlPosition position,
+        string method) =>
+        new(XmlDmlKind.Insert, target, content, contentExpression, contentAccessors, position, null, [], method);
 
     /// <summary>Builds a parsed <c>replace value of</c>.</summary>
     public static XmlDml CreateReplaceValueOf(
         XmlDmlPath target,
         XmlQueryExpr value,
         XmlSqlAccessorRef[] valueAccessors,
-        string? defaultElementNamespace,
-        Dictionary<string, string> prefixes,
+        bool targetNillable,
         string method) =>
-        new(XmlDmlKind.ReplaceValueOf, target, [], XmlDmlPosition.Into, value, valueAccessors, defaultElementNamespace, prefixes, method);
+        new(XmlDmlKind.ReplaceValueOf, target, [], null, [], XmlDmlPosition.Into, value, valueAccessors, method) { targetNillable = targetNillable };
+
+    /// <summary>
+    /// Whether a <c>replace value of</c> target is an element the receiver's
+    /// schema declares <c>nillable</c>, which an empty value sets
+    /// <c>xsi:nil</c> on rather than refusing.
+    /// </summary>
+    private bool targetNillable;
 
     /// <summary>
     /// Parses one XML-DML statement, applying every check real settles at
@@ -385,7 +291,7 @@ internal sealed class XmlDml
         Schemas.XmlSchemaCollection? schemaCollection,
         string method)
     {
-        var (defaultNamespace, prefixes, body) = XmlQueryEngine.ParsePrologAndBody(xquery);
+        var (defaultNamespace, prefixes, body) = XmlQueryEngine.ParsePrologAndBody(xquery, method);
         return new XmlDmlParser(body, defaultNamespace, prefixes, context, resolveColumnType, schemaCollection, method).ParseStatement();
     }
 
@@ -400,7 +306,7 @@ internal sealed class XmlDml
             return xmlText;
 
         var container = XmlInstance.CreateMutableContainer(xmlText);
-        var navigator = XmlInstance.CreateMutableNavigator(container);
+        var navigator = container.CreateNavigator();
         var selected = new List<XObject>();
         foreach (var item in XmlQueryEngine.Select(navigator, this.Target.Compiled))
         {
@@ -415,10 +321,11 @@ internal sealed class XmlDml
                     Remove(node);
                 break;
             case XmlDmlKind.ReplaceValueOf when selected.Count > 0:
-                ReplaceValue(selected[0], this.EvaluateReplacement(navigator, runtime));
+                if (this.EvaluateReplacement(navigator, selected[0], runtime) is { } replacement)
+                    ReplaceValue(selected[0], replacement);
                 break;
             case XmlDmlKind.Insert when selected.Count > 0:
-                this.InsertContent(selected[0], runtime);
+                this.InsertContent(selected[0], navigator, runtime);
                 break;
         }
         return Serialize(container);
@@ -557,38 +464,73 @@ internal sealed class XmlDml
     /// <summary>
     /// Evaluates the <c>with</c> expression against the instance being
     /// mutated, with each <c>sql:</c> accessor's value written into the scope
-    /// the compiled expression reads. A NULL accessor binds the empty sequence,
-    /// which atomizes to nothing — real's own reading.
+    /// the compiled expression reads as the XQuery item real maps it to — a
+    /// <c>money</c> 1.5 is <c>1.5</c>, a <c>float</c> 1e10 <c>1.0E10</c>, a
+    /// <c>bit</c> <c>true</c> (probe-confirmed). A NULL accessor binds the
+    /// empty sequence.
     /// </summary>
-    private string EvaluateReplacement(XPathNavigator instance, RuntimeContext runtime)
+    /// <remarks>
+    /// An empty result replaces nothing: real refuses it for an attribute or
+    /// element target (Msg 6320), and for a text node unless the expression
+    /// was written <c>()</c>, which removes the text (Msg 6325 otherwise).
+    /// </remarks>
+    private string? EvaluateReplacement(XPathNavigator instance, XObject target, RuntimeContext runtime)
     {
-        XmlVariableScope? scope = null;
-        if (this.ValueAccessors.Length > 0)
-        {
-            scope = new XmlVariableScope();
-            foreach (var accessor in this.ValueAccessors)
-            {
-                var value = accessor.IsColumn
-                    ? runtime.ResolveColumn(ColumnNameOf(accessor.Name))
-                    : runtime.Batch.Variables[accessor.Name.StartsWith('@') ? accessor.Name[1..] : accessor.Name].Value;
-                scope.Write(accessor.Slot, value.IsNull ? [] : [Selection.ScalarForXmlText(value)]);
-            }
-        }
-
+        var scope = BuildAccessorScope(this.ValueAccessors, runtime);
         var items = scope is null
             ? XmlQueryEngine.Select(instance, this.Value!)
             : XmlQueryEngine.Select(instance, this.Value!, scope);
-        if (items.Count == 1)
-            return XmlQueryValues.StringValue(items[0]);
-
-        var text = new StringBuilder();
-        foreach (var item in items)
+        if (items.Count == 0)
         {
-            if (text.Length > 0)
-                _ = text.Append(' ');
-            _ = text.Append(XmlQueryValues.StringValue(item));
+            if (target is XElement element && this.targetNillable)
+            {
+                SetNil(element);
+                return null;
+            }
+            if (target is not XText)
+                throw SimulatedSqlException.XmlDmlReplaceWithEmptyNotNillable();
+            if (this.Value is not XmlSequenceExpr { IsEmpty: true })
+                throw SimulatedSqlException.XmlDmlReplaceWithEmptySequence();
+            return string.Empty;
         }
-        return text.ToString();
+        return XmlQueryValues.JoinAtomized(items);
+    }
+
+    /// <summary>
+    /// Reads each accessor's value for the row into a fresh scope, or null
+    /// when there are none. A value typed <c>xml</c> — possible only where the
+    /// accessor's type wasn't known while compiling — passes through as its
+    /// text.
+    /// </summary>
+    private static XmlVariableScope? BuildAccessorScope(XmlSqlAccessorRef[] accessors, RuntimeContext runtime)
+    {
+        if (accessors.Length == 0)
+            return null;
+        var scope = new XmlVariableScope();
+        foreach (var accessor in accessors)
+        {
+            var value = accessor.IsColumn
+                ? runtime.ResolveColumn(ColumnNameOf(accessor.Name))
+                : runtime.Batch.Variables[accessor.Name.StartsWith('@') ? accessor.Name[1..] : accessor.Name].Value;
+            scope.Write(accessor.Slot, value.IsNull ? [] : [value.Type is XmlSqlType ? value.AsString : XmlAtomicTypes.FromSql(value)]);
+        }
+        return scope;
+    }
+
+    /// <summary>The XML Schema instance namespace <c>xsi:nil</c> lives in.</summary>
+    private static readonly XNamespace SchemaInstance = "http://www.w3.org/2001/XMLSchema-instance";
+
+    /// <summary>
+    /// Empties a nillable element and marks it <c>xsi:nil="true"</c>, declaring
+    /// the <c>xsi</c> prefix on it when nothing in scope does — real's answer
+    /// to <c>replace value of</c> a nillable element <c>with ()</c>.
+    /// </summary>
+    private static void SetNil(XElement element)
+    {
+        element.RemoveNodes();
+        if (element.GetPrefixOfNamespace(SchemaInstance) is null)
+            element.Add(new XAttribute(XNamespace.Xmlns + "xsi", SchemaInstance.NamespaceName));
+        element.SetAttributeValue(SchemaInstance + "nil", "true");
     }
 
     private static void ReplaceValue(XObject target, string replacement)
@@ -612,17 +554,21 @@ internal sealed class XmlDml
                 element.Nodes().Remove();
                 break;
             case XElement element:
+                // A value replaces a nil marker along with the content.
+                element.Attribute(SchemaInstance + "nil")?.Remove();
                 element.ReplaceNodes(new XText(replacement));
                 break;
         }
     }
 
-    private void InsertContent(XObject target, RuntimeContext runtime)
+    private void InsertContent(XObject target, XPathNavigator instance, RuntimeContext runtime)
     {
         var attributes = new List<XAttribute>();
         var nodes = new List<XNode>();
+        if (this.contentExpression is not null)
+            this.MaterializeExpression(instance, runtime, attributes, nodes);
         foreach (var item in this.Content)
-            Materialize(item, runtime, attributes, nodes);
+            this.MaterializeAccessor(item.Term, runtime, nodes);
 
         if (target is not XNode targetNode)
             return;
@@ -650,6 +596,33 @@ internal sealed class XmlDml
             default:
                 ((XContainer)targetNode).Add(nodes);
                 break;
+        }
+
+        foreach (var node in nodes)
+        {
+            if (node is XElement element)
+                DropInheritedDeclarations(element);
+        }
+    }
+
+    /// <summary>
+    /// Removes the namespace declarations a constructed element took from the
+    /// prolog that its insertion point already makes: real writes such a
+    /// binding only where the new position doesn't have it, so <c>declare default element namespace
+    /// "urn:d"; insert &lt;b/&gt;</c> under a <c>urn:d</c> parent comes back as
+    /// a plain <c>&lt;b/&gt;</c> (probe-confirmed).
+    /// </summary>
+    private static void DropInheritedDeclarations(XElement element)
+    {
+        if (element.Parent is not { } parent)
+            return;
+        foreach (var declaration in element.Attributes().Where(a => a.Annotation<XmlPrologDeclaration>() is not null).ToList())
+        {
+            var inherited = declaration.Name.Namespace == XNamespace.None
+                ? parent.GetDefaultNamespace().NamespaceName
+                : parent.GetNamespaceOfPrefix(declaration.Name.LocalName)?.NamespaceName;
+            if (inherited == declaration.Value)
+                declaration.Remove();
         }
     }
 
@@ -687,197 +660,85 @@ internal sealed class XmlDml
     }
 
     /// <summary>
-    /// Turns one content item into the attributes / nodes it contributes. A
-    /// bare value term is legal only when it carries <c>xml</c>; anything else
-    /// is an atomic value, which real refuses with Msg 2207 — statically when
-    /// the type is known at parse, here when only the row can say.
+    /// Evaluates the content expression against the instance as it stands
+    /// before the edit and copies what it answers: a node selected out of the
+    /// instance is inserted as a copy (<c>insert /r/b into (/r)[1]</c> doubles
+    /// the <c>b</c>), a constructed one as built, an attribute onto the target.
+    /// An atomic item is Msg 2207, which the compile already raised for every
+    /// content whose type it knew.
     /// </summary>
-    private void Materialize(XmlDmlItem item, RuntimeContext runtime, List<XAttribute> attributes, List<XNode> nodes)
+    private void MaterializeExpression(XPathNavigator instance, RuntimeContext runtime, List<XAttribute> attributes, List<XNode> nodes)
     {
-        switch (item.Kind)
+        var scope = BuildAccessorScope(this.contentAccessors, runtime);
+        var items = scope is null
+            ? XmlQueryEngine.Select(instance, this.contentExpression!)
+            : XmlQueryEngine.Select(instance, this.contentExpression!, scope);
+        foreach (var item in items)
         {
-            case XmlDmlItemKind.Attribute:
-                attributes.Add(new XAttribute(item.Name, Atomize(item.Enclosed[0], runtime)));
-                break;
-            case XmlDmlItemKind.Element:
-                nodes.Add(this.BuildElement(item, runtime));
-                break;
-            case XmlDmlItemKind.Text:
-                nodes.Add(new XText(Atomize(item.Enclosed[0], runtime)));
-                break;
-            case XmlDmlItemKind.Value:
-                var value = item.Enclosed[0][0].Evaluate(runtime);
-                if (value.IsNull)
-                    break;
-                if (value.Type is not XmlSqlType)
-                    throw SimulatedSqlException.XmlDmlOnlyNodesInsertable(this.method, XQueryTypeName(value.Type, isLiteral: false));
-                // A stored value is already-serialized XML, so it brings its own
-                // namespace scope rather than the prolog's.
-                AppendFragment(nodes, value.AsString, prologScope: null);
-                break;
-            default:
-                var markup = new StringBuilder(item.Literals[0]);
-                for (var i = 0; i < item.Enclosed.Length; i++)
-                {
-                    Selection.AppendForXmlText(markup, Atomize(item.Enclosed[i], runtime), item.EnclosedInAttribute[i]);
-                    _ = markup.Append(item.Literals[i + 1]);
-                }
-                this.AppendFragment(nodes, markup.ToString(), this.PrologScope());
-                break;
-        }
-    }
-
-    /// <summary>
-    /// Builds a computed <c>element name {…}</c> constructor's node. The name
-    /// resolves through the prolog exactly as a path step's does, and the
-    /// content items nest — attributes among them land on the element, atomic
-    /// terms become its text.
-    /// </summary>
-    private XElement BuildElement(XmlDmlItem item, RuntimeContext runtime)
-    {
-        var colon = item.Name.IndexOf(':', StringComparison.Ordinal);
-        var prefix = colon < 0 ? string.Empty : item.Name[..colon];
-        var local = colon < 0 ? item.Name : item.Name[(colon + 1)..];
-        var uri = colon < 0 ? this.defaultElementNamespace : this.prefixes[prefix];
-        var element = new XElement(uri is null ? XName.Get(local) : XName.Get(local, uri));
-        if (prefix.Length > 0)
-            element.Add(new XAttribute(XNamespace.Xmlns + prefix, uri!));
-
-        var attributes = new List<XAttribute>();
-        var nodes = new List<XNode>();
-        var atomics = new List<string>();
-        foreach (var child in item.Children)
-        {
-            // Inside a constructor the content sequence's atomic items are the
-            // element's text — the Msg 2207 rule that guards a top-level insert
-            // doesn't apply — and adjacent ones join with a single space, real's
-            // own atomization (`element n {"a","b"}` is `<n>a b</n>`).
-            if (child.Kind == XmlDmlItemKind.Value && child.Enclosed[0][0].StaticType is not XmlSqlType)
+            switch (item)
             {
-                atomics.Add(Atomize(child.Enclosed[0], runtime));
-                continue;
+                case XPathNavigator { UnderlyingObject: XAttribute attribute }:
+                    attributes.Add(new XAttribute(attribute));
+                    break;
+                case XPathNavigator { UnderlyingObject: XElement element }:
+                    var copy = new XElement(element);
+                    foreach (var declaration in element.Attributes())
+                    {
+                        if (declaration.Annotation<XmlPrologDeclaration>() is not null)
+                            copy.Attribute(declaration.Name)?.AddAnnotation(XmlPrologDeclaration.Instance);
+                    }
+                    nodes.Add(copy);
+                    break;
+                case XPathNavigator { UnderlyingObject: XContainer container }:
+                    foreach (var child in container.Nodes())
+                        nodes.Add(CopyNode(child));
+                    break;
+                case XPathNavigator { UnderlyingObject: XNode node }:
+                    nodes.Add(CopyNode(node));
+                    break;
+                case XPathNavigator text:
+                    nodes.Add(new XText(text.Value));
+                    break;
+                case XmlEmptyTextNode:
+                    break;
+                default:
+                    throw SimulatedSqlException.XmlDmlOnlyNodesInsertable(this.method, this.contentExpression!.AtomizedTypeName());
             }
-            Flush();
-            this.Materialize(child, runtime, attributes, nodes);
-        }
-        Flush();
-
-        foreach (var attribute in attributes)
-            element.Add(attribute);
-        foreach (var node in nodes)
-            element.Add(node);
-        return element;
-
-        void Flush()
-        {
-            if (atomics.Count == 0)
-                return;
-            nodes.Add(new XText(string.Join(' ', atomics)));
-            atomics.Clear();
         }
     }
 
-    /// <summary>
-    /// The namespace declarations a direct constructor parses under: the
-    /// prolog's default element namespace plus each declared prefix, written as
-    /// wrapper attributes so <c>&lt;p:b/&gt;</c> resolves the same way a path
-    /// step's <c>p:b</c> does.
-    /// </summary>
-    private string PrologScope()
+    private static XNode CopyNode(XNode node) => node switch
     {
-        var sb = new StringBuilder();
-        if (this.defaultElementNamespace is { } uri)
-            _ = sb.Append(" xmlns=\"").Append(uri).Append('"');
-        foreach (var (prefix, mapped) in this.prefixes)
-            _ = sb.Append(" xmlns:").Append(prefix).Append("=\"").Append(mapped).Append('"');
-        return sb.ToString();
-    }
+        XElement element => new XElement(element),
+        XComment comment => new XComment(comment),
+        XProcessingInstruction instruction => new XProcessingInstruction(instruction),
+        XText text => new XText(text.Value),
+        _ => node,
+    };
 
     /// <summary>
-    /// Parses a markup fragment through a throwaway wrapper element so a
-    /// multi-node result (or a stored <c>xml</c> value holding several
-    /// top-level nodes) contributes all of its nodes.
-    /// <paramref name="prologScope"/> carries the constructor's in-scope
-    /// namespace declarations; each is copied onto the top-level nodes that use
-    /// it, since the wrapper doesn't survive the insert.
+    /// A bare accessor item: legal only when it carries <c>xml</c>; anything
+    /// else is an atomic value, which real refuses with Msg 2207 — statically
+    /// when the type is known at parse, here when only the row can say.
     /// </summary>
-    private void AppendFragment(List<XNode> nodes, string markup, string? prologScope)
+    private void MaterializeAccessor(XmlDmlTerm term, RuntimeContext runtime, List<XNode> nodes)
     {
-        var wrapper = XElement.Parse($"<x{prologScope}>{markup}</x>");
+        var value = term.Evaluate(runtime);
+        if (value.IsNull)
+            return;
+        if (value.Type is not XmlSqlType)
+            throw SimulatedSqlException.XmlDmlOnlyNodesInsertable(this.method, XQueryTypeName(value.Type));
+
+        // A stored value is already-serialized XML, so it brings its own
+        // namespace scope.
+        var wrapper = XElement.Parse($"<x>{value.AsString}</x>");
         foreach (var node in wrapper.Nodes())
-        {
-            if (prologScope is not null && node is XElement element)
-                this.CarryPrefixDeclarations(element);
             nodes.Add(node);
-        }
     }
 
     /// <summary>
-    /// Re-declares on <paramref name="element"/> every prolog prefix its
-    /// subtree actually uses, so the binding outlives the parse wrapper. Real
-    /// writes the same declaration when the insertion point has no binding for
-    /// the prefix, and omits it when it has one — the simulator always writes
-    /// it, so a target that already declares the prefix ends up carrying it
-    /// twice.
+    /// The XQuery type name real names in Msg 2207 for a bare accessor, with
+    /// the occurrence indicator an accessor carries (<c>xs:int ?</c>).
     /// </summary>
-    private void CarryPrefixDeclarations(XElement element)
-    {
-        foreach (var (prefix, uri) in this.prefixes)
-        {
-            XNamespace mapped = uri;
-            if (element.Attribute(XNamespace.Xmlns + prefix) is not null)
-                continue;
-            if (!element.DescendantsAndSelf().Any(e => e.Name.Namespace == mapped || e.Attributes().Any(a => a.Name.Namespace == mapped)))
-                continue;
-            element.Add(new XAttribute(XNamespace.Xmlns + prefix, uri));
-        }
-    }
-
-    /// <summary>
-    /// The string value of a term sequence: each term's XML text form, joined
-    /// by a single space (real's atomization of a sequence in a <c>with</c>
-    /// clause or an enclosed expression). A NULL term contributes nothing.
-    /// </summary>
-    private static string Atomize(XmlDmlTerm[] terms, RuntimeContext runtime)
-    {
-        if (terms.Length == 1)
-        {
-            var single = terms[0].Evaluate(runtime);
-            return single.IsNull ? string.Empty : Selection.ScalarForXmlText(single);
-        }
-        var sb = new StringBuilder();
-        foreach (var term in terms)
-        {
-            var value = term.Evaluate(runtime);
-            if (value.IsNull)
-                continue;
-            if (sb.Length > 0)
-                _ = sb.Append(' ');
-            _ = sb.Append(Selection.ScalarForXmlText(value));
-        }
-        return sb.ToString();
-    }
-
-    /// <summary>
-    /// The XQuery type name real names in Msg 2207 for a SQL type, with the
-    /// occurrence indicator a <c>sql:</c> accessor carries and a written
-    /// literal doesn't. An integer literal is <c>xs:integer</c> where an
-    /// <c>int</c> variable is <c>xs:int</c> (probe-confirmed).
-    /// </summary>
-    internal static string XQueryTypeName(SqlType type, bool isLiteral)
-    {
-        var name = type switch
-        {
-            BigIntSqlType => "xs:long",
-            BitSqlType => "xs:boolean",
-            DecimalSqlType => "xs:decimal",
-            FloatSqlType => "xs:double",
-            Int32SqlType => isLiteral ? "xs:integer" : "xs:int",
-            RealSqlType => "xs:float",
-            SmallIntSqlType => "xs:short",
-            TinyIntSqlType => "xs:unsignedByte",
-            _ => "xs:string",
-        };
-        return isLiteral ? name : $"{name} ?";
-    }
+    internal static string XQueryTypeName(SqlType type) => $"{XmlAtomicTypes.SqlTypeName(type) ?? "xs:string"} ?";
 }
