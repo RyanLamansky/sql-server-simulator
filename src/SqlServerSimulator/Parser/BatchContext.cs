@@ -362,6 +362,13 @@ internal sealed class BatchContext
     public Selection? ExistenceProbe;
 
     /// <summary>
+    /// The plan <see cref="Selection.ExecuteWithRowAddresses"/> is draining,
+    /// which appends the address of its first FROM source's row to each row
+    /// it yields; null otherwise. A nested plan the run executes is never it.
+    /// </summary>
+    public Selection? RowAddressProbe;
+
+    /// <summary>
     /// Binder errors gathered while a module body or a batch binds, non-null
     /// only on the bind batch (<see cref="CreateTimeBinding"/>). Real reports <em>every</em>
     /// binder error a body contains rather than stopping at the first
@@ -1996,6 +2003,8 @@ internal sealed class BatchContext
         var snapshotXid = batch.ResolveSnapshotXidForRead(table);
         if (snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows)
             batch.AwaitUncommittedDeletes(table);
+        // Null unless the statement reads a row locator (see RowLocator).
+        var addresses = batch.CurrentStatement.RowAddresses;
         // A clustered table scans in its key's order (see ClusteredScan); a
         // snapshot read sweeps the heap and its version chains as before.
         if (snapshotXid is null && ClusteredScan.Order(table) is { } clusteredOrder)
@@ -2008,6 +2017,7 @@ internal sealed class BatchContext
                 if (batch.TouchRowForRead(table, pageIndex, slotIndex, plan) && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } bytes)
                 {
                     io?.Enter(pageIndex, ref lastPage);
+                    addresses?.Record(bytes, pageIndex, slotIndex);
                     yield return bytes;
                 }
             }
@@ -2021,11 +2031,15 @@ internal sealed class BatchContext
                 var resolved = Storage.VersionStore.ResolveVisibleVersion(table, (pageIndex, slotIndex), bytes, sx, batch.Connection.CurrentTransaction);
                 if (resolved is null)
                     continue;
+                addresses?.Record(resolved, pageIndex, slotIndex);
                 yield return resolved;
                 continue;
             }
             if (batch.TouchRowForRead(table, pageIndex, slotIndex, plan))
+            {
+                addresses?.Record(bytes, pageIndex, slotIndex);
                 yield return bytes;
+            }
         }
         // Second pass: under snapshot, surface tombstoned slots whose chain
         // carries a still-visible historical version. The live-heap pass
@@ -2043,6 +2057,7 @@ internal sealed class BatchContext
                 var resolved = Storage.VersionStore.ResolveTombstonedSlotForSnapshot(kv.Value, sx2, batch.Connection.CurrentTransaction);
                 if (resolved is null)
                     continue;
+                addresses?.Record(resolved, kv.Key.PageIndex, kv.Key.SlotIndex);
                 yield return resolved;
             }
         }

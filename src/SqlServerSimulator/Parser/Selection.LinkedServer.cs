@@ -30,10 +30,12 @@ partial class Selection
     /// <see cref="FromSource"/>.
     /// </para>
     /// <para>
-    /// No predicate / projection push-down: the simulator always asks the
-    /// remote for the full table and applies the local <c>WHERE</c> /
-    /// projection / join on the returned rowset. Correct but slow for
-    /// large remote tables; matches the agreed initial scope.
+    /// The projection is pushed down: a column the reading query never names
+    /// is left out of the remote query (<see cref="UnfetchedRemoteColumns"/>),
+    /// as real's provider fetches only what the query names — which is what
+    /// lets <c>SELECT id</c> read a table whose <c>vector</c> column real's
+    /// provider can't convert. Predicates aren't: the local <c>WHERE</c> /
+    /// projection / join run on the returned rowset.
     /// </para>
     /// </remarks>
     internal static Selection ForLinkedServer(LinkedServer server, string databaseName, string schemaName, string leafName, HeapColumn[] columns)
@@ -45,18 +47,25 @@ partial class Selection
             schemaArr[i] = columns[i].Type;
             columnNames[i] = columns[i].Name;
         }
-        return new Selection(
+        Selection? self = null;
+        var plan = new Selection(
             schemaArr,
             columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            rowSource: (_, _) => StreamRemoteRows(server, databaseName, schemaName, leafName, columns));
+            rowSource: (_, _) => StreamRemoteRows(server, databaseName, schemaName, leafName, columns, self!.UnfetchedRemoteColumns))
+        {
+            ReadsRemoteTable = true,
+        };
+        self = plan;
+        return plan;
     }
 
     /// <summary>
     /// Opens a fresh remote connection, issues
-    /// <c>SELECT * FROM [db].[schema].[leaf]</c>, materializes the row
-    /// bytes into a list (so the connection / command / reader chain
+    /// <c>SELECT … FROM [db].[schema].[leaf]</c> — every column but the
+    /// <paramref name="unfetched"/> ones, which read as NULL — materializes the
+    /// row bytes into a list (so the connection / command / reader chain
     /// disposes before iteration is consumed by the local plan), and
     /// returns the buffered rows. Disposing the connection drops any
     /// remote locks acquired by the query under the remote's
@@ -64,26 +73,117 @@ partial class Selection
     /// per remote query" semantic of real SQL Server's linked-server
     /// pipeline.
     /// </summary>
-    private static IEnumerable<byte[]> StreamRemoteRows(LinkedServer server, string databaseName, string schemaName, string leafName, HeapColumn[] columns)
+    private static IEnumerable<byte[]> StreamRemoteRows(LinkedServer server, string databaseName, string schemaName, string leafName, HeapColumn[] columns, bool[]? unfetched)
     {
         if (RemoteWrite.RunRemoteQuery(
             server,
-            string.Create(CultureInfo.InvariantCulture, $"SELECT {RemoteWrite.ColumnList(columns)} FROM [{EscapeIdent(databaseName)}].[{EscapeIdent(schemaName)}].[{EscapeIdent(leafName)}]"),
+            string.Create(CultureInfo.InvariantCulture, $"SELECT {RemoteWrite.ColumnList(columns, unfetched)} FROM [{EscapeIdent(databaseName)}].[{EscapeIdent(schemaName)}].[{EscapeIdent(leafName)}]"),
             databaseName,
             browse: false) is not { } result)
         {
             return [];
         }
         List<byte[]> rows = [.. result.RowBytes];
-        return Array.Exists(result.Schema, static type => type is VectorSqlType) ? ExposeVectors(server, result.Schema, columns, rows) : rows;
+        return unfetched is not null || Array.Exists(result.Schema, static type => type is VectorSqlType) ? ExposeVectors(server, result.Schema, columns, rows) : rows;
+    }
+
+    /// <summary>
+    /// Whether this plan is a four-part name's read of a linked server's
+    /// table (<see cref="ForLinkedServer"/>).
+    /// </summary>
+    internal bool ReadsRemoteTable;
+
+    /// <summary>
+    /// Per column of a <see cref="ReadsRemoteTable"/> plan, whether the remote
+    /// query leaves it out: set, once the reading query has bound, for each
+    /// column it never names (<see cref="NoteUnreadRemoteColumns"/>); null
+    /// fetches every column.
+    /// </summary>
+    internal bool[]? UnfetchedRemoteColumns;
+
+    /// <summary>
+    /// Marks the columns of each four-part read among
+    /// <paramref name="sources"/> that the query binding them never names, so
+    /// the remote query leaves them out. A query whose reach this walk can't
+    /// see all of — a subquery, whose body could correlate to the source, or an
+    /// <c>APPLY</c>, whose right side could — fetches every column; a query
+    /// naming the column anywhere (a derived table's <c>SELECT *</c> included)
+    /// fetches it, where real's optimizer may still find it unneeded.
+    /// </summary>
+    private static void NoteUnreadRemoteColumns(FromSource[] sources, JoinSpec[] joins, List<Expression> expressions, FromClause fromClause)
+    {
+        List<(int Source, bool[] Unread)>? reads = null;
+        for (var s = 0; s < sources.Length; s++)
+        {
+            if (sources[s].LateralPlan is { ReadsRemoteTable: true })
+                (reads ??= []).Add((s, Array.ConvertAll(sources[s].Columns, static _ => true)));
+        }
+        if (reads is null)
+            return;
+        foreach (var join in joins)
+        {
+            if (join.Kind is JoinKind.CrossApply or JoinKind.OuterApply)
+                return;
+        }
+
+        var seesAll = true;
+        bool Visit(ExpressionNode node, NodeShape shape)
+        {
+            if (!seesAll)
+                return false;
+            foreach (var local in shape.Locals)
+            {
+                if (local is Selection)
+                {
+                    seesAll = false;
+                    return false;
+                }
+            }
+            if (shape.Column is { } name)
+            {
+                var (source, column) = FindSourceColumnOfAnyKind(sources, name);
+                foreach (var (read, unread) in reads!)
+                {
+                    if (read == source)
+                        unread[column] = false;
+                }
+            }
+            return true;
+        }
+
+        foreach (var expression in expressions)
+            expression.Walk(Visit);
+        foreach (var excluder in fromClause.Excluders)
+            excluder.Walk(Visit);
+        foreach (var set in fromClause.GroupingSets)
+        {
+            foreach (var expression in set)
+                expression.Walk(Visit);
+        }
+        fromClause.Having?.Walk(Visit);
+        foreach (var item in fromClause.OrderBy)
+            item.Expr?.Walk(Visit);
+        foreach (var join in joins)
+            join.OnPredicate?.Walk(Visit);
+        if (!seesAll)
+            return;
+        foreach (var (read, unread) in reads)
+        {
+            // A read naming no column at all (COUNT(*)) still fetches one, so
+            // the remote query has a select list.
+            if (Array.TrueForAll(unread, static column => column))
+                unread[0] = false;
+            sources[read].LateralPlan!.UnfetchedRemoteColumns = Array.Exists(unread, static column => column) ? unread : null;
+        }
     }
 
     /// <summary>
     /// The rows of a read whose <c>vector</c> columns the provider lists as
     /// <c>varbinary</c> (<see cref="RemoteWrite.ProviderColumns"/>): a NULL one
     /// reads as NULL, and the first row holding a value is Msg 7346, after the
-    /// rows ahead of it (probed 2026-09-28 against SQL Server 2025, where only a
-    /// query that projects the column reaches it — here any read does).
+    /// rows ahead of it (probed 2026-09-28 against SQL Server 2025). A column
+    /// the query never names isn't fetched (<see cref="UnfetchedRemoteColumns"/>)
+    /// and reads as NULL.
     /// </summary>
     private static IEnumerable<byte[]> ExposeVectors(LinkedServer server, SqlType[] fetched, HeapColumn[] columns, List<byte[]> rows)
     {
@@ -93,8 +193,11 @@ partial class Selection
             var values = RowDecoder.DecodeRow(fetched, bytes);
             for (var i = 0; i < values.Length; i++)
             {
+                // An unfetched column arrives as a NULL of the literal's type.
                 if (fetched[i] is VectorSqlType)
                     values[i] = values[i].IsNull ? SqlValue.Null(exposed[i]) : throw SimulatedSqlException.RemoteRowDataNotConvertible(server);
+                else if (fetched[i] != exposed[i] && values[i].IsNull)
+                    values[i] = SqlValue.Null(exposed[i]);
             }
             yield return RowEncoder.EncodeRow(exposed, values);
         }

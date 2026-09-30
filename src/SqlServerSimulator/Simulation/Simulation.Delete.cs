@@ -241,7 +241,7 @@ partial class Simulation
             if (where is not null)
             {
                 var localValues = fullValues!;
-                SqlValue Resolve(MultiPartName name) => ReadTargetRowColumn(context.Batch, table, sourceView, localValues, viewRow, name);
+                SqlValue Resolve(MultiPartName name) => ReadTargetRowColumn(context.Batch, table, sourceView, localValues, viewRow, (pageIndex, slotIndex), name);
 
                 if (where.Run(new RuntimeContext(Resolve, context.Batch)) != true)
                     continue;

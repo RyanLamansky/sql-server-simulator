@@ -176,6 +176,80 @@ internal sealed class Cursor(
     /// kept through CLOSE — as <c>sp_describe_cursor</c> reports it.</summary>
     public int FetchStatus = -9;
 
+    /// <summary>When the cursor was declared, as <c>sys.dm_exec_cursors</c> reports it.</summary>
+    public DateTime CreationTime;
+
+    /// <summary>
+    /// The text of the batch (or module body) that declared the cursor, and
+    /// the declaring statement's first and last characters in it — what
+    /// <c>sys.dm_exec_cursors</c> reports as <c>sql_handle</c> and, doubled
+    /// into byte offsets, <c>statement_start_offset</c> /
+    /// <c>statement_end_offset</c> (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    public string DeclaringText = string.Empty;
+
+    public int DeclaringStart;
+
+    public int DeclaringEnd;
+
+    /// <summary>
+    /// The declaring statement's Query Store <c>statement_sql_handle</c> and
+    /// context settings id, when its database's store was READ_WRITE.
+    /// </summary>
+    public (byte[] Handle, long ContextSettingsId)? StatementIdentity;
+
+    /// <summary>Whether the cursor was declared <c>LOCAL</c> (a cursor variable's is reported global).</summary>
+    public bool DeclaredLocal;
+
+    /// <summary>Whether a FETCH has run since the cursor last opened.</summary>
+    private bool fetchedSinceOpen;
+
+    /// <summary>
+    /// <c>sys.dm_exec_cursors.fetch_buffer_size</c>: 1 while the last FETCH
+    /// since OPEN landed on a row, else 0 (probed 2026-09-30 against SQL
+    /// Server 2025).
+    /// </summary>
+    public int FetchBufferSize => this.IsOpen && this.fetchedSinceOpen && this.FetchStatus == 0 ? 1 : 0;
+
+    /// <summary>
+    /// <c>sys.dm_exec_cursors.fetch_buffer_start</c>: 0 before a FETCH since
+    /// OPEN and before the first row; past the last row -1; on a row its
+    /// 1-based position for a STATIC or KEYSET cursor and -1 for a DYNAMIC or
+    /// FAST_FORWARD one, which holds no positions (probed 2026-09-30 against
+    /// SQL Server 2025).
+    /// </summary>
+    public int FetchBufferStart
+    {
+        get
+        {
+            if (!this.IsOpen || !this.fetchedSinceOpen)
+                return 0;
+            if (this.Sensitivity == CursorSensitivity.Dynamic || this.FastForward)
+                return this.dynamicBeforeFirst && this.Sensitivity == CursorSensitivity.Dynamic ? 0 : -1;
+            var count = this.staticRows?.Count ?? this.keysetIdentities?.Count ?? 0;
+            return this.position < 0 ? 0 : this.position >= count ? -1 : this.position + 1;
+        }
+    }
+
+    /// <summary>
+    /// <c>sys.dm_exec_cursors.properties</c>: <c>TSQL | type | concurrency |
+    /// scope (0)</c>, the type and concurrency the cursor resolved to.
+    /// </summary>
+    public string DmvProperties
+    {
+        get
+        {
+            var type = this.FastForward ? "Fast_Forward" : this.Sensitivity switch
+            {
+                CursorSensitivity.Static => "Snapshot",
+                CursorSensitivity.Keyset => "Keyset",
+                _ => "Dynamic",
+            };
+            var concurrency = this.ReadOnly ? "Read Only" : this.Concurrency == CursorConcurrency.ScrollLocks ? "Scroll Locks" : "Optimistic";
+            return $"TSQL | {type} | {concurrency} | {(this.DeclaredLocal ? "Local" : "Global")} (0)";
+        }
+    }
+
     /// <summary>The qualifying rows <c>sp_describe_cursor</c> reports as
     /// <c>cursor_rows</c>: 0 closed, -1 for a DYNAMIC or FAST_FORWARD cursor,
     /// else the membership count.</summary>
@@ -282,6 +356,7 @@ internal sealed class Cursor(
         this.CurrentRids = null;
         this.OnKeysetHole = false;
         this.IsOpen = true;
+        this.fetchedSinceOpen = false;
         this.LastOperation = 1;
         this.LastOperationRows = 0;
         // SET CURSOR_CLOSE_ON_COMMIT closes, as the transaction ends, the
@@ -582,6 +657,7 @@ internal sealed class Cursor(
         };
         this.OnKeysetHole = status == -2;
         this.FetchStatus = status;
+        this.fetchedSinceOpen = true;
         this.LastOperation = 2;
         this.LastOperationRows = status == -1 ? 0 : 1;
 

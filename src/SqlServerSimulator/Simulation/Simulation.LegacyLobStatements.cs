@@ -61,7 +61,10 @@ partial class Simulation
             throw SimulatedSqlException.ReadTextWindowPastData(length);
 
         var column = table.Columns[columnIndex];
-        var slice = SliceLobValue(column.Type, current, (int)offset, size == 0 ? length - (int)offset : (int)size);
+        // A cell a write set NULL still has a pointer, and reads back as NULL.
+        var slice = current.IsNull
+            ? SqlValue.Null(column.Type)
+            : SliceLobValue(column.Type, current, (int)offset, size == 0 ? length - (int)offset : (int)size);
         return new SimulatedSqlResultSet([column.Type], [column.Name], [[slice]]);
     }
 
@@ -227,9 +230,8 @@ partial class Simulation
     /// <summary>
     /// The row a pointer addresses. A NULL pointer is Msg 7133 naming the
     /// utility, a pointer narrower than <c>binary(16)</c> is Msg 7122, and
-    /// bytes that carry no simulator signature, name another column, or name a
-    /// value no live row holds are Msg 7123 rendering the pointer as real
-    /// renders it.
+    /// bytes that name another table or column, a deleted row, or a cell with
+    /// no LOB root are Msg 7123 rendering the pointer as real renders it.
     /// </summary>
     private static (int PageIndex, int SlotIndex) ResolveTextPointerRow(HeapTable table, int columnIndex, SqlValue pointerValue, string utility, byte state)
     {
@@ -240,33 +242,46 @@ partial class Simulation
         var pointer = pointerValue.AsBytes;
         if (pointer.Length < LegacyTextPointer.Width)
             throw SimulatedSqlException.InvalidTextPointerType();
+        return LegacyTextPointer.TryResolve(pointer, table, columnIndex, out var address)
+            ? address
+            : throw SimulatedSqlException.InvalidTextPointerValue($"0x{Convert.ToHexString(pointer.AsSpan(0, LegacyTextPointer.Width))}");
+    }
 
-        var hex = $"0x{Convert.ToHexString(pointer.AsSpan(0, LegacyTextPointer.Width))}";
-        if (!LegacyTextPointer.TryRead(pointer, out var columnHash, out var valueHash)
-            || columnHash != LegacyTextPointer.ColumnHash(table.Columns[columnIndex].Name))
+    /// <summary>
+    /// The <c>text</c> / <c>ntext</c> / <c>image</c> columns among an
+    /// <c>UPDATE</c>'s assigned ones, or null when there are none — the only
+    /// columns whose cells <see cref="NoteRootedLobNulls"/> tracks.
+    /// </summary>
+    private static int[]? LegacyLobColumnsAmong(HeapTable table, IReadOnlyList<int> assigned)
+    {
+        List<int>? found = null;
+        foreach (var k in assigned)
         {
-            throw SimulatedSqlException.InvalidTextPointerValue(hex);
+            if (table.Columns[k].Type is TextSqlType or NTextSqlType or ImageSqlType)
+                (found ??= []).Add(k);
         }
+        return found?.ToArray();
+    }
 
-        var key = (columnHash, valueHash);
-        if (table.TextPointerRows is { } rows
-            && rows.TryGetValue(key, out var cached)
-            && table.Heap.ReadSlotBytes(cached.PageIndex, cached.SlotIndex) is not null)
+    /// <summary>
+    /// Before an <c>UPDATE</c> rewrites the row at the address, records each
+    /// of <paramref name="lobColumns"/> it takes from a value to NULL: real
+    /// keeps that cell's LOB root, so its text pointer stays (see
+    /// <see cref="Heap.RootedNullLobCells"/>).
+    /// </summary>
+    private static void NoteRootedLobNulls(HeapTable table, int[] lobColumns, int page, int slot, SqlValue[]? oldFull, SqlValue[] newFull)
+    {
+        foreach (var k in lobColumns)
         {
-            return cached;
-        }
-
-        var storedOrdinal = table.StorageOrdinals[columnIndex];
-        foreach (var (pageIndex, slotIndex, rowBytes) in table.Heap.EnumerateRowsWithAddress())
-        {
-            var cell = RowDecoder.DecodeColumn(table.StoredColumns, rowBytes, storedOrdinal, table.Heap);
-            if (cell.IsNull || LegacyTextPointer.ValueHash(cell) != valueHash)
+            if (!newFull[k].IsNull)
                 continue;
-            table.RememberTextPointerRow(key, (pageIndex, slotIndex));
-            return (pageIndex, slotIndex);
+            var ordinal = table.StorageOrdinals[k];
+            var old = oldFull is not null ? oldFull[k]
+                : table.Heap.ReadSlotBytes(page, slot) is { } bytes ? RowDecoder.DecodeColumn(table.StoredColumns, bytes, ordinal, table.Heap)
+                : SqlValue.Null(table.Columns[k].Type);
+            if (!old.IsNull)
+                table.Heap.MarkRootedNullLob(page, slot, ordinal);
         }
-
-        throw SimulatedSqlException.InvalidTextPointerValue(hex);
     }
 
     private static SqlValue ReadLobCell(HeapTable table, int columnIndex, (int PageIndex, int SlotIndex) address)
@@ -289,7 +304,11 @@ partial class Simulation
         var oldBytes = table.Heap.ReadSlotBytes(address.PageIndex, address.SlotIndex)
             ?? throw SimulatedSqlException.InvalidTextPointerValue("0x");
         var values = RowDecoder.DecodeRow(table.StoredColumns, oldBytes, table.Heap);
-        values[table.StorageOrdinals[columnIndex]] = newValue;
+        var storedOrdinal = table.StorageOrdinals[columnIndex];
+        // A cell written NULL keeps its LOB root, and with it its pointer.
+        if (newValue.IsNull && !values[storedOrdinal].IsNull)
+            table.Heap.MarkRootedNullLob(address.PageIndex, address.SlotIndex, storedOrdinal);
+        values[storedOrdinal] = newValue;
         var lockable = IsLockableTable(table);
         if (lockable)
             batch.AcquireRowLockTxScoped(table, address.PageIndex, address.SlotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);

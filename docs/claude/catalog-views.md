@@ -251,6 +251,7 @@ Remaining quirk: a decimal-declared sequence's inner reports BaseType `numeric` 
   **Not modeled yet**: plan handles, the query hashes, and real's background-task requests below SPID 51.
 - **`sys.dm_exec_sql_text(handle)`**, **`sys.dm_exec_input_buffer(session_id, request_id)`** and **`DBCC INPUTBUFFER`** read each session's current or most recent command text (`SessionToken.BatchText`); a handle resolves by matching the live sessions' handles, so there is no handle registry to outgrow, and a handle whose session has closed answers nothing where real's plan cache might still hold it.
   Both TVFs are `sys.`-qualified built-ins that an APPLY routes like a user TVF, so the monitoring join `CROSS APPLY sys.dm_exec_sql_text(r.sql_handle)` works.
+  `sys.dm_exec_cursors(session_id)` is one more, whose `sql_handle` resolves there too → [`cursors.md`](cursors.md#sysdm_exec_cursors).
   Every event is a `Language Event`: an RPC's own event type and text aren't distinguished.
 - **`sys.dm_os_sys_info`** describes the host process the way `sys.dm_os_host_info` does (probed 2026-09-25 against SQL Server 2025): the processor count, the memory the runtime sees, the process's CPU times, and the simulation's construction as `sqlserver_start_time`.
   `max_workers_count` and `scheduler_total_count` follow real's formulas from the CPU count; the affinity, time-source, soft-NUMA and memory-model columns carry real's defaults.

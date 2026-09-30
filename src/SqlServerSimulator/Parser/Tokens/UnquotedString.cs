@@ -10,6 +10,21 @@ sealed class UnquotedString : Name
     public override ReadOnlySpan<char> Span => Source;
 
     /// <summary>
+    /// Whether this names a <c>GOTO</c> label where it is declared: a single
+    /// <c>:</c> directly after the name. Real reads <c>lbl :</c> with a space
+    /// before the colon as Msg 102 (probed 2026-09-30 against SQL Server 2025),
+    /// and <c>::</c> is a scope qualifier, not a label.
+    /// </summary>
+    public bool IsLabelDeclaration
+    {
+        get
+        {
+            var end = this.EndIndex;
+            return end < this.command.Length && this.command[end] == ':' && (end + 1 == this.command.Length || this.command[end + 1] != ':');
+        }
+    }
+
+    /// <summary>
     /// Whether this is the <c>$partition</c> qualifier of a partition-function
     /// call. Only the tokenizer's <c>$</c>-word path yields an unquoted token
     /// starting with <c>$</c>, so a bracketed <c>[$partition]</c> never is.

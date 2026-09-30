@@ -17,7 +17,7 @@ The dispatch loop drains optional `;`s at the top of each iteration and trusts e
 Parsers that historically ended on the last token they consumed (DBCC's closing `)`, SET-session-state's `ON`/`OFF`) get a one-token advance via `IsStatementBoundary` after dispatch — Token already at `;`, end-of-batch, or a recognized statement-starting keyword is left alone.
 
 `Simulation.IsStatementBoundary(Token?)` is the **single source of truth** for "does this token begin a new top-level statement (or a hard boundary — `null` / `;` / the contextual `THROW`)?"
-It answers `true` for the full statement-keyword set: SELECT / INSERT / UPDATE / DELETE / MERGE / BEGIN / COMMIT / ROLLBACK / SAVE / CREATE / DROP / ALTER / DBCC / SET / DECLARE / WITH / IF / ELSE / END / WHILE / BREAK / CONTINUE / RETURN / PRINT / RAISERROR / WAITFOR / TRUNCATE / USE / GRANT / REVOKE / DENY / OPEN / FETCH / CLOSE / DEALLOCATE / EXEC / EXECUTE.
+It answers `true` for the full statement-keyword set: SELECT / INSERT / UPDATE / DELETE / MERGE / BEGIN / COMMIT / ROLLBACK / SAVE / CREATE / DROP / ALTER / DBCC / SET / DECLARE / WITH / IF / ELSE / END / WHILE / BREAK / CONTINUE / RETURN / PRINT / RAISERROR / WAITFOR / TRUNCATE / USE / GRANT / REVOKE / DENY / OPEN / FETCH / CLOSE / DEALLOCATE / EXEC / EXECUTE / RECONFIGURE / REVERT / CHECKPOINT / GOTO / BULK / KILL / READTEXT / WRITETEXT / UPDATETEXT / BACKUP / RESTORE / SHUTDOWN, and for a `GOTO` label's declaration (`UnquotedString.IsLabelDeclaration`), so a label directly after a statement ends it (probed 2026-09-30 against SQL Server 2025).
 Four consumers route through it so a new statement keyword is added in exactly one place:
 
 - the dispatch loop's post-statement cursor normalization + error-recovery scans;

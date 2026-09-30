@@ -238,4 +238,19 @@ public sealed class MergeJoinViewTests
         AreEqual(1, simulation.ExecuteScalar("select n from seen"));
         AreEqual(Untouched, Tables(simulation));
     }
+
+    /// <summary>
+    /// INSERTED reads a derived view column reading only the written table as
+    /// computed from the written row, not the view row as it stood (probed
+    /// 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Output_InsertedDerivedColumn_IsComputedFromTheWrittenRow()
+    {
+        var simulation = Seeded("create view vx as select a.id, a.x, a.x * 2 as x2, b.y from a join b on a.b_id = b.id");
+        using var reader = simulation.ExecuteReader("merge vx as t using (values (1, 11)) s(id, x) on t.id = s.id when matched then update set x = s.x output inserted.x2, deleted.x2;");
+        IsTrue(reader.Read());
+        AreEqual(22, reader.GetInt32(0));
+        AreEqual(20, reader.GetInt32(1));
+    }
 }

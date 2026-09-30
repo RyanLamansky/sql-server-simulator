@@ -73,12 +73,21 @@ It is a batch-level compile failure: no earlier statement in the batch runs and 
 ### The pointer encoding
 
 Real's pointer is an opaque handle into the LOB allocation structure that names a specific column and row.
-The simulator has no such structure, so it derives the 16 bytes from what identifies the cell: a 4-byte signature, a 4-byte FNV-1a-32 hash of the case-folded column name, and an 8-byte FNV-1a-64 hash of the cell's own value.
-The encoding is deterministic, so reading `TEXTPTR` twice off an unchanged cell yields the same bytes and two rows of one column yield different ones — both as on real.
+The simulator names the same two things directly: the table's object id, a 4-byte FNV-1a-32 hash of the case-folded column name, and the row's stable heap address, page then slot.
+The bytes won't match real's, and a pointer only ever resolves against the table and column it was read from.
 
-A write through a pointer changes the value its bytes were derived from, so the statements keep a per-`HeapTable` cache from (column hash, value hash) to the row address they settled on (`HeapTable.TextPointerRows`).
-That is what keeps one pointer driving the chunked idiom — a `WRITETEXT` followed by a run of appending `UPDATETEXT`s — which is the shape these statements exist for and which real supports because its pointer is physical.
-An entry naming an address that no longer holds a live row is discarded and the scan re-runs; the map is dropped wholesale past 4096 entries.
+The row's address reaches `TEXTPTR` through a row locator (see [`heap-storage.md`](heap-storage.md#row-addresses-reach-expressions-through-a-row-locator)), so the pointer follows the row rather than the value it holds.
+Probed 2026-09-30 against SQL Server 2025, all modeled:
+
+- Two rows of one column holding the **same value** get distinct pointers, and a write through one leaves the other row alone.
+- An **ordinary `UPDATE`** of the cell — or of the row's key, or one growing the row past its slot — leaves a pointer read before it valid, reading the new value.
+- A cell a write sets **NULL** (`UPDATE … SET c = NULL`, `WRITETEXT … NULL`) keeps its LOB root on real, so `TEXTPTR` still hands out a pointer to it, `TEXTVALID` answers 1, and `READTEXT` reads NULL; a cell that has never held a value has no pointer.
+  The heap records such cells (`Heap.RootedNullLobCells`), dropping a row's entry when the row is deleted and the whole set on `TRUNCATE`.
+- A **deleted** row's pointer is `TEXTVALID` 0 and Msg 7123 to the statements.
+- `TEXTPTR` reads only a base table's column: through a view or a derived table it is Msg 280.
+  Real raises it compiling the batch; the simulator raises it as the statement runs.
+
+`TEXTVALID` resolves its `'[db.][schema.]table.column'` name and answers 1 only for a pointer naming a live row of that table's column; a name resolving to no table or no `text` / `ntext` / `image` column is 0, as on real.
 
 ## `READTEXT` / `WRITETEXT` / `UPDATETEXT`
 
@@ -138,18 +147,16 @@ Msg 7133 is what forces the classic initialization dance: a cell that has never 
 
 ## Divergences
 
-- **Two rows of one column holding the same value share a pointer** and resolve to the first of them, since the pointer's row half is a hash of the value.
-  Real tells them apart.
-- **A `WRITETEXT` of NULL leaves the simulator's cell without a pointer** (`TEXTPTR` reads NULL again), where real keeps handing one out — real's pointer reflects an allocated LOB root rather than a non-NULL value, so on real the initialization dance is needed only once per cell.
-- **An ordinary `UPDATE` of the cell invalidates a pointer read before it** (Msg 7123 on next use) where real's stays valid and reads the new value.
-  The cached binding covers the sequence the statements themselves write; an outside write moves the value the pointer names.
+- **The pointer's bytes are the simulator's own**, so Msg 7123 renders different hex than real's for the same statement.
+- **A cell's LOB root is forgotten when a rolled-back delete restores its row**, so a cell a write had set NULL reads no pointer after that rollback where real's still has one.
 - A pointer wider than `binary(16)` reports Msg 7122 where real truncates to 16 bytes and reports Msg 7123.
 
 ## Not modeled yet
 
 - **`WRITETEXT BULK` / `UPDATETEXT BULK`** raise `NotSupportedException`.
   Real's bulk form is a bulk-copy data stream rather than a statement and answers Msg 185 (`Data stream is invalid for WRITETEXT statement in bulk form.`) to a normal client.
-- **Cross-session pointer reuse.** The binding cache lives on the table, so a pointer travels between connections of one `Simulation`; a pointer that outlives the value it names is Msg 7123 rather than real's physical-handle behavior.
+- **`TEXTPTR` in a joined `UPDATE` / `DELETE`, a write through a join view, or a `MERGE`** raises `NotSupportedException`: those statements' row resolvers don't carry a row locator.
+  A single-target `UPDATE` / `DELETE` and every read path do.
 - **`READTEXT` / `WRITETEXT` / `UPDATETEXT` through a view or a `#temp` table** resolve like any other `table.column` reference, so a view name reaches the view's own object rather than the base table's column and reports Msg 7125.
 - Binary `CHARINDEX` — `CHARINDEX(<varbinary>, <image>)` is real's binary search and the simulator's Msg 8116 (see [`scalars.md`](scalars.md#divergences)).
 - `SUBSTRING` over a `binary` / `varbinary` value under `SET ANSI_PADDING OFF` isn't distinguished; the simulator always reads the padded form.

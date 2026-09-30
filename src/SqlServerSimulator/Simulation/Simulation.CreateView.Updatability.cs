@@ -326,51 +326,91 @@ partial class Simulation
         || (body.UpdatabilityProfile is { Sources: [{ BackingView.IsWindowed: true }] });
 
     /// <summary>
-    /// Refuses a MERGE through a row-limited or windowed view when it runs:
-    /// its matching reads the rows the body yields, which only the DELETE /
-    /// UPDATE path pairs back to base rows.
-    /// </summary>
-    private static void RejectRowSelectiveMergeTarget(ParserContext context, View view, MultiPartName writtenName)
-    {
-        if (view is { IsRowLimited: true } or { IsWindowed: true } && !context.Batch.IsSkipping)
-            throw RowSelectiveViewWriteNotModeled(writtenName.ToString());
-    }
-
-    /// <summary>
     /// The rows a windowed or row-limited view or CTE yields, keyed by the base
-    /// row each came from, for a DELETE / UPDATE through it: real writes to
-    /// exactly those rows and reads the derived columns (a <c>ROW_NUMBER()</c>'s
-    /// <c>rn</c>) off them (probed 2026-09-25 against SQL Server 2025). Null
-    /// when the target is neither, or the write is positioned.
+    /// row each came from, for an UPDATE / DELETE / MERGE through it: real
+    /// writes to exactly those rows and reads the derived columns (a
+    /// <c>ROW_NUMBER()</c>'s <c>rn</c>) off them (probed 2026-09-25 and
+    /// 2026-09-30 against SQL Server 2025). Null when the target is neither, or
+    /// the write is positioned. A row's trailing element, past the body's own
+    /// columns, is the address it came from.
     /// </summary>
     /// <remarks>
-    /// The body runs once. A windowed body's rows arrive in the base heap's
-    /// order — the window stage places each result back on its input row and,
-    /// under <see cref="BatchContext.WindowRowsInArrivalOrder"/>, yields in
-    /// that order — so they pair, in order, with the base rows the view's
-    /// filter admits. A
-    /// row-limited body yields a subset in its own order, so each of its rows
-    /// is matched to an unclaimed base row whose direct columns agree; when two
-    /// candidates differ in a column the body didn't project, which one the
-    /// limit chose can't be told from its output, and the write refuses rather
-    /// than guess.
+    /// The body runs once, carrying each row's base address through its row
+    /// limit or window stage as a projected value
+    /// (<see cref="Selection.ExecuteWithRowAddresses"/>), so a limit choosing
+    /// between rows its projection can't tell apart still names the row it
+    /// chose. A body whose rows arrive through another view (a view over a
+    /// row-limited view) carries no address of its own, and falls back to
+    /// pairing (<see cref="PairRowSelectiveViewRows"/>).
     /// </remarks>
     private static Dictionary<(int Page, int Slot), SqlValue[]>? MaterializeRowSelectiveViewRows(ParserContext context, View? view, HeapTable table, bool positioned)
     {
         if (view is not ({ IsWindowed: true } or { IsRowLimited: true }) || positioned || context.Batch.IsSkipping)
             return null;
         var body = view.UnstoredBody ?? context.Connection.Simulation.ParseViewBodyPlan(context.Batch, view);
+        if (!body.HasTopOrOffsetOrFetch && !body.HasWindows
+            && body.UpdatabilityProfile is { Sources: [{ BackingView: { } lower }], Projections: var projections }
+            && lower is { IsWindowed: true } or { IsRowLimited: true })
+        {
+            return ProjectLowerViewRows(context, lower, projections, MaterializeRowSelectiveViewRows(context, lower, table, positioned: false)!);
+        }
+        var width = body.ColumnNames.Length;
+        var outputRows = body.ExecuteWithRowAddresses(context.Batch);
+        var rows = new Dictionary<(int Page, int Slot), SqlValue[]>();
+        foreach (var row in outputRows)
+        {
+            if (row.Length != width + 1 || row[width].IsNull)
+                return PairRowSelectiveViewRows(context, view, table, body);
+            rows[RowLocator.Unpack(row[width].AsInt64)] = row;
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// The rows of a view whose limit or window sits in the view it reads,
+    /// keyed by base address: each of the lower view's rows run through this
+    /// view's own projection, whose names read the lower row's columns. This
+    /// view's filter reads only direct columns, so the caller's
+    /// <see cref="View.VisibilityCheck"/> applies it to the base row (probed
+    /// 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    private static Dictionary<(int Page, int Slot), SqlValue[]> ProjectLowerViewRows(
+        ParserContext context, View lower, Expression[] projections, Dictionary<(int Page, int Slot), SqlValue[]> lowerRows)
+    {
+        var batch = context.Batch;
+        var collation = batch.CurrentDatabase.Collation;
+        SqlValue[] lowerRow = [];
+        SqlValue resolve(MultiPartName name) =>
+            IndexOfViewOutputColumn(collation, lower, name.Leaf) is var ordinal and >= 0 ? lowerRow[ordinal] : throw SimulatedSqlException.InvalidColumnName(name);
+        var runtime = new RuntimeContext(resolve, batch);
+        var rows = new Dictionary<(int Page, int Slot), SqlValue[]>(lowerRows.Count);
+        foreach (var (address, row) in lowerRows)
+        {
+            lowerRow = row;
+            var values = new SqlValue[projections.Length];
+            for (var k = 0; k < values.Length; k++)
+                values[k] = projections[k].Run(runtime);
+            rows[address] = values;
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// <see cref="MaterializeRowSelectiveViewRows"/> for a body whose rows
+    /// carry no address: runs it again and pairs its rows with the base rows
+    /// the view's filter admits — a windowed body's in the base heap's order
+    /// (the window stage places each result back on its input row and, under
+    /// <see cref="BatchContext.WindowRowsInArrivalOrder"/>, yields in that
+    /// order), a row-limited body's by matching an unclaimed base row whose
+    /// direct columns agree. When two candidates differ in a column the body
+    /// didn't project, which one the limit chose can't be told from its
+    /// output, and the write refuses rather than guess.
+    /// </summary>
+    private static Dictionary<(int Page, int Slot), SqlValue[]> PairRowSelectiveViewRows(ParserContext context, View view, HeapTable table, Selection body)
+    {
         List<SqlValue[]> outputRows;
-        var savedArrivalOrder = context.Batch.WindowRowsInArrivalOrder;
-        context.Batch.WindowRowsInArrivalOrder = true;
-        try
-        {
+        using (ParserScope.Enter(ref context.Batch.WindowRowsInArrivalOrder, true))
             outputRows = [.. body.Execute(context.Batch, null).RowValues];
-        }
-        finally
-        {
-            context.Batch.WindowRowsInArrivalOrder = savedArrivalOrder;
-        }
         var visible = new List<((int Page, int Slot) Address, SqlValue[] Values)>();
         foreach (var (page, slot, bytes) in table.Heap.EnumerateRowsWithAddress())
         {

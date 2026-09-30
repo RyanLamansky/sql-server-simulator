@@ -21,8 +21,11 @@ partial class Selection
 
     /// <summary>
     /// Parses a system TVF's parenthesized argument list, which takes exactly
-    /// <paramref name="count"/> arguments: fewer is Msg 313 and more Msg 8144,
-    /// both state 3 as real raises them for the <c>sys.dm_exec_*</c> functions.
+    /// <paramref name="count"/> arguments: fewer — none at all included — is
+    /// Msg 313 and more Msg 8144, both state 3 and at line 12 of the
+    /// function's own definition, as real raises them for the
+    /// <c>sys.dm_exec_*</c> functions (probed 2026-09-30 against SQL Server
+    /// 2025).
     /// </summary>
     private static Expression[] ParseSystemFunctionArguments(ParserContext context, string functionName, int count)
     {
@@ -33,6 +36,8 @@ partial class Selection
         for (var i = 0; ; i++)
         {
             context.MoveNextRequired();
+            if (i == 0 && context.Token is Operator { Character: ')' })
+                throw SimulatedSqlException.InsufficientArgumentsToFunction(functionName, 3).PinLine(12);
             var argument = Expression.Parse(context);
             if (i < count)
                 arguments[i] = argument;
@@ -41,9 +46,9 @@ partial class Selection
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             if (i < count - 1)
-                throw SimulatedSqlException.InsufficientArgumentsToFunction(functionName, 3);
+                throw SimulatedSqlException.InsufficientArgumentsToFunction(functionName, 3).PinLine(12);
             if (i >= count)
-                throw SimulatedSqlException.TooManyArgumentsToFunction(functionName, 3);
+                throw SimulatedSqlException.TooManyArgumentsToFunction(functionName, 3).PinLine(12);
             break;
         }
         context.MoveNextOptional();
@@ -150,4 +155,110 @@ partial class Selection
         }
         return null;
     }
+
+    private static readonly SqlType[] ExecCursorsSchema =
+    [
+        SqlType.Int32, SqlType.Int32,
+        NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit), NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.Implicit),
+        VarbinarySqlType.Get(64), SqlType.Int32, SqlType.Int32, SqlType.BigInt, SqlType.DateTime,
+        SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.Int32, SqlType.Int32, SqlType.Int32, SqlType.Int32,
+        SqlType.BigInt, SqlType.BigInt, SqlType.BigInt, SqlType.BigInt, VarbinarySqlType.Get(64), SqlType.BigInt,
+    ];
+
+    private static readonly string[] ExecCursorsColumnNames =
+    [
+        "session_id", "cursor_id", "name", "properties", "sql_handle", "statement_start_offset", "statement_end_offset",
+        "plan_generation_num", "creation_time", "is_open", "is_async_population", "is_close_on_commit", "fetch_status",
+        "fetch_buffer_size", "fetch_buffer_start", "ansi_position", "worker_time", "reads", "writes", "dormant_duration",
+        "statement_sql_handle", "statement_context_id",
+    ];
+
+    private static readonly bool[] ExecCursorsNullability =
+    [
+        false, false, true, false, true, false, false, false, false, false, false, false, false, false, false, false,
+        false, false, false, false, true, true,
+    ];
+
+    /// <summary>
+    /// Built-in system TVF <c>sys.dm_exec_cursors(session_id)</c>: one row per
+    /// cursor a session has declared, open or not — every session's for 0 or
+    /// NULL, none for a session id no session holds. A session without
+    /// <c>VIEW SERVER STATE</c> sees only its own. Probed 2026-09-30 against
+    /// SQL Server 2025, whose column shapes and per-state values the rows
+    /// follow; the cost columns (<c>worker_time</c>, <c>reads</c>,
+    /// <c>writes</c>, <c>dormant_duration</c>) read 0 and
+    /// <c>plan_generation_num</c> 1, a cursor's plan never recompiling here.
+    /// The session's local cursors and cursor variables are reached only for
+    /// the querying session; another session shows its global ones.
+    /// </summary>
+    public static Selection ParseExecCursors(ParserContext context, string functionName)
+    {
+        var arguments = ParseSystemFunctionArguments(context, functionName, 1);
+        return new Selection(ExecCursorsSchema, ExecCursorsColumnNames,
+            hasOrderBy: false,
+            hasTopOrOffsetOrFetch: false,
+            (batch, outerResolver) => EnumerateExecCursors(arguments[0], batch, outerResolver))
+        {
+            ColumnNullability = ExecCursorsNullability,
+        };
+    }
+
+    private static List<byte[]> EnumerateExecCursors(Expression sessionExpr, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        var session = sessionExpr.Run(new RuntimeContext(outerResolver ?? (n => throw SimulatedSqlException.InvalidColumnName(n)), batch));
+        var spid = session.IsNull ? 0 : session.CoerceTo(SqlType.Int32).AsInt32;
+        var security = batch.Connection.Security;
+        var seesAll = security.EffectiveIsDbo || batch.Connection.Simulation.HoldsServerPermission(security.Effective.LoginName, Permission.ViewServerState);
+        var rows = new List<(int Spid, int Handle, byte[] Row)>();
+        foreach (var connection in batch.Connection.Simulation.SnapshotConnections())
+        {
+            if ((spid != 0 && connection.Spid != spid) || (!seesAll && connection != batch.Connection))
+                continue;
+            var seen = new HashSet<Cursor>(ReferenceEqualityComparer.Instance);
+            void Add(Cursor? cursor, string name)
+            {
+                if (cursor is not null && seen.Add(cursor))
+                    rows.Add((connection.Spid, cursor.Handle, RowEncoder.EncodeRow(ExecCursorsSchema, ExecCursorsRow(connection.Spid, cursor, cursor.OriginVariable ?? name))));
+            }
+            // A session's local cursors and cursor variables live on the batch
+            // running, which only the querying session's own reach sees.
+            if (connection == batch.Connection)
+            {
+                foreach (var (name, cursor) in batch.LocalCursors)
+                    Add(cursor, name);
+                foreach (var (name, cursor) in batch.CursorVariables)
+                    Add(cursor, "@" + name);
+            }
+            foreach (var (name, cursor) in connection.Cursors)
+                Add(cursor, name);
+        }
+        rows.Sort(static (a, b) => a.Spid != b.Spid ? a.Spid.CompareTo(b.Spid) : a.Handle.CompareTo(b.Handle));
+        return rows.ConvertAll(static row => row.Row);
+    }
+
+    private static SqlValue[] ExecCursorsRow(int spid, Cursor cursor, string name) =>
+    [
+        SqlValue.FromInt32(spid),
+        SqlValue.FromInt32(cursor.Handle),
+        SqlValue.FromNVarchar(name),
+        SqlValue.FromNVarchar(cursor.DmvProperties),
+        SqlValue.FromVarbinary(BuiltInResources.SqlHandleOf(cursor.DeclaringText)),
+        SqlValue.FromInt32(cursor.DeclaringStart * 2),
+        SqlValue.FromInt32(cursor.DeclaringEnd * 2),
+        SqlValue.FromInt64(1),
+        SqlValue.FromDateTime(cursor.CreationTime),
+        SqlValue.FromBoolean(cursor.IsOpen),
+        SqlValue.FromBoolean(false),
+        SqlValue.FromBoolean(false),
+        SqlValue.FromInt32(cursor.FetchStatus),
+        SqlValue.FromInt32(cursor.FetchBufferSize),
+        SqlValue.FromInt32(cursor.FetchBufferStart),
+        SqlValue.FromInt32(1),
+        SqlValue.FromInt64(0),
+        SqlValue.FromInt64(0),
+        SqlValue.FromInt64(0),
+        SqlValue.FromInt64(0),
+        cursor.StatementIdentity is { } identity ? SqlValue.FromVarbinary(identity.Handle) : SqlValue.Null(VarbinarySqlType.Get(64)),
+        cursor.StatementIdentity is { } context ? SqlValue.FromInt64(context.ContextSettingsId) : SqlValue.Null(SqlType.BigInt),
+    ];
 }

@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
@@ -368,7 +369,7 @@ partial class Simulation
     /// body, else off the base row, where a derived column is Msg 207 — and
     /// otherwise by the table's.
     /// </summary>
-    private static SqlValue ReadTargetRowColumn(BatchContext batch, HeapTable table, View? view, SqlValue[] row, SqlValue[]? viewRow, MultiPartName name)
+    private static SqlValue ReadTargetRowColumn(BatchContext batch, HeapTable table, View? view, SqlValue[] row, SqlValue[]? viewRow, (int Page, int Slot) address, MultiPartName name)
     {
         if (view is not null)
         {
@@ -382,14 +383,36 @@ partial class Simulation
                         : row[baseOrd];
                 }
             }
-            throw SimulatedSqlException.InvalidColumnName(name);
+            throw RowLocator.IsLocatorName(name)
+                ? SimulatedSqlException.OnlyBaseTableColumnsInTextPtr()
+                : SimulatedSqlException.InvalidColumnName(name);
         }
         for (var k = 0; k < table.Columns.Length; k++)
         {
             if (batch.CurrentDatabase.Collation.Equals(table.Columns[k].Name, name.Leaf))
                 return row[k];
         }
-        throw SimulatedSqlException.InvalidColumnName(name);
+        return RowLocator.IsLocatorName(name)
+            ? ReadTargetRowLocator(batch, table, row, address, name)
+            : throw SimulatedSqlException.InvalidColumnName(name);
+    }
+
+    /// <summary>
+    /// A <see cref="RowLocator"/> read of the target row the write is
+    /// visiting — a <c>TEXTPTR</c> in its <c>SET</c> or <c>WHERE</c>, or the
+    /// row's address.
+    /// </summary>
+    private static SqlValue ReadTargetRowLocator(BatchContext batch, HeapTable table, SqlValue[] row, (int Page, int Slot) address, MultiPartName name)
+    {
+        if (name.Leaf[0] == RowLocator.AddressMarker)
+            return SqlValue.FromInt64(RowLocator.Pack(address));
+        var leaf = name.Leaf[1..];
+        for (var k = 0; k < table.Columns.Length; k++)
+        {
+            if (batch.CurrentDatabase.Collation.Equals(table.Columns[k].Name, leaf))
+                return LegacyTextPointer.For(table, k, address, row[k]);
+        }
+        throw SimulatedSqlException.InvalidColumnName(name.WithLeaf(leaf));
     }
 
     /// <summary>

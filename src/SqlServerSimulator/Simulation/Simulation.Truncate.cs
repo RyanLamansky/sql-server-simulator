@@ -125,6 +125,7 @@ partial class Simulation
         table.Heap.ForwardTargets.Clear();
         table.Heap.ClearFreeLobPages();
         table.Heap.ClearReclaimablePages();
+        table.Heap.RootedNullLobCells = null;
         // The page-swap rewinds heap state without going through Insert / DeleteAt,
         // so force any live seek cache to rebuild against the now-empty heap.
         table.Heap.InvalidateSeekJournal();

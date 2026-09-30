@@ -236,13 +236,19 @@ partial class Simulation
             return values;
         }
 
-        // The written row read back into the view's columns it projects.
+        // The written row read back into the view's columns: a direct one off
+        // the row, and for OUTPUT a derived one reading only the written table
+        // computed from it through the chain, so INSERTED sees its new value
+        // (probed 2026-09-30 against SQL Server 2025).
+        var derivedReader = output is null ? null : JoinViewDerivedReader(batch, plan);
         void MapBack(SqlValue[] viewValues, SqlValue[] baseValues)
         {
             for (var i = 0; i < viewValues.Length; i++)
             {
                 if (plan.ViewToBase[i] >= 0)
                     viewValues[i] = baseValues[plan.ViewToBase[i]];
+                else if (derivedReader?.Invoke(baseValues, i) is { } derived)
+                    viewValues[i] = derived.Type == viewRows.Columns[i].Type || derived.IsNull ? derived : derived.CoerceTo(viewRows.Columns[i].Type);
             }
         }
 
@@ -340,6 +346,29 @@ partial class Simulation
         return output is { HasTarget: false }
             ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, totalAffected)
             : new SimulatedNonQuery(totalAffected);
+    }
+
+    /// <summary>
+    /// Reads a join view's derived column off a written row of the plan's
+    /// table, evaluated down the chain with that row alone in its slot; null
+    /// for a column that also reads another source, which <c>INSERTED</c> may
+    /// not name (Msg 404) and so is never asked for.
+    /// </summary>
+    private static Func<SqlValue[], int, SqlValue?> JoinViewDerivedReader(BatchContext batch, JoinViewMergePlan plan)
+    {
+        var chain = plan.Chain;
+        var top = chain.Views.Length - 1;
+        var encode = JoinViewTargetSlotEncoder(batch, chain, plan.Path, chain.Sources, plan.Table);
+        var tuple = new byte[]?[chain.Sources.Length];
+        SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(chain.Sources, tuple, name, batch);
+        var resolveOutput = BuildChainResolvers(batch, chain, resolveTuple).Resolvers[^1];
+        return (row, ordinal) =>
+        {
+            if (JoinViewColumnReadsOtherSource(batch, chain, top, ordinal, plan.Path[0]))
+                return null;
+            tuple[plan.Path[0]] = encode(row);
+            return resolveOutput(new MultiPartName(chain.Views[top].OutputColumns[ordinal].Name));
+        };
     }
 
     /// <summary>

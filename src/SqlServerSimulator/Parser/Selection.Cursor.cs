@@ -251,6 +251,13 @@ internal sealed class CursorSourcePlan
     /// </summary>
     public readonly bool SupportsKeyset;
 
+    /// <summary>
+    /// Whether the SELECT reads a <see cref="RowLocator"/> (a <c>TEXTPTR</c>),
+    /// so each enumeration installs the statement's address map for the base
+    /// rows it reads. Copied from <see cref="Selection.InstallsRowAddresses"/>.
+    /// </summary>
+    public bool InstallsRowAddresses;
+
     public CursorSourcePlan(
         FromSource[] sources,
         JoinSpec[] joins,
@@ -725,7 +732,10 @@ internal sealed partial class Selection
 
         return new CursorSourcePlan(
             shape.Sources, shape.Joins, slots, shape.Projections, shape.Excluders,
-            selection.CursorOrderBy ?? [], selection.ColumnNames, shape.RowLimit);
+            selection.CursorOrderBy ?? [], selection.ColumnNames, shape.RowLimit)
+        {
+            InstallsRowAddresses = selection.InstallsRowAddresses,
+        };
     }
 
     /// <summary>
@@ -795,6 +805,8 @@ internal sealed partial class Selection
     /// </summary>
     private static List<CursorRow> EnumerateCursorRows(CursorSourcePlan plan, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, bool applyRowLimit)
     {
+        if (plan.InstallsRowAddresses)
+            batch.CurrentStatement.RowAddresses ??= new();
         var sources = plan.Sources;
         var width = sources.Length;
         var identityWidth = plan.IdentityTables.Length;
@@ -942,9 +954,11 @@ internal sealed partial class Selection
             var counts = io?.Touch(table);
             _ = counts?.ScanCount += 1;
             var lastPage = -1;
+            var addresses = batch.CurrentStatement.RowAddresses;
             foreach (var (page, slot, bytes) in table.Heap.EnumerateRowsWithAddress())
             {
                 counts?.Enter(page, ref lastPage);
+                addresses?.Record(bytes, page, slot);
                 scan.Bytes.Add(bytes);
                 scan.Rids.Add((page, slot));
                 scan.Uniquifiers.Add(uniquified ? table.Heap.UniquifierOf((page, slot)) : 0);

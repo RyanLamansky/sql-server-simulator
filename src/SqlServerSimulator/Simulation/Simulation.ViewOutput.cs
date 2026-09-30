@@ -153,11 +153,13 @@ partial class Simulation
         HeapColumn[] columns,
         JoinViewChain chain,
         FromSource[] sources,
-        int targetIndex,
+        int[] path,
         HeapTable table,
         Dictionary<SqlValue[], byte[]?[]>? tuplesByRow)
     {
         var top = chain.Views[^1];
+        var targetIndex = path[0];
+        var encodeTarget = JoinViewTargetSlotEncoder(batch, chain, path, sources, table);
         byte[]?[] tuple = [];
         SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, tuple, name, batch);
         var (resolvers, _) = BuildChainResolvers(batch, chain, resolveTuple);
@@ -168,13 +170,53 @@ partial class Simulation
             if (tuplesByRow is null || !tuplesByRow.TryGetValue(row, out var recorded))
             {
                 recorded = new byte[]?[sources.Length];
-                recorded[targetIndex] = RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, row));
+                recorded[targetIndex] = encodeTarget(row);
             }
             tuple = recorded;
             return resolveOutput(new MultiPartName(top.OutputColumns[ordinal].Name));
         }
 
         return new ViewOutputShape(columns, Read, ordinal => JoinViewColumnReadsOtherSource(batch, chain, chain.Views.Length - 1, ordinal, targetIndex));
+    }
+
+    /// <summary>
+    /// What the join tuple's slot <c>path[0]</c> holds for a written row of
+    /// <paramref name="table"/>: the row itself when the table is a bottom
+    /// source, or — when the source is a single-table view over it — that
+    /// view's row, each of its columns computed from the written one, so a
+    /// derived column reads the new value (probed 2026-09-30 against SQL
+    /// Server 2025). A nested join view would need its other sources' rows
+    /// for the columns reading them, and isn't built.
+    /// </summary>
+    private static Func<SqlValue[], byte[]> JoinViewTargetSlotEncoder(BatchContext batch, JoinViewChain chain, int[] path, FromSource[] sources, HeapTable table)
+    {
+        byte[] EncodeBase(SqlValue[] row) => RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, row));
+        if (path.Length == 1)
+            return EncodeBase;
+        if (path.Length != 2 || chain.Nested[path[0]] is not { Sources.Length: 1 } nested)
+            throw JoinOverJoinViewOutputNotModeled(chain.Views[^1]);
+
+        var nestedTuple = new byte[]?[1];
+        SqlValue resolveNested(MultiPartName name) => ResolveAcrossMutationTuple(nested.Sources, nestedTuple, name, batch);
+        var nestedOutput = BuildChainResolvers(batch, nested, resolveNested).Resolvers[^1];
+        var outputColumns = nested.Views[^1].OutputColumns;
+        var names = new MultiPartName[outputColumns.Length];
+        for (var k = 0; k < names.Length; k++)
+            names[k] = new MultiPartName(outputColumns[k].Name);
+        var schema = sources[path[0]].StoredSchema;
+        return row =>
+        {
+            nestedTuple[0] = EncodeBase(row);
+            var values = new SqlValue[schema.Length];
+            for (var k = 0; k < values.Length; k++)
+            {
+                var value = nestedOutput(names[k]);
+                values[k] = value.Type == schema[k].Type ? value
+                    : value.IsNull ? SqlValue.Null(schema[k].Type)
+                    : value.CoerceTo(schema[k].Type);
+            }
+            return RowEncoder.EncodeRow(schema, values);
+        };
     }
 
     /// <summary>

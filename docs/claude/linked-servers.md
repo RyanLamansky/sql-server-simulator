@@ -21,7 +21,7 @@ The edge-probe harness (`.vs/edge-probe`, `--linked`) maps a loopback `lb` on bo
 Four-part-name `srv.db.schema.t` references in FROM (parsed in [`Selection.cs::ParseSingleFromSource`](../../src/SqlServerSimulator/Parser/Selection.cs)), and a MERGE's `USING` source, route through [`BatchContext.TryResolveLinkedServerTable`](../../src/SqlServerSimulator/Parser/BatchContext.cs): leading segment → `Simulation.ActiveLinkedServers`, then 2nd/3rd/4th segments → the remote's table or view (direct in-process dict access, matching real SQL Server's "metadata at compile, data at execute" linked-server contract).
 A `sys` or `INFORMATION_SCHEMA` name reads the remote's catalog view, its columns found by running it once as `OPENQUERY` does.
 
-Execution opens a fresh `SimulatedDbConnection` on the remote, in the named database, and issues `SELECT * FROM [db].[schema].[t]` through the remote's full pipeline: parser, planner, lock manager, exception factories, session state.
+Execution opens a fresh `SimulatedDbConnection` on the remote, in the named database, and issues `SELECT <the columns the query names> FROM [db].[schema].[t]` through the remote's full pipeline: parser, planner, lock manager, exception factories, session state.
 An error the remote raises comes back as the remote raised it.
 The remote materializes the projection via `RowEncoder.EncodeRow(SqlType[], SqlValue[])` (no LOB store), so the byte rows are self-contained and cross-`Simulation`-portable — the local plan reads them via the same `RowDecoder` path as any other `FromSource`.
 `RemoteWrite.RunRemoteQuery` buffers the rows before the remote connection disposes, which drops remote locks promptly; matches the "fresh remote session per remote query" semantic of real SQL Server.
@@ -100,7 +100,7 @@ What the provider exposes of a four-part name's table or view (`RemoteWrite.Prov
 - A **CLR-typed** column — `geography`, `geometry`, `hierarchyid` — refuses the object with Msg 7325, which a pass-through query avoids: `OPENQUERY` and `EXEC … AT` return those values.
 - A **`json`** column isn't listed: `SELECT *` leaves it out, naming it is Msg 207, and an object whose only columns are `json` is Msg 7357.
   Through a pass-through query it reads as `varchar`.
-- A **`vector(n)`** column is listed as `varbinary(8 + 4n)`, its storage form's length; a NULL reads as NULL and a value is Msg 7346, raised as its row is reached and ending the batch, while a write whose statement doesn't set the column works.
+- A **`vector(n)`** column is listed as `varbinary(8 + 4n)`, its storage form's length; a NULL reads as NULL and a value is Msg 7346, raised as its row is reached and ending the batch, while a read whose query never names the column, and a write whose statement doesn't set it, work.
 
 ## Server options
 
@@ -127,12 +127,15 @@ Committing across two `Simulation`s would need a coordinator that real's default
 ## Divergences
 
 - **The replay isn't the statement real sends**: the simulator ships values it computed locally, where real ships a remotable single-table UPDATE's text for the server to evaluate — so a nondeterministic expression (`NEWID()`, `GETDATE()`) is evaluated by the local server, not the remote one.
-- **A `vector` value read through a four-part name** is Msg 7346 whenever a fetched row holds one, where real raises it only for a query that projects the column — `SELECT id`, `COUNT(*)` and `WHERE v IS NOT NULL` read on real, since its provider fetches only what the query names.
+- **A `vector` column a query names in anything but its output** is fetched, and a row holding a value is Msg 7346, where real remotes what it can and reads: `WHERE v IS NOT NULL`, `COUNT(v)`, `DATALENGTH(v)` and `CAST(v AS varchar(…))` (which answers the vector's text form) all run on the server there, and a query projecting `v` whose `WHERE` excludes every non-NULL row (`WHERE id = 2`) never fetches one (probed 2026-09-30 against SQL Server 2025).
+  A column named only inside a derived table's `SELECT *` is fetched too, where real's optimizer drops it.
 - **A `varbinary` value written into a remote `vector` column** is refused by the server's own conversion, which is Msg 206 here and Msg 13609 on real, whose provider sends it differently.
 
 ## Not modeled yet
 
-- **Predicate / projection pushdown**: every four-part-name read pulls the full remote table, and so does a write's stand-in.
+- **Predicate pushdown**: every four-part-name read pulls every remote row, and a write's stand-in the full table.
+  The projection is pushed: a read's remote query names only the columns its query does (`Selection.UnfetchedRemoteColumns`), reading the others as NULL, so a `vector` column real's provider can't convert stops the read only when the query names it (probed 2026-09-30 against SQL Server 2025).
+  A query whose reach the walk can't see all of — a subquery or an `APPLY` — fetches every column.
 - **LOB columns**: the remote projection uses the type-only `RowEncoder.EncodeRow` overload (no LOB store), so a MAX payload large enough to overflow the 65535-byte var-section cap raises during encoding on the remote.
 - **`@@SERVERNAME`** isn't routed — the local-server row in `sys.servers` uses the constant `"SIMULATED"` for `name` regardless of any host-configured value.
 - **`EXEC … AT DATA_SOURCE`**.

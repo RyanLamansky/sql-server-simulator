@@ -195,7 +195,7 @@ Inner CommandText-equivalent contexts (procedure / function / trigger / dynamic-
 ### `GOTO` and labels
 
 `GOTO <label>` jumps to a `label:` declaration elsewhere in the same batch or module body.
-A label is an **unquoted** identifier followed by a single `:` — real refuses the delimited spelling (`[my label]:` is Msg 102) — and label names are matched under the database collation, so `GOTO L` finds `l:`.
+A label is an **unquoted** identifier followed directly by a single `:` — real refuses the delimited spelling (`[my label]:` is Msg 102) and a space before the colon (`lbl :` is Msg 102, probed 2026-09-30) — and label names are matched under the database collation, so `GOTO L` finds `l:`.
 
 **The label pass runs while the batch compiles**, ahead of every statement, which is what makes three refusals compile-phase (all class 15, all probe-confirmed against SQL Server 2025 on 2026-08-08):
 

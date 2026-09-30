@@ -656,30 +656,6 @@ internal sealed class HeapTable : SchemaObject
     /// </summary>
     public readonly ConcurrentDictionary<(int PageIndex, int SlotIndex), RowVersionChain> RowVersions = new();
 
-    /// <summary>
-    /// Row addresses the legacy text-pointer statements have settled, keyed by
-    /// the two identity halves the pointer carries. A pointer is derived from
-    /// the cell's own value, so a write through one leaves its bytes naming a
-    /// value no row holds; the binding recorded on first use is what keeps the
-    /// same pointer driving the following <c>UPDATETEXT</c>s. Entries are a
-    /// cache — a stale one is discarded when the address no longer holds a live
-    /// row — and the whole map is dropped once it passes
-    /// <see cref="TextPointerRowCap"/>, since nothing but a long-running
-    /// pointer-per-row loop can grow it.
-    /// </summary>
-    public Dictionary<(uint ColumnHash, ulong ValueHash), (int PageIndex, int SlotIndex)>? TextPointerRows;
-
-    private const int TextPointerRowCap = 4096;
-
-    /// <summary>Records a resolved text-pointer binding, bounding the map.</summary>
-    public void RememberTextPointerRow((uint ColumnHash, ulong ValueHash) key, (int PageIndex, int SlotIndex) address)
-    {
-        var rows = this.TextPointerRows ??= [];
-        if (rows.Count >= TextPointerRowCap)
-            rows.Clear();
-        rows[key] = address;
-    }
-
     internal string DebugDisplay() => $"{this.Name} ({string.Join(", ", this.Columns.Select(c => c.Name))})";
 
     /// <summary>

@@ -915,11 +915,16 @@ internal sealed class RemoteWrite
             : schema;
 
     /// <summary>A projection of <paramref name="columns"/> by name, bracketed.</summary>
-    internal static string ColumnList(HeapColumn[] columns)
+    internal static string ColumnList(HeapColumn[] columns, bool[]? unfetched = null)
     {
         var text = new StringBuilder();
-        foreach (var column in columns)
-            _ = (text.Length > 0 ? text.Append(", ") : text).Append(Bracket(column.Name));
+        for (var i = 0; i < columns.Length; i++)
+        {
+            _ = text.Length > 0 ? text.Append(", ") : text;
+            _ = unfetched is not null && unfetched[i]
+                ? text.Append("NULL AS ").Append(Bracket(columns[i].Name))
+                : text.Append(Bracket(columns[i].Name));
+        }
         return text.ToString();
     }
 

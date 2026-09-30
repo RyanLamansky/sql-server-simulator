@@ -644,7 +644,7 @@ partial class Simulation
             if (viewRows is not null && !viewRows.TryGetValue((pageIndex, slotIndex), out viewRow))
                 continue;
 
-            SqlValue ResolveOriginal(MultiPartName name) => ReadTargetRowColumn(context.Batch, table, sourceView, fullValues, viewRow, name);
+            SqlValue ResolveOriginal(MultiPartName name) => ReadTargetRowColumn(context.Batch, table, sourceView, fullValues, viewRow, (pageIndex, slotIndex), name);
 
             if (where is not null && where.Run(new RuntimeContext(ResolveOriginal, context.Batch)) != true)
                 continue;
@@ -785,7 +785,7 @@ partial class Simulation
             EvaluateComputedColumns(table, fullValues, batch);
             if (sourceView?.VisibilityCheck is { } vis && !vis(fullValues, batch))
                 continue;
-            SqlValue Resolve(MultiPartName name) => ReadTargetRowColumn(batch, table, sourceView, fullValues, viewRow: null, name);
+            SqlValue Resolve(MultiPartName name) => ReadTargetRowColumn(batch, table, sourceView, fullValues, viewRow: null, (kv.Key.PageIndex, kv.Key.SlotIndex), name);
             if (where is not null && where.Run(new RuntimeContext(Resolve, batch)) != true)
                 continue;
             batch.Connection.CurrentTransaction?.EndRollback();
@@ -1044,10 +1044,13 @@ partial class Simulation
         var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(table);
         var trackedColumns = tracking?.UpdatedColumns(table, keyOrdinals, updatedColumnOrdinals);
         List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
+        var lobColumns = LegacyLobColumnsAmong(table, updatedColumnOrdinals);
         for (var i = 0; i < affected.Count; i++)
         {
             var (pageIndex, slotIndex, fullNew, fullOld) = affected[i];
             table.OwningDatabase?.RejectWriteWhenReadOnly();
+            if (lobColumns is not null)
+                NoteRootedLobNulls(table, lobColumns, pageIndex, slotIndex, fullOld, fullNew);
             tracking?.RecordUpdate(context.Batch, table, keyOrdinals, fullOld ?? DecodeFullRow(table, table.Heap.ReadSlotBytes(pageIndex, slotIndex)!), fullNew, trackedColumns, ref keyMoves);
             if (lockableTable)
             {
@@ -1898,7 +1901,11 @@ partial class Simulation
     {
         var (s, c) = Selection.FindSourceColumn(sources, name);
         if (s == -1)
-            throw SimulatedSqlException.InvalidColumnName(name);
+        {
+            throw RowLocator.IsLocatorName(name)
+                ? new NotSupportedException("TEXTPTR in a joined UPDATE, DELETE or a write through a join view isn't modeled: its rows don't carry the address a text pointer names.")
+                : SimulatedSqlException.InvalidColumnName(name);
+        }
 
         var bytes = tuple[s];
         return bytes is null

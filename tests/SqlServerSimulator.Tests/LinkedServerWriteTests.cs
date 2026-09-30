@@ -526,4 +526,24 @@ public class LinkedServerWriteTests
         AreEqual(2, vectorLocal.ExecuteNonQuery("delete OTHER.simulated.dbo.t"));
         AreEqual(0, vectorRemote.ExecuteScalar("select count(*) from t"));
     }
+
+    /// <summary>
+    /// A read fetches only the columns its query names, so one that never
+    /// names the vector column reads a table whose vector values the provider
+    /// can't convert (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select string_agg(id, ',') within group (order by id) from OTHER.simulated.dbo.t", "1,2")]
+    [DataRow("select cast(count(*) as varchar(9)) from OTHER.simulated.dbo.t", "2")]
+    [DataRow("select string_agg(id, ',') within group (order by n desc) from OTHER.simulated.dbo.t", "2,1")]
+    [DataRow("select cast(n as varchar(9)) from OTHER.simulated.dbo.t where id = 1", "5")]
+    [DataRow("select id, n into #x from OTHER.simulated.dbo.t; select cast(sum(n) as varchar(9)) from #x", "11")]
+    [DataRow("create table u (id int); insert u values (1); select cast(t.n as varchar(9)) from u join OTHER.simulated.dbo.t t on t.id = u.id", "5")]
+    [DataRow("select case when exists (select * from OTHER.simulated.dbo.t) then 'y' else 'n' end", "y")]
+    public void VectorColumn_TheQueryNeverNames_IsNotFetched(string sql, string expected)
+    {
+        var (local, _) = Linked("create table t (id int primary key, v vector(2), n int); insert t values (1, '[1,2]', 5), (2, null, 6)");
+        AreEqual(expected, local.ExecuteScalar(sql));
+        _ = local.AssertSqlError("select id, v from OTHER.simulated.dbo.t", 7346);
+    }
 }

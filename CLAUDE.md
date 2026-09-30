@@ -117,6 +117,7 @@ Column resolution is qualifier-aware via `FindSourceColumn` / `ResolveAcrossTupl
 Never pass a local function as its own `selfRecursive` argument; that allocates a delegate per resolution per row, which once measured as 41% of profile bytes.
 The same rule reaches the _arrays_ a per-row loop fills (grouping keys, hash-join bucket keys, bounded-`TOP` projections): write into reused scratch and copy out only where something retains them.
 The aggregate executor accumulates straight off the enumeration for a single grouping set, which is observable in _which_ error a row raises → [`query.md`](docs/claude/query.md#streaming-accumulation-and-where-an-error-surfaces).
+A base row's heap address reaches an expression as a `RowLocator` name the tuple resolver binds below -1, read from a map the heap row producers fill only while a statement installs one; a consumer that needs a row's identity past a projection, sort or window asks for it this way rather than threading addresses through a stage → [`heap-storage.md`](docs/claude/heap-storage.md#row-addresses-reach-expressions-through-a-row-locator).
 
 ### `MultiPartName`
 Readonly struct, up to 4 inline slots.

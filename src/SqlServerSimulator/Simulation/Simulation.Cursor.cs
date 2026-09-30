@@ -315,7 +315,13 @@ partial class Simulation
             fastForward)
         {
             Handle = batch.Connection.LastCursorHandle += 2,
+            CreationTime = DateTime.Now,
+            DeclaringText = batch.Parser.Command.CommandText,
+            DeclaringStart = batch.CurrentStatement.StartIndex,
+            DeclaringEnd = Math.Max(batch.CurrentStatement.StartIndex, batch.Parser.PreviousTokenEnd - 1),
+            DeclaredLocal = localScope,
         };
+        cursor.StatementIdentity = QueryStoreStatementIdentity(batch, cursor.DeclaringText[cursor.DeclaringStart..(cursor.DeclaringEnd + 1)]);
 
         // Scope: explicit LOCAL wins; otherwise the database's CURSOR_DEFAULT,
         // which the simulator models as GLOBAL (real SQL Server's install

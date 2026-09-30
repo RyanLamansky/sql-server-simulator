@@ -137,6 +137,18 @@ internal readonly struct MultiPartName
     }
 
     /// <summary>
+    /// This name with its <see cref="Leaf"/> replaced by <paramref name="leaf"/>,
+    /// every qualifier and flag kept.
+    /// </summary>
+    public MultiPartName WithLeaf(string leaf) => this.Count switch
+    {
+        1 => this.FromText ? new(leaf, this.LeafDelimited) : new(leaf),
+        2 => new(this.p1, leaf, null, null, 2, this.omittedLeading, this.SchemaOmitted, this.LeafDelimited, this.FromText),
+        3 => new(this.p1, this.p2!, leaf, null, 3, this.omittedLeading, this.SchemaOmitted, this.LeafDelimited, this.FromText),
+        _ => new(this.p1, this.p2!, this.p3!, leaf, 4, this.omittedLeading, this.SchemaOmitted, this.LeafDelimited, this.FromText),
+    };
+
+    /// <summary>
     /// Indexed access to populated segments, left-to-right. <c>name[0]</c> is
     /// the leftmost qualifier (e.g. the db in <c>db.schema.table</c>);
     /// <c>name[Count - 1]</c> is the <see cref="Leaf"/>.

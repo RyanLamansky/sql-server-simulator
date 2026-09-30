@@ -99,6 +99,7 @@ internal readonly ref struct QueryBlockScope
     private readonly Func<MultiPartName, DataMask?>? outerMaskResolver;
     private readonly FromSource[]? scopeSources;
     private readonly NextValueForScope nextValueForRejection;
+    private readonly bool readsRowLocators;
 
     public QueryBlockScope(ParserContext context, List<AggregateExpression> aggregates, List<WindowExpression> windows)
     {
@@ -114,6 +115,7 @@ internal readonly ref struct QueryBlockScope
         this.outerMaskResolver = context.OuterMaskResolver;
         this.scopeSources = context.ScopeSources;
         this.nextValueForRejection = context.NextValueForRejection;
+        this.readsRowLocators = context.ReadsRowLocators;
         context.EnclosingAggregateCollector = context.AggregateCollector;
         context.AggregateCollector = aggregates;
         context.WindowCollector = windows;
@@ -121,9 +123,13 @@ internal readonly ref struct QueryBlockScope
         context.FromSourceColumnSink = null;
         context.DeferNextValueRefusals = true;
         context.DeferredNextValueRefs = null;
+        context.ReadsRowLocators = false;
     }
 
-    /// <summary>Restores every field's entry value.</summary>
+    /// <summary>
+    /// Restores every field's entry value, save that a row locator the block
+    /// read is handed on to the enclosing block.
+    /// </summary>
     public void Dispose()
     {
         var context = this.context;
@@ -138,5 +144,6 @@ internal readonly ref struct QueryBlockScope
         context.OuterMaskResolver = this.outerMaskResolver;
         context.ScopeSources = this.scopeSources;
         context.NextValueForRejection = this.nextValueForRejection;
+        context.ReadsRowLocators |= this.readsRowLocators;
     }
 }

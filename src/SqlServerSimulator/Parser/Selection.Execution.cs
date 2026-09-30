@@ -1810,9 +1810,14 @@ internal sealed partial class Selection
             }
         }
 
+        // A four-part read leaves out the columns the query never names.
+        NoteUnreadRemoteColumns(sources, joins, expressions, fromClause);
+
         // The plan the closure below belongs to, for recognizing an emptiness
-        // probe of it (see HasAnyRow); assigned once the plan exists.
+        // probe of it (see HasAnyRow) or a row-address run (see
+        // ExecuteWithRowAddresses); assigned once the plan exists.
         Selection? self = null;
+        var installsRowAddresses = parseBatch.Parser.ReadsRowLocators;
         var selection = new Selection(outputSchema, outputColumnNames,
             hasOrderBy: orderBy.Count > 0,
             hasTopOrOffsetOrFetch: topExpression is not null || offsetExpression is not null || fetchExpression is not null,
@@ -1820,6 +1825,10 @@ internal sealed partial class Selection
             {
                 if (resultIsProvablyEmpty)
                     return [];
+                // A query reading a row locator has its sources' producers
+                // record each row's address from here on (see RowLocator).
+                if (installsRowAddresses)
+                    batch.CurrentStatement.RowAddresses ??= new();
                 // Per-execution count resolution: the expressions may carry
                 // parameters, and this closure replays across executions of a
                 // plan-cached SELECT (EF's Skip/Take shape), so the values
@@ -1867,7 +1876,9 @@ internal sealed partial class Selection
                 // An emptiness probe of this plan (HasAnyRow) needs its rows,
                 // not their values, so it projects nothing — unless an ORDER BY
                 // reads the projection.
-                var projection = orderBy.Count == 0 && ReferenceEquals(batch.ExistenceProbe, self) ? [] : expressions;
+                var projection = orderBy.Count == 0 && ReferenceEquals(batch.ExistenceProbe, self) ? []
+                    : ReferenceEquals(batch.RowAddressProbe, self) ? [.. expressions, new RowAddress(0)]
+                    : expressions;
                 return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
                     ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, projection, fromClause, outputColumnNames, aggregateOrderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver)
                     : windows.Count > 0
@@ -1891,6 +1902,7 @@ internal sealed partial class Selection
         if (selection.CursorShape is not null)
             selection.CursorOrderBy = orderBy;
         self = selection;
+        selection.InstallsRowAddresses = installsRowAddresses;
         selection.ColumnNullability = columnNullability;
         selection.ProjectionExpressions = [.. expressions];
         var drawnProjection = PassThroughDrawnColumns(expressions, sources);

@@ -102,9 +102,6 @@ partial class Simulation
             {
                 sourceView = resolvedView;
                 destinationTable = baseTable;
-                // A MERGE matches against the rows the view yields, so its row
-                // limit or window applies to every action.
-                RejectRowSelectiveMergeTarget(context, resolvedView, destinationName);
             }
         }
         else
@@ -217,7 +214,7 @@ partial class Simulation
         var output = TryParseMergeOutputClause(
             context, destinationTable, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks,
             joinWrite is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output }
-                ? new ViewOutputShape(destinationTable.Columns, read: null, insertedRefused: joinWrite.Path.Length == 1
+                ? new ViewOutputShape(destinationTable.Columns, read: null, insertedRefused: joinWrite.Path.Length == 1 || (joinWrite.Path.Length == 2 && joinWrite.Chain.Nested[joinWrite.Path[0]] is { Sources.Length: 1 })
                     ? ordinal => JoinViewColumnReadsOtherSource(context.Batch, joinWrite.Chain, joinWrite.Chain.Views.Length - 1, ordinal, joinWrite.Path[0])
                     : throw JoinOverJoinViewOutputNotModeled(viewRowsTarget!))
                 : viewRowsTarget is not null
@@ -1562,6 +1559,30 @@ partial class Simulation
         var sourceMatched = new bool[sourceRows.Count];
         var defaultTargetName = sourceView?.Name ?? destinationTable.Name;
 
+        // A MERGE through a row-limited or windowed view matches against the
+        // rows the view yields, so its row limit or window applies to every
+        // action, and the body's derived columns (a ROW_NUMBER()'s rn) read off
+        // the view row each base row showed as (probed 2026-09-30 against SQL
+        // Server 2025).
+        var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, destinationTable, positioned: false);
+        var viewRowOf = viewRows is null ? null : new Dictionary<SqlValue[], SqlValue[]>(ReferenceEqualityComparer.Instance);
+        bool TryReadDerivedTargetColumn(SqlValue[]? targetValues, string leaf, out SqlValue value)
+        {
+            value = default;
+            if (viewRowOf is null)
+                return false;
+            for (var i = 0; i < sourceView!.OutputColumns.Length; i++)
+            {
+                if (!context.Batch.CurrentDatabase.Collation.Equals(sourceView.OutputColumns[i].Name, leaf))
+                    continue;
+                value = targetValues is not null && viewRowOf.TryGetValue(targetValues, out var viewRow)
+                    ? viewRow[i]
+                    : SqlValue.Null(sourceView.OutputColumns[i].Type);
+                return true;
+            }
+            return false;
+        }
+
         // Target-side column lookup: user-facing names match view OutputColumns
         // when a view target is in scope, otherwise base table columns. View
         // path translates the matched user-name to a base ordinal via
@@ -1577,6 +1598,8 @@ partial class Simulation
             {
                 if (TryLookupTargetColumn(context.Batch.CurrentDatabase.Collation, name.Leaf, destinationTable, sourceView, out var targetOrdinal, out var targetType))
                     return targetValues is null ? SqlValue.Null(targetType) : targetValues[targetOrdinal];
+                if (TryReadDerivedTargetColumn(targetValues, name.Leaf, out var derived))
+                    return derived;
             }
             if (context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, sourceAlias))
             {
@@ -1590,13 +1613,17 @@ partial class Simulation
             {
                 if (TryLookupTargetColumn(context.Batch.CurrentDatabase.Collation, name.Leaf, destinationTable, sourceView, out var targetOrdinal, out var targetType))
                     return targetValues is null ? SqlValue.Null(targetType) : targetValues[targetOrdinal];
+                if (TryReadDerivedTargetColumn(targetValues, name.Leaf, out var derived))
+                    return derived;
                 for (var i = 0; i < sourceColumnNames.Length; i++)
                 {
                     if (context.Batch.CurrentDatabase.Collation.Equals(sourceColumnNames[i], name.Leaf))
                         return sourceValues is null ? SqlValue.Null(sourceSchema[i]) : sourceValues[i];
                 }
             }
-            throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
+            throw RowLocator.IsLocatorName(name)
+                ? new NotSupportedException("TEXTPTR in a MERGE isn't modeled: its target and source rows don't carry the address a text pointer names.")
+                : SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
         }
 
         Selection.SettleSerializableMergeFence(
@@ -1785,6 +1812,12 @@ partial class Simulation
                 // semantics.
                 if (sourceView?.VisibilityCheck is { } vis && !vis(targetValues, context.Batch))
                     continue;
+                if (viewRows is not null)
+                {
+                    if (!viewRows.TryGetValue((pageIndex, slotIndex), out var viewRow))
+                        continue;
+                    viewRowOf![targetValues] = viewRow;
+                }
 
                 // Find all matching source rows, ascending source index either
                 // way — the bucket chain links in build order.
@@ -2216,8 +2249,11 @@ partial class Simulation
             var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(destinationTable);
             var trackedColumns = tracking?.UpdatedColumns(destinationTable, keyOrdinals, updatedColumnOrdinals);
             List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
+            var lobColumns = LegacyLobColumnsAmong(destinationTable, updatedColumnOrdinals);
             foreach (var (page, slot, oldValues, newValues, _) in pendingUpdates)
             {
+                if (lobColumns is not null)
+                    NoteRootedLobNulls(destinationTable, lobColumns, page, slot, oldValues, newValues);
                 tracking?.RecordUpdate(context.Batch, destinationTable, keyOrdinals, oldValues, newValues, trackedColumns, ref keyMoves);
                 var rewritten = RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap);
                 if (lockableTable)

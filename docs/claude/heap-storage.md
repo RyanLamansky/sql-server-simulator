@@ -50,3 +50,19 @@ Every other family's value factory normalizes its payload at construction (`From
 **The live page counts are surfaced to the catalog**: `Heap.Pages.Count` (data pages) and `Heap.LobPages.Count` (LOB-chain pages) back `sys.allocation_units.total_pages` / `used_pages` / `data_pages`, and their per-database sum (`BuiltInResources.SumDataFilePages`) sizes `sys.database_files` / `sys.master_files` and `FILEPROPERTY(<db>, 'SpaceUsed')`.
 Because reclaimed interior pages stay in `Pages` (only the tail trims), these counts reflect the peak concurrent working set, not a post-GC minimum — a divergence from real SQL Server's IAM-tracked allocation.
 See [`catalog-views.md`](catalog-views.md) for the self-consistency contract.
+
+## Row addresses reach expressions through a row locator
+
+A heap source hands each row to the executor as a fresh `byte[]`, and expressions see a row only through the tuple's column resolver, so nothing downstream of a scan knew which `(page, slot)` a value came from.
+`RowLocator` carries it: a consumer asks for a name no identifier can spell — a marker character in front of a column's leaf for its `TEXTPTR`, or in front of a source index for the bare address — and the name travels the ordinary resolver chain, correlation to an enclosing query included.
+`SourceColumnMemo` binds it on its miss path as a source below -1, which `ResolveAcrossTuple` already branches on for the outer-scope fallthrough, so an ordinary column resolution pays nothing for it.
+
+The address comes from `RowAddressMap` on `StatementContext.RowAddresses`, keyed by the yielded array's reference: every heap row producer a query source reads through — the lock-checked scan (heap and clustered order, snapshot versions), the unlocked scan, the index-seek and snapshot seek materializations, and the cursor's slot scan — records the array against the address it read, but only while the statement has installed a map.
+A plan whose query block reads a locator installs one as it starts (`Selection.InstallsRowAddresses`, settled at parse by `ParserContext.ReadsRowLocators`), and `Selection.ExecuteWithRowAddresses` installs one around a body it runs with the address of each row appended to its projection.
+With no map installed, each producer tests one local it read once per enumeration.
+
+Because the address is a projected value, it passes through a `TOP`, a sort or a window stage with its row, which is what lets a write through a row-limited or windowed body name the base row behind each row the body yields ([`programmable.md`](programmable.md#updatable-views-dml-through-views)).
+A body whose rows arrive through another view carries no address of its own: the view's rows are re-encoded, so the locator reads NULL there and the consumer falls back to pairing.
+
+Measured on the index replay (2.1M records): **62.2 / 60.7 s** without the mechanism and **62.2 / 60.8 s** with it, and none of the producers' loops gained an allocation.
+

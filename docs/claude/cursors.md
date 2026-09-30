@@ -384,7 +384,24 @@ A column row's flags are 0x2 for a fixed-length type, 0x4 for a column the proje
 A table row names each table or view the query reads — a view as itself, a `#temp` table under tempdb — for a static cursor as much as a keyset one, with no hint or lock type.
 A NULL or unknown source is Msg 16902 (state 40 / 42), a NULL identity Msg 16902 state 43, a missing cursor Msg 16916 state 4, and an undeclared variable Msg 137 state 100, each from the procedure's own line.
 
+### `sys.dm_exec_cursors`
+
+`sys.dm_exec_cursors(session_id)` lists every cursor a session has declared, open or not, with real's 22 columns and shapes (probed 2026-09-30 against SQL Server 2025); 0 or NULL lists every session's, and a session id nobody holds none.
+A session without `VIEW SERVER STATE` sees only its own, and the wrong argument count is Msg 313 / Msg 8144 at line 12, as for the other `sys.dm_exec_*` functions.
+
+- **`properties`** is `TSQL | <type> | <concurrency> | <scope> (0)`: `Dynamic`, `Keyset`, `Snapshot` or `Fast_Forward`, then `Read Only`, `Optimistic` or `Scroll Locks`, then `Local` for a `LOCAL` cursor and `Global` otherwise, a cursor variable's included, which is named by its variable (`@cv`).
+- **`sql_handle`** is the declaring batch's handle, and **`statement_start_offset`** / **`statement_end_offset`** the byte offsets of the `DECLARE`'s first and last characters in it, so `sys.dm_exec_sql_text` and a substring recover the declaration.
+- **`statement_sql_handle`** / **`statement_context_id`** are the `DECLARE` text's Query Store statement handle (real's MD5 derivation, so the bytes match) and the store's context settings id for the session's settings — the declaration adds that row as real's does — while the database's store is READ_WRITE, and NULL with it off.
+- **`fetch_status`** is the cursor's own last fetch status: -9 before any, kept through `CLOSE` and a re-`OPEN`.
+- **`fetch_buffer_size`** is 1 while the last `FETCH` since `OPEN` landed on a row, else 0.
+- **`fetch_buffer_start`** is 0 before a `FETCH` since `OPEN`, before the first row and while closed, -1 past the last row, and on a row its 1-based position for a STATIC or KEYSET cursor and -1 for a DYNAMIC or FAST_FORWARD one.
+- **`is_open`** follows `OPEN` / `CLOSE`; `is_async_population` and `is_close_on_commit` read 0 — the latter for a cursor declared under `SET CURSOR_CLOSE_ON_COMMIT ON` too, as real reports one before its `OPEN` — and `ansi_position` 1.
+
 ## Divergences from SQL Server (documented, not byte-identical)
+
+- **`sys.dm_exec_cursors`' cost and plan columns** — `worker_time`, `reads`, `writes` and `dormant_duration` read 0 and `plan_generation_num` 1, where real's count work done and recompiles (a cursor declared in the batch that created its table reports its statement's recompile count there); `cursor_id` is the simulator's own handle numbering, and `statement_context_id` the simulator's own store's id.
+- **`sys.dm_exec_cursors` for another session** lists only its global cursors: its local cursors and cursor variables live on the batch it is running, which only the querying session reaches.
+- **A cursor declared in a module body** reports offsets into the body's text and a handle of it, where real's are into the module's whole definition.
 
 - **A cursor over a generator source is forced STATIC** — a TVF, a catalog view, `VALUES`, `OPENJSON`, PIVOT, `.nodes()`, a linked server.
   Real reports these as read-only snapshots too (probe-confirmed for `STRING_SPLIT`), so the sensitivity matches; what diverges is only that the simulator arrives there by refusing to plan the slot rather than by the source having no key.
@@ -416,7 +433,5 @@ A NULL or unknown source is Msg 16902 (state 40 / 42), a NULL identity Msg 16902
 
 ## Not modeled yet
 
-- **`sys.dm_exec_cursors(spid | 0)`** — the cursor DMV the probes above read effective types from; querying it is Msg 208.
-  Real's 22 columns, probed 2026-09-30: `session_id`, `cursor_id`, `name`, `properties` (`TSQL | Dynamic | Optimistic | Global (0)`, `TSQL | Fast_Forward | Read Only | Local (0)`, `TSQL | Snapshot | Read Only | Global (0)`, `TSQL | Dynamic | Scroll Locks | Global (0)`), `sql_handle`, `statement_start_offset`, `statement_end_offset` (byte offsets of the `DECLARE` in its batch), `plan_generation_num`, `creation_time`, `is_open`, `is_async_population`, `is_close_on_commit`, `fetch_status` (-9 before the first fetch), `fetch_buffer_size`, `fetch_buffer_start`, `ansi_position`, `worker_time`, `reads`, `writes`, `dormant_duration`, `statement_sql_handle`, `statement_context_id`.
-  The cursor model already answers `sp_cursor_list`, whose type and concurrency cells the `properties` text is built from.
 - **Asynchronous keyset population** under a non-default `cursor threshold` server option, where real reports a negative `@@CURSOR_ROWS` while it populates; the default (-1) populates synchronously, which is what the simulator always does.
+- **`sys.dm_exec_cursors` rows for API server cursors** — an `sp_cursoropen` cursor lives on the TDS session rather than the connection, so the DMV doesn't list it, where real does as `API | <type> | …`.

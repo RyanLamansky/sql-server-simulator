@@ -33,7 +33,9 @@ internal sealed class SourceColumnMemo
     /// <summary>
     /// Memoized <c>Selection.FindSourceColumn</c>: the (source, column)
     /// location of <paramref name="name"/> across <paramref name="sources"/>,
-    /// or <c>(-1, -1)</c> for the outer-scope fallthrough. Msg 209 ambiguity
+    /// or <c>(-1, -1)</c> for the outer-scope fallthrough; a
+    /// <see cref="RowLocator"/> name binds as <see cref="RowLocator.Find"/>
+    /// says, with a source below <c>-1</c>. Msg 209 ambiguity
     /// still raises from the underlying resolution (never cached — it throws
     /// before the append).
     /// </summary>
@@ -46,7 +48,9 @@ internal sealed class SourceColumnMemo
                 return (memoSource, memoColumn);
         }
 
-        var (sourceIndex, columnIndex) = Selection.FindSourceColumn(sources, name);
+        var (sourceIndex, columnIndex) = RowLocator.IsLocatorName(name)
+            ? RowLocator.Find(sources, name)
+            : Selection.FindSourceColumn(sources, name);
         if (snapshot.Length < CapacityCap)
         {
             var grown = new (string, string?, int, int)[snapshot.Length + 1];

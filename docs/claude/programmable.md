@@ -389,9 +389,10 @@ Probed against SQL Server 2025.
 - No DISTINCT, no aggregates, no GROUP BY, no HAVING, no window functions, no set-op chain.
   ORDER BY alone is allowed (it only affects reads).
   A TOP / OFFSET / FETCH row limit or a window function leaves the body updatable on real, but only to the rows the body yields (`DELETE` through a `TOP 1` view deletes one row; `DELETE … WHERE rn > 1` through a `ROW_NUMBER()` view dedupes — probed 2026-09-25).
-  Such a view is marked (`View.IsRowLimited` / `View.IsWindowed`), and an `UPDATE` / `DELETE` through it runs the body once and pairs each output row with the base row it came from (`MaterializeRowSelectiveViewRows`): a windowed body's rows by heap order, a row-limited body's by matching direct columns.
-  The write then takes only those rows, and its `WHERE` / `SET` read the body's derived columns (`rn`) off them; writing a derived column is still Msg 4406.
-  A limit that chose between rows its projection can't tell apart (a `TOP 1 id … ORDER BY v` over two `id = 1` rows) raises `NotSupportedException` rather than guess, as does a `MERGE` through either shape.
+  Such a view is marked (`View.IsRowLimited` / `View.IsWindowed`), and an `UPDATE`, `DELETE` or `MERGE` through it runs the body once with each output row's base address carried through its row-limit or window stage (`MaterializeRowSelectiveViewRows` over `Selection.ExecuteWithRowAddresses`; see [`heap-storage.md`](heap-storage.md#row-addresses-reach-expressions-through-a-row-locator)).
+  The write then takes exactly those rows — the one a `TOP 1 id … ORDER BY v` chose between two `id = 1` rows included — and its `WHERE` / `SET` (and a `MERGE`'s `ON`) read the body's derived columns (`rn`) off them; writing a derived column is still Msg 4406 (probed 2026-09-30 against SQL Server 2025).
+  A view over a row-limited or windowed view runs the lower view's rows through its own projection, its filter applying to the base row.
+  A body that limits or windows rows it reads through another view (`TOP 1 … FROM v1`) carries no address, the view's rows being re-encoded, and falls back to pairing its rows with the base rows — a windowed body's by heap order, a row-limited body's by matching direct columns — which raises `NotSupportedException` when the limit chose between rows its projection can't tell apart.
   A positioned write (`WHERE CURRENT OF`) names its row exactly, and an `INSERT` isn't reached by the limit, so both go through as before.
 - Every column referenced in any WHERE clause up the chain maps to a real base-table column (no WHERE that references an upstream derived projection).
 
@@ -521,11 +522,12 @@ The rules the translation adds, each probed 2026-09-28:
   Msg 8672 ends the batch and rolls the transaction back as under `XACT_ABORT`, on a table target as much as a view.
 - An `UPDATE` landing on a row an outer join NULL-extended is real's **Msg 8705** (`A DML statement encountered a missing entry in index ID 1 of table ID …`), and nothing is written.
 - `WITH CHECK OPTION` judges the written row through the join, as the UPDATE path does.
-- `OUTPUT` reads the view's rows: `DELETED` the whole row as it stood, `INSERTED` only the columns reading the written table (Msg 404 per column otherwise), with its identity and computed values read back from the row written; the written table's triggers refuse an `OUTPUT` without `INTO` with Msg 334 naming that table.
+- `OUTPUT` reads the view's rows: `DELETED` the whole row as it stood, `INSERTED` only the columns reading the written table (Msg 404 per column otherwise), with its identity and computed values read back from the row written and a derived column computed from it (probed 2026-09-30); the written table's triggers refuse an `OUTPUT` without `INTO` with Msg 334 naming that table.
 
 **Not modeled yet**:
 - A bottom source that is a **derived table** (`FROM (SELECT … FROM a) d JOIN b`) is Msg 4405, where real writes through it (probed 2026-09-30 for UPDATE, INSERT and MERGE).
-- `OUTPUT` through a join view whose written table sits under a **nested** join view or a single-table view source raises `NotSupportedException`, for UPDATE, INSERT and MERGE alike.
+- `OUTPUT` through a join view whose written table sits under a **nested join view** raises `NotSupportedException`, for UPDATE, INSERT and MERGE alike.
+  Under a single-table view source it ships: `INSERTED` computes that view's row from the written one, a derived column included, and `DELETED` reads the row's own join tuple (probed 2026-09-30 against SQL Server 2025).
 - The broken-chain check gathers only the outermost chain's own base tables, and real reports the SELECT and the write denials together where the simulator raises the first.
 
 ## Stored procedures

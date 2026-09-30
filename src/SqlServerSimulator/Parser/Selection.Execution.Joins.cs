@@ -34,8 +34,13 @@ internal sealed partial class Selection
         SourceColumnMemo memo)
     {
         var (s, c) = memo.Find(sources, name);
-        if (s == -1)
+        if (s < 0)
         {
+            // Below -1 is a row locator (see RowLocator), which shares the
+            // outer-scope branch so an ordinary column pays no test for it.
+            if (s != -1)
+                return RowLocator.Resolve(sources, tuple, s, c, batch);
+
             // The runtime counterpart of ResolveColumnTypeAcrossSources's split:
             // a name no scope binds is Msg 4104 when its qualifier names none of
             // them and Msg 207 otherwise. This is the site a deferred binding

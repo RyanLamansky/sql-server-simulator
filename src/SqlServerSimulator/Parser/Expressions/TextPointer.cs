@@ -10,32 +10,20 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </summary>
 /// <remarks>
 /// Real SQL Server's pointer is an opaque handle into the LOB allocation
-/// structure naming a specific column and row. The simulator has no such
-/// structure, so it derives the 16 bytes from what identifies the cell it was
-/// read from: a 4-byte signature marking it as a simulator pointer, a 4-byte
-/// FNV-1a-32 hash of the case-folded column name, and an 8-byte FNV-1a-64 hash
-/// of the cell's own value. The encoding is deterministic — reading
-/// <c>TEXTPTR</c> twice off an unchanged cell yields the same bytes, as on real
-/// — and the value half is what tells two rows of one column apart.
-/// <para>
-/// A write through a pointer changes the value its bytes were derived from, so
-/// the resolution keeps a per-table cache from (column, value hash) to the row
-/// address it settled on: the chunked idiom, where one pointer drives a
-/// <c>WRITETEXT</c> and then a run of appending <c>UPDATETEXT</c>s, resolves
-/// through the cache after the first use. Two rows of one column holding the
-/// same value share a pointer and resolve to the first of them — real tells
-/// them apart, and that is the encoding's one divergence.
-/// </para>
+/// structure naming a specific column and row. The simulator names the same
+/// two things directly: the table's object id, a 4-byte FNV-1a-32 hash of the
+/// case-folded column name, and the row's stable heap address — page, then
+/// slot. So, as on real, two rows holding the same value get distinct
+/// pointers, an ordinary <c>UPDATE</c> (even one moving the row's key) leaves a
+/// pointer read before it valid and reading the new value, and a deleted row's
+/// pointer stops resolving (Msg 7123), all probed 2026-09-30 against SQL
+/// Server 2025. The row's address reaches <c>TEXTPTR</c> through a
+/// <see cref="RowLocator"/>.
 /// </remarks>
 internal static class LegacyTextPointer
 {
     /// <summary>The pointer width real declares: <c>binary(16)</c>.</summary>
     public const int Width = 16;
-
-    private static ReadOnlySpan<byte> Signature => "SSTP"u8;
-
-    private const ulong Fnv64Offset = 14695981039346656037;
-    private const ulong Fnv64Prime = 1099511628211;
 
     public static uint ColumnHash(string columnName)
     {
@@ -50,55 +38,58 @@ internal static class LegacyTextPointer
     }
 
     /// <summary>
-    /// The value half of the pointer: FNV-1a-64 over the cell's own bytes for
-    /// a binary column and over its UTF-16 code units for a character one.
+    /// <c>TEXTPTR</c> of column <paramref name="columnIndex"/> of the row at
+    /// <paramref name="address"/>, whose value is <paramref name="cell"/>: NULL
+    /// for a cell that has never held a value, and a pointer otherwise — a cell
+    /// a write set NULL keeps its LOB root on real, and with it a pointer
+    /// (<see cref="Heap.RootedNullLobCells"/>).
     /// </summary>
-    public static ulong ValueHash(SqlValue value)
-    {
-        var h = Fnv64Offset;
-        if (value.IsNull)
-            return h;
-        if (SqlType.IsStringCategory(value.Type))
-        {
-            foreach (var ch in value.AsString)
-            {
-                h = (h ^ (byte)ch) * Fnv64Prime;
-                h = (h ^ (byte)(ch >> 8)) * Fnv64Prime;
-            }
-            return h;
-        }
+    public static SqlValue For(HeapTable table, int columnIndex, (int Page, int Slot) address, SqlValue cell) =>
+        !IsRooted(table, columnIndex, address, cell)
+            ? SqlValue.Null(VarbinarySqlType.Get(Width))
+            : SqlValue.FromVarbinary(VarbinarySqlType.Get(Width), Fabricate(table, columnIndex, address));
 
-        foreach (var b in value.AsBytes)
-            h = (h ^ b) * Fnv64Prime;
-        return h;
-    }
+    /// <summary>Whether the cell holds a LOB root: a value, or a NULL a write left one behind.</summary>
+    public static bool IsRooted(HeapTable table, int columnIndex, (int Page, int Slot) address, SqlValue cell) =>
+        !cell.IsNull || table.Heap.IsRootedNullLob(address, table.StorageOrdinals[columnIndex]);
 
-    public static byte[] Fabricate(string columnName, SqlValue value)
+    private static byte[] Fabricate(HeapTable table, int columnIndex, (int Page, int Slot) address)
     {
         var bytes = new byte[Width];
-        Signature.CopyTo(bytes);
-        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4), ColumnHash(columnName));
-        BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(8), ValueHash(value));
+        BinaryPrimitives.WriteInt32LittleEndian(bytes, table.ObjectId);
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4), ColumnHash(table.Columns[columnIndex].Name));
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(8), address.Page);
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(12), address.Slot);
         return bytes;
     }
 
     /// <summary>
-    /// Reads a candidate pointer's two identity halves, or answers
-    /// <see langword="false"/> when the bytes carry no simulator signature —
-    /// the arbitrary-bytes case both <c>TEXTVALID</c> and the statements refuse.
+    /// The row a pointer names in <paramref name="table"/>'s column
+    /// <paramref name="columnIndex"/>, when it names a live row there whose
+    /// cell holds a LOB root; false for bytes naming another table or column, a
+    /// deleted row, or anything else — the cases real refuses with Msg 7123
+    /// and <c>TEXTVALID</c> answers 0 to.
     /// </summary>
-    public static bool TryRead(ReadOnlySpan<byte> pointer, out uint columnHash, out ulong valueHash)
+    public static bool TryResolve(ReadOnlySpan<byte> pointer, HeapTable table, int columnIndex, out (int Page, int Slot) address)
     {
-        (columnHash, valueHash) = (0, 0);
-        if (pointer.Length < Width || !pointer[..4].SequenceEqual(Signature))
+        address = default;
+        if (pointer.Length < Width
+            || BinaryPrimitives.ReadInt32LittleEndian(pointer) != table.ObjectId
+            || BinaryPrimitives.ReadUInt32LittleEndian(pointer[4..]) != ColumnHash(table.Columns[columnIndex].Name))
+        {
             return false;
-        columnHash = BinaryPrimitives.ReadUInt32LittleEndian(pointer[4..]);
-        valueHash = BinaryPrimitives.ReadUInt64LittleEndian(pointer[8..]);
-        return true;
+        }
+        address = (BinaryPrimitives.ReadInt32LittleEndian(pointer[8..]), BinaryPrimitives.ReadInt32LittleEndian(pointer[12..]));
+        var heap = table.Heap;
+        if (address.Page < 0 || address.Page >= heap.Pages.Count || address.Slot < 0
+            || heap.IsSlotTombstoned(address.Page, address.Slot)
+            || heap.ReadSlotBytes(address.Page, address.Slot) is not { } row)
+        {
+            return false;
+        }
+        var cell = RowDecoder.DecodeColumn(table.StoredColumns, row, table.StorageOrdinals[columnIndex], heap);
+        return IsRooted(table, columnIndex, address, cell);
     }
-
-    public static bool Matches(ReadOnlySpan<byte> pointer, string columnName) =>
-        TryRead(pointer, out var columnHash, out _) && columnHash == ColumnHash(columnName);
 }
 
 /// <summary>
@@ -113,25 +104,22 @@ internal static class LegacyTextPointer
 internal sealed class TextPointer : Expression
 {
     private readonly Reference column;
-    private readonly string columnName;
+
+    /// <summary>The <see cref="RowLocator"/> name the pointer resolves as.</summary>
+    private readonly MultiPartName pointerName;
 
     public TextPointer(ParserContext context)
     {
         if (Parse(context) is not Reference reference)
             throw SimulatedSqlException.OnlyBaseTableColumnsInTextPtr();
         this.column = reference;
-        this.columnName = reference.ReferencedName.Leaf;
+        this.pointerName = RowLocator.TextPointerName(reference.ReferencedName);
+        context.ReadsRowLocators = true;
         if (context.Token is not Tokens.Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
-    public override SqlValue Run(RuntimeContext runtime)
-    {
-        var value = this.column.Run(runtime);
-        return value.IsNull
-            ? SqlValue.Null(VarbinarySqlType.Get(LegacyTextPointer.Width))
-            : SqlValue.FromVarbinary(VarbinarySqlType.Get(LegacyTextPointer.Width), LegacyTextPointer.Fabricate(this.columnName, value));
-    }
+    public override SqlValue Run(RuntimeContext runtime) => runtime.ResolveColumn(this.pointerName);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {

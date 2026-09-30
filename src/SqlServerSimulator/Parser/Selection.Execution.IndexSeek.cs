@@ -2711,12 +2711,14 @@ internal sealed partial class Selection
         // not-yet-applied or mis-keyed Delete can leave a tombstoned address in a
         // bucket, and a double-applied Insert can list one twice.
         var seen = new HashSet<(int, int)>();
+        var addresses = batch.CurrentStatement.RowAddresses;
         foreach (var (page, slot) in candidates)
         {
             if (!seen.Add((page, slot)) || table.Heap.IsSlotTombstoned(page, slot))
                 continue;
             if (!batch.TouchRowForRead(table, page, slot, plan) || table.Heap.ReadSlotBytes(page, slot) is not { } bytes)
                 continue;
+            addresses?.Record(bytes, page, slot);
             io?.Enter(page, ref lastPage);
             if (qualifying)
             {
@@ -3041,6 +3043,7 @@ internal sealed partial class Selection
         var lastPage = -1;
         var tx = batch.Connection.CurrentTransaction;
         var seen = new HashSet<(int, int)>();
+        var addresses = batch.CurrentStatement.RowAddresses;
 
         foreach (var (page, slot) in bucketCandidates)
         {
@@ -3050,6 +3053,7 @@ internal sealed partial class Selection
                 && Storage.VersionStore.ResolveVisibleVersion(table, (page, slot), live, snapshotXid, tx) is { } resolved)
             {
                 io?.Enter(page, ref lastPage);
+                addresses?.Record(resolved, page, slot);
                 yield return resolved;
             }
         }
@@ -3067,7 +3071,10 @@ internal sealed partial class Selection
                     ? Storage.VersionStore.ResolveVisibleVersion(table, (page, slot), live, snapshotXid, tx)
                     : null;
             if (resolved is { } bytes)
+            {
+                addresses?.Record(bytes, page, slot);
                 yield return bytes;
+            }
         }
     }
 

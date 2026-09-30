@@ -4,24 +4,14 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// SQL <c>TEXTVALID('table.column', text_ptr)</c>: returns <c>1</c> when the
-/// pointer is a valid in-row text pointer for the named column, else <c>0</c>.
-/// A NULL pointer or NULL name, a pointer that isn't a simulator-fabricated
-/// text pointer, and a name whose column segment doesn't match the pointer's
-/// source column all return <c>0</c> — probe-confirmed against SQL Server 2025.
-/// Reference:
+/// pointer is a valid text pointer for the named column, else <c>0</c>. A NULL
+/// pointer or NULL name, a name that resolves to no table or no
+/// <c>text</c> / <c>ntext</c> / <c>image</c> column, a pointer read from
+/// another table or column, and a pointer to a deleted row all return <c>0</c>,
+/// while a cell a write set NULL keeps its pointer valid — probe-confirmed
+/// against SQL Server 2025. Reference:
 /// https://learn.microsoft.com/en-us/sql/t-sql/functions/textvalid-transact-sql
 /// </summary>
-/// <remarks>
-/// The name argument is matched by its final (column) segment against the
-/// column identity the pointer carries (see <see cref="LegacyTextPointer"/>);
-/// the table portion is required to be present (a bare single-part name returns
-/// <c>0</c>, matching real) but is not resolved against the catalog. A
-/// syntactically valid name whose column segment matches the pointer's source
-/// column therefore returns <c>1</c> even if its table portion names a
-/// different table — real cross-checks the exact column object. This divergence
-/// is unobservable through the sanctioned <c>TEXTVALID('t.c', TEXTPTR(c))</c>
-/// idiom, where the two column names always agree.
-/// </remarks>
 internal sealed class TextValid : Expression
 {
     private readonly Expression nameArg;
@@ -43,20 +33,38 @@ internal sealed class TextValid : Expression
         var pointer = this.pointerArg.Run(runtime);
         if (name.IsNull || pointer.IsNull || pointer.Type.ClrType != typeof(byte[]))
             return SqlValue.FromInt32(0);
-        var column = ColumnSegment(StringScalars.CoerceToVarchar(name, runtime.Batch, "textvalid").AsString);
-        return SqlValue.FromInt32(column is not null && LegacyTextPointer.Matches(pointer.AsBytes, column) ? 1 : 0);
+        var batch = runtime.Batch;
+        return SqlValue.FromInt32(
+            ResolveColumn(StringScalars.CoerceToVarchar(name, batch, "textvalid").AsString, batch) is var (table, column)
+            && LegacyTextPointer.TryResolve(pointer.AsBytes, table, column, out _) ? 1 : 0);
     }
 
     /// <summary>
-    /// Returns the final dotted segment of a <c>[db.][schema.]table.column</c>
-    /// name (brackets stripped), or <c>null</c> when the name has fewer than two
-    /// non-empty segments — real requires at least <c>table.column</c>.
+    /// The table and LOB column a <c>[db.][schema.]table.column</c> name
+    /// (brackets stripped) names, or null when it names none — including a
+    /// bare column, since real requires at least <c>table.column</c>.
     /// </summary>
-    private static string? ColumnSegment(string name)
+    private static (HeapTable Table, int Column)? ResolveColumn(string name, BatchContext batch)
     {
         var segments = name.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return segments.Length < 2 ? null : segments[^1].Trim('[', ']', '"');
+        if (segments.Length is < 2 or > 4)
+            return null;
+        var tableName = new MultiPartName(Unbracket(segments[0]));
+        for (var i = 1; i < segments.Length - 1; i++)
+            tableName = tableName.WithAddedPart(Unbracket(segments[i]));
+        if (!batch.TryResolveTable(tableName, out var table))
+            return null;
+        var columnName = Unbracket(segments[^1]);
+        var collation = batch.DatabaseFor(table).Collation;
+        for (var i = 0; i < table.Columns.Length; i++)
+        {
+            if (collation.Equals(table.Columns[i].Name, columnName))
+                return table.Columns[i].Type is TextSqlType or NTextSqlType or ImageSqlType ? (table, i) : null;
+        }
+        return null;
     }
+
+    private static string Unbracket(string segment) => segment.Trim('[', ']', '"');
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {

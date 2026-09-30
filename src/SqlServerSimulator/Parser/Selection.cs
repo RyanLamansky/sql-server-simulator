@@ -202,6 +202,14 @@ internal sealed partial class Selection
     internal CursorShape? CursorShape;
 
     /// <summary>
+    /// Whether this plan's own query block reads a <see cref="RowLocator"/>
+    /// (or a nested block correlated to it does), so its execution installs
+    /// <see cref="StatementContext.RowAddresses"/> before its sources produce a
+    /// row. Set post-construction by <see cref="BuildSqlProjection"/>.
+    /// </summary>
+    internal bool InstallsRowAddresses;
+
+    /// <summary>
     /// The SELECT's ORDER BY items, captured for the updatable-cursor
     /// enumeration path (<c>EnumerateForCursor</c>) so KEYSET / DYNAMIC
     /// cursors and positioned DML can order rows the same way a read would.
@@ -564,6 +572,24 @@ internal sealed partial class Selection
         this.valueRowSource is { } values
             ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse }
             : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse };
+
+    /// <summary>
+    /// Runs this plan with the heap address of its first FROM source's row
+    /// appended to every row it yields, as a <c>bigint</c>
+    /// <see cref="RowLocator.Unpack"/> reads (NULL when that source's row came
+    /// from no heap). The address is projected alongside the body's own
+    /// columns, so it passes through a <c>TOP</c>, a sort or a window function
+    /// with the row it belongs to — what a write through a row-limited or
+    /// windowed body needs to find the base row behind each row it yields. A
+    /// plan built by another path (a set operation, a constant row) yields its
+    /// rows unchanged, one value short.
+    /// </summary>
+    internal List<SqlValue[]> ExecuteWithRowAddresses(BatchContext batch)
+    {
+        using var probe = ParserScope.Enter(ref batch.RowAddressProbe, this);
+        batch.CurrentStatement.RowAddresses ??= new();
+        return [.. this.Execute(batch).RowValues];
+    }
 
     /// <summary>
     /// Whether the plan yields a row — the question an emptiness probe asks,
@@ -1540,7 +1566,7 @@ internal sealed partial class Selection
             // element — `SELECT 1 xyz 2` is Msg 102 at the `2`, not a second
             // column. Only a comma or a clause keyword may follow a complete,
             // aliased element (probe-confirmed).
-            if (!elementExpected && StartsProjectionElement(context.Token) && !IsWindowClauseAhead(context))
+            if (!elementExpected && StartsProjectionElement(context.Token) && !IsWindowClauseAhead(context) && context.Token is not UnquotedString { IsLabelDeclaration: true })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
             switch (context.Token)
@@ -1682,6 +1708,11 @@ internal sealed partial class Selection
                     }
                     break;
 
+                // After an aliased element, `name:` is a GOTO label ending the
+                // statement, not the next element.
+                case UnquotedString { IsLabelDeclaration: true } when !elementExpected:
+                    goto ExitWhileTokenLoop;
+
                 // Column-alias-on-left shorthand: `alias = expr` at
                 // projection-element-start position is equivalent to
                 // `expr AS alias`. Peek past the Name token to disambiguate
@@ -1769,6 +1800,10 @@ internal sealed partial class Selection
                 // stand (probed 2026-09-29 against SQL Server 2025).
                 case Name when IsWindowClauseAhead(context):
                     ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope);
+                    goto ExitWhileTokenLoop;
+
+                // `name:` is a GOTO label ending the statement, never an alias.
+                case UnquotedString { IsLabelDeclaration: true }:
                     goto ExitWhileTokenLoop;
 
                 case Name name:
@@ -3238,8 +3273,8 @@ internal sealed partial class Selection
                         return BuiltInRowsetSource(context, ParseMyPermissions(context, objectName.Leaf));
                 }
 
-                // The dependency DMVs, the describe DMV, dm_exec_sql_text and
-                // dm_exec_input_buffer are system TVFs, `sys.`-qualified like
+                // The dependency DMVs, the describe DMV, dm_exec_sql_text,
+                // dm_exec_input_buffer and dm_exec_cursors are system TVFs, `sys.`-qualified like
                 // fn_virtualfilestats and dispatched on the same terms.
                 if (objectName.Count == 2 && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys"))
                 {
@@ -3253,6 +3288,8 @@ internal sealed partial class Selection
                         return BuiltInRowsetSource(context, ParseSqlText(context, objectName.ToString()));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_input_buffer"))
                         return BuiltInRowsetSource(context, ParseInputBuffer(context, objectName.ToString()));
+                    if (BuiltInToken.Equals(objectName.Leaf, "dm_exec_cursors"))
+                        return BuiltInRowsetSource(context, ParseExecCursors(context, objectName.ToString()));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_fts_parser"))
                         return BuiltInRowsetSource(context, ParseFtsParser(context, objectName.ToString()));
                 }
@@ -3895,7 +3932,7 @@ internal sealed partial class Selection
     private static bool IsSysRowsetFunction(MultiPartName name) =>
         name.Count == 2
         && BuiltInToken.Equals(name.ImmediateQualifier, "sys")
-        && BuiltInToken.EqualsAny(name.Leaf, "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_sql_text", "dm_fts_parser", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
+        && BuiltInToken.EqualsAny(name.Leaf, "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_sql_text", "dm_fts_parser", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
 
     private static FromSource BuiltInRowsetSource(ParserContext context, Selection plan)
     {
@@ -4352,7 +4389,7 @@ internal sealed partial class Selection
         // Bare-Name alias form (without the AS keyword): "FROM t a JOIN ..."
         // SQL Server accepts this as an alias — except a `WINDOW <name> AS (`
         // clause head, which is not an alias (WINDOW is otherwise a valid alias).
-        if (nextToken is Name aliasName && !IsWindowClauseAhead(context))
+        if (nextToken is Name aliasName && !IsWindowClauseAhead(context) && nextToken is not UnquotedString { IsLabelDeclaration: true })
         {
             context.MoveNextOptional();
             return aliasName.Value;
@@ -4376,7 +4413,7 @@ internal sealed partial class Selection
             context.MoveNextOptional();
             return alias;
         }
-        if (context.Token is Name aliasName && !IsWindowClauseAhead(context))
+        if (context.Token is Name aliasName && !IsWindowClauseAhead(context) && context.Token is not UnquotedString { IsLabelDeclaration: true })
         {
             context.MoveNextOptional();
             return aliasName.Value;

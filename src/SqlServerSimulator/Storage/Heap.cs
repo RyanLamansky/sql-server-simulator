@@ -558,8 +558,33 @@ internal sealed class Heap
     public void DeleteAt(int pageIndex, int slotIndex, UndoLog? undoLog = null, bool reclaimSuperseded = false)
     {
         _ = this.TouchedSlots?.Add((pageIndex, slotIndex));
+        _ = this.RootedNullLobCells?.TryRemove((pageIndex, slotIndex), out _);
         this.DeleteAtCore(pageIndex, slotIndex, undoLog, reclaimSuperseded, journalEvent: true);
     }
+
+    /// <summary>
+    /// The <c>text</c> / <c>ntext</c> / <c>image</c> cells a write set NULL
+    /// after they had held a value, keyed by row address with a bit per
+    /// stored ordinal below 64. Real keeps such a cell's LOB root allocated,
+    /// so <c>TEXTPTR</c> still hands out a pointer to it and the pointer stays
+    /// valid, where a cell that was never given a value has none (probed
+    /// 2026-09-30 against SQL Server 2025). A deleted row's entry goes with it,
+    /// so a later row at a reused address starts clear.
+    /// </summary>
+    public System.Collections.Concurrent.ConcurrentDictionary<(int PageIndex, int SlotIndex), ulong>? RootedNullLobCells;
+
+    /// <summary>Records that the cell at <paramref name="storedOrdinal"/> of the row at the address keeps its LOB root while NULL.</summary>
+    public void MarkRootedNullLob(int pageIndex, int slotIndex, int storedOrdinal)
+    {
+        if (storedOrdinal >= 64)
+            return;
+        var cells = this.RootedNullLobCells ?? Interlocked.CompareExchange(ref this.RootedNullLobCells, new(), null) ?? this.RootedNullLobCells;
+        _ = cells.AddOrUpdate((pageIndex, slotIndex), 1UL << storedOrdinal, (_, bits) => bits | (1UL << storedOrdinal));
+    }
+
+    /// <summary>Whether <see cref="MarkRootedNullLob"/> recorded the cell.</summary>
+    public bool IsRootedNullLob((int PageIndex, int SlotIndex) address, int storedOrdinal) =>
+        storedOrdinal < 64 && this.RootedNullLobCells is { } cells && cells.TryGetValue(address, out var bits) && (bits & (1UL << storedOrdinal)) != 0;
 
     /// <summary>
     /// When set, every visible address an <see cref="UpdateAt"/> or

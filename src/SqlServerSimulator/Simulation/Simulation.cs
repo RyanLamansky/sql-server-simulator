@@ -1608,6 +1608,7 @@ public sealed partial class Simulation
                 batch.CurrentStatement.AutocommitTransactionId = 0;
                 batch.CurrentStatement.StatementScopedValues = null;
                 batch.CurrentStatement.SubqueryResults = null;
+                batch.CurrentStatement.RowAddresses = null;
                 batch.CurrentStatement.CatalogViewRows = null;
 #if DEBUG
                 batch.CurrentStatement.AuditedCatalogRowSets = null;
@@ -3287,7 +3288,7 @@ public sealed partial class Simulation
         // (`SELECT 1 WHERE 1 IN (NULL), 2` is near ',', probed
         // 2026-09-26); any other token is left to the generic
         // end-of-dispatch normalizer.
-        if (context.Token is Numeric or Literal or Name or Operator { Character: ',' })
+        if (context.Token is (Numeric or Literal or Name or Operator { Character: ',' }) and not UnquotedString { IsLabelDeclaration: true })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (!batch.IsSkipping)
             PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
@@ -3440,12 +3441,17 @@ public sealed partial class Simulation
                 or Keyword.Truncate or Keyword.Use or Keyword.Grant or Keyword.Revoke or Keyword.Deny
                 or Keyword.Open or Keyword.Fetch or Keyword.Close or Keyword.Deallocate
                 or Keyword.Exec or Keyword.Execute or Keyword.Reconfigure or Keyword.Revert
+                or Keyword.Checkpoint or Keyword.Goto or Keyword.Bulk or Keyword.Kill
+                or Keyword.ReadText or Keyword.WriteText or Keyword.UpdateText
+                or Keyword.Backup or Keyword.Restore or Keyword.Shutdown
         }
         // THROW is a contextual keyword in SQL Server's grammar — added with
         // the TRY/CATCH companion feature in 2012, not in the reserved list.
         // It surfaces as UnquotedString from the tokenizer; statement-boundary
         // detection routes through the cached ContextualKeyword classifier.
-        or UnquotedString { ContextualKeyword: ContextualKeyword.Throw };
+        or UnquotedString { ContextualKeyword: ContextualKeyword.Throw }
+        // A GOTO label declaration starts the next statement too.
+        or UnquotedString { IsLabelDeclaration: true };
 
     /// <summary>
     /// At end-of-batch, copies the final values of every InputOutput /

@@ -47,6 +47,17 @@ internal sealed class StatementContext
     public Dictionary<object, object>? SubqueryResults;
 
     /// <summary>
+    /// The heap addresses of the rows this statement's scans and seeks have
+    /// handed out, while something in it reads a <see cref="RowLocator"/>;
+    /// null otherwise, which is what keeps every producer's per-row cost at
+    /// one hoisted null test. Installed by a plan whose query reads a locator
+    /// as its execution starts (<see cref="Selection.InstallsRowAddresses"/>)
+    /// and by <see cref="Selection.ExecuteWithRowAddresses"/>; cleared with the
+    /// statement's other per-run caches.
+    /// </summary>
+    public RowAddressMap? RowAddresses;
+
+    /// <summary>
     /// Existing rows' key tuples for each unique index or constraint whose key
     /// names a <em>non-persisted computed</em> column, keyed by the index /
     /// constraint instance (reference identity). Such a key can't be seeked —
@@ -450,6 +461,7 @@ internal sealed class StatementContext
         this.UtcNow = DateTime.UtcNow;
         this.StatementScopedValues = null;
         this.SubqueryResults = null;
+        this.RowAddresses = null;
         this.CatalogViewRows = null;
 #if DEBUG
         this.AuditedCatalogRowSets = null;

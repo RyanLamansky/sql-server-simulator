@@ -485,6 +485,15 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool DeferNextValueRefusals;
 
     /// <summary>
+    /// Set when an expression in the query block being parsed reads a
+    /// <see cref="RowLocator"/> (a <c>TEXTPTR</c>), so the plan the block builds
+    /// installs the statement's <see cref="RowAddressMap"/> as it runs. Each
+    /// block starts clear and hands its answer on to the enclosing block, whose
+    /// sources a correlated locator may read.
+    /// </summary>
+    public bool ReadsRowLocators;
+
+    /// <summary>
     /// The <c>OVER</c> definition each sequence's first reference in the
     /// statement starting at <see cref="SequenceOverStatementStart"/> wrote,
     /// as a normalized token string (empty for none); a later reference must

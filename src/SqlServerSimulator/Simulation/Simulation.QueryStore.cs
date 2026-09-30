@@ -432,6 +432,41 @@ partial class Simulation
         return true;
     }
 
+    /// <summary>
+    /// What <c>sys.dm_exec_cursors</c> reports for a cursor's declaring
+    /// statement while the current database's store is READ_WRITE: the
+    /// statement text's <c>statement_sql_handle</c> and the id of the context
+    /// settings row for the session's settings, which the declaration adds
+    /// when the store has none yet — as real does, whose store otherwise
+    /// captures nothing for it (probed 2026-09-30 against SQL Server 2025).
+    /// Null with the store off.
+    /// </summary>
+    internal static (byte[] Handle, long ContextSettingsId)? QueryStoreStatementIdentity(BatchContext batch, string statementText)
+    {
+        var database = batch.CurrentDatabase;
+        if (database.QueryStore.DesiredState != QueryStoreState.ReadWrite || batch.IsSkipping)
+            return null;
+        var connection = batch.Connection;
+        var key = new QueryStoreContextKey(
+            SetOptionsOf(connection, batch.Parser.QuotedIdentifiers),
+            connection.Language.LangId,
+            DateFormatCode(connection.DateFormat),
+            connection.DateFirst,
+            batch.ModuleObjectId != 0 ? -2 : Database.DboSchemaId);
+        var data = database.QueryStoreData;
+        QueryStoreContextSettings? context;
+        lock (data.Gate)
+        {
+            context = data.ContextSettings.Find(existing => existing.Key.Equals(key));
+            if (context is null)
+            {
+                context = new QueryStoreContextSettings(data.NextContextSettingsId++, key);
+                data.ContextSettings.Add(context);
+            }
+        }
+        return (StatementSqlHandleOf(statementText), context.Id);
+    }
+
     /// <summary>Adds the text, context settings and query rows for a newly captured query. Caller holds the gate.</summary>
     private static QueryStoreQuery CaptureQuery(QueryStoreData data, in QueryStoreExecution execution)
     {

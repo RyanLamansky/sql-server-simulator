@@ -426,9 +426,7 @@ partial class Simulation
             chain.HasCheckOptionAlong(path!)
                 ? (row, rowBatch) => PathRowRemainsVisible(rowBatch, chain, path!, table, row)
                 : null,
-            () => path!.Length == 1
-                ? JoinViewOutputShape(batch, ViewColumnsFor(batch, destinationView, destinationName), chain, chain.Sources, path[0], table, tuplesByRow: null)
-                : throw JoinOverJoinViewOutputNotModeled(destinationView));
+            () => JoinViewOutputShape(batch, ViewColumnsFor(batch, destinationView, destinationName), chain, chain.Sources, path!, table, tuplesByRow: null));
 
         _ = batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
         // A base table with another owner than the view breaks the chain,
@@ -585,7 +583,8 @@ partial class Simulation
     /// <summary>
     /// OUTPUT through a join view whose written table sits under a nested join
     /// view, which isn't built: <c>INSERTED</c> would have to be computed up
-    /// through the nested view from the written row alone.
+    /// through the nested view from the written row alone, and its columns
+    /// reading the nested view's other sources refused.
     /// </summary>
     private static NotSupportedException JoinOverJoinViewOutputNotModeled(View view) =>
         new($"OUTPUT through '{view.Name}', a join view whose written table another join view it reads supplies, isn't modeled.");

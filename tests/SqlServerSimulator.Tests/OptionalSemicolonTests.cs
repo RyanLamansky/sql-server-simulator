@@ -195,4 +195,26 @@ public sealed class OptionalSemicolonTests
         AreEqual(15, conn.CreateCommand(
             "declare @x int = 7 set @x = @x + 8 select @x").ExecuteScalar());
     }
+
+    /// <summary>
+    /// The statements that begin with a reserved word only a statement can
+    /// start end the one before them without a separator (probed 2026-09-30
+    /// against SQL Server 2025, each following an UPDATE's WHERE).
+    /// </summary>
+    [TestMethod]
+    [DataRow("checkpoint", "select 'after'", "after")]
+    [DataRow("goto skip\nselect 'skipped'\nskip:", "select 'after'", "after")]
+    [DataRow("writetext t.c @p 'zz'", "select cast(c as varchar(10)) from t", "zz")]
+    [DataRow("updatetext t.c @p 0 0 'q'", "select cast(c as varchar(10)) from t", "qb")]
+    public void StatementOnlyKeyword_EndsThePriorStatement(string statement, string then, string expected)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, c text); insert t values (1, 'a')");
+        AreEqual(expected, sim.ExecuteScalar($"""
+            declare @p varbinary(16) = (select textptr(c) from t where id = 1)
+            update t set c = 'b' where id = 1
+            {statement}
+            {then}
+            """));
+    }
 }

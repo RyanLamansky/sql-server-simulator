@@ -48,20 +48,19 @@ public sealed class CteDmlTests
 
     /// <summary>
     /// A limit that picks between rows its body's projection can't tell apart
-    /// refuses rather than guess, as does a MERGE through a row-selecting body.
+    /// still writes the row it picked, and a MERGE through a row-selecting body
+    /// matches only the rows the body yields (probed 2026-09-30 against SQL
+    /// Server 2025).
     /// </summary>
     [TestMethod]
-    [DataRow("create table u (id int, v int); insert u values (1, 5), (1, 9); with d as (select top 1 id from u order by v desc) delete from d")]
-    [DataRow("with d as (select top 1 * from t order by v) merge d using (values (1)) s(x) on d.id = s.x when matched then delete;")]
-    public void UndecidableRowSelection_IsRefusedWithoutWriting(string sql)
-    {
-        var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery(Setup);
-        using var connection = simulation.CreateOpenConnection();
-        using var command = connection.CreateCommand(sql);
-        _ = Throws<NotSupportedException>(() => command.ExecuteNonQuery());
-        AreEqual(3, simulation.ExecuteScalar("select count(*) from t"));
-    }
+    [DataRow("create table u (id int, v int); insert u values (1, 5), (1, 9); with d as (select top 1 id from u order by v desc) delete from d; select string_agg(concat(id, ':', v), ',') from u", "1:5")]
+    [DataRow("create table u (id int, v int); insert u values (1, 5), (1, 9), (1, 7); with d as (select top 1 id from u order by v) update d set id = 3; select string_agg(concat(id, ':', v), ',') within group (order by v) from u", "3:5,1:7,1:9")]
+    [DataRow("with d as (select top 1 * from t order by v) merge d using (values (1)) s(x) on d.id = s.x when matched then delete; select string_agg(concat(id, ':', v), ',') within group (order by v) from t", "1:2,2:3")]
+    [DataRow("with d as (select top 2 * from t order by v desc) merge d using (values (1)) s(x) on d.id = s.x when matched then update set v = -v when not matched then insert (id, v) values (s.x, 0); select string_agg(concat(id, ':', v), ',') within group (order by id, v) from t", "1:-2,1:1,2:3")]
+    [DataRow("with d as (select *, row_number() over (partition by id order by v) rn from t) merge d using (values (1)) s(x) on d.rn > s.x when matched then delete; select string_agg(concat(id, ':', v), ',') within group (order by v) from t", "1:1,2:3")]
+    [DataRow("with d as (select *, row_number() over (partition by id order by v desc) rn from t) merge d using (values (2)) s(x) on d.id = s.x when matched then update set v = d.rn * 10; select string_agg(concat(id, ':', v), ',') within group (order by id, v) from t", "1:1,1:2,2:10")]
+    public void UndecidableRowSelection_WritesTheChosenRow(string sql, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(Setup + sql));
 
     [TestMethod]
     public void RowLimitedView_WritesTheRowsItYields()
@@ -77,5 +76,29 @@ public sealed class CteDmlTests
         AreEqual(1, simulation.ExecuteScalar("select sum(v) from t"));
         _ = simulation.AssertSqlError("update vrn set rn = 5", 4406);
         AreEqual(1, simulation.ExecuteNonQuery("insert vtop values (4, 4)"));
+    }
+
+    /// <summary>
+    /// A view over a row-limited or windowed view writes the rows the lower
+    /// view yields and its own filter admits (probed 2026-09-30 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ViewOverRowSelectingView_WritesTheRowsItYields()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table u (id int, v int, w int); insert u values (1, 5, 100), (1, 3, 200), (2, 9, 300); create table x (id int, v int); insert x values (1, 5), (1, 3), (2, 9)",
+            "create view vtop as select top 1 id from u order by v",
+            "create view vover as select id from vtop",
+            "create view vrn as select id, v, row_number() over (partition by id order by v) rn from x",
+            "create view vfilter as select id, v, rn from vrn where id = 1",
+            "create view vtoo as select id, rn, v from vfilter");
+        _ = simulation.ExecuteNonQuery("update vover set id = 7");
+        AreEqual("1:100,7:200,2:300", simulation.ExecuteScalar("select string_agg(concat(id, ':', w), ',') within group (order by w) from u"));
+        _ = simulation.ExecuteNonQuery("merge vtoo as t using (select 2 k) s on t.rn = s.k when matched then update set v = -t.v;");
+        AreEqual("1:-5,1:3,2:9", simulation.ExecuteScalar("select string_agg(concat(id, ':', v), ',') within group (order by id, abs(v) desc) from x"));
+        _ = simulation.ExecuteNonQuery("delete vfilter where rn = 2");
+        AreEqual("1:-5,2:9", simulation.ExecuteScalar("select string_agg(concat(id, ':', v), ',') within group (order by id) from x"));
     }
 }

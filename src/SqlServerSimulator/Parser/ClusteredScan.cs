@@ -124,24 +124,27 @@ internal static class ClusteredScan
     /// </summary>
     /// <remarks>
     /// <paramref name="io"/>, when the executing statement is gathering
-    /// <c>STATISTICS IO</c>, counts the scan and the pages it enters.
+    /// <c>STATISTICS IO</c>, counts the scan and the pages it enters, and
+    /// <paramref name="addresses"/>, when it reads a row locator, records each
+    /// row's address.
     /// </remarks>
-    public static IEnumerable<byte[]> Rows(HeapTable table, IoStatistics? io = null)
+    public static IEnumerable<byte[]> Rows(HeapTable table, IoStatistics? io = null, RowAddressMap? addresses = null)
     {
         var counts = io?.Touch(table);
         _ = counts?.ScanCount += 1;
         var lastPage = -1;
         if (Order(table) is not { } order)
         {
-            if (counts is null)
+            if (counts is null && addresses is null)
             {
                 foreach (var bytes in table.Rows)
                     yield return bytes;
                 yield break;
             }
-            foreach (var (page, _, bytes) in table.Heap.EnumerateRowsWithAddress())
+            foreach (var (page, slot, bytes) in table.Heap.EnumerateRowsWithAddress())
             {
-                counts.Enter(page, ref lastPage);
+                counts?.Enter(page, ref lastPage);
+                addresses?.Record(bytes, page, slot);
                 yield return bytes;
             }
             yield break;
@@ -153,6 +156,7 @@ internal static class ClusteredScan
             if (seen.Add(address) && !heap.IsSlotTombstoned(address.Page, address.Slot) && heap.ReadSlotBytes(address.Page, address.Slot) is { } bytes)
             {
                 counts?.Enter(address.Page, ref lastPage);
+                addresses?.Record(bytes, address.Page, address.Slot);
                 yield return bytes;
             }
         }

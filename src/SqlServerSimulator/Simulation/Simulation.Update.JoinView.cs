@@ -78,10 +78,8 @@ partial class Simulation
         Dictionary<SqlValue[], byte[]?[]>? tuplesByRow = null;
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
         {
-            if (path.Length > 1)
-                throw JoinOverJoinViewOutputNotModeled(view);
             tuplesByRow = new(ReferenceEqualityComparer.Instance);
-            var shape = JoinViewOutputShape(batch, ViewColumnsFor(batch, view, targetName), chain, sources, path[0], table, tuplesByRow);
+            var shape = JoinViewOutputShape(batch, ViewColumnsFor(batch, view, targetName), chain, sources, path, table, tuplesByRow);
             output = TryParseOutputClauseForMutation(context, table, allowInserted: true, allowDeleted: true, shape);
             RejectClientOutputOnTriggeredTarget(batch, table, TriggerActions.Update, table.Name, output is { HasTarget: false });
         }

@@ -123,4 +123,56 @@ public sealed class JoinViewSingleTableViewSourceTests
     public void OwnershipChain_WithEveryLinkGranted_Writes()
         => AreEqual(1, OwnedView(ViewGrant + ";" + TableGrant + "; grant select on dbo.t2 to c")
             .ExecuteNonQuery("execute as user = 'c'; update dbo.v1 set b = 5"));
+
+    /// <summary>Every row of the statement's first result set, columns joined by '|', rows by ';'.</summary>
+    private static string Output(Simulation sim, string sql)
+    {
+        using var reader = sim.ExecuteReader(sql);
+        return string.Join(";", reader.EnumerateRecords().Select(record =>
+            string.Join("|", Enumerable.Range(0, record.FieldCount).Select(i => record.IsDBNull(i) ? "NULL" : Convert.ToString(record.GetValue(i), System.Globalization.CultureInfo.InvariantCulture)))));
+    }
+
+    private static Simulation SeededDerived()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table a (id int primary key, v int); create table b (id int primary key, q int); insert a values (1, 10), (2, 20); insert b values (1, 100), (2, 200), (3, 300)",
+            "create view vd as select id, v, v * 2 as v2 from a where v > 5",
+            "create view jd as select vd.id, vd.v, vd.v2, b.q from vd join b on b.id = vd.id");
+        return sim;
+    }
+
+    /// <summary>
+    /// OUTPUT through such a join view reads the view's columns: DELETED off
+    /// the row's own join tuple, INSERTED with the single-table view's columns
+    /// — a derived one included — computed from the written row (probed
+    /// 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Update_Output_ReadsTheNestedViewsColumns()
+    {
+        var sim = SeededDerived();
+        AreEqual("1|11|22|10|20|100", Output(sim, "update jd set v = v + 1 output inserted.id, inserted.v, inserted.v2, deleted.v, deleted.v2, deleted.q where id = 1"));
+        AreEqual(11, sim.ExecuteScalar("select v from a where id = 1"));
+    }
+
+    [TestMethod]
+    public void Update_Output_OtherSourcesColumnIsRefusedInInserted()
+        => _ = SeededDerived().AssertSqlError("update jd set v = 0 output inserted.q", 404);
+
+    [TestMethod]
+    public void Insert_Output_ComputesTheDerivedColumn()
+    {
+        var sim = SeededDerived();
+        AreEqual("3|7|14", Output(sim, "insert jd (id, v) output inserted.id, inserted.v, inserted.v2 values (3, 7)"));
+        AreEqual(7, sim.ExecuteScalar("select v from a where id = 3"));
+    }
+
+    [TestMethod]
+    public void Merge_Output_ReadsTheWrittenRowBack()
+    {
+        var sim = SeededDerived();
+        AreEqual("UPDATE|11|22|10|20|100", Output(sim, "merge jd as t using (values (1, 11)) s(id, v) on t.id = s.id when matched then update set v = s.v output $action, inserted.v, inserted.v2, deleted.v, deleted.v2, deleted.q;"));
+        AreEqual(11, sim.ExecuteScalar("select v from a where id = 1"));
+    }
 }
