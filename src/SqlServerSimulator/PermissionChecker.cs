@@ -654,12 +654,12 @@ internal static class PermissionEnforcement
     /// join itself — <paramref name="from"/> reading <paramref name="to"/>, the
     /// next view down. When their owners differ the caller needs SELECT on the
     /// columns of <paramref name="to"/> the statement reads, then UPDATE on it
-    /// at object grain when <paramref name="write"/> (probed 2026-09-29 against
+    /// at object grain for each of <paramref name="writes"/> (probed 2026-09-29 against
     /// SQL Server 2025: a write through <c>dbo.v1</c> over a <c>u1</c>-owned
     /// join view is Msg 229 naming the join view, SELECT before UPDATE, while a
     /// view the join only reads takes the SELECT alone).
     /// </summary>
-    internal static void CheckBrokenChainViewLink(BatchContext batch, Schemas.View from, Schemas.View to, ColumnReadTarget? reads, bool write = true)
+    internal static void CheckBrokenChainViewLink(BatchContext batch, Schemas.View from, Schemas.View to, ColumnReadTarget? reads, string[] writes)
     {
         if (!TryResolveBrokenChain(batch, from, to, out var database, out var principalId))
             return;
@@ -676,14 +676,26 @@ internal static class PermissionEnforcement
                 selectDenied = denied;
             }
         }
-        var updateDenied = !write || PermissionChecker.IsGranted(database, principalId, Permission.Update, PermissionChecker.ClassObject, to.ObjectId, to.SchemaId, Rights(batch))
-            ? null
-            : SimulatedSqlException.PermissionDenied("UPDATE", to.Name, database.Name, SchemaNameFor(database, to.SchemaId));
-        if (selectDenied is not null && updateDenied is not null)
-            throw SimulatedSqlException.Aggregate([selectDenied, updateDenied]);
-        if ((selectDenied ?? updateDenied) is { } denial)
+        SimulatedSqlException? writeDenied = null;
+        foreach (var write in writes)
+        {
+            if (!PermissionChecker.IsGranted(database, principalId, Permission.Resolve(write), PermissionChecker.ClassObject, to.ObjectId, to.SchemaId, Rights(batch)))
+            {
+                writeDenied = SimulatedSqlException.PermissionDenied(write, to.Name, database.Name, SchemaNameFor(database, to.SchemaId));
+                break;
+            }
+        }
+        if (selectDenied is not null && writeDenied is not null)
+            throw SimulatedSqlException.Aggregate([selectDenied, writeDenied]);
+        if ((selectDenied ?? writeDenied) is { } denial)
             throw denial;
     }
+
+    /// <summary>The write permission list of an <c>UPDATE</c> crossing a link.</summary>
+    internal static readonly string[] UpdateWrites = ["UPDATE"];
+
+    /// <summary>The write permission list of a link a statement only reads through.</summary>
+    internal static readonly string[] NoWrites = [];
 
     /// <summary>
     /// The column-grain broken-chain check for a write through a join view:

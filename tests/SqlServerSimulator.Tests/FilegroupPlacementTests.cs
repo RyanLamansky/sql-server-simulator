@@ -114,6 +114,9 @@ public sealed class FilegroupPlacementTests
     [DataRow("create table t (a int, b varchar(max)) textimage_on nofg", 1921)]
     [DataRow("create table t (a int) textimage_on fg1", 1709)]
     [DataRow("create table t (a int, b varchar(max)) on scheme_less textimage_on fg1", 1921)]
+    [DataRow("create table t (a int) filestream_on [primary]", 1716)]
+    [DataRow("create table t (a int, b text) textimage_on [primary] filestream_on [default]", 1716)]
+    [DataRow("create table t (a int) on fg1 filestream_on fg1", 1716)]
     public void Refusals(string statement, int number)
         => _ = WithFilegroups().AssertSqlError(statement, number);
 

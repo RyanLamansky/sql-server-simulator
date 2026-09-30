@@ -197,4 +197,23 @@ public sealed class AlterIndexMaintenanceTests
     [TestMethod]
     public void UnknownForm_IsASyntaxError()
         => AssertSqlError($"{Table} alter index ix_b on t frobnicate", 102);
+
+    /// <summary>Rebuild and SET option refusals shared by every rowstore index (probed 2026-09-30 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("alter index ix on t rebuild with (resumable = on)", 11438)]
+    [DataRow("alter index ix on t rebuild with (resumable = on, online = off)", 11438)]
+    [DataRow("alter index ix on t rebuild with (wait_at_low_priority (max_duration = 1 minutes, abort_after_wait = none), online = on)", 102)]
+    [DataRow("alter index ix on t set (allow_row_locks = 5)", 153)]
+    [DataRow("alter index ix on t set (statistics_norecompute = 7)", 153)]
+    [DataRow("alter index ix on t set (allow_page_locks = -1)", 153)]
+    [DataRow("alter index ix on t set (ignore_dup_key = 1)", 102)]
+    public void RebuildAndSetOptions_RefuseTheirBadShapes(string statement, int number)
+        => _ = new Simulation().AssertSqlError($"create table t (id int primary key, a int); create index ix on t(a); {statement}", number);
+
+    [TestMethod]
+    public void SetOptionNumericValue_NamesTheOptionAsWritten()
+    {
+        var ex = new Simulation().AssertSqlError("create table t (id int primary key, a int); create index ix on t(a); alter index ix on t set (Allow_Row_Locks = 5)", 153);
+        AreEqual("Invalid usage of the option Allow_Row_Locks in the INDEX statement.", ex.Errors[0].Message);
+    }
 }

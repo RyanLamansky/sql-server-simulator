@@ -416,5 +416,7 @@ A NULL or unknown source is Msg 16902 (state 40 / 42), a NULL identity Msg 16902
 
 ## Not modeled yet
 
-- **`sys.dm_exec_cursors`** — the cursor DMV the probes above read effective types from; querying it is Msg 208.
+- **`sys.dm_exec_cursors(spid | 0)`** — the cursor DMV the probes above read effective types from; querying it is Msg 208.
+  Real's 22 columns, probed 2026-09-30: `session_id`, `cursor_id`, `name`, `properties` (`TSQL | Dynamic | Optimistic | Global (0)`, `TSQL | Fast_Forward | Read Only | Local (0)`, `TSQL | Snapshot | Read Only | Global (0)`, `TSQL | Dynamic | Scroll Locks | Global (0)`), `sql_handle`, `statement_start_offset`, `statement_end_offset` (byte offsets of the `DECLARE` in its batch), `plan_generation_num`, `creation_time`, `is_open`, `is_async_population`, `is_close_on_commit`, `fetch_status` (-9 before the first fetch), `fetch_buffer_size`, `fetch_buffer_start`, `ansi_position`, `worker_time`, `reads`, `writes`, `dormant_duration`, `statement_sql_handle`, `statement_context_id`.
+  The cursor model already answers `sp_cursor_list`, whose type and concurrency cells the `properties` text is built from.
 - **Asynchronous keyset population** under a non-default `cursor threshold` server option, where real reports a negative `@@CURSOR_ROWS` while it populates; the default (-1) populates synchronously, which is what the simulator always does.

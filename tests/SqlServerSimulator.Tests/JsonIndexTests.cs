@@ -199,4 +199,49 @@ public sealed class JsonIndexTests
     [DataRow("declare @p nvarchar(10) = '$.a'; create json index ji on t(d) for (@p)", 102)]
     public void GrammarKeywords(string statement, int number) =>
         new Simulation().AssertSqlError($"{Table} {statement}", number);
+
+    private const string Indexed = Table + " create json index ji on t(d);";
+
+    /// <summary>ALTER INDEX forms and options a JSON index refuses (probed 2026-09-30 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("alter index ji on t set (allow_row_locks = off)", 13688, 1)]
+    [DataRow("alter index ji on t set (ignore_dup_key = on)", 13688, 1)]
+    [DataRow("alter index all on t set (allow_page_locks = off)", 13688, 1)]
+    [DataRow("alter index ji on t pause", 13688, 1)]
+    [DataRow("alter index ji on t resume", 13688, 1)]
+    [DataRow("alter index ji on t abort", 13688, 1)]
+    [DataRow("alter index ji on t rebuild partition = 1", 7731, 5)]
+    [DataRow("alter index ji on t reorganize partition = 1", 7731, 5)]
+    [DataRow("alter index ji on t reorganize with (compress_all_row_groups = on)", 35375, 3)]
+    [DataRow("alter index ji on t rebuild with (online = on)", 153, 37)]
+    [DataRow("alter index ji on t rebuild with (ignore_dup_key = on)", 153, 36)]
+    [DataRow("alter index ji on t rebuild with (statistics_incremental = on)", 153, 40)]
+    [DataRow("alter index ji on t rebuild with (sort_in_tempdb = on)", 153, 42)]
+    [DataRow("alter index ji on t rebuild with (statistics_norecompute = on)", 153, 43)]
+    [DataRow("alter index ji on t rebuild with (xml_compression = on)", 153, 45)]
+    [DataRow("alter index ji on t disable; alter index ji on t set (allow_row_locks = off)", 1973, 1)]
+    [DataRow("alter index ji on t disable; alter index ji on t reorganize", 1973, 1)]
+    public void AlterIndex_RefusesWhatAJsonIndexDoesntTake(string statement, int number, int state)
+    {
+        var ex = new Simulation().AssertSqlError($"{Indexed} {statement}", number);
+        AreEqual((byte)state, ex.Errors[0].State);
+    }
+
+    [TestMethod]
+    public void AlterIndex_RebuildOptionNamesAreReportedInTheirRealCase()
+    {
+        var ex = new Simulation().AssertSqlError($"{Indexed} alter index ji on t rebuild with (Ignore_Dup_Key = On, Online = On)", 153);
+        AreEqual("Invalid usage of the option ignore_dup_key in the ALTER INDEX REBUILD statement.", ex.Errors[0].Message);
+        ex = new Simulation().AssertSqlError($"{Indexed} alter index ji on t rebuild with (online = on)", 153);
+        AreEqual("Invalid usage of the option ONLINE in the ALTER INDEX REBUILD statement.", ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    [DataRow("alter index ji on t rebuild with (online = off, ignore_dup_key = off, sort_in_tempdb = off, xml_compression = off, statistics_norecompute = off)")]
+    [DataRow("alter index ji on t rebuild with (fillfactor = 80, maxdop = 1, data_compression = columnstore)")]
+    [DataRow("alter index ji on t reorganize with (compress_all_row_groups = off, lob_compaction = on)")]
+    [DataRow("alter index ji on t rebuild partition = all")]
+    [DataRow("alter index all on t rebuild")]
+    public void AlterIndex_AcceptsWhatAJsonIndexTakes(string statement)
+        => AreEqual(1, new Simulation().ExecuteScalar($"{Indexed} {statement}; select 1"));
 }

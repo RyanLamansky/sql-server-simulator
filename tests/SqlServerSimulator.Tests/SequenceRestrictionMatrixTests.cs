@@ -102,6 +102,15 @@ public sealed class SequenceRestrictionMatrixTests
     public void OverExemptsTheOrderByRefusalAlone(string sql, int number)
         => _ = WithSequence().AssertSqlError(sql, number);
 
+    /// <summary>
+    /// A subquery with its own <c>TOP</c> inside a <c>TOP</c> count leaves the
+    /// outer count's later reference still judged as the count's
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void TopCountReferenceAfterNestedTop_StaysInTheCount()
+        => _ = WithSequence().AssertSqlError("select top ((select top 1 1 from n) + cast(next value for dbo.s as int)) next value for dbo.s over (order by id) from n", 11739);
+
     // ---- Msg 11725: an aggregate's argument -------------------------------
 
     [TestMethod]

@@ -57,15 +57,15 @@ partial class Simulation
 
     /// <summary>
     /// Starts timing a statement for Query Store, or null when the store
-    /// won't record it: a batch walking in skip mode, a function or view
-    /// body (inlined into its caller), a module's CREATE-time bind, and a
+    /// won't record it: a batch walking in skip mode, a view body or an inlined
+    /// function body (part of its caller's statement), a module's CREATE-time bind, and a
     /// database whose store isn't READ_WRITE — or is capturing nothing new
     /// and holds nothing to update. The check reads two fields, so a
     /// database with its store off pays nothing more.
     /// </summary>
     private static QueryStoreCapture? BeginQueryStoreCapture(BatchContext batch, IoStatistics? io)
     {
-        if (batch.IsSkipping || batch.SuppressDiagnosticsResolution || batch.CreateTimeBinding)
+        if (batch.IsSkipping || (batch.SuppressDiagnosticsResolution && !batch.CapturesQueryStore) || batch.CreateTimeBinding)
             return null;
         var database = batch.CurrentDatabase;
         var options = database.QueryStore;

@@ -44,7 +44,7 @@ partial class Simulation
         Selection.DmlTopLimit? top)
     {
         var batch = context.Batch;
-        var chain = BuildJoinViewChain(batch, view);
+        var chain = BuildJoinViewChain(batch, view, targetName.ToString());
         var (path, assignments) = ResolveJoinViewSetTargets(batch, chain, rawAssignments, targetName.ToString());
         var table = chain.TableAt(path)
             ?? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(targetName.ToString());

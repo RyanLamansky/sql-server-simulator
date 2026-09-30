@@ -118,6 +118,7 @@ partial class Simulation
         context.MoveNextRequired();
         var tableName = BatchContext.ParseObjectName(context);
         var targetColumnstore = TargetsColumnstoreIndex(context, tableName, indexName);
+        var targetsJson = TargetsJsonIndex(context, tableName, indexName);
         context.MoveNextRequired();
 
         var form = context.Token switch
@@ -137,6 +138,8 @@ partial class Simulation
         var rebuildOptions = default(IndexOptions);
         var namedPartition = false;
         long partitionNumber = 0;
+        JsonRebuildRefusal? jsonRefusal = null;
+        var compressAllRowGroups = false;
         switch (form)
         {
             case AlterIndexForm.Set:
@@ -159,15 +162,19 @@ partial class Simulation
             case AlterIndexForm.Reorganize:
                 context.MoveNextOptional();
                 namedPartition = ParseOptionalIndexPartitionClause(context, out partitionNumber);
-                ParseOptionalReorganizeWithClause(context);
+                compressAllRowGroups = ParseOptionalReorganizeWithClause(context);
                 break;
             default:
                 // REBUILD takes an optional PARTITION = ALL and its own WITH (…)
                 // option block; neither describes anything a heap has.
                 context.MoveNextOptional();
                 namedPartition = ParseOptionalIndexPartitionClause(context, out partitionNumber);
+                jsonRefusal = targetsJson ? new JsonRebuildRefusal() : null;
                 rebuildOptions = ParseOptionalIndexWithClause(
-                    context, targetColumnstore == true ? IndexOptionStatement.RebuildColumnstoreIndex : IndexOptionStatement.AlterIndexRebuild, indexName);
+                    context,
+                    targetsJson ? IndexOptionStatement.RebuildJsonIndex : targetColumnstore == true ? IndexOptionStatement.RebuildColumnstoreIndex : IndexOptionStatement.AlterIndexRebuild,
+                    indexName,
+                    jsonRefusal);
                 break;
         }
 
@@ -194,7 +201,7 @@ partial class Simulation
                 if (collation.Equals(constraint.Name, indexName))
                 {
                     RejectNamedIndexTarget(form, namedPartition, partitionNumber, constraint.IsClustered ? table.Partitioning : constraint.Partitioning, constraint.Name, table.Name);
-                    ApplyToConstraint(table, constraint, form, ignoreDupKey, rebuildOptions, context.Batch);
+                    ApplyToConstraint(table, constraint, form, ignoreDupKey, rebuildOptions, context.Batch, tableName.ToString());
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
                 }
@@ -205,19 +212,35 @@ partial class Simulation
                 if (collation.Equals(index.Name, indexName))
                 {
                     RejectNamedIndexTarget(form, namedPartition, partitionNumber, index.IsClustered ? table.Partitioning : index.Partitioning, index.Name, table.Name);
-                    ApplyToIndex(context, table, index, form, ignoreDupKey, compressionDelay, rebuildOptions);
+                    ApplyToIndex(context, table, index, form, ignoreDupKey, compressionDelay, rebuildOptions, tableName.ToString());
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
                     return true;
                 }
             }
 
-            // A JSON index takes DISABLE and REBUILD (probed 2026-09-27
-            // against SQL Server 2025); it has nothing else to change.
+            // A JSON index takes DISABLE, REBUILD and REORGANIZE (probed
+            // 2026-09-27 and 2026-09-30 against SQL Server 2025) and refuses
+            // SET and the resumable forms, a partition number, and the REBUILD
+            // options that mean nothing to it.
             foreach (var jsonIndex in table.JsonIndexes)
             {
                 if (collation.Equals(jsonIndex.Name, indexName))
                 {
-                    RejectNamedIndexTarget(form, namedPartition, partitionNumber, placement: null, jsonIndex.Name, table.Name);
+                    if (form == AlterIndexForm.Set && jsonIndex.IsDisabled)
+                        throw SimulatedSqlException.OperationOnDisabledIndex(jsonIndex.Name, tableName.ToString());
+                    if (form is AlterIndexForm.Set or AlterIndexForm.Resume or AlterIndexForm.Pause or AlterIndexForm.Abort)
+                        throw SimulatedSqlException.JsonIndexAlterOptionsInvalid();
+                    if (namedPartition)
+                        throw SimulatedSqlException.PartitionNumberOnJsonIndex(jsonIndex.Name);
+                    if (jsonRefusal is { State: not 0 })
+                        throw SimulatedSqlException.InvalidJsonIndexRebuildOption(jsonRefusal.Name, jsonRefusal.State);
+                    if (form == AlterIndexForm.Reorganize)
+                    {
+                        if (jsonIndex.IsDisabled)
+                            throw SimulatedSqlException.OperationOnDisabledIndex(jsonIndex.Name, tableName.ToString());
+                        if (compressAllRowGroups)
+                            throw SimulatedSqlException.CompressAllRowGroupsNeedsColumnstore();
+                    }
                     if (form is AlterIndexForm.Disable or AlterIndexForm.Rebuild)
                         jsonIndex.IsDisabled = form == AlterIndexForm.Disable;
                     RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
@@ -263,14 +286,17 @@ partial class Simulation
             // would be Msg 1973 (probe-confirmed).
             if (form == AlterIndexForm.Reorganize && constraint.IsDisabled)
                 continue;
-            ApplyToConstraint(table, constraint, form, ignoreDupKey, rebuildOptions, context.Batch);
+            ApplyToConstraint(table, constraint, form, ignoreDupKey, rebuildOptions, context.Batch, tableName.ToString());
         }
         foreach (var index in table.Indexes)
         {
             if (form == AlterIndexForm.Reorganize && index.IsDisabled)
                 continue;
-            ApplyToIndex(context, table, index, form, ignoreDupKey, compressionDelay, rebuildOptions);
+            ApplyToIndex(context, table, index, form, ignoreDupKey, compressionDelay, rebuildOptions, tableName.ToString());
         }
+        // A JSON index takes no SET, and ALL reaches it after the relational ones.
+        if (form == AlterIndexForm.Set && table.JsonIndexes.Count > 0)
+            throw SimulatedSqlException.JsonIndexAlterOptionsInvalid();
         RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), table.Name, "INDEX", table.Name, "TABLE");
         return true;
     }
@@ -316,7 +342,7 @@ partial class Simulation
     /// succeeds on a table carrying a PRIMARY KEY.
     /// </summary>
     private static void ApplyToConstraint(
-        HeapTable table, KeyConstraint constraint, AlterIndexForm form, bool? ignoreDupKey, IndexOptions rebuildOptions, BatchContext batch)
+        HeapTable table, KeyConstraint constraint, AlterIndexForm form, bool? ignoreDupKey, IndexOptions rebuildOptions, BatchContext batch, string writtenTableName)
     {
         switch (form)
         {
@@ -336,11 +362,11 @@ partial class Simulation
                 // Nothing to compact in a flat page list, but a disabled index
                 // still refuses the operation.
                 if (constraint.IsDisabled)
-                    throw SimulatedSqlException.OperationOnDisabledIndex(constraint.Name, table.Name);
+                    throw SimulatedSqlException.OperationOnDisabledIndex(constraint.Name, writtenTableName);
                 break;
             default:
                 if (constraint.IsDisabled)
-                    throw SimulatedSqlException.OperationOnDisabledIndex(constraint.Name, table.Name);
+                    throw SimulatedSqlException.OperationOnDisabledIndex(constraint.Name, writtenTableName);
                 if (ignoreDupKey is not null)
                     throw SimulatedSqlException.IgnoreDupKeyOnConstraintIndex(constraint.Name);
                 constraint.AllowRowLocks = rebuildOptions.AllowRowLocks ?? constraint.AllowRowLocks;
@@ -351,7 +377,7 @@ partial class Simulation
     }
 
     private static void ApplyToIndex(
-        ParserContext context, HeapTable table, Storage.Index index, AlterIndexForm form, bool? ignoreDupKey, int? compressionDelay, IndexOptions rebuildOptions)
+        ParserContext context, HeapTable table, Storage.Index index, AlterIndexForm form, bool? ignoreDupKey, int? compressionDelay, IndexOptions rebuildOptions, string writtenTableName)
     {
         switch (form)
         {
@@ -379,11 +405,11 @@ partial class Simulation
                 break;
             case AlterIndexForm.Reorganize:
                 if (index.IsDisabled)
-                    throw SimulatedSqlException.OperationOnDisabledIndex(index.Name, table.Name);
+                    throw SimulatedSqlException.OperationOnDisabledIndex(index.Name, writtenTableName);
                 break;
             default:
                 if (index.IsDisabled)
-                    throw SimulatedSqlException.OperationOnDisabledIndex(index.Name, table.Name);
+                    throw SimulatedSqlException.OperationOnDisabledIndex(index.Name, writtenTableName);
                 if (compressionDelay is int delay && index.IsColumnstore)
                     index.CompressionDelay = delay;
                 if (ignoreDupKey is bool value)
@@ -435,7 +461,7 @@ partial class Simulation
             var value = context.GetNextRequired();
             if (OnOffIndexOptions.Contains(optionName))
             {
-                var on = ReadOnOffOptionValue(context, value);
+                var on = ReadOnOffOptionValue(context, value, optionName);
                 if (IgnoreDupKeyOption.Equals(optionName, StringComparison.OrdinalIgnoreCase))
                 {
                     ignoreDupKey = on;
@@ -508,6 +534,18 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Whether the named index is a JSON index, or — for <c>ALL</c> — the table
+    /// has one; false while the batch is skipping or the table doesn't resolve.
+    /// </summary>
+    private static bool TargetsJsonIndex(ParserContext context, MultiPartName tableName, string? indexName)
+    {
+        if (context.Batch.IsSkipping || !context.Batch.TryResolveTable(tableName, out var table))
+            return false;
+        var collation = context.Batch.CurrentDatabase.Collation;
+        return indexName is null ? table.JsonIndexes.Count > 0 : table.JsonIndexes.Exists(index => collation.Equals(index.Name, indexName));
+    }
+
+    /// <summary>
     /// <c>ALTER INDEX … REORGANIZE WITH (…)</c> options. Both take
     /// <c>ON</c> / <c>OFF</c>; real accepts the columnstore-shaped
     /// <c>COMPRESS_ALL_ROW_GROUPS</c> on a rowstore index without complaint
@@ -573,10 +611,11 @@ partial class Simulation
     /// REORGANIZE-flavoured Msg 155 and a non-<c>ON</c>/<c>OFF</c> value reports
     /// Msg 153 rather than a syntax error.
     /// </summary>
-    private static void ParseOptionalReorganizeWithClause(ParserContext context)
+    private static bool ParseOptionalReorganizeWithClause(ParserContext context)
     {
+        var compressAll = false;
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
-            return;
+            return compressAll;
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
@@ -589,8 +628,10 @@ partial class Simulation
                 throw SimulatedSqlException.UnrecognizedAlterIndexReorganizeOption(optionName);
             if (context.GetNextRequired() is not Operator { Character: '=' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } value)
                 throw SimulatedSqlException.InvalidUsageOfIndexOption(optionName);
+            if (value.Keyword == Keyword.On && optionName.Equals("COMPRESS_ALL_ROW_GROUPS", StringComparison.OrdinalIgnoreCase))
+                compressAll = true;
 
             if (context.GetNextRequired() is not Operator { Character: ',' })
                 break;
@@ -599,6 +640,7 @@ partial class Simulation
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+        return compressAll;
     }
 
     /// <summary>
@@ -646,8 +688,25 @@ partial class Simulation
         context.MoveNextOptional();
     }
 
-    private static bool ReadOnOffOptionValue(ParserContext context, Token value) =>
-        value is ReservedKeyword { Keyword: var keyword } && keyword is Keyword.On or Keyword.Off
-            ? keyword == Keyword.On
-            : throw SimulatedSqlException.SyntaxErrorNear(context);
+    /// <summary>
+    /// Reads an <c>ON</c> / <c>OFF</c> option value. An integer (signed or not) is Msg 153 naming the option as
+    /// written, except for <c>IGNORE_DUP_KEY</c>, whose grammar reads it as a syntax error (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    private static bool ReadOnOffOptionValue(ParserContext context, Token value, string? optionName = null)
+    {
+        if (value is ReservedKeyword { Keyword: var keyword } && keyword is Keyword.On or Keyword.Off)
+            return keyword == Keyword.On;
+        if (optionName is not null && !IgnoreDupKeyOption.Equals(optionName, StringComparison.OrdinalIgnoreCase) && value is Numeric)
+            throw SimulatedSqlException.InvalidUsageOfIndexOption(optionName);
+        if (optionName is not null && !IgnoreDupKeyOption.Equals(optionName, StringComparison.OrdinalIgnoreCase) && value is Operator { Character: '-' })
+        {
+            var checkpoint = context.SaveCheckpoint();
+            var signed = context.MoveNext() && context.Token is Numeric;
+            context.RestoreCheckpoint(checkpoint);
+            if (signed)
+                throw SimulatedSqlException.InvalidUsageOfIndexOption(optionName);
+        }
+        throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
 }

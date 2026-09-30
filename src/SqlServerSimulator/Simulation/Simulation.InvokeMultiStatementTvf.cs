@@ -132,7 +132,7 @@ partial class Simulation
         // confirmed: even a multi-statement TVF's mid-body error surfaces the
         // referencing SELECT's line, no procedure), so this frame leaves the
         // exception unresolved for the enclosing statement to stamp.
-        var innerBatch = new BatchContext(bodyCommand, variables) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, ModuleObjectId = function.ObjectId };
+        var innerBatch = new BatchContext(bodyCommand, variables) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, ModuleObjectId = function.ObjectId, CapturesQueryStore = true };
         innerBatch.TableVariables[function.ReturnVariableName] = returnTable;
         connection.NestingLevel++;
         var identityScope = IdentityScope.Enter(connection);

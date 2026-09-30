@@ -146,7 +146,7 @@ partial class Simulation
     /// clause or the rows. <c>TEXTIMAGE_ON</c> on a partitioned table is
     /// Msg 1707.
     /// </summary>
-    internal static void PlaceNewTable(BatchContext batch, HeapTable table, DataSpaceClause? written, string? textImageOn)
+    internal static void PlaceNewTable(BatchContext batch, HeapTable table, DataSpaceClause? written, string? textImageOn, bool fileStreamOn = false)
     {
         var rows = written is null ? null : ResolveDataSpaceClause(batch, written, table);
         if (textImageOn is not null && rows is not null)
@@ -179,6 +179,8 @@ partial class Simulation
                 throw SimulatedSqlException.TextImageOnWithoutLobColumn();
             table.LobFilegroupId = ResolveWritableFilegroup(database, textImageOn);
         }
+        if (fileStreamOn)
+            throw SimulatedSqlException.FileStreamOnWithoutFileStreamColumns();
     }
 
     /// <summary>The database a table's placement names filegroups of — its own, or <c>tempdb</c> for a temporary one.</summary>

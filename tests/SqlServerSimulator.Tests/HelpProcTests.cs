@@ -614,4 +614,34 @@ public sealed class HelpProcTests
         sim.ExecuteBatches("create table t (a int); create table u (a int)", "create view v as select a from t");
         AreEqual(expected, RunHelp(sim, command).Errors.ConvertAll(e => $"{e.Procedure}:{e.Number}@{e.LineNumber}")[0]);
     }
+
+    /// <summary>A system type name is a row of <c>sp_help</c>, one-part or under <c>sys</c> (probed 2026-09-30 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("int", "int|int|4|10|0|yes|none|none|")]
+    [DataRow("sys.INT", "int|int|4|10|0|yes|none|none|")]
+    [DataRow("[json]", "json|json|-1|-1||yes|none|none|")]
+    [DataRow("varchar", "varchar|varchar|8000|8000||yes|none|none|SQL_Latin1_General_CP1_CI_AS")]
+    [DataRow("nvarchar", "nvarchar|nvarchar|8000|4000||yes|none|none|SQL_Latin1_General_CP1_CI_AS")]
+    [DataRow("datetime2", "datetime2|datetime2|8|27|7|yes|none|none|")]
+    [DataRow("decimal", "decimal|decimal|17|38|38|yes|none|none|")]
+    [DataRow("geography", "geography||-1|-1||yes|none|none|")]
+    [DataRow("hierarchyid", "hierarchyid||892|892||yes|none|none|")]
+    [DataRow("timestamp", "timestamp|timestamp|8|8||no|none|none|")]
+    [DataRow("sysname", "sysname|nvarchar|256|128||no|none|none|SQL_Latin1_General_CP1_CI_AS")]
+    [DataRow("text", "text|text|16|2147483647||yes|none|none|SQL_Latin1_General_CP1_CI_AS")]
+    public void SpHelp_SystemTypeName_IsItsTypeRow(string name, string expected)
+    {
+        using var reader = new Simulation().ExecuteReader($"exec sp_help '{name}'");
+        IsTrue(reader.Read());
+        AreEqual(expected, string.Join('|', Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? "" : reader.GetValue(i))));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    [DataRow("dbo.int")]
+    [DataRow("vector")]
+    [DataRow("rowversion")]
+    [DataRow("integer")]
+    public void SpHelp_NotASystemType_IsMsg15009(string name)
+        => _ = new Simulation().AssertSqlError($"exec sp_help '{name}'", 15009);
 }

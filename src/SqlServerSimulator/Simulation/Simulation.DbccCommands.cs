@@ -100,6 +100,7 @@ partial class Simulation
             "CLEANTABLE" => RunDbccCleanTable(batch, dbcc),
             "DBREINDEX" => RunDbccDbReindex(batch, dbcc),
             "DROPCLEANBUFFERS" => RunDbccDropCleanBuffers(batch, dbcc),
+            "FLUSHAUTHCACHE" => RunDbccFlushAuthCache(batch, dbcc),
             "FREEPROCCACHE" => RunDbccFreeProcCache(batch, dbcc),
             "FREESESSIONCACHE" => RunDbccFreeSessionCache(batch, dbcc),
             "FREESYSTEMCACHE" => RunDbccFreeSystemCache(batch, dbcc),
@@ -107,10 +108,12 @@ partial class Simulation
             "INDEXDEFRAG" => RunDbccIndexDefrag(batch, dbcc),
             "LOGINFO" => RunDbccLogInfo(batch, dbcc),
             "OPENTRAN" => RunDbccOpenTran(batch, dbcc),
+            "PINTABLE" => RunDbccPinTable(batch, dbcc, "pintable"),
             "SQLPERF" => RunDbccSqlPerf(batch, dbcc),
             "TRACEOFF" => RunDbccTraceOnOff(batch, dbcc, on: false),
             "TRACEON" => RunDbccTraceOnOff(batch, dbcc, on: true),
             "TRACESTATUS" => RunDbccTraceStatus(batch, dbcc),
+            "UNPINTABLE" => RunDbccPinTable(batch, dbcc, "unpintable"),
             "UPDATEUSAGE" => RunDbccUpdateUsage(batch, dbcc),
             "USEROPTIONS" => RunDbccUserOptions(batch, dbcc),
             _ => IsUnbuiltDbccCommand(upper)
@@ -127,9 +130,9 @@ partial class Simulation
     /// </summary>
     private static bool IsUnbuiltDbccCommand(ReadOnlySpan<char> upper) => upper switch
     {
-        "BUFFER" or "CLONEDATABASE" or "DBINFO" or "DBTABLE" or "EXTENTINFO" or "FILEHEADER" or "FLUSHAUTHCACHE" or "IND" or "LOG"
-            or "MEMORYSTATUS" or "OUTPUTBUFFER" or "PAGE" or "PINTABLE" or "PROCCACHE" or "SHOWCONTIG" or "SHOWFILESTATS" or "SQLMGRSTATS"
-            or "STACKDUMP" or "TUPLEMOVER" or "UNPINTABLE" or "WRITEPAGE" => true,
+        "BUFFER" or "CLONEDATABASE" or "DBINFO" or "DBTABLE" or "EXTENTINFO" or "FILEHEADER" or "IND" or "LOG"
+            or "MEMORYSTATUS" or "OUTPUTBUFFER" or "PAGE" or "PROCCACHE" or "SHOWCONTIG" or "SHOWFILESTATS" or "SQLMGRSTATS"
+            or "STACKDUMP" or "TUPLEMOVER" or "WRITEPAGE" => true,
         _ => false,
     };
 
@@ -371,6 +374,33 @@ partial class Simulation
         dbcc.AllowOptions(DbccOptions.NoInfoMessages);
         dbcc.RequireArgumentCount(0, 0);
         RequireDbccServerPermission(batch, "dropcleanbuffers", 16, Permission.AlterServerState);
+        return DbccCompleted(batch, dbcc, []);
+    }
+
+    /// <summary>
+    /// <c>DBCC FLUSHAUTHCACHE</c>: no argument and no <c>WITH</c> option, <c>sysadmin</c> only; the
+    /// authentication cache it empties has no counterpart here (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    private static List<SimulatedStatementOutcome> RunDbccFlushAuthCache(BatchContext batch, DbccInvocation dbcc)
+    {
+        dbcc.AllowOptions(DbccOptions.None);
+        dbcc.RequireArgumentCount(0, 0);
+        RequireDbccSysadmin(batch, "flushauthcache", 1);
+        return DbccCompleted(batch, dbcc, []);
+    }
+
+    /// <summary>
+    /// <c>DBCC PINTABLE ( db_id, object_id )</c> and <c>UNPINTABLE</c>: two integers, no <c>WITH</c>
+    /// option, <c>sysadmin</c> only, and no look at the ids — an unknown database or object completes
+    /// as quietly as a real one (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    private static List<SimulatedStatementOutcome> RunDbccPinTable(BatchContext batch, DbccInvocation dbcc, string command)
+    {
+        dbcc.AllowOptions(DbccOptions.None);
+        dbcc.RequireArgumentCount(2, 2);
+        RequireDbccSysadmin(batch, command, 1);
+        _ = dbcc.IntegerArgument(batch, 0);
+        _ = dbcc.IntegerArgument(batch, 1);
         return DbccCompleted(batch, dbcc, []);
     }
 

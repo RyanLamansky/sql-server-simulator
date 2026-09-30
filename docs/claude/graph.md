@@ -78,4 +78,4 @@ A `SHORTEST_PATH` in a subquery is refused, as real refuses it; a derived table 
 ## Not modeled yet
 
 - A `SHORTEST_PATH` repeating more than one hop (`n1(-(e1)->n2-(e2)->n3)+`), a second `SHORTEST_PATH` in one WHERE — and with it `LAST_NODE(x) = LAST_NODE(y)` over two paths — and one starting from anything but a node table → `NotSupportedException` or a syntax error.
-- A column-level permission recorded against a pseudo-column read.
+- **A column-level permission recorded against a pseudo-column read**: real asks for SELECT on the pseudo-column's own `$node_id_<guid>` column and names it in Msg 230 — under `GRANT SELECT (id)` alone `SELECT $node_id` and `SELECT $node_id, id` are both denied, `SELECT *` names `$node_id_<guid>` and then `name`, and under a table-level grant with `DENY SELECT (name)` the pseudo-column still reads — where the simulator names the hidden `graph_id_<hex>` it renders from, lets `SELECT $node_id, id` through and refuses the last shape on `name` (probed 2026-09-30 against SQL Server 2025; an ordinary computed column already checks itself the way real does).

@@ -131,6 +131,31 @@ public sealed class NestedViewOwnershipChainTests
         Contains(message, ex.Errors[0].Message);
     }
 
+    /// <summary>
+    /// A MERGE through a view over another owner's join view is refused at the
+    /// join view — SELECT, then the action's own permission — and then at the
+    /// join's tables (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("update", "grant select, insert, update, delete on dbo.v1 to c", "The SELECT permission was denied on the object 'j'", "The UPDATE permission was denied on the object 'j'")]
+    [DataRow("insert", "grant select, insert, update, delete on dbo.v1 to c", "The SELECT permission was denied on the object 'j'", "The INSERT permission was denied on the object 'j'")]
+    [DataRow("delete", "grant select, insert, update, delete on dbo.v1 to c", "The SELECT permission was denied on the object 'j'", "The DELETE permission was denied on the object 'j'")]
+    [DataRow("update", "grant select, insert, update, delete on dbo.v1 to c; grant select, insert, update, delete on s1.j to c", "The SELECT permission was denied on the object 't2'", null)]
+    [DataRow("insert", "grant select, insert, update, delete on dbo.v1 to c; grant select on s1.j to c", "The INSERT permission was denied on the object 'j'", null)]
+    public void MergeThroughAJoinViewChain_IsRefusedAtTheFirstBrokenLink(string action, string grants, string first, string? second)
+    {
+        var statement = action switch
+        {
+            "update" => "merge dbo.v1 using (select 1 k) s on v1.a = s.k when matched then update set b = 5;",
+            "insert" => "merge dbo.v1 using (select 9 k) s on v1.a = s.k when not matched then insert (a, b) values (9, 9);",
+            _ => "merge dbo.v1 using (select 1 k) s on v1.a = s.k when matched then delete;",
+        };
+        var ex = OverJoinView(ViewOverJoin, grants).AssertSqlError($"execute as user = 'c'; {statement}", 229);
+        Contains(first, ex.Errors[0].Message);
+        if (second is not null)
+            Contains(second, ex.Errors[1].Message);
+    }
+
     /// <summary>With no grant on either of two tables a statement reads, real names the last one bound (probed 2026-09-29).</summary>
     [TestMethod]
     [DataRow("select ta.a from dbo.ta join dbo.tb on ta.a = tb.a", "tb")]

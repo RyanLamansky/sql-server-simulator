@@ -145,6 +145,7 @@ Probed 2026-09-29 against SQL Server 2025, with `sp_query_store_flush_db` and a 
 - **What a store records.**
   A query reading a table (or calling a user function, the one FROM-less query real keeps), every `INSERT` / `UPDATE` / `DELETE` / `MERGE` (a table variable's included), `SELECT … INTO`, a `DECLARE CURSOR`, and a `SET`, `DECLARE`, `RETURN` or `IF` / `WHILE` condition whose expression reads a table — the condition as `if <condition>`, each time it is evaluated.
   A procedure's, trigger's and dynamic batch's statements record for themselves, and a replayed plan-cache hit records like a parsed statement.
+  So do the statements of a function body the optimizer doesn't inline — every multi-statement table-valued function's, and a scalar function's below compatibility level 150 or when `ModuleInlining` says it isn't inlineable — under the function's `object_id` (`BatchContext.CapturesQueryStore`); an inlined body is part of its caller's statement (probed 2026-09-30).
   Nothing else does: `SELECT 1`, `SELECT @x + 1`, a bare `SET` or condition, `EXEC`, DDL, and a statement whose compile failed (a syntax error, a missing object or column).
 - **Capture modes.**
   ALL records a query's first execution; AUTO its 30th within a day, or the one that takes its CPU past 100 ms (a query run 31 times reports 2 executions, one run 42 times 13); CUSTOM the same by its own policy; NONE captures nothing new but keeps counting the queries it holds.
@@ -203,7 +204,7 @@ Forced plans and hints are recorded, not applied: the simulator has one plan per
 ### Not modeled yet
 
 - Size-based and stale-query cleanup, and `MAX_PLANS_PER_QUERY` (real enforced a `MAX_STORAGE_SIZE_MB` of 0 neither immediately nor by turning read-only in probes).
-- The statements of a non-inlined scalar function and of a multi-statement table-valued function, which real records under the function's `object_id`.
+- A variable prefix lists its declarations in the order the statement names them, where real's follows its binder — a `WHERE` reference ahead of a select-list assignment's own variable, so `select @m = max(a) from t where a <= @x` inside a function is `(@x int,@m int)` on real and `(@m int,@x int)` here (probed 2026-09-30).
 - The AUTO / CUSTOM compile-CPU threshold, forced parameterization, plan feedback and query variants, the internal statistics queries real records, and an operator tree in `query_plan`.
 
 ## Read-only databases

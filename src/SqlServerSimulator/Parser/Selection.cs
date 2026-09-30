@@ -1368,23 +1368,13 @@ internal sealed partial class Selection
             // absorb the following multiplicative chain, star included.
             using (context.EnterNextValueForScope(NextValueForScope.Clause))
             {
-                // InTopCount goes back to false rather than to its entry value,
-                // so a TOP inside a subquery of this count clears it for the
-                // rest of this count; a guard would restore true there.
-                context.InTopCount = true;
-                try
-                {
-                    context.RecursiveBranchConstructs.TopOrOffset = true;
-                    // A string literal is no legacy count either (`TOP '1'`, Msg 102
-                    // near it; probed 2026-09-24).
-                    if (context.MoveNextRequiredReturnSelf().Token is Operator { Character: '+' or '-' or '~' } or Literal { Value.Type.Category: SqlTypeCategory.String })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    topExpression = Expression.ParsePrimary(context);
-                }
-                finally
-                {
-                    context.InTopCount = false;
-                }
+                using var topCountScope = ParserScope.Enter(ref context.InTopCount, true);
+                context.RecursiveBranchConstructs.TopOrOffset = true;
+                // A string literal is no legacy count either (`TOP '1'`, Msg 102
+                // near it; probed 2026-09-24).
+                if (context.MoveNextRequiredReturnSelf().Token is Operator { Character: '+' or '-' or '~' } or Literal { Value.Type.Category: SqlTypeCategory.String })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                topExpression = Expression.ParsePrimary(context);
             }
             // `TOP n PERCENT` — cap becomes ceil(n% × rowcount). PERCENT is a
             // reserved keyword.

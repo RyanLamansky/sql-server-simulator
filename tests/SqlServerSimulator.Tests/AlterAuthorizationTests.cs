@@ -390,6 +390,33 @@ public sealed class AlterAuthorizationTests
     public void Chain_BrokenForDmlThroughAJoinView_BaseGrantAdmits(string grants, string statement)
         => AreEqual(1, BrokenJoinViewChain(grants).ExecuteScalar($"execute as user = 'c'; {statement} select @@rowcount"));
 
+    /// <summary>
+    /// A MERGE through the join view judges the other-owner table like the
+    /// UPDATE path does — SELECT on the columns read, the join column included,
+    /// then the action's own permission on the table written (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("", "merge jv using (select 10 k) s on jv.id = s.k when matched then update set q = 9;", 229, "The SELECT permission was denied on the object 'b'")]
+    [DataRow("grant select (id) on b to c; grant update (q) on b to c", "merge jv using (select 10 k) s on jv.id = s.k when matched then update set q = 9;", 230, "The SELECT permission was denied on the column 'aid' of the object 'b'")]
+    [DataRow("grant select on b to c", "merge jv using (select 10 k) s on jv.id = s.k when matched then update set q = 9;", 229, "The UPDATE permission was denied on the object 'b'")]
+    [DataRow("", "merge jv using (select 1 k) s on jv.a_id = s.k when matched then update set n = 'x';", 229, "The SELECT permission was denied on the object 'b'")]
+    [DataRow("grant delete on jv to c", "merge jv using (select 10 k) s on jv.id = s.k when matched then delete;", 229, "The SELECT permission was denied on the object 'b'")]
+    [DataRow("grant select on b to c", "merge jv using (select 20 k) s on jv.id = s.k when not matched then insert (id, aid, q) values (20, 1, 7);", 229, "The INSERT permission was denied on the object 'b'")]
+    [DataRow("", "merge jv using (select 2 k) s on jv.a_id = s.k when not matched then insert (a_id, n) values (2, 'two');", 229, "The SELECT permission was denied on the object 'b'")]
+    public void Chain_BrokenForMergeThroughAJoinView(string grants, string statement, int number, string message)
+    {
+        var ex = BrokenJoinViewChain(grants).AssertSqlError($"execute as user = 'c'; {statement}", number);
+        Contains(message, ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    [DataRow("grant select (id, aid) on b to c; grant update (q) on b to c", "merge jv using (select 10 k) s on jv.id = s.k when matched then update set q = 9;")]
+    [DataRow("grant select on b to c; grant insert on b to c", "merge jv using (select 20 k) s on jv.id = s.k when not matched then insert (id, aid, q) values (20, 1, 7);")]
+    [DataRow("grant select on b to c; grant delete on jv to c", "merge jv using (select 10 k) s on jv.id = s.k when matched then delete;")]
+    public void Chain_BrokenForMergeThroughAJoinView_GrantAdmits(string grants, string statement)
+        => AreEqual(1, BrokenJoinViewChain(grants).ExecuteScalar($"execute as user = 'c'; {statement} select @@rowcount"));
+
     [TestMethod]
     public void Chain_IntactThroughAView_NeedsNoBaseGrant()
     {

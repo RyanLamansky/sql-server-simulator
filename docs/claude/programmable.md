@@ -501,6 +501,8 @@ A bottom source that is itself a join view nests its own `JoinViewChain` (`JoinV
 The write runs over the outer chain's tuples with each nested view's slot replaced by that view's rows, computed from its own tuples and recorded against them (`SourcesAlongPath`), which is how an outer tuple leads back to the base row's `(page, slot)`; a base row several outer tuples show still takes the SET once.
 `WITH CHECK OPTION` re-runs the outermost chain carrying one with the written row standing in at the bottom, so an inner view's filter judges it.
 Targets on two paths are Msg 4405, and DELETE stays Msg 4405 (all probed 2026-09-27 against SQL Server 2025).
+A bottom source that is a **single-table view** takes the same path as a degenerate nested chain — one source, no joins (`ReadsThroughChain`, `BuildJoinViewChain(…, nested: true)`) — so a write reaches the view's table, a derived column of that view is Msg 4406, and its `WHERE` gates the rows (probed 2026-09-30 for UPDATE, INSERT and MERGE).
+The DML errors name the view as written, qualified or not (probed 2026-09-30).
 
 **A broken ownership chain is checked per base table**: every base table whose owner isn't the view's is checked for SELECT on the columns the statement reads of it — its join and filter columns and whatever the `WHERE` and `SET` values reach through the view — and the written one for UPDATE on the columns assigned, both column-grain; an INSERT checks only its INSERT on the written table (probed 2026-09-27 against SQL Server 2025) → [`permissions.md`](permissions.md#ownership).
 
@@ -522,8 +524,8 @@ The rules the translation adds, each probed 2026-09-28:
 - `OUTPUT` reads the view's rows: `DELETED` the whole row as it stood, `INSERTED` only the columns reading the written table (Msg 404 per column otherwise), with its identity and computed values read back from the row written; the written table's triggers refuse an `OUTPUT` without `INTO` with Msg 334 naming that table.
 
 **Not modeled yet**:
-- A bottom source that is a **single-table view or a derived table** (`FROM (SELECT … FROM a) d JOIN b`) is Msg 4405, where real writes through it (probed for the derived table).
-- `OUTPUT` through a join view whose written table sits under a **nested** join view raises `NotSupportedException`, for UPDATE, INSERT and MERGE alike.
+- A bottom source that is a **derived table** (`FROM (SELECT … FROM a) d JOIN b`) is Msg 4405, where real writes through it (probed 2026-09-30 for UPDATE, INSERT and MERGE).
+- `OUTPUT` through a join view whose written table sits under a **nested** join view or a single-table view source raises `NotSupportedException`, for UPDATE, INSERT and MERGE alike.
 - The broken-chain check gathers only the outermost chain's own base tables, and real reports the SELECT and the write denials together where the simulator raises the first.
 
 ## Stored procedures

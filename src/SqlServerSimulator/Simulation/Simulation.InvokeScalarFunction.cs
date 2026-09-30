@@ -103,7 +103,7 @@ partial class Simulation
         // statement (probe-confirmed: real reports the SELECT's line, no
         // procedure) — so this frame leaves the exception unresolved.
         var functionOwner = Ownership.EffectiveOwnerId(function.Schema.Database, function);
-        var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, OwnershipChainOwnerId = functionOwner, ModuleObjectId = function.ObjectId };
+        var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, OwnershipChainOwnerId = functionOwner, ModuleObjectId = function.ObjectId, CapturesQueryStore = BodyStatementsCaptured(function) };
         connection.NestingLevel++;
         // Module WITH EXECUTE AS: push the impersonation frame around the body
         // (OWNER → the owner, SELF → the creator, CALLER → no-op, a named user →
@@ -137,4 +137,13 @@ partial class Simulation
         // to a variable of the return type is.
         return Parser.Expressions.Cast.ApplyCoercion(udfFrame.ReturnedValue, function.ReturnType, function.ReturnMaxLength);
     }
+
+    /// <summary>
+    /// Whether a Query Store in the function's database records its body's statements under the
+    /// function: the optimizer doesn't inline the body (below compatibility level 150 none is, and
+    /// above it <see cref="ModuleInlining"/> says which are), probed 2026-09-30 against SQL Server 2025.
+    /// </summary>
+    private static bool BodyStatementsCaptured(ScalarFunction function) =>
+        function.Schema.Database is { QueryStore.DesiredState: QueryStoreState.ReadWrite } database
+        && (database.CompatibilityLevel < CompatibilityLevel.Sql150 || !(function.BodyInlines ??= ModuleInlining.Evaluate(function).InlineType));
 }

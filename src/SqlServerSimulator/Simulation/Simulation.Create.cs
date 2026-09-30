@@ -160,6 +160,17 @@ partial class Simulation
         if (graphKind == GraphTableKind.None)
             context.MoveNextOptional();
         var tableDataSpace = ParseOptionalDataSpaceClause(context, out var textImageOn);
+        // FILESTREAM_ON names where FILESTREAM data goes, which a table with no
+        // FILESTREAM column has none of (Msg 1716); the column itself is refused
+        // where it is written, so a clause here always lacks one.
+        var fileStreamOn = false;
+        if (context.Token is StringToken { Span: var fileStreamKeyword } && fileStreamKeyword.Equals("FILESTREAM_ON", StringComparison.OrdinalIgnoreCase))
+        {
+            if (context.GetNextRequired() is not Name)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            fileStreamOn = true;
+        }
         SystemVersioningOptions? systemVersioning = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
             systemVersioning = ParseTableOptions(context);
@@ -419,7 +430,7 @@ partial class Simulation
             GraphKind = graphKind,
         };
         AttachGraphColumns(heapTable);
-        PlaceNewTable(context.Batch, heapTable, tableDataSpace, textImageOn);
+        PlaceNewTable(context.Batch, heapTable, tableDataSpace, textImageOn, fileStreamOn);
         if (isGlobalTempTable)
             heapTable.OwnerSession = context.Batch.Connection.Session;
         if (isLocalTempTable)
@@ -882,7 +893,7 @@ partial class Simulation
     /// No-op when the cursor isn't on <c>WITH</c>. Cursor on exit: first token
     /// past the closing <c>)</c>, or unchanged when no clause was present.
     /// </summary>
-    internal static IndexOptions ParseOptionalIndexWithClause(ParserContext context, IndexOptionStatement statement = IndexOptionStatement.Unchecked, string? indexName = null)
+    internal static IndexOptions ParseOptionalIndexWithClause(ParserContext context, IndexOptionStatement statement = IndexOptionStatement.Unchecked, string? indexName = null, JsonRebuildRefusal? jsonRefusal = null)
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             return default;
@@ -926,6 +937,9 @@ partial class Simulation
             if (expectName && statement != IndexOptionStatement.Unchecked && context.Token is StringToken or ReservedKeyword)
             {
                 var name = context.Token.Source.ToString();
+                // WAIT_AT_LOW_PRIORITY is legal only nested in ONLINE's own list (probed 2026-09-30).
+                if (statement is IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.RebuildJsonIndex && name.Equals("WAIT_AT_LOW_PRIORITY", StringComparison.OrdinalIgnoreCase))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
                 var checkpoint = context.SaveCheckpoint();
                 var valueToken = context.MoveNext() && context.Token is Operator { Character: '=' } && context.MoveNext() ? context.Token : null;
                 context.RestoreCheckpoint(checkpoint);
@@ -940,6 +954,8 @@ partial class Simulation
                 {
                     throw SimulatedSqlException.Aggregate([unknown, SimulatedSqlException.InvalidUsageOfIndexOption(name)]);
                 }
+                if (jsonRefusal is { State: 0 } && valueToken is ReservedKeyword { Keyword: Keyword.On })
+                    jsonRefusal.Note(name);
                 maxDuration |= name.Equals("MAX_DURATION", StringComparison.OrdinalIgnoreCase);
                 if (valueToken is ReservedKeyword { Keyword: Keyword.On })
                 {
@@ -1043,6 +1059,8 @@ partial class Simulation
             throw SimulatedSqlException.MaxDurationRequiresResumable();
         // A resumable build has to be an online one, and a columnstore index
         // can't be resumable at all (probed 2026-09-26 against SQL Server 2025).
+        if (resumable && statement is IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.RebuildJsonIndex && !online)
+            throw SimulatedSqlException.ResumableRequiresOnline();
         if (resumable && statement is IndexOptionStatement.CreateIndex or IndexOptionStatement.CreateColumnstoreIndex)
         {
             if (!online)
@@ -1082,7 +1100,7 @@ partial class Simulation
                 if (!known)
                     throw SimulatedSqlException.UnrecognizedIndexOption(name, "CREATE INDEX");
                 break;
-            case IndexOptionStatement.AlterIndexRebuild:
+            case IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.RebuildJsonIndex:
                 if (!known)
                     throw SimulatedSqlException.UnrecognizedIndexOption(name, "ALTER INDEX");
                 if (name.Equals("DROP_EXISTING", StringComparison.OrdinalIgnoreCase)
@@ -1115,6 +1133,32 @@ partial class Simulation
             throw SimulatedSqlException.CompressionDelayRequiresColumnstore();
     }
 
+    /// <summary>
+    /// The first option a <c>REBUILD</c> of a JSON index refuses when it is turned on, noted while the
+    /// clause parses and raised once the index has resolved (probed 2026-09-30 against SQL Server 2025:
+    /// a partition number is refused ahead of it, and the same options off are accepted).
+    /// </summary>
+    internal sealed class JsonRebuildRefusal
+    {
+        public byte State;
+        public string Name = "";
+
+        public void Note(string written)
+        {
+            // Two names are reported in lower case and the rest in capitals, whatever was written.
+            (State, Name) = written switch
+            {
+                _ when written.Equals("ONLINE", StringComparison.OrdinalIgnoreCase) => ((byte)37, "ONLINE"),
+                _ when written.Equals("IGNORE_DUP_KEY", StringComparison.OrdinalIgnoreCase) => ((byte)36, "ignore_dup_key"),
+                _ when written.Equals("STATISTICS_INCREMENTAL", StringComparison.OrdinalIgnoreCase) => ((byte)40, "statistics_incremental"),
+                _ when written.Equals("SORT_IN_TEMPDB", StringComparison.OrdinalIgnoreCase) => ((byte)42, "SORT_IN_TEMPDB"),
+                _ when written.Equals("STATISTICS_NORECOMPUTE", StringComparison.OrdinalIgnoreCase) => ((byte)43, "STATISTICS_NORECOMPUTE"),
+                _ when written.Equals("XML_COMPRESSION", StringComparison.OrdinalIgnoreCase) => ((byte)45, "XML_COMPRESSION"),
+                _ => ((byte)0, ""),
+            };
+        }
+    }
+
     /// <summary>Which statement an index <c>WITH</c> clause belongs to, for the option names it validates.</summary>
     internal enum IndexOptionStatement
     {
@@ -1125,6 +1169,7 @@ partial class Simulation
         AlterTable,
         CreateColumnstoreIndex,
         RebuildColumnstoreIndex,
+        RebuildJsonIndex,
     }
 
     /// <summary>

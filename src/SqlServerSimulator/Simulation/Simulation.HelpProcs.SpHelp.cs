@@ -484,7 +484,77 @@ partial class Simulation
             rows.Add(HelpAliasTypeRow(batch.CurrentDatabase, alias));
         else if (batch.TryResolveTableType(parsed, out var tableType))
             rows.Add(HelpTableTypeRow(tableType));
+        else if (HelpSystemTypeRow(batch.CurrentDatabase, parsed) is { } system)
+            rows.Add(system);
         return rows;
+    }
+
+    /// <summary>
+    /// A system type as <c>sp_help</c> lists it: <c>Type_name</c>, its storage type (null for a CLR type),
+    /// then the length, precision and scale cells, whether it is nullable and whether it carries a collation
+    /// (probed 2026-09-30 against SQL Server 2025). A one-part name or one under <c>sys</c> reaches it.
+    /// </summary>
+    private static readonly (string Name, string? Storage, short Length, int Precision, int? Scale, bool Nullable, bool Collated)[] SystemHelpTypes =
+    [
+        ("bigint", "bigint", 8, 19, 0, true, false),
+        ("binary", "binary", 8000, 8000, null, true, false),
+        ("bit", "bit", 1, 1, null, true, false),
+        ("char", "char", 8000, 8000, null, true, true),
+        ("date", "date", 3, 10, 0, true, false),
+        ("datetime", "datetime", 8, 23, 3, true, false),
+        ("datetime2", "datetime2", 8, 27, 7, true, false),
+        ("datetimeoffset", "datetimeoffset", 10, 34, 7, true, false),
+        ("decimal", "decimal", 17, 38, 38, true, false),
+        ("float", "float", 8, 53, null, true, false),
+        ("geography", null, -1, -1, null, true, false),
+        ("geometry", null, -1, -1, null, true, false),
+        ("hierarchyid", null, 892, 892, null, true, false),
+        ("image", "image", 16, int.MaxValue, null, true, false),
+        ("int", "int", 4, 10, 0, true, false),
+        ("json", "json", -1, -1, null, true, false),
+        ("money", "money", 8, 19, 4, true, false),
+        ("nchar", "nchar", 8000, 4000, null, true, true),
+        ("ntext", "ntext", 16, 1073741823, null, true, true),
+        ("numeric", "numeric", 17, 38, 38, true, false),
+        ("nvarchar", "nvarchar", 8000, 4000, null, true, true),
+        ("real", "real", 4, 24, null, true, false),
+        ("smalldatetime", "smalldatetime", 4, 16, 0, true, false),
+        ("smallint", "smallint", 2, 5, 0, true, false),
+        ("smallmoney", "smallmoney", 4, 10, 4, true, false),
+        ("sql_variant", "sql_variant", 8016, 0, null, true, false),
+        ("sysname", "nvarchar", 256, 128, null, false, true),
+        ("text", "text", 16, int.MaxValue, null, true, true),
+        ("time", "time", 5, 16, 7, true, false),
+        ("timestamp", "timestamp", 8, 8, null, false, false),
+        ("tinyint", "tinyint", 1, 3, 0, true, false),
+        ("uniqueidentifier", "uniqueidentifier", 16, 16, null, true, false),
+        ("varbinary", "varbinary", 8000, 8000, null, true, false),
+        ("varchar", "varchar", 8000, 8000, null, true, true),
+        ("xml", "xml", -1, -1, null, true, false),
+    ];
+
+    private static SqlValue[]? HelpSystemTypeRow(Database database, MultiPartName name)
+    {
+        if (name.Count > 2 || (name.Count == 2 && !BuiltInToken.Equals(name[name.Count - 2], "sys")))
+            return null;
+        foreach (var (typeName, storage, length, precision, scale, nullable, collated) in SystemHelpTypes)
+        {
+            if (!typeName.Equals(name.Leaf, StringComparison.OrdinalIgnoreCase))
+                continue;
+            return
+            [
+                SqlValue.FromSystemName(typeName),
+                storage is null ? SqlValue.Null(SqlType.SystemName) : SqlValue.FromSystemName(storage),
+                SqlValue.FromInt16(length),
+                SqlValue.FromInt32(precision),
+                scale is { } s ? SqlValue.FromInt32(s) : SqlValue.Null(SqlType.Int32),
+                HelpFlag(nullable),
+                SqlValue.FromSystemName("none"),
+                SqlValue.FromSystemName("none"),
+                collated ? SqlValue.FromSystemName(database.CollationName) : SqlValue.Null(SqlType.SystemName),
+            ];
+        }
+        return null;
     }
 
     private static SqlValue[] HelpAliasTypeRow(Database database, AliasType alias)

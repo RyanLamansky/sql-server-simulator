@@ -815,5 +815,20 @@ public sealed class PartitioningTests
         _ = command.ExecuteNonQuery();
         Contains("'PRIMARY' is marked as the next used filegroup", string.Join("|", messages));
     }
+
+    /// <summary>A nonclustered columnstore index on a partitioned table is aligned with it, its rows counted per partition (probed 2026-09-30 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void NonclusteredColumnstoreIndex_IsAlignedByDefault()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"""
+            {LeftFunctionAndScheme}
+            create table t (id int not null, v int) on ps(id);
+            insert t values (5, 1), (6, 2), (50, 3);
+            create nonclustered columnstore index cs on t(v)
+            """);
+        AreEqual("ps", Text(simulation, "select ds.name from sys.indexes i join sys.data_spaces ds on ds.data_space_id = i.data_space_id where i.object_id = object_id('t') and i.name = 'cs'"));
+        AreEqual("0,2,1,0", PartitionRows(simulation, "t", indexId: 2));
+    }
 }
 

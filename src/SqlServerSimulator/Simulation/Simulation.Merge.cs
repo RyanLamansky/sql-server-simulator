@@ -263,7 +263,7 @@ partial class Simulation
         if (context.Token is not Operator { Character: ';' })
             throw SimulatedSqlException.MergeMustBeTerminated();
         if (!context.Batch.IsSkipping)
-            CheckMergePermissions(context.Batch, destinationName, triggerTarget, whenClauses, joinWrite?.Table);
+            CheckMergePermissions(context.Batch, destinationName, triggerTarget, whenClauses, joinWrite, onPredicate, targetAlias);
         if (joinWrite is not null && !context.Batch.IsSkipping)
         {
             LoadJoinViewMergeRows(context.Batch, joinWrite, destinationTable);
@@ -414,7 +414,7 @@ partial class Simulation
     /// after the view's (probed 2026-09-27 against SQL Server 2025). The
     /// source read is not separately checked — a documented gap.
     /// </summary>
-    private static void CheckMergePermissions(BatchContext batch, MultiPartName destinationName, SchemaObject destination, List<WhenClause> whenClauses, HeapTable? joinViewTable = null)
+    private static void CheckMergePermissions(BatchContext batch, MultiPartName destinationName, SchemaObject destination, List<WhenClause> whenClauses, JoinViewMergePlan? joinWrite = null, BooleanExpression? onPredicate = null, string? targetAlias = null)
     {
         var insert = false;
         var update = false;
@@ -448,8 +448,12 @@ partial class Simulation
                 Check("DELETE");
         }
 
-        // A join view's write crosses to the one base table it names.
-        if (destination is not View view || (view.BaseTable ?? joinViewTable) is not { } baseTable)
+        if (destination is View && joinWrite is not null)
+        {
+            CheckJoinViewMergeChain(batch, joinWrite, whenClauses, onPredicate!, targetAlias!, insert, update, delete);
+            return;
+        }
+        if (destination is not View view || view.BaseTable is not { } baseTable)
             return;
         void CheckBase(string permission) => PermissionEnforcement.CheckBrokenChainWrite(batch, permission, view, baseTable);
         CheckBase("SELECT");
@@ -459,6 +463,49 @@ partial class Simulation
             CheckBase("UPDATE");
         if (delete)
             CheckBase("DELETE");
+    }
+
+    /// <summary>
+    /// The broken ownership chain a <c>MERGE</c> through a join view crosses:
+    /// SELECT on the columns the statement reads of every other-owner table
+    /// and view below it, then each action's write permission on the table it
+    /// lands in — the UPDATE path's rules with INSERT and DELETE at object
+    /// grain (probed 2026-09-30 against SQL Server 2025: the join view's tables
+    /// for all three actions, and a view over another owner's join view
+    /// refused at the join view for SELECT then the action's permission).
+    /// A statement with several action kinds checks each in INSERT, UPDATE,
+    /// DELETE order, which is unprobed.
+    /// </summary>
+    private static void CheckJoinViewMergeChain(BatchContext batch, JoinViewMergePlan joinWrite, List<WhenClause> whenClauses, BooleanExpression onPredicate, string targetAlias, bool insert, bool update, bool delete)
+    {
+        var collation = batch.CurrentDatabase.Collation;
+        var reads = new List<string>();
+        void Read(MultiPartName name)
+        {
+            if (name.ImmediateQualifier is null || collation.Equals(name.ImmediateQualifier, targetAlias))
+                reads.Add(name.Leaf);
+        }
+        onPredicate.VisitOperandExpressions(operand => operand.VisitColumnReferences(Read));
+        var assignments = new List<(int Ordinal, Expression Expr)>();
+        foreach (var clause in whenClauses)
+        {
+            clause.SearchCondition?.VisitOperandExpressions(operand => operand.VisitColumnReferences(Read));
+            if (clause.Assignments is not { } assigned)
+                continue;
+            foreach (var (ordinal, expr) in assigned)
+            {
+                expr.VisitColumnReferences(Read);
+                assignments.Add((ordinal < 0 ? -1 : joinWrite.ViewToBase[ordinal], expr));
+            }
+        }
+        var writes = new List<string>(3);
+        if (insert)
+            writes.Add("INSERT");
+        if (update)
+            writes.Add("UPDATE");
+        if (delete)
+            writes.Add("DELETE");
+        CheckJoinViewBrokenChains(batch, joinWrite.Chain, joinWrite.Table, reads, assignments, [.. writes]);
     }
 
     /// <summary>

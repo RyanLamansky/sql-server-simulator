@@ -18,7 +18,7 @@ Everything below was probed 2026-09-28 against SQL Server 2025 through the `.vs/
   A command returning rows leaves it at their count, `DBREINDEX` at the table's row count, and `CHECKPOINT`, `CHECKCONSTRAINTS` and the consistency checks at 0; every other command leaves it alone, `CHECKIDENT`, `SHRINK*`, `SHOW_STATISTICS` and `TRACEON` included.
 - **`SET FMTONLY ON`** makes a DBCC statement do nothing and report nothing.
 - **Permissions.**
-  The server-scope commands refuse with Msg 2571 naming the command, each with its own state: `FREEPROCCACHE`, `DROPCLEANBUFFERS` and `FREESYSTEMCACHE` take `ALTER SERVER STATE`, while `FREESESSIONCACHE`, `TRACEON` / `TRACEOFF`, `LOGINFO` and `HELP` take a sysadmin login, `CONTROL SERVER` not sufficing — see [`permissions.md`](permissions.md#statement-gates).
+  The server-scope commands refuse with Msg 2571 naming the command, each with its own state: `FREEPROCCACHE`, `DROPCLEANBUFFERS` and `FREESYSTEMCACHE` take `ALTER SERVER STATE`, while `FREESESSIONCACHE`, `FLUSHAUTHCACHE`, `PINTABLE` / `UNPINTABLE`, `TRACEON` / `TRACEOFF`, `LOGINFO` and `HELP` take a sysadmin login, `CONTROL SERVER` not sufficing — see [`permissions.md`](permissions.md#statement-gates).
   The database checks (`CHECKDB`, `CHECKALLOC`, `CHECKCATALOG`, `CHECKFILEGROUP`, `CHECKCONSTRAINTS`, `UPDATEUSAGE`, `OPENTRAN`) take `db_owner`, else Msg 7983; `CHECKTABLE` and `DBREINDEX` take the table's ownership or `ALTER` (Msg 2557), `CLEANTABLE` and `INDEXDEFRAG` `ALTER` on the table (Msg 229 state 1); `SQLPERF(LOGSPACE)` takes `VIEW SERVER STATE` and its `CLEAR` form `ALTER SERVER STATE` (Msg 297, which ends the batch); `USEROPTIONS` and `TRACESTATUS` are open to everyone.
 - **Arguments.**
   A database argument is a name, quoted or not, a database id, or 0 for the current database: an unknown name is Msg 2520 state 5, an unknown id Msg 2521, a negative one Msg 2560.
@@ -34,6 +34,7 @@ The duration is a positive `int` literal; 0, a negative, a decimal, a variable o
 `FREEPROCCACHE` clears what [`plan-cache.md`](plan-cache.md#clearing-dbcc-freeproccache) describes; its argument is a pool name (`default`, `internal`), a binary handle of at least 44 bytes (a shorter one is Msg 2560 state 110), or nothing.
 `FREESYSTEMCACHE` takes `ALL`, a cache store name real lists in `sys.dm_os_memory_cache_counters`, a database's name or its `ObjPerm - ` store, and an optional pool; an unknown store or pool is Msg 2560 naming its position.
 `DROPCLEANBUFFERS` and `FREESESSIONCACHE` only report.
+`FLUSHAUTHCACHE` (no argument) and `PINTABLE` / `UNPINTABLE` (two integers, never looked up: an unknown database or object completes quietly, a string is Msg 2560) only report too, and every `WITH` option is Msg 2532 for them (probed 2026-09-30 against SQL Server 2025).
 
 ## `USEROPTIONS`
 
@@ -104,5 +105,5 @@ A simulated database is always consistent, so each check reports a healthy one:
 
 ## Not modeled yet
 
-- `DBCC PAGE`, `IND`, `SHOWCONTIG`, `OUTPUTBUFFER`, `PROCCACHE`, `MEMORYSTATUS`, `PINTABLE` / `UNPINTABLE`, `FLUSHAUTHCACHE`, `TUPLEMOVER`, `CLONEDATABASE` and the other undocumented commands, the repair options, and `CHECKALLOC … WITH TABLERESULTS`.
+- `DBCC PAGE` (without trace flag 3604 real prints only the completion message, and `WITH TABLERESULTS` returns an empty `ParentObject` / `Object` / `Field` / `VALUE` set; a page past the database is Msg 8968), `IND`, `SHOWCONTIG`, `OUTPUTBUFFER`, `PROCCACHE`, `MEMORYSTATUS`, `TUPLEMOVER`, `CLONEDATABASE` and the other undocumented commands, the repair options, and `CHECKALLOC … WITH TABLERESULTS`.
 - `CHECKDB … WITH TABLOCK`'s Msg 5232 noting that the catalog and Service Broker checks were skipped.

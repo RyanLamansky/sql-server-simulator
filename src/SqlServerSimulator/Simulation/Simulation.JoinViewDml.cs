@@ -44,8 +44,8 @@ partial class Simulation
         /// </summary>
         public readonly JoinViewChain?[] Nested = new JoinViewChain?[profiles[0].Sources.Length];
 
-        /// <summary>Name the DML errors report — the view the statement named.</summary>
-        public readonly string TargetName = $"{views[^1].Schema.Name}.{views[^1].Name}";
+        /// <summary>Name the DML errors report — the view the statement named, as it wrote it.</summary>
+        public string TargetName = $"{views[^1].Schema.Name}.{views[^1].Name}";
 
         /// <summary>
         /// The heap a write along <paramref name="path"/> reaches: one bottom
@@ -96,9 +96,9 @@ partial class Simulation
     /// A level that isn't DML-eligible, or one whose single source is neither
     /// a view nor part of a multi-source body, is <strong>Msg 4405</strong>.
     /// </summary>
-    private static JoinViewChain BuildJoinViewChain(BatchContext batch, View view)
+    private static JoinViewChain BuildJoinViewChain(BatchContext batch, View view, string? writtenName = null, bool nested = false)
     {
-        var viewName = $"{view.Schema.Name}.{view.Name}";
+        var viewName = writtenName ?? $"{view.Schema.Name}.{view.Name}";
         var views = new List<View>();
         var profiles = new List<ViewUpdatabilityProfile>();
         var level = view;
@@ -110,6 +110,10 @@ partial class Simulation
             profiles.Add(profile);
             if (profile.Sources.Length > 1)
                 break;
+            // A single-table view a join view reads is the degenerate bottom of
+            // a nested chain: one source, no joins.
+            if (nested && profile.Sources is [{ BackingTable: not null }])
+                break;
             if (profile.Sources is not [{ BackingView: { } lower }])
                 throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(viewName);
             level = lower;
@@ -117,7 +121,7 @@ partial class Simulation
 
         views.Reverse();
         profiles.Reverse();
-        return new JoinViewChain([.. views], [.. profiles]);
+        return new JoinViewChain([.. views], [.. profiles]) { TargetName = viewName };
     }
 
     /// <summary>
@@ -223,13 +227,20 @@ partial class Simulation
 
             // A source that is itself a join view flattens into the write:
             // the column descends through that view's own level stack.
-            if (current.Sources[sourceIndex] is not { BackingTable: null, BackingView: { BaseTable: null, IsJoinUpdatable: true } inner })
+            if (current.Sources[sourceIndex] is not { BackingTable: null, BackingView: { } inner } || !ReadsThroughChain(inner))
                 return ([.. path], columnIndex);
-            current = current.Nested[sourceIndex] ??= BuildJoinViewChain(batch, inner);
+            current = current.Nested[sourceIndex] ??= BuildJoinViewChain(batch, inner, nested: true);
             name = current.Views[^1].OutputColumns[columnIndex].Name;
             level = current.Views.Length - 1;
         }
     }
+
+    /// <summary>
+    /// Whether a view a join reads passes a write down as a level stack of its
+    /// own: a join view, or a single-table view whose body a write can reach the
+    /// table through (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    private static bool ReadsThroughChain(View view) => view.IsJoinUpdatable || view.BaseTable is not null;
 
     /// <summary>
     /// The bottom sources of <paramref name="chain"/> for a write whose target
@@ -383,11 +394,11 @@ partial class Simulation
         MultiPartName destinationName)
     {
         var batch = context.Batch;
-        var viewName = $"{destinationView.Schema.Name}.{destinationView.Name}";
+        var viewName = destinationName.ToString();
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(viewName);
 
-        var chain = BuildJoinViewChain(batch, destinationView);
+        var chain = BuildJoinViewChain(batch, destinationView, viewName);
         var checkpoint = context.SaveCheckpoint();
         var listedNames = ScanInsertColumnNames(context);
         context.RestoreCheckpoint(checkpoint);
@@ -463,10 +474,12 @@ partial class Simulation
         JoinViewChain chain,
         HeapTable table,
         List<string> readViewColumns,
-        List<(int Ordinal, Expression Expr)> assignments)
+        List<(int Ordinal, Expression Expr)> assignments,
+        string[]? writes = null)
     {
         if (batch.IsSkipping)
             return;
+        writes ??= PermissionEnforcement.UpdateWrites;
         // The join view reads the base tables, so it is the module their owners
         // are compared with; the views above it are links of their own.
         var view = chain.Views[0];
@@ -522,7 +535,7 @@ partial class Simulation
         // Top down: the first view whose owner differs from the one above it
         // is the one refused, ahead of anything under it.
         for (var level = chain.Views.Length - 1; level >= 1; level--)
-            PermissionEnforcement.CheckBrokenChainViewLink(batch, chain.Views[level], chain.Views[level - 1], viewReads[level - 1]);
+            PermissionEnforcement.CheckBrokenChainViewLink(batch, chain.Views[level], chain.Views[level - 1], viewReads[level - 1], writes);
 
         // The last-bound source is the one real names when several are denied.
         for (var i = chain.Sources.Length - 1; i >= 0; i--)
@@ -537,7 +550,7 @@ partial class Simulation
             // (probed 2026-09-29 against SQL Server 2025).
             var nested = chain.Nested[i];
             var writesThrough = nested is not null || (sourceView.BaseTable is { } sourceTable && ReferenceEquals(sourceTable, table));
-            PermissionEnforcement.CheckBrokenChainViewLink(batch, view, sourceView, sourceViewReads[i], writesThrough);
+            PermissionEnforcement.CheckBrokenChainViewLink(batch, view, sourceView, sourceViewReads[i], writesThrough ? writes : PermissionEnforcement.NoWrites);
             if (nested is null)
                 continue;
             var nestedRead = new List<string>();
@@ -546,19 +559,27 @@ partial class Simulation
                 foreach (var ordinal in readOfNested.Ordinals)
                     nestedRead.Add(sourceView.OutputColumns[ordinal - 1].Name);
             }
-            CheckJoinViewBrokenChains(batch, nested, table, nestedRead, assignments);
+            CheckJoinViewBrokenChains(batch, nested, table, nestedRead, assignments, writes);
         }
 
         // Only the chain whose own sources include the written table judges the write.
         if (!Array.Exists(chain.Sources, source => ReferenceEquals(source.BackingTable, table)))
             return;
-        var assigned = new ColumnReadTarget(table);
-        foreach (var (ordinal, _) in assignments)
+        foreach (var write in writes)
         {
-            if (ordinal >= 0)
-                _ = assigned.Ordinals.Add(ordinal + 1);
+            if (write != "UPDATE")
+            {
+                PermissionEnforcement.CheckBrokenChainLink(batch, write, view, table);
+                continue;
+            }
+            var assigned = new ColumnReadTarget(table);
+            foreach (var (ordinal, _) in assignments)
+            {
+                if (ordinal >= 0)
+                    _ = assigned.Ordinals.Add(ordinal + 1);
+            }
+            PermissionEnforcement.CheckBrokenChainTableColumns(batch, Permission.Update, view, assigned);
         }
-        PermissionEnforcement.CheckBrokenChainTableColumns(batch, Permission.Update, view, assigned);
     }
 
     /// <summary>

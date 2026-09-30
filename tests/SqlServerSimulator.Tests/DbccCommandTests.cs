@@ -716,4 +716,36 @@ public sealed class DbccCommandTests
         AreEqual("ran", new Simulation().ExecuteScalar(Setup + "dbcc checktable(t) with tablock, no_infomsgs; dbcc checkdb with no_infomsgs; select 'ran'"));
         AreEqual(916, new Simulation().ExecuteScalar(Setup + "begin try dbcc checktable(t); end try begin catch select error_number(); end catch"));
     }
+
+    /// <summary>FLUSHAUTHCACHE, PINTABLE and UNPINTABLE (probed 2026-09-30 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("dbcc flushauthcache")]
+    [DataRow("dbcc pintable(1, 1)")]
+    [DataRow("dbcc unpintable(999, 99999)")]
+    public void FlushAuthCacheAndPinTable_CompleteQuietly(string command)
+    {
+        CollectionAssert.AreEqual(new[] { "2528: " + Completed }, Run(command).Messages);
+    }
+
+    [TestMethod]
+    [DataRow("dbcc flushauthcache(1)", 2583)]
+    [DataRow("dbcc flushauthcache with no_infomsgs", 2532)]
+    [DataRow("dbcc pintable(1)", 2583)]
+    [DataRow("dbcc pintable(1, 1, 1)", 2583)]
+    [DataRow("dbcc pintable('a', 'b')", 2560)]
+    [DataRow("dbcc unpintable(1, 1) with no_infomsgs", 2532)]
+    public void FlushAuthCacheAndPinTable_RefuseBadShapes(string command, int number)
+        => _ = new Simulation().AssertSqlError(command, number);
+
+    [TestMethod]
+    [DataRow("dbcc flushauthcache", "flushauthcache")]
+    [DataRow("dbcc pintable(1, 1)", "pintable")]
+    [DataRow("dbcc unpintable(1, 1)", "unpintable")]
+    public void FlushAuthCacheAndPinTable_TakeSysadmin(string command, string name)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create user u without login");
+        var ex = simulation.AssertSqlError($"execute as user = 'u'; {command}", 2571);
+        AreEqual($"User 'u' does not have permission to run DBCC {name}.", ex.Errors[0].Message);
+    }
 }

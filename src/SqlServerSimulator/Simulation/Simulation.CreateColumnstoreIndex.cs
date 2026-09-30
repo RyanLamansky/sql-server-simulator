@@ -139,6 +139,13 @@ partial class Simulation
             options,
             isColumnstore: true,
             columnstoreOrder: order);
+        // A nonclustered columnstore index on a partitioned table is aligned with it unless
+        // its own ON says otherwise (probed 2026-09-30 against SQL Server 2025).
+        if (!isClustered)
+        {
+            index.Partitioning = PlacementFor(context.Batch, table, index.WrittenDataSpace);
+            index.FilegroupId = FilegroupFor(context.Batch, table, index.WrittenDataSpace);
+        }
         if (replaced is not null)
             table.Indexes[table.Indexes.IndexOf(replaced)] = index;
         else

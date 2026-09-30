@@ -952,6 +952,14 @@ internal sealed class BatchContext
     public int ModuleObjectId;
 
     /// <summary>
+    /// True in the body of a function the optimizer doesn't inline — a
+    /// multi-statement table-valued function, or a scalar one it can't or won't
+    /// inline — whose statements a Query Store records under the function's
+    /// object id, where an inlined body is part of its caller's statement.
+    /// </summary>
+    public bool CapturesQueryStore;
+
+    /// <summary>
     /// Leaf names (<c>#foo</c>) of local temp tables created while this batch's
     /// body executed. Non-null only for a module body — a procedure, trigger,
     /// or dynamic-SQL (<c>EXEC</c> / <c>sp_executesql</c>) scope — where SQL

@@ -56,7 +56,7 @@ partial class Simulation
         JoinViewChain chain;
         try
         {
-            chain = BuildJoinViewChain(batch, view);
+            chain = BuildJoinViewChain(batch, view, written);
         }
         catch (SimulatedSqlException refused) when (refused.Number == 4405)
         {
@@ -123,9 +123,9 @@ partial class Simulation
             while (true)
             {
                 first.Add(0);
-                if (current.Sources[0] is not { BackingTable: null, BackingView: { BaseTable: null, IsJoinUpdatable: true } inner })
+                if (current.Sources[0] is not { BackingTable: null, BackingView: { } inner } || !ReadsThroughChain(inner))
                     break;
-                current = current.Nested[0] ??= BuildJoinViewChain(batch, inner);
+                current = current.Nested[0] ??= BuildJoinViewChain(batch, inner, nested: true);
             }
             path = [.. first];
         }

@@ -433,6 +433,8 @@ Through a **join view** the chain is judged link by link, top down, and stops at
 An UPDATE needs, on each view below the one named whose owner differs from the one above it, SELECT on the columns read through it and then UPDATE at object grain — real reports both where both are missing, SELECT first — and a view the join only *reads* takes the SELECT alone.
 Under the join view, every other-owner base table is checked for SELECT on the columns the statement reads of it — its join and filter columns included, so an UPDATE writing the other table still needs SELECT on the join column — and the written table for UPDATE column-grain.
 A join view reading another join view descends into it, so the tables under the inner one are judged from the inner view's owner; an INSERT checks INSERT at object grain on each differing view and then on the table written.
+A `MERGE` through a join view takes the same walk with each action's own permission in the UPDATE's place — SELECT on the columns the `ON`, `WHEN` conditions and `SET` values read, then INSERT / UPDATE / DELETE on each differing view (object grain) and on the table written, INSERT and DELETE at object grain and UPDATE column-grain (probed 2026-09-30 against SQL Server 2025, one action per statement; a statement with several action kinds checks them in INSERT, UPDATE, DELETE order, unprobed).
+A single-table view a join view reads is a link of its own, refused and granted as a view over another owner's join view is.
 **Where several denied objects are reachable, real names the last one bound** — a join over two ungranted tables names the second, a subquery's the subquery's, and `INSERT … SELECT` the source's — so `CheckReadSources` and `CheckModuleBodyReads` walk their lists backwards (probed 2026-09-29: joins, subqueries, unions, view bodies).
 A `SELECT` through a view checks the body's other-owner reads with the statement (`ReferencedSecurable.ModuleReads`, carried by the view's own reference and nested through views it reads), so the refusal arrives from `ExecuteReader` rather than the first `Read`; an inline TVF's body is still checked when it is invoked.
 Under an `INSTEAD OF` trigger an `INSERT` checks nothing on the base, while an `UPDATE` or `DELETE` still needs SELECT on every base column for the pseudo-tables.
@@ -449,7 +451,6 @@ A `WITHOUT LOGIN` owner's or creator's `SYSTEM_USER` under `EXECUTE AS OWNER` / 
 
 **Not modeled yet.**
 The `ALTER AUTHORIZATION` classes past the eight above raise `NotSupportedException`.
-A `MERGE` through a join view checks no broken chain (probed 2026-09-29: real names the join view for SELECT and UPDATE, then the last-bound table), and a write through a join view whose source is a *single-table* view of another owner is Msg 4405 here where real runs it.
 An `INSERT … SELECT` over two denied objects raises the target's INSERT denial with the source's, where real names only the source.
 Server-scope DDL triggers aren't modeled, so `ALTER AUTHORIZATION ON DATABASE` raises no `ALTER_AUTHORIZATION_SERVER` event.
 

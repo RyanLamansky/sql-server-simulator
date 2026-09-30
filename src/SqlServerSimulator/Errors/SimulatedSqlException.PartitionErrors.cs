@@ -130,6 +130,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException TextImageOnWithoutLobColumn() =>
         new("Cannot use TEXTIMAGE_ON when a table has no text, ntext, image, varchar(max), nvarchar(max), non-FILESTREAM varbinary(max), xml or large CLR type columns.", 1709, 16, 1);
 
+    /// <summary>Msg 1716: <c>FILESTREAM_ON</c> on a table without a FILESTREAM column (probed 2026-09-30 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException FileStreamOnWithoutFileStreamColumns() =>
+        new("FILESTREAM_ON cannot be specified when a table has no FILESTREAM columns. Remove the FILESTREAM_ON clause from the statement, or add a FILESTREAM column to the table.", 1716, 16, 1);
+
+    /// <summary>Msg 1969: a <c>FILESTREAM</c> column in a database with no FILESTREAM filegroup to default to (probed 2026-09-30 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException DefaultFileStreamFilegroupNotAvailable(string databaseName) =>
+        new($"Default FILESTREAM filegroup is not available in database '{databaseName}'.", 1969, 16, 1);
+
     /// <summary>Msg 1924 state 2: a table or index created on a read-only filegroup (probed 2026-09-28 against SQL Server 2025).</summary>
     internal static SimulatedSqlException FilegroupIsReadOnly(string name) =>
         new($"Filegroup '{name}' is read-only.", 1924, 16, 2);

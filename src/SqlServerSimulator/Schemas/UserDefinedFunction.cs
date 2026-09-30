@@ -129,6 +129,9 @@ internal sealed class ScalarFunction(
 
     /// <summary>The <see cref="Simulation.SchemaVersion"/> <see cref="ReturnMask"/> was settled at; -1 before the first.</summary>
     public long ReturnMaskSchemaVersion = -1;
+
+    /// <summary>Whether the body is one the optimizer inlines (<see cref="ModuleInlining"/>), read on first use.</summary>
+    public bool? BodyInlines;
 }
 
 /// <summary>

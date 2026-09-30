@@ -86,7 +86,7 @@ A method call on a column of any other type but `xml` is Msg 258 naming the type
 The paths are string literals kept as written (`$` without `FOR`), each well-formed (Msg 13607); a path using `[*]` is Msg 13683 State 2, any other advanced accessor State 3, and two paths where one is the other or leads to it — names compared without case, the mode keyword ignored — State 1.
 `WITH` takes `FILLFACTOR` (Msg 129 outside 1-100), `PAD_INDEX`, `ALLOW_ROW_LOCKS`, `ALLOW_PAGE_LOCKS`, `OPTIMIZE_FOR_ARRAY_SEARCH`, `DATA_COMPRESSION`, `MAXDOP` and `DROP_EXISTING` (Msg 13685 when no JSON index of that name is on the column); another index option is Msg 153 State 35 and an unknown one Msg 155 then 153.
 `sys.indexes` lists it as type 9 `JSON`, `sys.index_columns`, `INDEXPROPERTY` and `INDEX_COL` see its column, and `sys.json_indexes` / `sys.json_index_paths` carry its options and paths.
-`ALTER INDEX … DISABLE` / `REBUILD`, `sp_rename` and `DROP INDEX … ON` work, the `table.index` form of the drop is Msg 3766; the index blocks `DROP COLUMN` / `ALTER COLUMN` (Msg 5074, ahead of the type grid) and dropping the primary key (Msg 3767); a name shared with any other index on the table is Msg 1913.
+`ALTER INDEX … DISABLE` / `REBUILD` / `REORGANIZE`, `sp_rename` and `DROP INDEX … ON` work — `SET` and the resumable forms are Msg 13688, a `PARTITION = n` on `REBUILD` / `REORGANIZE` Msg 7731 state 5, `REBUILD` with `ONLINE` / `IGNORE_DUP_KEY` / `STATISTICS_INCREMENTAL` / `SORT_IN_TEMPDB` / `STATISTICS_NORECOMPUTE` / `XML_COMPRESSION` turned on Msg 153 (states 37 / 36 / 40 / 42 / 43 / 45, the option named in capitals except the two lower-case ones), `REORGANIZE` of a disabled one Msg 1973 and `COMPRESS_ALL_ROW_GROUPS = ON` Msg 35375 (probed 2026-09-30 against SQL Server 2025) — the `table.index` form of the drop is Msg 3766; the index blocks `DROP COLUMN` / `ALTER COLUMN` (Msg 5074, ahead of the type grid) and dropping the primary key (Msg 3767); a name shared with any other index on the table is Msg 1913.
 
 ## Catalog surfaces
 
@@ -110,6 +110,4 @@ The TDS endpoint acknowledges no json feature extension and sends a json column 
 ## Not modeled yet
 
 - A JSON index's internal table (`json_index_<object_id>_<index_id>` in `sys.objects` and `sys.internal_tables`) and the internal index `sys.indexes` lists beside it.
-- `ALTER INDEX` on a JSON index beyond `DISABLE` / `REBUILD`; the other forms are accepted without effect.
 - The native json TDS type a json-aware client negotiates, a json parameter sent by such a client over RPC, and json columns in BACPAC import.
-- `sp_help 'json'` — `sp_help` answers no system type name.

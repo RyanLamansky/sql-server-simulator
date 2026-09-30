@@ -138,10 +138,10 @@ The loader creates the functions and schemes and places tables, indexes and key 
 
 ## Not modeled yet
 
-- **`FILESTREAM_ON`** and a `FILESTREAM` column are a syntax error here, where real refuses a non-FILESTREAM filegroup with Msg 1724 (probed 2026-09-28 against SQL Server 2025).
+- **A `FILESTREAM` column** is a syntax error here, where real raises Msg 5508 for a string `(max)` type, Msg 1969 for `varbinary(max)` with no FILESTREAM filegroup to default to, Msg 1921 state 3 for a `FILESTREAM_ON` naming no filegroup and Msg 1724 for one naming a filegroup that isn't a FILESTREAM one (probed 2026-09-30); `FILESTREAM_ON` on a table without one is Msg 1716.
 - **LOB data spilling onto a filegroup without files** is written, where real refuses it with Msg 622 once a value leaves the row.
-- **An indexed view's index on a scheme** reports `data_space_id` 1, and a nonclustered columnstore index on a partitioned table isn't aligned by default.
+- **An indexed view's index on a scheme** reports `data_space_id` 1 and no `sys.partitions` rows at all, where real reports the scheme and one row per partition counting the view's rows (probed 2026-09-30): the simulator never materializes the view, so it has no row counts to place.
 - **Per-partition data compression** (`REBUILD PARTITION = n WITH (DATA_COMPRESSION = …)`), and so SWITCH's compression check (Msg 11406, which real raises switching out of a page-compressed history table).
-- **`SELECT … INTO … ON filegroup`** is a syntax error here.
+- **`SELECT … INTO … ON filegroup`** is a syntax error here, where real places the table on the filegroup (`data_space_id` 1 for `[primary]` and `[default]`), refuses an unknown one with Msg 1921 and a scheme name, written with or without a column list, with Msg 2726 (probed 2026-09-30).
 - **Partition-level lock escalation** — `LOCK_ESCALATION = AUTO` still escalates to the table.
 - **SWITCH's remaining checks**: filegroup agreement between the two sides, non-aligned indexes on a partitioned side, and reasoning beyond the readable shapes above (`NOT`, functions, discrete non-integer types such as `date`).

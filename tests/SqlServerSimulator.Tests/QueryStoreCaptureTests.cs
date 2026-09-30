@@ -484,4 +484,31 @@ public sealed class QueryStoreCaptureTests
         IsGreaterThanOrEqualTo(200L, reader.GetInt64(1));
         IsLessThan(reader.GetInt64(3) - 150_000, reader.GetInt64(2));
     }
+
+    /// <summary>
+    /// A function body the optimizer doesn't inline records its statements under the function's object
+    /// id (probed 2026-09-30 against SQL Server 2025): a WHILE body's <c>SET</c> reading a table, a
+    /// multi-statement table-valued function's DML on its table variable, and a plain scalar function's
+    /// body below compatibility level 150.
+    /// </summary>
+    [TestMethod]
+    public void FunctionBodies_NotInlined_RecordUnderTheFunction()
+    {
+        var sim = CapturingAll();
+        sim.ExecuteBatches(
+            "create function f1 (@x int) returns int as begin declare @r int = 0; while @x > 0 begin set @r = @r + (select count(*) from t where a <= @x); set @x = @x - 1; end; return @r; end",
+            "create function f2 (@x int) returns @t table (a int) as begin insert @t select a from t where a <= @x; return; end",
+            "create function f3 (@x int) returns int as begin return (select max(a) from t where a = @x); end");
+        _ = sim.ExecuteScalar("select dbo.f1(3)");
+        _ = sim.ExecuteScalar("select count(*) from dbo.f2(3)");
+        _ = sim.ExecuteScalar("select dbo.f3(1)");
+        object? Module(string text) => sim.ExecuteScalar($"select object_name(object_id) from sys.query_store_query q join sys.query_store_query_text t on t.query_text_id = q.query_text_id where t.query_sql_text = '{text}'");
+        AreEqual("f1", Module("(@r int,@x int)set @r = @r + (select count(*) from t where a <= @x)"));
+        AreEqual("f2", Module("(@x int)insert @t select a from t where a <= @x"));
+        IsNull(Module("return (select max(a) from t where a = @x)"));
+
+        _ = sim.ExecuteNonQuery("alter database simulated set compatibility_level = 140");
+        _ = sim.ExecuteScalar("select dbo.f3(1)");
+        AreEqual("f3", Module("return (select max(a) from t where a = @x)"));
+    }
 }
