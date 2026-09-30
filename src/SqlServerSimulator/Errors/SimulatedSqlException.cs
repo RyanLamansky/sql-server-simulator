@@ -342,12 +342,17 @@ public sealed partial class SimulatedSqlException : DbException
     /// Gives this exception a fixed line that no enclosing frame's statement
     /// line or body offset replaces — for an error real reports at the same
     /// line wherever it is raised — while the procedure is still attributed.
+    /// With <paramref name="keepStamped"/>, an entry already stamped with a
+    /// line of its own keeps it.
     /// </summary>
-    internal SimulatedSqlException PinLine(int line)
+    internal SimulatedSqlException PinLine(int line, bool keepStamped = false)
     {
         this.linePinned = true;
         foreach (var error in this.Errors)
-            error.LineNumber = line;
+        {
+            if (!keepStamped || error.LineNumber == 0)
+                error.LineNumber = line;
+        }
         return this;
     }
 
@@ -447,6 +452,56 @@ public sealed partial class SimulatedSqlException : DbException
         if (messages is not null)
             entries.AddRange(messages);
 
+        var aggregate = FromErrors(entries);
+        aggregate.diagnosticsResolved = resolved;
+        return aggregate;
+    }
+
+    /// <summary>
+    /// The exception a client reads for a stretch of a batch: as
+    /// <see cref="Aggregate"/>, except that an informational entry riding with
+    /// an error (Msg 2724 after a parameter's Msg 2715) moves behind every
+    /// error, because SqlClient collects the errors first and the warnings
+    /// after them. The TDS stream keeps the order real sends.
+    /// </summary>
+    internal static SimulatedSqlException ForClient(List<SimulatedSqlException> errors, List<SimulatedError>? messages)
+    {
+        var sawInfo = false;
+        var misordered = false;
+        foreach (var error in errors)
+        {
+            foreach (var entry in error.Errors)
+            {
+                if (entry.Class <= 10)
+                    sawInfo = true;
+                else
+                    misordered |= sawInfo;
+            }
+        }
+        if (!misordered)
+            return Aggregate(errors, messages);
+
+        var entries = new List<SimulatedError>();
+        var resolved = true;
+        foreach (var error in errors)
+        {
+            resolved &= error.diagnosticsResolved;
+            foreach (var entry in error.Errors)
+            {
+                if (entry.Class > 10)
+                    entries.Add(entry);
+            }
+        }
+        foreach (var error in errors)
+        {
+            foreach (var entry in error.Errors)
+            {
+                if (entry.Class <= 10)
+                    entries.Add(entry);
+            }
+        }
+        if (messages is not null)
+            entries.AddRange(messages);
         var aggregate = FromErrors(entries);
         aggregate.diagnosticsResolved = resolved;
         return aggregate;

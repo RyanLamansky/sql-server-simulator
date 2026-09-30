@@ -58,6 +58,37 @@ partial class SimulatedSqlException
         new("Cannot perform an aggregate function on an expression containing an aggregate or a subquery.", 130, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 1028: <c>GROUP BY ALL</c> with a <c>ROLLUP</c>,
+    /// <c>CUBE</c> or <c>GROUPING SETS</c> item, a legacy <c>WITH ROLLUP</c> /
+    /// <c>WITH CUBE</c>, or an empty grouping set beside another item. A
+    /// parse-phase error that ends the batch's parse where it is raised
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException GroupingSetsInGroupByAll() =>
+        new("The CUBE, ROLLUP, and GROUPING SETS constructs are not allowed in a GROUP BY ALL clause.", 1028, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 1054: a construct a schema-bound module's body
+    /// may not hold, reported at <paramref name="line"/> — <c>GROUP BY ALL</c>'s
+    /// <c>ALL</c> is state 8 (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SyntaxNotAllowedInSchemaBoundObject(string syntax, byte state, int line)
+    {
+        var error = new SimulatedSqlException($"Syntax '{syntax}' is not allowed in schema-bound objects.", 1054, 15, state);
+        error.Errors[0].LineNumber = line;
+        return error;
+    }
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 7417: <c>GROUP BY ALL</c> over a <c>WHERE</c>
+    /// in a query whose own <c>FROM</c> reads a linked server's table or an
+    /// <c>OPENQUERY</c> rowset. A binding error, raised as the batch compiles
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException GroupByAllOverRemoteSource() =>
+        new("GROUP BY ALL is not supported in queries that access remote tables if there is also a WHERE clause in the query.", 7417, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 144 — an aggregate or subquery appears in a
     /// GROUP BY list expression (<c>GROUP BY MAX(a)</c>,
     /// <c>GROUP BY (SELECT …)</c>). Takes precedence over

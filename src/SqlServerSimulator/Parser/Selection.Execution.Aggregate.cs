@@ -158,8 +158,10 @@ internal sealed partial class Selection
         // Selection.Execution.AggregateParallel.cs for the gates, the
         // merge contract and the error rule.
         ParallelGroupedAccumulation? parallel = null;
-        var parallelConsidered = !allowParallel || !streaming || windows.Count > 0;
+        var groupAllFilter = fromClause.GroupByAllFilter;
+        var parallelConsidered = !allowParallel || !streaming || windows.Count > 0 || groupAllFilter is not null;
         var enumeratedRows = 0L;
+        var groupedAnyRow = false;
         try
         {
             foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
@@ -200,9 +202,25 @@ internal sealed partial class Selection
                 if (!include)
                     continue;
 
+                // GROUP BY ALL: the row forms its group whatever its WHERE
+                // says, and feeds the aggregates only when the WHERE keeps it.
+                var feedsAggregates = true;
+                if (groupAllFilter is not null)
+                {
+                    groupedAnyRow = true;
+                    foreach (var conjunct in groupAllFilter)
+                    {
+                        if (conjunct.Run(rowRuntime) != true)
+                        {
+                            feedsAggregates = false;
+                            break;
+                        }
+                    }
+                }
+
                 if (streamedGroups is not null)
                 {
-                    Accumulate(streamedGroups, effectiveSets[0], tuple, tupleIsShared: true);
+                    Accumulate(streamedGroups, effectiveSets[0], tuple, tupleIsShared: true, feedsAggregates);
                     continue;
                 }
 
@@ -220,6 +238,9 @@ internal sealed partial class Selection
                 AggregateDiagnostics.Sink?.Add("Aggregate:SerialRerun(merge)");
                 return null;
             }
+
+            if (groupedAnyRow && GroupByAllWarns(aggregates, sources, groupAllFilter!))
+                batch.CurrentStatement.NullEliminated = true;
         }
 #pragma warning disable CA1031 // Deliberate: the catch is the parallel path's whole error contract — every kind is discarded and re-raised, in order, by the serial re-run below.
         catch (Exception) when (parallel is not null)
@@ -380,7 +401,7 @@ internal sealed partial class Selection
         //
         // `tupleIsShared` says the caller is handing over the join driver's own
         // mutable tuple, so a retained representative has to be snapshotted.
-        void Accumulate(Dictionary<SqlValueKey, GroupState> groups, Expression[] groupingSet, byte[]?[] tuple, bool tupleIsShared)
+        void Accumulate(Dictionary<SqlValueKey, GroupState> groups, Expression[] groupingSet, byte[]?[] tuple, bool tupleIsShared, bool feedsAggregates = true)
         {
             GroupState state;
             if (ungroupedState is { } wholeInput)
@@ -420,6 +441,9 @@ internal sealed partial class Selection
                     state.Representative = tuple;
                 }
             }
+
+            if (!feedsAggregates)
+                return;
 
             for (var i = 0; i < aggregates.Count; i++)
             {
@@ -865,5 +889,28 @@ internal sealed partial class Selection
         /// the answer by construction.
         /// </summary>
         public long FirstRowOrdinal;
+    }
+
+    /// <summary>
+    /// Whether a <c>GROUP BY ALL</c> over a <c>WHERE</c> that grouped at least
+    /// one row sends Msg 8153. Real does whenever the query holds an aggregate
+    /// that reports a skipped NULL — <c>COUNT(*)</c> included, and whether or
+    /// not any row failed the WHERE — as though every group took one extra row
+    /// that feeds each aggregate a NULL; <c>STRING_AGG</c> doesn't. A FROM-less
+    /// query whose WHERE is a constant false reads no row at all there, so it
+    /// doesn't warn either (probed 2026-09-30 against SQL Server 2025). The
+    /// JSON, CLR and spatial aggregates, which never report a skipped NULL
+    /// elsewhere, are taken not to here.
+    /// </summary>
+    private static bool GroupByAllWarns(List<AggregateExpression> aggregates, FromSource[] sources, List<BooleanExpression> filter)
+    {
+        if (sources.Length == 0 && filter.Exists(static conjunct => conjunct.IsNeverTrue))
+            return false;
+        foreach (var aggregate in aggregates)
+        {
+            if (aggregate.Kind is not (AggregateKind.StringAgg or AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg or AggregateKind.ClrAggregate or AggregateKind.SpatialAggregate))
+                return true;
+        }
+        return false;
     }
 }

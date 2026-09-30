@@ -881,6 +881,31 @@ The result widens to the family maximum — `varchar(8000)` / `nvarchar(4000)`, 
 Non-`STRING_AGG` aggregate with `WITHIN GROUP` → **Msg 10757**; ORDER BY ordinal in this context → **Msg 5308** (distinct from projection-level ORDER BY which accepts ordinals); `WITHIN` is contextual (not reserved).
 Cross-aggregate Msg 8711 isn't modeled (EF doesn't emit).
 
+### `GROUP BY ALL`
+
+Real's deprecated form keeps every group the source produces, whatever the `WHERE` does to its rows, and the aggregates read only the rows the `WHERE` keeps — a group none of whose rows pass has `COUNT` 0 and every other aggregate NULL, and a dropped row never evaluates an aggregate's operand (`SUM(10 / v)` over a filtered zero is NULL, not Msg 8134).
+Without a `WHERE` it is a plain `GROUP BY`.
+The groups are those of the joined rows, `HAVING` reads the filtered aggregates, and with no `ORDER BY` the groups leave in the order a plain `GROUP BY`'s would ([row order](#row-order-without-order-by)) — all probed 2026-09-30 against SQL Server 2025, at compatibility level 100 as at 170.
+The parse moves the `WHERE`'s conjuncts from `FromClause.Excluders` to `FromClause.GroupByAllFilter`, so the seek, pushdown and parallel paths see a query with no filter and read every row, and the aggregate executor forms each row's group before asking the filter whether the row feeds the aggregates.
+
+What real refuses:
+- **Msg 1028** for a `ROLLUP`, `CUBE` or `GROUPING SETS` item, the legacy `WITH ROLLUP` / `WITH CUBE`, or an empty set `()` beside another item — `GROUP BY ALL ()` alone is one group.
+  It is a parse-phase error at the token after the grouping list (at the legacy form's `ROLLUP` / `CUBE`), so it outranks a missing table, fires in a dead branch, follows the syntax errors recovery found before it and ends the parse there.
+- **Msg 1054** state 8 (*"Syntax 'ALL' is not allowed in schema-bound objects."*) anywhere in a schema-bound view's or function's body, at the `ALL`'s line and ahead of anything the body binds; a plain view takes it.
+- **Msg 7417** when the query's own `FROM` — a derived table included — reads a linked server's table or an `OPENQUERY` rowset and the query has a `WHERE`; a remote read only in a `WHERE` or select-list subquery is fine.
+  It is a binding error raised while the batch compiles (a dead branch raises it, a `TRY` doesn't catch it), at the statement's line.
+- `GROUP BY ALL` with nothing after it is Msg 102, and the containment rules (Msg 8120, 144, 164) apply as to a plain `GROUP BY`.
+
+**Msg 8153.** Over a `WHERE`, real sends the NULL-elimination warning whenever a row reached the grouping and the query holds an aggregate that reports a skipped NULL — `COUNT(*)` included, and even when every row passed the `WHERE` — as though each group took one extra row feeding every aggregate a NULL; `STRING_AGG` alone doesn't warn, nor does an empty source or a query with no aggregate (probed 2026-09-30).
+A FROM-less `SELECT COUNT(*) WHERE 1 = 0 GROUP BY ALL ()` doesn't warn either, where the same shape over a variable that is false does (`Selection.GroupByAllWarns`).
+
+**Divergences.**
+- In a statement naming a table the batch itself creates, Msg 1028 surfaces when the statement runs, after the statements before it — the compile's deferral stops before such a statement's grouping list, as it does for its syntax errors (see [`control-flow.md`](control-flow.md#not-modeled-yet)).
+- A column that doesn't exist, in a query over a linked server, is Msg 7417 here and Msg 207 on real: the simulator binds a remote source's columns only when the query runs.
+- In a schema-bound body, real follows Msg 1054 with the Msg 319 its recovery reads from a later `WITH CUBE`; here Msg 1054 stands alone.
+- `OPENROWSET` over a provider and `OPENDATASOURCE` don't count as remote for Msg 7417 — not probed.
+- Real's Msg 7417 over a remote table the batch creates wasn't observable (the loopback server couldn't see it), so the simulator's deferral there — raising it when the statement runs, where a `TRY` catches it — is unconfirmed.
+
 ## Window functions
 - Ranking functions (ORDER BY required, raises a generic syntax error otherwise — Msg 4112 territory):
   - `ROW_NUMBER() OVER([PARTITION BY ...] ORDER BY ...)` — bigint.

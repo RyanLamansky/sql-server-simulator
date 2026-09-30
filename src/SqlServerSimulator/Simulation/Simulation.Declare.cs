@@ -421,6 +421,8 @@ partial class Simulation
         // caller uses the skip signal, to avoid registering the function.
         var pendingIndexes = new List<PendingInlineIndex>();
         _ = TryParseTableVariableColumnsAndConstraints(context, fullName, out var columns, out var keyConstraints, out var checkConstraints, pendingIndexes);
+        if (Array.Exists(columns, static column => column.Type == SqlType.RowVersion))
+            FunctionBodyShape.NoteSideEffect(context.Batch, "TIMESTAMP", FunctionBodyShape.TimestampColumnState);
         var internalName = context.Connection.Simulation.AllocateTableVariableInternalName();
         RenameAutoNamedConstraints(internalName, fullName, columns, keyConstraints, checkConstraints, checkTablePartLength: internalName.Length);
 

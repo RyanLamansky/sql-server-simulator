@@ -189,9 +189,9 @@ public sealed class BatchCompilationTests
     {
         var (_, connection) = Open();
         var scalar = Fails(connection, "create type dbo.Probe from int; declare @v dbo.Probe; set @v = 42; select @v");
-        CollectionAssert.AreEqual(new[] { 2715 }, scalar.Errors.Select(e => e.Number).ToArray());
+        CollectionAssert.AreEqual(new[] { 2715, 2724 }, scalar.Errors.Select(e => e.Number).ToArray());
         var table = Fails(connection, "create type dbo.t1 as table (id int); declare @t t1; insert @t values (5); select id from @t");
-        CollectionAssert.AreEqual(new[] { 2715, 1087, 1087 }, table.Errors.Select(e => e.Number).ToArray());
+        CollectionAssert.AreEqual(new[] { 2715, 1087, 1087, 2724 }, table.Errors.Select(e => e.Number).ToArray());
     }
 
     /// <summary>

@@ -187,7 +187,27 @@ internal sealed class LikeMatcher
             segIndex++;
         }
 
-        return !this.anchorEnd || pos == s.Length || (slack && IsAllSpaces(s[pos..]));
+        return !this.anchorEnd || pos == s.Length || this.OnlyWeightlessFrom(s, pos) || (slack && IsAllSpaces(s[pos..]));
+    }
+
+    /// <summary>
+    /// True when everything from <paramref name="pos"/> on is characters the
+    /// collation gives no weight. Only a subject made of nothing else reaches
+    /// here — anywhere else they ride with the character before them — and
+    /// real reads it as empty: <c>NCHAR(0) LIKE N''</c> is true and
+    /// <c>NCHAR(0) LIKE N'_'</c> false (probed 2026-09-30 against SQL Server
+    /// 2025).
+    /// </summary>
+    private bool OnlyWeightlessFrom(ReadOnlySpan<char> s, int pos)
+    {
+        if (this.weightless is null)
+            return false;
+        for (var i = pos; i < s.Length; i++)
+        {
+            if (!this.IsWeightlessAt(s, i))
+                return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -280,14 +300,15 @@ internal sealed class LikeMatcher
 
         // A run of characters real gives no weight isn't a character of its
         // own: at the start it rides with the character after it, anywhere
-        // else with the one before (see TrailingMarks).
+        // else with the one before (see TrailingMarks), and with no character
+        // to ride with the subject reads as ended (see OnlyWeightlessFrom).
         var lead = 0;
         while (pos + lead < s.Length && this.IsWeightlessAt(s, pos + lead))
             lead++;
         if (lead > 0)
         {
             if (pos + lead == s.Length)
-                return lead;
+                return 0;
             var rest = this.ElementLength(s, pos + lead, ascii);
             return rest < 0 ? rest : lead + rest;
         }

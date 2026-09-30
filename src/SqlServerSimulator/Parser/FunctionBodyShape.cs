@@ -42,6 +42,14 @@ internal sealed class FunctionBodyShape
     public const byte BuiltInOperatorState = 1;
 
     /// <summary>
+    /// Real's state on Msg 443 for a <c>timestamp</c> column in a table a
+    /// function declares — its return table or a <c>DECLARE @t TABLE</c> in
+    /// its body — which it names as the <c>TIMESTAMP</c> operator (probed
+    /// 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    public const byte TimestampColumnState = 16;
+
+    /// <summary>
     /// Violations in source order — every one of them reaches the <c>CREATE</c>,
     /// as one exception carrying an entry each.
     /// </summary>

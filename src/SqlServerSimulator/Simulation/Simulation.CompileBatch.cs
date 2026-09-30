@@ -187,6 +187,13 @@ partial class Simulation
                 var resume = reported && !readAsCte ? at.StartIndex : at.EndIndex;
                 restart = resume > restart ? resume : at.EndIndex;
             }
+            catch (SimulatedSqlException next) when (next.Number == 1028)
+            {
+                // GROUP BY ALL's grouping-set refusal is reported after the
+                // syntax errors before it, and ends the parse there.
+                errors.Add(next);
+                break;
+            }
             catch (SimulatedSqlException)
             {
                 break;

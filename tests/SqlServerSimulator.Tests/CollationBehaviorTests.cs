@@ -69,6 +69,25 @@ public sealed class CollationBehaviorTests
     public void DefaultCollation_VarcharControlCharacters_WeighBelowSpace(string condition, int expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select case when {condition} then 1 else 0 end"));
 
+    /// <summary>
+    /// Where the varchar sort weighs <c>CHAR(0)</c>, a pattern's literal run
+    /// that ends in one takes exactly as many of the subject's, whatever
+    /// wildcard follows (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("'a' + char(0) + 'b' like 'a' + char(0) + '_'", 1)]
+    [DataRow("'a' + char(0) + 'b' like 'a' + char(0) + '%'", 1)]
+    [DataRow("'a' + char(0) + char(0) + 'b' like 'a' + char(0) + '%'", 1)]
+    [DataRow("'a' + char(0) like 'a' + char(0) + '%'", 1)]
+    [DataRow("char(0) + 'b' like char(0) + '%'", 1)]
+    [DataRow("char(0) like char(0) + '%'", 1)]
+    [DataRow("char(0) like '_'", 1)]
+    [DataRow("char(0) like ''", 0)]
+    [DataRow("'a' + char(0) + 'b' like 'a_b'", 1)]
+    [DataRow("'a' + char(0) + 'b' like 'ab'", 0)]
+    public void DefaultCollation_VarcharNul_InALikePattern(string condition, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select case when {condition} then 1 else 0 end"));
+
     [TestMethod]
     public void DefaultCollation_VarcharNul_KeepsDistinctValuesApart()
         => AreEqual(2, new Simulation().ExecuteScalar("select count(distinct v) from (values ('a' + char(0) + 'b'), ('ab')) t(v)"));

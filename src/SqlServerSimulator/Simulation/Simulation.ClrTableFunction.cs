@@ -37,6 +37,7 @@ partial class Simulation
         Schema schema,
         MultiPartName functionName,
         List<UdfParameter> parameters,
+        List<SimulatedSqlException> declarationErrors,
         bool isAlter,
         bool createOrAlter)
     {
@@ -65,6 +66,8 @@ partial class Simulation
 
         var (assembly, type) = ResolveClrClass(context, externalName[0], externalName[1]);
         var method = ResolveClrMethod(type, externalName[2], externalName[1], assembly.Name);
+        if (HeldDeclarationErrors(declarationErrors) is { } held)
+            throw held;
         var methodParameters = method.GetParameters();
         if (methodParameters.Length != parameters.Count)
             throw SimulatedSqlException.ClrParameterCountMismatch("CREATE FUNCTION");

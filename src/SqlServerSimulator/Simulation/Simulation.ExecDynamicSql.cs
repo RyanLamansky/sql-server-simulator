@@ -424,7 +424,8 @@ partial class Simulation
         }
         catch (SimulatedSqlException error)
         {
-            throw error.PinLine(1);
+            // A READONLY parameter's Msg 346 carries its own line.
+            throw error.PinLine(1, keepStamped: error.Number == 346);
         }
     }
 
@@ -485,6 +486,9 @@ partial class Simulation
         defContext.MoveNextRequired();
 
         var parameters = new List<SpExecuteSqlParam>();
+        // Every declaration's Msg 346 and Msg 2715 is reported, in order, once
+        // the list has parsed (probed 2026-09-30 against SQL Server 2025).
+        var declarationErrors = new List<SimulatedSqlException>();
         while (true)
         {
             if (defContext.Token is not AtPrefixedString name)
@@ -492,7 +496,17 @@ partial class Simulation
             defContext.MoveNextRequired();
 
             // Type parsing reuses the procedure-parameter type grammar.
-            var (type, declaredMaxLength) = ParseSpExecuteSqlParamType(defContext, parameters.Count + 1, "@" + name.Value);
+            SqlType type;
+            int? declaredMaxLength;
+            try
+            {
+                (type, declaredMaxLength) = ParseSpExecuteSqlParamType(defContext, parameters.Count + 1, "@" + name.Value);
+            }
+            catch (SimulatedSqlException error) when (error.Number == 2715)
+            {
+                declarationErrors.Add(error);
+                (type, declaredMaxLength) = (SqlType.Int32, null);
+            }
 
             // A default comes before OUTPUT and is a constant, as a procedure
             // parameter's is: `@p int = 5 OUTPUT` (probed 2026-09-25 against
@@ -503,9 +517,10 @@ partial class Simulation
                 defaultValue = ParseSpExecuteSqlParamDefault(defContext);
                 defContext.MoveNextRequired();
             }
+            var readOnly = NoteReadOnlyScalarParameter(defContext, name, declarationErrors);
 
             var isOutput = false;
-            if (defContext.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
+            if (!readOnly && defContext.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
             {
                 isOutput = true;
                 defContext.MoveNextOptional();
@@ -522,7 +537,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(defContext);
             if (defContext.GetNextOptional() is not null)
                 throw SimulatedSqlException.BatchParametersNotValid();
-            return parameters;
+            return declarationErrors.Count == 0 ? parameters : throw SimulatedSqlException.Aggregate(declarationErrors);
         }
     }
 

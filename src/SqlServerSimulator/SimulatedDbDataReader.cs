@@ -630,7 +630,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
             }
             break;
         }
-        return SimulatedSqlException.Aggregate(errors, messages);
+        return SimulatedSqlException.ForClient(errors, messages);
     }
 
     private SqlType[] CurrentSchema => this.currentResult?.Schema ?? [];

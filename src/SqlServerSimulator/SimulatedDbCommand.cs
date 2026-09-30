@@ -242,7 +242,7 @@ public sealed class SimulatedDbCommand : DbCommand
     private void CompleteDrainedBatch(List<SimulatedSqlException>? errors, List<SimulatedError>? messages)
     {
         if (errors is not null)
-            throw SimulatedSqlException.Aggregate(errors, messages);
+            throw SimulatedSqlException.ForClient(errors, messages);
         if (messages is null)
             return;
         foreach (var message in messages)

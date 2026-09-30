@@ -160,6 +160,7 @@ partial class Simulation
         Schema schema,
         MultiPartName functionName,
         List<UdfParameter> parameters,
+        List<SimulatedSqlException> declarationErrors,
         SqlType returnType,
         bool isSchemaBound,
         bool isAlter,
@@ -178,6 +179,11 @@ partial class Simulation
 
         var (assembly, type) = ResolveClrClass(context, externalName[0], externalName[1]);
         var method = ResolveClrMethod(type, externalName[2], externalName[1], assembly.Name);
+        // Real resolves the assembly ahead of the declaration's own errors
+        // (a missing one is Msg 6528 over a READONLY parameter or a timestamp
+        // return; probed 2026-09-30 against SQL Server 2025).
+        if (HeldDeclarationErrors(declarationErrors) is { } held)
+            throw held;
 
         var methodParameters = method.GetParameters();
         if (methodParameters.Length != parameters.Count)

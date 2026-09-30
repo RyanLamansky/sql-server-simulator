@@ -60,8 +60,7 @@ Existence checks (probe-confirmed):
 Two disambiguation rules:
 
 - **Multi-part type name** (e.g. `dbo.MyType`) — unambiguous; resolved via `BatchContext.TryResolveTableType`.
-  Miss raises Msg 2715 ("Cannot find data type X.
-  Parameter or variable '@t' has an invalid data type.").
+  Miss raises Msg 2715 ("Cannot find data type X."), followed by the informational Msg 2724 ("Parameter or variable '@t' has an invalid data type.").
 - **1-part type name** — `BatchContext.TryResolveTableType` runs first against the default schema; on miss falls through to the scalar parser (`SqlType.GetByName`).
   Both `DECLARE @t int` and `DECLARE @t MyType` work through this path.
 

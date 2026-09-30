@@ -303,6 +303,15 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public int SubqueriesParsed;
 
     /// <summary>
+    /// Monotonic count of FROM sources that read a linked server — a four-part
+    /// name or an <c>OPENQUERY</c> rowset — for <c>GROUP BY ALL</c>'s Msg 7417,
+    /// which asks whether a query's own <c>FROM</c> clause, derived tables
+    /// included, holds one. Read as a difference across one parse, like
+    /// <see cref="AggregatesParsed"/>.
+    /// </summary>
+    public int RemoteSourcesParsed;
+
+    /// <summary>
     /// Column references parsed, net of function names. A bare name is built as
     /// a <see cref="Expressions.Reference"/> before the parser knows whether a
     /// <c>(</c> follows, so <c>GETDATE()</c> starts life looking exactly like a

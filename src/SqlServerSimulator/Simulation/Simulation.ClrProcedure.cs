@@ -32,6 +32,7 @@ partial class Simulation
         MultiPartName procName,
         short groupNumber,
         List<ProcedureParameter> parameters,
+        List<SimulatedSqlException> declarationErrors,
         string? executeAsClause,
         string? refusedOption,
         bool isAlter,
@@ -62,6 +63,8 @@ partial class Simulation
 
         var (assembly, type) = ResolveClrClass(context, externalName[0], externalName[1]);
         var method = ResolveClrMethod(type, externalName[2], externalName[1], assembly.Name);
+        if (HeldDeclarationErrors(declarationErrors) is { } held)
+            throw held;
         var methodParameters = method.GetParameters();
         if (methodParameters.Length != parameters.Count)
             throw SimulatedSqlException.ClrParameterCountMismatch("CREATE PROCEDURE");

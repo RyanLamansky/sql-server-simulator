@@ -87,12 +87,13 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         var parameters = new List<UdfParameter>();
+        var declarationErrors = new List<SimulatedSqlException>();
         context.MoveNextRequired();
         if (context.Token is not Operator { Character: ')' })
         {
             while (true)
             {
-                var parameter = ParseParameter(context, parameters.Count + 1);
+                var parameter = ParseParameter(context, parameters.Count + 1, declarationErrors);
                 if (parameters.Exists(declared => BatchContext.VariableNameComparer.Equals(declared.Name, parameter.Name)))
                     throw SimulatedSqlException.VariableAlreadyDeclared(parameter.Name);
                 parameters.Add(parameter);
@@ -112,10 +113,10 @@ partial class Simulation
         // TVF; otherwise the existing scalar path.
         return context.Token switch
         {
-            AtPrefixedString => ParseMultiStatementTvfTail(context, schema, functionName, parameters, isAlter, createOrAlter),
-            ReservedKeyword { Keyword: Keyword.Table } when NextIsOpenParen(context) => ParseClrTableFunctionTail(context, schema, functionName, parameters, isAlter, createOrAlter),
-            ReservedKeyword { Keyword: Keyword.Table } => ParseInlineTvfTail(context, schema, functionName, parameters, isAlter, createOrAlter),
-            _ => ParseScalarTail(context, schema, functionName, parameters, isAlter, createOrAlter),
+            AtPrefixedString => ParseMultiStatementTvfTail(context, schema, functionName, parameters, declarationErrors, isAlter, createOrAlter),
+            ReservedKeyword { Keyword: Keyword.Table } when NextIsOpenParen(context) => ParseClrTableFunctionTail(context, schema, functionName, parameters, declarationErrors, isAlter, createOrAlter),
+            ReservedKeyword { Keyword: Keyword.Table } => ParseInlineTvfTail(context, schema, functionName, parameters, declarationErrors, isAlter, createOrAlter),
+            _ => ParseScalarTail(context, schema, functionName, parameters, declarationErrors, isAlter, createOrAlter),
         };
     }
 
@@ -198,9 +199,10 @@ partial class Simulation
         }
     }
 
-    private static bool ParseMultiStatementTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, bool isAlter, bool createOrAlter)
+    private static bool ParseMultiStatementTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, List<SimulatedSqlException> declarationErrors, bool isAlter, bool createOrAlter)
     {
         var returnVariableName = ((AtPrefixedString)context.Token!).Value;
+        var returnVariableLine = context.Token.LineNumber;
         context.MoveNextRequired(); // consume @r
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Table })
@@ -302,12 +304,14 @@ partial class Simulation
         // Bind the body before the schema dict is touched — see
         // BindModuleBodyAtCreate. Value-form RETURN raises Msg 178 from here,
         // which is where real reports it too.
-        context.Simulation.BindMultiStatementTvfBodyAtCreate(
+        int? timestampColumnLine = Array.Exists(outputColumns, static column => column.Type == SqlType.RowVersion) ? returnVariableLine : null;
+        BindBehindDeclarationErrors(HeldDeclarationErrors(declarationErrors), () => context.Simulation.BindMultiStatementTvfBodyAtCreate(
             context, functionName.Leaf, parameters, returnVariableName, outputColumns,
             keyConstraints, checkConstraints, bodyText,
-            CountNewlines(commandText, 0, bodyStart));
+            CountNewlines(commandText, 0, bodyStart), timestampColumnLine));
 
         var replaced = ResolveFunctionAlterTarget<MultiStatementTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
+        RejectTimestampParameters(parameters);
 
         if (isSchemaBound)
             SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText);
@@ -348,7 +352,7 @@ partial class Simulation
     /// entry: the type-name token (right after the <c>RETURNS</c> keyword
     /// the outer parser already advanced past).
     /// </summary>
-    private static bool ParseScalarTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, bool isAlter, bool createOrAlter)
+    private static bool ParseScalarTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, List<SimulatedSqlException> declarationErrors, bool isAlter, bool createOrAlter)
     {
         var returnSpelledNumeric = IsNumericTypeWord(context.Token);
         var returnType = ParseFunctionReturnType(context, ordinal: 0, parameterName: "", out var returnMaxLength, out var returnAliasType);
@@ -370,7 +374,7 @@ partial class Simulation
         // AS, since EXTERNAL only follows it.
         var sawAs = ConsumeOptionalBodyAs(context);
         if (sawAs && context.Token is ReservedKeyword { Keyword: Keyword.External })
-            return ParseClrScalarTail(context, schema, functionName, parameters, returnType, isSchemaBound, isAlter, createOrAlter);
+            return ParseClrScalarTail(context, schema, functionName, parameters, declarationErrors, returnType, isSchemaBound, isAlter, createOrAlter);
 
         // BEGIN/END required for scalar UDF bodies. Capture span between
         // outer BEGIN (exclusive) and matching END (exclusive) using token-
@@ -447,11 +451,12 @@ partial class Simulation
 
         // Bind the body before the schema dict is touched — see
         // BindModuleBodyAtCreate.
-        context.Simulation.BindScalarFunctionBodyAtCreate(
+        BindBehindDeclarationErrors(HeldDeclarationErrors(declarationErrors, returnType, endLine), () => context.Simulation.BindScalarFunctionBodyAtCreate(
             context, functionName.Leaf, parameters, returnType, bodyText,
-            CountNewlines(commandText, 0, bodyStart));
+            CountNewlines(commandText, 0, bodyStart)));
 
         var replaced = ResolveFunctionAlterTarget<ScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
+        RejectTimestampParameters(parameters);
 
         if (isSchemaBound)
             SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText);
@@ -521,7 +526,7 @@ partial class Simulation
         return true;
     }
 
-    private static bool ParseInlineTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, bool isAlter, bool createOrAlter)
+    private static bool ParseInlineTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, List<SimulatedSqlException> declarationErrors, bool isAlter, bool createOrAlter)
     {
         context.MoveNextRequired(); // step past TABLE
 
@@ -579,7 +584,10 @@ partial class Simulation
         if (isSchemaBound)
             SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText);
 
-        var outputColumns = InferInlineTvfOutputColumns(context, [.. parameters], bodyText, functionName.Leaf, CountNewlines(commandText, 0, bodyStart), out var outputWireFlags);
+        HeapColumn[] outputColumns = [];
+        byte[]? outputWireFlags = null;
+        BindBehindDeclarationErrors(HeldDeclarationErrors(declarationErrors), () => outputColumns = InferInlineTvfOutputColumns(context, [.. parameters], bodyText, functionName.Leaf, CountNewlines(commandText, 0, bodyStart), out outputWireFlags));
+        RejectTimestampParameters(parameters);
 
         var function = new InlineTableValuedFunction(
             schema,
@@ -808,11 +816,14 @@ partial class Simulation
 
     /// <summary>
     /// Parses one entry in a <c>CREATE FUNCTION</c> parameter list:
-    /// <c>@name type [= default]</c>. Cursor on entry: the leading <c>@</c>
-    /// or parameter name token. Cursor on exit: the trailing <c>,</c> or
-    /// <c>)</c> separator (caller decides which).
+    /// <c>@name type [= default] [READONLY]</c>. Cursor on entry: the leading
+    /// <c>@</c> or parameter name token. Cursor on exit: the trailing <c>,</c>
+    /// or <c>)</c> separator (caller decides which). A type that doesn't
+    /// resolve and a <c>READONLY</c> on it land on
+    /// <paramref name="declarationErrors"/> instead of ending the parse — see
+    /// <see cref="HeldDeclarationErrors"/>.
     /// </summary>
-    private static UdfParameter ParseParameter(ParserContext context, int ordinal)
+    private static UdfParameter ParseParameter(ParserContext context, int ordinal, List<SimulatedSqlException> declarationErrors)
     {
         if (context.Token is not AtPrefixedString variable)
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -820,7 +831,18 @@ partial class Simulation
         context.MoveNextRequired();
 
         var spelledNumeric = IsNumericTypeWord(context.Token);
-        var paramType = ParseFunctionReturnType(context, ordinal, "@" + name, out var paramMaxLength, out var aliasType);
+        SqlType paramType;
+        int? paramMaxLength;
+        AliasType? aliasType;
+        try
+        {
+            paramType = ParseFunctionReturnType(context, ordinal, "@" + name, out paramMaxLength, out aliasType);
+        }
+        catch (SimulatedSqlException error) when (error.Number == 2715)
+        {
+            declarationErrors.Add(error);
+            (paramType, paramMaxLength, aliasType) = (SqlType.Int32, null, null);
+        }
         spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
 
         Expression? defaultExpression = null;
@@ -829,7 +851,85 @@ partial class Simulation
             context.MoveNextRequired();
             defaultExpression = Expression.Parse(context);
         }
+        _ = NoteReadOnlyScalarParameter(context, variable, declarationErrors);
         return new UdfParameter(name, paramType, defaultExpression) { SpelledNumeric = spelledNumeric, AliasType = aliasType, DeclaredMaxLength = paramMaxLength, LineNumber = variable.LineNumber };
+    }
+
+    /// <summary>
+    /// Steps past a <c>READONLY</c> after a parameter that isn't table-valued,
+    /// noting real's Msg 346 at the parameter's line on
+    /// <paramref name="declarationErrors"/>. Real reads the keyword after the
+    /// default and before <c>OUTPUT</c>, so <c>READONLY OUTPUT</c> is a syntax
+    /// error at the <c>OUTPUT</c> (probed 2026-09-30 against SQL Server 2025).
+    /// Answers whether the keyword was there, which closes the declaration.
+    /// </summary>
+    private static bool NoteReadOnlyScalarParameter(ParserContext context, AtPrefixedString parameter, List<SimulatedSqlException> declarationErrors)
+    {
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.ReadOnly })
+            return false;
+        declarationErrors.Add(SimulatedSqlException.ReadOnlyScalarParameter("@" + parameter.Value, parameter.LineNumber));
+        context.MoveNextRequired();
+        return true;
+    }
+
+    /// <summary>
+    /// The errors a module's parameter list and return type raise, which real
+    /// reports once the whole statement has parsed — so a syntax error in the
+    /// body outranks them — and ahead of anything its body binds (probed
+    /// 2026-09-30 against SQL Server 2025). A <c>timestamp</c> return type is
+    /// Msg 2733 alone, at the line the statement ends on; otherwise every
+    /// parameter's Msg 346 and Msg 2715 (with its Msg 2724 note), in parameter
+    /// order. Null when there are none.
+    /// </summary>
+    private static SimulatedSqlException? HeldDeclarationErrors(List<SimulatedSqlException> declarationErrors, SqlType? returnType = null, int endLine = 0)
+    {
+        if (returnType == SqlType.RowVersion)
+        {
+            var refusal = SimulatedSqlException.TimestampReturnTypeInvalid();
+            refusal.Errors[0].LineNumber = endLine;
+            return refusal;
+        }
+        return declarationErrors.Count == 0 ? null : SimulatedSqlException.Aggregate(declarationErrors);
+    }
+
+    /// <summary>
+    /// Runs <paramref name="bind"/> — a module body's CREATE-time bind — behind
+    /// <paramref name="held"/>: a parse-phase error the body raises (severity
+    /// 15, a syntax error) is still reported, and anything the bind would
+    /// report after it gives way to the held errors.
+    /// </summary>
+    private static void BindBehindDeclarationErrors(SimulatedSqlException? held, Action bind)
+    {
+        if (held is null)
+        {
+            bind();
+            return;
+        }
+        try
+        {
+            bind();
+        }
+        catch (SimulatedSqlException error) when (error.Class != 15)
+        {
+        }
+        catch (NotSupportedException)
+        {
+        }
+        throw held;
+    }
+
+    /// <summary>
+    /// Msg 2724 for the first function parameter declared <c>timestamp</c> /
+    /// <c>rowversion</c> — raised once the body has bound, so a body's binder
+    /// errors outrank it (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    private static void RejectTimestampParameters(List<UdfParameter> parameters)
+    {
+        foreach (var parameter in parameters)
+        {
+            if (parameter.Type == SqlType.RowVersion)
+                throw SimulatedSqlException.FunctionParameterInvalidType("@" + parameter.Name);
+        }
     }
 
     /// <summary>

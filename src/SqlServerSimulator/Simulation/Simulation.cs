@@ -2984,6 +2984,10 @@ public sealed partial class Simulation
                     // itself starts skipping.
                     var returnRuns = !batch.IsSkipping;
                     var carriesStatus = ParseReturnStatement(batch);
+                    // A token after the returned value is a syntax error at it
+                    // (`RETURN 1 x` is Msg 102 near 'x'; probed 2026-09-30
+                    // against SQL Server 2025).
+                    context.RejectTrailingToken();
                     // A procedure's RETURN of a value is a SELECT-kind
                     // statement counting one row (probed 2026-09-28 against
                     // SQL Server 2025).

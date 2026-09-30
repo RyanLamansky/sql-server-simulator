@@ -72,15 +72,29 @@ partial class Simulation
     {
         if (!batch.TryResolveAliasType(qualifiedTypeName, out var alias))
         {
+            // A variable or parameter (named with its @) and a function's
+            // return type (named empty) report Msg 2715 in its variable form.
+            var namesVariable = columnName is { } written && (written.Length == 0 || written[0] == '@');
             // A built-in type's only qualifier is sys; real names any other
             // missing qualified type as written (probed 2026-09-24 against
             // SQL Server 2025).
             if (qualifiedTypeName.Count > 1 && columnName is not null
                 && !string.Equals(qualifiedTypeName.ImmediateQualifier, "sys", StringComparison.OrdinalIgnoreCase))
             {
-                throw SimulatedSqlException.CannotFindDataType(qualifiedTypeName.ToString(), index);
+                throw namesVariable
+                    ? SimulatedSqlException.CannotFindDataType(index, qualifiedTypeName.ToString(), columnName)
+                    : SimulatedSqlException.CannotFindDataType(qualifiedTypeName.ToString(), index);
             }
-            var (resolved, maxLength) = SqlType.GetByName(leafToken, declaredMaxLength, declaredScale, index, site, columnName);
+            SqlType resolved;
+            int? maxLength;
+            try
+            {
+                (resolved, maxLength) = SqlType.GetByName(leafToken, declaredMaxLength, declaredScale, index, site, columnName);
+            }
+            catch (SimulatedSqlException error) when (namesVariable && error.Number == 2715)
+            {
+                throw SimulatedSqlException.CannotFindDataType(index, qualifiedTypeName.ToString(), columnName!);
+            }
             // sysname is itself a system alias type declared NOT NULL, so a
             // column that doesn't say otherwise is NOT NULL (probed 2026-09-25
             // against SQL Server 2025, table variables included).

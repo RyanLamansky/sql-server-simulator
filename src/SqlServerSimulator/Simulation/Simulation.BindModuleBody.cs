@@ -298,7 +298,8 @@ partial class Simulation
         KeyConstraint[] keyConstraints,
         CheckConstraint[] checkConstraints,
         string bodyText,
-        int bodyLineOffset)
+        int bodyLineOffset,
+        int? timestampColumnLine)
     {
         var outerBatch = outerContext.Batch;
         var variables = SeedFunctionParameters(parameters);
@@ -312,13 +313,20 @@ partial class Simulation
             checkConstraints: checkConstraints,
             isTableVariable: true);
 
+        // A timestamp column in the return table is the first shape violation,
+        // at the line of the return variable, so it follows every binder error
+        // the body holds (probed 2026-09-30 against SQL Server 2025).
+        var shape = new FunctionBodyShape();
+        if (timestampColumnLine is { } line)
+            shape.Violations.Add((line - bodyLineOffset, SimulatedSqlException.SideEffectingOperatorInFunction("TIMESTAMP", FunctionBodyShape.TimestampColumnState)));
+
         BindModuleBodyAtCreate(outerContext, bodyText, functionName, bodyLineOffset, bodyCommand =>
         {
             var batch = new BatchContext(bodyCommand, variables);
             batch.TableVariables[returnVariableName] = returnTable;
             return batch;
         },
-        new FunctionBodyShape(),
+        shape,
         rejectsNextValueFor: true);
     }
 

@@ -170,11 +170,16 @@ internal abstract partial class Collation
                 length++;
         }
         // CompareInfo swallows a trailing CHAR(0) it gives no weight; where the
-        // collation weights it, the run stops short of it.
-        if (this.WeightsNul && !run.EndsWith('\0'))
+        // collation weights it, the run stops short of it — or, for a run that
+        // ends in NULs of its own, reaches exactly as many of them, which
+        // CompareInfo may have left outside the match.
+        if (this.WeightsNul)
         {
+            var runNuls = run.Length - run.TrimEnd('\0').Length;
             while (length > 0 && subject[length - 1] == '\0')
                 length--;
+            for (var taken = 0; taken < runNuls && length < subject.Length && subject[length] == '\0'; taken++)
+                length++;
         }
         if (!this.MatchIsExact(subject[..length], run, linguistic))
             return false;

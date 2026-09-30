@@ -107,6 +107,7 @@ partial class Simulation
             context.MoveNextRequired();
 
         var parameters = new List<ProcedureParameter>();
+        var declarationErrors = new List<SimulatedSqlException>();
         while (true)
         {
             if (openParen && context.Token is Operator { Character: ')' })
@@ -120,7 +121,7 @@ partial class Simulation
             if (!openParen && context.Token is ReservedKeyword { Keyword: Keyword.With or Keyword.As })
                 break;
 
-            var parameter = ParseProcedureParameter(context, parameters.Count + 1);
+            var parameter = ParseProcedureParameter(context, parameters.Count + 1, declarationErrors);
             if (parameters.Exists(declared => BatchContext.VariableNameComparer.Equals(declared.Name, parameter.Name)))
                 throw SimulatedSqlException.VariableAlreadyDeclared(parameter.Name);
             parameters.Add(parameter);
@@ -156,7 +157,7 @@ partial class Simulation
         var commandText = context.Command.CommandText;
         context.MoveNextOptional();
         if (context.Token is ReservedKeyword { Keyword: Keyword.External })
-            return ParseClrProcedureTail(context, schema, procName, groupNumber, parameters, executeAsClause, options.RefusedByExternalModule, isAlter, createOrAlter);
+            return ParseClrProcedureTail(context, schema, procName, groupNumber, parameters, declarationErrors, executeAsClause, options.RefusedByExternalModule, isAlter, createOrAlter);
 
         // Empty body is legal — `CREATE PROC p AS` with nothing after AS
         // succeeds in real SQL Server. The body capture below produces an
@@ -191,7 +192,7 @@ partial class Simulation
         // real reports a body error rather than Msg 2714 for a plain CREATE over
         // an existing name, and rather than Msg 208 for a bare ALTER of a name
         // that doesn't exist.
-        context.Simulation.BindProcedureBodyAtCreate(context, procName.Leaf, parameters, bodyText, bodyLineOffset, nativelyCompiled);
+        BindBehindDeclarationErrors(HeldDeclarationErrors(declarationErrors), () => context.Simulation.BindProcedureBodyAtCreate(context, procName.Leaf, parameters, bodyText, bodyLineOffset, nativelyCompiled));
 
         if (groupNumber > 1)
         {
@@ -336,7 +337,7 @@ partial class Simulation
     /// <c>@</c> or parameter name token. Cursor on exit: the trailing
     /// separator (<c>,</c>, <c>)</c>, or the <c>WITH</c>/<c>AS</c> keyword).
     /// </summary>
-    private static ProcedureParameter ParseProcedureParameter(ParserContext context, int ordinal)
+    private static ProcedureParameter ParseProcedureParameter(ParserContext context, int ordinal, List<SimulatedSqlException> declarationErrors)
     {
         if (context.Token is not AtPrefixedString variable)
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -380,7 +381,20 @@ partial class Simulation
         }
 
         var spelledNumeric = IsNumericTypeWord(context.Token);
-        var (paramType, declaredMaxLength, aliasType) = ParseProcedureParameterType(context, ordinal, "@" + name);
+        SqlType paramType;
+        int? declaredMaxLength;
+        AliasType? aliasType;
+        try
+        {
+            (paramType, declaredMaxLength, aliasType) = ParseProcedureParameterType(context, ordinal, "@" + name);
+        }
+        catch (SimulatedSqlException error) when (error.Number == 2715)
+        {
+            // Held with the rest of the list's declaration errors — see
+            // HeldDeclarationErrors.
+            declarationErrors.Add(error);
+            (paramType, declaredMaxLength, aliasType) = (SqlType.Int32, null, null);
+        }
         spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
 
         Expression? defaultExpression = null;
@@ -389,13 +403,14 @@ partial class Simulation
             context.MoveNextRequired();
             defaultExpression = Expression.Parse(context);
         }
+        var readOnly = NoteReadOnlyScalarParameter(context, variable, declarationErrors);
 
         // `OUTPUT` (with the synonym `OUT`) marks the parameter as a writeback
         // slot. Real SQL Server treats `OUT` and `OUTPUT` as equivalent; both
         // surface as ContextualKeyword on the tokenizer side (neither is
         // reserved).
         var isOutput = false;
-        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
+        if (!readOnly && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
         {
             isOutput = true;
             context.MoveNextRequired();

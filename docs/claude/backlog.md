@@ -250,19 +250,17 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
   What separates the two is plan-shaped rather than grammatical (probed 2026-09-27): the refusal needs a single table or view source and no `GROUP BY`, `HAVING`, `TOP`, `LIKE` filter or `OPTION (RECOMPILE)` — any of those, a derived table, a `#temp` table or a table variable accepts it — and it follows the value expression too (`UPPER(s)`, `LEFT(s, 10)`, `ISNULL(s, '')` accept; `s + ''`, `(s)`, `CAST(i AS varchar)`, `'x'` refuse), and a `CONVERT`, a `char(1)` or `varchar(max)` target and a `COLLATE` refuse like the `CAST`.
   The shapes line up with simple parameterization's eligibility — a `CAST`'s literal turned into a parameter is no longer a literal — but `PARAMETERIZATION FORCED` doesn't make the accepted shapes refuse, and none of the refused statements leaves a parameterized plan in `sys.dm_exec_cached_plans` (probed 2026-09-28), so that reading isn't confirmed.
   Probed 2026-09-28: the refusal survives `WHERE i = 1`, `WITHIN GROUP`, a table alias, `dbo.t`, `WITH (NOLOCK)`, a column alias and another statement in the batch, while `CHAR(13) + CHAR(10)`, `', ' + ' '`, `CONCAT(',', ' ')`, `CHAR(44)` and `SPACE(1)` are accepted over the same table.
-- Under a Windows collation real's `LIKE` passes over an ignored `CHAR(0)` in the subject rather than letting `_` take it — `'a' + CHAR(0) + 'b' LIKE 'a_b'` is false on real and true here (probed 2026-09-28).
 - **Deferred until requested.** **Real accepts collations `sys.fn_helpcollations()` doesn't list**, in columns, `COLLATE` and `COLLATIONPROPERTY` alike, where the simulator refuses them as unrecognized (probed 2026-09-28 against SQL Server 2025).
   Searching every listed language base against every version suffix finds only `Azeri_Latin_90_*` (LCID 1068, code page 1254) and `Azeri_Cyrillic_90_*` (2092, 1251), version 1, with every flag suffix including `_SC` and `_SC_UTF8`.
   They are not aliases: they sort by the Azeri alphabet as `_100` does but order `I i ı İ` where `_100` orders `I ı i İ`, and they carry no dotted / dotless I case rule (`UPPER(N'iı')` is `II`, `_100`'s is `İI`).
   Four unversioned names outside the listed bases resolve too, at version 0: `Hindi_CI_AS` (1081, code page 0), `Macedonian_CI_AS` (1071, 1251), `Korean_Wansung_Unicode_CI_AS` (66578, 949) and `Lithuanian_Classic_CI_AS` (2087, 1257); other historical names tried (`Mexican_Trad_Spanish`, unversioned `Azeri_*` / `Uzbek_*` / `Tatar` / `Kazakh` …) and non-listed `_UTF8` / `SQL_` combinations do not.
 
-**Same error, different number, state or class** (probed 2026-09-28):
+**Same error, different number, state or class** (probed 2026-09-30):
 
-- A `timestamp` parameter to `CREATE FUNCTION` is Msg 2724 on real and accepted here, and a `READONLY` scalar parameter is Msg 346 on real and Msg 102 here.
-
-**Name resolution** (probed 2026-09-26):
-
-- `GROUP BY ALL` isn't parsed yet (Msg 156 here), so a statement using it reports that instead of its names.
+- A parse-phase error in a statement naming a table its own batch creates surfaces when the statement runs rather than as the batch compiles — `CREATE TABLE t …; INSERT t …; SELECT … FROM t GROUP BY ALL g WITH CUBE` runs the `INSERT` before Msg 1028 here, and a syntax error in the same position behaves the same — because the compile walk defers such a statement before reaching its tail.
+- `DECLARE @a nosuch; SELECT nosuchcol FROM sys.objects` reports Msg 2715 (with its Msg 2724 note) alone on real, which treats a declaration's missing type as parse-phase; here the Msg 207 follows it.
+- A function parameter's default that can't convert to its type is Msg 257 on real ahead of anything else (`@p timestamp = 'abc'`), and isn't checked here.
+- A multi-statement function's return table declaring a column named just `timestamp` (`RETURNS @t TABLE (a int, timestamp)`) is Msg 443 on real and Msg 102 here, which doesn't read the typeless `timestamp` column form in a table variable's column list.
 
 **Built-in values** (probed 2026-09-26):
 
@@ -330,6 +328,7 @@ Entries are verified against the simulator, so one that no longer reproduces is 
 - **`tempdb`'s catalog names temp objects by their written names** — a `#temp` table's padded name and a table variable's `#`-and-hex name ship for the messages but not the catalog, and a table variable isn't listed in `tempdb.sys.tables` at all where real lists it (probed 2026-09-28) → [`temp-tables.md`](temp-tables.md#tempdbs-catalog-lists-them), [`table-variables.md`](table-variables.md#fidelity-gaps-remaining).
 - **Expression and predicate remoting for a four-part read** — the projection is pushed down, so a query never naming a `vector` column reads its table, but one naming it anywhere but its output (`WHERE v IS NOT NULL`, `COUNT(v)`, `CAST(v AS varchar(…))`) or excluding every non-NULL row with its `WHERE` is Msg 7346 here where real runs those parts on the server (probed 2026-09-30) → [`linked-servers.md`](linked-servers.md#divergences).
 - **Index-option residues** — option names in the column-level clauses; see [`indexes.md`](indexes.md#fidelity-gaps).
+- **`SELECT *` in a schema-bound body** is **Msg 1054** state 6 (*"Syntax '*' is not allowed in schema-bound objects."*) on real, at the `*`'s line, and accepted here (probed 2026-09-30 against SQL Server 2025); the same message's state 8 for `GROUP BY ALL` ships ([`query.md`](query.md#group-by-all)), but a `*` needs telling a select-list star from `COUNT(*)` and multiplication rather than a token scan.
 
 - **`SqlValue.FromDecimal` validates scale but not precision** — it restates the payload at the declared scale and leaves the declared precision to the caller, which is what lets the storage decoder reconstruct whatever is on disk.
   The coercion path is the precision gate for every conversion, but a *computation* that lands on a narrower type has to check for itself — `ROUND` does (see [`scalars.md`](scalars.md#math-scalar-functions)), and a future scalar that narrows its own result would have to.

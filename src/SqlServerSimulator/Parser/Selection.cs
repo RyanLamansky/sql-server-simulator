@@ -1033,6 +1033,28 @@ internal sealed partial class Selection
         public BooleanExpression? Having;
 
         /// <summary>
+        /// True for <c>GROUP BY ALL</c>: every group the source produces is
+        /// kept, whatever the <c>WHERE</c> clause does to its rows.
+        /// </summary>
+        public bool GroupByAll;
+
+        /// <summary>
+        /// For <c>GROUP BY ALL</c> over a <c>WHERE</c>, the WHERE's conjuncts,
+        /// moved out of <see cref="Excluders"/> so that every row reaches the
+        /// grouping and the plan's seek / pushdown machinery reads the whole
+        /// source: a row failing them still forms its group but feeds none of
+        /// the aggregates, so the group's <c>COUNT</c> is 0 and every other
+        /// aggregate NULL. Null otherwise.
+        /// </summary>
+        public List<BooleanExpression>? GroupByAllFilter;
+
+        /// <summary>
+        /// Whether this query's own FROM clause reads a linked server (see
+        /// <see cref="ParserContext.RemoteSourcesParsed"/>).
+        /// </summary>
+        public bool ReadsRemoteSource;
+
+        /// <summary>
         /// The sources a WHERE clause's <c>MATCH</c> bound, which lead a bare
         /// <c>SELECT *</c> in real's order rather than the FROM clause's.
         /// </summary>
@@ -1072,6 +1094,8 @@ internal sealed partial class Selection
             var copy = new FromClause
             {
                 Having = this.Having,
+                GroupByAll = this.GroupByAll,
+                GroupByAllFilter = this.GroupByAllFilter,
                 GroupingSetsWritten = this.GroupingSetsWritten,
                 OffsetExpression = this.OffsetExpression,
                 FetchExpression = this.FetchExpression,
@@ -1479,10 +1503,12 @@ internal sealed partial class Selection
             var candidateJoins = new List<JoinSpec>();
             try
             {
+                var remoteSourcesBefore = context.RemoteSourcesParsed;
                 ParseSourcesAndJoins(context, scope, candidateSources, candidateJoins);
                 afterSources = context.SaveCheckpoint();
                 preParsedSources = candidateSources;
                 preParsedJoins = candidateJoins;
+                fromClause.ReadsRemoteSource = context.RemoteSourcesParsed > remoteSourcesBefore;
             }
             catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
             {
@@ -2359,7 +2385,9 @@ internal sealed partial class Selection
         FromClause fromClause,
         bool allowOrderBy)
     {
+        var remoteSourcesBefore = context.RemoteSourcesParsed;
         ParseSourcesAndJoins(context, scope, sources, joins);
+        fromClause.ReadsRemoteSource = context.RemoteSourcesParsed > remoteSourcesBefore;
 
         // Now register the multi-source type resolver and parse WHERE / etc.
         ConsumeWhereOrderByWithOuterScope(context, fromClause, [.. sources], [.. joins], allowOrderBy, scope);
@@ -3328,7 +3356,10 @@ internal sealed partial class Selection
                     if (!context.Batch.TryResolveLinkedServerTable(objectName, out var linkedServer, out var remoteName, out var remoteColumns, out var remoteDbName, out var remoteSchemaName))
                     {
                         if (TryRemoteCatalogViewSource(context, objectName) is { } catalogSource)
+                        {
+                            context.RemoteSourcesParsed++;
                             return catalogSource;
+                        }
                         // Real checks the server's metadata compiling the
                         // batch, so a branch the batch never takes raises it.
                         throw SimulatedSqlException.RemoteTableNotFound(RemoteWrite.ResolveServer(context.Batch, objectName[0]), RemoteWrite.QuotedName(objectName));
@@ -3340,6 +3371,7 @@ internal sealed partial class Selection
                     for (var ci = 0; ci < linkedColumnNames.Length; ci++)
                         linkedColumnNames[ci] = remoteColumns[ci].Name;
                     var linkedAlias = ConsumeOptionalAlias(context);
+                    context.RemoteSourcesParsed++;
                     _ = ParseOptionalTableHints(context);
                     return new FromSource(
                         qualifier: linkedAlias ?? remoteName,
@@ -3865,6 +3897,7 @@ internal sealed partial class Selection
                     }
 
                     var openQueryPlan = ParseOpenQuery(context);
+                    context.RemoteSourcesParsed++;
                     var openQueryAlias = ConsumeOptionalAliasAtCurrent(context);
                     // A column-alias list — `OPENQUERY(...) q(c1, c2)` — is not
                     // allowed on OPENQUERY (real SQL Server: Msg 102 near the
@@ -4499,7 +4532,20 @@ internal sealed partial class Selection
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.RecursiveBranchConstructs.GroupingOrAggregate = true;
+                // `GROUP BY ALL` — ParseGroupByList steps from the ALL onto the
+                // first item as it would from the BY.
+                var beforeAll = context.SaveCheckpoint();
+                fromClause.GroupByAll = context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.All };
+                if (!fromClause.GroupByAll)
+                    context.RestoreCheckpoint(beforeAll);
                 ParseGroupByList(context, fromClause);
+                if (fromClause.GroupByAll && fromClause.Excluders.Count > 0)
+                {
+                    fromClause.GroupByAllFilter = [.. fromClause.Excluders];
+                    fromClause.Excluders.Clear();
+                    if (fromClause.ReadsRemoteSource)
+                        context.PendingBindError ??= SimulatedSqlException.GroupByAllOverRemoteSource();
+                }
             }
 
             if (context.Token is ReservedKeyword { Keyword: Keyword.Having })
@@ -4746,6 +4792,17 @@ internal sealed partial class Selection
                 context.PendingBindError ??= SimulatedSqlException.GroupByExpressionHasNoLocalColumn();
         } while (context.Token is Operator { Character: ',' });
 
+        // GROUP BY ALL takes plain items only: a ROLLUP / CUBE / GROUPING SETS
+        // item, or an empty set beside another item, is Msg 1028 at the token
+        // after the list — the legacy WITH form below raises it at its ROLLUP
+        // / CUBE word (probed 2026-09-30 against SQL Server 2025).
+        if (fromClause.GroupByAll
+            && (fromClause.GroupingSetsWritten
+                || (itemContributions.Count > 1 && itemContributions.Exists(static item => item is [[]]))))
+        {
+            throw SimulatedSqlException.GroupingSetsInGroupByAll();
+        }
+
         // Cartesian product of per-item contributions: each combination of
         // one fragment from each item gets concatenated into one grouping
         // set. Order matters only insofar as result-row ordering follows
@@ -4774,6 +4831,8 @@ internal sealed partial class Selection
         if (context.Token is ReservedKeyword { Keyword: Keyword.With } && !AtWithCheckOption(context))
         {
             var modifierToken = context.GetNextRequired();
+            if (fromClause.GroupByAll && modifierToken is UnquotedString { ContextualKeyword: ContextualKeyword.Rollup or ContextualKeyword.Cube })
+                throw SimulatedSqlException.GroupingSetsInGroupByAll();
             fromClause.GroupingSetsWritten = true;
             var columns = combined.Count == 1 ? combined[0] : [.. combined.SelectMany(static s => s)];
             combined = modifierToken switch

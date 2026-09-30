@@ -41,9 +41,10 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         var parameters = new List<UdfParameter>();
+        var declarationErrors = new List<SimulatedSqlException>();
         while (true)
         {
-            var parameter = ParseParameter(context, parameters.Count + 1);
+            var parameter = ParseParameter(context, parameters.Count + 1, declarationErrors);
             if (parameter.Default is not null)
                 throw SimulatedSqlException.ClrAggregateDefaultParameter();
             parameters.Add(parameter);
@@ -53,6 +54,8 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
         }
+        if (HeldDeclarationErrors(declarationErrors) is { } held)
+            throw held;
 
         if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Returns })
             throw SimulatedSqlException.SyntaxErrorNear(context);

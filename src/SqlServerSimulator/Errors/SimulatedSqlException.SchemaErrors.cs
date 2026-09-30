@@ -1103,14 +1103,46 @@ partial class SimulatedSqlException
         new($"The server '{serverName}' does not exist. Use sp_helpserver to show available servers.", 15015, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 2715: a <c>DECLARE</c> / <c>CREATE
-    /// PROCEDURE</c> / <c>CREATE FUNCTION</c> parameter referenced a type
-    /// name that doesn't resolve. Probe-confirmed two-line wording against
-    /// SQL Server 2025 (the "Parameter or variable" suffix is part of the
-    /// canonical message).
+    /// Mimics SQL Server error 2715 at a <c>DECLARE</c>, a procedure or
+    /// function parameter, a function's return type (<paramref name="parameterName"/>
+    /// empty, index 0) or an <c>sp_executesql</c> declaration: a type name
+    /// that doesn't resolve. Real follows it with an informational Msg 2724
+    /// naming the variable (probed 2026-09-30 against SQL Server 2025); a
+    /// column's 2715 is state 6 and alone (<see cref="CannotFindDataType(ReadOnlySpan{char}, int)"/>).
     /// </summary>
     internal static SimulatedSqlException CannotFindDataType(int parameterIndex, string typeFullName, string parameterName) =>
-        new($"Column, parameter, or variable #{parameterIndex}: Cannot find data type {typeFullName}.{Environment.NewLine}Parameter or variable '{parameterName}' has an invalid data type.", 2715, 16, 3);
+        Aggregate(
+            [new($"Column, parameter, or variable #{parameterIndex}: Cannot find data type {typeFullName}.", 2715, 16, 3)],
+            [new SimulatedError(@class: 0, lineNumber: 0, $"Parameter or variable '{parameterName}' has an invalid data type.", 2724, procedure: "", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 2)]);
+
+    /// <summary>
+    /// Mimics SQL Server error 2724 state 3: a function parameter declared
+    /// <c>timestamp</c> / <c>rowversion</c>, which only a procedure may take.
+    /// Real names the first such parameter, once the body has bound (probed
+    /// 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FunctionParameterInvalidType(string parameterName) =>
+        new($"Parameter or variable '{parameterName}' has an invalid data type.", 2724, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 2733: a scalar function declared to return
+    /// <c>timestamp</c> / <c>rowversion</c> (probed 2026-09-30 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TimestampReturnTypeInvalid() =>
+        new("The timestamp data type is invalid for return values.", 2733, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 346: <c>READONLY</c> on a parameter that isn't
+    /// table-valued, reported at the parameter's own line (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ReadOnlyScalarParameter(string parameterName, int line)
+    {
+        var error = new SimulatedSqlException($"The parameter \"{parameterName}\" can not be declared READONLY since it is not a table-valued parameter.", 346, 15, 1);
+        error.Errors[0].LineNumber = line;
+        return error;
+    }
 
     /// <summary>
     /// Mimics SQL Server error 352: a <c>CREATE PROCEDURE</c> / <c>CREATE

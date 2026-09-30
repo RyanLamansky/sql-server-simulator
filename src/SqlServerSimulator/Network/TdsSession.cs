@@ -1367,7 +1367,9 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             if (exception.EndsSession && error.Number == 0)
                 continue;
             var sessionKilled = exception.EndsSession && error.Number == 596;
-            writer.WriteErrorOrInfo(Tds.TokenError, error.Number, error.State, error.Class, error.Message, ServerName, sessionKilled ? "" : error.Procedure, sessionKilled ? 0 : error.LineNumber);
+            // An informational entry riding with the errors (Msg 2724 after a
+            // parameter's Msg 2715) goes out as the INFO token real sends.
+            writer.WriteErrorOrInfo(error.Class <= 10 ? Tds.TokenInfo : Tds.TokenError, error.Number, error.State, error.Class, error.Message, ServerName, sessionKilled ? "" : error.Procedure, sessionKilled ? 0 : error.LineNumber);
         }
     }
 

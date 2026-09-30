@@ -175,6 +175,25 @@ The clause is judged only once it has parsed and its host's next token is in pla
 An `ALTER` without the option brings the text back.
 Last, `SCHEMABINDING` and `NATIVE_COMPILATION` must come together on a procedure or trigger, and `NATIVE_COMPILATION` needs `SCHEMABINDING` on a function, or it is Msg 10796 — which real reports at line 16 of the module whatever its length.
 
+## Parameter lists and return types
+
+What real refuses in a module's declaration, and where it reports it (probed 2026-09-30 against SQL Server 2025):
+- **Msg 346** (class 15) for `READONLY` on a parameter that isn't table-valued — any function kind, a procedure, an `sp_executesql` declaration — at the parameter's own line.
+  The keyword comes after a default and closes the declaration: `@p int READONLY OUTPUT` is Msg 102 at the `OUTPUT`.
+- **Msg 2715** state 3 for a parameter's, variable's or function return's type that doesn't resolve, each followed by an informational **Msg 2724** state 2 naming it (a column's Msg 2715 is state 6 and alone).
+  `SqlClient` collects a batch's errors first and its warnings after them, so an in-process client reads every 2724 behind the errors (`SimulatedSqlException.ForClient`), while the TDS stream sends each one where real does.
+- **Msg 2724** state 3 for a function parameter declared `timestamp` / `rowversion`, naming the first; a procedure takes the type.
+- **Msg 2733** for a scalar function returning `timestamp`, at the line the statement ends on.
+- **Msg 443** state 16, the `TIMESTAMP` operator, for a `timestamp` column in a multi-statement function's return table (at the return variable's line) or in a table variable a scalar or multi-statement function's body declares — a shape violation, so it follows the body's binder errors.
+
+The order: the parameter list's and return type's errors are held until the whole statement has parsed (`HeldDeclarationErrors`), so a syntax error in the body outranks them, and then preempt the body's bind — Msg 2733 alone if the return type raises it, else every parameter's 346 and 2715 in parameter order.
+Msg 2724 comes after a clean bind of the body and after the name-collision check, so a binder error or Msg 2714 outranks it, and an `ALTER` it refuses leaves the function as it was.
+A CLR module resolves its assembly first (a missing one is Msg 6528 over a `READONLY` parameter or a `timestamp` return); past a resolved assembly the held errors come next, which is unprobed.
+
+**Divergences.**
+- A default real can't convert to the parameter's type is Msg 257 ahead of Msg 2724 on real (`@p timestamp = 'abc'`); the simulator doesn't check a function parameter's default, so it reports the 2724.
+- Real reports a return-table `timestamp` column's Msg 443 *ahead* of the Msg 207 raised inside an `INSERT` into that table, which the simulator reports behind it, as it does every other binder error.
+
 ## Scalar user-defined functions
 `CREATE FUNCTION schema.name(@p type [= default], ...) RETURNS <type> [WITH RETURNS NULL ON NULL INPUT] [AS] BEGIN ... END`, called as `SELECT schema.fn(args)`.
 Body source captured between outer `BEGIN`/`END` (BEGIN TRAN/TRANSACTION/DISTRIBUTED skipped during nesting) and re-tokenized per call; parameters seed a child `BatchContext.Variables`, value-form RETURN lands in `BatchContext.UdfFrame.ReturnedValue`.
