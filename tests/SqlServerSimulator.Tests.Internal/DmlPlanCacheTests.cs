@@ -199,7 +199,8 @@ public sealed class DmlPlanCacheTests
         var connection = simulation.CreateDbConnection();
 #pragma warning restore CA2000
         connection.Open();
-        Execute(connection, "begin transaction; update t set v = 99 where id = @id", ("@id", 1));
+        Execute(connection, "begin transaction");
+        Execute(connection, "update t set v = 99 where id = @id", ("@id", 1));
         return connection.Session;
     }
 

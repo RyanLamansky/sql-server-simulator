@@ -63,13 +63,34 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
 
+        var optionsWritten = context.Token is ReservedKeyword { Keyword: Keyword.With };
         var noRecompute = ParseStatisticsOptions(context);
+
+        // The filter follows the options; one written ahead of them is a
+        // keyword real stops at (probed 2026-09-30 against SQL Server 2025).
+        BooleanExpression? filter = null;
+        string? filterDefinition = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Where } whereKeyword)
+        {
+            if (optionsWritten)
+                throw SimulatedSqlException.SyntaxErrorNearKeyword(whereKeyword);
+            context.MoveNextRequired();
+            RejectFilterPredicateKeywords(context);
+            filter = BooleanExpression.Parse(context);
+            CheckFilterPredicate(filter, statistics: true, statisticsName, targetTableName.Leaf);
+            filterDefinition = filter.RenderFilterDefinition(context.Batch);
+            noRecompute = ParseStatisticsOptions(context) || noRecompute;
+        }
 
         if (context.Batch.IsSkipping)
             return true;
 
         if (!context.Batch.TryResolveTable(targetTableName, out var table))
-            throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
+        {
+            throw filter is not null
+                ? SimulatedSqlException.InvalidObjectName(targetTableName, state: 101)
+                : SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
+        }
 
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(table), table.ObjectId, table.SchemaId))
@@ -86,6 +107,10 @@ partial class Simulation
             if (identity.Name is { } indexName && collation.Equals(indexName, statisticsName))
                 throw SimulatedSqlException.StatisticsAlreadyExist(table.Name, statisticsName);
         }
+
+        var filterOrdinals = filter is null ? [] : BindFilterColumns(context.Batch, table, filter);
+        if (filter is not null)
+            RejectComputedColumnInIndexFilter(context.Batch, table, statisticsName, targetTableName.ToString(), filter, forStatistics: true);
 
         var ordinals = new int[columnNames.Count];
         for (var i = 0; i < columnNames.Count; i++)
@@ -114,7 +139,10 @@ partial class Simulation
             NextStatisticsId(table),
             ordinals,
             noRecompute,
-            context.Batch.CurrentStatement.UtcNow);
+            context.Batch.CurrentStatement.UtcNow,
+            filter,
+            filterDefinition,
+            filterOrdinals);
         table.UserStatistics.Add(created);
         RecordDdlUndo(context, () => _ = table.UserStatistics.Remove(created));
         table.NoteStatisticsCreated(statisticsName, context.CurrentDatabase.Collation);
@@ -180,19 +208,11 @@ partial class Simulation
     }
 
     /// <summary>
-    /// The next free per-table stats id: one past the highest index id and the
-    /// highest statistic already recorded. Index-backed statistics share their
-    /// index's id, so the two draw from one sequence.
+    /// The next free per-table stats id: the lowest one no index or statistic
+    /// holds, from 2 (id 1 is the clustered index's, a heap's included) — one
+    /// pool, so an index dropped earlier leaves the gap a statistic fills.
     /// </summary>
-    private static int NextStatisticsId(HeapTable table)
-    {
-        var highest = 0;
-        foreach (var identity in table.IndexIdentities())
-            highest = Math.Max(highest, identity.IndexId);
-        foreach (var statistic in table.UserStatistics)
-            highest = Math.Max(highest, statistic.StatsId);
-        return highest + 1;
-    }
+    private static int NextStatisticsId(HeapTable table) => table.NextFreeIndexId();
 
     /// <summary>
     /// Consumes the optional <c>WITH</c> option list, returning whether

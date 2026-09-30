@@ -20,8 +20,31 @@ namespace SqlServerSimulator.Storage;
 /// standalone one takes the next free slot.
 /// </para>
 /// </remarks>
-internal sealed class UserStatistic(string name, int statsId, int[] columnFullOrdinals, bool noRecompute, DateTime createDate)
+internal sealed class UserStatistic(string name, int statsId, int[] columnFullOrdinals, bool noRecompute, DateTime createDate, Parser.BooleanExpression? filter = null, string? filterDefinition = null, int[]? filterColumnFullOrdinals = null)
 {
+    /// <summary>
+    /// The <c>WHERE</c> predicate of a filtered statistic, judged against a
+    /// row's stored values like a filtered index's; <see langword="null"/> for
+    /// an unfiltered one.
+    /// </summary>
+    public readonly Parser.BooleanExpression? Filter = filter;
+
+    /// <summary>The rendered <c>sys.stats.filter_definition</c>, <see langword="null"/> when unfiltered.</summary>
+    public readonly string? FilterDefinition = filterDefinition;
+
+    /// <summary>The <see cref="HeapTable.Columns"/> indices the filter reads.</summary>
+    public readonly int[] FilterColumnFullOrdinals = filterColumnFullOrdinals ?? [];
+
+    /// <summary>Whether the column at <paramref name="ordinal"/> is one the statistic describes or its filter reads.</summary>
+    public bool DependsOn(int ordinal) => Array.IndexOf(this.ColumnFullOrdinals, ordinal) >= 0 || this.FiltersOn(ordinal);
+
+    /// <summary>Whether the statistic's filter reads the column at <paramref name="ordinal"/>.</summary>
+    public bool FiltersOn(int ordinal) => Array.IndexOf(this.FilterColumnFullOrdinals, ordinal) >= 0;
+
+    /// <summary>The same statistic with its column ordinals mapped through <paramref name="oldToNew"/>, as a column drop renumbers them.</summary>
+    public UserStatistic Remapped(int[] oldToNew)
+        => new(this.Name, this.StatsId, [.. this.ColumnFullOrdinals.Select(o => oldToNew[o])], this.NoRecompute, this.CreateDate, this.Filter, this.FilterDefinition, [.. this.FilterColumnFullOrdinals.Select(o => oldToNew[o])]);
+
     public readonly string Name = name;
 
     /// <summary>Per-table id, unique against every index id on the table.</summary>

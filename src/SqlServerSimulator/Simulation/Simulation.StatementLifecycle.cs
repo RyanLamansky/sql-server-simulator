@@ -714,7 +714,8 @@ partial class Simulation
                     shown.Class,
                     shown.State,
                     shown.LineNumber,
-                    shown.Procedure.Length == 0 ? null : shown.Procedure);
+                    shown.Procedure.Length == 0 ? null : shown.Procedure,
+                    caught.CatchReadsFirstEntry || caught.Errors.Count < 2 ? null : [.. caught.Errors.SkipLast(1)]);
                 batch.ErrorSignaled = true;
             }
             connection.LastErrorNumber = caught.Number;

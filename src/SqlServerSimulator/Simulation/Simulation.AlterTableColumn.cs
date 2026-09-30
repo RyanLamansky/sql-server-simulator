@@ -544,7 +544,7 @@ partial class Simulation
         foreach (var ordinal in toDropOrdinals)
         {
             var col = table.Columns[ordinal];
-            var blockers = CollectColumnBlockers(context.Batch.CurrentDatabase, table, ordinal, col, includeCheckAndDefault: true, includeIndexes: true);
+            var blockers = CollectColumnBlockers(context.Batch.CurrentDatabase, table, ordinal, col, includeCheckAndDefault: true, includeIndexes: true, includeStatistics: true, includeFilterIndexes: true);
             if (blockers.Count > 0)
                 throw SimulatedSqlException.ColumnHasDependencies("DROP COLUMN", col.Name, blockers);
         }
@@ -623,6 +623,10 @@ partial class Simulation
             for (var i = 0; i < fk.ReferencedColumnOrdinals.Length; i++)
                 fk.ReferencedColumnOrdinals[i] = oldFullToNew[fk.ReferencedColumnOrdinals[i]];
         }
+        // A statistic on a surviving column follows it to its new position;
+        // replaced rather than edited so the table's DDL undo snapshot keeps the old.
+        for (var i = 0; i < table.UserStatistics.Count; i++)
+            table.UserStatistics[i] = table.UserStatistics[i].Remapped(oldFullToNew);
 
         // Rewrite heap rows projecting surviving storage slots.
         RewriteHeapForDropColumns(table, oldStorageColumns, oldStorageToNew, newStorageIndex);
@@ -878,7 +882,10 @@ partial class Simulation
         var blockers = CollectColumnBlockers(
             context.Batch.CurrentDatabase, table, ordinal, existingCol,
             includeCheckAndDefault: isTypeChange,
-            includeIndexes: isTypeChange || newNullable != existingCol.Nullable);
+            includeIndexes: isTypeChange || newNullable != existingCol.Nullable,
+            includeStatistics: isTypeChange || newNullable != existingCol.Nullable,
+            includeFilterStatistics: true,
+            includeFilterIndexes: true);
         if (blockers.Count > 0)
             throw SimulatedSqlException.ColumnHasDependencies("ALTER COLUMN", columnName, blockers);
         var maskingFunction = maskingFunctionText is null ? null : MaskingFunction.Parse(maskingFunctionText, columnName, newType);
@@ -946,7 +953,7 @@ partial class Simulation
     /// </summary>
     private static List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind)> CollectColumnBlockers(
         Database database, HeapTable table, int ordinal, HeapColumn col, bool includeCheckAndDefault, bool includeIndexes,
-        bool includedColumnsBlock = true, bool includeStatistics = false)
+        bool includedColumnsBlock = true, bool includeStatistics = false, bool includeFilterStatistics = false, bool includeFilterIndexes = false)
     {
         var collation = database.Collation;
         var blockers = new List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind, int Rank, int ObjectId)>();
@@ -993,12 +1000,22 @@ partial class Simulation
                     blockers.Add((ix.Name, SimulatedSqlException.AlterColumnBlockerKind.Index, 5, ix.ObjectId));
             }
         }
-        if (includeStatistics)
+        if (includeStatistics || includeFilterStatistics)
         {
             foreach (var statistic in table.UserStatistics)
             {
-                if (Array.IndexOf(statistic.ColumnFullOrdinals, ordinal) >= 0)
+                if (includeStatistics ? statistic.DependsOn(ordinal) : statistic.FiltersOn(ordinal))
                     blockers.Add((statistic.Name, SimulatedSqlException.AlterColumnBlockerKind.Statistics, 5, int.MaxValue - 1));
+            }
+        }
+        // A filtered index depends on every column its predicate reads, whatever
+        // the change (probed 2026-09-30 against SQL Server 2025).
+        if (includeFilterIndexes)
+        {
+            foreach (var ix in table.Indexes)
+            {
+                if (ix.Filter is { } indexFilter && ComputedReferencesFilterColumn(collation, indexFilter, col.Name) && !blockers.Exists(blocker => blocker.ObjectId == ix.ObjectId))
+                    blockers.Add((ix.Name, SimulatedSqlException.AlterColumnBlockerKind.Index, 5, ix.ObjectId));
             }
         }
         foreach (var ix in table.Indexes)
@@ -1030,6 +1047,39 @@ partial class Simulation
         }
 
         return [.. blockers.OrderBy(static b => b.Rank).ThenBy(static b => b.ObjectId).Select(static b => (b.Name, b.Kind))];
+    }
+
+    private static bool ComputedReferencesFilterColumn(Collation collation, BooleanExpression filter, string columnName)
+    {
+        var found = false;
+        filter.VisitOperandExpressions(operand => operand.VisitColumnReferences(reference =>
+        {
+            if (!found && collation.Equals(reference.Leaf, columnName))
+                found = true;
+        }));
+        return found;
+    }
+
+    /// <summary>
+    /// Names the filtered indexes and statistics whose predicate reads a column,
+    /// the objects <c>sp_rename … 'COLUMN'</c> refuses to move it from under.
+    /// </summary>
+    internal static List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind)> FilterDependents(Database database, HeapTable table, int ordinal)
+    {
+        var collation = database.Collation;
+        var name = table.Columns[ordinal].Name;
+        List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind)> dependents = [];
+        foreach (var ix in table.Indexes)
+        {
+            if (ix.Filter is { } indexFilter && ComputedReferencesFilterColumn(collation, indexFilter, name))
+                dependents.Add((ix.Name, SimulatedSqlException.AlterColumnBlockerKind.Index));
+        }
+        foreach (var statistic in table.UserStatistics)
+        {
+            if (statistic.FiltersOn(ordinal))
+                dependents.Add((statistic.Name, SimulatedSqlException.AlterColumnBlockerKind.Statistics));
+        }
+        return dependents;
     }
 
     /// <summary>

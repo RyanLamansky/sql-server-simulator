@@ -782,43 +782,99 @@ internal sealed class HeapTable : SchemaObject
         return false;
     }
 
-    public List<IndexIdentity> IndexIdentities()
-    {
-        var entries = new List<(int ObjectId, bool Clustered, KeyConstraint? Key, Index? Index)>(this.KeyConstraints.Count + this.Indexes.Count);
-        foreach (var k in this.KeyConstraints)
-            entries.Add((k.ObjectId, k.IsClustered, k, null));
-        foreach (var ix in this.Indexes)
-            entries.Add((ix.ObjectId, ix.IsClustered, null, ix));
-        entries.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
+    private readonly Lock indexIdLock = new();
 
-        var clusteredIndex = -1;
-        for (var i = 0; i < entries.Count; i++)
+    /// <summary>
+    /// Gives every index and key constraint without one its <c>index_id</c>, in
+    /// object-id order: the clustered one takes 1, each other the lowest id from
+    /// 2 that no index, constraint or statistic of the table holds. An id is
+    /// kept until its object is dropped, so a drop leaves a gap the next object
+    /// fills — the lowest free one, index or statistic alike (probed 2026-09-30
+    /// against SQL Server 2025). A drop or an add settles what is there first,
+    /// so only the objects one statement declares together are numbered at once.
+    /// </summary>
+    public void SettleIndexIds()
+    {
+        lock (this.indexIdLock)
         {
-            if (entries[i].Clustered)
+            var pending = new List<(int ObjectId, KeyConstraint? Key, Index? Index)>();
+            var used = new HashSet<int>();
+            foreach (var statistic in this.UserStatistics)
+                _ = used.Add(statistic.StatsId);
+            foreach (var key in this.KeyConstraints)
             {
-                clusteredIndex = i;
-                break;
+                if (key.IsClustered)
+                    key.IndexId = 1;
+                else if (key.IndexId < 2)
+                    pending.Add((key.ObjectId, key, null));
+                else
+                    _ = used.Add(key.IndexId);
+            }
+            foreach (var index in this.Indexes)
+            {
+                if (index.IsClustered)
+                    index.IndexId = 1;
+                else if (index.IndexId < 2)
+                    pending.Add((index.ObjectId, null, index));
+                else
+                    _ = used.Add(index.IndexId);
+            }
+            pending.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
+            var next = 2;
+            foreach (var (_, key, index) in pending)
+            {
+                while (used.Contains(next))
+                    next++;
+                if (key is not null)
+                    key.IndexId = next;
+                else
+                    index!.IndexId = next;
+                _ = used.Add(next);
             }
         }
+    }
+
+    /// <summary>The lowest id from 2 the table's next index or statistic can take.</summary>
+    public int NextFreeIndexId()
+    {
+        this.SettleIndexIds();
+        var used = new HashSet<int>();
+        foreach (var statistic in this.UserStatistics)
+            _ = used.Add(statistic.StatsId);
+        foreach (var key in this.KeyConstraints)
+            _ = used.Add(key.IndexId);
+        foreach (var index in this.Indexes)
+            _ = used.Add(index.IndexId);
+        var next = 2;
+        while (used.Contains(next))
+            next++;
+        return next;
+    }
+
+    public List<IndexIdentity> IndexIdentities()
+    {
+        this.SettleIndexIds();
+        var entries = new List<(int IndexId, bool Clustered, KeyConstraint? Key, Index? Index)>(this.KeyConstraints.Count + this.Indexes.Count);
+        foreach (var k in this.KeyConstraints)
+            entries.Add((k.IndexId, k.IsClustered, k, null));
+        foreach (var ix in this.Indexes)
+            entries.Add((ix.IndexId, ix.IsClustered, null, ix));
+        entries.Sort(static (a, b) => a.IndexId.CompareTo(b.IndexId));
 
         var result = new List<IndexIdentity>(entries.Count + 1);
-        if (clusteredIndex < 0)
+        if (entries.Count == 0 || !entries[0].Clustered)
         {
             result.Add(new IndexIdentity(0, 0, null, null, null));
         }
-        else
+        foreach (var entry in entries)
         {
-            var clustered = entries[clusteredIndex];
-            result.Add(new IndexIdentity(1, clustered.Index is { IsColumnstore: true } ? (byte)5 : (byte)1, clustered.Key is not null ? clustered.Key.Name : clustered.Index!.Name, clustered.Key, clustered.Index));
-        }
-
-        var nextId = 2;
-        for (var i = 0; i < entries.Count; i++)
-        {
-            if (i == clusteredIndex)
-                continue;
-            var entry = entries[i];
-            result.Add(new IndexIdentity(nextId++, entry.Index is { IsColumnstore: true } ? (byte)6 : (byte)2, entry.Key is not null ? entry.Key.Name : entry.Index!.Name, entry.Key, entry.Index));
+            var columnstore = entry.Index is { IsColumnstore: true };
+            result.Add(new IndexIdentity(
+                entry.IndexId,
+                entry.Clustered ? (columnstore ? (byte)5 : (byte)1) : (columnstore ? (byte)6 : (byte)2),
+                entry.Key is not null ? entry.Key.Name : entry.Index!.Name,
+                entry.Key,
+                entry.Index));
         }
         return result;
     }

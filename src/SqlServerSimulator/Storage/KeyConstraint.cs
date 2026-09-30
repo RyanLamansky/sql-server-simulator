@@ -24,6 +24,12 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     public readonly KeyConstraintKind Kind = kind;
 
     /// <summary>
+    /// The <c>index_id</c> the backing index keeps for life, or 0 while none is
+    /// assigned; see <see cref="HeapTable.SettleIndexIds"/>.
+    /// </summary>
+    public int IndexId;
+
+    /// <summary>
     /// UTC creation timestamp — the declaring statement's frozen
     /// <c>UtcNow</c>, so a constraint declared inside <c>CREATE TABLE</c>
     /// shares the table's instant while an <c>ALTER TABLE … ADD CONSTRAINT</c>

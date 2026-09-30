@@ -43,6 +43,28 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     public void Abort() => socket.Dispose();
 
     /// <summary>
+    /// Ends the connection an idle session's <c>KILL</c> severs, closing it in
+    /// order so the client finds it dead at its next command as it does after
+    /// real's kill, rather than meeting a reset.
+    /// </summary>
+    public void CloseGracefully()
+    {
+        try
+        {
+            socket.Shutdown(SocketShutdown.Both);
+        }
+        catch (SocketException)
+        {
+            // Already gone: the dispose below is all that's left to do.
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+        socket.Dispose();
+    }
+
+    /// <summary>
     /// Tears down the session's backing connection and the MARS machinery.
     /// Called by the listener after <see cref="RunAsync"/> returns; the
     /// connection's own teardown rolls back open transactions and drops temp
@@ -281,7 +303,17 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // forward and acknowledged on the next iteration's idle branch,
                 // never lost.
                 var attentionConsumed = runsEngine && this.connection!.ExecutionCancellationToken.IsCancellationRequested;
-                if (attentionConsumed)
+                if (attentionConsumed && this.connection!.Killed)
+                {
+                    // Another session's KILL ended this one mid-command: its
+                    // error tokens and the DONE that carries the server-error
+                    // bit stand where an attention's acknowledgment would, and
+                    // the connection closes behind them.
+                    var killed = SimulatedSqlException.SessionKilled();
+                    WriteErrors(writer, killed);
+                    writer.WriteDoneToken(Tds.TokenDone, ErrorDoneStatus(killed), 0, StatementDoneKind.Batch);
+                }
+                else if (attentionConsumed)
                 {
                     // The engine settled the cancelled batch as it unwound
                     // (SimulatedDbConnection.SettleCancelledExecution); send
@@ -442,6 +474,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         opened.Security = Simulation.BuildAuthenticatedSecurityContext(principal, userName);
 
         opened.FramesEveryStatement = true;
+        opened.AbortTransport = this.CloseGracefully;
         this.connection = opened;
         return true;
     }
@@ -1300,6 +1333,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
         fresh.FramesEveryStatement = true;
         fresh.ScopesTransactionsToBatch = this.multiplexer is not null;
+        fresh.AbortTransport = this.CloseGracefully;
         this.connection = fresh;
     }
 

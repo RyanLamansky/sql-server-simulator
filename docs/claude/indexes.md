@@ -518,7 +518,9 @@ It returns the table's canonical `IndexIdentity` rows — `(index_id, type, name
   The clustered index is always id 1 regardless of creation order (a `CREATE CLUSTERED INDEX` added after nonclustered indexes still lands at 1; those keep their ids).
 - With no clustered entry the table is a **heap**: one synthetic row at `index_id = 0`, `type = 0`, no backing object.
   Nonclustered ids on a heap still start at 2 — index_id 1 (the clustered slot) is never reused.
-- Every remaining (nonclustered) constraint / index — including a NONCLUSTERED PK — takes `index_id = 2..N`, `type = 2`, in **object-id order**.
+- Every remaining (nonclustered) constraint / index — including a NONCLUSTERED PK — takes an `index_id` from 2, `type = 2`, the ones one statement declares together in **object-id order**.
+  An id is **kept for life**: a drop leaves a gap, and the next index, key constraint or statistic takes the lowest id from 2 that nothing on the table holds (`create index i1, i2, i3; drop index i2; create index i4` is `i1` 2, `i4` 3, `i3` 4), one pool for indexes and statistics alike; `DROP_EXISTING` keeps the replaced index's id (probed 2026-09-30 against SQL Server 2025).
+  `HeapTable.SettleIndexIds` numbers what is unnumbered, and every add and drop calls it first so a gap is real by the time it matters.
 
 Object-id order is not declaration order for the key constraints and inline indexes of a single declaration: real allocates the clustered one's id first and the rest in **reverse** declaration order, keys and inline `INDEX` clauses interleaved as written (probe-confirmed for `CREATE TABLE` — inline and table-level alike, 2026-09-26 for the indexes — and for an `ALTER TABLE ADD` of several constrained columns), which `Simulation.AllocateDeclarationObjectIds` mirrors for `CREATE TABLE` and `CREATE TYPE … AS TABLE`.
 So `create table t (id int primary key nonclustered, u int unique)` answers UNIQUE 2 / PRIMARY KEY 3, and `create table t (a int unique, b int primary key clustered, c int unique)` answers the clustered PK 1, `c`'s UNIQUE 2, `a`'s 3.
@@ -552,7 +554,7 @@ One row per (index, column):
 What's modeled is the **declaration**, not a histogram — the simulator makes no cardinality estimates, so a statistic changes nothing about how a query runs.
 What it does carry is catalog identity: `sys.stats` rows with `user_created = 1` and `sys.stats_columns` rows in the declared column order, which is what DacFx re-exports, SSMS scripts, and a bacpac's `SqlStatistic` elements round-trip through.
 
-`stats_id` is drawn from the **same per-table sequence the index ids use**, continuing past the highest one in use — an index-backed statistic shares its index's id, so a table whose PK takes index_id 1 gives its first standalone statistic stats_id 2.
+`stats_id` is drawn from the **same per-table pool the index ids use** — an index-backed statistic shares its index's id, so a table whose PK takes index_id 1 gives its first standalone statistic stats_id 2, a heap's first is 2 as well, and a gap a dropped index or statistic left is filled first (see [Index-id allocation](#index-id-allocation)).
 
 Of the WITH options only `NORECOMPUTE` is observable (`sys.stats.no_recompute`); the sampling family (`FULLSCAN`, `SAMPLE n {PERCENT | ROWS}`, `PERSIST_SAMPLE_PERCENT`, `INCREMENTAL`, `MAXDOP`, `AUTO_DROP`) describes how real would scan the data to build a histogram there isn't one of here, so those parse and discard.
 
@@ -564,6 +566,13 @@ Diagnostics, probe-confirmed against SQL Server 2025:
 | Missing table | **Msg 1088** state 12 (shared with `CREATE INDEX`) |
 | Missing column | **Msg 1911** |
 | `DROP STATISTICS` of one the table doesn't carry | **Msg 3701** sev **11** state 7, `Cannot drop the statistics '<written name>', because it does not exist or you do not have permission.` |
+
+`CREATE STATISTICS … WHERE <predicate>` makes a **filtered statistic**: `sys.stats.has_filter` / `filter_definition` carry the predicate in a filtered index's rendering (a one-candidate `IN` is stored as the equality it is), the options follow the filter (`WITH … WHERE` is Msg 156), and `sp_helpstats` lists it.
+The filter takes exactly a filtered index's grammar, and the refusals are shared: Msg 156 / 102 for `OR`, `LIKE`, `BETWEEN`, `NOT`, Msg 112 (state 4) for a variable, Msg 1046 for a subquery, Msg 10620 for a comparison with a literal `NULL` (`b = NULL`, `b IN (1, NULL)`; a `NULL` on the left is Msg 10735), Msg 10735 for anything else that isn't an AND of column-against-constant comparisons, and Msg 10609 for a computed column, each naming the table as written.
+The filter binds before the statement's own names: its columns before the key columns (Msg 207 ahead of Msg 1911) and its table before the statement's (Msg 208 for a missing one, where the same statement with no filter is Msg 1088).
+A statistic **depends on its key and filter columns**: `ALTER TABLE … DROP COLUMN` of either is Msg 5074 then 4922, and so is an `ALTER COLUMN` that changes a key column's type or nullability or touches a filter column at all (widening a `varchar` key is free); a filtered index's filter columns hold the same way, and `sp_rename … 'COLUMN'` refuses a filter's column from line 905 of the procedure, its key columns free to move (probed 2026-09-30 against SQL Server 2025).
+`DBCC SHOW_STATISTICS … WITH HISTOGRAM` reads a user statistic's leading column over the rows its filter admits.
+Not modeled yet: the `STAT_HEADER` and `DENSITY_VECTOR` forms (a header's `Filter Expression` and `Unfiltered Rows` among them), a histogram's NULL step and real's compression of a few distinct values into fewer steps (three values `1, 2, 3` are the steps `1` and `3` on real, three steps here), and Msg 2528 after a `Msg 2767` miss.
 
 Auto-created column statistics (the `_WA_Sys_*` rows real materializes on first predicate use) still aren't modeled — see [`catalog-views.md`](catalog-views.md).
 

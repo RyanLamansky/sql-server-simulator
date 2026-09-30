@@ -103,10 +103,11 @@ partial class Simulation
                     $"sp_rename with @objtype '{objType}' is not modeled; supported @objtype values are COLUMN, INDEX, and a table / object rename (NULL @objtype).");
             }
         }
-        catch (SimulatedSqlException readOnly) when (readOnly.Number == 3906)
+        catch (SimulatedSqlException readOnly) when (readOnly.Number is 3906 or 5074)
         {
-            // Real cautions before it finds the database read-only, so the
-            // caution precedes the Msg 3906 (probed 2026-09-25).
+            // Real cautions before it finds the database read-only or a filter
+            // reading the column, so the caution precedes the Msg 3906 or 5074
+            // (probed 2026-09-25 and 2026-09-30).
             QueueRenameCaution(batch);
             throw;
         }
@@ -330,6 +331,17 @@ partial class Simulation
         // (both probe-confirmed).
         if (SchemaBinding.ColumnReferencingModules(batch.CurrentDatabase, table, columnName).Count > 0)
             throw SimulatedSqlException.RenameParticipatesInEnforcedDependencies(objName);
+
+        // A filter names its columns, so a column a filtered index or
+        // statistic's predicate reads can't be renamed: Msg 5074 for each,
+        // then Msg 4922, from line 905 of sp_rename (probed 2026-09-30
+        // against SQL Server 2025).
+        if (FilterDependents(batch.CurrentDatabase, table, ordinal) is { Count: > 0 } dependents)
+        {
+            var refusal = SimulatedSqlException.ColumnHasDependencies("RENAME COLUMN", table.Columns[ordinal].Name, dependents);
+            refusal.PreserveDiagnostics(905, "sp_rename");
+            throw refusal;
+        }
 
         // Storage is by ordinal, so the name change needs no row re-encode — but
         // the schema-version bump invalidates any cached plan that resolved the

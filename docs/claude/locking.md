@@ -180,6 +180,27 @@ A connection disposed properly never enters the queue at all (`Component.Dispose
 
 Oracle: `AbandonedSessionReclamationTests` (Tests.Internal), one test per state kind plus the mid-statement rule, the `sp_who` window, the idempotence rule, and one end-to-end `GC.Collect()` test that fails if any global reference is reintroduced.
 
+## `KILL`
+
+`KILL <session id> [WITH STATUSONLY]` ends another session of the same `Simulation`, an in-process connection or a TDS session alike (`Simulation.ParseKill`, `SimulatedDbConnection.Kill`).
+What a session id meets, in order (probed 2026-09-30 against SQL Server 2025): `WITH COMMIT | ROLLBACK` is Msg 6108, an open user transaction Msg 6115, an id outside 1 to 32767 Msg 6101, a system session Msg 6107, an id no session holds Msg 6106, the caller's own Msg 6104, and a caller holding neither sysadmin nor `ALTER ANY CONNECTION` Msg 6102 — after the existence checks, so a login without it still hears Msg 6106 for a missing id.
+The target must be a literal: a variable, a parenthesized value or a bare `NULL` is a syntax error, and a decimal or past-`int` integer is Msg 1080.
+A string is `KILL UOW`, whose ids are checked as a GUID (Msg 8169), refused inside a transaction (Msg 6115) and otherwise Msg 6110, the simulator having no distributed transaction.
+`WITH STATUSONLY` is Msg 6120 for every live session, since a kill here finishes before anything could report its rollback.
+Every one of these is a statement-level error: the batch carries on, and a `CATCH` reads it.
+
+The victim, by what it is doing:
+
+- **Idle**: its transaction rolls back at once, so the locks it held and the rows it wrote are gone for the killer's next statement; it leaves `sys.dm_exec_sessions`; a TDS session's socket closes.
+  An in-process connection's next command raises SqlClient's own severity-20 Msg 0 (`The connection is broken and recovery is not possible.`) and closes it, as real does for a session holding a transaction.
+- **Running** (a `WAITFOR`, a lock wait, a long statement): the command is cancelled at its next safe point, ends with Msg 596 at severity 21 and then SqlClient's severity-20 Msg 0, which no `CATCH` intercepts, and the connection closes with its transaction rolled back.
+  Over TDS the two errors and a DONE carrying the server-error bit stand where an attention's acknowledgment would.
+
+**Divergences.**
+Over TDS, an idle victim's next command is SqlClient's `A transport-level error has occurred` (error 2) where real's is the `connection is broken` error for a session holding a transaction and a transparent reconnect for one that holds none: SqlClient's idle-connection resiliency needs the server's session-recovery feature acknowledgment in the LOGINACK, which the endpoint doesn't send.
+Sessions 1 to 50 are all system sessions here (Msg 6107); only session 7 was probed, and real answers Msg 6106 for one of them that doesn't exist.
+`KILL` has no DONE kind of its own on the wire yet (its real code wasn't captured).
+
 ## Row-lock storage
 
 Per-row `LockResource`s live in `HeapTable.RowLocks`, a `ConcurrentDictionary<(int pageIndex, int slotIndex), LockResource>` keyed by RID.

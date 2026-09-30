@@ -1,3 +1,4 @@
+using System.Text;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
@@ -69,7 +70,7 @@ partial class Simulation
             // InFlightError is non-null by construction (the CATCH only ran
             // because the matching TRY caught something).
             var err = batch.InFlightError!.Value;
-            throw SimulatedSqlException.ThrowReRaised(err.Number, err.Message, err.State, err.Line, err.Procedure);
+            throw SimulatedSqlException.ThrowReRaised(err);
         }
 
         // Value form: three comma-separated literals or variables.
@@ -105,7 +106,7 @@ partial class Simulation
         if (stateInt < 0)
             throw SimulatedSqlException.ThrowStateNegative(stateInt);
 
-        throw SimulatedSqlException.ThrowRaised(numberInt, messageValue.IsNull ? "" : messageValue.AsString, (byte)stateInt);
+        throw SimulatedSqlException.ThrowRaised(numberInt, messageValue.IsNull ? "" : FormatThrowMessage(messageValue.AsString), (byte)stateInt);
     }
 
     /// <summary>
@@ -158,5 +159,45 @@ partial class Simulation
         public readonly SqlValue Literal = literal;
 
         public SqlValue Read() => this.Slot is null ? this.Literal : this.Slot.Value;
+    }
+
+    /// <summary>
+    /// The message THROW sends, which real reads for <c>%</c> escapes as an
+    /// operating-system message template rather than as RAISERROR's format
+    /// (probed 2026-09-30 against SQL Server 2025): <c>%%</c>, <c>%.</c>,
+    /// <c>%!</c> and a percent before a space send the character after it,
+    /// <c>%0</c> vanishes, <c>%n</c> sends a line break then its own
+    /// <c>n</c>, and any other <c>%</c> — a specification, a digit, a letter,
+    /// a trailing one — leaves the message empty.
+    /// </summary>
+    internal static string FormatThrowMessage(string message)
+    {
+        if (!message.Contains('%', StringComparison.Ordinal))
+            return message;
+        var builder = new StringBuilder(message.Length);
+        for (var i = 0; i < message.Length; i++)
+        {
+            if (message[i] != '%')
+            {
+                _ = builder.Append(message[i]);
+                continue;
+            }
+            if (++i == message.Length)
+                return "";
+            switch (message[i])
+            {
+                case '%' or '.' or '!' or ' ':
+                    _ = builder.Append(message[i]);
+                    break;
+                case '0':
+                    break;
+                case 'n':
+                    _ = builder.Append("\r\nn");
+                    break;
+                default:
+                    return "";
+            }
+        }
+        return builder.ToString();
     }
 }

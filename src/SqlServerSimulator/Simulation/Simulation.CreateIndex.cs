@@ -1,5 +1,6 @@
 using System.Text;
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Expressions;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
 using StoredIndex = SqlServerSimulator.Storage.Index;
@@ -137,7 +138,10 @@ partial class Simulation
                 RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", view.Name, "VIEW");
                 return true;
             }
-            throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
+            // A filter binds first, so its table is an ordinary missing object.
+            throw filter is not null
+                ? SimulatedSqlException.InvalidObjectName(targetTableName, state: 101)
+                : SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
         }
 
         RecordTableDdlUndo(context, table);
@@ -158,7 +162,10 @@ partial class Simulation
             throw SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("create", indexName, qualifiedTableName);
 
         if (filter is not null)
-            RejectComputedColumnInIndexFilter(context.Batch, table, indexName, qualifiedTableName, filter);
+        {
+            _ = BindFilterColumns(context.Batch, table, filter);
+            RejectComputedColumnInIndexFilter(context.Batch, table, indexName, targetTableName.ToString(), filter);
+        }
 
         // DROP_EXISTING = ON replaces the index of that name, keeping its
         // index_id; without it the name must be new (probed 2026-09-26
@@ -267,9 +274,15 @@ partial class Simulation
             RejectIndexOnEmptyFilegroup(context.Batch, table, filegroup);
 
         if (replaced is not null)
+        {
+            index.IndexId = replaced.IndexId;
             table.Indexes[table.Indexes.IndexOf(replaced)] = index;
+        }
         else
+        {
+            table.SettleIndexIds();
             table.Indexes.Add(index);
+        }
         table.NoteStatisticsCreated(index.Name, context.CurrentDatabase.Collation);
         if (isClustered)
         {
@@ -296,7 +309,7 @@ partial class Simulation
     /// row silently fell outside the filter.
     /// </summary>
     private static void RejectComputedColumnInIndexFilter(
-        BatchContext batch, HeapTable table, string indexName, string qualifiedTableName, BooleanExpression filter)
+        BatchContext batch, HeapTable table, string indexName, string qualifiedTableName, BooleanExpression filter, bool forStatistics = false)
     {
         var collation = batch.CurrentDatabase.Collation;
         string? offending = null;
@@ -315,7 +328,7 @@ partial class Simulation
         }));
 
         if (offending is not null)
-            throw SimulatedSqlException.FilteredIndexOnComputedColumn(indexName, qualifiedTableName, offending);
+            throw SimulatedSqlException.FilteredIndexOnComputedColumn(indexName, qualifiedTableName, offending, forStatistics);
     }
 
     /// <summary>
@@ -596,8 +609,7 @@ partial class Simulation
             context.MoveNextRequired();
             RejectFilterPredicateKeywords(context);
             filter = BooleanExpression.Parse(context);
-            if (!filter.IsFilteredIndexShape)
-                throw SimulatedSqlException.IncorrectFilteredIndexWhereClause(indexName, tableLeaf);
+            CheckFilterPredicate(filter, statistics: false, indexName, tableLeaf);
             // Render the parsed predicate into SQL Server's normalized
             // filter_definition form ([col]=(1) AND …) for sys.indexes. Null
             // when the predicate falls outside the renderable filtered grammar
@@ -608,6 +620,58 @@ partial class Simulation
         var options = ParseOptionalIndexWithClause(context, statement, optionIndexName)
             .WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
         return (includeColumnNames, filter, filterDefinition, options);
+    }
+
+    /// <summary>
+    /// The refusals a filtered index's or statistic's parsed <c>WHERE</c>
+    /// meets, in the order real reports them: a variable (Msg 112), a
+    /// subquery (Msg 1046), a comparison with a literal <c>NULL</c>
+    /// (Msg 10620), then anything but an AND of column-against-constant
+    /// comparisons (Msg 10735); probed 2026-09-30 against SQL Server 2025.
+    /// </summary>
+    internal static void CheckFilterPredicate(BooleanExpression filter, bool statistics, string objectName, string tableLeaf)
+    {
+        var hasVariable = false;
+        var hasSubquery = false;
+        filter.VisitOperandExpressions(operand => operand.Walk((node, _) =>
+        {
+            hasVariable |= node is VariableReference;
+            hasSubquery |= node is ScalarSubqueryExpression;
+            return true;
+        }));
+        if (hasVariable)
+            throw SimulatedSqlException.VariablesNotAllowedInCreateIndex();
+        if (hasSubquery)
+            throw SimulatedSqlException.SubqueriesNotAllowedInThisContext();
+        if (filter.FilterComparesToNullLiteral)
+            throw SimulatedSqlException.FilterComparesToNullLiteral(statistics, objectName, tableLeaf);
+        if (!filter.IsFilteredIndexShape)
+        {
+            throw statistics
+                ? SimulatedSqlException.IncorrectFilteredStatisticsWhereClause(objectName, tableLeaf)
+                : SimulatedSqlException.IncorrectFilteredIndexWhereClause(objectName, tableLeaf);
+        }
+    }
+
+    /// <summary>
+    /// The <see cref="HeapTable.Columns"/> indices a filter reads; a name the
+    /// table lacks is Msg 207, which real reports ahead of the key columns'
+    /// own Msg 1911.
+    /// </summary>
+    internal static int[] BindFilterColumns(BatchContext batch, HeapTable table, BooleanExpression filter)
+    {
+        var collation = batch.CurrentDatabase.Collation;
+        List<int> ordinals = [];
+        MultiPartName? missing = null;
+        filter.VisitOperandExpressions(operand => operand.VisitColumnReferences(reference =>
+        {
+            var found = Array.FindIndex(table.Columns, column => collation.Equals(column.Name, reference.Leaf));
+            if (found < 0)
+                missing ??= reference;
+            else if (!ordinals.Contains(found))
+                ordinals.Add(found);
+        }));
+        return missing is { } unresolved ? throw SimulatedSqlException.InvalidColumnName(unresolved) : [.. ordinals];
     }
 
     /// <summary>

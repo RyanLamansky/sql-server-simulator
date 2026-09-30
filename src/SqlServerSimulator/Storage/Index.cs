@@ -120,6 +120,12 @@ internal sealed class Index(
     public readonly int[] IncludedColumns = includedColumns;
 
     /// <summary>
+    /// The <c>index_id</c> this index keeps for life, or 0 while none is
+    /// assigned; see <see cref="HeapTable.SettleIndexIds"/>.
+    /// </summary>
+    public int IndexId;
+
+    /// <summary>
     /// INCLUDE-clause full column ordinals (0-based positions in
     /// <c>HeapTable.Columns</c>), parallel to <see cref="IncludedColumns"/>.
     /// The source for <c>sys.index_columns.column_id</c> — unambiguous even

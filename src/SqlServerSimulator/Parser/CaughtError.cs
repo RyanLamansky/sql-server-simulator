@@ -10,7 +10,7 @@ namespace SqlServerSimulator.Parser;
 /// re-raise (which reconstructs a <c>SimulatedSqlException</c> from these
 /// fields).
 /// </summary>
-internal readonly struct CaughtError(int number, string message, byte severity, byte state, int line, string? procedure)
+internal readonly struct CaughtError(int number, string message, byte severity, byte state, int line, string? procedure, SimulatedError[]? preceding)
 {
     /// <summary>SQL error number (e.g. 8134 for divide by zero, 50000 for RAISERROR).</summary>
     public readonly int Number = number;
@@ -34,4 +34,11 @@ internal readonly struct CaughtError(int number, string message, byte severity, 
     /// that caught a body-fired error surfaces NULL.
     /// </summary>
     public readonly string? Procedure = procedure;
+
+    /// <summary>
+    /// The entries an error raised as several sent ahead of the one the
+    /// <c>CATCH</c> reads, which a bare <c>THROW</c> sends again ahead of
+    /// its own re-raise; <see langword="null"/> for a single error.
+    /// </summary>
+    public readonly SimulatedError[]? Preceding = preceding;
 }

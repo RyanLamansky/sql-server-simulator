@@ -225,7 +225,9 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
         this.WriteInt32(number);
         this.WriteByte(state);
         this.WriteByte(severity);
-        this.WriteUsVarchar(message);
+        // An empty message goes out as one space, as an uncaught THROW of an
+        // empty or all-escape message shows (probed 2026-09-30 against SQL Server 2025).
+        this.WriteUsVarchar(message.Length == 0 ? " " : message);
         this.WriteBVarchar(server);
         this.WriteBVarchar(procedure);
         this.WriteInt32(line);

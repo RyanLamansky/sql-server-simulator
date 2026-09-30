@@ -333,6 +333,8 @@ public sealed class SimulatedDbCommand : DbCommand
     private SimulatedSqlException CancellationException()
     {
         var connection = this.Connection;
+        if (connection is { Killed: true })
+            return SimulatedSqlException.SessionKilled();
         var cancelled = connection?.ExecutionTimedOut == true
             ? SimulatedSqlException.ExecutionTimeoutExpired()
             : SimulatedSqlException.CommandCancelled();
@@ -354,6 +356,11 @@ public sealed class SimulatedDbCommand : DbCommand
     {
         if (this.Connection is not { } connection)
             throw new InvalidOperationException($"{method}: Connection property has not been initialized.");
+        if (connection is { Killed: true, State: ConnectionState.Open })
+        {
+            connection.Close();
+            throw SimulatedSqlException.ConnectionBroken();
+        }
         if (connection.State != ConnectionState.Open)
         {
             var state = connection.State switch

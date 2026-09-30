@@ -228,6 +228,17 @@ partial class Simulation
     /// when the consumer omits its own nullability hint; an explicit
     /// <c>NULL</c> / <c>NOT NULL</c> at the consumer site overrides.
     /// </remarks>
+    private static bool IsTwoArgumentBase(ReadOnlySpan<char> name)
+        => name.Equals("decimal", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("numeric", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("dec", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("vector", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsFractionalSecondBase(ReadOnlySpan<char> name)
+        => name.Equals("datetime2", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("time", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("datetimeoffset", StringComparison.OrdinalIgnoreCase);
+
     private static bool TryParseCreateAliasType(ParserContext context, Schema schema, MultiPartName typeName)
     {
         // Cursor on FROM; advance to the base-type name. The base is a
@@ -271,6 +282,8 @@ partial class Simulation
                     ? SqlType.MaxLengthSentinel
                     : throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
+            if (declaredMaxLength == SqlType.MaxLengthSentinel && context.Token is Operator { Character: ',' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
             if (context.Token is Operator { Character: ',' })
             {
                 var scaleToken = context.GetNextRequired();
@@ -316,25 +329,41 @@ partial class Simulation
                 if (baseLeafToken.Span.Equals("nchar", StringComparison.OrdinalIgnoreCase))
                     throw SimulatedSqlException.SizeExceedsMaximumCast("nchar", declaredMaxLength.Value, 8000);
             }
-            try
+            // A second argument only decimal, numeric and vector take is refused
+            // when the statement runs — after Msg 192 for a scale past the
+            // first argument, which the parse settles — its state 5 for the
+            // fractional-second types, 4 for the rest (probed 2026-09-30
+            // against SQL Server 2025).
+            if (declaredScale is { } extraScale
+                && !IsTwoArgumentBase(baseLeafToken.Span))
             {
-                (resolvedType, resolvedMaxLength) = SqlType.GetByName(
-                    baseLeafToken, declaredMaxLength, declaredScale,
-                    index: 0, TypeSpecSite.Scalar, columnName: baseLeafToken.Value);
+                if (extraScale > declaredMaxLength)
+                    throw SimulatedSqlException.ScaleExceedsPrecision();
+                refusal = SimulatedSqlException.FollowedByUdtParametersInvalid(
+                    SimulatedSqlException.AliasBaseNeedsLength(baseLeafToken.Value, IsFractionalSecondBase(baseLeafToken.Span) ? (byte)5 : (byte)4), typeName.ToString());
             }
-            catch (SimulatedSqlException ex) when (ex.Number is 2750 or 2716 || (ex.Number == 2717 && ex.State == 2))
+            if (refusal is null)
             {
-                throw SimulatedSqlException.FollowedByUdtParametersInvalid(ex, typeName.ToString());
-            }
-            catch (SimulatedSqlException ex) when (ex.Number is 2715 or 243 or 102)
-            {
-                refusal = SimulatedSqlException.InvalidBaseTypeForAlias(baseName.ToString());
+                try
+                {
+                    (resolvedType, resolvedMaxLength) = SqlType.GetByName(
+                        baseLeafToken, declaredMaxLength, declaredScale,
+                        index: 0, TypeSpecSite.Scalar, columnName: baseLeafToken.Value);
+                }
+                catch (SimulatedSqlException ex) when (ex.Number is 2750 or 2716 || (ex.Number == 2717 && ex.State == 2))
+                {
+                    refusal = SimulatedSqlException.FollowedByUdtParametersInvalid(ex, typeName.ToString());
+                }
+                catch (SimulatedSqlException ex) when (ex.Number is 2715 or 243 or 102)
+                {
+                    refusal = SimulatedSqlException.InvalidBaseTypeForAlias(baseName.ToString());
+                }
             }
 
             // A base whose length a column would default to takes none here
             // (probed 2026-09-30 against SQL Server 2025).
             if (refusal is null && declaredMaxLength is null && resolvedType is CharSqlType or VarcharSqlType or NCharSqlType or NVarcharSqlType or BinarySqlType or VarbinarySqlType)
-                throw SimulatedSqlException.FollowedByUdtParametersInvalid(SimulatedSqlException.AliasBaseNeedsLength(baseLeafToken.Value), typeName.ToString());
+                refusal = SimulatedSqlException.FollowedByUdtParametersInvalid(SimulatedSqlException.AliasBaseNeedsLength(baseLeafToken.Value), typeName.ToString());
         }
 
         // The CLR system types, rowversion and sysname (itself a system

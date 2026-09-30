@@ -125,10 +125,12 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Msg 2724 for <c>CREATE TYPE … FROM char</c> and its kin: a base type
-    /// written without the length it needs. Real follows it with Msg 225.
+    /// written without the length it needs (state 1), or with a second
+    /// argument it takes none of (state 4, state 5 for the fractional-second
+    /// types). Real follows it with Msg 225.
     /// </summary>
-    internal static SimulatedSqlException AliasBaseNeedsLength(string baseType) =>
-        new($"Parameter or variable '{baseType}' has an invalid data type.", 2724, 16, 1);
+    internal static SimulatedSqlException AliasBaseNeedsLength(string baseType, byte state = 1) =>
+        new($"Parameter or variable '{baseType}' has an invalid data type.", 2724, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 159: a one-part <c>DROP INDEX</c> name with no
@@ -422,6 +424,24 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException DbccParameterIsIncorrect(int parameterNumber, byte state = 9) =>
         new($"Parameter {parameterNumber} is incorrect for this DBCC statement.", 2560, 16, state);
+
+    /// <summary>Mimics SQL Server error 112: a variable in a filtered index's or statistic's <c>WHERE</c>.</summary>
+    internal static SimulatedSqlException VariablesNotAllowedInCreateIndex() =>
+        new("Variables are not allowed in the CREATE INDEX statement.", 112, 15, 4);
+
+    /// <summary>
+    /// Mimics SQL Server error 10620: a filtered index's or statistic's
+    /// <c>WHERE</c> compares a column with a literal NULL.
+    /// </summary>
+    internal static SimulatedSqlException FilterComparesToNullLiteral(bool statistics, string objectName, string tableName) =>
+        new($"Filtered {(statistics ? "statistics" : "index")} '{objectName}' cannot be created on table '{tableName}' because the filter expression contains a comparison with a literal NULL value. Rewrite the comparison to use the IS [NOT] NULL comparison operator to test for NULL values.", 10620, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10735 for a filtered statistic's WHERE clause
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IncorrectFilteredStatisticsWhereClause(string statisticsName, string tableName) =>
+        new($"Incorrect WHERE clause for filtered statistics '{statisticsName}' on table '{tableName}'.", 10735, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server error 10735: a filtered index's WHERE clause isn't an
@@ -1414,8 +1434,8 @@ partial class SimulatedSqlException
     /// <c>PERSISTED</c> (probe-confirmed both ways), and names the table
     /// two-part.
     /// </summary>
-    internal static SimulatedSqlException FilteredIndexOnComputedColumn(string indexName, string qualifiedTableName, string columnName) =>
-        new($"Filtered index '{indexName}' cannot be created on table '{qualifiedTableName}' because the column '{columnName}' in the filter expression is a computed column. Rewrite the filter expression so that it does not include this column.", 10609, 16, 1);
+    internal static SimulatedSqlException FilteredIndexOnComputedColumn(string indexName, string qualifiedTableName, string columnName, bool forStatistics = false) =>
+        new($"Filtered {(forStatistics ? "statistics" : "index")} '{indexName}' cannot be created on table '{qualifiedTableName}' because the column '{columnName}' in the filter expression is a computed column. Rewrite the filter expression so that it does not include this column.", 10609, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 2729: a computed column named as an index,
@@ -2821,7 +2841,7 @@ partial class SimulatedSqlException
             };
             errors.Add(new($"The {noun} '{name}' is dependent on column '{columnName}'.", 5074, 16, 1));
         }
-        errors.Add(new($"ALTER TABLE {verb} {columnName} failed because one or more objects access this column.", 4922, 16, 9));
+        errors.Add(new($"{(verb.StartsWith("RENAME", StringComparison.Ordinal) ? "" : "ALTER TABLE ")}{verb} {columnName} failed because one or more objects access this column.", 4922, 16, 9));
         return Aggregate(errors);
     }
 

@@ -370,8 +370,7 @@ partial class Simulation
     /// truncated before validation (probe-confirmed: <c>'statsZZZ'</c> is
     /// accepted, <c>'ALLXX'</c> is not). An empty report emits the severity-10
     /// Msg 15574 (<c>STATS</c>) or Msg 15575 (<c>ALL</c>) and no result set.
-    /// The simulator models only index-backed statistics, so the default
-    /// <c>STATS</c> form always takes that branch.
+    /// A table's <c>CREATE STATISTICS</c> objects list under both forms.
     /// </remarks>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelpStats(BatchContext batch)
     {
@@ -404,6 +403,18 @@ partial class Simulation
                 rows.Add([
                     SqlValue.FromSystemName(identity.Name!),
                     SqlValue.FromString(HelpStatsKeysType, HelpIndexKeys(target, identity, markDescending: false)),
+                ]);
+            }
+        }
+
+        // CREATE STATISTICS objects are the statistics no index backs.
+        if (target.Object is HeapTable statisticsTable)
+        {
+            foreach (var statistic in statisticsTable.UserStatistics)
+            {
+                rows.Add([
+                    SqlValue.FromSystemName(statistic.Name),
+                    SqlValue.FromString(HelpStatsKeysType, string.Join(", ", statistic.ColumnFullOrdinals.Select(ordinal => statisticsTable.Columns[ordinal].Name))),
                 ]);
             }
         }

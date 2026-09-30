@@ -716,6 +716,46 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal bool SessionEnding;
 
+    /// <summary>
+    /// Set by another session's <c>KILL</c>. A command running when it lands
+    /// ends with Msg 596 and the connection closes behind it; an idle
+    /// session's transaction rolls back at once, and its next command finds
+    /// the connection broken (see <see cref="Kill"/>).
+    /// </summary>
+    internal volatile bool Killed;
+
+    /// <summary>How many commands are executing on this connection right now, which is how <see cref="Kill"/> tells a running session from an idle one.</summary>
+    private int commandsInFlight;
+
+    internal void BeginCommand() => _ = Interlocked.Increment(ref this.commandsInFlight);
+
+    internal void EndCommand() => _ = Interlocked.Decrement(ref this.commandsInFlight);
+
+    /// <summary>Drops the physical connection under this session: the TDS endpoint's socket, for a session it hosts.</summary>
+    internal Action? AbortTransport;
+
+    /// <summary>
+    /// Ends this session as a <c>KILL</c> from another does (probed 2026-09-30
+    /// against SQL Server 2025): a running command is cancelled and answers
+    /// Msg 596 as it unwinds, its transaction rolled back and the connection
+    /// closed after it; an idle session's transaction rolls back at once, its
+    /// locks going with it, and the session leaves <c>sys.dm_exec_sessions</c>.
+    /// </summary>
+    internal void Kill()
+    {
+        this.Killed = true;
+        this.Simulation.UnregisterConnection(this);
+        if (Volatile.Read(ref this.commandsInFlight) > 0)
+        {
+            this.SessionEnding = true;
+            this.CancelExecution();
+            return;
+        }
+        this.CurrentTransaction?.EndRollback();
+        this.ReleaseSessionAppLocks();
+        this.AbortTransport?.Invoke();
+    }
+
     /// <summary>The physical connection this session rides, which <c>sys.dm_exec_connections</c> reports.</summary>
     internal Network.ConnectionTransport Transport = new(client: null, local: null, protocolVersion: 0, packetSize: 0);
 

@@ -81,6 +81,8 @@ A `CREATE DEFAULT` / `CREATE RULE` object bound to the type flows to its columns
 
 `sp_addtype` and `sp_droptype` run `CREATE TYPE … FROM` and `DROP TYPE`, with real's own argument errors ahead of them.
 `CREATE TYPE … FROM char | binary` without a length raises Msg 2724 then 225, a size over 8000 on `nchar` / `nvarchar` Msg 131, and a name a system type owns Msg 219 (probed 2026-09-30 against SQL Server 2025).
+The 2724 / 2750 / 2716 pairs are raised when the statement runs, not while the batch compiles: an earlier statement has answered, a `CATCH` reads the second error (225), and a bare `THROW` sends both again, the first at its own class and state.
+A second argument on a base that takes one only in `decimal` / `numeric` is Msg 2724 at state 4 (state 5 for `datetime2`, `time` and `datetimeoffset`) then 225, unless the scale passes the first argument, which is Msg 192 while compiling; `varbinary(max, 1)` is Msg 102 at the comma.
 
 ## Known gaps
 

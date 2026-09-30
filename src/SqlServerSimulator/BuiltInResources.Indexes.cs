@@ -1279,8 +1279,8 @@ internal static partial class BuiltInResources
                         falseBit, // auto_created
                         trueBit,  // user_created
                         statistic.NoRecompute ? trueBit : falseBit,
-                        falseBit, // has_filter
-                        nullFilter,
+                        statistic.Filter is null ? falseBit : trueBit, // has_filter
+                        statistic.FilterDefinition is { } statisticFilter ? SqlValue.FromNVarchar(statisticFilter) : nullFilter,
                         falseBit, // is_temporary
                         falseBit, // is_incremental
                         falseBit, // has_persisted_sample

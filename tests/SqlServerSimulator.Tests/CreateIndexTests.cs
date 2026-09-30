@@ -822,7 +822,7 @@ public sealed class CreateIndexTests
         sim.AssertSqlError(
             $"create index ix_t on t (a) where {predicate}",
             10609,
-            "Filtered index 'ix_t' cannot be created on table 'dbo.t' because the column 'c' in the filter expression is a computed column. Rewrite the filter expression so that it does not include this column.");
+            "Filtered index 'ix_t' cannot be created on table 't' because the column 'c' in the filter expression is a computed column. Rewrite the filter expression so that it does not include this column.");
     }
 
     /// <summary>A predicate over ordinary columns is unaffected.</summary>

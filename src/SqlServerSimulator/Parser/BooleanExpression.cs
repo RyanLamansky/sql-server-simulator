@@ -70,6 +70,22 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     internal virtual bool IsFilteredIndexShape => false;
 
+    /// <summary>
+    /// Whether a conjunct compares a column with a literal <c>NULL</c> —
+    /// <c>b = NULL</c>, <c>b &lt;&gt; NULL</c>, <c>b IN (1, NULL)</c> — which a
+    /// filtered index or statistic refuses with its own Msg 10620 (the NULL on
+    /// the left is Msg 10735, as any other misplaced constant is; probed
+    /// 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal virtual bool FilterComparesToNullLiteral => false;
+
+    private static bool IsNullLiteral(Expression operand)
+    {
+        while (operand is Parenthesized paren)
+            operand = paren.Wrapped;
+        return operand is Value { IsUntypedNull: true };
+    }
+
     private static bool IsFilterColumn(Expression operand)
     {
         while (operand is Parenthesized paren)
@@ -1571,6 +1587,8 @@ internal abstract class BooleanExpression : ExpressionNode
 
         internal override bool ParallelSafe => folded.ParallelSafe;
 
+        internal override bool FilterComparesToNullLiteral => folded.FilterComparesToNullLiteral;
+
         internal override void VisitOperandExpressions(Action<Expression> visitor) => folded.VisitOperandExpressions(visitor);
 
         // The fold took these out of the tree before the containment pass ran.
@@ -1718,6 +1736,8 @@ internal abstract class BooleanExpression : ExpressionNode
                 : Array.Exists(operands, operand => operand.OffersSeek(probe, negated));
 
         internal override bool IsFilteredIndexShape => Array.TrueForAll(operands, operand => operand.IsFilteredIndexShape);
+
+        internal override bool FilterComparesToNullLiteral => Array.Exists(operands, operand => operand.FilterComparesToNullLiteral);
 
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
         {
@@ -2061,12 +2081,20 @@ internal abstract class BooleanExpression : ExpressionNode
 
         internal override bool IsFilteredIndexShape => !negated && IsFilterColumn(source) && Array.TrueForAll(candidates, IsFilterConstant);
 
+        internal override bool FilterComparesToNullLiteral => !negated && IsFilterColumn(source) && Array.Exists(candidates, IsNullLiteral);
+
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
         {
             // NOT IN isn't part of the filtered-index grammar (real SQL Server
             // rejects it), so only the positive form renders.
             if (negated || candidates.Length == 0 || !TryAppendFilterOperand(sb, source, batch))
                 return false;
+            // A one-candidate list is stored as the equality it is.
+            if (candidates.Length == 1)
+            {
+                _ = sb.Append('=');
+                return TryAppendFilterOperand(sb, candidates[0], batch);
+            }
             _ = sb.Append(" IN (");
             for (var i = 0; i < candidates.Length; i++)
             {
@@ -2811,6 +2839,8 @@ internal abstract class BooleanExpression : ExpressionNode
         protected virtual string? FilterOperator => null;
 
         internal override bool IsFilteredIndexShape => this.FilterOperator is not null && IsFilterColumn(this.left) && IsFilterConstant(this.right);
+
+        internal override bool FilterComparesToNullLiteral => this.FilterOperator is not null && IsFilterColumn(this.left) && IsNullLiteral(this.right);
 
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
         {

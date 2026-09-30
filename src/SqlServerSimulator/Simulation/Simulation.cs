@@ -1164,6 +1164,7 @@ public sealed partial class Simulation
             session.RequestStartUtc = DateTime.UtcNow;
             session.BatchText = command.CommandText;
             session.StatementStartIndex = 0;
+            requester.BeginCommand();
         }
         try
         {
@@ -1175,6 +1176,8 @@ public sealed partial class Simulation
         finally
         {
             _ = Interlocked.Decrement(ref this.statementsInFlight);
+            if (command.Connection is { } finished)
+                finished.EndCommand();
             // A cancelled execution has unwound by here, whichever safe point
             // saw the cancellation; what it leaves behind is the same for
             // every front door.
@@ -1305,6 +1308,7 @@ public sealed partial class Simulation
         var adHocScope = command.ScopeTempTablesToBatch || command.Parameters.Count > 0;
         var enteredNoCount = batch.Connection.NoCount;
         var enteredOptions = new SimulatedDbConnection.SessionOptionScope(batch.Connection);
+        var enteredTranCount = batch.Connection.CurrentTransaction?.TranCount ?? 0;
         try
         {
             // Under SET PARSEONLY ON the batch is checked for syntax alone and
@@ -1334,8 +1338,12 @@ public sealed partial class Simulation
 
             var context = batch.Parser;
             context.MoveNextOptional();
+            var batchAborted = false;
             foreach (var outcome in DispatchStatementsUntil(batch, endKeyword: null))
+            {
+                batchAborted |= outcome is SimulatedErrorOutcome { Exception: var ended } && EndsBatch(ended);
                 yield return outcome;
+            }
             // A transaction an XACT_ABORT-caught error doomed can survive to
             // here: the CATCH ran, the batch carried on, and nothing rolled it
             // back. Real ends such a batch by rolling back and reporting
@@ -1348,6 +1356,23 @@ public sealed partial class Simulation
                 var endOfBatch = SimulatedSqlException.UncommittableTransactionAtEndOfBatch();
                 endOfBatch.ResolveDiagnostics(1, batch.LineOffset, batch.ErrorProcedureName);
                 yield return new SimulatedErrorOutcome(endOfBatch);
+            }
+            // An sp_executesql scope, like a procedure's, that ends with
+            // @@TRANCOUNT other than it began with answers Msg 266 after its
+            // results (probed 2026-09-30 against SQL Server 2025); a plain
+            // batch is judged by nothing, a batch an error aborted (Msg 3609
+            // from a trigger's rollback) says no more, and
+            // IMPLICIT_TRANSACTIONS exempts.
+            if (adHocScope
+                && !batchAborted
+                && !batch.Connection.ImplicitTransactions
+                && !batch.Connection.ExecutionCancellationRequested
+                && (batch.Connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount
+                && exitTranCount != enteredTranCount)
+            {
+                var mismatch = SimulatedSqlException.TransactionCountMismatch(enteredTranCount, exitTranCount, "");
+                batch.Connection.LastErrorNumber = mismatch.Number;
+                yield return new SimulatedErrorOutcome(mismatch);
             }
             WriteBackOutputParameters(batch);
         }
@@ -3045,6 +3070,9 @@ public sealed partial class Simulation
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Checkpoint } when ParseCheckpoint(context, batch):
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Kill } when ParseKill(context, batch):
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):

@@ -211,7 +211,7 @@ partial class Simulation
         if (!batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindTableOrObject(tableText);
 
-        outcomes.Add(BuildHistogram(table, statName.Leaf));
+        outcomes.Add(BuildHistogram(batch, table, statName.Leaf));
         if (informational)
             AfterDbccRows(batch, outcomes, SimulatedSqlException.DbccExecutionCompletedMessage(batch));
         return true;
@@ -245,7 +245,7 @@ partial class Simulation
     /// The synthetic heap identity (no backing index) can't match; a miss raises
     /// Msg 2767.
     /// </summary>
-    private static SimulatedSqlResultSet BuildHistogram(HeapTable table, string statisticsName)
+    private static SimulatedSqlResultSet BuildHistogram(BatchContext batch, HeapTable table, string statisticsName)
     {
         foreach (var identity in table.IndexIdentities())
         {
@@ -255,16 +255,31 @@ partial class Simulation
             var leadingOrdinal = identity.Constraint is { } key
                 ? key.StorageOrdinals[0]
                 : identity.Index!.KeyColumns[0].StorageOrdinal;
-            return ComputeHistogram(table, leadingOrdinal);
+            var storedColumns = table.StoredColumns;
+            var lobStore = table.Heap;
+            return ComputeHistogram(table.Schema[leadingOrdinal], table, rowBytes => RowDecoder.DecodeColumn(storedColumns, rowBytes, leadingOrdinal, lobStore));
+        }
+
+        // A CREATE STATISTICS object describes its leading column over the rows
+        // its filter admits, the filter judged as a filtered index's is.
+        var collation = batch.CurrentDatabase.Collation;
+        if (table.UserStatistics.Find(statistic => collation.Equals(statistic.Name, statisticsName)) is { } user)
+        {
+            var leadingFull = user.ColumnFullOrdinals[0];
+            SqlValue[]? fullRow = null;
+            return ComputeHistogram(table.Columns[leadingFull].Type, table, rowBytes =>
+            {
+                fullRow = DecodeFullRowWithComputed(table, rowBytes, batch, ref fullRow);
+                return user.Filter is { } filter && EvaluateIndexFilter(filter, table, fullRow, batch) != true ? null : fullRow[leadingFull];
+            });
         }
         throw SimulatedSqlException.CouldNotLocateStatistics(statisticsName);
     }
 
     /// <summary>
     /// Scans <paramref name="table"/>'s live rows once, reading the leading key
-    /// column at <paramref name="leadingOrdinal"/> via the array-typed
-    /// <see cref="RowDecoder.DecodeColumn(HeapColumn[], System.ReadOnlySpan{byte}, int, Heap?)"/>
-    /// fast path, and folds the values into a multi-step histogram: one step
+    /// column through <paramref name="readLeading"/> (null for a row the
+    /// statistic's filter leaves out), and folds the values into a multi-step histogram: one step
     /// per distinct leading-key value up to 200 steps, else 200 boundary steps
     /// evenly spaced over the sorted distinct values. The first step is always
     /// the MIN value and the last the MAX, matching real SQL Server's
@@ -275,18 +290,14 @@ partial class Simulation
     /// round-trips over the wire through the standard codecs. An empty table
     /// yields a 0-row result set.
     /// </summary>
-    private static SimulatedSqlResultSet ComputeHistogram(HeapTable table, int leadingOrdinal)
+    private static SimulatedSqlResultSet ComputeHistogram(SqlType keyType, HeapTable table, Func<byte[], SqlValue?> readLeading)
     {
-        var keyType = table.Schema[leadingOrdinal];
         SqlType[] schema = [keyType, SqlType.Real, SqlType.Real, SqlType.BigInt, SqlType.Real];
 
-        var storedColumns = table.StoredColumns;
-        var lobStore = table.Heap;
         var counts = new Dictionary<SqlValueKey, (SqlValue Value, long Count)>();
         foreach (var rowBytes in table.Heap.EnumerateRows())
         {
-            var value = RowDecoder.DecodeColumn(storedColumns, rowBytes, leadingOrdinal, lobStore);
-            if (value.IsNull)
+            if (readLeading(rowBytes) is not { IsNull: false } value)
                 continue;
             var key = new SqlValueKey([value]);
             counts[key] = counts.TryGetValue(key, out var existing)

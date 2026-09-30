@@ -119,6 +119,12 @@ partial class Simulation
             }
             if (password is not null)
             {
+                // sa is CHECK_POLICY ON, so a password real's policy refuses
+                // is refused before the unmodeled recording (probed
+                // 2026-09-30 against SQL Server 2025, a too-short password).
+                if (password.Length > PasswordHash.MaxClearTextChars)
+                    throw SimulatedSqlException.PasswordEncryptionInvalidValue();
+                ValidateLoginPassword(name, password);
                 throw new NotSupportedException(
                     "ALTER LOGIN [sa] WITH PASSWORD is not modeled: recording a password for sa "
                     + "would mean adding it to the login registry, which switches the TDS endpoint "

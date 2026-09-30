@@ -1167,6 +1167,7 @@ partial class Simulation
         switch (action.Family)
         {
             case DropConstraintFamily.Key:
+                table.SettleIndexIds();
                 _ = table.KeyConstraints.Remove(action.Key!);
                 break;
             case DropConstraintFamily.Check:

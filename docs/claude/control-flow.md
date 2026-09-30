@@ -412,7 +412,9 @@ Statement adjacency requires `;` before THROW (probe-confirmed: `select 1 throw 
   Real's own system rows (about 16,750 per language) are not carried, so a system id such as 13001 lands here.
 - Inline-string form (`RAISERROR('text', …)`) always uses msg id 50000.
 - `FORMATMESSAGE(msg_number, …)` formats a registered message, or for an unregistered number returns the terse text `Error: {id}, Severity: {severity}, State: 1. (Params:)…` (probed 2026-09-30 against SQL Server 2025).
-- A `THROW` whose message text contains `%` diverges from real in one rare shape recorded during the probe; the common shapes match.
+- A `THROW` message is read for `%` escapes as an operating-system message template, not as `RAISERROR`'s format (probed 2026-09-30 against SQL Server 2025): `%%`, `%.`, `%!` and a percent before a space send the character after it, `%0` vanishes, `%n` sends a line break then its own `n`, and any other `%` — `%d`, `%s`, a digit, a letter, a trailing one — leaves the message empty (`Simulation.FormatThrowMessage`).
+  An empty message goes out on the wire as one space, which a `CATCH` never sees (`ERROR_MESSAGE()` is empty).
+  A bare `THROW` sends every entry of an error real raised as several — `3728` then `3727` for a constraint drop, `5011` then `5069` for `ALTER DATABASE` — each as it was, the caught one last.
 
 **WITH options**: comma-separated list after the closing `)`.
 `LOG` raises Msg 2778 ("Only System Administrator can specify WITH LOG option for RAISERROR command") for a session that isn't a sysadmin, and is otherwise accepted with nothing logged.

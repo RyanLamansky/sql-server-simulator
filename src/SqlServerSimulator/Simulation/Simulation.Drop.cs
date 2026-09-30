@@ -994,6 +994,7 @@ partial class Simulation
                 table.OwningDatabase?.RejectWriteWhenReadOnly();
                 if (table.Indexes[i].IsClustered && RetentionCleanupDependsOn(context, table))
                     throw SimulatedSqlException.CannotDropRetentionCleanupIndex(qualifiedTableName, indexName);
+                table.SettleIndexIds();
                 table.Indexes.RemoveAt(i);
                 RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
                 return;

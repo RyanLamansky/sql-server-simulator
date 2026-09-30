@@ -742,11 +742,22 @@ partial class SimulatedSqlException
     /// pre-stamps them and marks the exception resolved to keep the enclosing
     /// dispatch frame from overwriting with the <c>THROW</c> statement's line.
     /// </summary>
-    internal static SimulatedSqlException ThrowReRaised(int number, string message, byte state, int line, string? procedure)
+    internal static SimulatedSqlException ThrowReRaised(CaughtError caught)
     {
-        var exception = new SimulatedSqlException(message, number, 16, state) { TerminatesBatch = true };
-        exception.PreserveDiagnostics(line, procedure);
-        return exception;
+        var last = new SimulatedSqlException(caught.Message, caught.Number, 16, caught.State) { TerminatesBatch = true };
+        last.PreserveDiagnostics(caught.Line, caught.Procedure);
+        if (caught.Preceding is not { Length: > 0 } preceding)
+            return last;
+
+        // An error raised as several is sent again whole, each entry as it
+        // was, with the re-raised one closing it (probed 2026-09-30 against
+        // SQL Server 2025).
+        List<SimulatedError> entries = [.. preceding, last.Errors[0]];
+        return new(string.Join(Environment.NewLine, entries.Select(entry => entry.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(entries))
+        {
+            TerminatesBatch = true,
+            diagnosticsResolved = true,
+        };
     }
 
     /// <summary>
