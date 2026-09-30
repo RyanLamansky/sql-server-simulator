@@ -317,9 +317,11 @@ partial class Simulation
                     // A cancelled command (TDS attention / CommandTimeout /
                     // in-process Cancel()) breaks the loop at the iteration
                     // boundary — the classic cancel target of an otherwise
-                    // unbounded WHILE. Body-internal statements observe the
-                    // same signal through DispatchStatementsUntil.
-                    if (batch.Connection.ExecutionCancellationToken.IsCancellationRequested)
+                    // unbounded WHILE — and, inside a function, procedure or
+                    // trigger body, ends the calling statement. Body-internal
+                    // statements observe the same signal through
+                    // DispatchStatementsUntil.
+                    if (batch.CancelledAtStatementBoundary())
                         goto ExitLoop;
 
                     if (++batch.LoopIterations > BatchContext.LoopIterationLimit)

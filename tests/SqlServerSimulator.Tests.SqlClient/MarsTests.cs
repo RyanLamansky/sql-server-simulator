@@ -283,4 +283,98 @@ public sealed class MarsTests
             AreEqual(5, await inner.ExecuteScalarAsync(TestContext.CancellationToken));
         }
     }
+
+    /// <summary>
+    /// A MARS connection scopes a transaction a batch begins by SQL text to
+    /// that batch: one left open is rolled back at the batch's end with
+    /// Msg 3997, no other request needing to be active (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task BeginTran_LeftOpenByABatch_RollsBackWithMsg3997()
+    {
+        var simulation = Seeded();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+
+        await using (var begin = new SqlCommand("begin tran; insert t values (6, 'f')", connection))
+        {
+            var error = await ThrowsExactlyAsync<SqlException>(async () => await begin.ExecuteNonQueryAsync(TestContext.CancellationToken));
+            AreEqual(3997, error.Number);
+            AreEqual(1, error.LineNumber);
+        }
+
+        await using var state = new SqlCommand("select concat(@@trancount, ',', (select count(*) from t))", connection);
+        AreEqual("0,5", await state.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
+    /// While a reader is still receiving a large result, a transaction-manager
+    /// begin is Msg 3988, and a commit is Msg 3981 that rolls the transaction
+    /// back, after which requests are Msg 3989 until the reader finishes
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task TransactionRequests_WhileAReaderIsPending_AreRefused()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table big (id int primary key); insert big select value from generate_series(1, 20000); create table logt (v int)");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+
+        await using (var pending = new SqlCommand("select id from big order by id", connection))
+        await using (var reader = await pending.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            AreEqual(3988, Throws<SqlException>(connection.BeginTransaction).Number);
+        }
+
+        var transaction = connection.BeginTransaction();
+        await using (var insert = new SqlCommand("insert logt values (1)", connection, transaction))
+            _ = await insert.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        await using (var pending = new SqlCommand("select id from big order by id", connection, transaction))
+        await using (var reader = await pending.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            AreEqual(3981, Throws<SqlException>(transaction.Commit).Number);
+            await using var refused = new SqlCommand("select 1", connection);
+            AreEqual(3989, (await ThrowsExactlyAsync<SqlException>(async () => await refused.ExecuteScalarAsync(TestContext.CancellationToken))).Number);
+        }
+
+        await using var state = new SqlCommand("select concat(@@trancount, ',', (select count(*) from logt))", connection);
+        AreEqual("0,0", await state.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
+    /// The same refusal by SQL text: a <c>COMMIT</c> that would end the
+    /// transaction (state 1) or a <c>SAVE TRANSACTION</c> (state 2) while a
+    /// reader is pending rolls the transaction back, where a nested one only
+    /// counts down (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("commit", 1)]
+    [DataRow("save tran s", 2)]
+    public async Task TransactionStatements_WhileAReaderIsPending_AreMsg3981(string statement, int state)
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table big (id int primary key); insert big select value from generate_series(1, 20000)");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+
+        var transaction = connection.BeginTransaction();
+        await using (var pending = new SqlCommand("select id from big order by id", connection, transaction))
+        await using (var reader = await pending.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            await using var nested = new SqlCommand("begin tran; commit; select @@trancount", connection, transaction);
+            AreEqual(1, await nested.ExecuteScalarAsync(TestContext.CancellationToken));
+            await using var refused = new SqlCommand(statement, connection, transaction);
+            var error = await ThrowsExactlyAsync<SqlException>(async () => await refused.ExecuteNonQueryAsync(TestContext.CancellationToken));
+            AreEqual(3981, error.Number);
+            AreEqual(state, error.State);
+        }
+
+        await using var trancount = new SqlCommand("select @@trancount", connection);
+        AreEqual(0, await trancount.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
 }

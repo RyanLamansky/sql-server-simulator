@@ -170,6 +170,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             // below byte-for-byte.
             if (marsRequested)
             {
+                this.connection.ScopesTransactionsToBatch = true;
                 this.marsPacketSize = transport.PacketSize;
                 this.multiplexer = new SmpMultiplexer(transportStream, this);
                 await this.multiplexer.RunAsync(cancellationToken).ConfigureAwait(false);
@@ -195,7 +196,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     // naturally. Either way, acknowledge it — SqlClient waits for
                     // the DONE_ATTN before declaring the connection reusable — and
                     // keep the session alive.
-                    writer.WriteDone(Tds.DoneAttention, 0);
+                    await this.WriteAttentionAcknowledgmentAsync(writer, interrupted: false, cancellationToken).ConfigureAwait(false);
                     await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
                     pendingRead = transport.ReadMessageAsync(cancellationToken).AsTask();
                     continue;
@@ -282,11 +283,11 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 var attentionConsumed = runsEngine && this.connection!.ExecutionCancellationToken.IsCancellationRequested;
                 if (attentionConsumed)
                 {
-                    // Roll the transaction back only under XACT_ABORT ON, then
-                    // send the single DONE_ATTN the client is waiting for.
-                    this.ApplyCancellationTransactionSemantics();
-                    this.WriteTransactionEnvChanges(writer);
-                    writer.WriteDone(Tds.DoneAttention, 0);
+                    // The engine settled the cancelled batch as it unwound
+                    // (SimulatedDbConnection.SettleCancelledExecution); send
+                    // what that announces, then the single DONE_ATTN the
+                    // client is waiting for.
+                    await this.WriteAttentionAcknowledgmentAsync(writer, interrupted: true, cancellationToken).ConfigureAwait(false);
                 }
 
                 await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
@@ -518,6 +519,77 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     public void CancelConnectionExecution() => this.connection?.CancelExecution();
 
     /// <summary>
+    /// Serves one request of a MARS logical session: runs it under the
+    /// connection's execution gate into the session's deferred-flush writer,
+    /// then acknowledges any attention and sends the whole response.
+    /// </summary>
+    private async Task ServeMarsRequestAsync(SmpSession session, TdsMessage message, string? batchText, bool isBulkInsertBegin, TdsTokenWriter writer, CancellationToken cancellationToken)
+    {
+        bool cancelled;
+        await this.engineExecutionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        session.Executing = true;
+        try
+        {
+            // A request arriving while one a Msg 3981 abort left running is
+            // still sending its results is refused.
+            if (this.connection!.RefusesRequestAfterAbort)
+            {
+                WriteErrors(writer, AtLineOne(SimulatedSqlException.RequestWithoutValidTransactionDescriptor()));
+                writer.WriteDone(Tds.DoneError, 0);
+            }
+            else
+            {
+                switch (message.PacketType)
+                {
+                    case Tds.PacketSqlBatch:
+                        if (isBulkInsertBegin)
+                            this.BeginBulkInsert(batchText!, writer);
+                        else
+                            await this.ExecuteBatchAsync(message, writer, cancellationToken).ConfigureAwait(false);
+                        break;
+                    case Tds.PacketRpc:
+                        await this.ExecuteRpcMessageAsync(message, writer, cancellationToken).ConfigureAwait(false);
+                        break;
+                    case Tds.PacketBulkLoad:
+                        this.ExecuteBulkLoad(message, writer);
+                        break;
+                    case Tds.PacketTransactionManager:
+                        this.ExecuteTransactionManagerRequest(message, writer);
+                        break;
+                    default:
+                        writer.WriteErrorOrInfo(
+                            Tds.TokenError, 50000, 1, 16,
+                            $"The SqlServerSimulator network listener does not support TDS request type {message.PacketType}.",
+                            "SIMULATED", "", 1);
+                        writer.WriteDone(Tds.DoneError, 0);
+                        break;
+                }
+            }
+
+            // Read under the lock: the engine settled a cancelled batch (its
+            // XACT_ABORT rollback included) as it unwound here.
+            cancelled = this.connection!.ExecutionCancellationToken.IsCancellationRequested;
+        }
+        finally
+        {
+            session.Executing = false;
+            _ = this.engineExecutionGate.Release();
+        }
+
+        // Consume any attention the multiplexer signalled. Reading the flag
+        // with an exchange AFTER clearing Executing closes the race where the
+        // attention lands just as execution finishes: the multiplexer either
+        // saw Executing and left the flag for this exchange, or saw it cleared
+        // and fed the pipe — the exchange de-dupes so exactly one site emits
+        // the DONE_ATTN.
+        var attention = Interlocked.Exchange(ref session.AttentionState, 0) == 1;
+        if (cancelled || attention)
+            await this.WriteAttentionAcknowledgmentAsync(writer, interrupted: cancelled, cancellationToken).ConfigureAwait(false);
+
+        await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Runs the TDS batch loop for one SMP logical session. Mirrors the
     /// non-MARS loop but over a per-session transport riding the session's
     /// demuxed stream, guards engine execution with the per-connection
@@ -551,7 +623,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     // have consumed it when the attention raced completion.
                     if (Interlocked.Exchange(ref session.AttentionState, 0) == 1)
                     {
-                        writer.WriteDone(Tds.DoneAttention, 0);
+                        await this.WriteAttentionAcknowledgmentAsync(writer, interrupted: false, cancellationToken).ConfigureAwait(false);
                         await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
                     }
 
@@ -566,64 +638,18 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                     isBulkInsertBegin = IsBulkInsertBatch(batchText);
                 }
 
-                bool cancelled;
-                await this.engineExecutionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                session.Executing = true;
+                var serving = this.connection!;
+                serving.BeginMarsRequest();
                 try
                 {
-                    switch (message.PacketType)
-                    {
-                        case Tds.PacketSqlBatch:
-                            if (isBulkInsertBegin)
-                                this.BeginBulkInsert(batchText!, writer);
-                            else
-                                await this.ExecuteBatchAsync(message, writer, cancellationToken).ConfigureAwait(false);
-                            break;
-                        case Tds.PacketRpc:
-                            await this.ExecuteRpcMessageAsync(message, writer, cancellationToken).ConfigureAwait(false);
-                            break;
-                        case Tds.PacketBulkLoad:
-                            this.ExecuteBulkLoad(message, writer);
-                            break;
-                        case Tds.PacketTransactionManager:
-                            this.ExecuteTransactionManagerRequest(message, writer);
-                            break;
-                        default:
-                            writer.WriteErrorOrInfo(
-                                Tds.TokenError, 50000, 1, 16,
-                                $"The SqlServerSimulator network listener does not support TDS request type {message.PacketType}.",
-                                "SIMULATED", "", 1);
-                            writer.WriteDone(Tds.DoneError, 0);
-                            break;
-                    }
-
-                    // A mid-execution cancel rolls the transaction back only under
-                    // XACT_ABORT ON; captured under the lock so the shared
-                    // transaction isn't touched concurrently with another session.
-                    cancelled = this.connection!.ExecutionCancellationToken.IsCancellationRequested;
-                    if (cancelled)
-                        this.ApplyCancellationTransactionSemantics();
+                    await this.ServeMarsRequestAsync(session, message, batchText, isBulkInsertBegin, writer, cancellationToken).ConfigureAwait(false);
                 }
                 finally
                 {
-                    session.Executing = false;
-                    _ = this.engineExecutionGate.Release();
+                    // The request is done once its whole response has gone
+                    // out, which for a large result waits on the client.
+                    serving.EndMarsRequest();
                 }
-
-                // Consume any attention the multiplexer signalled. Reading the
-                // flag with an exchange AFTER clearing Executing closes the race
-                // where the attention lands just as execution finishes: the
-                // multiplexer either saw Executing and left the flag for this
-                // exchange, or saw it cleared and fed the pipe — the exchange
-                // de-dupes so exactly one site emits the DONE_ATTN.
-                var attention = Interlocked.Exchange(ref session.AttentionState, 0) == 1;
-                if (cancelled || attention)
-                {
-                    this.WriteTransactionEnvChanges(writer);
-                    writer.WriteDone(Tds.DoneAttention, 0);
-                }
-
-                await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException or OperationCanceledException or InvalidDataException or AuthenticationException)
@@ -1175,19 +1201,36 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         hasOutcome || trailingTokensFollow || this.pendingInfoMessages.Count > 0 ? Tds.DoneMore : Tds.DoneFinal;
 
     /// <summary>
-    /// Applies the probe-confirmed transaction semantics of a cancelled batch:
-    /// under <c>SET XACT_ABORT ON</c> an open transaction rolls back (the
-    /// client observes <c>@@TRANCOUNT</c> 0 afterward); under the default
-    /// <c>OFF</c> the transaction survives the cancel intact and the session
-    /// stays usable. Variables and the aborted statements' unrun side effects
-    /// go with the ended batch either way; committed statements' effects and
-    /// the connection's temp tables persist.
+    /// Acknowledges an attention as real does (captured 2026-09-30 against
+    /// SQL Server 2025 through a cleartext tee). When it interrupted the
+    /// batch, the batch's response ends first: the transaction ENVCHANGEs its
+    /// unwinding recorded, Msg 3621 when it ended a write (see
+    /// <see cref="SimulatedDbConnection.AttentionEndedWrite"/>), and a DONE
+    /// carrying <c>DONE_ERROR</c>, which takes the place — and the statement
+    /// kind — of a completed statement's DONE nothing has followed yet. The
+    /// <c>DONE_ATTN</c> the client waits for before reusing the connection
+    /// follows as a message of its own, and is the whole acknowledgment of an
+    /// attention that found nothing running.
     /// </summary>
-    private void ApplyCancellationTransactionSemantics()
+    private async ValueTask WriteAttentionAcknowledgmentAsync(TdsTokenWriter writer, bool interrupted, CancellationToken cancellationToken)
     {
         var connection = this.connection!;
-        if (connection.XactAbort && connection.CurrentTransaction is { } tx)
-            tx.EndRollback();
+        var curCmd = StatementDoneKind.Batch;
+        if (interrupted && writer.TryTakeTrailingDone(out var pending))
+            curCmd = pending;
+        this.WriteTransactionEnvChanges(writer);
+        if (interrupted)
+        {
+            if (connection.AttentionEndedWrite)
+            {
+                connection.AttentionEndedWrite = false;
+                var message = SimulatedSqlException.AttentionStatementTerminatedMessage(connection);
+                writer.WriteErrorOrInfo(Tds.TokenInfo, message.Number, message.State, message.Class, message.Message, ServerName, message.Procedure, message.LineNumber);
+            }
+            writer.WriteDoneToken(Tds.TokenDone, Tds.DoneError, 0, curCmd);
+            await writer.FlushAsync(final: true, cancellationToken).ConfigureAwait(false);
+        }
+        writer.WriteDoneToken(Tds.TokenDone, Tds.DoneAttention, 0, StatementDoneKind.Batch);
     }
 
     /// <summary>
@@ -1256,6 +1299,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             fresh.Security = Simulation.BuildAuthenticatedSecurityContext(principal, loginName);
 
         fresh.FramesEveryStatement = true;
+        fresh.ScopesTransactionsToBatch = this.multiplexer is not null;
         this.connection = fresh;
     }
 

@@ -21,6 +21,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.IsolationLevel = isolationLevel;
         this.TransactionId = simulation.AllocateTransactionId();
         this.target = this;
+        connection.LastBegunTransactionId = this.TransactionId;
         connection.RecordTransactionEvent(TransactionEvent.Begin, this);
     }
 

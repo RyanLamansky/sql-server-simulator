@@ -72,8 +72,38 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
         {
             Buffer.BlockCopy(this.buffer, offset, this.buffer, 0, this.length - offset);
             this.length -= offset;
+            this.trailingDoneAt -= offset;
         }
     }
+
+    /// <summary>
+    /// Where the last batch-level DONE written starts, while it may still be
+    /// the buffer's final token (see <see cref="TryTakeTrailingDone"/>).
+    /// </summary>
+    private int trailingDoneAt = -1;
+
+    /// <summary>
+    /// Takes back a batch-level DONE that is still the last thing buffered —
+    /// no token written after it and no flush having sent it — handing back
+    /// the statement kind it named. An attention acknowledgment folds such a
+    /// DONE into the <c>DONE_ERROR</c> that ends the interrupted response, as
+    /// real, whose statement DONE waits for the next token, does.
+    /// </summary>
+    public bool TryTakeTrailingDone(out ushort curCmd)
+    {
+        var at = this.trailingDoneAt;
+        if (at < 0 || at + DoneTokenLength != this.length)
+        {
+            curCmd = 0;
+            return false;
+        }
+        curCmd = BinaryPrimitives.ReadUInt16LittleEndian(this.buffer.AsSpan(at + 3));
+        this.length = at;
+        this.trailingDoneAt = -1;
+        return true;
+    }
+
+    private const int DoneTokenLength = 13;
 
     public void WriteByte(byte value)
     {
@@ -228,6 +258,8 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     /// </summary>
     public void WriteDoneToken(byte token, ushort status, long rowCount, ushort curCmd = 0)
     {
+        if (token == Tds.TokenDone)
+            this.trailingDoneAt = this.length;
         this.WriteByte(token);
         this.WriteUInt16(status);
         this.WriteUInt16(curCmd);

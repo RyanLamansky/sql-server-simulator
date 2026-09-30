@@ -304,7 +304,9 @@ Three shapes qualify, all reusing one composite ordered view:
   A deep page measured **~18× faster than the equivalent `OFFSET … FETCH`** (1.2 vs 22.5 ms/query at ~90 % depth over 30 000 rows) — the gap grows with depth, since `OFFSET` streams through every skipped row while the cursor seeks straight to its position.
   Only matched without a pinned prefix or a same-column range fold (those are the other ways the leading column gets bounded); an equality-pinned tenant prefix plus a keyset cursor is left for later.
 
-The ordered candidate list is still built eagerly (O(rows) addresses) for the non-keyset shapes, so their win is "no sort + materialize only what's taken," not sublinear; a deep `OFFSET` over them streams past the skipped rows too, so its win is just the eliminated sort.
+An unbounded ordered scan reads the cache entry's key order, an address array kept until a write changes a bucket (`CacheEntry.KeyOrder`), so a repeated read of an unchanged table indexes into it rather than walking the ordered view again; a bounded one (a pin, a range, a keyset cursor) still builds its slice per query.
+A descending order reads the same array from its end.
+A deep `OFFSET` with no residual WHERE passes its skipped addresses over without fetching their rows (see [`query.md`](query.md#the-rows-an-offset-skips)), so it costs a walk of offset + fetch addresses, as real's Top over the ordered scan does; with a residual WHERE every skipped row is still read and judged, just not projected.
 The keyset seek is the one that turns deep pagination sublinear in the cursor position.
 
 Every shape rides any leading-prefix index — a PK / UNIQUE key *or* a secondary `CREATE INDEX` — identically: the ordered view is built from the live heap-row bytes keyed by whatever ordinal list the index provides, so there's no clustered-vs-nonclustered distinction (the seek / range / order paths all enumerate `KeyConstraints` then `Indexes`).

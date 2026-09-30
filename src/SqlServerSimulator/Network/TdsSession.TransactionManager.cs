@@ -72,6 +72,8 @@ internal sealed partial class TdsSession
                         // sent (probed 2026-09-28 against SQL Server 2025). The
                         // parallel-transaction refusal is SqlClient's own
                         // client-side rule, not the server's.
+                        if (this.connection!.OtherMarsRequestsInFlight)
+                            throw AtLineOne(SimulatedSqlException.NewTransactionWhileRequestsRunning());
                         var isolationLevel = MapIsolationLevel(this.lastTmIsolation);
                         if (this.connection!.CurrentTransaction is { } open)
                         {
@@ -103,6 +105,7 @@ internal sealed partial class TdsSession
                         // state 3 and opens nothing (probed 2026-09-28).
                         var open = this.connection!.CurrentTransaction
                             ?? throw SimulatedSqlException.NoCorrespondingBeginCommit(state: 3);
+                        RefuseWithRequestsPending(open, state: 1);
                         // The request ends one nesting level, and the
                         // transaction only with the last.
                         if (open.TranCount > 1)
@@ -148,6 +151,7 @@ internal sealed partial class TdsSession
                         var name = ReadTransactionName(payload, ref offset);
                         var open = this.connection!.CurrentTransaction
                             ?? throw SimulatedSqlException.SaveTransactionWithoutTransaction();
+                        RefuseWithRequestsPending(open, state: 2);
                         open.SetSavepointByName(name);
                         writer.WriteDone(Tds.DoneFinal, 0);
                         break;
@@ -175,6 +179,30 @@ internal sealed partial class TdsSession
             writer.WriteDone(Tds.DoneError, 0);
         }
 #pragma warning restore CA1031
+    }
+
+    /// <summary>
+    /// A commit or save a MARS connection refuses while another request is
+    /// still sending results (see
+    /// <see cref="SimulatedDbConnection.RefuseTransactionOperationWithRequestsPending"/>),
+    /// reported at line 1 as real reports a transaction-manager request's.
+    /// </summary>
+    private static void RefuseWithRequestsPending(SimulatedDbTransaction open, byte state)
+    {
+        try
+        {
+            open.Owner.RefuseTransactionOperationWithRequestsPending(open, state);
+        }
+        catch (SimulatedSqlException refused)
+        {
+            throw AtLineOne(refused);
+        }
+    }
+
+    private static SimulatedSqlException AtLineOne(SimulatedSqlException error)
+    {
+        error.ResolveDiagnostics(1, 0, "");
+        return error;
     }
 
     /// <summary>

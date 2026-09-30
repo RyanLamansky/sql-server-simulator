@@ -690,6 +690,8 @@ partial class Simulation
         if (scope.ContainsKey(name))
             throw SimulatedSqlException.CursorAlreadyExists(name);
         scope[name] = cursor;
+        if (!local)
+            (batch.Connection.CursorsDeclaredInExecution ??= []).Add(cursor);
     }
 
     /// <summary>

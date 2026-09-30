@@ -220,6 +220,15 @@ An **unaliased** derived table is still accepted, where real requires the alias 
 - TOP + OFFSET → **Msg 10741**.
 - Counts resolve at parse time (constants, parameters, arithmetic).
 
+### The rows an `OFFSET` skips
+
+Real evaluates the select list above its Top, so a row the `OFFSET` skips is never projected: `1 / (id - 5)` over a page past `id` 5 returns the page, while the same expression on a row the page returns is Msg 8134 (probed 2026-09-30 against SQL Server 2025).
+The streaming projection models it — the WHERE still judges each skipped row, the select list doesn't run — and so does the index-ordered scan behind it, which does less still.
+
+When an index supplies the `ORDER BY` order (see [`indexes.md`](indexes.md#order-by-elimination)) and no residual WHERE stands between the scan and the page, every row the scan yields is a result row, so the scan passes the `OFFSET`'s rows over where it walks them — locked and counted in `STATISTICS IO` like any row it reads, but never fetched, decoded or projected — and stops once the `FETCH` is full, which is real's plan: a Top over the ordered index scan reading offset + fetch rows.
+Measured on a 150k-row table paged at offset 140k, fetch 100, `ORDER BY` the primary key: **53 ms → 5 ms** (real ~6 ms), with a residual WHERE 62 ms → 18 ms (real ~7 ms), and the first page 11.6 ms → 0.04 ms, since the key order it walks is kept between writes rather than rebuilt per query.
+A sort the index can't serve still sorts and projects every row — see [`backlog.md`](backlog.md).
+
 ## `TOP n [PERCENT] [WITH TIES]`
 - `TOP n` — the plain integer row cap; streams when no ORDER BY / DISTINCT, else applied after the buffered sort.
 - `TOP n PERCENT` — the cap is `ceil(rowcount × n / 100)` (probe-confirmed against SQL Server 2025).

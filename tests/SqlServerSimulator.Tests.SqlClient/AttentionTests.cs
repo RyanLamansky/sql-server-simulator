@@ -93,6 +93,67 @@ public sealed class AttentionTests
         await AssertSessionReusableAsync(connection, TestContext.CancellationToken);
     }
 
+    /// <summary>
+    /// A timeout inside a single-source statement's row loop — two billion
+    /// generated rows, none passing — is noticed at the loop's own safe point;
+    /// the session stays usable, reading <c>@@ROWCOUNT</c> 0 as real's does
+    /// after an attention.
+    /// </summary>
+    [TestMethod]
+    public async Task CommandTimeout_InsideASingleSourceRowLoop_RaisesTimeoutAndSessionStaysReusable()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        await using (var command = new SqlCommand("select 1 union all select 2; select count(*) from generate_series(1, 2000000000) where value < 0", connection) { CommandTimeout = 1 })
+        {
+            var error = await ThrowsExactlyAsync<SqlException>(
+                async () => await command.ExecuteNonQueryAsync(TestContext.CancellationToken));
+            AreEqual(-2, error.Number);
+        }
+
+        IsLessThan(10, elapsed.Elapsed.TotalSeconds);
+        await using var rowCount = new SqlCommand("select @@rowcount", connection);
+        AreEqual(0, await rowCount.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
+    /// A timeout that interrupts a write — here inside the scalar function it
+    /// calls per row — is acknowledged after Msg 3621; the write rolls back
+    /// and a transaction an earlier batch began stays open. SqlClient lists
+    /// the notice after its own errors on its synchronous path and drops it on
+    /// its asynchronous one, against real and the simulator alike (captured
+    /// 2026-09-30 against SQL Server 2025 through SqlClient 7.0.2).
+    /// </summary>
+    [TestMethod]
+    public async Task CommandTimeout_InsideAWrite_SendsMsg3621AndRollsTheWriteBack()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table big (v int); insert big select value from generate_series(1, 1000); create table logt (v int)");
+        Wire.ExecInProc(simulation, "create function dbo.slow(@x int) returns int as begin declare @i int = 0; while @i < 2000 set @i += 1; return @i + @x end");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using (var begin = new SqlCommand("begin tran", connection))
+            _ = await begin.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        await using (var command = new SqlCommand("insert logt select dbo.slow(v) from big", connection) { CommandTimeout = 1 })
+        {
+            // SqlClient's synchronous path is the one that shows the notice.
+            var error = Throws<SqlException>(() => command.ExecuteNonQuery());
+            AreEqual(-2, error.Number);
+            Contains((3621, 1), error.Errors.Cast<SqlError>().Select(static e => (e.Number, e.LineNumber)));
+
+            error = await ThrowsExactlyAsync<SqlException>(async () => await command.ExecuteNonQueryAsync(TestContext.CancellationToken));
+            AreEqual(-2, error.Number);
+            HasCount(1, error.Errors);
+        }
+
+        await using var state = new SqlCommand("select concat(@@trancount, ',', (select count(*) from logt)); rollback", connection);
+        AreEqual("1,0", await state.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
     [TestMethod]
     public async Task Cancel_DuringWaitfor_RaisesCancelAndSessionStaysReusable()
     {

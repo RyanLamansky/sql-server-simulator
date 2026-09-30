@@ -761,6 +761,7 @@ partial class Simulation
                 var rows = new List<SqlValue[]>();
                 foreach (var rowBytes in ClusteredScan.Rows(sourceTable, batch.Connection.StatementIo))
                 {
+                    batch.PollCancellation();
                     var fullValues = DecodeFullRow(sourceTable, rowBytes);
                     EvaluateComputedColumns(sourceTable, fullValues, batch);
                     rows.Add(fullValues);
@@ -1760,6 +1761,7 @@ partial class Simulation
                 // discovery order, but with no per-target source loop.
                 foreach (var (pageIndex, slotIndex, rowBytes) in ClusteredScan.RowsWithAddress(destinationTable, context.Connection.StatementIo))
                 {
+                    context.Batch.PollCancellation();
                     var targetValues = DecodeFullRow(destinationTable, rowBytes);
                     EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
                     Step(matchedByTarget.TryGetValue((pageIndex, slotIndex), out var matchedSources)
@@ -1803,6 +1805,7 @@ partial class Simulation
 
             foreach (var (pageIndex, slotIndex, rowBytes) in ClusteredScan.RowsWithAddress(destinationTable, context.Connection.StatementIo))
             {
+                context.Batch.PollCancellation();
                 var targetValues = DecodeFullRow(destinationTable, rowBytes);
                 EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
 

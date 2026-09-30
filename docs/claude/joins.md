@@ -81,7 +81,9 @@ Correctness over a rare, typically tiny shape (SSMS's Table Designer partition-m
 `ApplyJoin` picks the operator per join level — and is the single point where the strategy (hash vs nested loop) is decided.
 
 **Cancellation inside the fold.**
-Every join operator polls the execution's cancellation once per row it reads from its left (`ThrowIfExecutionCancelled`), so a `CommandTimeout` or `Cancel()` interrupts a long fold instead of waiting for the statement boundary — see [`control-flow.md`](control-flow.md) for how the interrupted statement surfaces.
+Every join operator polls the execution's cancellation once per row it reads from its left (`BatchContext.ThrowIfCancelled`), and the fold's leftmost source every 32nd row it yields (`BatchContext.PollCancellation` in `EnumerateLeftmost`), so a `CommandTimeout` or `Cancel()` interrupts a long fold — or a single-source statement, whose only level is the leftmost — instead of waiting for the statement boundary.
+The join operators look on every row because one left row can cost a whole right-side scan; the leftmost strides because a scan's rows are cheap and the look reads through the connection, and the stride's counter lives on the batch so a source read a row at a time — a recursive CTE's member, a correlated inner plan — still reaches it.
+See [`control-flow.md`](control-flow.md#waitfor-delay) for how the interrupted statement surfaces.
 
 ### Equi-join fast path
 

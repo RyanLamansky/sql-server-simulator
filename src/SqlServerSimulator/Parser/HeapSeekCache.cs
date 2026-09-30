@@ -135,18 +135,21 @@ internal sealed class HeapSeekCache
     // ascending in-range list yields the descending page). Reuses the same
     // ordered view the equality / range seeks build, inheriting the
     // incremental no-warm-up maintenance; within-key tie order is arbitrary
-    // either way, matching ORDER BY's unspecified tie-break.
-    public List<(int Page, int Slot)> OrderedSeek(
-        Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, bool descending,
+    // either way, matching ORDER BY's unspecified tie-break. The addresses
+    // always come back ascending — a descending caller reads them from the
+    // end — and an unbounded walk is the entry's memoized key order, shared
+    // with every reader until the next write, so the caller must not change
+    // it.
+    public (int Page, int Slot)[] OrderedSeek(
+        Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons,
         SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive)
     {
         lock (this.gate)
         {
             var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons);
-            var ordered = entry.OrderedCandidates(lower, lowerInclusive, upper, upperInclusive);
-            if (descending)
-                ordered.Reverse();
-            return ordered;
+            return lower is null && upper is null
+                ? entry.KeyOrder()
+                : [.. entry.OrderedCandidates(lower, lowerInclusive, upper, upperInclusive)];
         }
     }
 
@@ -396,6 +399,16 @@ internal sealed class HeapSeekCache
         // needs it, so equality-only workloads never pay for it.
         private SortedSet<SqlValueKey>? sortedKeys;
 
+        // Every address in ascending key order, as the unbounded ordered walk
+        // lists them, kept until a write changes a bucket (AddRid / RemoveRid
+        // drop it). A paged ordered read — the same ORDER BY over an unchanged
+        // table, page after page — then indexes straight to its OFFSET instead
+        // of walking the ordered view to build the list again.
+        private (int Page, int Slot)[]? keyOrder;
+
+        public (int Page, int Slot)[] KeyOrder() =>
+            this.keyOrder ??= [.. this.OrderedCandidates(null, false, null, false)];
+
         // Hash views for shorter-arity equality probes against this (widened)
         // entry, keyed by probe arity, each mapping a leading-prefix key to the
         // union of its full-key buckets. Built lazily on the first probe of an
@@ -551,6 +564,7 @@ internal sealed class HeapSeekCache
         // sync — a key joins sortedKeys exactly when its bucket is first created.
         private void AddRid(SqlValueKey key, (int Page, int Slot) rid)
         {
+            this.keyOrder = null;
             if (!this.Buckets.TryGetValue(key, out var bucket))
             {
                 this.Buckets[key] = bucket = [];
@@ -572,6 +586,7 @@ internal sealed class HeapSeekCache
 
         private void RemoveRid(SqlValueKey key, (int Page, int Slot) rid)
         {
+            this.keyOrder = null;
             if (this.Buckets.TryGetValue(key, out var bucket))
             {
                 _ = bucket.Remove(rid);

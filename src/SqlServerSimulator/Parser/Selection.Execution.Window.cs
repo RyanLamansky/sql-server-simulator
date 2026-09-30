@@ -860,6 +860,9 @@ internal sealed partial class Selection
                             {
                                 for (var i = 0; i < count; i++)
                                 {
+                                    // Quadratic in the frame, so each row
+                                    // polls for a cancel.
+                                    batch.PollCancellation();
                                     var (rebuildStart, rebuildEnd) = ComputeFrameExtent(win, indices, perWindowKeys, w, orderByList, i);
                                     var aggregator = Aggregator.Create(aggregate, operandType, resultType, batch: batch);
                                     for (var j = rebuildStart; j <= rebuildEnd; j++)

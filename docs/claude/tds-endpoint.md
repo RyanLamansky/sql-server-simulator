@@ -96,9 +96,9 @@ The session maps 1:1 onto a `SimulatedDbConnection`; execution flows through `Si
 - **Reset-connection status bit** (pooled-connection recycle): backing connection disposed and recreated on the same database, acked with the empty ENVCHANGE type 18 before the batch's tokens.
   The fresh session keeps its predecessor's `@@SPID`, LOGIN7 client identity and physical-connection record, as real's `sp_reset_connection` does.
 - **Attention** (type 6, mid-stream cancel): a client `SqlCommand.Cancel()` or expiring `CommandTimeout` sends an attention while a batch executes or streams.
-  The session notices it *concurrently* — see [Mid-stream attention](#mid-stream-attention-cancel) below — aborts the batch at the next safe point, and replies with a single DONE carrying `DONE_ATTN` and **no error token** (SqlClient synthesizes the surfaced exception itself: Msg -2 "Execution Timeout Expired" for a timeout, Msg 0 "Operation cancelled by user" for an explicit cancel).
+  The session notices it *concurrently* — see [Mid-stream attention](#mid-stream-attention-cancel) below — aborts the batch at the next safe point, ends the interrupted response with a `DONE_ERROR` DONE, and acknowledges with a DONE carrying `DONE_ATTN` as a message of its own, with **no error token** (SqlClient synthesizes the surfaced exception itself: Msg -2 "Execution Timeout Expired" for a timeout, Msg 0 for an explicit cancel).
   The session stays alive and reusable.
-  An idle attention (or one racing a just-completed response) is acked the same way.
+  An idle attention (or one racing a just-completed response) is acked with the `DONE_ATTN` alone.
 - **Bulk-load (7)**: `SqlBulkCopy` — the `INSERT BULK` SQL batch opens bulk mode and the following BulkLoadBCP data packet streams rows.
   Full flow + options matrix in [Bulk load](#bulk-load-sqlbulkcopy) below.
 
@@ -529,10 +529,7 @@ A real build number is load-bearing for SSMS's per-build client feature gates (A
 - Credential-enforcement edges not modeled: password policy (`CHECK_POLICY` / expiration / lockout) never enforced; no login auditing.
 - RPC parameters are gap-free in both directions: every input TYPE_INFO is accepted — TVP / UDT / `sql_variant` / `text` / `ntext` / `image` — every client value-stream column type (bulk / TVP) decodes through the shared `TdsWireValue` / `TdsColumnDecoder`, and output-direction UDT / `sql_variant` parameters write back as RETURNVALUE tokens (see [CLR-UDT / sql_variant parameters](#clr-udt--sql_variant-parameters)).
   Non-cursor well-known ProcIDs beyond the sp_execute/sp_prepare family are rejected with ERROR 50000 naming the id.
-- Mid-stream attention (cancel) ships — see below.
-  Residual: cancel reaction is bounded by the current statement's *materialization*, not just its streaming, because a statement's rows are materialized in one synchronous step before they stream (a cancel mid-way through a compute-heavy `SELECT`/sort waits for that materialization to finish, then discards the result at the outcome boundary; real streams-as-it-computes and stops sooner).
-  The common streaming-bound drain interrupts promptly between rows.
-  A single in-flight DML statement likewise runs to completion before the abort is observed (no interior row-loop cancellation), so it isn't rolled back the way real's mid-statement abort would; multi-statement batches abort at the statement boundary correctly.
+- Mid-stream attention (cancel) ships — see below, including inside a single statement.
 - SPID in packet headers truncates to 16 bits.
 - **TDS 7.1–7.4 clients connect** (the LOGINACK always answers 7.4, or 8.0 under strict); **TDS 7.0** (SQL Server 7.0 / 1998, `tds_version=7.0` in FreeTDS/pymssql) is **not modeled** — its divergent pre-modern-PRELOGIN handshake makes the session close early ("Unexpected EOF" client-side) rather than complete.
   Real SQL Server 2025 still accepts 7.0, so matching it would mean implementing a 27-year-old handshake variant no modern client (SqlClient, JDBC, ODBC 18, pymssql-default) ever requests and the managed oracle can't exercise; deferred as a legacy-protocol edge with no fidelity payoff short of full support.
@@ -554,16 +551,22 @@ Bulk-insert-begin (`INSERT BULK`, whose next packet is the bulk-data type-7, not
 
 **Where the engine stops (safe points).**
 `SimulatedDbConnection` owns a per-execution `CancellationTokenSource`, replaced at the top of `CreateResultSetsForCommand` (so a cancel against a prior command on the same connection doesn't bleed forward) and connection-scoped so proc / UDF / dynamic-SQL bodies inherit it.
-`DispatchStatementsUntil` and the `WHILE` loop poll it at statement / iteration boundaries; the join operators poll it per left row inside a statement; `WAITFOR DELAY` waits on its wait handle; `StreamOutcomesAsync` polls between outcomes and between rows (never mid-ROW-token).
-On cancel the streamer returns a "cancelled" flag; the batch loop applies the transaction semantics below and writes the single `DONE_ATTN`.
+`DispatchStatementsUntil` and the `WHILE` loop poll it at statement / iteration boundaries, raising the attention inside a body that runs within a caller's statement; inside a statement the row loops poll it — the join operators per left row, a fold's leftmost source every 32nd row, a recursive CTE per iteration, the DML target walks per row — and raise the attention the interrupted statement rolls back on (the list and the rules are in [`control-flow.md`](control-flow.md#waitfor-delay)); `WAITFOR DELAY` waits on its wait handle; `StreamOutcomesAsync` polls between outcomes and between rows (never mid-ROW-token).
+On cancel the streamer returns a "cancelled" flag and the batch loop writes the acknowledgment below.
+
+**The acknowledgment's shape** (captured 2026-09-30 against SQL Server 2025 through a cleartext tee).
+Real ends the interrupted response first: whatever it had buffered, the transaction ENVCHANGEs the unwinding caused, Msg 3621 when the cancel ended a write, then a DONE carrying `DONE_ERROR` that takes the place of a completed statement's DONE nothing has followed yet (it keeps that statement's `CurCmd`, `0x00FD` otherwise), with the end-of-message bit; the `DONE_ATTN` follows as a message of its own.
+`TdsSession.WriteAttentionAcknowledgmentAsync` writes the same, taking back a still-buffered trailing DONE (`TdsTokenWriter.TryTakeTrailingDone`) to fold it in.
+The fold is load-bearing for what SqlClient shows: with an extra DONE ahead of the notice, SqlClient's reader dropped the Msg 3621 real's response gets listed.
+SqlClient also drops it on its asynchronous path (`ExecuteNonQueryAsync` shows its Msg -2 alone where `ExecuteNonQuery` lists the notice after it), from a response carrying a transaction ENVCHANGE — a transaction the batch began, even one it committed — and only sometimes lists it after an explicit `Cancel()`; and it sometimes adds its own "Operation cancelled by user." Msg 0 after its first error, a client-side race seen against real and the simulator alike, so tests assert on neither.
 
 **Transaction / session semantics (probed).**
 Under the default `SET XACT_ABORT OFF`, a cancel leaves an open transaction **intact and usable** (`@@TRANCOUNT` unchanged, committed statements' rows preserved).
 Under `SET XACT_ABORT ON`, the cancel **rolls the transaction back** (`@@TRANCOUNT` → 0).
-The cancel path reads the same `SimulatedDbConnection.XactAbort` the option's error promotion does — see [`transactions.md`](transactions.md#set-xact_abort).
+The engine applies it as the cancelled batch unwinds (`SimulatedDbConnection.SettleCancelledExecution`), reading the same `XactAbort` the option's error promotion does — see [`transactions.md`](transactions.md#set-xact_abort) — and resets `@@ROWCOUNT` / `@@ERROR` and deallocates the cursors the batch declared there too, for both front doors.
 Batch-scoped variables go with the ended batch either way; connection-scoped temp tables persist.
-`SimulatedDbCommand.Cancel()` routes to the same machinery, so an in-process `Cancel()` from another thread interrupts a running `WAITFOR` / long batch identically (the reader then drains already-materialized rows, nothing left in flight — the documented in-process reaction bound).
-Oracle: `AttentionTests` (Tests.SqlClient), `WaitForDelayTests.Delay_InterruptedByInProcessCancel_ReturnsPromptly` (Tests).
+`SimulatedDbCommand.Cancel()` routes to the same machinery, so an in-process `Cancel()` from another thread interrupts a running `WAITFOR` / long batch / long statement identically.
+Oracle: `AttentionTests` (Tests.SqlClient), `StatementCancellationTests` and `WaitForDelayTests.Delay_InterruptedByInProcessCancel_ReturnsPromptly` (Tests).
 
 **Partial response packets don't flush early (probed).**
 The server accumulates response tokens into a TDS packet and sends it only when the packet fills or the response ends — real SQL Server behaves identically: for `select @p; waitfor delay '00:00:30'` the one-row first result set sits in the send buffer for the full 30 seconds and the client's first `ReadAsync` blocks until the batch ends, on real and sim alike.
@@ -620,7 +623,16 @@ The cost is a fully-materialized response per session (bounded by the largest un
 
 **Interleaving / DML (probed).**
 A concurrent DML on a second session while a SELECT reader is open runs without deadlock (real interleaves SELECT at statement boundaries, runs DML atomically; the buffered model matches — A's SELECT fully materializes, B's DML runs).
-The simulator never produces the "MARS batch interrupted" **Msg 8628/8651** family (full serialization means no interior interrupt point) — a divergence, not reachable by the lazy-load / split-query shapes.
+
+**Transactions a MARS batch begins (probed 2026-09-30 against SQL Server 2025).**
+A transaction a batch begins by SQL text — `BEGIN TRANSACTION`, or an `IMPLICIT_TRANSACTIONS` statement — is scoped to that batch: one still open when the batch ends rolls back with **Msg 3997** at line 1, whether or not another request was active, after the batch's own errors (an unbalanced procedure's Msg 266 included); after an `sp_executesql` RPC it rolls back without the message.
+A transaction the API began, or an earlier batch, is not the batch's to end, so a nested `BEGIN TRANSACTION` inside one doesn't trip it (`Simulation.EndBatchScopedTransaction`, keyed on `SimulatedDbConnection.TransactionIdAtExecutionStart`).
+While another request is still sending its results, a transaction-manager begin is **Msg 3988**, and a commit ending the transaction — through the API or by `COMMIT` — is **Msg 3981** state 1, a save point state 2; either rolls the transaction back and ends the batch, a rollback goes ahead, and until the pending request finishes every new request is **Msg 3989**.
+A request counts as pending from its arrival until its whole response has gone out, which for a result larger than the SMP window waits on the client (`SimulatedDbConnection.BeginMarsRequest` / `EndMarsRequest`).
+Neither 8628 nor 8651 is a MARS error: the first is an optimizer timeout, the second a memory-grant failure (their `sys.messages` text, read 2026-09-30).
+
+**Not modeled yet:** real streams each request's results as the client reads them, so a SELECT a reader is still draining sees a second request's writes to the rows it hasn't reached — a `DELETE` of half the table left its reader with half the rows, and an `UPDATE` showed its new values (probed 2026-09-30).
+The simulator runs each request whole under the gate, so the reader keeps the rows as they were when it ran.
 
 **Shared session state (probed identical on real).**
 One `@@SPID` across all sessions; temp tables and `SET` state shared; the connection-level transaction shared.
@@ -638,7 +650,7 @@ The in-process `SimulatedDbConnection` has no wire and no MARS enforcement — o
 This is the deliberate contract: the in-process stand-in behaves like a MARS-enabled connection (the permissive superset EF's lazy loading needs).
 See [`data-reader.md`](data-reader.md#in-process-mars-overlapping-readers).
 
-**Divergences (all frame-shape-safe — spec-consistent frames native SNI accepts):** Msg 8628/8651 never raised; a session's response fully materializes under the gate (memory-bound for very large results, same class as the attention-materialization residual); the mid-message ACK fires once **per** EOM-clear packet whereas the real server ACKs roughly every two (both advance a monotonic `received + 4` window, so the extra ACKs are harmless); a cancel's DONE_ATTN rides one DATA packet where the real server split it across two; and the attention-during-execution ACK can trail its DATA response by a thread-scheduling race (its SEQNUM still equals the last-sent DATA sequence, so it stays spec-valid).
+**Divergences (all frame-shape-safe — spec-consistent frames native SNI accepts):** a session's response fully materializes under the gate (memory-bound for very large results); the mid-message ACK fires once **per** EOM-clear packet whereas the real server ACKs roughly every two (both advance a monotonic `received + 4` window, so the extra ACKs are harmless); a cancel's DONE_ATTN rides one DATA packet where the real server split it across two; and the attention-during-execution ACK can trail its DATA response by a thread-scheduling race (its SEQNUM still equals the last-sent DATA sequence, so it stays spec-valid).
 **Not verified on native SNI from this environment** (Linux has only managed SNI): the frame-shape corrections above are derived from the real cleartext trace — the shape native SNI provably accepts — but a Windows re-test is the final confirmation.
 
 ## Testing

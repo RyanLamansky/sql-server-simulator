@@ -625,6 +625,7 @@ partial class Simulation
         var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, table, positionedCursor is not null);
         foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
         {
+            context.Batch.PollCancellation();
             // Positioned UPDATE (WHERE CURRENT OF): target only the row the
             // cursor is sitting on, identified by its stable heap address.
             if (positionedCursor is { } positioned && !CursorRowMatches(positioned, (pageIndex, slotIndex)))

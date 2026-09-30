@@ -997,17 +997,26 @@ internal sealed partial class Selection
     /// or drop a row. ORDER BY elimination is the one optimization observable if
     /// wrong, so the bar to apply it is deliberately high.
     /// </para>
+    /// <para>
+    /// <paramref name="skip"/> is the statement's OFFSET; when no residual WHERE
+    /// stands between the scan and the page, the scan passes that many rows over
+    /// unread and reports it in <paramref name="skipped"/>, leaving the caller
+    /// the rest of the OFFSET to apply.
+    /// </para>
     /// </summary>
     private static bool TryApplyOrderedScan(
         FromSource[] sources,
         JoinSpec[] joins,
         List<OrderBySpec> orderBy,
         List<BooleanExpression> excluders,
+        int skip,
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver,
-        out FromSource[] orderedSources)
+        out FromSource[] orderedSources,
+        out int skipped)
     {
         orderedSources = sources;
+        skipped = 0;
         if (sources.Length != 1 || joins.Length != 0 || orderBy.Count == 0)
             return false;
         var source = sources[0];
@@ -1201,7 +1210,7 @@ internal sealed partial class Selection
 
         var cache = HeapSeekCache.For(table.Heap);
         var candidates = cache.OrderedSeek(
-            table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons, descending,
+            table.Heap, source.StoredSchema, source.LobStore, fullPrefix, commons,
             lowerKey, lowerKeyInclusive, upperKey, upperKeyInclusive);
 
         IndexSeekDiagnostics.Sink?.Add($"OrderedScan({table.Name})");
@@ -1213,8 +1222,49 @@ internal sealed partial class Selection
         // pin or bound makes the predicate UNKNOWN for every row present and
         // future, so nothing can phantom into it.
         batch.EnsureSerializableTableLock(table, plan);
-        orderedSources = SeekedSource(source, MaterializeWithLockChecks(table, batch, plan, candidates));
+        // With no residual WHERE every row the scan yields is a result row, so
+        // the OFFSET's rows can be passed over where the scan reads them, as
+        // real's Top over the ordered scan does.
+        skipped = excluders.Count == 0 ? skip : 0;
+        orderedSources = SeekedSource(source, MaterializeOrderedWithLockChecks(table, batch, plan, candidates, descending, skipped));
         return true;
+    }
+
+    /// <summary>
+    /// The ordered scan's rows: <paramref name="order"/> read forward, or from
+    /// the end for a descending order, with the per-row checks
+    /// <see cref="MaterializeWithLockChecks"/> makes. The first
+    /// <paramref name="skip"/> rows — an OFFSET no residual WHERE stands
+    /// between — are locked and counted like any read row but never fetched
+    /// or yielded, so a deep page costs a walk of addresses rather than a
+    /// decode and projection of every row ahead of it.
+    /// </summary>
+    private static IEnumerable<byte[]> MaterializeOrderedWithLockChecks(
+        HeapTable table, BatchContext batch, DataLockPlan plan, (int Page, int Slot)[] order, bool descending, int skip)
+    {
+        var io = batch.Connection.StatementIo?.Touch(table);
+        _ = io?.ScanCount += 1;
+        var lastPage = -1;
+        var seen = new HashSet<(int, int)>();
+        var addresses = batch.CurrentStatement.RowAddresses;
+        var heap = table.Heap;
+        for (var i = 0; i < order.Length; i++)
+        {
+            var (page, slot) = order[descending ? order.Length - 1 - i : i];
+            if (!seen.Add((page, slot)) || heap.IsSlotTombstoned(page, slot) || !batch.TouchRowForRead(table, page, slot, plan))
+                continue;
+            io?.Enter(page, ref lastPage);
+            if (skip > 0)
+            {
+                skip--;
+                batch.PollCancellation();
+                continue;
+            }
+            if (heap.ReadSlotBytes(page, slot) is not { } bytes)
+                continue;
+            addresses?.Record(bytes, page, slot);
+            yield return bytes;
+        }
     }
 
     // Builds a GetViewBetween bound: the pinned prefix with the bound value

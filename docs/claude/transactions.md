@@ -6,8 +6,8 @@ A fourth arrives over the network: TDS Transaction Manager requests map onto the
 - **Statement-level atomicity**: a mutation throwing mid-execution rolls back its partial writes.
   Multi-row INSERT failing on row 3 leaves zero rows.
 - **Cancel (TDS attention / `CommandTimeout` / in-process `Cancel()`) vs. an open tx**: probed against SQL Server 2025 — under the default `SET XACT_ABORT OFF` the transaction **survives** the cancel intact and usable; under `SET XACT_ABORT ON` the cancel **rolls it back** (`@@TRANCOUNT` → 0).
-  The TDS endpoint applies this at the attention safe point (`SimulatedDbConnection.XactAbort` gates the rollback).
-  A cancel aborts the batch at a statement boundary, so already-committed statements' effects persist and un-run statements never fire; a single in-flight statement is not interrupted inside its row loop (materialization completes first — the reaction bound noted in [`tds-endpoint.md`](tds-endpoint.md#mid-stream-attention-cancel)), so it is not partial-rolled-back the way a mid-statement *error* is.
+  Both front doors apply it as the cancelled batch unwinds (`SimulatedDbConnection.SettleCancelledExecution`, gated by `XactAbort`).
+  Already-committed statements' effects persist and un-run statements never fire, while a statement the cancel lands inside rolls back like one a mid-statement *error* ends — the row loops poll for it, so it doesn't run to completion first (see [`control-flow.md`](control-flow.md#waitfor-delay)).
 - **Explicit txs**: `BEGIN TRAN` increments `TranCount`; only outermost `COMMIT` commits; `ROLLBACK` zeroes `TranCount` and walks the whole log.
   `SAVE TRAN <name>` + `ROLLBACK TRAN <name>` is the EF SaveChanges path inside an explicit tx.
   Savepoints form a stack, as real's do (probed 2026-09-28 against SQL Server 2025): saving a name again stacks a second savepoint rather than moving the first, and `ROLLBACK TRAN <name>` returns to the newest of that name and consumes it with every later one, so repeating it reaches the older one and then Msg 6401.

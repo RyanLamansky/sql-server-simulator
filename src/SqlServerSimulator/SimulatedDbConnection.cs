@@ -301,6 +301,62 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool FramesEveryStatement;
 
     /// <summary>
+    /// Whether this connection serves a MARS session, where a transaction a
+    /// batch begins by SQL text is scoped to that batch: one still open when
+    /// the batch ends is rolled back, with Msg 3997 after a SQL batch and
+    /// silently after an RPC (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal bool ScopesTransactionsToBatch;
+
+    /// <summary>
+    /// MARS requests received and not yet fully answered — executing, waiting
+    /// for the execution gate, or still sending a response the client hasn't
+    /// read. Real counts a request as running until its results have gone
+    /// out, which is what its transaction refusals (Msg 3988, 3981) turn on.
+    /// Zero outside MARS.
+    /// </summary>
+    private int marsRequestsInFlight;
+
+    /// <summary>Whether a MARS request other than the one asking is in flight.</summary>
+    internal bool OtherMarsRequestsInFlight => Volatile.Read(ref this.marsRequestsInFlight) > 1;
+
+    /// <summary>
+    /// Set when a Msg 3981 rolled the transaction back under a request still
+    /// sending its results; every request arriving before the last in-flight
+    /// one finishes is Msg 3989 (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    private volatile bool transactionAbortedWithRequestsPending;
+
+    /// <summary>Whether a request arriving now is Msg 3989 (see <see cref="transactionAbortedWithRequestsPending"/>).</summary>
+    internal bool RefusesRequestAfterAbort => this.transactionAbortedWithRequestsPending && this.OtherMarsRequestsInFlight;
+
+    /// <summary>Counts a MARS request in flight, from its arrival until its response has gone out.</summary>
+    internal void BeginMarsRequest() => Interlocked.Increment(ref this.marsRequestsInFlight);
+
+    /// <summary>Ends a <see cref="BeginMarsRequest"/>; the last one out clears a Msg 3981 abort's refusal.</summary>
+    internal void EndMarsRequest()
+    {
+        if (Interlocked.Decrement(ref this.marsRequestsInFlight) == 0)
+            this.transactionAbortedWithRequestsPending = false;
+    }
+
+    /// <summary>
+    /// A commit ending <paramref name="transaction"/> (state 1) or a save
+    /// point in it (state 2), by SQL text or through the API, while another
+    /// MARS request is still sending results: real refuses it with Msg 3981
+    /// and rolls the transaction back, while a rollback goes ahead (probed
+    /// 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal void RefuseTransactionOperationWithRequestsPending(SimulatedDbTransaction transaction, byte state)
+    {
+        if (!this.OtherMarsRequestsInFlight)
+            return;
+        transaction.EndRollback();
+        this.transactionAbortedWithRequestsPending = true;
+        throw SimulatedSqlException.TransactionOperationWithPendingRequests(state);
+    }
+
+    /// <summary>
     /// Session-scoped <c>XACT_ABORT</c> setting (default
     /// <see langword="false"/>, surfaced as <c>@@OPTIONS &amp; 16384</c>).
     /// While on, a run-time error that would otherwise terminate only its own
@@ -520,6 +576,9 @@ public sealed class SimulatedDbConnection : DbConnection
         if (timeout is { } span)
             fresh.CancelAfter(span);
         this.executionCancelledByUser = false;
+        this.TransactionIdAtExecutionStart = this.Simulation.LastAllocatedTransactionId;
+        this.AttentionEndedWrite = false;
+        this.CursorsDeclaredInExecution = null;
         var previous = Interlocked.Exchange(ref this.executionCancellation, fresh);
         previous.Dispose();
     }
@@ -547,6 +606,76 @@ public sealed class SimulatedDbConnection : DbConnection
     /// join operators make, which skips materializing a token.
     /// </summary>
     internal bool ExecutionCancellationRequested => Volatile.Read(ref this.executionCancellation).IsCancellationRequested;
+
+    /// <summary>
+    /// The server's last allocated transaction id when the current execution
+    /// began (see <see cref="BeginExecutionScope"/>): a transaction with a
+    /// greater id began during it. Read by the rules that turn on whether the
+    /// batch itself opened a transaction — whether SqlClient shows the Msg 3621
+    /// an attention sends after a write, and a MARS batch's Msg 3997.
+    /// </summary>
+    internal long TransactionIdAtExecutionStart;
+
+    /// <summary>The id of the last transaction this session began, by SQL text, implicitly or through the API.</summary>
+    internal long LastBegunTransactionId;
+
+    /// <summary>Whether a transaction began on this session during the current execution, whether or not it is still open.</summary>
+    internal bool TransactionBegunInExecution => this.LastBegunTransactionId > this.TransactionIdAtExecutionStart;
+
+    /// <summary>
+    /// Set when a cancellation ended a write, so the attention's
+    /// acknowledgment is preceded by Msg 3621, as real sends it: when the
+    /// interrupted statement — the innermost one outside any function body —
+    /// is an <c>INSERT</c>, <c>UPDATE</c>, <c>DELETE</c>, <c>MERGE</c> or
+    /// <c>SELECT … INTO</c>, not inside a trigger, with <c>XACT_ABORT</c> off
+    /// (captured 2026-09-30 against SQL Server 2025). SqlClient then shows it
+    /// among the exception's errors only when no transaction began during the
+    /// batch — even one it already committed — which is what the in-process
+    /// surface mirrors.
+    /// </summary>
+    internal bool AttentionEndedWrite;
+
+    /// <summary>
+    /// The <c>GLOBAL</c> cursors the current execution declared, which a
+    /// cancellation deallocates: real drops a cursor its interrupted batch
+    /// declared, while one an earlier batch declared survives, open and
+    /// positioned (probed 2026-09-30 against SQL Server 2025). Null until one
+    /// is declared.
+    /// </summary>
+    internal List<Cursor>? CursorsDeclaredInExecution;
+
+    /// <summary>
+    /// Leaves the session as a cancelled execution leaves it on real, once the
+    /// engine has unwound it: under <c>SET XACT_ABORT ON</c> an open
+    /// transaction rolls back (under <c>OFF</c> it survives, usable);
+    /// <c>@@ROWCOUNT</c> and <c>@@ERROR</c> read 0 whatever ran before the
+    /// cancel; and the global cursors the batch declared are deallocated
+    /// (probed 2026-09-30 against SQL Server 2025). Idempotent.
+    /// </summary>
+    internal void SettleCancelledExecution()
+    {
+        if (this.XactAbort && this.CurrentTransaction is { } transaction)
+            transaction.EndRollback();
+        this.LastStatementRowCount = 0;
+        this.LastErrorNumber = 0;
+        if (this.CursorsDeclaredInExecution is { } declared)
+        {
+            this.CursorsDeclaredInExecution = null;
+            foreach (var cursor in declared)
+            {
+                foreach (var (name, registered) in this.Cursors)
+                {
+                    if (ReferenceEquals(registered, cursor))
+                    {
+                        _ = this.Cursors.Remove(name);
+                        if (cursor.VariableRefCount == 0)
+                            cursor.ReleaseScrollLocks(this);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     /// <summary>
     /// Requests cancellation of the command currently executing on this

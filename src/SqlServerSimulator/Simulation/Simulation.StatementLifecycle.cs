@@ -374,6 +374,16 @@ partial class Simulation
                         procFrame.MaxErrorSeverity = ex.Class;
                 }
             }
+            // A cancellation is decided by the innermost statement it
+            // interrupted outside any function body: whether that statement
+            // ended a write decides the Msg 3621 ahead of the attention's
+            // acknowledgment.
+            if (ex.IsAttention && !ex.AttentionSettled && !batch.SuppressDiagnosticsResolution)
+            {
+                ex.AttentionSettled = true;
+                connection.AttentionEndedWrite = batch.CurrentStatement.WritesRows && !batch.IsSkipping
+                    && batch.TriggerFrame is null && !connection.XactAbort;
+            }
             // Class 13 = deadlock victim. Real SQL Server auto-rolls
             // back the active transaction before propagating (probe-
             // confirmed: @@TRANCOUNT reads 0 in the catch handler).

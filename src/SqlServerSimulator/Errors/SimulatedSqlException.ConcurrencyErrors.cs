@@ -43,6 +43,53 @@ partial class SimulatedSqlException
         : new(CommandCancelledMessage, 0, 11, 0) { IsAttention = true };
 
     /// <summary>
+    /// Msg 3621 as it follows an attention that ended a write: always line 1
+    /// and no procedure, wherever the write was — a procedure's or a dynamic
+    /// batch's statement included (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedError AttentionStatementTerminatedMessage(SimulatedDbConnection connection) =>
+        new(@class: 0, lineNumber: 1, message: "The statement has been terminated.", number: 3621, procedure: "", server: connection.DataSource, source: "SqlServerSimulator", state: 0);
+
+    /// <summary>
+    /// Msg 3997: on a MARS connection a transaction a batch began by SQL text —
+    /// <c>BEGIN TRANSACTION</c>, or <c>IMPLICIT_TRANSACTIONS</c> — is scoped to
+    /// that batch, and one still open when the batch ends is rolled back with
+    /// this, at line 1, whether or not another request was active (probed
+    /// 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException MarsBatchTransactionStillActive() =>
+        new("A transaction that was started in a MARS batch is still active at the end of the batch. The transaction is rolled back.", 3997, 16, 1);
+
+    /// <summary>
+    /// Msg 3988: a transaction-manager begin arriving on a MARS connection
+    /// while another of its requests is still producing results (probed
+    /// 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NewTransactionWhileRequestsRunning() =>
+        new("New transaction is not allowed because there are other threads running in the session.", 3988, 16, 1);
+
+    /// <summary>
+    /// Msg 3981: a transaction-manager commit (state 1) or save (state 2)
+    /// arriving on a MARS connection while another request is still producing
+    /// results in the transaction. It is transaction-aborting: the
+    /// transaction rolls back and the rest of the batch doesn't run (probed
+    /// 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TransactionOperationWithPendingRequests(byte state) =>
+        new("The transaction operation cannot be performed because there are pending requests working on this transaction.", 3981, 16, state)
+        {
+            AbortsTransaction = true,
+        };
+
+    /// <summary>
+    /// Msg 3989: a request arriving on a MARS connection while a request the
+    /// transaction's Msg 3981 abort left running is still producing results
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException RequestWithoutValidTransactionDescriptor() =>
+        new("New request is not allowed to start because it should come with valid transaction descriptor.", 3989, 16, 1);
+
+    /// <summary>
     /// Msg 1222 — fired when a lock acquisition exceeds the session's
     /// configured <c>@@LOCK_TIMEOUT</c>. Single, fixed wording regardless of
     /// the lock kind that timed out (probed against SQL Server 2025); the

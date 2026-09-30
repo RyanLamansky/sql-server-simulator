@@ -183,6 +183,16 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool IsAttention { get; private init; }
 
     /// <summary>
+    /// Set once the innermost statement-level frame an <see cref="IsAttention"/>
+    /// error reached has decided whether the attention ended a write (see
+    /// <see cref="SimulatedDbConnection.AttentionEndedWrite"/>), so a frame
+    /// further out re-raising it doesn't decide again. A function body leaves
+    /// it to the statement that called it, as real attributes the function's
+    /// work to that statement.
+    /// </summary>
+    internal bool AttentionSettled;
+
+    /// <summary>
     /// An identity value past its column's type, which real follows with the
     /// class-0 Msg 3606 (<c>Arithmetic overflow occurred.</c>) where another
     /// error ending a write is followed by Msg 3621 (probed 2026-09-25 against

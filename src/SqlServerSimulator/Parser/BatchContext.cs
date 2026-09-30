@@ -451,6 +451,78 @@ internal sealed class BatchContext
     public const long LoopIterationLimit = 100_000;
 
     /// <summary>
+    /// Rows the row-level cancellation poll has let through since its last
+    /// look (see <see cref="PollCancellation"/>). A field rather than a loop
+    /// local so the stride carries across enumerations: a recursive CTE's
+    /// member, a correlated inner plan or a cursor's fetch each enumerate a
+    /// row or two at a time, and a per-enumeration count would never reach it.
+    /// </summary>
+    private int cancellationPollTick;
+
+    /// <summary>
+    /// The row loops' cancellation safe point: every 32nd call looks at the
+    /// execution's cancellation and raises the attention when it has fired.
+    /// The stride keeps a scan's per-row cost to an increment and a test —
+    /// a 228k-row <c>COUNT(*)</c> and the index replay measured unchanged
+    /// within noise — where a look on every row would read through the
+    /// connection to the cancellation source's state. Thirty-two rows cheap
+    /// enough for the stride to matter take microseconds, and a row that isn't
+    /// cheap — a scalar function's loop — polls inside its own body.
+    /// </summary>
+    public void PollCancellation()
+    {
+        if ((++this.cancellationPollTick & 31) == 0)
+            this.ThrowIfCancelled();
+    }
+
+    /// <summary>
+    /// Raises the attention a <c>CommandTimeout</c> expiry or a caller's cancel
+    /// becomes inside a running statement (Msg -2 or Msg 0, marked
+    /// <see cref="SimulatedSqlException.IsAttention"/>), when it has fired.
+    /// </summary>
+    public void ThrowIfCancelled()
+    {
+        var connection = this.Connection;
+        if (connection.ExecutionCancellationRequested)
+            throw SimulatedSqlException.Attention(connection.ExecutionTimedOut);
+    }
+
+    /// <summary>
+    /// The statement-boundary safe point — between two statements, and at the
+    /// top of each <c>WHILE</c> iteration. At the top level a cancellation
+    /// simply ends the batch, so this returns <see langword="true"/> for the
+    /// dispatch loop to stop on. Inside a body that runs within a caller's
+    /// statement it raises the attention instead, since stopping quietly
+    /// would hand the caller a body that ended early — a function returning a
+    /// half-computed value, a trigger letting its statement commit — and real
+    /// ends the calling statement. No statement of the body's own was
+    /// interrupted, so the body settles the attention as ending no write,
+    /// except a function body, whose work is its calling statement's.
+    /// </summary>
+    public bool CancelledAtStatementBoundary()
+    {
+        var connection = this.Connection;
+        if (!connection.ExecutionCancellationRequested)
+            return false;
+        if (!this.RunsInsideCallerStatement)
+            return true;
+        var attention = SimulatedSqlException.Attention(connection.ExecutionTimedOut);
+        attention.AttentionSettled = !this.SuppressDiagnosticsResolution;
+        throw attention;
+    }
+
+    /// <summary>
+    /// True for a body that runs inside a statement of its caller — a
+    /// procedure, trigger, function, view or dynamic-SQL body — where a
+    /// cancellation seen between two of its own statements must end the
+    /// calling statement too, rather than let the caller carry on with a
+    /// body that stopped early.
+    /// </summary>
+    public bool RunsInsideCallerStatement =>
+        this.UdfFrame is not null || this.ProcFrame is not null || this.TriggerFrame is not null
+        || this.CalledFunctionBody || this.SuppressDiagnosticsResolution || this.IsContextConnectionCommand;
+
+    /// <summary>
     /// The <c>QUOTED_IDENTIFIER</c> setting a top-level batch's last
     /// <c>SET</c> of it leaves, which <c>@@OPTIONS</c> reads anywhere in the
     /// batch; null for a batch holding none (see

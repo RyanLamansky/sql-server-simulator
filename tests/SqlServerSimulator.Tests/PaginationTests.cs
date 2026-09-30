@@ -183,4 +183,52 @@ public sealed class PaginationTests
         _ = new Simulation().AssertSqlError(
         "select 1 as v order by v offset 0 rows fetch next 1 rows only union select 2", 156);
     }
+
+    private static Simulation SeededKeyed()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table k (id int not null primary key, v int not null); insert k select value, value from generate_series(1, 50)");
+        return simulation;
+    }
+
+    /// <summary>
+    /// The rows an OFFSET skips are never projected: real evaluates the select
+    /// list above its Top, so an expression that would raise on a skipped row
+    /// doesn't, where one on a returned row still does (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select id, 1 / (id - 5) from k order by id offset 10 rows fetch next 3 rows only", new[] { 11, 12, 13 })]
+    [DataRow("select id, 1 / (v - 5) from k where v > 0 order by id offset 10 rows fetch next 3 rows only", new[] { 11, 12, 13 })]
+    [DataRow("select id, 1 / (id - 45) from k order by id desc offset 10 rows fetch next 3 rows only", new[] { 40, 39, 38 })]
+    public void OffsetOverAnIndexOrder_NeverProjectsTheSkippedRows(string query, int[] expected)
+        => CollectionAssert.AreEqual(expected, ReadInts(SeededKeyed().CreateCommand(query)));
+
+    [TestMethod]
+    public void OffsetOverAnIndexOrder_ProjectsTheRowsItReturns()
+        => SeededKeyed().AssertSqlError("select id, 1 / (id - 5) from k order by id desc offset 44 rows fetch next 3 rows only", 8134);
+
+    /// <summary>
+    /// A deep page over an index order passes the skipped rows over without
+    /// reading them, off a key order kept between writes; each page must
+    /// still see every write made since the last.
+    /// </summary>
+    [TestMethod]
+    public void OffsetOverAnIndexOrder_FollowsWritesBetweenPages()
+    {
+        var simulation = SeededKeyed();
+        const string page = "select id from k order by id offset 40 rows fetch next 3 rows only";
+        CollectionAssert.AreEqual(new[] { 41, 42, 43 }, ReadInts(simulation.CreateCommand(page)));
+        _ = simulation.ExecuteNonQuery("delete k where id in (2, 42)");
+        CollectionAssert.AreEqual(new[] { 43, 44, 45 }, ReadInts(simulation.CreateCommand(page)));
+        _ = simulation.ExecuteNonQuery("insert k values (0, 0), (-1, -1)");
+        CollectionAssert.AreEqual(new[] { 40, 41, 43 }, ReadInts(simulation.CreateCommand(page)));
+        _ = simulation.ExecuteNonQuery("update k set id = id + 100 where id = 1");
+        CollectionAssert.AreEqual(new[] { 41, 43, 44 }, ReadInts(simulation.CreateCommand(page)));
+        CollectionAssert.AreEqual(new[] { 101, 50 }, ReadInts(simulation.CreateCommand("select id from k order by id desc offset 0 rows fetch next 2 rows only")));
+    }
+
+    [TestMethod]
+    public void OffsetOverAnIndexOrder_PastTheEnd_ReturnsNothing()
+        => IsEmpty(ReadInts(SeededKeyed().CreateCommand("select id from k order by id offset 50 rows fetch next 3 rows only")));
 }

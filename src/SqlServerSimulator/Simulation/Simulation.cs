@@ -617,6 +617,12 @@ public sealed partial class Simulation
     /// </summary>
     internal long AllocateTransactionId() => Interlocked.Increment(ref this.transactionIdCounter);
 
+    /// <summary>
+    /// The last transaction id allocated server-wide; a transaction whose id
+    /// exceeds a value read here began after the read.
+    /// </summary>
+    internal long LastAllocatedTransactionId => Volatile.Read(ref this.transactionIdCounter);
+
     private long tempTableCounter;
 
     /// <summary>
@@ -1163,10 +1169,17 @@ public sealed partial class Simulation
         {
             foreach (var outcome in this.CreateResultSetsForCommandCore(command, continueOnError))
                 yield return outcome;
+            if (command.Connection is { ScopesTransactionsToBatch: true } mars && EndBatchScopedTransaction(command, mars) is { } stillActive)
+                yield return stillActive;
         }
         finally
         {
             _ = Interlocked.Decrement(ref this.statementsInFlight);
+            // A cancelled execution has unwound by here, whichever safe point
+            // saw the cancellation; what it leaves behind is the same for
+            // every front door.
+            if (command.Connection is { ExecutionCancellationRequested: true } cancelled)
+                cancelled.SettleCancelledExecution();
             // An error that ends the session closes the connection once the
             // command has delivered it.
             if (command.Connection is { SessionEnding: true } ended)
@@ -1178,6 +1191,31 @@ public sealed partial class Simulation
     }
 
     private int statementsInFlight;
+
+    /// <summary>
+    /// Rolls back a transaction a MARS batch began by SQL text and left open,
+    /// answering Msg 3997 after a SQL batch; an RPC's — <c>sp_executesql</c>
+    /// or a procedure call — goes silently, its Msg 266 having already said
+    /// so (probed 2026-09-30 against SQL Server 2025). A transaction begun
+    /// before the batch, through the API or by an earlier batch, is not the
+    /// batch's to end, and nor is one a cancel left.
+    /// </summary>
+    private static SimulatedErrorOutcome? EndBatchScopedTransaction(SimulatedDbCommand command, SimulatedDbConnection connection)
+    {
+        if (connection.CurrentTransaction is not { } open
+            || open.TransactionId <= connection.TransactionIdAtExecutionStart
+            || connection.ExecutionCancellationRequested)
+        {
+            return null;
+        }
+        open.EndRollback();
+        if (command.CommandType == CommandType.StoredProcedure || command.ScopeTempTablesToBatch)
+            return null;
+        var stillActive = SimulatedSqlException.MarsBatchTransactionStillActive();
+        stillActive.ResolveDiagnostics(1, 0, "");
+        connection.LastErrorNumber = stillActive.Number;
+        return new SimulatedErrorOutcome(stillActive);
+    }
 
     /// <summary>
     /// How many command executions are currently in flight across every
@@ -2059,7 +2097,7 @@ public sealed partial class Simulation
                 // between statements is one. The transaction is left intact
                 // here (XACT_ABORT ON rollback is applied by the caller once
                 // the batch has unwound).
-                if (batch.Connection.ExecutionCancellationToken.IsCancellationRequested)
+                if (batch.CancelledAtStatementBoundary())
                     yield break;
 
                 if (endKeyword is Keyword end && context.Token is ReservedKeyword rk && rk.Keyword == end)
@@ -3530,6 +3568,7 @@ public sealed partial class Simulation
         // SAVE TRANSACTION writes a log record, so a doomed transaction
         // refuses it with Msg 3930 (probe-confirmed).
         RejectWriteInDoomedTransaction(context.Connection);
+        context.Connection.RefuseTransactionOperationWithRequestsPending(tx, state: 2);
         tx.SetSavepoint(name);
         return true;
     }
@@ -3707,6 +3746,8 @@ public sealed partial class Simulation
         // Msg 3930 exactly as a DML statement does (probe-confirmed) — real
         // names the message's own advice: roll back instead.
         RejectWriteInDoomedTransaction(connection);
+        if (tx.TranCount == 1)
+            connection.RefuseTransactionOperationWithRequestsPending(tx, state: 1);
         tx.TranCount--;
         if (tx.TranCount == 0)
         {

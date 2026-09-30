@@ -193,6 +193,12 @@ internal sealed partial class Selection
             : source.RowsFor(batch);
         foreach (var row in rows)
         {
+            // Every row any statement reads passes through a fold's leftmost
+            // slot, whatever produced it (a scan, a seek, a derived table, a
+            // generator), so this one poll bounds how long a single-source
+            // statement's row loop runs on after a cancel; the join operators
+            // poll each row a level reads from its left.
+            batch.PollCancellation();
             tuple[slot] = row;
             yield return tuple;
         }
@@ -244,7 +250,7 @@ internal sealed partial class Selection
 
         foreach (var _ in left)
         {
-            ThrowIfExecutionCancelled(batch);
+            batch.ThrowIfCancelled();
             var leftMatched = false;
             for (var i = 0; i < groupRows.Count; i++)
             {
@@ -299,20 +305,6 @@ internal sealed partial class Selection
                 return true;
         }
         return false;
-    }
-
-    /// <summary>
-    /// The join operators' cancellation safe point, polled once per row a level
-    /// reads from its left. Every join level passes each of its left rows
-    /// through here, so a fold that multiplies its rowset — a cross product, or
-    /// a nested loop whose ON rejects nearly everything — still reaches one at a
-    /// rate bounded by one right-side scan, where the statement-boundary check
-    /// would wait for the whole fold to finish.
-    /// </summary>
-    private static void ThrowIfExecutionCancelled(BatchContext batch)
-    {
-        if (batch.Connection.ExecutionCancellationRequested)
-            throw SimulatedSqlException.Attention(batch.Connection.ExecutionTimedOut);
     }
 
     private static IEnumerable<byte[]?[]> ApplyJoin(
@@ -373,7 +365,7 @@ internal sealed partial class Selection
     {
         foreach (var _ in left)
         {
-            ThrowIfExecutionCancelled(batch);
+            batch.ThrowIfCancelled();
             var rows = right.LateralPlan is { } plan
                 ? plan.Execute(batch, resolve).RowBytes
                 : right.RowsFor(batch);
@@ -405,7 +397,7 @@ internal sealed partial class Selection
     {
         foreach (var _ in left)
         {
-            ThrowIfExecutionCancelled(batch);
+            batch.ThrowIfCancelled();
             var rows = right.LateralPlan is { } plan
                 ? plan.Execute(batch, resolve).RowBytes
                 : right.RowsFor(batch);
@@ -460,7 +452,7 @@ internal sealed partial class Selection
 
         foreach (var _ in left)
         {
-            ThrowIfExecutionCancelled(batch);
+            batch.ThrowIfCancelled();
             for (var i = 0; i < rightRows.Count; i++)
             {
                 tuple[level] = rightRows[i];
@@ -511,7 +503,7 @@ internal sealed partial class Selection
 
         foreach (var _ in left)
         {
-            ThrowIfExecutionCancelled(batch);
+            batch.ThrowIfCancelled();
             var leftMatched = false;
             for (var i = 0; i < rightRows.Count; i++)
             {
@@ -875,7 +867,7 @@ internal sealed partial class Selection
         var runtime = new RuntimeContext(resolve, batch);
         for (var i = 0; i < buffer.Count; i++)
         {
-            ThrowIfExecutionCancelled(batch);
+            batch.ThrowIfCancelled();
             Array.Copy(buffer[i], tuple, level);
             var seeked = i == 0 ? firstSeek : MaybeApplyIndexSeek([right], NoJoins, [join.OnPredicate!], batch, resolve);
             var matched = false;
@@ -1005,7 +997,7 @@ internal sealed partial class Selection
 
         foreach (var _ in left)
         {
-            ThrowIfExecutionCancelled(batch);
+            batch.ThrowIfCancelled();
             var matchedLeft = false;
             if (TryComputeKeyInto(plan.Keys, runtime, rightSide: false, keyScratch, out var probeKey)
                 && buckets.TryGetValue(probeKey, out var probeChain))

@@ -2694,9 +2694,9 @@ internal sealed partial class Selection
         // buffered rowcount / ORDER BY keys, so they skip the streaming paths.
         var hasJoinGroup = ContainsJoinGroup(joins);
         if (!hasJoinGroup && !distinct && !top.RequiresBuffering && orderBy.Count > 0
-            && TryApplyOrderedScan(sources, joins, orderBy, excluders, batch, outerResolver, out var orderedSources))
+            && TryApplyOrderedScan(sources, joins, orderBy, excluders, offsetCount ?? 0, batch, outerResolver, out var orderedSources, out var skipped))
         {
-            return ProjectStreaming(orderedSources, joins, expressions, excluders, top.Count, offsetCount, fetchCount, batch, outerResolver);
+            return ProjectStreaming(orderedSources, joins, expressions, excluders, top.Count, offsetCount - skipped, fetchCount, batch, outerResolver);
         }
 
         if (!hasJoinGroup)
@@ -2732,10 +2732,15 @@ internal sealed partial class Selection
         int? fetchCount,
         BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
-        return ApplyOffsetTake(InnerStream(), offsetCount, topCount ?? fetchCount);
+        return ApplyOffsetTake(InnerStream(), offsetCount: null, topCount ?? fetchCount);
 
         IEnumerable<SqlValue[]> InnerStream()
         {
+            // The OFFSET's rows pass the WHERE but are never projected: real
+            // evaluates the select list above its Top, so an expression that
+            // would raise on a skipped row doesn't (probed 2026-09-30 against
+            // SQL Server 2025), and a deep page skips the projection's cost.
+            var skip = offsetCount ?? 0;
             // Hoisted per-row resolution scaffolding: one mutable-capture
             // tuple slot, one cached self-referencing resolver lambda, one
             // RuntimeContext — instead of a fresh closure + several delegates
@@ -2759,6 +2764,11 @@ internal sealed partial class Selection
                 }
                 if (!include)
                     continue;
+                if (skip > 0)
+                {
+                    skip--;
+                    continue;
+                }
 
                 // Per-row stamp bump so NEXT VALUE FOR in the projection
                 // advances per output row (and dedupes across same-row

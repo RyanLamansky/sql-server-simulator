@@ -217,6 +217,7 @@ partial class Simulation
         var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, table, positionedCursor is not null);
         foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
         {
+            context.Batch.PollCancellation();
             // Positioned DELETE (WHERE CURRENT OF): only the cursor's row.
             if (positionedCursor is { } positioned && !CursorRowMatches(positioned, (pageIndex, slotIndex)))
                 continue;

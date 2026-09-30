@@ -61,6 +61,10 @@ internal sealed partial class Selection
             iteration++;
             if (maxRecursion > 0 && iteration > maxRecursion)
                 throw SimulatedSqlException.MaxRecursionExceeded(maxRecursion);
+            // MAXRECURSION 0 lets a recursion run without end, which a
+            // cancel is the one way out of; an iteration's rows are few, so
+            // each one looks rather than riding the row poll's stride.
+            batch.ThrowIfCancelled();
 
             binding.CurrentIterationRows = current;
             var next = new List<byte[]>();

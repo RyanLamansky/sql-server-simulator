@@ -323,10 +323,26 @@ public sealed class SimulatedDbCommand : DbCommand
     /// command's <see cref="CommandTimeout"/> expired, <b>Msg 0</b> when a
     /// caller cancelled — the same split real SqlClient makes.
     /// </summary>
-    private SimulatedSqlException CancellationException() =>
-        this.Connection?.ExecutionTimedOut == true
+    /// <remarks>
+    /// A cancel that ended a write carries the Msg 3621 real sends ahead of
+    /// its acknowledgment, which SqlClient lists after its own error — unless
+    /// a transaction began during the batch, when the transaction ENVCHANGEs
+    /// sharing that response leave SqlClient showing its own error alone
+    /// (probed 2026-09-30 against SQL Server 2025 through SqlClient 7.0.2).
+    /// </remarks>
+    private SimulatedSqlException CancellationException()
+    {
+        var connection = this.Connection;
+        var cancelled = connection?.ExecutionTimedOut == true
             ? SimulatedSqlException.ExecutionTimeoutExpired()
             : SimulatedSqlException.CommandCancelled();
+        if (connection is not { AttentionEndedWrite: true })
+            return cancelled;
+        connection.AttentionEndedWrite = false;
+        if (connection.TransactionBegunInExecution)
+            return cancelled;
+        return SimulatedSqlException.Aggregate([cancelled], [SimulatedSqlException.AttentionStatementTerminatedMessage(connection)]);
+    }
 
     /// <summary>
     /// SqlClient's refusal to run a command without an open connection — one
