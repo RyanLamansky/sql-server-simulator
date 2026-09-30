@@ -225,7 +225,7 @@ Varbinary/binary route through `SqlValue.CoerceBinaryToStringWithStyle(target, 0
 **Image stays rejected** (Msg 8116) — real SQL Server rejects too, and `IsCoerceableToVarchar` deliberately excludes the legacy LOB form.
 Probe-confirmed against SQL Server 2025: `LOWER(12345) = '12345'`, `LEN(CAST('2024-01-15' AS DATE)) = 10`, `LOWER(CAST('2024-01-15 12:34:56' AS DATETIME)) = 'jan 15 2024 12:34pm'` (legacy datetime default format), `REPLACE(CAST('2024-01-15' AS DATE), '-', '/') = '2024/01/15'`.
 Source families outside the coerce-able set (varbinary, xml, spatial, table types) raise Msg 8116 via `InvalidArgumentDataType`.
-The projection-schema result type for `LEN` is always `int`; the other functions project as `varchar` for non-string sources and preserve the input string type otherwise.
+The projection-schema result type for `LEN` is always `int`; the other functions project as `varchar` for non-string sources and preserve the input string type otherwise — except that `UPPER` / `LOWER` / `LTRIM` / `RTRIM` / `TRIM` / `REVERSE` turn a fixed-width `char(n)` / `nchar(n)` into `varchar(n)` / `nvarchar(n)`, which is what lets a trim shed the padding (`DATALENGTH(RTRIM(CAST(N'a' AS nchar(5))))` is 2; probed 2026-09-30 against SQL Server 2025).
 `REPLACE` runs the coerce per argument with the matching argument index in the Msg 8116 wording.
 `CHARINDEX`'s **haystack** (arg 2) coerces (`CHARINDEX('2', 12345) = 2`); the **needle** (arg 1) and **start** (arg 3) stay strict-int / strict-string respectively, matching real's Msg 8116 rejection.
 
@@ -644,10 +644,10 @@ Layout: 2-byte big-endian version tag, 4-byte random salt, then the derived key.
 
 ## `LOGINPROPERTY`
 
-**`LOGINPROPERTY(login_name, property_name)`** (`Parser/Expressions/LoginProperty.cs`) — resolves the single fixed login (`dbo`, the placeholder `SUSER_NAME` reports) plus any login registered via `CREATE LOGIN` (see [`permissions.md`](permissions.md)); any other name behaves like a nonexistent login and returns **NULL** for every property (probe-confirmed: nonexistent login → NULL across the board).
+**`LOGINPROPERTY(login_name, property_name)`** (`Parser/Expressions/LoginProperty.cs`) — resolves the single fixed login (`dbo`, the placeholder `SUSER_NAME` reports), `sa`, and any login registered via `CREATE LOGIN` (see [`permissions.md`](permissions.md)); any other name behaves like a nonexistent login and returns **NULL** for every property (probe-confirmed: nonexistent login → NULL across the board).
 NULL login / NULL property / unrecognized property → NULL.
 Property names case-insensitive.
-Values are plausible constants matching the live probe's shape: `PasswordLastSetTime` → the login's actual password-set stamp for a registered login, a fixed seed date `2020-01-01 00:00:00.000` for `dbo`; `BadPasswordTime` / `LockoutTime` → the `1900-01-01` "never" sentinel; `BadPasswordCount` / `HistoryLength` / `IsExpired` / `IsLocked` / `IsMustChange` → `0`; `DaysUntilExpiration` / `PasswordHash` / `PasswordHashAlgorithm` → NULL (a low-privilege login sees NULL for the hash on the live server too, matching what the simulator exposes); `DefaultDatabase` → the session's current database; `DefaultLanguage` → `us_english`.
+Values are plausible constants matching the live probe's shape: `PasswordLastSetTime` → the login's actual password-set stamp for a registered login, a fixed seed date `2020-01-01 00:00:00.000` for `dbo`; `BadPasswordTime` / `LockoutTime` → the `1900-01-01` "never" sentinel; `BadPasswordCount` / `IsExpired` / `IsLocked` / `IsMustChange` → `0`; `HistoryLength` → 1 while the login's password policy is checked (sa's is), 0 for a `CHECK_POLICY = OFF` login; `PasswordHashAlgorithm` → 3, SQL Server 2025's PBKDF2 hashing (probed 2026-09-30); `DaysUntilExpiration` / `PasswordHash` → NULL (a low-privilege login sees NULL for the hash on the live server too, matching what the simulator exposes); `DefaultDatabase` → the login's default database, `master` for sa and the session's current database for `dbo`; `DefaultLanguage` → `us_english`.
 Like real SQL Server, the result is **`sql_variant`** carrying a per-property inner base type: `datetime` for the time properties (`PasswordLastSetTime` / `BadPasswordTime` / `LockoutTime`), `int` for the counters / `Is*` flags, `nvarchar` for the name properties (all probe-confirmed against SQL Server 2025).
 `PasswordHash` is `varbinary` in real but always NULL here (no stored hash), so it surfaces as a NULL `sql_variant`.
 
@@ -903,9 +903,9 @@ Probe-confirmed against SQL Server 2025.
   The no-argument form returns `0x01`, matching `sys.dm_exec_sessions.security_id` for the simulator's fixed session principal.
   The optional Param2 (real's skip-name-validation flag) parses and is ignored.
   Result type `varbinary(85)`-family (`SqlType.Varbinary`).
-- **`SID_BINARY(name)`** is constant NULL — probe-confirmed against SQL Server 2025: it resolves only Windows / Entra-ID directory principals and returns NULL even for existing SQL-auth logins, so NULL is faithful for every input the simulator can host.
-  The argument still parses and evaluates.
-  Surfaced by SSMS's Select-Top-1000 server-properties batch (`suser_sname(sid_binary(@SqlGroup))`).
+- **`SID_BINARY(sid)`** converts a SID's string form (`S-1-5-32-544`, case-insensitive, the authority decimal or `0x` hex) to the binary one — revision, subauthority count, the 48-bit big-endian authority, then each subauthority little-endian — and anything else, a login name such as `sa` or a binary value included, is NULL (probed 2026-07-10 and 2026-09-30 against SQL Server 2025).
+  **`SUSER_SNAME`** names the built-in Windows accounts no login maps — `BUILTIN\Administrators`, `BUILTIN\Users`, `NT AUTHORITY\SYSTEM` — by SID.
+  SMO's server bag and SSMS's server-properties batch read `suser_sname(sid_binary(@SqlGroup))` for `SqlDomainGroup`.
 
 ## Legacy text-pointer scalars: `TEXTPTR` / `TEXTVALID`
 

@@ -99,4 +99,19 @@ public sealed class StringFunctionWidthTests
         AreEqual(60, MaxLength("datename(month, cast('2020-05-06' as date))"));   // 30 chars * 2 bytes
         AreEqual(60, MaxLength("datename(weekday, cast('2020-05-06' as date))"));
     }
+
+    /// <summary>
+    /// UPPER / LOWER / LTRIM / RTRIM / TRIM / REVERSE over a fixed-width
+    /// <c>char(n)</c> / <c>nchar(n)</c> return <c>varchar(n)</c> /
+    /// <c>nvarchar(n)</c>, so a trim sheds the padding (probed 2026-09-30
+    /// against SQL Server 2025); ISNULL keeps its first argument's type.
+    /// </summary>
+    [TestMethod]
+    public void RewritingFunctions_OverFixedWidth_ReturnVariableWidth()
+        => AreEqual("upper:nvarchar:10:10|rtrim:nvarchar:10:2|ltrim:varchar:5:4|trim:nvarchar:10:2|reverse:nvarchar:10:10|lower:varchar:5:5|isnull:nchar:10:10", new Simulation().ExecuteScalar("""
+            declare @c nchar(5) = N'a', @v char(5) = ' b';
+            select string_agg(concat_ws(':', f, cast(sql_variant_property(v, 'BaseType') as varchar), cast(sql_variant_property(v, 'MaxLength') as int), datalength(v)), '|')
+            from (values ('upper', cast(upper(@c) as sql_variant)), ('rtrim', rtrim(@c)), ('ltrim', ltrim(@v)), ('trim', trim(@c)),
+                ('reverse', reverse(@c)), ('lower', lower(@v)), ('isnull', isnull(@c, N'x'))) t(f, v)
+            """));
 }

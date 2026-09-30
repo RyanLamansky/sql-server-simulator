@@ -289,7 +289,8 @@ public sealed class FormatMessageAndLoginScalarTests
         AreEqual(0, Scalar("select loginproperty('dbo', 'BadPasswordCount')"));
         AreEqual(new DateTime(1900, 1, 1), Scalar("select loginproperty('dbo', 'BadPasswordTime')"));
         AreEqual(new DateTime(1900, 1, 1), Scalar("select loginproperty('dbo', 'LockoutTime')"));
-        AreEqual(0, Scalar("select loginproperty('dbo', 'HistoryLength')"));
+        // One remembered password, as for sa, whose policy is checked.
+        AreEqual(1, Scalar("select loginproperty('dbo', 'HistoryLength')"));
     }
 
     [TestMethod]
@@ -305,7 +306,23 @@ public sealed class FormatMessageAndLoginScalarTests
     {
         AreEqual(DBNull.Value, Scalar("select loginproperty('dbo', 'DaysUntilExpiration')"));
         AreEqual(DBNull.Value, Scalar("select loginproperty('dbo', 'PasswordHash')"));
-        AreEqual(DBNull.Value, Scalar("select loginproperty('dbo', 'PasswordHashAlgorithm')"));
+    }
+
+    /// <summary>
+    /// SQL Server 2025 hashes a SQL login's password with PBKDF2, reported as
+    /// algorithm 3; sa answers like any login, and a login created without the
+    /// password policy remembers no password history.
+    /// </summary>
+    [TestMethod]
+    public void LoginProperty_PasswordHashAlgorithmAndHistory()
+    {
+        AreEqual(3, Scalar("select loginproperty('sa', 'PasswordHashAlgorithm')"));
+        AreEqual("master", Scalar("select loginproperty('sa', 'DefaultDatabase')"));
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create login lax with password = 'x', check_policy = off; create login strict with password = 'Pr0be!Pass#2026x'");
+        AreEqual(0, simulation.ExecuteScalar("select loginproperty('lax', 'HistoryLength')"));
+        AreEqual(1, simulation.ExecuteScalar("select loginproperty('strict', 'HistoryLength')"));
+        AreEqual(3, simulation.ExecuteScalar("select loginproperty('lax', 'PasswordHashAlgorithm')"));
     }
 
     [TestMethod]

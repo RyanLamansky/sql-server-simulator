@@ -78,9 +78,31 @@ public sealed class PrincipalIdAndPermsTests
     public void IsMember_DbOwner_Returns1()
         => AreEqual(1, new Simulation().ExecuteScalar("select is_member('db_owner')"));
 
+    /// <summary>
+    /// The dbo user belongs to every fixed database role but the deny pair,
+    /// with no membership rows (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void IsMember_OtherFixedRole_Returns0()
-        => AreEqual(0, new Simulation().ExecuteScalar("select is_member('db_datareader')"));
+    public void IsMember_OtherFixedRole_Returns1ForDbo()
+    {
+        var simulation = new Simulation();
+        AreEqual(1, simulation.ExecuteScalar("select is_member('db_datareader')"));
+        AreEqual(1, simulation.ExecuteScalar("select is_member('db_accessadmin')"));
+        AreEqual(1, simulation.ExecuteScalar("select is_rolemember('db_backupoperator')"));
+        AreEqual(1, simulation.ExecuteScalar("select is_rolemember('db_datareader', 'dbo')"));
+        AreEqual(0, simulation.ExecuteScalar("select is_member('db_denydatareader')"));
+        AreEqual(0, simulation.ExecuteScalar("select is_rolemember('db_denydatawriter', 'dbo')"));
+    }
+
+    /// <summary>A db_owner member belongs to db_owner alone among the fixed roles.</summary>
+    [TestMethod]
+    public void IsMember_DbOwnerMember_OnlyDbOwner()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("create user u without login; alter role db_owner add member u").ExecuteNonQuery();
+        AreEqual("1,0", connection.CreateCommand("execute as user = 'u'; select concat(is_member('db_owner'), ',', is_member('db_datareader')); revert").ExecuteScalar());
+    }
 
     [TestMethod]
     public void IsMember_UnknownName_ReturnsNull()

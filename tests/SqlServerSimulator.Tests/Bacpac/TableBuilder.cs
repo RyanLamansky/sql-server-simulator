@@ -29,6 +29,8 @@ public sealed class TableBuilder
     internal string? HistoryTableName;
 
     private (string Scheme, string Column)? partitioning;
+    private readonly Dictionary<string, string> _masks = [];
+    private string? textImageFilegroup;
 
     internal TableBuilder(string schemaName, string tableName)
     {
@@ -52,6 +54,26 @@ public sealed class TableBuilder
     {
         _columns.Add(new ColumnDef(name, sqlType, nullable, identity, identitySeed, identityIncrement, periodKind, collation, rowGuidCol, xmlSchemaCollection, identityNotForReplication));
         _order.Add((Computed: false, _columns.Count - 1));
+        return this;
+    }
+
+    /// <summary>
+    /// Gives <paramref name="column"/> a Dynamic Data Masking function, which
+    /// DacFx writes as the column's <c>MaskingFunction</c> property.
+    /// </summary>
+    public TableBuilder Masked(string column, string function)
+    {
+        _masks[column] = function;
+        return this;
+    }
+
+    /// <summary>
+    /// Names the filegroup holding the table's LOB data, DacFx's
+    /// <c>FilegroupForTextImage</c> relationship.
+    /// </summary>
+    public TableBuilder TextImageOn(string filegroup)
+    {
+        textImageFilegroup = filegroup;
         return this;
     }
 
@@ -223,6 +245,12 @@ public sealed class TableBuilder
                     new XElement(ns + "Entry", new XElement(ns + "References", new XAttribute("Name", $"[{SchemaName}].[{TableName}].[{column}]")))),
                 new XElement(ns + "Relationship", new XAttribute("Name", "PartitionScheme"),
                     new XElement(ns + "Entry", new XElement(ns + "References", new XAttribute("Name", $"[{scheme}]")))));
+        }
+
+        if (textImageFilegroup is not null)
+        {
+            tableElement.Add(new XElement(ns + "Relationship", new XAttribute("Name", "FilegroupForTextImage"),
+                new XElement(ns + "Entry", new XElement(ns + "References", new XAttribute("Name", $"[{textImageFilegroup}]")))));
         }
 
         if (HistorySchemaName is not null && HistoryTableName is not null)
@@ -483,6 +511,13 @@ public sealed class TableBuilder
             element.Add(new XElement(ns + "Property",
                 new XAttribute("Name", "IsNullable"),
                 new XAttribute("Value", "False")));
+        }
+
+        if (_masks.TryGetValue(column.Name, out var mask))
+        {
+            element.Add(new XElement(ns + "Property",
+                new XAttribute("Name", "MaskingFunction"),
+                new XAttribute("Value", mask)));
         }
 
         if (column.Identity)

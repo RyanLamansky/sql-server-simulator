@@ -141,11 +141,11 @@ internal static partial class BuiltInResources
             new("rank_desc", SqlType.Varchar, 8, true),
         ], static (batch, database) => []);
 
-        // sys.database_recovery_status / sys.database_filestream_options:
-        // recovery-fork bookkeeping and FILESTREAM options aren't modeled, so
-        // both are empty views with the documented SQL Server 2025 shape. SMO's
-        // database-properties preamble LEFT JOINs each by database_id; an empty
-        // projection resolves each property to its ISNULL default.
+        // sys.database_recovery_status: one row per database, a never-restored
+        // database's family and recovery fork one GUID and no log backup
+        // (probed 2026-09-30 against SQL Server 2025). SMO's
+        // database-properties preamble LEFT JOINs it by database_id for
+        // DatabaseGuid / RecoveryForkGuid / HasFullBackup.
         Sys("database_recovery_status",
         [
             new("database_id", SqlType.Int32, null, false),
@@ -155,7 +155,21 @@ internal static partial class BuiltInResources
             new("recovery_fork_guid", SqlType.UniqueIdentifier, null, true),
             new("first_recovery_fork_guid", SqlType.UniqueIdentifier, null, true),
             new("fork_point_lsn", SqlType.GetDecimal(25, 0), null, true, spelledNumeric: true),
-        ], static (batch, database) => []);
+        ], static (batch, database) =>
+            Parser.Expressions.DbId.DatabasesWithIds(batch.Connection.Simulation)
+                .Select(entry => new SqlValue[]
+                {
+                    SqlValue.FromInt32(entry.Id),
+                    SqlValue.FromGuid(entry.Database.DatabaseGuid),
+                    SqlValue.FromGuid(entry.Database.RecoveryForkGuid),
+                    SqlValue.Null(SqlType.GetDecimal(25, 0)),
+                    SqlValue.FromGuid(entry.Database.RecoveryForkGuid),
+                    SqlValue.Null(SqlType.UniqueIdentifier),
+                    SqlValue.Null(SqlType.GetDecimal(25, 0)),
+                }));
+
+        // sys.database_filestream_options: FILESTREAM isn't modeled, so the
+        // view is empty with the documented SQL Server 2025 shape.
 
         Sys("change_tracking_databases",
         [
@@ -254,12 +268,11 @@ internal static partial class BuiltInResources
             new("is_inlineable", SqlType.Bit, null, true),
         ], EnumerateSqlModules);
 
-        // sys.system_sql_modules: same shape as sys.sql_modules but scoped to
-        // system objects' module definitions. The simulator ships no
-        // system-defined modules with stored T-SQL, so this is always empty —
-        // which is exactly what SMO's SSMS Object-Explorer trigger sub-node
-        // query needs (it LEFT JOINs sys.system_sql_modules to distinguish a
-        // WITH ENCRYPTION module, and user triggers never appear here).
+        // sys.system_sql_modules: same shape as sys.sql_modules, one row per
+        // system module (every system object but an extended procedure), with
+        // real's flags and a NULL definition — the simulator doesn't carry
+        // real's system module text. SMO reads a system procedure's Recompile
+        // and a view's module flags from it.
         Sys("system_sql_modules",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -274,14 +287,12 @@ internal static partial class BuiltInResources
             new("uses_native_compilation", SqlType.Bit, null, false),
             new("inline_type", SqlType.Bit, null, false),
             new("is_inlineable", SqlType.Bit, null, false),
-        ], static (batch, database) => []);
+        ], static (batch, database) => EnumerateSystemSqlModules());
 
-        // sys.all_sql_modules shares sys.sql_modules' shape and row generator —
-        // user-module parity, like sys.all_objects / sys.all_views. The
-        // simulator ships no system modules with stored T-SQL, so the union of
-        // system + user modules is just the user modules. SMO's Script-As
-        // trigger query LEFT JOINs sys.all_sql_modules to read
-        // uses_native_compilation / is_schema_bound off the trigger body.
+        // sys.all_sql_modules is the union of sys.system_sql_modules and
+        // sys.sql_modules, like sys.all_objects / sys.all_views. SMO's Script-As
+        // trigger query LEFT JOINs it to read uses_native_compilation /
+        // is_schema_bound off the trigger body.
         Sys("all_sql_modules",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -296,7 +307,7 @@ internal static partial class BuiltInResources
             new("uses_native_compilation", SqlType.Bit, null, true),
             new("inline_type", SqlType.Bit, null, true),
             new("is_inlineable", SqlType.Bit, null, true),
-        ], EnumerateSqlModules);
+        ], static (batch, database) => EnumerateSystemSqlModules().Concat(EnumerateSqlModules(batch, database)));
     }
 
     /// <summary>
@@ -368,6 +379,40 @@ internal static partial class BuiltInResources
         {
             if (SchemaObject.IsSqlModule(ddlTrigger))
                 yield return Row(ddlTrigger);
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.system_sql_modules</c>: every system module ANSI_NULLS on,
+    /// QUOTED_IDENTIFIER per <see cref="SystemObject.UsesQuotedIdentifier"/>, and
+    /// every other flag off (probed 2026-09-30 against SQL Server 2025). The
+    /// definition is NULL where real's carries the module's text.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSystemSqlModules()
+    {
+        var on = SqlValue.FromBoolean(true);
+        var off = SqlValue.FromBoolean(false);
+        var nullDefinition = SqlValue.Null(SqlType.NVarchar);
+        var nullPrincipal = SqlValue.Null(SqlType.Int32);
+        foreach (var system in SystemObjects.Value)
+        {
+            if (!system.IsModule)
+                continue;
+            yield return
+            [
+                SqlValue.FromInt32(system.ObjectId),
+                nullDefinition,
+                on, // uses_ansi_nulls
+                system.UsesQuotedIdentifier ? on : off,
+                off, // is_schema_bound
+                off, // uses_database_collation
+                off, // is_recompiled
+                off, // null_on_null_input
+                nullPrincipal,
+                off, // uses_native_compilation
+                off, // inline_type
+                off, // is_inlineable
+            ];
         }
     }
 }

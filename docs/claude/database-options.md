@@ -34,6 +34,9 @@ Only `SET` follows a refusal with Msg 5069: the `COLLATE`, `MODIFY`, `ADD` and `
 **`IntegerWithUnit`** (`SET <name> = N SECONDS|MINUTES` — unit required per probe):
 - `TARGET_RECOVERY_TIME`
 
+**`Broker`** (a bare switch, at most one per `SET` list — a second is Msg 5062 naming it, raised as the batch compiles; probed 2026-09-30 against SQL Server 2025):
+- `ENABLE_BROKER` / `DISABLE_BROKER` / `NEW_BROKER` / `ERROR_BROKER_CONVERSATIONS`
+
 **`AccessMode`** (bare state, no `=`, with an optional termination clause): `SET {SINGLE_USER | MULTI_USER | RESTRICTED_USER} [WITH ROLLBACK IMMEDIATE | WITH ROLLBACK AFTER n [SECONDS] | WITH NO_WAIT]`.
 `READ_ONLY` / `READ_WRITE` take the same shape and the same termination clause but are load-bearing — see [Read-only databases](#read-only-databases).
 The state is recorded for the catalog and the termination clause discarded — the simulator has no connection-count access model, so it never actually restricts, and `WITH ROLLBACK …` never evicts.
@@ -45,8 +48,9 @@ See [Query Store](#query-store).
 
 ## Recorded switches
 
-The `OnOff` options, `PAGE_VERIFY` (and its legacy `TORN_PAGE_DETECTION` spelling), `CURSOR_DEFAULT`, `PARAMETERIZATION` and the access mode are recorded on the database (`Database.Switches` / `PageVerify` / `UserAccess`) without driving anything, and reported by `sys.databases`' option columns and `DATABASEPROPERTYEX` (probed 2026-09-26 against SQL Server 2025).
-Every database, system or user, starts from the same defaults: automatic statistics creation and update and temporal history retention on, page verification `CHECKSUM`, `MULTI_USER`, everything else off.
+The `OnOff` options, `PAGE_VERIFY` (and its legacy `TORN_PAGE_DETECTION` spelling), `CURSOR_DEFAULT`, `PARAMETERIZATION`, the access mode, `TARGET_RECOVERY_TIME` and the broker switches are recorded on the database (`Database.Switches` / `PageVerify` / `UserAccess` / `TargetRecoveryTimeSeconds` / `BrokerEnabled`) without driving anything, and reported by `sys.databases`' option columns and `DATABASEPROPERTYEX` (probed 2026-09-26 against SQL Server 2025).
+Every database, system or user, starts from the same defaults: automatic statistics creation and update and temporal history retention on, page verification `CHECKSUM`, `MULTI_USER`, a target recovery time of 60 seconds, Service Broker enabled, everything else off — save what the system databases ship with (`master` a recovery time of 0, `master` and `model` the broker off, `master` and `msdb` snapshot isolation allowed; probed 2026-09-30).
+`TORN_PAGE_DETECTION OFF` clears torn-page detection alone: a `CHECKSUM` database stays `CHECKSUM` (probed 2026-09-30).
 Turning `AUTO_CREATE_STATISTICS` off takes its incremental mode with it.
 
 ## Load-bearing options (behavior wired)

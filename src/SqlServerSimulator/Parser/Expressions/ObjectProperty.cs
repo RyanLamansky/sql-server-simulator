@@ -47,21 +47,56 @@ internal sealed class ObjectProperty : Expression
     }
 
     /// <summary>
-    /// The properties a system object answers: shipped, and a view or a
-    /// (possibly extended) procedure, never a table; anything else is NULL
-    /// (probed 2026-09-24 for sys.tables and sys.sp_help).
+    /// The properties a system object answers (probed 2026-09-30 against SQL
+    /// Server 2025 over a catalog view, an <c>INFORMATION_SCHEMA</c> view, a
+    /// procedure, an extended procedure and an inline function): every kind
+    /// flag, the whole <c>Exec*</c> family (off but for the module SET-option
+    /// pair), the owner and schema; the trigger and index members for a view
+    /// only; the <c>Table*</c> family, all off, for a table-valued function
+    /// only; and the module-scoped members for anything but an extended
+    /// procedure, which answers NULL to them.
     /// </summary>
     internal static int? EvaluateSystemObjectProperty(BuiltInResources.SystemObject system, string property)
     {
-        Span<char> upper = stackalloc char[Math.Min(property.Length, 32)];
-        _ = property.AsSpan(0, upper.Length).ToUpperInvariant(upper);
-        return upper switch
+        Span<char> upper = stackalloc char[property.Length];
+        var name = upper[..property.AsSpan().ToUpperInvariant(upper)];
+        var isView = system.Type == "V ";
+        var isTableFunction = system.Type is "IF" or "TF";
+        var module = system.IsModule;
+        return name switch
         {
-            "ISEXTENDEDPROC" => system.Type == "X " ? 1 : 0,
-            "ISMSSHIPPED" => 1,
-            "ISPROCEDURE" => system.Type == "P " ? 1 : 0,
-            "ISSYSTEMTABLE" or "ISTABLE" or "ISUSERTABLE" => 0,
-            "ISVIEW" => system.Type == "V " ? 1 : 0,
+            "EXECISAFTERTRIGGER" or "EXECISDELETETRIGGER" or "EXECISFIRSTDELETETRIGGER" or "EXECISFIRSTINSERTTRIGGER"
+                or "EXECISFIRSTUPDATETRIGGER" or "EXECISINSERTTRIGGER" or "EXECISINSTEADOFTRIGGER" or "EXECISLASTDELETETRIGGER"
+                or "EXECISLASTINSERTTRIGGER" or "EXECISLASTUPDATETRIGGER" or "EXECISSTARTUP" or "EXECISTRIGGERDISABLED"
+                or "EXECISTRIGGERNOTFORREPL" or "EXECISUPDATETRIGGER" or "EXECISWITHNATIVECOMPILATION" => 0,
+            "EXECISANSINULLSON" => Flag(module),
+            "EXECISQUOTEDIDENTON" => Flag(system.UsesQuotedIdentifier),
+            "HASAFTERTRIGGER" or "HASDELETETRIGGER" or "HASINSERTTRIGGER" or "HASINSTEADOFTRIGGER" or "HASUPDATETRIGGER"
+                or "ISINDEXABLE" or "ISINDEXED" => isView ? 0 : null,
+            "ISANSINULLSON" => module ? 1 : null,
+            "ISCHECKCNST" or "ISCONSTRAINT" or "ISDEFAULT" or "ISDEFAULTCNST" or "ISFOREIGNKEY" or "ISPRIMARYKEY" or "ISQUEUE"
+                or "ISREPLPROC" or "ISRULE" or "ISSCALARFUNCTION" or "ISSYSTEMTABLE" or "ISTABLE" or "ISTRIGGER" or "ISUNIQUECNST"
+                or "ISUSERTABLE" => 0,
+            "ISDETERMINISTIC" or "ISSYSTEMVERIFIED" => isView || isTableFunction ? 0 : null,
+            "ISENCRYPTED" or "ISSCHEMABOUND" => module ? 0 : null,
+            "ISEXECUTED" or "ISMSSHIPPED" => 1,
+            "ISEXTENDEDPROC" => Flag(!module),
+            "ISINLINEFUNCTION" => Flag(system.Type == "IF"),
+            "ISPROCEDURE" => Flag(system.Type == "P "),
+            "ISQUOTEDIDENTON" => module ? Flag(system.UsesQuotedIdentifier) : null,
+            "ISTABLEFUNCTION" => Flag(isTableFunction),
+            "ISVIEW" => Flag(isView),
+            // A system object's owner is its schema's: sys, or INFORMATION_SCHEMA,
+            // whose principal ids equal their schema ids.
+            "OWNERID" or "SCHEMAID" => system.SchemaId,
+            "TABLEDELETETRIGGER" or "TABLEDELETETRIGGERCOUNT" or "TABLEFULLTEXTBACKGROUNDUPDATEINDEXON" or "TABLEFULLTEXTCATALOGID"
+                or "TABLEFULLTEXTCHANGETRACKINGON" or "TABLEFULLTEXTKEYCOLUMN" or "TABLEFULLTEXTPOPULATESTATUS" or "TABLEHASACTIVEFULLTEXTINDEX"
+                or "TABLEHASCHECKCNST" or "TABLEHASCLUSTINDEX" or "TABLEHASCOLUMNSET" or "TABLEHASDEFAULTCNST" or "TABLEHASDELETETRIGGER"
+                or "TABLEHASFOREIGNKEY" or "TABLEHASFOREIGNREF" or "TABLEHASIDENTITY" or "TABLEHASINDEX" or "TABLEHASINSERTTRIGGER"
+                or "TABLEHASNONCLUSTINDEX" or "TABLEHASPRIMARYKEY" or "TABLEHASROWGUIDCOL" or "TABLEHASTEXTIMAGE" or "TABLEHASTIMESTAMP"
+                or "TABLEHASUNIQUECNST" or "TABLEHASUPDATETRIGGER" or "TABLEHASVARDECIMALSTORAGEFORMAT" or "TABLEINSERTTRIGGER"
+                or "TABLEINSERTTRIGGERCOUNT" or "TABLEISFAKE" or "TABLEISLOCKEDONBULKLOAD" or "TABLEISMEMORYOPTIMIZED" or "TABLEISPINNED"
+                or "TABLETEMPORALTYPE" or "TABLETEXTINROWLIMIT" or "TABLEUPDATETRIGGER" or "TABLEUPDATETRIGGERCOUNT" => isTableFunction ? 0 : null,
             _ => null,
         };
     }

@@ -32,11 +32,11 @@ internal sealed class LeftTrim : Expression
         var raw = source.Run(runtime);
         StringScalars.RejectLegacyLob(raw, "ltrim");
         if (raw.IsNull)
-            return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
+            return SqlValue.Null(StringScalars.ResolveRewrittenType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "ltrim");
         var chars = StringScalars.ResolveTrimCharacters(this.trimChars, runtime, "ltrim");
         if (chars is not { } set)
-            return SqlValue.FromString(value.Type, StringScalars.TrimSpaces(value.AsString, leading: true, trailing: false));
+            return SqlValue.FromString(StringScalars.ResolveRewrittenType(value.Type, runtime.Batch), StringScalars.TrimSpaces(value.AsString, leading: true, trailing: false));
         if (set.IsNull)
             return SqlValue.Null(value.Type);
         // An empty explicit set removes nothing.
@@ -49,11 +49,11 @@ internal sealed class LeftTrim : Expression
                 StringScalars.CollationFor(runtime.Batch, value.Type, set.Type),
                 leading: true,
                 trailing: false);
-        return SqlValue.FromString(value.Type, trimmed);
+        return SqlValue.FromString(StringScalars.ResolveRewrittenType(value.Type, runtime.Batch), trimmed);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        StringScalars.ResolveResultType(StringScalars.BindTrimmed(source, trimChars, batch, resolveColumnType, "ltrim"), batch);
+        StringScalars.ResolveRewrittenType(StringScalars.BindTrimmed(source, trimChars, batch, resolveColumnType, "ltrim"), batch);
 
     internal override string DebugDisplay() => $"LTRIM({source.DebugDisplay()})";
 

@@ -2453,4 +2453,94 @@ public class BacpacLoaderTests
             : sqlType.StartsWith("time", StringComparison.Ordinal)
                 ? TimeSpan.Parse(literal, CultureInfo.InvariantCulture)
                 : DateTime.Parse(literal, CultureInfo.InvariantCulture, DateTimeStyles.None);
+
+    /// <summary>
+    /// DacFx stores a module's header and body apart, the body carrying its own
+    /// leading line break, and its import keeps the text's CRLF line breaks as
+    /// the model holds them — the stored definition is the header and body
+    /// joined with nothing between (the reference's WideWorldImporters import,
+    /// probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ModuleText_KeepsCrLfAndJoinsHeaderToBody()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Procedure("dbo", "p", "\r\nCREATE PROCEDURE dbo.p\r\nAS", "\r\nBEGIN\r\n    SELECT 1;\r\nEND")
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("\r\nCREATE PROCEDURE dbo.p\r\nAS\r\nBEGIN\r\n    SELECT 1;\r\nEND", sim.ExecuteScalar("select definition from sys.sql_modules where object_id = object_id('dbo.p')"));
+    }
+
+    /// <summary>A column's <c>MaskingFunction</c> property imports as its mask.</summary>
+    [TestMethod]
+    public void MaskingFunction_ImportsAsColumnMask()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "T", t => t.Column("Id", "int").Column("Secret", "nvarchar(20)", nullable: true).Masked("Secret", "default()"))
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("Secret", sim.ExecuteScalar("select name from sys.masked_columns"));
+        AreEqual("default()", sim.ExecuteScalar("select masking_function from sys.masked_columns"));
+    }
+
+    /// <summary>
+    /// A table's <c>FilegroupForTextImage</c> places its LOB data, and a
+    /// rowstore filegroup gets a data file of its own, named for it plus eight
+    /// hex digits, as DacFx's import creates (probed 2026-09-30 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Filegroup_GetsDataFileAndHoldsTextImage()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Filegroup("USERDATA")
+            .Table("dbo", "T", t => t.Column("Id", "int").Column("Doc", "nvarchar(max)", nullable: true).TextImageOn("USERDATA"))
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("USERDATA", sim.ExecuteScalar("select ds.name from sys.tables t join sys.data_spaces ds on ds.data_space_id = t.lob_data_space_id where t.name = 'T'"));
+        var file = (string)sim.ExecuteScalar("select f.name from sys.database_files f join sys.filegroups g on g.data_space_id = f.data_space_id where g.name = 'USERDATA'")!;
+        MatchesRegex(new System.Text.RegularExpressions.Regex("^USERDATA_[0-9A-F]{8}$"), file);
+    }
+
+    /// <summary>
+    /// A model's database options land as DacFx's import leaves them: the
+    /// async statistics switch it carries, torn-page protection off leaving
+    /// CHECKSUM, and — for the two it omits at their model defaults — Service
+    /// Broker disabled and a target recovery time of 0 (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DatabaseOptions_ApplyModelDefaults()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .DatabaseOption("IsAutoUpdateStatisticsAsyncOn", "True")
+            .DatabaseOption("IsTornPageProtectionOn", "False")
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("1 CHECKSUM 0 0", sim.ExecuteScalar("""
+            select concat(is_auto_update_stats_async_on, ' ', page_verify_option_desc, ' ', is_broker_enabled, ' ', target_recovery_time_in_seconds)
+            from sys.databases where name = db_name()
+            """));
+    }
+
+    /// <summary>An explicit <c>ServiceBrokerOption</c> of 1 enables the broker.</summary>
+    [TestMethod]
+    public void DatabaseOptions_ServiceBrokerEnabled()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .DatabaseOption("ServiceBrokerOption", "1")
+            .DatabaseOption("TargetRecoveryTimePeriod", "60")
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out _);
+        AreEqual("1 60", sim.ExecuteScalar("select concat(is_broker_enabled, ' ', target_recovery_time_in_seconds) from sys.databases where name = db_name()"));
+    }
 }

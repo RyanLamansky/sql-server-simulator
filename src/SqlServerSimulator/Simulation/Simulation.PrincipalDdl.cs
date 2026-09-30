@@ -26,7 +26,14 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var name = nameToken.Value;
         context.MoveNextOptional();
+        // With no source clause at all, the user maps to the login of its own
+        // name, which has to exist (Msg 15007, probed 2026-09-30 against SQL
+        // Server 2025).
+        var bare = context.Token is not ReservedKeyword { Keyword: Keyword.For or Keyword.From }
+            && !(context.Token is Name { Value: var sourceWord } && sourceWord.Equals("WITHOUT", StringComparison.OrdinalIgnoreCase));
         var (loginLink, withoutLogin) = ParseCreateUserSource(context);
+        if (bare)
+            loginLink = name;
         var (defaultSchema, _) = ParsePrincipalWithOptions(context);
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)

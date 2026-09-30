@@ -23,18 +23,18 @@ internal sealed class Reverse(ParserContext context) : Expression
         var raw = source.Run(runtime);
         StringScalars.RejectLegacyLob(raw, "reverse");
         if (raw.IsNull)
-            return SqlValue.Null(StringScalars.ResolveResultType(raw.Type, runtime.Batch));
+            return SqlValue.Null(StringScalars.ResolveRewrittenType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "reverse");
 
         var input = value.AsString;
         var reversed = value.Type.Collation?.IsSupplementaryCharacterAware == true
             ? SupplementaryCharacters.ReverseByCodepoints(input)
             : SupplementaryCharacters.ReverseByCodeUnits(input);
-        return SqlValue.FromString(value.Type, reversed);
+        return SqlValue.FromString(StringScalars.ResolveRewrittenType(value.Type, runtime.Batch), reversed);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        StringScalars.ResolveResultType(StringScalars.BindArgument(source, batch, resolveColumnType, "reverse"), batch);
+        StringScalars.ResolveRewrittenType(StringScalars.BindArgument(source, batch, resolveColumnType, "reverse"), batch);
 
     internal override string DebugDisplay() => $"REVERSE({source.DebugDisplay()})";
 

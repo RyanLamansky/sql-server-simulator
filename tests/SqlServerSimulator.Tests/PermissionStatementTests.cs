@@ -71,7 +71,7 @@ public sealed class PermissionStatementTests
     public void CreateUser_StoresInPrincipalsDict()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create user alice");
+        _ = sim.ExecuteNonQuery("create user alice without login");
         AreEqual(1, sim.ExecuteScalar("select count(*) from sys.database_principals where name = 'alice'"));
         AreEqual("SQL_USER", sim.ExecuteScalar("select type_desc from sys.database_principals where name = 'alice'"));
     }
@@ -88,8 +88,8 @@ public sealed class PermissionStatementTests
     public void CreateUser_Duplicate_Raises15023()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create user alice");
-        _ = sim.AssertSqlError("create user alice", 15023);
+        _ = sim.ExecuteNonQuery("create user alice without login");
+        _ = sim.AssertSqlError("create user alice without login", 15023);
     }
 
     [TestMethod]
@@ -97,7 +97,7 @@ public sealed class PermissionStatementTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
-            create user alice;
+            create user alice without login;
             create role data_reader;
             alter role data_reader add member alice;
             """);
@@ -115,7 +115,7 @@ public sealed class PermissionStatementTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
-            create user alice;
+            create user alice without login;
             drop user alice;
             """);
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.database_principals where name = 'alice'"));
@@ -130,7 +130,7 @@ public sealed class PermissionStatementTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
-            create user alice;
+            create user alice without login;
             create role data_reader;
             alter role data_reader add member alice
             """);

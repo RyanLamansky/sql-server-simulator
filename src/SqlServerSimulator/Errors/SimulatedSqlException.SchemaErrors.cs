@@ -297,6 +297,15 @@ partial class SimulatedSqlException
         new("Full-text operation failed because database is read only.", 7690, 16, state);
 
     /// <summary>
+    /// Mimics SQL Server error 5062: one <c>ALTER DATABASE … SET</c> list
+    /// names two options that set the same state, such as two of the Service
+    /// Broker switches; <paramref name="option"/> is the second. Raised while
+    /// the batch compiles. Class 16 state 5.
+    /// </summary>
+    internal static SimulatedSqlException DatabaseOptionConflicts(string option) =>
+        new($"The option \"{option}\" conflicts with another requested option. The options cannot both be requested at the same time.", 5062, 16, 5);
+
+    /// <summary>
     /// Mimics SQL Server error 5058: <c>ALTER DATABASE … SET</c> names an
     /// option that database pins — <c>READ_ONLY</c> / <c>READ_WRITE</c> on
     /// <c>master</c> or <c>tempdb</c>. Probe-confirmed against SQL Server 2025

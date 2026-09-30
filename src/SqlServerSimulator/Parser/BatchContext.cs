@@ -3401,8 +3401,11 @@ internal sealed class BatchContext
         // view is keyed `sys.<name>` / `INFORMATION_SCHEMA.<name>`, so a bare
         // user-table name never collides.
         var key = name.Count == 1 ? name.Leaf : $"{name.ImmediateQualifier}.{name.Leaf}";
-        if (!Simulation.CatalogViews.TryGetValue(key, out view))
+        if (!Simulation.CatalogViews.TryGetValue(key, out view)
+            && !TryResolveCompatibilityViewThroughDbo(name, targetDatabase, out view))
+        {
             return false;
+        }
         // master.dbo.spt_values (and its 1-/2-part forms) resolve only when the
         // reference lands in master — the compatibility table exists nowhere else.
         if (view.MasterScoped && !Collation.Baseline.Equals(targetDatabase.Name, Simulation.MasterDatabaseName))
@@ -3412,6 +3415,24 @@ internal sealed class BatchContext
             return false;
         }
         return true;
+    }
+
+    /// <summary>
+    /// A compatibility view (<c>sysobjects</c>, <c>sysprocesses</c>, …) also
+    /// resolves under <c>dbo</c> — <c>dbo.sysobjects</c>,
+    /// <c>master.dbo.sysprocesses</c>, <c>master..sysobjects</c> — where a
+    /// modern catalog view doesn't (<c>dbo.tables</c> is Msg 208), unless a
+    /// <c>dbo</c> object of that name is there to take it (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    private static bool TryResolveCompatibilityViewThroughDbo(MultiPartName name, Database targetDatabase, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out CatalogView? view)
+    {
+        view = null;
+        return name.Count > 1
+            && Collation.Baseline.Equals(name.ImmediateQualifier, Database.DefaultSchemaName)
+            && Simulation.CatalogViews.TryGetValue(name.Leaf, out view)
+            && !(targetDatabase.Schemas.TryGetValue(Database.DefaultSchemaName, out var dbo)
+                && (dbo.HeapTables.ContainsKey(name.Leaf) || dbo.Views.ContainsKey(name.Leaf) || dbo.Synonyms.ContainsKey(name.Leaf)));
     }
 
     /// <summary>

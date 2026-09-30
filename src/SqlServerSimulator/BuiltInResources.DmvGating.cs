@@ -18,21 +18,27 @@ internal static partial class BuiltInResources
     // sys.dm_db_xtp_table_memory_stats are ungated (probe: readable by guest).
     private static readonly (string Key, DmvGateKind Kind)[] GatedDmvs =
     [
+        ("sys.dm_db_file_space_usage", DmvGateKind.ServerState),
         ("sys.dm_db_partition_stats", DmvGateKind.DatabaseState),
         ("sys.dm_exec_connections", DmvGateKind.ServerStatePolicy),
         ("sys.dm_exec_requests", DmvGateKind.SessionSelfFilter),
         ("sys.dm_exec_sessions", DmvGateKind.SessionSelfFilter),
         ("sys.dm_hadr_cluster", DmvGateKind.ServerState),
         ("sys.dm_hadr_database_replica_states", DmvGateKind.DatabaseState),
+        ("sys.dm_database_encryption_keys", DmvGateKind.ServerSecurityState),
+        ("sys.dm_os_process_memory", DmvGateKind.ServerState),
         ("sys.dm_os_sys_info", DmvGateKind.ServerState),
         ("sys.dm_os_waiting_tasks", DmvGateKind.ServerState),
         ("sys.dm_tran_active_snapshot_database_transactions", DmvGateKind.ServerState),
         ("sys.dm_tran_active_transactions", DmvGateKind.ServerState),
         ("sys.dm_tran_current_transaction", DmvGateKind.ServerState),
         ("sys.dm_tran_locks", DmvGateKind.ServerState),
+        ("sys.dm_tran_persistent_version_store_stats", DmvGateKind.DatabaseState),
         ("sys.dm_tran_session_transactions", DmvGateKind.ServerState),
         ("sys.dm_tran_version_store", DmvGateKind.ServerState),
         ("sys.dm_tran_version_store_space_usage", DmvGateKind.ServerState),
+        ("sys.sysprocesses", DmvGateKind.SessionSelfFilter),
+        ("sysprocesses", DmvGateKind.SessionSelfFilter),
     ];
 
     /// <summary>
@@ -70,6 +76,10 @@ internal static partial class BuiltInResources
             case DmvGateKind.ServerState:
                 if (!simulation.HoldsServerPermission(login, Permission.ViewServerPerformanceState))
                     throw SimulatedSqlException.ServerStatePermissionDenied("VIEW SERVER PERFORMANCE STATE", databaseName);
+                return rows;
+            case DmvGateKind.ServerSecurityState:
+                if (!simulation.HoldsServerPermission(login, Permission.ViewServerSecurityState))
+                    throw SimulatedSqlException.ServerStatePermissionDenied("VIEW SERVER SECURITY STATE", databaseName);
                 return rows;
             case DmvGateKind.ServerStatePolicy:
                 if (!simulation.HoldsServerPermission(login, Permission.ViewServerPerformanceState))

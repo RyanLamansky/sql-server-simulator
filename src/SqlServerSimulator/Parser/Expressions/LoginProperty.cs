@@ -27,9 +27,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// the live probe's shape: <c>PasswordLastSetTime</c> is a fixed seed date;
 /// the <c>BadPassword*</c> / lockout time sentinels are <c>1900-01-01</c>;
 /// counts and <c>Is*</c> flags are <c>0</c>; <c>DaysUntilExpiration</c> /
-/// <c>PasswordHash</c> / <c>PasswordHashAlgorithm</c> are NULL (a low-privilege
-/// login sees NULL for the hash on the live server too, and the simulator
-/// stores no login hash); <c>DefaultDatabase</c> is the session's current
+/// <c>PasswordHash</c> are NULL (a low-privilege login sees NULL for the hash
+/// on the live server too, and the simulator stores no login hash); <c>DefaultDatabase</c> is the session's current
 /// database; <c>DefaultLanguage</c> is <c>us_english</c>. Property names are
 /// case-insensitive.
 /// </para>
@@ -75,7 +74,7 @@ internal sealed class LoginProperty : Expression
         // password-set stamps; every other name behaves like a nonexistent
         // login (all properties NULL).
         var registered = runtime.Batch.Connection.Simulation.Logins.TryGetValue(login, out var serverLogin);
-        if (!registered && !BuiltInToken.Comparer.Equals(login, PrincipalPlaceholders.CurrentLogin))
+        if (!registered && !BuiltInToken.EqualsAny(login, PrincipalPlaceholders.CurrentLogin, "sa"))
             return SqlValue.Null(SqlType.SqlVariant);
 
         var property = propertyValue.CoerceTo(SqlType.NVarchar).AsString;
@@ -86,19 +85,25 @@ internal sealed class LoginProperty : Expression
         Span<char> upper = stackalloc char[property.Length];
         _ = property.AsSpan().ToUpperInvariant(upper);
         // Each property carries its probed inner base type; the null-valued
-        // properties (DaysUntilExpiration / PasswordHash / PasswordHashAlgorithm
-        // and any unknown name) surface as a NULL sql_variant.
+        // properties (DaysUntilExpiration / PasswordHash and any unknown name)
+        // surface as a NULL sql_variant.
         var inner = upper switch
         {
             "BADPASSWORDCOUNT" => SqlValue.FromInt32(0),
             "BADPASSWORDTIME" => SqlValue.FromDateTime(NeverSentinel),
-            "DEFAULTDATABASE" => SqlValue.FromNVarchar(registered ? serverLogin!.DefaultDatabase : runtime.Batch.CurrentDatabase.Name),
+            "DEFAULTDATABASE" => SqlValue.FromNVarchar(registered ? serverLogin!.DefaultDatabase
+                : BuiltInToken.Equals(login, "sa") ? "master" : runtime.Batch.CurrentDatabase.Name),
             "DEFAULTLANGUAGE" => SqlValue.FromNVarchar(registered ? serverLogin!.DefaultLanguage : "us_english"),
-            "HISTORYLENGTH" => SqlValue.FromInt32(0),
+            // One remembered password while the policy is checked, as it is
+            // for sa (probed 2026-09-30 against SQL Server 2025).
+            "HISTORYLENGTH" => SqlValue.FromInt32(!registered || serverLogin!.IsPolicyChecked ? 1 : 0),
             "ISEXPIRED" => SqlValue.FromInt32(0),
             "ISLOCKED" => SqlValue.FromInt32(0),
             "ISMUSTCHANGE" => SqlValue.FromInt32(0),
             "LOCKOUTTIME" => SqlValue.FromDateTime(NeverSentinel),
+            // SQL Server 2025 hashes every SQL login's password with PBKDF2,
+            // which this reports as 3 (probed 2026-09-30).
+            "PASSWORDHASHALGORITHM" => SqlValue.FromInt32(3),
             "PASSWORDLASTSETTIME" => SqlValue.FromDateTime(registered ? serverLogin!.PasswordLastSetTime : PasswordLastSetSeed),
             _ => SqlValue.Null(SqlType.SqlVariant),
         };

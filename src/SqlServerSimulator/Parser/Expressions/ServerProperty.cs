@@ -67,6 +67,9 @@ internal sealed class ServerProperty : Expression
             "EDITION" => Text("Enterprise Developer Edition (64-bit)"),
             "EDITIONID" => SqlValue.FromInt32(-2117995310),
             "ENGINEEDITION" => SqlValue.FromInt32(3),
+            // The error log sits under the engine's Linux layout too (probed
+            // 2026-09-30 against SQL Server 2025).
+            "ERRORLOGFILENAME" => Text("/var/opt/mssql/log/errorlog"),
             "FILESTREAMCONFIGUREDLEVEL" => SqlValue.FromInt32(0),
             "FILESTREAMEFFECTIVELEVEL" => SqlValue.FromInt32(0),
             "FILESTREAMSHARENAME" => Text("MSSQLSERVER"),

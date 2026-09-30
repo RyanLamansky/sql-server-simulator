@@ -150,11 +150,15 @@ internal static partial class BuiltInResources
         "sp_MSforeach_worker",
         "sp_revokedbaccess",
         // xp_msver returns a version/host-info table (SSMS calls it on connect);
-        // xp_qv is the AlwaysOn-availability probe; xp_instance_regread reads
-        // instance registry defaults.
+        // xp_qv is the AlwaysOn-availability probe; xp_instance_regread and
+        // xp_regread read
+        // the instance and machine registry values SMO asks for.
         "xp_msver",
         "xp_qv",
         "xp_instance_regread",
+        "xp_regread",
+        // xp_getnetname: SMO's fully-qualified server name read.
+        "xp_getnetname",
         // sp_tablecollations_100: SqlClient's SqlBulkCopy metadata batch calls
         // it (`exec ..sp_tablecollations_100 N'[schema].[table]'`) to read the
         // destination columns' TDS collation structures before streaming rows.
@@ -786,6 +790,28 @@ internal static partial class BuiltInResources
         public readonly int SchemaId = schemaId;
         public readonly string Type = type;
         public readonly string TypeDesc = typeDesc;
+
+        /// <summary>
+        /// Whether the object is a T-SQL module — every kind but an extended
+        /// procedure — and so has a <c>sys.system_sql_modules</c> row and
+        /// answers the module-scoped OBJECTPROPERTY names.
+        /// </summary>
+        public readonly bool IsModule = type != "X ";
+
+        /// <summary>
+        /// The module's QUOTED_IDENTIFIER capture: off for the
+        /// <c>INFORMATION_SCHEMA</c> views, the Query Store views,
+        /// <c>sys.spatial_reference_systems</c> and the <c>sp_MSforeach</c>
+        /// family, on for every other system module (probed 2026-09-30 against
+        /// SQL Server 2025 through <c>ExecIsQuotedIdentOn</c>); ANSI_NULLS is
+        /// on for all of them.
+        /// </summary>
+        public readonly bool UsesQuotedIdentifier = type != "X "
+            && schemaId != Database.InformationSchemaId
+            && !name.StartsWith("query_store_", StringComparison.OrdinalIgnoreCase)
+            && !name.StartsWith("database_query_store_", StringComparison.OrdinalIgnoreCase)
+            && !name.StartsWith("sp_MSforeach", StringComparison.OrdinalIgnoreCase)
+            && name is not ("query_context_settings" or "spatial_reference_systems");
     }
 
     /// <summary>

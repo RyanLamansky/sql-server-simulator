@@ -3274,7 +3274,8 @@ internal sealed partial class Selection
                 }
 
                 // The dependency DMVs, the describe DMV, dm_exec_sql_text,
-                // dm_exec_input_buffer and dm_exec_cursors are system TVFs, `sys.`-qualified like
+                // dm_exec_input_buffer, dm_exec_cursors and
+                // dm_io_virtual_file_stats are system TVFs, `sys.`-qualified like
                 // fn_virtualfilestats and dispatched on the same terms.
                 if (objectName.Count == 2 && BuiltInToken.Equals(objectName.ImmediateQualifier, "sys"))
                 {
@@ -3292,6 +3293,8 @@ internal sealed partial class Selection
                         return BuiltInRowsetSource(context, ParseExecCursors(context, objectName.ToString()));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_fts_parser"))
                         return BuiltInRowsetSource(context, ParseFtsParser(context, objectName.ToString()));
+                    if (BuiltInToken.Equals(objectName.Leaf, "dm_io_virtual_file_stats"))
+                        return BuiltInRowsetSource(context, ParseVirtualFileStatsDmv(context, objectName.ToString()));
                 }
 
                 // Linked-server fork: four-part `server.db.schema.t` routes

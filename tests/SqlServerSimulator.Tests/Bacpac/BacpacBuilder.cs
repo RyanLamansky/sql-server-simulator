@@ -107,6 +107,17 @@ public sealed partial class BacpacBuilder
         return this;
     }
 
+    /// <summary>
+    /// Adds a procedure as DacFx writes one: the <c>CREATE PROCEDURE … AS</c>
+    /// header in the <c>HeaderContents</c> annotation, and the body — which
+    /// starts with its own line break — in <c>BodyScript</c>.
+    /// </summary>
+    public BacpacBuilder Procedure(string schemaName, string procedureName, string header, string body)
+    {
+        _programmableObjects.Add(new ProgrammableObjectDef("SqlProcedure", "BodyScript", schemaName, procedureName, body, FunctionBodyHost: false, Header: header));
+        return this;
+    }
+
     /// <summary>Adds a CREATE FUNCTION emission (scalar UDF).</summary>
     public BacpacBuilder ScalarFunction(string schemaName, string functionName, string createStatement)
     {
@@ -674,7 +685,10 @@ public sealed partial class BacpacBuilder
         var entry = archive.CreateEntry("model.xml");
         using var stream = entry.Open();
         using var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        doc.Save(writer);
+        // DacFx writes a module body's CRLF line breaks into its CDATA as they
+        // stand; the default settings would fold them to the platform newline.
+        using var xmlWriter = System.Xml.XmlWriter.Create(writer, new System.Xml.XmlWriterSettings { Indent = true, NewLineHandling = System.Xml.NewLineHandling.None });
+        doc.Save(xmlWriter);
     }
 
     private static void WriteTableData(ZipArchive archive, TableBuilder table)
@@ -1265,7 +1279,7 @@ public sealed partial class BacpacBuilder
             new XAttribute("Type", "SysCommentsObjectAnnotation"),
             new XElement(ns + "Property",
                 new XAttribute("Name", "HeaderContents"),
-                new XAttribute("Value", "-- header"))));
+                new XAttribute("Value", prog.Header ?? "-- header"))));
         bodyHost.Add(new XElement(ns + "Property",
             new XAttribute("Name", prog.BodyPropertyName),
             new XElement(ns + "Value", new XCData(prog.CreateStatement))));
@@ -1285,7 +1299,8 @@ internal sealed record ProgrammableObjectDef(
     string ObjectName,
     string CreateStatement,
     bool FunctionBodyHost,
-    string? ParentTable = null);
+    string? ParentTable = null,
+    string? Header = null);
 
 internal enum ExtendedPropertyHost { AutoDetect, Index, Constraint, Unknown, DdlTrigger, Filegroup }
 

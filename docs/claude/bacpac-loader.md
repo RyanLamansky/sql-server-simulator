@@ -57,7 +57,7 @@ The two public types sit at the project root in namespace `SqlServerSimulator`, 
 
 | Phase | Elements |
 |---|---|
-| 1 | DB options + schemas + UDDTs + sequences + roles + **logins + users** + table types + XML schema collections + **full-text catalogs** + **filegroups** (registered on `Database.Filegroups` so `sys.filegroups` / `sys.data_spaces` surface them — no physical file model) + **partition functions**, then at the end of the phase the **partition schemes** (DacFx lists a scheme ahead of the filegroups it names) |
+| 1 | DB options + schemas + UDDTs + sequences + roles + **logins + users** + table types + XML schema collections + **full-text catalogs** + **filegroups** (registered on `Database.Filegroups` so `sys.filegroups` / `sys.data_spaces` surface them, each rowstore one with a data file) + **partition functions**, then at the end of the phase the **partition schemes** (DacFx lists a scheme ahead of the filegroups it names) |
 | 2 | Tables (columns + computed columns inline at model ordinal, defaults inline, `ON scheme(column)` for a table the model places on a partition scheme; a computed expression that forward-references a not-yet-created UDF makes the CREATE TABLE throw, so that one table is re-created with computed columns stripped and they defer to phase 8) |
 | 3 | Constraints (PK / UQ / CHECK / DEFAULT — DACFx already parenthesizes `DefaultExpressionScript` (`(NEXT VALUE FOR …)`), so `EmitDefaultConstraint` wraps only an unparenthesized script; wrapping an already-`(…)` script would double the parens the `ALTER … DEFAULT (…)` parser re-derives, diverging from real's single-pair `sys.default_constraints.definition`) |
 | 4 | Foreign keys |
@@ -121,6 +121,12 @@ An empty table keeps its declared seed.
   property for a read-only source (probe-confirmed) — an earlier reading that
   it omits one came from `READONLY` table-valued *parameters* matching the same
   attribute name in an unrelated element.
+- **Two database options are written only when they differ from DacFx's model defaults, which a fresh database doesn't share.**
+  An omitted `ServiceBrokerOption` means the broker disabled and an omitted `TargetRecoveryTimePeriod` a recovery time of 0, so the loader applies both when the model leaves them out (probed 2026-09-30 against SQL Server 2025: the reference's imports of WideWorldImporters and InsiteCommerce read 0, and of WideWorldImporters and AdventureWorks the broker off).
+  `IsTornPageProtectionOn="False"` becomes `TORN_PAGE_DETECTION OFF`, which leaves a `CHECKSUM` database `CHECKSUM`.
+- **A module body keeps its CRLF line breaks and joins its header with nothing between.**
+  The `HeaderContents` annotation ends where the body's own leading line break begins, and the CDATA body carries raw CRLFs that `XmlReader.Create` would fold to LF, so the model is read without end-of-line normalization; the stored definition then matches the reference's byte for byte (probed 2026-09-30 against SQL Server 2025, WideWorldImporters).
+- **A column's `MaskingFunction` property is its Dynamic Data Masking function**, and a table's `FilegroupForTextImage` relationship its `TEXTIMAGE_ON` filegroup.
 
 ## BCP wire format
 
@@ -225,6 +231,7 @@ The remaining four families:
   Export needed `sys.fulltext_languages` populated (DacFx INNER JOINs it by `language_id` to name the column's language — an empty view NREs the column-specifier populator) and `sys.fulltext_indexes.data_space_id` = 1 (PRIMARY) + `stoplist_id` = 0 (system stoplist), both of which DacFx INNER JOINs `sys.data_spaces` on the former (NULL drops the parent index element, orphaning its column specifiers → NRE) and reads the latter to decide `DoUseSystemStopList` vs `IsStopListOff`.
   See [`full-text.md`](full-text.md).
 - **`SqlFilegroup`** (phase 1) → registers the (non-PRIMARY) filegroup on `Database.Filegroups` so `sys.filegroups` / `sys.data_spaces` surface it and DacFx re-emits the standalone element.
+  A rowstore filegroup also gets one data file, named for it plus eight hex digits beside the primary file, as DacFx's import creates one (probed 2026-09-30 against SQL Server 2025); the digits hash the names where real's differ per import.
   No physical file model, and a table's `Filegroup` relationship is dropped; an index's or key constraint's becomes its `ON [filegroup]`, which is what keeps a unique index the model places off a partitioned table's scheme from defaulting onto it (and failing Msg 1908).
 - **`SqlPartitionFunction`** (phase 1) → `CREATE PARTITION FUNCTION name (type) AS RANGE LEFT | RIGHT FOR VALUES (…)` — `Range` 2 is `RIGHT`, the boundaries are the `SqlPartitionValue` expression scripts.
   **`SqlPartitionScheme`** (end of phase 1) → `CREATE PARTITION SCHEME name AS PARTITION function TO (…)`, its filegroup specifiers in order, the one past the partitions becoming `NEXT USED`.

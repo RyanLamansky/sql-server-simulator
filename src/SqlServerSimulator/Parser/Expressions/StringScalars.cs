@@ -222,6 +222,21 @@ internal static class StringScalars
     /// schema only needs to be roughly correct since the value never
     /// materializes).
     /// </summary>
+    /// <summary>
+    /// The result type of a function that rewrites its string argument's
+    /// characters — UPPER / LOWER / LTRIM / RTRIM / TRIM / REVERSE: a
+    /// fixed-width <c>char(n)</c> / <c>nchar(n)</c> argument comes back as
+    /// <c>varchar(n)</c> / <c>nvarchar(n)</c>, which is what lets a trim shed
+    /// the padding (probed 2026-09-30 against SQL Server 2025); any other
+    /// type is <see cref="ResolveResultType"/>'s answer.
+    /// </summary>
+    public static SqlType ResolveRewrittenType(SqlType sourceType, BatchContext batch) => sourceType switch
+    {
+        CharSqlType fixedChar => VarcharSqlType.Get(fixedChar.length, fixedChar.Collation, fixedChar.Coercibility),
+        NCharSqlType fixedNChar => NVarcharSqlType.Get(fixedNChar.length, fixedNChar.Collation, fixedNChar.Coercibility),
+        _ => ResolveResultType(sourceType, batch),
+    };
+
     public static SqlType ResolveResultType(SqlType sourceType, BatchContext batch) =>
         SqlType.IsStringCategory(sourceType) || !IsCoerceableToVarchar(sourceType)
             ? sourceType

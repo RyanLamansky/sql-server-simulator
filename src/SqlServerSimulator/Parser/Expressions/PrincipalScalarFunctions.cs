@@ -103,8 +103,22 @@ internal sealed class SUserName : Expression
             if (sid is not null ? !row[2].IsNull && row[2].AsBytes.AsSpan().SequenceEqual(sid) : row[1].AsInt32 == id)
                 return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), row[0].AsString);
         }
+        if (sid is not null && WellKnownWindowsAccount(sid) is { } account)
+            return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), account);
         return SqlValue.Null(MetadataNameType(runtime.Batch));
     }
+
+    /// <summary>
+    /// The built-in Windows accounts <c>SUSER_SNAME</c> names by SID though no
+    /// login maps them (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    private static string? WellKnownWindowsAccount(byte[] sid) => Convert.ToHexString(sid) switch
+    {
+        "010100000000000512000000" => @"NT AUTHORITY\SYSTEM",
+        "01020000000000052000000020020000" => @"BUILTIN\Administrators",
+        "01020000000000052000000021020000" => @"BUILTIN\Users",
+        _ => null,
+    };
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
@@ -175,14 +189,14 @@ internal sealed class SUserSid : Expression
 }
 
 /// <summary>
-/// SQL <c>SID_BINARY(name)</c>: resolves a Windows / Entra-ID principal
-/// name to its binary SID. Probe-confirmed against SQL Server 2025: it
-/// returns NULL even for existing SQL-auth logins (<c>sid_binary(N'sa')</c>
-/// is NULL) — it only resolves directory principals, which the simulator
-/// never hosts — so a constant NULL <c>varbinary(85)</c> is faithful for
-/// every input the simulator can see. The argument is still parsed and
-/// evaluated (one required argument). SSMS's Select-Top-1000
-/// server-properties batch calls it on the service's Windows group name.
+/// SQL <c>SID_BINARY(sid)</c>: converts a SID in its string form
+/// (<c>S-1-5-32-544</c>, case-insensitive, the authority decimal or
+/// <c>0x</c> hex) to the binary one — revision, subauthority count, the
+/// 48-bit big-endian authority, then each subauthority little-endian. Any
+/// other input, a login name such as <c>sa</c> or a binary value included,
+/// is NULL (probed 2026-07-10 and 2026-09-30 against SQL Server 2025). SMO
+/// and SSMS's server-properties batch call it on the service's Windows
+/// group SID.
 /// </summary>
 internal sealed class SidBinary : Expression
 {
@@ -197,8 +211,40 @@ internal sealed class SidBinary : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
-        _ = this.arg.Run(runtime);
-        return SqlValue.Null(SqlType.Varbinary);
+        var value = this.arg.Run(runtime);
+        return value.IsNull || value.Type.Category != SqlTypeCategory.String || Parse(value.AsString) is not { } sid
+            ? SqlValue.Null(SqlType.Varbinary)
+            : SqlValue.FromVarbinary(sid);
+    }
+
+    /// <summary>The binary form of a string SID, or null when the text isn't one.</summary>
+    internal static byte[]? Parse(string text)
+    {
+        var parts = text.Split('-');
+        if (parts.Length is < 3 or > 18 || !parts[0].Equals("S", StringComparison.OrdinalIgnoreCase)
+            || !byte.TryParse(parts[1], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var revision))
+        {
+            return null;
+        }
+        var authorityText = parts[2];
+        var hex = authorityText.StartsWith("0x", StringComparison.OrdinalIgnoreCase);
+        if (!ulong.TryParse(hex ? authorityText[2..] : authorityText, hex ? System.Globalization.NumberStyles.AllowHexSpecifier : System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var authority) || authority > 0xFFFF_FFFF_FFFF)
+        {
+            return null;
+        }
+        var sid = new byte[8 + (4 * (parts.Length - 3))];
+        sid[0] = revision;
+        sid[1] = (byte)(parts.Length - 3);
+        for (var i = 0; i < 6; i++)
+            sid[2 + i] = (byte)(authority >> (8 * (5 - i)));
+        for (var i = 3; i < parts.Length; i++)
+        {
+            if (!uint.TryParse(parts[i], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var subAuthority))
+                return null;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(sid.AsSpan(8 + (4 * (i - 3))), subAuthority);
+        }
+        return sid;
     }
 
     /// <summary>

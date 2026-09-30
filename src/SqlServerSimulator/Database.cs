@@ -388,6 +388,34 @@ internal sealed partial class Database
     public byte PageVerify = 2;
 
     /// <summary>
+    /// <c>sys.databases.is_broker_enabled</c>, set by the <c>ALTER DATABASE …
+    /// SET</c> Service Broker switches — recorded; Service Broker itself isn't
+    /// modeled. A new database starts enabled whatever <c>model</c> says
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    public bool BrokerEnabled = true;
+
+    /// <summary>
+    /// <c>sys.databases.target_recovery_time_in_seconds</c>, set by
+    /// <c>ALTER DATABASE … SET TARGET_RECOVERY_TIME</c> — recorded, with no
+    /// checkpoint to drive.
+    /// </summary>
+    public int TargetRecoveryTimeSeconds = 60;
+
+    /// <summary>
+    /// <c>sys.database_recovery_status.database_guid</c>: this database's
+    /// identity, drawn when it's created.
+    /// </summary>
+    public readonly Guid DatabaseGuid = Guid.NewGuid();
+
+    /// <summary>
+    /// <c>sys.database_recovery_status</c>'s <c>family_guid</c> and
+    /// <c>recovery_fork_guid</c>, one value for a database that has never been
+    /// restored.
+    /// </summary>
+    public readonly Guid RecoveryForkGuid = Guid.NewGuid();
+
+    /// <summary>
     /// <c>sys.databases.user_access</c>: 0 MULTI_USER, 1 SINGLE_USER,
     /// 2 RESTRICTED_USER — recorded; the simulator never restricts a
     /// connection by it.

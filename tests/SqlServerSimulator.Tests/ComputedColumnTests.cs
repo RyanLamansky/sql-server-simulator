@@ -540,4 +540,16 @@ public sealed class ComputedColumnTests
         _ = sim.ExecuteNonQuery("update t set a = 7 where id = 1");
         Assert.AreEqual("old=40 new=70", sim.ExecuteScalar("select note from tlog"));
     }
+
+    /// <summary>
+    /// A computed column over an expression with no declared width — JSON_VALUE,
+    /// FORMAT — stores the width the wire gives it, 8000 bytes (probed
+    /// 2026-09-30 against SQL Server 2025); SMO reads it as the column's Length.
+    /// </summary>
+    [TestMethod]
+    public void UnsizedExpression_StoresWireWidth()
+        => Assert.AreEqual("c:8000,d:8000,f:8000,u:20", new Simulation().ExecuteScalar("""
+            create table t (a nvarchar(10), c as json_value(a, '$.x'), d as json_query(a), f as format(1, 'N'), u as upper(a));
+            select string_agg(concat(name, ':', max_length), ',') within group (order by column_id) from sys.columns where object_id = object_id('t') and is_computed = 1
+            """));
 }

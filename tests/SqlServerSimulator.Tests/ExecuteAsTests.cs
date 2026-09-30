@@ -189,10 +189,27 @@ public sealed class ExecuteAsTests
         AreEqual(SidOf(new Simulation()), SidOf(new Simulation()));
     }
 
+    /// <summary>
+    /// A user with no source clause maps to the login of its own name; with no
+    /// such login it's Msg 15007 (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CreateUser_BareMapsSameNamedLogin()
+    {
+        var sim = new Simulation();
+        _ = sim.AssertSqlError("create user nobody", 15007);
+        AreEqual("l", sim.ExecuteScalar("""
+            create login l with password = 'P@ss1word';
+            create user l;
+            select suser_sname(sid) from sys.database_principals where name = 'l'
+            """));
+    }
+
     [TestMethod]
     public void CreateUser_BareAndForLogin_BothRegisterPrincipal()
         => AreEqual(2, new Simulation().ExecuteScalar<int>("""
             create login l with password = 'P@ss1word';
+            create login bare with password = 'P@ss1word';
             create user bare;
             create user linked for login l;
             select case when user_id('bare') is not null then 1 else 0 end

@@ -293,6 +293,9 @@ internal enum DmvGateKind : byte
     /// <summary>Server-scope DMV — needs <c>VIEW SERVER PERFORMANCE STATE</c> (covered by <c>VIEW SERVER STATE</c>); denial raises Msg 300.</summary>
     ServerState,
 
+    /// <summary>A server-scope DMV needing <c>VIEW SERVER SECURITY STATE</c> (covered by <c>VIEW SERVER STATE</c>); denial raises Msg 300.</summary>
+    ServerSecurityState,
+
     /// <summary>A server-scope DMV gated as <see cref="ServerState"/> whose denial raises Msg 371 instead (<c>sys.dm_exec_connections</c>).</summary>
     ServerStatePolicy,
 

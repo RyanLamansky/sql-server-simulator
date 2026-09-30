@@ -802,16 +802,20 @@ internal static partial class BuiltInResources
             CharSqlType c => (c.length, 0, 0),
             NCharSqlType nc => ((short)(nc.length * 2), 0, 0),
             BinarySqlType bn => (bn.length, 0, 0),
-            VarcharSqlType vc => (vc.length == 0 ? (short)(col.MaxLength ?? 1) : vc.length, 0, 0),
+            // An unsized string or binary type — the result of an expression
+            // such as JSON_VALUE or FORMAT, stored as a computed or view
+            // column — reports the width the wire gives it, 8000 bytes (probed
+            // 2026-09-30 against SQL Server 2025).
+            VarcharSqlType vc => (vc.length == 0 ? (short)(col.MaxLength ?? 8000) : vc.length, 0, 0),
             NVarcharSqlType nv => (
                 nv.length switch
                 {
                     -1 => -1,
-                    0 => (short)((col.MaxLength ?? 1) * 2),
+                    0 => (short)((col.MaxLength ?? 4000) * 2),
                     _ => (short)(nv.length * 2),
                 },
                 0, 0),
-            VarbinarySqlType vb => (vb.length == 0 ? (short)(col.MaxLength ?? 1) : vb.length, 0, 0),
+            VarbinarySqlType vb => (vb.length == 0 ? (short)(col.MaxLength ?? 8000) : vb.length, 0, 0),
             // xml: real SQL Server reports max_length = -1 (matching the
             // nvarchar(MAX) storage shape) and no numeric precision/scale.
             XmlSqlType => (-1, 0, 0),

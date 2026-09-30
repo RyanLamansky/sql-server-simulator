@@ -301,4 +301,72 @@ public class AlterDatabaseOptionsTests
         using var cmd = conn.CreateCommand("SELECT 1");
         AreEqual(1, cmd.ExecuteScalar());
     }
+
+    /// <summary>
+    /// The Service Broker switches record is_broker_enabled — a new database
+    /// starts enabled though model is off — and two in one list are Msg 5062
+    /// naming the second (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ServiceBrokerSwitches_Recorded()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create database b");
+        AreEqual(1, sim.ExecuteScalar("select cast(is_broker_enabled as int) from sys.databases where name = 'b'"));
+        _ = sim.ExecuteNonQuery("alter database b set disable_broker");
+        AreEqual(0, sim.ExecuteScalar("select cast(is_broker_enabled as int) from sys.databases where name = 'b'"));
+        _ = sim.ExecuteNonQuery("alter database b set enable_broker with rollback immediate");
+        AreEqual(1, sim.ExecuteScalar("select cast(is_broker_enabled as int) from sys.databases where name = 'b'"));
+        _ = sim.ExecuteNonQuery("alter database b set disable_broker; alter database b set new_broker");
+        AreEqual(1, sim.ExecuteScalar("select cast(is_broker_enabled as int) from sys.databases where name = 'b'"));
+        sim.AssertSqlError("alter database b set enable_broker, disable_broker", 5062,
+            "The option \"DISABLE_BROKER\" conflicts with another requested option. The options cannot both be requested at the same time.");
+    }
+
+    /// <summary>TARGET_RECOVERY_TIME records its seconds, a MINUTES value converted.</summary>
+    [TestMethod]
+    public void TargetRecoveryTime_Recorded()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("alter database current set target_recovery_time = 2 minutes");
+        AreEqual(120, sim.ExecuteScalar("select target_recovery_time_in_seconds from sys.databases where name = db_name()"));
+        _ = sim.ExecuteNonQuery("alter database current set target_recovery_time = 0 seconds");
+        AreEqual(0, sim.ExecuteScalar("select target_recovery_time_in_seconds from sys.databases where name = db_name()"));
+    }
+
+    /// <summary>
+    /// TORN_PAGE_DETECTION OFF clears torn-page detection only: a CHECKSUM
+    /// database keeps CHECKSUM (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void TornPageDetectionOff_KeepsChecksum()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("alter database current set torn_page_detection off");
+        AreEqual("CHECKSUM", sim.ExecuteScalar("select page_verify_option_desc from sys.databases where name = db_name()"));
+        _ = sim.ExecuteNonQuery("alter database current set torn_page_detection on; alter database current set torn_page_detection off");
+        AreEqual("NONE", sim.ExecuteScalar("select page_verify_option_desc from sys.databases where name = db_name()"));
+    }
+
+    /// <summary>
+    /// The system databases' shipped settings (probed 2026-09-30 against SQL
+    /// Server 2025): master and msdb allow snapshot isolation, master's target
+    /// recovery time is 0, master and model have Service Broker off with an
+    /// all-zero GUID, and master, model and tempdb report full-text disabled.
+    /// </summary>
+    [TestMethod]
+    public void SystemDatabases_ShippedSettings()
+        => AreEqual("master:1:0:0:1:0|tempdb:0:60:1:0:0|model:0:60:0:1:0|msdb:1:60:1:0:1", new Simulation().ExecuteScalar("""
+            select string_agg(concat_ws(':', name, snapshot_isolation_state, target_recovery_time_in_seconds, cast(is_broker_enabled as int),
+                iif(service_broker_guid = '00000000-0000-0000-0000-000000000000', 1, 0), cast(is_fulltext_enabled as int)), '|') within group (order by database_id)
+            from sys.databases where database_id <= 4
+            """));
+
+    /// <summary>DATABASEPROPERTYEX's IsFulltextEnabled agrees with sys.databases.</summary>
+    [TestMethod]
+    public void IsFulltextEnabled_OffForMasterModelTempdb()
+        => AreEqual("0,0,0,1,1", new Simulation().ExecuteScalar("""
+            select concat_ws(',', cast(databasepropertyex('master', 'IsFulltextEnabled') as int), cast(databasepropertyex('model', 'IsFulltextEnabled') as int),
+                cast(databasepropertyex('tempdb', 'IsFulltextEnabled') as int), cast(databasepropertyex('msdb', 'IsFulltextEnabled') as int), cast(databasepropertyex(db_name(), 'IsFulltextEnabled') as int))
+            """));
 }

@@ -165,4 +165,9 @@ public sealed class ServerPropertyTests
     [TestMethod]
     public void AStringProperty_IsDeclaredNVarchar128()
         => AreEqual(256, new Simulation().ExecuteScalar("select cast(sql_variant_property(serverproperty('ProductVersion'), 'MaxLength') as int)"));
+
+    /// <summary>The error log sits under the engine's Linux layout (probed 2026-09-30 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void ErrorLogFileName_LinuxLayout()
+        => AreEqual("/var/opt/mssql/log/errorlog", new Simulation().ExecuteScalar("select serverproperty('ErrorLogFileName')"));
 }

@@ -78,7 +78,11 @@ internal static class ModelXmlReader
             IgnoreProcessingInstructions = true,
             CloseInput = false,
         };
-        using var xmlReader = XmlReader.Create(modelStream, settings);
+        // XmlReader.Create folds every CRLF inside a CDATA body to LF; DacFx's
+        // import keeps a module body's line breaks as the model carries them,
+        // so the underlying reader skips end-of-line normalization.
+        using var textReader = new XmlTextReader(modelStream) { DtdProcessing = DtdProcessing.Prohibit, Normalization = false };
+        using var xmlReader = XmlReader.Create(textReader, settings);
         var doc = XDocument.Load(xmlReader, LoadOptions.None);
         var model = doc.Root?.Element(Ns + "Model")
             ?? throw new InvalidDataException("bacpac: <DataSchemaModel><Model> root not found.");
@@ -267,7 +271,7 @@ internal static class ModelXmlReader
                     // live on PRIMARY regardless. Phase 1: no dependencies, and
                     // FILEGROUP-scoped extended properties (phase 9) resolve the
                     // registered data_space_id.
-                    ("SqlFilegroup", 1) => Run(() => EmitFilegroup(name, connection)),
+                    ("SqlFilegroup", 1) => Run(() => EmitFilegroup(element, name, connection)),
                     // A partition function has no dependencies; a scheme names
                     // filegroups, which DacFx may list later in the model, so
                     // the schemes wait for the end of phase 1. Both precede the
@@ -468,12 +472,26 @@ internal static class ModelXmlReader
             ["QueryStoreMaxStorageSize"] = "100",
         };
 
+        // DacFx writes these only when they differ from its model defaults —
+        // Service Broker disabled and a target recovery time of 0 — which a
+        // fresh database doesn't share, so an omitted one still has to be
+        // applied (probed 2026-09-30 against SQL Server 2025: the reference's
+        // imports of WideWorldImporters and InsiteCommerce, whose models omit
+        // the recovery time, read 0, and of WideWorldImporters and
+        // AdventureWorks, which omit the broker option, read it disabled).
+        var omittedDefaults = new SortedDictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["ServiceBrokerOption"] = "0",
+            ["TargetRecoveryTimePeriod"] = "0",
+        };
+
         foreach (var property in element.Elements(Ns + "Property"))
         {
             var name = property.Attribute("Name")?.Value;
             var value = property.Attribute("Value")?.Value;
             if (name is null || value is null)
                 continue;
+            _ = omittedDefaults.Remove(name);
 
             // Recorded rather than emitted — see BacpacImportResult.DatabaseIsReadOnly.
             if (name == "IsReadOnly" && IsTrue(value))
@@ -491,6 +509,14 @@ internal static class ModelXmlReader
 
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
             command.CommandText = sql;
+#pragma warning restore CA2100
+            _ = command.ExecuteNonQuery();
+        }
+
+        foreach (var (name, value) in omittedDefaults)
+        {
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+            command.CommandText = TranslateDatabaseOption(name, value, bracketedDb);
 #pragma warning restore CA2100
             _ = command.ExecuteNonQuery();
         }
@@ -599,6 +625,7 @@ internal static class ModelXmlReader
         "IsOptimizedLockingOn" => $"ALTER DATABASE {bracketedDb} SET OPTIMIZED_LOCKING = {OnOff(value)};",
         "IsReadCommittedSnapshot" => $"ALTER DATABASE {bracketedDb} SET READ_COMMITTED_SNAPSHOT {OnOff(value)};",
         "IsAllowSnapshotIsolation" => $"ALTER DATABASE {bracketedDb} SET ALLOW_SNAPSHOT_ISOLATION {OnOff(value)};",
+        "IsAutoUpdateStatisticsAsyncOn" => $"ALTER DATABASE {bracketedDb} SET AUTO_UPDATE_STATISTICS_ASYNC {OnOff(value)};",
         // The database's compatibility level gates real behavior — the
         // simulator's own compat-170 surface among it — so a model that
         // declares one has to reach the database, or every import runs at the
@@ -613,6 +640,15 @@ internal static class ModelXmlReader
         // FULL default: 1 = SIMPLE, 2 = BULK_LOGGED (probe-confirmed by
         // exporting a database at each of the three settings).
         "RecoveryMode" => $"ALTER DATABASE {bracketedDb} SET RECOVERY {RecoveryMode(value)};",
+        // ServiceBrokerOption: 0 = DISABLE_BROKER (the model default),
+        // 1 = ENABLE_BROKER, 2 = NEW_BROKER, 3 = ERROR_BROKER_CONVERSATIONS.
+        "ServiceBrokerOption" => $"ALTER DATABASE {bracketedDb} SET {value switch
+        {
+            "1" => "ENABLE_BROKER",
+            "2" => "NEW_BROKER",
+            "3" => "ERROR_BROKER_CONVERSATIONS",
+            _ => "DISABLE_BROKER",
+        }};",
         // IsCursorDefaultScopeGlobal: True → GLOBAL, False → LOCAL.
         "IsCursorDefaultScopeGlobal" => $"ALTER DATABASE {bracketedDb} SET CURSOR_DEFAULT {(IsTrue(value) ? "GLOBAL" : "LOCAL")};",
         // TARGET_RECOVERY_TIME requires a unit; bacpac always stores SECONDS.
@@ -1069,7 +1105,10 @@ internal static class ModelXmlReader
 
         try
         {
-            ExecuteCreateTable(qualifiedName, inlineDdls, connection, PlacementClause(element, partitionedOnly: true));
+            // The model names the LOB filegroup for a table holding a LOB
+            // column; the stripped retry below may have dropped the only one,
+            // so only this attempt places it.
+            ExecuteCreateTable(qualifiedName, inlineDdls, connection, PlacementClause(element, partitionedOnly: true) + TextImageClause(element));
             // Inline succeeded: HeapTable.Columns is in model order, so the
             // alias side-map keeps a slot per model column (computed slots are
             // false and never read — BCP filters computed columns out before
@@ -1135,7 +1174,7 @@ internal static class ModelXmlReader
     /// <summary>
     /// Builds the per-column DDL fragment for a single <c>SqlSimpleColumn</c>
     /// element. Output shape:
-    /// <c>[col] type[(args)] [IDENTITY(seed, increment) [NOT FOR REPLICATION]] [ROWGUIDCOL] [NULL|NOT NULL]</c>.
+    /// <c>[col] type[(args)] [COLLATE c] [MASKED WITH (FUNCTION = …)] [IDENTITY(seed, increment) [NOT FOR REPLICATION]] [ROWGUIDCOL] [NULL|NOT NULL]</c>.
     /// IDENTITY defaults to (1,1) and appends NOT FOR REPLICATION when
     /// <c>IdentityIsNotForReplication=True</c>; ROWGUIDCOL only emits when
     /// <c>IsRowGuidColumn=True</c>; the explicit NULL/NOT NULL marker comes
@@ -1226,7 +1265,11 @@ internal static class ModelXmlReader
         // is what lets a UDDT-aliased column inherit the alias's nullability
         // rather than have an explicit NULL override it.
         var nullability = isNullableExplicit || !isNullable ? (isNullable ? " NULL" : " NOT NULL") : "";
-        return $"{columnLeaf} {typeDdl}{collateClause}{identityClause}{rowGuidClause}{generatedClause}{nullability}";
+        // A Dynamic Data Masking column carries its mask as MaskingFunction.
+        var maskingClause = ReadStringProperty(columnElement, "MaskingFunction") is { } maskingFunction
+            ? $" MASKED WITH (FUNCTION = '{maskingFunction.Replace("'", "''", StringComparison.Ordinal)}')"
+            : "";
+        return $"{columnLeaf} {typeDdl}{collateClause}{maskingClause}{identityClause}{rowGuidClause}{generatedClause}{nullability}";
     }
 
     /// <summary>
@@ -1995,7 +2038,9 @@ internal static class ModelXmlReader
 
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = headerContents + "\n" + body;
+        // DacFx's body carries its own leading line break, which the stored
+        // definition keeps verbatim; a body without one takes a separator.
+        command.CommandText = char.IsWhiteSpace(body[0]) ? headerContents + body : headerContents + "\n" + body;
 #pragma warning restore CA2100
         try
         {
@@ -2146,6 +2191,17 @@ internal static class ModelXmlReader
     }
 
     /// <summary>
+    /// <c>TEXTIMAGE_ON filegroup</c> for a table whose model names a
+    /// <c>FilegroupForTextImage</c> — the filegroup its LOB data lives on,
+    /// which a later clustered key moving the rows leaves where it is. Empty
+    /// for a table on a partition scheme, which takes no such clause.
+    /// </summary>
+    private static string TextImageClause(XElement element) =>
+        ReadSingleReference(element, "PartitionScheme") is null && ReadSingleReference(element, "FilegroupForTextImage") is { } filegroup
+            ? $" TEXTIMAGE_ON {filegroup}"
+            : "";
+
+    /// <summary>
     /// The <c>ON</c> clause an element's placement writes: <c>ON scheme(column)</c>
     /// for one on a partition scheme, else — unless
     /// <paramref name="partitionedOnly"/> — <c>ON filegroup</c> for one naming
@@ -2223,14 +2279,35 @@ internal static class ModelXmlReader
     /// <c>sys.filegroups</c> / <c>sys.data_spaces</c> surface it and DacFx
     /// re-emits the standalone element on export. The element Name is the
     /// 1-part bracketed filegroup name (e.g. <c>[USERDATA]</c>); <c>PRIMARY</c>
-    /// is built-in and never arrives here. No physical file model; a partition
-    /// scheme can map partitions to the filegroup.
+    /// is built-in and never arrives here. A partition scheme can map
+    /// partitions to the filegroup.
+    /// <para>
+    /// DacFx's import gives a rowstore filegroup one data file, named for the
+    /// filegroup plus eight hex digits (<c>USERDATA_1FBBEDC1</c>) and placed
+    /// beside the primary file (probed 2026-09-30: the reference's
+    /// WideWorldImporters import). The digits here are a hash of the names,
+    /// so an import is repeatable where real's differ per import.
+    /// </para>
     /// </summary>
-    private static void EmitFilegroup(string? elementName, DbConnection connection)
+    private static void EmitFilegroup(XElement element, string? elementName, DbConnection connection)
     {
         if (string.IsNullOrEmpty(elementName))
             throw new InvalidDataException("bacpac: SqlFilegroup element missing Name attribute.");
-        _ = ((SimulatedDbConnection)connection).CurrentDatabase.RegisterFilegroup(Unbracket(elementName));
+        var database = ((SimulatedDbConnection)connection).CurrentDatabase;
+        var filegroup = Unbracket(elementName);
+        _ = database.RegisterFilegroup(filegroup);
+        if (ReadBoolProperty(element, "ContainsMemoryOptimizedData", defaultValue: false))
+            return;
+        var hash = Simulation.Fnv1a32.Initial;
+        hash.Mix(database.Name);
+        hash.Mix(filegroup);
+        var fileName = $"{filegroup}_{hash.Value:X8}";
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"ALTER DATABASE CURRENT ADD FILE (NAME = N'{fileName.Replace("'", "''", StringComparison.Ordinal)}', "
+            + $"FILENAME = N'/var/opt/mssql/data/{$"{database.Name}_{fileName}".Replace("'", "''", StringComparison.Ordinal)}.mdf') TO FILEGROUP {BracketName(filegroup)};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
     }
 
     /// <summary>

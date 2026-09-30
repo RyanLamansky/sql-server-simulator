@@ -296,12 +296,16 @@ public sealed class SsmsTablesNodeCatalogTests
 
     /// <summary>
     /// The Triggers sub-node query LEFT JOINs sys.system_sql_modules to detect a
-    /// WITH ENCRYPTION module. The simulator ships no system-defined modules, so
-    /// the view is always empty.
+    /// WITH ENCRYPTION module: only system modules appear there, never a user
+    /// trigger.
     /// </summary>
     [TestMethod]
-    public void SystemSqlModules_IsEmpty()
-        => AreEqual(0, new Simulation().ExecuteScalar<int>("select count(*) from sys.system_sql_modules"));
+    public void SystemSqlModules_HoldsOnlySystemModules()
+        => AreEqual(0, new Simulation().ExecuteScalar<int>("""
+            create table t (id int);
+            exec('create trigger tr on t after insert as select 1');
+            select count(*) from sys.system_sql_modules where object_id > 0
+            """));
 
     /// <summary>
     /// sys.partitions carries the table's live row count on the rows column

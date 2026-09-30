@@ -477,9 +477,9 @@ internal sealed class HasPermsByName : Expression
 /// the session principal (<c>dbo</c> at the database level; the single
 /// login at the server level). Probe-confirmed shape: member → 1, known
 /// role without membership → 0, anything that isn't a role at that scope →
-/// NULL. Database scope: <c>public</c> and <c>db_owner</c> → 1 (dbo is
-/// always a member of both), the other fixed roles → 0, user-created roles
-/// consult <see cref="Database.RoleMembers"/>, non-role principals and
+/// NULL. Database scope: <c>public</c> → 1, and for <c>dbo</c> every fixed
+/// role but the deny pair; other roles consult
+/// <see cref="Database.RoleMembers"/>, non-role principals and
 /// unknown names → NULL. Server scope: <c>public</c> → 1, the other fixed
 /// server roles → 0 (no server-role membership model), everything else →
 /// NULL. NULL argument returns NULL.
@@ -541,12 +541,10 @@ internal sealed class RoleMemberCheck : Expression
 
         var database = runtime.Batch.CurrentDatabase;
         var effectiveId = runtime.Batch.Connection.Security.Effective.DatabasePrincipalId;
-        // dbo is implicitly a member of db_owner (probe D2) — real reports 1
-        // without a db_owner membership row.
-        if (effectiveId == Database.DboPrincipalId && BuiltInToken.Comparer.Equals(roleName, "db_owner"))
-            return SqlValue.FromInt32(1);
         if (database.Principals.TryGetValue(roleName, out var principal) && principal.TypeCode == "R")
         {
+            if (effectiveId == Database.DboPrincipalId && DboBelongsTo(principal))
+                return SqlValue.FromInt32(1);
             // Transitive membership of the effective principal (incl. nested
             // roles) via the permission checker's role closure.
             return SqlValue.FromInt32(PermissionChecker.IsRoleMember(database, effectiveId, principal) ? 1 : 0);
@@ -569,7 +567,7 @@ internal sealed class RoleMemberCheck : Expression
         if (!database.Principals.TryGetValue(roleName, out var roleP))
             return SqlValue.Null(SqlType.Int32);
         if (roleP.PrincipalId == member.PrincipalId
-            || (member.PrincipalId == Database.DboPrincipalId && BuiltInToken.Comparer.Equals(roleName, "db_owner")))
+            || (member.PrincipalId == Database.DboPrincipalId && DboBelongsTo(roleP)))
         {
             return SqlValue.FromInt32(1);
         }
@@ -577,6 +575,16 @@ internal sealed class RoleMemberCheck : Expression
             ? SqlValue.FromInt32(PermissionChecker.IsRoleMember(database, member.PrincipalId, roleP) ? 1 : 0)
             : SqlValue.Null(SqlType.Int32);
     }
+
+    /// <summary>
+    /// The <c>dbo</c> user belongs to every fixed database role but the two
+    /// deny roles without a membership row, where a <c>db_owner</c> member
+    /// belongs to <c>db_owner</c> alone (probed 2026-09-30 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static bool DboBelongsTo(DatabasePrincipal role) =>
+        role.IsFixedRole && role.PrincipalId != 0
+        && !BuiltInToken.EqualsAny(role.Name, "db_denydatareader", "db_denydatawriter");
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {

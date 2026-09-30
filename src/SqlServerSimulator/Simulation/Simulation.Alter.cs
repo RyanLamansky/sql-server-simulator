@@ -274,6 +274,7 @@ partial class Simulation
         var options = 0;
         var changeTracking = false;
         var queryStore = false;
+        var broker = false;
         combinesChangeTracking = false;
         while (true)
         {
@@ -289,6 +290,14 @@ partial class Simulation
                 if (queryStore)
                     throw SimulatedSqlException.QueryStoreOptionGivenTwice();
                 queryStore = true;
+            }
+            // One Service Broker switch per list (Msg 5062, probed 2026-09-30
+            // against SQL Server 2025), naming the second.
+            if (optionName is not null && RecognizedDatabaseOptions.TryGetValue(optionName.Value, out var optionKind) && optionKind == AlterDatabaseOptionKind.Broker)
+            {
+                if (broker)
+                    throw SimulatedSqlException.DatabaseOptionConflicts(optionName.Value.ToUpperInvariant());
+                broker = true;
             }
             context.RestoreCheckpoint(beforeOption);
             if (!TryParseAlterDatabaseSetOption(context, target, ref changesSnapshotIsolation))
@@ -518,6 +527,12 @@ partial class Simulation
         /// before DROP DATABASE).
         /// </summary>
         AccessMode,
+        /// <summary>
+        /// A bare Service Broker switch (ENABLE_BROKER / DISABLE_BROKER /
+        /// NEW_BROKER / ERROR_BROKER_CONVERSATIONS), recorded on
+        /// <see cref="Database.BrokerEnabled"/>; at most one per SET list.
+        /// </summary>
+        Broker,
     }
 
     /// <summary>
@@ -559,6 +574,10 @@ partial class Simulation
         ["SINGLE_USER"] = AlterDatabaseOptionKind.AccessMode,
         ["MULTI_USER"] = AlterDatabaseOptionKind.AccessMode,
         ["RESTRICTED_USER"] = AlterDatabaseOptionKind.AccessMode,
+        ["ENABLE_BROKER"] = AlterDatabaseOptionKind.Broker,
+        ["DISABLE_BROKER"] = AlterDatabaseOptionKind.Broker,
+        ["NEW_BROKER"] = AlterDatabaseOptionKind.Broker,
+        ["ERROR_BROKER_CONVERSATIONS"] = AlterDatabaseOptionKind.Broker,
     }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
@@ -620,9 +639,13 @@ partial class Simulation
                     RecordDatabaseEnumOption(target, name, context.Token!.Source.ToString());
                 return true;
             case AlterDatabaseOptionKind.IntegerWithUnit:
-                return ConsumeIntegerWithUnit(context);
+                return ConsumeIntegerWithUnit(context, target);
             case AlterDatabaseOptionKind.QueryStore:
                 return ParseQueryStoreTail(context, target);
+            case AlterDatabaseOptionKind.Broker:
+                if (!context.Batch.IsSkipping)
+                    target.BrokerEnabled = !BuiltInToken.Equals(name, "DISABLE_BROKER");
+                return true;
             case AlterDatabaseOptionKind.AccessMode:
                 if (!ConsumeTerminationClause(context))
                     return false;
@@ -642,9 +665,11 @@ partial class Simulation
     private static void RecordDatabaseSwitch(Database target, string name, bool on, bool? incremental)
     {
         // TORN_PAGE_DETECTION is PAGE_VERIFY's legacy spelling.
+        // Turning it off clears only torn-page detection itself: a CHECKSUM
+        // database keeps CHECKSUM (probed 2026-09-30 against SQL Server 2025).
         if (BuiltInToken.Equals(name, "TORN_PAGE_DETECTION"))
         {
-            target.PageVerify = on ? (byte)1 : (byte)0;
+            target.PageVerify = on ? (byte)1 : target.PageVerify == 1 ? (byte)0 : target.PageVerify;
             return;
         }
         Span<char> upper = stackalloc char[name.Length];
@@ -757,16 +782,27 @@ partial class Simulation
             _ => false,
         };
 
-    private static bool ConsumeIntegerWithUnit(ParserContext context) =>
-        context.GetNextRequired() switch
+    /// <summary>
+    /// <c>TARGET_RECOVERY_TIME = n { SECONDS | MINUTES }</c>, recorded on
+    /// <see cref="Database.TargetRecoveryTimeSeconds"/>.
+    /// </summary>
+    private static bool ConsumeIntegerWithUnit(ParserContext context, Database target)
+    {
+        if (context.GetNextRequired() is not Operator { Character: '=' }
+            || context.GetNextRequired() is not Numeric { Value: { IsNull: false } amount }
+            || context.GetNextRequired() is not UnquotedString { Value: var unit })
         {
-            Operator { Character: '=' } => context.GetNextRequired() switch
-            {
-                Numeric { Value.IsNull: false } => context.GetNextRequired() is UnquotedString,
-                _ => false,
-            },
-            _ => false,
-        };
+            return false;
+        }
+        if (!context.Batch.IsSkipping)
+        {
+            if (BuiltInToken.Equals(unit, "SECONDS"))
+                target.TargetRecoveryTimeSeconds = amount.AsInt32;
+            else if (BuiltInToken.Equals(unit, "MINUTES"))
+                target.TargetRecoveryTimeSeconds = amount.AsInt32 * 60;
+        }
+        return true;
+    }
 
     /// <summary>
     /// Cursor on the QUERY_STORE name token. Accepts four shapes per probe:

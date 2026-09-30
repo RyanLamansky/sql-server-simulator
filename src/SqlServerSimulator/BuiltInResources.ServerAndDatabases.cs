@@ -544,14 +544,12 @@ internal static partial class BuiltInResources
             new("mirroring_replication_lsn", lsnNumeric, null, true, spelledNumeric: true),
         ], EnumerateSysDatabaseMirroring);
 
-        // sys.endpoints: server-scope endpoint catalog. The simulator's TDS
-        // listener isn't surfaced as a configured endpoint object, so the view
-        // is always empty — SMO's Server.Endpoints enumeration does
-        // `SELECT e.name FROM sys.endpoints AS e ORDER BY [Name]`, which must
-        // resolve and return zero rows (the real server's built-in system
-        // endpoints aren't modeled). Probe-confirmed column shape (SQL Server
-        // 2025).
-        Sys("endpoints",
+        // sys.endpoints: the five system endpoints every instance ships, owned
+        // by sa, started, the dedicated admin connection the only admin one
+        // (probed 2026-09-30 against SQL Server 2025); sys.tcp_endpoints lists
+        // the two over TCP, each on a dynamic port 0. The simulator's own TDS
+        // listener isn't among them, as a listener's port never is.
+        HeapColumn[] endpointColumns =
         [
             new("name", SqlType.SystemName, 128, false),
             new("endpoint_id", SqlType.Int32, null, false),
@@ -563,7 +561,15 @@ internal static partial class BuiltInResources
             new("state", SqlType.TinyInt, null, true),
             new("state_desc", nvarchar60Catalog, 60, true),
             new("is_admin_endpoint", SqlType.Bit, null, false),
-        ], static (_, _) => EmptyCatalogRows);
+        ];
+        Sys("endpoints", endpointColumns, static (_, _) => SystemEndpointRows(tcpOnly: false));
+        Sys("tcp_endpoints",
+        [
+            .. endpointColumns,
+            new("port", SqlType.Int32, null, false),
+            new("is_dynamic_port", SqlType.Bit, null, false),
+            new("ip_address", VarcharSqlType.Get(45, Collation.Catalog, Coercibility.Implicit), 45, true),
+        ], static (_, _) => SystemEndpointRows(tcpOnly: true));
 
         // sys.availability_replicas: server-scope AlwaysOn Availability-Group
         // catalog. No AGs are configured in the simulator, so the view is
@@ -1115,6 +1121,14 @@ internal static partial class BuiltInResources
     private static readonly Guid SysDatabasesBrokerGuid = new("00000000-0000-0000-0000-000000000001");
 
     /// <summary>
+    /// <c>is_fulltext_enabled</c> / <c>DATABASEPROPERTYEX(…, 'IsFulltextEnabled')</c>:
+    /// on for every database but master, model and tempdb (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static bool ReportsFullTextEnabled(Database database) =>
+        !BuiltInToken.EqualsAny(database.Name, "master", "model", "tempdb");
+
+    /// <summary>
     /// Rows for <c>sys.databases</c>. One row per <see cref="Database"/>
     /// hosted by the connected <see cref="Simulation"/>; matches real SQL
     /// Server's "instance-scoped catalog view" semantic. Full 98-column
@@ -1130,9 +1144,10 @@ internal static partial class BuiltInResources
     /// DISABLED, catalog_collation DATABASE_DEFAULT). recovery_model is
     /// SIMPLE for <c>master</c> / <c>tempdb</c> / <c>msdb</c> and FULL for
     /// <c>model</c> and every user database, which inherits the template's,
-    /// and <c>is_broker_enabled</c> is 1 everywhere but <c>master</c> and
-    /// <c>model</c> (both probe-confirmed). Code↔desc pairs are always
-    /// internally consistent.
+    /// and <c>is_broker_enabled</c> / <c>target_recovery_time_in_seconds</c>
+    /// read <see cref="Database.BrokerEnabled"/> /
+    /// <see cref="Database.TargetRecoveryTimeSeconds"/>. Code↔desc pairs are
+    /// always internally consistent.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDatabases(Parser.BatchContext batch, Database database)
     {
@@ -1141,13 +1156,13 @@ internal static partial class BuiltInResources
         var zeroByte = SqlValue.FromByte(0);
         var createDate = SqlValue.FromDateTime(SysDatabasesCreateDate);
         var brokerGuid = SqlValue.FromGuid(SysDatabasesBrokerGuid);
+        var zeroGuid = SqlValue.FromGuid(Guid.Empty);
         var online = SqlValue.FromNVarchar("ONLINE");
         var nothing = SqlValue.FromNVarchar("NOTHING");
         var none = SqlValue.FromNVarchar("NONE");
         var disabled = SqlValue.FromNVarchar("DISABLED");
         var databaseDefault = SqlValue.FromNVarchar("DATABASE_DEFAULT");
         var unsupported = SqlValue.FromNVarchar("UNSUPPORTED");
-        var recoveryTime = SqlValue.FromInt32(60);
         var zeroInt = SqlValue.FromInt32(0);
         var nullInt = SqlValue.Null(SqlType.Int32);
         var nullSmallInt = SqlValue.Null(SqlType.SmallInt);
@@ -1164,12 +1179,9 @@ internal static partial class BuiltInResources
             if (!connection.Simulation.CanSeeDatabase(connection, db))
                 continue;
             var snapshotOn = db.AllowSnapshotIsolation;
-            // Service Broker is enabled everywhere but master and model
-            // (probe-confirmed: tempdb, msdb and a freshly created user
-            // database all read 1). Broker itself isn't modeled — this is the
-            // flag alone.
-            var isBrokerEnabled = !Collation.Baseline.Equals(db.Name, "master")
-                && !Collation.Baseline.Equals(db.Name, "model");
+            // master and model carry an all-zero broker GUID (probed
+            // 2026-09-30 against SQL Server 2025).
+            var isMasterOrModel = BuiltInToken.EqualsAny(db.Name, "master", "model");
             var switches = db.Switches;
             SqlValue Switch(DatabaseSwitches flag) => (switches & flag) != 0 ? trueBit : falseBit;
             yield return [
@@ -1227,7 +1239,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromBoolean(db.RecursiveTriggers),
                 Switch(DatabaseSwitches.CursorCloseOnCommit),
                 Switch(DatabaseSwitches.LocalCursorDefault),
-                trueBit,  // is_fulltext_enabled
+                ReportsFullTextEnabled(db) ? trueBit : falseBit,
                 SqlValue.FromBoolean(db.Trustworthy),
                 SqlValue.FromBoolean(db.CrossDatabaseChaining),
                 Switch(DatabaseSwitches.ParameterizationForced),
@@ -1240,8 +1252,8 @@ internal static partial class BuiltInResources
                 falseBit, // is_merge_published
                 falseBit, // is_distributor
                 falseBit, // is_sync_with_backup
-                brokerGuid,
-                SqlValue.FromBoolean(isBrokerEnabled),
+                isMasterOrModel ? zeroGuid : brokerGuid,
+                SqlValue.FromBoolean(db.BrokerEnabled),
                 zeroByte,
                 nothing,
                 Switch(DatabaseSwitches.DateCorrelationOptimization),
@@ -1260,7 +1272,7 @@ internal static partial class BuiltInResources
                 nullSmallInt,
                 zeroByte,
                 none,
-                recoveryTime,
+                SqlValue.FromInt32(db.TargetRecoveryTimeSeconds),
                 zeroInt,
                 disabled,
                 falseBit, // is_memory_optimized_elevate_to_snapshot_on
@@ -1827,5 +1839,42 @@ internal static partial class BuiltInResources
         _ = batch;
         foreach (var (entryName, entryDesc) in Collation.EnumerateRecognized().OrderBy(e => e.Name, StringComparer.Ordinal))
             yield return [SqlValue.FromSystemName(entryName), SqlValue.FromNVarchar(entryDesc)];
+    }
+
+    /// <summary>
+    /// The system endpoints' rows — every one for <c>sys.endpoints</c>, the TCP
+    /// pair with their port columns appended for <c>sys.tcp_endpoints</c>.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> SystemEndpointRows(bool tcpOnly)
+    {
+        (int Id, string Name, byte Protocol, string ProtocolDesc)[] endpoints =
+        [
+            (1, "Dedicated Admin Connection", 2, "TCP"),
+            (2, "TSQL Local Machine", 4, "SHARED_MEMORY"),
+            (3, "TSQL Named Pipes", 3, "NAMED_PIPES"),
+            (4, "TSQL Default TCP", 2, "TCP"),
+            (5, "TSQL Default VIA", 5, "VIA"),
+        ];
+        foreach (var (id, name, protocol, protocolDesc) in endpoints)
+        {
+            if (tcpOnly && protocol != 2)
+                continue;
+            SqlValue[] row =
+            [
+                SqlValue.FromSystemName(name),
+                SqlValue.FromInt32(id),
+                SqlValue.FromInt32(1),
+                SqlValue.FromByte(protocol),
+                SqlValue.FromNVarchar(protocolDesc),
+                SqlValue.FromByte(2),
+                SqlValue.FromNVarchar("TSQL"),
+                SqlValue.FromByte(0),
+                SqlValue.FromNVarchar("STARTED"),
+                SqlValue.FromBoolean(id == 1),
+            ];
+            yield return tcpOnly
+                ? [.. row, SqlValue.FromInt32(0), SqlValue.FromBoolean(true), SqlValue.Null(VarcharSqlType.Get(45, Collation.Catalog, Coercibility.Implicit))]
+                : row;
+        }
     }
 }

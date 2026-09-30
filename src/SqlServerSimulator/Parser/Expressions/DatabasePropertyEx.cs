@@ -98,7 +98,7 @@ internal sealed class DatabasePropertyEx : Expression
             // replication, standby and memory-optimized ones int — all off.
             "ISCLONE" or "ISDATABASESUSPENDEDFORSNAPSHOTBACKUP" or "ISVERIFIEDCLONE" => SqlValue.FromByte(0),
             "ISCLOSECURSORSONCOMMITENABLED" => Switch(DatabaseSwitches.CursorCloseOnCommit),
-            "ISFULLTEXTENABLED" => SqlValue.FromInt32(1),
+            "ISFULLTEXTENABLED" => SqlValue.FromInt32(BuiltInResources.ReportsFullTextEnabled(db) ? 1 : 0),
             "ISINSTANDBY" or "ISMEMORYOPTIMIZEDELEVATETOSNAPSHOTENABLED" or "ISMERGEPUBLISHED" or "ISPUBLISHED" or "ISSUBSCRIBED"
                 or "ISSYNCWITHBACKUP" => SqlValue.FromInt32(0),
             "ISLOCALCURSORSDEFAULT" => Switch(DatabaseSwitches.LocalCursorDefault),

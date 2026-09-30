@@ -21,7 +21,7 @@ partial class Simulation
         or "sp_describe_undeclared_parameters" or "sp_droplinkedsrvlogin" or "sp_droprolemember" or "sp_dropserver"
         or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_serveroption" or "sp_set_session_context"
         or "sp_setapprole" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
-        or "xp_instance_regread" or "xp_msver" or "xp_qv");
+        or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread");
 
     /// <summary>
     /// Whether a system procedure only reads, so running it leaves the cached
@@ -45,7 +45,7 @@ partial class Simulation
         or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_100" or "sp_statistics"
         or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations_100"
         or "sp_tables" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
-        or "xp_instance_regread" or "xp_msver" or "xp_qv";
+        or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread";
 
     /// <summary>
     /// <c>EXEC @v</c>: the procedure named by a character-string variable,
@@ -354,9 +354,11 @@ partial class Simulation
             "sp_who2" => InvokeSpWho2(batch),
             "sp_xml_preparedocument" => InvokeSpXmlPrepareDocument(batch, returnCodeVar),
             "sp_xml_removedocument" => InvokeSpXmlRemoveDocument(batch, returnCodeVar),
-            "xp_instance_regread" => InvokeXpInstanceRegread(batch),
+            "xp_getnetname" => InvokeXpGetNetName(batch),
+            "xp_instance_regread" => InvokeXpInstanceRegread(batch, instanceMapped: true),
             "xp_msver" => InvokeXpMsver(batch),
             "xp_qv" => InvokeXpQv(batch, returnCodeVar),
+            "xp_regread" => InvokeXpInstanceRegread(batch, instanceMapped: false),
             _ => throw new InvalidOperationException($"{systemProcName} is in SystemProcedureNames but has no dispatch arm."),
         };
         if (systemProc is not null)

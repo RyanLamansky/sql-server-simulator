@@ -387,7 +387,7 @@ The same goes for a database-scoped frame out of a non-`TRUSTWORTHY` database: t
 ### Principal DDL
 
 - `CREATE USER name [{FOR | FROM} ...] [WITH option = value, …]` — name + principal_id allocation; `type_code='S'`.
-  `FOR / FROM LOGIN` and `WITHOUT LOGIN` are read, and a login the server doesn't know is **Msg 15007** (probed 2026-09-29 against SQL Server 2025); the `WITH` list records `DEFAULT_SCHEMA` (as written, even when no such schema exists) and reads the other options without effect; anything else parses-and-discards through the next statement boundary.
+  `FOR / FROM LOGIN` and `WITHOUT LOGIN` are read, a user with no source clause at all maps to the login of its own name, and a login the server doesn't know is **Msg 15007** either way (probed 2026-09-29 and 2026-09-30 against SQL Server 2025); the `WITH` list records `DEFAULT_SCHEMA` (as written, even when no such schema exists) and reads the other options without effect; anything else parses-and-discards through the next statement boundary.
 - `ALTER USER name WITH option = value, …` — `NAME` renames, `DEFAULT_SCHEMA` sets the default schema, the rest are read without effect; a missing user is **Msg 15151** state 1 and a taken name **Msg 15023** state 10.
   The default schema is catalog-only: an unqualified name still resolves through `dbo` for every user (not built yet).
 - `CREATE ROLE name [AUTHORIZATION owner]` — `type_code='R'`.
@@ -841,7 +841,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 - `HAS_PERMS_BY_NAME(securable, securable_class, permission [, …])` returns NULL for a NULL `permission`, `1` for a dbo session on whatever exists (preserving the DacFx bacpac-export gate `HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')` = 1), and otherwise the real checker result (1/0) for a `DATABASE` / `OBJECT` / `SCHEMA` securable_class; the server forms — a NULL class, `SERVER` and `LOGIN` — are in [Scalars and functions](#scalars-and-functions).
   Even for dbo, real answers 0 for an object, schema or column that isn't there and NULL for a class it doesn't know or a NULL object (probed 2026-09-26 against SQL Server 2025); an unknown permission name is NULL on real but still 1 here, since the permission catalog covers only the modeled names.
   An unresolvable OBJECT / SCHEMA securable or an unrecognized class returns NULL.
-- `IS_MEMBER(group_or_role)` — `public` → 1; the effective principal's transitive membership (nested roles + fixed roles via the checker's role closure) → 1/0; dbo → 1 for `db_owner`; any non-role / unknown name → NULL.
+- `IS_MEMBER(group_or_role)` — `public` → 1; the effective principal's transitive membership (nested roles + fixed roles via the checker's role closure) → 1/0; the dbo user → 1 for every fixed role but `db_denydatareader` / `db_denydatawriter`, with no membership row, where a `db_owner` member belongs to `db_owner` alone (probed 2026-09-30 against SQL Server 2025); any non-role / unknown name → NULL.
 - `IS_ROLEMEMBER(role [, principal])` — same shape as `IS_MEMBER`; a named principal is resolved first (a missing one is NULL even for `public`), counts as a member of itself, and follows nested roles (probed 2026-09-25).
 - `IS_SRVROLEMEMBER(role [, login])` — `public` → 1; real membership from `Simulation.ServerRoleMembers` (1/0); a sysadmin-member login → 1 for **every fixed** server role; a non-role name → NULL; NULL → NULL. The 1-arg form checks the session's effective login; the 2-arg form looks up the named login (an unknown named login → NULL).
 

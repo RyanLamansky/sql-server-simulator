@@ -96,7 +96,7 @@ internal sealed class Trim : Expression
         var value = source.Run(runtime);
         StringScalars.RejectLegacyLob(value, "Trim", sourceIndex);
         if (value.IsNull)
-            return SqlValue.Null(StringScalars.ResolveResultType(value.Type, runtime.Batch));
+            return SqlValue.Null(StringScalars.ResolveRewrittenType(value.Type, runtime.Batch));
         // A binary source reads as the varchar it converts to (probed
         // 2026-09-26 against SQL Server 2025: TRIM(0x41) is 'A').
         if (value.Type is BinarySqlType or VarbinarySqlType)
@@ -108,16 +108,16 @@ internal sealed class Trim : Expression
         var leading = this.side != TrimSide.Trailing;
         var trailing = this.side != TrimSide.Leading;
         if (charsValue is not { } suppliedChars)
-            return SqlValue.FromString(value.Type, StringScalars.TrimSpaces(text, leading, trailing));
+            return SqlValue.FromString(StringScalars.ResolveRewrittenType(value.Type, runtime.Batch), StringScalars.TrimSpaces(text, leading, trailing));
         if (suppliedChars.IsNull)
             return SqlValue.Null(value.Type);
         var set = suppliedChars.AsString;
         // An empty trim-character set removes nothing.
         if (set.Length == 0)
-            return SqlValue.FromString(value.Type, text);
+            return SqlValue.FromString(StringScalars.ResolveRewrittenType(value.Type, runtime.Batch), text);
 
         var collation = StringScalars.CollationFor(runtime.Batch, value.Type, suppliedChars.Type);
-        return SqlValue.FromString(value.Type, StringScalars.TrimUnderCollation(text, set, collation, leading, trailing));
+        return SqlValue.FromString(StringScalars.ResolveRewrittenType(value.Type, runtime.Batch), StringScalars.TrimUnderCollation(text, set, collation, leading, trailing));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
@@ -127,7 +127,7 @@ internal sealed class Trim : Expression
         var sourceIndex = this.trimChars is null ? 1 : 2;
         VectorArguments.RejectVector(source.GetSqlType(batch, resolveColumnType), "Trim", sourceIndex, 6);
         var sourceType = StringScalars.RequireStringArgument(source, StringScalars.BindArgument(source, batch, resolveColumnType, "Trim", argumentIndex: sourceIndex), "Trim", sourceIndex, acceptsBinary: true);
-        return StringScalars.ResolveResultType(sourceType, batch);
+        return StringScalars.ResolveRewrittenType(sourceType, batch);
     }
 
     private static bool TryParseSide(ReadOnlySpan<char> span, out TrimSide side)
