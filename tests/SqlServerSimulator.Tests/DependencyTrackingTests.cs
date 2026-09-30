@@ -724,15 +724,22 @@ public sealed class DependencyTrackingTests
             IsFalse(Flag(row, "is_updated"));
     }
 
+    /// <summary>
+    /// Real's eighteen columns, led by <c>referencing_minor_id</c> and with
+    /// <c>referenced_minor_name</c> ahead of the two ids (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void ReferencedEntities_ReportsSeventeenColumns()
+    public void ReferencedEntities_ReportsEighteenColumns()
     {
         var sim = Fixture();
         using var reader = sim.ExecuteReader("select * from sys.dm_sql_referenced_entities('dbo.v', 'OBJECT')");
-        AreEqual(17, reader.FieldCount);
-        AreEqual("referenced_server_name", reader.GetName(0));
-        AreEqual("referenced_minor_name", reader.GetName(6));
-        AreEqual("is_incomplete", reader.GetName(16));
+        AreEqual(18, reader.FieldCount);
+        AreEqual("referencing_minor_id", reader.GetName(0));
+        AreEqual("referenced_server_name", reader.GetName(1));
+        AreEqual("referenced_minor_name", reader.GetName(5));
+        AreEqual("referenced_id", reader.GetName(6));
+        AreEqual("is_incomplete", reader.GetName(17));
     }
 
     /// <summary>
@@ -1126,5 +1133,184 @@ public sealed class DependencyTrackingTests
         sim.ExecuteBatches("drop view v");
         IsEmpty(Rows(sim, $"select 1 from sys.sql_dependencies where object_id = {viewId}"));
         IsEmpty(Rows(sim, $"select 1 from sysdepends where id = {viewId}"));
+    }
+
+    // ---- a table and its constraints as the referencing entity ----
+
+    /// <summary>
+    /// A table whose computed columns read its own columns and call a function,
+    /// with CHECK and DEFAULT constraints — the shapes real answers the
+    /// referenced-entities DMV and <c>sp_depends</c> for (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    private static Simulation TableExpressionFixture()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create function dbo.fn1(@x int) returns int with schemabinding as begin return @x end",
+            """
+            create table dbo.t2 (a int, b int, c as a + b, e int,
+                constraint ck_e check (e > a), constraint ck_t check (a < b),
+                f int constraint df_f default (1), g as (b * 2) persisted)
+            """,
+            """
+            create table dbo.t3 (a int, c as dbo.fn1(a), d int constraint df_d default (dbo.fn1(2)),
+                constraint ck3 check (dbo.fn1(a) > 0), e int constraint ck_col check (e > 0), constraint aa check (a > 1))
+            """);
+        return sim;
+    }
+
+    private static List<Dictionary<string, object?>> Referenced(Simulation sim, string name) => Rows(sim, $"""
+        select referencing_minor_id, referenced_entity_name, isnull(referenced_minor_name, '-') mn, referenced_minor_id,
+               is_selected, is_updated, is_select_all, is_all_columns_found, is_incomplete
+        from sys.dm_sql_referenced_entities('{name}', 'OBJECT')
+        """);
+
+    /// <summary>
+    /// A table answers for each computed column in column order, the column's
+    /// id as <c>referencing_minor_id</c>, one column row per column it reads and
+    /// no object row for the table it reaches without naming.
+    /// </summary>
+    [TestMethod]
+    public void ReferencedEntities_Table_ListsEachComputedColumnsReads()
+    {
+        var rows = Referenced(TableExpressionFixture(), "dbo.t2");
+        CollectionAssert.AreEqual(new object?[] { 3, 3, 6 }, rows.ConvertAll(r => r["referencing_minor_id"]));
+        CollectionAssert.AreEqual(new object?[] { "a", "b", "b" }, rows.ConvertAll(r => r["mn"]));
+        CollectionAssert.AreEqual(new object?[] { 1, 2, 2 }, rows.ConvertAll(r => r["referenced_minor_id"]));
+        foreach (var row in rows)
+        {
+            AreEqual("t2", row["referenced_entity_name"]);
+            IsFalse(Flag(row, "is_selected"));
+            IsFalse(Flag(row, "is_updated"));
+            IsFalse(Flag(row, "is_select_all"));
+            IsTrue(Flag(row, "is_all_columns_found"));
+            IsFalse(Flag(row, "is_incomplete"));
+        }
+    }
+
+    /// <summary>A function a computed column calls is an object row ahead of the column it reads.</summary>
+    [TestMethod]
+    public void ReferencedEntities_ComputedColumnCallingAFunction_ReportsTheFunctionRow()
+    {
+        var rows = Referenced(TableExpressionFixture(), "dbo.t3");
+        CollectionAssert.AreEqual(new object?[] { 2, 2 }, rows.ConvertAll(r => r["referencing_minor_id"]));
+        CollectionAssert.AreEqual(new object?[] { "fn1", "t3" }, rows.ConvertAll(r => r["referenced_entity_name"]));
+        CollectionAssert.AreEqual(new object?[] { "-", "a" }, rows.ConvertAll(r => r["mn"]));
+    }
+
+    /// <summary>
+    /// A CHECK constraint answers under its own name, its columns in the
+    /// table's column order; a DEFAULT reading no column but a function reports
+    /// the function; a DEFAULT over a constant reports nothing.
+    /// </summary>
+    [TestMethod]
+    [DataRow("dbo.ck_e", "t2.a,t2.e")]
+    [DataRow("dbo.ck_t", "t2.a,t2.b")]
+    [DataRow("dbo.ck3", "fn1.-,t3.a")]
+    [DataRow("dbo.ck_col", "t3.e")]
+    [DataRow("dbo.df_d", "fn1.-")]
+    [DataRow("dbo.df_f", "")]
+    public void ReferencedEntities_Constraint_ReportsItsExpressionsReads(string constraint, string expected)
+    {
+        var rows = Referenced(TableExpressionFixture(), constraint);
+        AreEqual(expected, string.Join(",", rows.ConvertAll(r => $"{r["referenced_entity_name"]}.{r["mn"]}")));
+        foreach (var row in rows)
+            AreEqual(0, row["referencing_minor_id"]);
+    }
+
+    /// <summary>
+    /// The referencing-entities DMV lists a table whose computed columns read it
+    /// against itself, once however many do, and orders every referencer by
+    /// name under the catalog collation.
+    /// </summary>
+    [TestMethod]
+    public void ReferencingEntities_ListsTheTableItselfAndOrdersByName()
+    {
+        var sim = TableExpressionFixture();
+        var names = Rows(sim, "select referencing_entity_name n from sys.dm_sql_referencing_entities('dbo.t3', 'OBJECT')")
+            .ConvertAll(r => r["n"]);
+        CollectionAssert.AreEqual(new object?[] { "aa", "ck_col", "ck3", "t3" }, names);
+        CollectionAssert.AreEqual(
+            new object?[] { "ck_e", "ck_t", "t2" },
+            Rows(sim, "select referencing_entity_name n from sys.dm_sql_referencing_entities('dbo.t2', 'OBJECT')").ConvertAll(r => r["n"]));
+        CollectionAssert.AreEqual(
+            new object?[] { "ck3", "df_d", "t3" },
+            Rows(sim, "select referencing_entity_name n from sys.dm_sql_referencing_entities('dbo.fn1', 'OBJECT')").ConvertAll(r => r["n"]));
+    }
+
+    /// <summary>
+    /// <c>sp_depends</c> on a table reports what its computed columns read, a
+    /// row per column per computed column, and lists the table among what
+    /// references it.
+    /// </summary>
+    [TestMethod]
+    public void SpDepends_Table_ReportsItsComputedColumnsAndItself()
+    {
+        using var connection = TableExpressionFixture().CreateOpenConnection();
+        using var command = connection.CreateCommand("exec sp_depends 'dbo.t2'");
+        using var reader = command.ExecuteReader();
+        var references = new List<string>();
+        while (reader.Read())
+            references.Add($"{reader.GetString(0)}|{reader.GetString(1)}|{reader.GetString(2)}|{reader.GetString(3)}|{reader.GetString(4)}");
+        CollectionAssert.AreEqual(
+            new[] { "dbo.t2|user table|no|no|a", "dbo.t2|user table|no|no|b", "dbo.t2|user table|no|no|b" },
+            references);
+        IsTrue(reader.NextResult());
+        var referencedBy = new List<string>();
+        while (reader.Read())
+            referencedBy.Add($"{reader.GetString(0)}|{reader.GetString(1)}");
+        CollectionAssert.AreEqual(new[] { "dbo.ck_e|check cns", "dbo.ck_t|check cns", "dbo.t2|user table" }, referencedBy);
+    }
+
+    /// <summary>
+    /// <c>sp_depends</c> on a CHECK reports its columns in the table's column
+    /// order, and a function a CHECK calls with a NULL column cell; a function
+    /// lists the table, its CHECK and its DEFAULT among what references it.
+    /// </summary>
+    [TestMethod]
+    [DataRow("dbo.ck_e", "dbo.t2|user table|a,dbo.t2|user table|e")]
+    [DataRow("dbo.ck3", "dbo.fn1|scalar function|-,dbo.t3|user table|a")]
+    [DataRow("dbo.df_d", "dbo.fn1|scalar function|-")]
+    [DataRow("dbo.fn1", "dbo.ck3|check cns,dbo.df_d|default (maybe cns),dbo.t3|user table")]
+    public void SpDepends_ConstraintsAndTheFunctionTheyCall(string name, string expected)
+    {
+        var rows = Rows(TableExpressionFixture(), $"exec sp_depends '{name}'");
+        AreEqual(expected, string.Join(",", rows.ConvertAll(r => r.TryGetValue("column", out var column)
+            ? $"{r["name"]}|{r["type"]}|{column ?? "-"}"
+            : $"{r["name"]}|{r["type"]}")));
+    }
+
+    /// <summary>A DEFAULT over a constant references nothing and nothing references it.</summary>
+    [TestMethod]
+    public void SpDepends_ConstantDefault_ReportsMsg15461()
+    {
+        using var connection = (SimulatedDbConnection)TableExpressionFixture().CreateOpenConnection();
+        var errors = new List<SimulatedError>();
+        connection.InfoMessage += (_, e) => errors.AddRange(e.Errors);
+        using var command = connection.CreateCommand("exec sp_depends 'dbo.df_f'");
+        _ = command.ExecuteNonQuery();
+        AreEqual(15461, errors.Single().Number);
+    }
+
+    /// <summary>
+    /// A comma in a FROM list introduces another source, derived tables and
+    /// joined groups between them included, while a <c>FOR XML</c> directive's
+    /// comma introduces none (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ReferencedEntities_CommaSeparatedFromList_RecordsEverySource()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.zt (b int, a int)",
+            "create table dbo.at (y int, x int)",
+            "create table dbo.mt (m int)",
+            "create procedure dbo.p1 as select zt.a, d.x from dbo.zt, (select x from dbo.at) d, dbo.mt where zt.b = 1 for xml path('r'), root('q')",
+            "create procedure dbo.p2 as update dbo.zt set a = 1, b = 2 from dbo.zt, dbo.at a2 join dbo.mt on mt.m = a2.x, dbo.zt z2 where a2.y = 3");
+        static string Summary(List<Dictionary<string, object?>> rows) =>
+            string.Join(",", rows.ConvertAll(r => $"{r["referenced_entity_name"]}.{r["mn"]}").Order(StringComparer.Ordinal));
+        AreEqual("at.-,at.x,mt.-,zt.-,zt.a,zt.b", Summary(Referenced(sim, "dbo.p1")));
+        AreEqual("at.-,at.x,at.y,mt.-,mt.m,zt.-,zt.a,zt.b", Summary(Referenced(sim, "dbo.p2")));
     }
 }

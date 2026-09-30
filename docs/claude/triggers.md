@@ -3,6 +3,8 @@
 `CREATE [OR ALTER] TRIGGER [schema.]name ON [schema.]parent { AFTER | FOR | INSTEAD OF } { INSERT | UPDATE | DELETE } [, ...] AS body`, mutated via `ALTER TRIGGER`, dropped via `DROP TRIGGER [IF EXISTS]`, toggled via `{ DISABLE | ENABLE } TRIGGER { name | ALL } ON parent`, fired automatically by the matching DML against the parent.
 Body source is captured between `AS` and end-of-batch; re-tokenized per fire inside a child `BatchContext` with a [`TriggerFrame`](../../src/SqlServerSimulator/Parser/TriggerFrame.cs) seeded with the `INSERTED` / `DELETED` pseudo-tables.
 It is also bound once at `CREATE` / `ALTER` against *empty* pseudo-tables of the same shape, so a bad column — on the parent, on `INSERTED` / `DELETED`, or inside `UPDATE(col)` — reports Msg 207 there and the trigger isn't created; the parent's own Msg 8197 still comes first → [`programmable.md`](programmable.md#create-time-body-binding).
+The body's *parse* comes before the parent, though: a syntax error in it (and what recovery finds past it, Msg 4145 and Msg 137 among them) outranks a missing parent's Msg 8197, which the simulator gets by binding the body against a column-less stand-in parent and keeping only its severity-15 errors (probed 2026-09-30 against SQL Server 2025).
+A `#` or `##` temporary parent is **Msg 167** ahead of the body's syntax errors, and a word leading the action list is **Msg 1084** (an invalid event type) where one after a comma is Msg 102.
 AFTER (and its `FOR` synonym) attaches to heap tables only; INSTEAD OF attaches to heap tables and views.
 Probed against SQL Server 2025.
 
@@ -19,7 +21,7 @@ Server-scope triggers (`CREATE TRIGGER … ON ALL SERVER`) — logon triggers an
   `ALTER TABLE t { DISABLE | ENABLE } TRIGGER { ALL | name [, …] }` is the table-scoped form; a name the table lacks is Msg 4920 and toggles none of the list (probed 2026-09-25).
   Works on both table and view parents.
 - **AFTER INSERT / UPDATE / DELETE** plus the **FOR-synonym-for-AFTER** spelling — table parents only.
-  AFTER on a view raises Msg 8197 (probe-confirmed).
+  AFTER on a view raises Msg 8197 at state 6, a missing parent's state 4 (probed 2026-09-30).
 - **INSTEAD OF INSERT / UPDATE / DELETE** — replaces the would-be DML with the trigger body.
   The heap-write phase is skipped; identity allocation is skipped (INSERTED's identity column shows the type's typed default — 0 for int — rather than the next sequential value); NOT NULL / CHECK / key constraints are not enforced on the suppressed write; AFTER triggers on the same action don't fire.
   DEFAULT-clause evaluation and computed columns still run so INSERTED carries the would-be values (probe-confirmed).

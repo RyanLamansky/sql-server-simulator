@@ -1694,6 +1694,7 @@ internal sealed partial class Selection
                 // projected expression, `*` is the multiplication operator and
                 // is handled by Expression.Parse's binary loop instead.
                 case Operator { Character: '*' }:
+                    RejectStarInSchemaBoundBody(context, scope, qualified: false);
                     expressions.Add(new StarProjection(null));
                     context.MoveNextOptional();
                     break;
@@ -1756,7 +1757,7 @@ internal sealed partial class Selection
                         else
                         {
                             context.RestoreCheckpoint(checkpoint);
-                            expressions.Add(TryParseQualifiedStar(context) ?? Expression.Parse(context));
+                            expressions.Add(TryParseQualifiedStar(context, scope) ?? Expression.Parse(context));
                         }
                     }
                     break;
@@ -4538,6 +4539,8 @@ internal sealed partial class Selection
                 fromClause.GroupByAll = context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.All };
                 if (!fromClause.GroupByAll)
                     context.RestoreCheckpoint(beforeAll);
+                else if (context.SchemaBoundBody != SchemaBoundBody.None)
+                    throw SimulatedSqlException.SyntaxNotAllowedInSchemaBoundObject("ALL", 8);
                 ParseGroupByList(context, fromClause);
                 if (fromClause.GroupByAll && fromClause.Excluders.Count > 0)
                 {
@@ -5433,7 +5436,7 @@ internal sealed partial class Selection
     /// cursor past the <c>*</c>; null, with the cursor unmoved, for anything
     /// else.
     /// </summary>
-    private static StarProjection? TryParseQualifiedStar(ParserContext context)
+    private static StarProjection? TryParseQualifiedStar(ParserContext context, QueryScope scope)
     {
         if (context.Token is not Name first)
             return null;
@@ -5447,6 +5450,7 @@ internal sealed partial class Selection
                     name = name.WithAddedPart(part.Value);
                     continue;
                 case Operator { Character: '*' }:
+                    RejectStarInSchemaBoundBody(context, scope, qualified: true);
                     context.MoveNextOptional();
                     return new StarProjection(name.Leaf, name.ToString(), name);
             }
@@ -5456,6 +5460,31 @@ internal sealed partial class Selection
 
         context.RestoreCheckpoint(checkpoint);
         return null;
+    }
+
+    /// <summary>
+    /// Msg 1054 for a select-list star — bare or qualified, never
+    /// <c>COUNT(*)</c>, <c>CHECKSUM(*)</c> or an <c>OUTPUT</c> clause's
+    /// <c>inserted.*</c> — in a schema-bound view's or function's body, raised
+    /// with the cursor on the <c>*</c>. Real refuses it as its parser reads it,
+    /// so it outranks everything the body binds, and recovers past it the way
+    /// it does past a syntax error (probed 2026-09-30 against SQL Server 2025).
+    /// The state tells a statement's own query in a function's statement list
+    /// (1 bare, 2 qualified) from a defining query or a nested one (6, 7).
+    /// </summary>
+    private static void RejectStarInSchemaBoundBody(ParserContext context, QueryScope scope, bool qualified)
+    {
+        if (context.SchemaBoundBody == SchemaBoundBody.None)
+            return;
+        var statementQuery = context.SchemaBoundBody == SchemaBoundBody.Statements
+            && scope.Position is QueryPosition.Statement or QueryPosition.InsertSource or QueryPosition.ParenthesizedInsertSource;
+        throw SimulatedSqlException.SyntaxNotAllowedInSchemaBoundObject("*", (statementQuery, qualified) switch
+        {
+            (true, false) => 1,
+            (true, true) => 2,
+            (false, false) => 6,
+            (false, true) => 7,
+        });
     }
 
     /// <summary>

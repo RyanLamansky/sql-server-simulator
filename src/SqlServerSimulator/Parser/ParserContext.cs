@@ -248,6 +248,15 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool BindingViewDefinition;
 
     /// <summary>
+    /// Set by a schema-bound view's or function's option clause for the body
+    /// that follows, whose refusals are raised as the parser meets them. A
+    /// refusal leaves it set, since recovery past one reads the rest of the
+    /// batch — which such a body runs to, a <c>CREATE SCHEMA</c> element view
+    /// aside — under the same rule; a view body that parses clears it.
+    /// </summary>
+    public SchemaBoundBody SchemaBoundBody;
+
+    /// <summary>
     /// Depth of <c>IF</c> / <c>WHILE</c> conditions being parsed, which open no
     /// implicit transaction whatever they read (see
     /// <see cref="BatchContext.BeginImplicitTransaction"/>).

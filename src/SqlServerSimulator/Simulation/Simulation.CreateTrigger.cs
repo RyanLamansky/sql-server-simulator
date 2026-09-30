@@ -9,6 +9,35 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
+    /// The body of a DML trigger whose parent doesn't resolve, bound against
+    /// a column-less stand-in for the parent only for what real's parse phase
+    /// raises — a syntax error, and what recovery finds past it; a binder
+    /// error there waits behind the missing parent's Msg 8197.
+    /// </summary>
+    private static void RejectTriggerBodySyntax(
+        ParserContext context, Schema triggerSchema, string triggerName, TriggerActions actions, TriggerTiming timing, string bodyText, int bodyLineOffset)
+    {
+        var standIn = new HeapTable(triggerName, [], objectId: 0, createDate: context.Batch.CurrentStatement.UtcNow);
+        var bindTrigger = new Trigger(triggerSchema, triggerName, objectId: 0, standIn, actions, timing, bodyText, createDate: context.Batch.CurrentStatement.UtcNow);
+        try
+        {
+            context.Simulation.BindTriggerBodyAtCreate(
+                context,
+                triggerName,
+                new TriggerFrame(
+                    bindTrigger,
+                    MaterializePseudoTable([], "inserted", [], context.Batch),
+                    MaterializePseudoTable([], "deleted", [], context.Batch),
+                    columnsUpdatedMask: []),
+                bodyText,
+                bodyLineOffset);
+        }
+        catch (SimulatedSqlException error) when (error.Class != 15)
+        {
+        }
+    }
+
+    /// <summary>
     /// Parses <c>CREATE [OR ALTER] TRIGGER [schema.]name ON [schema.]parent
     /// { AFTER | FOR | INSTEAD OF } { INSERT | UPDATE | DELETE } [, ...]
     /// AS body</c>. Body source is captured between <c>AS</c> (exclusive)
@@ -67,6 +96,7 @@ partial class Simulation
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var parentName = BatchContext.ParseObjectName(context);
+        var parentLine = context.Token.LineNumber;
 
         context.MoveNextRequired();
 
@@ -105,6 +135,10 @@ partial class Simulation
                 ReservedKeyword { Keyword: Keyword.Insert } => TriggerActions.Insert,
                 ReservedKeyword { Keyword: Keyword.Update } => TriggerActions.Update,
                 ReservedKeyword { Keyword: Keyword.Delete } => TriggerActions.Delete,
+                // A word leading the list is read as an event type, one after
+                // a comma as a syntax error (probed 2026-09-30 against SQL
+                // Server 2025).
+                Name { Value: var word } when actions == TriggerActions.None => throw SimulatedSqlException.InvalidEventType(word),
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
             context.MoveNextRequired();
@@ -151,14 +185,13 @@ partial class Simulation
         // parents in either case.
         SchemaObject parent;
         string parentKind;
-        if (context.Batch.TryResolveView(parentName, out var parentView))
+        if (context.Batch.TryResolveView(parentName, out var parentView) && timing == TriggerTiming.InsteadOf)
         {
-            if (timing != TriggerTiming.InsteadOf)
-                throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString(), triggerName.Leaf);
             parent = parentView;
             parentKind = "view";
         }
-        else if (context.Batch.TryResolveTable(parentName, out var parentTable)
+        else if (parentView is null
+            && context.Batch.TryResolveTable(parentName, out var parentTable)
             && !parentTable.IsTableVariable
             && !BatchContext.IsLocalTempName(parentTable.Name))
         {
@@ -167,7 +200,29 @@ partial class Simulation
         }
         else
         {
-            throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString(), triggerName.Leaf);
+            // Real parses the body before it resolves the parent, so a syntax
+            // error there outranks the missing parent, while a binder error
+            // doesn't (probed 2026-09-30 against SQL Server 2025).
+            SimulatedSqlException? bodySyntax = null;
+            try
+            {
+                if (externalName is null)
+                    RejectTriggerBodySyntax(context, triggerSchema, triggerName.Leaf, actions, timing, bodyText, CountNewlines(commandText, 0, bodyStart));
+            }
+            catch (SimulatedSqlException syntax) when (parentName.Leaf.StartsWith('#'))
+            {
+                bodySyntax = syntax;
+            }
+            if (parentName.Leaf.StartsWith('#'))
+            {
+                // A temporary parent, local or global, is refused as the batch
+                // parses, ahead of the body's syntax errors and in place of
+                // Msg 8197.
+                var temporary = SimulatedSqlException.TriggerOnTemporaryObject();
+                temporary.PreserveDiagnostics(parentLine, triggerName.Leaf);
+                throw bodySyntax is null ? temporary : SimulatedSqlException.Aggregate([temporary, bodySyntax]);
+            }
+            throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString(), triggerName.Leaf, parentView is null ? (byte)4 : (byte)6);
         }
 
         // Bind the body against empty INSERTED / DELETED pseudo-tables shaped

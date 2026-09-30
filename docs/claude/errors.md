@@ -117,6 +117,21 @@ Real recovers the way a yacc parser does: it restarts at the token it failed on,
 An error a grammar action raises rather than the token stream — Msg 319 for a `WITH` after an unterminated statement, Msg 111 for a module `CREATE` not first in its batch, Msg 178 for the valued `RETURN` its body then holds — is reported however soon it comes, so a table hint the grammar refuses (`INSERT t (c) WITH (TABLOCK) …`) is Msg 156 then the Msg 319 its `WITH` raises read as a common table expression.
 `Simulation.WithRecoveredSyntaxErrors` re-reads the batch from each restart point with the text before it blanked out (lines and positions stay as written), restarting only at a keyword, `;`, `THROW` or a `(` that opens a query, since real's grammar gives a bare name nothing to begin.
 It walks the simulator's own statement parser rather than real's grammar, so where that parser reads a restart differently the report diverges; see the backlog.
+What it carries past the blanking, each probed 2026-09-30 against SQL Server 2025:
+
+- **A module body recovers too.** A procedure's, trigger's or function's body — bound on its own child batch at `CREATE` — restarts on a child batch with the body's own frame, so a restart reads its `RETURN`, parameters and return table as the body does, and every variable and table variable the failed walk had declared.
+  An inline function's body, parsed as one query, restarts as statements, which is what makes `RETURN SELECT 1 + FROM (SELECT 1 a) q` Msg 156 then Msg 102 at `q`.
+- **An `END` closing a block the blanked text opened** is the block's end, not Msg 102, and an `END TRY`'s `BEGIN CATCH` opens with it; a `CASE` the error left open is abandoned, so its `END` closes the enclosing block instead.
+  The three-token count runs on across such an `END`.
+- **Msg 4145 and Msg 137 send the parser on in place** rather than into recovery, so the tokens after them count toward the next report.
+  A Msg 4145 (a non-boolean expression where a condition belongs) is always reported and its own token counts, since the parser raised it on reading that token — which is what reports `SELECT 1 WHERE 1; SELECT 2 +`'s Msg 102.
+  A Msg 137 (an undeclared variable) counts through its variable, so `DECLARE @a int = @b + @c` reports only `@b` while `SELECT @nope; SELECT @nope2` reports both, and a variable whose `DECLARE` a syntax error cost is Msg 137 where it is next read.
+  A binder error after either still waits for a batch that parses.
+- **An error at the end of the text** counts every token before it and names the last one — `WITH CUBE` read as a common table expression after a refused `GROUP BY ALL` is its Msg 319 — except in a scalar or multi-statement function body, captured without its closing `END`, where it is Msg 156 near that `END`, as written and at its line.
+
+A schema-bound body's Msg 1054 (a select-list star, `GROUP BY ALL`) is a grammar-action error too, and the schema-bound rule outlives the blanked header, since the body runs to the end of its batch ([`programmable.md`](programmable.md#schema-binding-with-schemabinding)).
+
+A `SET` to an undeclared variable is Msg 137 at **state 1**, raised once the statement has parsed, so a syntax error or an undeclared variable (state 2, as every read is) on its right-hand side comes first.
 
 ## Bind errors in a deferred statement are catchable here and aren't on real
 

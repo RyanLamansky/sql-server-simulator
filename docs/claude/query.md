@@ -891,7 +891,7 @@ The parse moves the `WHERE`'s conjuncts from `FromClause.Excluders` to `FromClau
 What real refuses:
 - **Msg 1028** for a `ROLLUP`, `CUBE` or `GROUPING SETS` item, the legacy `WITH ROLLUP` / `WITH CUBE`, or an empty set `()` beside another item — `GROUP BY ALL ()` alone is one group.
   It is a parse-phase error at the token after the grouping list (at the legacy form's `ROLLUP` / `CUBE`), so it outranks a missing table, fires in a dead branch, follows the syntax errors recovery found before it and ends the parse there.
-- **Msg 1054** state 8 (*"Syntax 'ALL' is not allowed in schema-bound objects."*) anywhere in a schema-bound view's or function's body, at the `ALL`'s line and ahead of anything the body binds; a plain view takes it.
+- **Msg 1054** state 8 (*"Syntax 'ALL' is not allowed in schema-bound objects."*) anywhere in a schema-bound view's or function's body, raised by the parser at the `ALL` and ahead of anything the body binds, with recovery reporting what follows — a later `WITH CUBE`'s Msg 319, a later select-list star's own Msg 1054 ([`programmable.md`](programmable.md#schema-binding-with-schemabinding)); a plain view takes it.
 - **Msg 7417** when the query's own `FROM` — a derived table included — reads a linked server's table or an `OPENQUERY` rowset and the query has a `WHERE`; a remote read only in a `WHERE` or select-list subquery is fine.
   It is a binding error raised while the batch compiles (a dead branch raises it, a `TRY` doesn't catch it), at the statement's line.
 - `GROUP BY ALL` with nothing after it is Msg 102, and the containment rules (Msg 8120, 144, 164) apply as to a plain `GROUP BY`.
@@ -902,7 +902,6 @@ A FROM-less `SELECT COUNT(*) WHERE 1 = 0 GROUP BY ALL ()` doesn't warn either, w
 **Divergences.**
 - In a statement naming a table the batch itself creates, Msg 1028 surfaces when the statement runs, after the statements before it — the compile's deferral stops before such a statement's grouping list, as it does for its syntax errors (see [`control-flow.md`](control-flow.md#not-modeled-yet)).
 - A column that doesn't exist, in a query over a linked server, is Msg 7417 here and Msg 207 on real: the simulator binds a remote source's columns only when the query runs.
-- In a schema-bound body, real follows Msg 1054 with the Msg 319 its recovery reads from a later `WITH CUBE`; here Msg 1054 stands alone.
 - `OPENROWSET` over a provider and `OPENDATASOURCE` don't count as remote for Msg 7417 — not probed.
 - Real's Msg 7417 over a remote table the batch creates wasn't observable (the loopback server couldn't see it), so the simulator's deferral there — raising it when the statement runs, where a `TRY` catches it — is unconfirmed.
 

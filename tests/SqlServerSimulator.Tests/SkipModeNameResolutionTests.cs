@@ -318,4 +318,88 @@ public sealed class SkipModeNameResolutionTests
     [DataRow("if 1 = 0 update m set a = 1 from missing m where m.a = 1 else select 'else'")]
     public void DeadBranchOverMissingDmlTarget_ElseRuns(string sql)
         => AreEqual("else", new Simulation().ExecuteScalar(sql));
+
+    private static Simulation MergeFixture()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.r (a int, b int); insert dbo.r values (1, 2)",
+            "create procedure dbo.pr @x int = 0 as select @x");
+        return sim;
+    }
+
+    /// <summary>
+    /// A dead branch over a missing <c>MERGE</c> target or an <c>INSERT … EXEC</c>
+    /// into one parses to its end — every <c>WHEN</c> clause, <c>OUTPUT</c>,
+    /// <c>OPTION</c> and the procedure's argument list — so the ELSE runs and
+    /// the EXEC doesn't (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("if 1 = 0 merge missing as t using (select 1 a) s on t.a = s.a when matched then update set t.a = 1; else select 'else'")]
+    [DataRow("if 1 = 0 merge missing as t using dbo.r s on t.a = s.a when matched then update set a = 1 when not matched then insert (a) values (s.a) when not matched by source then delete output $action, inserted.*; else select 'else'")]
+    [DataRow("if 1 = 0 merge into missing with (holdlock) as t using (values (1)) s(a) on t.a = s.a when matched and s.a > 0 then update set t.a = s.a, b = 2 when not matched by target then insert values (s.a, default) when not matched by source and t.a = 3 then update set a = 4; else select 'else'")]
+    [DataRow("if 1 = 0 merge top (5) missing t using dbo.r s on t.a = s.a when matched then delete output deleted.a into dbo.r (a); else select 'else'")]
+    [DataRow("if 1 = 0 merge missing t using (select 1 a) s on t.a = s.a when matched then update set t.a = (select max(a) from dbo.r), b = s.a + 1; else select 'else'")]
+    [DataRow("if 1 = 0 merge missing using dbo.r on missing.a = r.a when matched then delete; else select 'else'")]
+    [DataRow("if 1 = 0 merge missing t using missing2 s on t.a = s.a when matched then delete; else select 'else'")]
+    [DataRow("if 1 = 0 merge missing t using (values (1)) s(a) on 1 = 1 when not matched then insert values (1) option (recompile); else select 'else'")]
+    [DataRow("if 1 = 0 insert missing exec dbo.pr 1; else select 'else'")]
+    [DataRow("if 1 = 0 insert missing exec('select 1'); else select 'else'")]
+    [DataRow("if 1 = 0 insert missing (a) exec dbo.pr @x = 1; else select 'else'")]
+    [DataRow("if 1 = 0 insert missing exec sp_executesql N'select 1'; else select 'else'")]
+    [DataRow("if 1 = 0 insert into missing with (tablock) exec dbo.pr @x = 1 with recompile; else select 'else'")]
+    public void DeadBranchOverMissingMergeOrInsertExecTarget_ElseRuns(string sql)
+    {
+        using var reader = MergeFixture().ExecuteReader(sql);
+        IsTrue(reader.Read());
+        AreEqual("else", reader.GetValue(0));
+        IsFalse(reader.Read());
+        IsFalse(reader.NextResult());
+    }
+
+    /// <summary>
+    /// Past a missing <c>MERGE</c> target or <c>INSERT … EXEC</c> target a syntax
+    /// error stops the batch while it compiles, before the statement ahead of it
+    /// runs; a well-formed statement runs what precedes it and then raises Msg
+    /// 208 — for the <c>USING</c> source ahead of the target when both are
+    /// missing (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("merge missing as t using (select 1 a) s on t.a = s.a when matched then update set a = ;", 102, null)]
+    [DataRow("merge missing t using dbo.r s on t.a = s.a when matched then delete zz;", 102, null)]
+    [DataRow("merge missing t using dbo.r s on t.a = s.a when matched then delete", 10713, null)]
+    [DataRow("merge missing t using dbo.r s on t.a = s.a;", 102, null)]
+    [DataRow("insert missing exec dbo.pr 1,;", 102, null)]
+    [DataRow("insert missing exec dbo.pr 1 zz;", 102, null)]
+    [DataRow("merge missing as t using (select 1 a) s on t.a = s.a when matched then update set t.a = 1;", 208, "missing")]
+    [DataRow("merge missing t using dbo.r s on t.a = s.nosuch when matched then delete;", 208, "missing")]
+    [DataRow("merge missing t using dbo.r s on t.a = s.a when matched then delete option (maxdop 1);", 208, "missing")]
+    [DataRow("merge missing t using missing2 s on t.a = s.a when matched then delete;", 208, "missing2")]
+    [DataRow("insert missing exec dbo.pr 1;", 208, "missing")]
+    [DataRow("insert missing exec dbo.nosuchproc 1;", 208, "missing")]
+    public void MissingMergeOrInsertExecTarget_CompileErrorsOutrankTheMissingObject(string statement, int number, string? missing)
+    {
+        using var connection = MergeFixture().CreateOpenConnection();
+        using var command = connection.CreateCommand("select 'before'; " + statement);
+        var rows = 0;
+        var error = ThrowsExactly<SimulatedSqlException>(() =>
+        {
+            using var reader = command.ExecuteReader();
+            do
+            {
+                while (reader.Read())
+                    rows++;
+            }
+            while (reader.NextResult());
+        });
+        AreEqual(number, error.Number);
+        AreEqual(missing is null ? 0 : 1, rows);
+        if (missing is not null)
+            AreEqual($"Invalid object name '{missing}'.", error.Message);
+    }
+
+    /// <summary>A stray word where a MERGE's closing semicolon belongs is Msg 102 at the word, over a real target too.</summary>
+    [TestMethod]
+    public void MergeWithAStrayWordForItsSemicolon_Msg102()
+        => MergeFixture().AssertSqlError("merge dbo.r t using dbo.r s on t.a = s.a when matched then delete zz;", 102, "Incorrect syntax near 'zz'.");
 }

@@ -708,6 +708,39 @@ public sealed class TriggerTests
         AreEqual(8197, ex.Number);
     }
 
+    /// <summary>
+    /// Real parses a trigger's body before it resolves the parent, so a syntax
+    /// error there outranks the missing parent, while a binder error, or a
+    /// view an AFTER trigger names, doesn't; a temporary parent is Msg 167
+    /// ahead of the body's syntax errors, and a word leading the action list
+    /// is an invalid event type (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create trigger tr on missing after insert as select 1 from ; select", "102/1@1")]
+    [DataRow("create trigger tr on missing after insert as\nselect 1\nselect 2\nselect 3 from", "102/1@4")]
+    [DataRow("create trigger tr on missing instead of insert as select 1 from ;", "102/1@1")]
+    [DataRow("create trigger tr on dbo.missing after insert as select 1 from ; select 2 +;", "102/1@1 102/1@1")]
+    [DataRow("create trigger tr on missing after insert as if 1 select 2", "4145/1@1")]
+    [DataRow("create trigger tr on missing with encryption after insert as select 1 from ;", "102/1@1")]
+    [DataRow("create trigger tr on missing after insert as select @nope", "137/2@1")]
+    [DataRow("create trigger tr on missing after insert as select 1", "8197/4@1")]
+    [DataRow("create trigger tr on missing instead of insert as select nosuch from inserted", "8197/4@1")]
+    [DataRow("create trigger tr on v_plain after insert as select 1", "8197/6@1")]
+    [DataRow("create trigger tr on v_plain after insert as select 1 from ;", "102/1@1")]
+    [DataRow("create trigger tr on #tmp after insert as select 1 from ;", "167/1@1 102/1@1")]
+    [DataRow("create trigger tr on ##g after insert as select 1", "167/1@1")]
+    [DataRow("create trigger tr on missing after bogus as select 1", "1084/1@1")]
+    [DataRow("create trigger tr on missing after insert, bogus as select 1", "102/1@1")]
+    public void CreateTrigger_BodySyntaxBeforeTheParent(string sql, string expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create view v_plain as select 1 a");
+        var error = ThrowsExactly<SimulatedSqlException>(() => simulation.ExecuteNonQuery(sql));
+        AreEqual(expected, string.Join(" ", error.Errors.Select(entry => $"{entry.Number}/{entry.State}@{entry.LineNumber}")));
+        foreach (var entry in error.Errors)
+            AreEqual("tr", entry.Procedure);
+    }
+
     [TestMethod]
     public void CreateTrigger_DuplicateName_Raises2714()
     {

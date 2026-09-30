@@ -69,15 +69,13 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server's Msg 1054: a construct a schema-bound module's body
-    /// may not hold, reported at <paramref name="line"/> — <c>GROUP BY ALL</c>'s
-    /// <c>ALL</c> is state 8 (probed 2026-09-30 against SQL Server 2025).
+    /// may not hold, raised by the parser standing on it — <c>GROUP BY ALL</c>'s
+    /// <c>ALL</c> is state 8, a select-list <c>*</c> state 6 and a qualified
+    /// <c>t.*</c> state 7, or 1 and 2 in a statement's own query within a
+    /// function's statement list (probed 2026-09-30 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException SyntaxNotAllowedInSchemaBoundObject(string syntax, byte state, int line)
-    {
-        var error = new SimulatedSqlException($"Syntax '{syntax}' is not allowed in schema-bound objects.", 1054, 15, state);
-        error.Errors[0].LineNumber = line;
-        return error;
-    }
+    internal static SimulatedSqlException SyntaxNotAllowedInSchemaBoundObject(string syntax, byte state) =>
+        new($"Syntax '{syntax}' is not allowed in schema-bound objects.", 1054, 15, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 7417: <c>GROUP BY ALL</c> over a <c>WHERE</c>

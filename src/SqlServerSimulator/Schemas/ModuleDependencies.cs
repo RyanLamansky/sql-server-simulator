@@ -228,18 +228,47 @@ internal static class ModuleDependencies
     }
 
     /// <summary>
-    /// The entity <paramref name="target"/> names, or null when the object
-    /// carries no dependency-bearing definition. The DMV pair addresses one
-    /// module, so it wants a lookup rather than the whole sweep.
+    /// The entities the object with id <paramref name="objectId"/> carries, in
+    /// minor-id order: a module's or a constraint's one, or a table's one per
+    /// computed column — empty when it carries no dependency-bearing
+    /// definition.
     /// </summary>
-    internal static Entity? ForObject(Database database, SchemaObject target)
+    internal static List<Entity> ForObject(Database database, int objectId) =>
+        Enumerate(database).FindAll(entity => entity.ReferencingId == objectId && entity.ReferencingClass == ObjectOrColumnClass);
+
+    /// <summary>
+    /// The object id of the CHECK or DEFAULT constraint named
+    /// <paramref name="name"/> on one of <paramref name="schema"/>'s tables, or
+    /// null — the two constraint kinds whose expression carries dependencies.
+    /// </summary>
+    internal static int? ExpressionConstraintId(Database database, Schema schema, string name)
     {
-        foreach (var entity in Enumerate(database))
+        foreach (var (_, table) in schema.HeapTables)
         {
-            if (entity.ReferencingId == target.ObjectId && entity.ReferencingMinorId == 0)
-                return entity;
+            foreach (var check in table.CheckConstraints)
+            {
+                if (database.Collation.Equals(check.Name, name))
+                    return check.ObjectId;
+            }
+            foreach (var column in table.Columns)
+            {
+                if (column.DefaultConstraint is { } constraint && database.Collation.Equals(constraint.Name, name))
+                    return constraint.ObjectId;
+            }
         }
         return null;
+    }
+
+    /// <summary>
+    /// Orders two referencing entities by schema, then name, under the catalog
+    /// collation — the order real's referencing-entities DMV and
+    /// <c>sp_depends</c>' "referenced by" set list them in (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static int CompareByName(Entity a, Entity b)
+    {
+        var bySchema = Collation.Catalog.Compare(a.SchemaName, b.SchemaName);
+        return bySchema != 0 ? bySchema : Collation.Catalog.Compare(a.EntityName, b.EntityName);
     }
 
     private static void AddModule(
@@ -404,11 +433,17 @@ internal static class ModuleDependencies
                     continue;
                 case Operator { Character: ')' }:
                     frame.Depth--;
+                    while (frame.FromListDepths.TryPeek(out var fromDepth) && fromDepth > frame.Depth)
+                        _ = frame.FromListDepths.Pop();
                     if (frame.Depth <= 0)
                     {
                         frame.InInsertColumnList = false;
                         frame.InsertColumnListQualifier = null;
                     }
+                    continue;
+                case Operator { Character: ',' } when frame.FromListDepths.TryPeek(out var listDepth) && listDepth == frame.Depth:
+                    // A comma in a FROM list introduces the next source.
+                    frame.PendingSource = SourceRole.Selected;
                     continue;
                 case Operator { Character: ';' }:
                     frame = CloseFrame(frame);
@@ -508,6 +543,26 @@ internal static class ModuleDependencies
         /// <summary>True once a <c>MERGE</c> opened this frame, so its WHEN clauses' verbs stay inside it.</summary>
         public bool IsMergeFrame;
 
+        /// <summary>
+        /// The paren depths whose <c>FROM</c> list the walk is inside, innermost
+        /// on top, so a comma at that depth introduces another source.
+        /// </summary>
+        public readonly Stack<int> FromListDepths = new();
+
+        /// <summary>Notes a <c>FROM</c> opening its source list at the current depth.</summary>
+        public void OpenFromList()
+        {
+            if (!this.FromListDepths.TryPeek(out var top) || top != this.Depth)
+                this.FromListDepths.Push(this.Depth);
+        }
+
+        /// <summary>Notes a clause that ends the <c>FROM</c> list at the current depth.</summary>
+        public void CloseFromList()
+        {
+            if (this.FromListDepths.TryPeek(out var top) && top == this.Depth)
+                _ = this.FromListDepths.Pop();
+        }
+
         /// <summary>The most recent mention, so an <c>=</c> can mark it written.</summary>
         public Mention? LastMention;
 
@@ -574,12 +629,19 @@ internal static class ModuleDependencies
             // the nested projection's first name would be read as a source.
             switch (keyword)
             {
-                case Keyword.From or Keyword.Join:
+                case Keyword.From:
+                    frame.PendingSource = SourceRole.Selected;
+                    frame.OpenFromList();
+                    break;
+                case Keyword.Join:
                     frame.PendingSource = SourceRole.Selected;
                     break;
-                case Keyword.Select or Keyword.Where or Keyword.On or Keyword.Values
-                    or Keyword.Group or Keyword.Order or Keyword.Having:
+                case Keyword.On or Keyword.Values:
                     frame.PendingSource = SourceRole.None;
+                    break;
+                case Keyword.Select or Keyword.Where or Keyword.Group or Keyword.Order or Keyword.Having or Keyword.For:
+                    frame.PendingSource = SourceRole.None;
+                    frame.CloseFromList();
                     break;
             }
             return frame;
@@ -637,7 +699,12 @@ internal static class ModuleDependencies
                 // otherwise the name it introduces is read, not written.
                 if (frame.PendingSource != SourceRole.Updated)
                     frame.PendingSource = SourceRole.Selected;
+                if (keyword == Keyword.From)
+                    frame.OpenFromList();
                 frame.InSetList = false;
+                return frame;
+            case Keyword.For:
+                frame.CloseFromList();
                 return frame;
             case Keyword.Into:
                 // INSERT INTO t / MERGE INTO t — the armed target role carries
@@ -647,6 +714,8 @@ internal static class ModuleDependencies
             case Keyword.Where or Keyword.Having or Keyword.Group or Keyword.Order or Keyword.On or Keyword.Values:
                 frame.InSetList = false;
                 frame.PendingSource = SourceRole.None;
+                if (keyword is not (Keyword.On or Keyword.Values))
+                    frame.CloseFromList();
                 return frame;
             case Keyword.Select or Keyword.Declare or Keyword.If or Keyword.While or Keyword.Return
                 or Keyword.Print or Keyword.Begin or Keyword.End or Keyword.RaisError or Keyword.WaitFor

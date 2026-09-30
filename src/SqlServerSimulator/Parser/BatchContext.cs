@@ -3068,6 +3068,13 @@ internal sealed class BatchContext
     /// </summary>
     internal string? CreateSchemaElementScope;
 
+    /// <summary>
+    /// The schema a <c>CREATE SCHEMA</c> statement creates, while the compile
+    /// pass walks its element list without creating it, so an element naming
+    /// it as a qualifier defers to the run. Null everywhere else.
+    /// </summary>
+    internal string? SchemaCompiledUncreated;
+
     public bool TryResolveSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
     {
         if (name.Count >= 4)

@@ -87,9 +87,11 @@ partial class Simulation
         {
             _ = this.CreateSchemaBody(context, schemaName, ownerName);
         }
-        catch (SimulatedSqlException exception) when (!context.Batch.IsSkipping)
+        catch (SimulatedSqlException exception) when (!context.Batch.IsSkipping || exception.Class != 15)
         {
-            // A syntax error the batch's parse walk meets stands alone.
+            // A syntax error the batch's parse walk meets stands alone; a
+            // binder error it meets, an element view's included, takes the
+            // Msg 2759 (probed 2026-09-30 against SQL Server 2025).
             throw SimulatedSqlException.Aggregate([exception, SimulatedSqlException.CreateSchemaFailed()]);
         }
 
@@ -118,7 +120,18 @@ partial class Simulation
     private bool CreateSchemaBody(ParserContext context, string schemaName, string? ownerName)
     {
         if (context.Batch.IsSkipping)
-            return this.ParseSchemaElements(context, elementScope: null);
+        {
+            var previous = context.Batch.SchemaCompiledUncreated;
+            context.Batch.SchemaCompiledUncreated = schemaName;
+            try
+            {
+                return this.ParseSchemaElements(context, elementScope: null);
+            }
+            finally
+            {
+                context.Batch.SchemaCompiledUncreated = previous;
+            }
+        }
 
         context.CurrentDatabase.RejectWriteWhenReadOnly();
 

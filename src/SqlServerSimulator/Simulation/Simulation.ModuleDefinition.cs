@@ -190,6 +190,14 @@ public sealed partial class Simulation
     {
         if (!context.Batch.TryResolveSchema(name, out var schema))
         {
+            // A CREATE SCHEMA element names the schema its statement creates,
+            // which the compile pass hasn't created; the run settles the name
+            // (probed 2026-09-30 against SQL Server 2025).
+            if (context.Batch.SchemaCompiledUncreated is { } uncreated && name.ImmediateQualifier is { } qualifier
+                && context.CurrentDatabase.Collation.Equals(qualifier, uncreated))
+            {
+                return new Schema(context.CurrentDatabase, qualifier, 0);
+            }
             throw isAlter
                 ? SimulatedSqlException.InvalidObjectName(name)
                 : SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(name.ImmediateQualifier ?? Database.DefaultSchemaName);

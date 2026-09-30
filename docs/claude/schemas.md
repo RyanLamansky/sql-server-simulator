@@ -224,6 +224,8 @@ Trailing `;` separators and comments are not statements.
 **The element list is part of the statement**, and its point is the name scope: *an unqualified name inside an element resolves to the schema being created*.
 `CREATE SCHEMA s CREATE TABLE t (…) GRANT SELECT ON t TO u` creates `s.t` and grants on `s.t`, a sibling element's `REFERENCES p(a)` finds `s.p`, and a view element's body resolves there too; an explicit qualifier still wins (`CREATE TABLE dbo.qq` lands in `dbo`).
 `BatchContext.CreateSchemaElementScope` carries it, consulted by `TryResolveSchema` — the one place a 1-part name picks its schema — so creation sites and reference sites agree without a second rule.
+An element may also name the schema being created as its qualifier (`CREATE SCHEMA zs CREATE VIEW zs.v1 …`), which the compile pass, walking the list before the schema exists, defers to the run through `BatchContext.SchemaCompiledUncreated`; one naming a schema that doesn't exist is Msg 2760 plus the Msg 2759 (probed 2026-09-30 against SQL Server 2025).
+An element view's errors name no procedure, and a binder error the compile pass meets in one takes the Msg 2759 too.
 
 Real's element grammar admits `CREATE TABLE`, `CREATE VIEW`, `GRANT`, `REVOKE` and `DENY` and nothing else: `CREATE PROCEDURE` / `FUNCTION` is Msg 156, `CREATE TYPE` Msg 102 and `CREATE INDEX` Msg 1018.
 A `CREATE VIEW` element may be followed by further elements — a view body normally runs to the end of its batch, and inside an element list it ends at the next element keyword instead, so `RejectStatementAfterModuleBody` stands down while the scope is installed.

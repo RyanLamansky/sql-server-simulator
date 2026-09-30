@@ -104,9 +104,14 @@ partial class Simulation
                 destinationTable = baseTable;
             }
         }
+        else if (target.Table is { } table)
+        {
+            destinationTable = table;
+        }
         else
         {
-            destinationTable = target.Table ?? throw MissingDmlTargetError(context.Batch, destinationName);
+            ParseMissingMergeTail(context, destinationName);
+            throw MissingDmlTargetError(context.Batch, destinationName);
         }
         NoteWriteTable(context.Batch, destinationName, destinationTable, "MERGE", persistent: viewRowsTarget is not null);
 
@@ -257,8 +262,10 @@ partial class Simulation
 
         // Required trailing ; — end-of-batch included, which real refuses as
         // it compiles, so a MERGE without one never runs (probed 2026-09-26).
+        // A stray word where the ; belongs is a syntax error at the word
+        // (probed 2026-09-30).
         if (context.Token is not Operator { Character: ';' })
-            throw SimulatedSqlException.MergeMustBeTerminated();
+            throw IsStatementBoundary(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
         if (!context.Batch.IsSkipping)
             CheckMergePermissions(context.Batch, destinationName, triggerTarget, whenClauses, joinWrite, onPredicate, targetAlias);
         if (joinWrite is not null && !context.Batch.IsSkipping)

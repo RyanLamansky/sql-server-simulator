@@ -78,7 +78,10 @@ partial class Simulation
         // syntax, its binding, its shape, even the name collision — as the
         // statement wrote it (probed 2026-09-25 against SQL Server 2025). The
         // statement is its batch's only one, so nothing after it inherits this.
-        context.Batch.ErrorProcedureName = viewName.Leaf;
+        // An element of a CREATE SCHEMA is no module of its own there, and
+        // its errors name none (probed 2026-09-30 against SQL Server 2025).
+        if (context.Batch.CreateSchemaElementScope is null)
+            context.Batch.ErrorProcedureName = viewName.Leaf;
         RejectQualifiedModuleName(viewName, "VIEW");
         var schema = ResolveModuleSchema(context, viewName, isAlter);
 
@@ -136,6 +139,9 @@ partial class Simulation
         context.BindingViewDefinition = true;
         var bodySelection = ParseBodyQuery(context, rejectsNextValueFor: true, bodyParens > 0 ? QueryPosition.ParenthesizedModuleBody : QueryPosition.Statement);
         context.BindingViewDefinition = false;
+        // A CREATE SCHEMA's next element is no part of this body. A refusal
+        // leaves the rule set for the recovery that follows it.
+        context.SchemaBoundBody = SchemaBoundBody.None;
         var bodyEnd = context.Token?.StartIndex ?? commandText.Length;
         var bodyText = commandText[bodyStart..bodyEnd];
         for (; bodyParens > 0; bodyParens--)

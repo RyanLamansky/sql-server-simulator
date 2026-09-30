@@ -823,6 +823,17 @@ partial class Simulation
         if (context.Batch.CursorVariables.ContainsKey(variableToken.Value))
             return TryParseSetCursorVariable(context, variableToken.Value);
 
+        if (!context.Batch.Variables.ContainsKey(variableToken.Value) && !context.Batch.TableVariables.ContainsKey(variableToken.Value))
+        {
+            // An undeclared target is refused once the statement has parsed.
+            context.MoveNextRequired();
+            if (context.Token is not Operator { Character: '.' } && TryConsumeAssignmentOperator(context) is not null)
+            {
+                context.MoveNextRequired();
+                _ = Expression.Parse(context);
+            }
+            throw SimulatedSqlException.MustDeclareSetTarget(variableToken.Value);
+        }
         var slot = context.Batch.GetVariableSlot(variableToken.Value);
 
         context.MoveNextRequired();

@@ -3447,9 +3447,10 @@ public sealed partial class Simulation
         // `FROM t a hash` leaves `hash`, probed 2026-09-24). A
         // well-formed SELECT never ends on one, nor on a comma
         // (`SELECT 1 WHERE 1 IN (NULL), 2` is near ',', probed
-        // 2026-09-26); any other token is left to the generic
-        // end-of-dispatch normalizer.
-        if (context.Token is (Numeric or Literal or Name or Operator { Character: ',' }) and not UnquotedString { IsLabelDeclaration: true })
+        // 2026-09-26), nor on an AS (`(SELECT 1) AS q` is near the
+        // keyword 'as', probed 2026-09-30); any other token is left to
+        // the generic end-of-dispatch normalizer.
+        if (context.Token is (Numeric or Literal or Name or Operator { Character: ',' } or ReservedKeyword { Keyword: Keyword.As }) and not UnquotedString { IsLabelDeclaration: true })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (!batch.IsSkipping)
             PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);

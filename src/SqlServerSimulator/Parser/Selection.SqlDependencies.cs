@@ -20,8 +20,9 @@ partial class Selection
 
     private static readonly SqlType[] ReferencedEntitiesSchema =
     [
+        SqlType.Int32,
         SqlType.SystemName, SqlType.SystemName, SqlType.SystemName, SqlType.SystemName,
-        SqlType.Int32, SqlType.Int32, SqlType.SystemName,
+        SqlType.SystemName, SqlType.Int32, SqlType.Int32,
         SqlType.TinyInt, NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit),
         SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.Bit, SqlType.Bit,
         SqlType.Bit, SqlType.Bit, SqlType.Bit,
@@ -29,8 +30,9 @@ partial class Selection
 
     private static readonly string[] ReferencedEntitiesColumnNames =
     [
+        "referencing_minor_id",
         "referenced_server_name", "referenced_database_name", "referenced_schema_name", "referenced_entity_name",
-        "referenced_id", "referenced_minor_id", "referenced_minor_name",
+        "referenced_minor_name", "referenced_id", "referenced_minor_id",
         "referenced_class", "referenced_class_desc",
         "is_caller_dependent", "is_ambiguous", "is_selected", "is_updated", "is_select_all",
         "is_all_columns_found", "is_insert_all", "is_incomplete",
@@ -42,7 +44,9 @@ partial class Selection
     /// <paramref name="functionName"/>'s first argument, one row each,
     /// <em>directly</em> (real reports no transitive closure — probe-confirmed
     /// that a procedure calling a procedure that reads a table isn't listed
-    /// against the table).
+    /// against the table), in schema-then-name order. A table whose computed
+    /// columns read its own columns lists itself (probed 2026-09-30 against
+    /// SQL Server 2025).
     /// </summary>
     /// <remarks>
     /// Both arguments are required and both are read as strings. A class string
@@ -65,13 +69,17 @@ partial class Selection
     /// what the named entity itself references: one row per referenced object
     /// plus one per referenced column, for <em>every</em> referencing kind
     /// rather than only the schema-bound ones
-    /// <c>sys.sql_expression_dependencies</c> details.
+    /// <c>sys.sql_expression_dependencies</c> details. A table answers for its
+    /// computed columns, each row carrying the column's id as
+    /// <c>referencing_minor_id</c>, and a CHECK or DEFAULT constraint for its
+    /// expression; a column of the entity's own table is a column row with no
+    /// object row beside it (probed 2026-09-30 against SQL Server 2025).
     /// </summary>
     /// <remarks>
     /// A reference the analysis can't resolve marks its rows
     /// <c>is_incomplete</c> and makes the DMV raise <strong>Msg 2020</strong>
     /// after handing the rows back — probe-confirmed ordering: the rows arrive,
-    /// then the error. A name that isn't a module (a table) or doesn't exist
+    /// then the error. A name that carries no expression or doesn't exist
     /// yields zero rows and no error.
     /// </remarks>
     public static Selection ParseSqlReferencedEntities(ParserContext context, string functionName)
@@ -112,19 +120,22 @@ partial class Selection
         Expression nameExpr, Expression classExpr, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var database = batch.CurrentDatabase;
-        if (ResolveDependencyDmvTarget(nameExpr, classExpr, batch, outerResolver, database) is not { } target)
+        if (ResolveDependencyDmvTarget(nameExpr, classExpr, batch, outerResolver, database) is not { } targetId)
             yield break;
 
         var objectClassDesc = SqlValue.FromNVarchar(
             (NVarcharSqlType)ReferencingEntitiesSchema[4], "OBJECT_OR_COLUMN");
         var ddlTriggerClassDesc = SqlValue.FromNVarchar(
             (NVarcharSqlType)ReferencingEntitiesSchema[4], "DATABASE_DDL_TRIGGER");
-        // A table type is addressed by its user_type_id, which is the id a
-        // TYPE-class reference carries; every other securable by its object id.
-        var targetId = target is TableType tableTypeTarget ? tableTypeTarget.UserTypeId : target.ObjectId;
+        // One row per referencing object, though a table's computed columns are
+        // an entity each; the one the first of them yields carries the flag the
+        // rest would.
+        var rows = new List<(ModuleDependencies.Entity Entity, bool CallerDependent)>();
         foreach (var entity in ModuleDependencies.Enumerate(database))
         {
-            if (entity.ReferencingId == target.ObjectId)
+            // A module naming itself isn't listed against itself; a table whose
+            // computed columns read its own columns is.
+            if (entity.ReferencingId == targetId && entity.ReferencingMinorId == 0)
                 continue;
             var callerDependent = false;
             var references = false;
@@ -135,9 +146,13 @@ partial class Selection
                 references = true;
                 callerDependent |= reference.IsCallerDependent;
             }
-            if (!references)
-                continue;
+            if (references && !rows.Exists(row => row.Entity.ReferencingId == entity.ReferencingId))
+                rows.Add((entity, callerDependent));
+        }
+        rows.Sort(static (a, b) => ModuleDependencies.CompareByName(a.Entity, b.Entity));
 
+        foreach (var (entity, callerDependent) in rows)
+        {
             var isDdlTrigger = entity.ReferencingClass == ModuleDependencies.DatabaseDdlTriggerClass;
             yield return RowEncoder.EncodeRow(ReferencingEntitiesSchema,
             [
@@ -155,19 +170,26 @@ partial class Selection
         Expression nameExpr, Expression classExpr, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         var database = batch.CurrentDatabase;
-        if (ResolveDependencyDmvTarget(nameExpr, classExpr, batch, outerResolver, database) is not { } target
-            || ModuleDependencies.ForObject(database, target) is not { } entity)
-        {
+        if (ResolveDependencyDmvTarget(nameExpr, classExpr, batch, outerResolver, database) is not { } targetId)
             yield break;
-        }
+        var entities = ModuleDependencies.ForObject(database, targetId);
+        if (entities.Count == 0)
+            yield break;
 
-        var classType = (NVarcharSqlType)ReferencedEntitiesSchema[8];
+        var classType = (NVarcharSqlType)ReferencedEntitiesSchema[9];
         var objectClassDesc = SqlValue.FromNVarchar(classType, "OBJECT_OR_COLUMN");
         var typeClassDesc = SqlValue.FromNVarchar(classType, "TYPE");
         var nullName = SqlValue.Null(SqlType.SystemName);
         var incomplete = false;
 
-        foreach (var reference in entity.References)
+        var pairs = new List<(ModuleDependencies.Entity Entity, ModuleDependencies.Reference Reference)>();
+        foreach (var entity in entities)
+        {
+            foreach (var reference in entity.References)
+                pairs.Add((entity, reference));
+        }
+
+        foreach (var (entity, reference) in pairs)
         {
             var isType = reference.ReferencedClass == ModuleDependencies.TypeClass;
             var resolved = reference.ReferencedId is not null;
@@ -176,13 +198,14 @@ partial class Selection
 
             SqlValue[] Row(int minorId, string? minorName, bool selected, bool updated, bool selectAll) =>
             [
+                SqlValue.FromInt32(entity.ReferencingMinorId),
                 reference.ServerName is { } server ? SqlValue.FromSystemName(server) : nullName,
                 reference.DatabaseName is { } db ? SqlValue.FromSystemName(db) : nullName,
                 reference.SchemaName is { } schema ? SqlValue.FromSystemName(schema) : nullName,
                 SqlValue.FromSystemName(reference.EntityName),
+                minorName is null ? nullName : SqlValue.FromSystemName(minorName),
                 resolved ? SqlValue.FromInt32(reference.ReferencedId!.Value) : SqlValue.Null(SqlType.Int32),
                 SqlValue.FromInt32(minorId),
-                minorName is null ? nullName : SqlValue.FromSystemName(minorName),
                 SqlValue.FromByte(isType ? ModuleDependencies.TypeClass : ModuleDependencies.ObjectOrColumnClass),
                 isType ? typeClassDesc : objectClassDesc,
                 SqlValue.FromBoolean(reference.IsCallerDependent),
@@ -195,8 +218,14 @@ partial class Selection
                 SqlValue.FromBoolean(!resolved),
             ];
 
-            yield return RowEncoder.EncodeRow(ReferencedEntitiesSchema,
-                Row(0, null, reference.IsSelected, reference.IsUpdated, reference.IsSelectAll));
+            // A computed column, CHECK or DEFAULT reaches its own table's
+            // columns without naming the table, so that reference has no
+            // object row.
+            if (reference.HasObjectReference)
+            {
+                yield return RowEncoder.EncodeRow(ReferencedEntitiesSchema,
+                    Row(0, null, reference.IsSelected, reference.IsUpdated, reference.IsSelectAll));
+            }
 
             if (columns is null)
                 continue;
@@ -220,17 +249,19 @@ partial class Selection
         // be short of columns — the error follows the rowset rather than
         // replacing it.
         if (incomplete)
-            throw SimulatedSqlException.DependencyReportMayBeIncomplete($"{entity.SchemaName}.{entity.EntityName}");
+            throw SimulatedSqlException.DependencyReportMayBeIncomplete($"{entities[0].SchemaName}.{entities[0].EntityName}");
     }
 
     /// <summary>
-    /// Resolves the <c>(name, class)</c> pair to the object both DMVs report
-    /// on, or null when the pair names nothing they can answer for. Every miss
-    /// is silent by design: real returns an empty rowset for an unrecognized
-    /// class string, a NULL name, a one-part name, and a name no object
-    /// carries.
+    /// Resolves the <c>(name, class)</c> pair to the id of the object both DMVs
+    /// report on — a table type's <c>user_type_id</c>, which is the id a
+    /// TYPE-class reference carries, and any other securable's object id, a
+    /// CHECK or DEFAULT constraint's included — or null when the pair names
+    /// nothing they can answer for. Every miss is silent by design: real
+    /// returns an empty rowset for an unrecognized class string, a NULL name, a
+    /// one-part name, and a name no object carries.
     /// </summary>
-    private static SchemaObject? ResolveDependencyDmvTarget(
+    private static int? ResolveDependencyDmvTarget(
         Expression nameExpr, Expression classExpr, BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver, Database database)
     {
@@ -253,14 +284,14 @@ partial class Selection
             return null;
         var leaf = parts[^1].Trim('[', ']');
         return BuiltInToken.Equals(classValue.AsString, "TYPE")
-            ? schema.TableTypes.TryGetValue(leaf, out var tableType) ? tableType : null
-            : schema.HeapTables.TryGetValue(leaf, out var table) ? table
-            : schema.Views.TryGetValue(leaf, out var view) ? view
-            : schema.Functions.TryGetValue(leaf, out var function) ? function
-            : schema.Procedures.TryGetValue(leaf, out var procedure) ? procedure
-            : schema.Triggers.TryGetValue(leaf, out var trigger) ? trigger
-            : schema.Synonyms.TryGetValue(leaf, out var synonym) ? synonym
-            : schema.Sequences.TryGetValue(leaf, out var sequence) ? sequence
-            : null;
+            ? schema.TableTypes.TryGetValue(leaf, out var tableType) ? tableType.UserTypeId : null
+            : schema.HeapTables.TryGetValue(leaf, out var table) ? table.ObjectId
+            : schema.Views.TryGetValue(leaf, out var view) ? view.ObjectId
+            : schema.Functions.TryGetValue(leaf, out var function) ? function.ObjectId
+            : schema.Procedures.TryGetValue(leaf, out var procedure) ? procedure.ObjectId
+            : schema.Triggers.TryGetValue(leaf, out var trigger) ? trigger.ObjectId
+            : schema.Synonyms.TryGetValue(leaf, out var synonym) ? synonym.ObjectId
+            : schema.Sequences.TryGetValue(leaf, out var sequence) ? sequence.ObjectId
+            : ModuleDependencies.ExpressionConstraintId(database, schema, leaf);
     }
 }

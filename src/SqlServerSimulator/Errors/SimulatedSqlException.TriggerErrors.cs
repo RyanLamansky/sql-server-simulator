@@ -20,6 +20,14 @@ partial class SimulatedSqlException
         new("OWNER is not a valid option for EXECUTE AS in the context of server and database level triggers.", 1083, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 167: a DML trigger's parent is a local or
+    /// global temporary table, raised while the batch parses, so the body's syntax
+    /// errors follow it (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TriggerOnTemporaryObject() =>
+        new("Cannot create trigger on a temporary object.", 167, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1084: an event type the
     /// <c>sys.trigger_event_types</c> catalog doesn't carry, echoed as written.
     /// </summary>

@@ -280,4 +280,49 @@ public sealed class CreateSchemaElementTests
         _ = sim.ExecuteNonQuery("create schema s2 create table t (a int) grant select on t to u");
         AreEqual(before + 1, sim.ExecuteScalar<int>("select count(*) from sys.database_permissions"));
     }
+
+    /// <summary>
+    /// An element view or table may name the schema its statement creates, or
+    /// another existing one (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create schema zs create view zs.v1 as select 1 a", "zs.v1")]
+    [DataRow("create schema zs create table zs.t1 (a int)", "zs.t1")]
+    [DataRow("create schema zs create table zs.t1 (a int) create view zs.v1 as select a from zs.t1", "zs.t1,zs.v1")]
+    [DataRow("create schema zs create view zs.v1 as select 1 a create view zs.v2 as select a from zs.v1", "zs.v1,zs.v2")]
+    [DataRow("create schema zs create view dbo.v1 as select 1 a", "dbo.v1")]
+    public void QualifiedElementName_LandsInTheNamedSchema(string sql, string expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(sql);
+        AreEqual(expected, simulation.ExecuteScalar(
+            "select string_agg(schema_name(schema_id) + '.' + name, ',') within group (order by name) from sys.objects where name in ('t1', 'v1', 'v2')"));
+    }
+
+    [TestMethod]
+    public void QualifiedElementGrant_GrantsOnTheNewSchemasTable()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create schema zs create table zs.t1 (a int) grant select on zs.t1 to public");
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.database_permissions where major_id = object_id('zs.t1')"));
+    }
+
+    /// <summary>
+    /// A view element naming a schema that doesn't exist fails the statement
+    /// with Msg 2760 and Msg 2759, and one whose body doesn't bind with its
+    /// binder error and Msg 2759, neither attributed to the view.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create schema zs create view nosuch.v1 as select 1 a", "2760,2759")]
+    [DataRow("create schema zs create view zs.v1 as select nosuch", "207,2759")]
+    [DataRow("create schema zs create table t0 (a int) create view v1 as select nosuch from t0", "207,2759")]
+    public void FailingViewElement_FailsTheStatement(string sql, string expected)
+    {
+        var simulation = new Simulation();
+        var error = ThrowsExactly<SimulatedSqlException>(() => simulation.ExecuteNonQuery(sql));
+        AreEqual(expected, string.Join(",", error.Errors.Select(entry => entry.Number)));
+        foreach (var entry in error.Errors)
+            AreEqual("", entry.Procedure);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.schemas where name = 'zs'"));
+    }
 }

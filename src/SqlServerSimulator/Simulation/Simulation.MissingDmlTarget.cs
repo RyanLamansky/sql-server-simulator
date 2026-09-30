@@ -146,8 +146,9 @@ partial class Simulation
 
     /// <summary>
     /// The compile pass's read of an INSERT whose target didn't resolve: the
-    /// column list, then the source — <c>VALUES</c> tuples, a query, or
-    /// <c>DEFAULT VALUES</c>. An <c>EXEC</c> source is left unread.
+    /// column list, then the source — <c>VALUES</c> tuples, a query,
+    /// <c>DEFAULT VALUES</c>, or an <c>EXEC</c> with its argument list, which
+    /// runs nothing in the compile pass.
     /// </summary>
     private static void ParseMissingInsertTail(ParserContext context)
     {
@@ -183,10 +184,173 @@ partial class Simulation
                 context.MoveNextOptional();
                 break;
             case ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute }:
+                foreach (var _ in context.Batch.Connection.Simulation.ParseExec(context.Batch, insertExecSource: true))
+                {
+                    // Skip mode yields nothing; the enumeration drives the parse.
+                }
                 break;
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
         RejectStrayToken(context);
+    }
+
+    /// <summary>
+    /// The read of a MERGE whose target didn't resolve, from the target name's
+    /// last token. The <c>USING</c> source binds as it always does, so a
+    /// missing source is the Msg 208 real reports ahead of the target's (probed
+    /// 2026-09-30 against SQL Server 2025). In the compile pass the rest — the
+    /// target's hints and alias, a source that doesn't resolve either, the
+    /// <c>ON</c> predicate, every <c>WHEN</c> clause's condition and action,
+    /// <c>OUTPUT</c> and <c>OPTION</c> — reads over placeholder columns, and the
+    /// statement's closing <c>;</c> is required, so a syntax error anywhere in
+    /// it outranks the missing target and a dead branch parses to its end.
+    /// </summary>
+    private static void ParseMissingMergeTail(ParserContext context, MultiPartName targetName)
+    {
+        context.MoveNextRequired();
+        if (!BatchContext.IsTableVariableName(targetName.Leaf))
+            Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
+        if (context.Token is ReservedKeyword { Keyword: Keyword.As })
+            context.MoveNextRequired();
+        if (context.Token is Name and not UnquotedString { ContextualKeyword: ContextualKeyword.Using })
+            context.MoveNextRequired();
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Using })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        if (!context.Batch.IsSkipping || !SkipUnresolvedMergeSource(context))
+            _ = ParseMergeSource(context);
+        if (!context.Batch.IsSkipping)
+            return;
+
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        _ = Selection.ParseAndBindPredicate(context, static _ => SqlType.Int32);
+
+        var clauses = 0;
+        while (context.Token is ReservedKeyword { Keyword: Keyword.When })
+        {
+            clauses++;
+            if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Not })
+                context.MoveNextRequired();
+            if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Matched })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.By })
+            {
+                if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Source or ContextualKeyword.Target })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+            }
+            if (context.Token is ReservedKeyword { Keyword: Keyword.And })
+            {
+                context.MoveNextRequired();
+                _ = Selection.ParseAndBindPredicate(context, static _ => SqlType.Int32);
+            }
+            if (context.Token is not ReservedKeyword { Keyword: Keyword.Then })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            switch (context.GetNextRequired())
+            {
+                case ReservedKeyword { Keyword: Keyword.Delete }:
+                    context.MoveNextOptional();
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Update }:
+                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Set })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    do
+                    {
+                        context.MoveNextRequired();
+                        _ = BatchContext.ParseObjectName(context);
+                        if (context.GetNextRequired() is not Operator { Character: '=' })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        context.MoveNextRequired();
+                        ParseMissingMergeValue(context);
+                    }
+                    while (context.Token is Operator { Character: ',' });
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Insert }:
+                    if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Default })
+                    {
+                        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Values })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        context.MoveNextOptional();
+                        break;
+                    }
+                    if (context.Token is Operator { Character: '(' })
+                    {
+                        do
+                        {
+                            if (context.GetNextRequired() is not StringToken)
+                                throw SimulatedSqlException.SyntaxErrorNear(context);
+                        }
+                        while (context.GetNextRequired() is Operator { Character: ',' });
+                        if (context.Token is not Operator { Character: ')' })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        context.MoveNextRequired();
+                    }
+                    if (context.Token is not ReservedKeyword { Keyword: Keyword.Values } || context.GetNextRequired() is not Operator { Character: '(' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    do
+                    {
+                        if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Default })
+                            context.MoveNextRequired();
+                        else
+                            ParseMissingMergeValue(context);
+                    }
+                    while (context.Token is Operator { Character: ',' });
+                    if (context.Token is not Operator { Character: ')' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    context.MoveNextOptional();
+                    break;
+                default:
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+        }
+        if (clauses == 0)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+            SkipOutputClause(context);
+        SkipOptionClause(context);
+        if (context.Token is not Operator { Character: ';' })
+            throw IsStatementBoundary(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
+    /// Steps over a MERGE's bare-name <c>USING</c> source that names nothing
+    /// the statement can read, with its alias and hints, in the compile pass;
+    /// false, the cursor on <c>USING</c>, for any other source.
+    /// </summary>
+    private static bool SkipUnresolvedMergeSource(ParserContext context)
+    {
+        var atUsing = context.SaveCheckpoint();
+        context.MoveNextRequired();
+        if (context.Token is not Operator { Character: '(' })
+        {
+            var name = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+            var batch = context.Batch;
+            var resolves = (name.Count == 1 && context.CteBindings is { } ctes && ctes.ContainsKey(name.Leaf))
+                || name.Count == 4
+                || batch.TryResolveView(name, out _)
+                || batch.TryResolveTable(name, out _);
+            if (!resolves)
+            {
+                _ = Selection.ConsumeOptionalAlias(context);
+                _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
+                return true;
+            }
+        }
+        context.RestoreCheckpoint(atUsing);
+        return false;
+    }
+
+    /// <summary>A value in a missing MERGE target's action, read over placeholder columns.</summary>
+    private static void ParseMissingMergeValue(ParserContext context)
+    {
+        var aggregates = new List<Parser.Expressions.AggregateExpression>();
+        using (ParserScope.Enter(ref context.OuterTypeResolver, static _ => SqlType.Int32))
+        using (ParserScope.Enter(ref context.AggregateCollector, aggregates))
+        {
+            _ = Expression.Parse(context);
+        }
     }
 }

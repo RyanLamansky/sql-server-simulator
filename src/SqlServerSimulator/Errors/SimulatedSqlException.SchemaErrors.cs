@@ -670,9 +670,12 @@ partial class SimulatedSqlException
     /// attributed to the trigger by its unqualified name as a CREATE-time bind
     /// error is (2026-09-23).
     /// </summary>
-    internal static SimulatedSqlException ObjectDoesNotExistForTrigger(string name, string triggerName)
+    /// <param name="name">The parent as written.</param>
+    /// <param name="triggerName">The trigger, which the error is attributed to.</param>
+    /// <param name="state">4 for a parent that doesn't exist, 6 for a view an AFTER trigger names (probed 2026-09-30).</param>
+    internal static SimulatedSqlException ObjectDoesNotExistForTrigger(string name, string triggerName, byte state)
     {
-        var exception = new SimulatedSqlException($"The object '{name}' does not exist or is invalid for this operation.", 8197, 16, 4);
+        var exception = new SimulatedSqlException($"The object '{name}' does not exist or is invalid for this operation.", 8197, 16, state);
         exception.Errors[0].Procedure = triggerName;
         return exception;
     }

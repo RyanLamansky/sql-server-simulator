@@ -81,6 +81,11 @@ partial class Simulation
     /// they are appended behind the binder's own errors once the whole body has
     /// bound, which is the order real reports them in.
     /// </param>
+    /// <param name="closingEnd">
+    /// For a function body, the <c>END</c> that closes it as written, which
+    /// the captured text leaves out — the token an error at the text's end
+    /// is reported near.
+    /// </param>
     /// <param name="rejectsNextValueFor">
     /// True for the module kinds real names in Msg 11719 — a scalar UDF and a
     /// multi-statement TVF — so a <c>NEXT VALUE FOR</c> anywhere in the body
@@ -94,7 +99,8 @@ partial class Simulation
         int bodyLineOffset,
         Func<SimulatedDbCommand, BatchContext> buildBindBatch,
         FunctionBodyShape? shape = null,
-        bool rejectsNextValueFor = false)
+        bool rejectsNextValueFor = false,
+        string? closingEnd = null)
     {
         if (string.IsNullOrEmpty(bodyText))
             return;
@@ -121,8 +127,33 @@ partial class Simulation
         // value per call.
         if (rejectsNextValueFor)
             bindBatch.Parser.RaiseNextValueForFloor(NextValueForScope.Nested);
+        bindBatch.Parser.SchemaBoundBody = outerContext.SchemaBoundBody;
 
-        var walkedToEnd = this.BindWithoutRunning(bindBatch, bindErrors);
+        bool walkedToEnd;
+        try
+        {
+            walkedToEnd = this.BindWithoutRunning(bindBatch, bindErrors);
+        }
+        catch (SimulatedSqlException parsePhase) when (parsePhase.Number == 102 && bindBatch.Parser.Token is null && closingEnd is not null)
+        {
+            // The body ran out where its END stands.
+            var atEnd = SimulatedSqlException.SyntaxErrorNearKeyword(closingEnd);
+            atEnd.ResolveDiagnostics(Token.LineAt(bodyText, bodyText.Length), bodyLineOffset, moduleName);
+            throw atEnd;
+        }
+        catch (SimulatedSqlException parsePhase) when (IsRecoverableSyntaxError(parsePhase) && bindBatch.Parser.Token is { } errorToken)
+        {
+            // Real's parser recovers inside a body as it does in a batch, and
+            // reports every syntax error it finds past the first.
+            throw this.WithRecoveredSyntaxErrors(bindBatch, parsePhase, errorToken, command =>
+            {
+                var recovery = buildBindBatch(command);
+                recovery.AdoptStatementFreezeFrom(outerContext.Batch);
+                if (rejectsNextValueFor)
+                    recovery.Parser.RaiseNextValueForFloor(NextValueForScope.Nested);
+                return recovery;
+            }, closingEnd);
+        }
 
         // Only a walk that reached the end of the body saw the statement the
         // last-statement rule is about; a deferral abandoned partway
@@ -199,14 +230,15 @@ partial class Simulation
             // reporting the unfinished statement it was left on.
             return false;
         }
-        catch (SimulatedSqlException) when (bindErrors.Count > 0 && !bindBatch.BindResumedCleanly)
+        catch (SimulatedSqlException error) when (bindErrors.Count > 0 && !bindBatch.BindResumedCleanly && error.Number != 1054)
         {
             // A severity-15 error raised after a binder error was gathered,
             // from a position the recovery scan guessed at — it may be a
             // diagnostic against a fragment rather than against the text, so
             // report what bound instead. Raised from a clean resume it
             // propagates, which is real's parse phase preempting the binder's
-            // whole report.
+            // whole report — as does a schema-bound body's Msg 1054, which a
+            // statement's own parse raises wherever the walk resumed.
             return false;
         }
         finally
@@ -274,13 +306,15 @@ partial class Simulation
         List<UdfParameter> parameters,
         SqlType returnType,
         string bodyText,
-        int bodyLineOffset)
+        int bodyLineOffset,
+        string closingEnd)
     {
         var variables = SeedFunctionParameters(parameters);
         BindModuleBodyAtCreate(outerContext, bodyText, functionName, bodyLineOffset,
             bodyCommand => new BatchContext(bodyCommand, variables, new UdfFrame(returnType)),
             new FunctionBodyShape(),
-            rejectsNextValueFor: true);
+            rejectsNextValueFor: true,
+            closingEnd);
     }
 
     /// <summary>
@@ -299,7 +333,8 @@ partial class Simulation
         CheckConstraint[] checkConstraints,
         string bodyText,
         int bodyLineOffset,
-        int? timestampColumnLine)
+        int? timestampColumnLine,
+        string closingEnd)
     {
         var outerBatch = outerContext.Batch;
         var variables = SeedFunctionParameters(parameters);
@@ -327,7 +362,8 @@ partial class Simulation
             return batch;
         },
         shape,
-        rejectsNextValueFor: true);
+        rejectsNextValueFor: true,
+        closingEnd);
     }
 
     /// <summary>

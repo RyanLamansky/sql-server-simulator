@@ -303,11 +303,102 @@ public sealed class BatchCompilationTests
     [DataRow("select 1;\ninsert t (c) with (tablock) values (1);", "156@2 319@2")]
     [DataRow("select 1;\nmerge t as a with (holdlock) using (select 1 c) s on a.c = s.c when not matched then insert values (s.c);", "156@2 319@2 102@2")]
     [DataRow("select 1 with;", "319@1")]
+    [DataRow("(select 1) as q", "156@1")]
+    [DataRow("begin select 1 +; select 2 end", "102@1")]
+    [DataRow("begin select 1 +; select 2 + end", "102@1 156@1")]
+    [DataRow("begin try select 1 +; end try begin catch select 3 end catch", "102@1")]
+    [DataRow("if 1=1 begin select 1 +; select 2 end select 3 +; select 4", "102@1 102@1")]
+    [DataRow("begin select case when 1 +; select 2\nend\nend", "102@1 102@3")]
+    [DataRow("begin tran; select 1 +; select 2 end", "102@1 102@1")]
+    [DataRow("select * from where;\nselect case when 1 then 2 end", "156@1 4145@2")]
+    [DataRow("select 1 +;\nif 1 select 2", "102@1 4145@2")]
+    [DataRow("begin\n  if 1=1 begin select * from where; end\n  select case when 1 then\nend", "156@2 4145@3")]
+    [DataRow("select case when 1 then 2 end;\nselect 1 +;", "4145@1 102@2")]
+    [DataRow("select case when 1 then 2 end; select case when 2 then 3 end", "4145@1 4145@1")]
+    [DataRow("select 1 where 1 and 2; select 1 +;", "4145@1 102@1")]
+    [DataRow("select 1 where 1; select 2 +", "4145@1 102@1")]
+    [DataRow("select 1 where 1\nselect 2 +", "4145@2 102@2")]
+    [DataRow("select 2 +; select 1 where 1", "102@1 4145@1")]
+    [DataRow("select 1 where 1; select nosuch from sys.objects", "4145@1")]
+    [DataRow("select 1 where 1 select 2 + 3 +", "4145@1 102@1")]
+    [DataRow("select 1 where 1; select 2 from", "4145@1 102@1")]
+    [DataRow("select 1 where 1; select @nope", "4145@1 137@1")]
+    [DataRow("select @nope; select 1 +;", "137@1 102@1")]
+    [DataRow("select @nope; select @nope2; select 3", "137@1 137@1")]
+    [DataRow("declare @a int = @b + @c", "137@1")]
+    [DataRow("select @nope\nselect 2 +", "137@1 102@2")]
+    [DataRow("select @n1 + @n2; select 3", "137@1")]
+    [DataRow("select @nope; select 1 where 1", "137@1 4145@1")]
+    [DataRow("set @x = 1; select 2 +;", "137@1 102@1")]
+    [DataRow("set @x = 1 +", "102@1")]
+    [DataRow("exec sp_executesql N'select @q; select 1 +'", "137@1 102@1")]
     public void SyntaxErrors_ReportThoseRecoveryReaches(string batch, string expected)
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create table t (c int)");
-        var ex = sim.AssertSqlError(batch, int.Parse(expected[..3], System.Globalization.CultureInfo.InvariantCulture));
+        var ex = sim.AssertSqlError(batch, int.Parse(expected[..expected.IndexOf('@')], System.Globalization.CultureInfo.InvariantCulture));
         AreEqual(expected, string.Join(" ", ex.Errors.Cast<SimulatedError>().Select(error => $"{error.Number}@{error.LineNumber}")));
+    }
+
+    /// <summary>
+    /// Recovery runs inside a module body as it does in a batch, reading the
+    /// rest of the body as statements with the body's own frame and the
+    /// variables it declared, and an END closing a block the error left open
+    /// as the block's end (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create procedure p as\nselect 1 +;\nselect 2 +;", "102@2 102@3")]
+    [DataRow("create function f() returns int as begin declare @x int; set @x = 1 +; set @x = 2 +; return 1 end", "102@1 102@1")]
+    [DataRow("create function f() returns table as return select 1 + from (select 1 a) q", "156@1 102@1")]
+    [DataRow("create procedure p as if 1=1 begin select 1 +; end else select 2", "102@1")]
+    [DataRow("create procedure p as begin try select 1 +; end try begin catch select 2 end catch", "102@1")]
+    [DataRow("create function f() returns int as begin declare @x int; if 1=1 begin set @x = 1 +; end; return @x end", "102@1")]
+    [DataRow("create trigger tr on dbo.t after insert as begin select 1 +; select 2 end", "102@1")]
+    [DataRow("create procedure p as while 1=0 begin select 1 +; break; end", "102@1")]
+    [DataRow("create procedure p as\nselect 1 + ;\ndeclare @y int;\nset @y = 2 +;\nselect @y", "102@2 102@4")]
+    [DataRow("create function f() returns @r table (a int, b int) as begin insert @r select 1 +, 2; insert @r select 3 +, 4; return end", "102@1 102@1")]
+    [DataRow("create procedure p as select * from dbo.t where c = ; select 1 from dbo.t where c = ;", "102@1 102@1")]
+    [DataRow("create function f() returns int as begin return 1 +; end", "102@1")]
+    [DataRow("create procedure p @a int as select @a +; select @a", "102@1")]
+    [DataRow("create procedure p as begin select 1 +; select 2\nend\nselect 3\nend", "102@1 102@4")]
+    [DataRow("create procedure p as\nbegin\n  if 1=1 begin select * from where; end\n  select case when 1 then\nend", "156@3 4145@4")]
+    [DataRow("create procedure p as if 1 select 2\nselect 1 +", "4145@1 102@2")]
+    [DataRow("create procedure p as select 1 where 1; select 2 +", "4145@1 102@1")]
+    [DataRow("create procedure p as select 1 where 1\nselect 2 +", "4145@2 102@2")]
+    [DataRow("create procedure p as select 1 where 1; select nosuch from sys.objects", "4145@1")]
+    [DataRow("create function f() returns int as begin if 1 return 1; return 2 + end", "4145@1 156@1")]
+    [DataRow("create function f() returns int as begin return 2 + end", "156@1")]
+    [DataRow("create function f() returns int as begin\nreturn 2 +\nend", "156@3")]
+    [DataRow("create function f() returns int as begin declare @x int; set @x = 1 +; return 2 + end", "102@1 156@1")]
+    [DataRow("create function f() returns @r table (a int) as begin insert @r select 1 +; insert @r select 2 + end", "102@1 156@1")]
+    [DataRow("create function f() returns int as begin declare @x int; select @x = 1 where 1; return 2 + END", "4145@1 156@1")]
+    [DataRow("create procedure p as\nbegin\n  declare @c int = 1 +;\n  select @c;\n  set @c = ;\nend", "102@3 137@4 102@5")]
+    [DataRow("create function f() returns int as begin declare @x int = 1 +; return @x end", "102@1 137@1")]
+    public void SyntaxErrors_RecoveryInsideAModuleBody(string batch, string expected)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (c int)");
+        var ex = sim.AssertSqlError(batch, int.Parse(expected[..expected.IndexOf('@')], System.Globalization.CultureInfo.InvariantCulture));
+        AreEqual(expected, string.Join(" ", ex.Errors.Cast<SimulatedError>().Select(error => $"{error.Number}@{error.LineNumber}")));
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select object_id('p')"));
+    }
+
+    /// <summary>
+    /// A <c>SET</c> to an undeclared variable is Msg 137 at state 1, checked
+    /// once the statement has parsed — after a syntax error or an undeclared
+    /// variable on its right-hand side (state 2) — where a read is state 2
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("set @x = 1", "137/1 @x")]
+    [DataRow("set @x += 1", "137/1 @x")]
+    [DataRow("set @x.modify('delete /a')", "137/1 @x")]
+    [DataRow("set @x = @y", "137/2 @y")]
+    [DataRow("set @x = (select 1 from nosuch)", "137/1 @x")]
+    [DataRow("select @x", "137/2 @x")]
+    public void SetTargetUndeclared_IsState1(string batch, string expected)
+    {
+        var error = new Simulation().AssertSqlError(batch, 137);
+        AreEqual(expected, $"{error.Number}/{error.State} {error.Message[error.Message.IndexOf('@')..^2]}");
     }
 }

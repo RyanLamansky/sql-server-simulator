@@ -60,7 +60,15 @@ partial class Simulation
         {
             connection.CurrentDatabase = enteredDatabase;
             return IsRecoverableSyntaxError(parsePhase) && compileBatch.Parser.Token is { } errorToken
-                ? this.WithRecoveredSyntaxErrors(compileBatch, parsePhase, errorToken)
+                ? this.WithRecoveredSyntaxErrors(compileBatch, parsePhase, errorToken, command =>
+                {
+                    var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+                    var recovery = compileBatch.ProcFrame is { } frame
+                        ? new BatchContext(command, variables, new ProcFrame(frame.ProcedureName, frame.IsDynamicSql))
+                        : new BatchContext(command, variables);
+                    recovery.CompilingForRun = true;
+                    return recovery;
+                })
                 : parsePhase;
         }
         finally
@@ -108,17 +116,19 @@ partial class Simulation
         return compile;
     }
 
-    /// <summary>The syntax errors real's parser recovers from and parses on past.</summary>
-    private static bool IsRecoverableSyntaxError(SimulatedSqlException error) => error.Number is 102 or 111 or 156 or 178 or 319;
+    /// <summary>The parse-phase errors real's parser recovers from and parses on past.</summary>
+    private static bool IsRecoverableSyntaxError(SimulatedSqlException error) => error.Number is 102 or 111 or 137 or 156 or 178 or 319 or 1054 or 4145;
 
     /// <summary>
     /// Whether <paramref name="error"/> is one the grammar's own actions raise
     /// rather than a token the parser can't take — a module <c>CREATE</c> not
     /// first in its batch (Msg 111), a valued <c>RETURN</c> outside a module
-    /// (Msg 178), a <c>WITH</c> after an unterminated statement (Msg 319) —
-    /// which recovery reports however few tokens have parsed since the last.
+    /// (Msg 178), a <c>WITH</c> after an unterminated statement (Msg 319), a
+    /// schema-bound body's select-list star or <c>GROUP BY ALL</c> (Msg 1054),
+    /// a non-boolean expression where a condition belongs (Msg 4145) — which
+    /// recovery reports however few tokens have parsed since the last.
     /// </summary>
-    private static bool IsGrammarActionError(SimulatedSqlException error) => error.Number is 111 or 178 or 319;
+    private static bool IsGrammarActionError(SimulatedSqlException error) => error.Number is 111 or 178 or 319 or 1054 or 4145;
 
     /// <summary>
     /// <paramref name="first"/> followed by the syntax errors real's parser
@@ -133,7 +143,21 @@ partial class Simulation
     /// restart parses the text from there on with everything before it
     /// blanked out, so positions and lines stay as written.
     /// </summary>
-    private SimulatedSqlException WithRecoveredSyntaxErrors(BatchContext compileBatch, SimulatedSqlException first, Parser.Token errorToken)
+    /// <param name="compileBatch">The batch or module body whose walk raised <paramref name="first"/>.</param>
+    /// <param name="first">The error the walk stopped on.</param>
+    /// <param name="errorToken">The token the walk's parser stood on when it raised.</param>
+    /// <param name="buildRecovery">
+    /// Builds the context each restart walks the blanked text on, with the
+    /// frame the text runs in — a module body's own, so a restart reads its
+    /// <c>RETURN</c> and its parameters as the body does. The variables and
+    /// table variables the failed walk declared carry over, as real's parser
+    /// keeps them.
+    /// </param>
+    /// <param name="closingEnd">
+    /// The <c>END</c> that closes the text as written, for a function body
+    /// captured without it — the token an error at the end of the text names.
+    /// </param>
+    private SimulatedSqlException WithRecoveredSyntaxErrors(BatchContext compileBatch, SimulatedSqlException first, Parser.Token errorToken, Func<SimulatedDbCommand, BatchContext> buildRecovery, string? closingEnd = null)
     {
         var text = compileBatch.Parser.Command.CommandText;
         var connection = compileBatch.Connection;
@@ -141,12 +165,24 @@ partial class Simulation
         var errors = new List<SimulatedSqlException> { first };
         // A grammar action's error names a construct the parser read whole;
         // the parser resumes past the token it stopped at.
-        var restart = IsGrammarActionError(first) ? errorToken.EndIndex : errorToken.StartIndex;
+        // A Msg 4145 or Msg 137 sends the parser on in place rather than into
+        // recovery, so the tokens after it count toward the next report — the
+        // 4145's own token among them, since the parser raised it on reading
+        // that token, not past it (probed 2026-09-30 against SQL Server 2025).
+        var restart = first.Number == 4145 ? errorToken.StartIndex
+            : IsGrammarActionError(first) || first.Number == 137 ? errorToken.EndIndex
+            : errorToken.StartIndex;
+        // Where each error stopped the parser, and where the count of tokens
+        // parsed since the last error starts — which a block's END, read as
+        // one rather than as an error, doesn't reset.
+        List<int> errorOffsets = [errorToken.StartIndex];
+        int? countFrom = first.Number is 4145 or 137 ? restart : null;
         for (var attempts = 0; attempts < 64; attempts++)
         {
             restart = NextStatementStart(text, restart);
             if (restart >= text.Length)
                 break;
+            countFrom ??= restart;
             var masked = string.Create(text.Length, (text, restart), static (span, state) =>
             {
                 for (var i = 0; i < span.Length; i++)
@@ -156,21 +192,54 @@ partial class Simulation
 #pragma warning disable CA2100 // the batch's own text, blanked in part
             command.CommandText = masked;
 #pragma warning restore CA2100
-            var variables = new Dictionary<string, VariableSlot>(compileBatch.Variables, BatchContext.VariableNameComparer);
-            var recovery = compileBatch.ProcFrame is { } frame
-                ? new BatchContext(command, variables, new ProcFrame(frame.ProcedureName, frame.IsDynamicSql))
-                : new BatchContext(command, variables);
+            var recovery = buildRecovery(command);
+            if (!ReferenceEquals(recovery.Variables, compileBatch.Variables))
+            {
+                foreach (var (name, slot) in compileBatch.Variables)
+                    _ = recovery.Variables.TryAdd(name, slot);
+            }
+            foreach (var (name, table) in compileBatch.TableVariables)
+                _ = recovery.TableVariables.TryAdd(name, table);
             recovery.LineOffset = compileBatch.LineOffset;
             recovery.ErrorProcedureName = compileBatch.ErrorProcedureName;
-            recovery.CompilingForRun = true;
+            // Past a schema-bound body's header, the rest of the batch is still
+            // that body, which recovery reads as statements.
+            if (compileBatch.Parser.SchemaBoundBody != SchemaBoundBody.None)
+                recovery.Parser.SchemaBoundBody = SchemaBoundBody.Statements;
             try
             {
                 _ = this.BindWithoutRunning(recovery, []);
                 break;
             }
-            catch (SimulatedSqlException next) when (IsRecoverableSyntaxError(next) && recovery.Parser.Token is { } at && at.StartIndex >= restart)
+            // An error at the end of the text names the last token.
+            catch (SimulatedSqlException next) when (IsRecoverableSyntaxError(next) && (recovery.Parser.Token ?? recovery.Parser.LastToken) is { } at && at.StartIndex >= restart)
             {
-                var parsed = TokensBetween(masked, restart, at.StartIndex);
+                // An END at a statement's start closes a block opened before
+                // the restart, which the blanked text no longer shows; real's
+                // parser, still inside the block, reads it as the block's end.
+                // An END TRY's CATCH block opens there too, which a restart at
+                // its BEGIN would read as a CATCH without a TRY.
+                if (next.Number == 102 && at is Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.End } && OpenBlocksBefore(text, at.StartIndex, errorOffsets) > 0)
+                {
+                    restart = PastCatchOpening(text, at.EndIndex);
+                    continue;
+                }
+                errorOffsets.Add(at.StartIndex);
+                // At the end of the text every token has parsed; a Msg 137's
+                // variable has too.
+                var atEnd = recovery.Parser.Token is null;
+                var parsed = TokensBetween(text, countFrom.Value, atEnd || next.Number == 137 ? at.EndIndex : at.StartIndex);
+                if (atEnd && next.Number == 102 && closingEnd is not null)
+                {
+                    next = SimulatedSqlException.SyntaxErrorNearKeyword(closingEnd);
+                    next.ResolveDiagnostics(Parser.Token.LineAt(text, text.Length), compileBatch.LineOffset, compileBatch.ErrorProcedureName);
+                }
+                countFrom = next.Number switch
+                {
+                    137 => at.EndIndex,
+                    4145 => at.StartIndex,
+                    _ => null,
+                };
                 // A WITH the parser restarts at reads as a common table
                 // expression after an unterminated statement, and fails as one.
                 var startsWithWith = masked.AsSpan(restart).StartsWith("with", StringComparison.OrdinalIgnoreCase)
@@ -184,7 +253,7 @@ partial class Simulation
                 var reported = parsed >= 3 || IsGrammarActionError(next);
                 if (reported)
                     errors.Add(next);
-                var resume = reported && !readAsCte ? at.StartIndex : at.EndIndex;
+                var resume = reported && !readAsCte && next.Number != 137 ? at.StartIndex : at.EndIndex;
                 restart = resume > restart ? resume : at.EndIndex;
             }
             catch (SimulatedSqlException next) when (next.Number == 1028)
@@ -256,6 +325,97 @@ partial class Simulation
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// How many <c>BEGIN … END</c> blocks — <c>BEGIN TRY</c> and
+    /// <c>BEGIN CATCH</c> among them, a <c>BEGIN TRAN</c> not — are open at
+    /// <paramref name="offset"/> of <paramref name="text"/>. A <c>CASE</c>'s
+    /// <c>END</c> closes the <c>CASE</c>, except one still open where a syntax
+    /// error stopped the parser, which recovery abandons (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    /// <param name="text">The text being recovered.</param>
+    /// <param name="offset">Where the count is taken.</param>
+    /// <param name="errorOffsets">Where each error so far stopped the parser, in order.</param>
+    private static int OpenBlocksBefore(string text, int offset, List<int> errorOffsets)
+    {
+        var open = new Stack<bool>();
+        var (index, nextError) = (0, 0);
+        var afterBegin = false;
+        try
+        {
+            while (index < offset && Parser.Tokenizer.NextToken(text, ref index, Collation.Baseline) is { } token && token.StartIndex < offset)
+            {
+                if (token is Parser.Tokens.Whitespace or Parser.Tokens.Comment)
+                    continue;
+                for (; nextError < errorOffsets.Count && errorOffsets[nextError] <= token.StartIndex; nextError++)
+                {
+                    while (open.TryPeek(out var isBlock) && !isBlock)
+                        _ = open.Pop();
+                }
+                switch (token)
+                {
+                    case Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.Tran or Parser.Keyword.Transaction or Parser.Keyword.Distributed } when afterBegin:
+                        _ = open.Pop();
+                        break;
+                    case Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.Begin }:
+                        open.Push(true);
+                        afterBegin = true;
+                        continue;
+                    case Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.Case }:
+                        open.Push(false);
+                        break;
+                    case Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.End }:
+                        _ = open.TryPop(out _);
+                        break;
+                }
+                afterBegin = false;
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+        }
+        var blocks = 0;
+        foreach (var isBlock in open)
+        {
+            if (isBlock)
+                blocks++;
+        }
+        return blocks;
+    }
+
+    /// <summary>
+    /// The offset past <c>TRY BEGIN CATCH</c> when those three words follow
+    /// <paramref name="from"/> — an <c>END</c>'s <c>TRY</c> and the
+    /// <c>CATCH</c> block it leads into — otherwise <paramref name="from"/>.
+    /// </summary>
+    private static int PastCatchOpening(string text, int from)
+    {
+        var index = from;
+        var matched = 0;
+        try
+        {
+            while (Parser.Tokenizer.NextToken(text, ref index, Collation.Baseline) is { } token)
+            {
+                if (token is Parser.Tokens.Whitespace or Parser.Tokens.Comment)
+                    continue;
+                var expected = matched switch
+                {
+                    0 => token is Parser.Tokens.UnquotedString { Value: var tryWord } && tryWord.Equals("TRY", StringComparison.OrdinalIgnoreCase),
+                    1 => token is Parser.Tokens.ReservedKeyword { Keyword: Parser.Keyword.Begin },
+                    _ => token is Parser.Tokens.UnquotedString { Value: var catchWord } && catchWord.Equals("CATCH", StringComparison.OrdinalIgnoreCase),
+                };
+                if (!expected)
+                    return from;
+                if (++matched == 3)
+                    return token.EndIndex;
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+        }
+        return from;
     }
 
     /// <summary>The tokens, whitespace and comments aside, between two offsets of <paramref name="text"/>.</summary>

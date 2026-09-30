@@ -35,36 +35,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Msg 1054 for a <c>GROUP BY ALL</c> anywhere in a schema-bound view's or
-    /// function's body, which runs from the cursor to the end of the batch. Real
-    /// raises it while parsing, at the <c>ALL</c>, ahead of anything the body
-    /// binds (probed 2026-09-30 against SQL Server 2025), so the body's tokens
-    /// are scanned before it parses. Leaves the cursor where it was.
-    /// </summary>
-    private static void RejectGroupByAllInSchemaBoundBody(ParserContext context)
-    {
-        var checkpoint = context.SaveCheckpoint();
-        try
-        {
-            Token? previous = null, beforePrevious = null;
-            for (var token = context.Token; token is not null; token = context.GetNextOptional())
-            {
-                if (token is ReservedKeyword { Keyword: Keyword.All }
-                    && previous is ReservedKeyword { Keyword: Keyword.By }
-                    && beforePrevious is ReservedKeyword { Keyword: Keyword.Group })
-                {
-                    throw SimulatedSqlException.SyntaxNotAllowedInSchemaBoundObject("ALL", 8, token.LineNumber);
-                }
-                (beforePrevious, previous) = (previous, token);
-            }
-        }
-        finally
-        {
-            context.RestoreCheckpoint(checkpoint);
-        }
-    }
-
-    /// <summary>
     /// Reads a module's optional <c>WITH option [, option …]</c> clause,
     /// leaving the cursor on the token after it, which must be the one the
     /// host's grammar continues with. A function's clause and every other
@@ -214,8 +184,17 @@ partial class Simulation
             error.PreserveDiagnostics(16, moduleName);
             throw error;
         }
-        if (options.SchemaBinding && host is ModuleOptionHost.View or ModuleOptionHost.ScalarFunction or ModuleOptionHost.InlineFunction or ModuleOptionHost.TableFunction)
-            RejectGroupByAllInSchemaBoundBody(context);
+        // The body a schema-bound view or function goes on to parse refuses a
+        // select-list star and GROUP BY ALL as the parser meets them.
+        if (options.SchemaBinding)
+        {
+            context.SchemaBoundBody = host switch
+            {
+                ModuleOptionHost.View or ModuleOptionHost.InlineFunction => SchemaBoundBody.DefiningQuery,
+                ModuleOptionHost.ScalarFunction or ModuleOptionHost.TableFunction => SchemaBoundBody.Statements,
+                _ => SchemaBoundBody.None,
+            };
+        }
         return options;
 
         static void ExpectOnNullInput(ParserContext context)

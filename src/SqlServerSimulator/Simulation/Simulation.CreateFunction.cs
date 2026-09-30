@@ -308,7 +308,7 @@ partial class Simulation
         BindBehindDeclarationErrors(HeldDeclarationErrors(declarationErrors), () => context.Simulation.BindMultiStatementTvfBodyAtCreate(
             context, functionName.Leaf, parameters, returnVariableName, outputColumns,
             keyConstraints, checkConstraints, bodyText,
-            CountNewlines(commandText, 0, bodyStart), timestampColumnLine));
+            CountNewlines(commandText, 0, bodyStart), timestampColumnLine, commandText[bodyEnd..(bodyEnd + 3)]));
 
         var replaced = ResolveFunctionAlterTarget<MultiStatementTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
         RejectTimestampParameters(parameters);
@@ -453,7 +453,7 @@ partial class Simulation
         // BindModuleBodyAtCreate.
         BindBehindDeclarationErrors(HeldDeclarationErrors(declarationErrors, returnType, endLine), () => context.Simulation.BindScalarFunctionBodyAtCreate(
             context, functionName.Leaf, parameters, returnType, bodyText,
-            CountNewlines(commandText, 0, bodyStart)));
+            CountNewlines(commandText, 0, bodyStart), commandText[bodyEnd..(bodyEnd + 3)]));
 
         var replaced = ResolveFunctionAlterTarget<ScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
         RejectTimestampParameters(parameters);
@@ -579,14 +579,18 @@ partial class Simulation
         if (isSchemaBound)
             SchemaBinding.EnforceNoAliasTypes(context.Batch, parameters, returnsAliasScalar: false, null, "", 0, 0);
 
+        // The body binds ahead of the name check, as a multi-statement
+        // function's does: real reports a body's own errors over an existing
+        // function of that name (probed 2026-09-30 against SQL Server 2025).
+        HeapColumn[] outputColumns = [];
+        byte[]? outputWireFlags = null;
+        BindBehindDeclarationErrors(HeldDeclarationErrors(declarationErrors), () => outputColumns = InferInlineTvfOutputColumns(context, [.. parameters], bodyText, functionName.Leaf, CountNewlines(commandText, 0, bodyStart), out outputWireFlags));
+
         var replaced = ResolveFunctionAlterTarget<InlineTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
 
         if (isSchemaBound)
             SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText);
 
-        HeapColumn[] outputColumns = [];
-        byte[]? outputWireFlags = null;
-        BindBehindDeclarationErrors(HeldDeclarationErrors(declarationErrors), () => outputColumns = InferInlineTvfOutputColumns(context, [.. parameters], bodyText, functionName.Leaf, CountNewlines(commandText, 0, bodyStart), out outputWireFlags));
         RejectTimestampParameters(parameters);
 
         var function = new InlineTableValuedFunction(
@@ -766,9 +770,29 @@ partial class Simulation
         try
         {
             var parser = innerBatch.Parser;
+            parser.SchemaBoundBody = outerContext.SchemaBoundBody;
             parser.MoveNextRequired();
 
-            var selection = ReportingEveryBindError(innerBatch, bodyLineOffset, () => ParseBodyQuery(parser, rejectsNextValueFor: true));
+            Selection selection;
+            try
+            {
+                selection = ReportingEveryBindError(innerBatch, bodyLineOffset, () => ParseBodyQuery(parser, rejectsNextValueFor: true));
+            }
+            catch (SimulatedSqlException parsePhase) when (IsRecoverableSyntaxError(parsePhase) && parser.Token is { } errorToken)
+            {
+                // Real's parser recovers past a syntax error in the body and
+                // reads what follows as statements, reporting each error it
+                // finds there. The body's query parsed outside any dispatch
+                // frame, so its error takes the body's line here.
+                parsePhase.ResolveDiagnostics(errorToken.LineNumber, bodyLineOffset, functionName);
+                innerBatch.ErrorProcedureName = functionName;
+                throw connection.Simulation.WithRecoveredSyntaxErrors(innerBatch, parsePhase, errorToken, command =>
+                {
+                    var recovery = new BatchContext(command, new Dictionary<string, VariableSlot>(variables, BatchContext.VariableNameComparer), new UdfFrame(SqlType.Int32));
+                    recovery.AdoptStatementFreezeFrom(outerContext.Batch);
+                    return recovery;
+                });
+            }
 
             // Msg 1033: an inline function is one of the five constructs the
             // message names, so its ORDER BY needs a companion TOP / OFFSET /

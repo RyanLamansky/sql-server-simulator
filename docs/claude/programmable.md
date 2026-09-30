@@ -384,6 +384,14 @@ Both checks run at CREATE / ALTER of the schema-bound module, off the same extra
   Variables are found by a token walk of the body's `DECLARE` statements (`SchemaBinding.EnforceNoAliasTypes`), not the bound tree.
 - A two-part name that doesn't resolve → **Msg 208** at CREATE, even in a scalar function's body, whose unbound names otherwise defer — schema binding defers nothing (probed 2026-09-26).
 
+**What a schema-bound body may not write.**
+A select-list star, bare or qualified, is **Msg 1054** (*"Syntax '\*' is not allowed in schema-bound objects."*), and so is `GROUP BY ALL`'s `ALL` (state 8, see [`query.md`](query.md#group-by-all)) — both raised by the parser as it reads the token, so they outrank every binder error, a missing object and a name collision, and fire at the token's own line (probed 2026-09-30 against SQL Server 2025).
+`COUNT(*)`, `CHECKSUM(*)`, multiplication and an `OUTPUT` clause's `inserted.*` are no select-list star and pass.
+The state tells where the star sits: 6 (bare) / 7 (qualified) in a view's or inline function's defining query at any depth and in any nested query of a function's statement list — a subquery, `EXISTS`, a derived table, a CTE — and 1 / 2 in the statement's own query there: a `SELECT` statement, a cursor's query, an `INSERT` source, every branch of a set operation among them.
+`ParserContext.SchemaBoundBody` carries the rule: set by the module's option clause and left set to the end of the batch, which such a body always runs to.
+Real's parser recovers past the refusal as past a syntax error ([`errors.md`](errors.md#syntax-error-recovery)), reading the rest of the body as statements — so a later star in a restarted query is state 1 or 2, a derived table after the refused star is Msg 102 at its alias (Msg 156 at an `AS`), and a `GROUP BY ALL` after a refused star is never reached.
+Procedures and triggers aren't schema bound (Msg 10796 outside native compilation), so the rule never reaches them.
+
 **Divergences**:
 - **Column dependency is name-based.** Real tracks the exact columns a body binds; column references here resolve per row through a name-keyed resolver, so there is no parse-time (table, ordinal) binding to consult.
   A module counts as depending on column `C` of table `T` when it references `T` *and* its body mentions the identifier `C` anywhere.

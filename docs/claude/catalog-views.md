@@ -815,7 +815,7 @@ Every one of those falls out of recomputing from definition text, which is what 
 ### What contributes a row
 
 Extraction is a token walk over the stored definition — the same shape `SchemaBinding` and `ModuleDeterminism` use, and for the same reason (scalar-function, procedure and trigger bodies are stored as source, so there is no expression tree at CREATE).
-The walk splits a definition into statement frames, classifies each dotted name chain by the keyword introducing it, and resolves the result against the live schema.
+The walk splits a definition into statement frames, classifies each dotted name chain by the keyword introducing it — a comma in a `FROM` list introducing the next source, as the `FROM` did — and resolves the result against the live schema.
 
 Referencing kinds, all probe-confirmed to record:
 
@@ -846,6 +846,7 @@ The two surfaces split on who gets them:
   So a plain view over `dbo.t` is one row; the same view `WITH SCHEMABINDING` is that row plus one per bound column.
   A computed column / CHECK / DEFAULT is column rows *only* — it reaches its own table's columns without naming the table, so there is no minor-0 companion.
 - **`sys.dm_sql_referenced_entities`** emits the object row plus column rows for **every** referencing kind, plain views and procedures included.
+  A table answers for its computed columns, each row carrying the column's `column_id` as `referencing_minor_id` (the DMV's first column), and a CHECK or DEFAULT constraint answers under its own name; the own-table columns those reach are column rows with no object row, while a function they call is an object row (probed 2026-09-30 against SQL Server 2025).
 
 **Object-row flags follow the reference position, not the columns** (probe-confirmed): a body whose only mention of a table is `UPDATE t SET a = 5 WHERE b = 'q'` reports the object as `is_updated` and *not* `is_selected`, even though column `b` is read; the same body plus a `SELECT … FROM t` reports both.
 Per-column, `a` is `is_updated` and `b` is `is_selected`.
@@ -899,6 +900,11 @@ The `type` cell is real's `spt_values` type-`'O9T'` label (`user table`, `view`,
 A reference carrying no column detail — a function call, an `EXEC`, a synonym — reports a NULL `column` cell with both flags `no`.
 The `selected` cell is real's `readobj | selall`, so a column reached through a `*` reads `yes` here even though the catalog view keeps `is_selected` and `is_select_all` apart.
 A trigger is listed against what its **body reads**, never against the table it is attached to.
+A table's "references" set is what its computed columns read, a row per column per computed column, a CHECK's or DEFAULT's what its expression reads; each reference's columns come in the referenced object's column order.
+The "referenced by" set lists a table whose computed columns read it against itself, and the Msg 15460 header arrives between the two result sets.
+
+**Ordering.** `sys.dm_sql_referencing_entities` and `sp_depends`' "referenced by" set list referencers by schema, then name, under the catalog collation (`a_v` ahead of `a1` ahead of `Av`), whatever their object ids (probed 2026-09-30 against SQL Server 2025).
+`sys.dm_sql_referenced_entities` and the "references" set follow the definition's own order, a table's computed columns in column order.
 
 ### Divergences
 
@@ -908,7 +914,7 @@ A trigger is listed against what its **body reads**, never against the table it 
   Closing that wants parse-time (source, ordinal) capture, which the per-row name-keyed resolver doesn't do.
 - **A MERGE's target key column carries an extra `is_updated`** when the same column appears in both the `ON` clause and a `WHEN NOT MATCHED THEN INSERT` column list; real reports it selected only.
 - **Msg 2020 arrives before the rows rather than after them.** Real yields `sys.dm_sql_referenced_entities`'s rows and then raises; the simulator's reader surfaces the error at `ExecuteReader`.
-- **`sp_depends` row order is by object id.** Real's procedure carries no `ORDER BY`, so its order is unspecified; the simulator's is deterministic.
+- **`sys.dm_sql_referenced_entities` over a comma-separated `FROM` list** reports its sources in written order, where real's differs — `FROM dbo.zt, dbo.at, dbo.mt` reads `at`, `mt`, `zt` (probed 2026-09-30 against SQL Server 2025), neither written, object-id nor, over a join, name order, and the probes so far don't pin its rule; a joined `FROM` and an `APPLY` report written order on both.
 - **A reference mixing a whole-object write with a column-level one loses the object row in the legacy pair.**
   A procedure that both `DELETE`s from `t` and `INSERT`s `t (a)` reports real's `referenced_minor_id = 0` *and* column `a`; the simulator reports column `a` alone, because the aggregated `Reference` no longer says which statement contributed which.
   Every single-shape case matches.

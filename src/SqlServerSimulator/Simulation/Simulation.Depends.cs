@@ -86,10 +86,13 @@ partial class Simulation
         var target = ResolveHelpTarget(batch, "sp_depends", objectName);
         var database = batch.CurrentDatabase;
         var entities = ModuleDependencies.Enumerate(database);
-        var targetId = target.Object?.ObjectId ?? -1;
+        // A CHECK or DEFAULT constraint answers for its own expression.
+        var targetId = target.Object?.ObjectId
+            ?? (target.Table is not null ? ModuleDependencies.ExpressionConstraintId(database, target.Schema, target.Name) : null)
+            ?? -1;
 
         var references = SpDependsReferenceRows(entities, targetId);
-        var referencedBy = SpDependsReferencedByRows(database, entities, targetId);
+        var referencedBy = SpDependsReferencedByRows(entities, targetId);
         if (references.Count == 0 && referencedBy.Count == 0)
         {
             batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 83, 15461,
@@ -106,19 +109,26 @@ partial class Simulation
 
         if (referencedBy.Count > 0)
         {
-            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 67, 15460,
+            // Sent as an outcome of its own so it lands between the two result
+            // sets rather than ahead of the first.
+            yield return new SimulatedInfoOutcome(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 67, 15460,
                 "In the current database, the specified object is referenced by the following:"));
             yield return new SimulatedSqlResultSet(SpDependsReferencedBySchema, SpDependsReferencedByColumnNames, referencedBy);
         }
     }
 
-    /// <summary>What the named object references, one row per referenced column (or one column-less row).</summary>
+    /// <summary>
+    /// What the named object references, one row per referenced column (or one
+    /// column-less row) — a table's through each of its computed columns in
+    /// turn, a CHECK's or DEFAULT's through its expression (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
     private static List<SqlValue[]> SpDependsReferenceRows(List<ModuleDependencies.Entity> entities, int targetId)
     {
         var rows = new List<SqlValue[]>();
         foreach (var entity in entities)
         {
-            if (entity.ReferencingId != targetId || entity.ReferencingMinorId != 0)
+            if (entity.ReferencingId != targetId || entity.ReferencingClass != ModuleDependencies.ObjectOrColumnClass)
                 continue;
             foreach (var reference in entity.References)
             {
@@ -131,7 +141,11 @@ partial class Simulation
                     rows.Add([name, type, SpDependsNo, SpDependsNotSelected, SqlValue.Null(SqlType.SystemName)]);
                     continue;
                 }
-                foreach (var column in reference.Columns)
+                // In the referenced object's own column order, whatever order
+                // the definition names them in.
+                var columns = new List<ModuleDependencies.ColumnUse>(reference.Columns);
+                columns.Sort((a, b) => ModuleDependencies.ColumnIdOf(resolved, a.Name).CompareTo(ModuleDependencies.ColumnIdOf(resolved, b.Name)));
+                foreach (var column in columns)
                 {
                     rows.Add([
                         name,
@@ -149,32 +163,35 @@ partial class Simulation
         return rows;
     }
 
-    /// <summary>What references the named object, distinct on (name, type).</summary>
-    private static List<SqlValue[]> SpDependsReferencedByRows(
-        Database database, List<ModuleDependencies.Entity> entities, int targetId)
+    /// <summary>
+    /// What references the named object, distinct on (name, type), in
+    /// schema-then-name order — a table whose computed columns read its own
+    /// columns included (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    private static List<SqlValue[]> SpDependsReferencedByRows(List<ModuleDependencies.Entity> entities, int targetId)
     {
-        var rows = new List<SqlValue[]>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var referencing = new List<ModuleDependencies.Entity>();
         foreach (var entity in entities)
         {
-            if (entity.ReferencingId == targetId)
+            // A module naming itself isn't listed against itself, and a DDL
+            // trigger has no schema-qualified name real can report.
+            if ((entity.ReferencingId == targetId && entity.ReferencingMinorId == 0)
+                || entity.ReferencingClass != ModuleDependencies.ObjectOrColumnClass)
+            {
                 continue;
+            }
             var referencesTarget = false;
             foreach (var reference in entity.References)
                 referencesTarget |= reference.ReferencedId == targetId;
-            if (!referencesTarget)
-                continue;
-
-            // A DDL trigger has no schema-qualified name real can report, and a
-            // computed column reports under its own table's row rather than a
-            // second one.
-            if (entity.ReferencingClass != ModuleDependencies.ObjectOrColumnClass)
-                continue;
-            var qualified = $"{entity.SchemaName}.{entity.EntityName}";
-            if (seen.Add(qualified))
-                rows.Add([SqlValue.FromSystemName(qualified), SpDependsTypeLabel(entity.ObjectTypeCode)]);
+            // A table's computed columns report under one row for the table.
+            if (referencesTarget && !referencing.Exists(listed => listed.ReferencingId == entity.ReferencingId))
+                referencing.Add(entity);
         }
-        _ = database;
+        referencing.Sort(ModuleDependencies.CompareByName);
+
+        var rows = new List<SqlValue[]>(referencing.Count);
+        foreach (var entity in referencing)
+            rows.Add([SqlValue.FromSystemName($"{entity.SchemaName}.{entity.EntityName}"), SpDependsTypeLabel(entity.ObjectTypeCode)]);
         return rows;
     }
 

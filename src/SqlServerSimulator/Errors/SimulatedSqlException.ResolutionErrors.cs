@@ -96,6 +96,13 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException MustDeclareScalarVariable(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 2);
 
     /// <summary>
+    /// Msg 137 at state 1: the target of a <c>SET</c>, which real checks once
+    /// the whole statement has parsed, after its right-hand side's own errors
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException MustDeclareSetTarget(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 137 for a table variable read as a scalar —
     /// <c>SELECT @t</c>, <c>SET @t = 1</c>, <c>@t.a</c> — which real reports
     /// at class 16 state 1 where an undeclared name is class 15 state 2
