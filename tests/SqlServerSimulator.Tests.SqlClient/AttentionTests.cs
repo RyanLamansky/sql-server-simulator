@@ -121,11 +121,11 @@ public sealed class AttentionTests
 
     /// <summary>
     /// A timeout that interrupts a write — here inside the scalar function it
-    /// calls per row — is acknowledged after Msg 3621; the write rolls back
-    /// and a transaction an earlier batch began stays open. SqlClient lists
-    /// the notice after its own errors on its synchronous path and drops it on
-    /// its asynchronous one, against real and the simulator alike (captured
-    /// 2026-09-30 against SQL Server 2025 through SqlClient 7.0.2).
+    /// calls per row — rolls the write back, and a transaction an earlier batch
+    /// began stays open (captured 2026-09-30 against SQL Server 2025 through
+    /// SqlClient 7.0.2). Whether SqlClient surfaces the Msg 3621 notice depends
+    /// on when its own timer reads the stream, so this asserts only what the
+    /// client guarantees; StatementCancellationTests pins the notice itself.
     /// </summary>
     [TestMethod]
     public async Task CommandTimeout_InsideAWrite_SendsMsg3621AndRollsTheWriteBack()
@@ -140,14 +140,8 @@ public sealed class AttentionTests
 
         await using (var command = new SqlCommand("insert logt select dbo.slow(v) from big", connection) { CommandTimeout = 1 })
         {
-            // SqlClient's synchronous path is the one that shows the notice.
-            var error = Throws<SqlException>(() => command.ExecuteNonQuery());
-            AreEqual(-2, error.Number);
-            Contains((3621, 1), error.Errors.Cast<SqlError>().Select(static e => (e.Number, e.LineNumber)));
-
-            error = await ThrowsExactlyAsync<SqlException>(async () => await command.ExecuteNonQueryAsync(TestContext.CancellationToken));
-            AreEqual(-2, error.Number);
-            HasCount(1, error.Errors);
+            AreEqual(-2, Throws<SqlException>(() => command.ExecuteNonQuery()).Number);
+            AreEqual(-2, (await ThrowsExactlyAsync<SqlException>(async () => await command.ExecuteNonQueryAsync(TestContext.CancellationToken))).Number);
         }
 
         await using var state = new SqlCommand("select concat(@@trancount, ',', (select count(*) from logt)); rollback", connection);
