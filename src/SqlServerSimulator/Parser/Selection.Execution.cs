@@ -183,6 +183,152 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// How a <c>SELECT DISTINCT</c> query's ORDER BY term appears in its select
+    /// list: 0 for a bare name the per-row resolver reads off the projection
+    /// (an output alias, or the source column behind a projected one), the
+    /// 1-based position of the select item an expression term matches, or -1
+    /// when it appears nowhere — Msg 145 while compiling.
+    /// An expression term matches an item by shape, the structural match a
+    /// GROUP BY expression makes (columns by the source column they resolve
+    /// to, parentheses transparent, a subquery only itself), never by the
+    /// columns it reads: real accepts <c>ORDER BY id + 1</c> over
+    /// <c>SELECT DISTINCT p.id + 1</c> and <c>ORDER BY COUNT(*)</c> over a
+    /// projected <c>COUNT(*)</c>, and refuses <c>ORDER BY n + 0</c>,
+    /// <c>ORDER BY 1 + id</c>, <c>ORDER BY n + 1.0</c>, a <c>CASE</c> or
+    /// <c>COLLATE</c> over a projected column and a subquery written twice,
+    /// even over projected columns alone (probed 2026-09-30 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static int DistinctOrderTermOrdinal(FromSource[] sources, List<Expression> expressions, string[] outputColumnNames, OrderBySpec term)
+    {
+        var peeled = term.Expr!;
+        while (peeled is Parenthesized paren)
+            peeled = paren.Wrapped;
+
+        if (peeled is Reference reference)
+        {
+            var name = reference.ReferencedName;
+            if (term.MayNameAlias && name.ImmediateQualifier is null && Array.Exists(outputColumnNames, output => BuiltInToken.Equals(output, name.Leaf)))
+                return 0;
+            if (ProjectionSourceReferences(expressions) is { } projected && Array.Exists(projected, source => source is { } column && SourceReferenceMatches(column, name)))
+                return 0;
+        }
+
+        var key = GroupingKey(sources, peeled);
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            var projection = expressions[i] is NamedExpression named ? named.Inner : expressions[i];
+            while (projection is Parenthesized wrapped)
+                projection = wrapped.Wrapped;
+            if (projection is not Reference && key.Equals(GroupingKey(sources, projection)))
+                return i + 1;
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// The predicates and sort terms this query binds beside its projections —
+    /// WHERE, each join's ON, HAVING and ORDER BY — kept so an enclosing grouped
+    /// query can judge the references they make to its own columns (see
+    /// <see cref="VisitCorrelatedReferences"/>). Null on plan shapes that don't
+    /// record them, which that check then reads as having none.
+    /// </summary>
+    internal ExpressionNode[]? ClauseExpressions;
+
+    private static ExpressionNode[] ClauseExpressionsOf(FromClause fromClause, JoinSpec[] joins, List<OrderBySpec> orderBy)
+    {
+        var clauses = new List<ExpressionNode>(fromClause.Excluders);
+        foreach (var join in joins)
+        {
+            if (join.OnPredicate is { } on)
+                clauses.Add(on);
+        }
+        if (fromClause.Having is { } having)
+            clauses.Add(having);
+        foreach (var item in orderBy)
+        {
+            if (item.Expr is { } term)
+                clauses.Add(term);
+        }
+        return [.. clauses];
+    }
+
+    /// <summary>
+    /// The subqueries a predicate carries at its own level — an <c>EXISTS</c>,
+    /// an <c>IN</c> or a quantified comparison — rather than inside one of its
+    /// value operands, which a walk of those operands reaches.
+    /// </summary>
+    private static List<Selection> PredicateSubqueries(BooleanExpression predicate)
+    {
+        var subqueries = new List<Selection>();
+        predicate.Walk((node, shape) =>
+        {
+            if (node is Expression)
+                return false;
+            foreach (var local in shape.Locals)
+            {
+                if (local is Selection inner)
+                    subqueries.Add(inner);
+            }
+            return true;
+        });
+        return subqueries;
+    }
+
+    /// <summary>
+    /// Hands <paramref name="onReference"/> every column reference
+    /// <paramref name="inner"/> — a subquery, its derived tables and the
+    /// subqueries nested in either — makes outside an aggregate to a name none
+    /// of those scopes binds, which is a reference to an enclosing query.
+    /// A grouped query holds such a reference to the containment rule its own
+    /// select list keeps: <c>SELECT p.id, (SELECT COUNT(*) FROM b AS u WHERE
+    /// u.pid = b.pid) … GROUP BY p.id</c> is Msg 8120 on <c>b.pid</c>, in the
+    /// subquery's select list, WHERE, ON or a derived table alike, and a
+    /// subquery in HAVING or ORDER BY reports Msg 8121 / 8127, while an
+    /// aggregate over the outer column alone is the outer query's own
+    /// (<c>(SELECT MAX(b.v) FROM p)</c> runs) and a grouping expression still
+    /// covers its match (<c>(SELECT b.v + 1)</c> under <c>GROUP BY b.v + 1</c>
+    /// runs) — probed 2026-09-30 against SQL Server 2025.
+    /// <paramref name="covers"/> answers that last match, asked at each node.
+    /// </summary>
+    private static void VisitCorrelatedReferences(
+        Selection inner,
+        Func<MultiPartName, bool> boundWithin,
+        Func<ExpressionNode, bool> covers,
+        Action<ExpressionNode, MultiPartName> onReference)
+    {
+        if (inner.BranchFromSources is not { } sources)
+            return;
+
+        bool Bound(MultiPartName name) => TryResolveSourceColumn(sources, name) is not null || boundWithin(name);
+
+        void Visit(ExpressionNode root) => root.Walk((node, shape) =>
+        {
+            if (node is AggregateExpression or WindowExpression || covers(node))
+                return false;
+            foreach (var local in shape.Locals)
+            {
+                if (local is Selection nested)
+                    VisitCorrelatedReferences(nested, Bound, covers, onReference);
+            }
+            if (shape.Column is { } name && !Bound(name))
+                onReference(node, name);
+            return true;
+        });
+
+        foreach (var projection in inner.ProjectionExpressions ?? [])
+            Visit(projection);
+        foreach (var clause in inner.ClauseExpressions ?? [])
+            Visit(clause);
+        foreach (var source in sources)
+        {
+            if (source.LateralPlan is { } derived)
+                VisitCorrelatedReferences(derived, Bound, covers, onReference);
+        }
+    }
+
+    /// <summary>
     /// Enforces the GROUP BY containment rule (Msg 8120 / 8121 / 8127): outside
     /// an aggregate, a column reference must resolve to a bare GROUP BY column.
     /// <see cref="Expression.VisitColumnReferences(Action{MultiPartName})"/> already skips
@@ -272,12 +418,20 @@ internal sealed partial class Selection
             throw error(qualifier is null ? column : $"{qualifier}.{column}");
         }
 
+        // Inside a subquery only a grouping expression's match covers: the
+        // folds above type their operands against this query's sources alone.
+        bool coversCorrelated(ExpressionNode node) =>
+            node is Expression expression && groupingKeys.Count != 0 && groupingKeys.Contains(GroupingKey(sources, expression));
+
+        Action<Selection> SubqueryCheck(Func<string, SimulatedSqlException> error) =>
+            inner => VisitCorrelatedReferences(inner, static _ => false, coversCorrelated, (_, name) => Check(name, error));
+
         ColumnReferenceVisitor VisitorFor(Func<string, SimulatedSqlException> error) =>
-            new(name => Check(name, error), coversSubtree);
+            new(name => Check(name, error), coversSubtree, SubqueryCheck(error));
 
         if (report is not null)
         {
-            RecordGroupingViolations(report, sources, expressions, orderBy, outputColumnNames, fromClause, windows, groupedBare, coversSubtree);
+            RecordGroupingViolations(report, sources, expressions, orderBy, outputColumnNames, fromClause, windows, groupedBare, coversSubtree, coversCorrelated);
             return;
         }
 
@@ -316,6 +470,11 @@ internal sealed partial class Selection
         // `HAVING 1 = 0 AND b > 1` both answer no rows over an ungrouped `b`).
         var havingVisitor = VisitorFor(SimulatedSqlException.ColumnNotInGroupByForHaving);
         fromClause.Having?.VisitSurvivingOperandExpressions(op => op.VisitColumnReferences(havingVisitor));
+        if (fromClause.Having is { } having)
+        {
+            foreach (var inner in PredicateSubqueries(having))
+                havingVisitor.OnSubquery!(inner);
+        }
 
         var orderByVisitor = new ColumnReferenceVisitor(
             name =>
@@ -334,7 +493,8 @@ internal sealed partial class Selection
 
                 Check(name, SimulatedSqlException.ColumnNotInGroupByForOrderBy);
             },
-            coversSubtree);
+            coversSubtree,
+            SubqueryCheck(SimulatedSqlException.ColumnNotInGroupByForOrderBy));
         foreach (var item in orderBy)
             item.Expr?.VisitColumnReferences(orderByVisitor);
     }
@@ -360,22 +520,31 @@ internal sealed partial class Selection
         FromClause fromClause,
         List<WindowExpression> windows,
         HashSet<(int Source, int Column)> groupedBare,
-        Func<ExpressionNode, bool> coversSubtree)
+        Func<ExpressionNode, bool> coversSubtree,
+        Func<ExpressionNode, bool> coversCorrelated)
     {
-        void Judge(List<Expression> roots, Func<string, SimulatedSqlException> error, bool orderByTerm)
+        void Judge(List<Expression> roots, Func<string, SimulatedSqlException> error, bool orderByTerm, List<Selection>? predicateSubqueries = null)
         {
             var references = new List<(Reference? Node, MultiPartName Name)>();
+            void AddCorrelated(Selection inner) =>
+                VisitCorrelatedReferences(inner, static _ => false, coversCorrelated, (node, name) => references.Add((node as Reference, name)));
             foreach (var root in roots)
             {
                 root.Walk((node, shape) =>
                 {
                     if (node is AggregateExpression or WindowExpression || coversSubtree(node))
                         return false;
+                    foreach (var local in shape.Locals)
+                    {
+                        if (local is Selection inner)
+                            AddCorrelated(inner);
+                    }
                     if (shape.Column is { } name)
                         references.Add((node as Reference, name));
                     return true;
                 });
             }
+            predicateSubqueries?.ForEach(AddCorrelated);
 
             var start = int.MaxValue;
             var end = -1;
@@ -416,7 +585,7 @@ internal sealed partial class Selection
         {
             var operands = new List<Expression>();
             having.VisitSurvivingOperandExpressions(operands.Add);
-            Judge(operands, SimulatedSqlException.ColumnNotInGroupByForHaving, orderByTerm: false);
+            Judge(operands, SimulatedSqlException.ColumnNotInGroupByForHaving, orderByTerm: false, PredicateSubqueries(having));
         }
         foreach (var expression in expressions)
             Judge([expression], SimulatedSqlException.ColumnNotInGroupByForSelect, orderByTerm: false);
@@ -1671,6 +1840,24 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.Aggregate([unknown, SimulatedSqlException.OrderByItemNotInSelectListWithDistinct()]);
             }
 
+            // A term whose binding recorded an error has had DISTINCT's own
+            // complaint recorded after it above; a statement read again for
+            // its binder report records this one where the term sits.
+            if (distinct && !orderBy[i].IsOrdinal && (parseBatch.BindErrors?.Count ?? 0) == recorded)
+            {
+                var ordinal = DistinctOrderTermOrdinal(sources, expressions, outputColumnNames, orderBy[i]);
+                if (ordinal < 0)
+                {
+                    if (parseBatch.BindErrors is not { } report || report.SpanOf(orderBy[i].Expr) is not { } term)
+                        throw SimulatedSqlException.OrderByItemNotInSelectListWithDistinct();
+                    report.Record(SimulatedSqlException.OrderByItemNotInSelectListWithDistinct(), term.End);
+                }
+                else if (ordinal > 0)
+                {
+                    orderBy[i] = OrderBySpec.FromOrdinal(ordinal, orderBy[i].Descending);
+                }
+            }
+
             if (keyType.IsIncomparable)
                 throw NotComparableInClause(keyType, "ORDER BY");
             RequireSettledOutputCollation(keyType, "ORDER BY", i + 1);
@@ -1915,6 +2102,7 @@ internal sealed partial class Selection
         selection.ColumnMasks = ProjectionMasks(parseBatch, expressions, sources, outerMask, ResolveColumnType);
         selection.ColumnIdentitySources = ColumnIdentitySourcesOf(expressions, sources, joins);
         selection.BranchFromSources = sources;
+        selection.ClauseExpressions = ClauseExpressionsOf(fromClause, joins, orderBy);
         selection.AutoSourceNames = AutoSourceNamesOf(sources);
         (selection.AutoColumnSource, selection.AutoColumnOrdinal) = AutoColumnBindingOf(expressions, sources);
         selection.ColumnWireFlags = WireFlagsOf(expressions, sources, selection.AutoColumnSource, selection.AutoColumnOrdinal);

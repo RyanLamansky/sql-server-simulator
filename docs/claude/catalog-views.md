@@ -510,10 +510,13 @@ Probed *inlineable* despite looking otherwise, so deliberately not disqualifying
   - **`@objtype` NULL / omitted, or `OBJECT`**, renames anything in the schema's shared namespace — a table, view, procedure, function, sequence, synonym or DML trigger, moved within its `Schema` dictionary — or a PRIMARY KEY / UNIQUE / CHECK / FOREIGN KEY / DEFAULT constraint on one of its tables, the name updating in place (object identity / `object_id` preserved) and `modify_date` advancing (probed 2026-09-25).
     A module's stored definition keeps the name it was created with, as real's does, and the RENAME DDL event names the kind (`VIEW`, `PRIMARY KEY CONSTRAINT`, `DEFAULT`, …).
     A missing object → **Msg 15225** (`No item by the name of '<objname>' … given that @itemtype was input as '(null)'`) for the NULL type, **Msg 15248** for `OBJECT`; a `@newname` colliding anywhere in the shared object namespace → **Msg 15335** (`… already in use as a object name …` — the ungrammatical "a object" matched verbatim).
+    With the NULL type a `table.leaf` name no object answers renames that table's column, else its index (probed 2026-09-30).
   - **`@objtype` = COLUMN** (case-insensitive) renames a column of `[schema.]table.column`: `HeapColumn.Name` updates in place (storage is by ordinal — no row re-encode).
-    A duplicate column name → **Msg 15335** (kind `COLUMN`).
+    A duplicate column name → **Msg 15335**.
+    A column a computed column or a CHECK constraint reads is **Msg 15336** as a schema-bound module's is, and a computed column itself is **Msg 4928** after the caution (probed 2026-09-30).
   - **`@objtype` = INDEX** renames an index of `[schema.]table.index`: `Index.Name` updates in place (surfaces through `sys.indexes`).
-    A duplicate index name → **Msg 15335** (kind `INDEX`).
+    A duplicate index name → **Msg 15335**.
+  - Msg 15335 names the kind as `@objtype` spelled it, or without one as real inferred it, in lower case (`column`, `index`, `object`); a new name differing from the old in case alone renames the object, column or index itself (probed 2026-09-30).
   - A missing parent table or missing column / index (the COLUMN / INDEX paths) → **Msg 15248** (`Either the parameter @objname is ambiguous or the claimed @objtype (<type>) is wrong`).
   - `@newname` is used **verbatim** as the new leaf — real does not parse it as a multi-part name.
   - A table or column a `WITH SCHEMABINDING` module references can't be renamed → **Msg 15336** (`Object '<objname>' cannot be renamed because the object participates in enforced dependencies.`, echoing `@objname` as passed); a column no schema-bound body names renames fine — see [`programmable.md`](programmable.md#schema-binding-with-schemabinding).

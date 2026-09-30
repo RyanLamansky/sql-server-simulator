@@ -448,6 +448,7 @@ Per-isolation reader behavior:
 - **`sys.dm_tran_locks`** — one row per held / waiting lock across every schema-bound `SchemaLock`, every `HeapTable.TableDataLock`, every per-row entry in `HeapTable.RowLocks`, and every key-lock anchor in `HeapTable.KeyLockGroups`.
   A row lock reports `KEY` on a clustered table, whose row real locks by its key, and `RID` on a heap; a row lock and a key-range lock one session holds on the same clustered key fold into one row in the combined mode (see [Divergences](#divergences)).
   Column subset: `resource_type` (`OBJECT` / `RID` / `KEY`), `resource_database_id`, `resource_description`, `resource_associated_entity_id` (`object_id`), `request_mode` (`Sch-S` / `Sch-M` / `IS` / `IX` / `SIX` / `S` / `U` / `X` / `RangeS-S` / `RangeS-U` / `RangeX-X` / `RangeI-N`), `request_status` (`GRANT` / `WAIT`), `request_session_id`.
+  An OBJECT row's `resource_description` is 256 spaces, as real's is — the object is `resource_associated_entity_id` — and `resource_database_id` is the database's own id (probed 2026-09-30 against SQL Server 2025).
   Row generator at `LockDmvs.EnumerateDmTranLocks`.
 - **`sys.dm_os_waiting_tasks`** — one row per currently-blocked connection: `session_id` (waiter's SPID), `wait_type` (`LCK_M_<mode>`), `resource_description`, `blocking_session_id` (one conflicting holder's SPID).
   Row generator at `LockDmvs.EnumerateDmOsWaitingTasks`.

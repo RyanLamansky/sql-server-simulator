@@ -1336,6 +1336,14 @@ internal abstract class Expression : ExpressionNode
                 return false;
             if (visit.CoversSubtree?.Invoke(node) == true)
                 return false;
+            if (visit.OnSubquery is { } onSubquery)
+            {
+                foreach (var local in shape.Locals)
+                {
+                    if (local is Selection inner)
+                        onSubquery(inner);
+                }
+            }
             if (shape.Column is { } name)
                 visit.OnReference(name);
             return true;

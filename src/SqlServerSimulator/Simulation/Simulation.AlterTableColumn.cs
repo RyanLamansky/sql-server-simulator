@@ -707,10 +707,10 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.Add or Keyword.Drop } addOrDrop)
             return TryParseAlterColumnAttribute(context, tableName, columnName, adding: addOrDrop.Keyword == Keyword.Add);
 
-        if (context.Token is not Name)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        var qualifiedTypeName = BatchContext.ParseObjectName(context);
-        var typeName = (Name)context.Token;
+        // A multi-word synonym (`double precision`, `national character
+        // varying`) names its type here as in CREATE TABLE (probed 2026-09-30
+        // against SQL Server 2025).
+        var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         context.MoveNextOptional();
 
         int? declaredMaxLength = null;
@@ -868,24 +868,41 @@ partial class Simulation
         if (existingCol.Identity is not null && !SqlType.IsIntegerCategory(newType))
             throw SimulatedSqlException.IdentityColumnMustBeIntegerType(columnName);
 
-        // Blocker detection. PK/UQ, FK (both directions), computed-column and
-        // schema-bound module dependencies block unconditionally. A CHECK or
-        // DEFAULT blocks a change of type — the family, the collation, or a
-        // move to or from MAX — but not of length, precision, scale or
-        // nullability; an index blocks those and a nullability change too
-        // (probed 2026-09-25 against SQL Server 2025: varchar(10)→varchar(5)
-        // passes a CHECK, int→bigint and varchar→nvarchar don't).
+        // Blocker detection. Computed-column and schema-bound module
+        // dependencies block unconditionally. A CHECK or DEFAULT blocks a
+        // change of type — the family, the collation, or a move to or from
+        // MAX — but not of length, precision, scale or nullability (probed
+        // 2026-09-25 against SQL Server 2025: varchar(10)→varchar(5) passes a
+        // CHECK, int→bigint and varchar→nvarchar don't). A foreign key, at
+        // either end, blocks any change of type or size, a longer varchar
+        // included, but no nullability change. An index, a UNIQUE or PRIMARY
+        // KEY and a statistic block a change of type, a change of size other
+        // than a variable-length type growing, and NULL to NOT NULL; a PRIMARY
+        // KEY blocks NOT NULL to NULL as well. Restating the column as it is
+        // passes all of them (probed 2026-09-30 against SQL Server 2025).
         var isTypeChange = existingCol.Type.GetType() != newType.GetType()
             || !Equals(existingCol.Type.Collation, newType.Collation)
             || Parser.Expressions.StringScalars.IsMaxForm(existingCol.Type) != Parser.Expressions.StringScalars.IsMaxForm(newType)
             || (existingCol.Type is VarbinarySqlType { length: SqlType.MaxLengthSentinel }) != (newType is VarbinarySqlType { length: SqlType.MaxLengthSentinel });
+        var isSizeChange = isTypeChange || !string.Equals(existingCol.Type.ToString(), newType.ToString(), StringComparison.Ordinal);
+        var isVariableLengthGrowth = (existingCol.Type, newType) switch
+        {
+            (VarcharSqlType before, VarcharSqlType after) => before.length > 0 && after.length > before.length,
+            (NVarcharSqlType before, NVarcharSqlType after) => before.length > 0 && after.length > before.length,
+            (VarbinarySqlType before, VarbinarySqlType after) => before.length > 0 && after.length > before.length,
+            _ => false,
+        };
+        var keyBlocks = isTypeChange || (isSizeChange && !isVariableLengthGrowth) || (existingCol.Nullable && !newNullable);
         var blockers = CollectColumnBlockers(
             context.Batch.CurrentDatabase, table, ordinal, existingCol,
             includeCheckAndDefault: isTypeChange,
-            includeIndexes: isTypeChange || newNullable != existingCol.Nullable,
-            includeStatistics: isTypeChange || newNullable != existingCol.Nullable,
+            includeIndexes: keyBlocks,
+            includeStatistics: keyBlocks,
             includeFilterStatistics: true,
-            includeFilterIndexes: true);
+            includeFilterIndexes: true,
+            includePrimaryKey: keyBlocks || (!existingCol.Nullable && newNullable),
+            includeUniqueKeys: keyBlocks,
+            includeForeignKeys: isSizeChange);
         if (blockers.Count > 0)
             throw SimulatedSqlException.ColumnHasDependencies("ALTER COLUMN", columnName, blockers);
         var maskingFunction = maskingFunctionText is null ? null : MaskingFunction.Parse(maskingFunctionText, columnName, newType);
@@ -953,7 +970,8 @@ partial class Simulation
     /// </summary>
     private static List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind)> CollectColumnBlockers(
         Database database, HeapTable table, int ordinal, HeapColumn col, bool includeCheckAndDefault, bool includeIndexes,
-        bool includedColumnsBlock = true, bool includeStatistics = false, bool includeFilterStatistics = false, bool includeFilterIndexes = false)
+        bool includedColumnsBlock = true, bool includeStatistics = false, bool includeFilterStatistics = false, bool includeFilterIndexes = false,
+        bool includePrimaryKey = true, bool includeUniqueKeys = true, bool includeForeignKeys = true)
     {
         var collation = database.Collation;
         var blockers = new List<(string Name, SimulatedSqlException.AlterColumnBlockerKind Kind, int Rank, int ObjectId)>();
@@ -989,7 +1007,8 @@ partial class Simulation
             blockers.Add((table.Name, objectKind, 4, int.MinValue));
         foreach (var kc in table.KeyConstraints)
         {
-            if ((storageOrdinal >= 0 && Array.IndexOf(kc.StorageOrdinals, storageOrdinal) >= 0) || ReferenceEquals(kc.Partitioning?.Column, col))
+            var keyCounts = kc.Kind == KeyConstraintKind.PrimaryKey ? includePrimaryKey : includeUniqueKeys;
+            if ((keyCounts && storageOrdinal >= 0 && Array.IndexOf(kc.StorageOrdinals, storageOrdinal) >= 0) || ReferenceEquals(kc.Partitioning?.Column, col))
                 blockers.Add((kc.Name, objectKind, 4, kc.ObjectId));
         }
         if (includeIndexes && storageOrdinal >= 0)
@@ -1037,12 +1056,12 @@ partial class Simulation
         }
         foreach (var fk in table.OutgoingForeignKeys)
         {
-            if (Array.IndexOf(fk.ChildColumnOrdinals, ordinal) >= 0)
+            if (includeForeignKeys && Array.IndexOf(fk.ChildColumnOrdinals, ordinal) >= 0)
                 blockers.Add((fk.Name, objectKind, 6, fk.ObjectId));
         }
         foreach (var fk in table.IncomingForeignKeys)
         {
-            if (Array.IndexOf(fk.ReferencedColumnOrdinals, ordinal) >= 0)
+            if (includeForeignKeys && Array.IndexOf(fk.ReferencedColumnOrdinals, ordinal) >= 0)
                 blockers.Add((fk.Name, objectKind, 7, fk.ObjectId));
         }
 

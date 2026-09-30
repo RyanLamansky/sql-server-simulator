@@ -447,18 +447,19 @@ Widening within the same family (`varchar(50) → varchar(100)`, `int → bigint
 
 ### Blockers (Msg 5074)
 
-`CollectColumnBlockers` walks the same surface as DROP COLUMN, with CHECK, DEFAULT and index blocking only some changes (probed 2026-09-25).
-A **type change** is a different type family (`int → bigint`, `varchar → nvarchar`), a different collation, or a move to or from MAX; length, precision, scale and nullability changes are not:
+`CollectColumnBlockers` walks the same surface as DROP COLUMN, with most sources blocking only some changes (probed 2026-09-25, the key, foreign-key and statistics rows 2026-09-30, against SQL Server 2025).
+A **type change** is a different type family (`int → bigint`, `varchar → nvarchar`), a different collation, or a move to or from MAX.
+A **size change** is any other change to the declaration — a length, precision or scale; **growth** is a `varchar` / `nvarchar` / `varbinary` length growing.
+Restating the column exactly as it stands passes every row but the always-blocking ones, which is what lets an ORM re-issue `ALTER COLUMN` over a key or foreign-key column to change only its comment or nullability:
 
 | Source | Blocks ALTER COLUMN? | Prefix in Msg 5074 |
 |--------|----------------------|--------------------|
-| PRIMARY KEY on this column | Always | `The object 'X' is dependent…` |
-| UNIQUE constraint on this column | Always | `The object 'X' is dependent…` |
-| Outgoing FOREIGN KEY using this column as a child column | Always | `The object 'X' is dependent…` |
-| Incoming FOREIGN KEY referencing this column as a parent column | Always | `The object 'X' is dependent…` |
+| PRIMARY KEY on this column | A type change, a size change other than growth, or NOT NULL to NULL | `The object 'X' is dependent…` |
+| UNIQUE constraint on this column | A type change, a size change other than growth, or NULL to NOT NULL | `The object 'X' is dependent…` |
+| Index whose key or include columns reference this column, and a statistic on it | As a UNIQUE constraint — `char(10) → char(20)`, `datetime2(3) → datetime2(7)` and a decimal precision change block, `varchar(10) → varchar(20)` passes | `The index 'X' is dependent…` / `The statistics 'X' is dependent…` |
+| FOREIGN KEY at either end — this column as a child or as the referenced column | A type or size change, growth included; no nullability change | `The object 'X' is dependent…` |
 | Computed column that references this column in its expression | Always | `The column 'X' is dependent…` |
 | `WITH SCHEMABINDING` view or function whose body names this column | Always — probe-confirmed that a widening an index waves past still fails here | `The object 'X' is dependent…` |
-| Index whose key or include columns reference this column | On a type change or a nullability change — length widening within the same family (`varchar(50) → varchar(100)`) passes | `The index 'X' is dependent…` |
 | CHECK constraint that references this column | On a type change (a length change passes and the constraint keeps enforcing) | `The object 'X' is dependent…` |
 | DEFAULT constraint on this column | On a type change | `The object 'X' is dependent…` |
 
@@ -502,5 +503,3 @@ Storage cost is negligible at simulator workload sizes.
 
 - **Eager rewrite even when bytes are identical**: As above — pure length widening within the same family rewrites every row, even though the encoded bytes are byte-for-byte identical between varchar(50) and varchar(100).
   Performance only; behavior matches.
-- **Index protection nuance**: Real SQL Server allows length widening AND length narrowing (when data fits) under an index — both pass with the same SqlType base.
-  The simulator allows both only when the `SqlType` subclass matches; decimal precision narrowing under an index (same `DecimalSqlType` subclass) would pass in the simulator but is probably blocked in real SQL Server (not probed; EF Migrations drops indexes before significant type changes anyway, so the gap is application-unreachable through EF).

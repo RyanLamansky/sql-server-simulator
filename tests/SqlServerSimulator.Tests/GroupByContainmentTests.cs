@@ -288,4 +288,46 @@ public sealed class GroupByContainmentTests
     [DataRow("select case when 1 = 1 then 5 else b end, count(*) from t")]
     public void FoldKeepsTheColumn_Msg8120(string select)
         => Rejects(select, 8120, "'t.b'");
+
+    /// <summary>
+    /// A subquery's reference to the grouped query's own column is held to the
+    /// same rule: in the subquery's select list, WHERE, ON or a derived table
+    /// it is Msg 8120, from HAVING Msg 8121 and from ORDER BY Msg 8127 — the
+    /// shape Django emits for an <c>Exists(OuterRef(...))</c> annotation next
+    /// to an aggregate (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select a, (select count(*) from t u where u.b = t.b) from t group by a", 8120, "'t.b'")]
+    [DataRow("select a, case when exists (select 1 from t u where u.b = t.b) then 1 else 0 end, count(*) from t group by a", 8120, "'t.b'")]
+    [DataRow("select count(*), (select t.b) from t", 8120, "'t.b'")]
+    [DataRow("select a, (select (select count(*) from t u where u.id = t.b)) from t group by a", 8120, "'t.b'")]
+    [DataRow("select a, (select count(*) from t u join t w on w.id = t.b) from t group by a", 8120, "'t.b'")]
+    [DataRow("select a, (select count(*) from (select t.b as x) d) from t group by a", 8120, "'t.b'")]
+    [DataRow("select a, (select max(t.b) + t.b from t u) from t group by a", 8120, "'t.b'")]
+    [DataRow("select a from t group by a having exists (select 1 from t u where u.id = t.b)", 8121, "'t.b'")]
+    [DataRow("select a from t group by a order by (select max(u.id) from t u where u.id = t.b)", 8127, "\"t.b\"")]
+    public void Subquery_OuterUngroupedColumn_Rejected(string select, int number, string quotedColumn)
+        => Rejects(select, number, quotedColumn);
+
+    /// <summary>
+    /// A grouped column, an aggregate over the outer column alone (the outer
+    /// query's own), a grouping expression's match, a WHERE subquery and a name
+    /// the subquery's own source binds all pass (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select a, (select count(*) from t u where u.a = t.a) from t group by a")]
+    [DataRow("select a, (select max(t.b) from t u where u.id = 1) from t group by a")]
+    [DataRow("select b + 1, (select t.b + 1) from t group by b + 1")]
+    [DataRow("select a from t where exists (select 1 from t u where u.id = t.b) group by a")]
+    [DataRow("select a, (select count(*) from t u where b = 100) from t group by a")]
+    public void Subquery_OuterReferenceLicensed(string select)
+        => _ = Run(select);
+
+    [TestMethod]
+    public void Subquery_EveryOuterUngroupedColumnReported()
+    {
+        var ex = new Simulation().AssertSqlError(Setup + "select a, (select t.b + t.id) from t group by a", 8120);
+        AreEqual(2, ex.Errors.Count);
+        Assert.Contains("'t.id'", ex.Errors[1].Message);
+    }
 }

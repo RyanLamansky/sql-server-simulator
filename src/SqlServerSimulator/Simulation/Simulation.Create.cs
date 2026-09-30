@@ -2796,11 +2796,18 @@ partial class Simulation
                 if (column.Type is VectorSqlType or JsonSqlType or ClrUdtSqlType { Udt.IsByteOrdered: false })
                     throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName), state: 0);
                 if (column.IsLob)
-                    throw SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName);
-                if (column.IsSparse)
-                    throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName, state: 3));
+                    throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName), state: 0);
+                // A sparse key is refused at state 2 in a UNIQUE constraint and
+                // at state 3 in a PRIMARY KEY, whose explicitly nullable column
+                // raises Msg 8111 first (probed 2026-09-30 against SQL Server 2025).
                 if (pending.Kind == KeyConstraintKind.PrimaryKey && column.Nullable)
                     throw SimulatedSqlException.PrimaryKeyOnNullableColumn(tableName);
+                if (column.IsSparse)
+                {
+                    throw pending.Kind == KeyConstraintKind.PrimaryKey
+                        ? SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName, state: 3))
+                        : SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName, state: 2), state: 0);
+                }
                 RejectComputedKeyColumnNotIndexable(
                     database, heapColumns, $"{Database.DefaultSchemaName}.{tableName}", column, constraintName, viaConstraint: true);
 

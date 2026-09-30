@@ -194,4 +194,39 @@ public class DistinctTests
         AreEqual(7, reader[0]);
         IsFalse(reader.Read());
     }
+
+    /// <summary>
+    /// An expression term under DISTINCT must match a select item by shape,
+    /// not merely read projected columns: columns match by the source column
+    /// they resolve to and parentheses are transparent, and the term sorts by
+    /// the item it matches (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select distinct t.a + 1 as x from t order by a + 1 desc", 4)]
+    [DataRow("select distinct a + 1 from t order by (t.a + 1) desc", 4)]
+    [DataRow("select distinct -a from t order by -a", -3)]
+    [DataRow("select distinct count(*) from t group by a order by count(*)", 1)]
+    [DataRow("select distinct a, b * 2 from t order by b * 2", 2)]
+    public void Distinct_OrderByExpressionMatchingSelectItem_Sorts(string select, int first)
+        => AreEqual(first, new Simulation().ExecuteScalar("create table t (a int, b int); insert t values (1, 30), (2, 10), (3, 20); " + select));
+
+    /// <summary>
+    /// Anything else is Msg 145 while compiling — even an expression over
+    /// projected columns alone, a reordered or retyped operand, and a subquery
+    /// written in both places — the shapes Django's <c>nulls_first</c> ordering
+    /// over a subquery annotation emits (probed 2026-09-30 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select distinct a, b from t order by b + 0")]
+    [DataRow("select distinct 1 + a from t order by a + 1")]
+    [DataRow("select distinct a, b + 1 from t order by b + 1.0")]
+    [DataRow("select distinct a from t order by case when a is null then 0 else 1 end, a")]
+    [DataRow("select distinct a, s from t order by s collate Latin1_General_BIN")]
+    [DataRow("select distinct count(*) as c from t group by a order by count(*) + 1")]
+    [DataRow("select distinct a, (select max(b) from t u where u.a = t.a) as m from t order by case when (select max(b) from t u where u.a = t.a) is null then 0 else 1 end")]
+    [DataRow("select distinct a, (select 1) as s from t order by (select 1)")]
+    public void Distinct_OrderByExpressionNotASelectItem_Msg145AtCompile(string select)
+        => new Simulation().AssertSqlError("create table t (a int, b int, s varchar(10)); insert t values (1, 30, 'x'); print 'ran'; " + select, 145,
+            "ORDER BY items must appear in the select list if SELECT DISTINCT is specified.");
 }

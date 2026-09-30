@@ -1,3 +1,5 @@
+using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+
 namespace SqlServerSimulator;
 
 /// <summary>
@@ -688,5 +690,87 @@ public sealed class KeyConstraintTests
         var sim = new Simulation();
         sim.ExecuteBatches("create schema s", "create table s.p (id int constraint pk_p primary key, code varchar(5) constraint uq_code unique); insert s.p values (1, 'a')");
         sim.AssertSqlError(insert, 2627, message);
+    }
+
+    /// <summary>
+    /// A LOB key follows Msg 1919 with the constraint's Msg 1750 at state 0, in
+    /// CREATE TABLE — constraint or inline index — and ALTER TABLE alike
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (a nvarchar(max) primary key nonclustered)")]
+    [DataRow("create table t (a nvarchar(max) unique)")]
+    [DataRow("create table t (a text primary key)")]
+    [DataRow("create table t (a nvarchar(max), index ix (a))")]
+    [DataRow("create table t (a xml, index ix (a))")]
+    [DataRow("create table t (a xml); alter table t add constraint uq unique (a)")]
+    public void LobKey_Msg1919ThenMsg1750(string sql)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 1919);
+        AreEqual((1, 1750, 0), (ex.Errors[0].State, ex.Errors[1].Number, ex.Errors[1].State));
+    }
+
+    /// <summary>
+    /// A sparse key column: a UNIQUE constraint refuses it with Msg 1919 state
+    /// 2, a PRIMARY KEY with state 3 — unless the column says NULL outright,
+    /// when the PRIMARY KEY's Msg 8111 comes first (probed 2026-09-30 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (a int sparse unique)", 1919, 2, 0)]
+    [DataRow("create table t (a int sparse, constraint u unique (a))", 1919, 2, 0)]
+    [DataRow("create table t (a int sparse null); alter table t add constraint u unique (a)", 1919, 2, 0)]
+    [DataRow("create table t (a int sparse primary key)", 1919, 3, 1)]
+    [DataRow("create table t (a int sparse, constraint p primary key (a))", 1919, 3, 1)]
+    [DataRow("create table t (a int sparse null, b int not null, constraint p primary key (b, a))", 8111, 1, 0)]
+    public void SparseKey_Refusals(string sql, int number, int state, int trailerState)
+    {
+        var ex = new Simulation().AssertSqlError(sql, number);
+        AreEqual((state, 1750, trailerState), (ex.Errors[0].State, ex.Errors[1].Number, ex.Errors[1].State));
+    }
+
+    /// <summary>
+    /// CREATE INDEX judges each key and included column's type ahead of its
+    /// name and the clustered-index check — the refusal Django's
+    /// <c>TextField(db_index=True)</c> meets (probed 2026-09-30 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create index i on dbo.t (a)", 1919, "Column 'a' in table 'dbo.t' is of a type that is invalid for use as a key column in an index.")]
+    [DataRow("create index i on t (im)", 1919, "Column 'im' in table 't' is of a type that is invalid for use as a key column in an index.")]
+    [DataRow("create index i on t (id, a) where id > 0", 1919, "Column 'a' in table 't' is of a type that is invalid for use as a key column in an index.")]
+    [DataRow("create clustered index i on t (a)", 1919, "Column 'a' in table 't' is of a type that is invalid for use as a key column in an index.")]
+    [DataRow("create index ix on t (a)", 1919, "Column 'a' in table 't' is of a type that is invalid for use as a key column in an index.")]
+    [DataRow("create index i on t (d)", 1977, "Could not create index 'i' on table 't'. Only XML Index can be created on XML column 'd'.")]
+    [DataRow("create index i on t (g)", 1978, "Column 'g' in table 't' is of a type that is invalid for use as a key column in an index or statistics.")]
+    [DataRow("create index i on t (id) include (n)", 1999, "Column 'n' in table 't' is of a type that is invalid for use as included column in an index.")]
+    public void CreateIndex_InvalidColumnType(string createIndex, int number, string message)
+        => new Simulation().AssertSqlError(
+            $"create table t (id int primary key, a nvarchar(max), d xml, g geography, n ntext, im image); create index ix on t (id); {createIndex}",
+            number, message);
+
+    [TestMethod]
+    public void CreateIndex_IncludedMaxAndXmlColumns_Pass()
+        => AreEqual(2, new Simulation().ExecuteScalar("""
+            create table t (id int primary key, a nvarchar(max), d xml);
+            create index i1 on t (id) include (a);
+            create index i2 on t (id) include (d);
+            select count(*) from sys.indexes where object_id = object_id('t') and name like 'i_'
+            """));
+
+    /// <summary>
+    /// An index CREATE TABLE declares reports an xml or spatial key as Msg
+    /// 1919 and every refusal with Msg 1750 after it (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (a nvarchar(max), index ix (a))", 1919)]
+    [DataRow("create table t (id int, d xml, index ix (d))", 1919)]
+    [DataRow("create table t (id int, g geography, index ix (g))", 1919)]
+    [DataRow("create table t (id int, n ntext, index ix (id) include (n))", 1999)]
+    public void InlineIndex_InvalidColumnType_FollowedByMsg1750(string sql, int number)
+    {
+        var ex = new Simulation().AssertSqlError(sql, number);
+        AreEqual(1750, ex.Errors[1].Number);
     }
 }

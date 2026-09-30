@@ -53,7 +53,11 @@ internal static class LockDmvs
     internal static IEnumerable<SqlValue[]> EnumerateDmTranLocks(BatchContext batch, Database database)
     {
         var sim = batch.Connection.Simulation;
-        var dbId = SqlValue.FromInt32(1);
+        var dbId = SqlValue.FromInt32(database.Id);
+        // Real describes an OBJECT resource by 256 spaces, not by name — the
+        // object is resource_associated_entity_id (probed 2026-09-30 against
+        // SQL Server 2025).
+        var objectDescription = new string(' ', 256);
         var grantStatus = SqlValue.FromNVarchar("GRANT");
         var waitStatus = SqlValue.FromNVarchar("WAIT");
         var objectType = SqlValue.FromNVarchar("OBJECT");
@@ -70,9 +74,9 @@ internal static class LockDmvs
         {
             foreach (var (_, t) in schema.HeapTables)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, t.Name, t.ObjectId, t.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, t.ObjectId, t.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
-                foreach (var row in EmitRowsForResource(objectType, dbId, t.Name, t.ObjectId, t.TableDataLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, t.ObjectId, t.TableDataLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
                 // A row of a clustered table is its clustered key, which is
                 // what real locks and reports as KEY; only a heap's row is a RID.
@@ -97,32 +101,32 @@ internal static class LockDmvs
             }
             foreach (var (_, v) in schema.Views)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, v.Name, v.ObjectId, v.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, v.ObjectId, v.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
             foreach (var (_, f) in schema.Functions)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, f.Name, f.ObjectId, f.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, f.ObjectId, f.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
             foreach (var (_, p) in schema.Procedures)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, p.Name, p.ObjectId, p.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, p.ObjectId, p.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
             foreach (var (_, s) in schema.Sequences)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, s.Name, s.ObjectId, s.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, s.ObjectId, s.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
             foreach (var (_, tt) in schema.TableTypes)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, tt.Name, tt.ObjectId, tt.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, tt.ObjectId, tt.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
             foreach (var (_, tr) in schema.Triggers)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, tr.Name, tr.ObjectId, tr.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, tr.ObjectId, tr.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
         }

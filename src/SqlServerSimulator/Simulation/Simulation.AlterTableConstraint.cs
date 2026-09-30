@@ -497,7 +497,12 @@ partial class Simulation
             if (col.Type is VectorSqlType or JsonSqlType or ClrUdtSqlType { Udt.IsByteOrdered: false })
                 throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name), state: 0);
             if (col.IsLob)
-                throw SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name);
+                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name), state: 0);
+            // A PRIMARY KEY over a sparse column raised Msg 8111 above, since a
+            // sparse column is always nullable (probed 2026-09-30 against SQL
+            // Server 2025).
+            if (col.IsSparse)
+                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(col.Name, table.Name, state: 2), state: 0);
             // A non-persisted computed column is a legal UNIQUE key — its value
             // is evaluated per row by the enforcement paths — subject to the
             // determinism / precision gate CREATE INDEX applies. PRIMARY KEY on

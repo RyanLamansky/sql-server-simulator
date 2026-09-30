@@ -40,14 +40,14 @@ partial class Simulation
     /// <item>Success mutates catalog state and buffers Msg 15477 (severity 10)
     /// as an info message; the proc returns 0.</item>
     /// <item><c>@objtype</c> NULL / omitted renames a table (or object); the
-    /// resolved leaf moves within its schema. A missing object → Msg 15225 with
-    /// <c>@itemtype</c> rendered as <c>(null)</c>.</item>
+    /// resolved leaf moves within its schema. A table.leaf name no object
+    /// answers renames that table's column or index instead. A missing object
+    /// → Msg 15225 with <c>@itemtype</c> rendered as <c>(null)</c>.</item>
     /// <item><c>@objtype</c> = COLUMN / INDEX (case-insensitive) renames a column
     /// / index of <c>[schema.]table.leaf</c>. A missing parent table or leaf →
     /// Msg 15248 ("ambiguous or the claimed @objtype is wrong").</item>
-    /// <item>A colliding <c>@newname</c> → Msg 15335; the substituted kind is
-    /// COLUMN / INDEX for those paths and the ungrammatical <c>object</c> for the
-    /// table path (matched verbatim).</item>
+    /// <item>A colliding <c>@newname</c> → Msg 15335, naming the kind as
+    /// <c>@objtype</c> spelled it or, without one, as real inferred it.</item>
     /// <item><c>@newname</c> is used verbatim as the new leaf — real does not
     /// parse it as a multi-part name.</item>
     /// </list>
@@ -82,19 +82,34 @@ partial class Simulation
 
         try
         {
-            if (objType is null || BuiltInToken.Equals(objType, "OBJECT"))
+            // Without @objtype a table.leaf name no object answers renames the
+            // column, else the index, it names, and the collision message
+            // names the kind in lower case where a passed @objtype is echoed
+            // as written (probed 2026-09-30 against SQL Server 2025).
+            var inferred = objType is null ? InferredSubobjectKind(batch, objName) : null;
+            if (inferred == "column")
+            {
+                RenameColumn(batch, objName, newName, inferred);
+                RecordRenameEvent(batch, objName, "COLUMN");
+            }
+            else if (inferred == "index")
+            {
+                RenameIndex(batch, objName, newName, inferred);
+                RecordRenameEvent(batch, objName, "INDEX");
+            }
+            else if (objType is null || BuiltInToken.Equals(objType, "OBJECT"))
             {
                 var renamedKind = RenameObject(batch, objName, newName, objType);
                 RecordRenameEvent(batch, objName, renamedKind);
             }
             else if (BuiltInToken.Equals(objType, "COLUMN"))
             {
-                RenameColumn(batch, objName, newName);
+                RenameColumn(batch, objName, newName, objType);
                 RecordRenameEvent(batch, objName, "COLUMN");
             }
             else if (BuiltInToken.Equals(objType, "INDEX"))
             {
-                RenameIndex(batch, objName, newName);
+                RenameIndex(batch, objName, newName, objType);
                 RecordRenameEvent(batch, objName, "INDEX");
             }
             else
@@ -103,11 +118,12 @@ partial class Simulation
                     $"sp_rename with @objtype '{objType}' is not modeled; supported @objtype values are COLUMN, INDEX, and a table / object rename (NULL @objtype).");
             }
         }
-        catch (SimulatedSqlException readOnly) when (readOnly.Number is 3906 or 5074)
+        catch (SimulatedSqlException refused) when (refused.Number is 3906 or 4928 or 5074)
         {
-            // Real cautions before it finds the database read-only or a filter
-            // reading the column, so the caution precedes the Msg 3906 or 5074
-            // (probed 2026-09-25 and 2026-09-30).
+            // Real cautions before it finds the database read-only, a filter
+            // reading the column or the column computed, so the caution
+            // precedes the Msg 3906, 5074 or 4928 (probed 2026-09-25 and
+            // 2026-09-30).
             QueueRenameCaution(batch);
             throw;
         }
@@ -190,12 +206,15 @@ partial class Simulation
             // Collision is against the whole shared object namespace
             // (probe-confirmed: renaming a table onto a view name also raises
             // Msg 15335 "as a object").
-            if (schema.HasNameInSharedNamespace(newName))
-                throw SimulatedSqlException.RenameDuplicateName(newName, "object");
+            // A new name differing from the old in case alone is the object
+            // itself, which real renames (probed 2026-09-30 against SQL
+            // Server 2025: 'r' to 'R').
+            if (schema.TryFindInSharedNamespace(newName, out var clash) && !ReferenceEquals(clash, found))
+                throw SimulatedSqlException.RenameDuplicateName(newName, objType ?? "object");
             // A schema-bound module's reference is by name, so real refuses to
             // rename out from under one — Msg 15336, echoing @objname as passed.
             if (SchemaBinding.FindReferencingModule(database, found) is not null)
-                throw SimulatedSqlException.RenameParticipatesInEnforcedDependencies(objName);
+                throw SimulatedSqlException.RenameParticipatesInEnforcedDependencies(objName, column: false);
 
             // Real refuses a read-only database only once the rename has
             // otherwise been accepted: an unresolvable @objname still reports
@@ -290,7 +309,7 @@ partial class Simulation
             if (!PermissionEnforcement.HasObjectAlter(batch, database, table.ObjectId, table.SchemaId))
                 throw NotFound();
             if (schema.HasNameInSharedNamespace(newName))
-                throw SimulatedSqlException.RenameDuplicateName(newName, "object");
+                throw SimulatedSqlException.RenameDuplicateName(newName, objType ?? "object");
             database.RejectWriteWhenReadOnly();
             batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
             RecordTableDdlUndo(batch, table);
@@ -299,7 +318,7 @@ partial class Simulation
         }
     }
 
-    private void RenameColumn(BatchContext batch, string objName, string newName)
+    private void RenameColumn(BatchContext batch, string objName, string newName, string kind)
     {
         if (!TrySplitTableAndLeaf(objName, out var tableName, out var columnName)
             || !batch.TryResolveTable(tableName, out var table))
@@ -320,17 +339,32 @@ partial class Simulation
         if (ordinal < 0)
             throw SimulatedSqlException.RenameAmbiguousOrWrongType("COLUMN");
 
-        foreach (var column in table.Columns)
+        // The column itself is no clash, so a change of case alone renames
+        // (probed 2026-09-30 against SQL Server 2025).
+        for (var i = 0; i < table.Columns.Length; i++)
         {
-            if (collation.Equals(column.Name, newName))
-                throw SimulatedSqlException.RenameDuplicateName(newName, "COLUMN");
+            if (i != ordinal && collation.Equals(table.Columns[i].Name, newName))
+                throw SimulatedSqlException.RenameDuplicateName(newName, kind);
         }
 
-        // Column-granular schema binding: renaming a column no schema-bound
-        // module reads is allowed, renaming one that is read is Msg 15336
-        // (both probe-confirmed).
-        if (SchemaBinding.ColumnReferencingModules(batch.CurrentDatabase, table, columnName).Count > 0)
-            throw SimulatedSqlException.RenameParticipatesInEnforcedDependencies(objName);
+        // Column-granular binding by name: renaming a column no schema-bound
+        // module, computed column or CHECK constraint reads is allowed, and
+        // renaming one that any of them reads is Msg 15336 — a column-level
+        // CHECK and a persisted computed column included, while a DEFAULT, an
+        // index key and either end of a foreign key rename freely (probed
+        // 2026-09-30 against SQL Server 2025).
+        var renamed = table.Columns[ordinal];
+        if (SchemaBinding.ColumnReferencingModules(batch.CurrentDatabase, table, columnName).Count > 0
+            || Array.Exists(table.Columns, column => column.Computed is { } computed && ComputedReferencesColumn(collation, computed, renamed.Name))
+            || table.CheckConstraints.Exists(check => (check.InlineColumn is { } inline && collation.Equals(inline, renamed.Name)) || CheckPredicateReferencesColumn(collation, check.Predicate, renamed.Name)))
+        {
+            throw SimulatedSqlException.RenameParticipatesInEnforcedDependencies(objName, column: true);
+        }
+
+        // A computed column itself can't be renamed: Msg 4928 from line 905
+        // (probed 2026-09-30 against SQL Server 2025).
+        if (renamed.Computed is not null)
+            throw SimulatedSqlException.CannotAlterColumnOfKind(renamed.Name, "COMPUTED");
 
         // A filter names its columns, so a column a filtered index or
         // statistic's predicate reads can't be renamed: Msg 5074 for each,
@@ -353,7 +387,7 @@ partial class Simulation
         BumpSchemaVersion();
     }
 
-    private void RenameIndex(BatchContext batch, string objName, string newName)
+    private void RenameIndex(BatchContext batch, string objName, string newName, string kind)
     {
         if (!TrySplitTableAndLeaf(objName, out var tableName, out var indexName)
             || !batch.TryResolveTable(tableName, out var table))
@@ -365,8 +399,10 @@ partial class Simulation
         Storage.Index? target = null;
         foreach (var index in table.Indexes)
         {
-            if (collation.Equals(index.Name, newName))
-                throw SimulatedSqlException.RenameDuplicateName(newName, "INDEX");
+            // The index itself is no clash: a change of case alone renames
+            // (probed 2026-09-30 against SQL Server 2025).
+            if (collation.Equals(index.Name, newName) && !collation.Equals(index.Name, indexName))
+                throw SimulatedSqlException.RenameDuplicateName(newName, kind);
             if (collation.Equals(index.Name, indexName))
                 target = index;
         }
@@ -376,7 +412,7 @@ partial class Simulation
         foreach (var jsonIndex in table.JsonIndexes)
         {
             if (collation.Equals(jsonIndex.Name, newName))
-                throw SimulatedSqlException.RenameDuplicateName(newName, "INDEX");
+                throw SimulatedSqlException.RenameDuplicateName(newName, kind);
             if (collation.Equals(jsonIndex.Name, indexName))
                 jsonTarget = jsonIndex;
         }
@@ -384,7 +420,7 @@ partial class Simulation
         foreach (var vectorIndex in table.VectorIndexes)
         {
             if (collation.Equals(vectorIndex.Name, newName))
-                throw SimulatedSqlException.RenameDuplicateName(newName, "INDEX");
+                throw SimulatedSqlException.RenameDuplicateName(newName, kind);
             if (collation.Equals(vectorIndex.Name, indexName))
                 vectorTarget = vectorIndex;
         }
@@ -413,6 +449,28 @@ partial class Simulation
     /// table's <see cref="MultiPartName"/> and the trailing column / index leaf.
     /// Returns false for a bare 1-part name (no parent table to resolve against).
     /// </summary>
+    /// <summary>
+    /// What a NULL-<c>@objtype</c> <c>sp_rename</c> of <paramref name="objName"/>
+    /// renames when no object in the shared namespace answers the name:
+    /// <c>"column"</c> or <c>"index"</c> for a table.leaf whose table has one
+    /// by that leaf, the column first, else null for the object path.
+    /// </summary>
+    private static string? InferredSubobjectKind(BatchContext batch, string objName)
+    {
+        if (ObjectId.TryParseObjectName(objName, out var name) && batch.TryResolveSchema(name, out var schema) && schema.TryFindInSharedNamespace(name.Leaf, out _))
+            return null;
+        if (!TrySplitTableAndLeaf(objName, out var tableName, out var leaf) || !batch.TryResolveTable(tableName, out var table))
+            return null;
+        var collation = batch.CurrentDatabase.Collation;
+        if (Array.Exists(table.Columns, column => collation.Equals(column.Name, leaf)))
+            return "column";
+        return table.Indexes.Exists(index => collation.Equals(index.Name, leaf))
+            || table.JsonIndexes.Exists(index => collation.Equals(index.Name, leaf))
+            || table.VectorIndexes.Exists(index => collation.Equals(index.Name, leaf))
+            ? "index"
+            : null;
+    }
+
     private static bool TrySplitTableAndLeaf(string objName, out MultiPartName tableName, out string leaf)
     {
         tableName = default;

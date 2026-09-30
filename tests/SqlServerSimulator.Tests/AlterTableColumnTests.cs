@@ -1089,4 +1089,70 @@ public sealed class AlterTableColumnTests
             alter table t drop column a, column b;
             select count(*) from sys.columns where object_id = object_id('t')
             """));
+
+    /// <summary>
+    /// A multi-word type synonym names its type in ALTER COLUMN as in CREATE
+    /// TABLE — Django's <c>FloatField</c> emits <c>double precision</c>
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("double precision", "float 8")]
+    [DataRow("national character varying(10)", "nvarchar 20")]
+    public void AlterColumn_MultiWordSynonym(string type, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            create table t (a int not null);
+            alter table t alter column a {type} not null;
+            select concat(type_name(system_type_id), ' ', max_length) from sys.columns where object_id = object_id('t')
+            """));
+
+    /// <summary>
+    /// What a key, index, statistic or foreign key lets ALTER COLUMN change —
+    /// the statement Django's schema editor re-issues for a column it only
+    /// re-comments or re-nulls (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table x (k int not null primary key)", "k int not null")]
+    [DataRow("create table x (k varchar(10) not null primary key)", "k varchar(20) not null")]
+    [DataRow("create table x (k int not null unique)", "k int null")]
+    [DataRow("create table x (k varchar(10) null unique)", "k varchar(20) null")]
+    [DataRow("create table x (k nvarchar(10) null); create index i on x (k)", "k nvarchar(20) null")]
+    [DataRow("create table x (k varbinary(10) not null); create index i on x (k)", "k varbinary(20) null")]
+    [DataRow("create table x (k varchar(10) null); create statistics s on x (k)", "k varchar(20) null")]
+    [DataRow("create table p (id int primary key); create table x (k int not null references p (id))", "k int null")]
+    [DataRow("create table p (id int primary key); create table x (k int null references p (id))", "k int not null")]
+    [DataRow("create table x (k int not null primary key); create table c (r int references x (k))", "k int not null")]
+    public void AlterColumn_KeyOrForeignKeyColumn_Passes(string setup, string alter)
+        => AreEqual(0, new Simulation().ExecuteScalar($"{setup}; alter table x alter column {alter}; select 0"));
+
+    [TestMethod]
+    [DataRow("create table x (k int not null primary key)", "k int null")]
+    [DataRow("create table x (k varchar(10) not null primary key)", "k varchar(20) null")]
+    [DataRow("create table x (k decimal(10, 2) not null primary key)", "k decimal(12, 2) not null")]
+    [DataRow("create table x (k int null unique)", "k int not null")]
+    [DataRow("create table x (k char(10) null); create index i on x (k)", "k char(20) null")]
+    [DataRow("create table x (k datetime2(3) null); create index i on x (k)", "k datetime2(7) null")]
+    [DataRow("create table x (k varchar(10) null); create index i on x (k)", "k varchar(5) null")]
+    [DataRow("create table x (k varchar(10) null); create statistics s on x (k)", "k varchar(10) not null")]
+    [DataRow("create table p (id varchar(10) primary key); create table x (k varchar(10) not null references p (id))", "k varchar(20) not null")]
+    [DataRow("create table x (k varchar(10) not null primary key); create table c (r varchar(10) references x (k))", "k varchar(20) not null")]
+    public void AlterColumn_KeyOrForeignKeyColumn_Msg5074(string setup, string alter)
+        => _ = new Simulation().AssertSqlError($"{setup}; alter table x alter column {alter}", 5074);
+
+    [TestMethod]
+    public void AlterColumn_WidenedPrimaryKey_StillSeeksAndEnforces()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (k varchar(10) not null primary key);
+            create table q (k int not null primary key);
+            create table c (id int primary key, qk int not null references q (k));
+            insert p values ('a'); insert q values (1); insert c values (1, 1);
+            alter table p alter column k varchar(20) not null;
+            alter table c alter column qk int null;
+            insert p values ('abcdefghijklmnop'); insert c values (2, null)
+            """);
+        AreEqual("abcdefghijklmnop", sim.ExecuteScalar("select k from p where k = 'abcdefghijklmnop'"));
+        _ = sim.AssertSqlError("insert p values ('a')", 2627);
+        _ = sim.AssertSqlError("insert c values (3, 9)", 547);
+    }
 }

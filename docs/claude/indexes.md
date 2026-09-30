@@ -23,6 +23,10 @@ A missing index still raises **Msg 3701** through the same path as the `name ON 
 
 **One clustered index per table**: `CREATE CLUSTERED INDEX` on a table that already carries a clustered index — a clustered PRIMARY KEY / UNIQUE constraint (a default PK is clustered) or a prior clustered index — raises **Msg 1902** (`Cannot create more than one clustered index on table 't'. Drop the existing clustered index '…' before creating another.`), naming the existing clustered index.
 
+**Column types are judged first**: ahead of the index name (Msg 1913) and the clustered-index check, a LOB key (`varchar(max)`, `nvarchar(max)`, `varbinary(max)`, `text`, `ntext`, `image`) is **Msg 1919** naming the table as written, an `xml` key **Msg 1977**, a spatial key **Msg 1978** state 1, and a `text` / `ntext` / `image` included column **Msg 1999**, while a MAX or `xml` included column is fine (probed 2026-09-30 against SQL Server 2025).
+Inline, an `xml` or spatial key is Msg 1919 too, and every one of them is followed by Msg 1750, as a LOB key constraint's Msg 1919 is.
+Not modeled yet: the warning real prints when an index's key can exceed its 1,700- or 900-byte limit (a `sql_variant` key, say), which leaves the index created.
+
 **No INCLUDE on a clustered index**: a clustered index's leaf *is* the table row, so real refuses the list with **Msg 10601** class 16 state 1, `Cannot specify included columns for a clustered index.` — naming neither the index nor the table, because it is a statement-shape check.
 It fires ahead of every name-resolution error (a missing table and a missing INCLUDE column alike) and ahead of Msg 1916, all probe-confirmed, so it sits beside the `IGNORE_DUP_KEY` shape check in `TryParseCreateIndex` and covers the indexed-view path with it.
 

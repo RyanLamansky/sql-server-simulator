@@ -281,5 +281,98 @@ public sealed class RenameProcTests
         _ = command.ExecuteNonQuery();
         CollectionAssert.AreEqual(new[] { "Object '[dbo].[t]' was successfully marked for recompilation." }, messages);
     }
-}
 
+    /// <summary>
+    /// A new name differing from the old in case alone renames the column,
+    /// index or table itself — Django's <c>RenameField</c> to a new casing
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CaseOnlyRename_RenamesItself()
+        => AreEqual("FiElD IX_CASE R", new Simulation().ExecuteScalar("""
+            create table r (id int primary key, field int, v int);
+            create index ix_Case on r (v);
+            exec sp_rename 'r.field', 'FiElD', 'COLUMN';
+            exec sp_rename 'r.ix_Case', 'IX_CASE', 'INDEX';
+            exec sp_rename 'r', 'R';
+            select concat(
+                (select name from sys.columns where object_id = object_id('r') and column_id = 2), ' ',
+                (select name from sys.indexes where object_id = object_id('r') and index_id = 2), ' ',
+                (select name from sys.tables where object_id = object_id('r')))
+            """));
+
+    /// <summary>
+    /// Without <c>@objtype</c>, a table.leaf name renames the table's column,
+    /// else its index, and the collision message names the inferred kind in
+    /// lower case where a passed <c>@objtype</c> is echoed as written (probed
+    /// 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void NullObjtype_TableLeaf_RenamesColumnOrIndex()
+        => AreEqual("a2 i9", new Simulation().ExecuteScalar("""
+            create table r (id int primary key, a int);
+            create index i1 on r (a);
+            exec sp_rename 'r.a', 'a2';
+            exec sp_rename 'dbo.r.i1', 'i9';
+            select concat(col_name(object_id('r'), 2), ' ', (select name from sys.indexes where object_id = object_id('r') and index_id = 2))
+            """));
+
+    [TestMethod]
+    [DataRow("exec sp_rename 'r.a', 'b'", "column")]
+    [DataRow("exec sp_rename 'r', 's', 'Object'", "Object")]
+    public void Collision_NamesTheKindAsPassedOrInferred(string rename, string kind)
+    {
+        var ex = new Simulation().AssertSqlError("create table r (a int, b int); create table s (id int); " + rename, 15335);
+        AreEqual($"Error: The new name '{(kind == "column" ? "b" : "s")}' is already in use as a {kind} name and would cause a duplicate that is not permitted.", ex.Errors[0].Message);
+        AreEqual(738, ex.Errors[0].LineNumber);
+    }
+
+    /// <summary>
+    /// A column a computed column or a CHECK constraint reads can't be renamed
+    /// (Msg 15336 from line 774), while a DEFAULT, an index key and either end
+    /// of a foreign key rename freely; a computed column itself is Msg 4928
+    /// from line 905, after the caution (probed 2026-09-30 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("r.pink")]
+    [DataRow("r.w")]
+    [DataRow("r.c")]
+    [DataRow("dbo.r.t")]
+    public void Column_ReadByComputedOrCheck_Raises15336(string column)
+    {
+        var ex = new Simulation().AssertSqlError(RenameDependencySetup + $"exec sp_rename '{column}', 'renamed', 'COLUMN'", 15336);
+        AreEqual($"Object '{column}' cannot be renamed because the object participates in enforced dependencies.", ex.Errors[0].Message);
+        AreEqual<byte>(16, ex.Errors[0].Class);
+        AreEqual(774, ex.Errors[0].LineNumber);
+        AreEqual("sp_rename", ex.Errors[0].Procedure);
+    }
+
+    [TestMethod]
+    public void Column_DefaultIndexOrForeignKey_Renames()
+        => AreEqual("id2 d2 k2 fkc2", new Simulation().ExecuteScalar(RenameDependencySetup + """
+            exec sp_rename 'r.d', 'd2', 'COLUMN';
+            exec sp_rename 'r.k', 'k2', 'COLUMN';
+            exec sp_rename 'r.fkc', 'fkc2', 'COLUMN';
+            exec sp_rename 'r.id', 'id2', 'COLUMN';
+            select concat(col_name(object_id('r'), 1), ' ', col_name(object_id('r'), 6), ' ', col_name(object_id('r'), 7), ' ', col_name(object_id('r'), 8))
+            """));
+
+    [TestMethod]
+    public void ComputedColumn_Raises4928AfterCaution()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(RenameDependencySetup);
+        var ex = sim.AssertSqlError("exec sp_rename 'r.g', 'g2', 'COLUMN'", 4928);
+        AreEqual("Cannot alter column 'g' because it is 'COMPUTED'.", ex.Errors[0].Message);
+        AreEqual(905, ex.Errors[0].LineNumber);
+        AreEqual("g", sim.ExecuteScalar("select col_name(object_id('r'), 4)"));
+    }
+
+    private const string RenameDependencySetup = """
+        create table r (id int primary key, field int, pink int, g as pink + 1, c int check (c > 0), d int default 1, k int,
+            fkc int references r (id), t int, u int, constraint ck2 check (t > u), w int, gw as w * 2 persisted);
+        create index ix_k on r (k);
+
+        """;
+}

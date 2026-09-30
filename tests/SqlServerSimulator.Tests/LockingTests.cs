@@ -880,4 +880,23 @@ public sealed class LockingTests
         AreEqual((1222, (byte)state), (ex.Number, ex.State));
         _ = writer.CreateCommand("rollback").ExecuteNonQuery();
     }
+
+    /// <summary>
+    /// An OBJECT lock names its object by <c>resource_associated_entity_id</c>
+    /// and describes itself with 256 spaces, and every row carries the
+    /// database's own id (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DmTranLocks_ObjectRow_BlankDescriptionAndDatabaseId()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create database d2; ");
+        using var conn = sim.CreateOpenConnection();
+        _ = conn.CreateCommand("use d2; create table t (id int primary key); begin tran; select * from t with (tablockx)").ExecuteNonQuery();
+        AreEqual("512 0 1", conn.CreateCommand("""
+            select concat(datalength(resource_description), ' ', len(resource_description), ' ', iif(resource_database_id = db_id(), 1, 0))
+            from sys.dm_tran_locks where resource_type = 'OBJECT' and resource_associated_entity_id = object_id('t')
+            """).ExecuteScalar());
+        _ = conn.CreateCommand("rollback").ExecuteNonQuery();
+    }
 }

@@ -167,6 +167,8 @@ partial class Simulation
             RejectComputedColumnInIndexFilter(context.Batch, table, indexName, targetTableName.ToString(), filter);
         }
 
+        RejectIndexColumnTypes(context.Batch.CurrentDatabase.Collation, table, [.. keyColumns.Select(static k => k.Name)], includeColumnNames, indexName, targetTableName.ToString());
+
         // DROP_EXISTING = ON replaces the index of that name, keeping its
         // index_id; without it the name must be new (probed 2026-09-26
         // against SQL Server 2025).
@@ -375,6 +377,17 @@ partial class Simulation
             }
 
             RejectDuplicateIndexColumns(collation, [.. pending.Columns.Select(static c => c.ColumnName)], pending.IncludeColumnNames, inline: true);
+            // CREATE TABLE's own index follows the refusal with Msg 1750, at
+            // state 0 after a key's 1919 and state 1 after an included column's
+            // 1999 (probed 2026-09-30 against SQL Server 2025).
+            try
+            {
+                RejectIndexColumnTypes(collation, table, [.. pending.Columns.Select(static c => c.ColumnName)], pending.IncludeColumnNames, pending.Name, writtenTableName, inline: true);
+            }
+            catch (SimulatedSqlException refused) when (refused.Number is 1919 or 1999)
+            {
+                throw SimulatedSqlException.FollowedByConstraintNotCreated(refused, state: refused.Number == 1919 ? (byte)0 : (byte)1);
+            }
 
             var keyColumns = new IndexKeyColumn[pending.Columns.Length];
             for (var i = 0; i < pending.Columns.Length; i++)
@@ -461,6 +474,41 @@ partial class Simulation
                 var duplicate = SimulatedSqlException.DuplicateIndexColumn(all[i], state: i < keyColumnNames.Length ? (byte)1 : (byte)2);
                 throw inline ? SimulatedSqlException.FollowedByConstraintNotCreated(duplicate, state: 0) : duplicate;
             }
+        }
+    }
+
+    /// <summary>
+    /// Refuses a key or included column whose type an index can't hold, ahead
+    /// of the name, the clustered-index and every later check: a LOB key is
+    /// Msg 1919 naming the table as written, an <c>xml</c> key Msg 1977, a
+    /// spatial key Msg 1978, and a <c>text</c> / <c>ntext</c> / <c>image</c>
+    /// included column Msg 1999 (probed 2026-09-30 against SQL Server 2025:
+    /// an index named like an existing one over an <c>nvarchar(max)</c> key is
+    /// Msg 1919, not Msg 1913). An index CREATE TABLE declares
+    /// (<paramref name="inline"/>) reports an <c>xml</c> or spatial key as Msg
+    /// 1919 too. A name no column answers is left to the resolution that
+    /// follows.
+    /// </summary>
+    private static void RejectIndexColumnTypes(Collation collation, HeapTable table, List<string> keyColumnNames, List<string> includeColumnNames, string indexName, string writtenTableName, bool inline = false)
+    {
+        foreach (var name in keyColumnNames)
+        {
+            switch (Array.Find(table.Columns, column => collation.Equals(column.Name, name)))
+            {
+                case { Type: XmlSqlType or SpatialSqlType } typed when inline:
+                    throw SimulatedSqlException.KeyColumnInvalidType(typed.Name, writtenTableName);
+                case { Type: XmlSqlType } xml:
+                    throw SimulatedSqlException.IndexKeyOnXmlColumn(indexName, table.Name, xml.Name);
+                case { Type: SpatialSqlType } spatial:
+                    throw SimulatedSqlException.VectorKeyColumnInvalid(spatial.Name, writtenTableName, state: 1);
+                case { Type: not (VectorSqlType or JsonSqlType), IsLob: true } lob:
+                    throw SimulatedSqlException.KeyColumnInvalidType(lob.Name, writtenTableName);
+            }
+        }
+        foreach (var name in includeColumnNames)
+        {
+            if (Array.Find(table.Columns, column => collation.Equals(column.Name, name)) is { Type.IsLegacyLob: true } legacy)
+                throw SimulatedSqlException.IncludedColumnInvalidType(legacy.Name, table.Name);
         }
     }
 

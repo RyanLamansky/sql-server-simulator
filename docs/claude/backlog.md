@@ -203,6 +203,18 @@ Roots **filed** (still open):
 
 Re-measured 2026-09-26 on the same 35-app slice after a busy stretch of fidelity work: **0 sim-only, 0 real-only**, 72 failing on both — the one sim-only failure on the way there (`bulk_create.test_bulk_insert_nullable_fields`) was the missing `sp_describe_undeclared_parameters`, which pyodbc uses to type a `None` bound for a `varbinary` column.
 
+Widened 2026-09-30 to a 132-app slice (**9,295 tests**, the apps listed in the harness's `apps.txt`) weighted toward the ORM, migrations, fixtures, serializers, transactions, admin and the model / relation apps, with `schema` (219 tests) run as its own batch: **0 sim-only, 0 real-only**, 154 failing on both, and `schema` 0 / 0 with 29 on both.
+Per batch on the way there: the query apps (1,247 tests) 0 / 2 / 43, the model and relation apps (671) 0 / 0 / 2, fixtures to caches (2,909) 0 / 0 / 19, migrations with backends and introspection (1,086) 2 / 2 / 13, `schema` 1 / 13 / 16, admin and views (1,414) 0 / 0 / 4.
+`many_to_one_null` and `m2m_through_regress` stay out: their `to_field` onto a nullable unique column fails migration on both sides (Msg 1776, mssql-django's filtered unique index being no candidate key), and `get_or_create.UpdateOrCreateTransactionTests.test_creation_in_transaction` is a thread-timing race that fails on both in different ways.
+The roots, each now matching real:
+
+- **A subquery's reference to a grouped query's ungrouped column** ran where real raises Msg 8120 (Django's `Exists(OuterRef(...))` next to an aggregate) — see [`query.md`](query.md#group-by-containment).
+- **`SELECT DISTINCT … ORDER BY` an expression** was accepted whenever it read projected columns; real wants the term to match a select item by shape (Django's `nulls_first` ordering over a subquery annotation) — see [`query.md`](query.md#order-by-term-resolution).
+- **`ALTER COLUMN` over a key or foreign-key column** refused restating the column unchanged, which Django's schema editor does for a comment or a nullability flip; real's per-source rules are in [`alter-table.md`](alter-table.md#blockers-msg-5074).
+- **`ALTER COLUMN … double precision`** was a syntax error.
+- **`sp_rename`** refused a case-only rename, didn't infer a column or index for a NULL `@objtype`, and renamed columns a computed column or CHECK reads — see [`catalog-views.md`](catalog-views.md).
+- **`CREATE INDEX` over an `nvarchar(max)` key** (Django's `TextField(db_index=True)`) was accepted; real's Msg 1919 closes the connection Django's test case holds, which is what the 13 real-only `schema` failures were — see [`indexes.md`](indexes.md#grammar).
+
 Getting there took eleven roots, and the pattern worth keeping is that failures cluster by *cause*, not by test — grouping them that way found each one:
 
 - **Cascade beats breadth.** An unmodeled statement used to kill the TDS connection, so every later test in the class failed too; one statement accounted for 27 of 50 at the time. Now a statement-level fault is Msg 50000 severity 16 and the session survives ([`tds-endpoint.md`](tds-endpoint.md#statement-tier--severity-16-session-survives)).

@@ -1389,13 +1389,31 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 1919: a column whose type SQL Server doesn't
-    /// allow as a key column appeared in a PRIMARY KEY or UNIQUE constraint.
-    /// Triggers for <c>text</c>, <c>ntext</c>, <c>image</c>, and any
-    /// <c>varchar(MAX)</c> / <c>nvarchar(MAX)</c> / <c>varbinary(MAX)</c>, and at
-    /// state 3 for a sparse column (probed 2026-09-25).
+    /// allow as a key column appeared in a PRIMARY KEY or UNIQUE constraint or
+    /// an index's key. Triggers for <c>text</c>, <c>ntext</c>, <c>image</c>, and
+    /// any <c>varchar(MAX)</c> / <c>nvarchar(MAX)</c> / <c>varbinary(MAX)</c>, and
+    /// at state 3 for a sparse column (probed 2026-09-25); a constraint or an
+    /// index declared in CREATE TABLE follows it with Msg 1750 (probed
+    /// 2026-09-30).
     /// </summary>
     internal static SimulatedSqlException KeyColumnInvalidType(string columnName, string tableName, byte state = 1) =>
         new($"Column '{columnName}' in table '{tableName}' is of a type that is invalid for use as a key column in an index.", 1919, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 1977: <c>CREATE INDEX</c> keyed an <c>xml</c>
+    /// column, which only an XML index may index (probed 2026-09-30 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IndexKeyOnXmlColumn(string indexName, string tableName, string columnName) =>
+        new($"Could not create index '{indexName}' on table '{tableName}'. Only XML Index can be created on XML column '{columnName}'.", 1977, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1999: an index's <c>INCLUDE</c> list named a
+    /// <c>text</c>, <c>ntext</c> or <c>image</c> column (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IncludedColumnInvalidType(string columnName, string tableName) =>
+        new($"Column '{columnName}' in table '{tableName}' is of a type that is invalid for use as included column in an index.", 1999, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 1711: <c>PRIMARY KEY</c> targeted a computed
@@ -1598,13 +1616,20 @@ partial class SimulatedSqlException
                 number: 3729, procedure: moduleLeafName, server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 3));
 
     /// <summary>
-    /// Mimics SQL Server error 15336: <c>sp_rename</c> targeted an object or
-    /// column a <c>WITH SCHEMABINDING</c> module references. Real echoes the
+    /// Mimics SQL Server error 15336: <c>sp_rename</c> targeted an object a
+    /// <c>WITH SCHEMABINDING</c> module references, or a column such a module,
+    /// a computed column or a CHECK constraint reads. Real echoes the
     /// <c>@objname</c> as passed — <c>'dbo.t'</c> for the object form,
-    /// <c>'dbo.t.c'</c> for the column form. Probe-confirmed verbatim.
+    /// <c>'dbo.t.c'</c> for the column form — and raises the two from lines
+    /// 794 and 774 of <c>sp_rename</c> (probed 2026-09-30 against SQL Server
+    /// 2025), which is the line this carries until the procedure's error site
+    /// stamps it.
     /// </summary>
-    internal static SimulatedSqlException RenameParticipatesInEnforcedDependencies(string objName) =>
-        new($"Object '{objName}' cannot be renamed because the object participates in enforced dependencies.", 15336, 16, 1);
+    internal static SimulatedSqlException RenameParticipatesInEnforcedDependencies(string objName, bool column)
+    {
+        var message = $"Object '{objName}' cannot be renamed because the object participates in enforced dependencies.";
+        return new(message, new SimulatedError(@class: 16, lineNumber: column ? 774 : 794, message, 15336, procedure: "sp_rename", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 1));
+    }
 
     /// <summary>
     /// Mimics SQL Server error 15348: <c>ALTER SCHEMA … TRANSFER</c> targeted
@@ -3042,11 +3067,11 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 15335: <c>sp_rename</c>'s <c>@newname</c> already
-    /// exists — <paramref name="kind"/> is <c>COLUMN</c> / <c>INDEX</c> for those
-    /// paths and the ungrammatical <c>object</c> for the table / object path
-    /// (matched verbatim against real: "already in use as a object name").
-    /// Severity 11, state 1, probe-confirmed wording (SQL Server 2025,
-    /// 2026-07-23).
+    /// exists — <paramref name="kind"/> is the <c>@objtype</c> as passed, or
+    /// without one the lower-case kind real inferred (<c>object</c>,
+    /// <c>column</c>, <c>index</c>), ungrammatical article and all
+    /// ("already in use as a object name"; probed 2026-09-30 against SQL
+    /// Server 2025). Severity 11, state 1, from line 738 of <c>sp_rename</c>.
     /// </summary>
     internal static SimulatedSqlException RenameDuplicateName(string newName, string kind) =>
         RenameError($"Error: The new name '{newName}' is already in use as a {kind} name and would cause a duplicate that is not permitted.", 15335);

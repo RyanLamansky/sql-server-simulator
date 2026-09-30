@@ -366,6 +366,8 @@ That holds while compiling as well as per row, so an unknown qualifier is Msg 41
 Matching on the leaf alone silently sorted by the wrong column whenever a join brought a same-named column into scope — `ORDER BY child.id` bound to the projected `parent.id`, which is the shape an ORM emits when ordering by a related model's field.
 
 `DISTINCT` keeps its own rule: the term must appear in the select list, and a miss is Msg 145 rather than a source fallback.
+An expression term appears there only when it matches a select item **by shape** — the structural match a grouping expression makes, columns keyed by the source column they resolve to and parentheses transparent — and sorts by that item: `ORDER BY id + 1` over `SELECT DISTINCT p.id + 1`, `ORDER BY COUNT(*)` over a projected `COUNT(*)` (probed 2026-09-30 against SQL Server 2025).
+Reading projected columns alone is not enough: `ORDER BY n + 0`, `ORDER BY 1 + id` over `id + 1`, `n + 1.0` over `n + 1`, a `CASE` or `COLLATE` over a projected column and a subquery written in both places are all Msg 145, raised while compiling.
 The term may name the **source column behind a projected one** rather than its output alias (`SELECT DISTINCT c.name AS Col5 … ORDER BY c.name`), which is the only spelling left when an ORM aliases every output positionally.
 Under DISTINCT the qualified form follows the same source-reference rule as the non-DISTINCT path: it must name a source column that is itself projected, and a miss is Msg 145 rather than a leaf match against the output aliases (tightened 2026-07-31 — `SELECT DISTINCT val AS id … ORDER BY t.id` is an error, while `ORDER BY c.nm` over `SELECT DISTINCT nm AS Col5` is legal).
 
@@ -778,6 +780,11 @@ Probed against SQL Server 2025 (2026-08-05):
 | `SELECT a + b` over `GROUP BY b + a` | Msg 8120, once per column |
 
 The walk carries the covering predicate down the tree (`ColumnReferenceVisitor.CoversSubtree`), so it stops the moment a node matches a grouping expression and every reference that reaches the check is one nothing covered.
+
+**A subquery's reference to the grouped query's own column is checked too** (probed 2026-09-30 against SQL Server 2025).
+`SELECT a, (SELECT COUNT(*) FROM t AS u WHERE u.b = t.b) FROM t GROUP BY a` is Msg 8120 on `t.b`, and so is the reference from the subquery's select list, ON, a derived table inside it or a subquery nested in it; from HAVING it is Msg 8121 and from ORDER BY Msg 8127, and a bare scalar aggregate raises it too (`SELECT COUNT(*), (SELECT t.b) FROM t`).
+What passes: a grouped column, an aggregate over the outer column alone (the outer query's own, see [aggregate ownership](#aggregate-ownership-across-scopes)), a subquery in WHERE, and a grouping expression's match, which crosses the boundary (`(SELECT b + 1)` under `GROUP BY b + 1` runs).
+Each subquery plan keeps its select list and clauses (`Selection.ClauseExpressions`) for that walk, which resolves each name innermost first.
 A node's identity is its `ShapeKey`: the tree's node kinds, their own state and their children, with each column keyed by the source column it resolves to.
 The walk reaches every expression kind (each describes its children through `ExpressionNode.Describe`), so a column inside a `CASE` arm, `COALESCE` or any scalar's argument is checked like any other (`SELECT COALESCE(a, 0) … GROUP BY b` is Msg 8120, probed 2026-09-23); it stops only at an aggregate, a window function and a subquery.
 
