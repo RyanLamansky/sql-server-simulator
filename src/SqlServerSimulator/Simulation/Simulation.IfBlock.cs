@@ -269,11 +269,9 @@ partial class Simulation
     /// body SELECT, and BREAK-exit scenarios.
     /// </para>
     /// <para>
-    /// Iteration cap: <see cref="BatchContext.LoopIterationLimit"/> caps the
-    /// total iterations across the batch (not per-loop) so a buggy test
-    /// doesn't hang CI. Real SQL Server has no such cap (server timeouts
-    /// handle runaway loops); the simulator surfaces an explicit error
-    /// instead. Document this in CLAUDE.md as a simulator-only limit.
+    /// A WHILE has no iteration limit, as real's has none: a runaway loop ends
+    /// at the command timeout or a cancel, which the between-statement check
+    /// above observes.
     /// </para>
     /// <para>
     /// <see cref="BatchContext.LoopDepth"/> is bumped unconditionally (even
@@ -324,13 +322,6 @@ partial class Simulation
                     if (batch.CancelledAtStatementBoundary())
                         goto ExitLoop;
 
-                    if (++batch.LoopIterations > BatchContext.LoopIterationLimit)
-                    {
-                        throw new InvalidOperationException(
-                            $"WHILE iteration cap exceeded ({BatchContext.LoopIterationLimit} iterations). "
-                            + "Real SQL Server has no such cap; the simulator enforces one so a buggy test doesn't hang. "
-                            + "If this is a legitimate use case, restructure the loop or bump LoopIterationLimit.");
-                    }
 
                     context.RestoreCheckpoint(bodyStart);
                     StatementClock? conditionClock = connection.StatisticsTime ? StatementClock.Start(connection) : null;

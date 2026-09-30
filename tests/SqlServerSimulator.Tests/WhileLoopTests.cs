@@ -9,7 +9,7 @@ namespace SqlServerSimulator;
 /// (Msg 135 / Msg 136 fire even from un-taken IF branches — real SQL
 /// Server's compile-time check), @@ROWCOUNT=0 at every exit path,
 /// non-boolean cond (Msg 4145), WHILE in un-taken IF (skip-mode), and
-/// the simulator's iteration cap. Behavior probed against SQL Server
+/// runaway loops ending at the command timeout. Behavior probed against SQL Server
 /// 2025 (2026-05-11).
 /// </summary>
 [TestClass]
@@ -203,7 +203,7 @@ public sealed class WhileLoopTests
     /// <summary>
     /// WHILE inside an un-taken IF branch: the WHILE never iterates.
     /// Critical because the body is <c>WHILE 1=1</c> (infinite loop) —
-    /// if skip-mode failed, the test would hit the iteration cap.
+    /// if skip-mode failed, the test would run until the command timeout.
     /// </summary>
     [TestMethod]
     public void WhileInsideSkippedIf_NeverIterates()
@@ -253,22 +253,29 @@ public sealed class WhileLoopTests
             select @i
             """));
 
-    // ---- Iteration cap ----
+    // ---- Runaway loops ----
 
     /// <summary>
-    /// Simulator-only safety: a runaway WHILE throws after the per-batch
-    /// iteration cap is exceeded. Real SQL Server has no such cap — query
-    /// timeouts handle this in production — but the simulator surfaces an
-    /// explicit error so a buggy test doesn't hang CI.
+    /// A WHILE has no iteration limit, as real's has none: a long loop runs
+    /// to completion, and a runaway one ends at the command timeout with
+    /// Msg -2 (probed 2026-09-30 against SQL Server 2025).
     /// </summary>
     [TestMethod]
-    public void IterationCap_ThrowsAfterLimit()
-    {
-        var ex = Throws<InvalidOperationException>(() => new Simulation().ExecuteNonQuery("""
+    public void LongLoop_RunsToCompletion()
+        => AreEqual(150_000, new Simulation().ExecuteScalar<int>("""
             declare @i int = 0;
-            while 1 = 1 set @i = @i + 1
+            while @i < 150000 set @i += 1;
+            select @i
             """));
-        Contains("iteration cap exceeded", ex.Message, StringComparison.Ordinal);
+
+    [TestMethod]
+    public void RunawayLoop_EndsAtTheCommandTimeout()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "declare @i int = 0; while 1 = 1 set @i = @i + 1";
+        command.CommandTimeout = 1;
+        AreEqual(-2, Throws<SimulatedSqlException>(() => command.ExecuteNonQuery()).Number);
     }
 
     /// <summary>

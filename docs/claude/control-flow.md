@@ -102,9 +102,7 @@ The check on `BatchContext.LoopDepth == 0` fires *unconditionally* — real SQL 
 **This is distinct from the un-taken-branch deferred-name-resolution behavior** described below: name resolution defers in skip mode, but BREAK's structural scope check does not — `IF 1=0 BREAK` at batch top level fires Msg 135 even though the branch is un-taken.
 Inside a real WHILE, `LoopDepth > 0` lets BREAK in an un-taken IF body just no-op (because the `!IsSkipping` gate on the flag *write* prevents the actual control transfer).
 
-**Iteration cap** — simulator-only safety net at `BatchContext.LoopIterationLimit = 100_000` total iterations per batch.
-Real SQL Server has no such cap (timeouts handle runaway loops).
-The simulator throws `InvalidOperationException` so a buggy test doesn't hang CI.
+**No iteration limit** — as on real, a runaway `WHILE` ends only at the command timeout or a cancel, which the loop's between-statement check observes (probed 2026-09-30 against SQL Server 2025).
 
 **`LoopDepth` is bumped unconditionally** (even when the WHILE itself is in skip mode) so BREAK / CONTINUE inside the body — including inside un-taken IF branches — never see Msg 135 / 136 fire incorrectly.
 The flag-write gate (`!IsSkipping`) handles the runtime "BREAK in skipped-IF inside WHILE" case.

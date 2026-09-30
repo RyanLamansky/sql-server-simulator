@@ -440,17 +440,6 @@ internal sealed class BatchContext
     public int LoopDepth;
 
     /// <summary>
-    /// Total WHILE iterations executed in this batch. Counted across all
-    /// loops; the cap is global per batch. Real SQL Server has no such cap
-    /// (timeouts handle runaway loops in production); the simulator caps
-    /// at <see cref="LoopIterationLimit"/> so a buggy test doesn't hang CI.
-    /// </summary>
-    public long LoopIterations;
-
-    /// <summary>Per-batch ceiling on total WHILE iterations.</summary>
-    public const long LoopIterationLimit = 100_000;
-
-    /// <summary>
     /// Rows the row-level cancellation poll has let through since its last
     /// look (see <see cref="PollCancellation"/>). A field rather than a loop
     /// local so the stride carries across enumerations: a recursive CTE's
