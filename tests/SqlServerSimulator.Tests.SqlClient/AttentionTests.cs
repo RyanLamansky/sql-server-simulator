@@ -126,8 +126,13 @@ public sealed class AttentionTests
     /// SqlClient 7.0.2). Whether SqlClient surfaces the Msg 3621 notice depends
     /// on when its own timer reads the stream, so this asserts only what the
     /// client guarantees; StatementCancellationTests pins the notice itself.
+    /// Kept out of the parallel run: its synchronous call waits on a pool thread
+    /// while the attention watcher needs another, and a starved pool that delays
+    /// the acknowledgment past SqlClient's 5-second wait makes it break the
+    /// connection, failing the asynchronous half on a closed connection.
     /// </summary>
     [TestMethod]
+    [DoNotParallelize]
     public async Task CommandTimeout_InsideAWrite_SendsMsg3621AndRollsTheWriteBack()
     {
         var simulation = new Simulation();
