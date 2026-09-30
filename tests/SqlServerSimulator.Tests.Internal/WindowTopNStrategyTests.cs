@@ -123,9 +123,9 @@ public sealed class WindowTopNStrategyTests
 
     [TestMethod]
     public void BoundPastTheHeapCeiling_StillBinds() =>
-        // Past BoundedRowNumberHeapMaxRows the partition sorts as it always did,
-        // but the bound still narrows what gets projected — the deep-paging
-        // shape's whole win.
+        // Past the heap's ceiling the partition is buffered and the bound's
+        // window selected out of it, so only that window is sorted or
+        // projected — the deep-paging shape's whole win.
         Contains("RowNumberBound(x,5001..5050)", TraceOf(Shape("rn between 5001 and 5050")));
 
     [TestMethod]

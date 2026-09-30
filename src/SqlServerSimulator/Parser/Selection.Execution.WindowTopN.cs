@@ -30,17 +30,6 @@ partial class Selection
     internal Func<RowNumberBound, Selection?>? RowNumberBoundPushdown;
 
     /// <summary>
-    /// Largest per-partition row count the bounded selection heap will take.
-    /// Past this the per-row sift stops being cheaper than sorting the partition
-    /// once — the same crossover <see cref="TopNHeapMaxRows"/> draws for a
-    /// statement's own <c>TOP (n)</c>. A wider bound still <em>narrows</em>: the
-    /// partition sorts as it always did and only the rows inside the bound are
-    /// projected, which is the whole win for a deep-paging
-    /// <c>rn BETWEEN 50001 AND 50050</c> read.
-    /// </summary>
-    private const int BoundedRowNumberHeapMaxRows = 4096;
-
-    /// <summary>
     /// An enclosing statement's constant bound on a derived table's row-number
     /// column: the body's output <see cref="Ordinal"/> the bound was written
     /// against, and the inclusive row-number window
@@ -398,9 +387,9 @@ partial class Selection
     /// whose single window is a <c>ROW_NUMBER()</c> an enclosing statement
     /// bounded to <c>[<paramref name="lower"/>, <paramref name="upper"/>]</c>.
     /// Each partition collects into its own
-    /// <see cref="PartitionTopRows"/> — a bounded max-heap of
+    /// <see cref="TopRows{T}"/> — a bounded max-heap of
     /// <paramref name="upper"/> rows where that fits
-    /// <see cref="BoundedRowNumberHeapMaxRows"/>, an ordinary buffer otherwise —
+    /// <see cref="TopRowsHeapMaxRows"/>, an ordinary buffer otherwise —
     /// so a row the bound can't reach is dropped as it is read, without being
     /// cloned, ranked or projected.
     /// <para>
@@ -438,7 +427,7 @@ partial class Selection
         var rowRuntime = new RuntimeContext(resolveSource, batch);
 
         var orderByList = new List<OrderBySpec>(window.OrderBy);
-        var partitions = new Dictionary<SqlValue[], PartitionTopRows>(RowEqualityComparer.Instance);
+        var partitions = new Dictionary<SqlValue[], TopRows<byte[]?[]>>(RowEqualityComparer.Instance);
         // Partition and order keys go into reused scratch: a partition is keyed
         // by a copy only the first time it is seen, and a row's keys are copied
         // only if the collector admits it — so a row the bound rejects costs no
@@ -469,18 +458,21 @@ partial class Selection
 
             if (!partitions.TryGetValue(partitionKeys, out var collector))
             {
-                collector = new PartitionTopRows(
-                    upper <= BoundedRowNumberHeapMaxRows ? Math.Max(upper, 1) : int.MaxValue, orderByList);
+                collector = new TopRows<byte[]?[]>(
+                    upper <= TopRowsHeapMaxRows ? Math.Max(upper, 1) : int.MaxValue, orderByList);
                 partitions[[.. partitionKeys]] = collector;
             }
 
-            collector.Offer(tuple, orderKeys, sequence++);
+            var admission = collector.Classify(orderKeys, sequence);
+            if (admission != TopRowAdmission.Rejected)
+                collector.Add(admission, [.. tuple], [.. orderKeys], sequence);
+            sequence++;
         }
 
         // Rank each partition's retained rows and keep the ones inside the
         // bound, partition by partition in key order — the window sort's order,
         // which the unbounded path yields in too.
-        var ordered = new List<KeyValuePair<SqlValue[], PartitionTopRows>>(partitions);
+        var ordered = new List<KeyValuePair<SqlValue[], TopRows<byte[]?[]>>>(partitions);
         ordered.Sort(static (a, b) =>
         {
             for (var p = 0; p < a.Key.Length; p++)
@@ -494,10 +486,9 @@ partial class Selection
         List<(byte[]?[] Tuple, long RowNumber)> kept = [];
         foreach (var (_, collector) in ordered)
         {
-            var ranked = collector.DrainOrdered();
-            var limit = Math.Min(ranked.Count, upper);
-            for (var i = lower - 1; i < limit; i++)
-                kept.Add((ranked[i].Tuple, i + 1));
+            var ranked = collector.Rank(lower - 1, upper);
+            for (var i = 0; i < ranked.Count; i++)
+                kept.Add((ranked[i].Payload, lower + i));
         }
 
         foreach (var (tuple, rowNumber) in kept)
@@ -508,110 +499,6 @@ partial class Selection
             for (var j = 0; j < expressions.Count; j++)
                 projected[j] = expressions[j].Run(rowRuntime);
             yield return projected;
-        }
-    }
-
-    /// <summary>
-    /// One partition's candidate rows for a bounded <c>ROW_NUMBER()</c>, ordered
-    /// by the window's ORDER BY keys and then by arrival position — the total
-    /// order both window paths rank against.
-    /// <para>
-    /// With a finite capacity this is a bounded max-heap of the <c>n</c> smallest
-    /// rows seen (root = the worst row admitted), so once it is full a candidate
-    /// is rejected on a single compare and never copied — the same mechanism
-    /// <c>TopNRowHeap</c> gives a statement's own <c>TOP (n)</c>, over a
-    /// partition rather than the whole result. An <see cref="int.MaxValue"/>
-    /// capacity buffers instead and sorts once at the drain, which is what a
-    /// bound too wide for the heap (a deep-paging read) falls back to: it still
-    /// spares the projection of every row outside the bound.
-    /// </para>
-    /// </summary>
-    private sealed class PartitionTopRows(int capacity, List<OrderBySpec> orderBy)
-    {
-        private readonly List<(byte[]?[] Tuple, SqlValue[] Keys, int Sequence)> entries = [];
-
-        /// <summary>
-        /// Admits the row if it beats the worst held (always, when unbounded),
-        /// else drops it. The tuple and its keys are copied only on admission —
-        /// the caller hands over reused scratch, and
-        /// <see cref="EnumerateJoinedRows"/> rewrites its tuple in place.
-        /// </summary>
-        public void Offer(byte[]?[] tuple, SqlValue[] keys, int sequence)
-        {
-            if (this.entries.Count < capacity)
-            {
-                this.entries.Add(((byte[]?[])tuple.Clone(), [.. keys], sequence));
-                if (capacity != int.MaxValue)
-                    this.SiftUp(this.entries.Count - 1);
-                return;
-            }
-
-            if (this.Compare(keys, sequence, this.entries[0]) >= 0)
-                return;
-            this.entries[0] = ((byte[]?[])tuple.Clone(), [.. keys], sequence);
-            this.SiftDown();
-        }
-
-        /// <summary>The rows held, best first. A heap fills the result back to front by repeated root removal; a buffer sorts in place.</summary>
-        public List<(byte[]?[] Tuple, SqlValue[] Keys, int Sequence)> DrainOrdered()
-        {
-            if (capacity == int.MaxValue)
-            {
-                this.entries.Sort((a, b) => this.Compare(a.Keys, a.Sequence, b));
-                return this.entries;
-            }
-
-            var ordered = new (byte[]?[] Tuple, SqlValue[] Keys, int Sequence)[this.entries.Count];
-            for (var i = ordered.Length - 1; i >= 0; i--)
-            {
-                ordered[i] = this.entries[0];
-                this.entries[0] = this.entries[^1];
-                this.entries.RemoveAt(this.entries.Count - 1);
-                this.SiftDown();
-            }
-
-            return [.. ordered];
-        }
-
-        private int Compare(SqlValue[] keys, int sequence, (byte[]?[] Tuple, SqlValue[] Keys, int Sequence) other)
-        {
-            var comparison = SortOrderKeys(keys, other.Keys, orderBy);
-            return comparison != 0 ? comparison : sequence.CompareTo(other.Sequence);
-        }
-
-        private void SiftUp(int index)
-        {
-            while (index > 0)
-            {
-                var parent = (index - 1) / 2;
-                if (this.Compare(this.entries[index].Keys, this.entries[index].Sequence, this.entries[parent]) <= 0)
-                    return;
-                (this.entries[parent], this.entries[index]) = (this.entries[index], this.entries[parent]);
-                index = parent;
-            }
-        }
-
-        private void SiftDown()
-        {
-            var index = 0;
-            while (true)
-            {
-                var left = (index * 2) + 1;
-                if (left >= this.entries.Count)
-                    return;
-                var largest = this.Compare(this.entries[left].Keys, this.entries[left].Sequence, this.entries[index]) > 0 ? left : index;
-                var right = left + 1;
-                if (right < this.entries.Count
-                    && this.Compare(this.entries[right].Keys, this.entries[right].Sequence, this.entries[largest]) > 0)
-                {
-                    largest = right;
-                }
-
-                if (largest == index)
-                    return;
-                (this.entries[largest], this.entries[index]) = (this.entries[index], this.entries[largest]);
-                index = largest;
-            }
         }
     }
 }

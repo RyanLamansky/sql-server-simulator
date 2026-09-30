@@ -227,16 +227,16 @@ The streaming projection models it — the WHERE still judges each skipped row, 
 
 When an index supplies the `ORDER BY` order (see [`indexes.md`](indexes.md#order-by-elimination)) and no residual WHERE stands between the scan and the page, every row the scan yields is a result row, so the scan passes the `OFFSET`'s rows over where it walks them — locked and counted in `STATISTICS IO` like any row it reads, but never fetched, decoded or projected — and stops once the `FETCH` is full, which is real's plan: a Top over the ordered index scan reading offset + fetch rows.
 Measured on a 150k-row table paged at offset 140k, fetch 100, `ORDER BY` the primary key: **53 ms → 5 ms** (real ~6 ms), with a residual WHERE 62 ms → 18 ms (real ~7 ms), and the first page 11.6 ms → 0.04 ms, since the key order it walks is kept between writes rather than rebuilt per query.
-A sort the index can't serve still sorts and projects every row — see [`backlog.md`](backlog.md).
+A sort no index serves ranks the rows by their keys and projects only the page — see [Top-N selection](#top-n-selection).
 
 ## `TOP n [PERCENT] [WITH TIES]`
-- `TOP n` — the plain integer row cap; streams when no ORDER BY / DISTINCT, else applied after the buffered sort.
+- `TOP n` — the plain integer row cap; streams when no ORDER BY / DISTINCT, else read off the [Top-N selection](#top-n-selection).
 - `TOP n PERCENT` — the cap is `ceil(rowcount × n / 100)` (probe-confirmed against SQL Server 2025).
   The percent value must resolve to a numeric in `[0, 100]` — outside → **Msg 1031**, NULL → **Msg 1014**.
-  PERCENT forces the buffered path (the total rowcount must be known).
+  PERCENT buffers every row (the total rowcount must be known).
 - `TOP n WITH TIES` — after the cap, additionally emits every following row whose ORDER BY key equals the boundary row's.
-  Requires an ORDER BY (else **Msg 1062**); also forces the buffered path.
-- Both flags ride the existing TOP parse (`topPercent` / `topWithTies` on the projection build) and are honored by the buffered, windowed, and aggregate projection paths via `ComputeTopCap`.
+  Requires an ORDER BY (else **Msg 1062**).
+- Both flags ride the existing TOP parse (`topPercent` / `topWithTies` on the projection build).
 
 ### The operand's type, and where it is checked
 
@@ -247,22 +247,44 @@ Real settles that one from the operand's *declared type* instead, which is why `
 A **written constant** keeps the ordinary value check even at bind time, since real refuses `TOP (NULL)` and `TOP (1.5)` at CREATE too (probe-confirmed).
 `OFFSET` / `FETCH` take the same operands and the same split.
 
-### Top-N heap
+### Top-N selection
 
-A plain `TOP (n)` over an ORDER BY doesn't sort its buffer at all: `ProjectBuffered` feeds rows into a bounded max-heap of `n` entries (`TopNRowHeap` in `Selection.Execution.OrderBy.cs`) whose root is the worst row admitted, so once it is full a candidate is rejected on a single `CompareOrderKeys`.
-That turns the cap's cost from O(rows log rows) into O(rows) plus a sift for the few rows that get in — and it is **the operator shape real picks too**: its plan for `SELECT TOP (10) … ORDER BY <unindexed>` over 228k rows is a Clustered Index Scan under a *TopN Sort*.
+An ORDER BY no index serves ranks the rows the WHERE keeps by their **keys alone**, and projects only the rows its `TOP` / `OFFSET` / `FETCH` window returns (`ProjectSorted` in `Selection.Execution.TopRows.cs`).
+That is real's plan shape — its select list is a Compute Scalar above the Sort and Top — and it is observable: a select-list expression that raises on a row outside the window never runs, while one naming a sort key by alias or ordinal runs for every row, as real's sort key must (probed 2026-09-30 against SQL Server 2025, `1 / (id - 5)` in each position).
+A key naming a select-list column hands its value to the projection rather than evaluating twice, so a `NEWID()` the rows sort by is the one they return.
+The one exception is a select list drawing `NEXT VALUE FOR` (legal under its own `OVER`), which projects every row as it is read: a sequence draws once per row, deduplicated by the row stamp the read sets.
 
-Eligible when there is an ORDER BY, the cap is a plain `TOP (n)` or `FETCH` resolving into `1 … 1024`, and nothing behind it needs the full ordered set: `PERCENT` and `WITH TIES` both read the total row count or the boundary row's neighbours, an `OFFSET` skips into the middle of the order, and `DISTINCT` has to dedupe the whole set before the cap means anything.
-Each of those keeps the full sort, and past the 1024 ceiling the per-row sift stops being cheaper than sorting once.
+The ranking lives in `TopRows<T>` (`Selection.Execution.TopRows.cs`), shared with a grouped query's `TOP` and the bounded per-partition `ROW_NUMBER()`:
+- **A bound known before the scan within 4096 rows** (`TOP`, or `OFFSET` + `FETCH`, resolved per execution, so EF's parameterized `Skip` / `Take` qualifies) is a bounded max-heap: once full, a candidate is rejected on one compare against the root and never copied, and a reused scratch key tuple means a rejected row allocates nothing.
+  Under `WITH TIES` the heap also keeps the rejected candidates tying its root; the root only improves, so that list is either still the boundary's or wholly outside it.
+- **Anything wider, `PERCENT`, or no cap** buffers every row as its tuple and keys and selects the window at the end: Hoare selection places the window's last rank, then its first, and only the window is sorted — about three compares a row for a deep page, where the full sort paid seventeen.
 
-**Ties at the boundary.**
-A candidate tying the root is rejected, so among rows with equal keys the earliest-scanned survive — a stable pick, where the full-sort path's `List<T>.Sort` is an unstable introsort.
-Real leaves it unspecified too (its TopN Sort carries no stability guarantee), so the two agree on every row whose key is strictly inside the window and may differ only on which members of a tie group *spanning* the boundary come back.
-No existing test depended on the old pick.
+**The order is total**: the ORDER BY keys (with a `Pref` collation's uppercase preference once every key ties), then arrival.
+So every strategy returns the full sort's rows in the full sort's order, ties at the boundary included, and ties everywhere keep arrival order — which is what [row order](#row-order-without-order-by) documents for a sort's ties, and what the old `List<T>.Sort` introsort only gave below its insertion-sort threshold.
+Real leaves a tie's order to the plan: its full sort and its Top N Sort return one tie group in different orders for the same data (probed 2026-09-30), so no fixed rule matches it and arrival costs nothing.
+The `DISTINCT` and windowed paths project first (deduplication and the windows read the projection) and then rank through the same selection.
 
-Measured on `SELECT TOP (10) InvoiceLineID, UnitPrice, ExtendedPrice FROM Sales.InvoiceLines ORDER BY UnitPrice DESC, InvoiceLineID DESC` (228k rows, no index on the sort column): 338 ms → 122 ms median, 8.8× live → ~3.1×.
-The residual is not the cap — a bare `SELECT COUNT(*)` over the same table already costs ~70 ms here — but the scan, and real's own plan shows why it wins: 41 ms elapsed against **280 ms of CPU**, at `DegreeOfParallelism="8"`.
-Single-threaded, the simulator uses less CPU than real does for the same query; the gap is intra-query parallelism, which no top-N strategy reaches.
+Measured 2026-09-30 on 150k rows (`id int` primary key, sort columns unindexed; offsets 0 / 1k / 140k, fetch 100; `WHERE id % 3 <> 0` keeps 100k, paged at 90k), median ms, the reference server at DOP 8:
+
+| shape | before | after | real |
+|---|---|---|---|
+| `int`, offset 0 / 1k / 140k | 73 / 159 / 132 | **25 / 30 / 86** | 9 / 6 / 34 |
+| `nvarchar(40)`, offset 0 / 1k / 140k | 53 / 602 / 605 | **23 / 33 / 91** | 10 / 12 / 49 |
+| `varchar(40)`, offset 0 / 1k / 140k | 54 / 439 / 450 | **22 / 29 / 79** | 10 / 9 / 54 |
+| `g, s DESC`, offset 0 / 1k / 140k | 45 / 452 / 436 | **20 / 27 / 90** | 9 / 9 / 58 |
+| `nvarchar` + WHERE, offset 0 / 1k / 90k | 56 / 411 / 415 | **33 / 40 / 87** | 10 / 10 / 34 |
+| `TOP (100) WITH TIES` over a 50-valued key | 162 | **13** | 10 |
+| `TOP (1) PERCENT` by `nvarchar` | 568 | **77** | 193 |
+| EF `OFFSET @p ROWS FETCH NEXT @q` (5000, 100) | 600 | **88** | 14 |
+| full sort by `nvarchar`, all 150k rows | 619 | **356** | 90 |
+
+Allocation fell from 84–119 MB to 17–30 MB for a heap-served page and 37–63 MB for a buffered one.
+A bare `SELECT COUNT(*), MAX(s)` over the same table is 24 ms here and 14 ms on real, so a heap-served page sits a few milliseconds above the scan it has to do anyway.
+A deep page's median carries garbage-collection noise its minimum doesn't (`int` at 140k: 86 median, 39 minimum), since every row's tuple and keys survive to the selection.
+
+**The comparer was most of a sort's cost.**
+Profiled, the full sort by `nvarchar` spent 72% of its time inside `SQL_Latin1_General_CP1_CI_AS`'s compare, which read three frozen dictionaries per character; flat tables for U+0000–U+00FF (`Latin1Entry` in `Collation.SqlLatin1Sort.cs`) cut that sort from 650 ms to 355 ms, and every comparison under the default collation gains the same.
+The residual against real is its parallelism: the 150k-row sort is a single thread here against eight there.
 
 ## `SET ROWCOUNT n`
 
@@ -463,7 +485,7 @@ A *constant* term never reaches this table — the ORDER BY parser rejects it up
 
 ## Result drain / ORDER BY representation
 The FROM-bearing SELECT projection paths — streaming, buffered (ORDER BY / DISTINCT), windowed, and aggregate — all yield already-projected `SqlValue[]` rows, so `SimulatedSqlResultSet` serves the reader and TDS cursors directly with no encode-then-re-decode round-trip (see the `SimulatedSqlResultSet` doc + [`data-reader.md`](data-reader.md)).
-**ORDER BY on a single SELECT sorts those projected `SqlValue[]` rows** (`ProjectBuffered.materialized.Sort`), so ordered drains ride the same decoded-once fast path as unordered ones; the only ordered-vs-unordered cost is the inherent buffer + per-row key computation + `List.Sort`, not a decode round-trip, and peak retained memory is effectively unchanged (measured within 0.2% on a 150k-row wide drain).
+**ORDER BY on a single SELECT ranks rows by their keys and projects the survivors into `SqlValue[]`** (see [Top-N selection](#top-n-selection)), so ordered drains ride the same decoded-once fast path as unordered ones, with no decode round-trip.
 
 The **top-level ORDER BY after a set-op chain** (`ApplyTopLevelOrderBy`) is the exception: the inner UNION / INTERSECT / EXCEPT chain yields byte[] rows natively (branch dedup / coercion re-encode), so that path keeps the byte[] form through the sort and lets the drain cursor decode once — eagerly decoding every column into `SqlValue[]` for the whole buffer measured slower and heavier (strings re-materialized and retained across the sort).
 Sort keys decode only the ORDER BY columns off each row (`ComputeTopLevelOrderKeys`), not the full tuple.
@@ -619,7 +641,8 @@ Oracle: `ParallelAggregateTests` — serial-vs-parallel equality on every admitt
 
 ### Top-N over the grouped stream
 
-A small `TOP (n)` / `FETCH` whose ORDER BY runs over the *groups* takes the same bounded heap the row-level projection does (see [Top-N heap](#top-n-heap) for the mechanism, the eligibility rules and the tie behaviour — they are the same rules, read against the grouped stream).
+A small `TOP (n)` / `FETCH` whose ORDER BY runs over the *groups* takes the same bounded heap the row-level projection does (see [Top-N selection](#top-n-selection) for the mechanism and the tie order).
+Only a plain `TOP (n)` / `FETCH` of at most 1024 groups with no `OFFSET`, `PERCENT`, `WITH TIES` or `DISTINCT` takes it; the rest sort every group.
 `TOP (5) OrderID, COUNT(*) … GROUP BY OrderID ORDER BY N DESC` over 73k groups keeps five in a bounded heap rather than sorting all 73k.
 Under the heap the projection and key tuple are computed into reused scratch and copied only on admission, so the groups that lose cost no allocation at all — which is most of the win at that group count.
 
@@ -946,7 +969,7 @@ SELECT … FROM (SELECT …, ROW_NUMBER() OVER (PARTITION BY p ORDER BY s) AS rn
 ```
 
 Read literally that ranks every row of every partition and projects all of them for the filter to throw away — 73k rows and 663 partitions to answer 663.
-`Selection.BoundRowNumberBodies` (`Selection.Execution.WindowTopN.cs`) hands the body the **inclusive row-number window the enclosing WHERE leaves surviving** instead, and the body then keeps each partition's top rows in a bounded max-heap (`PartitionTopRows`) — the mechanism [Top-N heap](#top-n-heap) gives a statement's own `TOP (n)`, read against one partition rather than the whole result.
+`Selection.BoundRowNumberBodies` (`Selection.Execution.WindowTopN.cs`) hands the body the **inclusive row-number window the enclosing WHERE leaves surviving** instead, and the body then keeps each partition's top rows in a bounded max-heap (`TopRows<T>`) — the mechanism [Top-N selection](#top-n-selection) gives a statement's own `TOP (n)`, read against one partition rather than the whole result.
 A row the bound can't reach is dropped as it is read: not cloned, not ranked, not projected.
 
 **The bounding conjunct stays in the enclosing WHERE**, the residual invariant every narrowing pass rests on (see [`joins.md`](joins.md) and [`indexes.md`](indexes.md#the-scan-prefilter-a-join-source-no-key-can-seek)).
@@ -961,7 +984,8 @@ The bound itself is collected **per bounded column** rather than per conjunct, s
 Rounding is outward on both ends — `rn <= 2.5` keeps two rows, `rn >= 2.5` starts at three — so a fractional comparand can never tighten the window past what the residual comparison rejects.
 A lower bound with no upper one declines: every row of the partition would still have to be ranked.
 
-Past **4096** rows the selection heap stands down (the crossover [Top-N heap](#top-n-heap) draws, for the same reason) and the partition sorts as it always did — but the bound still narrows what is *projected*, which is the whole win for a deep-paging `rn BETWEEN 50001 AND 50050` read.
+Past **4096** rows the heap stands down for the buffer [Top-N selection](#top-n-selection) falls back to, which selects the bound's window rather than sorting the partition, and projects only that window.
+Measured 2026-09-30, `rn BETWEEN 100001 AND 100050` over 150k rows ordered by an unindexed `nvarchar`: 546 ms → 127 ms median (88 ms minimum), real 40 ms.
 
 **Ties, and why the ranking sort is total.** A heap can only reproduce a full sort's answer against an order with no ties in it, so both paths order a partition by the window's ORDER BY keys **and then by the row's own arrival position**.
 That settles which member of a tie group takes which number; a bare `List<int>.Sort` introsort would pick arbitrarily above its insertion-sort threshold and stably below it — not even consistent with itself across partition sizes.

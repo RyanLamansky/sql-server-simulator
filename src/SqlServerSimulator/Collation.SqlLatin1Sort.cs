@@ -209,6 +209,45 @@ internal abstract partial class Collation
             { 'æ', "ae" }, { 'Æ', "ae" }, { 'ß', "ss" },
         }.ToFrozenDictionary();
 
+        // The weight tables' U+0000–U+00FF rows as flat arrays, answering the
+        // repertoire, ignorable, expansion and weight lookups a comparison
+        // makes per character in one indexed read — nearly all text is
+        // Latin-1, and the dictionary lookups were most of a sort's time.
+        private static readonly Latin1Entry[] varcharLatin1 = BuildLatin1(varcharWeights, varcharExpansion, ignorable: null);
+
+        private static readonly Latin1Entry[] nvarcharLatin1 = BuildLatin1(nvarcharWeights, nvarcharExpansion, nvarcharIgnorable);
+
+        private enum Latin1Kind : byte
+        {
+            Absent,
+            Weighted,
+            Ignorable,
+            Expanding,
+        }
+
+        private readonly struct Latin1Entry(Latin1Kind kind, int primary, int secondary)
+        {
+            public readonly Latin1Kind Kind = kind;
+            public readonly int Primary = primary;
+            public readonly int Secondary = secondary;
+        }
+
+        private static Latin1Entry[] BuildLatin1(
+            FrozenDictionary<char, (int Primary, int Secondary)> weights, FrozenDictionary<char, string> expansions, FrozenSet<char>? ignorable)
+        {
+            var table = new Latin1Entry[256];
+            for (var ch = '\0'; ch < table.Length; ch++)
+            {
+                if (!weights.TryGetValue(ch, out var weight))
+                    continue;
+                var kind = ignorable is not null && ignorable.Contains(ch) ? Latin1Kind.Ignorable
+                    : expansions.ContainsKey(ch) ? Latin1Kind.Expanding
+                    : Latin1Kind.Weighted;
+                table[ch] = new(kind, weight.Primary, weight.Secondary);
+            }
+            return table;
+        }
+
         // In-repertoire characters whose GetHashCode must fold onto another
         // spelling. Each entry's target is inner-collation-equal to its key
         // (validated by test against an exhaustive ICU scan), and equality
@@ -663,8 +702,8 @@ internal abstract partial class Collation
 
         private WeightCursor NewCursor(string s) =>
             this.varcharStorage
-                ? new WeightCursor(s, varcharWeights, varcharExpansion, skipIgnorable: false)
-                : new WeightCursor(s, nvarcharWeights, nvarcharExpansion, skipIgnorable: true);
+                ? new WeightCursor(s, varcharWeights, varcharExpansion, varcharLatin1, skipIgnorable: false)
+                : new WeightCursor(s, nvarcharWeights, nvarcharExpansion, nvarcharLatin1, skipIgnorable: true);
 
         // Yields the (primary, secondary, tertiary) weight of each collation
         // element of a string in order: ignorables (nvarchar) are skipped,
@@ -678,6 +717,8 @@ internal abstract partial class Collation
             private readonly FrozenDictionary<char, (int Primary, int Secondary)> weights;
 
             private readonly FrozenDictionary<char, string> expansions;
+
+            private readonly Latin1Entry[] latin1;
 
             private readonly bool skipIgnorable;
 
@@ -693,11 +734,12 @@ internal abstract partial class Collation
 
             internal int Tertiary;
 
-            internal WeightCursor(string s, FrozenDictionary<char, (int Primary, int Secondary)> weights, FrozenDictionary<char, string> expansions, bool skipIgnorable)
+            internal WeightCursor(string s, FrozenDictionary<char, (int Primary, int Secondary)> weights, FrozenDictionary<char, string> expansions, Latin1Entry[] latin1, bool skipIgnorable)
             {
                 this.s = s;
                 this.weights = weights;
                 this.expansions = expansions;
+                this.latin1 = latin1;
                 this.skipIgnorable = skipIgnorable;
             }
 
@@ -714,6 +756,19 @@ internal abstract partial class Collation
                 while (this.index < this.s.Length)
                 {
                     var ch = this.s[this.index++];
+                    if (ch < this.latin1.Length)
+                    {
+                        var entry = this.latin1[ch];
+                        if (entry.Kind == Latin1Kind.Weighted)
+                        {
+                            this.Primary = entry.Primary;
+                            this.Secondary = entry.Secondary;
+                            this.Tertiary = 0;
+                            return true;
+                        }
+                        if (entry.Kind == Latin1Kind.Ignorable)
+                            continue;
+                    }
                     if (this.skipIgnorable && nvarcharIgnorable.Contains(ch))
                         continue;
                     if (this.expansions.TryGetValue(ch, out var exp))
@@ -789,9 +844,10 @@ internal abstract partial class Collation
         private bool InRepertoire(string s)
         {
             var weights = this.varcharStorage ? varcharWeights : nvarcharWeights;
+            var latin1 = this.varcharStorage ? varcharLatin1 : nvarcharLatin1;
             foreach (var ch in s)
             {
-                if (!weights.ContainsKey(ch))
+                if (ch < latin1.Length ? latin1[ch].Kind == Latin1Kind.Absent : !weights.ContainsKey(ch))
                     return false;
             }
 

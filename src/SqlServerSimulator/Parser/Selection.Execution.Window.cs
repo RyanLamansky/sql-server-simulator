@@ -160,13 +160,18 @@ internal sealed partial class Selection
         var materialized = filtered.ToList();
         if (orderBy.Count > 0)
         {
-            materialized.Sort((a, b) => SortOrderKeys(a.Keys, b.Keys, orderBy));
+            // Ties keep the windows' own emit order, as every ORDER BY here does.
+            var ranked = new TopRows<SqlValue[]>(int.MaxValue, orderBy, top.WithTies);
+            for (var i = 0; i < materialized.Count; i++)
+                ranked.Add(TopRowAdmission.Admitted, materialized[i].Projected, materialized[i].Keys, i);
             NoteSortWorktable(batch, sources, orderBy, expressions);
+            foreach (var entry in ranked.Rank(offsetCount ?? 0, RankWindowEnd(top, offsetCount, fetchCount, ranked.Count)))
+                yield return entry.Payload;
+            yield break;
         }
-        else if (distinct)
-        {
+
+        if (distinct)
             SortDistinctRows(materialized, static item => item.Projected, sources, joins, expressions);
-        }
 
         var cap = ComputeTopCap(materialized, item => item.Keys, orderBy, top, fetchCount);
 

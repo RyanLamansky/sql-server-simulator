@@ -245,10 +245,11 @@ internal sealed partial class Selection
         // stream. Ineligible shapes (PERCENT, WITH TIES, OFFSET, DISTINCT) fall
         // back to the full sort below.
         var topNGroups = TopNHeapCap(orderByItems, distinct, top, offsetCount, fetchCount) is { } topNCap
-            ? new TopNRowHeap(topNCap, orderByItems)
+            ? new TopRows<SqlValue[]>(topNCap, orderByItems)
             : null;
         var projectionScratch = topNGroups is null ? [] : new SqlValue[expressions.Count];
         var orderKeyScratch = topNGroups is null ? [] : new SqlValue[orderByItems.Count];
+        var groupSequence = 0;
 
         // Window pass input. A window in a grouped SELECT spans the query's
         // *whole* grouped result — with ROLLUP / CUBE / GROUPING SETS that
@@ -621,10 +622,17 @@ internal sealed partial class Selection
                             : orderByItems[k].Expr!.Run(orderRuntime);
                     }
 
-                    if (topNGroups is not null)
-                        topNGroups.OfferCopying(projected, orderKeys);
-                    else
+                    if (topNGroups is null)
+                    {
                         output.Add((groupOrder is null ? orderKeys : currentState.KeyValues, projected));
+                    }
+                    else
+                    {
+                        var admission = topNGroups.Classify(orderKeys, groupSequence);
+                        if (admission != TopRowAdmission.Rejected)
+                            topNGroups.Add(admission, [.. projected], [.. orderKeys], groupSequence);
+                        groupSequence++;
+                    }
                 }
                 finally
                 {
@@ -706,10 +714,17 @@ internal sealed partial class Selection
                             : orderByItems[k].Expr!.Run(orderRuntime);
                     }
 
-                    if (topNGroups is not null)
-                        topNGroups.Offer(projectedGroup, groupOrderKeys);
-                    else
+                    if (topNGroups is null)
+                    {
                         output.Add((groupOrderKeys, projectedGroup));
+                    }
+                    else
+                    {
+                        var admission = topNGroups.Classify(groupOrderKeys, groupSequence);
+                        if (admission != TopRowAdmission.Rejected)
+                            topNGroups.Add(admission, projectedGroup, groupOrderKeys, groupSequence);
+                        groupSequence++;
+                    }
                 }
             }
             finally
@@ -727,7 +742,7 @@ internal sealed partial class Selection
         // The bounded heap already holds exactly the rows the sort-then-cap
         // below would have kept, in the same order, so it answers on its own.
         if (topNGroups is not null)
-            return [.. topNGroups.Drain()];
+            return [.. topNGroups.Rank(0, topNGroups.Count).Select(static entry => entry.Payload)];
 
         // DISTINCT dedupes the *grouped* projection, and does so before ORDER
         // BY and any row limiting: `SELECT DISTINCT YEAR(pubdate) … GROUP BY id,

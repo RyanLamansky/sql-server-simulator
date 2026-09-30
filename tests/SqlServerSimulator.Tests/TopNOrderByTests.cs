@@ -6,8 +6,8 @@ namespace SqlServerSimulator;
 /// <c>TOP (n)</c> over an ORDER BY is served from a bounded top-N heap rather
 /// than by sorting the whole buffer — the operator shape real picks too (its
 /// plan for the same query is a Clustered Index Scan under a <em>TopN Sort</em>).
-/// These pin that the rows are the ones the full sort would have produced, and
-/// that every shape needing the full ordered set behind it still gets it.
+/// These pin that the rows are the ones the uncapped full sort produces, in its
+/// order, ties included.
 /// </summary>
 [TestClass]
 public sealed class TopNOrderByTests
@@ -41,11 +41,7 @@ public sealed class TopNOrderByTests
         return ids;
     }
 
-    /// <summary>
-    /// The heap's rows are the full sort's first n. Compared against the
-    /// identical order taken through <c>OFFSET 0 ROWS FETCH NEXT n</c>, which
-    /// declines the heap (an OFFSET is present) and so runs the full sort.
-    /// </summary>
+    /// <summary>The heap's rows are the uncapped full sort's first n.</summary>
     [TestMethod]
     [DataRow(1)]
     [DataRow(2)]
@@ -58,15 +54,14 @@ public sealed class TopNOrderByTests
     [DataRow(500)]
     public void TopN_MatchesTheFullSort_OnAUniqueKey(int n)
         => CollectionAssert.AreEqual(
-            Ids(Seeded(), $"select id from t order by id desc offset 0 rows fetch next {n} rows only"),
+            Ids(Seeded(), "select id from t order by id desc").Take(n).ToList(),
             Ids(Seeded(), $"select top ({n}) id from t order by id desc"));
 
     /// <summary>
     /// The same, with a tie group straddling the boundary: <c>grade</c> has 20
     /// rows per value, so any n that isn't a multiple of 20 cuts one in half.
-    /// The <em>keys</em> must match even where the individual rows chosen from
-    /// the straddling group need not (neither the heap nor real's TopN Sort is
-    /// stable), so this compares the grade column.
+    /// Both strategies order ties by arrival, so even the members picked from
+    /// the straddling group are the full sort's.
     /// </summary>
     [TestMethod]
     [DataRow(1)]
@@ -79,8 +74,8 @@ public sealed class TopNOrderByTests
     {
         var simulation = Seeded();
         CollectionAssert.AreEqual(
-            Ids(simulation, $"select grade from t order by grade offset 0 rows fetch next {n} rows only"),
-            Ids(simulation, $"select top ({n}) grade from t order by grade"));
+            Ids(simulation, "select id from t order by grade").Take(n).ToList(),
+            Ids(simulation, $"select top ({n}) id from t order by grade"));
     }
 
     /// <summary>
@@ -108,7 +103,7 @@ public sealed class TopNOrderByTests
         for (var n = 1; n <= 45; n += 11)
         {
             CollectionAssert.AreEqual(
-                Ids(simulation, $"select id from t order by grade desc, id asc offset 0 rows fetch next {n} rows only"),
+                Ids(simulation, "select id from t order by grade desc, id asc").Take(n).ToList(),
                 Ids(simulation, $"select top ({n}) id from t order by grade desc, id asc"));
         }
     }
@@ -123,16 +118,16 @@ public sealed class TopNOrderByTests
             insert t values (1, 5), (2, null), (3, 1), (4, null), (5, 3)
             """);
         CollectionAssert.AreEqual(
-            Ids(simulation, "select id from t order by v, id offset 0 rows fetch next 3 rows only"),
+            new[] { 2, 4, 3 },
             Ids(simulation, "select top (3) id from t order by v, id"));
         CollectionAssert.AreEqual(
-            Ids(simulation, "select id from t order by v desc, id offset 0 rows fetch next 3 rows only"),
+            new[] { 1, 5, 3 },
             Ids(simulation, "select top (3) id from t order by v desc, id"));
     }
 
     /// <summary>
-    /// The shapes that decline the heap because they need the ordered set
-    /// behind the cap. Each is checked against the answer it has always given.
+    /// The shapes that read more of the order than a plain cap. Each is checked
+    /// against the answer it has always given.
     /// </summary>
     [TestMethod]
     public void WithTies_StillExtendsPastTheCap()
@@ -162,19 +157,19 @@ public sealed class TopNOrderByTests
             Ids(Seeded(), "select distinct top (3) grade from t order by grade"));
 
     /// <summary>
-    /// A cap past the heap's own ceiling falls back to the full sort and must
+    /// A cap past the heap's own ceiling buffers and selects instead, and must
     /// answer identically — the boundary is a performance switch, not a
     /// semantic one.
     /// </summary>
     [TestMethod]
-    [DataRow(1024)]
-    [DataRow(1025)]
+    [DataRow(4096)]
+    [DataRow(4097)]
     public void CapsAroundTheHeapCeiling_AnswerIdentically(int n)
     {
         var simulation = Seeded();
         CollectionAssert.AreEqual(
-            Ids(simulation, $"select id from t order by id desc offset 0 rows fetch next {n} rows only"),
-            Ids(simulation, $"select top ({n}) id from t order by id desc"));
+            Ids(simulation, "select id from t order by grade desc"),
+            Ids(simulation, $"select top ({n}) id from t order by grade desc"));
     }
 
     /// <summary>TOP (0) and a variable-valued TOP both stay correct.</summary>
@@ -199,7 +194,7 @@ public sealed class TopNOrderByTests
                             (5,'five'),(6,'six'),(7,'seven'),(8,'eight'),(9,'nine')
             """);
         CollectionAssert.AreEqual(
-            Ids(simulation, "select t.id from t join g on g.grade = t.grade order by t.id desc offset 0 rows fetch next 7 rows only"),
+            Ids(simulation, "select t.id from t join g on g.grade = t.grade order by t.id desc").Take(7).ToList(),
             Ids(simulation, "select top (7) t.id from t join g on g.grade = t.grade order by t.id desc"));
     }
 }

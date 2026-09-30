@@ -283,22 +283,17 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Largest <c>TOP (n)</c> the bounded top-N heap will take. Past this the
-    /// heap's per-row sift stops being cheaper than sorting once, and the point
-    /// of the path — reading a small window of a large scan without paying for
-    /// the whole sort — no longer applies.
+    /// Largest <c>TOP (n)</c> a grouped query keeps in a bounded heap of groups.
     /// </summary>
     private const int TopNHeapMaxRows = 1024;
 
     /// <summary>
-    /// The row cap a buffered, sorted projection can serve from a bounded heap
-    /// instead of sorting its whole buffer, or <see langword="null"/> when it
-    /// can't. Eligible: an ORDER BY with a plain small <c>TOP (n)</c> or
-    /// <c>FETCH</c> and nothing that needs the full ordered set behind it —
-    /// <c>PERCENT</c> and <c>WITH TIES</c> both read the total row count or the
-    /// boundary row's neighbours, an <c>OFFSET</c> skips into the middle of the
-    /// order, and <c>DISTINCT</c> has to dedupe the whole set before the cap
-    /// means anything.
+    /// The row cap a grouped, sorted projection serves from a bounded
+    /// <see cref="TopRows{T}"/> of groups instead of sorting them all, or
+    /// <see langword="null"/> when it can't: an ORDER BY with a plain small
+    /// <c>TOP (n)</c> or <c>FETCH</c>, and no <c>PERCENT</c>, <c>WITH TIES</c>,
+    /// <c>OFFSET</c> or <c>DISTINCT</c>. The same test decides whether a
+    /// row-level sort lists a work table under <c>STATISTICS IO</c>.
     /// </summary>
     private static int? TopNHeapCap(List<OrderBySpec> orderBy, bool distinct, TopSpec top, int? offsetCount, int? fetchCount)
     {
@@ -307,108 +302,5 @@ internal sealed partial class Selection
 
         // TOP and FETCH are mutually exclusive at parse time (Msg 10741).
         return (top.Count ?? fetchCount) is > 0 and <= TopNHeapMaxRows and var cap ? cap : null;
-    }
-
-    /// <summary>
-    /// A bounded max-heap of the <c>n</c> smallest rows seen so far under
-    /// <see cref="CompareOrderKeys"/> — the top-N of an ORDER BY, kept in one
-    /// pass without sorting everything scanned. The root is the worst row
-    /// admitted, so a candidate is rejected on a single compare once the heap
-    /// is full, which is what makes the path O(rows) against the full sort's
-    /// O(rows log rows) for a scan whose window is tiny.
-    /// </summary>
-    /// <remarks>
-    /// A candidate tying the root is rejected, so among rows with equal keys
-    /// the earliest-scanned survive — a stable pick, where the full-sort path's
-    /// <c>List&lt;T&gt;.Sort</c> is an unstable introsort and picks arbitrarily.
-    /// Real leaves it unspecified too (its Top N Sort operator carries no
-    /// stability guarantee), so the two agree on every row whose key is strictly
-    /// inside the window and may differ only on which members of a tie group
-    /// spanning the boundary come back.
-    /// </remarks>
-    private sealed class TopNRowHeap(int capacity, List<OrderBySpec> orderBy)
-    {
-        private readonly List<(SqlValue[] Projected, SqlValue[] Keys)> entries = new(capacity);
-
-        /// <summary>Admits <paramref name="keys"/> if it beats the worst row held, else drops it.</summary>
-        public void Offer(SqlValue[] projected, SqlValue[] keys)
-        {
-            if (this.entries.Count < capacity)
-            {
-                this.entries.Add((projected, keys));
-                this.SiftUp(this.entries.Count - 1);
-                return;
-            }
-
-            if (SortOrderKeys(keys, this.entries[0].Keys, orderBy) >= 0)
-                return;
-            this.entries[0] = (projected, keys);
-            this.SiftDown();
-        }
-
-        /// <summary>
-        /// <see cref="Offer"/> for a caller that reuses one pair of scratch
-        /// arrays across candidates: the heap copies whatever it admits, so a
-        /// rejected candidate costs no allocation at all. Worth it where the
-        /// candidates are groups — a 73k-group <c>TOP (5)</c> allocated a
-        /// projection and a key tuple per group to throw all but five away.
-        /// The copies are value-identical (<see cref="SqlValue"/> is a readonly
-        /// struct), so the rows are the ones <see cref="Offer"/> would hold.
-        /// </summary>
-        public void OfferCopying(SqlValue[] projected, SqlValue[] keys)
-        {
-            if (this.entries.Count >= capacity && SortOrderKeys(keys, this.entries[0].Keys, orderBy) >= 0)
-                return;
-            this.Offer([.. projected], [.. keys]);
-        }
-
-        /// <summary>The rows held, in ORDER BY order — repeated root removal fills the result back to front.</summary>
-        public SqlValue[][] Drain()
-        {
-            var ordered = new SqlValue[this.entries.Count][];
-            for (var i = ordered.Length - 1; i >= 0; i--)
-            {
-                ordered[i] = this.entries[0].Projected;
-                this.entries[0] = this.entries[^1];
-                this.entries.RemoveAt(this.entries.Count - 1);
-                this.SiftDown();
-            }
-            return ordered;
-        }
-
-        private void SiftUp(int index)
-        {
-            while (index > 0)
-            {
-                var parent = (index - 1) / 2;
-                if (SortOrderKeys(this.entries[index].Keys, this.entries[parent].Keys, orderBy) <= 0)
-                    return;
-                (this.entries[parent], this.entries[index]) = (this.entries[index], this.entries[parent]);
-                index = parent;
-            }
-        }
-
-        private void SiftDown()
-        {
-            var index = 0;
-            while (true)
-            {
-                var left = (index * 2) + 1;
-                if (left >= this.entries.Count)
-                    return;
-                var largest = SortOrderKeys(this.entries[left].Keys, this.entries[index].Keys, orderBy) > 0 ? left : index;
-                var right = left + 1;
-                if (right < this.entries.Count
-                    && SortOrderKeys(this.entries[right].Keys, this.entries[largest].Keys, orderBy) > 0)
-                {
-                    largest = right;
-                }
-
-                if (largest == index)
-                    return;
-                (this.entries[largest], this.entries[index]) = (this.entries[index], this.entries[largest]);
-                index = largest;
-            }
-        }
     }
 }

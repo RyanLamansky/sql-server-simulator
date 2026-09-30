@@ -2704,6 +2704,8 @@ internal sealed partial class Selection
         (sources, joins) = NarrowJoinSources(sources, joins, excluders, batch, outerResolver);
         return !distinct && orderBy.Count == 0 && !top.RequiresBuffering
             ? ProjectStreaming(sources, joins, expressions, excluders, top.Count, offsetCount, fetchCount, batch, outerResolver)
+            : !distinct && orderBy.Count > 0
+            ? ProjectSorted(sources, joins, expressions, excluders, outputColumnNames, orderBy, top, offsetCount, fetchCount, batch, outerResolver)
             : ProjectBuffered(sources, joins, expressions, excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);
     }
 
@@ -2799,13 +2801,6 @@ internal sealed partial class Selection
     {
         var buffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>();
 
-        // TOP (n) over a sort keeps only the n best rows rather than buffering
-        // and sorting the whole scan — see TopNRowHeap for the eligibility
-        // rules and the tie-at-the-boundary note.
-        var topN = TopNHeapCap(orderBy, distinct, top, offsetCount, fetchCount) is { } heapCapacity
-            ? new TopNRowHeap(heapCapacity, orderBy)
-            : null;
-
         // Hoisted per-row resolution scaffolding — see InnerStream above.
         var memo = new SourceColumnMemo();
         var currentTuple = default(byte[]?[])!;
@@ -2839,17 +2834,7 @@ internal sealed partial class Selection
                 projected[i] = expressions[i].Run(rowRuntime);
 
             var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, projectionSources, distinct, batch, resolveSource);
-            if (topN is not null)
-                topN.Offer(projected, keys);
-            else
-                buffer.Add((projected, keys));
-        }
-
-        if (topN is not null)
-        {
-            foreach (var row in topN.Drain())
-                yield return row;
-            yield break;
+            buffer.Add((projected, keys));
         }
 
         IEnumerable<(SqlValue[] Projected, SqlValue[] Keys)> filtered = buffer;
@@ -2864,13 +2849,17 @@ internal sealed partial class Selection
 
         if (orderBy.Count > 0)
         {
-            materialized.Sort((a, b) => SortOrderKeys(a.Keys, b.Keys, orderBy));
+            var ranked = new TopRows<SqlValue[]>(int.MaxValue, orderBy, top.WithTies);
+            for (var i = 0; i < materialized.Count; i++)
+                ranked.Add(TopRowAdmission.Admitted, materialized[i].Projected, materialized[i].Keys, i);
             NoteSortWorktable(batch, sources, orderBy, expressions);
+            foreach (var entry in ranked.Rank(offsetCount ?? 0, RankWindowEnd(top, offsetCount, fetchCount, ranked.Count)))
+                yield return entry.Payload;
+            yield break;
         }
-        else if (distinct)
-        {
+
+        if (distinct)
             SortDistinctRows(materialized, static item => item.Projected, sources, joins, expressions);
-        }
 
         var cap = ComputeTopCap(materialized, item => item.Keys, orderBy, top, fetchCount);
 
