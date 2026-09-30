@@ -60,10 +60,7 @@ partial class Simulation
 
         BindDeferredXmlMutators(context, table, rawAssignments, targetName.ToString());
         FunctionBodyShape.NoteTableWrite(batch, "UPDATE", table);
-        RejectDisabledClusteredIndex(table);
-        RejectIncorrectSetOptionsForWrite(table, batch, "UPDATE");
-        RejectWriteToUnwritableFilegroup(table, batch, "UPDATE");
-        _ = batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
+        LockWriteTable(batch, table, "UPDATE", checkFilegroup: true);
 
         // Compile-time bind of the SET values and the predicate against the
         // view's own output columns — same contract as the single-base path,

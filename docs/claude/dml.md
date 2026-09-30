@@ -1,5 +1,21 @@
 # DML — UPDATE / DELETE / INSERT…SELECT / INSERT…EXEC / SELECT…INTO / MERGE / rowversion
 
+## The DML target
+
+`INSERT`, `UPDATE`, `DELETE` and `MERGE` read their target through one layer (`Simulation.DmlTarget.cs`): `ParseDmlTarget` resolves the name once into a `DmlTarget` — a linked server's table (four-part, `OPENQUERY`, `OPENROWSET`), a view or a CTE the statement writes through, a table, or nothing — and each verb routes on what it found.
+A view routes through `RouteViewWrite`: the action's `INSTEAD OF` trigger, its one base table, a join view's written table, or real's refusal.
+The layer holds what the verbs do alike — the missing-target error, the checks and lock ahead of a table write, the `UPDATE` / `DELETE` `OUTPUT` binding with its Msg 334 naming, the remote replay shape, a view's broken ownership chain, and the plan-cache shape gate — so a new target kind or route lands in one place.
+
+What stays per verb is where the verbs differ:
+
+- **Permissions.**
+  `INSERT` checks object-grain `INSERT`, `UPDATE` column-grain SELECT then UPDATE, `DELETE` column-grain SELECT then object-grain DELETE, and `MERGE` object-grain SELECT plus each action's permission, each probe-pinned.
+- **Order.**
+  `INSERT` records its function-body write by the written name ahead of resolving it, parses its hints before resolving, and locks its table before the disabled-index and SET-option checks the other verbs make first; `UPDATE` and `DELETE` resolve before their hints, and refuse a view real can't write through there.
+- **`MERGE` and views.**
+  A remote target is Msg 5315 before anything a remote write checks of the name, and a view with no base table or carrying any `INSTEAD OF` trigger is matched as its own rows, its triggers taking all of the actions or none (Msg 5316) — so `MERGE` doesn't take `RouteViewWrite`.
+- **`DELETE` through a join view** is Msg 4405 whatever it names, where `INSERT` and `UPDATE` write the one base table their columns land in.
+
 ## UPDATE / DELETE
 - Bare `UPDATE table SET ... [WHERE]` and `DELETE [FROM] table [WHERE]`.
 - **Target scan is seek-narrowed** when the single-table WHERE carries an indexable equality / IN / cross-column OR / range (`Selection.SeekMutationTarget`), instead of walking the whole heap — the same per-`Heap` seek cache the SELECT path and FK enforcement use.

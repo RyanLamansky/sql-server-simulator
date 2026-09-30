@@ -32,108 +32,42 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
             context.MoveNextRequired();
 
-        MultiPartName leadingIdent;
-        RemoteWrite? remoteWrite;
-        switch (context.Token)
+        var target = ParseDmlTarget(context, RemoteWriteKind.Delete);
+        var (leadingIdent, remoteWrite, leadingView, leadingTable) = (target.Name, target.Remote, target.View, target.Table);
+        if (leadingView is not null)
         {
-            case ReservedKeyword { Keyword: Keyword.OpenQuery }:
-                {
-                    var (serverName, query) = Selection.ParseOpenQueryArguments(context);
-                    remoteWrite = RemoteWrite.ForOpenQuery(context.Batch, serverName, query, RemoteWriteKind.Delete);
-                    leadingIdent = new MultiPartName(remoteWrite.Proxy.Name);
-                    break;
-                }
-            case ReservedKeyword { Keyword: Keyword.OpenRowSet }:
-                remoteWrite = Selection.ParseAdHocWriteTarget(context, RemoteWriteKind.Delete);
-                leadingIdent = new MultiPartName(remoteWrite.Proxy.Name);
-                break;
-            case ReservedKeyword { Keyword: Keyword.OpenDataSource }:
-                throw Selection.ParseOpenDataSource(context);
-            default:
-                leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-                remoteWrite = RemoteWrite.ForTarget(context.Batch, leadingIdent, RemoteWriteKind.Delete);
-                break;
-        }
-
-        View? leadingView = null;
-        HeapTable? leadingTable;
-        if (remoteWrite is not null)
-        {
-            leadingTable = remoteWrite.Proxy;
-        }
-        else if (TryResolveCteTarget(context, leadingIdent, out var resolvedView) || context.Batch.TryResolveView(leadingIdent, out resolvedView))
-        {
-            // An INSTEAD OF DELETE trigger takes the write whatever the
-            // view's shape, reading the view's own rows.
-            if (HasInsteadOfTrigger(context.Batch, resolvedView, TriggerActions.Delete))
+            switch (RouteViewWrite(context.Batch, leadingView, TriggerActions.Delete))
             {
-                context.MoveNextOptional();
-                var insteadOfHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
-                Selection.ValidateDmlTargetHints(insteadOfHints);
-                return ExecuteInsteadOfViewDelete(context, leadingIdent, resolvedView, top, insteadOfHints.Serializable);
-            }
-            if (resolvedView.BaseTable is not { } baseTable)
-            {
-                throw resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(leadingIdent.ToString())
-                    : SimulatedSqlException.CannotUpdateNonUpdatableView(leadingIdent.ToString());
-            }
-            leadingView = resolvedView;
-            leadingTable = baseTable;
-        }
-        else
-        {
-            _ = context.Batch.TryResolveTable(leadingIdent, out leadingTable);
-            // An alias the FROM clause defines may name a linked server's
-            // table there.
-            if (leadingTable is null && leadingIdent.Count == 1)
-            {
-                context.Batch.CurrentStatement.RemoteWriteAlias = leadingIdent.Leaf;
-                context.Batch.CurrentStatement.RemoteWriteAliasKind = RemoteWriteKind.Delete;
+                case DmlViewRoute.InsteadOf:
+                    {
+                        // An INSTEAD OF DELETE trigger takes the write whatever the
+                        // view's shape, reading the view's own rows.
+                        context.MoveNextOptional();
+                        var insteadOfHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
+                        Selection.ValidateDmlTargetHints(insteadOfHints);
+                        return ExecuteInsteadOfViewDelete(context, leadingIdent, leadingView, top, insteadOfHints.Serializable);
+                    }
+                case DmlViewRoute.Refused:
+                    throw NonUpdatableViewError(leadingView, leadingIdent.ToString());
             }
         }
         context.MoveNextOptional();
         var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
         Selection.ValidateDmlTargetHints(targetHints);
-        // Phase 1a: acquire X on the resolved DELETE target. Tx-scoped when
-        // BEGIN TRAN is active. Skipped when leadingTable is null (multi-
-        // source alias form — target determined post-FROM, deferred to 1b).
+        // Phase 1a: lock the resolved DELETE target. Skipped when
+        // leadingTable is null (multi-source alias form — target determined
+        // post-FROM, deferred to 1b).
         if (leadingTable is not null)
         {
-            RejectDisabledClusteredIndex(leadingTable);
-            RejectIncorrectSetOptionsForWrite(leadingTable, context.Batch, "DELETE");
-            _ = context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
+            LockWriteTable(context.Batch, leadingTable, "DELETE");
             context.Batch.RejectReferentialDeleteIntoVectorIndex(leadingTable);
         }
 
-        // OUTPUT requires a known target. INSERTED isn't a valid qualifier
-        // in DELETE OUTPUT (probe-confirmed Msg 4104). Alias-form multi-
-        // source DELETE with OUTPUT isn't modeled — see the matching
-        // limitation in ParseUpdate. Through a view, DELETED takes the view's
-        // columns, read off the base rows.
-        OutputProjection? output = null;
         if (remoteWrite is not null)
-        {
-            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
-                throw SimulatedSqlException.RemoteDmlTargetWithOutput();
-            remoteWrite.SingleStatement = remoteWrite.WrittenName is not null && context.Token is not ReservedKeyword { Keyword: Keyword.From };
-        }
-        if (leadingTable is not null)
-        {
-            var viewShape = leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output }
-                ? SingleBaseViewOutputShape(context.Batch, leadingView, leadingIdent, leadingTable)
-                : null;
-            output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: false, allowDeleted: true, viewShape);
-            RejectClientOutputOnTriggeredTarget(context.Batch, leadingTable, TriggerActions.Delete, leadingView is null ? leadingIdent.ToString() : leadingTable.Name, output is { HasTarget: false });
-        }
-        else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
-        {
-            // Only a FROM after it makes the leading name an alias; without
-            // one the target is a missing object, whose OUTPUT has nothing to bind.
-            SkipOutputClause(context);
-            if (context.Token is ReservedKeyword { Keyword: Keyword.From })
-                throw new NotSupportedException("OUTPUT with alias-form multi-source DELETE isn't modeled — re-emit with the table name as the target if OUTPUT is required.");
-        }
+            SettleRemoteMutation(context, remoteWrite, remoteWrite);
+        // INSERTED isn't a valid qualifier in DELETE OUTPUT (probe-confirmed
+        // Msg 4104).
+        var output = ParseMutationOutput(context, leadingIdent, leadingTable, leadingView, TriggerActions.Delete);
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
         {
@@ -142,16 +76,7 @@ partial class Simulation
                 : ExecuteJoinedDelete(context, leadingIdent, leadingTable, output, top);
         }
 
-        if (leadingTable is null)
-            ParseMissingTargetTail(context);
-        var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
-            ? SimulatedSqlException.MustDeclareTableVariable(leadingIdent.Leaf)
-            : context.Batch.UnresolvableObjectName(leadingIdent));
-        if (BatchContext.IsTableVariableName(leadingIdent.Leaf))
-            context.Batch.CurrentStatement.TransactedWrite = false;
-        if (table.IsTableValuedParameter)
-            throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf);
-        FunctionBodyShape.NoteTableWrite(context.Batch, "DELETE", table);
+        var table = RequireMutationTable(context, leadingIdent, leadingTable, "DELETE");
         return ExecuteDeleteAgainstTable(context, leadingIdent, table, output, top, targetHints.Serializable, leadingView);
     }
 
@@ -184,10 +109,7 @@ partial class Simulation
         NoteDmlPlan(
             context,
             plan,
-            admitted: sourceView is null
-                && positionedCursor is null
-                && output is not { HasTarget: true }
-                && !BlocksDmlPlan(context.Batch, table, clientOutput: output is not null));
+            admitted: positionedCursor is null && AdmitsDmlPlan(context.Batch, table, sourceView, output));
         return RunDelete(context, plan);
     }
 
@@ -251,29 +173,10 @@ partial class Simulation
             }
             PermissionEnforcement.CheckSchemaObject(context.Batch, "DELETE", securable);
         }
-        // Through a single-table view with another owner than its base table
-        // the chain breaks, so the base table is checked after the view — even
-        // from a module body whose reference to the view is chained: SELECT on
-        // the columns the WHERE reads, then DELETE; under an INSTEAD OF DELETE
-        // trigger, SELECT on every column its pseudo-tables read and no DELETE
-        // (probed 2026-09-27 against SQL Server 2025).
-        if (deleteSecurable is not null && sourceView is { BaseTable: { } deleteBase })
-        {
-            if (HasInsteadOfTrigger(context.Batch, sourceView, TriggerActions.Delete))
-            {
-                PermissionEnforcement.CheckBrokenChainColumns(context.Batch, Permission.Select, sourceView, viewColumns: null);
-            }
-            else
-            {
-                if (where is not null)
-                {
-                    var baseRead = new ColumnReadTarget(sourceView);
-                    where.VisitOperandExpressions(op => op.VisitColumnReferences(baseRead.Add));
-                    PermissionEnforcement.CheckBrokenChainColumns(context.Batch, Permission.Select, sourceView, baseRead);
-                }
-                PermissionEnforcement.CheckBrokenChainWrite(context.Batch, "DELETE", sourceView, deleteBase);
-            }
-        }
+        // Checked even from a module body whose reference to the view is
+        // chained.
+        if (deleteSecurable is not null)
+            CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Delete, where, rawAssignments: null);
 
         if (positionedCursor is null)
             Selection.SettleSerializableWriteFence(table, where, serializableHint, context.Batch);
@@ -338,29 +241,7 @@ partial class Simulation
             if (where is not null)
             {
                 var localValues = fullValues!;
-                SqlValue Resolve(MultiPartName name)
-                {
-                    if (sourceView is not null)
-                    {
-                        for (var v = 0; v < sourceView.OutputColumns.Length; v++)
-                        {
-                            if (context.Batch.CurrentDatabase.Collation.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
-                            {
-                                var baseOrd = sourceView.BaseColumnOrdinals[v];
-                                return viewRow is not null ? viewRow[v]
-                                    : baseOrd < 0 ? throw SimulatedSqlException.InvalidColumnName(name)
-                                    : localValues[baseOrd];
-                            }
-                        }
-                        throw SimulatedSqlException.InvalidColumnName(name);
-                    }
-                    for (var k = 0; k < table.Columns.Length; k++)
-                    {
-                        if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[k].Name, name.Leaf))
-                            return localValues[k];
-                    }
-                    throw SimulatedSqlException.InvalidColumnName(name);
-                }
+                SqlValue Resolve(MultiPartName name) => ReadTargetRowColumn(context.Batch, table, sourceView, localValues, viewRow, name);
 
                 if (where.Run(new RuntimeContext(Resolve, context.Batch)) != true)
                     continue;
@@ -415,26 +296,7 @@ partial class Simulation
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();
 
-        var table = sources[targetIndex].BackingTable
-            ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
-        // The alias form names its target through the FROM clause, so the write
-        // is classified for a function body's Msg 443 here rather than at the
-        // leading identifier.
-        FunctionBodyShape.NoteTableWrite(context.Batch, "DELETE", table);
-        if (!context.Batch.IsSkipping)
-        {
-            // A joined DELETE reads every FROM source (target + join sources);
-            // real requires SELECT on each, checked before the DELETE write
-            // permission (probe M2).
-            CheckJoinedReadSources(context.Batch, sources, targetIndex);
-            PermissionEnforcement.CheckSchemaObject(context.Batch, "DELETE", (SchemaObject?)sources[targetIndex].ViaSynonym ?? table);
-        }
-
-        // Alias-form DELETE: table-IX wasn't pre-acquired (target identified
-        // post-FROM). Acquire it now; row-X per affected row fires at the
-        // mutation site below.
-        RejectIncorrectSetOptionsForWrite(table, context.Batch, "DELETE");
-        _ = context.Batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
+        var table = BindJoinedMutationTable(context, sources, targetIndex, "DELETE");
         context.Batch.RejectReferentialDeleteIntoVectorIndex(table);
 
         BooleanExpression? where = null;

@@ -123,13 +123,7 @@ partial class Simulation
             // without it they reach the base table (probed 2026-09-29).
             if (options.FireTriggers && HasInsteadOfTrigger(batch, view, TriggerActions.Insert))
                 insteadOfView = view;
-            if (view.BaseTable is not { } baseTable)
-            {
-                throw view.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-                    ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(name.ToString())
-                    : SimulatedSqlException.CannotUpdateNonUpdatableView(name.ToString());
-            }
-            table = baseTable;
+            table = view.BaseTable ?? throw NonUpdatableViewError(view, name.ToString());
             fileColumns = view.OutputColumns;
             baseOrdinals = view.BaseColumnOrdinals;
         }

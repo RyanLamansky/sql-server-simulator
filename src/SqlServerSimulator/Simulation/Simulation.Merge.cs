@@ -75,29 +75,23 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
-        if (context.Token is ReservedKeyword { Keyword: Keyword.OpenRowSet })
-        {
-            _ = Selection.ParseAdHocWriteTarget(context, RemoteWriteKind.Insert);
-            throw SimulatedSqlException.MergeTargetIsRemote();
-        }
-        var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-        if (context.Batch.ExpandSynonym(destinationName).Count >= 4)
-            throw SimulatedSqlException.MergeTargetIsRemote();
+        var target = ParseDmlTarget(context, remoteKind: null);
+        var (destinationName, resolvedView) = (target.Name, target.View);
 
-        // View target: resolve via TryResolveView first (CTE bindings are
-        // already shadowed at the source level, not the target). An updatable
-        // single-base view routes through its base table for the actual
-        // mutation; a non-updatable view raises Msg 4403 / Msg 4405 the same
-        // way INSERT / UPDATE / DELETE through view do.
+        // View target (CTE bindings are already shadowed at the source level,
+        // not the target). An updatable single-base view routes through its
+        // base table for the actual mutation; a non-updatable view raises
+        // Msg 4403 / Msg 4405 the same way INSERT / UPDATE / DELETE through
+        // view do.
         View? sourceView = null;
         View? viewRowsTarget = null;
         HeapTable destinationTable;
-        if (TryResolveCteTarget(context, destinationName, out var resolvedView) || context.Batch.TryResolveView(destinationName, out resolvedView))
+        if (resolvedView is not null)
         {
             // A view with no single base table is always matched as its own
             // rows: its INSTEAD OF triggers take them, or for a join view the
             // actions are carried to the one base table they name.
-            if (resolvedView.BaseTable is null || (readsViewRows ?? HasAnyInsteadOfTrigger(context.Batch, resolvedView)))
+            if (resolvedView.BaseTable is not { } baseTable || (readsViewRows ?? HasAnyInsteadOfTrigger(context.Batch, resolvedView)))
             {
                 // The view's own rows, under its own column names, stand in
                 // for the target; nothing is written to them.
@@ -107,10 +101,7 @@ partial class Simulation
             else
             {
                 sourceView = resolvedView;
-                destinationTable = resolvedView.BaseTable
-                    ?? throw (resolvedView.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-                        ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(destinationName.ToString())
-                        : SimulatedSqlException.CannotUpdateNonUpdatableView(destinationName.ToString()));
+                destinationTable = baseTable;
                 // A MERGE matches against the rows the view yields, so its row
                 // limit or window applies to every action.
                 RejectRowSelectiveMergeTarget(context, resolvedView, destinationName);
@@ -118,15 +109,9 @@ partial class Simulation
         }
         else
         {
-            destinationTable = context.Batch.TryResolveTable(destinationName, out var table)
-                ? table
-                : throw (BatchContext.IsTableVariableName(destinationName.Leaf)
-                    ? SimulatedSqlException.MustDeclareTableVariable(destinationName.Leaf)
-                    : context.Batch.UnresolvableObjectName(destinationName));
+            destinationTable = target.Table ?? throw MissingDmlTargetError(context.Batch, destinationName);
         }
-        if (destinationTable.IsTableValuedParameter)
-            throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
-        FunctionBodyShape.NoteTableWrite(context.Batch, "MERGE", viewRowsTarget is null ? destinationTable : null);
+        NoteWriteTable(context.Batch, destinationName, destinationTable, "MERGE", persistent: viewRowsTarget is not null);
 
         // MERGE target hints: hint-then-alias placement
         // (probe-confirmed: `MERGE INTO t WITH (TABLOCK) AS x USING …` works,
@@ -137,11 +122,7 @@ partial class Simulation
         // variable targets reject hints — skip the parser for `@t`.
         context.MoveNextRequired();
         var serializableHint = false;
-        if (BatchContext.IsTableVariableName(destinationName.Leaf))
-        {
-            context.Batch.CurrentStatement.TransactedWrite = false;
-        }
-        else
+        if (!BatchContext.IsTableVariableName(destinationName.Leaf))
         {
             var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
             Selection.ValidateDmlTargetHints(targetHints);
@@ -149,10 +130,7 @@ partial class Simulation
         }
         // Phase 1b: acquire table-IX on the MERGE target; row-X on each
         // affected row at mutation time.
-        RejectDisabledClusteredIndex(destinationTable);
-        RejectIncorrectSetOptionsForWrite(destinationTable, context.Batch, "MERGE");
-        RejectWriteToUnwritableFilegroup(destinationTable, context.Batch, "MERGE");
-        _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, default, isWrite: true);
+        LockWriteTable(context.Batch, destinationTable, "MERGE", checkFilegroup: true);
 
         // Optional target alias: AS <alias> or bare <alias>.
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })
@@ -354,9 +332,7 @@ partial class Simulation
                     return SimulatedSqlException.ViewDmlTouchesDerivedField(writtenName.ToString());
             }
         }
-        return view.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-            ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName.ToString())
-            : SimulatedSqlException.CannotUpdateNonUpdatableView(writtenName.ToString());
+        return NonUpdatableViewError(view, writtenName.ToString());
     }
 
     /// <summary>

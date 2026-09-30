@@ -19,24 +19,8 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.Into })
             context.MoveNextRequired();
 
-        switch (context.Token)
-        {
-            case ReservedKeyword { Keyword: Keyword.OpenQuery }:
-                {
-                    var (serverName, query) = Selection.ParseOpenQueryArguments(context);
-                    var openQueryTarget = RemoteWrite.ForOpenQuery(context.Batch, serverName, query, RemoteWriteKind.Insert);
-                    return ProcessRemoteInsert(context, openQueryTarget, top, new MultiPartName(openQueryTarget.Proxy.Name));
-                }
-            case ReservedKeyword { Keyword: Keyword.OpenRowSet }:
-                {
-                    var adHocTarget = Selection.ParseAdHocWriteTarget(context, RemoteWriteKind.Insert);
-                    return ProcessRemoteInsert(context, adHocTarget, top, new MultiPartName(adHocTarget.Proxy.Name));
-                }
-            case ReservedKeyword { Keyword: Keyword.OpenDataSource }:
-                throw Selection.ParseOpenDataSource(context);
-        }
-        var destinationName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-        if (RemoteWrite.ForTarget(context.Batch, destinationName, RemoteWriteKind.Insert) is { } remoteWrite)
+        var destinationName = ParseDmlTargetName(context, RemoteWriteKind.Insert, out var remoteWrite);
+        if (remoteWrite is not null)
             return ProcessRemoteInsert(context, remoteWrite, top, destinationName);
         // A function body may write a table variable but nothing persistent
         // (Msg 443). An INSERT / MERGE target is always a written name, never a
@@ -62,14 +46,13 @@ partial class Simulation
             Selection.ValidateDmlTargetHints(targetHints);
         }
 
-        if (TryResolveCteTarget(context, destinationName, out var destinationView) || context.Batch.TryResolveView(destinationName, out destinationView))
+        var target = ResolveDmlTarget(context, destinationName, RemoteWriteKind.Insert);
+        if (target.View is { } destinationView)
             return ProcessViewInsert(destinationView, context, top, destinationName);
-        if (!context.Batch.TryResolveTable(destinationName, out var destinationTable))
+        if (target.Table is not { } destinationTable)
         {
             ParseMissingInsertTail(context);
-            throw BatchContext.IsTableVariableName(destinationName.Leaf)
-                ? SimulatedSqlException.MustDeclareTableVariable(destinationName.Leaf)
-                : context.Batch.UnresolvableObjectName(destinationName.WithoutOmittedLeading());
+            throw MissingDmlTargetError(context.Batch, destinationName.WithoutOmittedLeading());
         }
         if (destinationTable.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
@@ -122,39 +105,36 @@ partial class Simulation
     /// pre-empts the heap-write path entirely — the trigger body becomes
     /// responsible for any side effects and INSERTED is populated with
     /// source-provided values shaped to <see cref="View.OutputColumns"/>.
-    /// Otherwise the view's updatability shape gates routing: an updatable
-    /// view delegates to <see cref="ProcessHeapInsert"/> against the view's
+    /// Otherwise the view's updatability shape gates routing
+    /// (<see cref="RouteViewWrite"/>): an updatable view delegates to
+    /// <see cref="ProcessHeapInsert"/> against the view's
     /// <see cref="View.BaseTable"/> with column-name lookups translated
     /// through <see cref="View.BaseColumnOrdinals"/>; one whose chain bottoms
     /// out in a multi-source body goes to <see cref="ProcessJoinViewInsert"/>,
     /// which reads the column list to decide which base table the write lands
     /// in; anything else raises <strong>Msg 4403</strong> /
     /// <strong>Msg 4405</strong> from <see cref="View.RejectionReason"/>.
-    /// OUTPUT with a view target is rejected at the inner site
-    /// (NotSupportedException).
     /// </summary>
     private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName)
     {
+        var route = RouteViewWrite(context.Batch, destinationView, TriggerActions.Insert);
         if (!context.Batch.IsSkipping)
         {
             PermissionEnforcement.CheckReference(context.Batch, "INSERT", destinationName, destinationView);
             // An INSTEAD OF INSERT trigger writes nothing through the view, so
             // the base table goes unchecked (probed 2026-09-27 against SQL
             // Server 2025).
-            if (destinationView.BaseTable is { } baseTable && !HasInsteadOfTrigger(context.Batch, destinationView, TriggerActions.Insert))
+            if (destinationView.BaseTable is { } baseTable && route != DmlViewRoute.InsteadOf)
                 PermissionEnforcement.CheckBrokenChainWrite(context.Batch, "INSERT", destinationView, baseTable);
         }
-        return ProcessViewInsertCore(destinationView, context, top, destinationName);
+        return route switch
+        {
+            DmlViewRoute.InsteadOf => ProcessInsteadOfInsertOnView(destinationView, context, top, destinationName),
+            DmlViewRoute.BaseTable => ProcessHeapInsert(destinationView.BaseTable!, context, top, destinationName, destinationView),
+            DmlViewRoute.JoinView => ProcessJoinViewInsert(destinationView, context, top, destinationName),
+            _ => throw RefuseNonUpdatableViewWrite(context, destinationView, destinationName, isUpdate: false),
+        };
     }
-
-    private static SimulatedStatementOutcome ProcessViewInsertCore(View destinationView, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName) =>
-        HasInsteadOfTrigger(context.Batch, destinationView, TriggerActions.Insert)
-            ? ProcessInsteadOfInsertOnView(destinationView, context, top, destinationName)
-            : destinationView.BaseTable is { } baseTable
-                ? ProcessHeapInsert(baseTable, context, top, destinationName, destinationView)
-                : destinationView.IsJoinUpdatable
-                    ? ProcessJoinViewInsert(destinationView, context, top, destinationName)
-                    : throw RefuseNonUpdatableViewWrite(context, destinationView, destinationName, isUpdate: false);
 
     /// <summary>
     /// INSERT into a view whose INSTEAD OF INSERT trigger replaces the
@@ -395,7 +375,7 @@ partial class Simulation
         // to the client, and the message names that table (probed 2026-09-27
         // against SQL Server 2025).
         RejectClientOutputOnTriggeredTarget(
-            context.Batch, destinationTable, TriggerActions.Insert, destinationView is null ? destinationName.ToString() : destinationTable.Name, output is { HasTarget: false });
+            context.Batch, destinationTable, TriggerActions.Insert, TriggeredOutputTargetName(destinationName, destinationTable, destinationView), output is { HasTarget: false });
 
         // OUTPUT combined with an INSERT … EXEC source is rejected outright
         // (Msg 483) — probe-confirmed. The check runs regardless of skip
@@ -432,10 +412,7 @@ partial class Simulation
             NoteDmlPlan(
                 context,
                 plan,
-                admitted: destinationView is null
-                    && joinViewPlan is null
-                    && output is not { HasTarget: true }
-                    && !BlocksDmlPlan(context.Batch, destinationTable, clientOutput: output is not null));
+                admitted: AdmitsDmlPlan(context.Batch, destinationTable, destinationView, output));
             return RunInsertValues(context, plan);
         }
 

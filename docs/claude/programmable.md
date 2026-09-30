@@ -402,7 +402,7 @@ Selection-side capture is `Selection.UpdatabilityProfile` (set in `BuildSqlProje
 The map composes through view-on-view chains so a renamed column at level 1 referenced through level 2 still resolves to its base ordinal.
 
 **DML routing**:
-- **INSERT**: `ProcessViewInsert` validates `BaseTable` is non-null (else Msg 4403 / Msg 4405 by `RejectionReason`), then routes to `ProcessHeapInsert(baseTable, context, destinationView)`.
+- **INSERT**: `ProcessViewInsert` routes through `RouteViewWrite` (an `INSTEAD OF` trigger, the base table, a join view, else Msg 4403 / Msg 4405 by `RejectionReason`); a view with a `BaseTable` goes to `ProcessHeapInsert(baseTable, context, destinationView)`.
   Column-name lookups in the explicit list translate through `BaseColumnOrdinals`; touching a `-1` ordinal raises **Msg 4406**.
   Implicit column list (no `(cols)` after view name) expands to the view's projection columns mapped to base ordinals — the base table's computed and identity columns drop out while a projected `rowversion` keeps its position, and defaults fire normally for unlisted base columns.
   A projected **derived** column has no position to fill, so the column-list-less form is **Msg 4406** whatever the value count.
@@ -462,7 +462,7 @@ A **single-source view reading such a view** carries the same pair, so the shape
 DELETE stays Msg 4405 whatever it touches, which is what real does — it removes a whole row and so reaches every base table.
 Probed against SQL Server 2025 (17.0.4065.4).
 
-`ParseUpdate` routes to `ExecuteJoinViewUpdate` in `Simulation.Update.JoinView.cs`, `ProcessViewInsertCore` to `ProcessJoinViewInsert`; the level machinery both share is `Simulation.JoinViewDml.cs`.
+`ParseUpdate` routes to `ExecuteJoinViewUpdate` in `Simulation.Update.JoinView.cs`, `ProcessViewInsert` to `ProcessJoinViewInsert`; the level machinery both share is `Simulation.JoinViewDml.cs`.
 
 **The level stack** is `JoinViewChain`: index 0 is the multi-source view, each higher index a single-source view reading the one below, and the last is the view the statement named (whose name every error reports).
 Each level's body is **re-parsed at the statement** (`Simulation.ParseViewBodyPlan`, the propagating twin of the cursor-planning `TryParseViewBodyPlan`) rather than captured at CREATE, because the profile carries live `FromSource` row enumerators — the same reason the read path re-parses per reference.

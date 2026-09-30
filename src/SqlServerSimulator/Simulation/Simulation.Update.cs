@@ -52,28 +52,12 @@ partial class Simulation
         bindErrors?.SetBarriers(BindClause.SetTarget, BindClause.SetValue);
         context.MoveNextRequired();
         var top = Selection.ParseDmlTopClause(context);
-        MultiPartName leadingIdent;
-        RemoteWrite? remoteWrite;
-        switch (context.Token)
-        {
-            case ReservedKeyword { Keyword: Keyword.OpenQuery }:
-                {
-                    var (serverName, query) = Selection.ParseOpenQueryArguments(context);
-                    remoteWrite = RemoteWrite.ForOpenQuery(context.Batch, serverName, query, RemoteWriteKind.Update);
-                    leadingIdent = new MultiPartName(remoteWrite.Proxy.Name);
-                    break;
-                }
-            case ReservedKeyword { Keyword: Keyword.OpenRowSet }:
-                remoteWrite = Selection.ParseAdHocWriteTarget(context, RemoteWriteKind.Update);
-                leadingIdent = new MultiPartName(remoteWrite.Proxy.Name);
-                break;
-            case ReservedKeyword { Keyword: Keyword.OpenDataSource }:
-                throw Selection.ParseOpenDataSource(context);
-            default:
-                leadingIdent = BatchContext.ParseObjectName(context, acceptTableVariable: true);
-                remoteWrite = RemoteWrite.ForTarget(context.Batch, leadingIdent, RemoteWriteKind.Update);
-                break;
-        }
+        // A name that resolves to nothing is the alias of the FROM clause
+        // that follows (multi-table form), which must then provide the binding
+        // via alias-matching; aliases are always single-segment, so a
+        // multi-part name that fails to resolve is always Msg 208.
+        var target = ParseDmlTarget(context, RemoteWriteKind.Update);
+        var (leadingIdent, remoteWrite, leadingView, leadingTable) = (target.Name, target.Remote, target.View, target.Table);
 
         // View target: route to base table with view-aware column lookups,
         // visibility filtering, and (optional) WITH CHECK OPTION enforcement.
@@ -81,42 +65,19 @@ partial class Simulation
         // aren't supported — EF Core doesn't emit that shape and it would
         // require composing the view's visibility predicate with a multi-
         // source join, which the existing alias-form path can't represent.
-        View? leadingView = null;
-        HeapTable? leadingTable;
-        if (remoteWrite is not null)
-        {
-            leadingTable = remoteWrite.Proxy;
-        }
-        else if (TryResolveCteTarget(context, leadingIdent, out var resolvedView) || context.Batch.TryResolveView(leadingIdent, out resolvedView))
+        DmlViewRoute? viewRoute = null;
+        if (leadingView is not null)
         {
             // A multi-source body has no single base table to route to up
             // front — which base the statement writes is the SET list's to
             // say — so it leaves `leadingTable` null and the join-view path
             // below picks up once the SET list has parsed. An INSTEAD OF
             // UPDATE trigger takes the write whatever the view's shape.
-            if (resolvedView.BaseTable is null && !resolvedView.IsJoinUpdatable
-                && !HasInsteadOfTrigger(context.Batch, resolvedView, TriggerActions.Update))
+            viewRoute = RouteViewWrite(context.Batch, leadingView, TriggerActions.Update);
+            if (viewRoute == DmlViewRoute.Refused)
             {
                 context.MoveNextOptional();
-                throw RefuseNonUpdatableViewWrite(context, resolvedView, leadingIdent, isUpdate: true);
-            }
-            leadingView = resolvedView;
-            leadingTable = resolvedView.BaseTable;
-        }
-        else
-        {
-            // Leading identifier: target table name (single-table form) or an
-            // alias for the FROM clause that follows (multi-table form). Try
-            // table-resolution now; if it fails, the FROM clause must provide
-            // the binding via alias-matching. Aliases are always single-segment,
-            // so a multi-part name that fails to resolve is always Msg 208.
-            _ = context.Batch.TryResolveTable(leadingIdent, out leadingTable);
-            // An alias the FROM clause defines may name a linked server's
-            // table there.
-            if (leadingTable is null && leadingIdent.Count == 1)
-            {
-                context.Batch.CurrentStatement.RemoteWriteAlias = leadingIdent.Leaf;
-                context.Batch.CurrentStatement.RemoteWriteAliasKind = RemoteWriteKind.Update;
+                throw RefuseNonUpdatableViewWrite(context, leadingView, leadingIdent, isUpdate: true);
             }
         }
 
@@ -124,16 +85,11 @@ partial class Simulation
         var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
         Selection.ValidateDmlTargetHints(targetHints);
         // Phase 1a: when the leading identifier resolved to a concrete table
-        // (the simple `UPDATE t SET …` case), acquire X on it. Tx-scoped via
-        // AcquireDataLockIfApplicable when an explicit BEGIN TRAN is active.
-        // The multi-table-alias form's target is determined later via the
-        // FROM clause; that path's X acquisition is deferred to phase 1b.
+        // (the simple `UPDATE t SET …` case), lock it now. The
+        // multi-table-alias form's target is determined later via the FROM
+        // clause; that path's lock is deferred to phase 1b.
         if (leadingTable is not null)
-        {
-            RejectDisabledClusteredIndex(leadingTable);
-            RejectIncorrectSetOptionsForWrite(leadingTable, context.Batch, "UPDATE");
-            _ = context.Batch.AcquireDataLockIfApplicable(leadingTable, default, isWrite: true);
-        }
+            LockWriteTable(context.Batch, leadingTable, "UPDATE");
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         bindErrors?.EnterClause(context.Token, BindClause.SetValue);
@@ -302,44 +258,18 @@ partial class Simulation
                     setNames.Add(columnName);
             }
             remoteTarget.CheckSetColumns(context.Batch, setNames);
-            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
-                throw SimulatedSqlException.RemoteDmlTargetWithOutput();
-            remoteTarget.SingleStatement = remoteWrite is { WrittenName: not null } && context.Token is not ReservedKeyword { Keyword: Keyword.From };
+            SettleRemoteMutation(context, remoteTarget, remoteWrite);
         }
 
         // An INSTEAD OF UPDATE trigger on a view takes the write, reading the
         // view's own rows; a multi-source view's SET list names the base
         // table it writes, so its OUTPUT binds only once that is known.
-        if (leadingView is not null && HasInsteadOfTrigger(context.Batch, leadingView, TriggerActions.Update))
+        if (leadingView is not null && viewRoute == DmlViewRoute.InsteadOf)
             return ExecuteInsteadOfViewUpdate(context, leadingIdent, leadingView, rawAssignments, top, targetHints.Serializable);
-        if (leadingView is { BaseTable: null } joinView)
-            return ExecuteJoinViewUpdate(context, leadingIdent, joinView, rawAssignments, top);
+        if (leadingView is not null && viewRoute == DmlViewRoute.JoinView)
+            return ExecuteJoinViewUpdate(context, leadingIdent, leadingView, rawAssignments, top);
 
-        // OUTPUT requires a known target. If leading-ident resolved to a
-        // table, parse OUTPUT now (existing single-table OUTPUT path). For
-        // the alias-form multi-source case, OUTPUT support would require
-        // deferring its parse until after FROM has identified the target —
-        // not modeled today (EF Core 10 doesn't combine OUTPUT with multi-
-        // source ExecuteUpdate, and the simulator raises NotSupportedException
-        // when this combination is attempted). Through a view, INSERTED /
-        // DELETED take the view's columns, read off the base rows.
-        OutputProjection? output = null;
-        if (leadingTable is not null)
-        {
-            var viewShape = leadingView is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output }
-                ? SingleBaseViewOutputShape(context.Batch, leadingView, leadingIdent, leadingTable)
-                : null;
-            output = TryParseOutputClauseForMutation(context, leadingTable, allowInserted: true, allowDeleted: true, viewShape);
-            RejectClientOutputOnTriggeredTarget(context.Batch, leadingTable, TriggerActions.Update, leadingView is null ? leadingIdent.ToString() : leadingTable.Name, output is { HasTarget: false });
-        }
-        else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
-        {
-            // Only a FROM after it makes the leading name an alias; without
-            // one the target is a missing object, whose OUTPUT has nothing to bind.
-            SkipOutputClause(context);
-            if (context.Token is ReservedKeyword { Keyword: Keyword.From })
-                throw new NotSupportedException("OUTPUT with alias-form multi-source UPDATE isn't modeled — re-emit with the table name as the target if OUTPUT is required.");
-        }
+        var output = ParseMutationOutput(context, leadingIdent, leadingTable, leadingView, TriggerActions.Update);
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
         {
@@ -348,16 +278,7 @@ partial class Simulation
                 : ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output, top, preParsedFrom);
         }
 
-        if (leadingTable is null)
-            ParseMissingTargetTail(context);
-        var table = leadingTable ?? throw (BatchContext.IsTableVariableName(leadingIdent.Leaf)
-            ? SimulatedSqlException.MustDeclareTableVariable(leadingIdent.Leaf)
-            : context.Batch.UnresolvableObjectName(leadingIdent));
-        if (BatchContext.IsTableVariableName(leadingIdent.Leaf))
-            context.Batch.CurrentStatement.TransactedWrite = false;
-        if (table.IsTableValuedParameter)
-            throw SimulatedSqlException.TableValuedParameterIsReadOnly(leadingIdent.Leaf);
-        FunctionBodyShape.NoteTableWrite(context.Batch, "UPDATE", table);
+        var table = RequireMutationTable(context, leadingIdent, leadingTable, "UPDATE");
         return ExecuteUpdateAgainstTable(context, leadingIdent, table, rawAssignments, output, top, targetHints.Serializable, leadingView);
     }
 
@@ -627,11 +548,9 @@ partial class Simulation
         NoteDmlPlan(
             context,
             plan,
-            admitted: sourceView is null
-                && positionedCursor is null
-                && output is not { HasTarget: true }
+            admitted: positionedCursor is null
                 && !rawAssignments.Exists(assignment => assignment.ColumnName is null || assignment.Expr is AssignmentExpression or XmlModify or JsonModify or ClrTypeMutation)
-                && !BlocksDmlPlan(context.Batch, table, clientOutput: output is not null));
+                && AdmitsDmlPlan(context.Batch, table, sourceView, output));
         return RunUpdate(context, plan);
     }
 
@@ -725,29 +644,7 @@ partial class Simulation
             if (viewRows is not null && !viewRows.TryGetValue((pageIndex, slotIndex), out viewRow))
                 continue;
 
-            SqlValue ResolveOriginal(MultiPartName name)
-            {
-                if (sourceView is not null)
-                {
-                    for (var v = 0; v < sourceView.OutputColumns.Length; v++)
-                    {
-                        if (context.Batch.CurrentDatabase.Collation.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
-                        {
-                            var baseOrd = sourceView.BaseColumnOrdinals[v];
-                            return viewRow is not null ? viewRow[v]
-                                : baseOrd < 0 ? throw SimulatedSqlException.InvalidColumnName(name)
-                                : fullValues[baseOrd];
-                        }
-                    }
-                    throw SimulatedSqlException.InvalidColumnName(name);
-                }
-                for (var k = 0; k < table.Columns.Length; k++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[k].Name, name.Leaf))
-                        return fullValues[k];
-                }
-                throw SimulatedSqlException.InvalidColumnName(name);
-            }
+            SqlValue ResolveOriginal(MultiPartName name) => ReadTargetRowColumn(context.Batch, table, sourceView, fullValues, viewRow, name);
 
             if (where is not null && where.Run(new RuntimeContext(ResolveOriginal, context.Batch)) != true)
                 continue;
@@ -818,7 +715,7 @@ partial class Simulation
             // A module body's reference to the view is chained, but the
             // view's own reference to its base table still breaks on an
             // owner change.
-            CheckBrokenChainUpdate(context, sourceView, rawAssignments, where);
+            CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments);
             return;
         }
 
@@ -829,7 +726,7 @@ partial class Simulation
             if (where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch))
                 PermissionEnforcement.CheckSchemaObject(context.Batch, "SELECT", synonym);
             PermissionEnforcement.CheckSchemaObject(context.Batch, "UPDATE", synonym);
-            CheckBrokenChainUpdate(context, sourceView, rawAssignments, where);
+            CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments);
             return;
         }
 
@@ -850,40 +747,7 @@ partial class Simulation
         foreach (var columnName in SetColumnNames(rawAssignments))
             assigned.Add(columnName);
         PermissionEnforcement.CheckColumns(context.Batch, Permission.Update, assigned);
-        CheckBrokenChainUpdate(context, sourceView, rawAssignments, where);
-    }
-
-    /// <summary>
-    /// An UPDATE through a single-table view whose owner differs from its base
-    /// table's checks the base table too, after the view: SELECT on the base
-    /// columns the WHERE and SET expressions read, then UPDATE on the ones
-    /// assigned (probed 2026-09-27 against SQL Server 2025). Under an
-    /// <c>INSTEAD OF UPDATE</c> trigger nothing is written through the view,
-    /// but its pseudo-tables still read every base column, which takes SELECT
-    /// on the whole base table.
-    /// </summary>
-    private static void CheckBrokenChainUpdate(
-        ParserContext context,
-        View? sourceView,
-        List<(string? ColumnName, Expression Expr)> rawAssignments,
-        BooleanExpression? where)
-    {
-        if (sourceView is not { BaseTable: not null })
-            return;
-        if (HasInsteadOfTrigger(context.Batch, sourceView, TriggerActions.Update))
-        {
-            PermissionEnforcement.CheckBrokenChainColumns(context.Batch, Permission.Select, sourceView, viewColumns: null);
-            return;
-        }
-        var read = new ColumnReadTarget(sourceView);
-        where?.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
-        foreach (var (_, expr) in rawAssignments)
-            expr.VisitColumnReferences(read.Add);
-        PermissionEnforcement.CheckBrokenChainColumns(context.Batch, Permission.Select, sourceView, read);
-        var assigned = new ColumnReadTarget(sourceView);
-        foreach (var columnName in SetColumnNames(rawAssignments))
-            assigned.Add(columnName);
-        PermissionEnforcement.CheckBrokenChainColumns(context.Batch, Permission.Update, sourceView, assigned);
+        CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments);
     }
 
     /// <summary>
@@ -921,29 +785,7 @@ partial class Simulation
             EvaluateComputedColumns(table, fullValues, batch);
             if (sourceView?.VisibilityCheck is { } vis && !vis(fullValues, batch))
                 continue;
-            SqlValue Resolve(MultiPartName name)
-            {
-                if (sourceView is not null)
-                {
-                    for (var v = 0; v < sourceView.OutputColumns.Length; v++)
-                    {
-                        if (context.Batch.CurrentDatabase.Collation.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
-                        {
-                            var baseOrd = sourceView.BaseColumnOrdinals[v];
-                            return baseOrd < 0
-                                ? throw SimulatedSqlException.InvalidColumnName(name)
-                                : fullValues[baseOrd];
-                        }
-                    }
-                    throw SimulatedSqlException.InvalidColumnName(name);
-                }
-                for (var k = 0; k < table.Columns.Length; k++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(table.Columns[k].Name, name.Leaf))
-                        return fullValues[k];
-                }
-                throw SimulatedSqlException.InvalidColumnName(name);
-            }
+            SqlValue Resolve(MultiPartName name) => ReadTargetRowColumn(batch, table, sourceView, fullValues, viewRow: null, name);
             if (where is not null && where.Run(new RuntimeContext(Resolve, batch)) != true)
                 continue;
             batch.Connection.CurrentTransaction?.EndRollback();
@@ -998,28 +840,7 @@ partial class Simulation
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();
 
-        var table = sources[targetIndex].BackingTable
-            ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
-        // The alias form names its target through the FROM clause, so the write
-        // is classified for a function body's Msg 443 here rather than at the
-        // leading identifier.
-        FunctionBodyShape.NoteTableWrite(context.Batch, "UPDATE", table);
-        if (!context.Batch.IsSkipping)
-        {
-            // A joined UPDATE reads every FROM source (target + join sources);
-            // real requires SELECT on each, checked before the UPDATE write
-            // permission (probe M2). Additional-source reads inside a WHERE
-            // subquery route through the standard Selection read-source sink.
-            CheckJoinedReadSources(context.Batch, sources, targetIndex);
-            PermissionEnforcement.CheckSchemaObject(context.Batch, "UPDATE", (SchemaObject?)sources[targetIndex].ViaSynonym ?? table);
-        }
-
-        // Alias-form UPDATE: table-IX wasn't pre-acquired because the target
-        // wasn't yet known. Now that the FROM clause identified it, acquire
-        // table-IX + the standard row-X-per-mutation will happen at the
-        // mutation site (matching the simple-form UPDATE path).
-        RejectIncorrectSetOptionsForWrite(table, context.Batch, "UPDATE");
-        _ = context.Batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
+        var table = BindJoinedMutationTable(context, sources, targetIndex, "UPDATE");
 
         BindDeferredXmlMutators(context, table, rawAssignments, WrittenNameOf(sources[targetIndex], table));
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, bindErrors: context.Batch.BindErrors);

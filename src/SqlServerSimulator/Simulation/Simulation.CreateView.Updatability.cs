@@ -298,9 +298,7 @@ partial class Simulation
             if (anyDerived)
                 return SimulatedSqlException.ViewDmlTouchesDerivedField(viewLabel);
         }
-        return view.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-            ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(viewLabel)
-            : SimulatedSqlException.CannotUpdateNonUpdatableView(viewLabel);
+        return NonUpdatableViewError(view, viewLabel);
     }
 
     /// <summary>
