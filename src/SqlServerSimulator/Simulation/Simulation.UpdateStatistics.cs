@@ -108,6 +108,22 @@ partial class Simulation
                     statistic.NoRecompute = noRecompute;
             }
         }
+        // The statistics an index backs take it too (probed 2026-09-30 against
+        // SQL Server 2025), and the update is what a table's stale-statistics
+        // check reads (see HeapTable.StatisticsFreshness).
+        foreach (var identity in indexes)
+        {
+            if (identity.IsHeap || identity.Name is not { } indexName
+                || (targets is not null && !targets.Exists(target => collation.Equals(indexName, target))))
+            {
+                continue;
+            }
+            if (identity.Constraint is { } constraint)
+                constraint.StatisticsNoRecompute = noRecompute;
+            else if (identity.Index is { } index)
+                index.StatisticsNoRecompute = noRecompute;
+        }
+        table?.MarkStatisticsFresh(targets, collation);
         return true;
     }
 

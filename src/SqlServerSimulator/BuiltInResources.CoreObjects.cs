@@ -236,12 +236,12 @@ internal static partial class BuiltInResources
                         SqlValue.FromInt32(t.HasLobColumn() ? t.Partitioning?.Scheme.DataSpaceId ?? t.LobFilegroupId : 0),
                         SqlValue.FromInt32(t.MaxColumnIdUsed),
                         falseTableFlag, // is_replicated
-                        falseTableFlag, // lock_on_bulk_load
+                        SqlValue.FromBoolean(t.LockOnBulkLoad), // lock_on_bulk_load
                         falseTableFlag, // is_merge_published
                         falseTableFlag, // is_schema_published
                         falseTableFlag, // is_published
-                        SqlValue.FromInt32(0),
-                        falseTableFlag, // large_value_types_out_of_row
+                        SqlValue.FromInt32(t.TextInRowLimit), // text_in_row_limit
+                        SqlValue.FromBoolean(t.LargeValueTypesOutOfRow), // large_value_types_out_of_row
                         falseTableFlag, // is_tracked_by_cdc
                         falseTableFlag, // is_remote_data_archive_enabled
                         t.SystemVersioning is not null ? SqlValue.FromInt32(t.HistoryRetentionPeriod) : SqlValue.Null(SqlType.Int32),

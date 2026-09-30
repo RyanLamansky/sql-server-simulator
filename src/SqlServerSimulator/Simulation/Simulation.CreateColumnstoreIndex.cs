@@ -150,6 +150,7 @@ partial class Simulation
             table.Indexes[table.Indexes.IndexOf(replaced)] = index;
         else
             table.Indexes.Add(index);
+        table.NoteStatisticsCreated(index.Name, context.CurrentDatabase.Collation);
         RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
         return true;
     }

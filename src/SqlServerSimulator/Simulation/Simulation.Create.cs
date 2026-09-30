@@ -916,6 +916,7 @@ partial class Simulation
         bool? allowRowLocks = null;
         bool? allowPageLocks = null;
         bool? optimizeForSequentialKey = null;
+        bool? statisticsNoRecompute = null;
         var depth = 1;
         // Two-token lookbehind over the balanced skip: the option name, then its
         // '='. Only a name at the list's own depth counts — a nested group is
@@ -989,6 +990,8 @@ partial class Simulation
                         allowPageLocks = on;
                     else if (namedOption == "OPTIMIZE_FOR_SEQUENTIAL_KEY")
                         optimizeForSequentialKey = on;
+                    else if (namedOption == "STATISTICS_NORECOMPUTE")
+                        statisticsNoRecompute = on;
                     break;
                 case Numeric or Operator { Character: '-' } when sawEquals && namedOption == "FILLFACTOR":
                     fillFactor = ReadFillFactor(context);
@@ -1049,6 +1052,9 @@ partial class Simulation
                 case StringToken name when depth == 1 && name.Span.Equals("OPTIMIZE_FOR_SEQUENTIAL_KEY", StringComparison.OrdinalIgnoreCase):
                     namedOption = "OPTIMIZE_FOR_SEQUENTIAL_KEY";
                     continue;
+                case StringToken name when depth == 1 && name.Span.Equals("STATISTICS_NORECOMPUTE", StringComparison.OrdinalIgnoreCase):
+                    namedOption = "STATISTICS_NORECOMPUTE";
+                    continue;
             }
 
             namedOption = null;
@@ -1069,7 +1075,7 @@ partial class Simulation
                 throw SimulatedSqlException.ColumnstoreResumable();
         }
         context.MoveNextOptional();
-        return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting, compressionDelay, columnstoreArchive, allowRowLocks, allowPageLocks, optimizeForSequentialKey);
+        return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting, compressionDelay, columnstoreArchive, allowRowLocks, allowPageLocks, optimizeForSequentialKey, statisticsNoRecompute: statisticsNoRecompute);
     }
 
     /// <summary>

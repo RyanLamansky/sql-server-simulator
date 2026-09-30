@@ -596,8 +596,8 @@ internal static partial class BuiltInResources
                 // public (principal_id 0) reports is_fixed_role 0 although it
                 // is a fixed role (probed 2026-09-25), as at the server level.
                 p.IsFixedRole && p.PrincipalId != 0 ? trueBit : falseBit,
-                isDbo ? authInstance : authNone,
-                isDbo ? authInstanceDesc : authNoneDesc,
+                isDbo || p.LoginName is not null ? authInstance : authNone,
+                isDbo || p.LoginName is not null ? authInstanceDesc : authNoneDesc,
                 nullLanguageName,
                 nullLanguageLcid,
             ];
@@ -606,6 +606,13 @@ internal static partial class BuiltInResources
 
     /// <summary>The well-known single-byte <c>sid</c> <c>guest</c> reports.</summary>
     private static readonly SqlValue GuestSid = SqlValue.FromVarbinary([0x00]);
+
+    /// <summary>The <c>sid</c> <c>sys.database_principals</c> reports for <paramref name="principal"/>, or null for the catalog principals.</summary>
+    internal static byte[]? DatabasePrincipalSid(Database database, DatabasePrincipal principal) =>
+        principal.PrincipalId == Database.DboPrincipalId ? Ownership.OwnerSid(database)
+        : principal.PrincipalId == Database.GuestPrincipalId ? [0x00]
+        : principal.PrincipalId is Database.SysPrincipalId or Database.InformationSchemaPrincipalId ? null
+        : DeriveDatabasePrincipalSid(principal);
 
     /// <summary>
     /// The 12-byte prefix of a database-scoped SID — revision 1, five
@@ -772,7 +779,7 @@ internal static partial class BuiltInResources
             rows.Add((login.PrincipalId, [
                 SqlValue.FromSystemName(login.Name), SqlValue.FromInt32(login.PrincipalId), SqlValue.FromVarbinary(DeriveLoginSid(login.Name)),
                 loginType, sqlLogin, login.IsDisabled ? trueBit : falseBit, SqlValue.FromDateTime(login.CreateDate), SqlValue.FromDateTime(login.PasswordLastSetTime),
-                master, usEnglish, nullCredentialId, nullOwningId, falseBit, zeroTenant,
+                SqlValue.FromSystemName(login.DefaultDatabase), SqlValue.FromSystemName(login.DefaultLanguage), nullCredentialId, nullOwningId, falseBit, zeroTenant,
             ]));
         }
 
@@ -957,11 +964,11 @@ internal static partial class BuiltInResources
                 login.IsDisabled ? trueBit : falseBit,
                 SqlValue.FromDateTime(login.CreateDate),
                 SqlValue.FromDateTime(login.PasswordLastSetTime),
-                master,
-                usEnglish,
+                SqlValue.FromSystemName(login.DefaultDatabase),
+                SqlValue.FromSystemName(login.DefaultLanguage),
                 nullCredentialId,
-                trueBit,
-                falseBit,
+                login.IsPolicyChecked ? trueBit : falseBit,
+                login.IsExpirationChecked ? trueBit : falseBit,
                 nullPasswordHash,
             ];
         }

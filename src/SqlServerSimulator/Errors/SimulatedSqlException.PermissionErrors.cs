@@ -345,6 +345,10 @@ public sealed partial class SimulatedSqlException
     internal static SimulatedSqlException CannotAlterServerRole(string roleName) =>
         new($"Cannot alter the server role '{roleName}', because it does not exist or you do not have permission.", 15151, 16, 1);
 
+    /// <summary>Mimics SQL Server error 15151: <c>ALTER SERVER ROLE … DROP MEMBER</c> naming a server principal that doesn't exist (probed 2026-09-30).</summary>
+    internal static SimulatedSqlException CannotDropServerPrincipal(string loginName) =>
+        new($"Cannot drop the server principal '{loginName}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
     /// <summary>Mimics SQL Server error 15151: <c>ALTER SERVER ROLE … ADD MEMBER</c> naming a server principal that doesn't exist. Probe-confirmed wording (probe6 N6).</summary>
     internal static SimulatedSqlException CannotAddServerPrincipal(string loginName) =>
         new($"Cannot add the server principal '{loginName}', because it does not exist or you do not have permission.", 15151, 16, 1);

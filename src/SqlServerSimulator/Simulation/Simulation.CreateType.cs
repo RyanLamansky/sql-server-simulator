@@ -156,7 +156,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (schema.TableTypes.ContainsKey(typeName.Leaf) || schema.AliasTypes.ContainsKey(typeName.Leaf))
+        if (TypeNameIsTaken(context, schema, typeName))
             throw SimulatedSqlException.TypeAlreadyExists(typeName.ToString());
 
         var typeTableObjectId = context.CurrentDatabase.AllocateObjectId();
@@ -198,6 +198,16 @@ partial class Simulation
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
         return true;
     }
+
+    /// <summary>
+    /// Whether a type by this name exists already: an alias or table type of
+    /// the schema, or — in <c>dbo</c> — one of the system types, whose names
+    /// the shared type namespace holds (probed 2026-09-30: <c>CREATE TYPE
+    /// dbo.int</c> is Msg 219).
+    /// </summary>
+    private static bool TypeNameIsTaken(ParserContext context, Schema schema, MultiPartName typeName) =>
+        schema.TableTypes.ContainsKey(typeName.Leaf) || schema.AliasTypes.ContainsKey(typeName.Leaf)
+        || (schema.SchemaId == Database.DboSchemaId && Array.Exists(BuiltInResources.SystypesRowData, row => context.CurrentDatabase.Collation.Equals((string)row[0]!, typeName.Leaf)));
 
     /// <summary>
     /// Parses the scalar alias-type form of <c>CREATE TYPE</c>: <c>CREATE
@@ -297,20 +307,34 @@ partial class Simulation
         int? resolvedMaxLength = null;
         if (refusal is null)
         {
+            // A size past 8000 is refused for its own reason before nvarchar's
+            // 4000 ceiling is (Msg 131, probed 2026-09-30 against SQL Server 2025).
+            if (declaredMaxLength is > 8000 and not SqlType.MaxLengthSentinel)
+            {
+                if (baseLeafToken.Span.Equals("nvarchar", StringComparison.OrdinalIgnoreCase))
+                    throw SimulatedSqlException.SizeExceedsMaximumCast("nvarchar", declaredMaxLength.Value, 8000);
+                if (baseLeafToken.Span.Equals("nchar", StringComparison.OrdinalIgnoreCase))
+                    throw SimulatedSqlException.SizeExceedsMaximumCast("nchar", declaredMaxLength.Value, 8000);
+            }
             try
             {
                 (resolvedType, resolvedMaxLength) = SqlType.GetByName(
                     baseLeafToken, declaredMaxLength, declaredScale,
                     index: 0, TypeSpecSite.Scalar, columnName: baseLeafToken.Value);
             }
-            catch (SimulatedSqlException ex) when (ex.Number == 2750)
+            catch (SimulatedSqlException ex) when (ex.Number is 2750 or 2716 || (ex.Number == 2717 && ex.State == 2))
             {
-                throw SimulatedSqlException.FollowedByUdtParametersInvalid(ex, typeName.Leaf);
+                throw SimulatedSqlException.FollowedByUdtParametersInvalid(ex, typeName.ToString());
             }
             catch (SimulatedSqlException ex) when (ex.Number is 2715 or 243 or 102)
             {
                 refusal = SimulatedSqlException.InvalidBaseTypeForAlias(baseName.ToString());
             }
+
+            // A base whose length a column would default to takes none here
+            // (probed 2026-09-30 against SQL Server 2025).
+            if (refusal is null && declaredMaxLength is null && resolvedType is CharSqlType or VarcharSqlType or NCharSqlType or NVarcharSqlType or BinarySqlType or VarbinarySqlType)
+                throw SimulatedSqlException.FollowedByUdtParametersInvalid(SimulatedSqlException.AliasBaseNeedsLength(baseLeafToken.Value), typeName.ToString());
         }
 
         // The CLR system types, rowversion and sysname (itself a system
@@ -322,12 +346,16 @@ partial class Simulation
                 baseName.Count == 2 ? $"{baseName.ImmediateQualifier}.{resolvedType.SqlServerName}" : resolvedType.SqlServerName);
         }
 
+        // Anything left after the nullability is refused before the type exists
+        // (`FROM int IDENTITY` is Msg 156).
+        if (context.Token is not null && !IsStatementBoundary(context.Token))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.Batch.IsSkipping)
             return true;
         if (refusal is not null)
             throw refusal;
 
-        if (schema.TableTypes.ContainsKey(typeName.Leaf) || schema.AliasTypes.ContainsKey(typeName.Leaf))
+        if (TypeNameIsTaken(context, schema, typeName))
             throw SimulatedSqlException.TypeAlreadyExists(typeName.ToString());
 
         schema.AliasTypes[typeName.Leaf] = new AliasType(

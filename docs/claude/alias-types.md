@@ -77,6 +77,11 @@ Real treats the alias as part of an expression's type, so a projection carries i
 
 A `CREATE DEFAULT` / `CREATE RULE` object bound to the type flows to its columns — see [`rules-and-defaults.md`](rules-and-defaults.md).
 
+## Legacy procedures
+
+`sp_addtype` and `sp_droptype` run `CREATE TYPE … FROM` and `DROP TYPE`, with real's own argument errors ahead of them.
+`CREATE TYPE … FROM char | binary` without a length raises Msg 2724 then 225, a size over 8000 on `nchar` / `nvarchar` Msg 131, and a name a system type owns Msg 219 (probed 2026-09-30 against SQL Server 2025).
+
 ## Known gaps
 
 - **Alias-type `max_length` not emitted in `sys.types`** — gap from the catalog view's shipped subset.

@@ -183,6 +183,12 @@ internal sealed class Index(
     public bool OptimizeForSequentialKey = options.OptimizeForSequentialKey ?? false;
 
     /// <summary>
+    /// <c>sys.stats.no_recompute</c> of the index's statistic: <c>STATISTICS_NORECOMPUTE</c>
+    /// declared, or set since by <c>ALTER INDEX</c>, <c>UPDATE STATISTICS</c> or <c>sp_autostats</c>.
+    /// </summary>
+    public bool StatisticsNoRecompute = options.StatisticsNoRecompute ?? false;
+
+    /// <summary>
     /// Whether <c>ALTER INDEX … DISABLE</c> has taken this index out of service.
     /// A disabled UNIQUE index stops being enforced entirely — duplicates insert
     /// freely — and <c>ALTER INDEX … REBUILD</c> puts it back, re-validating the

@@ -36,8 +36,12 @@ partial class Simulation
         // principal gets Msg 15247 (probe M3).
         if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
             throw SimulatedSqlException.UserDoesNotHavePermission();
-        if (context.CurrentDatabase.Principals.ContainsKey(name))
-            throw SimulatedSqlException.PrincipalAlreadyExists(name);
+        // The state says what already holds the name: dbo 1, public 6, any other user 5 (probed 2026-09-30).
+        if (context.CurrentDatabase.Principals.TryGetValue(name, out var taken))
+            throw SimulatedSqlException.PrincipalAlreadyExists(name, state: taken.PrincipalId == Database.DboPrincipalId ? (byte)1 : taken.PrincipalId == 0 ? (byte)6 : (byte)5);
+        // sa is a login a user can't be made for.
+        if (loginLink is not null && BuiltInToken.Comparer.Equals(loginLink, "sa"))
+            throw SimulatedSqlException.CannotUseSpecialPrincipal(loginLink);
         // A login the server doesn't know can't be mapped (probed 2026-09-29
         // against SQL Server 2025).
         if (loginLink is not null
@@ -49,6 +53,12 @@ partial class Simulation
         // The database owner's login is already here as dbo (probed 2026-09-27).
         if (loginLink is not null && context.CurrentDatabase.Collation.Equals(loginLink, context.CurrentDatabase.OwnerLoginName))
             throw SimulatedSqlException.LoginAlreadyHasAccount("dbo");
+        // One user per login in a database (probed 2026-09-30).
+        if (loginLink is not null
+            && context.CurrentDatabase.Principals.EnumerateValues().FirstOrDefault(other => other.LoginName is { } linked && context.CurrentDatabase.Collation.Equals(linked, loginLink)) is { } linkedUser)
+        {
+            throw SimulatedSqlException.LoginAlreadyHasAccount(linkedUser.Name);
+        }
         var id = context.CurrentDatabase.AllocatePrincipalId();
         RecordSecurityUndo(context, context.CurrentDatabase);
         context.CurrentDatabase.Principals[name] = new DatabasePrincipal(
@@ -57,6 +67,7 @@ partial class Simulation
             securityIdentifierString: withoutLogin ? DeriveSyntheticUserSid(name) : null)
         {
             DefaultSchemaName = defaultSchema,
+            LoginPrincipalId = loginLink is not null && context.Simulation.TryResolveServerPrincipalId(loginLink, out var linkedId) ? linkedId : 0,
         };
         // CREATE USER auto-seeds a CONNECT grant (class 0 DATABASE, grantor dbo,
         // state G) — probe-confirmed against sys.database_permissions.
@@ -240,7 +251,7 @@ partial class Simulation
         if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
             throw SimulatedSqlException.UserDoesNotHavePermission();
         if (context.CurrentDatabase.Principals.ContainsKey(name))
-            throw SimulatedSqlException.PrincipalAlreadyExists(name);
+            throw SimulatedSqlException.PrincipalAlreadyExists(name, state: 8);
         var owner = Database.DboPrincipalId;
         if (ownerName is not null)
         {

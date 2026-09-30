@@ -315,6 +315,16 @@ public sealed partial class SimulatedSqlException : DbException
     /// </summary>
     internal bool RaisedBySystemProcedure;
 
+    /// <summary>
+    /// The return code a system procedure gives the <c>EXEC @rc = …</c> caller
+    /// when this error ends it: 1 for most, the error number itself for the
+    /// <c>sys.sp_*</c> option procedures (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal int SystemProcedureReturnCode = 1;
+
+    /// <summary>Set on a refusal binding a system procedure's arguments, which leaves the caller's return code unset.</summary>
+    internal bool SystemProcedureBindingError;
+
     /// <summary>Set by <see cref="PinLine"/>: the line holds wherever the error is caught.</summary>
     private bool linePinned;
 

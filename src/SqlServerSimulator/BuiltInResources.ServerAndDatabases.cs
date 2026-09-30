@@ -1770,7 +1770,7 @@ internal static partial class BuiltInResources
     /// (stable across runs, distinct from real SQL Server's
     /// <c>object_id</c>-derived ordering — see the quirks list).
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateSysServers(Parser.BatchContext batch, Database database)
+    internal static IEnumerable<SqlValue[]> EnumerateSysServers(Parser.BatchContext batch, Database database)
     {
         _ = database;
         var yes = SqlValue.FromBoolean(true);

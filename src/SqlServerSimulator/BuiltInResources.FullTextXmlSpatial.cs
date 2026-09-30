@@ -162,10 +162,8 @@ internal static partial class BuiltInResources
         // every installed language from Language.All in langid order — the set
         // SET LANGUAGE resolves against, and what a stock instance's
         // default-language configuration (configuration_id 124, value_in_use 0)
-        // joins by langid to name the default. The three name-list columns
-        // (months / shortmonths / days) are nullable on real and left NULL
-        // here: no surface reads them, since message and date-name
-        // localization aren't modeled.
+        // joins by langid to name the default. The month, abbreviated-month and
+        // weekday name lists are each language's own, as real reports them.
         Sys("syslanguages",
         [
             new("langid", SqlType.SmallInt, null, false),
@@ -192,11 +190,40 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt32(0),
                     SqlValue.FromNVarchar(language.Name),
                     SqlValue.FromNVarchar(language.Alias),
-                    SqlValue.Null(NVarcharSqlType.Get(372, Collation.Baseline, Coercibility.CoercibleDefault)),
-                    SqlValue.Null(NVarcharSqlType.Get(132, Collation.Baseline, Coercibility.CoercibleDefault)),
-                    SqlValue.Null(NVarcharSqlType.Get(217, Collation.Baseline, Coercibility.CoercibleDefault)),
+                    SqlValue.FromNVarchar(language.Months),
+                    SqlValue.FromNVarchar(language.ShortMonths),
+                    SqlValue.FromNVarchar(language.Days),
                     SqlValue.FromInt32(language.Lcid),
                     SqlValue.FromInt16(language.MsgLangId),
+                ]);
+            }
+            return rows;
+        });
+
+        // sys.messages: the user messages sp_addmessage registered, in
+        // (message_id, language_id) order — a clustered scan's. Real's
+        // system rows (16,750 per language, ids below 50000) aren't carried.
+        Sys("messages",
+        [
+            new("message_id", SqlType.Int32, null, false),
+            new("language_id", SqlType.SmallInt, null, false),
+            new("severity", SqlType.TinyInt, null, true),
+            new("is_event_logged", SqlType.Bit, null, false),
+            new("text", SqlType.NVarchar, 2048, false),
+        ], static (batch, database) =>
+        {
+            _ = database;
+            var registered = batch.Connection.Simulation.UserMessages.ToArray();
+            Array.Sort(registered, static (a, b) => a.Key.MessageId != b.Key.MessageId ? a.Key.MessageId.CompareTo(b.Key.MessageId) : a.Key.LanguageId.CompareTo(b.Key.LanguageId));
+            var rows = new List<SqlValue[]>(registered.Length);
+            foreach (var (key, message) in registered)
+            {
+                rows.Add([
+                    SqlValue.FromInt32(key.MessageId),
+                    SqlValue.FromInt16(key.LanguageId),
+                    SqlValue.FromByte(message.Severity),
+                    SqlValue.FromBoolean(message.IsEventLogged),
+                    SqlValue.FromNVarchar(message.Text),
                 ]);
             }
             return rows;

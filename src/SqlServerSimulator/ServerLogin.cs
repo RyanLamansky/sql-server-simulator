@@ -7,7 +7,7 @@ namespace SqlServerSimulator;
 /// verified by the TDS endpoint at LOGIN7 time. Instances are immutable;
 /// <c>ALTER LOGIN … WITH PASSWORD</c> swaps in a replacement entry.
 /// </summary>
-internal sealed class ServerLogin(int principalId, string name, byte[] passwordHash, DateTime createDate, DateTime passwordLastSetTime, bool isDisabled = false)
+internal sealed class ServerLogin(int principalId, string name, byte[] passwordHash, DateTime createDate, DateTime passwordLastSetTime, bool isDisabled = false, string defaultDatabase = "master", string defaultLanguage = "us_english", bool isPolicyChecked = true, bool isExpirationChecked = false)
 {
     /// <summary>
     /// Server-level principal id, allocated once at <c>CREATE LOGIN</c> and
@@ -41,4 +41,31 @@ internal sealed class ServerLogin(int principalId, string name, byte[] passwordH
     /// against SQL Server 2025). Projected as <c>is_disabled</c>.
     /// </summary>
     public readonly bool IsDisabled = isDisabled;
+
+    /// <summary>
+    /// The <c>DEFAULT_DATABASE</c> the login was created or altered with, as it was written
+    /// (<c>sys.server_principals.default_database_name</c>, <c>LOGINPROPERTY 'DefaultDatabase'</c>).
+    /// The session doesn't land there: a connection opens on the database it names, or <c>simulated</c>.
+    /// </summary>
+    public readonly string DefaultDatabase = defaultDatabase;
+
+    /// <summary>
+    /// The <c>DEFAULT_LANGUAGE</c> as written — an official name or an alias, kept as given
+    /// (<c>sys.server_principals.default_language_name</c>). It doesn't set the session's language.
+    /// </summary>
+    public readonly string DefaultLanguage = defaultLanguage;
+
+    /// <summary><c>CHECK_POLICY</c>: <c>sys.sql_logins.is_policy_checked</c>, and whether a new password meets the password policy.</summary>
+    public readonly bool IsPolicyChecked = isPolicyChecked;
+
+    /// <summary><c>CHECK_EXPIRATION</c>: <c>sys.sql_logins.is_expiration_checked</c>. Nothing here expires a password.</summary>
+    public readonly bool IsExpirationChecked = isExpirationChecked;
+
+    /// <summary>A login like this one with the given fields changed — logins are replaced whole, never mutated.</summary>
+    public ServerLogin With(
+        byte[]? passwordHash = null, DateTime? passwordLastSetTime = null, bool? isDisabled = null, string? defaultDatabase = null,
+        string? defaultLanguage = null, bool? isPolicyChecked = null, bool? isExpirationChecked = null) =>
+        new(this.PrincipalId, this.Name, passwordHash ?? this.PasswordHash, this.CreateDate, passwordLastSetTime ?? this.PasswordLastSetTime,
+            isDisabled ?? this.IsDisabled, defaultDatabase ?? this.DefaultDatabase, defaultLanguage ?? this.DefaultLanguage,
+            isPolicyChecked ?? this.IsPolicyChecked, isExpirationChecked ?? this.IsExpirationChecked);
 }

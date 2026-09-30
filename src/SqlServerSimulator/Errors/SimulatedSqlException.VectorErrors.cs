@@ -111,7 +111,7 @@ partial class SimulatedSqlException
     /// Msg 1978: a vector column (state 4), a json column (state 3) or a CLR
     /// type column not marked <c>IsByteOrdered</c> (state 1) named as
     /// a key of a <c>CREATE INDEX</c> or <c>CREATE STATISTICS</c> — where a key
-    /// constraint takes Msg 1919 instead.
+    /// constraint takes Msg 1919 instead. The table is named as the statement wrote it.
     /// </summary>
     internal static SimulatedSqlException VectorKeyColumnInvalid(string columnName, string tableName, byte state = 4) =>
         new($"Column '{columnName}' in table '{tableName}' is of a type that is invalid for use as a key column in an index or statistics.", 1978, 16, state);

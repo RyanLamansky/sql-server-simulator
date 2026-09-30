@@ -2266,6 +2266,7 @@ partial class Simulation
                 ClusteredScan.NoteKeyAssignment(destinationTable, updatedColumnOrdinals, (page, slot), undoLog);
             }
             tracking?.RecordKeyMoves(context.Batch, destinationTable, keyMoves);
+            destinationTable.NoteColumnsUpdated(updatedColumnOrdinals);
         }
         if (!insteadOfInsert)
         {

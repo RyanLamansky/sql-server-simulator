@@ -101,7 +101,7 @@ public sealed class PrincipalScalarTests
     public void SuserSid_RegistryLogin_MatchesServerPrincipalsSid()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create login probe_login with password = 'p@ss'");
+        _ = sim.ExecuteNonQuery("create login probe_login with password = 'P@ssw0rd1'");
         AreEqual(1, sim.ExecuteScalar(
             "select iif(suser_sid(N'probe_login') = (select sid from sys.server_principals where name = N'probe_login'), 1, 0)"));
     }
@@ -121,7 +121,7 @@ public sealed class PrincipalScalarTests
         // Windows / Entra-ID directory principals — it returns NULL even for
         // an existing SQL-auth login, so constant NULL is faithful here.
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create login probe_login2 with password = 'p@ss'");
+        _ = sim.ExecuteNonQuery("create login probe_login2 with password = 'P@ssw0rd1'");
         AreEqual(DBNull.Value, sim.ExecuteScalar("select sid_binary(N'probe_login2')"));
         AreEqual(DBNull.Value, sim.ExecuteScalar("select sid_binary(N'')"));
     }

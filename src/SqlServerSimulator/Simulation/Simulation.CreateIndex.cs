@@ -206,7 +206,7 @@ partial class Simulation
         {
             var fullOrdinal = ResolveColumnOrdinal(context.Batch.CurrentDatabase.Collation, table, keyColumns[i].Name);
             if (table.Columns[fullOrdinal].Type is VectorSqlType or JsonSqlType or ClrUdtSqlType { Udt.IsByteOrdered: false })
-                throw SimulatedSqlException.VectorKeyColumnInvalid(table.Columns[fullOrdinal].Name, table.Name, table.Columns[fullOrdinal].Type switch { JsonSqlType => 3, VectorSqlType => 4, _ => 1 });
+                throw SimulatedSqlException.VectorKeyColumnInvalid(table.Columns[fullOrdinal].Name, targetTableName.ToString(), table.Columns[fullOrdinal].Type switch { JsonSqlType => 3, VectorSqlType => 4, _ => 1 });
             RejectComputedKeyColumnNotIndexable(context.Batch, table, table.Columns[fullOrdinal], indexName, viaConstraint: false);
             resolvedKeyColumns[i] = new IndexKeyColumn(table.StorageOrdinals[fullOrdinal], fullOrdinal, keyColumns[i].IsDescending);
         }
@@ -270,6 +270,7 @@ partial class Simulation
             table.Indexes[table.Indexes.IndexOf(replaced)] = index;
         else
             table.Indexes.Add(index);
+        table.NoteStatisticsCreated(index.Name, context.CurrentDatabase.Collation);
         if (isClustered)
         {
             table.Partitioning = placement;
@@ -390,6 +391,7 @@ partial class Simulation
             if (!table.IsTableVariable && !table.IsTypeTable)
                 PlaceNewIndex(batch, table, index);
             table.Indexes.Add(index);
+            table.NoteStatisticsCreated(index.Name, batch.CurrentDatabase.Collation);
         }
     }
 

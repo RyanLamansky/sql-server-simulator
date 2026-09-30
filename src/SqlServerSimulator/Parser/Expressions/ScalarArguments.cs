@@ -89,7 +89,7 @@ internal static class ScalarArguments
         {
             throw ProcedureParameterConversionError(value, target);
         }
-        catch (SimulatedSqlException e) when (e.Number is 8115 or 232 or 237 or 220)
+        catch (SimulatedSqlException e) when (e.Number is 8115 or 232 or 237 or 220 or 245)
         {
             // The conversion-overflow family a decimal / float / money source
             // raises internally still reports as the procedure-parameter

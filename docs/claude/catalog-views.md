@@ -211,7 +211,7 @@ Remaining quirk: a decimal-declared sequence's inner reports BaseType `numeric` 
   A database-scope DDL trigger's rows expand its event list, and the server-scope trigger catalog — `sys.server_triggers`, `sys.server_trigger_events`, `sys.server_sql_modules` — is in [`triggers.md`](triggers.md#server-scope-triggers--on-all-server).
   DDL triggers aren't surfaced (their events are DDL event types SMO's per-table query never reads).
   SMO's trigger-scripting query `LEFT JOIN`s it three times (one per DML event) to build the `FOR` clause.
-- **`sys.syslanguages`** (legacy compatibility view) models only the default **us_english** language (`langid 0` / `lcid 1033` / `name`/`alias`), which a stock instance's default-language configuration (`configuration_id 124`, `value_in_use 0`) resolves to — SMO's server-settings query joins it by `langid` to name the default language.
+- **`sys.syslanguages`** (legacy compatibility view) models the 34 languages a stock instance installs, with real's month, short-month and day names; the default-language configuration (`configuration_id 124`, `value_in_use 0`) resolves to us_english (`langid 0` / `lcid 1033`), which a stock instance's default-language configuration (`configuration_id 124`, `value_in_use 0`) resolves to — SMO's server-settings query joins it by `langid` to name the default language.
 - **Empty unmodeled-feature views** (full probe-confirmed SQL Server 2025 shape, zero rows — the AlwaysOn-DMV precedent): `sys.external_tables` (29), `sys.filetables` (5), `sys.external_data_sources` (11), `sys.external_file_formats` (13), `sys.column_encryption_keys` (4) / `sys.sensitivity_classifications` (10) (Always Encrypted / data classification), `sys.fulltext_stoplists` (5) / `sys.registered_search_property_lists` (5) / `sys.fulltext_languages` (2) (full-text feature surfaces), and the database-level `sys.database_recovery_status` (7) / `sys.database_filestream_options` (4).
   All are `LEFT JOIN`ed by the "Script Table as → CREATE To" and database-properties SMO queries; the empty projection resolves each reference and defaults each property via `ISNULL`.
   `sys.change_tracking_tables` and `sys.change_tracking_databases`, which the same queries join, are populated — see [`change-tracking.md`](change-tracking.md).
@@ -748,6 +748,25 @@ Overall the set went from 53.9 s to 0.85 s against the reference's 2.0 s (0.8 s 
 The worst per-table SMO query was a `LEFT JOIN` to `sys.all_objects` on a computed name, a nested loop over every object per index row; with the table narrowed by its name seek it loops over three rows.
 The constraint-inventory query that motivated the cache, re-measured on the Insite.Commerce import, went from ~310 ms to ~125 ms against the reference's ~68 ms.
 What remains of the per-table ratios is ordinary per-statement cost — name resolution and projection over forty-odd columns — rather than anything catalog-specific.
+
+## System procedures over the registries
+
+Probed 2026-09-30 against SQL Server 2025, black-box from SQL inputs and observed outputs.
+Errors carry real's number, state, procedure name and line; a `sys.sp_*` option procedure returns its error number as the return code where the rest return 1, and a binding refusal (too many arguments, a missing required one, an unknown name) leaves the return code unset.
+A procedure whose real body runs an ordinary statement runs the same statement here, so its errors come out at line 1 with no procedure.
+
+- **Messages** — `sp_addmessage`, `sp_altermessage` and `sp_dropmessage` maintain `Simulation.UserMessages`, which `sys.messages`, `RAISERROR` and `FORMATMESSAGE` read.
+  A localized text uses positional `%N!` or `%N` placeholders against the us_english specifiers, each position at most once.
+  `is_event_logged` and severity are per message id, so replacing the us_english row rewrites every language's.
+  The registry is transactional: a rollback restores it.
+  Real's own system rows are not carried.
+- **Types** — `sp_addtype` and `sp_droptype` delegate to `CREATE TYPE … FROM` and `DROP TYPE`.
+- **Logins and users** — `sp_addlogin`, `sp_droplogin`, `sp_password`, `sp_defaultdb`, `sp_defaultlanguage`, `sp_adduser`, `sp_grantdbaccess`, `sp_dropuser`, `sp_revokedbaccess`, `sp_addrole`, `sp_droprole`, `sp_addsrvrolemember`, `sp_dropsrvrolemember`, `sp_helprolemember` and `sp_change_users_login` (REPORT, UPDATE_ONE, AUTO_FIX) → [`permissions.md`](permissions.md).
+- **Options** — `sp_tableoption`, `sp_indexoption` and `sp_autostats` write `sys.tables`' `lock_on_bulk_load` / `text_in_row_limit` / `large_value_types_out_of_row`, the index lock flags and `sys.stats.no_recompute`.
+- **Statistics** — `sp_updatestats` refreshes the statistics whose leading column changed (or whose table gained or lost rows) since they were last current, and `sp_createstats` creates single-column statistics through `CREATE STATISTICS`.
+  Real also walks internal tables in both; only user tables are listed here.
+- **Reports** — `sp_helplanguage` (over `sys.syslanguages`, whose month and day names are real's), `sp_helpsort`, `sp_helpserver`, `sp_monitor` (host-process figures) and `sp_lock` (over the lock DMV plus each session's database lock; real also lists the locks its own metadata reads take).
+  `sp_MSforeach_worker` called directly raises the four errors real's does without the cursor its callers declare.
 
 ## Expression dependencies
 

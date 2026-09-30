@@ -18,7 +18,8 @@ internal readonly struct IndexOptions(
     bool? allowRowLocks = null,
     bool? allowPageLocks = null,
     bool? optimizeForSequentialKey = null,
-    Schemas.DataSpaceClause? dataSpace = null)
+    Schemas.DataSpaceClause? dataSpace = null,
+    bool? statisticsNoRecompute = null)
 {
     public readonly bool IgnoreDupKey = ignoreDupKey;
 
@@ -48,11 +49,14 @@ internal readonly struct IndexOptions(
     /// <summary><c>OPTIMIZE_FOR_SEQUENTIAL_KEY</c>, when given; only the catalog reports it.</summary>
     public readonly bool? OptimizeForSequentialKey = optimizeForSequentialKey;
 
+    /// <summary><c>STATISTICS_NORECOMPUTE</c>, when given: <c>sys.stats.no_recompute</c> of the index's statistic.</summary>
+    public readonly bool? StatisticsNoRecompute = statisticsNoRecompute;
+
     /// <summary>The <c>ON</c> placement clause written after the options, if any.</summary>
     public readonly Schemas.DataSpaceClause? DataSpace = dataSpace;
 
     /// <summary>These options with <paramref name="clause"/> as the placement.</summary>
     public IndexOptions WithDataSpace(Schemas.DataSpaceClause? clause) =>
         new(this.IgnoreDupKey, this.FillFactor, this.PadIndex, this.DropExisting, this.CompressionDelay, this.ColumnstoreArchive,
-            this.AllowRowLocks, this.AllowPageLocks, this.OptimizeForSequentialKey, clause);
+            this.AllowRowLocks, this.AllowPageLocks, this.OptimizeForSequentialKey, clause, this.StatisticsNoRecompute);
 }

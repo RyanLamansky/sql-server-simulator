@@ -7,12 +7,11 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <summary>
 /// SQL <c>FORMATMESSAGE(msg_number_or_string, [param, ...])</c>: renders a
 /// printf-style format string against substitution arguments. The
-/// <c>msg_id</c> overload (first argument numeric) resolves a
-/// <c>sys.messages</c> entry on real SQL Server; the simulator doesn't model
-/// <c>sys.messages</c>, so every numeric id — user (≥50000) or system —
-/// returns NULL, matching real SQL Server's behavior for an unknown id
-/// (probe-confirmed 2026-07-10: <c>FORMATMESSAGE(50000, 'x')</c> and
-/// <c>FORMATMESSAGE(99999999)</c> both yield NULL). Result type is
+/// <c>msg_id</c> overload (first argument numeric) formats the
+/// registered user message (<c>sp_addmessage</c>) for that id, and for an
+/// unregistered id returns real's terse text
+/// <c>Error: {id}, Severity: {severity}, State: 1. (Params:)…</c>
+/// (probed 2026-09-30 against SQL Server 2025). Result type is
 /// <c>nvarchar</c>; the value truncates to 2047 characters (probe-confirmed).
 /// </summary>
 /// <remarks>
@@ -73,8 +72,8 @@ internal sealed class FormatMessage : Expression
     /// Byte-exact capture from SQL Server 2025 (2026-07-10), trailing CRLF
     /// included.
     /// </summary>
-    private const string TerseFormattingError =
-        "Error: 50000, Severity: -1, State: 1. (Params:). The error is printed in terse mode because there was error during formatting. Tracing, ETW, notifications etc are skipped.\r\n";
+    private static string TerseFormattingError(int messageId, int severity) =>
+        $"Error: {messageId}, Severity: {severity}, State: 1. (Params:). The error is printed in terse mode because there was error during formatting. Tracing, ETW, notifications etc are skipped.\r\n";
 
     private readonly Expression formatArg;
     private readonly Expression[] substitutionArgs;
@@ -102,15 +101,35 @@ internal sealed class FormatMessage : Expression
         if (formatValue.IsNull)
             return SqlValue.Null(SqlType.NVarchar);
 
-        // Numeric first argument → the msg_id overload. sys.messages isn't
-        // modeled, so every id resolves as "unknown" → NULL — but every
-        // parameter's type is judged first, consumed or not (probed
-        // 2026-09-26 against SQL Server 2025: FORMATMESSAGE(1, 1e0) is Msg 2748).
+        // Numeric first argument → the msg_id overload, read from the user
+        // messages sp_addmessage registered (a system message id, which isn't
+        // carried, is an unknown id → NULL). Every parameter's type is judged
+        // first, consumed or not (probed 2026-09-26 against SQL Server 2025:
+        // FORMATMESSAGE(1, 1e0) is Msg 2748).
         if (formatValue.Type.Category == SqlTypeCategory.Integer)
         {
-            for (var i = 0; i < this.substitutionArgs.Length; i++)
-                RejectDisallowedType(this.substitutionArgs[i].Run(runtime), i + 1);
-            return SqlValue.Null(SqlType.NVarchar);
+            var supplied = new SqlValue[this.substitutionArgs.Length];
+            for (var i = 0; i < supplied.Length; i++)
+            {
+                supplied[i] = this.substitutionArgs[i].Run(runtime);
+                RejectDisallowedType(supplied[i], i + 1);
+            }
+            var batch = runtime.Batch;
+            if (formatValue.Type == SqlType.BigInt && formatValue.AsInt64 is < int.MinValue or > int.MaxValue)
+                return SqlValue.Null(SqlType.NVarchar);
+            var registered = RegisteredMessage.Find(batch.Connection.Simulation, formatValue.CoerceTo(SqlType.Int32).AsInt32, batch.Connection.Language.MsgLangId);
+            if (registered is null)
+                return SqlValue.Null(SqlType.NVarchar);
+            var messageText = registered.Text;
+            var arguments = supplied;
+            var ok = messageText.Length != 0;
+            if (ok && registered.Localized)
+            {
+                ok = TryRender(registered.UsEnglish.Text, arguments, out _)
+                    && registered.TryLocalize(arguments, out messageText, out arguments);
+            }
+            var message = ok && TryRender(messageText, arguments, out var body) ? body : TerseFormattingError(registered.MessageId, registered.Severity);
+            return SqlValue.FromNVarchar(message.Length > MaxResultChars ? message[..MaxResultChars] : message);
         }
 
         var format = formatValue.CoerceTo(SqlType.NVarchar).AsString;
@@ -119,7 +138,7 @@ internal sealed class FormatMessage : Expression
         for (var i = 0; i < args.Length; i++)
             args[i] = this.substitutionArgs[i].Run(runtime);
 
-        var rendered = TryRender(format, args, out var text) ? text : TerseFormattingError;
+        var rendered = TryRender(format, args, out var text) ? text : TerseFormattingError(50000, -1);
         if (rendered.Length > MaxResultChars)
             rendered = rendered[..MaxResultChars];
         return SqlValue.FromNVarchar(rendered);

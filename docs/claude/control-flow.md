@@ -407,10 +407,14 @@ Statement adjacency requires `;` before THROW (probe-confirmed: `select 1 throw 
 - A substitution that isn't an integer (bit excluded), a string or a binary is Msg 2748 naming its type and its position among all the arguments — whether a specifier reads it or not, except a decimal, which is refused only when read.
 - More than 20 substitution args raises Msg 2747 ("Too many substitution parameters for RAISERROR. Cannot exceed 20 substitution parameters") — applied even when the format string has no specifiers.
 
-**msg_id matrix**: the simulator hasn't modeled the `sys.messages` registry or `sp_addmessage`, so every numeric `msg_id` falls into one of two error paths:
-- `msg_id = 50000` (the reserved synthesized id for the inline-string form) or `msg_id < 13000` → Msg 2732 ("Error number N is invalid. The number must be from 13000 through 2147483647 and it cannot be 50000").
-- Any other numeric id, including system message ids like 13001 that exist in real SQL Server's `sys.messages` → Msg 18054 ("Error N, severity S, state T was raised, but no message with that error number was found in sys.messages. If error is larger than 50000, make sure the user-defined message is added using sp_addmessage").
+**msg_id matrix**: a numeric `msg_id` reads the message registry `sp_addmessage` fills (see [`catalog-views.md`](catalog-views.md#system-procedures-over-the-registries)).
+- `msg_id = 50000` (the synthesized id for the inline-string form) or `msg_id < 13000` → Msg 2732 ("Error number N is invalid. The number must be from 13000 through 2147483647 and it cannot be 50000"), including a NULL id typed as an integer, which reads as 0.
+- A registered id formats the message's text for the language of the session and takes the message's own severity for a negative literal severity; a `NULL` literal message is the empty message.
+- Any other numeric id → Msg 18054 ("Error N, severity S, state T was raised, but no message with that error number was found in sys.messages. If error is larger than 50000, make sure the user-defined message is added using sp_addmessage").
+  Real's own system rows (about 16,750 per language) are not carried, so a system id such as 13001 lands here.
 - Inline-string form (`RAISERROR('text', …)`) always uses msg id 50000.
+- `FORMATMESSAGE(msg_number, …)` formats a registered message, or for an unregistered number returns the terse text `Error: {id}, Severity: {severity}, State: 1. (Params:)…` (probed 2026-09-30 against SQL Server 2025).
+- A `THROW` whose message text contains `%` diverges from real in one rare shape recorded during the probe; the common shapes match.
 
 **WITH options**: comma-separated list after the closing `)`.
 `LOG` raises Msg 2778 ("Only System Administrator can specify WITH LOG option for RAISERROR command") for a session that isn't a sysadmin, and is otherwise accepted with nothing logged.

@@ -92,8 +92,8 @@ internal sealed class LoginProperty : Expression
         {
             "BADPASSWORDCOUNT" => SqlValue.FromInt32(0),
             "BADPASSWORDTIME" => SqlValue.FromDateTime(NeverSentinel),
-            "DEFAULTDATABASE" => SqlValue.FromNVarchar(runtime.Batch.CurrentDatabase.Name),
-            "DEFAULTLANGUAGE" => SqlValue.FromNVarchar("us_english"),
+            "DEFAULTDATABASE" => SqlValue.FromNVarchar(registered ? serverLogin!.DefaultDatabase : runtime.Batch.CurrentDatabase.Name),
+            "DEFAULTLANGUAGE" => SqlValue.FromNVarchar(registered ? serverLogin!.DefaultLanguage : "us_english"),
             "HISTORYLENGTH" => SqlValue.FromInt32(0),
             "ISEXPIRED" => SqlValue.FromInt32(0),
             "ISLOCKED" => SqlValue.FromInt32(0),

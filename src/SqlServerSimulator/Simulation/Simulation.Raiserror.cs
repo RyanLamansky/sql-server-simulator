@@ -48,15 +48,14 @@ partial class Simulation
     /// single space, matching probe) is the inline-message form, formatted
     /// via <see cref="MessageFormatter"/> with the substitution args. A
     /// numeric value is treated as a registered <c>sys.messages</c> id —
-    /// the simulator hasn't modeled the message registry, so every numeric
-    /// msg_id falls into one of two error paths: <c>&lt; 13000</c> or
+    /// a user message <c>sp_addmessage</c> registered formats its text; an id
+    /// that is not registered falls into one of two error paths: <c>&lt; 13000</c> or
     /// <c>= 50000</c> raises Msg 2732 (the "invalid number" path —
     /// 50000 is reserved as the synthesized id for inline-string raises,
     /// so passing it literally is rejected), and any other numeric id raises
     /// Msg 18054 (the "not found in sys.messages" path). Apps using
     /// <c>RAISERROR(N, ...)</c> with N in the valid user-defined range work
-    /// on real SQL Server only after <c>sp_addmessage</c> registration;
-    /// they hit Msg 18054 here for the same reason
+    /// on real SQL Server only after <c>sp_addmessage</c> registration
     /// (probe-confirmed wording verbatim).
     /// </para>
     /// <para>
@@ -151,60 +150,62 @@ partial class Simulation
         if (withLog && !isSysadmin && !batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.AlterTrace))
             throw SimulatedSqlException.RaiserrorLogRequiresSysadmin();
 
-        // Severity: NULL or negative → 0 (informational, no error).
-        var severity = CoerceToInt32OrNull(severityValue) is { } sev && sev >= 0 ? sev : 0;
-        if (severity > 18)
+        // A numeric message id names a registered message; the inline form is
+        // id 50000. A negative severity takes the registered message's own, so
+        // that lookup comes first for it (probed 2026-09-30 against SQL Server
+        // 2025); a NULL one is 0 and any other severity is the caller's.
+        var rawSeverity = CoerceToInt32OrNull(severityValue);
+        var messageNumber = 50000;
+        var isInlineForm = msgValue.Type.Category == SqlTypeCategory.String;
+        var registered = !isInlineForm && rawSeverity is < 0
+            ? LookUpRegisteredMessage(batch, msgValue, rawSeverity.Value, NormalizeRaiserrorState(stateValue))
+            : null;
+
+        // Severity: NULL → 0 (informational, no error).
+        var severity = registered is not null ? registered.Severity : rawSeverity is { } sev && sev >= 0 ? sev : 0;
+        if (severity > 18 && rawSeverity is >= 0)
         {
             if (!withLog)
                 throw SimulatedSqlException.RaiserrorSeverityRequiresSysadmin();
         }
 
-        var state = CoerceToInt32OrNull(stateValue) switch
-        {
-            null => (byte)0,
-            < 0 => (byte)1,
-            var st => (byte)(st & 0xFF),
-        };
+        var state = NormalizeRaiserrorState(stateValue);
 
         // Resolve the message: string-typed values are inline format strings;
-        // numeric values are msg_id lookups against the (unmodeled) registry.
+        // numeric values are msg_id lookups against the registry.
         string formatString;
-        if (msgValue.IsNull)
+        var formatted = string.Empty;
+        if (isInlineForm)
         {
-            // NULL message renders as a single space (probe).
-            formatString = " ";
-        }
-        else if (msgValue.Type.Category == SqlTypeCategory.String)
-        {
-            formatString = msgValue.AsString;
+            // A NULL message renders as a single space (probe).
+            formatString = msgValue.IsNull ? " " : msgValue.AsString;
             // Empty string also renders as a single space (probe-confirmed).
             if (formatString.Length == 0)
                 formatString = " ";
         }
         else
         {
-            var msgId = CoerceToInt32OrNull(msgValue) ?? 0;
-            if (msgId is 50000 or < 13000)
-                throw SimulatedSqlException.RaiserrorMsgIdInvalid(msgId);
-            // Any other numeric id — even valid user-defined ranges or system
-            // ids like 13001 — falls into the "registry not modeled" path.
-            throw SimulatedSqlException.RaiserrorMsgIdNotFound(msgId, (byte)severity, state);
+            registered ??= LookUpRegisteredMessage(batch, msgValue, severity, state);
+            messageNumber = registered.MessageId;
+            formatString = string.Empty;
+            formatted = registered.Format(substitutions);
         }
 
-        var formatted = MessageFormatter.Format(formatString, substitutions);
+        if (registered is null)
+            formatted = MessageFormatter.Format(formatString, substitutions);
 
         // Severity 20 and up ends the session.
         if (severity >= 20)
         {
             batch.Connection.SessionEnding = true;
-            throw SimulatedSqlException.RaiserrorEndsSession(formatted, (byte)Math.Min(severity, 25), state, batch.Connection.Spid);
+            throw SimulatedSqlException.RaiserrorEndsSession(formatted, (byte)Math.Min(severity, 25), state, batch.Connection.Spid, messageNumber);
         }
 
         if (severity >= 11)
         {
             // Catchable error. The TRY/CATCH dispatch wrapper handles the
             // Class / State / Number capture from this exception.
-            throw SimulatedSqlException.RaiserrorRaised(formatted, (byte)severity, state);
+            throw SimulatedSqlException.RaiserrorRaised(formatted, (byte)severity, state, messageNumber);
         }
 
         // Informational severity (0-10): no throw. The message routes through
@@ -212,10 +213,10 @@ partial class Simulation
         // captured on the SimulatedError); coalesces with any PRINTs in the
         // same batch. WITH SETERROR forces @@ERROR to 50000 for the next
         // statement to observe.
-        batch.AppendInfoError(@class: (byte)severity, state: state, number: 50000, message: formatted);
+        batch.AppendInfoError(@class: (byte)severity, state: state, number: messageNumber, message: formatted);
         if (withSetError)
         {
-            batch.Connection.LastErrorNumber = 50000;
+            batch.Connection.LastErrorNumber = messageNumber;
             batch.CurrentStatement.SuppressErrorReset = true;
         }
     }
@@ -262,7 +263,9 @@ partial class Simulation
                 break;
             case ReservedKeyword { Keyword: Keyword.Null }:
                 if (negate) throw SimulatedSqlException.SyntaxErrorNear(context);
-                value = SqlValue.Null(SqlType.Int32);
+                // A NULL literal as the message is the empty one (a space),
+                // where an int-typed NULL variable there is message id 0.
+                value = SqlValue.Null(SqlType.NVarchar);
                 break;
             case AtPrefixedString varRef:
                 if (negate) throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -273,6 +276,27 @@ partial class Simulation
         }
         context.MoveNextOptional();
         return value;
+    }
+
+    private static byte NormalizeRaiserrorState(SqlValue stateValue) => CoerceToInt32OrNull(stateValue) switch
+    {
+        null => 0,
+        < 0 => 1,
+        var st => (byte)(st & 0xFF),
+    };
+
+    /// <summary>
+    /// The registered message a numeric <c>RAISERROR</c> id names, in the
+    /// session's language: Msg 2732 for an id below 13000 or 50000, Msg 18054
+    /// for one <c>sys.messages</c> doesn't carry.
+    /// </summary>
+    private static RegisteredMessage LookUpRegisteredMessage(BatchContext batch, SqlValue msgValue, int severity, byte state)
+    {
+        var messageId = CoerceToInt32OrNull(msgValue) ?? 0;
+        if (messageId is 50000 or < 13000)
+            throw SimulatedSqlException.RaiserrorMsgIdInvalid(messageId);
+        return RegisteredMessage.Find(batch.Connection.Simulation, messageId, batch.Connection.Language.MsgLangId)
+            ?? throw SimulatedSqlException.RaiserrorMsgIdNotFound(messageId, severity, state);
     }
 
     private static SqlValue NegateNumeric(SqlValue v) =>

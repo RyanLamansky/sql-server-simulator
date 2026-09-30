@@ -466,6 +466,7 @@ partial class Simulation
             newPairs.Add((oldClone, newRow));
         }
         tracking?.RecordKeyMoves(context.Batch, childTable, keyMoves);
+        childTable.NoteColumnsUpdated(fk.ChildColumnOrdinals);
         // Recurse: the child rows just got their FK columns rewritten — if
         // those columns are themselves a key referenced by another FK, that
         // FK's UPDATE action fires.
@@ -537,6 +538,7 @@ partial class Simulation
             newPairs.Add((oldClone, newRow));
         }
         tracking?.RecordKeyMoves(context.Batch, childTable, keyMoves);
+        childTable.NoteColumnsUpdated(fk.ChildColumnOrdinals);
         // For SET NULL / SET DEFAULT under a DELETE on parent, the recursion
         // shape is still UPDATE on the child (the FK column changed). Use the
         // UPDATE-flavored recursion so downstream incoming FKs see the right

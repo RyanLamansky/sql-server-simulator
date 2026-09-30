@@ -454,6 +454,15 @@ The `ALTER AUTHORIZATION` classes past the eight above raise `NotSupportedExcept
 An `INSERT … SELECT` over two denied objects raises the target's INSERT denial with the source's, where real names only the source.
 Server-scope DDL triggers aren't modeled, so `ALTER AUTHORIZATION ON DATABASE` raises no `ALTER_AUTHORIZATION_SERVER` event.
 
+### Legacy security procedures
+
+Probed 2026-09-30 against SQL Server 2025.
+A login carries a default database, default language and the `CHECK_POLICY` / `CHECK_EXPIRATION` flags.
+`CHECK_POLICY = ON` enforces a minimum length of eight (Msg 33062) and three of the four character classes without the login name in it (Msg 33064).
+The legacy procedures (`sp_addlogin`, `sp_password`, `sp_adduser`, `sp_addrole`, `sp_change_users_login` and their siblings) build and run the ordinary statement real does, and raise real's own errors from real's line numbers; see [`catalog-views.md`](catalog-views.md#system-procedures-over-the-registries).
+A user is an orphan when its login link no longer matches the login of its name.
+A `CREATE LOGIN` `SID` is derived from the name, so `sp_addlogin @sid` is ignored.
+
 ### Server logins (`Simulation/Simulation.LoginDdl.cs`)
 
 Server-scope, stored in `Simulation.Logins` (`ConcurrentDictionary<string, ServerLogin>`, `BuiltInToken.Comparer` — the same case-insensitive keying as the sibling server-scope dicts, a slight divergence from real keying by server collation).

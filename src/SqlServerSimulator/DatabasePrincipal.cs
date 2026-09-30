@@ -40,7 +40,14 @@ internal sealed class DatabasePrincipal(
     /// <c>SYSTEM_USER</c> / <c>SUSER_SNAME()</c> value while impersonating this
     /// user.
     /// </summary>
-    public readonly string? LoginName = loginName;
+    public string? LoginName = loginName;
+
+    /// <summary>
+    /// The <c>principal_id</c> of the login <see cref="LoginName"/> named when the user was linked to
+    /// it. A login dropped and made again under the same name is another login with another id, so
+    /// the user is an orphan still, as real's SID match finds it.
+    /// </summary>
+    public int LoginPrincipalId;
 
     /// <summary>
     /// The synthetic <c>S-1-9-3-…</c> security-identifier string a

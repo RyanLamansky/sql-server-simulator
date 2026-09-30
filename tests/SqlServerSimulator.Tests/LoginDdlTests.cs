@@ -92,7 +92,7 @@ public sealed class LoginDdlTests
 
     [TestMethod]
     public void CreateLogin_128CharPassword_Succeeds()
-        => new Simulation().ExecuteBatches($"create login app with password = '{new string('a', 128)}'");
+        => new Simulation().ExecuteBatches($"create login app with password = '{new string('a', 126)}A1'");
 
     [TestMethod]
     public void CreateLogin_WithOptionTail_Parses()

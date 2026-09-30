@@ -104,17 +104,20 @@ partial class Simulation
             // Statistics take the same determinism / precision gate an index
             // key does — real's Msg 2729 / 2799 both name "index or statistics".
             if (table.Columns[ordinal].Type is VectorSqlType or JsonSqlType or ClrUdtSqlType { Udt.IsByteOrdered: false })
-                throw SimulatedSqlException.VectorKeyColumnInvalid(table.Columns[ordinal].Name, table.Name, table.Columns[ordinal].Type switch { JsonSqlType => 3, VectorSqlType => 4, _ => 1 });
+                throw SimulatedSqlException.VectorKeyColumnInvalid(table.Columns[ordinal].Name, targetTableName.ToString(), table.Columns[ordinal].Type switch { JsonSqlType => 3, VectorSqlType => 4, _ => 1 });
             RejectComputedKeyColumnNotIndexable(context.Batch, table, table.Columns[ordinal], statisticsName, viaConstraint: false);
             ordinals[i] = ordinal;
         }
 
-        table.UserStatistics.Add(new UserStatistic(
+        var created = new UserStatistic(
             statisticsName,
             NextStatisticsId(table),
             ordinals,
             noRecompute,
-            context.Batch.CurrentStatement.UtcNow));
+            context.Batch.CurrentStatement.UtcNow);
+        table.UserStatistics.Add(created);
+        RecordDdlUndo(context, () => _ = table.UserStatistics.Remove(created));
+        table.NoteStatisticsCreated(statisticsName, context.CurrentDatabase.Collation);
         RecordDdlEvent(context, "CREATE_STATISTICS", EventSchemaName(targetTableName), statisticsName, "STATISTICS", table.Name, "TABLE");
         return true;
     }
@@ -156,7 +159,9 @@ partial class Simulation
             var index = table.UserStatistics.FindIndex(s => collation.Equals(s.Name, written.Leaf));
             if (index < 0)
                 throw SimulatedSqlException.CannotDropStatistics(written.ToString());
+            var dropped = table.UserStatistics[index];
             table.UserStatistics.RemoveAt(index);
+            RecordDdlUndo(context, () => table.UserStatistics.Insert(Math.Min(index, table.UserStatistics.Count), dropped));
             RecordDdlEvent(context, "DROP_STATISTICS", EventSchemaName(tableName), written.Leaf, "STATISTICS", table.Name, "TABLE");
         }
         return true;

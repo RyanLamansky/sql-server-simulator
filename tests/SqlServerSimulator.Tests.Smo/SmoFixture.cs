@@ -122,7 +122,7 @@ internal static class SmoFixture
             "INSERT Sales.Orders (CustomerID, OrderReference) VALUES (1, 'PO-1'), (2, 'PO-2')",
             "INSERT Sales.OrderLines (OrderID, CustomerID) VALUES (1, 1), (2, 2)",
             "INSERT Application.EmployeeRoles (PersonID, RoleName) VALUES (1, 'Manager')",
-            "CREATE LOGIN smo WITH PASSWORD = 'smo'",
+            "CREATE LOGIN smo WITH PASSWORD = 'smo', CHECK_POLICY = OFF",
             // SMO / SSMS connects as an administrator; sysadmin membership maps
             // smo to dbo in the target database (an unmapped login would be
             // refused there — guest is inaccessible in a user database).

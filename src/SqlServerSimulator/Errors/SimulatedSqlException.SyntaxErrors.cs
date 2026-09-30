@@ -763,6 +763,16 @@ partial class SimulatedSqlException
         new($"Invalid format specification: '{spec}'.", 2787, 16, 1);
 
     /// <summary>
+    /// Msg 2787 state 2: a localized registered message whose positional
+    /// placeholders (<c>%1!</c>) don't fit — one past the us_english version's
+    /// specifiers, repeated, or a plain <c>%s</c>. The echoed text starts after
+    /// the offending <c>%</c>, which the state-1 wording keeps (probed
+    /// 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException RaiserrorInvalidLocalizedFormatSpec(string spec) =>
+        new($"Invalid format specification: '{spec}'.", 2787, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 2786: a <c>RAISERROR</c> substitution argument's
     /// runtime type doesn't match the corresponding format specifier (e.g.
     /// <c>%d</c> with a string-typed arg, <c>%s</c> with an int, <c>%d</c>
@@ -825,7 +835,7 @@ partial class SimulatedSqlException
     /// is larger than 50000, make sure the user-defined message is added using
     /// sp_addmessage."</c>). Class 16 State 1.
     /// </summary>
-    internal static SimulatedSqlException RaiserrorMsgIdNotFound(int msgId, byte severity, byte state) =>
+    internal static SimulatedSqlException RaiserrorMsgIdNotFound(int msgId, int severity, byte state) =>
         new($"Error {msgId}, severity {severity}, state {state} was raised, but no message with that error number was found in sys.messages. If error is larger than 50000, make sure the user-defined message is added using sp_addmessage.", 18054, 16, 1);
 
     /// <summary>
@@ -862,8 +872,8 @@ partial class SimulatedSqlException
     /// and discards the message otherwise. <c>RaisedByRaiserror</c> marks the
     /// one raising construct <c>SET XACT_ABORT ON</c> leaves alone.
     /// </summary>
-    internal static SimulatedSqlException RaiserrorRaised(string message, byte severity, byte state) =>
-        new(message, 50000, severity, state) { RaisedByRaiserror = true };
+    internal static SimulatedSqlException RaiserrorRaised(string message, byte severity, byte state, int number = 50000) =>
+        new(message, number, severity, state) { RaisedByRaiserror = true };
 
     /// <summary>
     /// A <c>RAISERROR … WITH LOG</c> at severity 20 or more, which ends the
@@ -873,12 +883,12 @@ partial class SimulatedSqlException
     /// transaction back and no <c>CATCH</c> intercepts it; the caller marks
     /// the connection so the command closes it once this has been delivered.
     /// </summary>
-    internal static SimulatedSqlException RaiserrorEndsSession(string message, byte severity, byte state, int spid)
+    internal static SimulatedSqlException RaiserrorEndsSession(string message, byte severity, byte state, int spid, int number = 50000)
     {
         List<SimulatedError> entries =
         [
-            .. new SimulatedSqlException(message, 50000, severity, state).Errors,
-            .. new SimulatedSqlException($"Process ID {spid} has raised user error 50000, severity {severity}. SQL Server is terminating this process.", 2745, 16, 2).Errors,
+            .. new SimulatedSqlException(message, number, severity, state).Errors,
+            .. new SimulatedSqlException($"Process ID {spid} has raised user error {number}, severity {severity}. SQL Server is terminating this process.", 2745, 16, 2).Errors,
             .. new SimulatedSqlException("Cannot continue the execution because the session is in the kill state.", 596, 21, 1).Errors,
             .. new SimulatedSqlException("A severe error occurred on the current command.  The results, if any, should be discarded.", 0, 20, 0).Errors,
         ];

@@ -96,7 +96,7 @@ public sealed class AuthenticationTests
         // Non-ASCII UTF-16 units (including a surrogate pair) exercise the
         // LOGIN7 nibble-swap/XOR de-obfuscation and the char-counted length.
         var simulation = new Simulation();
-        Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = N'pä£€🙂ß'");
+        Wire.ExecInProc(simulation, "CREATE LOGIN app WITH PASSWORD = N'pä£€🙂ß', CHECK_POLICY = OFF");
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await AssertLoginSucceeds(listener, "app", "pä£€🙂ß", TestContext.CancellationToken);
         _ = await AssertLoginFails(listener, "app", "pä£€ß", TestContext.CancellationToken);

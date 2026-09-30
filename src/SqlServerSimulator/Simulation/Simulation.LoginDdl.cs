@@ -29,7 +29,7 @@ partial class Simulation
         context.MoveNextRequired();
         var name = ParseLoginName(context);
         var password = ParseLoginPasswordClause(context, required: true, out var passwordStart, out var passwordEnd);
-        ConsumeToStatementBoundary(context);
+        var options = ConsumeLoginOptions(context);
         if (context.Batch.IsSkipping)
             return true;
         RecordServerSecurityUndo(context.Batch);
@@ -46,10 +46,21 @@ partial class Simulation
         // resolvable names that Logins doesn't hold, so checking that
         // dictionary alone would let CREATE LOGIN [sa] through and leave the
         // catalog views projecting two of it.
+        // A backslash names a Windows principal, which a SQL login's name can't (probed 2026-09-30).
+        if (name.Contains('\\', StringComparison.Ordinal))
+            throw SimulatedSqlException.InvalidLoginNameCharacters(name);
         if (simulation.TryResolveServerPrincipalId(name, out _) || simulation.Logins.ContainsKey(name))
             throw SimulatedSqlException.ServerPrincipalAlreadyExists(name);
+        ValidateLoginDefaults(simulation, options.DefaultDatabase, options.DefaultLanguage);
+        var checkPolicy = options.CheckPolicy ?? true;
+        if (options.CheckExpiration == true && !checkPolicy)
+            throw SimulatedSqlException.CheckExpirationNeedsPolicy();
+        if (checkPolicy)
+            ValidateLoginPassword(name, password);
         var utcNow = context.Batch.CurrentStatement.UtcNow;
-        var login = new ServerLogin(simulation.AllocatePrincipalId(), name, PasswordHash.EncryptLegacy(password), utcNow, utcNow);
+        var login = new ServerLogin(simulation.AllocatePrincipalId(), name, PasswordHash.EncryptLegacy(password), utcNow, utcNow,
+            defaultDatabase: options.DefaultDatabase ?? "master", defaultLanguage: options.DefaultLanguage ?? "us_english",
+            isPolicyChecked: checkPolicy, isExpirationChecked: options.CheckExpiration ?? false);
         if (!simulation.Logins.TryAdd(name, login))
             throw SimulatedSqlException.ServerPrincipalAlreadyExists(name);
         // CREATE LOGIN auto-seeds a server-scope CONNECT SQL grant (class 100,
@@ -80,7 +91,7 @@ partial class Simulation
             ? word.Equals("DISABLE", StringComparison.OrdinalIgnoreCase) ? true
                 : word.Equals("ENABLE", StringComparison.OrdinalIgnoreCase) ? false : null
             : null;
-        ConsumeToStatementBoundary(context);
+        var options = ConsumeLoginOptions(context);
         if (context.Batch.IsSkipping)
             return true;
         RecordServerSecurityUndo(context.Batch);
@@ -100,7 +111,12 @@ partial class Simulation
             // DEFAULT_LANGUAGE), and every option but PASSWORD parses and
             // discards, so there is nothing to record.
             if (!BuiltInToken.Comparer.Equals(name, "sa"))
-                throw SimulatedSqlException.CannotAlterOrDropLogin("alter", name);
+            {
+                // A role — public or a server role — isn't a login ALTER LOGIN takes (probed 2026-09-30).
+                throw simulation.TryResolveServerPrincipalId(name, out _)
+                    ? SimulatedSqlException.CannotUseSpecialPrincipal(name)
+                    : SimulatedSqlException.CannotAlterOrDropLogin("alter", name);
+            }
             if (password is not null)
             {
                 throw new NotSupportedException(
@@ -111,19 +127,25 @@ partial class Simulation
             RecordServerDdlEvent(context, "ALTER_LOGIN", databaseName: null, name, passwordStart, passwordEnd);
             return true;
         }
-        if (password is not null)
-        {
-            if (password.Length > PasswordHash.MaxClearTextChars)
-                throw SimulatedSqlException.PasswordEncryptionInvalidValue();
-            simulation.Logins[name] = new ServerLogin(
-                existing.PrincipalId, existing.Name, PasswordHash.EncryptLegacy(password), existing.CreateDate,
-                context.Batch.CurrentStatement.UtcNow, existing.IsDisabled);
-        }
-        else if (disable is bool isDisabled)
-        {
-            simulation.Logins[name] = new ServerLogin(
-                existing.PrincipalId, existing.Name, existing.PasswordHash, existing.CreateDate, existing.PasswordLastSetTime, isDisabled);
-        }
+        // An OLD_PASSWORD that isn't the login's is refused as a login the caller can't alter.
+        if (options.OldPassword is { } oldPassword && !PasswordHash.Verify(oldPassword, existing.PasswordHash))
+            throw SimulatedSqlException.CannotAlterOrDropLogin("alter", name);
+        ValidateLoginDefaults(simulation, options.DefaultDatabase, options.DefaultLanguage);
+        var policyChecked = options.CheckPolicy ?? existing.IsPolicyChecked;
+        if ((options.CheckExpiration ?? existing.IsExpirationChecked) && !policyChecked)
+            throw SimulatedSqlException.CheckExpirationNeedsPolicy();
+        if (password is not null && password.Length > PasswordHash.MaxClearTextChars)
+            throw SimulatedSqlException.PasswordEncryptionInvalidValue();
+        if (password is not null && policyChecked)
+            ValidateLoginPassword(name, password);
+        simulation.Logins[name] = existing.With(
+            passwordHash: password is null ? null : PasswordHash.EncryptLegacy(password),
+            passwordLastSetTime: password is null ? null : context.Batch.CurrentStatement.UtcNow,
+            isDisabled: disable,
+            defaultDatabase: options.DefaultDatabase,
+            defaultLanguage: options.DefaultLanguage,
+            isPolicyChecked: options.CheckPolicy,
+            isExpirationChecked: options.CheckExpiration);
         RecordServerDdlEvent(context, "ALTER_LOGIN", databaseName: null, name, passwordStart, passwordEnd);
         return true;
     }
@@ -146,6 +168,9 @@ partial class Simulation
         if (!HoldsLoginDdlPermission(context, name))
             throw SimulatedSqlException.CannotAlterOrDropLogin("drop", name);
         var simulation = context.Batch.Connection.Simulation;
+        // sa is a login DROP LOGIN can't take (probed 2026-09-30).
+        if (BuiltInToken.Comparer.Equals(name, "sa"))
+            throw SimulatedSqlException.CannotUseSpecialPrincipal(name);
         if (simulation.Logins.ContainsKey(name))
         {
             foreach (var database in simulation.Databases.Values)
@@ -164,6 +189,93 @@ partial class Simulation
         if (context.Batch.Connection.FramesEveryStatement)
             (context.Batch.PendingTriggerOutcomes ??= []).AddRange([new SimulatedReturnStatus(0), new SimulatedReturnStatus(0)]);
         return true;
+    }
+
+    /// <summary>The options of a <c>CREATE LOGIN</c> / <c>ALTER LOGIN</c> the simulator keeps, null for one not written.</summary>
+    private readonly struct LoginOptions(string? defaultDatabase, string? defaultLanguage, bool? checkPolicy, bool? checkExpiration, string? oldPassword)
+    {
+        public readonly string? OldPassword = oldPassword;
+        public readonly string? DefaultDatabase = defaultDatabase;
+        public readonly string? DefaultLanguage = defaultLanguage;
+        public readonly bool? CheckPolicy = checkPolicy;
+        public readonly bool? CheckExpiration = checkExpiration;
+    }
+
+    /// <summary>
+    /// Reads the rest of a <c>CREATE LOGIN</c> / <c>ALTER LOGIN</c> statement, keeping
+    /// the <c>DEFAULT_DATABASE</c> and <c>DEFAULT_LANGUAGE</c> values as written and the
+    /// <c>CHECK_POLICY</c> / <c>CHECK_EXPIRATION</c> switches, and discarding every other option.
+    /// </summary>
+    private static LoginOptions ConsumeLoginOptions(ParserContext context)
+    {
+        string? database = null, language = null, oldPassword = null;
+        bool? checkPolicy = null, checkExpiration = null;
+        while (!IsStatementBoundary(context.Token))
+        {
+            if (context.Token is UnquotedString { Value: var option })
+            {
+                var isDatabase = option.Equals("DEFAULT_DATABASE", StringComparison.OrdinalIgnoreCase);
+                var isLanguage = option.Equals("DEFAULT_LANGUAGE", StringComparison.OrdinalIgnoreCase);
+                var isPolicy = option.Equals("CHECK_POLICY", StringComparison.OrdinalIgnoreCase);
+                var isExpiration = option.Equals("CHECK_EXPIRATION", StringComparison.OrdinalIgnoreCase);
+                var isOldPassword = option.Equals("OLD_PASSWORD", StringComparison.OrdinalIgnoreCase);
+                if ((isDatabase || isLanguage || isPolicy || isExpiration || isOldPassword) && context.GetNextOptional() is Operator { Character: '=' })
+                {
+                    var value = context.GetNextOptional();
+                    var written = value switch
+                    {
+                        Literal { Value: var literal } => literal.AsString,
+                        Name name => name.Value,
+                        ReservedKeyword keyword => keyword.Source.ToString(),
+                        _ => null,
+                    };
+                    if (written is not null && isDatabase)
+                        database = written;
+                    else if (written is not null && isLanguage)
+                        language = written;
+                    else if (written is not null && isOldPassword)
+                        oldPassword = written;
+                    else if (written is not null && isPolicy)
+                        checkPolicy = written.Equals("ON", StringComparison.OrdinalIgnoreCase);
+                    else if (written is not null)
+                        checkExpiration = written.Equals("ON", StringComparison.OrdinalIgnoreCase);
+                }
+            }
+            context.MoveNextOptional();
+        }
+        return new LoginOptions(database, language, checkPolicy, checkExpiration, oldPassword);
+    }
+
+    /// <summary>
+    /// The password policy a login with <c>CHECK_POLICY</c> on meets (probed 2026-09-30
+    /// against SQL Server 2025): at least 8 characters (Msg 33062), then three of the
+    /// four character sets — upper, lower, digit, symbol — without the login's own name
+    /// in it (Msg 33064).
+    /// </summary>
+    private static void ValidateLoginPassword(string loginName, string password)
+    {
+        if (password.Length < 8)
+            throw SimulatedSqlException.PasswordTooShort();
+        var sets = 0;
+        sets += password.Any(char.IsUpper) ? 1 : 0;
+        sets += password.Any(char.IsLower) ? 1 : 0;
+        sets += password.Any(char.IsDigit) ? 1 : 0;
+        sets += password.Any(static c => !char.IsLetterOrDigit(c)) ? 1 : 0;
+        if (sets < 3 || password.Contains(loginName, StringComparison.OrdinalIgnoreCase))
+            throw SimulatedSqlException.PasswordNotComplex();
+    }
+
+    /// <summary>
+    /// The refusals a login's default database or language earns: Msg 15010 for a
+    /// database the instance doesn't have and Msg 15033 for a language it doesn't
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    private static void ValidateLoginDefaults(Simulation simulation, string? database, string? language)
+    {
+        if (database is not null && !simulation.Databases.Values.Any(candidate => BuiltInToken.Comparer.Equals(candidate.Name, database)))
+            throw SimulatedSqlException.DefaultDatabaseDoesNotExist(database);
+        if (language is not null && Language.Find(language) is null)
+            throw SimulatedSqlException.NotAnOfficialLanguageName(language);
     }
 
     /// <summary>

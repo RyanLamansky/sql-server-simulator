@@ -640,7 +640,8 @@ partial class Simulation
         var connection = outerBatch.Connection;
         using var dynCommand = new SimulatedDbCommand(this, connection);
 #pragma warning disable CA2100 // dynamic SQL is the application's input; the caller is responsible for sanitization
-        dynCommand.CommandText = sqlText;
+        // An empty string is a batch of nothing, which the command refuses to hold.
+        dynCommand.CommandText = sqlText.Length == 0 ? " " : sqlText;
 #pragma warning restore CA2100
 
         // Seed an empty variable dict (so outer @vars don't leak in) plus

@@ -106,6 +106,49 @@ internal static partial class BuiltInResources
         "sp_unbindrule",
         // sp_changedbowner: the deprecated ALTER AUTHORIZATION ON DATABASE.
         "sp_changedbowner",
+        // sp_addmessage / sp_altermessage / sp_dropmessage: the user-defined
+        // message registry sys.messages projects and RAISERROR / FORMATMESSAGE
+        // read; see docs/claude/control-flow.md.
+        "sp_addmessage",
+        "sp_altermessage",
+        "sp_dropmessage",
+        // sp_addtype / sp_droptype: the pre-CREATE TYPE spelling of alias types,
+        // which build and run the CREATE TYPE / DROP TYPE statement.
+        "sp_addtype",
+        "sp_droptype",
+        // sp_tableoption / sp_indexoption: the pre-ALTER spellings of a table's
+        // storage options and an index's locking options.
+        "sp_tableoption",
+        "sp_indexoption",
+        // sp_updatestats / sp_autostats / sp_createstats: the statistics
+        // maintenance procedures over the per-table freshness and no_recompute
+        // state sys.stats reports.
+        "sp_updatestats",
+        "sp_autostats",
+        "sp_createstats",
+        // Legacy login management over the CREATE / ALTER / DROP LOGIN statements.
+        "sp_addlogin",
+        "sp_defaultdb",
+        "sp_defaultlanguage",
+        "sp_droplogin",
+        "sp_password",
+        // Legacy database and server security management over the statements.
+        "sp_addrole",
+        "sp_addsrvrolemember",
+        "sp_adduser",
+        "sp_change_users_login",
+        "sp_dropsrvrolemember",
+        "sp_dropuser",
+        "sp_droprole",
+        "sp_grantdbaccess",
+        "sp_helprolemember",
+        "sp_helplanguage",
+        "sp_helpserver",
+        "sp_helpsort",
+        "sp_lock",
+        "sp_monitor",
+        "sp_MSforeach_worker",
+        "sp_revokedbaccess",
         // xp_msver returns a version/host-info table (SSMS calls it on connect);
         // xp_qv is the AlwaysOn-availability probe; xp_instance_regread reads
         // instance registry defaults.

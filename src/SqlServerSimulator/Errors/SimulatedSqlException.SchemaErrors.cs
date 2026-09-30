@@ -121,7 +121,14 @@ partial class SimulatedSqlException
     /// Server 2025).
     /// </summary>
     internal static SimulatedSqlException FollowedByUdtParametersInvalid(SimulatedSqlException error, string typeName) =>
-        FollowedBy(error, new($"The parameters supplied for the UDT \"{typeName}\" are not valid.", 225, 16, 1));
+        FollowedBy(error, new($"The parameters supplied for the UDT \"{typeName}\" are not valid.", 225, 16, 1) { TerminatesBatch = true });
+
+    /// <summary>
+    /// Msg 2724 for <c>CREATE TYPE … FROM char</c> and its kin: a base type
+    /// written without the length it needs. Real follows it with Msg 225.
+    /// </summary>
+    internal static SimulatedSqlException AliasBaseNeedsLength(string baseType) =>
+        new($"Parameter or variable '{baseType}' has an invalid data type.", 2724, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 159: a one-part <c>DROP INDEX</c> name with no
@@ -168,6 +175,7 @@ partial class SimulatedSqlException
         return new(string.Join(Environment.NewLine, entries.Select(entry => entry.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(entries))
         {
             AbortsAsUnderXactAbort = error.AbortsAsUnderXactAbort,
+            TerminatesBatch = trailer.TerminatesBatch,
         };
     }
 

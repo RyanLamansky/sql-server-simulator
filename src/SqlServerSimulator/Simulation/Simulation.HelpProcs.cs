@@ -499,6 +499,10 @@ partial class Simulation
     // the texts and lines live with the other message factories.
     private static SimulatedInfoOutcome Printed(SimulatedError message) => new(message);
 
+    /// <summary>The procedures that write their own return code, so an error never sets the generic 1.</summary>
+    private static bool OwnsReturnCode(string systemProcName) =>
+        systemProcName is "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_xml_preparedocument" or "sp_xml_removedocument" or "xp_qv";
+
     /// <summary>
     /// Passes a system procedure's outcomes through, attributing an error it
     /// raises from its own body as real does: to the procedure by the name it
@@ -508,7 +512,7 @@ partial class Simulation
     /// attribution.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> AttributedToSystemProcedure(
-        IEnumerable<SimulatedStatementOutcome> outcomes, string systemProcName, string calledName)
+        IEnumerable<SimulatedStatementOutcome> outcomes, string systemProcName, string calledName, VariableSlot? returnCode, SystemProcedureResult result)
     {
         using var enumerator = outcomes.GetEnumerator();
         while (true)
@@ -522,7 +526,24 @@ partial class Simulation
             {
                 exception.PreserveDiagnostics(site.Line, site.Procedure ?? calledName);
                 exception.RaisedBySystemProcedure = exception.Number != 201;
+                if (returnCode is not null && exception.RaisedBySystemProcedure)
+                    returnCode.Value = SqlValue.FromInt32(exception.SystemProcedureReturnCode).CoerceTo(returnCode.DeclaredType);
                 throw;
+            }
+            catch (SimulatedSqlException exception) when (returnCode is not null && !exception.SystemProcedureBindingError && !OwnsReturnCode(systemProcName))
+            {
+                // An error the procedure raised from its own body ends it with
+                // return code 1 (probed 2026-09-30: sp_addmessage, sp_dropmessage).
+                returnCode.Value = SqlValue.FromInt32(exception.SystemProcedureReturnCode).CoerceTo(returnCode.DeclaredType);
+                throw;
+            }
+            // A statement a procedure ran through dynamic SQL that failed ends the
+            // procedure with return code 1, though the batch went on.
+            if (enumerator.Current is SimulatedErrorOutcome && !OwnsReturnCode(systemProcName))
+            {
+                result.Failed = true;
+                if (returnCode is { } slot)
+                    slot.Value = SqlValue.FromInt32(1).CoerceTo(slot.DeclaredType);
             }
             yield return enumerator.Current;
         }

@@ -1070,6 +1070,7 @@ partial class Simulation
                 Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
         }
         tracking?.RecordKeyMoves(context.Batch, table, keyMoves);
+        table.NoteColumnsUpdated(updatedColumnOrdinals);
 
         // Indexed-view maintenance: re-evaluate any unique-indexed view over
         // this table on the post-update base rows and enforce uniqueness

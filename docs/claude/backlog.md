@@ -273,7 +273,8 @@ Blocked on a larger unmodeled parent feature (shipping a function here implies t
 
 - **System stored procedures** (`sp_*` family) — formatted-metadata / management procs invoked via `EXEC sp_name`.
   Shipped so far: the `sp_help` family (`sp_help` / `sp_helptext` / `sp_helpindex` / `sp_helpconstraint` / `sp_helpdb` / `sp_helpfile` / `sp_helpstats` / `sp_helprotect` / `sp_helptrigger` / `sp_helpuser`), `sp_depends`, the ODBC/JDBC catalog set (`sp_tables` / `sp_columns` / `sp_columns_100` / `sp_pkeys` / `sp_fkeys` / `sp_statistics` / `sp_statistics_100` / `sp_stored_procedures` / `sp_sproc_columns` / `sp_sproc_columns_100` / `sp_special_columns` / `sp_special_columns_100` / `sp_table_privileges` / `sp_column_privileges` / `sp_datatype_info` / `sp_datatype_info_100` / `sp_server_info` / `sp_databases`), `sp_spaceused`, `sp_who` / `sp_who2`, `sp_MSforeachtable` / `sp_MSforeachdb`, `sp_rename`, `sp_configure` and the `sp_xml_preparedocument` / `sp_xml_removedocument` pair — see [`catalog-views.md`](catalog-views.md).
-  Still unregistered → **Msg 2812** ("Could not find stored procedure '…'."): `sp_MSforeach_worker` (the two `sp_MSforeach*` procs materialize their name lists rather than driving the global cursor it consumes), the `sp_add*` management family.
+  Also shipped: the message, legacy security, type, option, statistics and report procs listed under [System procedures over the registries](catalog-views.md#system-procedures-over-the-registries).
+  Not modeled yet: internal-table rows in `sp_updatestats` / `sp_createstats`, login SIDs honouring `@sid`, `sp_password` on `sa`, filtered `CREATE STATISTICS … WHERE`, real's system message rows, and the message language of the session for Msg 2786 / 2787 / 5703 wording; other procedures still raise Msg 2812.
   A broad surface — each proc is its own result-shape contract over the catalog views.
   Ships piecemeal by popularity, not as a bundle.
 

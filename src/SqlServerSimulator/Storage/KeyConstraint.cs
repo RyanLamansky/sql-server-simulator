@@ -163,6 +163,12 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     public bool OptimizeForSequentialKey = options.OptimizeForSequentialKey ?? false;
 
     /// <summary>
+    /// <c>sys.stats.no_recompute</c> of the index's statistic: <c>STATISTICS_NORECOMPUTE</c>
+    /// declared, or set since by <c>ALTER INDEX</c>, <c>UPDATE STATISTICS</c> or <c>sp_autostats</c>.
+    /// </summary>
+    public bool StatisticsNoRecompute = options.StatisticsNoRecompute ?? false;
+
+    /// <summary>
     /// Whether <c>ALTER INDEX … DISABLE</c> has taken the constraint's backing
     /// index out of service — real allows that on a constraint even though it
     /// refuses to change the constraint's IGNORE_DUP_KEY (Msg 1979). While

@@ -58,8 +58,8 @@ partial class Simulation
     /// semantic (see <c>docs/claude/constraints.md</c>); <c>ALLOW_ROW_LOCKS</c>
     /// / <c>ALLOW_PAGE_LOCKS</c> / <c>OPTIMIZE_FOR_SEQUENTIAL_KEY</c> and a
     /// columnstore index's <c>COMPRESSION_DELAY</c> are recorded for the
-    /// catalog, and <c>STATISTICS_NORECOMPUTE</c> is validated by name and
-    /// discarded, a heap-only store having nothing for it to change.
+    /// catalog, and <c>STATISTICS_NORECOMPUTE</c> moves the index's
+    /// <c>sys.stats.no_recompute</c>.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -294,6 +294,13 @@ partial class Simulation
                 continue;
             ApplyToIndex(context, table, index, form, ignoreDupKey, compressionDelay, rebuildOptions, tableName.ToString());
         }
+        // A table with no clustered index has the heap row index_id 0 stands for,
+        // and ALL moves its locking options with the rest (probed 2026-09-30).
+        if (form is AlterIndexForm.Set or AlterIndexForm.Rebuild && table.IndexIdentities().Exists(static identity => identity.IsHeap))
+        {
+            table.HeapAllowRowLocks = rebuildOptions.AllowRowLocks ?? table.HeapAllowRowLocks;
+            table.HeapAllowPageLocks = rebuildOptions.AllowPageLocks ?? table.HeapAllowPageLocks;
+        }
         // A JSON index takes no SET, and ALL reaches it after the relational ones.
         if (form == AlterIndexForm.Set && table.JsonIndexes.Count > 0)
             throw SimulatedSqlException.JsonIndexAlterOptionsInvalid();
@@ -357,6 +364,7 @@ partial class Simulation
                 constraint.IsPadded = rebuildOptions.PadIndex ?? constraint.IsPadded;
                 constraint.AllowRowLocks = rebuildOptions.AllowRowLocks ?? constraint.AllowRowLocks;
                 constraint.AllowPageLocks = rebuildOptions.AllowPageLocks ?? constraint.AllowPageLocks;
+                constraint.StatisticsNoRecompute = rebuildOptions.StatisticsNoRecompute ?? constraint.StatisticsNoRecompute;
                 break;
             case AlterIndexForm.Reorganize:
                 // Nothing to compact in a flat page list, but a disabled index
@@ -372,6 +380,7 @@ partial class Simulation
                 constraint.AllowRowLocks = rebuildOptions.AllowRowLocks ?? constraint.AllowRowLocks;
                 constraint.AllowPageLocks = rebuildOptions.AllowPageLocks ?? constraint.AllowPageLocks;
                 constraint.OptimizeForSequentialKey = rebuildOptions.OptimizeForSequentialKey ?? constraint.OptimizeForSequentialKey;
+                constraint.StatisticsNoRecompute = rebuildOptions.StatisticsNoRecompute ?? constraint.StatisticsNoRecompute;
                 break;
         }
     }
@@ -401,6 +410,7 @@ partial class Simulation
                 index.IsPadded = rebuildOptions.PadIndex ?? index.IsPadded;
                 index.AllowRowLocks = rebuildOptions.AllowRowLocks ?? index.AllowRowLocks;
                 index.AllowPageLocks = rebuildOptions.AllowPageLocks ?? index.AllowPageLocks;
+                index.StatisticsNoRecompute = rebuildOptions.StatisticsNoRecompute ?? index.StatisticsNoRecompute;
                 index.ColumnstoreArchive = rebuildOptions.ColumnstoreArchive ?? index.ColumnstoreArchive;
                 break;
             case AlterIndexForm.Reorganize:
@@ -423,6 +433,7 @@ partial class Simulation
                 index.AllowRowLocks = rebuildOptions.AllowRowLocks ?? index.AllowRowLocks;
                 index.AllowPageLocks = rebuildOptions.AllowPageLocks ?? index.AllowPageLocks;
                 index.OptimizeForSequentialKey = rebuildOptions.OptimizeForSequentialKey ?? index.OptimizeForSequentialKey;
+                index.StatisticsNoRecompute = rebuildOptions.StatisticsNoRecompute ?? index.StatisticsNoRecompute;
                 break;
         }
     }
@@ -440,7 +451,7 @@ partial class Simulation
     /// </summary>
     private static (bool? IgnoreDupKey, int? CompressionDelay, IndexOptions LockOptions) ParseAlterIndexSetOptions(ParserContext context, bool? targetColumnstore)
     {
-        bool? allowRowLocks = null, allowPageLocks = null, optimizeForSequentialKey = null;
+        bool? allowRowLocks = null, allowPageLocks = null, optimizeForSequentialKey = null, statisticsNoRecompute = null;
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
@@ -478,6 +489,10 @@ partial class Simulation
                 {
                     optimizeForSequentialKey = on;
                 }
+                else if (targetColumnstore != true && optionName.Equals("STATISTICS_NORECOMPUTE", StringComparison.OrdinalIgnoreCase))
+                {
+                    statisticsNoRecompute = on;
+                }
                 // A columnstore index refuses the locking and statistics
                 // options as its rebuild does (probed 2026-09-26 against SQL
                 // Server 2025).
@@ -509,7 +524,7 @@ partial class Simulation
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        return (ignoreDupKey, compressionDelay, new IndexOptions(false, null, null, allowRowLocks: allowRowLocks, allowPageLocks: allowPageLocks, optimizeForSequentialKey: optimizeForSequentialKey));
+        return (ignoreDupKey, compressionDelay, new IndexOptions(false, null, null, allowRowLocks: allowRowLocks, allowPageLocks: allowPageLocks, optimizeForSequentialKey: optimizeForSequentialKey, statisticsNoRecompute: statisticsNoRecompute));
     }
 
     /// <summary>

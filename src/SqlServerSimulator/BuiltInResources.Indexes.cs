@@ -674,7 +674,7 @@ internal static partial class BuiltInResources
                     continue;
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var identity in table.IndexIdentities())
-                    yield return RowForIdentity(tableObjectId, identity, Simulation.PlacementOf(table, identity), Simulation.FilegroupOf(table, identity));
+                    yield return RowForIdentity(tableObjectId, identity, Simulation.PlacementOf(table, identity), Simulation.FilegroupOf(table, identity), table);
                 // XML and spatial indexes follow at their own index-id ranges,
                 // with every option at its default (probed 2026-09-26 against
                 // SQL Server 2025).
@@ -702,7 +702,7 @@ internal static partial class BuiltInResources
             }
         }
 
-        SqlValue[] RowForIdentity(SqlValue objectId, IndexIdentity identity, PartitionPlacement? placement, int filegroupId)
+        SqlValue[] RowForIdentity(SqlValue objectId, IndexIdentity identity, PartitionPlacement? placement, int filegroupId, HeapTable? heapOwner = null)
         {
             var typeDesc = identity.Type switch
             {
@@ -759,6 +759,10 @@ internal static partial class BuiltInResources
                 filterDefinition = nullFilter;
                 ignoreDupKey = falseBit;
                 isDisabled = falseBit;
+                // The heap row carries the locking options too — sp_indexoption
+                // and ALTER INDEX ALL move them (probed 2026-09-30).
+                if (heapOwner is not null)
+                    (allowRowLocks, allowPageLocks) = (heapOwner.HeapAllowRowLocks, heapOwner.HeapAllowPageLocks);
             }
             return BuildIndexRow(
                 name: name,
@@ -1230,7 +1234,7 @@ internal static partial class BuiltInResources
         var primaryRoleDesc = SqlValue.FromString(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit), "PRIMARY");
         var nullName = SqlValue.Null(SqlType.SystemName);
         var trueBit = SqlValue.FromBoolean(true);
-        foreach (var (table, indexId, name, isHeap, _, _) in EnumerateTableIndexIdentities(database, batch).Concat(TypeTableIndexIdentities(database)))
+        foreach (var (table, indexId, name, isHeap, index, _) in EnumerateTableIndexIdentities(database, batch).Concat(TypeTableIndexIdentities(database)))
         {
             if (isHeap)
                 continue;
@@ -1244,7 +1248,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(indexId),
                 falseBit, // auto_created
                 falseBit, // user_created
-                falseBit, // no_recompute
+                index is null ? (table.KeyConstraints.Find(key => string.Equals(key.Name, name, StringComparison.Ordinal))?.StatisticsNoRecompute == true ? trueBit : falseBit) : (index.StatisticsNoRecompute ? trueBit : falseBit), // no_recompute
                 filtered is null ? falseBit : trueBit, // has_filter
                 filtered?.FilterDefinition is { } filter ? SqlValue.FromNVarchar(filter) : nullFilter,
                 falseBit, // is_temporary

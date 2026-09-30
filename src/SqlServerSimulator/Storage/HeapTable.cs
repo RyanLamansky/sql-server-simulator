@@ -474,6 +474,85 @@ internal sealed class HeapTable : SchemaObject
     /// </summary>
     public readonly List<UserStatistic> UserStatistics = [];
 
+    /// <summary><c>sys.tables.lock_on_bulk_load</c>, set by <c>sp_tableoption 'table lock on bulk load'</c>.</summary>
+    public bool LockOnBulkLoad;
+
+    /// <summary>
+    /// <c>sys.tables.text_in_row_limit</c>, set by <c>sp_tableoption 'text in row'</c>:
+    /// 0 when off. Catalog only — a <c>text</c> / <c>ntext</c> / <c>image</c> value's storage doesn't follow it.
+    /// </summary>
+    public int TextInRowLimit;
+
+    /// <summary>
+    /// <c>sys.tables.large_value_types_out_of_row</c>, set by <c>sp_tableoption 'large value types out of row'</c>.
+    /// Catalog only, as <see cref="TextInRowLimit"/> is.
+    /// </summary>
+    public bool LargeValueTypesOutOfRow;
+
+    /// <summary>
+    /// The heap row's <c>allow_row_locks</c> / <c>allow_page_locks</c> — a table with no
+    /// clustered index has the row <c>index_id</c> 0 stands for, which <c>ALTER INDEX ALL</c>
+    /// and <c>sp_indexoption</c> move like any index's.
+    /// </summary>
+    public bool HeapAllowRowLocks = true;
+
+    /// <inheritdoc cref="HeapAllowRowLocks"/>
+    public bool HeapAllowPageLocks = true;
+
+    // The Heap.MutationGeneration each statistic held when it was last brought up
+    // to date — by its creation, UPDATE STATISTICS or sp_updatestats. A statistic
+    // is stale once a row has been inserted or deleted since, or an UPDATE has
+    // assigned the column it leads with, the way real counts modifications per
+    // column. There is no histogram to refresh, so this is all freshness is.
+    private long statisticsBaseline;
+    private Dictionary<string, long>? statisticsFreshness;
+    private long[]? columnUpdatedAt;
+
+    /// <summary>Notes that the statistic named <paramref name="name"/> was just built, so it is current.</summary>
+    public void NoteStatisticsCreated(string name, Collation collation) =>
+        (this.statisticsFreshness ??= new Dictionary<string, long>(collation))[name] = this.Heap.MutationGeneration;
+
+    /// <summary>
+    /// Brings the named statistics — every one when <paramref name="names"/> is
+    /// null — up to date with the heap's writes.
+    /// </summary>
+    public void MarkStatisticsFresh(List<string>? names, Collation collation)
+    {
+        if (names is null)
+        {
+            this.statisticsBaseline = this.Heap.MutationGeneration;
+            this.statisticsFreshness = null;
+            return;
+        }
+        foreach (var name in names)
+            this.NoteStatisticsCreated(name, collation);
+    }
+
+    /// <summary>Notes that an UPDATE assigned the columns at <paramref name="ordinals"/> (full-row positions).</summary>
+    public void NoteColumnsUpdated(IEnumerable<int> ordinals)
+    {
+        var updated = this.columnUpdatedAt;
+        if (updated is null || updated.Length < this.Columns.Length)
+            this.columnUpdatedAt = updated = updated is null ? new long[this.Columns.Length] : [.. updated, .. new long[this.Columns.Length - updated.Length]];
+        foreach (var ordinal in ordinals)
+        {
+            if (ordinal >= 0 && ordinal < updated.Length)
+                updated[ordinal] = this.Heap.MutationGeneration;
+        }
+    }
+
+    /// <summary>
+    /// Whether the statistic named <paramref name="name"/>, leading with the column at
+    /// <paramref name="leadingOrdinal"/>, has been outrun by a write since it was last current.
+    /// </summary>
+    public bool IsStatisticStale(string name, int leadingOrdinal)
+    {
+        var current = Math.Max(this.statisticsBaseline, this.statisticsFreshness is not null && this.statisticsFreshness.TryGetValue(name, out var at) ? at : 0);
+        if (this.Heap.LastRowCountChangeGeneration > current)
+            return true;
+        return this.columnUpdatedAt is { } updated && leadingOrdinal >= 0 && leadingOrdinal < updated.Length && updated[leadingOrdinal] > current;
+    }
+
     /// <summary>
     /// Indexed views (<c>Schemas.View</c> with a unique clustered index) whose
     /// body references this table as a base. Populated at CREATE INDEX-on-view

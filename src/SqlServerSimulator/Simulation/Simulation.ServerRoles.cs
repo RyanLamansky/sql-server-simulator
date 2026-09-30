@@ -44,6 +44,9 @@ partial class Simulation
     /// <summary><c>principal_id</c> of the <c>dbcreator</c> fixed server role — the membership that carries <c>CREATE DATABASE</c> / <c>DROP DATABASE</c> (probe-confirmed).</summary>
     internal const int DbCreatorRoleId = 9;
 
+    /// <summary><c>principal_id</c> of the <c>serveradmin</c> fixed server role — with <c>sysadmin</c>, the membership the message procedures require.</summary>
+    internal const int ServerAdminRoleId = 5;
+
     /// <summary>Fixed-server-role name → id, for role-name resolution. Keyed by <see cref="BuiltInToken.Comparer"/>.</summary>
     private static readonly FrozenDictionary<string, int> FixedServerRoleIds =
         FixedServerRoles.ToFrozenDictionary(r => r.Name, r => r.Id, BuiltInToken.Comparer);
@@ -431,13 +434,18 @@ partial class Simulation
             return true;
         RecordServerSecurityUndo(context.Batch);
         var simulation = context.Batch.Connection.Simulation;
+        // public's membership is fixed, and sa is a member none may change (probed 2026-09-30).
+        if (BuiltInToken.Comparer.Equals(roleName, "public"))
+            throw SimulatedSqlException.PublicRoleMembershipFixed();
         if (!simulation.TryResolveServerRole(roleName, out var roleId, out var isFixed)
             || !simulation.MayChangeServerRoleMembers(context.Connection, roleId, isFixed))
         {
             throw SimulatedSqlException.CannotAlterServerRole(roleName);
         }
+        if (BuiltInToken.Comparer.Equals(memberName, "sa"))
+            throw SimulatedSqlException.CannotUseSpecialPrincipal(memberName);
         if (!simulation.TryResolveServerPrincipalId(memberName, out var memberId))
-            throw SimulatedSqlException.CannotAddServerPrincipal(memberName);
+            throw isAdd ? SimulatedSqlException.CannotAddServerPrincipal(memberName) : SimulatedSqlException.CannotDropServerPrincipal(memberName);
         lock (simulation.ServerRoleMembers)
         {
             if (isAdd)

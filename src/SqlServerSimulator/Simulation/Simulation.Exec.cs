@@ -239,13 +239,27 @@ partial class Simulation
         // the SQL text's casing. A null falls through to user-procedure
         // resolution.
         var systemProcName = ResolveSystemProcedureName(batch.CurrentDatabase.Collation, procName.Leaf);
+        var calledAs = procName.WithoutOmittedLeading().Written;
         var systemProc = systemProcName switch
         {
             null => null,
             "sp_addextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Add),
             "sp_addlinkedserver" => InvokeSpAddLinkedServer(batch),
+            "sp_addlogin" => this.InvokeSpAddLogin(batch, calledAs),
             "sp_addlinkedsrvlogin" or "sp_droplinkedsrvlogin" => InvokeSpLinkedServerNoOp(batch),
+            "sp_addmessage" => InvokeSpAddMessage(batch, calledAs),
+            "sp_addrole" => this.InvokeSpAddRole(batch, calledAs),
             "sp_addrolemember" => InvokeSpRoleMember(batch, isAdd: true),
+            "sp_addsrvrolemember" => this.InvokeSpAddSrvRoleMember(batch, calledAs),
+            "sp_adduser" => this.InvokeSpAddUser(batch, calledAs),
+            "sp_change_users_login" => Uncounted(this.InvokeSpChangeUsersLogin(batch, calledAs)),
+            "sp_addtype" => this.InvokeSpAddType(batch, calledAs),
+            "sp_autostats" => InvokeSpAutoStats(batch, calledAs),
+            "sp_createstats" => this.InvokeSpCreateStats(batch, calledAs),
+            "sp_indexoption" => this.InvokeSpIndexOption(batch, calledAs),
+            "sp_tableoption" => InvokeSpTableOption(batch, calledAs),
+            "sp_updatestats" => InvokeSpUpdateStats(batch, calledAs),
+            "sp_altermessage" => InvokeSpAlterMessage(batch, calledAs),
             "sp_bindefault" => InvokeSpBind(batch, CalledName(procName), isRule: false),
             "sp_bindrule" => InvokeSpBind(batch, CalledName(procName), isRule: true),
             "sp_changedbowner" => InvokeSpChangeDbOwner(batch),
@@ -263,8 +277,24 @@ partial class Simulation
             "sp_describe_cursor_tables" => InvokeSpDescribeCursor(batch, CalledName(procName), CursorDescription.Tables),
             "sp_describe_first_result_set" => this.InvokeSpDescribeFirstResultSet(batch),
             "sp_describe_undeclared_parameters" => this.InvokeSpDescribeUndeclaredParameters(batch),
+            "sp_defaultdb" => this.InvokeSpDefaultDb(batch, calledAs),
+            "sp_defaultlanguage" => this.InvokeSpDefaultLanguage(batch, calledAs),
             "sp_dropextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop),
+            "sp_droplogin" => this.InvokeSpDropLogin(batch, calledAs),
+            "sp_dropmessage" => InvokeSpDropMessage(batch, calledAs),
+            "sp_droprole" => this.InvokeSpDropRole(batch, calledAs),
             "sp_droprolemember" => InvokeSpRoleMember(batch, isAdd: false),
+            "sp_dropsrvrolemember" => this.InvokeSpDropSrvRoleMember(batch, calledAs),
+            "sp_dropuser" => this.InvokeSpDropUser(batch, calledAs),
+            "sp_grantdbaccess" => this.InvokeSpGrantDbAccess(batch, calledAs),
+            "sp_helplanguage" => InvokeSpHelpLanguage(batch, calledAs),
+            "sp_helpserver" => Uncounted(InvokeSpHelpServer(batch, calledAs)),
+            "sp_helpsort" => Uncounted(InvokeSpHelpSort(batch, calledAs)),
+            "sp_lock" => Uncounted(InvokeSpLock(batch, calledAs)),
+            "sp_monitor" => Uncounted(InvokeSpMonitor(batch, calledAs)),
+            "sp_MSforeach_worker" => InvokeSpMsForEachWorker(batch, calledAs),
+            "sp_helprolemember" => InvokeSpHelpRoleMember(batch, calledAs),
+            "sp_droptype" => this.InvokeSpDropType(batch, calledAs),
             "sp_dropserver" => InvokeSpDropServer(batch),
             "sp_executesql" => ParseSpExecuteSql(batch, returnCodeVar, insertExecSource),
             "sp_fkeys" => Uncounted(InvokeSpFkeys(batch)),
@@ -283,6 +313,7 @@ partial class Simulation
             "sp_helpuser" => Uncounted(InvokeSpHelpUser(batch)),
             "sp_MSforeachdb" => this.InvokeSpMsForEachDb(batch),
             "sp_MSforeachtable" => this.InvokeSpMsForEachTable(batch),
+            "sp_password" => this.InvokeSpPassword(batch, calledAs),
             "sp_pkeys" => InvokeSpPkeys(batch),
             "sp_query_store_clear_hints" => InvokeSpQueryStoreHints(batch, set: false),
             "sp_query_store_clear_message_queues" => InvokeSpQueryStoreClearMessageQueues(batch),
@@ -299,6 +330,7 @@ partial class Simulation
             "sp_refreshsqlmodule" => this.InvokeSpRefreshSqlModule(batch),
             "sp_refreshview" => this.InvokeSpRefreshView(batch),
             "sp_releaseapplock" => InvokeSpReleaseAppLock(batch, returnCodeVar),
+            "sp_revokedbaccess" => this.InvokeSpRevokeDbAccess(batch, calledAs),
             "sp_rename" => InvokeSpRename(batch),
             "sp_setapprole" => InvokeSpSetAppRole(batch),
             "sp_settriggerorder" => InvokeSpSetTriggerOrder(batch),
@@ -336,9 +368,10 @@ partial class Simulation
             var framesScope = batch.Connection.FramesEveryStatement && !batch.IsSkipping && !insertExecSource && systemProcName != "sp_executesql";
             if (framesScope)
                 yield return new SimulatedProcScopeBoundary(isEnter: true);
+            var procedureResult = new SystemProcedureResult();
             try
             {
-                foreach (var outcome in AttributedToSystemProcedure(systemProc, systemProcName!, CalledName(procName)))
+                foreach (var outcome in AttributedToSystemProcedure(systemProc, systemProcName!, CalledName(procName), returnCodeVar is null || batch.IsSkipping ? null : batch.GetVariableSlot(returnCodeVar), procedureResult))
                     yield return outcome;
             }
             finally
@@ -352,8 +385,8 @@ partial class Simulation
             // (probed 2026-09-25 across sp_help, sp_who, sp_rename and the
             // extended-property procedures); the few with codes of their own
             // write them themselves.
-            if (returnCodeVar is not null && !batch.IsSkipping
-                && systemProcName is not ("sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_xml_preparedocument" or "sp_xml_removedocument" or "xp_qv"))
+            if (returnCodeVar is not null && !batch.IsSkipping && !procedureResult.Failed
+                && !OwnsReturnCode(systemProcName!))
             {
                 var slot = batch.GetVariableSlot(returnCodeVar);
                 slot.Value = SqlValue.FromInt32(0).CoerceTo(slot.DeclaredType);

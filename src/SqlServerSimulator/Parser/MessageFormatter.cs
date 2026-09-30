@@ -251,6 +251,98 @@ internal static class MessageFormatter
     }
 
     /// <summary>
+    /// The specifier texts of a us_english format string, in order — each from
+    /// its <c>%</c> through its type letter, <c>%%</c> skipped. Reading stops
+    /// at a malformed specifier, which <see cref="Format"/> raises for.
+    /// </summary>
+    public static List<string> SplitSpecifiers(string format)
+    {
+        var specs = new List<string>();
+        for (var i = 0; i < format.Length; i++)
+        {
+            if (format[i] != '%')
+                continue;
+            var start = i++;
+            if (i >= format.Length)
+                break;
+            if (format[i] == '%')
+                continue;
+            while (i < format.Length && format[i] is '-' or '0')
+                i++;
+            while (i < format.Length && (format[i] is (>= '0' and <= '9') or '*'))
+                i++;
+            if (i < format.Length && format[i] == '.')
+            {
+                i++;
+                while (i < format.Length && (format[i] is (>= '0' and <= '9') or '*'))
+                    i++;
+            }
+            if (i < format.Length && format[i] == 'l')
+                i++;
+            else if (i + 2 < format.Length && format[i] == 'I' && format[i + 1] == '6' && format[i + 2] == '4')
+                i += 3;
+            if (i >= format.Length)
+                break;
+            specs.Add(format[start..(i + 1)]);
+        }
+        return specs;
+    }
+
+    /// <summary>
+    /// Reads a localized message's text against its us_english version's
+    /// specifiers (<paramref name="specifiers"/>): the localized text names
+    /// each one by position — <c>%1!</c> or <c>%1</c> — in any order, each at
+    /// most once, with <c>%%</c> a literal percent, and anything else after a
+    /// <c>%</c> is invalid (probed 2026-09-30 against SQL Server 2025). On
+    /// success <paramref name="format"/> is an ordinary format string that
+    /// carries those specifiers in the localized order and
+    /// <paramref name="order"/> the zero-based argument each consumes; on
+    /// failure <paramref name="invalidSpecification"/> is the text from after
+    /// the offending <c>%</c>.
+    /// </summary>
+    public static bool TryLocalize(List<string> specifiers, string localized, out string format, out List<int> order, out string invalidSpecification)
+    {
+        var output = new StringBuilder(localized.Length);
+        order = [];
+        invalidSpecification = string.Empty;
+        for (var i = 0; i < localized.Length; i++)
+        {
+            if (localized[i] != '%')
+            {
+                _ = output.Append(localized[i]);
+                continue;
+            }
+            var afterPercent = i + 1;
+            if (afterPercent >= localized.Length)
+            {
+                format = string.Empty;
+                return false;
+            }
+            if (localized[afterPercent] == '%')
+            {
+                _ = output.Append("%%");
+                i = afterPercent;
+                continue;
+            }
+            var end = afterPercent;
+            var position = 0;
+            while (end < localized.Length && localized[end] is >= '0' and <= '9' && position < 1000)
+                position = (position * 10) + (localized[end++] - '0');
+            if (end == afterPercent || (end < localized.Length && localized[end] != '!') || position < 1 || position > specifiers.Count || order.Contains(position - 1))
+            {
+                format = string.Empty;
+                invalidSpecification = localized[afterPercent..];
+                return false;
+            }
+            order.Add(position - 1);
+            _ = output.Append(specifiers[position - 1]);
+            i = end < localized.Length && localized[end] == '!' ? end : end - 1;
+        }
+        format = output.ToString();
+        return true;
+    }
+
+    /// <summary>
     /// Reads the next substitution argument as a string. Returns
     /// <c>("(null)", isNullArg: true)</c> for a NULL or missing argument so
     /// the caller can decide whether to skip precision/width truncation.

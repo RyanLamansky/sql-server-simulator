@@ -7,11 +7,11 @@ namespace SqlServerSimulator;
 /// </summary>
 /// <remarks>
 /// The 34 rows are a stock SQL Server 2025 instance's, captured verbatim
-/// (2026-08-08). <see cref="DateFirst"/> and <see cref="DateFormat"/> are the
+/// (2026-08-08; the month and weekday name lists 2026-09-30). <see cref="DateFirst"/> and <see cref="DateFormat"/> are the
 /// load-bearing columns: a successful <c>SET LANGUAGE</c> carries them into
 /// the session's <c>@@DATEFIRST</c> and <c>SET DATEFORMAT</c> order.
 /// </remarks>
-internal sealed class Language(short langId, string name, string alias, string dateFormat, byte dateFirst, int lcid, short msgLangId)
+internal sealed class Language(short langId, string name, string alias, string dateFormat, byte dateFirst, int lcid, short msgLangId, string months, string shortMonths, string days)
 {
     public readonly short LangId = langId;
     public readonly string Name = name;
@@ -21,46 +21,55 @@ internal sealed class Language(short langId, string name, string alias, string d
     public readonly int Lcid = lcid;
     public readonly short MsgLangId = msgLangId;
 
+    /// <summary>The comma-separated month, abbreviated month and weekday names <c>sys.syslanguages</c> and <c>sp_helplanguage</c> report (weekdays start on Monday).</summary>
+    public readonly string Months = months;
+
+    /// <inheritdoc cref="Months"/>
+    public readonly string ShortMonths = shortMonths;
+
+    /// <inheritdoc cref="Months"/>
+    public readonly string Days = days;
+
     /// <summary>
     /// Every installed language, in <c>langid</c> order — which is also
     /// <c>sys.syslanguages</c>'s own order.
     /// </summary>
     public static readonly Language[] All =
     [
-        new(0, "us_english", "English", "mdy", 7, 1033, 1033),
-        new(1, "Deutsch", "German", "dmy", 1, 1031, 1031),
-        new(2, "Français", "French", "dmy", 1, 1036, 1036),
-        new(3, "日本語", "Japanese", "ymd", 7, 1041, 1041),
-        new(4, "Dansk", "Danish", "dmy", 1, 1030, 1030),
-        new(5, "Español", "Spanish", "dmy", 1, 3082, 3082),
-        new(6, "Italiano", "Italian", "dmy", 1, 1040, 1040),
-        new(7, "Nederlands", "Dutch", "dmy", 1, 1043, 1043),
-        new(8, "Norsk", "Norwegian", "dmy", 1, 2068, 2068),
-        new(9, "Português", "Portuguese", "dmy", 7, 2070, 2070),
-        new(10, "Suomi", "Finnish", "dmy", 1, 1035, 1035),
-        new(11, "Svenska", "Swedish", "ymd", 1, 1053, 1053),
-        new(12, "čeština", "Czech", "dmy", 1, 1029, 1029),
-        new(13, "magyar", "Hungarian", "ymd", 1, 1038, 1038),
-        new(14, "polski", "Polish", "dmy", 1, 1045, 1045),
-        new(15, "română", "Romanian", "dmy", 1, 1048, 1048),
-        new(16, "hrvatski", "Croatian", "ymd", 1, 1050, 1050),
-        new(17, "slovenčina", "Slovak", "dmy", 1, 1051, 1051),
-        new(18, "slovenski", "Slovenian", "dmy", 1, 1060, 1060),
-        new(19, "ελληνικά", "Greek", "dmy", 1, 1032, 1032),
-        new(20, "български", "Bulgarian", "dmy", 1, 1026, 1026),
-        new(21, "русский", "Russian", "dmy", 1, 1049, 1049),
-        new(22, "Türkçe", "Turkish", "dmy", 1, 1055, 1055),
-        new(23, "British", "British English", "dmy", 1, 2057, 1033),
-        new(24, "eesti", "Estonian", "dmy", 1, 1061, 1061),
-        new(25, "latviešu", "Latvian", "ymd", 1, 1062, 1062),
-        new(26, "lietuvių", "Lithuanian", "ymd", 1, 1063, 1063),
-        new(27, "Português (Brasil)", "Brazilian", "dmy", 7, 1046, 1046),
-        new(28, "繁體中文", "Traditional Chinese", "ymd", 7, 1028, 1028),
-        new(29, "한국어", "Korean", "ymd", 7, 1042, 1042),
-        new(30, "简体中文", "Simplified Chinese", "ymd", 7, 2052, 2052),
-        new(31, "Arabic", "Arabic", "dmy", 1, 1025, 1025),
-        new(32, "ไทย", "Thai", "dmy", 7, 1054, 1054),
-        new(33, "norsk (bokmål)", "Bokmål", "dmy", 1, 1044, 1044),
+        new(0, "us_english", "English", "mdy", 7, 1033, 1033, "January,February,March,April,May,June,July,August,September,October,November,December", "Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec", "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday"),
+        new(1, "Deutsch", "German", "dmy", 1, 1031, 1031, "Januar,Februar,März,April,Mai,Juni,Juli,August,September,Oktober,November,Dezember", "Jan,Feb,Mär,Apr,Mai,Jun,Jul,Aug,Sep,Okt,Nov,Dez", "Montag,Dienstag,Mittwoch,Donnerstag,Freitag,Samstag,Sonntag"),
+        new(2, "Français", "French", "dmy", 1, 1036, 1036, "janvier,février,mars,avril,mai,juin,juillet,août,septembre,octobre,novembre,décembre", "janv,févr,mars,avr,mai,juin,juil,août,sept,oct,nov,déc", "lundi,mardi,mercredi,jeudi,vendredi,samedi,dimanche"),
+        new(3, "日本語", "Japanese", "ymd", 7, 1041, 1041, "01,02,03,04,05,06,07,08,09,10,11,12", "01,02,03,04,05,06,07,08,09,10,11,12", "月曜日,火曜日,水曜日,木曜日,金曜日,土曜日,日曜日"),
+        new(4, "Dansk", "Danish", "dmy", 1, 1030, 1030, "januar,februar,marts,april,maj,juni,juli,august,september,oktober,november,december", "jan,feb,mar,apr,maj,jun,jul,aug,sep,okt,nov,dec", "mandag,tirsdag,onsdag,torsdag,fredag,lørdag,søndag"),
+        new(5, "Español", "Spanish", "dmy", 1, 3082, 3082, "Enero,Febrero,Marzo,Abril,Mayo,Junio,Julio,Agosto,Septiembre,Octubre,Noviembre,Diciembre", "Ene,Feb,Mar,Abr,May,Jun,Jul,Ago,Sep,Oct,Nov,Dic", "Lunes,Martes,Miércoles,Jueves,Viernes,Sábado,Domingo"),
+        new(6, "Italiano", "Italian", "dmy", 1, 1040, 1040, "gennaio,febbraio,marzo,aprile,maggio,giugno,luglio,agosto,settembre,ottobre,novembre,dicembre", "gen,feb,mar,apr,mag,giu,lug,ago,set,ott,nov,dic", "lunedì,martedì,mercoledì,giovedì,venerdì,sabato,domenica"),
+        new(7, "Nederlands", "Dutch", "dmy", 1, 1043, 1043, "januari,februari,maart,april,mei,juni,juli,augustus,september,oktober,november,december", "jan,feb,mrt,apr,mei,jun,jul,aug,sep,okt,nov,dec", "maandag,dinsdag,woensdag,donderdag,vrijdag,zaterdag,zondag"),
+        new(8, "Norsk", "Norwegian", "dmy", 1, 2068, 2068, "januar,februar,mars,april,mai,juni,juli,august,september,oktober,november,desember", "jan,feb,mar,apr,mai,jun,jul,aug,sep,okt,nov,des", "mandag,tirsdag,onsdag,torsdag,fredag,lørdag,søndag"),
+        new(9, "Português", "Portuguese", "dmy", 7, 2070, 2070, "janeiro,fevereiro,março,abril,maio,junho,julho,agosto,setembro,outubro,novembro,dezembro", "jan,fev,mar,abr,mai,jun,jul,ago,set,out,nov,dez", "segunda-feira,terça-feira,quarta-feira,quinta-feira,sexta-feira,sábado,domingo"),
+        new(10, "Suomi", "Finnish", "dmy", 1, 1035, 1035, "tammikuuta,helmikuuta,maaliskuuta,huhtikuuta,toukokuuta,kesäkuuta,heinäkuuta,elokuuta,syyskuuta,lokakuuta,marraskuuta,joulukuuta", "tammi,helmi,maalis,huhti,touko,kesä,heinä,elo,syys,loka,marras,joulu", "maanantai,tiistai,keskiviikko,torstai,perjantai,lauantai,sunnuntai"),
+        new(11, "Svenska", "Swedish", "ymd", 1, 1053, 1053, "januari,februari,mars,april,maj,juni,juli,augusti,september,oktober,november,december", "jan,feb,mar,apr,maj,jun,jul,aug,sep,okt,nov,dec", "måndag,tisdag,onsdag,torsdag,fredag,lördag,söndag"),
+        new(12, "čeština", "Czech", "dmy", 1, 1029, 1029, "leden,únor,březen,duben,květen,červen,červenec,srpen,září,říjen,listopad,prosinec", "I,II,III,IV,V,VI,VII,VIII,IX,X,XI,XII", "pondělí,úterý,středa,čtvrtek,pátek,sobota,neděle"),
+        new(13, "magyar", "Hungarian", "ymd", 1, 1038, 1038, "január,február,március,április,május,június,július,augusztus,szeptember,október,november,december", "jan,febr,márc,ápr,máj,jún,júl,aug,szept,okt,nov,dec", "hétfő,kedd,szerda,csütörtök,péntek,szombat,vasárnap"),
+        new(14, "polski", "Polish", "dmy", 1, 1045, 1045, "styczeń,luty,marzec,kwiecień,maj,czerwiec,lipiec,sierpień,wrzesień,październik,listopad,grudzień", "I,II,III,IV,V,VI,VII,VIII,IX,X,XI,XII", "poniedziałek,wtorek,środa,czwartek,piątek,sobota,niedziela"),
+        new(15, "română", "Romanian", "dmy", 1, 1048, 1048, "ianuarie,februarie,martie,aprilie,mai,iunie,iulie,august,septembrie,octombrie,noiembrie,decembrie", "Ian,Feb,Mar,Apr,Mai,Iun,Iul,Aug,Sep,Oct,Nov,Dec", "luni,marţi,miercuri,joi,vineri,sîmbătă,duminică"),
+        new(16, "hrvatski", "Croatian", "ymd", 1, 1050, 1050, "siječanj,veljača,ožujak,travanj,svibanj,lipanj,srpanj,kolovoz,rujan,listopad,studeni,prosinac", "sij,vel,ožu,tra,svi,lip,srp,kol,ruj,lis,stu,pro", "ponedjeljak,utorak,srijeda,četvrtak,petak,subota,nedjelja"),
+        new(17, "slovenčina", "Slovak", "dmy", 1, 1051, 1051, "január,február,marec,apríl,máj,jún,júl,august,september,október,november,december", "I,II,III,IV,V,VI,VII,VIII,IX,X,XI,XII", "pondelok,utorok,streda,štvrtok,piatok,sobota,nedeľa"),
+        new(18, "slovenski", "Slovenian", "dmy", 1, 1060, 1060, "januar,februar,marec,april,maj,junij,julij,avgust,september,oktober,november,december", "jan,feb,mar,apr,maj,jun,jul,avg,sept,okt,nov,dec", "ponedeljek,torek,sreda,četrtek,petek,sobota,nedelja"),
+        new(19, "ελληνικά", "Greek", "dmy", 1, 1032, 1032, "Ιανουαρίου,Φεβρουαρίου,Μαρτίου,Απριλίου,Μα_ου,Ιουνίου,Ιουλίου,Αυγούστου,Σεπτεμβρίου,Οκτωβρίου,Νοεμβρίου,Δεκεμβρίου", "Ιαν,Φεβ,Μαρ,Απρ,Μαϊ,Ιουν,Ιουλ,Αυγ,Σεπ,Οκτ,Νοε,Δεκ", "Δευτέρα,Τρίτη,Τετάρτη,Πέμπτη,Παρασκευή,Σάββατο,Κυριακή"),
+        new(20, "български", "Bulgarian", "dmy", 1, 1026, 1026, "януари,февруари,март,април,май,юни,юли,август,септември,октомври,ноември,декември", "януари,февруари,март,април,май,юни,юли,август,септември,октомври,ноември,декември", "понеделник,вторник,сряда,четвъртък,петък,събота,неделя"),
+        new(21, "русский", "Russian", "dmy", 1, 1049, 1049, "Январь,Февраль,Март,Апрель,Май,Июнь,Июль,Август,Сентябрь,Октябрь,Ноябрь,Декабрь", "янв,фев,мар,апр,май,июн,июл,авг,сен,окт,ноя,дек", "понедельник,вторник,среда,четверг,пятница,суббота,воскресенье"),
+        new(22, "Türkçe", "Turkish", "dmy", 1, 1055, 1055, "Ocak,Şubat,Mart,Nisan,Mayıs,Haziran,Temmuz,Ağustos,Eylül,Ekim,Kasım,Aralık", "Oca,Şub,Mar,Nis,May,Haz,Tem,Ağu,Eyl,Eki,Kas,Ara", "Pazartesi,Salı,Çarşamba,Perşembe,Cuma,Cumartesi,Pazar"),
+        new(23, "British", "British English", "dmy", 1, 2057, 1033, "January,February,March,April,May,June,July,August,September,October,November,December", "Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec", "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday"),
+        new(24, "eesti", "Estonian", "dmy", 1, 1061, 1061, "jaanuar,veebruar,märts,aprill,mai,juuni,juuli,august,september,oktoober,november,detsember", "jaan,veebr,märts,apr,mai,juuni,juuli,aug,sept,okt,nov,dets", "esmaspäev,teisipäev,kolmapäev,neljapäev,reede,laupäev,pühapäev"),
+        new(25, "latviešu", "Latvian", "ymd", 1, 1062, 1062, "janvāris,februāris,marts,aprīlis,maijs,jūnijs,jūlijs,augusts,septembris,oktobris,novembris,decembris", "jan,feb,mar,apr,mai,jūn,jūl,aug,sep,okt,nov,dec", "pirmdiena,otrdiena,trešdiena,ceturtdiena,piektdiena,sestdiena,svētdiena"),
+        new(26, "lietuvių", "Lithuanian", "ymd", 1, 1063, 1063, "sausis,vasaris,kovas,balandis,gegužė,birželis,liepa,rugpjūtis,rugsėjis,spalis,lapkritis,gruodis", "sau,vas,kov,bal,geg,bir,lie,rgp,rgs,spl,lap,grd", "pirmadienis,antradienis,trečiadienis,ketvirtadienis,penktadienis,šeštadienis,sekmadienis"),
+        new(27, "Português (Brasil)", "Brazilian", "dmy", 7, 1046, 1046, "Janeiro,Fevereiro,Março,Abril,Maio,Junho,Julho,Agosto,Setembro,Outubro,Novembro,Dezembro", "Jan,Fev,Mar,Abr,Mai,Jun,Jul,Ago,Set,Out,Nov,Dez", "Segunda-Feira,Terça-Feira,Quarta-Feira,Quinta-Feira,Sexta-Feira,Sábado,Domingo"),
+        new(28, "繁體中文", "Traditional Chinese", "ymd", 7, 1028, 1028, "一月,二月,三月,四月,五月,六月,七月,八月,九月,十月,十一月,十二月", "01,02,03,04,05,06,07,08,09,10,11,12", "星期一,星期二,星期三,星期四,星期五,星期六,星期日"),
+        new(29, "한국어", "Korean", "ymd", 7, 1042, 1042, "01,02,03,04,05,06,07,08,09,10,11,12", "01,02,03,04,05,06,07,08,09,10,11,12", "월요일,화요일,수요일,목요일,금요일,토요일,일요일"),
+        new(30, "简体中文", "Simplified Chinese", "ymd", 7, 2052, 2052, "01,02,03,04,05,06,07,08,09,10,11,12", "01,02,03,04,05,06,07,08,09,10,11,12", "星期一,星期二,星期三,星期四,星期五,星期六,星期日"),
+        new(31, "Arabic", "Arabic", "dmy", 1, 1025, 1025, "Muharram,Safar,Rabie I,Rabie II,Jumada I,Jumada II,Rajab,Shaaban,Ramadan,Shawwal,Thou Alqadah,Thou Alhajja", "Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec", "Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday"),
+        new(32, "ไทย", "Thai", "dmy", 7, 1054, 1054, "มกราคม,กุมภาพันธ์,มีนาคม,เมษายน,พฤษภาคม,มิถุนายน,กรกฎาคม,สิงหาคม,กันยายน,ตุลาคม,พฤศจิกายน,ธันวาคม", "ม.ค.,ก.พ.,มี.ค.,เม.ย.,พ.ค.,มิ.ย.,ก.ค.,ส.ค.,ก.ย.,ต.ค.,พ.ย.,ธ.ค.", "จันทร์,อังคาร,พุธ,พฤหัสบดี,ศุกร์,เสาร์,อาทิตย์"),
+        new(33, "norsk (bokmål)", "Bokmål", "dmy", 1, 1044, 1044, "januar,februar,mars,april,mai,juni,juli,august,september,oktober,november,desember", "jan,feb,mar,apr,mai,jun,jul,aug,sep,okt,nov,des", "mandag,tirsdag,onsdag,torsdag,fredag,lørdag,søndag"),
     ];
 
     /// <summary>The instance default — <c>us_english</c>, langid 0, DATEFIRST 7.</summary>

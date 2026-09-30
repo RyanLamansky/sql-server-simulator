@@ -191,7 +191,10 @@ partial class Simulation
             {
                 var resolved = ResolveKeyConstraints(table.Name, combined, shiftedKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
                 foreach (var kc in resolved)
+                {
                     table.KeyConstraints.Add(kc);
+                    table.NoteStatisticsCreated(kc.Name, context.CurrentDatabase.Collation);
+                }
             }
 
             if (pendingChecks.Count > 0)

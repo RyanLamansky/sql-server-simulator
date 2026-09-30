@@ -533,6 +533,7 @@ partial class Simulation
         if (placement is null)
             RejectIndexOnEmptyFilegroup(context.Batch, table, filegroup);
         table.KeyConstraints.Add(constraint);
+        table.NoteStatisticsCreated(constraint.Name, context.CurrentDatabase.Collation);
         if (isClustered)
         {
             table.Partitioning = placement;
