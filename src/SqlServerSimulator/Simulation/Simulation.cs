@@ -4109,7 +4109,7 @@ public sealed partial class Simulation
                 // log.Commit() above). An active snapshot legitimately needs the
                 // versions, so defer — and skip the scan — until it closes.
                 var autoCommitSimulation = context.Connection.Simulation;
-                if (versionedThisStatement && autoCommitSimulation.ActiveSnapshotTxs.IsEmpty)
+                if (versionedThisStatement && autoCommitSimulation.ActiveSnapshotTxs.IsEmptyLockFree())
                     Storage.VersionStore.RunGarbageCollection(autoCommitSimulation, context.CurrentDatabase);
             }
             // Table-variable writes are non-transactional and final on

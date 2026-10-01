@@ -418,8 +418,12 @@ A view target is written through its base table when it has one; a view with non
 
 ### Match strategies
 
-Phase A settles on one of three, all producing the same matched-source list per target row — ascending source index, so first-source-wins, the Msg 8672 multi-match guard and heap-order application read identically whichever ran.
-The opt-in `JoinDiagnostics` trace records the choice (`Merge:TargetSeek` / `Merge:HashMatch(keys=N,residual=M)` / `Merge:Scan`), which is what `MergeMatchStrategyTests` guards.
+Phase A settles on one of three, all producing the same matched-source list per target row — ascending source index, so first-source-wins, the Msg 8672 multi-match guard and heap-order application read identically whichever ran — or skips the target altogether.
+The opt-in `JoinDiagnostics` trace records the choice (`Merge:NoTargetRead` / `Merge:TargetSeek` / `Merge:HashMatch(keys=N,residual=M)` / `Merge:Scan`), which is what `MergeMatchStrategyTests` guards.
+
+- **No target read** — the ON is settled non-TRUE while compiling (`ON 1=0`, every EF Core multi-row insert; `ON 0=1 AND …`; `ON NULL = 1`) and no WHEN NOT MATCHED BY SOURCE clause needs the unmatched targets, so nothing can match and every source row goes straight to WHEN NOT MATCHED BY TARGET.
+  Real's plan doesn't read the target either: `STATISTICS IO` lists it at scan count 0 with only the inserts' reads, and no worktable (probed 2026-10-01 against SQL Server 2025), and the simulator now reports the same.
+  Walking it instead cost a decode per target row and an ON per target × source pair, growing with the table ([measured](plan-cache.md#ef-cores-multi-row-insert)).
 
 - **Target seek** — the ON carries a seekable target equality and the target isn't a view (whose column names don't map to the base heap).
   The loop inverts: seek the matching targets per source row (`Selection.TryPrepareMergeTargetSeek`), re-running the full ON per candidate as a residual filter.

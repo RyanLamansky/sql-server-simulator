@@ -7,11 +7,15 @@ using Microsoft.CodeAnalysis.Operations;
 namespace SqlServerSimulator.Analyzers;
 
 /// <summary>
-/// Flags a read of <c>ConcurrentDictionary&lt;TKey, TValue&gt;.Values</c> or
-/// <c>.Keys</c>. Both properties take every one of the dictionary's bucket
-/// locks and copy its whole contents into a fresh list on each access, so a
-/// loop over <c>dict.Values</c> pays a lock sweep and a full copy just to
-/// visit each entry once.
+/// Flags a read of <c>ConcurrentDictionary&lt;TKey, TValue&gt;.Values</c>,
+/// <c>.Keys</c> or <c>.IsEmpty</c>. The first two take every one of the
+/// dictionary's bucket locks and copy its whole contents into a fresh list on
+/// each access, so a loop over <c>dict.Values</c> pays a lock sweep and a full
+/// copy just to visit each entry once. <c>IsEmpty</c> takes the same lock
+/// sweep whenever its answer is yes — the common answer at the sites that ask
+/// it as a fast-path guard, such as the per-row uniqueness check's test for
+/// another session's pending key — while the enumerator's first step answers
+/// the question lock-free.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -32,10 +36,9 @@ namespace SqlServerSimulator.Analyzers;
 /// rationale.
 /// </para>
 /// <para>
-/// <c>Count</c> and <c>IsEmpty</c> also take every lock (<c>IsEmpty</c> only
-/// when the dictionary is empty) but copy nothing, and each of their reads
-/// answers a question the enumeration can't answer more cheaply, so they
-/// stay off the list.
+/// <c>Count</c> also takes every lock but copies nothing, and answers a
+/// question the enumeration can't answer more cheaply, so it stays off the
+/// list.
 /// </para>
 /// </remarks>
 [DiagnosticAnalyzer(LanguageNames.CSharp)]
@@ -43,12 +46,12 @@ public sealed class ConcurrentDictionarySnapshotAnalyzer : DiagnosticAnalyzer
 {
     private static readonly DiagnosticDescriptor Rule = new(
         id: "SSS012",
-        title: "ConcurrentDictionary.Values / .Keys copies the dictionary under every lock",
-        messageFormat: "'{0}' takes every bucket lock of the ConcurrentDictionary and copies its contents on each read; enumerate the dictionary itself (foreach (var (_, v) in dict) / dict.Select(p => p.Value)), which is lock-free but a moving view rather than a snapshot",
+        title: "ConcurrentDictionary.Values / .Keys / .IsEmpty sweeps every lock",
+        messageFormat: "'{0}' takes every bucket lock of the ConcurrentDictionary{1}; {2}, which is lock-free but a moving view rather than a snapshot",
         category: "Performance",
         defaultSeverity: DiagnosticSeverity.Warning,
         isEnabledByDefault: true,
-        description: "ConcurrentDictionary's Values and Keys properties acquire all of the dictionary's locks and copy its contents into a new list on every access. Enumerating the dictionary directly is lock-free and allocates only the enumerator, at the cost of seeing concurrent adds and removes as they happen instead of a point-in-time copy. A site that needs that copy — it mutates the dictionary while iterating and must not observe its own changes, or it needs a stable count — calls dict.ToArray() explicitly or suppresses with #pragma warning disable SSS012 and a rationale.");
+        description: "ConcurrentDictionary's Values and Keys properties acquire all of the dictionary's locks and copy its contents into a new list on every access, and IsEmpty acquires them all whenever the dictionary is empty. Enumerating the dictionary directly (or dict.IsEmptyLockFree(), its first step) is lock-free and allocates only the enumerator, at the cost of seeing concurrent adds and removes as they happen instead of a point-in-time copy. A site that needs that copy — it mutates the dictionary while iterating and must not observe its own changes, or it needs a stable count — calls dict.ToArray() explicitly or suppresses with #pragma warning disable SSS012 and a rationale.");
 
     /// <inheritdoc/>
     public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics => [Rule];
@@ -74,7 +77,7 @@ public sealed class ConcurrentDictionarySnapshotAnalyzer : DiagnosticAnalyzer
     {
         var reference = (IPropertyReferenceOperation)context.Operation;
         var property = reference.Property;
-        if (property.Name is not ("Values" or "Keys"))
+        if (property.Name is not ("Values" or "Keys" or "IsEmpty"))
             return;
         if (!SymbolEqualityComparer.Default.Equals(property.ContainingType.OriginalDefinition, concurrentDictionary))
             return;
@@ -84,6 +87,9 @@ public sealed class ConcurrentDictionarySnapshotAnalyzer : DiagnosticAnalyzer
         var location = reference.Syntax is MemberAccessExpressionSyntax memberAccess
             ? memberAccess.Name.GetLocation()
             : reference.Syntax.GetLocation();
-        context.ReportDiagnostic(Diagnostic.Create(Rule, location, reference.Syntax.ToString()));
+        var (cost, fix) = property.Name == "IsEmpty"
+            ? (" whenever the dictionary is empty", "ask dict.IsEmptyLockFree(), the enumerator's first step")
+            : (" and copies its contents on each read", "enumerate the dictionary itself (foreach (var (_, v) in dict) / dict.Select(p => p.Value))");
+        context.ReportDiagnostic(Diagnostic.Create(Rule, location, reference.Syntax.ToString(), cost, fix));
     }
 }

@@ -362,7 +362,7 @@ internal sealed class Heap
     /// </remarks>
     private bool TryReuseReclaimablePage(ReadOnlySpan<byte> row, out int pageIndex)
     {
-        if (this.reclaimablePages.IsEmpty)
+        if (this.reclaimablePages.IsEmptyLockFree())
         {
             pageIndex = -1;
             return false;
@@ -386,6 +386,15 @@ internal sealed class Heap
                 pageIndex = candidate;
                 return true;
             }
+            // Even emptied, a page holds no more than what its slot directory
+            // leaves, and the directory only grows. Delete-and-insert churn
+            // leaves pages whose directory fills them — each still a candidate
+            // for the few reclaimable bytes it can't use — and reading
+            // ReclaimableBytes walks that whole directory, so checking the bound
+            // first is what keeps an insert from walking thousands of slots per
+            // such page.
+            if (HeapPage.PageSize - HeapPage.HeaderSize - (2 * page.SlotCount) < need)
+                continue;
             if (page.FreeSpace + page.ReclaimableBytes >= need)
             {
                 page.Compact();

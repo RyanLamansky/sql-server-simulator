@@ -18,7 +18,7 @@ partial class Simulation
     /// </summary>
     internal SimulatedSqlException? RefuseLogin(string userName, string password)
     {
-        if (this.Logins.IsEmpty)
+        if (this.Logins.IsEmptyLockFree())
             return null;
         if (!this.Logins.TryGetValue(userName, out var login) || !PasswordHash.Verify(password, login.PasswordHash))
             return SimulatedSqlException.LoginFailed(userName);
@@ -63,7 +63,7 @@ partial class Simulation
     {
         // Empty login registry => open dev mode: any credentials, dbo everywhere
         // (the zero-configuration back-compat invariant).
-        if (simulation.Logins.IsEmpty)
+        if (simulation.Logins.IsEmptyLockFree())
         {
             principal = target.Principals["dbo"];
             return true;

@@ -432,9 +432,15 @@ partial class Simulation
             for (var ordinal = 0; ordinal < destinationTable.Columns.Length; ordinal++)
                 EnforceRule(destinationTable, rowValues, ordinal, batch);
         }
-        if (destinationTable.CheckConstraints.Count == 0)
-            return;
+        if (destinationTable.CheckConstraints.Count > 0)
+            JudgeCheckConstraints(destinationTable, rowValues, batch, verb);
+    }
 
+    // Apart from EnforceCheckConstraints so the closure the resolver captures
+    // is allocated only for a table with CHECK constraints, not per row of
+    // every insert.
+    private static void JudgeCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch, string verb)
+    {
         SqlValue ResolveByName(MultiPartName reference)
         {
             for (var k = 0; k < destinationTable.Columns.Length; k++)

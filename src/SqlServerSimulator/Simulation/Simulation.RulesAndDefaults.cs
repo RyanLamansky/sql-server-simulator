@@ -435,9 +435,14 @@ partial class Simulation
     private static void EnforceRule(HeapTable table, SqlValue[] values, int ordinal, BatchContext batch)
     {
         var column = table.Columns[ordinal];
-        if (column.BoundRule is not { } rule)
-            return;
-        var value = values[ordinal];
+        if (column.BoundRule is { } rule)
+            JudgeRule(table, column, rule, values[ordinal], batch);
+    }
+
+    // Apart from EnforceRule so the closure over the value is allocated only
+    // for a column a rule is bound to, not for every column of every row.
+    private static void JudgeRule(HeapTable table, HeapColumn column, RuleObject rule, SqlValue value, BatchContext batch)
+    {
         if (rule.Predicate.Run(new RuntimeContext(_ => value, batch)) == false)
         {
             throw SimulatedSqlException.RuleViolation(

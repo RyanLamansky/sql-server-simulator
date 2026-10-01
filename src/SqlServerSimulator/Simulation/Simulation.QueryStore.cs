@@ -251,7 +251,7 @@ partial class Simulation
     {
         foreach (var name in shape.Variables)
         {
-            if (batch.TableVariables.ContainsKey(name[1..]))
+            if (batch.TableVariables.ContainsKey(name))
                 return true;
         }
         return false;
@@ -270,18 +270,27 @@ partial class Simulation
         if (shape.IsConditionOrReturn)
             return null;
         StringBuilder? prefix = null;
+        Dictionary<string, VariableSlot>? asDeclared = null;
         foreach (var name in shape.Variables)
         {
-            var bare = name[1..];
-            if (!batch.Variables.TryGetValue(bare, out var slot))
-                continue;
-            var declared = bare;
-            foreach (var key in batch.Variables.Keys)
+            // A name spelled as it was declared is found ordinally, under the
+            // key that is its declared spelling; only one spelled otherwise
+            // pays the culture-aware lookup and the search for the key. That
+            // lookup per name was the dominant cost of a statement naming
+            // many parameters, such as EF Core's multi-row INSERT / MERGE.
+            asDeclared ??= new(batch.Variables, StringComparer.Ordinal);
+            var declared = name;
+            if (!asDeclared.TryGetValue(name, out var slot))
             {
-                if (BatchContext.VariableNameComparer.Equals(key, bare))
+                if (!batch.Variables.TryGetValue(name, out slot))
+                    continue;
+                foreach (var (key, _) in batch.Variables)
                 {
-                    declared = key;
-                    break;
+                    if (BatchContext.VariableNameComparer.Equals(key, name))
+                    {
+                        declared = key;
+                        break;
+                    }
                 }
             }
             prefix = prefix is null ? new StringBuilder("(") : prefix.Append(',');
@@ -619,7 +628,7 @@ internal sealed class QueryStoreShape
     /// <summary>The length of <see cref="Parameterized"/>'s declaration, which the batch offsets skip.</summary>
     public readonly int ParameterizedPrefixLength;
 
-    /// <summary>Every <c>@name</c> the statement reads, <c>@</c> included, in first-appearance order.</summary>
+    /// <summary>Every <c>@name</c> the statement reads, without its <c>@</c> (the <see cref="BatchContext.Variables"/> key form), in first-appearance order.</summary>
     public readonly string[] Variables;
 
     public bool DeclaresVariables => this.Variables.Length > 0;
@@ -708,7 +717,7 @@ internal sealed class QueryStoreShape
                     intoSeen = true;
                     break;
                 case AtPrefixedString variable:
-                    var name = "@" + variable.Span.ToString();
+                    var name = variable.Span.ToString();
                     if (!variables.Exists(existing => BatchContext.VariableNameComparer.Equals(existing, name)))
                         variables.Add(name);
                     break;

@@ -1539,7 +1539,7 @@ internal sealed class BatchContext
     /// </summary>
     public void AwaitUncommittedDeletes(HeapTable table)
     {
-        if (table.SupersededKeyImages.IsEmpty)
+        if (table.SupersededKeyImages.IsEmptyLockFree())
             return;
         var connection = this.Connection;
         List<LockResource>? holders = null;
@@ -1570,7 +1570,7 @@ internal sealed class BatchContext
     /// </summary>
     public void AwaitSupersededKeyHolders(HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe)
     {
-        if (table.SupersededKeyImages.IsEmpty)
+        if (table.SupersededKeyImages.IsEmptyLockFree())
             return;
         var connection = this.Connection;
         List<LockResource>? holders = null;
@@ -2395,12 +2395,14 @@ internal sealed class BatchContext
     /// </summary>
     public readonly Dictionary<string, int> VariableDeclarationSites = new(VariableNameComparer);
 
-    internal static readonly StringComparer VariableNameComparer =
-        StringComparer.Create(
-            System.Globalization.CultureInfo.InvariantCulture,
-            System.Globalization.CompareOptions.IgnoreCase
-            | System.Globalization.CompareOptions.IgnoreKanaType
-            | System.Globalization.CompareOptions.IgnoreWidth);
+    /// <summary>How <see cref="Variables"/> matches names: ignoring case, kana type and width.</summary>
+    internal static readonly MemoizedNameComparer VariableNameComparer = new(
+        System.Globalization.CompareOptions.IgnoreCase
+        | System.Globalization.CompareOptions.IgnoreKanaType
+        | System.Globalization.CompareOptions.IgnoreWidth);
+
+    /// <summary>How <see cref="TableVariables"/> and <see cref="CursorVariables"/> match names: ignoring case.</summary>
+    internal static readonly MemoizedNameComparer TableVariableNameComparer = new(System.Globalization.CompareOptions.IgnoreCase);
 
     /// <summary>
     /// The documents behind this batch's <c>.nodes()</c> rows, allocated by the
@@ -2435,7 +2437,7 @@ internal sealed class BatchContext
     /// (probe-confirmed: real SQL Server's name-uniqueness check is per-name,
     /// not per-kind).
     /// </summary>
-    public readonly Dictionary<string, HeapTable> TableVariables = new(StringComparer.InvariantCultureIgnoreCase);
+    public readonly Dictionary<string, HeapTable> TableVariables = new(TableVariableNameComparer);
 
     /// <summary>
     /// LOCAL cursors declared in this batch / procedure / trigger frame
@@ -2458,7 +2460,7 @@ internal sealed class BatchContext
     /// binding increments <see cref="Cursor.VariableRefCount"/>, rebinding /
     /// <c>DEALLOCATE @c</c> / frame exit decrements and tears down at zero.
     /// </summary>
-    public readonly Dictionary<string, Cursor?> CursorVariables = new(StringComparer.InvariantCultureIgnoreCase);
+    public readonly Dictionary<string, Cursor?> CursorVariables = new(TableVariableNameComparer);
 
     /// <summary>
     /// Monotonically-increasing per-row stamp consumed by
@@ -2637,7 +2639,7 @@ internal sealed class BatchContext
 
     private static Dictionary<string, VariableSlot> SeedVariables(SimulatedDbCommand command)
     {
-        var dict = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+        var dict = new Dictionary<string, VariableSlot>(command.Parameters.Count, BatchContext.VariableNameComparer);
         foreach (SimulatedDbParameter parameter in command.Parameters)
         {
             // Skip structured / table-valued parameters here — they land in

@@ -38,7 +38,7 @@ internal static class VersionStoreDmvs
         {
             foreach (var (_, table) in schema.HeapTables)
             {
-                if (table.RowVersions.IsEmpty)
+                if (table.RowVersions.IsEmptyLockFree())
                     continue;
                 var rowsetId = SqlValue.FromInt64(table.ObjectId);
                 foreach (var kv in table.RowVersions)
@@ -89,7 +89,7 @@ internal static class VersionStoreDmvs
         {
             foreach (var (_, table) in schema.HeapTables)
             {
-                if (table.RowVersions.IsEmpty)
+                if (table.RowVersions.IsEmptyLockFree())
                     continue;
                 foreach (var kv in table.RowVersions)
                 {

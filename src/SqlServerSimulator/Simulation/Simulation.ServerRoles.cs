@@ -304,7 +304,7 @@ partial class Simulation
         var effective = connection.Security.Effective;
         return !effective.IsDatabaseScoped
             && (BuiltInToken.Comparer.Equals(effective.LoginName, "sa")
-                || this.Logins.IsEmpty
+                || this.Logins.IsEmptyLockFree()
                 || this.HoldsServerPermission(effective.LoginName, permission));
     }
 
@@ -515,7 +515,7 @@ partial class Simulation
         if (!isFixed)
             return this.SessionHoldsServerPermission(connection, Permission.AlterAnyServerRole);
         return !effective.IsDatabaseScoped
-            && (this.Logins.IsEmpty
+            && (this.Logins.IsEmptyLockFree()
                 || this.IsLoginSysadmin(effective.LoginName)
                 || this.IsLoginInServerRole(effective.LoginName, roleId));
     }

@@ -70,6 +70,33 @@ public sealed class ConcurrentDictionarySnapshotAnalyzerTests
             }
             """);
 
+    // IsEmpty copies nothing, but sweeps every lock whenever it answers yes.
+    [TestMethod]
+    public Task IsEmpty_Reports() =>
+        RunAsync("""
+            using System.Collections.Concurrent;
+            internal static class Holder
+            {
+                public static bool None(ConcurrentDictionary<string, int> dict) => dict.{|SSS012:IsEmpty|};
+            }
+            """);
+
+    // The enumerator's first step is the lock-free answer to the same question.
+    [TestMethod]
+    public Task FirstEnumerationStep_DoesNotReport() =>
+        RunAsync("""
+            using System.Collections.Concurrent;
+            internal static class Holder
+            {
+                public static bool None(ConcurrentDictionary<string, int> dict)
+                {
+                    foreach (var _ in dict)
+                        return false;
+                    return true;
+                }
+            }
+            """);
+
     [TestMethod]
     public Task EnumeratingTheDictionary_DoesNotReport() =>
         RunAsync("""

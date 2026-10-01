@@ -431,7 +431,7 @@ internal static partial class BuiltInResources
     /// </summary>
     private static SqlValue[][] SysconfiguresRowsFor(Simulation simulation, SqlValue[][] stockRows)
     {
-        if (simulation.ServerConfiguration.IsEmpty && !simulation.EnableClr)
+        if (simulation.ServerConfiguration.IsEmptyLockFree() && !simulation.EnableClr)
             return stockRows;
 
         var rows = (SqlValue[][])stockRows.Clone();

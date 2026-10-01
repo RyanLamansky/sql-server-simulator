@@ -443,14 +443,18 @@ internal abstract partial class Collation
         // inner's plain equality instead — the same equality/ordering
         // split CultureCollation itself has — keeping hyphen and
         // apostrophe distinct marks and staying consistent with the inner
-        // GetHashCode the canonicalized hash path delegates to.
+        // GetHashCode the canonicalized hash path delegates to. Identical
+        // text is equal under any collation, which settles the common
+        // identifier match (a column or alias spelled as declared) without
+        // the weight walks and the ignorable-key tiebreak behind them.
         public override bool Equals(string? x, string? y) =>
             x is null
                 ? y is null
                 : y is not null
-                    && (!this.InRepertoire(x) || !this.InRepertoire(y)
-                        ? this.inner.Equals(x, y)
-                        : this.CompareInRepertoire(x, y) == 0);
+                    && (string.Equals(x, y, StringComparison.Ordinal)
+                        || (!this.InRepertoire(x) || !this.InRepertoire(y)
+                            ? this.inner.Equals(x, y)
+                            : this.CompareInRepertoire(x, y) == 0));
 
         public override int GetHashCode(string obj)
         {

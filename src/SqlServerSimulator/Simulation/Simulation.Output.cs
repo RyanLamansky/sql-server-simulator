@@ -713,11 +713,12 @@ partial class Simulation
             }
 
             var projected = new SqlValue[expressions.Count];
+            var runtime = new RuntimeContext(Resolve, batch);
             for (var i = 0; i < expressions.Count; i++)
             {
                 projected[i] = action is not null && IsMergeActionRef(expressions[i])
                     ? SqlValue.FromNVarchar(action)
-                    : expressions[i].Run(new RuntimeContext(Resolve, batch));
+                    : expressions[i].Run(runtime);
             }
 
             // Which masks apply is the executing principal's to answer; an

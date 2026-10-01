@@ -732,6 +732,10 @@ internal abstract partial class Collation : IComparer<string>, IEqualityComparer
                 return y is null;
             if (y is null)
                 return false;
+            // Identical text is equal under any collation; the common
+            // identifier match skips the ICU compare.
+            if (string.Equals(x, y, StringComparison.Ordinal))
+                return true;
             if (this.weightsNul && (x.Contains('\0', StringComparison.Ordinal) || y.Contains('\0', StringComparison.Ordinal)))
                 return CompareNulWeighted(x, y, this.CompareIgnoringNul) == 0;
             var weightless = this.Weightless;

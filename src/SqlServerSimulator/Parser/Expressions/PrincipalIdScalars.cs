@@ -361,7 +361,7 @@ internal sealed class HasPermsByName : Expression
         }
         var effective = connection.Security.Effective;
         var holds = !effective.IsDatabaseScoped
-            && (simulation.Logins.IsEmpty
+            && (simulation.Logins.IsEmptyLockFree()
                 || simulation.HoldsServerPrincipalPermission(effective.LoginName, targetId, permission, serverWide));
         return SqlValue.FromInt32(holds ? 1 : 0);
     }

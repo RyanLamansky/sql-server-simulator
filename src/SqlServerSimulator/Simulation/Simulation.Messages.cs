@@ -131,7 +131,7 @@ partial class Simulation
         var simulation = connection.Simulation;
         var effective = connection.Security.Effective;
         return !effective.IsDatabaseScoped
-            && (simulation.Logins.IsEmpty
+            && (simulation.Logins.IsEmptyLockFree()
                 || simulation.IsLoginSysadmin(effective.LoginName)
                 || simulation.IsLoginInServerRole(effective.LoginName, roleId));
     }

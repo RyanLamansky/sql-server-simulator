@@ -663,7 +663,7 @@ internal sealed partial class Selection
     // lock) pairs, or null when there are none.
     private static List<(byte[] Image, LockResource Lock)>? OtherSessionsDeletedRows(HeapTable table, BatchContext batch)
     {
-        if (table.SupersededKeyImages.IsEmpty)
+        if (table.SupersededKeyImages.IsEmptyLockFree())
             return null;
         var session = batch.Connection.Session;
         List<(byte[] Image, LockResource Lock)>? deleted = null;

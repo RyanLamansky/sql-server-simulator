@@ -2951,6 +2951,9 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private static bool IsRuntimeConstant(Expression expression)
     {
+        // A literal has no children to walk.
+        if (expression is Value)
+            return true;
         var constant = true;
         expression.Walk((node, _) =>
         {

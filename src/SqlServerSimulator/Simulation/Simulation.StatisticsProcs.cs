@@ -98,7 +98,7 @@ partial class Simulation
 
         var values = BindSystemProcedureArguments("sp_updatestats", calledAs, arguments, UpdateStatsParameters);
         var security = batch.Connection.Security;
-        if (!(security.EffectiveIsDbo || batch.Connection.Simulation.Logins.IsEmpty || batch.Connection.Simulation.IsLoginSysadmin(security.Effective.LoginName)))
+        if (!(security.EffectiveIsDbo || batch.Connection.Simulation.Logins.IsEmptyLockFree() || batch.Connection.Simulation.IsLoginSysadmin(security.Effective.LoginName)))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.UserDoesNotHavePermission(), 15);
         var option = values[0].IsNull ? "NO" : values[0].AsString.TrimEnd(' ');
         if (!option.Equals("NO", StringComparison.OrdinalIgnoreCase) && !option.Equals("RESAMPLE", StringComparison.OrdinalIgnoreCase))

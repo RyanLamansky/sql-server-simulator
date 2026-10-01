@@ -1730,16 +1730,31 @@ partial class Simulation
         // precomputed matches, dropping the inner source loop either way. An
         // unindexed target keeps the heap walk, hashing the source by the ON's
         // equality keys instead (below) so neither shape is O(target × source).
-        var targetSeek = sourceView is null
+        //
+        // An ON settled non-TRUE while compiling — EF Core's multi-row insert
+        // writes ON 1=0 — matches no target row, so with no NOT MATCHED BY
+        // SOURCE clause to visit the unmatched ones the target isn't read at
+        // all and every source row falls to Phase B: real's plan for it reports
+        // the target at scan count 0 and lists no work table (probed 2026-10-01
+        // against SQL Server 2025), where walking it here cost a decode per
+        // target row and an ON per target × source pair.
+        var hasNotMatchedBySource = whenClauses.Any(c => c.Kind == WhenClauseKind.NotMatchedBySource);
+        var readsTarget = hasNotMatchedBySource
+            || !(onPredicate.IsNeverTrue || (ConstantFolding.TryFoldPredicate(onPredicate, context, out var onConstant) && onConstant != true));
+        var targetSeek = readsTarget && sourceView is null
             ? Selection.TryPrepareMergeTargetSeek(destinationTable, targetAlias, onPredicate, context.Batch)
             : null;
         // Real's MERGE lists a work table between its source and its target.
-        context.Connection.StatementIo?.UseWorktable();
+        if (readsTarget)
+            context.Connection.StatementIo?.UseWorktable();
 
-        if (targetSeek is not null)
+        if (!readsTarget)
+        {
+            JoinDiagnostics.Sink?.Add("Merge:NoTargetRead");
+        }
+        else if (targetSeek is not null)
         {
             JoinDiagnostics.Sink?.Add("Merge:TargetSeek");
-            var hasNotMatchedBySource = whenClauses.Any(c => c.Kind == WhenClauseKind.NotMatchedBySource);
 
             // Match phase: per source row, seek the matching target rows and group
             // them by target address — first-source-wins via source-index order
@@ -2068,6 +2083,7 @@ partial class Simulation
             rowValues[i] = CoerceForInsert(EnforceMaxLength(defaultValue, column, destinationTable, context.Connection), column);
         }
 
+        var sourceRuntime = new RuntimeContext(name => resolveCombined(null, sourceValues, name), context.Batch);
         for (var i = 0; i < clause.InsertColumns.Length; i++)
         {
             var targetColumn = clause.InsertColumns[i];
@@ -2080,7 +2096,7 @@ partial class Simulation
                     break;
                 }
             }
-            var source = clause.InsertValues![i].Run(new RuntimeContext(name => resolveCombined(null, sourceValues, name), context.Batch));
+            var source = clause.InsertValues![i].Run(sourceRuntime);
             if (clause.WriteMasks?[ordinal] is { } mask)
                 source = DataMasking.ForStorage(mask.Apply(source, targetColumn.Type));
             source = EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);

@@ -150,7 +150,7 @@ partial class Selection
                     _ => Permission.ControlServer,
                 };
                 return !effective.IsDatabaseScoped
-                    && (simulation.Logins.IsEmpty || simulation.HoldsServerPrincipalPermission(effective.LoginName, targetId, requested, serverWide));
+                    && (simulation.Logins.IsEmptyLockFree() || simulation.HoldsServerPrincipalPermission(effective.LoginName, targetId, requested, serverWide));
             };
         }
         else

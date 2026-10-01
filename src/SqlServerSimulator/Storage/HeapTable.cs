@@ -682,7 +682,7 @@ internal sealed class HeapTable : SchemaObject
     /// <summary>Retires <paramref name="owner"/>'s superseded image of <paramref name="address"/>, if any.</summary>
     internal void RetireSupersededKeyImage(SessionToken owner, (int PageIndex, int SlotIndex) address)
     {
-        if (this.SupersededKeyImages.TryGetValue(owner, out var images) && images.TryRemove(address, out _) && images.IsEmpty)
+        if (this.SupersededKeyImages.TryGetValue(owner, out var images) && images.TryRemove(address, out _) && images.IsEmptyLockFree())
             _ = this.SupersededKeyImages.TryRemove(owner, out _);
     }
 

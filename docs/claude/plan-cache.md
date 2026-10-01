@@ -365,11 +365,58 @@ The sqllogictest index replay (60.3 s against 61.5 s) and the `SqlServerSimulato
 
 The token memo's EF-level figures above (~200 µs for a one-row insert) came from shorter runs; after a time-based warm-up the same insert measures ~39 µs, so read those as un-warmed.
 
+### EF Core's multi-row insert
+
+EF Core 10's `SaveChanges` for several new rows sends one batch per 42 rows: a `MERGE … USING (VALUES …) ON 1=0 … OUTPUT` for an identity key (into `@inserted0` beside a trigger, which also sends two-row batches as single-row `INSERT`s), and a multi-row `INSERT … VALUES` for a client-generated key.
+Those exact texts and parameters were captured from `SaveChanges` and replayed through ADO.NET, one case per process, each warmed for half its run and timed for the other half (8 s runs, 10 s over the 5,000-row table; median batch), at 2, 10 and 100 rows (measured 2026-10-01).
+With the target emptied between batches (`TRUNCATE`):
+
+| Shape | Rows | Before | After | Δ |
+|---|---|---|---|---|
+| Identity key (`MERGE`) | 2 | 14.7 µs | 9.9 µs | −33% |
+| Identity key | 10 | 40.6 µs | 21.5 µs | −47% |
+| Identity key | 100 | 564 µs | 175 µs | −69% |
+| GUID key (`INSERT … VALUES`) | 2 | 8.1 µs | 5.8 µs | −28% |
+| GUID key | 10 | 35.0 µs | 16.6 µs | −53% |
+| GUID key | 100 | 613 µs | 151 µs | −75% |
+| Triggered table | 2 | 53.2 µs | 46.3 µs | −13% |
+| Triggered table (`MERGE … INTO @inserted0`) | 10 | 94.2 µs | 65.4 µs | −31% |
+| Triggered table | 100 | 866 µs | 420 µs | −51% |
+| Computed + `rowversion` columns (`MERGE`) | 2 | 17.6 µs | 11.7 µs | −34% |
+| Computed + `rowversion` columns | 10 | 51.6 µs | 27.2 µs | −47% |
+| Computed + `rowversion` columns | 100 | 695 µs | 228 µs | −67% |
+
+Over a table already holding 5,000 rows, the inserted ones deleted between batches:
+
+| Shape | Rows | Before | After |
+|---|---|---|---|
+| Identity key | 2 | 844 µs | 28 µs |
+| Identity key | 10 | 1.62 ms | 46 µs |
+| Identity key | 100 | 14.7 ms | 0.52 ms |
+| GUID key | 100 | 7.0 ms | 0.96 ms |
+| Triggered table | 10 | 2.71 ms | 114 µs |
+
+What the time went to, in the order the fixes took it, cumulatively on the identity key at 10 / 100 rows over the emptied target:
+
+- **Query Store's declaration prefix searched the variables quadratically** (41 → 37 µs; 564 → 406 µs, GUID 100 rows 614 → 259 µs).
+  It found each named variable's declared spelling by walking every key with a culture-aware compare; it now looks a name up ordinally first.
+- **A `MERGE` read its whole target for `ON 1=0`** (406 → 325 µs at 100 rows; the 5,000-row table's 33× above).
+  It decoded every target row and ran the ON per target × source pair, so the cost grew with the table, which is what the [DML-plan measurement](#dml-statement-plans-1)'s bimodal 100-row `MERGE` was.
+  An ON settled non-TRUE while compiling, with no `NOT MATCHED BY SOURCE` clause, now reads no target, as real's plan doesn't ([`dml.md`](dml.md#match-strategies)).
+- **`ConcurrentDictionary.IsEmpty` takes every bucket lock when the answer is yes** — the per-row uniqueness check's test for another session's pending key asked it once per row (325 → 313 µs); SSS012 now refuses it.
+- **Every variable lookup built an ICU sort key** (~80 ns) to hash the name (37 → 29 µs; 313 → 241 µs; GUID 249 → 157 µs): a batch seeds, binds, reads and Query-Store-describes each parameter through `BatchContext.Variables`; `MemoizedNameComparer` memoizes the hash by ordinal text.
+- **Every identifier match through a collation ran its full weight compare** (29 → 22 µs; 241 → 178 µs) — resolving `i.[Name]` against the target, the source alias and `INSERTED` once per row; `SQL_Latin1_General_CP1_CI_AS`'s compare of two equal strings also allocated two lists for its ignorable-character tiebreak.
+  Identical text now answers equal before either collation family compares.
+- Closures allocated per row whether or not a table had a rule or `CHECK`, a `RuntimeContext` per value or OUTPUT column, an unsized parameter dictionary, and a dedup set for a uniqueness probe that found nothing (22 → 21 µs; 178 → 174 µs).
+- **Delete-and-insert churn left pages whose slot directory filled them** — each still a reuse candidate for the one dead row it couldn't hold — and every insert that missed the tail page walked each candidate's whole directory ([`heap-storage.md`](heap-storage.md)); the 5,000-row table's 100-row batch went from 6.0 ms to 0.52 ms on that alone.
+
+After them, a thread-time profile of the 10-row identity `MERGE` puts about a third of the batch in parsing — the compile walk and the run each parse the statement — so a `MERGE` plan is now worth as much as any remaining execution cost.
+
 ## Not modeled / future
 
 - **DML plans for the declined shapes** — `MERGE`, `INSERT … SELECT`, the joined `UPDATE` / `DELETE` forms, DML through a view, `OUTPUT … INTO`, and a statement holding a subquery.
   Each needs its own split point, and a subquery's plan its closures moved off the parse (the `OuterTypeResolver` a nested query captures reaches the `ParserContext`).
-  `MERGE` is the one EF Core emits (every multi-row insert), and the measurement [above](#dml-statement-plans-1) says its execution, not its parse, is where its time goes.
+  `MERGE` is the one EF Core emits (every multi-row insert); [its profile](#ef-cores-multi-row-insert) puts about a third of it in the two parses a batch gives it.
 - **A DML plan for a principal permission checks apply to** — the parse checks `INSERT` permission on the target as it goes, so a replay under such a principal would need that check recorded as a replay step between the locks.
 - **`SET` / `DECLARE` as recordable effects**, which is what a batch mixing them with a SELECT would need to cache as a SELECT sequence; the DML statement plans don't need it, since they sit beside statements that still parse.
 - LRU eviction, for both layers (the cap is hard FIFO-ish, and a one-shot migration script run first can fill it ahead of the steady-state working set).

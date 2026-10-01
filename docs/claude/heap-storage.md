@@ -19,8 +19,13 @@ Measured on a 228k-row `SELECT COUNT(*)`: **71 ms → 11 ms**, which is the floo
 
 **The reuse candidates are walked without snapshotting them.**
 `Heap.TryReuseReclaimablePage` runs on the insert path — once for every row the tail page can't hold, which on a bulk load is once per page — and the candidate set is a `ConcurrentDictionary`.
-Reading its `Keys` property takes *every* one of the dictionary's locks and copies the keys into a fresh collection; the walk enumerates the dictionary directly instead, which is the lock-free weakly-consistent enumeration the set was chosen for, and short-circuits on `IsEmpty` for the overwhelmingly common heap nothing has deleted from.
+Reading its `Keys` property takes *every* one of the dictionary's locks and copies the keys into a fresh collection; the walk enumerates the dictionary directly instead, which is the lock-free weakly-consistent enumeration the set was chosen for, and short-circuits on `IsEmptyLockFree` for the overwhelmingly common heap nothing has deleted from (`IsEmpty` itself takes every lock when the answer is yes).
 Removing candidates mid-walk is what that enumerator supports, so the stale-index and exhausted-page removals stay where they were.
+
+**A candidate the slot directory has filled is skipped unread.**
+The directory only grows, so delete-and-insert churn leaves pages that are almost all directory — thousands of zero-extent tombstones around one dead row's bytes, too few to hold a row, so the page stays a candidate.
+`HeapPage.ReclaimableBytes` walks the whole directory, and the walk ran for every such candidate on every insert that missed the tail page; bounding what the page could hold even emptied (`PageSize − HeaderSize − 2 × SlotCount`) skips it without the walk, and keeps it a candidate for a row small enough.
+A 100-row EF Core insert batch into a 5,000-row table whose previous batch was deleted measured 6.0 ms before and 0.52 ms after (2026-10-01).
 
 **The slot total is maintained, not walked.**
 `Heap.RowCount` is a field the four seams that move it keep current — `InsertCore` (each insert appends exactly one slot, whether to the tail page, a reused reclaimable page or a fresh one), `TrimTrailingDeadPages` (whole pages off the tail), and `TRUNCATE` plus the undo log's truncation restore, which replace `Heap.Pages` wholesale and re-derive through `Heap.RecomputeRowCount`.

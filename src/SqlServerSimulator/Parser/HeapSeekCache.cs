@@ -244,10 +244,12 @@ internal sealed class HeapSeekCache
             candidates = [.. entry.EqualityCandidates(probeKey)];
         }
 
-        var seen = new HashSet<(int, int)>();
+        // A uniqueness probe of a fresh key — every row an insert checks —
+        // finds no candidate, and a unique key one: only two can repeat.
+        var seen = candidates.Count > 1 ? new HashSet<(int, int)>() : null;
         foreach (var (page, slot) in candidates)
         {
-            if (!seen.Add((page, slot)) || heap.IsSlotTombstoned(page, slot))
+            if ((seen is not null && !seen.Add((page, slot))) || heap.IsSlotTombstoned(page, slot))
                 continue;
             if (heap.ReadSlotBytes(page, slot) is { } bytes
                 && TryComputeKey(bytes, ordinals, commons, schema, heap, out var liveKey)

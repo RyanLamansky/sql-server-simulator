@@ -112,6 +112,25 @@ public sealed class MergeMatchStrategyTests
             when matched then update set v = s.v;
             """));
 
+    /// <summary>
+    /// An ON settled false while compiling (EF Core's multi-row insert writes
+    /// ON 1=0) reads no target row at all, so no strategy runs; a NOT MATCHED
+    /// BY SOURCE clause still needs the scan to find the unmatched targets.
+    /// </summary>
+    [TestMethod]
+    public void ConstantFalseOn_ReadsNoTarget()
+        => Contains("Merge:NoTargetRead", CaptureStrategies("""
+            merge t using (values (3, 30)) as s (id, v) on 1 = 0
+            when not matched then insert (id, k, v) values (s.id, 0, s.v);
+            """));
+
+    [TestMethod]
+    public void ConstantFalseOn_WithNotMatchedBySource_KeepsTheScan()
+        => Contains("Merge:Scan", CaptureStrategies("""
+            merge t using (values (3, 30)) as s (id, v) on 1 = 0
+            when not matched by source then delete;
+            """));
+
     [TestMethod]
     public void NonEquiOn_KeepsTheScan()
         => Contains("Merge:Scan", CaptureStrategies("""

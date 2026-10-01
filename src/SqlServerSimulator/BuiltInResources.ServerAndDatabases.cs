@@ -1001,7 +1001,7 @@ internal static partial class BuiltInResources
     private static SqlValue[][] ConfigurationRowsFor(Parser.BatchContext batch)
     {
         var simulation = batch.Connection.Simulation;
-        if (!simulation.EnableClr && simulation.ServerConfiguration.IsEmpty)
+        if (!simulation.EnableClr && simulation.ServerConfiguration.IsEmptyLockFree())
             return ConfigurationsRows;
 
         var rows = (SqlValue[][])ConfigurationsRows.Clone();

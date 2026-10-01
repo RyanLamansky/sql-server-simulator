@@ -324,7 +324,7 @@ internal static class VersionStore
         {
             foreach (var (_, table) in schema.HeapTables)
             {
-                if (table.RowVersions.IsEmpty)
+                if (table.RowVersions.IsEmptyLockFree())
                     continue;
                 foreach (var kv in table.RowVersions)
                 {
@@ -407,7 +407,7 @@ internal static class VersionStore
     /// </summary>
     private static long OldestActiveSnapshotXid(Simulation simulation)
     {
-        if (simulation.ActiveSnapshotTxs.IsEmpty)
+        if (simulation.ActiveSnapshotTxs.IsEmptyLockFree())
             return simulation.CurrentTransactionCommitId;
         var min = long.MaxValue;
         foreach (var kv in simulation.ActiveSnapshotTxs)

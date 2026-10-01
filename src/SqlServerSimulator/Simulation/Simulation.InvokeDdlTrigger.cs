@@ -48,7 +48,7 @@ partial class Simulation
     /// </summary>
     internal static bool RaisesDdlEvents(ParserContext context) =>
         !context.Batch.IsSkipping && !context.Connection.SuppressDdlTriggers
-        && (!context.CurrentDatabase.DdlTriggers.IsEmpty || context.Simulation.ServerTriggers.All.Length != 0);
+        && (!context.CurrentDatabase.DdlTriggers.IsEmptyLockFree() || context.Simulation.ServerTriggers.All.Length != 0);
 
     /// <summary>
     /// Renders a <c>&lt;Parameters&gt;</c> list, one <c>&lt;Param&gt;</c> per
@@ -141,7 +141,7 @@ partial class Simulation
 
         var database = batch.CurrentDatabase;
         var serverTriggers = this.ServerTriggers.All;
-        if (database.DdlTriggers.IsEmpty && serverTriggers.Length == 0)
+        if (database.DdlTriggers.IsEmptyLockFree() && serverTriggers.Length == 0)
             return;
 
         // The statement's source text, which every event this statement

@@ -113,6 +113,29 @@ public sealed partial class StatisticsIoTimeTests
                 """));
     }
 
+    /// <summary>
+    /// An ON settled false while compiling — EF Core's multi-row insert —
+    /// leaves real's MERGE nothing to read in the target: scan count 0 and no
+    /// worktable (probed 2026-10-01 against SQL Server 2025). A NOT MATCHED BY
+    /// SOURCE clause still has every target row to visit; whether real lists a
+    /// worktable beside that scan is its plan's to say (it doesn't for this
+    /// one), so that row leaves the worktable unasserted.
+    /// </summary>
+    [TestMethod]
+    [DataRow("on 1 = 0 when not matched then insert values (s.id, s.g)", 0, false)]
+    [DataRow("on 0 = 1 and c.g = s.g when not matched then insert values (s.id, s.g)", 0, false)]
+    [DataRow("on null = 1 when not matched then insert values (s.id, s.g)", 0, false)]
+    [DataRow("on 1 = 0 when not matched by source and c.id = 1 then delete", 1, null)]
+    [DataRow("on c.g = s.g when not matched then insert values (s.id, s.g)", 1, true)]
+    public void Io_MergeOnAConstantFalseReadsNoTarget(string tail, int scans, bool? worktable)
+    {
+        using var connection = Open("create table c (id int primary key, g int); insert c values (1, 1), (2, 2); set statistics io on");
+        var sent = Run(connection, $"merge c using (values (5, 7), (6, 7)) as s (id, g) {tail};");
+        StartsWith($"3615 L1: Table 'c'. Scan count {scans}, ", sent[0]);
+        if (worktable is { } listed)
+            AreEqual(listed, sent.Any(line => line.Contains("'Worktable'", StringComparison.Ordinal)));
+    }
+
     [TestMethod]
     [DataRow("select * from c order by g", true)]
     [DataRow("select * from c order by id desc", false)]
