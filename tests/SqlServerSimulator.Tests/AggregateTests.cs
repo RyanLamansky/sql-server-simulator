@@ -195,6 +195,64 @@ public sealed class AggregateTests
         IsLessThan(1e-5, Math.Abs(pop - 66.6666666));
     }
 
+    /// <summary>
+    /// The statistical family's moments combine as real's do —
+    /// <c>(Σx² − (Σx)² / n) / divisor</c> — which is visible in the last bit:
+    /// over 1, 2, 3, -1, 5, 7 real's sample variance is 8.166666666666668 where
+    /// <c>Σx² − n·mean²</c> gives 8.166666666666666 (probed 2026-10-01 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("var", 8.166666666666668)]
+    [DataRow("varp", 6.805555555555556)]
+    [DataRow("stdev", 2.8577380332470415)]
+    [DataRow("stdevp", 2.608745973749755)]
+    public void Statistical_MomentsMatchRealsLastBit(string function, double expected)
+    {
+        using var connection = Seeded("a smallint", "(1), (2), (3), (-1), (5), (7), (null)");
+        AreEqual(expected, connection.CreateCommand($"select {function}(a) from t").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// <c>DISTINCT</c> folds each value once before the moments accumulate,
+    /// where it used to be ignored (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("var", 109.30000000000001)]
+    [DataRow("varp", 87.44000000000001)]
+    [DataRow("stdev", 10.454664030948102)]
+    [DataRow("stdevp", 9.350935782048769)]
+    public void Statistical_Distinct_FoldsDuplicates(string function, double expected)
+    {
+        using var connection = Seeded("a int", "(10), (20), (null), (30), (30), (5), (7)");
+        AreEqual(expected, connection.CreateCommand($"select {function}(distinct a) from t").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A zero variance computed in floating point can land a hair below zero;
+    /// real answers 0 there, and its small positive residues stand.
+    /// </summary>
+    [TestMethod]
+    public void Statistical_EqualValues_ClampAtZero()
+    {
+        using var connection = Seeded("a float", "(0.1), (0.1), (0.1)");
+        AreEqual(0d, connection.CreateCommand("select var(a) from t").ExecuteScalar());
+        AreEqual(0d, connection.CreateCommand("select stdev(a) from t").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A select-list refusal names a <c>numeric</c> column's type as declared
+    /// (probed 2026-10-01 against SQL Server 2025), where it read
+    /// <c>decimal</c>.
+    /// </summary>
+    [TestMethod]
+    public void ChecksumAgg_OverNumericColumn_NamesNumeric()
+    {
+        using var connection = Seeded("a numeric(5, 0)", "");
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select checksum_agg(a) from t").ExecuteScalar());
+        AreEqual("Operand data type numeric is invalid for checksum_agg operator.", ex.Message);
+    }
+
     [TestMethod]
     public void StringAgg_ConcatsWithSeparator()
     {

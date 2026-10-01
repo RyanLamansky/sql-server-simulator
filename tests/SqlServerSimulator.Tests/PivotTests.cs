@@ -255,4 +255,86 @@ public sealed class PivotTests
         => _ = new Simulation().AssertSqlError(
             "create table q (ProductId int, Q1 int, Q2 int); " +
             "select * from q unpivot (Sales for Quarter in (Q1, Nope)) as u", 207);
+
+    /// <summary>
+    /// An IN value that doesn't convert to the FOR column's type is Msg 8114
+    /// naming <c>nvarchar</c>, then Msg 473 naming the value (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Pivot_InValueNotConvertible_RaisesMsg8114Then473()
+    {
+        using var connection = SeededSales();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
+            "select * from (select Region, Yr, Amount from sales) s pivot (sum(Amount) for Yr in ([2020], [x])) p").ExecuteScalar());
+        AreEqual("8114,473", string.Join(",", ex.Errors.Cast<SimulatedError>().Select(error => error.Number)));
+        AreEqual("Error converting data type nvarchar to int.", ex.Errors[0].Message);
+        AreEqual("The incorrect value \"x\" is supplied in the PIVOT operator.", ex.Errors[1].Message);
+    }
+
+    /// <summary>
+    /// A rotated output column named after one the operator passes through is
+    /// Msg 265 then Msg 8156 — for a PIVOT IN value and an UNPIVOT value column
+    /// alike — and two IN values differing only in case or trailing spaces
+    /// repeat one name (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from (select Region, Yr, Amount from sales) s pivot (sum(Amount) for Yr in ([2020], [Region])) p", "265,8156")]
+    [DataRow("select * from (select Region, Yr, Amount from sales) s unpivot (Region for Col in (Yr)) u", "265,8156")]
+    [DataRow("select * from (select Region, Note, Amount from sales) s pivot (sum(Amount) for Note in ([a], [a ])) p", "8156")]
+    [DataRow("select * from (select Region, Note, Amount from sales) s pivot (sum(Amount) for Note in ([a], [A])) p", "8156")]
+    public void Pivot_OutputColumnCollisions(string sql, string numbers)
+    {
+        using var connection = SeededSales();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(sql).ExecuteScalar());
+        AreEqual(numbers, string.Join(",", ex.Errors.Cast<SimulatedError>().Select(error => error.Number)));
+    }
+
+    /// <summary>
+    /// CHECKSUM_AGG can't tell an empty cell from one whose values were NULL,
+    /// so PIVOT refuses it with Msg 406; STRING_AGG's separator is the syntax
+    /// error at its comma.
+    /// </summary>
+    [TestMethod]
+    public void Pivot_AggregateRefusals()
+    {
+        using var connection = SeededSales();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
+            "select * from (select Region, Yr, Amount from sales) s pivot (checksum_agg(Amount) for Yr in ([2020])) p").ExecuteScalar());
+        AreEqual(406, ex.Number);
+        AreEqual("checksum_agg cannot be used in the PIVOT operator because it is not invariant to NULLs.", ex.Message);
+        ex = Throws<SimulatedSqlException>(() => connection.CreateCommand(
+            "select * from (select Region, Yr, Note from sales) s pivot (string_agg(Note, ',') for Yr in ([2020])) p").ExecuteScalar());
+        AreEqual("Incorrect syntax near ','.", ex.Message);
+    }
+
+    /// <summary>
+    /// A rotated source keeps its passthrough columns' nullability, and an
+    /// UNPIVOT value column is NOT NULL when every column it folds is (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Rotation_KeepsPassthroughNullability()
+    {
+        const string seed = "create table rn (id int not null, k varchar(5) not null, a int not null, b int not null, c int null); insert rn values (1, 'x', 1, 2, 3); ";
+        CollectionAssert.AreEqual(
+            new[] { false, true },
+            new Simulation().ColumnNullability(seed + "select * from (select id, k, a from rn) s pivot (sum(a) for k in ([x])) p"));
+        CollectionAssert.AreEqual(
+            new[] { false, false, true },
+            new Simulation().ColumnNullability(seed + "select * from (select id, a, b from rn) s unpivot (v for col in (a, b)) u"));
+        CollectionAssert.AreEqual(
+            new[] { false, true, true },
+            new Simulation().ColumnNullability(seed + "select * from (select id, a, c from rn) s unpivot (v for col in (a, c)) u"));
+    }
+
+    /// <summary>
+    /// UNPIVOT's columns must match exactly: real refuses two lengths of one
+    /// string type with Msg 8167 rather than widening (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Unpivot_DifferingLengths_RaiseMsg8167()
+        => _ = new Simulation().AssertSqlError(
+            "select * from (select 1 id, cast('a' as varchar(10)) a, cast('b' as varchar(5)) b) s unpivot (v for col in (a, b)) u", 8167);
 }

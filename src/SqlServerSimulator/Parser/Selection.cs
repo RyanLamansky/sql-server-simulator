@@ -889,7 +889,8 @@ internal sealed partial class Selection
             else
             {
                 kind = SetOpKind.Except;
-                context.MoveNextRequired();
+                if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.All })
+                    throw SimulatedSqlException.SetOperatorAllNotSupported("EXCEPT", 2);
             }
 
             var right = ParseIntersectChain(context, scope, isFirstBranch: false);
@@ -949,7 +950,8 @@ internal sealed partial class Selection
         while (context.Token is ReservedKeyword { Keyword: Keyword.Intersect })
         {
             RejectSequenceDrawUnderSetOperator(context, sequenceDrawsBefore);
-            context.MoveNextRequired();
+            if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.All })
+                throw SimulatedSqlException.SetOperatorAllNotSupported("INTERSECT", 1);
             var right = ParseSetOpBranch(context, scope, allowOrderBy: false);
             RecordSetOperationShape(context);
             left = CombineSetOps(left, right, SetOpKind.Intersect, scope.NamesOutputCollation);
@@ -1371,7 +1373,7 @@ internal sealed partial class Selection
     /// plan-cached SELECT must re-resolve rather than replay the parse-time
     /// value (EF's <c>Skip</c>/<c>Take</c> emit exactly this shape).
     /// </summary>
-    private static int? ResolveRowCountLimit(Expression? expression, RowLimitKind kind, BatchContext batch)
+    private static int? ResolveRowCountLimit(Expression? expression, RowLimitKind kind, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver = null)
     {
         if (expression is null)
             return null;
@@ -1389,13 +1391,13 @@ internal sealed partial class Selection
         if (batch.CreateTimeBinding && !expression.IsWrittenConstant)
         {
             var declared = expression.GetSqlType(batch, name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name));
-            return SqlType.IsIntegerCategory(declared) || declared is DecimalSqlType { scale: 0 }
-                ? null
+            return IsRowCountType(declared, expression) ? null
+                : kind == RowLimitKind.Offset ? throw SimulatedSqlException.OffsetRequiresInteger()
                 : throw SimulatedSqlException.TopFetchRequiresInteger();
         }
 
-        var resolved = expression.Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
-        if (kind == RowLimitKind.Offset && (resolved.IsNull || !IsRowCountType(resolved.Type)))
+        var resolved = expression.Run(new RuntimeContext(name => outerResolver is null ? throw SimulatedSqlException.ColumnReferenceNotAllowed(name) : outerResolver(name), batch));
+        if (kind == RowLimitKind.Offset && (resolved.IsNull || !IsRowCountType(resolved.Type, expression)))
             throw SimulatedSqlException.OffsetRequiresInteger();
         var count = ClampRowCount(resolved, expression);
         // What a written count is settles while compiling: a FETCH below one is
@@ -1410,8 +1412,61 @@ internal sealed partial class Selection
         };
     }
 
-    private static bool IsRowCountType(SqlType type) =>
-        SqlType.IsIntegerCategory(type) || type is DecimalSqlType { scale: 0 };
+    /// <summary>
+    /// A row count may read an enclosing query's columns — a correlated
+    /// subquery's or an <c>APPLY</c> body's <c>TOP (t.g)</c> counts per outer
+    /// row, Msg 1014 for a NULL and 127 for a negative (probed 2026-10-01
+    /// against SQL Server 2025) — so an operand reading columns has no value
+    /// to check while parsing. Each column must resolve in the enclosing
+    /// scope (Msg 4115 otherwise) and the operand's type must count; answers
+    /// whether the operand read any column, leaving the value to the run.
+    /// </summary>
+    private static bool ReadsOuterColumns(Expression expression, bool percent, ParserContext context, Func<MultiPartName, SqlType>? scopeOuter)
+    {
+        MultiPartName? first = null;
+        expression.VisitColumnReferences(name => first ??= name);
+        if (first is not { } column)
+            return false;
+        // A correlated subquery reads its enclosing query through the parser's
+        // resolver, an APPLY body its left side through the scope's.
+        var outer = context.OuterTypeResolver ?? scopeOuter ?? throw SimulatedSqlException.ColumnReferenceNotAllowed(column);
+        SqlType declared;
+        try
+        {
+            declared = expression.GetSqlType(context.Batch, outer);
+        }
+        catch (SimulatedSqlException) when (scopeOuter is not null && !ReferenceEquals(outer, scopeOuter))
+        {
+            try
+            {
+                declared = expression.GetSqlType(context.Batch, scopeOuter);
+            }
+            catch (SimulatedSqlException)
+            {
+                throw SimulatedSqlException.ColumnReferenceNotAllowed(column);
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+            throw SimulatedSqlException.ColumnReferenceNotAllowed(column);
+        }
+        return IsRowCountType(declared, expression) || percent
+            ? true
+            : throw SimulatedSqlException.TopFetchRequiresInteger();
+    }
+
+    /// <summary>
+    /// Whether a row count's operand has a type real counts with: an integer
+    /// other than <c>bit</c>, or an exact numeric at scale 0 that real names
+    /// <c>numeric</c> — a literal (<c>2.</c>, <c>9999999999</c>), a
+    /// <c>CAST … AS numeric(5, 0)</c> or arithmetic over one — where the same
+    /// value typed <c>decimal(5, 0)</c>, a computation over that or a variable
+    /// declared either way is Msg 1060 (probed 2026-10-01 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static bool IsRowCountType(SqlType type, Expression expression) =>
+        (SqlType.IsIntegerCategory(type) && type is not BitSqlType)
+        || (type is DecimalSqlType { scale: 0 } && expression.ResultReportsNumeric);
 
     /// <summary>
     /// The error a NULL <c>TOP</c> / <c>FETCH</c> count raises: an integer
@@ -1426,10 +1481,10 @@ internal sealed partial class Selection
 
     /// <summary>
     /// The row count a <c>TOP</c> / <c>OFFSET</c> / <c>FETCH</c> operand
-    /// yields. Real accepts any integer-family value and any exact numeric at
-    /// <b>scale 0</b> — an integer literal past int's range is
-    /// <c>numeric(digit_count, 0)</c>, so <c>TOP (9999999999)</c> is an
-    /// ordinary accepted row count — narrowing the operand to <c>bigint</c>
+    /// yields. Real accepts the types <see cref="IsRowCountType"/> names — an
+    /// integer literal past int's range is <c>numeric(digit_count, 0)</c>, so
+    /// <c>TOP (9999999999)</c> is an ordinary accepted row count — narrowing
+    /// the operand to <c>bigint</c>
     /// (a 20-digit literal overflows there with Msg 8115 naming
     /// <c>bigint</c>). A fractional scale is the grammar's Msg 1060, as is
     /// any other family; NULL is <see cref="NullRowCount"/>'s. The result clamps to <c>int</c>: no
@@ -1440,7 +1495,7 @@ internal sealed partial class Selection
     {
         if (resolved.IsNull)
             throw NullRowCount(resolved, expression);
-        if (!IsRowCountType(resolved.Type))
+        if (!IsRowCountType(resolved.Type, expression))
             throw SimulatedSqlException.TopFetchRequiresInteger();
         var wide = resolved.CoerceTo(SqlType.BigInt).AsInt64;
         return wide > int.MaxValue ? int.MaxValue
@@ -1455,9 +1510,9 @@ internal sealed partial class Selection
     /// the buffered rowcount is known. Mirrors <see cref="ResolveDmlTopCap"/>'s
     /// percent branch.
     /// </summary>
-    private static double ResolveTopPercentValue(Expression expression, BatchContext batch)
+    private static double ResolveTopPercentValue(Expression expression, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver = null)
     {
-        var resolved = expression.Run(new RuntimeContext(name => throw SimulatedSqlException.ColumnReferenceNotAllowed(name), batch));
+        var resolved = expression.Run(new RuntimeContext(name => outerResolver is null ? throw SimulatedSqlException.ColumnReferenceNotAllowed(name) : outerResolver(name), batch));
         var pct = resolved.IsNull
             ? throw SimulatedSqlException.TopClauseInvalidValue()
             : resolved.CoerceTo(SqlType.Float).AsDouble;
@@ -1592,7 +1647,7 @@ internal sealed partial class Selection
                 : (int)Math.Ceiling(candidateCount * pct / 100.0);
         }
         var count = resolved.IsNull ? throw NullRowCount(resolved, limit.Expression)
-            : !IsRowCountType(resolved.Type) ? throw SimulatedSqlException.TopFetchRequiresInteger()
+            : !IsRowCountType(resolved.Type, limit.Expression) ? throw SimulatedSqlException.TopFetchRequiresInteger()
             : resolved.CoerceTo(SqlType.BigInt).AsInt64;
         return count < 0
             ? throw SimulatedSqlException.TopRowCountMustNotBeNegative()
@@ -1606,6 +1661,7 @@ internal sealed partial class Selection
         // enclosing WHERE included (probed 2026-09-29 against SQL Server 2025).
         using var windowScope = ParserScope.Enter(ref context.NamedWindowScope, (context.PendingNamedWindows.Count, context.NamedWindowDefinitions.Count));
         using var allowsWindows = ParserScope.Enter(ref context.AllowsWindowExpressions, true);
+        using var inWhere = ParserScope.Enter(ref context.InWhereClause, false);
         return ParseQueryBlock(context, scope, aggregates, windows, allowOrderBy);
     }
 
@@ -1664,7 +1720,9 @@ internal sealed partial class Selection
                 context.RecursiveBranchConstructs.TopOrOffset = true;
                 // A string literal is no legacy count either (`TOP '1'`, Msg 102
                 // near it; probed 2026-09-24).
-                if (context.MoveNextRequiredReturnSelf().Token is Operator { Character: '+' or '-' or '~' } or Literal { Value.Type.Category: SqlTypeCategory.String })
+                // Nor is a variable: `TOP @n` is Msg 102 near it, where `TOP (@n)`
+                // counts (probed 2026-10-01 against SQL Server 2025).
+                if (context.MoveNextRequiredReturnSelf().Token is Operator { Character: '+' or '-' or '~' } or Literal { Value.Type.Category: SqlTypeCategory.String } or AtPrefixedString)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 topExpression = Expression.ParsePrimary(context);
             }
@@ -1690,10 +1748,13 @@ internal sealed partial class Selection
             // Parse-time validation of the count / percent literal, mirroring
             // SQL Server's compile-time rejection. A module body binding a
             // parameter has no value to check (see ResolveRowCountLimit).
-            if (!topPercent)
-                _ = ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch);
-            else if (!context.Batch.CreateTimeBinding || topExpression.IsWrittenConstant)
-                _ = ResolveTopPercentValue(topExpression, context.Batch);
+            if (!ReadsOuterColumns(topExpression, topPercent, context, scope.OuterTypeResolver))
+            {
+                if (!topPercent)
+                    _ = ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch);
+                else if (!context.Batch.CreateTimeBinding || topExpression.IsWrittenConstant)
+                    _ = ResolveTopPercentValue(topExpression, context.Batch);
+            }
         }
 
         // Both quantifiers precede the select list, so real's statement-level
@@ -3356,7 +3417,7 @@ internal sealed partial class Selection
         var columnNames = lateralPlan.ColumnNames;
         var lateralColumns = new HeapColumn[schema.Length];
         for (var ci = 0; ci < lateralColumns.Length; ci++)
-            lateralColumns[ci] = new HeapColumn(string.Empty, schema[ci], maxLength: null, nullable: true) { AliasType = lateralPlan.ColumnAliasTypes?[ci], IdentitySource = lateralPlan.ColumnIdentitySources?[ci], DerivedMask = lateralPlan.ColumnMasks?[ci] };
+            lateralColumns[ci] = new HeapColumn(string.Empty, schema[ci], maxLength: null, nullable: lateralPlan.ColumnNullability?[ci] ?? true) { AliasType = lateralPlan.ColumnAliasTypes?[ci], IdentitySource = lateralPlan.ColumnIdentitySources?[ci], DerivedMask = lateralPlan.ColumnMasks?[ci] };
 
         var alias = ConsumeOptionalAlias(context);
         columnNames = ResolveDerivedTableColumnNames(context, columnNames, alias);
@@ -4565,6 +4626,10 @@ internal sealed partial class Selection
         context.MoveNextRequired();
         if (IsJoinHint(context.Token))
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        // A hint fixes the join order, which real reports with Msg 8625 as
+        // the statement compiles (probed 2026-10-01 against SQL Server 2025).
+        if (!context.Batch.IsSkipping)
+            context.Batch.AppendInfoError(@class: 0, state: 0, SimulatedSqlException.JoinOrderEnforcedMessageNumber, SimulatedSqlException.JoinOrderEnforcedMessage);
     }
 
     private static bool IsJoinHint(Token? token) => token switch
@@ -4807,6 +4872,7 @@ internal sealed partial class Selection
             var collector = context.AggregateCollector;
             var aggregatesBefore = collector?.Count ?? 0;
             using (ParserScope.Save(ref context.MatchScope))
+            using (ParserScope.Enter(ref context.InWhereClause, true))
             {
                 while (context.Token is ReservedKeyword { Keyword: Keyword.Where })
                 {
@@ -5107,6 +5173,15 @@ internal sealed partial class Selection
         // set. Order matters only insofar as result-row ordering follows
         // grouping-set iteration order.
         var combined = new List<List<Expression>> { new() };
+        var setCount = 1L;
+        foreach (var item in itemContributions)
+            setCount = Math.Min(setCount * item.Count, MaxGroupingSets + 1);
+        if (setCount > MaxGroupingSets)
+        {
+            context.PendingBindError ??= SimulatedSqlException.TooManyGroupingSets();
+            for (var i = 0; i < itemContributions.Count; i++)
+                itemContributions[i] = [itemContributions[i][0]];
+        }
         foreach (var item in itemContributions)
         {
             var next = new List<List<Expression>>(combined.Count * item.Count);
@@ -5196,72 +5271,51 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// The most grouping sets one GROUP BY may expand to; past it real
+    /// raises Msg 10703 (see <see cref="SimulatedSqlException.TooManyGroupingSets"/>).
+    /// </summary>
+    private const int MaxGroupingSets = 4096;
+
+    /// <summary>
     /// Parses one top-level GROUP BY item. Returns the list of fragments
     /// (each fragment a column-list) the item contributes. A plain expression
     /// contributes a single one-element fragment <c>[[expr]]</c>; a ROLLUP
     /// contributes <c>N+1</c> fragments shrinking from full prefix to empty;
     /// a CUBE contributes all <c>2^N</c> subsets; a GROUPING SETS contributes
-    /// each explicit set verbatim.
+    /// each member's sets in turn — a member being a ROLLUP or CUBE (all of its
+    /// sets), a parenthesized composite whose elements, ROLLUP and CUBE
+    /// included, Cartesian-combine (<c>GROUPING SETS ((g, ROLLUP(h)))</c> is
+    /// <c>(g, h), (g)</c>), the empty <c>()</c>, or a bare expression (probed
+    /// 2026-10-01 against SQL Server 2025). A GROUPING SETS inside another is
+    /// Msg 102 near <c>sets</c>.
     /// </summary>
     private static List<Expression[]> ParseGroupByItem(ParserContext context)
     {
         if (context.Token is UnquotedString { ContextualKeyword: var kw }
             && kw is ContextualKeyword.Rollup or ContextualKeyword.Cube or ContextualKeyword.Grouping)
         {
-            switch (kw)
+            if (kw != ContextualKeyword.Grouping)
+                return ParseRollupOrCube(context, cube: kw == ContextualKeyword.Cube);
+
+            if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Sets })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.GetNextRequired() is not Operator { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var fragments = new List<Expression[]>();
+            do
             {
-                case ContextualKeyword.Rollup:
-                    {
-                        var columns = ParseParenthesizedExpressionList(context);
-                        var fragments = new List<Expression[]>(columns.Length + 1);
-                        for (var k = columns.Length; k > 0; k--)
-                            fragments.Add(columns[..k]);
-                        fragments.Add([]);
-                        return fragments;
-                    }
-                case ContextualKeyword.Cube:
-                    {
-                        var columns = ParseParenthesizedExpressionList(context);
-                        var count = 1 << columns.Length;
-                        var fragments = new List<Expression[]>(count);
-                        for (var mask = count - 1; mask >= 0; mask--)
-                        {
-                            var bits = System.Numerics.BitOperations.PopCount((uint)mask);
-                            var fragment = new Expression[bits];
-                            var w = 0;
-                            for (var b = 0; b < columns.Length; b++)
-                            {
-                                if ((mask & (1 << b)) != 0)
-                                    fragment[w++] = columns[b];
-                            }
-                            fragments.Add(fragment);
-                        }
-                        return fragments;
-                    }
-                case ContextualKeyword.Grouping:
-                    {
-                        if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Sets })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        if (context.GetNextRequired() is not Operator { Character: '(' })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        var fragments = new List<Expression[]>();
-                        context.MoveNextRequired();
-                        while (true)
-                        {
-                            fragments.Add(ParseGroupingSetMember(context));
-                            if (context.Token is Operator { Character: ',' })
-                            {
-                                context.MoveNextRequired();
-                                continue;
-                            }
-                            break;
-                        }
-                        if (context.Token is not Operator { Character: ')' })
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
-                        context.MoveNextOptional();
-                        return fragments;
-                    }
+                context.MoveNextRequired();
+                var member = ParseGroupingSetMember(context);
+                if (fragments.Count + member.Count > MaxGroupingSets)
+                    context.PendingBindError ??= SimulatedSqlException.TooManyGroupingSets();
+                else
+                    fragments.AddRange(member);
             }
+            while (context.Token is Operator { Character: ',' });
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            return fragments;
         }
         // `GROUP BY ()` — the empty grouping set (grand total over all rows),
         // the bare-parenthesis equivalent of `GROUPING SETS(())`. Distinguished
@@ -5281,57 +5335,153 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Parses a parenthesized comma-separated expression list, returning the
-    /// expressions as an array. Entered with cursor on the keyword preceding
-    /// <c>(</c> (e.g., <c>ROLLUP</c> / <c>CUBE</c>); consumes through the
-    /// closing <c>)</c>.
+    /// Parses <c>ROLLUP(…)</c> / <c>CUBE(…)</c>, entered on the keyword. Each
+    /// element is an expression or a parenthesized composite <c>(a, b)</c>
+    /// that rolls up as one unit — <c>ROLLUP((g, h), s)</c> is
+    /// <c>(g, h, s), (g, h), ()</c>; an empty <c>()</c> element is Msg 102
+    /// near its <c>)</c> (probed 2026-10-01 against SQL Server 2025). Past
+    /// <see cref="MaxGroupingSets"/> the expansion is refused with a held
+    /// Msg 10703 rather than built.
     /// </summary>
-    private static Expression[] ParseParenthesizedExpressionList(ParserContext context)
+    private static List<Expression[]> ParseRollupOrCube(ParserContext context, bool cube)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
-        var list = new List<Expression> { Expression.Parse(context) };
-        while (context.Token is Operator { Character: ',' })
+        var units = new List<Expression[]>();
+        do
         {
             context.MoveNextRequired();
-            list.Add(Expression.Parse(context));
+            units.Add(ParseGroupingUnit(context));
         }
+        while (context.Token is Operator { Character: ',' });
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        return [.. list];
+
+        if (cube && units.Count > 12)
+        {
+            context.PendingBindError ??= SimulatedSqlException.TooManyGroupingSets();
+            return [[.. units.SelectMany(static unit => unit)]];
+        }
+
+        if (!cube)
+        {
+            var rollup = new List<Expression[]>(units.Count + 1);
+            for (var k = units.Count; k >= 0; k--)
+                rollup.Add([.. units.Take(k).SelectMany(static unit => unit)]);
+            return rollup;
+        }
+
+        var count = 1 << units.Count;
+        var fragments = new List<Expression[]>(count);
+        for (var mask = count - 1; mask >= 0; mask--)
+        {
+            var fragment = new List<Expression>();
+            for (var b = 0; b < units.Count; b++)
+            {
+                if ((mask & (1 << b)) != 0)
+                    fragment.AddRange(units[b]);
+            }
+            fragments.Add([.. fragment]);
+        }
+        return fragments;
     }
 
     /// <summary>
-    /// Parses one member of a <c>GROUPING SETS(...)</c> list. A member is
-    /// either a parenthesized column tuple (<c>(a, b)</c> or the empty
-    /// <c>()</c>) or a bare single expression. Returns the member's column
-    /// list; the empty parenthesized form returns <c>[]</c> (the grand-total
-    /// grouping set).
+    /// One ROLLUP / CUBE element: a parenthesized composite of two or more
+    /// expressions, or an expression — a lone parenthesized one included,
+    /// which reads on as an expression (<c>(g) + 1</c>).
     /// </summary>
-    private static Expression[] ParseGroupingSetMember(ParserContext context)
+    private static Expression[] ParseGroupingUnit(ParserContext context)
     {
         if (context.Token is Operator { Character: '(' })
         {
-            context.MoveNextRequired();
-            if (context.Token is Operator { Character: ')' })
+            var checkpoint = context.SaveCheckpoint();
+            if (context.GetNextRequired() is Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var first = Expression.Parse(context);
+            if (context.Token is Operator { Character: ',' })
+            {
+                var list = new List<Expression> { first };
+                while (context.Token is Operator { Character: ',' })
+                {
+                    context.MoveNextRequired();
+                    list.Add(Expression.Parse(context));
+                }
+                if (context.Token is not Operator { Character: ')' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextOptional();
+                return [.. list];
+            }
+            context.RestoreCheckpoint(checkpoint);
+        }
+        return [Expression.Parse(context)];
+    }
+
+    private static bool NextIsOpenParenthesis(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var next = context.GetNextOptional();
+        context.RestoreCheckpoint(checkpoint);
+        return next is Operator { Character: '(' };
+    }
+
+    /// <summary>
+    /// Parses one member of a <c>GROUPING SETS(...)</c> list into the sets it
+    /// contributes: a ROLLUP or CUBE gives all of its sets, the empty
+    /// <c>()</c> the grand total, a parenthesized composite the Cartesian
+    /// combination of its elements (each an expression, a ROLLUP or a CUBE),
+    /// and a bare expression one set of itself. A parenthesized expression
+    /// that reads on past its <c>)</c> (<c>(a + 1) * 2</c>) is a bare
+    /// expression.
+    /// </summary>
+    private static List<Expression[]> ParseGroupingSetMember(ParserContext context)
+    {
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Rollup or ContextualKeyword.Cube } keyword
+            && NextIsOpenParenthesis(context))
+        {
+            return ParseRollupOrCube(context, cube: keyword.ContextualKeyword == ContextualKeyword.Cube);
+        }
+
+        if (context.Token is Operator { Character: '(' })
+        {
+            var checkpoint = context.SaveCheckpoint();
+            if (context.GetNextRequired() is Operator { Character: ')' })
             {
                 context.MoveNextOptional();
-                return [];
+                return [[]];
             }
-            var list = new List<Expression> { Expression.Parse(context) };
-            while (context.Token is Operator { Character: ',' })
+            List<List<Expression>> combined = [[]];
+            while (true)
             {
+                var element = context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Rollup or ContextualKeyword.Cube } nested
+                    && NextIsOpenParenthesis(context)
+                    ? ParseRollupOrCube(context, cube: nested.ContextualKeyword == ContextualKeyword.Cube)
+                    : [[Expression.Parse(context)]];
+                if ((long)combined.Count * element.Count > MaxGroupingSets)
+                {
+                    context.PendingBindError ??= SimulatedSqlException.TooManyGroupingSets();
+                    element = [element[0]];
+                }
+                var next = new List<List<Expression>>(combined.Count * element.Count);
+                foreach (var prefix in combined)
+                {
+                    foreach (var fragment in element)
+                        next.Add([.. prefix, .. fragment]);
+                }
+                combined = next;
+                if (context.Token is not Operator { Character: ',' })
+                    break;
                 context.MoveNextRequired();
-                list.Add(Expression.Parse(context));
             }
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextOptional();
-            return [.. list];
+            if (context.Token is null or Operator { Character: ',' or ')' })
+                return [.. combined.Select(static set => set.ToArray())];
+            context.RestoreCheckpoint(checkpoint);
         }
-        return [Expression.Parse(context)];
+        return [[Expression.Parse(context)]];
     }
 
     /// <summary>

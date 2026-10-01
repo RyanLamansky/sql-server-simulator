@@ -940,4 +940,58 @@ public sealed class WindowFunctionTests
         // 2025).
         => AreEqual(2, new Simulation().ExecuteScalar(
             $"select max(s) from (select sum(1) over (order by {term} range between unbounded preceding and current row) s from (values (1), (2)) t(x)) q"));
+
+    /// <summary>
+    /// An offset reading the row's own columns is evaluated per row (probed
+    /// 2026-10-01 against SQL Server 2025): each row steps back by its own
+    /// count, a NULL count reads NULL, and a zero count reads the row itself.
+    /// </summary>
+    [TestMethod]
+    public void Lag_OffsetFromColumn_EvaluatesPerRow()
+    {
+        var reader = new Simulation().ExecuteReader("""
+            select id, lag(v, o) over (order by id) from (values
+                (1, 10, 1), (2, 20, 2), (3, 30, null), (4, 40, 3), (5, 50, 0), (6, 60, 5)) t(id, v, o)
+            order by id
+            """);
+        var answers = new List<string>();
+        while (reader.Read())
+            answers.Add(reader.IsDBNull(1) ? "null" : reader.GetInt32(1).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        AreEqual("null,null,null,10,50,10", string.Join(",", answers));
+    }
+
+    /// <summary>
+    /// Real adds a <c>LEAD</c> offset to the row's position in <c>bigint</c>,
+    /// so one within reach of bigint's maximum overflows rather than taking
+    /// the default, while the same offset under <c>LAG</c> reaches no row.
+    /// </summary>
+    [TestMethod]
+    public void Lead_OffsetNearBigintMaximum_Overflows()
+    {
+        var ex = new Simulation().AssertSqlError("select lead(x, 9223372036854775806, 0) over (order by x) from (values (1), (2)) v(x)", 8115);
+        AreEqual("Arithmetic overflow error converting expression to data type bigint.", ex.Message);
+        AreEqual(-5, new Simulation().ExecuteScalar("select lag(x, 9223372036854775807, -5) over (order by x) from (values (1)) v(x)"));
+    }
+
+    /// <summary>
+    /// A constant bucket count settles while compiling, so <c>NTILE(0)</c> is
+    /// Msg 4116 over an empty input too.
+    /// </summary>
+    [TestMethod]
+    public void NTile_ConstantNonPositiveCount_RefusesOverEmptyInput()
+        => _ = new Simulation().AssertSqlError("select ntile(0) over (order by x) from (values (1)) v(x) where 1 = 0", 4116);
+
+    /// <summary>
+    /// A windowed function inside an aggregate's argument is Msg 4109, windowed
+    /// or not; one in an UPDATE's SET list or a VALUES row is Msg 4108 (probed
+    /// 2026-10-01 against SQL Server 2025), where those used to fail with an
+    /// internal error.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select sum(row_number() over (order by x)) from (values (1)) v(x)", 4109)]
+    [DataRow("select sum(row_number() over (order by x)) over () from (values (1)) v(x)", 4109)]
+    [DataRow("select * from (values (row_number() over (order by (select 1)))) v(x)", 4108)]
+    [DataRow("create table w (a int); update w set a = row_number() over (order by a)", 4108)]
+    public void WindowedFunction_OutOfPlace_IsRefused(string sql, int number)
+        => _ = new Simulation().AssertSqlError(sql, number);
 }

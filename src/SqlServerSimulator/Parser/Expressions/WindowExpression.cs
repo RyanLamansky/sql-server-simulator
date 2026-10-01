@@ -207,9 +207,11 @@ internal sealed class WindowExpression : Expression
 
     private static WindowExpression Register(ParserContext context, WindowExpression expression)
     {
-        if (!context.AllowsWindowExpressions)
+        // Outside any query block — an UPDATE's SET list, say — no select
+        // list or ORDER BY is there to hold one either.
+        if (!context.AllowsWindowExpressions || context.WindowCollector is not { } collector)
             throw SimulatedSqlException.WindowedFunctionInWrongClause();
-        context.WindowCollector?.Add(expression);
+        collector.Add(expression);
         // Real binds the OVER clause before the function's own arguments.
         if (context.Batch.BindErrors is { } report)
         {
@@ -401,8 +403,11 @@ internal sealed class WindowExpression : Expression
             if (keyType.IsIncomparable)
                 throw Selection.NotComparableInClause(keyType, "ORDER BY");
         }
+        // A constant count settles while compiling, so `NTILE(0)` refuses over
+        // an empty input too (probed 2026-10-01 against SQL Server 2025).
         if (this.Kind == WindowKind.NTile && this.BucketCount is { } bucketCount
-            && (IsUntypedNullLiteral(bucketCount) || bucketCount.GetSqlType(batch, resolveColumnType) is not { Category: SqlTypeCategory.Integer } countType || countType == SqlType.Bit))
+            && (IsUntypedNullLiteral(bucketCount) || bucketCount.GetSqlType(batch, resolveColumnType) is not { Category: SqlTypeCategory.Integer } countType || countType == SqlType.Bit
+                || (ConstantFolding.TryFold(bucketCount, batch, out var foldedCount) && !foldedCount.IsNull && foldedCount.CoerceTo(SqlType.BigInt).AsInt64 <= 0)))
         {
             throw SimulatedSqlException.NTileBucketCountMustBePositive();
         }
@@ -414,6 +419,15 @@ internal sealed class WindowExpression : Expression
                 _ = Cast.CoerceToDeclared(literal.Constant, operandType);
         }
     }
+
+    /// <summary>
+    /// <c>PERCENTILE_DISC</c> returns one of its ordering key's own values, and
+    /// every partition holds one, so real projects it NOT NULL over a NOT NULL
+    /// key (probed 2026-10-01 against SQL Server 2025); every other window
+    /// function reads nullable, the ranking family included.
+    /// </summary>
+    internal override bool ResultIsNullable(NullabilityContext context) =>
+        this.Kind != WindowKind.PercentileDisc || this.OrderBy[0].Expr is not { } key || key.ResultIsNullable(context);
 
     private SqlType ResultType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Kind switch
     {
@@ -698,6 +712,8 @@ internal sealed class WindowExpression : Expression
                 context.MoveNextRequired();
                 break;
         }
+        if (context.Token is Operator { Character: ',' })
+            throw SimulatedSqlException.WithinGroupNeedsOneExpression(functionLowerName, 1);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var orderBy = new[] { OrderBySpec.FromExpression(sortExpr, descending) };

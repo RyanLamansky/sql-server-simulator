@@ -296,6 +296,10 @@ internal sealed partial class Selection
         // Propagate INTO from the left branch; strip identity on each
         // destination column since set-op results lose the source's
         // identity property.
+        // The destination's columns take the combined nullability (probed
+        // 2026-10-01 against SQL Server 2025: a NOT NULL left column unioned
+        // with a nullable one creates a nullable column).
+        var combinedNullability = CombinedNullability(left.ColumnNullability, right.ColumnNullability, kind, combinedSchema.Length);
         HeapColumn[]? combinedDestSchema = null;
         if (left.IntoTarget is not null && left.DestColumnSchema is { } leftDest)
         {
@@ -306,7 +310,7 @@ internal sealed partial class Selection
                     leftDest[i].Name,
                     combinedSchema[i],
                     maxLength: null,
-                    nullable: leftDest[i].Nullable,
+                    nullable: leftDest[i].Nullable || combinedNullability is null || combinedNullability[i],
                     identity: null,
                     spelledNumeric: combinedReportsNumeric is { } numeric && numeric[i]);
             }
@@ -364,7 +368,7 @@ internal sealed partial class Selection
             ColumnReportsNumeric = combinedReportsNumeric,
             ColumnAliasTypes = combinedAliasTypes,
             ColumnMasks = CombinedMasks(left.ColumnMasks, right.ColumnMasks, combinedSchema.Length),
-            ColumnNullability = CombinedNullability(left.ColumnNullability, right.ColumnNullability, kind, combinedSchema.Length),
+            ColumnNullability = combinedNullability,
             // A set operation's columns read as neither updatable nor computed
             // (captured 2026-09-26).
             ColumnWireFlags = new byte[combinedSchema.Length],
@@ -648,8 +652,14 @@ internal sealed partial class Selection
         {
             if (spec.IsOrdinal)
             {
+                // Real follows an out-of-range position with the set
+                // operation's Msg 104 (probed 2026-10-01 against SQL Server
+                // 2025).
                 if (spec.Ordinal < 1 || spec.Ordinal > columnNames.Length)
-                    throw SimulatedSqlException.OrderByPositionOutOfRange(spec.Ordinal);
+                {
+                    (errors ??= []).Add(SimulatedSqlException.OrderByPositionOutOfRange(spec.Ordinal));
+                    errors.Add(SimulatedSqlException.OrderByItemNotInSelectListWithSetOperator());
+                }
                 continue;
             }
 
@@ -783,6 +793,12 @@ internal sealed partial class Selection
             AutoColumnOrdinal = inner.AutoColumnOrdinal,
             ColumnMasks = inner.ColumnMasks,
             VolatileColumns = inner.VolatileColumns,
+            // Nor the result's metadata: the combined nullability, the numeric
+            // spelling and the alias types survive the ORDER BY.
+            ColumnNullability = inner.ColumnNullability,
+            ColumnReportsNumeric = inner.ColumnReportsNumeric,
+            ColumnAliasTypes = inner.ColumnAliasTypes,
+            ColumnWireFlags = inner.ColumnWireFlags,
         };
     }
 }

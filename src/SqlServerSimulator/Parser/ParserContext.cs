@@ -455,6 +455,13 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool AllowsWindowExpressions = true;
 
     /// <summary>
+    /// True while a query block's own <c>WHERE</c> parses, where an
+    /// aggregate-like <c>GROUPING</c> / <c>GROUPING_ID</c> call is Msg 147.
+    /// A nested query block clears it.
+    /// </summary>
+    public bool InWhereClause;
+
+    /// <summary>
     /// Which of SQL Server's <c>NEXT VALUE FOR</c> refusals the expression
     /// currently being parsed sits under, or <see cref="NextValueForScope.Allowed"/>
     /// in the positions that stay legal (a bare projection, a <c>VALUES</c>

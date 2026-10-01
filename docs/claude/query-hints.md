@@ -10,6 +10,7 @@ Implementation lives in [`src/SqlServerSimulator/Parser/Selection.Hints.cs`](../
 `MERGE` / `HASH` / `LOOP` / `REMOTE` between the join type and `JOIN` — `INNER MERGE JOIN`, `LEFT OUTER HASH JOIN`, `FULL LOOP JOIN`.
 Accept-and-discard: the hint names the physical operator real should use, and the simulator picks its own strategy, so it can never change an answer (probe-confirmed — hinted and unhinted forms return identical rows).
 Distinct from the statement-level `OPTION (MERGE JOIN)` spelling, which is parsed separately.
+A hint does fix the join order, and real says so with the informational Msg 8625 ("Warning: The join order has been enforced because a local join hint is used.") as the statement compiles; the simulator sends it from the statement that runs (probed 2026-10-01 against SQL Server 2025).
 
 Real accepts all four hints against **every** join type, including combinations that look implausible: `FULL LOOP JOIN` and `RIGHT LOOP JOIN` are both legal, so there is no pairing to refuse.
 It does require the type keyword, and refuses three shapes (all probe-confirmed):

@@ -660,4 +660,99 @@ public sealed class GroupingSetTests
         rows.Sort(StringComparer.Ordinal);
         AreEqual(expected, string.Join(";", rows));
     }
+
+    private const string NestingSeed = """
+        create table gs (id int primary key, g int, h varchar(5), s varchar(5));
+        insert gs values (1, 1, 'a', 'a'), (2, 1, 'b', 'b'), (3, 2, 'a', null);
+        """;
+
+    /// <summary>Every row of the first result set, columns joined by <c>|</c> and rows by <c>;</c>.</summary>
+    private static string Render(string sql)
+    {
+        using var reader = new Simulation().ExecuteReader(NestingSeed + sql);
+        var rows = new List<string>();
+        while (reader.Read())
+        {
+            var cells = new string[reader.FieldCount];
+            for (var i = 0; i < cells.Length; i++)
+                cells[i] = reader.IsDBNull(i) ? "NULL" : Convert.ToString(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture)!;
+            rows.Add(string.Join("|", cells));
+        }
+        return string.Join(";", rows);
+    }
+
+    /// <summary>
+    /// A GROUPING SETS member may itself be a ROLLUP or CUBE, contributing all
+    /// of its sets, or a parenthesized composite whose elements — ROLLUP and
+    /// CUBE included — combine; and a ROLLUP / CUBE element may be a
+    /// parenthesized composite that rolls up as one unit (probed 2026-10-01
+    /// against SQL Server 2025, which these rows reproduce).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select g, h, count(*), grouping_id(g, h) gid from gs group by grouping sets (rollup(g), cube(h)) order by gid, g, h",
+        "1|NULL|2|1;2|NULL|1|1;NULL|a|2|2;NULL|b|1|2;NULL|NULL|3|3;NULL|NULL|3|3")]
+    [DataRow("select g, h, count(*) from gs group by grouping sets ((g, rollup(h))) order by g, h",
+        "1|NULL|2;1|a|1;1|b|1;2|NULL|1;2|a|1")]
+    [DataRow("select g, h, s, count(*), grouping_id(g, h, s) gid from gs group by rollup((g, h), s) order by gid, g, h, s",
+        "1|a|a|1|0;1|b|b|1|0;2|a|NULL|1|0;1|a|NULL|1|1;1|b|NULL|1|1;2|a|NULL|1|1;NULL|NULL|NULL|3|7")]
+    [DataRow("select g, h, count(*), grouping_id(g, h) gid from gs group by cube((g, h)) order by gid, g, h",
+        "1|a|1|0;1|b|1|0;2|a|1|0;NULL|NULL|3|3")]
+    [DataRow("select g, count(*) from gs group by rollup((g)) order by g",
+        "NULL|3;1|2;2|1")]
+    public void GroupingSets_NestedAndCompositeElements(string sql, string expected)
+        => AreEqual(expected, Render(sql));
+
+    /// <summary>
+    /// What the nested grammar refuses: an empty element inside ROLLUP and a
+    /// GROUPING SETS inside another are Msg 102.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select g, count(*) from gs group by rollup(g, ())")]
+    [DataRow("select g, count(*) from gs group by grouping sets (grouping sets (g))")]
+    public void GroupingSets_NestedGrammarRefusals(string sql)
+        => _ = new Simulation().AssertSqlError(NestingSeed + sql, 102);
+
+    /// <summary>
+    /// Past 4096 grouping sets real refuses the query with Msg 10703; CUBE over
+    /// twelve columns is the largest that passes (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void GroupingSets_MoreThan4096_RaisesMsg10703()
+    {
+        const string twelve = "a, b, c, d, e, f, g, h, i, j, k, l";
+        const string seed = "create table wide (a int, b int, c int, d int, e int, f int, g int, h int, i int, j int, k int, l int, m int); insert wide values (1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1); ";
+        AreEqual(4096, new Simulation().ExecuteScalar($"{seed}select count(*) from (select count(*) x from wide group by cube({twelve})) z"));
+        _ = new Simulation().AssertSqlError($"{seed}select count(*) from wide group by cube({twelve}, m)", 10703);
+        _ = new Simulation().AssertSqlError($"{seed}select count(*) from wide group by cube({twelve}), rollup(m)", 10703);
+    }
+
+    /// <summary>
+    /// STRING_AGG has no partial state a subtotal could merge, so real refuses
+    /// it once the grouping expands past one set (Msg 8710) — every other
+    /// aggregate merges (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void StringAgg_UnderMultipleGroupingSets_RaisesMsg8710()
+    {
+        _ = new Simulation().AssertSqlError(NestingSeed + "select g, string_agg(h, ',') from gs group by rollup(g)", 8710);
+        _ = new Simulation().AssertSqlError(NestingSeed + "select g, string_agg(h, ',') from gs group by g with cube", 8710);
+        AreEqual("1|a,b;2|a", Render("select g, string_agg(h, ',') within group (order by id) from gs group by grouping sets ((g)) order by g"));
+        AreEqual("1|3;2|3;NULL|0", Render("select g, checksum_agg(id) from gs group by rollup(g) order by grouping(g), g"));
+    }
+
+    /// <summary>
+    /// GROUPING and GROUPING_ID are aggregate-like: a call in the query's own
+    /// WHERE is Msg 147, and their results are NOT NULL (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Grouping_InWhere_RaisesMsg147_AndProjectsNotNull()
+    {
+        _ = new Simulation().AssertSqlError(NestingSeed + "select g from gs where grouping(g) = 0 group by g", 147);
+        _ = new Simulation().AssertSqlError(NestingSeed + "select g from gs where grouping_id(g) = 0 group by g", 147);
+        CollectionAssert.AreEqual(
+            new[] { true, false, false },
+            new Simulation().ColumnNullability(NestingSeed + "select g, grouping(g), grouping_id(g) from gs group by rollup(g)"));
+    }
 }

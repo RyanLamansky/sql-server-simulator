@@ -68,6 +68,31 @@ partial class SimulatedSqlException
         new("The CUBE, ROLLUP, and GROUPING SETS constructs are not allowed in a GROUP BY ALL clause.", 1028, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 8710: an aggregate with no mergeable partial
+    /// state — <c>STRING_AGG</c> — in a query whose ROLLUP / CUBE / GROUPING
+    /// SETS expand to more than one grouping set.
+    /// </summary>
+    internal static SimulatedSqlException SubaggregatesNotMergeable() =>
+        new("Aggregate functions that are used with CUBE, ROLLUP, or GROUPING SET queries must provide for the merging of subaggregates. To fix this problem, remove the aggregate function or write the query using UNION ALL over GROUP BY clauses.", 8710, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 324 — <c>INTERSECT ALL</c> (state 1) or
+    /// <c>EXCEPT ALL</c> (state 2), which real parses and refuses (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SetOperatorAllNotSupported(string operatorName, byte state) =>
+        new($"The 'ALL' version of the {operatorName} operator is not supported.", 324, 15, state);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10703: a GROUP BY whose ROLLUP / CUBE /
+    /// GROUPING SETS items expand to more than 4096 grouping sets once
+    /// combined — <c>CUBE</c> over twelve columns is the largest that passes
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TooManyGroupingSets() =>
+        new("Too many grouping sets. The maximum number is 4096.", 10703, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 1054: a construct a schema-bound module's body
     /// may not hold, raised by the parser standing on it — <c>GROUP BY ALL</c>'s
     /// <c>ALL</c> is state 8, a select-list <c>*</c> state 6 and a qualified
@@ -433,6 +458,31 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException AggregateInWhereClause() =>
         new("An aggregate may not appear in the WHERE clause unless it is in a subquery contained in a HAVING clause or a select list, and the column being aggregated is an outer reference.", 147, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 265 — a <c>PIVOT</c> <c>IN</c> value, or an
+    /// <c>UNPIVOT</c>'s value or name column, named after a column the
+    /// operator passes through; real follows it with Msg 8156.
+    /// </summary>
+    internal static SimulatedSqlException RotatedColumnNameConflict(string column, string operatorName) =>
+        new($"The column name \"{column}\" specified in the {operatorName} operator conflicts with the existing column name in the {operatorName} argument.", 265, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 473 — a <c>PIVOT</c> <c>IN</c> value that
+    /// doesn't convert to the <c>FOR</c> column's type, following the Msg 8114
+    /// the conversion raised (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PivotValueNotConvertible(string value) =>
+        new($"The incorrect value \"{value}\" is supplied in the PIVOT operator.", 473, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 406 — a <c>PIVOT</c> over an aggregate whose
+    /// answer over NULLs differs from its answer over no rows
+    /// (<c>CHECKSUM_AGG</c>, <c>JSON_ARRAYAGG</c>; probed 2026-10-01 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PivotAggregateNotNullInvariant(string functionLowerName) =>
+        new($"{functionLowerName} cannot be used in the PIVOT operator because it is not invariant to NULLs.", 406, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 488 — a <c>PIVOT</c> grouping column (any
@@ -920,12 +970,21 @@ partial class SimulatedSqlException
         new($"The function '{functionLowerName}' is not a valid windowing function, and cannot be used with the OVER clause.", 4113, 15, state);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 10751 — an <c>APPROX_PERCENTILE</c> function's
-    /// <c>WITHIN GROUP</c> ordering named more than one expression (probed
-    /// 2026-09-26 against SQL Server 2025).
+    /// Mimics SQL Server's Msg 4109 — a windowed function inside an aggregate's
+    /// or another windowed function's argument.
     /// </summary>
-    internal static SimulatedSqlException WithinGroupNeedsOneExpression(string functionLowerName) =>
-        new($"The ORDER BY in WITHIN GROUP clause of '{functionLowerName}' function must have exactly one expression.", 10751, 15, 2);
+    internal static SimulatedSqlException WindowedFunctionInAggregate() =>
+        new("Windowed functions cannot be used in the context of another windowed function or aggregate.", 4109, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 10751 — a percentile function's <c>WITHIN
+    /// GROUP</c> ordering named more than one expression: state 2 for the
+    /// <c>APPROX_PERCENTILE</c> pair (probed 2026-09-26 against SQL Server
+    /// 2025), state 1 for the windowed <c>PERCENTILE_CONT</c> /
+    /// <c>PERCENTILE_DISC</c> (probed 2026-10-01).
+    /// </summary>
+    internal static SimulatedSqlException WithinGroupNeedsOneExpression(string functionLowerName, byte state = 2) =>
+        new($"The ORDER BY in WITHIN GROUP clause of '{functionLowerName}' function must have exactly one expression.", 10751, 15, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4116 — <c>NTILE(N)</c> requires <c>N</c> to be a

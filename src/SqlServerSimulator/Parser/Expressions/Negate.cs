@@ -126,9 +126,17 @@ internal sealed class Negate(Expression operand) : Expression
 
     // Unary minus is arithmetic, so real projects it nullable even over a NOT
     // NULL operand (`-col` is nullable where `+col` is not) — the exception is
-    // the constant real folds away first, which makes `-1` and `-(1)` NOT NULL.
+    // a negated literal, which real folds away first: `-1`, `-(1)`, `- -1`,
+    // `-1.5` and `-$1` are NOT NULL, while `-(1 + 1)`, `-ABS(1)` and
+    // `-CAST(1 AS int)` stay nullable (probed 2026-10-01 against SQL Server
+    // 2025) — and so does `-7 / 2`, which parses here as `-(7 / 2)`.
     internal override bool ResultIsNullable(NullabilityContext context) =>
-        !context.TryFold(this, out var folded) || folded.IsNull;
+        Unwrap(this.Operand) switch
+        {
+            Value { IsLiteral: true, Constant.IsNull: false } => false,
+            Negate inner => inner.ResultIsNullable(context),
+            _ => true,
+        };
 
     internal override bool ResultReportsNumeric => this.Operand.ResultReportsNumeric;
 

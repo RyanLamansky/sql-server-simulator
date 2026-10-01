@@ -188,4 +188,66 @@ public sealed class AnalyticWindowTests
     public void CumeDist_WithoutOrderBy_IsRejected()
         => Throws<SimulatedSqlException>(() => new Simulation().ExecuteScalar(
             "create table t (n int); insert t values (10),(20); select cume_dist() over (partition by n) from t"));
+
+    /// <summary>
+    /// <c>PERCENTILE_CONT</c> interpolates at the one-based row number
+    /// <c>1 + p·(n − 1)</c> as <c>(1 − f)·lo + f·hi</c>, which settles the
+    /// last bit: the 25th percentile of -1.5, 0.1, 1.5, 2.5, 3.5, 7.7 is 0.45
+    /// on real, where <c>lo + f·(hi − lo)</c> gives 0.44999999999999996
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("0.25", "", 0.45)]
+    [DataRow("0.33", "", 1.0100000000000005)]
+    [DataRow("0.3", " desc", 3.0)]
+    public void PercentileCont_InterpolatesAsRealDoes(string fraction, string direction, double expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"""
+            select distinct percentile_cont({fraction}) within group (order by x{direction}) over ()
+            from (values (-1.5e0), (0.1e0), (1.5e0), (2.5e0), (3.5e0), (7.7e0)) v(x)
+            """));
+
+    /// <summary>
+    /// The fraction is one value for the statement: a column of the query's
+    /// own source is Msg 8726, as for the approximate pair, while a variable
+    /// counts (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Percentile_FractionReadingOwnColumn_RaisesMsg8726()
+    {
+        using var connection = SeededValues();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("select percentile_cont(v) within group (order by v) over () from t").ExecuteScalar());
+        AreEqual(8726, ex.Number);
+        AreEqual("Input parameter of PERCENTILE_CONT function must be a constant.", ex.Message);
+        AreEqual(20, connection.CreateCommand("declare @p float = 0.5; select percentile_disc(@p) within group (order by v) over () from t").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A <c>WITHIN GROUP</c> naming two keys is Msg 10751 state 1 here, where
+    /// the approximate pair's is state 2.
+    /// </summary>
+    [TestMethod]
+    public void Percentile_TwoWithinGroupKeys_RaisesMsg10751()
+    {
+        var ex = new Simulation().AssertSqlError("select percentile_cont(0.5) within group (order by x, y) over () from (values (1, 2)) v(x, y)", 10751);
+        AreEqual(1, ex.State);
+    }
+
+    /// <summary>
+    /// <c>PERCENTILE_DISC</c> returns one of its key's values, so it is NOT
+    /// NULL over a NOT NULL key; <c>PERCENTILE_CONT</c> stays nullable (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void PercentileDisc_OverNotNullKey_IsNotNull()
+    {
+        CollectionAssert.AreEqual(
+            new[] { true, false, true },
+            new Simulation().ColumnNullability("""
+                create table k (a int not null, b int null);
+                insert k values (1, 1);
+                select percentile_cont(0.5) within group (order by a) over (),
+                    percentile_disc(0.5) within group (order by a) over (),
+                    percentile_disc(0.5) within group (order by b) over () from k
+                """));
+    }
 }

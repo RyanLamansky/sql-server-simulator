@@ -19,9 +19,7 @@ public class TopTests
     }
 
     [TestMethod]
-    [DataRow("@p0", 1, new[] { 1 })]
     [DataRow("(@p0)", 1, new[] { 1 })]
-    [DataRow("@p0", 0, new int[] { })]
     [DataRow("(@p0)", 0, new int[] { })]
     public void TopParameterizedUnsorted(string parameterExpression, int parameterValue, int[] expectedValues)
     {
@@ -31,6 +29,19 @@ public class TopTests
             .ExecuteReader()
             .EnumerateRecords()
             .Select(reader => (int)reader[0])], EqualityComparer<int>.Default);
+    }
+
+    /// <summary>
+    /// The legacy unparenthesized count takes a constant only: a variable or
+    /// parameter there is Msg 102 near it (probed 2026-10-01 against SQL Server
+    /// 2025, a declared variable and an <c>sp_executesql</c> parameter alike).
+    /// </summary>
+    [TestMethod]
+    public void Top_UnparenthesizedVariable_IsSyntaxError()
+    {
+        _ = new Simulation().AssertSqlError("declare @n int = 2; select top @n 1", 102);
+        using var command = new Simulation().CreateOpenConnection().CreateCommand("select top @p0 1", ("p0", 1));
+        AreEqual(102, Throws<SimulatedSqlException>(command.ExecuteScalar).Number);
     }
 
     [TestMethod]
@@ -177,5 +188,55 @@ public class TopTests
         _ = sim.ExecuteNonQuery("insert t values (1), (2), (3)");
         _ = sim.ExecuteNonQuery("create procedure dbo.p @skip int, @take int as select v from t order by v offset @skip rows fetch next @take rows only");
         AreEqual(2, sim.ExecuteScalar("create table #r (v int); insert #r exec dbo.p 1, 1; select v from #r"));
+    }
+
+    /// <summary>
+    /// A row count is an integer other than <c>bit</c>, or an exact numeric at
+    /// scale 0 that real names <c>numeric</c> — a literal, a <c>CAST … AS
+    /// numeric</c> or arithmetic over one; the same value typed <c>decimal</c>,
+    /// a computation over that and a variable either way are Msg 1060 (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(2 as numeric(5, 0))", 2)]
+    [DataRow("2.", 2)]
+    [DataRow("cast(2 as smallint)", 2)]
+    [DataRow("cast(2 as decimal(5, 0))", -1)]
+    [DataRow("cast(2 as numeric(5, 0)) + 0", 2)]
+    [DataRow("cast(2 as decimal(5, 0)) + 0", -1)]
+    [DataRow("cast(1 as bit)", -1)]
+    public void Top_OperandType(string operand, int expectedRows)
+    {
+        const string source = "from (values (1), (2), (3)) v(x)";
+        if (expectedRows < 0)
+            _ = new Simulation().AssertSqlError($"select top ({operand}) x {source}", 1060);
+        else
+            AreEqual(expectedRows, new Simulation().ExecuteScalar($"select count(*) from (select top ({operand}) x {source}) z"));
+    }
+
+    /// <summary>
+    /// The OFFSET's own refusal, Msg 10743, covers a variable of another type
+    /// too.
+    /// </summary>
+    [TestMethod]
+    public void Offset_StringVariable_RaisesMsg10743()
+        => _ = new Simulation().AssertSqlError("declare @o varchar(3) = '1'; select x from (values (1)) v(x) order by x offset @o rows", 10743);
+
+    /// <summary>
+    /// A row count may read an enclosing query's columns, counting per outer
+    /// row — in a correlated subquery and an APPLY body alike — where a NULL
+    /// is Msg 1014 and a negative Msg 127 as the row reaches it (probed
+    /// 2026-10-01 against SQL Server 2025). A column of the query's own source
+    /// stays Msg 4115.
+    /// </summary>
+    [TestMethod]
+    public void Top_OuterColumnCount_CountsPerOuterRow()
+    {
+        const string seed = "create table o (id int, n int); insert o values (1, 1), (2, 2), (3, 0); create table i (id int); insert i values (1), (2), (3); ";
+        AreEqual(3, new Simulation().ExecuteScalar(seed + "select count(*) from o cross apply (select top (o.n) id from i order by id) x"));
+        AreEqual(2, new Simulation().ExecuteScalar(seed + "select count(*) from o where o.id in (select top (o.n) id from i order by id)"));
+        _ = new Simulation().AssertSqlError(seed + "insert o values (4, null); select count(*) from o cross apply (select top (o.n) id from i order by id) x", 1014);
+        _ = new Simulation().AssertSqlError(seed + "select count(*) from o cross apply (select top (o.n - 5) id from i order by id) x", 127);
+        _ = new Simulation().AssertSqlError(seed + "select top (id) id from i", 4115);
     }
 }

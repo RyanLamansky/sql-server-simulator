@@ -659,14 +659,19 @@ internal sealed partial class Selection
                             }
                             else
                             {
-                                // Continuous: linear interpolation at rank p*(n-1).
-                                var count = values.Count;
-                                var rank = p * (count - 1);
-                                var lo = (int)Math.Floor(rank);
-                                var hi = (int)Math.Ceiling(rank);
-                                var loValue = values[lo].CoerceTo(SqlType.Float).AsDouble;
-                                var hiValue = values[hi].CoerceTo(SqlType.Float).AsDouble;
-                                result = SqlValue.FromDouble(loValue + ((rank - lo) * (hiValue - loValue)));
+                                // Continuous: linear interpolation at the
+                                // one-based row number 1 + p·(n − 1), weighted
+                                // (1 − f)·lo + f·hi — real's last bit on all 81
+                                // random probes, ascending and descending alike
+                                // (2026-10-01, SQL Server 2025), where a
+                                // zero-based rank or lo + f·(hi − lo) missed.
+                                var rowNumber = 1 + (p * (values.Count - 1));
+                                var lo = (int)Math.Floor(rowNumber);
+                                var hi = (int)Math.Ceiling(rowNumber);
+                                var fraction = rowNumber - lo;
+                                var loValue = values[lo - 1].CoerceTo(SqlType.Float).AsDouble;
+                                var hiValue = values[hi - 1].CoerceTo(SqlType.Float).AsDouble;
+                                result = SqlValue.FromDouble(((1 - fraction) * loValue) + (fraction * hiValue));
                             }
 
                             foreach (var idx in indices)
@@ -683,29 +688,40 @@ internal sealed partial class Selection
                         if (rowCount == 0)
                             break;
                         var sign = win.Kind == WindowKind.Lag ? -1 : 1;
-                        var offsetValue = win.OffsetArg is null ? SqlValue.FromInt64(1) : EvaluateScalarArg(win.OffsetArg, rowCount, runtimeAt);
                         var operandType = win.Operand!.GetSqlType(batch, resolveColumnType);
-                        // A NULL offset reaches no row, so every row reads NULL
-                        // — the default included (probed 2026-09-25 against SQL
-                        // Server 2025).
-                        if (offsetValue.IsNull)
-                        {
-                            foreach (var (_, indices) in partitions)
-                            {
-                                foreach (var index in indices)
-                                    results[index] = SqlValue.Null(operandType);
-                            }
-                            break;
-                        }
-                        var lagOffset = offsetValue.CoerceTo(SqlType.BigInt).AsInt64;
-                        if (lagOffset < 0)
-                            throw SimulatedSqlException.NegativeLagLeadOffset(win.OffsetArg!.IsWrittenConstant ? (byte)1 : (byte)2);
+                        // An offset reading the row's own columns is the
+                        // row's: real evaluates it per row, so `LAG(v, ti)`
+                        // steps back by each row's `ti` (probed 2026-10-01
+                        // against SQL Server 2025). Any other offset is one
+                        // value for the statement.
+                        var perRowOffset = win.OffsetArg is { IsRowIndependent: false };
+                        var sharedOffset = win.OffsetArg is null ? SqlValue.FromInt64(1)
+                            : perRowOffset ? default : EvaluateScalarArg(win.OffsetArg, rowCount, runtimeAt);
                         foreach (var (_, indices) in partitions)
                         {
                             indices.Sort((a, b) =>
                                 SortOrderKeys(perWindowKeys[a][w].OrderKeys, perWindowKeys[b][w].OrderKeys, orderByList));
                             for (var i = 0; i < indices.Count; i++)
                             {
+                                var offsetValue = perRowOffset ? win.OffsetArg!.Run(runtimeAt(indices[i])) : sharedOffset;
+                                // A NULL offset reaches no row, so the row reads
+                                // NULL — the default included (probed 2026-09-25
+                                // against SQL Server 2025).
+                                if (offsetValue.IsNull)
+                                {
+                                    results[indices[i]] = SqlValue.Null(operandType);
+                                    continue;
+                                }
+                                var lagOffset = offsetValue.CoerceTo(SqlType.BigInt).AsInt64;
+                                if (lagOffset < 0)
+                                    throw SimulatedSqlException.NegativeLagLeadOffset(win.OffsetArg!.IsWrittenConstant ? (byte)1 : (byte)2);
+                                // Real adds a LEAD's offset to the row's
+                                // one-based position in bigint, so an offset
+                                // within that much of bigint's maximum overflows
+                                // rather than taking the default (probed
+                                // 2026-10-01 against SQL Server 2025).
+                                if (sign > 0 && lagOffset > long.MaxValue - (i + 1))
+                                    throw SimulatedSqlException.ArithmeticOverflow("bigint");
                                 // An offset past the partition — however far, a
                                 // bigint one included — takes the default.
                                 var target = i + (sign * lagOffset);

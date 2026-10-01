@@ -2735,7 +2735,9 @@ partial class Simulation
         var enclosingCollector = context.AggregateCollector;
         var valuesAggregates = new List<AggregateExpression>();
         List<Expression[]> tuples;
+        // Nor a windowed function (Msg 4108), outside a subquery in a cell.
         using (ParserScope.Enter(ref context.AggregateCollector, valuesAggregates))
+        using (ParserScope.Enter(ref context.AllowsWindowExpressions, false))
         {
             tuples = ParseValuesTupleList(context, allowDefault);
         }

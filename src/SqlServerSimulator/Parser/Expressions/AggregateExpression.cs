@@ -311,6 +311,18 @@ internal sealed class AggregateExpression : Expression
     }
 
     /// <summary>
+    /// A windowed function in an aggregate's operand — <c>SUM(ROW_NUMBER()
+    /// OVER (…))</c>, windowed or not — is Msg 4109 (probed 2026-10-01 against
+    /// SQL Server 2025). A subquery's windows register with its own block, so
+    /// only one written directly in the operand counts.
+    /// </summary>
+    private static void RefuseNestedWindow(ParserContext context, int windowsBefore)
+    {
+        if ((context.WindowCollector?.Count ?? 0) > windowsBefore)
+            throw SimulatedSqlException.WindowedFunctionInAggregate();
+    }
+
+    /// <summary>
     /// The refusal of an operand with no type — the bare <c>NULL</c>, or a
     /// derived column filled only with it. STRING_AGG names the argument where
     /// the others name the operator (Msg 8116, probed 2026-09-24).
@@ -821,7 +833,9 @@ internal sealed class AggregateExpression : Expression
 
         var aggregatesBefore = context.AggregatesParsed;
         var subqueriesBefore = context.SubqueriesParsed;
+        var windowsBefore = context.WindowCollector?.Count ?? 0;
         var operand = Expression.Parse(context);
+        RefuseNestedWindow(context, windowsBefore);
         ValidateOperand(context, kind, operand, aggregatesBefore, subqueriesBefore);
         return Register(context, new AggregateExpression(kind, operand, distinct, separator: null));
     }
@@ -830,7 +844,9 @@ internal sealed class AggregateExpression : Expression
     {
         var aggregatesBefore = context.AggregatesParsed;
         var subqueriesBefore = context.SubqueriesParsed;
+        var windowsBefore = context.WindowCollector?.Count ?? 0;
         var operand = Expression.Parse(context);
+        RefuseNestedWindow(context, windowsBefore);
         ValidateOperand(context, AggregateKind.StringAgg, operand, aggregatesBefore, subqueriesBefore);
         if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);

@@ -23,6 +23,7 @@
   **NULLs are equal during set-op dedup/matching** (opposite of `=`'s tri-state).
   An untyped `NULL` column takes its partner branch's type rather than its placeholder `int` (`SELECT NULL UNION ALL SELECT 'a'` is `varchar`), and stays untyped through a chain of them until a typed branch arrives (`Selection.ColumnIsUntypedNull`, probed 2026-09-23).
   Per-branch ORDER BY in non-final branch → Msg 156.
+  `INTERSECT ALL` / `EXCEPT ALL` parse and are Msg 324, states 1 and 2 (probed 2026-10-01 against SQL Server 2025).
   A branch may be **parenthesized**, and the parentheses may wrap a whole nested chain rather than a single SELECT — `SELECT … UNION (SELECT … UNION SELECT …)` and `… EXCEPT (… INTERSECT …)` are what an ORM emits when it combines an already-combined queryset (`ParseSetOpBranch`).
   Without it the opening paren read as a scalar subquery, so the branch looked like a one-column select list and the chain failed the equal-expression-count check.
   A statement may open with one too — `(SELECT 1) UNION (SELECT 2) ORDER BY 1`, `(SELECT 1)` alone, after a CTE prefix or as an IF body — since the dispatcher routes a leading `(` to the SELECT parser; the parentheses end their query whatever its position (`QueryScope.InParentheses`), so a FROM-less branch inside them no longer reads its `)` as a stray token (probed 2026-09-26).
@@ -244,7 +245,10 @@ A sort no index serves ranks the rows by their keys and projects only the page �
 
 ### The operand's type, and where it is checked
 
-The row count is resolved per execution — the operand may carry a parameter or a variable, which is exactly what EF's `Skip` / `Take` emit — and validated once at parse for the immediate rejection real gives a bad literal: real accepts any integer-family value and any exact numeric at **scale 0**, everything else (a fractional scale, another family, NULL) being **Msg 1060**, and a negative one Msg 127.
+The row count is resolved per execution — the operand may carry a parameter or a variable, which is exactly what EF's `Skip` / `Take` emit — and validated once at parse for the immediate rejection real gives a bad literal: real accepts an integer other than `bit`, and an exact numeric at **scale 0** only when real names it `numeric` — a literal (`2.`), a `CAST … AS numeric(5, 0)` or arithmetic over one — while the same value typed `decimal(5, 0)`, a variable declared either way, `bit`, a fractional scale, another family and NULL are **Msg 1060** (an `OFFSET` takes its own Msg 10743 for all of them), and a negative one Msg 127 (probed 2026-10-01 against SQL Server 2025).
+The legacy unparenthesized count takes a constant only: `TOP @n` is Msg 102 near the variable.
+
+A `TOP` count may read an enclosing query's columns — a correlated subquery's or an `APPLY` body's `TOP (t.g)` — and then counts per outer row, Msg 1014 for a NULL and 127 for a negative as the row reaches it; a column of the query's own source is Msg 4115 (probed 2026-10-01).
 
 A **module body** binds without running, so an operand naming a parameter has no value to read.
 Real settles that one from the operand's *declared type* instead, which is why `SELECT TOP (@rows)` over an `int` parameter creates while the `nvarchar` and `decimal(5, 2)` spellings are refused at CREATE — WideWorldImporters' five `Website.SearchFor*` procedures are the shape that turns on it.
@@ -482,7 +486,7 @@ Everything else is an error, and *which* error is the whole distinction (real em
 | Any expression over a bound name (`ORDER BY id + 1`, `LEN(name)`, `(SELECT 1)`, `c COLLATE …`) | **Msg 104** |
 | Name nothing in scope carries — including a column only a *later* branch has (`ORDER BY other`), and an output alias used inside an expression (`ORDER BY zz + 1`) | **Msg 207** `Invalid column name '…'.` |
 | Qualifier no FROM source answers to — the second branch's alias, an output alias, an unknown one (`ORDER BY b.id`) | **Msg 4104** `The multi-part identifier "…" could not be bound.` |
-| Ordinal below 1 or past the column count | **Msg 108** |
+| Ordinal below 1 or past the column count | **Msg 108**, then Msg 104 (probed 2026-10-01) |
 
 A FROM-less branch contributes an **empty** scope, not an unknown one: `SELECT 2 AS X UNION ALL SELECT 1 ORDER BY X` is legal and `ORDER BY Y` is Msg 207.
 A skip-mode placeholder source suppresses the whole pass — real defers such a statement's binding, so no name in scope can be a compile error there.
@@ -849,6 +853,8 @@ Ownership is decided by walking the operand's column references, so **an express
 
 `FromClause.GroupingSets: List<Expression[]>` holds the flat grouping-set list — simple `GROUP BY a, b` parses as `[[a, b]]`, `GROUP BY ROLLUP(a, b)` as `[[a, b], [a], []]`, `GROUP BY CUBE(a, b)` as the 2^N power-set entries, `GROUP BY GROUPING SETS((a, b), (a), ())` verbatim.
 Mixed forms (`GROUP BY a, ROLLUP(b, c)`) Cartesian-combine each top-level item's fragments at parse time.
+A `GROUPING SETS` member may be a `ROLLUP` or `CUBE` (all of its sets) or a parenthesized composite whose elements, `ROLLUP` and `CUBE` included, combine the same way (`GROUPING SETS ((g, ROLLUP(h)))` is `(g, h), (g)`), and a `ROLLUP` / `CUBE` element may be a composite `(a, b)` that rolls up as one unit; an empty `()` inside `ROLLUP` and a `GROUPING SETS` inside another are Msg 102.
+Past 4096 sets the query is Msg 10703 — `CUBE` over twelve columns is the largest that passes — and `STRING_AGG` under more than one set is Msg 8710, every other aggregate merging (all probed 2026-10-01 against SQL Server 2025).
 The legacy `GROUP BY <cols> WITH ROLLUP` / `WITH CUBE` modifier is equivalent to `GROUP BY ROLLUP(<cols>)` / `CUBE(<cols>)` — after the column list parses to its single Cartesian set, `RollupExpansion` / `CubeExpansion` re-expand it in place (probe-confirmed the row output matches the function forms).
 `FromClause.AllGroupingExpressions` is the union (first-seen order) used by GROUPING() validation.
 
@@ -873,7 +879,7 @@ ORDER BY items resolve a select-list **alias** first (`ORDER BY Total`, bare ter
 Parse-time type-checking is alias-aware to match.
 
 `GROUPING(col)` / `GROUPING_ID(c1, ..., cN)` read the executor-published context off `BatchContext.GroupingSetExpressions` (current set's column list) and `BatchContext.AllGroupingExpressions` (union across query).
-Returns `tinyint` 0/1 and `int` bitmap respectively; **leftmost arg of `GROUPING_ID` occupies the most-significant bit** (probe-confirmed against SQL Server 2025 — `GROUPING_ID(region, product)` with region grouped + product not grouped returns `2`, the inverse case returns `1`).
+Returns `tinyint` 0/1 and `int` bitmap respectively, both NOT NULL, and either in the query's own `WHERE` is the aggregate's Msg 147 (probed 2026-10-01); **leftmost arg of `GROUPING_ID` occupies the most-significant bit** (probe-confirmed against SQL Server 2025 — `GROUPING_ID(region, product)` with region grouped + product not grouped returns `2`, the inverse case returns `1`).
 Argument must match a GROUP BY expression.
 Arg not in any grouping set → Msg 8161; same Msg for GROUPING outside any GROUP BY context.
 The match is the containment rule's `ShapeKey` with each column keyed by its name alone, so it is qualifier-tolerant (`GROUPING(x.a + 1)` over `ROLLUP(a + 1)` matches on real, probed 2026-09-23) and parentheses are transparent.
@@ -924,9 +930,11 @@ A FROM-less `SELECT COUNT(*) WHERE 1 = 0 GROUP BY ALL ()` doesn't warn either, w
     Distributes the partition into `N` buckets; the first `count % N` buckets carry one extra row each.
     `N <= 0` at runtime → Msg 9819.
     The bucket-count expression is evaluated once per query against the first buffered row's resolver (constants and parameters work; column references would surface as resolver errors — real SQL Server rejects non-constant bucket counts at compile time, the simulator surfaces it as a runtime issue).
+    A constant count of zero or less is Msg 4116 while compiling, so it refuses over an empty input too.
 - Value functions (ORDER BY required, operand re-evaluated against another row's resolver):
   - `LAG(expr [, offset [, default]]) OVER (...)` — operand type.
     Offset defaults to 1; default expression is evaluated in the boundary row's resolver context when the offset crosses the partition boundary (and typed NULL when no default is given).
+    An offset reading the row's own columns is the row's: `LAG(v, ti)` steps back by each row's `ti`, a NULL one reading NULL; and a `LEAD` offset added to the row's one-based position past bigint's maximum is Msg 8115 rather than the default (probed 2026-10-01 against SQL Server 2025).
     The default then converts to the operand's exact type with CAST semantics — `'7'` becomes 7, `2.9` becomes 2, a longer string is cut to the operand's declared length, and `'x'` over an int is Msg 245 — but only a default actually used converts, so one that never reaches a row raises nothing (probed 2026-09-23).
   - `LEAD(expr [, offset [, default]]) OVER (...)` — same shape, opposite direction.
   - `FIRST_VALUE(expr) OVER ([PARTITION BY ...] ORDER BY ... [frame])` — operand type.
@@ -942,7 +950,8 @@ A FROM-less `SELECT COUNT(*) WHERE 1 = 0 GROUP BY ALL ()` doesn't warn either, w
   Modeled as `WindowKind.PercentileCont` / `PercentileDisc` on `WindowExpression`: the percentile fraction lands in `PercentileArg`, the single `WITHIN GROUP` sort key reuses the `OrderBy` field, and the per-partition result is broadcast to every row (no per-row frame).
   The `OVER` clause is **mandatory** (Msg 10753 when absent) and may carry only `PARTITION BY` — an `ORDER BY` inside `OVER` is rejected with Msg 10758 (the ordering must come from `WITHIN GROUP`).
   NULL sort keys are excluded from the computation; an all-NULL / empty partition yields NULL.
-  `PERCENTILE_CONT` returns `float` and linearly interpolates at `rank = p·(n−1)` between the floor/ceil values; `PERCENTILE_DISC` returns the **sort expression's own type** and picks the smallest value whose CUME_DIST ≥ p (index `ceil(p·n) − 1`, clamped).
+  `PERCENTILE_CONT` returns `float` and interpolates at the one-based row number `rn = 1 + p·(n−1)` as `(1 − f)·lo + f·hi`, `f` being `rn`'s fraction — the arrangement that reproduces real's last bit, where `lo + f·(hi − lo)` at the zero-based rank misses it (`APPROX_PERCENTILE_CONT` weights the same way at the zero-based rank, which is what its last bit fits); `PERCENTILE_DISC` returns the **sort expression's own type**, NOT NULL over a NOT NULL key, and picks the smallest value whose CUME_DIST ≥ p (index `ceil(p·n) − 1`, clamped).
+  A fraction reading the query's own columns is Msg 8726 and a second `WITHIN GROUP` key Msg 10751 state 1 (all probed 2026-10-01 against SQL Server 2025).
   The fraction `p` is evaluated once per query (constant, variable, or parameter); NULL or a value outside `[0, 1]` → Msg 8727 at runtime.
   `DESC` reverses the sort.
 - Aggregate windows: `SUM`/`AVG`/`COUNT`/`COUNT_BIG`/`MIN`/`MAX`/`STDEV*`/`VAR*`/`CHECKSUM_AGG`/`PRODUCT(expr) OVER ([PARTITION BY ...] [ORDER BY ...] [frame])`, and `APPROX_COUNT_DISTINCT(ALL expr)` — only with its `ALL` written (see [the approximate aggregates](#the-approximate-aggregates)).
@@ -964,7 +973,7 @@ A FROM-less `SELECT COUNT(*) WHERE 1 = 0 GROUP BY ALL ()` doesn't warn either, w
   A **named window** carries no exemption: real validates the resolved body before it knows which function reads it, so `COUNT(*) OVER w` against a frame-carrying, orderless `w` is Msg 5364 like every other function's.
   Divergence: with no ORDER BY the row order a `ROWS` frame counts along is unspecified, and real doesn't run it in the emitted order for every bound pair — a frame ending at `UNBOUNDED FOLLOWING` counts opposite to the rows it emits (probe-confirmed), which the simulator's straight partition-order walk doesn't reproduce.
   The `PRECEDING`-anchored bounds, which is what the shape is written for, match.
-- Errors: `STRING_AGG OVER` → Msg 4113; `COUNT(DISTINCT) OVER` / `SUM(DISTINCT) OVER` → Msg 10759; windowed function in WHERE/HAVING/GROUP BY/ON → Msg 4108.
+- Errors: `STRING_AGG OVER` → Msg 4113; `COUNT(DISTINCT) OVER` / `SUM(DISTINCT) OVER` → Msg 10759; windowed function in WHERE/HAVING/GROUP BY/ON, a `VALUES` row or an `UPDATE`'s `SET` list → Msg 4108; one inside an aggregate's argument, windowed or not (`SUM(ROW_NUMBER() OVER (…))`) → Msg 4109.
 
 ### RANGE-frame ORDER BY (Msg 8728)
 

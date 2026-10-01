@@ -233,7 +233,7 @@ The harness is local-only and not checked in; its three connection-killing findi
 
 **Type-pair neighbors** — found by the type-pair probes and left open (probed 2026-09-23):
 
-- An alias type over numeric reads `decimal`, as does a numeric column's name in a type-pair message (raised while binding, before references are marked); everything else carries the name (see [`arithmetic.md`](arithmetic.md#numeric-vs-decimal-reported-type-name)).
+- An alias type over numeric reads `decimal`, as does a numeric column's name in a type-pair message raised outside the select list (a `WHERE` comparison, probed 2026-10-01), where only the select list's references are marked before typing; everything else carries the name (see [`arithmetic.md`](arithmetic.md#numeric-vs-decimal-reported-type-name)).
 
 **Message stream**: what's left — Msg 5703's localized wording and Msg 8153 over a constant `VALUES` grouping — is in [`errors.md`](errors.md#not-modeled-yet).
 
@@ -275,6 +275,15 @@ The harness is local-only and not checked in; its three connection-killing findi
   The same calls over a variable or a column unify as the simulator does, and a numeric pair keeps the unified type even when folded (`CASE WHEN 1 = 1 THEN 1 ELSE 2.5 END` is `numeric(2, 1)` on both), so the fold changes only a string result's type and width.
 - **`TRANSLATE` over surrogate code units** maps them in a way not yet explained: `TRANSLATE(N'a😀', N'😀', N'xy')` is `axx` on real (`axy` here), `TRANSLATE(N'😀😁', N'😁', N'xy')` is `xxxx`, a lone low surrogate looked up in a list holding only the high one translates (`TRANSLATE(N'a' + NCHAR(56832), NCHAR(55357), N'x')` is `ax`), yet `TRANSLATE(N'😀', N'x😀', N'abc')` leaves the input unchanged.
 - **`AT TIME ZONE` before a zone's first rule** reads Windows' rules extended backwards on real and the host's IANA history here — see [`scalars.md`](scalars.md#at-time-zone).
+
+**Query-semantics sweep** — a third corpus of 1,330 small cases over aggregates, windows, grouping sets, PIVOT / UNPIVOT, TOP and OFFSET, set operations, subqueries, joins and NULL handling, each over a per-case table and compared by value, result-column type and the TDS nullability flag (probed 2026-10-01 against SQL Server 2025).
+Of the cases still differing once its fixes shipped, the environmental ones are clock and `NEWID()` values, tie order, which of two equal values a `UNION` keeps and join order, and the filed ones the `CHECKSUM` hash of `decimal` and `nvarchar`, Msg 8153 after an error, a correlated GROUP BY item's Msg 164, a window's rows streamed before an error and syntax-error recovery.
+What it left open:
+
+- **Msg 8153 from a quantified comparison.** `id > ANY (SELECT k …)` and `id < ANY (…)` over a subquery holding a NULL send the NULL-elimination warning on real, which runs them as an aggregate over the subquery; `= ANY`, `> ALL`, `0 > ANY` and `IN` don't, so which shapes warn follows real's rewrite rather than a rule the simulator models.
+- **`$IDENTITY`** — the identity-column pseudo-reference (`SELECT $identity FROM t`, NOT NULL on real) is Msg 156 here.
+- **`TOP … ORDER BY` ahead of a `UNION` in an `IN` subquery.** `WHERE g IN (SELECT TOP 1 k FROM u ORDER BY k UNION SELECT 3)` answers on real and is Msg 156 here.
+- **Rows ahead of a per-row `TOP` error.** An `APPLY` body's `TOP (t.g)` meeting a NULL is Msg 1014 on both, but real streams the outer rows before it when its plan needs no sort for the statement's `ORDER BY`, the plan-shaped sibling of the partial results noted under [streaming accumulation](query.md#streaming-accumulation-and-where-an-error-surfaces).
 
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 

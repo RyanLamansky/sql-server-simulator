@@ -439,4 +439,22 @@ public sealed class ResultNullabilityTests
             select string_agg(concat(c.name, '=', c.is_nullable), ' ') within group (order by c.column_id)
             from sys.columns c where c.object_id = object_id('dest')
             """));
+
+    /// <summary>
+    /// A negated literal is NOT NULL — real folds it first — but a negated
+    /// computation is arithmetic and nullable, <c>-7 / 2</c> included (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("-1", false)]
+    [DataRow("-(1)", false)]
+    [DataRow("- -1", false)]
+    [DataRow("-1.5", false)]
+    [DataRow("-$1", false)]
+    [DataRow("-(1 + 1)", true)]
+    [DataRow("-7 / 2", true)]
+    [DataRow("-abs(1)", true)]
+    [DataRow("-cast(1 as int)", true)]
+    public void Negation_NullableUnlessOverALiteral(string projection, bool expected)
+        => AreEqual(expected, new Simulation().ColumnNullability($"select {projection}")[0]);
 }

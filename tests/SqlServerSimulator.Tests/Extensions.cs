@@ -156,6 +156,17 @@ static class Extensions
     public static DbDataReader ExecuteReader(this Simulation simulation, string commandText)
         => simulation.CreateCommand(commandText).ExecuteReader();
 
+    /// <summary>
+    /// The <c>AllowDBNull</c> flag of each column of the first result set
+    /// <paramref name="commandText"/> returns — the nullability the TDS
+    /// COLMETADATA claims for it.
+    /// </summary>
+    public static bool[] ColumnNullability(this Simulation simulation, string commandText)
+    {
+        using var reader = simulation.ExecuteReader(commandText);
+        return [.. reader.GetSchemaTable()!.Rows.Cast<System.Data.DataRow>().Select(static row => (bool)row["AllowDBNull"])];
+    }
+
     public static IEnumerable<DbDataReader> EnumerateRecords(this DbDataReader reader)
     {
         while (reader.Read())

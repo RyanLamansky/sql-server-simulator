@@ -1604,6 +1604,19 @@ internal sealed partial class Selection
             if (join.OnPredicate is { } on)
                 RejectDirectNodesColumnRead(on, sources);
         }
+        // A reference to a numeric-spelled column names what reads it
+        // numeric, so each is marked against the column it binds to — ahead
+        // of typing, whose refusals name the operand's type the same way
+        // (`CHECKSUM_AGG(<numeric column>)` is Msg 8117 naming numeric).
+        foreach (var expression in expressions)
+        {
+            // An unbindable name marks nothing; typing reports it below.
+            Reference.MarkNumericSpelled(expression, name =>
+                TryResolveSourceColumn(sources, name) is { } id && sources[id.Source].Columns[id.Column].SpelledNumeric);
+            Reference.MarkAliasTyped(expression, name =>
+                TryResolveSourceColumn(sources, name) is { } id ? sources[id.Source].Columns[id.Column].AliasType : null);
+        }
+
         for (var i = 0; i < expressions.Count; i++)
         {
             outputSchema[i] = expressions[i].TypeCarryingTypeChecks(parseBatch, readColumnSink is null ? ResolveColumnType : RecordingResolver);
@@ -1612,19 +1625,6 @@ internal sealed partial class Selection
                 // column it reads (probed 2026-09-27 against SQL Server 2025).
                 ? sources[pseudoSource].ColumnNames[pseudoColumn]
                 : expressions[i].Name;
-        }
-
-        // A reference to a numeric-spelled column names what reads it
-        // numeric, so each is marked against the column it binds to.
-        foreach (var expression in expressions)
-        {
-            // Typing above settled every name, so the lookups here never
-            // raise; an unbindable one a whole-statement bind error report
-            // carried past marks nothing.
-            Reference.MarkNumericSpelled(expression, name =>
-                TryResolveSourceColumn(sources, name) is { } id && sources[id.Source].Columns[id.Column].SpelledNumeric);
-            Reference.MarkAliasTyped(expression, name =>
-                TryResolveSourceColumn(sources, name) is { } id ? sources[id.Source].Columns[id.Column].AliasType : null);
         }
 
         // A column a derived source filled only with bare NULLs has no type
@@ -1902,6 +1902,14 @@ internal sealed partial class Selection
             }
         }
 
+        // STRING_AGG keeps no partial state a subtotal could merge, so real
+        // refuses it under ROLLUP / CUBE / GROUPING SETS once they expand past
+        // one set (Msg 8710); every other aggregate, the approximate pair and
+        // CHECKSUM_AGG included, merges (probed 2026-10-01 against SQL Server
+        // 2025).
+        if (fromClause.GroupingSets.Count > 1 && aggregates.Exists(static a => a.Kind == AggregateKind.StringAgg))
+            throw SimulatedSqlException.SubaggregatesNotMergeable();
+
         var offsetExpression = fromClause.OffsetExpression;
         var fetchExpression = fromClause.FetchExpression;
 
@@ -1913,6 +1921,19 @@ internal sealed partial class Selection
         var windowResultTypes = new SqlType[windows.Count];
         for (var i = 0; i < windows.Count; i++)
         {
+            // A percentile's fraction reading this query's own columns is
+            // real's Msg 8726, as for the approximate pair — an enclosing
+            // query's column or a variable is one value for the statement
+            // (probed 2026-10-01 against SQL Server 2025).
+            if (windows[i] is { Kind: WindowKind.PercentileCont or WindowKind.PercentileDisc, PercentileArg: { } fraction } percentile)
+            {
+                fraction.VisitColumnReferences(name =>
+                {
+                    var sourceIndex = FindSourceColumn(sources, name).SourceIndex;
+                    if (sourceIndex >= 0 && sources[sourceIndex].LateralPlan is not { IsSingleConstantRow: true })
+                        throw SimulatedSqlException.PercentileInputNotConstant(percentile.Kind == WindowKind.PercentileCont ? "PERCENTILE_CONT" : "PERCENTILE_DISC");
+                });
+            }
             if (windows[i].Kind == WindowKind.Aggregate)
             {
                 var aggregate = windows[i].AggregateInfo!;
@@ -2023,10 +2044,10 @@ internal sealed partial class Selection
                 var top = topExpression is null
                     ? default
                     : topPercent
-                        ? new TopSpec(null, ResolveTopPercentValue(topExpression, batch), topWithTies)
-                        : new TopSpec(ResolveRowCountLimit(topExpression, RowLimitKind.Top, batch), null, topWithTies);
-                var offsetCount = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, batch);
-                var fetchCount = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, batch);
+                        ? new TopSpec(null, ResolveTopPercentValue(topExpression, batch, outerResolver), topWithTies)
+                        : new TopSpec(ResolveRowCountLimit(topExpression, RowLimitKind.Top, batch, outerResolver), null, topWithTies);
+                var offsetCount = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, batch, outerResolver);
+                var fetchCount = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, batch, outerResolver);
                 // TOP 0 is a plan with nothing to start, and an emptiness
                 // probe of an EXISTS reads no projection.
                 if (top.Count != 0)

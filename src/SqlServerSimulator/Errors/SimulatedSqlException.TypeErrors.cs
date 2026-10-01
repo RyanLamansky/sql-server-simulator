@@ -328,8 +328,8 @@ partial class SimulatedSqlException
     /// arm of CONVERT-style dispatch where no <c>time</c> singleton exists
     /// because the type carries precision).
     /// </summary>
-    internal static SimulatedSqlException ConvertingDataTypeError(string sourceFamilyName, string targetWord) =>
-        new($"Error converting data type {sourceFamilyName} to {targetWord}.", 8114, 16, 5);
+    internal static SimulatedSqlException ConvertingDataTypeError(string sourceFamilyName, string targetWord, byte state = 5) =>
+        new($"Error converting data type {sourceFamilyName} to {targetWord}.", 8114, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 8115 in its decimal/numeric variant: scale-

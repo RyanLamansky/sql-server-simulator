@@ -417,4 +417,19 @@ public sealed class WindowAggregateTests
         foreach (var count in counts)
             AreEqual(3, count);
     }
+
+    /// <summary>
+    /// A sliding <c>MAX</c> answers the value its frame holds: values that
+    /// compare equal can render differently (<c>'x'</c> and <c>'x '</c>), and
+    /// once the earlier one leaves the frame the answer is the one still in it
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SlidingMax_AnswersTheTiedValueStillInFrame()
+        => AreEqual("x ", new Simulation().ExecuteScalar("""
+            select top 1 m from (
+                select id, max(s) over (order by id rows between 1 preceding and current row) m
+                from (values (1, 'x'), (2, 'a'), (3, 'x '), (4, '')) v(id, s)) w
+            order by id desc
+            """));
 }

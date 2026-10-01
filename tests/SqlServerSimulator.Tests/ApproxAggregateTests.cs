@@ -68,4 +68,17 @@ public sealed class ApproxAggregateTests
     [DataRow("declare @p float = 0.25; select approx_percentile_cont(@p + @p) within group (order by value) from generate_series(1, 10)", 5.5)]
     public void ApproxPercentileFraction_FoldingToAConstant_IsAccepted(string sql, double expected)
         => AreEqual(expected, new Simulation().ExecuteScalar(sql));
+
+    /// <summary>
+    /// <c>APPROX_PERCENTILE_CONT</c> interpolates at the zero-based rank
+    /// <c>p·(n − 1)</c> as <c>(1 − f)·lo + f·hi</c> — not the windowed
+    /// function's one-based rank — which is what its last bit answers to
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("0.3", "(7.314846e0), (-0.96e0), (-6.306793e0), (2.6e0), (-8.118e0)", -5.2374344000000006)]
+    [DataRow("0.7", "(-8.2e0), (-9.69e0)", -8.647)]
+    [DataRow("0.33", "(8.35e0), (5.0e0), (-4.616121e0)", 1.7305188600000005)]
+    public void ApproxPercentileCont_InterpolatesAsRealDoes(string fraction, string values, double expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select approx_percentile_cont({fraction}) within group (order by x) from (values {values}) v(x)"));
 }

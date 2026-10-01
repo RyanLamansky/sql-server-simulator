@@ -199,4 +199,19 @@ public sealed class ApplyTests
     [DataRow("select g.value from t cross apply generate_series((select t.id), 1) g", "1")]
     public void ASubqueryArgument_CorrelatesToTheLeftSide(string query, string expected)
         => Assert.AreEqual(expected, Convert.ToString(new Simulation().ExecuteScalar("create table t (id int, n varchar(5)); insert t values (1, 'x,y'); " + query), System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// A CROSS APPLY body's NOT NULL column stays NOT NULL in the result, while
+    /// OUTER APPLY's NULL-filling makes it nullable (probed 2026-10-01 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cross", false)]
+    [DataRow("outer", true)]
+    public void Apply_BodyColumnNullability(string apply, bool expected)
+        => AreEqual(expected, new Simulation().ColumnNullability($"""
+            create table an (id int not null, k int null);
+            insert an values (1, 1);
+            select x.id from an {apply} apply (select id from an a2 where a2.k = an.k) x
+            """)[0]);
 }

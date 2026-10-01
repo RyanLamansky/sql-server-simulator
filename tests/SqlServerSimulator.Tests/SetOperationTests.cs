@@ -578,16 +578,20 @@ public sealed class SetOperationTests
     /// <summary>
     /// An ordinal outside the projection's column count is Msg 108, the same as
     /// on a single SELECT — the top-level sort used to index the projected row
-    /// unchecked and surface an <see cref="ArgumentOutOfRangeException"/>.
+    /// unchecked and surface an <see cref="ArgumentOutOfRangeException"/> — and
+    /// real follows it with the set operation's Msg 104 (probed 2026-10-01
+    /// against SQL Server 2025).
     /// </summary>
     [TestMethod]
     [DataRow(0)]
     [DataRow(5)]
     public void SetOperation_TopLevelOrderBy_OrdinalOutOfRange_RaisesMsg108(int ordinal)
-        => AreEqual(
-            $"The ORDER BY position number {ordinal} is out of range of the number of items in the select list.",
-            SeededSetOpOrderByTables()
-                .AssertSqlError($"select id from so_a union select id from so_b order by {ordinal}", 108).Message);
+    {
+        var errors = SeededSetOpOrderByTables()
+            .AssertSqlError($"select id from so_a union select id from so_b order by {ordinal}", 108).Errors.Cast<SimulatedError>().ToArray();
+        AreEqual($"The ORDER BY position number {ordinal} is out of range of the number of items in the select list.", errors[0].Message);
+        AreEqual("108,104", string.Join(",", errors.Select(error => error.Number)));
+    }
 
     /// <summary>
     /// A qualified term names the source column, never an output alias, so it
@@ -772,5 +776,48 @@ public sealed class SetOperationTests
         simulation.AssertSqlError("(select top 1 1 a order by 1) union (select 2)", 156, "Incorrect syntax near the keyword 'order'.");
         simulation.AssertSqlError("select 1 union (select top 1 2 a order by 1)", 156, "Incorrect syntax near the keyword 'order'.");
         simulation.AssertSqlError("(select top 1 1 a order by 1)", 156, "Incorrect syntax near the keyword 'order'.");
+    }
+
+    /// <summary>
+    /// A set operation's column is nullable as real infers it — UNION when
+    /// either branch's is, INTERSECT only when both are, EXCEPT as the left's —
+    /// and a top-level ORDER BY keeps that, where the sort used to report every
+    /// column nullable (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select a from sn union all select b from sn order by 1", true)]
+    [DataRow("select a from sn union select a from sn order by 1", false)]
+    [DataRow("select a from sn intersect select b from sn order by 1", false)]
+    [DataRow("select b from sn except select a from sn order by 1", true)]
+    [DataRow("select a from sn except select b from sn order by 1", false)]
+    [DataRow("select 1 as x union all select '2' order by x", false)]
+    public void SetOperation_OrderBy_KeepsNullability(string sql, bool expected)
+        => AreEqual(expected, new Simulation().ColumnNullability("create table sn (a int not null, b int null); insert sn values (1, 1); " + sql)[0]);
+
+    /// <summary>
+    /// <c>SELECT … INTO</c> from a set operation declares the destination with
+    /// the combined nullability: a NOT NULL left column unioned with a nullable
+    /// one creates a nullable column (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SetOperation_Into_TakesCombinedNullability()
+        => AreEqual("YES", new Simulation().ExecuteScalar("""
+            create table sn (a int not null, b int null);
+            select a into sz from sn union all select b from sn;
+            select IS_NULLABLE from INFORMATION_SCHEMA.COLUMNS where TABLE_NAME = 'sz'
+            """));
+
+    /// <summary>
+    /// <c>INTERSECT ALL</c> and <c>EXCEPT ALL</c> parse and are refused with
+    /// Msg 324, states 1 and 2 (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("intersect", 1)]
+    [DataRow("except", 2)]
+    public void SetOperation_AllQuantifier_RaisesMsg324(string operation, int state)
+    {
+        var ex = new Simulation().AssertSqlError($"select 1 {operation} all select 1", 324);
+        AreEqual(state, ex.State);
+        AreEqual($"The 'ALL' version of the {operation.ToUpperInvariant()} operator is not supported.", ex.Message);
     }
 }

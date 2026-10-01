@@ -96,4 +96,22 @@ public sealed class InlineJoinHintTests
         // unreserved hint word is left over after the alias, and the reserved
         // MERGE opens a statement whose next token is JOIN (probed 2026-09-24).
         => Seeded().AssertSqlError($"select count(*) from jh1 a {join} jh2 b on b.id = a.id", message.Contains("keyword", StringComparison.Ordinal) ? 156 : 102, message);
+
+    /// <summary>
+    /// A local hint fixes the join order, which real reports with the
+    /// informational Msg 8625 as the statement compiles (probed 2026-10-01
+    /// against SQL Server 2025); an unhinted join sends nothing.
+    /// </summary>
+    [TestMethod]
+    [DataRow("inner hash join", 1)]
+    [DataRow("full merge join", 1)]
+    [DataRow("join", 0)]
+    public void TheHintSendsMsg8625(string join, int expected)
+    {
+        using var connection = (SimulatedDbConnection)Seeded().CreateOpenConnection();
+        var messages = new List<int>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(error => error.Number));
+        _ = connection.CreateCommand($"select count(*) from jh1 a {join} jh2 b on b.id = a.id").ExecuteScalar();
+        AreEqual(expected, messages.Count(number => number == 8625));
+    }
 }

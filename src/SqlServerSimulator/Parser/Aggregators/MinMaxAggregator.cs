@@ -12,7 +12,11 @@ namespace SqlServerSimulator.Parser.Aggregators;
 /// A single running extreme can't be un-done (dropping the current extreme
 /// leaves the next one unknown), so the removable mode requested for sliding
 /// window frames keeps a directional multiset instead — ordered so the wanted
-/// extreme is always the first key, with per-value multiplicity for removal.
+/// extreme is always the first key, holding the frame's own values in arrival
+/// order for removal. Values that compare equal can render differently (a
+/// trailing space, a case-insensitive collation), and a frame's answer is the
+/// first of them still inside it — keying on the first one ever added
+/// answered <c>'x'</c> for a frame holding only <c>'x '</c>.
 /// GROUP BY and forward-cumulative windows never remove, so they keep the
 /// cheaper two-field running-extreme path.
 /// </para>
@@ -21,7 +25,7 @@ internal sealed class MinMaxAggregator : Aggregator
 {
     private readonly SqlType resultType;
     private readonly bool isMax;
-    private readonly SortedDictionary<SqlValue, int>? multiset;
+    private readonly SortedDictionary<SqlValue, Queue<SqlValue>>? multiset;
 
     private SqlValue current;
     private bool sawAny;
@@ -33,7 +37,7 @@ internal sealed class MinMaxAggregator : Aggregator
         this.current = SqlValue.Null(resultType);
         if (removable)
         {
-            this.multiset = new SortedDictionary<SqlValue, int>(
+            this.multiset = new SortedDictionary<SqlValue, Queue<SqlValue>>(
                 Comparer<SqlValue>.Create(isMax ? static (a, b) => b.CompareTo(a) : static (a, b) => a.CompareTo(b)));
         }
     }
@@ -44,8 +48,9 @@ internal sealed class MinMaxAggregator : Aggregator
             return;
         if (this.multiset is { } bag)
         {
-            _ = bag.TryGetValue(value, out var n);
-            bag[value] = n + 1;
+            if (!bag.TryGetValue(value, out var peers))
+                bag[value] = peers = new Queue<SqlValue>(1);
+            peers.Enqueue(value);
             return;
         }
         if (!this.sawAny)
@@ -65,12 +70,13 @@ internal sealed class MinMaxAggregator : Aggregator
     {
         if (value.IsNull)
             return;
+        // A frame's start advances in arrival order, so the value leaving is
+        // the oldest of its peers.
         var bag = this.multiset!;
-        var n = bag[value];
-        if (n == 1)
+        var peers = bag[value];
+        _ = peers.Dequeue();
+        if (peers.Count == 0)
             _ = bag.Remove(value);
-        else
-            bag[value] = n - 1;
     }
 
     /// <summary>
@@ -111,7 +117,7 @@ internal sealed class MinMaxAggregator : Aggregator
         if (this.multiset is { } bag)
         {
             foreach (var pair in bag)
-                return pair.Key;
+                return pair.Value.Peek();
             return SqlValue.Null(this.resultType);
         }
 

@@ -26,7 +26,19 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </remarks>
 internal sealed class Grouping(ParserContext context) : Expression
 {
-    private readonly Expression argument = Parse(context);
+    private readonly Expression argument = RefuseInWhere(context) ?? Parse(context);
+
+    /// <summary>
+    /// <c>GROUPING</c> and <c>GROUPING_ID</c> are aggregate-like to real, so a
+    /// call written in a query's own <c>WHERE</c> is the aggregate's Msg 147
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static Expression? RefuseInWhere(ParserContext context) =>
+        context.InWhereClause ? throw SimulatedSqlException.AggregateInWhereClause() : null;
+
+    // A grouped-away marker or a bitmap — never NULL, so real projects both
+    // functions NOT NULL (probed 2026-10-01 against SQL Server 2025).
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     public override SqlValue Run(RuntimeContext runtime)
     {
@@ -80,6 +92,7 @@ internal sealed class GroupingId : Expression
 
     public GroupingId(ParserContext context)
     {
+        _ = Grouping.RefuseInWhere(context);
         var list = new List<Expression> { Parse(context) };
         while (context.Token is Tokens.Operator { Character: ',' })
         {
@@ -111,6 +124,8 @@ internal sealed class GroupingId : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
+
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() =>
         $"GROUPING_ID({string.Join(", ", this.arguments.Select(a => a.DebugDisplay()))})";

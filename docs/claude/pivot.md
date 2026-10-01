@@ -39,10 +39,17 @@ WHERE / ORDER BY / further joins on the pivoted source operate on its rotated ou
 | Missing `AS alias` | Msg 102 |
 | Unknown aggregate operand, then unknown FOR column | Msg 207 each, in that order |
 | A grouping column (every source column but the operand and the FOR column) of a type real can't compare — `text`, `xml`, `vector` … | Msg 488, after the names (probed 2026-09-28) |
-| Duplicate `IN` value | Msg 8156 (`The column 'X' was specified multiple times for '<alias>'.`) |
+| Duplicate `IN` value — names compare case- and trailing-space-insensitively, so `[a]` / `[A]` and `[x]` / `[x ]` repeat | Msg 8156 (`The column 'X' was specified multiple times for '<alias>'.`) |
+| An `IN` value naming a grouping column | Msg 265, then Msg 8156 |
+| An `IN` value that doesn't convert to the FOR column's type | Msg 8114 naming `nvarchar`, then Msg 473 naming the value |
+| `CHECKSUM_AGG` (real's `JSON_ARRAYAGG` too) | Msg 406 — not invariant to NULLs |
+| `STRING_AGG(col, sep)` | Msg 102 at the separator's comma |
 
 The `IN` entries must be identifiers (`[2020]`, `[East]`, bare names): SQL Server rejects string/numeric literals here.
 The identifier *text* is both the output column name and (coerced to the FOR column's type) the comparison value.
+The rows added to the error table and the passthrough nullability below were probed 2026-10-01 against SQL Server 2025.
+
+A grouping column keeps its source's nullability, and every pivoted column is nullable, `COUNT` included.
 
 ## UNPIVOT
 
@@ -58,10 +65,7 @@ An unfold, not an aggregation — built as a `Selection` with a custom row-produ
 - The `IN` columns fold into one value column, so they **must all share a type**.
   SQL Server doesn't promote here: `int` + `bigint` conflicts → Msg 8167 (`The type of column "X" conflicts with the type of other columns specified in the UNPIVOT list.`).
   An untyped NULL column (`SELECT NULL AS x`, an all-NULL `VALUES` column) conflicts with every typed one the same way, while two of them agree (probed 2026-09-26).
-  Missing alias → Msg 102; unknown `IN` column → Msg 207.
+  Missing alias → Msg 102; unknown `IN` column → Msg 207; a value or name column named after a passthrough column → Msg 265, then Msg 8156.
+- A passthrough column keeps its source's nullability, and the value column is NOT NULL when every column it folds is.
 
-### Divergence — UNPIVOT length unification
-
-The value-type check uses exact `SqlType` equality, so two same-base-type columns of differing declared length (`varchar(10)` + `varchar(20)`) are rejected rather than unified to the widest.
-Real SQL Server unifies same-family differing lengths; the differing-*type* rejection (int/bigint) matches.
-The AW crosscheck driver is PIVOT, not UNPIVOT, so this gap is unexercised in practice — widen to family-equality + max-length if a workload needs it.
+The type match is exact on real too: `varchar(10)` beside `varchar(5)`, `char(3)` beside `varchar(3)`, `decimal(9, 2)` beside `decimal(10, 2)` and two collations of one `varchar(10)` are all Msg 8167 (probed 2026-10-01 against SQL Server 2025), so the exact `SqlType` equality the check uses is real's rule rather than an approximation of a widening one.

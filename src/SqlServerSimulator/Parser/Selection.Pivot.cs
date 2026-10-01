@@ -69,16 +69,23 @@ internal sealed partial class Selection
         ExpectOperator(context.GetNextRequired(), '(');
 
         context.MoveNextRequired();
-        var aggregateName = (context.Token as Name)?.Value ?? throw SimulatedSqlException.SyntaxErrorNear(context);
-        var kind = MapPivotAggregate(aggregateName) ?? throw SimulatedSqlException.SyntaxErrorNear(context);
+        var aggregateToken = context.Token;
+        var aggregateName = (aggregateToken as Name)?.Value ?? throw SimulatedSqlException.SyntaxErrorNear(context);
 
         ExpectOperator(context.GetNextRequired(), '(');
         context.MoveNextRequired();
         // COUNT(*) reaches here with `*` (an Operator), so the Name cast fails
         // → Msg 102, matching SQL Server's rejection of COUNT(*) in PIVOT.
+        // The call's shape is read before its name, so STRING_AGG's separator
+        // is Msg 102 at its comma (probed 2026-10-01 against SQL Server 2025).
         var argToken = context.Token;
         var argColName = (argToken as Name)?.Value ?? throw SimulatedSqlException.SyntaxErrorNear(context);
         ExpectOperator(context.GetNextRequired(), ')');
+        var kind = MapPivotAggregate(aggregateName) ?? throw SimulatedSqlException.SyntaxErrorNear(aggregateToken);
+        // An aggregate that answers for a group of NULLs — CHECKSUM_AGG — can't
+        // tell an empty cell from one whose values were NULL (Msg 406).
+        if (kind == AggregateKind.ChecksumAgg)
+            throw SimulatedSqlException.PivotAggregateNotNullInvariant("checksum_agg");
 
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.For })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -121,6 +128,7 @@ internal sealed partial class Selection
         // Grouping key = every inner column except the FOR column and the
         // aggregate argument column. Each has to be comparable (Msg 488).
         var groupingRefs = new List<Expression>();
+        var groupingNames = new List<string>();
         for (var i = 0; i < source.ColumnNames.Length; i++)
         {
             var colName = source.ColumnNames[i];
@@ -135,6 +143,7 @@ internal sealed partial class Selection
                 namesMissing = true;
             }
             groupingRefs.Add(new Reference(colName));
+            groupingNames.Add(colName);
         }
         if (namesMissing)
             return FromSource.DeferredPlaceholder(alias);
@@ -145,14 +154,33 @@ internal sealed partial class Selection
         var seenValues = new List<string>();
         foreach (var pivotValue in pivotValues)
         {
+            // Output names compare as identifiers do — a case or trailing-space
+            // variant repeats one — and one naming a grouping column is Msg 265
+            // ahead of the repeat (probed 2026-10-01 against SQL Server 2025).
+            foreach (var grouping in groupingNames)
+            {
+                if (SameColumnName(grouping, pivotValue))
+                    throw RotatedColumnConflict(pivotValue, alias, "PIVOT");
+            }
             foreach (var prior in seenValues)
             {
-                if (BuiltInToken.Equals(prior, pivotValue))
+                if (SameColumnName(prior, pivotValue))
                     throw SimulatedSqlException.ColumnSpecifiedMultipleTimes(pivotValue, alias);
             }
             seenValues.Add(pivotValue);
 
-            var literal = new Value(SqlValue.FromNVarchar(pivotValue).CoerceTo(forColType));
+            SqlValue pivotKey;
+            try
+            {
+                pivotKey = SqlValue.FromNVarchar(pivotValue).CoerceTo(forColType);
+            }
+            catch (SimulatedSqlException)
+            {
+                throw SimulatedSqlException.Aggregate([
+                    SimulatedSqlException.ConvertingDataTypeError("nvarchar", SimulatedSqlException.FamilyRootName(forColType), 1),
+                    SimulatedSqlException.PivotValueNotConvertible(pivotValue)]);
+            }
+            var literal = new Value(pivotKey);
             var when = CaseExpression.CreateSimple(
                 new Reference(forColName), [literal], [new Reference(argColName)], elseBranch: null);
             var aggregate = AggregateExpression.CreatePivotAggregate(kind, when);
@@ -256,6 +284,18 @@ internal sealed partial class Selection
                 passthroughNames.Add(colName);
         }
 
+        // The value and name columns join the passthrough ones, so naming one
+        // after a passthrough column is Msg 265 (probed 2026-10-01 against
+        // SQL Server 2025).
+        foreach (var added in (string[])[valueColName, nameColName])
+        {
+            foreach (var passthrough in passthroughNames)
+            {
+                if (SameColumnName(passthrough, added))
+                    throw RotatedColumnConflict(added, alias, "UNPIVOT");
+            }
+        }
+
         // Output shape: passthrough columns, then the value column, then the
         // name column (SQL Server's SELECT * order for UNPIVOT). The name
         // column carries source column names — nvarchar(128), like sysname.
@@ -281,6 +321,17 @@ internal sealed partial class Selection
         var plan = new Selection(schema, columnNames, hasOrderBy: false, hasTopOrOffsetOrFetch: false,
             (batch, outerResolver) => UnpivotRows(
                 source, capturedPassthrough, capturedUnpivot, schema, capturedValueType, nameColType, batch, outerResolver));
+
+        // A passthrough column keeps its own nullability, and the value column
+        // is NOT NULL when every column it folds is (probed 2026-10-01 against
+        // SQL Server 2025).
+        var nullability = new bool[schema.Length];
+        for (var i = 0; i < capturedPassthrough.Length; i++)
+            nullability[i] = source.Columns[FindSourceColumn([source], new MultiPartName(capturedPassthrough[i])).ColumnIndex].Nullable;
+        foreach (var col in capturedUnpivot)
+            nullability[^2] |= source.Columns[FindSourceColumn([source], new MultiPartName(col)).ColumnIndex].Nullable;
+        nullability[^1] = true;
+        plan.ColumnNullability = nullability;
 
         // A passthrough column masks as it reads. Folding a masked column
         // masks both the value and the name column as default() — even the
@@ -381,7 +432,7 @@ internal sealed partial class Selection
     {
         var columns = new HeapColumn[plan.Schema.Length];
         for (var i = 0; i < columns.Length; i++)
-            columns[i] = new HeapColumn(string.Empty, plan.Schema[i], maxLength: null, nullable: true) { DerivedMask = plan.ColumnMasks?[i] };
+            columns[i] = new HeapColumn(string.Empty, plan.Schema[i], maxLength: null, nullable: plan.ColumnNullability?[i] ?? true) { DerivedMask = plan.ColumnMasks?[i] };
 
         return new FromSource(
             qualifier: alias,
@@ -393,6 +444,23 @@ internal sealed partial class Selection
             rows: [],
             lateralPlan: plan);
     }
+
+    /// <summary>
+    /// Whether two output column names collide: as identifiers compare, case
+    /// and trailing spaces aside (<c>[x]</c> and <c>[x ]</c> repeat one,
+    /// probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static bool SameColumnName(string left, string right) =>
+        Collation.Baseline.Equals(left.TrimEnd(' '), right.TrimEnd(' '));
+
+    /// <summary>
+    /// Real's pair for a rotated output column named after one the operator
+    /// already carries: Msg 265, then the Msg 8156 repeat it amounts to.
+    /// </summary>
+    private static SimulatedSqlException RotatedColumnConflict(string column, string alias, string operatorName) =>
+        SimulatedSqlException.Aggregate([
+            SimulatedSqlException.RotatedColumnNameConflict(column, operatorName),
+            SimulatedSqlException.ColumnSpecifiedMultipleTimes(column, alias)]);
 
     private static void ExpectOperator(Token? token, char character)
     {

@@ -8,20 +8,27 @@ namespace SqlServerSimulator.Parser.Aggregators;
 /// and population variance / standard deviation. All return
 /// <see cref="SqlType.Float"/>. Sample variants need n &gt; 1 (single-row
 /// or empty input → NULL); population variants accept any non-empty input
-/// (single-row → 0). NULLs in input are skipped. Implementation uses the
-/// classical sum / sum-of-squares formulation for simplicity; a Welford-
-/// style two-pass would be more numerically stable but the simulator
-/// matches SQL Server's documented behavior at common precisions.
+/// (single-row → 0). NULLs in input are skipped, and <c>DISTINCT</c> folds
+/// each operand value once.
+/// <para>
+/// The moments are real's own: a running sum and sum of squares in
+/// <c>float</c>, combined as <c>(Σx² − (Σx)² / n) / divisor</c> and clamped at
+/// zero. That reproduced the last bit of all 126 random sample and population
+/// variances probed against SQL Server 2025 (2026-10-01), where
+/// <c>Σx² − n·mean²</c>, a two-pass sum of squared deviations and Welford's
+/// update each missed some.
+/// </para>
 /// </summary>
-internal sealed class StatisticalAggregator(AggregateKind kind) : Aggregator
+internal sealed class StatisticalAggregator(AggregateKind kind, bool distinct) : Aggregator
 {
+    private readonly HashSet<SqlValue>? seen = distinct ? [] : null;
     private long count;
     private double sum;
     private double sumOfSquares;
 
     public override void Add(SqlValue value)
     {
-        if (value.IsNull)
+        if (value.IsNull || (this.seen is not null && !this.seen.Add(value)))
             return;
         var x = value.CoerceTo(SqlType.Float).AsDouble;
         this.count++;
@@ -33,9 +40,10 @@ internal sealed class StatisticalAggregator(AggregateKind kind) : Aggregator
             throw SimulatedSqlException.ArithmeticOverflow("float");
     }
 
-    // The classical sum / sum-of-squares moments subtract directly, so the
-    // statistical aggregates slide incrementally over a window frame.
-    public override bool CanRemove => true;
+    // The sum / sum-of-squares moments subtract directly, so the statistical
+    // aggregates slide incrementally over a window frame. A windowed aggregate
+    // takes no DISTINCT.
+    public override bool CanRemove => this.seen is null;
 
     public override void Remove(SqlValue value)
     {
@@ -57,9 +65,8 @@ internal sealed class StatisticalAggregator(AggregateKind kind) : Aggregator
         if (!isPopulation && this.count == 1)
             return SqlValue.Null(SqlType.Float);
 
-        var mean = this.sum / this.count;
         var divisor = isPopulation ? this.count : this.count - 1;
-        var variance = (this.sumOfSquares - (this.count * (mean * mean))) / divisor;
+        var variance = (this.sumOfSquares - (this.sum * this.sum / this.count)) / divisor;
 
         // Floating-point can produce a tiny-negative variance when the true
         // value is zero; clamp before sqrt to avoid NaN.
