@@ -155,4 +155,100 @@ public sealed class InsertExecTests
         _ = sim.ExecuteNonQuery($"insert t exec ('{body.Replace("'", "''", StringComparison.Ordinal)}')");
         AreEqual(1, sim.ExecuteScalar("select count(*) from t"));
     }
+
+    /// <summary>
+    /// The executed body runs on past an error that ends only its statement,
+    /// as any called batch does: its errors and later messages reach the
+    /// client, every later result set is inserted, and the INSERT
+    /// itself succeeds — <c>@@ROWCOUNT</c> counting every row, <c>@@ERROR</c>
+    /// reading 0 (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void BodyError_RunsTheBodyOn()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int)",
+            "create procedure p as begin select 1; select 1/0; print 'body after'; select 2; raiserror('x', 16, 1); select 3 end");
+        using var connection = sim.CreateOpenConnection();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("insert t exec p; print concat(@@rowcount, ' ', @@error)").ExecuteNonQuery());
+        CollectionAssert.AreEqual(
+            new[] { "8134 Divide by zero error encountered.", "50000 x", "0 body after", "0 3 0" },
+            ex.Errors.Select(e => $"{e.Number} {e.Message}").ToArray());
+        AreEqual(6, connection.CreateCommand("select sum(a) from t").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A nested procedure's error continues the same way, its later rows
+    /// inserted with the caller's.
+    /// </summary>
+    [TestMethod]
+    public void NestedBodyError_RunsBothBodiesOn()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int)",
+            "create procedure q as begin select 5; select 1/0; select 6 end",
+            "create procedure p as begin select 1; exec q; select 2 end");
+        using var connection = sim.CreateOpenConnection();
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand("insert t exec p").ExecuteNonQuery());
+        AreEqual("4 14", connection.CreateCommand("select concat(count(*), ' ', sum(a)) from t").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// An error that ends the executed batch — a missing object, from a
+    /// procedure or dynamic SQL — still lets the INSERT write the rows
+    /// returned before it, inside a transaction too; the INSERT then reports
+    /// no count and leaves <c>@@ERROR</c> reading the error.
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec ('select 1; select * from nosuch; select 2')")]
+    [DataRow("exec p")]
+    public void BodyEndedByAMissingObject_InsertsWhatItReturned(string exec)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int)",
+            "create procedure p as begin select 1; select * from nosuch; select 2 end");
+        using var connection = sim.CreateOpenConnection();
+        using var command = connection.CreateCommand($"begin tran; insert t {exec}; print concat(@@rowcount, ' ', @@error); commit");
+        var ex = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
+        CollectionAssert.AreEqual(new[] { "208", "0" }, ex.Errors.Select(e => e.Number.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray());
+        AreEqual("1 208", ex.Errors[1].Message);
+        AreEqual(1, connection.CreateCommand("select sum(a) from t").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A result set the target can't take ends the body and the INSERT with
+    /// nothing written, rows of earlier result sets included, yet the INSERT
+    /// doesn't fail: <c>@@ERROR</c> reads 0 after it, and the batch goes on.
+    /// </summary>
+    [TestMethod]
+    public void AssignmentRule_WritesNothingAndLeavesAtAtErrorClear()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int)",
+            "create procedure p as begin select 1; select newid(); select 2 end");
+        using var connection = sim.CreateOpenConnection();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("insert t exec p; print concat(@@rowcount, ' ', @@error)").ExecuteNonQuery());
+        AreEqual(206, ex.Number);
+        AreEqual("0 0", ex.Errors[1].Message);
+        AreEqual(0, connection.CreateCommand("select count(*) from t").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// Inside a <c>TRY</c> the body's first error is caught instead, and the
+    /// INSERT writes nothing.
+    /// </summary>
+    [TestMethod]
+    public void BodyErrorInsideTry_IsCaughtAndInsertsNothing()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int)",
+            "create procedure p as begin select 1; select 1/0; select 2 end");
+        AreEqual("8134 0", sim.ExecuteScalar(
+            "begin try insert t exec p end try begin catch select concat(error_number(), ' ', (select count(*) from t)) end catch"));
+    }
 }

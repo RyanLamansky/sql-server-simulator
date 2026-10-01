@@ -241,6 +241,13 @@ public sealed partial class SimulatedSqlException : DbException
     internal object? EndedCalledBatchIn;
 
     /// <summary>
+    /// Set on the refusal of a result set an <c>INSERT … EXEC</c> target's
+    /// columns can't take, which ends every batch between it and the
+    /// <c>INSERT</c>, as an error that ends only its statement doesn't.
+    /// </summary>
+    internal bool EndsInsertExec;
+
+    /// <summary>
     /// Set when a write in a function body raised this error — a
     /// multi-statement function filling its return table — which ends the
     /// calling statement as a write of its own would, Msg 3621 following it.

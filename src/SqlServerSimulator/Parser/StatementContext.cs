@@ -341,6 +341,14 @@ internal sealed class StatementContext
     public bool BindsDeferredSource;
 
     /// <summary>
+    /// Set in skip mode when a statement whose write target doesn't exist was
+    /// read to its end before raising its deferred name-resolution error, so a
+    /// compile walk resumes at the statement after it rather than stopping
+    /// there, as real parses the whole batch before deferring any of it.
+    /// </summary>
+    public bool DeferredReadToEnd;
+
+    /// <summary>
     /// Set by <c>OPTION (USE HINT ('DISABLE_TSQL_SCALAR_UDF_INLINING'))</c>,
     /// which keeps the statement's scalar function calls from inlining (see
     /// <see cref="InlinedScalarCalls"/>).
@@ -462,6 +470,7 @@ internal sealed class StatementContext
         this.ClientOutputShape = null;
         this.TransactedWrite = false;
         this.BindsDeferredSource = false;
+        this.DeferredReadToEnd = false;
         this.DisablesScalarUdfInlining = false;
         this.Recompiles = false;
         this.ReadsTableVariable = false;

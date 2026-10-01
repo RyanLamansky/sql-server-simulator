@@ -240,6 +240,7 @@ A body starts under `SET XACT_ABORT ON` whatever the session says — `@@OPTIONS
 - An error the body leaves unhandled ends the firing batch and rolls the transaction back, and so does one from a procedure or dynamic SQL the body calls, which inherit the option.
   The firing statement still sends Msg 3621 after it, which an error ending the batch from the statement itself doesn't (`SimulatedSqlException.EndedTriggerBody`).
 - Caught by a `TRY` in the firing batch, it dooms the transaction.
+  A `TRY` catches the body's binder errors too — those of the compile as the trigger first fires and a missing object the body names when it runs — which otherwise end the batch the same way (probed 2026-10-01 against SQL Server 2025).
 - `RAISERROR`, which the option exempts, lets the body run on the way a procedure body does ([`control-flow.md`](control-flow.md#procedure-and-dynamic-sql-bodies)): the error reaches the client among the body's output, and the firing statement keeps its rows.
   So does any error after the body's own `SET XACT_ABORT OFF`.
 

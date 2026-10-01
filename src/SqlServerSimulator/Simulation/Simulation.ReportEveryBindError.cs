@@ -30,7 +30,7 @@ partial class Simulation
         if (batch.BindErrors is not null
             || !BindErrorReport.StartsReport(first)
             || !ReportsEveryBindError(batch.Parser, start)
-            || (batch.IsSkipping && (IsDeferrableNameResolutionError(first) || (IsBinderError(first) && batch.CurrentStatement.BindsDeferredSource))))
+            || (batch.IsSkipping && DefersWithItsStatement(batch, first)))
         {
             return (first, false);
         }

@@ -51,9 +51,11 @@ partial class Simulation
     /// </param>
     /// <returns>The error or errors that stop the batch, or <see langword="null"/> when it compiled.</returns>
     /// <remarks>
-    /// Real keeps compiling the statements after one it defers; the walk stops at
-    /// a deferred DML target, because its recovery scan can't tell where that
-    /// statement ended, so an error past it surfaces when its statement runs.
+    /// Real keeps compiling the statements after one it defers, and so does the
+    /// walk past a write to a missing table, which it reads to its end; a
+    /// deferral raised mid-statement stops the walk, because its recovery scan
+    /// can't tell where that statement ended, so an error past it surfaces when
+    /// its statement runs.
     /// </remarks>
     private SimulatedSqlException? CompileBatch(BatchContext compileBatch, PlanCacheKey? key, out List<SimulatedSqlException>? inliningFailures, bool sendsOnce = true)
     {
@@ -137,7 +139,7 @@ partial class Simulation
     /// <summary>
     /// The throwaway context <see cref="CompileBatch"/> walks
     /// <paramref name="executing"/>'s text on: the same command, a copy of the
-    /// variables and table variables its parameters seeded (so the walk's own
+    /// variables, table variables and cursor variables its parameters seeded (so the walk's own
     /// <c>DECLARE</c>s don't collide with the run's), and the same frame —
     /// a trigger body's firing frame included — and error attribution.
     /// </summary>
@@ -149,6 +151,8 @@ partial class Simulation
             : new BatchContext(command, variables);
         foreach (var (name, table) in executing.TableVariables)
             compile.TableVariables[name] = table;
+        foreach (var (name, cursor) in executing.CursorVariables)
+            compile.CursorVariables[name] = cursor;
         compile.LineOffset = executing.LineOffset;
         compile.ErrorProcedureName = executing.ErrorProcedureName;
         compile.ForceTempTableScope = executing.ForceTempTableScope;

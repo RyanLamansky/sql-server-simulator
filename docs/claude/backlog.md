@@ -239,7 +239,7 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Batch compilation** ships ([`control-flow.md`](control-flow.md#batch-compilation)); what the sweep found past it:
 
-- The compile's remaining gaps (the walk stopping at a deferred DML target, a procedure body's first-execution compile reporting none of its own errors, an `INSERT … EXEC` body stopping at its first error) are listed in [`control-flow.md`](control-flow.md#not-modeled-yet).
+- The compile walk still stops at a deferral raised mid-statement — an `ALTER TABLE` of a table the batch creates, a binder error in a statement reading one — so an error past it surfaces only when its statement runs ([`control-flow.md`](control-flow.md#not-modeled-yet)).
 - Syntax-error recovery ([`errors.md`](errors.md#syntax-error-recovery)) restarts at statement keywords rather than walking real's grammar, so a restart the simulator's own parser reads differently diverges: `begin try end try begin catch select 1 end catch` on one line adds Msg 102 near the last `catch` on real and nothing here, and a Msg 178 after a misplaced `CREATE PROCEDURE` names the procedure on real and nothing here (probed 2026-09-28).
 
 **Wrong results**:
@@ -256,7 +256,6 @@ Already listed elsewhere here and not repeated: parenthesized set-op branches.
 
 **Same error, different number, state or class** (probed 2026-09-30):
 
-- A parse-phase error in a statement naming a table its own batch creates surfaces when the statement runs rather than as the batch compiles — `CREATE TABLE t …; INSERT t …; SELECT … FROM t GROUP BY ALL g WITH CUBE` runs the `INSERT` before Msg 1028 here, and a syntax error in the same position behaves the same — because the compile walk defers such a statement before reaching its tail.
 - An error escaping a trigger body is followed by Msg 3621 carrying the trigger as its `Procedure` on real, and by none after a Msg 208 a called function raises; here the Msg 3621 follows unattributed in both (probed 2026-10-01; [`triggers.md`](triggers.md#not-modeled-yet)).
 
 **Built-in values** (probed 2026-09-26):

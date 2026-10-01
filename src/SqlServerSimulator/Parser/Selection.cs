@@ -3706,7 +3706,7 @@ internal sealed partial class Selection
                             ? ConsumeOptionalAlias(context)
                             : ConsumeOptionalAliasAtCurrent(context);
                         ParseOptionalTableSample(context);
-                        _ = ParseOptionalTableHints(context);
+                        _ = ParseOptionalFromSourceHints(context, placeholderAlias is not null, objectName.ToString());
                         return FromSource.DeferredPlaceholder(placeholderAlias ?? objectName.Leaf);
                     }
                     throw context.Batch.UnresolvableObjectName(objectName);

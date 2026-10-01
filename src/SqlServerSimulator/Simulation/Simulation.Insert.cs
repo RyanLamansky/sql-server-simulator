@@ -417,6 +417,7 @@ partial class Simulation
         }
 
         List<SqlValue[]> sourceRows;
+        SimulatedSqlException? endedBody = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
         {
             // `INSERT INTO t DEFAULT VALUES` — one row with every column
@@ -436,17 +437,25 @@ partial class Simulation
             sourceRows = context.Token switch
             {
                 ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable),
-                ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns),
+                ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns, out endedBody),
                 Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable),
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
         }
 
-        return InsertRows(
+        var written = InsertRows(
             context,
             new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples: null),
             sourceRows,
             valueTupleStamps: null);
+        // The error that ended an executed body is the statement's, though it
+        // wrote the rows the body returned before it.
+        if (endedBody is not null)
+        {
+            context.Batch.CurrentStatement.SuppressErrorReset = true;
+            context.Connection.LastErrorNumber = endedBody.Number;
+        }
+        return written;
     }
 
     /// <summary>
@@ -1407,7 +1416,21 @@ partial class Simulation
     /// An <c>INSERT … EXEC</c> reached while another is draining on the same
     /// connection raises <strong>Msg 8164</strong> (nesting is disallowed).
     /// </summary>
-    private static List<SqlValue[]> ExecuteExecSource(ParserContext context, HeapColumn[] destinationColumns)
+    /// <param name="context">The INSERT's parser, on its <c>EXEC</c>.</param>
+    /// <param name="destinationColumns">The columns the rows fill.</param>
+    /// <param name="endedBody">
+    /// The error that ended the executed batch partway — a missing object a
+    /// statement it deferred names — or null. Real inserts the rows the body
+    /// returned before it, sends the error ahead of the INSERT's DONE, which
+    /// then carries no count, and leaves <c>@@ERROR</c> reading it (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </param>
+    /// <remarks>
+    /// The body runs on past an error that ends only its statement, as any
+    /// called batch does, and its error reaches the client among its messages
+    /// while the rows of its later statements are still inserted.
+    /// </remarks>
+    private static List<SqlValue[]> ExecuteExecSource(ParserContext context, HeapColumn[] destinationColumns, out SimulatedSqlException? endedBody)
     {
         var expectedColumnCount = destinationColumns.Length;
         var batch = context.Batch;
@@ -1415,6 +1438,7 @@ partial class Simulation
         if (connection.InsertExecActive)
             throw SimulatedSqlException.InsertExecCannotBeNested();
 
+        endedBody = null;
         var rows = new List<SqlValue[]>();
         connection.InsertExecActive = true;
         connection.InsertExecTargetTypes = Array.ConvertAll(destinationColumns, column => column.Type);
@@ -1422,19 +1446,28 @@ partial class Simulation
         {
             foreach (var outcome in connection.Simulation.ParseExec(batch, insertExecSource: true))
             {
-                // The procedure's messages still reach the client, ahead of
-                // the INSERT's own outcome, and on a connection that frames
-                // every statement so do its statements' DONEINPROCs, none
-                // carrying a count — the rows went to the table (probed
-                // 2026-09-28 against SQL Server 2025).
+                // The procedure's messages and the errors it continued past
+                // still reach the client, ahead of the INSERT's own outcome,
+                // and on a connection that frames every statement so do its
+                // statements' DONEINPROCs, none carrying a count — the rows
+                // went to the table (probed 2026-09-28 against SQL Server
+                // 2025).
                 if (connection.FramesEveryStatement)
                 {
                     if (FramedInsertExecOutcome(outcome) is { } framed)
                         (batch.PendingTriggerOutcomes ??= []).Add(framed);
                 }
+                else if (outcome is SimulatedErrorOutcome)
+                {
+                    SendAfterQueuedMessages(batch, outcome);
+                }
                 else if (outcome is SimulatedInfoOutcome info)
                 {
-                    connection.PendingMessages.Enqueue(info.Message);
+                    // Behind an error already sent, a message keeps its place.
+                    if (batch.PendingTriggerOutcomes is not null)
+                        batch.PendingTriggerOutcomes.Add(info);
+                    else
+                        connection.PendingMessages.Enqueue(info.Message);
                 }
                 if (outcome is not SimulatedSqlResultSet resultSet)
                     continue;
@@ -1444,23 +1477,42 @@ partial class Simulation
                     rows.Add(RowDecoder.DecodeRow(resultSet.Schema, rowBytes));
             }
         }
+        catch (SimulatedSqlException ended) when (ended is { EndedCalledBatch: true, XactAbortPromoted: false, TerminatesBatch: false } && ContinuesCalledBatch(batch))
+        {
+            // A result set the target can't take ends the INSERT with nothing
+            // written, yet the statement doesn't fail: it reports no count,
+            // and @@ERROR reads 0 after it (probed 2026-10-01 against SQL
+            // Server 2025).
+            if (ended.EndsInsertExec)
+                rows.Clear();
+            else
+                endedBody = ended;
+            SendAfterQueuedMessages(batch, new SimulatedErrorOutcome(ended, raisedWhileCompiling: true));
+        }
         finally
         {
             connection.InsertExecActive = false;
             connection.InsertExecTargetTypes = null;
         }
         return rows;
+
+        static void SendAfterQueuedMessages(BatchContext batch, SimulatedStatementOutcome outcome)
+        {
+            var pending = batch.PendingTriggerOutcomes ??= [];
+            pending.AddRange(DrainPendingMessages(batch.Connection));
+            pending.Add(outcome);
+        }
     }
 
     /// <summary>
     /// What one of an <c>INSERT … EXEC</c> body's outcomes sends the client:
-    /// its messages as they are, a statement's DONE without its count, and
+    /// its messages and the errors it continued past as they are, a statement's DONE without its count, and
     /// nothing for a result set's rows or a scope's close, which real frames
     /// as neither.
     /// </summary>
     private static SimulatedStatementOutcome? FramedInsertExecOutcome(SimulatedStatementOutcome outcome) => outcome switch
     {
-        SimulatedInfoOutcome => outcome,
+        SimulatedInfoOutcome or SimulatedErrorOutcome => outcome,
         SimulatedQueryResult or SimulatedNonQuery => new SimulatedNonQuery(-1)
         {
             DoneKind = outcome.DoneKind == StatementDoneKind.NoDone ? StatementDoneKind.Select : outcome.DoneKind,
@@ -1498,6 +1550,7 @@ partial class Simulation
                 // It ends the executed body and the INSERT, never the
                 // caller's batch.
                 refused.EndedCalledBatch = true;
+                refused.EndsInsertExec = true;
                 throw;
             }
         }

@@ -52,6 +52,7 @@ partial class Simulation
     {
         if (!context.Batch.IsSkipping)
             return;
+        context.Batch.CurrentStatement.BindsDeferredSource = true;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
             context.MoveNextRequired();
@@ -83,6 +84,7 @@ partial class Simulation
             joins.Add(new JoinSpec(JoinKind.Cross, onPredicate: null));
             sources.Add(FromSource.DeferredPlaceholder(leadingIdent.Leaf));
         }
+        context.Batch.CurrentStatement.BindsDeferredSource = true;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
             context.MoveNextRequired();
@@ -137,13 +139,17 @@ partial class Simulation
         return true;
     }
 
-    /// <summary>A token that neither ends a statement nor starts the next is Msg 102 (156 for a reserved word).</summary>
+    /// <summary>
+    /// A token that neither ends a statement nor starts the next is Msg 102
+    /// (156 for a reserved word); otherwise the statement was read to its end.
+    /// </summary>
     private static void RejectStrayToken(ParserContext context)
     {
         if (!EndsStatement(context.Token))
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.Token is Operator { Character: '(' } paren)
             context.StatementEndedOnParen = paren.StartIndex;
+        context.Batch.CurrentStatement.DeferredReadToEnd = true;
     }
 
     /// <summary>
@@ -175,7 +181,17 @@ partial class Simulation
         switch (context.Token)
         {
             case ReservedKeyword { Keyword: Keyword.Values }:
-                _ = ParseValuesTuples(context, allowDefault: true);
+                // The tuples read no column of the target, so they bind as the
+                // batch compiles: a column name there is Msg 207, an illegal
+                // CAST Msg 529 (probed 2026-10-01 against SQL Server 2025).
+                foreach (var tuple in ParseValuesTuples(context, allowDefault: true))
+                {
+                    foreach (var cell in tuple)
+                    {
+                        if (cell is not Parser.Expressions.DefaultValueExpression)
+                            _ = cell.GetSqlType(context.Batch, static name => throw SimulatedSqlException.UnboundColumnReference(name));
+                    }
+                }
                 break;
             case ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }:
                 _ = Selection.Parse(context, new QueryScope(QueryPosition.InsertSource, null));
@@ -224,6 +240,7 @@ partial class Simulation
             _ = ParseMergeSource(context);
         if (!context.Batch.IsSkipping)
             return;
+        context.Batch.CurrentStatement.BindsDeferredSource = true;
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -263,10 +280,26 @@ partial class Simulation
                     {
                         context.MoveNextRequired();
                         _ = BatchContext.ParseObjectName(context);
-                        if (context.GetNextRequired() is not Operator { Character: '=' })
+                        // A column's mutator method is the whole clause.
+                        if (context.GetNextRequired() is Operator { Character: '(' })
+                        {
+                            do
+                            {
+                                context.MoveNextRequired();
+                                ParseMissingMergeValue(context);
+                            }
+                            while (context.Token is Operator { Character: ',' });
+                            if (context.Token is not Operator { Character: ')' })
+                                throw SimulatedSqlException.SyntaxErrorNear(context);
+                            context.MoveNextOptional();
+                            continue;
+                        }
+                        if (context.Token is not Operator { Character: '=' })
                             throw SimulatedSqlException.SyntaxErrorNear(context);
-                        context.MoveNextRequired();
-                        ParseMissingMergeValue(context);
+                        if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Default })
+                            context.MoveNextOptional();
+                        else
+                            ParseMissingMergeValue(context);
                     }
                     while (context.Token is Operator { Character: ',' });
                     break;
@@ -315,6 +348,7 @@ partial class Simulation
         SkipOptionClause(context);
         if (context.Token is not Operator { Character: ';' })
             throw EndsStatement(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
+        context.Batch.CurrentStatement.DeferredReadToEnd = true;
     }
 
     /// <summary>

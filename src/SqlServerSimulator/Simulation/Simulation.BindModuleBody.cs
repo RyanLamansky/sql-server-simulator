@@ -51,8 +51,8 @@ partial class Simulation
     /// <see cref="NotSupportedException"/> names a feature the simulator hasn't
     /// built rather than something real's binder rejects, so raising it at
     /// CREATE would refuse a module real accepts — it is swallowed here and
-    /// surfaces at invocation as before. A swallowed deferred-name error
-    /// abandons the rest of the pass for the reason recorded on
+    /// surfaces at invocation as before. A deferred-name error raised
+    /// mid-statement abandons the rest of the pass for the reason recorded on
     /// <see cref="BatchContext.CreateTimeBinding"/>.
     /// </para>
     /// </remarks>

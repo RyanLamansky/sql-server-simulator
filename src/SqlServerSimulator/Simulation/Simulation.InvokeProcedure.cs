@@ -348,10 +348,18 @@ partial class Simulation
                 try
                 {
                     // The body compiles as the call is about to run it, unless
-                    // its plan stands; what it couldn't inline goes out first.
+                    // its plan stands; what it couldn't inline goes out first,
+                    // and an error compiling it is the EXEC's own, as dynamic
+                    // SQL's is.
                     var recompiles = recompile || procedure.RecompilesEveryCall;
-                    if (this.CompileModuleBody(innerBatch, procedure.Schema.Database, ref procedure.CompiledPlan, parent: null, recompiles, keepsPlan: !recompiles) is { } failures)
+                    if (this.CompileModuleBody(innerBatch, procedure.Schema.Database, ref procedure.CompiledPlan, parent: null, recompiles, keepsPlan: !recompiles, out var compileError) is { } failures)
                         outcomes.AddRange(CompileFailuresSent(innerBatch, failures));
+                    if (compileError is not null)
+                    {
+                        compileError.EndedCalledBatch = true;
+                        compileError.EndedCalledBatchIn = innerBatch;
+                        throw compileError;
+                    }
                     var parser = innerBatch.Parser;
                     parser.MoveNextOptional();
                     foreach (var outcome in DispatchStatementsUntil(innerBatch, endKeyword: null))
@@ -472,13 +480,12 @@ partial class Simulation
     /// <c>XACT_ABORT ON</c>, so only an error that option exempts continues
     /// there. It does when the caller itself
     /// continues and no <c>TRY</c> in it is open, since an open one catches
-    /// the body's first error and abandons the rest. Real runs an
-    /// <c>INSERT … EXEC</c> body on too; that isn't built yet, since the
-    /// statement collects the body's rows rather than forwarding its outcomes,
-    /// so such a body stops at its first error.
+    /// the body's first error and abandons the rest. An <c>INSERT … EXEC</c>
+    /// body runs on the same way, inserting what its later statements return
+    /// (probed 2026-10-01 against SQL Server 2025).
     /// </summary>
     private static bool ContinuesCalledBatch(BatchContext caller)
-        => caller.ContinueOnError && caller.TryFrameDepth == 0 && !caller.Connection.InsertExecActive;
+        => caller.ContinueOnError && caller.TryFrameDepth == 0;
 
     /// <summary>
     /// Converts an argument to its parameter's declared type the way real

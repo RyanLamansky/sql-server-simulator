@@ -260,10 +260,11 @@ internal sealed class BatchContext
     /// <item>permission enforcement is off (<see cref="EnforcesPermissions"/>)
     /// — a bind resolves names, it never reads or writes anything, and real
     /// binds a body under the module's own ownership chain;</item>
-    /// <item>a swallowed deferred-name error abandons the rest of the bind
-    /// (<see cref="BatchAborted"/>), because the parse cursor is left
-    /// mid-statement and anything the recovery scan reaches after it would be
-    /// bound from an unreliable position.</item>
+    /// <item>a swallowed deferred-name error raised mid-statement abandons the
+    /// rest of the bind (<see cref="BatchAborted"/>), because anything the
+    /// recovery scan reaches after it would be bound from an unreliable
+    /// position; one raised by a statement read to its end
+    /// (<see cref="StatementContext.DeferredReadToEnd"/>) doesn't.</item>
     /// </list>
     /// </summary>
     public bool CreateTimeBinding;

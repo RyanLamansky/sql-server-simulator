@@ -211,18 +211,16 @@ public sealed class ModuleBodyBindingTests
     }
 
     /// <summary>
-    /// A missing DML target is the one deferral the simulator reaches by
-    /// swallowing a raised Msg 208 rather than by a placeholder source, and its
-    /// recovery scan leaves the parse cursor unreliable — so the bind stops
-    /// there and the rest of the body binds at first invocation instead.
+    /// A write to a missing table defers only itself: the bind reads it to its
+    /// end and binds the statements after it (probed 2026-10-01 against SQL
+    /// Server 2025).
     /// </summary>
     [TestMethod]
-    public void ProcedureBody_MissingDmlTarget_AbandonsTheRestOfTheBind()
+    public void ProcedureBody_MissingDmlTarget_BindsTheRestOfTheBody()
     {
         var sim = WithFixture();
-        sim.ExecuteBatches("create procedure dbo.pdefer as insert into dbo.missing_xyz values (1); select nosuchcol from dbo.bt");
-        AreEqual(1, ObjectCount(sim, "pdefer"));
-        _ = sim.AssertSqlError("exec dbo.pdefer", 208);
+        sim.AssertSqlError("create procedure dbo.pdefer as insert into dbo.missing_xyz values (1); select nosuchcol from dbo.bt", 207, "Invalid column name 'nosuchcol'.");
+        AreEqual(0, ObjectCount(sim, "pdefer"));
     }
 
     /// <summary>
@@ -392,18 +390,18 @@ public sealed class ModuleBodyBindingTests
     }
 
     /// <summary>
-    /// A statement that defers ends the bind, so what was gathered before it is
-    /// what the CREATE reports. Real, which knows where the deferred statement
-    /// ended, keeps binding and would report the later error too.
+    /// The binder errors on both sides of a deferred write are reported
+    /// together (probed 2026-10-01 against SQL Server 2025).
     /// </summary>
     [TestMethod]
-    public void BinderErrorBeforeADeferral_ReportsWhatBound()
+    public void BinderErrorsAroundADeferral_AreAllReported()
     {
         var sim = WithFixture();
         var ex = sim.AssertSqlError(
             "create procedure dbo.pdefer as select nosuchone from dbo.bt; insert into dbo.missing_xyz values (1); select nosuchtwo from dbo.bt", 207);
-        AreEqual(1, ex.Errors.Count);
-        AreEqual("Invalid column name 'nosuchone'.", ex.Message);
+        AreEqual(2, ex.Errors.Count);
+        AreEqual("Invalid column name 'nosuchone'.", ex.Errors[0].Message);
+        AreEqual("Invalid column name 'nosuchtwo'.", ex.Errors[1].Message);
     }
 
     /// <summary>

@@ -630,10 +630,11 @@ partial class Simulation
         // Only a module body may hold one: at batch level, dynamic SQL
         // included, ATOMIC is a syntax error, and a module that isn't natively
         // compiled refuses it as it binds at CREATE (Msg 10782) — probed
-        // 2026-09-25 against SQL Server 2025. A body that runs has passed that.
+        // 2026-09-25 against SQL Server 2025. A body that runs has passed that,
+        // and so has one compiling as its call is about to run it.
         if (batch.UdfFrame is null && batch.TriggerFrame is null && batch.ProcFrame is not { IsDynamicSql: false })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (batch.CreateTimeBinding && !batch.NativelyCompiledBody)
+        if (batch.CreateTimeBinding && !batch.CompilingForRun && !batch.NativelyCompiledBody)
             throw SimulatedSqlException.BeginAtomicOutsideNativeModule();
         context.MoveNextRequired(); // consume ATOMIC
 

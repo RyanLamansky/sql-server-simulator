@@ -66,9 +66,11 @@ Probe-confirmed deferrals, all creating successfully on real and here: a missing
 
 Statement granularity is real's: a body whose first statement names a missing table and whose second names a bad column on an existing one still reports Msg 207, in either order.
 
-**Stop-at-first-deferral is the divergence.**
-When the deferral arrives as a *swallowed Msg 208* — the DML / DROP-target case, not the placeholder one — the parser threw mid-statement and the only recovery is a scan to the next statement-boundary token, which can still land inside the failed statement (`INSERT INTO missing SELECT …` throws with the cursor already on `SELECT`).
-Binding on from there would report errors against fragments, so `CreateTimeBinding` sets `BatchContext.BatchAborted` and the rest of the body falls back to binding at first invocation.
+A missing DML target's statement is read to its end over placeholder columns before its Msg 208 is swallowed, so the bind goes on past it and reports the binder errors on both sides together (probed 2026-10-01 against SQL Server 2025).
+
+**Stop-at-a-mid-statement-deferral is the divergence.**
+When the deferral is raised partway through a statement — an `ALTER TABLE` of a missing table, a binder error in a statement over a placeholder source — the only recovery is a scan to the next statement-boundary token, which can still land inside the failed statement.
+Binding on from there would report errors against fragments, so `CreateTimeBinding` sets `BatchContext.BatchAborted` and the rest of the body binds when a call first compiles it ([`control-flow.md`](control-flow.md#batch-compilation)).
 Real keeps binding, because it knows where the statement ended.
 
 ### What binds
@@ -254,7 +256,7 @@ A batch that fails to compile carries the failures among its binder errors where
 A procedure's body compiles when a call first runs it — a nested `EXEC`, `EXEC ('…')` and `sp_executesql` alike — and a DML trigger's when it first fires, so the failures go out then, inside the call ahead of the body's first statement and past any `TRY` in it, taking that statement's `DONEINPROC` count as a batch's take its first `DONE` (probed 2026-10-01 against SQL Server 2025).
 Later calls reuse the plan and send nothing until it no longer stands; `ModulePlan` on `Procedure.CompiledPlan` / `Trigger.CompiledPlan` carries the rules: `DBCC FREEPROCCACHE`, `sp_recompile` of the module or of a table it reads (which also moves the table's `modify_date`), and a change to an object it depends on — a table it reads altered or dropped, a function it calls altered, or an object such a function reads dropped — while an unrelated `CREATE` or `DROP` and `sp_recompile` of a called function leave it standing.
 `EXEC … WITH RECOMPILE` compiles afresh without replacing the plan, a procedure created `WITH RECOMPILE` compiles on every call, and the body's deferred and `OPTION (RECOMPILE)` statements compile as the plan runs them, as a batch's do.
-`Simulation.CompileModuleBody` reads the body with the batch compile's own walk, so a body that doesn't compile sends nothing and raises as its statements run.
+`Simulation.CompileModuleBody` reads the body with the batch compile's own walk, so a body that doesn't compile sends no failure of this kind: it reports its binder errors before its first statement runs and keeps no plan ([`control-flow.md`](control-flow.md#batch-compilation)).
 
 **How it is sent.**
 The failure is a `SimulatedErrorOutcome` marked `RaisedWhileCompiling`, with no DONE of its own: on the wire the next DONE, whatever statement sends it, carries `DONE_ERROR` and drops `DONE_COUNT` while keeping its count, so SqlClient raises no `StatementCompleted` for that statement and leaves its rows out of `RecordsAffected` — and the in-process surface leaves them out too (`CompileErrorCount`).

@@ -91,6 +91,7 @@ Once enabled, the rowset reads through the linked-server machinery ([`linked-ser
   `Database` / `Initial Catalog` is where its sessions start, else `master`.
 - A query is a pass-through as `OPENQUERY`'s is; one with no result set is Msg 7357, and one with an `xml` column Msg 9514 naming the rowset's alias, else `OPENROWSET`.
   An object needs three parts — fewer is **Msg 7313**, four is Msg 117 — and a missing one is **Msg 7314**.
+  Its metadata is read as the batch compiles, so a table the same batch creates and writes first is that Msg 7314 before anything runs.
 - `INSERT` / `UPDATE` / `DELETE` through either form write as a linked server's target does, the joined forms through its alias; a `MERGE` target is **Msg 5315**, and a write inside a local transaction is the loopback's **Msg 3910** (a registered remote's **Msg 7391**).
 - A column-alias list is Msg 102.
 
@@ -106,7 +107,6 @@ The `Msg 7222` / `Msg 15281` refusals come first.
 - A format-file rowset's field that doesn't convert ends the statement with its row error; `MAXERRORS` isn't applied to a rowset.
 - Ad hoc: the provider string's keywords aren't checked and nothing authenticates, so an OLE DB spelling real's driver refuses (`User ID=` / `Password=` → Msg 7399, 7303) connects here, as does the three-part form real's loopback refused on encryption.
   An unreachable server's Msg 2 arrives without the two Msg 7412 provider messages real sends ahead of it.
-- A table created in the same batch as an ad hoc read of it: real checks the remote metadata when the batch compiles and fails (Msg 7314 / 208), where the simulator's compile walk stops at the table's first write — the general limitation in [`control-flow.md`](control-flow.md#not-modeled-yet).
 
 ## Not modeled yet
 

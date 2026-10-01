@@ -425,11 +425,22 @@ partial class Simulation
                         compileAt = outerBatch.PendingTriggerOutcomes?.Count ?? 0;
                 }
                 // A DML trigger's body compiles as it first fires, unless its
-                // plan stands; what it couldn't inline goes out first.
-                if (frame.Trigger is { } compiled
-                    && this.CompileModuleBody(innerBatch, bodyDatabase, ref compiled.CompiledPlan, compiled.Parent, recompile: false, keepsPlan: true) is { } failures)
+                // plan stands; what it couldn't inline goes out first. An error
+                // compiling it ends the firing statement as one its body raised
+                // under the body's XACT_ABORT ON would, so a TRY around the
+                // statement catches it (probed 2026-10-01 against SQL Server
+                // 2025).
+                if (frame.Trigger is { } compiled)
                 {
-                    (outerBatch.PendingTriggerOutcomes ??= []).AddRange(CompileFailuresSent(innerBatch, failures));
+                    if (this.CompileModuleBody(innerBatch, bodyDatabase, ref compiled.CompiledPlan, compiled.Parent, recompile: false, keepsPlan: true, out var compileError) is { } failures)
+                        (outerBatch.PendingTriggerOutcomes ??= []).AddRange(CompileFailuresSent(innerBatch, failures));
+                    if (compileError is not null)
+                    {
+                        ApplyXactAbortPromotion(connection, compileError);
+                        compileError.EndedCalledBatch = true;
+                        compileError.EndedCalledBatchIn = innerBatch;
+                        throw compileError;
+                    }
                 }
                 var parser = innerBatch.Parser;
                 parser.MoveNextOptional();

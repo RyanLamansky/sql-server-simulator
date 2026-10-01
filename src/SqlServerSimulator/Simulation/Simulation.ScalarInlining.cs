@@ -98,8 +98,12 @@ partial class Simulation
     /// inlining failures the compile sends ahead of the body's first statement
     /// (see <see cref="ModulePlan"/>). The statements the compile leaves to
     /// compile as they run go on <paramref name="body"/>, from the plan when it
-    /// stands. A body that doesn't compile — its errors raise as its statements
-    /// run — sends nothing.
+    /// stands. A body that doesn't compile — a statement naming a table created
+    /// after the module that no longer binds — sends nothing, keeps no plan, so
+    /// the next call compiles it again, and hands back
+    /// <paramref name="compileError"/>: every binder error the body holds, which
+    /// real sends before the body's first statement runs (probed 2026-10-01
+    /// against SQL Server 2025).
     /// </summary>
     /// <param name="body">The batch the body is about to run on.</param>
     /// <param name="database">The database the body binds in.</param>
@@ -107,23 +111,26 @@ partial class Simulation
     /// <param name="parent">A trigger's table, whose change the plan depends on too; null for a procedure.</param>
     /// <param name="recompile">Whether the call compiles the body whatever plan stands — <c>EXEC … WITH RECOMPILE</c> or a procedure created <c>WITH RECOMPILE</c>.</param>
     /// <param name="keepsPlan">Whether the compile becomes the module's plan, which <c>EXEC … WITH RECOMPILE</c>'s doesn't.</param>
-    private List<SimulatedSqlException>? CompileModuleBody(BatchContext body, Database database, ref ModulePlan? plan, SchemaObject? parent, bool recompile, bool keepsPlan)
+    /// <param name="compileError">The errors that stop the body before it runs, or null when it compiled.</param>
+    private List<SimulatedSqlException>? CompileModuleBody(BatchContext body, Database database, ref ModulePlan? plan, SchemaObject? parent, bool recompile, bool keepsPlan, out SimulatedSqlException? compileError)
     {
-        // Nothing inlines in a database that doesn't inline scalar functions,
-        // so there is nothing such a compile could send.
-        if (database is not { CompatibilityLevel: >= CompatibilityLevel.Sql150, ScopedConfiguration.TsqlScalarUdfInlining: true })
-            return null;
         var generation = Volatile.Read(ref this.modulePlanGeneration);
         if (!recompile && plan is { } standing && standing.Stands(Volatile.Read(ref this.SchemaVersion), generation))
         {
             body.StatementsCompiledOnRun = standing.CompiledOnRun;
+            compileError = null;
             return null;
         }
 
         var schemaVersion = Volatile.Read(ref this.SchemaVersion);
         var compileContext = CompileContextFor(body, body.Parser.Command);
-        var compileError = this.CompileBatch(compileContext, key: null, out var failures, sendsOnce: false);
-        var compiledOnRun = compileError is null ? compileContext.StatementsCompiledOnRun : null;
+        compileError = this.CompileBatch(compileContext, key: null, out var failures, sendsOnce: false);
+        if (compileError is not null)
+        {
+            body.StatementsCompiledOnRun = null;
+            return null;
+        }
+        var compiledOnRun = compileContext.StatementsCompiledOnRun;
         body.StatementsCompiledOnRun = compiledOnRun;
         if (keepsPlan)
         {
@@ -131,7 +138,7 @@ partial class Simulation
             AddBodyDependencies(database, body.Parser.Command.CommandText, dependencies, compileContext.InlinedCalls?.Calls);
             plan = new ModulePlan(schemaVersion, generation, ModulePlan.Track(database, dependencies), compiledOnRun);
         }
-        return compileError is null ? failures : null;
+        return failures;
     }
 
     /// <summary>

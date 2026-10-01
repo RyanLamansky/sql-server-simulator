@@ -2544,6 +2544,19 @@ public sealed partial class Simulation
         => ex.Number is 208 or 4902;
 
     /// <summary>
+    /// Whether <paramref name="ex"/>, raised as a statement parses without
+    /// running, waits for the statement to run: a missing object, or any
+    /// error real's binder raises in a statement that reads an object that
+    /// doesn't exist yet, which real binds only once it runs. Real's binder
+    /// raises a few severity-15 errors too — Msg 107, 130, 145, 147, 164 and
+    /// 4108 wait with their statement, where a parse-phase one such as Msg 174
+    /// or 321 doesn't (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static bool DefersWithItsStatement(BatchContext batch, SimulatedSqlException ex)
+        => IsDeferrableNameResolutionError(ex)
+            || (batch.CurrentStatement.BindsDeferredSource && (IsBinderError(ex) || ex.Number is 107 or 130 or 145 or 147 or 164 or 4108));
+
+    /// <summary>
     /// True when <paramref name="ex"/> is a statement-terminating error that
     /// ends the current statement but lets the batch continue to the next one
     /// (SQL Server's default severity model). Severity (<see cref="SimulatedSqlException.Class"/>)
@@ -2710,7 +2723,7 @@ public sealed partial class Simulation
     /// raised where the batch's compile deferred the statement, ends the batch
     /// uncatchable by the same scope's TRY as a name-resolution miss does
     /// (probed 2026-09-26 against SQL Server 2025, each after a CREATE TABLE
-    /// deferred its statement; Msg 8124 2026-09-28). The bulk loads' refusals
+    /// deferred its statement; Msg 8124 2026-09-28, Msg 10709 2026-10-01). The bulk loads' refusals
     /// of their permission and files — Msg 4834, 4860, 4861 — end the batch
     /// the same way wherever they are raised (probed 2026-09-29). An error not
     /// listed keeps a run-time error's handling.
@@ -2718,7 +2731,7 @@ public sealed partial class Simulation
     internal static bool IsDeferredCompileError(SimulatedSqlException ex)
         => IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex) || ex.Number is 4902 or 2705
             || ex.Number is 107 or 108 or 130 or 145 or 147 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 447 or 448 or 529
-                or 1011 or 1012 or 1013 or 4108 or 4115 or 5318 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622;
+                or 1011 or 1012 or 1013 or 4108 or 4115 or 5318 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622 or 10709;
 
     /// <summary>
     /// Whether a TRY frame catches <paramref name="ex"/> where it is raised:

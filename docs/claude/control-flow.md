@@ -160,7 +160,7 @@ The simulator has no compile/run split — it resolves inline with parsing — s
   Runs *ahead* of the TRY-frame path so a skipped `BEGIN TRY` body's missing-name error doesn't activate its CATCH.
   A missing DML target reads the rest of its statement over placeholder columns before it throws — every INSERT source an `EXEC` included, and a MERGE's whole tail ([`grammar.md`](grammar.md#trailing-token-tightening)) — so the swallow starts at the statement's true end.
   Residual divergence: because this path uses the flat recovery scan rather than placeholder parse-continuation, the astronomically-rare shape of a deferred *sequence / XML-collection* reference immediately followed by an orphan-prone `ELSE` / `END` can still mis-navigate — the common table / column / function / DML-target shapes are fully covered.
-  It is also why a CREATE-time module bind stops at its first swallowed 208 rather than binding on from an unreliable cursor ([`programmable.md`](programmable.md#what-defers)).
+  Read to its end, such a statement leaves the compile walk and a CREATE-time bind to go on past it (`StatementContext.DeferredReadToEnd`); any other swallowed deferral was raised mid-statement, and stops them there rather than binding on from an unreliable cursor ([`programmable.md`](programmable.md#what-defers)).
 
 **Skip mode parses; it must not execute.**
 Several statement processors used to run per-row work in skip mode, which was invisible while the only skip-mode client was a dead branch over literal values — and became wrong the moment [CREATE-time module binding](programmable.md#create-time-body-binding) started binding every body in skip mode with its parameters standing in as typed NULLs.
@@ -237,7 +237,9 @@ The report follows real's two phases:
 - A scalar function call the compile inlines but whose body no longer binds adds a non-aborting Msg 208 that goes out ahead of everything the batch runs, or joins a failing compile's report where the call bound — see [`programmable.md`](programmable.md#inlining-a-call-as-the-query-compiles).
 
 A statement naming an object that doesn't exist when the batch compiles — a table the batch itself creates, a `#temp` a `SELECT … INTO` makes — binds when it runs, so the statements before it have run by then.
-Skip mode's placeholder source is that deferral, and a binder error in a statement over one defers with it (`StatementContext.BindsDeferredSource`).
+Only its binding waits: real parses the whole batch first, so its syntax errors, and those of every statement after it, refuse the batch before anything runs, and the statements after it bind as the batch compiles (probed 2026-10-01 against SQL Server 2025).
+Skip mode's placeholder source is that deferral, and a binder error in a statement over one defers with it (`StatementContext.BindsDeferredSource`), as do the few severity-15 errors real's binder raises (`DefersWithItsStatement`).
+A write to a missing table reads the rest of its statement over placeholder columns too ([`grammar.md`](grammar.md#trailing-token-tightening)), and the walk goes on past it; what in such a write reads no column of the target binds as the batch compiles — an `INSERT`'s `VALUES` tuples and source query, where `INSERT t VALUES (nosuch)` is Msg 207 before anything runs.
 Everything else binds against the schema as the batch found it, which is where real's familiar same-batch traps come from: `ALTER TABLE t ADD b …; SELECT b FROM t` is Msg 207 with the column never added, a type created and used in one batch is Msg 2715, and a table dropped and re-created with other columns binds its old definition.
 A `USE` does move the walk: what follows it binds in the database it names, which `CompileBatch` puts back once the walk ends, and a `USE` naming a database that doesn't exist when the batch compiles ends the walk there (probed 2026-09-28 against SQL Server 2025).
 A variable whose `DECLARE` names a missing type is declared anyway, so later references bind rather than raising Msg 137.
@@ -253,14 +255,16 @@ A `TRY` frame the walk parses catches nothing: a syntax error inside a `TRY` bod
 
 An error that ends a procedure's or dynamic SQL's batch — a compile error, or a missing object at run time — reaches no further: in the caller the `EXEC` fails like any statement, the caller's batch goes on, and a `TRY` around the `EXEC` catches it (`SimulatedSqlException.EndedCalledBatch`, probed 2026-09-24).
 
+A procedure or DML trigger body compiles again as a whole when a call first runs it (`CompileModuleBody`), so a statement over a table created after the module binds then, untaken branches included, and every binder error it holds is reported before the body's first statement runs (probed 2026-10-01 against SQL Server 2025).
+A procedure's is the `EXEC`'s own error, as dynamic SQL's is: the caller goes on, a `TRY` around the call catches it with the procedure as `ERROR_PROCEDURE()`, and neither a return status nor an `OUTPUT` value comes back.
+A trigger's ends the firing statement as its body's errors do under the body's `XACT_ABORT ON`, so the batch ends and the write rolls back unless a `TRY` around the statement catches it — as it also catches a missing object the body names when it runs.
+A body that doesn't compile keeps no plan, so the next call compiles and reports it again; one that compiles keeps its plan until an object it reads changes (see `ModulePlan`).
+
 ### Not modeled yet
 
-- **The walk stops at a deferred DML target** (`INSERT INTO <missing>`), since the recovery scan can't tell where that statement ends; real keeps compiling the statements after it, so an error past one surfaces here only when its statement runs — after the statements ahead of it have run.
+- **The walk still stops at a deferral raised mid-statement**, since the recovery scan can't tell where that statement ends: an `ALTER TABLE` of a table the batch creates (Msg 4902), and a binder error in a statement reading one (`CREATE TABLE t …; SELECT a FROM t WHERE a = CAST(1 AS xml)`, whose Msg 529 real defers).
+  Real keeps compiling the statements after it, so an error past one surfaces here only when its statement runs — after the statements ahead of it have run (probed 2026-10-01 against SQL Server 2025).
   A syntax error (Msg 102 / 156) surfacing that way at least ends the batch (`EndsBatch`), as real's refusal would have, rather than the dispatch resuming inside the broken statement's tail.
-  One visible instance: a batch that creates a table, inserts into it and then creates a vector index on it is Msg 343 on real before anything runs when `PREVIEW_FEATURES` was off as the batch began (setting it inside the batch doesn't count), where the simulator runs the batch (probed 2026-09-29 against SQL Server 2025).
-- **A procedure body's compile at its first execution reports nothing of its own**; real compiles it again as a whole then, so a body statement naming a table created after the procedure fails there before the body's first statement runs.
-  Here that compile only sends its scalar inlining failures ([`programmable.md`](programmable.md#inlining-a-call-as-the-query-compiles)), and a body that doesn't compile raises as its statements run.
-- **An `INSERT … EXEC` body stops at its first error**, since the statement collects the body's rows rather than forwarding its outcomes; real runs that body on too, inserting what its later statements return (probed 2026-09-24).
 
 ## Statement-terminating vs batch-aborting errors (unified continue-on-error)
 
@@ -315,6 +319,7 @@ See [`tds-endpoint.md`](tds-endpoint.md).
 A procedure or dynamic-SQL body runs on past a statement-terminating error the way a batch does: `PRINT 'p1'; SELECT 1/0; PRINT 'p2'` sends `p1`, the error and `p2`, and the caller carries on after the `EXEC` (probed 2026-09-24 against SQL Server 2025).
 The body inherits continuation when its caller continues and has no `TRY` open (`ContinuesCalledBatch`), and its errors travel up among its outcomes to whichever front door renders them.
 An open `TRY` in the caller catches the body's first error and abandons the rest of the body.
+An `INSERT … EXEC` body runs on the same way, its later result sets inserted ([`dml.md`](dml.md#insert--exec)).
 An error that ends the batch — an uncaught `THROW`, an `XACT_ABORT`-promoted error — ends every caller's batch too, while a name-resolution miss ends only the body's (`EndedCalledBatch`, above).
 A trigger body continues the same way, but it starts under `XACT_ABORT ON`, so only an error that option exempts gets to — see [`triggers.md`](triggers.md#errors-in-a-trigger-body).
 

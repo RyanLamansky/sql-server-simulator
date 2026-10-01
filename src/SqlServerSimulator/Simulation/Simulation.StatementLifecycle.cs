@@ -508,20 +508,17 @@ partial class Simulation
             // statement that parsed over a missing FROM source — syntax /
             // structural errors carry other numbers and still propagate.
             if (batch.IsSkipping
-                && (IsDeferrableNameResolutionError(ex) || (IsBinderError(ex) && batch.CurrentStatement.BindsDeferredSource)))
+                && DefersWithItsStatement(batch, ex))
             {
                 this.Ending = StatementEnding.Deferred;
-                // CREATE-time module binding stops at the first deferral.
-                // Real keeps binding the statements after a missing-object
-                // one, but it knows exactly where that statement ended; the
-                // simulator only has EndSkipped's recovery scan, which stops at
-                // the first statement-boundary token — and that token can
-                // still be inside the failed statement (an `INSERT INTO
-                // missing SELECT …` throws with the cursor already on
-                // `SELECT`). Binding on from there would report errors
-                // against fragments, so the rest of the body falls back to
-                // the pre-existing behavior of binding at first invocation.
-                if (batch.CreateTimeBinding)
+                // Real parses the whole batch and binds every statement it
+                // doesn't defer, so the walk goes on past a write to a missing
+                // target, which the compile pass reads to its end. Any other
+                // deferral is raised mid-statement, where EndSkipped's
+                // recovery scan can stop on a token still inside it (a
+                // subquery's SELECT), and walking on from there would report
+                // errors against fragments, so the walk stops there.
+                if (batch.CreateTimeBinding && !batch.CurrentStatement.DeferredReadToEnd)
                     batch.BatchAborted = true;
             }
             else if (batch.CreateTimeBindErrors is { } bindErrors && IsBinderError(ex))
@@ -577,7 +574,7 @@ partial class Simulation
                 this.Ending = StatementEnding.Continued;
                 batch.BatchAborted = true;
             }
-            else if (batch.ContinueOnError && !EndsBatch(ex) && IsStatementTerminating(ex) && !(ex.EndedCalledBatch && ReferenceEquals(ex.EndedCalledBatchIn, batch)))
+            else if (batch.ContinueOnError && !EndsBatch(ex) && IsStatementTerminating(ex) && !(ex.EndedCalledBatch && ReferenceEquals(ex.EndedCalledBatchIn, batch)) && !ex.EndsInsertExec)
             {
                 // A continuing procedure, trigger or dynamic-SQL body takes this arm
                 // too, and its error travels up among the body's outcomes;
@@ -588,10 +585,12 @@ partial class Simulation
             }
             else
             {
-                // A procedure's, dynamic SQL's or called function's batch
-                // is as far as a batch-aborting name-resolution error
-                // reaches.
-                if ((batch.ProcFrame is not null || batch.CalledFunctionBody) && (IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex)) && !ex.EndedCalledBatch)
+                // A procedure's, dynamic SQL's, trigger's or called
+                // function's batch is as far as a batch-aborting
+                // name-resolution error reaches, so a TRY around the call
+                // or the firing statement catches it (probed 2026-10-01
+                // against SQL Server 2025 for a trigger).
+                if ((batch.ProcFrame is not null || batch.TriggerFrame is not null || batch.CalledFunctionBody) && (IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex)) && !ex.EndedCalledBatch)
                 {
                     ex.EndedCalledBatch = true;
                     ex.EndedCalledBatchIn = batch;

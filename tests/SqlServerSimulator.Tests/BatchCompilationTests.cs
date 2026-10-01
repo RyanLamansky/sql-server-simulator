@@ -239,17 +239,130 @@ public sealed class BatchCompilationTests
     }
 
     /// <summary>
-    /// A syntax error the compile walk couldn't reach — past a statement
-    /// naming a table the batch creates — still ends the batch when it
-    /// surfaces, rather than the dispatch resuming inside the broken
-    /// statement's tail, since real would have refused the whole batch.
+    /// A syntax error in a statement writing a table the batch creates refuses
+    /// the whole batch while compiling.
     /// </summary>
     [TestMethod]
-    public void SyntaxErrorPastADeferredTarget_EndsTheBatch()
+    public void SyntaxErrorInADeferredWrite_RunsNothing()
     {
         var simulation = new Simulation();
         _ = simulation.AssertSqlError("create table t (a int); insert t (a) with (tablock) values (1); create table u (b int)", 156);
-        AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('u')"));
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select object_id('t')"));
+    }
+
+    /// <summary>
+    /// Real parses the whole batch before running any of it and defers only
+    /// the binding of a statement over an object that doesn't exist yet, so
+    /// the compile walks on past a write to a table the batch creates: a later
+    /// statement's syntax error — or its binder error, or one in the write's
+    /// own <c>VALUES</c>, which read no column of the target — refuses the
+    /// batch before anything runs, from inside an <c>IF</c> or a <c>TRY</c>
+    /// too, while a binder error that reads the missing table waits for the
+    /// run (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert t2 values (1); select [abs](-1), a from t2", 102)]
+    [DataRow("insert t2 select 1; select 1 +", 102)]
+    [DataRow("update t2 set a = 2 where a = 1; select 1 +", 102)]
+    [DataRow("delete t2 where a = 1; select 1 +", 102)]
+    [DataRow("merge t2 using (select 1 a) s on t2.a = s.a when not matched then insert values (s.a); select 1 +", 102)]
+    [DataRow("insert t2 values (1); select nosuch from t", 207)]
+    [DataRow("insert t2 values (nosuch)", 207)]
+    [DataRow("insert t2 values (cast(1 as xml))", 529)]
+    [DataRow("if 1 = 1 insert t2 values (1) else print 'x'; select 1 +", 102)]
+    [DataRow("begin try insert t2 values (1); select 1 + end try begin catch print 'caught' end catch", 156)]
+    [DataRow("select nosuch from t; insert t2 values (1); select [abs](-1)", 102)]
+    [DataRow("insert t2 values (1); select @nope", 137)]
+    public void CompilePastADeferredWrite_RunsNothing(string tail, int number)
+    {
+        var (_, connection) = Open();
+        var ex = Fails(connection, "print 'first'; create table t2 (a int); " + tail);
+        AreEqual(number, ex.Number);
+        IsEmpty(Messages(ex));
+        AreEqual(DBNull.Value, Scalar(connection, "select object_id('t2')"));
+    }
+
+    [TestMethod]
+    public void CompilePastADeferredWrite_ReportsBinderErrorsOnBothSides()
+    {
+        var (_, connection) = Open();
+        var ex = Fails(connection, "select nosuch1 from t; create table t2 (a int); insert t2 values (1); select nosuch2 from t");
+        CollectionAssert.AreEqual(new[] { "Invalid column name 'nosuch1'.", "Invalid column name 'nosuch2'." }, ex.Errors.Select(e => e.Message).ToArray());
+    }
+
+    [TestMethod]
+    public void BinderErrorReadingTheDeferredTable_WaitsForTheRun()
+    {
+        var (_, connection) = Open();
+        var ex = Fails(connection, "print 'first'; create table t2 (a int); update t2 set a = 2 where nosuch = 1; print 'after'");
+        AreEqual(207, ex.Number);
+        CollectionAssert.AreEqual(new[] { "first" }, Messages(ex));
+    }
+
+    /// <summary>
+    /// A procedure compiles again as its call first runs it, so a statement
+    /// naming a table created after the procedure — and a body's untaken
+    /// branch alike — reports every binder error before the body's first
+    /// statement runs. The error is the <c>EXEC</c>'s own: the caller goes on,
+    /// a <c>TRY</c> around it catches it, no return status or <c>OUTPUT</c>
+    /// value comes back, and no plan is kept, so the next call reports again
+    /// until the table changes (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ProcedureCompileAtFirstCall_ReportsTheBodysErrorsBeforeItRuns()
+    {
+        var (simulation, connection) = Open();
+        simulation.ExecuteBatches(
+            "create procedure p @o int = 0 output as begin print 'body'; set @o = 5; if @o = 0 select nosuch1 from t2; select a from t2 where nosuch2 = 1; return 7 end",
+            "create table t2 (a int)");
+        var ex = Fails(connection, "declare @r int = 1, @o int = 1; exec @r = p @o output; exec @r = p @o output; print concat(@r, ' ', @o)");
+        CollectionAssert.AreEqual(
+            new[] { "Invalid column name 'nosuch1'.", "Invalid column name 'nosuch2'.", "Invalid column name 'nosuch1'.", "Invalid column name 'nosuch2'.", "1 1" },
+            ex.Errors.Select(e => e.Message).ToArray());
+        AreEqual("p", ex.Errors[0].Procedure);
+        AreEqual("207 p", Scalar(connection, "begin try exec p end try begin catch select concat(error_number(), ' ', error_procedure()) end catch"));
+        _ = Scalar(connection, "alter table t2 add nosuch1 int, nosuch2 int");
+        using var command = connection.CreateCommand();
+        command.CommandText = "declare @r int; exec @r = p; select @r";
+        using var reader = command.ExecuteReader();
+        IsTrue(reader.NextResult());
+        IsTrue(reader.Read());
+        AreEqual(7, reader.GetInt32(0));
+    }
+
+    /// <summary>
+    /// A grouping or type error the compile meets is the call's own as well,
+    /// where the body's run would have ended the caller's batch.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select a, count(*) from t2", 8120)]
+    [DataRow("select a from t2 where a = cast(1 as xml)", 529)]
+    public void ProcedureCompileAtFirstCall_LetsTheCallerContinue(string statement, int number)
+    {
+        var (simulation, connection) = Open();
+        simulation.ExecuteBatches($"create procedure p as begin print 'body'; {statement} end", "create table t2 (a int)");
+        var ex = Fails(connection, "exec p; print 'after'");
+        AreEqual(number, ex.Number);
+        CollectionAssert.AreEqual(new[] { "after" }, Messages(ex));
+    }
+
+    /// <summary>
+    /// A DML trigger compiles as it first fires: an error compiling it ends
+    /// the firing statement as one its body raised would — the batch ends and
+    /// the write rolls back — and a <c>TRY</c> around the statement catches it,
+    /// as it does a missing object the body names when it runs.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select nosuch from t2")]
+    [DataRow("select * from nope")]
+    public void TriggerError_EndsTheFiringBatchUnlessCaught(string statement)
+    {
+        var (simulation, connection) = Open();
+        simulation.ExecuteBatches($"create trigger tr on t after insert as begin print 'body'; {statement} end", "create table t2 (a int)");
+        var ex = Fails(connection, "insert t values (1); print 'after'");
+        IsFalse(Messages(ex).Contains("after"));
+        AreEqual(0, Scalar(connection, "select count(*) from t"));
+        AreEqual("tr 0", Scalar(connection, "begin try insert t values (1) end try begin catch select concat(error_procedure(), ' ', @@trancount) end catch"));
     }
 
     /// <summary>
