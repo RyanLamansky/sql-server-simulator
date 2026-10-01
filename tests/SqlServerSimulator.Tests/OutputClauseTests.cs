@@ -622,4 +622,26 @@ public class OutputClauseTests
             "create function f() returns @r table (a int) as begin declare @log table (a int); insert @r output inserted.a into @log output inserted.a values (1); return end",
             443);
     }
+
+    /// <summary>
+    /// An <c>OUTPUT … INTO</c> target's PRIMARY KEY / UNIQUE keys are enforced
+    /// as an INSERT's are — a duplicate ends the statement and takes back its
+    /// own writes, two NULLs collide, and <c>IGNORE_DUP_KEY</c> drops the row
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("k int primary key", "inserted.k", "(1), (1)", 2627, 0)]
+    [DataRow("k int null unique", "null", "(7), (8)", 2627, 0)]
+    [DataRow("k int not null, unique (k) with (ignore_dup_key = on)", "inserted.k", "(1), (1), (2)", 0, 2)]
+    public void OutputIntoAKeyedTable_EnforcesItsKeys(string target, string projection, string values, int error, int landed)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create table t ({target}); create table s (k int)");
+        var statement = $"insert s output {projection} into t values {values}";
+        if (error != 0)
+            _ = simulation.AssertSqlError(statement, error);
+        else
+            _ = simulation.ExecuteNonQuery(statement);
+        Assert.AreEqual(landed, simulation.ExecuteScalar("select count(*) from t"));
+    }
 }

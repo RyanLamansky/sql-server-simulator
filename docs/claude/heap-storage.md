@@ -87,6 +87,8 @@ What it covers spans files:
 - **What an insert publishes with its row.**
   `Simulation.InsertRow` runs the row's X lock and its version-store entry inside the latch (`Heap.Insert`'s hook), before any reader can see the slot; the key-range test, which can wait, runs first, outside it.
   Taking the X after the row was visible let a READ COMMITTED reader meet an uncommitted insert with nothing locked yet, and a snapshot read it as committed long ago.
+- **A uniqueness check's last look.**
+  A write of a checked key (`Heap.Insert` with a guard, `Heap.TryUpdateAt`) first reads the seek journal for what other sessions wrote since its check began, and refuses rather than write a duplicate neither check saw — the journal, unlike the seek cache, is the latch's own, so the look keeps the lock order ([`locking.md`](locking.md#writers-racing-to-one-new-key)).
 
 **Readers take no latch.**
 They read optimistically against `Heap.latchSequence`, even at rest and odd while a holder is mid-mutation: note it, read, re-read it, and read again if it moved.

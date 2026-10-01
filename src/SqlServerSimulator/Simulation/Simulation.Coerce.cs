@@ -872,35 +872,120 @@ partial class Simulation
 
         if (scanned is null)
             return RowKeyVerdict.Unique;
+        return ScanForDuplicateKey(destinationTable, scanned, storedRowValues, batch) is not { } violated
+            ? RowKeyVerdict.Unique
+            : violated.IgnoreDupKey
+                ? ReportIgnoredDuplicate(batch)
+                : throw KeyConstraintViolation(destinationTable, violated, storedRowValues);
+    }
 
-        var storedColumns = destinationTable.StoredColumns;
-        var lobStore = destinationTable.Heap;
-
-        foreach (var rowBytes in destinationTable.Heap.EnumerateRows())
+    /// <summary>
+    /// The scan a key-constraint check falls back to when its key can't be
+    /// seeked (see <see cref="TryPrepareKeySeek"/>): the first of
+    /// <paramref name="constraints"/> a live row already carries
+    /// <paramref name="storedRowValues"/>'s key for, in one pass over the
+    /// heap. A row carrying it under another session's uncommitted write is
+    /// waited out as the seek path waits, and the scan starts over.
+    /// </summary>
+    private static KeyConstraint? ScanForDuplicateKey(HeapTable table, List<KeyConstraint> constraints, SqlValue[] storedRowValues, BatchContext batch)
+    {
+        while (true)
         {
-            foreach (var constraint in scanned)
+            var waited = false;
+            foreach (var (page, slot, rowBytes) in table.Heap.EnumerateRowsWithAddress())
             {
-                var allEqual = true;
-                for (var i = 0; i < constraint.StorageOrdinals.Length; i++)
+                foreach (var constraint in constraints)
                 {
-                    var ord = constraint.StorageOrdinals[i];
-                    var existing = RowDecoder.DecodeColumn(storedColumns, rowBytes, ord, lobStore);
-                    if (!existing.Equals(storedRowValues[ord]))
-                    {
-                        allEqual = false;
-                        break;
-                    }
+                    if (!RowCarriesKey(table, rowBytes, constraint.StorageOrdinals, storedRowValues))
+                        continue;
+                    if (!batch.AwaitKeyHolderAt(table, page, slot))
+                        return constraint;
+                    waited = true;
+                    break;
                 }
-                if (allEqual)
+                if (waited)
+                    break;
+            }
+            if (!waited)
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ScanForDuplicateKey"/> for one key: whether a live row
+    /// other than <paramref name="excluded"/> carries it and passes
+    /// <paramref name="filter"/>.
+    /// </summary>
+    private static bool ScanFindsKey(HeapTable table, int[] storageOrdinals, SqlValue[] storedRowValues, BooleanExpression? filter, HashSet<(int, int)>? excluded, BatchContext batch)
+    {
+        SqlValue[]? existingRowValues = null;
+        while (true)
+        {
+            var waited = false;
+            foreach (var (page, slot, rowBytes) in table.Heap.EnumerateRowsWithAddress())
+            {
+                if (excluded?.Contains((page, slot)) == true
+                    || (filter is not null && EvaluateIndexFilter(filter, table, DecodeFullRow(table, rowBytes, ref existingRowValues), batch) != true)
+                    || !RowCarriesKey(table, rowBytes, storageOrdinals, storedRowValues))
                 {
-                    return constraint.IgnoreDupKey
-                        ? ReportIgnoredDuplicate(batch)
-                        : throw KeyConstraintViolation(destinationTable, constraint, storedRowValues);
+                    continue;
                 }
+                if (!batch.AwaitKeyHolderAt(table, page, slot))
+                    return true;
+                waited = true;
+                break;
+            }
+            if (!waited)
+                return false;
+        }
+    }
+
+    // The scan's comparison: SqlValue equality per key column, two NULLs equal.
+    private static bool RowCarriesKey(HeapTable table, byte[] rowBytes, int[] storageOrdinals, SqlValue[] storedRowValues)
+    {
+        foreach (var ordinal in storageOrdinals)
+        {
+            if (!RowDecoder.DecodeColumn(table.StoredColumns, rowBytes, ordinal, table.Heap).Equals(storedRowValues[ordinal]))
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Inserts a row an INSERT or bulk load checked, checking its keys again
+    /// whenever <paramref name="guard"/> finds another session wrote one of
+    /// them since (see <see cref="UniqueKeyWriteGuard"/>); false when that
+    /// second check drops the row under <c>IGNORE_DUP_KEY</c>.
+    /// </summary>
+    private static bool InsertCheckedRow(BatchContext batch, HeapTable table, SqlValue[] rowValues, SqlValue[] storedValues, ReadOnlySpan<byte> image, UndoLog? undoLog, UniqueKeyWriteGuard? guard)
+    {
+        while (InsertRow(batch, table, image, undoLog, guard: guard, storedValues: storedValues).PageIndex < 0)
+        {
+            _ = guard!.Restart();
+            ForgetComputedKeySets(batch, table);
+            if (EnforceKeyConstraints(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate
+                || EnforceUniqueIndexes(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate)
+            {
+                return false;
             }
         }
+        return true;
+    }
 
-        return RowKeyVerdict.Unique;
+    /// <summary>
+    /// Drops the key sets this statement built for <paramref name="table"/>'s
+    /// non-persisted computed keys (<see cref="ComputedKeySetFor"/>): they miss
+    /// rows another session wrote since, and a row checked again is already
+    /// in them.
+    /// </summary>
+    private static void ForgetComputedKeySets(BatchContext batch, HeapTable table)
+    {
+        if (batch.CurrentStatement.ComputedUniqueKeys is not { } cache)
+            return;
+        foreach (var constraint in table.KeyConstraints)
+            _ = cache.Remove(constraint);
+        foreach (var index in table.Indexes)
+            _ = cache.Remove(index);
     }
 
     /// <summary>
@@ -910,14 +995,16 @@ partial class Simulation
     /// another transaction deleted or re-keyed. Real waits on the key's lock
     /// in both cases, so a duplicate is only reported against a committed row
     /// and a key freed by an uncommitted delete isn't reused before that
-    /// delete settles (probed 2026-09-26 against SQL Server 2025).
+    /// delete settles (probed 2026-09-26 against SQL Server 2025). A
+    /// uniqueness check waits in X, as real's second writer of a key requests
+    /// X on it, and a foreign key's check in S (probed 2026-10-01).
     /// </summary>
-    private static void AwaitUncommittedKeyWriters(BatchContext batch, HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe)
+    private static void AwaitUncommittedKeyWriters(BatchContext batch, HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe, LockMode mode = LockMode.Exclusive)
     {
         if (batch.IsSkipping)
             return;
-        batch.AwaitSupersededKeyHolders(table, storageOrdinals, commons, probe);
-        _ = batch.AwaitLiveKeyHolders(table, storageOrdinals, commons, probe);
+        batch.AwaitSupersededKeyHolders(table, storageOrdinals, commons, probe, mode);
+        _ = batch.AwaitLiveKeyHolders(table, storageOrdinals, commons, probe, mode);
     }
 
     /// <summary>
@@ -1052,31 +1139,11 @@ partial class Simulation
                 continue;
             }
 
-            foreach (var rowBytes in destinationTable.Heap.EnumerateRows())
+            if (ScanFindsKey(destinationTable, index.KeyStorageOrdinals, storedRowValues, index.Filter, excluded: null, batch))
             {
-                if (index.Filter is { } filter
-                    && Simulation.EvaluateIndexFilter(filter, destinationTable, DecodeFullRow(destinationTable, rowBytes, ref existingRowValues), batch) != true)
-                {
-                    continue;
-                }
-
-                var allEqual = true;
-                for (var i = 0; i < index.KeyStorageOrdinals.Length; i++)
-                {
-                    var ord = index.KeyStorageOrdinals[i];
-                    var existing = RowDecoder.DecodeColumn(storedColumns, rowBytes, ord, lobStore);
-                    if (!existing.Equals(storedRowValues[ord]))
-                    {
-                        allEqual = false;
-                        break;
-                    }
-                }
-                if (allEqual)
-                {
-                    return index.IgnoreDupKey
-                        ? ReportIgnoredDuplicate(batch)
-                        : throw UniqueIndexViolation(index, qualifiedTableName, storedRowValues);
-                }
+                return index.IgnoreDupKey
+                    ? ReportIgnoredDuplicate(batch)
+                    : throw UniqueIndexViolation(index, qualifiedTableName, storedRowValues);
             }
         }
 

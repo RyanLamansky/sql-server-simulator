@@ -1580,10 +1580,11 @@ internal sealed class BatchContext
     /// Waits out every other session's uncommitted delete or rewrite of a row
     /// whose <paramref name="storageOrdinals"/> tuple was
     /// <paramref name="probe"/> (see <see cref="HeapTable.SupersededKeyImages"/>),
-    /// the way real's insert of a key waits on that key's lock. Cheap when
-    /// no other session has one pending on the table.
+    /// the way real's insert of a key waits on that key's lock — in
+    /// <paramref name="mode"/>, X for a uniqueness check and S for a foreign
+    /// key's. Cheap when no other session has one pending on the table.
     /// </summary>
-    public void AwaitSupersededKeyHolders(HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe)
+    public void AwaitSupersededKeyHolders(HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe, LockMode mode)
     {
         if (table.SupersededKeyImages.IsEmptyLockFree())
             return;
@@ -1603,7 +1604,7 @@ internal sealed class BatchContext
         if (holders is not null)
         {
             foreach (var resource in holders)
-                _ = this.AwaitRowWriters(table, resource);
+                _ = this.AwaitRowWriters(table, resource, mode);
         }
     }
 
@@ -1612,9 +1613,12 @@ internal sealed class BatchContext
     /// <paramref name="probe"/> — the duplicate a uniqueness check just
     /// found, which is only a duplicate once that write commits (real's
     /// second insert of a key waits on the first's lock rather than failing
-    /// at once). True when it waited, so the caller checks again.
+    /// at once, requesting X on it; probed 2026-10-01 against SQL Server
+    /// 2025). <paramref name="mode"/> is
+    /// <see cref="AwaitSupersededKeyHolders"/>'s. True when it waited, so the
+    /// caller checks again.
     /// </summary>
-    public bool AwaitLiveKeyHolders(HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe)
+    public bool AwaitLiveKeyHolders(HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe, LockMode mode)
     {
         if (Volatile.Read(ref table.ActiveDataWriters) == 0)
             return false;
@@ -1622,10 +1626,20 @@ internal sealed class BatchContext
         foreach (var (page, slot, _) in HeapSeekCache.For(table.Heap).MatchingRows(table.Heap, table.StoredColumns, storageOrdinals, commons, probe))
         {
             if (table.RowLocks.TryGetValue((page, slot), out var resource))
-                waited |= this.AwaitRowWriters(table, resource);
+                waited |= this.AwaitRowWriters(table, resource, mode);
         }
         return waited;
     }
+
+    /// <summary>
+    /// <see cref="AwaitLiveKeyHolders"/> for one row a uniqueness check's
+    /// scan found carrying the key — the scan a NULL key component sends it
+    /// to. True when it waited, so the caller scans again.
+    /// </summary>
+    public bool AwaitKeyHolderAt(HeapTable table, int pageIndex, int slotIndex) =>
+        Volatile.Read(ref table.ActiveDataWriters) != 0
+        && table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource)
+        && this.AwaitRowWriters(table, resource, LockMode.Exclusive);
 
     /// <summary>
     /// Blocks until no other session holds the row lock
@@ -1635,14 +1649,14 @@ internal sealed class BatchContext
     public void AwaitRowWritersOf(HeapTable table, LockResource resource) => _ = this.AwaitRowWriters(table, resource);
 
     // True when there was someone to wait for.
-    private bool AwaitRowWriters(HeapTable table, LockResource resource)
+    private bool AwaitRowWriters(HeapTable table, LockResource resource, LockMode mode = LockMode.Shared)
     {
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
-        if (!manager.HasIncompatibleHolderOtherThan(resource, LockMode.Shared, connection.Session))
+        if (!manager.HasIncompatibleHolderOtherThan(resource, mode, connection.Session))
             return false;
-        manager.Acquire(resource, LockMode.Shared, connection.Session, this.LockTimeoutFor(table));
-        manager.Release(resource, LockMode.Shared, connection.Session);
+        manager.Acquire(resource, mode, connection.Session, this.LockTimeoutFor(table));
+        manager.Release(resource, mode, connection.Session);
         return true;
     }
 

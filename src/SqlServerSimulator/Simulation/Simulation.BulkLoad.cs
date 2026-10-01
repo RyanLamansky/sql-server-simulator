@@ -188,6 +188,7 @@ partial class Simulation
         var inserted = 0;
         // One encoded-row buffer for the whole load — Insert copies into the page.
         byte[]? encoded = null;
+        var keyGuard = insteadOf || rows.Count == 0 ? null : BeginUniqueKeyGuard(batch, table);
 
         foreach (var sourceRow in rows)
         {
@@ -257,6 +258,8 @@ partial class Simulation
                 EnforceCheckConstraints(table, rowValues, batch);
 
             var storedValues = ProjectStoredValues(table, rowValues);
+            if (keyGuard?.Restart() == true)
+                ForgetComputedKeySets(batch, table);
             if (EnforceKeyConstraints(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate
                 || EnforceUniqueIndexes(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate)
             {
@@ -268,7 +271,8 @@ partial class Simulation
 
             table.OwningDatabase?.RejectWriteWhenReadOnly();
             var length = RowEncoder.EncodeRowInto(table.StoredColumns, storedValues, table.Heap, ref encoded);
-            _ = InsertRow(batch, table, encoded.AsSpan(0, length), batch.CurrentUndoLog);
+            if (!InsertCheckedRow(batch, table, rowValues, storedValues, encoded.AsSpan(0, length), batch.CurrentUndoLog, keyGuard))
+                continue;
             table.ChangeTracking?.RecordRow(batch, table, rowValues, ChangeTrackingOperation.Insert);
             if (identityColumn is not null && !keepIdentity)
                 lastIdentity = IdentityState.FromSqlValue(rowValues[identityOrdinal]);

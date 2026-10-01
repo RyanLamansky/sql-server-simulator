@@ -418,6 +418,9 @@ partial class Simulation
         /// <see cref="BatchContext.CurrentTableVarUndoLog"/>; regular tables
         /// use the connection's
         /// <see cref="BatchContext.CurrentUndoLog"/> of the executing <paramref name="batch"/>.
+        /// The target's PRIMARY KEY / UNIQUE constraints and unique indexes are
+        /// enforced as an INSERT's are, <c>IGNORE_DUP_KEY</c> dropping the row
+        /// (probed 2026-10-01 against SQL Server 2025).
         /// </summary>
         public void Append(SqlValue[] projectedValues, BatchContext batch)
         {
@@ -454,7 +457,18 @@ partial class Simulation
                         : SqlValue.Null(column.Type);
             }
             var undoLog = target.IsTableVariable ? batch.CurrentTableVarUndoLog : batch.CurrentUndoLog;
-            _ = Simulation.InsertRow(batch, target, RowEncoder.EncodeRow(target.StoredColumns, targetValues, target.Heap), undoLog);
+            var storedValues = ProjectStoredValues(target, targetValues);
+            // A guard per row, so a key set the statement cached for a
+            // computed key can't have missed another session's rows.
+            var guard = BeginUniqueKeyGuard(batch, target);
+            if (guard is not null)
+                ForgetComputedKeySets(batch, target);
+            if (EnforceKeyConstraints(target, targetValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate
+                || EnforceUniqueIndexes(target, targetValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate
+                || !InsertCheckedRow(batch, target, targetValues, storedValues, RowEncoder.EncodeRow(target.StoredColumns, storedValues, target.Heap), undoLog, guard))
+            {
+                return;
+            }
             batch.Connection.StatementIo?.CountWrite(target);
             target.ChangeTracking?.RecordRow(batch, target, targetValues, ChangeTrackingOperation.Insert);
         }

@@ -1005,6 +1005,7 @@ partial class Simulation
                 : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, affected.Count);
         }
 
+        var keyGuard = BeginUniqueKeyGuard(context.Batch, table);
         EnforceKeyConstraintsForUpdate(table, affected, context.Batch);
         EnforceUniqueIndexesForUpdate(table, affected, context.Batch);
 
@@ -1058,7 +1059,8 @@ partial class Simulation
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
                 context.Batch.NoteSupersededRow(table, pageIndex, slotIndex);
             }
-            var newImage = RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, fullNew), table.Heap);
+            var storedNew = ProjectStoredValues(table, fullNew);
+            var newImage = RowEncoder.EncodeRow(table.StoredColumns, storedNew, table.Heap);
             // The row-X above tested the clustered key the row is leaving; a
             // nonclustered index the update touches, and a key change carrying
             // the row INTO a gap some SERIALIZABLE reader fences, are only
@@ -1069,7 +1071,7 @@ partial class Simulation
             // image before the chain marks it in flight.
             if (lockableTable && oldBytesPerAffected is not null)
                 Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
-            table.Heap.UpdateAt(pageIndex, slotIndex, newImage, undoLog, ReclaimSuperseded(table, context));
+            UpdateCheckedRow(context.Batch, table, affected, i, newImage, storedNew, undoLog, ReclaimSuperseded(table, context), keyGuard);
             ClusteredScan.NoteKeyAssignment(table, updatedColumnOrdinals, (pageIndex, slotIndex), undoLog);
         }
         tracking?.RecordKeyMoves(context.Batch, table, keyMoves);
@@ -1156,18 +1158,82 @@ partial class Simulation
     /// reader meets the row already locked and a snapshot meets it already in
     /// flight, rather than reading an uncommitted row as committed. The
     /// key-range test, which can wait, runs first, outside the latch.
+    /// With a <paramref name="guard"/>, the uniqueness check that cleared
+    /// <paramref name="storedValues"/> takes its last look under the latch,
+    /// and a refusal writes nothing and returns <c>(-1, -1)</c>.
     /// </summary>
-    internal static (int PageIndex, int SlotIndex) InsertRow(BatchContext batch, HeapTable table, ReadOnlySpan<byte> image, UndoLog? undoLog, bool captureVersion = true)
+    internal static (int PageIndex, int SlotIndex) InsertRow(
+        BatchContext batch, HeapTable table, ReadOnlySpan<byte> image, UndoLog? undoLog, bool captureVersion = true, UniqueKeyWriteGuard? guard = null, SqlValue[]? storedValues = null)
     {
         if (!IsLockableTable(table))
             return table.Heap.Insert(image, undoLog);
         batch.ProbeKeyLocksForInsert(table, image);
-        return table.Heap.Insert(image, undoLog, (batch, table, captureVersion), static (state, address) =>
+        return table.Heap.Insert(
+            image,
+            undoLog,
+            (batch, table, captureVersion),
+            static (state, address) =>
+            {
+                state.batch.AcquireInsertedRowLock(state.table, address.PageIndex, address.SlotIndex);
+                if (state.captureVersion)
+                    VersionStore.CaptureWrite(state.batch, state.table, address, oldRid: null, oldPayload: null, VersionWriteKind.Insert);
+            },
+            guard,
+            storedValues);
+    }
+
+    /// <summary>
+    /// The guard for a statement's writes of <paramref name="table"/> whose
+    /// keys a check about to start clears (see <see cref="UniqueKeyWriteGuard"/>),
+    /// or null when no other session can write the table or it enforces no
+    /// unique key.
+    /// </summary>
+    private static UniqueKeyWriteGuard? BeginUniqueKeyGuard(BatchContext batch, HeapTable table) =>
+        batch.IsSkipping || !IsLockableTable(table) ? null : UniqueKeyWriteGuard.Begin(table);
+
+    /// <summary>
+    /// Rewrites row <paramref name="row"/> of <paramref name="affected"/>, an
+    /// UPDATE or MERGE target row whose keys the statement's check cleared,
+    /// checking its keys again whenever <paramref name="guard"/> finds another
+    /// session wrote one of them since.
+    /// </summary>
+    private static void UpdateCheckedRow(
+        BatchContext batch,
+        HeapTable table,
+        List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
+        int row,
+        byte[] newImage,
+        SqlValue[] storedValues,
+        UndoLog? undoLog,
+        bool reclaimSuperseded,
+        UniqueKeyWriteGuard? guard)
+    {
+        var (pageIndex, slotIndex, _, _) = affected[row];
+        if (guard is null)
         {
-            state.batch.AcquireInsertedRowLock(state.table, address.PageIndex, address.SlotIndex);
-            if (state.captureVersion)
-                VersionStore.CaptureWrite(state.batch, state.table, address, oldRid: null, oldPayload: null, VersionWriteKind.Insert);
-        });
+            table.Heap.UpdateAt(pageIndex, slotIndex, newImage, undoLog, reclaimSuperseded);
+            return;
+        }
+        // The statement's guard keeps judging the rows after this one; the
+        // second check vouches for this row alone, so its retry takes a guard
+        // of its own.
+        while (!table.Heap.TryUpdateAt(pageIndex, slotIndex, newImage, undoLog, reclaimSuperseded, guard, storedValues))
+            guard = RecheckAffectedRow(batch, table, affected, row);
+    }
+
+    /// <summary>
+    /// Checks row <paramref name="row"/> of <paramref name="affected"/> again
+    /// after a guard refused its write, returning the guard its retry writes
+    /// under: the uniqueness check, which meets the other session's row and
+    /// waits on it, then raises or lets the write go ahead.
+    /// </summary>
+    private static UniqueKeyWriteGuard RecheckAffectedRow(
+        BatchContext batch, HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, int row)
+    {
+        var guard = UniqueKeyWriteGuard.Begin(table)!;
+        EnforceKeyConstraintsForUpdate(table, affected, batch, row);
+        EnforceUniqueIndexesForUpdate(table, affected, batch, row);
+        return guard;
     }
 
     /// <summary>
@@ -1957,8 +2023,11 @@ partial class Simulation
     /// compares new-vs-new among affected rows — overlap with the pre-shift
     /// snapshot via (b) only fires when a non-affected row's existing key
     /// genuinely collides with the new value (a true violation).
+    /// <paramref name="onlyRow"/>, when set, checks that one row against the
+    /// heap again — the second check a <see cref="UniqueKeyWriteGuard"/>
+    /// refusal asks for, the comparison among the affected rows already made.
     /// </summary>
-    private static void EnforceKeyConstraintsForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, BatchContext batch)
+    private static void EnforceKeyConstraintsForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, BatchContext batch, int onlyRow = -1)
     {
         if (table.KeyConstraints.Count == 0)
             return;
@@ -1972,11 +2041,10 @@ partial class Simulation
         }
 
         var storedColumns = table.StoredColumns;
-        var lobStore = table.Heap;
         var affectedKeys = new AffectedKeyIndex?[table.KeyConstraints.Count];
         var existingComputedKeys = new HashSet<SqlValueKey>?[table.KeyConstraints.Count];
 
-        for (var i = 0; i < affected.Count; i++)
+        for (var i = Math.Max(onlyRow, 0); i < (onlyRow < 0 ? affected.Count : onlyRow + 1); i++)
         {
             var myStored = storedSnapshots[i];
 
@@ -1992,7 +2060,7 @@ partial class Simulation
                 {
                     if (!ComputedKeyMoved(constraint.FullOrdinals, affected[i], table, batch))
                         continue;
-                    if (ComputedKeySharedByAnotherAffectedRow(affected, i, constraint.FullOrdinals, table, filter: null, batch))
+                    if (onlyRow < 0 && ComputedKeySharedByAnotherAffectedRow(affected, i, constraint.FullOrdinals, table, filter: null, batch))
                         throw KeyConstraintViolationOnComputedKey(table, constraint, affected[i].FullNew);
                     var unaffected = existingComputedKeys[c] ??= BuildComputedKeySet(table, constraint.FullOrdinals, filter: null, batch, affectedAddrs);
                     if (unaffected.Contains(new SqlValueKey(ReadKeyByFullOrdinals(constraint.FullOrdinals, affected[i].FullNew))))
@@ -2003,8 +2071,7 @@ partial class Simulation
                 if (!KeyTupleMoved(constraint.StorageOrdinals, myStored, affected[i], table))
                     continue;
 
-                var keyed = affectedKeys[c] ??= AffectedKeyIndex.Build(storedSnapshots, constraint.StorageOrdinals, participates: null);
-                if (keyed.SharedByAnotherRow(i))
+                if (onlyRow < 0 && (affectedKeys[c] ??= AffectedKeyIndex.Build(storedSnapshots, constraint.StorageOrdinals, participates: null)).SharedByAnotherRow(i))
                     throw KeyConstraintViolation(table, constraint, myStored);
 
                 if (TryPrepareKeySeek(table, constraint.StorageOrdinals, myStored, out var commons, out var probe))
@@ -2019,24 +2086,8 @@ partial class Simulation
                     continue;
                 }
 
-                foreach (var (p, s, bytes) in table.Heap.EnumerateRowsWithAddress())
-                {
-                    if (affectedAddrs.Contains((p, s)))
-                        continue;
-                    var allEqual = true;
-                    for (var k = 0; k < constraint.StorageOrdinals.Length; k++)
-                    {
-                        var ord = constraint.StorageOrdinals[k];
-                        var existing = RowDecoder.DecodeColumn(storedColumns, bytes, ord, lobStore);
-                        if (!existing.Equals(myStored[ord]))
-                        {
-                            allEqual = false;
-                            break;
-                        }
-                    }
-                    if (allEqual)
-                        throw KeyConstraintViolation(table, constraint, myStored);
-                }
+                if (ScanFindsKey(table, constraint.StorageOrdinals, myStored, filter: null, affectedAddrs, batch))
+                    throw KeyConstraintViolation(table, constraint, myStored);
             }
         }
     }
@@ -2047,9 +2098,10 @@ partial class Simulation
     /// Msg 2601 on the first key collision among updated rows or against
     /// other (non-affected) heap rows. Filter-aware in the same shape as
     /// the INSERT path — rows excluded by an index's <c>Index.Filter</c>
-    /// are skipped on both sides of the comparison.
+    /// are skipped on both sides of the comparison. <paramref name="onlyRow"/>
+    /// is <see cref="EnforceKeyConstraintsForUpdate"/>'s.
     /// </summary>
-    private static void EnforceUniqueIndexesForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, BatchContext batch)
+    private static void EnforceUniqueIndexesForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, BatchContext batch, int onlyRow = -1)
     {
         if (table.Indexes.Count == 0)
             return;
@@ -2075,13 +2127,12 @@ partial class Simulation
         }
 
         var storedColumns = table.StoredColumns;
-        var lobStore = table.Heap;
         SqlValue[]? existingRowValues = null;
         var qualifiedTableName = QualifiedForViolation(table);
         var affectedKeys = new AffectedKeyIndex?[table.Indexes.Count];
         var existingComputedKeys = new HashSet<SqlValueKey>?[table.Indexes.Count];
 
-        for (var i = 0; i < affected.Count; i++)
+        for (var i = Math.Max(onlyRow, 0); i < (onlyRow < 0 ? affected.Count : onlyRow + 1); i++)
         {
             var myStored = storedSnapshots[i];
             var myFull = affected[i].FullNew;
@@ -2118,7 +2169,7 @@ partial class Simulation
                 // the unaffected rows out of a set built once for the statement.
                 if (!index.KeysAreStored)
                 {
-                    if (ComputedKeySharedByAnotherAffectedRow(affected, i, index.KeyFullOrdinals, table, index.Filter, batch))
+                    if (onlyRow < 0 && ComputedKeySharedByAnotherAffectedRow(affected, i, index.KeyFullOrdinals, table, index.Filter, batch))
                         throw UniqueIndexViolationOnComputedKey(index, qualifiedTableName, myFull);
                     var unaffected = existingComputedKeys[x] ??= BuildComputedKeySet(table, index.KeyFullOrdinals, index.Filter, batch, affectedAddrs);
                     if (unaffected.Contains(new SqlValueKey(ReadKeyByFullOrdinals(index.KeyFullOrdinals, myFull))))
@@ -2126,14 +2177,16 @@ partial class Simulation
                     continue;
                 }
 
-                var keyed = affectedKeys[x] ??= AffectedKeyIndex.Build(
-                    storedSnapshots,
-                    index.KeyStorageOrdinals,
-                    index.Filter is not { } setFilter
-                        ? null
-                        : FilterMembership(table, setFilter, affected, batch));
-                if (keyed.SharedByAnotherRow(i))
+                if (onlyRow < 0
+                    && (affectedKeys[x] ??= AffectedKeyIndex.Build(
+                        storedSnapshots,
+                        index.KeyStorageOrdinals,
+                        index.Filter is not { } setFilter
+                            ? null
+                            : FilterMembership(table, setFilter, affected, batch))).SharedByAnotherRow(i))
+                {
                     throw UniqueIndexViolation(index, qualifiedTableName, myStored);
+                }
 
                 if (TryPrepareKeySeek(table, index.KeyStorageOrdinals, myStored, out var commons, out var probe))
                 {
@@ -2154,30 +2207,8 @@ partial class Simulation
                     continue;
                 }
 
-                foreach (var (p, s, bytes) in table.Heap.EnumerateRowsWithAddress())
-                {
-                    if (affectedAddrs.Contains((p, s)))
-                        continue;
-                    if (index.Filter is { } filter
-                        && Simulation.EvaluateIndexFilter(filter, table, DecodeFullRow(table, bytes, ref existingRowValues), batch) != true)
-                    {
-                        continue;
-                    }
-
-                    var allEqual = true;
-                    for (var k = 0; k < index.KeyStorageOrdinals.Length; k++)
-                    {
-                        var ord = index.KeyStorageOrdinals[k];
-                        var existing = RowDecoder.DecodeColumn(storedColumns, bytes, ord, lobStore);
-                        if (!existing.Equals(myStored[ord]))
-                        {
-                            allEqual = false;
-                            break;
-                        }
-                    }
-                    if (allEqual)
-                        throw UniqueIndexViolation(index, qualifiedTableName, myStored);
-                }
+                if (ScanFindsKey(table, index.KeyStorageOrdinals, myStored, index.Filter, affectedAddrs, batch))
+                    throw UniqueIndexViolation(index, qualifiedTableName, myStored);
             }
         }
     }

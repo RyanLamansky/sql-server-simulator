@@ -593,6 +593,7 @@ partial class Simulation
         // IGNORE_DUP_KEY key dropped a duplicate, which real excludes from
         // rows-affected and @@ROWCOUNT alike (probe-confirmed).
         var insertedCount = 0;
+        var keyGuard = insteadOfActive || sourceRows.Count == 0 ? null : BeginUniqueKeyGuard(context.Batch, destinationTable);
         for (var rowIndex = 0; rowIndex < sourceRows.Count; rowIndex++)
         {
             var sourceRow = sourceRows[rowIndex];
@@ -765,6 +766,8 @@ partial class Simulation
                 if (!insteadOfActive)
                 {
                     var storedValues = ProjectStoredValues(destinationTable, rowValues);
+                    if (keyGuard?.Restart() == true)
+                        ForgetComputedKeySets(context.Batch, destinationTable);
                     // A duplicate against an IGNORE_DUP_KEY key drops this row and
                     // the statement carries on: no heap write, no OUTPUT row, no
                     // trigger row, and it doesn't count toward rows-affected.
@@ -786,7 +789,8 @@ partial class Simulation
                     // that reader commits, and a row already in the heap with
                     // no row-X on it yet would be visible to a READ COMMITTED
                     // reader for the whole wait.
-                    _ = InsertRow(context.Batch, destinationTable, image, destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
+                    if (!InsertCheckedRow(context.Batch, destinationTable, rowValues, storedValues, image, destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog, keyGuard))
+                        continue;
                     context.Connection.StatementIo?.CountWrite(destinationTable);
                     destinationTable.ChangeTracking?.RecordRow(context.Batch, destinationTable, rowValues, Storage.ChangeTrackingOperation.Insert);
                 }

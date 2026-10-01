@@ -497,7 +497,9 @@ Two sources feed the wait (`Simulation.AwaitUncommittedKeyWriters`, called once 
 - **`HeapTable.SupersededKeyImages`**, each session's pre-images of the rows it deleted or rewrote while it still holds their row X (`BatchContext.NoteSupersededRow`, called at every UPDATE / DELETE / MERGE / FK-cascade rewrite site after the row X is taken).
   An entry retires with the final release of its row X — `LockResource.RowAddress` tells `LockManager.Release` which — so the registry holds only writes still in flight, and a session's own entries are never consulted by its own checks.
 
-A check whose key has a NULL component (the scan fallback) doesn't wait.
+A check whose key has a NULL component scans rather than seeks, and waits on a live row carrying the key the same way; it doesn't consult the delete registry, so a NULL key an uncommitted DELETE took away is free to reuse at once.
+
+A uniqueness check waits in **X**, as real's second writer of a key requests X on it (probed 2026-10-01 against SQL Server 2025: `LCK_M_X` on the first writer's `KEY` for an INSERT and a key-moving UPDATE alike, a NULL in a UNIQUE column included); a foreign key's check waits in S.
 
 Foreign keys take the same wait on both sides: the child-side parent-existence check waits on the parent key, and the parent-side check for referencing children (a DELETE, a key-changing UPDATE) on the child key — so a child can't slip in under an uncommitted parent insert that a rollback then removes, and a parent can't go while an uncommitted child delete that a rollback restores still points at it.
 Real's parent-side check scans an unindexed child table and so waits on *any* locked child row; the simulator waits only on children carrying the key.
@@ -505,6 +507,37 @@ Real's parent-side check scans an unindexed child table and so waits on *any* lo
 The same registry covers **locking reads over an uncommitted DELETE**: the heap walk never reaches a tombstoned slot, where real's scan meets the deleted row's X-locked key and waits on it, so a READ COMMITTED / REPEATABLE READ / SERIALIZABLE / `UPDLOCK` read used to report the delete before it committed.
 A scan (`BatchContext.AwaitUncommittedDeletes`) waits on every other session's tombstoned entry for its table up front — earlier within the statement than real's wait at the row's turn, with the same outcome — and an equality or range seek on those whose pre-image its probes or bounds reach, so a seek elsewhere in the key space proceeds as on real.
 NOLOCK / READ UNCOMMITTED, READPAST and the snapshot readers don't wait.
+
+### Writers racing to one new key
+
+The check can't decide alone for a key no row carries yet: two sessions each check, find nothing, and write — a duplicate neither saw.
+Real closes the window by taking the new key's X as the row enters the index, so the second writer waits on it and then raises Msg 2627 / 2601, or writes after a rollback.
+The simulator folds that key lock into the row's own X: `UniqueKeyWriteGuard` (its declaration holds the design) takes one last look under the heap's latch, as the write publishes the row with its X, at the images other sessions inserted or updated since the check began, read off the seek journal.
+One carrying a key the write would duplicate refuses it, and the second check meets that row — published with its X — and waits on it like any uncommitted key, which keeps the wait in the lock manager, so deadlock detection and `SET LOCK_TIMEOUT` (Msg 1222) see it.
+Every path that writes a checked key takes the look: INSERT (`VALUES`, `SELECT`, `EXEC`), `BULK INSERT` and the TDS bulk load, `OUTPUT … INTO` a keyed table, MERGE's inserts and updates, and UPDATE; `SELECT … INTO` creates a table no other session can see yet, with no key to race on.
+`ConcurrentUniqueKeyTests` races eight sessions per key over a heap's UNIQUE constraint, a clustered key, a unique index and a composite key through each of those paths, plus NULL keys and `IGNORE_DUP_KEY`; without the guard nearly every variant left duplicates on nearly every run.
+
+Uncontended the look is a generation compare, since nothing but the guard's own writes moved the heap — measured 2026-10-01 one case per process, the range of each process's best round (or median batch, where marked) over three to five processes:
+
+| Case | Before | After |
+| ---- | ------ | ----- |
+| `INSERT … VALUES` into a clustered primary key, plan-cached | 4.41–4.54 µs | 4.34–4.54 µs |
+| the same into a heap with a UNIQUE constraint | 4.47–4.55 µs | 4.48–4.56 µs |
+| the same into an identity-keyed table with a unique index | 6.15–6.34 µs | 6.28–6.40 µs |
+| EF Core 10's identity-key `MERGE`, 10 / 100 rows (median) | 15.2–15.7 / 112.9–115.9 µs | 15.2–15.7 / 113.4–115.2 µs |
+| key-moving `UPDATE` of 20,000 rows over two unique keys (median) | 51.4–54.9 ms | 52.7–54.0 ms |
+| bacpac import — AdventureWorks / WWI Standard / WWI Full / Insite (mean of 3) | 1.97 / 2.63 / 1.77 / 1.26 s | 1.92 / 2.58 / 1.89 / 1.19 s |
+
+A lock-manager lock per unique key — the shape real's DMVs show — would have put the manager's one gate on every insert and interned a lock resource per key for the table's life.
+
+Probed 2026-10-01 against SQL Server 2025 and reproduced: the second writer waits however the first wrote the key (INSERT, key-moving UPDATE, MERGE's insert) and raises Msg 2627 / 2601 once it commits, writes once it rolls back, and under `IGNORE_DUP_KEY` reports Msg 3604 and writes nothing; `SET LOCK_TIMEOUT` ends the wait with Msg 1222; two transactions each inserting the key the other holds deadlock, the one closing the cycle the victim.
+
+Divergences in what the lock DMVs show:
+
+- **Real locks the key in every unique index the row enters** — `KEY X` on a heap's UNIQUE constraint beside the row's `RID X`, and on a unique nonclustered index beside the clustered key — and the second writer waits on that index key.
+  Here the row's own lock stands for all of them, so the first writer shows only its row lock and the waiter waits in X on that row (`KEY` for a clustered table, matching real there; `RID` on a heap).
+- **A MERGE's second writer waits in U** on real, the lock its matching read takes; here the uniqueness wait's X.
+- **An `IGNORE_DUP_KEY` unique nonclustered index** takes `RangeX-X` on the inserted key and `RangeS-U` past it on real, and the waiter waits in U; the simulator takes no range locks there.
 
 ## Granularity approximations
 

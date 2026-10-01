@@ -2356,13 +2356,17 @@ partial class Simulation
         var insteadOfUpdate = pendingUpdates.Count > 0 && HasInsteadOfTrigger(context.Batch, insteadOfTarget, TriggerActions.Update);
         var insteadOfDelete = pendingDeletes.Count > 0 && HasInsteadOfTrigger(context.Batch, insteadOfTarget, TriggerActions.Delete);
 
+        // The guard's second check, for a write another session raced, reads
+        // the same list the check below does: the updates first, then the inserts.
+        List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>? pseudoAffected = null;
+        UniqueKeyWriteGuard? keyGuard = null;
         // Validate key constraints across only the actions that actually
         // hit the heap. INSTEAD OF action lists bypass key checks since
         // they never reach the heap — the trigger body's own DML lands
         // with its own validation.
         if ((!insteadOfInsert && pendingInserts.Count > 0) || (!insteadOfUpdate && pendingUpdates.Count > 0))
         {
-            var pseudoAffected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
+            pseudoAffected = [];
             if (!insteadOfUpdate)
             {
                 foreach (var (page, slot, oldValues, newValues, _) in pendingUpdates)
@@ -2377,6 +2381,7 @@ partial class Simulation
             }
             if (pseudoAffected.Count > 0)
             {
+                keyGuard = BeginUniqueKeyGuard(context.Batch, destinationTable);
                 EnforceKeyConstraintsForUpdate(destinationTable, pseudoAffected, context.Batch);
                 EnforceUniqueIndexesForUpdate(destinationTable, pseudoAffected, context.Batch);
             }
@@ -2437,12 +2442,14 @@ partial class Simulation
             var trackedColumns = tracking?.UpdatedColumns(destinationTable, keyOrdinals, updatedColumnOrdinals);
             List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
             var lobColumns = LegacyLobColumnsAmong(destinationTable, updatedColumnOrdinals);
-            foreach (var (page, slot, oldValues, newValues, _) in pendingUpdates)
+            for (var u = 0; u < pendingUpdates.Count; u++)
             {
+                var (page, slot, oldValues, newValues, _) = pendingUpdates[u];
                 if (lobColumns is not null)
                     NoteRootedLobNulls(destinationTable, lobColumns, page, slot, oldValues, newValues);
                 tracking?.RecordUpdate(context.Batch, destinationTable, keyOrdinals, oldValues, newValues, trackedColumns, ref keyMoves);
-                var rewritten = RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap);
+                var storedNew = ProjectStoredValues(destinationTable, newValues);
+                var rewritten = RowEncoder.EncodeRow(destinationTable.StoredColumns, storedNew, destinationTable.Heap);
                 if (lockableTable)
                 {
                     context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
@@ -2450,7 +2457,7 @@ partial class Simulation
                     context.Batch.ProbeKeyLocksForUpdate(destinationTable, page, slot, rewritten);
                     CaptureMergeVersion(context.Batch, destinationTable, page, slot, VersionWriteKind.Update);
                 }
-                destinationTable.Heap.UpdateAt(page, slot, rewritten, undoLog, ReclaimSuperseded(destinationTable, context));
+                UpdateCheckedRow(context.Batch, destinationTable, pseudoAffected!, u, rewritten, storedNew, undoLog, ReclaimSuperseded(destinationTable, context), keyGuard);
                 ClusteredScan.NoteKeyAssignment(destinationTable, updatedColumnOrdinals, (page, slot), undoLog);
             }
             tracking?.RecordKeyMoves(context.Batch, destinationTable, keyMoves);
@@ -2458,10 +2465,16 @@ partial class Simulation
         }
         if (!insteadOfInsert)
         {
-            foreach (var (newValues, _) in pendingInserts)
+            var firstInsert = insteadOfUpdate ? 0 : pendingUpdates.Count;
+            for (var n = 0; n < pendingInserts.Count; n++)
             {
+                var newValues = pendingInserts[n].NewValues;
                 tracking?.RecordRow(context.Batch, destinationTable, newValues, ChangeTrackingOperation.Insert);
-                _ = InsertRow(context.Batch, destinationTable, RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, newValues), destinationTable.Heap), undoLog);
+                var storedNew = ProjectStoredValues(destinationTable, newValues);
+                var image = RowEncoder.EncodeRow(destinationTable.StoredColumns, storedNew, destinationTable.Heap);
+                var guard = keyGuard;
+                while (InsertRow(context.Batch, destinationTable, image, undoLog, guard: guard, storedValues: storedNew).PageIndex < 0)
+                    guard = RecheckAffectedRow(context.Batch, destinationTable, pseudoAffected!, firstInsert + n);
                 context.Connection.StatementIo?.CountWrite(destinationTable);
             }
         }

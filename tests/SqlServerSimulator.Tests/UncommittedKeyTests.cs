@@ -27,6 +27,8 @@ public sealed class UncommittedKeyTests
             create table t (k int not null primary key, v int not null);
             create table u (id int not null, code int not null);
             create unique index ux on u (code);
+            create table n (k int null, constraint uqn unique (k));
+            create table g (k int not null, constraint pkg primary key (k) with (ignore_dup_key = on));
             insert t values (10, 1), (20, 2), (30, 3);
             insert u values (1, 100)
             """);
@@ -69,6 +71,8 @@ public sealed class UncommittedKeyTests
     [DataRow("insert u values (2, 200)", "insert u values (3, 200)")]
     [DataRow("delete u where code = 100", "insert u values (3, 100)")]
     [DataRow("delete t where k = 10", "update t set k = 10 where k = 20")]
+    [DataRow("insert n values (null)", "insert n values (null)")]
+    [DataRow("insert g values (1)", "insert g values (1)")]
     public void KeyUnderAnotherTransactionsWrite_Waits(string write, string contender)
     {
         var sim = Keyed();
@@ -134,6 +138,75 @@ public sealed class UncommittedKeyTests
         IsNull(await BlockedUntil(holder, other, "insert t values (22, 9)", "rollback"));
 
         AreEqual(9, sim.ExecuteScalar("select v from t where k = 22"));
+    }
+
+    /// <summary>
+    /// The second writer of a key requests X on it, as real's does (probed
+    /// 2026-10-01 against SQL Server 2025: <c>LCK_M_X</c> on the first
+    /// writer's key).
+    /// </summary>
+    [TestMethod]
+    public async Task SecondInsertOfAKey_WaitsForX()
+    {
+        var sim = Keyed();
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+        using var monitor = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; insert t values (22, 1)").ExecuteNonQuery();
+        var contender = Task.Run(() => Throws<SimulatedSqlException>(() => other.CreateCommand("insert t values (22, 9)").ExecuteNonQuery()), TestContext.CancellationToken);
+        string? waiting = null;
+        for (var attempt = 0; attempt < 1000 && waiting is null; attempt++)
+        {
+            waiting = (string?)monitor.CreateCommand("select resource_type + ' ' + request_mode from sys.dm_tran_locks where request_status = 'WAIT'").ExecuteScalar();
+            if (waiting is null)
+                await Task.Delay(5, TestContext.CancellationToken);
+        }
+        AreEqual("KEY X", waiting);
+        _ = holder.CreateCommand("commit").ExecuteNonQuery();
+
+        AreEqual(2627, (await contender).Number);
+    }
+
+    /// <summary>
+    /// A held key under <c>IGNORE_DUP_KEY</c> is waited on like any other,
+    /// and the duplicate is ignored once its writer commits.
+    /// </summary>
+    [TestMethod]
+    public async Task SecondInsertUnderIgnoreDupKey_IsIgnoredOnceTheFirstCommits()
+    {
+        var sim = Keyed();
+        using var holder = sim.CreateOpenConnection();
+        using var other = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; insert g values (1)").ExecuteNonQuery();
+        IsNull(await BlockedUntil(holder, other, "insert g values (1)", "commit"));
+
+        AreEqual(1, sim.ExecuteScalar("select count(*) from g"));
+    }
+
+    /// <summary>
+    /// Two transactions each inserting the key the other holds deadlock, and
+    /// the one closing the cycle is the victim, as on real (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task CrossedInsertsOfEachOthersKey_Deadlock()
+    {
+        var sim = Keyed();
+        using var first = sim.CreateOpenConnection();
+        using var second = sim.CreateOpenConnection();
+
+        _ = first.CreateCommand("begin tran; insert t values (41, 1)").ExecuteNonQuery();
+        _ = second.CreateCommand("begin tran; insert t values (42, 2)").ExecuteNonQuery();
+        var blocked = Task.Run(() => first.CreateCommand("insert t values (42, 1)").ExecuteNonQuery(), TestContext.CancellationToken);
+        await Task.Delay(150, TestContext.CancellationToken);
+        IsFalse(blocked.IsCompleted);
+
+        AreEqual(1205, Throws<SimulatedSqlException>(() => second.CreateCommand("insert t values (41, 2)").ExecuteNonQuery()).Number);
+        AreEqual(1, await blocked);
+        _ = first.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual("41:1,42:1", sim.ExecuteScalar("select string_agg(concat(k, ':', v), ',') within group (order by k) from t where k > 40"));
     }
 
     [TestMethod]

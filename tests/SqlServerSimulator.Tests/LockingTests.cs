@@ -810,7 +810,8 @@ public sealed class LockingTests
         var sleepTask = Task.Run(() => sleeper.CreateCommand("waitfor delay '00:00:01'").ExecuteNonQuery(), TestContext.CancellationToken);
         var row = await PollUntil(
             () => observer.CreateCommand($"select concat(status, '|', command, '|', wait_type, '|', blocking_session_id) from sys.dm_exec_requests where session_id = {sleeperSpid}").ExecuteScalar() as string,
-            value => value is not null,
+            // The request is visible from the batch's start, a moment before its WAITFOR begins.
+            value => value?.StartsWith("suspended|", StringComparison.Ordinal) == true,
             TestContext.CancellationToken);
         AreEqual("suspended|WAITFOR|WAITFOR|0", row);
         _ = await sleepTask;

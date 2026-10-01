@@ -166,7 +166,7 @@ A disabled index isn't enforced at all, so an `ALTER INDEX … DISABLE` earlier 
 ## Key-uniqueness enforcement seeks rather than scans
 
 Four enforcement paths ask the same question — *does a live row already carry this key tuple?* — and all four answer it by seeking the shared per-`Heap` cache, the way foreign-key parent-existence already did:
-`EnforceKeyConstraints` / `EnforceUniqueIndexes` (`Simulation.Coerce.cs`, reached from INSERT, the TVP row materializer, and BCP bulk load) and `EnforceKeyConstraintsForUpdate` / `EnforceUniqueIndexesForUpdate` (`Simulation.Update.cs`, reached from UPDATE and MERGE).
+`EnforceKeyConstraints` / `EnforceUniqueIndexes` (`Simulation.Coerce.cs`, reached from INSERT, `OUTPUT … INTO` a keyed table, the TVP row materializer, and BCP bulk load) and `EnforceKeyConstraintsForUpdate` / `EnforceUniqueIndexesForUpdate` (`Simulation.Update.cs`, reached from UPDATE and MERGE).
 
 `TryPrepareKeySeek` is the shared gate.
 It resolves the per-component promoted types the seek entry keys on — each key column's own stored type, the same convention `TryMapFkColumnsToStorage` uses — and builds the probe through `TryBuildSeekProbe`, which both families share.
@@ -184,6 +184,8 @@ Size is deliberately *not* a third condition.
 A minimum-heap-size gate was built, measured and dropped: it won nowhere — 500 keyed tables seeded 1 / 3 / 10 / 50 rows each landed within run-to-run noise with and without it, since building a bucket entry over a heap that small is nearly free — and it cost 26% at 200 rows per table and up to 1.9× per insert on a few-hundred-row narrow table, whose rows all still fit inside the single page it exempted.
 The memory argument for it doesn't survive either: a table big enough for its bucket index to matter is past any such threshold by definition, so the gate only ever exempted indexes that were trivially small, while making enforcement allocate *more* (every scan comparison decodes a value — 224 MiB against 177 MiB over a 300-table × 100-row fixture).
 The whole-suite timing can't see the difference in either direction; it sits under the ±3% run-to-run noise.
+
+The check runs outside the heap's latch, since it can wait on another session's uncommitted key, so two sessions writing one new key could each pass it; the write's last look under the latch is what closes that ([`locking.md`](locking.md#writers-racing-to-one-new-key)).
 
 A filtered unique index seeks like any other: the key narrows the candidates, then the filter is evaluated on each candidate's own decoded row (`DecodeFullRow`), so only filter-passing rows on both sides participate.
 

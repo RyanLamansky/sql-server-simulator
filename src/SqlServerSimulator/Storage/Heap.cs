@@ -50,7 +50,8 @@ internal sealed class Heap
     /// free-list, the forward-target set, the reuse candidates and the
     /// row-count bookkeeping runs under this latch, entered through
     /// <see cref="EnterLatch"/>. That is <see cref="Insert"/> (with what its
-    /// caller publishes alongside the row), <see cref="UpdateAt"/>,
+    /// caller publishes alongside the row, and the last look a uniqueness
+    /// check's <see cref="UniqueKeyWriteGuard"/> takes before it), <see cref="UpdateAt"/>,
     /// <see cref="DeleteAt"/>, the LOB chain allocator and free, the tail
     /// trims, and the undo log's page writes on rollback and commit.
     /// <para>
@@ -325,7 +326,7 @@ internal sealed class Heap
     /// <see cref="Insert"/> / <see cref="DeleteAt"/> / <see cref="UpdateAt"/>
     /// skip all journal work.
     /// </summary>
-    private volatile bool seekJournalActive;
+    internal volatile bool SeekJournalActive;
 
     private const int MaxSeekJournalEvents = 512;
 
@@ -343,7 +344,7 @@ internal sealed class Heap
         using (this.EnterLatch())
         {
             this.seekJournal ??= new Queue<SeekJournalEvent>();
-            this.seekJournalActive = true;
+            this.SeekJournalActive = true;
             return this.MutationGeneration;
         }
     }
@@ -374,6 +375,26 @@ internal sealed class Heap
     }
 
     /// <summary>
+    /// Adds to <paramref name="images"/> the row image of every insert and
+    /// update since <paramref name="generation"/>, read off the seek journal;
+    /// false when the journal can't account for them all — not active, or
+    /// trimmed past that point. Runs under the latch, for a uniqueness
+    /// check's last look (<see cref="UniqueKeyWriteGuard"/>).
+    /// </summary>
+    internal bool CollectWrittenImagesSince(long generation, ref List<byte[]>? images)
+    {
+        Debug.Assert(this.latch.IsHeldByCurrentThread, "The seek journal is read under the latch.");
+        if (this.seekJournal is not { } journal || generation < this.seekJournalDroppedThroughGen)
+            return false;
+        foreach (var e in journal)
+        {
+            if (e.Generation > generation && e.NewImage is { } image)
+                (images ??= []).Add(image);
+        }
+        return true;
+    }
+
+    /// <summary>
     /// Drops the entire journal and advances <see cref="seekJournalDroppedThroughGen"/>
     /// to the current generation, so every existing cache rebuilds on its next
     /// seek. Called when a rollback rewinds heap state without producing
@@ -383,7 +404,7 @@ internal sealed class Heap
     /// </summary>
     internal void InvalidateSeekJournal()
     {
-        if (!this.seekJournalActive)
+        if (!this.SeekJournalActive)
             return;
         using var latch = this.EnterLatch();
         this.MutationGeneration++;
@@ -422,12 +443,22 @@ internal sealed class Heap
     /// it, an uncommitted insert would read as unlocked to a READ COMMITTED
     /// reader and as committed long ago to a snapshot. <paramref name="placed"/> runs
     /// under the latch, so it must not wait on another session.
+    /// <para>
+    /// With a <paramref name="guard"/>, the uniqueness check that cleared
+    /// <paramref name="storedValues"/> takes its last look under the same latch
+    /// hold, before the row is written: refused, nothing is written and the
+    /// address is <c>(-1, -1)</c>, for the caller to check the row again.
+    /// </para>
     /// </summary>
-    public (int PageIndex, int SlotIndex) Insert<TState>(ReadOnlySpan<byte> row, UndoLog? undoLog, TState state, Action<TState, (int PageIndex, int SlotIndex)> placed)
+    public (int PageIndex, int SlotIndex) Insert<TState>(
+        ReadOnlySpan<byte> row, UndoLog? undoLog, TState state, Action<TState, (int PageIndex, int SlotIndex)> placed, UniqueKeyWriteGuard? guard = null, SqlValue[]? storedValues = null)
     {
         using var latch = this.EnterLatch();
+        if (guard is not null && !guard.Admits(storedValues!))
+            return (-1, -1);
         var address = this.InsertCore(row, undoLog, journalEvent: true);
         placed(state, address);
+        guard?.NoteOwnWrite();
         return address;
     }
 
@@ -475,7 +506,7 @@ internal sealed class Heap
             this.LastRowCountChangeGeneration = this.MutationGeneration;
         this.LastModifiedEpoch = Volatile.Read(ref ModificationEpoch);
         undoLog?.RecordInsert(this, pageIndex, slotIndex);
-        if (journalEvent && this.seekJournalActive)
+        if (journalEvent && this.SeekJournalActive)
             this.RecordSeekJournalEvent(SeekJournalKind.Insert, pageIndex, slotIndex, oldImage: null, newImage: row.ToArray());
         return (pageIndex, slotIndex);
     }
@@ -902,7 +933,7 @@ internal sealed class Heap
     // of a visible row, so it must not produce a seek-journal Delete.
     private void DeleteAtCore(int pageIndex, int slotIndex, UndoLog? undoLog, bool reclaimSuperseded, bool journalEvent)
     {
-        var oldImage = journalEvent && this.seekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
+        var oldImage = journalEvent && this.SeekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
         this.MutationGeneration++;
         if (journalEvent)
             this.LastRowCountChangeGeneration = this.MutationGeneration;
@@ -950,14 +981,35 @@ internal sealed class Heap
     /// </remarks>
     public void UpdateAt(int pageIndex, int slotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog = null, bool reclaimSuperseded = false)
     {
+        using var latch = this.EnterLatch();
+        this.UpdateAtCore(pageIndex, slotIndex, newRow, undoLog, reclaimSuperseded);
+    }
+
+    /// <summary>
+    /// <see cref="UpdateAt"/> whose uniqueness check takes its last look under
+    /// the latch, as a guarded <see cref="Insert{TState}"/>'s does: false, with
+    /// nothing written, when <paramref name="guard"/> refuses
+    /// <paramref name="storedValues"/>.
+    /// </summary>
+    public bool TryUpdateAt(int pageIndex, int slotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog, bool reclaimSuperseded, UniqueKeyWriteGuard guard, SqlValue[] storedValues)
+    {
+        using var latch = this.EnterLatch();
+        if (!guard.Admits(storedValues))
+            return false;
+        this.UpdateAtCore(pageIndex, slotIndex, newRow, undoLog, reclaimSuperseded);
+        guard.NoteOwnWrite();
+        return true;
+    }
+
+    private void UpdateAtCore(int pageIndex, int slotIndex, ReadOnlySpan<byte> newRow, UndoLog? undoLog, bool reclaimSuperseded)
+    {
         // The visible Rid (pageIndex, slotIndex) is stable across an UPDATE even
         // when the payload relocates (the original slot keeps its forward bit),
         // so the seek journal records one Update at that address. Capture the
         // pre-UPDATE visible image before the mutation; the internal target
         // Insert / old-target Delete the relocating paths run are NOT journaled.
-        using var latch = this.EnterLatch();
         _ = this.TouchedSlots?.Add((pageIndex, slotIndex));
-        var oldImage = this.seekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
+        var oldImage = this.SeekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
         var page = this.Pages[pageIndex];
         if (page.IsSlotForwarded(slotIndex))
             this.UpdateForwarded(page, pageIndex, slotIndex, newRow, undoLog, reclaimSuperseded);

@@ -150,7 +150,7 @@ partial class Simulation
             throw new InvalidOperationException($"FOREIGN KEY '{fk.Name}' has no seekable referenced-column tuple.");
         }
 
-        AwaitUncommittedKeyWriters(batch, fk.ReferencedTable, refStorageOrdinals, commons, probe);
+        AwaitUncommittedKeyWriters(batch, fk.ReferencedTable, refStorageOrdinals, commons, probe, LockMode.Shared);
         var exists = HeapSeekCache.For(fk.ReferencedTable.Heap)
             .AnyRowMatches(fk.ReferencedTable.Heap, fk.ReferencedTable.StoredColumns, refStorageOrdinals, commons, probe);
         // A lookup of the referenced key: no scan, and the page of the row it found.
@@ -240,7 +240,7 @@ partial class Simulation
                 continue;
             // A child another transaction is writing decides whether the
             // parent key is still referenced only once that write settles.
-            AwaitUncommittedKeyWriters(batch, fk.ChildTable, childStorageOrdinals, commons, probe);
+            AwaitUncommittedKeyWriters(batch, fk.ChildTable, childStorageOrdinals, commons, probe, LockMode.Shared);
             foreach (var (page, slot, bytes) in cache.MatchingRows(fk.ChildTable.Heap, fk.ChildTable.StoredColumns, childStorageOrdinals, commons, probe))
             {
                 if (seen.Add((page, slot)))
