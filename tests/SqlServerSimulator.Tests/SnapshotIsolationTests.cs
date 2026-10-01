@@ -376,6 +376,42 @@ public sealed class SnapshotIsolationTests
     }
 
     [TestMethod]
+    public void DeleteInFlight_ConcurrentSnapshotSeesTheRow()
+    {
+        var sim = SnapshotFixture();
+        using var writer = sim.CreateOpenConnection();
+        _ = writer.CreateCommand("begin tran; delete t where id = 1").ExecuteNonQuery();
+        using var siConn = sim.CreateOpenConnection();
+        AreEqual(2, siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select count(*) from t").ExecuteScalar());
+        AreEqual(100, siConn.CreateCommand("select v from t where id = 1").ExecuteScalar());
+        _ = writer.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual(2, siConn.CreateCommand("select count(*) from t").ExecuteScalar());
+        _ = siConn.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual(1, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void MergeInFlight_ConcurrentSnapshotSeesThePreMergeRows()
+    {
+        const string rows = "select string_agg(concat(id, ':', v), ',') within group (order by id) from t";
+        var sim = SnapshotFixture();
+        using var writer = sim.CreateOpenConnection();
+        _ = writer.CreateCommand("""
+            begin tran;
+            merge t using (values (1, 300), (3, 300)) s (id, v) on t.id = s.id
+            when matched then update set v = s.v
+            when not matched then insert values (s.id, s.v)
+            when not matched by source then delete;
+            """).ExecuteNonQuery();
+        using var siConn = sim.CreateOpenConnection();
+        AreEqual("1:100,2:100", siConn.CreateCommand("set transaction isolation level snapshot; begin tran; " + rows).ExecuteScalar());
+        _ = writer.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual("1:100,2:100", siConn.CreateCommand(rows).ExecuteScalar());
+        _ = siConn.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual("1:300,3:300", sim.ExecuteScalar(rows));
+    }
+
+    [TestMethod]
     public void InsertThenUpdateInOneTransaction_OlderSnapshotSeesNoRow()
     {
         var sim = SnapshotFixture();

@@ -1454,14 +1454,13 @@ internal sealed class BatchContext
     /// </summary>
     public void AcquireRowLockTxScoped(HeapTable table, int pageIndex, int slotIndex, LockMode mode, RowLockPurpose purpose = RowLockPurpose.Read)
     {
-        var connection = this.Connection;
-        // Every DML path passes through here with a RID in hand, so it is
-        // where the key-lock tests hang. The slot holds the image that matters
-        // at each site: an INSERT locks after the heap write (so it reads its
-        // new row), an UPDATE / DELETE locks before (so it reads the row it is
-        // about to supersede). An UPDATE's new image is tested separately at
-        // the rewrite site — a row moving into a fenced gap is a phantom the
-        // old image can't reveal.
+        // Every UPDATE / DELETE path passes through here with a RID in hand,
+        // so it is where their key-lock tests hang: the lock comes before the
+        // write, so the slot holds the row it is about to supersede. An
+        // UPDATE's new image is tested separately at the rewrite site — a row
+        // moving into a fenced gap is a phantom the old image can't reveal —
+        // and an INSERT tests its image before the heap write and takes its
+        // X through AcquireInsertedRowLock.
         if (Volatile.Read(ref table.ActiveKeyRangeLocks) != 0
             && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } liveImage)
         {
@@ -1470,10 +1469,26 @@ internal sealed class BatchContext
             else
                 this.TestKeyLocksForWrite(table, liveImage, purpose);
         }
+        this.AcquireRowLock(table, pageIndex, slotIndex, mode);
+    }
+
+    /// <summary>
+    /// The X on a row an insert has just placed, taken under the heap's latch
+    /// before the row is visible (see <c>Simulation.InsertRow</c>), so it
+    /// skips the key-range tests, which can wait and which the insert ran
+    /// before taking the latch. No session can hold a lock on an address
+    /// that didn't exist, so the acquisition never waits.
+    /// </summary>
+    public void AcquireInsertedRowLock(HeapTable table, int pageIndex, int slotIndex) =>
+        this.AcquireRowLock(table, pageIndex, slotIndex, LockMode.Exclusive, underLatch: true);
+
+    private void AcquireRowLock(HeapTable table, int pageIndex, int slotIndex, LockMode mode, bool underLatch = false)
+    {
         if (this.EscalatedModeOf(table) is { } escalated && (escalated == LockMode.Exclusive || mode == LockMode.Shared))
             return;
+        var connection = this.Connection;
         var resource = table.GetOrCreateRowLock(pageIndex, slotIndex);
-        connection.Simulation.LockManager.Acquire(resource, mode, connection.Session, this.LockTimeoutFor(table));
+        connection.Simulation.LockManager.Acquire(resource, mode, connection.Session, this.LockTimeoutFor(table), sweepAbandoned: !underLatch);
         if (connection.CurrentTransaction is { } activeTx)
             activeTx.HeldLocks.Add((resource, mode));
         else
@@ -2023,10 +2038,10 @@ internal sealed class BatchContext
     /// <exception cref="SimulatedSqlException">
     /// Msg 1222 on lock timeout, Msg 1205 when waiting would close a cycle.
     /// </exception>
-    public void ProbeKeyLocksForInsert(HeapTable table, byte[] image)
+    public void ProbeKeyLocksForInsert(HeapTable table, ReadOnlySpan<byte> image)
     {
         if (Volatile.Read(ref table.ActiveKeyRangeLocks) != 0)
-            this.TestKeyLocksForWrite(table, image, RowLockPurpose.Insert);
+            this.TestKeyLocksForWrite(table, image.ToArray(), RowLockPurpose.Insert);
     }
 
     /// <summary>
@@ -2092,7 +2107,7 @@ internal sealed class BatchContext
             {
                 if (!seen.Add((pageIndex, slotIndex)) || table.Heap.IsSlotTombstoned(pageIndex, slotIndex))
                     continue;
-                if (batch.TouchRowForRead(table, pageIndex, slotIndex, plan) && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } bytes)
+                if (batch.TouchRowForRead(table, pageIndex, slotIndex, plan) && table.Heap.ReadLiveRow(pageIndex, slotIndex) is { } bytes)
                 {
                     io?.Enter(pageIndex, ref lastPage);
                     addresses?.Record(bytes, pageIndex, slotIndex);
@@ -2101,42 +2116,62 @@ internal sealed class BatchContext
             }
             yield break;
         }
-        foreach (var (pageIndex, slotIndex, bytes) in table.Heap.EnumerateRowsWithAddress())
+        var heap = table.Heap;
+        if (snapshotXid is { } sx)
         {
-            io?.Enter(pageIndex, ref lastPage);
-            if (snapshotXid is { } sx)
+            // A deleted slot comes through too: the snapshot may predate the
+            // delete. Each slot resolves once, against the chain as it stood
+            // with the slot, so a write landing mid-scan neither hides a row
+            // nor shows it twice.
+            foreach (var (pageIndex, slotIndex, read, sequence) in heap.EnumerateSlots())
             {
-                var resolved = Storage.VersionStore.ResolveVisibleVersion(table, (pageIndex, slotIndex), bytes, sx, batch.Connection.CurrentTransaction);
+                io?.Enter(pageIndex, ref lastPage);
+                var resolved = Storage.VersionStore.ReadSnapshotSlot(table, (pageIndex, slotIndex), read, sequence, sx, batch.Connection.Session);
                 if (resolved is null)
                     continue;
                 addresses?.Record(resolved, pageIndex, slotIndex);
                 yield return resolved;
-                continue;
             }
-            if (batch.TouchRowForRead(table, pageIndex, slotIndex, plan))
+            // A chain whose address the heap no longer has — its page trimmed
+            // or truncated away — may still hold a version the snapshot
+            // predates.
+            foreach (var (address, chain) in table.RowVersions)
             {
-                addresses?.Record(bytes, pageIndex, slotIndex);
-                yield return bytes;
-            }
-        }
-        // Second pass: under snapshot, surface tombstoned slots whose chain
-        // carries a still-visible historical version. The live-heap pass
-        // skips these (heap iteration skips tombstoned slots), but the
-        // SI / RCSI snapshot may pre-date the delete, in which case the
-        // pre-delete payload is the visible version. Walks the per-table
-        // version dict directly; live slots are filtered out by the
-        // tombstone check so we don't double-yield.
-        if (snapshotXid is { } sx2)
-        {
-            foreach (var kv in table.RowVersions)
-            {
-                if (!table.Heap.IsSlotTombstoned(kv.Key.PageIndex, kv.Key.SlotIndex))
+                if (heap.TryReadSlot(address.PageIndex, address.SlotIndex, out _, out _))
                     continue;
-                var resolved = Storage.VersionStore.ResolveTombstonedSlotForSnapshot(kv.Value, sx2, batch.Connection.CurrentTransaction);
+                var resolved = Storage.VersionStore.ResolveTombstonedSlotForSnapshot(chain, sx, batch.Connection.Session);
                 if (resolved is null)
                     continue;
-                addresses?.Record(resolved, kv.Key.PageIndex, kv.Key.SlotIndex);
+                addresses?.Record(resolved, address.PageIndex, address.SlotIndex);
                 yield return resolved;
+            }
+        }
+        else
+        {
+            using var rows = heap.EnumerateRowsWithAddress().GetEnumerator();
+            while (true)
+            {
+                // Read just ahead of the row, so a write since — one a wait in
+                // the probe below outlasted — shows as a moved sequence.
+                var sequence = heap.WriteSequence;
+                if (!rows.MoveNext())
+                    break;
+                var (pageIndex, slotIndex, bytes) = rows.Current;
+                io?.Enter(pageIndex, ref lastPage);
+                if (!batch.TouchRowForRead(table, pageIndex, slotIndex, plan))
+                    continue;
+                // A wait on the row's writer can outlast the image read before
+                // it: when anything wrote the heap since, read the row as it
+                // stands — gone if the write deleted it — as real's read after
+                // the wait does.
+                if (heap.WriteSequence != sequence)
+                {
+                    if (heap.ReadLiveRow(pageIndex, slotIndex) is not { } current)
+                        continue;
+                    bytes = current;
+                }
+                addresses?.Record(bytes, pageIndex, slotIndex);
+                yield return bytes;
             }
         }
     }
@@ -2165,12 +2200,15 @@ internal sealed class BatchContext
             {
                 if (tx.SnapshotXid is null)
                 {
+                    // Registered before the stamp is read, under one no later
+                    // than it: a version sweep running meanwhile either sees
+                    // the registration or read its cutoff before this stamp
+                    // existed, so it can't drop a version the snapshot reads.
+                    var transactionId = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(tx);
+                    simulation.ActiveSnapshotTxs[connection.Session] = new ActiveSnapshotRegistration(transactionId, simulation.CurrentTransactionCommitId, connection.Spid);
                     var snapshotXid = simulation.CurrentTransactionCommitId;
                     tx.SnapshotXid = snapshotXid;
-                    simulation.ActiveSnapshotTxs[connection.Session] = new ActiveSnapshotRegistration(
-                        System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(tx),
-                        snapshotXid,
-                        connection.Spid);
+                    simulation.ActiveSnapshotTxs[connection.Session] = new ActiveSnapshotRegistration(transactionId, snapshotXid, connection.Spid);
                 }
                 return tx.SnapshotXid;
             }

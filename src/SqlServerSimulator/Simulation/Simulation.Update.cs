@@ -778,8 +778,8 @@ partial class Simulation
             // is the conflict it is on real (probed 2026-09-28 against SQL
             // Server 2025).
             var hist = table.Heap.IsSlotTombstoned(kv.Key.PageIndex, kv.Key.SlotIndex)
-                ? Storage.VersionStore.ResolveTombstonedSlotForSnapshot(kv.Value, sx, batch.Connection.CurrentTransaction)
-                : Storage.VersionStore.ResolveChangedLiveSlotForSnapshot(kv.Value, sx, batch.Connection.CurrentTransaction);
+                ? Storage.VersionStore.ResolveTombstonedSlotForSnapshot(kv.Value, sx, batch.Connection.Session)
+                : Storage.VersionStore.ResolveChangedLiveSlotForSnapshot(kv.Value, sx, batch.Connection.Session);
             if (hist is null)
                 continue;
             var fullValues = DecodeFullRow(table, hist);
@@ -1065,10 +1065,12 @@ partial class Simulation
             // judged once the post-update image is known.
             if (lockableTable)
                 context.Batch.ProbeKeyLocksForUpdate(table, pageIndex, slotIndex, newImage);
-            table.Heap.UpdateAt(pageIndex, slotIndex, newImage, undoLog, ReclaimSuperseded(table, context));
-            ClusteredScan.NoteKeyAssignment(table, updatedColumnOrdinals, (pageIndex, slotIndex), undoLog);
+            // Captured ahead of the rewrite, so a snapshot never meets the new
+            // image before the chain marks it in flight.
             if (lockableTable && oldBytesPerAffected is not null)
                 Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
+            table.Heap.UpdateAt(pageIndex, slotIndex, newImage, undoLog, ReclaimSuperseded(table, context));
+            ClusteredScan.NoteKeyAssignment(table, updatedColumnOrdinals, (pageIndex, slotIndex), undoLog);
         }
         tracking?.RecordKeyMoves(context.Batch, table, keyMoves);
         table.NoteColumnsUpdated(updatedColumnOrdinals);
@@ -1124,7 +1126,6 @@ partial class Simulation
         UndoLog? undoLog)
     {
         var stampedNow = SqlValue.FromDateTime2(parent.Columns[period.EndOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
-        var lockableHistory = IsLockableTable(historyTable);
         foreach (var (_, _, _, oldFull) in affected)
         {
             if (oldFull is null)
@@ -1132,9 +1133,7 @@ partial class Simulation
             var historyRow = new SqlValue[oldFull.Length];
             Array.Copy(oldFull, historyRow, oldFull.Length);
             historyRow[period.EndOrdinal] = stampedNow;
-            var (newPage, newSlot) = historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
-            if (lockableHistory)
-                context.Batch.AcquireRowLockTxScoped(historyTable, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
+            _ = InsertRow(context.Batch, historyTable, RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
         }
     }
 
@@ -1148,6 +1147,39 @@ partial class Simulation
         !table.IsTableVariable
         && !BatchContext.IsLocalTempName(table.Name)
         && !Simulation.SystemHeapTables.Values.Contains(table);
+
+    /// <summary>
+    /// Inserts a row a statement writes. On a table other sessions can read,
+    /// the row's X lock and — with <paramref name="captureVersion"/> — its
+    /// version-store entry are published under the heap's latch together
+    /// with the row (<see cref="Heap.Insert{TState}"/>), so a READ COMMITTED
+    /// reader meets the row already locked and a snapshot meets it already in
+    /// flight, rather than reading an uncommitted row as committed. The
+    /// key-range test, which can wait, runs first, outside the latch.
+    /// </summary>
+    internal static (int PageIndex, int SlotIndex) InsertRow(BatchContext batch, HeapTable table, ReadOnlySpan<byte> image, UndoLog? undoLog, bool captureVersion = true)
+    {
+        if (!IsLockableTable(table))
+            return table.Heap.Insert(image, undoLog);
+        batch.ProbeKeyLocksForInsert(table, image);
+        return table.Heap.Insert(image, undoLog, (batch, table, captureVersion), static (state, address) =>
+        {
+            state.batch.AcquireInsertedRowLock(state.table, address.PageIndex, address.SlotIndex);
+            if (state.captureVersion)
+                VersionStore.CaptureWrite(state.batch, state.table, address, oldRid: null, oldPayload: null, VersionWriteKind.Insert);
+        });
+    }
+
+    /// <summary>
+    /// Records the pre-write version of the row a MERGE is about to delete or
+    /// rewrite, ahead of the heap write as UPDATE and DELETE record theirs, so
+    /// a snapshot reads the row as it stood until the MERGE commits.
+    /// </summary>
+    private static void CaptureMergeVersion(BatchContext batch, HeapTable table, int pageIndex, int slotIndex, VersionWriteKind kind)
+    {
+        if (VersionStore.WillCaptureVersions(batch.DatabaseFor(table), table) && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } oldBytes)
+            VersionStore.CaptureWrite(batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytes, kind);
+    }
 
     /// <summary>
     /// Whether a superseding UPDATE / DELETE may reclaim the old row's off-row

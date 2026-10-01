@@ -543,25 +543,16 @@ public sealed class DmlPlanReplayTests
             using var connection = simulation.CreateOpenConnection();
             for (var i = 0; i < iterations; i++)
             {
-                // The writes take turns under a table lock: what runs side by
-                // side is every session replaying the one plan, each writing
-                // its own batch's table variable.
-                using (var hold = connection.CreateCommand("begin tran; select top (0) id from c with (tablockx)"))
-                    _ = hold.ExecuteNonQuery();
                 var name = $"w{worker}-{i}";
-                using (var command = connection.CreateCommand(text, ("@p0", name), ("@p1", 2 * i), ("@p2", name), ("@p3", (2 * i) + 1)))
-                using (var reader = command.ExecuteReader())
+                using var command = connection.CreateCommand(text, ("@p0", name), ("@p1", 2 * i), ("@p2", name), ("@p3", (2 * i) + 1));
+                using var reader = command.ExecuteReader();
+                for (var position = 0; position < 2; position++)
                 {
-                    for (var position = 0; position < 2; position++)
-                    {
-                        IsTrue(reader.Read());
-                        AreEqual(name, reader.GetString(0));
-                        AreEqual((2 * i) + position, reader.GetInt32(1));
-                    }
-                    IsFalse(reader.Read());
+                    IsTrue(reader.Read());
+                    AreEqual(name, reader.GetString(0));
+                    AreEqual((2 * i) + position, reader.GetInt32(1));
                 }
-                using var commit = connection.CreateCommand("commit");
-                _ = commit.ExecuteNonQuery();
+                IsFalse(reader.Read());
             }
         });
         AreEqual(workers * iterations * 2, simulation.ExecuteScalar("select count(*) from c"));

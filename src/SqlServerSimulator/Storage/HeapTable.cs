@@ -735,6 +735,17 @@ internal sealed class HeapTable : SchemaObject
     /// </summary>
     public readonly ConcurrentDictionary<(int PageIndex, int SlotIndex), RowVersionChain> RowVersions = new();
 
+    /// <summary>
+    /// Serializes the writes to <see cref="RowVersions"/> and its chains — a
+    /// writer's capture, a commit's stamps, a rollback's discard and the
+    /// version sweep — so a sweep can't drop a chain a writer just took, nor
+    /// two sweeps free one version's off-row chains twice. Readers take no
+    /// lock. A leaf: taken under the heap's latch (an insert publishing its
+    /// chain) and the simulation's commit gate, never the other way round, so
+    /// a sweep frees the chains it dropped after leaving it.
+    /// </summary>
+    internal readonly Lock RowVersionsGate = new();
+
     internal string DebugDisplay() => $"{this.Name} ({string.Join(", ", this.Columns.Select(c => c.Name))})";
 
     /// <summary>
@@ -904,7 +915,7 @@ internal readonly struct IndexIdentity(int indexId, byte type, string? name, Key
 /// <summary>
 /// Tracks the commit timeline for a single heap slot. The live heap row
 /// represents the most-recent version (or the in-flight writer's
-/// pre-commit version when <see cref="WriterTx"/> is non-null);
+/// pre-commit version when <see cref="WriterSession"/> is non-null);
 /// <see cref="Head"/> chains older committed payloads newest-first.
 /// Readers under SNAPSHOT / READ_COMMITTED_SNAPSHOT walk this structure
 /// to find the version visible at their snapshot timestamp.
@@ -915,20 +926,21 @@ internal sealed class RowVersionChain
     /// Commit Xid that made the live heap row current. Zero for rows
     /// that pre-date the simulator's first version-aware operation
     /// (implicitly committed at Xid 0, visible to every snapshot).
-    /// Updated atomically alongside <see cref="WriterTx"/> = null at
-    /// the writer's commit-time finalization step.
+    /// Stamped before <see cref="WriterSession"/> clears at the writer's
+    /// commit-time finalization step.
     /// </summary>
     internal long LiveXmin;
 
     /// <summary>
-    /// Non-null while a transaction is currently writing to this slot —
-    /// the live heap payload reflects the writer's pre-commit value and
-    /// must not be returned to SI / RCSI readers. Cleared on writer
-    /// commit (with <see cref="LiveXmin"/> bumped to the new commit
-    /// stamp) or rollback (with <see cref="LiveXmin"/> left at its
-    /// pre-tx value — the undo log restores the heap row).
+    /// The session whose uncommitted write the slot holds — a transaction
+    /// or an auto-commit statement alike — so the live heap payload must not
+    /// be returned to another session's SI / RCSI read, while the writer's
+    /// own reads see it. Cleared on the writer's commit (with
+    /// <see cref="LiveXmin"/> bumped to the new commit stamp) or rollback
+    /// (with <see cref="LiveXmin"/> left at its pre-tx value — the undo log
+    /// restores the heap row).
     /// </summary>
-    internal SimulatedDbTransaction? WriterTx;
+    internal SessionToken? WriterSession;
 
     /// <summary>
     /// True after a committed DELETE tombstones the live heap slot. SI /

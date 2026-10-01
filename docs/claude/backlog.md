@@ -74,12 +74,12 @@ The subsections that follow carry the areas with work in flight.
   Warm-up is also longer than it looks: a single-row `UPDATE` batch read ~100 µs after 3,000 iterations and 12 µs after 100,000, so a run warms by elapsed time (seconds), not by an iteration count.
   How a benchmark resets its table between iterations is part of what it measures: `DELETE` leaves dead pages an insert's reuse walk visits and `TRUNCATE` doesn't, and a table that just grows makes any target scan grow with it — so measure the shape you mean, and say which.
 
-### Concurrent writers to one table
+### Concurrent inserts of one new key
 
-**Inserts from several sessions into one table race in `Heap.InsertCore`**, which appends to the tail page and the page list with nothing serializing it: a table-level IX lock admits every inserting session at once, as real's does, but real serializes the page itself under a latch the simulator has no counterpart for.
-Eight sessions each running `INSERT … OUTPUT INSERTED.id INTO @t VALUES (…)` twice per batch into one identity-keyed table lose a few rows in a hundred batches apiece — the row's `OUTPUT` id names no stored row — and occasionally throw `NullReferenceException` from `InsertCore`; the same holds for `MERGE`, plan-cached or not.
-Separate tables don't race (`LockingTests.TwoThreads_ConcurrentInsertsIntoSeparateTables_BothSucceed`), and `DmlPlanReplayTests.ConcurrentReplays_OfTheEfMergeIntoTableVariable_ReadTheirOwnRows` takes its writes in turns under `TABLOCKX` for this reason.
-A per-heap write gate around the page-list mutations (insert, the reuse walk, tail shrink) is the likely shape; its cost on the single-session insert path needs the usual A/B.
+**Two sessions inserting the same not-yet-present key into a PRIMARY KEY or UNIQUE column can both pass the duplicate check**, leaving two rows with one key: the check (`Simulation.AwaitUncommittedKeyWriters`, then the seek cache's `MatchingRows`) and the insert that publishes the row with its X lock aren't one step, so neither session sees the other's row in between.
+Eight sessions each inserting keys 0–299 in the same order leave one or two duplicated keys per run.
+Real takes the new key's X lock as the row enters the index, so the second inserter waits on it and then raises Msg 2627 (or succeeds after a rollback) — the behavior an uncommitted *existing* row already gets here ([`locking.md`](locking.md#uncommitted-keys-and-deletes-make-their-readers-wait)).
+The likely shape is a short-held lock-manager lock on the key, taken before the check and released once the row's own X is published, so the wait is visible to deadlock detection — not a latch, since the window spans foreign-key checks and key-range tests that wait on other sessions — at the cost of one more lock acquisition per unique key per insert, which needs the usual A/B; a key-changing `UPDATE` / `MERGE` and the bulk paths need the same.
 
 ### TDS network endpoint — follow-up phases
 

@@ -1,5 +1,7 @@
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace SqlServerSimulator.Storage;
 
@@ -38,7 +40,107 @@ internal sealed class Heap
     public const int MaxRowSize = 8060;
 
     /// <summary>Pages in this heap, in allocation order. Index <c>i</c> is reachable via prev/next links.</summary>
-    public readonly List<HeapPage> Pages = [];
+    public readonly HeapPageList Pages = [];
+
+    /// <summary>
+    /// The heap's write latch — real's page latch, at heap granularity. A
+    /// table-level IX lock admits every inserting session at once, as real's
+    /// does, so the lock manager serializes nothing here: whatever changes
+    /// <see cref="Pages"/>, a page's bytes, <see cref="LobPages"/> and its
+    /// free-list, the forward-target set, the reuse candidates and the
+    /// row-count bookkeeping runs under this latch, entered through
+    /// <see cref="EnterLatch"/>. That is <see cref="Insert"/> (with what its
+    /// caller publishes alongside the row), <see cref="UpdateAt"/>,
+    /// <see cref="DeleteAt"/>, the LOB chain allocator and free, the tail
+    /// trims, and the undo log's page writes on rollback and commit.
+    /// <para>
+    /// Held for the page mutation only. Nothing under it waits on another
+    /// session — no lock wait, trigger, constraint check or read of another
+    /// table — because a reader spinning on <see cref="latchSequence"/> may
+    /// be the session the holder would wait for. The order is: this latch,
+    /// then the lock manager's gate (the insert hook takes a row X that no
+    /// session can hold, skipping the abandoned-session sweep), the table's
+    /// version-store gate, and the simulation's session registry (the LOB
+    /// reclamation's oldest-reader check), each a leaf. No path takes this
+    /// latch while holding one of those, nor while holding another heap's
+    /// latch; the seek cache and the clustered-order cache read the heap
+    /// under their own locks, which therefore come before it.
+    /// </para>
+    /// <para>
+    /// Readers take no latch: they read optimistically against
+    /// <see cref="latchSequence"/> (see <see cref="BeginRead"/>), so a scan
+    /// pays a volatile read per row and a reader never sees a torn page, a
+    /// half-forwarded row or a half-published insert.
+    /// </para>
+    /// </summary>
+    private readonly Lock latch = new();
+
+    /// <summary>
+    /// Even at rest, odd while a latch holder is between its first change and
+    /// its exit. A reader notes it before reading and re-reads it after: the
+    /// same even value both times means no writer touched the heap meanwhile.
+    /// </summary>
+    private int latchSequence;
+
+    // How deeply the holder has re-entered the latch (an UPDATE's forwarding
+    // insert, an undo entry freeing chains); touched only by the holder, and
+    // only the outermost enter and exit move the sequence.
+    private int latchDepth;
+
+    /// <summary>Enters <see cref="latch"/> for a mutation; dispose the scope to leave it.</summary>
+    internal LatchScope EnterLatch()
+    {
+        this.latch.Enter();
+        if (this.latchDepth++ == 0)
+            _ = Interlocked.Increment(ref this.latchSequence);
+        return new(this);
+    }
+
+    private void ExitLatch()
+    {
+        if (--this.latchDepth == 0)
+            Volatile.Write(ref this.latchSequence, this.latchSequence + 1);
+        this.latch.Exit();
+    }
+
+    /// <summary>A held <see cref="latch"/>, released on dispose.</summary>
+    internal readonly ref struct LatchScope(Heap heap)
+    {
+        public void Dispose() => heap.ExitLatch();
+    }
+
+    /// <summary>
+    /// Starts an optimistic read: returns the even <see cref="latchSequence"/>
+    /// to hand <see cref="EndRead"/>, waiting out a writer mid-mutation first.
+    /// The latch holder's own reads (an undo entry reading the row whose chains
+    /// it frees) see its writes in progress and return at once.
+    /// </summary>
+    private int BeginRead()
+    {
+        var sequence = Volatile.Read(ref this.latchSequence);
+        return (sequence & 1) == 0 || this.latch.IsHeldByCurrentThread ? sequence : this.AwaitLatchHolder();
+    }
+
+    private int AwaitLatchHolder()
+    {
+        var spin = new SpinWait();
+        int sequence;
+        while (((sequence = Volatile.Read(ref this.latchSequence)) & 1) != 0)
+            spin.SpinOnce();
+        return sequence;
+    }
+
+    /// <summary>
+    /// Whether no writer touched the heap since <see cref="BeginRead"/>
+    /// returned <paramref name="sequence"/>; when false, what was read may be
+    /// torn and the caller reads again. The reads it validates must not throw
+    /// on torn input — the page accessors on this path bound-check instead.
+    /// </summary>
+    private bool EndRead(int sequence)
+    {
+        Volatile.ReadBarrier();
+        return Volatile.Read(ref this.latchSequence) == sequence;
+    }
 
     /// <summary>
     /// Slots that are the target of some forwarding pointer. Iteration over
@@ -48,8 +150,43 @@ internal sealed class Heap
     /// callers can address them by their physical location. <c>TRUNCATE</c>
     /// clears this alongside <see cref="Pages"/> and <see cref="LobPages"/>;
     /// <see cref="UndoLog"/>'s truncation entry snapshots and restores it.
+    /// Concurrent because a scan probes it without the latch, and the probe
+    /// runs only while <see cref="forwardTargetCount"/>, which the latch
+    /// holder keeps, says it holds something.
     /// </summary>
-    internal readonly HashSet<(int Page, int Slot)> ForwardTargets = [];
+    private readonly ConcurrentDictionary<(int Page, int Slot), byte> forwardTargets = new();
+
+    private int forwardTargetCount;
+
+    private void AddForwardTarget((int Page, int Slot) target)
+    {
+        if (this.forwardTargets.TryAdd(target, 0))
+            this.forwardTargetCount++;
+    }
+
+    private void RemoveForwardTarget((int Page, int Slot) target)
+    {
+        if (this.forwardTargets.TryRemove(target, out _))
+            this.forwardTargetCount--;
+    }
+
+    /// <summary>The forward-target set as it stands, for <c>TRUNCATE</c>'s undo entry.</summary>
+    internal HashSet<(int Page, int Slot)> SnapshotForwardTargets()
+    {
+        var snapshot = new HashSet<(int Page, int Slot)>();
+        foreach (var (target, _) in this.forwardTargets)
+            _ = snapshot.Add(target);
+        return snapshot;
+    }
+
+    /// <summary>Replaces the forward-target set with <paramref name="targets"/> — empty on <c>TRUNCATE</c>, the snapshot when one rolls back.</summary>
+    internal void RestoreForwardTargets(HashSet<(int Page, int Slot)> targets)
+    {
+        this.forwardTargets.Clear();
+        foreach (var target in targets)
+            _ = this.forwardTargets.TryAdd(target, 0);
+        this.forwardTargetCount = targets.Count;
+    }
 
     /// <summary>
     /// The stand-in for real's uniquifier under a non-unique clustered index:
@@ -92,8 +229,8 @@ internal sealed class Heap
     /// changed, so any-positive delta forces a rebuild or — once the seek
     /// journal is active (see <see cref="seekJournal"/>) — a delta replay.
     /// Not a transactional value: it advances on the physical mutation and
-    /// never rolls back. Mutations on a given table are lock-serialized, so
-    /// this needs no interlocking.
+    /// never rolls back. Advanced only under <see cref="latch"/>, so it needs
+    /// no interlocking.
     /// </summary>
     public long MutationGeneration;
 
@@ -152,8 +289,6 @@ internal sealed class Heap
         public readonly byte[]? NewImage = newImage;
     }
 
-    private readonly Lock seekJournalGate = new();
-
     /// <summary>
     /// Bounded log of visible-row mutations since the seek cache went live,
     /// enabling the per-<see cref="Heap"/> equality-seek cache to apply a delta
@@ -165,6 +300,13 @@ internal sealed class Heap
     /// rebuild for any cache that fell too far behind (a large bulk mutation, or
     /// a heap that wasn't seeked for a long time). A rollback or ALTER clears it
     /// via <see cref="InvalidateSeekJournal"/>.
+    /// <para>
+    /// Guarded by <see cref="latch"/>, under which every writer advances
+    /// <see cref="MutationGeneration"/> and records its event, so a snapshot
+    /// can't read a generation whose event is missing from the journal: that
+    /// would step a seek cache past an insert it never replays, and a
+    /// clustered scan following the cache's key order would lose the row.
+    /// </para>
     /// </summary>
     private Queue<SeekJournalEvent>? seekJournal;
 
@@ -198,7 +340,7 @@ internal sealed class Heap
     /// </summary>
     internal long ActivateSeekJournal()
     {
-        lock (this.seekJournalGate)
+        using (this.EnterLatch())
         {
             this.seekJournal ??= new Queue<SeekJournalEvent>();
             this.seekJournalActive = true;
@@ -216,7 +358,7 @@ internal sealed class Heap
     /// </summary>
     internal SeekJournalEvent[]? SnapshotSeekJournalSince(long sinceGen, out long currentGen)
     {
-        lock (this.seekJournalGate)
+        using (this.EnterLatch())
         {
             currentGen = this.MutationGeneration;
             if (this.seekJournal is null || sinceGen < this.seekJournalDroppedThroughGen)
@@ -243,24 +385,19 @@ internal sealed class Heap
     {
         if (!this.seekJournalActive)
             return;
-        lock (this.seekJournalGate)
-        {
-            this.MutationGeneration++;
-            this.seekJournalDroppedThroughGen = this.MutationGeneration;
-            this.seekJournal?.Clear();
-        }
+        using var latch = this.EnterLatch();
+        this.MutationGeneration++;
+        this.seekJournalDroppedThroughGen = this.MutationGeneration;
+        this.seekJournal?.Clear();
     }
 
     private void RecordSeekJournalEvent(SeekJournalKind kind, int page, int slot, byte[]? oldImage, byte[]? newImage)
     {
-        lock (this.seekJournalGate)
-        {
-            if (this.seekJournal is not { } journal)
-                return;
-            journal.Enqueue(new SeekJournalEvent(this.MutationGeneration, kind, page, slot, oldImage, newImage));
-            while (journal.Count > MaxSeekJournalEvents)
-                this.seekJournalDroppedThroughGen = Math.Max(this.seekJournalDroppedThroughGen, journal.Dequeue().Generation);
-        }
+        if (this.seekJournal is not { } journal)
+            return;
+        journal.Enqueue(new SeekJournalEvent(this.MutationGeneration, kind, page, slot, oldImage, newImage));
+        while (journal.Count > MaxSeekJournalEvents)
+            this.seekJournalDroppedThroughGen = Math.Max(this.seekJournalDroppedThroughGen, journal.Dequeue().Generation);
     }
 
     /// <summary>
@@ -271,8 +408,28 @@ internal sealed class Heap
     /// columns off-row to honor that cap; this method only enforces it as
     /// a defensive guard against bypassed callers.
     /// </summary>
-    public (int PageIndex, int SlotIndex) Insert(ReadOnlySpan<byte> row, UndoLog? undoLog = null) =>
-        this.InsertCore(row, undoLog, journalEvent: true);
+    public (int PageIndex, int SlotIndex) Insert(ReadOnlySpan<byte> row, UndoLog? undoLog = null)
+    {
+        using var latch = this.EnterLatch();
+        return this.InsertCore(row, undoLog, journalEvent: true);
+    }
+
+    /// <summary>
+    /// <see cref="Insert"/> that runs <paramref name="placed"/> with the new
+    /// row's address before releasing <see cref="latch"/>, so what the caller
+    /// publishes with the row — its row X lock, its version-store entry — is
+    /// in place before any latch-free reader can see the slot; published after
+    /// it, an uncommitted insert would read as unlocked to a READ COMMITTED
+    /// reader and as committed long ago to a snapshot. <paramref name="placed"/> runs
+    /// under the latch, so it must not wait on another session.
+    /// </summary>
+    public (int PageIndex, int SlotIndex) Insert<TState>(ReadOnlySpan<byte> row, UndoLog? undoLog, TState state, Action<TState, (int PageIndex, int SlotIndex)> placed)
+    {
+        using var latch = this.EnterLatch();
+        var address = this.InsertCore(row, undoLog, journalEvent: true);
+        placed(state, address);
+        return address;
+    }
 
     // journalEvent is false for the forwarding-UPDATE path's internal target
     // insert — that target is a relocated payload, not a new visible row, so it
@@ -280,6 +437,7 @@ internal sealed class Heap
     // the Update event UpdateAt records instead.
     private (int PageIndex, int SlotIndex) InsertCore(ReadOnlySpan<byte> row, UndoLog? undoLog, bool journalEvent)
     {
+        Debug.Assert(this.latch.IsHeldByCurrentThread, "The heap's latch covers every page mutation.");
         if (row.Length > MaxRowSize)
             throw new NotSupportedException($"Row of {row.Length} bytes exceeds SQL Server's per-row maximum of {MaxRowSize}; the encoder should have pushed variable-length columns off-row.");
 
@@ -442,6 +600,7 @@ internal sealed class Heap
     /// </summary>
     internal int TrimTrailingDeadPages(Func<int, bool> pageIsPinned)
     {
+        using var latch = this.EnterLatch();
         var removed = 0;
         while (this.Pages.Count > 0)
         {
@@ -449,7 +608,7 @@ internal sealed class Heap
             if (!this.Pages[last].IsFullyDead || pageIsPinned(last))
                 break;
             this.RowCount -= this.Pages[last].SlotCount;
-            this.Pages.RemoveAt(last);
+            this.Pages.RemoveLast();
             _ = this.reclaimablePages.TryRemove(last, out _);
             if (this.Pages.Count > 0)
                 this.Pages[^1].NextPageIndex = -1;
@@ -472,6 +631,8 @@ internal sealed class Heap
     /// </summary>
     internal int TrimTrailingFreeLobPages()
     {
+        using var latch = this.EnterLatch();
+        _ = this.RecycleRetiredLobChains();
         var free = new HashSet<int>(this.freeLobPages);
         var removed = 0;
         while (this.LobPages.Count > 0 && free.Remove(this.LobPages.Count - 1))
@@ -529,27 +690,150 @@ internal sealed class Heap
     /// </remarks>
     public IEnumerable<(int PageIndex, int SlotIndex, byte[] Bytes)> EnumerateRowsWithAddress()
     {
+        var sequence = Volatile.Read(ref this.latchSequence);
         for (var p = 0; p < this.Pages.Count; p++)
         {
             var page = this.Pages[p];
             var slotCount = page.SlotCount;
             for (var slotIndex = 0; slotIndex < slotCount; slotIndex++)
             {
-                if (!page.TryReadLiveSlot(slotIndex, out var raw, out var forwarded))
-                    continue;
-                if (this.ForwardTargets.Count > 0 && this.ForwardTargets.Contains((p, slotIndex)))
-                    continue;
-                if (forwarded)
+                if (this.ReadScanSlotFast(page, p, slotIndex, ref sequence, out var bytes) == SlotRead.Live)
+                    yield return (p, slotIndex, bytes);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The slots a snapshot reader walks: every live row as
+    /// <see cref="EnumerateRowsWithAddress"/> yields it, and every deleted
+    /// slot with null bytes, since the snapshot may predate the delete — each
+    /// with the <see cref="WriteSequence"/> it was read at. The reader pairs
+    /// the slot with the row's version chain, read after it; when the
+    /// sequence has moved by then, it reads the slot again
+    /// (<see cref="TryReadSlot"/>).
+    /// </summary>
+    public IEnumerable<(int PageIndex, int SlotIndex, byte[]? Bytes, int Sequence)> EnumerateSlots()
+    {
+        var sequence = Volatile.Read(ref this.latchSequence);
+        for (var p = 0; p < this.Pages.Count; p++)
+        {
+            var page = this.Pages[p];
+            var slotCount = page.SlotCount;
+            for (var slotIndex = 0; slotIndex < slotCount; slotIndex++)
+            {
+                switch (this.ReadScanSlotFast(page, p, slotIndex, ref sequence, out var bytes))
                 {
-                    var (tp, ts) = page.ReadForwardTarget(slotIndex);
-                    yield return (p, slotIndex, this.Pages[tp].ReadSlotBytes(ts)!);
-                }
-                else
-                {
-                    yield return (p, slotIndex, raw);
+                    case SlotRead.Live:
+                        yield return (p, slotIndex, bytes, sequence);
+                        break;
+                    case SlotRead.Tombstoned:
+                        yield return (p, slotIndex, null, sequence);
+                        break;
+                    default:
+                        break;
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// One slot as <see cref="EnumerateSlots"/> reads it, again: false when
+    /// the address lies past the heap's slots; otherwise
+    /// <paramref name="bytes"/> is the row, followed through a forward
+    /// pointer, or null for a deleted slot.
+    /// </summary>
+    public bool TryReadSlot(int pageIndex, int slotIndex, out byte[]? bytes, out int sequence)
+    {
+        bytes = null;
+        sequence = this.WriteSequence;
+        if ((uint)pageIndex >= (uint)this.Pages.Count)
+            return false;
+        var page = this.Pages[pageIndex];
+        if ((uint)slotIndex >= page.SlotCount)
+            return false;
+        var read = this.ReadScanSlot(page, pageIndex, slotIndex, out var live, out sequence);
+        bytes = read == SlotRead.Tombstoned ? null : live;
+        return true;
+    }
+
+    /// <summary>
+    /// The live row at the address, read at one moment and followed through a
+    /// forward pointer, or null when the slot is deleted or past the heap's
+    /// slots: what a reader testing <see cref="IsSlotTombstoned"/> and then
+    /// reading <see cref="ReadSlotBytes"/> means, without another session's
+    /// delete — and the compaction reclaiming its bytes — landing between the
+    /// two.
+    /// </summary>
+    public byte[]? ReadLiveRow(int pageIndex, int slotIndex) =>
+        this.TryReadSlot(pageIndex, slotIndex, out var bytes, out _) ? bytes : null;
+
+    /// <summary>
+    /// Advances by two with every latched mutation of the heap, a rollback's
+    /// page writes included: a reader that notes it before reading a row and
+    /// finds it moved afterwards knows the row may have changed since.
+    /// </summary>
+    public int WriteSequence => Volatile.Read(ref this.latchSequence);
+
+    private enum SlotRead : byte
+    {
+        Live,
+        Tombstoned,
+        ForwardTarget,
+    }
+
+    /// <summary>
+    /// <see cref="ReadScanSlot"/> with its common case inlined into the scan:
+    /// no writer mid-mutation, no forwarding anywhere in the heap, a live slot.
+    /// <paramref name="sequence"/> is a <see cref="latchSequence"/> the scan
+    /// read before this slot — the one the previous slot validated against —
+    /// so one read per row both closes this row's validation and opens the
+    /// next's; a write in between, the consumer's own included, fails it and
+    /// sends the row to the retrying reader. The scan is the path every table
+    /// read runs, and the call into that reader plus a second read per row
+    /// cost several percent of a whole-table count.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private SlotRead ReadScanSlotFast(HeapPage page, int pageIndex, int slotIndex, ref int sequence, out byte[] bytes)
+    {
+        if ((sequence & 1) == 0 && this.forwardTargetCount == 0 && page.TryReadLiveSlot(slotIndex, out bytes, out var forwarded) && !forwarded)
+        {
+            Volatile.ReadBarrier();
+            if (Volatile.Read(ref this.latchSequence) == sequence)
+                return SlotRead.Live;
+        }
+        return this.ReadScanSlot(page, pageIndex, slotIndex, out bytes, out sequence);
+    }
+
+    /// <summary>
+    /// One slot of a scan, read optimistically (see <see cref="BeginRead"/>):
+    /// live, deleted, or a forward target the scan leaves to its forwarder;
+    /// for a live slot, its row bytes, followed through a forward pointer.
+    /// Retries until no writer moved meanwhile, so a forwarding UPDATE's
+    /// target insert, pointer write and target registration are seen together
+    /// or not at all.
+    /// </summary>
+    private SlotRead ReadScanSlot(HeapPage page, int pageIndex, int slotIndex, out byte[] bytes, out int sequence)
+    {
+        while (true)
+        {
+            sequence = this.BeginRead();
+            var read = !page.TryReadLiveSlot(slotIndex, out bytes, out var forwarded)
+                ? SlotRead.Tombstoned
+                : this.forwardTargetCount != 0 && this.forwardTargets.ContainsKey((pageIndex, slotIndex))
+                    ? SlotRead.ForwardTarget
+                    : SlotRead.Live;
+            if (read == SlotRead.Live && forwarded)
+                bytes = this.ReadForwardedRow(page, slotIndex) ?? [];
+            if (this.EndRead(sequence))
+                return read;
+        }
+    }
+
+    // The row a forwarding slot points at; null where a torn read named no page.
+    private byte[]? ReadForwardedRow(HeapPage page, int slotIndex)
+    {
+        var (tp, ts) = page.ReadForwardTarget(slotIndex);
+        return (uint)tp < (uint)this.Pages.Count ? this.Pages[tp].ReadSlotBytes(ts) : null;
     }
 
     /// <summary>
@@ -567,7 +851,7 @@ internal sealed class Heap
     /// When the visible slot is a forwarding pointer, the row's payload (and any
     /// off-row chains) lives at the relocated target, not the pointer slot — so
     /// both are deleted, and the target is unregistered from
-    /// <see cref="ForwardTargets"/>. The target's Delete entry carries the
+    /// <see cref="forwardTargets"/>. The target's Delete entry carries the
     /// <paramref name="reclaimSuperseded"/> gate (it owns the row + chains); the
     /// pointer's entry only reclaims its directory slot — its bytes are a
     /// forward pointer, not a row, so they must never be decoded for LOB heads.
@@ -575,6 +859,7 @@ internal sealed class Heap
     /// </remarks>
     public void DeleteAt(int pageIndex, int slotIndex, UndoLog? undoLog = null, bool reclaimSuperseded = false)
     {
+        using var latch = this.EnterLatch();
         _ = this.TouchedSlots?.Add((pageIndex, slotIndex));
         _ = this.RootedNullLobCells?.TryRemove((pageIndex, slotIndex), out _);
         this.DeleteAtCore(pageIndex, slotIndex, undoLog, reclaimSuperseded, journalEvent: true);
@@ -630,7 +915,7 @@ internal sealed class Heap
             this.Pages[target.PageIndex].DeleteSlot(target.SlotIndex);
             undoLog?.RecordForwardedPointerDelete(this, pageIndex, slotIndex, target);
             page.DeleteSlot(slotIndex);
-            _ = this.ForwardTargets.Remove(target);
+            this.RemoveForwardTarget(target);
             if (oldImage is not null)
                 this.RecordSeekJournalEvent(SeekJournalKind.Delete, pageIndex, slotIndex, oldImage, newImage: null);
             return;
@@ -670,6 +955,7 @@ internal sealed class Heap
         // so the seek journal records one Update at that address. Capture the
         // pre-UPDATE visible image before the mutation; the internal target
         // Insert / old-target Delete the relocating paths run are NOT journaled.
+        using var latch = this.EnterLatch();
         _ = this.TouchedSlots?.Add((pageIndex, slotIndex));
         var oldImage = this.seekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
         var page = this.Pages[pageIndex];
@@ -698,7 +984,7 @@ internal sealed class Heap
             var target = this.InsertCore(newRow, undoLog, journalEvent: false);
             undoLog?.RecordForwardInstall(this, pageIndex, slotIndex, oldBytes, target, reclaimSuperseded);
             this.Pages[pageIndex].InstallForward(slotIndex, target);
-            _ = this.ForwardTargets.Add(target);
+            this.AddForwardTarget(target);
         }
     }
 
@@ -725,22 +1011,20 @@ internal sealed class Heap
             this.DeleteAtCore(oldTarget.PageIndex, oldTarget.SlotIndex, undoLog, reclaimSuperseded, journalEvent: false);
             undoLog?.RecordForwardRetarget(this, originalPageIndex, originalSlotIndex, oldTarget, newTarget);
             originalPage.RewriteForward(originalSlotIndex, newTarget);
-            _ = this.ForwardTargets.Remove(oldTarget);
-            _ = this.ForwardTargets.Add(newTarget);
+            this.RemoveForwardTarget(oldTarget);
+            this.AddForwardTarget(newTarget);
         }
     }
 
     /// <summary>
     /// Undo callback for <see cref="UndoLog.RecordForwardInstall"/> — removes
-    /// the target from <see cref="ForwardTargets"/> after the page-level
+    /// the target from <see cref="forwardTargets"/> after the page-level
     /// forward bit is cleared. Called as part of the rollback walk; the
     /// target slot itself is tombstoned by the paired <see cref="UndoKind.Insert"/>
     /// entry.
     /// </summary>
-    internal void UnregisterForwardTargetForUndo((int Page, int Slot) target)
-    {
-        _ = this.ForwardTargets.Remove(target);
-    }
+    internal void UnregisterForwardTargetForUndo((int Page, int Slot) target) =>
+        this.RemoveForwardTarget(target);
 
     /// <summary>
     /// Undo callback for <see cref="UndoLog.RecordForwardRetarget"/> — restores
@@ -750,8 +1034,8 @@ internal sealed class Heap
     /// </summary>
     internal void SwapForwardTargetForUndo((int Page, int Slot) oldTarget, (int Page, int Slot) newTarget)
     {
-        _ = this.ForwardTargets.Remove(newTarget);
-        _ = this.ForwardTargets.Add(oldTarget);
+        this.RemoveForwardTarget(newTarget);
+        this.AddForwardTarget(oldTarget);
     }
 
     /// <summary>
@@ -761,7 +1045,7 @@ internal sealed class Heap
     /// the target also appearing as a standalone live row.
     /// </summary>
     internal void ReinstateForwardTargetForUndo((int Page, int Slot) target) =>
-        _ = this.ForwardTargets.Add(target);
+        this.AddForwardTarget(target);
 
     /// <summary>
     /// Returns a fresh copy of the row bytes at the given Rid, dereferencing
@@ -777,12 +1061,13 @@ internal sealed class Heap
         if (pageIndex < 0 || pageIndex >= this.Pages.Count)
             return null;
         var page = this.Pages[pageIndex];
-        if (page.IsSlotForwarded(slotIndex))
+        while (true)
         {
-            var (tp, ts) = page.ReadForwardTarget(slotIndex);
-            return this.Pages[tp].ReadSlotBytes(ts);
+            var sequence = this.BeginRead();
+            var bytes = page.IsSlotForwarded(slotIndex) ? this.ReadForwardedRow(page, slotIndex) : page.ReadSlotBytes(slotIndex);
+            if (this.EndRead(sequence))
+                return bytes;
         }
-        return page.ReadSlotBytes(slotIndex);
     }
 
     /// <summary>
@@ -887,6 +1172,7 @@ internal sealed class Heap
     /// </summary>
     public int AllocateLobChain(ReadOnlySpan<byte> data)
     {
+        using var latch = this.EnterLatch();
         var head = AllocateLobPage();
         var page = this.LobPages[head];
         var remaining = data;
@@ -913,7 +1199,7 @@ internal sealed class Heap
     /// </summary>
     private int AllocateLobPage()
     {
-        if (this.freeLobPages.TryPop(out var recycled))
+        if (this.freeLobPages.TryPop(out var recycled) || (this.RecycleRetiredLobChains() && this.freeLobPages.TryPop(out recycled)))
         {
 #if DEBUG
             lock (this.debugFreedLobPages)
@@ -938,6 +1224,7 @@ internal sealed class Heap
     /// </summary>
     public void FreeLobChain(int headIndex)
     {
+        using var latch = this.EnterLatch();
         var idx = headIndex;
         while (idx >= 0 && idx < this.LobPages.Count)
         {
@@ -958,6 +1245,45 @@ internal sealed class Heap
     }
 
     /// <summary>
+    /// Chains a commit, a rollback or the version sweep gave up, each tagged
+    /// with the <see cref="LobReclamation"/> epoch it retired at, oldest
+    /// first; <see cref="RecycleRetiredLobChains"/> frees them once no running
+    /// statement predates the tag. Touched only under <see cref="latch"/>.
+    /// </summary>
+    private readonly Queue<(int Head, long Epoch, LobReclamation Reclamation)> retiredLobChains = new();
+
+    /// <summary>
+    /// Gives up the chain rooted at <paramref name="headIndex"/>, as
+    /// <see cref="FreeLobChain"/> does, but leaves its pages unused until
+    /// every statement running as it retires — any of which may hold a row
+    /// image naming them — has ended (see <see cref="LobReclamation"/>).
+    /// Without <paramref name="reclamation"/> the chain frees at once.
+    /// </summary>
+    public void RetireLobChain(int headIndex, LobReclamation? reclamation)
+    {
+        using var latch = this.EnterLatch();
+        if (reclamation is null)
+            this.FreeLobChain(headIndex);
+        else
+            this.retiredLobChains.Enqueue((headIndex, reclamation.Retire(), reclamation));
+    }
+
+    /// <summary>Frees the retired chains no running statement predates; true when it freed any.</summary>
+    private bool RecycleRetiredLobChains()
+    {
+        if (this.retiredLobChains.Count == 0)
+            return false;
+        var oldestReader = this.retiredLobChains.Peek().Reclamation.OldestReader();
+        var freed = false;
+        while (this.retiredLobChains.TryPeek(out var retired) && retired.Epoch <= oldestReader)
+        {
+            this.FreeLobChain(this.retiredLobChains.Dequeue().Head);
+            freed = true;
+        }
+        return freed;
+    }
+
+    /// <summary>
     /// Snapshots the current free-list (used by <c>TRUNCATE</c>'s undo entry,
     /// which must restore both <see cref="LobPages"/> and the indices that
     /// were reusable before the truncate).
@@ -967,6 +1293,7 @@ internal sealed class Heap
     /// <summary>Clears the free-list — paired with clearing <see cref="LobPages"/> on <c>TRUNCATE</c>.</summary>
     internal void ClearFreeLobPages()
     {
+        this.retiredLobChains.Clear();
         this.freeLobPages.Clear();
 #if DEBUG
         lock (this.debugFreedLobPages)
@@ -1047,23 +1374,39 @@ internal sealed class Heap
     /// </summary>
     public long LobPagesRead;
 
+    // Read optimistically (see BeginRead), re-checking the sequence per page
+    // so a walk a writer tears — a page it frees or reuses midway — restarts
+    // rather than following a link the writer is halfway through. A chain
+    // that reads wrong with no writer in the way was freed and reused after
+    // the reader read the row naming it, which LobReclamation rules out for
+    // a reader inside an announced statement.
     private void FillLobChain(Span<byte> destination, int headIndex)
     {
-        var totalLength = destination.Length;
-        var dest = destination;
-        var current = headIndex;
-        while (current >= 0 && dest.Length > 0)
+        while (true)
         {
-            var page = this.LobPages[current];
-            this.LobPagesRead++;
-            var payload = page.Payload;
-            if (payload.Length > dest.Length)
-                throw new InvalidDataException($"LOB chain at head {headIndex} produced more bytes than the row's declared total length {totalLength}.");
-            payload.CopyTo(dest);
-            dest = dest[payload.Length..];
-            current = page.NextPageIndex;
+            var sequence = this.BeginRead();
+            var dest = destination;
+            var current = headIndex;
+            var overrun = false;
+            while (current >= 0 && dest.Length > 0 && current < this.LobPages.Count && this.EndRead(sequence))
+            {
+                var page = this.LobPages[current];
+                this.LobPagesRead++;
+                var payload = page.Payload;
+                if (payload.Length > dest.Length)
+                {
+                    overrun = true;
+                    break;
+                }
+                payload.CopyTo(dest);
+                dest = dest[payload.Length..];
+                current = page.NextPageIndex;
+            }
+            if (!this.EndRead(sequence))
+                continue;
+            if (overrun || dest.Length != 0)
+                throw SimulatedSqlException.NoLockScanDataMovement();
+            return;
         }
-        if (dest.Length != 0)
-            throw new InvalidDataException($"LOB chain at head {headIndex} produced fewer bytes than the row's declared total length {totalLength} (short by {dest.Length}).");
     }
 }

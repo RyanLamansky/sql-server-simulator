@@ -781,20 +781,13 @@ partial class Simulation
                     EnforceEdgeConstraints(destinationTable, rowValues, context, "INSERT");
                     destinationTable.OwningDatabase?.RejectWriteWhenReadOnly();
                     var image = RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap);
-                    // Key-range probe before the heap write, not after: a wait
-                    // on a SERIALIZABLE reader's range can last until that
-                    // reader commits, and a row already in the heap with no
-                    // row-X on it yet would be visible to a READ COMMITTED
+                    // The key-range probe runs before the heap write, not after:
+                    // a wait on a SERIALIZABLE reader's range can last until
+                    // that reader commits, and a row already in the heap with
+                    // no row-X on it yet would be visible to a READ COMMITTED
                     // reader for the whole wait.
-                    if (IsLockableTable(destinationTable))
-                        context.Batch.ProbeKeyLocksForInsert(destinationTable, image);
-                    var (pageIndex, slotIndex) = destinationTable.Heap.Insert(image, destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
+                    _ = InsertRow(context.Batch, destinationTable, image, destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog);
                     context.Connection.StatementIo?.CountWrite(destinationTable);
-                    if (IsLockableTable(destinationTable))
-                    {
-                        context.Batch.AcquireRowLockTxScoped(destinationTable, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.Insert);
-                        Storage.VersionStore.CaptureWrite(context.Batch, destinationTable, (pageIndex, slotIndex), oldRid: null, oldPayload: null, Storage.VersionWriteKind.Insert);
-                    }
                     destinationTable.ChangeTracking?.RecordRow(context.Batch, destinationTable, rowValues, Storage.ChangeTrackingOperation.Insert);
                 }
 

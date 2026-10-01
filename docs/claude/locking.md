@@ -351,6 +351,11 @@ The reader:
 2. If non-zero, look up the specific row with `RowLocks.TryGetValue` (still no intern — a row with no interned entry has no holder, so it reads through); only when an entry exists does it probe under the gate and wait / READPAST-skip as before.
 
 Counting only `Exclusive` (U is `S`-compatible; IX / SIX are table-level intent the row probe already ignores) keeps the visible behavior identical to the always-probe path — it only elides gate traffic when no X exists.
+The zero read is sound because a writer's row X is granted before its write is visible: an UPDATE / DELETE locks the row ahead of the heap write, and an INSERT takes the new row's X inside the heap's latch before the slot is published (`Simulation.InsertRow`, see [`heap-storage.md`](heap-storage.md#concurrent-writers-the-heap-latch)) — before that, a READ COMMITTED reader could meet an uncommitted insert with no lock on it yet and read it.
+
+**A reader that waited reads the row again.**
+A scan reads the row's bytes, then probes its lock; when the probe waited out a writer, the image it read may be the writer's, which a rollback then took back.
+The heap scan notes the heap's write sequence (`Heap.WriteSequence`) before each row and re-reads the slot after the probe when it moved — skipping the row if the write deleted it — so a scan waiting out a rolled-back UPDATE returns the restored row rather than the never-committed one; the clustered-order and seek paths read the row after the probe already.
 Snapshot / RCSI reads never reach this path (they resolve through the version store), so the fast path is a pure READ COMMITTED non-snapshot win.
 The `ActiveDataWriters` invariant (0 at rest, follows the X through commit / rollback / escalation) is guarded by `LockResourceTests.ActiveDataWriters_*`.
 
@@ -510,7 +515,7 @@ NOLOCK / READ UNCOMMITTED, READPAST and the snapshot readers don't wait.
 ## Snapshot isolation + MVCC
 
 `ALLOW_SNAPSHOT_ISOLATION` and `READ_COMMITTED_SNAPSHOT` are per-database flags on `Database` (both default `false`, flipped via `ALTER DATABASE … SET (ALLOW_SNAPSHOT_ISOLATION | READ_COMMITTED_SNAPSHOT) { ON | OFF }`).
-When either flag is on, every INSERT / UPDATE / DELETE captures a row-version entry in the per-table `HeapTable.RowVersions` dict; readers under SNAPSHOT or RCSI consult the chain to substitute pre-write payloads.
+When either flag is on, every INSERT / UPDATE / DELETE / MERGE captures a row-version entry in the per-table `HeapTable.RowVersions` dict; readers under SNAPSHOT or RCSI consult the chain to substitute pre-write payloads.
 
 ### Database flags
 Both flags are read off the **table's own database**, not the session's (probe-confirmed in all four combinations): a session in a non-RCSI database reading a three-part name into an RCSI one reads versioned, the reverse blocks on the writer's X lock, and a SNAPSHOT session's Msg 3952 names the target database it reached rather than the one it sits in.
@@ -525,40 +530,45 @@ Both flags are read off the **table's own database**, not the session's (probe-c
   Real SQL Server's "requires single-user-mode" semantic on the flip is not modeled.
 
 ### Commit-Xid allocator
-`Simulation.AllocateTransactionCommitId()` is a monotonic **instance-wide** counter; each committing transaction reads one stamp however many databases it wrote to, and SI readers acquire their snapshot via `Simulation.CurrentTransactionCommitId`.
+The commit counter is monotonic and **instance-wide**; each committing transaction takes one stamp however many databases it wrote to, and SI readers acquire their snapshot via `Simulation.CurrentTransactionCommitId`.
 Counter starts at zero so pre-versioning rows (implicit Xmin = 0) are visible to every snapshot.
+A commit draws the next stamp, stamps every row it wrote, and only then publishes the stamp, all under `Simulation.CommitGate`: a snapshot taken while the stamps land still reads the old counter and sees none of the transaction's rows.
+Publishing first — which the counter once did, as an increment ahead of the stamping — let a snapshot read the new stamp while the rows were still marked in flight, see them hidden, and see them appear on its next read inside the same transaction.
 
 Instance scope mirrors real, whose transaction sequence number is server-wide (its version store lives in `tempdb`, not per database), and it is what makes a snapshot stamp comparable across databases.
 Probed: a SNAPSHOT transaction fixes **one** stamp at its first data-access statement and reads *every* database as of that instant — a transaction whose first read was in one database still sees another's pre-update state when it reads it later, and `BEGIN TRAN` alone fixes nothing (a commit landing before the first read is visible).
 `Simulation.ActiveSnapshotTxs` is instance-wide for the same reason: an open snapshot anywhere pins history everywhere, so the GC cutoff reads the simulation's oldest active Xid.
 
 ### Version-store data structures
-Per-`HeapTable`: `ConcurrentDictionary<(int Page, int Slot), RowVersionChain> RowVersions`.
+Per-`HeapTable`: `ConcurrentDictionary<(int Page, int Slot), RowVersionChain> RowVersions`, written only under the table's `RowVersionsGate` — a writer's capture, a commit's stamps, a rollback's discard and the sweep — and read lock-free.
 
 `RowVersionChain`:
 - `LiveXmin: long` — commit Xid of the live row.
-- `WriterTx: SimulatedDbTransaction?` — non-null while an in-flight writer's pre-commit payload occupies the live slot.
-  SI readers see this and walk history.
+- `WriterSession: SessionToken?` — the session whose uncommitted write occupies the live slot, a transaction's or an auto-commit statement's alike.
+  Another session's SI reader sees it and walks history; the writer's own reads see the live row.
+  It named the transaction once, which left an auto-commit statement's in-flight write unmarked — a concurrent snapshot read it as committed long ago.
 - `IsDeletedLive: bool` — true after a committed DELETE tombstones the slot; readers with snapshot before the delete Xid still see the historical payload through `Head`.
 - `Head: HistoricalVersion?` — linked list of older committed versions, newest-first.
   Walked by the visibility predicate `Xmin <= SX < Xmax` (with `Xmax = long.MaxValue` denoting a still-in-flight superseder).
 
 ### Writer-side capture
-`VersionStore.CaptureWrite(batch, table, newRid, oldRid?, oldPayload?, kind)` is called from every DML mutation site after the heap mutation lands:
-- **INSERT**: creates chain at `newRid` with `WriterTx = tx`, `LiveXmin = 0` (sentinel); commit stamps `LiveXmin = commitXid`, clears `WriterTx`; rollback removes the chain entirely.
-- **UPDATE**: reads the existing chain at `oldRid` (if any) to inherit its `LiveXmin` + `Head`, builds a fresh `HistoricalVersion { Payload = oldPayload, Xmin = oldLiveXmin, Xmax = PendingXmax, Next = oldHead }`, creates chain at `newRid` with that HV at `Head` and `WriterTx = tx`.
+`VersionStore.CaptureWrite(batch, table, newRid, oldRid?, oldPayload?, kind)` is called from every INSERT / UPDATE / DELETE / MERGE mutation site **before the write is visible to another session**: an UPDATE or DELETE captures ahead of its heap mutation, and an INSERT captures from the hook `Heap.Insert` runs under the heap's latch before it publishes the slot.
+Capturing after the heap write, as it once did, left a window in which a concurrent snapshot met a changed row whose chain didn't say so.
+- **INSERT**: creates chain at `newRid` marked in flight, `LiveXmin = 0` (sentinel); commit stamps `LiveXmin = commitXid` and clears the mark; rollback removes the chain entirely.
+- **UPDATE**: reads the existing chain at `oldRid` (if any) to inherit its `LiveXmin` + `Head`, builds a fresh `HistoricalVersion { Payload = oldPayload, Xmin = oldLiveXmin, Xmax = PendingXmax, Next = oldHead }`, creates chain at `newRid` with that HV at `Head`, marked in flight once the HV is in place.
   Commit replaces the pending Xmax with the real commit Xid, stamps `LiveXmin`, drops the abandoned old-slot chain.
   Rollback removes the new chain entirely (old chain stays).
   A second write of a row by the same unit (`RowVersionChain.PendingEntries` names the transaction's, or an auto-commit statement's, pending list) pushes nothing: the history its first write recorded — or, for a row it inserted, the absence of any — is the pre-transaction state, so a row keeps one version per committed transaction and no snapshot ever sees an intermediate one, as real keeps one version per row per transaction (probed 2026-09-28 against SQL Server 2025: three UPDATEs of one row and one of another leave two rows in `sys.dm_tran_version_store`).
   `PendingVersionEntry.PushedHistory` tells a rollback which entries pushed the pending version it must pop.
   Measured over 300 transactions each updating 50 rows twice and once more, with a snapshot open: 199 ms against 400 ms before, the chains no longer growing per UPDATE; with no snapshot open, unchanged (130 ms).
-- **DELETE**: marks existing chain's `WriterTx = tx`; commit pushes pre-delete payload to `Head`, stamps `LiveXmin = commitXid` (the delete Xid), sets `IsDeletedLive`.
-  Rollback clears `WriterTx`.
+- **DELETE**: pushes the pre-delete payload as a pending HV exactly as UPDATE does, under the same one-version-per-transaction rule; commit stamps its Xmax and `LiveXmin` with the delete Xid and sets `IsDeletedLive`; rollback pops it.
+  It once pushed the payload only at commit, so while the delete was in flight a snapshot walking a history-less row's chain found nothing and lost the row.
 
 Capture is a no-op when neither flag is on for the database, when the table is a table-variable / local-temp / system table, or when the writer's iso level doesn't participate (uncovered — versioning happens for any writer when the flag is on, regardless of writer's iso).
 
 ### Pending-entries lifecycle
-Each `SimulatedDbTransaction.PendingVersionEntries` accumulates captures across the tx; `Commit` hands the list to `VersionStore.FinalizePendingEntries` (allocates one commit Xid for the whole batch, walks each entry stamping chains), `Rollback` / implicit-Dispose hands it to `VersionStore.DiscardPendingEntries` (walks each entry undoing the in-flight mark).
+Each `SimulatedDbTransaction.PendingVersionEntries` accumulates captures across the tx; `Commit` hands the list to `VersionStore.FinalizePendingEntries` (one commit Xid for the whole batch, see the allocator above), `Rollback` / implicit-Dispose hands it to `VersionStore.DiscardPendingEntries` (walks each entry undoing the in-flight mark).
+A rollback rewinds the heap **before** it discards the entries, a statement's as well as a transaction's: while the entries stand, a snapshot reads past the rolled-back rows to the versions they superseded, and discarding first exposed the rolled-back image as committed for the moment between.
 
 For auto-commit DML (no active tx), `RunMutation` allocates a fresh list on `BatchContext.CurrentStatementVersionEntries`, drains on success / discards on failure — same surface as the existing per-statement undo log.
 A rollback to a savepoint discards the entries written after it, as it undoes their heap writes.
@@ -569,19 +579,21 @@ A rollback to a savepoint discards the entries written after it, as it undoes th
 - `BatchContext.RcsiStatementSnapshotXid` (lazy-allocated at first user-table read in this statement) for default-RC sessions when `ReadCommittedSnapshot` is on.
 - `null` for every other reader path (NOLOCK, default-RC without RCSI, RR, SERIALIZABLE, table variables, temp tables, system catalogs).
 
-`BatchContext.WrapWithRowConflictChecks` consults the snapshot Xid and routes through `VersionStore.ResolveVisibleVersion` per row: returns the live payload, a historical payload, or `null` (skip the row — inserted-after-snapshot or already-deleted-pre-snapshot).
+`BatchContext.WrapWithRowConflictChecks` consults the snapshot Xid and walks every slot once, deleted ones included (`Heap.EnumerateSlots`), resolving each through `VersionStore.ReadSnapshotSlot`: the live payload, a historical payload, or `null` (skip the row — inserted-after-snapshot or already-deleted-pre-snapshot).
+The slot and its chain are read at different moments, so the pair is checked against the heap's write sequence and the slot read again when a write landed between; the capture-before-write and rewind-before-discard orders above are what make a pair read inside one sequence consistent.
+The seek path (`MaterializeSnapshotCandidates`) resolves its candidates and its sweep of `RowVersions` the same way.
+Walking live rows first and deleted slots in a second pass, as the scan once did, counted a row twice when its delete committed between the passes and lost it when the delete rolled back; a SNAPSHOT transaction reading one table twice under eight concurrent writers saw its count move.
 
 ### Update-conflict detection (Msg 3960)
 `VersionStore.CheckSnapshotUpdateConflict(batch, table, rid)` runs at the top of `CommitUpdate` and `CommitDelete` when the writer's iso is Snapshot.
-Raises **Msg 3960** verbatim (`Snapshot isolation transaction aborted due to update conflict. You cannot use snapshot isolation to access table '<schema>.<table>' directly or indirectly in database '<db>' to update, delete, or insert the row that has been modified or deleted by another transaction. Retry the transaction or change the isolation level for the update/delete statement.` Cls 16) when the chain at the target Rid shows `LiveXmin > snapshotXid` or a foreign `WriterTx` — state 2 for a table with a clustered index, 6 for a heap (probed 2026-09-28 against SQL Server 2025).
+Raises **Msg 3960** verbatim (`Snapshot isolation transaction aborted due to update conflict. You cannot use snapshot isolation to access table '<schema>.<table>' directly or indirectly in database '<db>' to update, delete, or insert the row that has been modified or deleted by another transaction. Retry the transaction or change the isolation level for the update/delete statement.` Cls 16) when the chain at the target Rid shows `LiveXmin > snapshotXid` or another session's write in flight — state 2 for a table with a clustered index, 6 for a heap (probed 2026-09-28 against SQL Server 2025).
 Auto-rolls back the SI transaction before throwing (probe-confirmed `@@TRANCOUNT = 0` in the CATCH block).
 A row another transaction changed so that the live row no longer matches the WHERE — its key moved, or the column the predicate reads — is a conflict too when the version the snapshot sees matches: the writer's pre-flight judges it by that version (`VersionStore.ResolveChangedLiveSlotForSnapshot`), as the next section's does a deleted row (probed 2026-09-28 against SQL Server 2025).
 
-### Tombstoned-slot snapshot pass
-SI / RCSI iteration walks tombstoned slots in a second pass after the live-heap pass so deleted rows whose pre-delete payload is still visible at the snapshot surface correctly.
-Same per-row visibility check (`VersionStore.ResolveTombstonedSlotForSnapshot`) used at both sites — readers (via `WrapWithRowConflictChecks`) and writers (via `Simulation.CheckSnapshotConflictOnTombstonedRows`, called at the top of UPDATE / DELETE before the affected-rows mutation loop).
+### Tombstoned-slot snapshot resolution
+A deleted slot whose pre-delete payload is still visible at the snapshot resolves through `VersionStore.ResolveTombstonedSlotForSnapshot`, at both sites — readers (the slot walk above) and writers (`Simulation.CheckSnapshotConflictOnTombstonedRows`, called at the top of UPDATE / DELETE before the affected-rows mutation loop).
 The writer-side scan decodes each candidate, evaluates the WHERE predicate against it, and raises Msg 3960 + auto-rolls back if WHERE matches a tombstoned-but-visible row.
-`Heap.IsSlotTombstoned(pageIndex, slotIndex)` (and the underlying `HeapPage.IsSlotTombstoned`) exposes the per-slot tombstone bit so the snapshot-aware iterators filter duplicate yields against the live-heap pass.
+A chain whose address the heap no longer has — its page trimmed or truncated away — is swept after the slot walk.
 
 ### MVCC observability
 
@@ -603,12 +615,15 @@ Three DMVs cover version-store state, with column shapes probe-confirmed against
 `VersionStore.RunGarbageCollection(Database)` runs at every `SimulatedDbTransaction.Commit / Rollback / Dispose`.
 Walks every per-table `RowVersions` chain and drops trailing `HistoricalVersion` nodes whose `Xmax <= oldest_active_snapshot_xid` (no active SI transaction needs them anymore).
 When no SI tx is in flight, the cutoff is `Simulation.CurrentTransactionCommitId` so every finalized HV becomes collectible.
-Chains that lose their only HV AND aren't `IsDeletedLive` AND have no in-flight `WriterTx` AND whose `LiveXmin` every active snapshot has reached get removed from the dict entirely — a row inserted since an open snapshot keeps its history-less chain, which is what hides it from that snapshot; chains with non-null `WriterTx` are skipped (a `PendingXmax`-marked HV must not be disturbed mid-tx).
+Chains that lose their only HV AND aren't `IsDeletedLive` AND have no in-flight writer AND whose `LiveXmin` every active snapshot has reached get removed from the dict entirely — a row inserted since an open snapshot keeps its history-less chain, which is what hides it from that snapshot; chains with an in-flight writer are skipped (a `PendingXmax`-marked HV must not be disturbed mid-tx).
+The sweep runs per table under `RowVersionsGate` and frees the dropped versions' off-row chains after leaving it; two sweeps from two committing sessions once trimmed the same chain and freed its LOB pages twice.
 
-The oldest active Xid comes from `Simulation.ActiveSnapshotTxs`, a `ConcurrentDictionary<SimulatedDbTransaction, byte>` populated at `BatchContext.ResolveSnapshotXidForRead` (first user-table read of an SI tx) and drained at tx finalization.
-RCSI per-statement snapshots don't register here — their sub-statement lifetime means the once-per-tx GC cadence won't observe them as load-bearing, and the short window of risk is bounded by statement execution time.
+The oldest active Xid comes from `Simulation.ActiveSnapshotTxs`, populated at `BatchContext.ResolveSnapshotXidForRead` (first user-table read of an SI tx) and drained at tx finalization.
+A transaction registers before it reads its stamp, and the sweep reads the counter before the registrations, so a sweep that misses a registration read a counter no later than that snapshot's stamp — reading the stamp first let a concurrent sweep drop the history-less chains of rows committed in between, which the snapshot then saw.
+RCSI per-statement snapshots don't register here — their sub-statement lifetime means the once-per-tx GC cadence won't observe them as load-bearing, and the short window of risk is bounded by statement execution time; the off-row chains such a statement reads are held for it anyway, by the statement-scoped LOB reclamation in [`heap-storage.md`](heap-storage.md#a-freed-lob-chain-waits-for-the-statements-that-could-read-it).
 
 ### Known MVCC limitations
+- **A foreign-key cascade's child writes aren't versioned**: an `ON DELETE` / `ON UPDATE` action rewrites or deletes child rows without a version-store capture, so a snapshot reading the child table sees the cascade's effect, committed or not, where it sees every other write's pre-image.
 - **Msg 3960's state 4**: real reports a conflict it meets scanning a table with a clustered index at state 4 and one it meets seeking at state 2, where the simulator, knowing no access path there, reports 2 for every table with a clustered index (probed 2026-09-28 against SQL Server 2025).
 - **`sys.dm_tran_version_store` timing**: real lists a version while its writer is still in flight and keeps it until its cleanup task runs, where the simulator lists only finalized versions and collects them at commit once no snapshot needs them.
 

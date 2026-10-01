@@ -19,6 +19,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.simulation = simulation;
         this.Owner = connection;
         this.IsolationLevel = isolationLevel;
+        this.UndoLog = new(simulation.LobReclamation);
         this.TransactionId = simulation.AllocateTransactionId();
         this.target = this;
         connection.LastBegunTransactionId = this.TransactionId;
@@ -36,6 +37,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.simulation = enlisted.simulation;
         this.Owner = enlisted.Owner;
         this.IsolationLevel = isolationLevel;
+        this.UndoLog = enlisted.UndoLog;
         this.TransactionId = enlisted.TransactionId;
         this.target = enlisted;
     }
@@ -103,7 +105,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// here; <see cref="Rollback()"/> walks the log backwards. <see cref="Commit"/>
     /// just discards it — committed writes are already in the heap.
     /// </summary>
-    internal readonly UndoLog UndoLog = new();
+    internal readonly UndoLog UndoLog;
 
     /// <summary>
     /// SQL Server's <c>@@TRANCOUNT</c> nesting depth. Starts at 1 when this
@@ -494,8 +496,10 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal void EndRollback(TransactionEvent cause = TransactionEvent.Rollback)
     {
         var db = this.Owner.CurrentDatabase;
-        Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
+        // The heap rewinds first: until the pending versions go, a snapshot
+        // reads past the rolled-back rows to the versions they superseded.
         this.UndoLog.Rollback();
+        Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
         this.TranCount = 0;
         this.CloseCursorsOnEnd();
         ReleaseAllLocks();

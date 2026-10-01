@@ -43,6 +43,17 @@ partial class SimulatedSqlException
         : new(CommandCancelledMessage, 0, 11, 0) { IsAttention = true };
 
     /// <summary>
+    /// <b>Msg 601</b> — real's error for a scan taking no locks (<c>NOLOCK</c>,
+    /// <c>READ UNCOMMITTED</c>) that meets data a writer moved under it. The
+    /// simulator raises it where such a read follows a row it read to off-row
+    /// data freed since — the row's delete or update committed, or its insert
+    /// rolled back, between the two reads — since it reclaims a superseded
+    /// chain at commit where real defers to its ghost cleanup.
+    /// </summary>
+    internal static SimulatedSqlException NoLockScanDataMovement() =>
+        new("Could not continue scan with NOLOCK due to data movement.", 601, 12, 3);
+
+    /// <summary>
     /// Msg 3621 as it follows an attention that ended a write: always line 1
     /// and no procedure, wherever the write was — a procedure's or a dynamic
     /// batch's statement included (probed 2026-09-30 against SQL Server 2025).

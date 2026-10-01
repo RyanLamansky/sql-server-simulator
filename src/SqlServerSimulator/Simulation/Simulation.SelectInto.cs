@@ -156,9 +156,7 @@ partial class Simulation
             var length = RowEncoder.EncodeRowInto(destTable.StoredColumns, sourceValues, destTable.Heap, ref encoded);
             // Use the active undo log so a containing tx's ROLLBACK unwinds
             // the row writes alongside the table creation entry.
-            var (newPage, newSlot) = destTable.Heap.Insert(encoded.AsSpan(0, length), undoLog);
-            if (IsLockableTable(destTable))
-                batch.AcquireRowLockTxScoped(destTable, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
+            _ = InsertRow(batch, destTable, encoded.AsSpan(0, length), undoLog, captureVersion: false);
             rowCount++;
         }
 

@@ -107,11 +107,6 @@ partial class Simulation
             return;
         }
 
-        var oldPages = new List<HeapPage>(table.Heap.Pages);
-        var oldLobPages = new List<HeapLobPage>(table.Heap.LobPages);
-        var oldForwardTargets = new HashSet<(int Page, int Slot)>(table.Heap.ForwardTargets);
-        var oldFreeLobPages = table.Heap.SnapshotFreeLobPages();
-
         var identitySnapshots = new List<(IdentityState State, Int128? HighWaterMark)>();
         foreach (var column in table.Columns)
         {
@@ -119,16 +114,29 @@ partial class Simulation
                 identitySnapshots.Add((identity, identity.Snapshot()));
         }
 
-        table.Heap.Pages.Clear();
-        _ = table.Heap.RecomputeRowCount();
-        table.Heap.LobPages.Clear();
-        table.Heap.ForwardTargets.Clear();
-        table.Heap.ClearFreeLobPages();
-        table.Heap.ClearReclaimablePages();
-        table.Heap.RootedNullLobCells = null;
-        // The page-swap rewinds heap state without going through Insert / DeleteAt,
-        // so force any live seek cache to rebuild against the now-empty heap.
-        table.Heap.InvalidateSeekJournal();
+        // Sch-M excludes every reader, but not a version-store sweep freeing
+        // chains, so the swap still runs under the heap's latch.
+        List<HeapPage> oldPages;
+        List<HeapLobPage> oldLobPages;
+        HashSet<(int Page, int Slot)> oldForwardTargets;
+        int[] oldFreeLobPages;
+        using (table.Heap.EnterLatch())
+        {
+            oldPages = [.. table.Heap.Pages];
+            oldLobPages = [.. table.Heap.LobPages];
+            oldForwardTargets = table.Heap.SnapshotForwardTargets();
+            oldFreeLobPages = table.Heap.SnapshotFreeLobPages();
+            table.Heap.Pages.Clear();
+            _ = table.Heap.RecomputeRowCount();
+            table.Heap.LobPages.Clear();
+            table.Heap.RestoreForwardTargets([]);
+            table.Heap.ClearFreeLobPages();
+            table.Heap.ClearReclaimablePages();
+            table.Heap.RootedNullLobCells = null;
+            // The page-swap rewinds heap state without going through Insert / DeleteAt,
+            // so force any live seek cache to rebuild against the now-empty heap.
+            table.Heap.InvalidateSeekJournal();
+        }
         for (var i = 0; i < identitySnapshots.Count; i++)
             identitySnapshots[i].State.Restore(null);
 

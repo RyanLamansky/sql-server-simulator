@@ -319,9 +319,9 @@ partial class Simulation
                 tracking.UpdatedColumns(table, keyOrdinals, [columnIndex]));
         }
         var undoLog = table.IsTableVariable ? batch.CurrentTableVarUndoLog : batch.CurrentUndoLog;
-        table.Heap.UpdateAt(address.PageIndex, address.SlotIndex, RowEncoder.EncodeRow(table.StoredColumns, values, table.Heap), undoLog);
         if (lockable && VersionStore.IsVersioningEnabled(batch.DatabaseFor(table)))
             VersionStore.CaptureWrite(batch, table, address, address, oldBytes, VersionWriteKind.Update);
+        table.Heap.UpdateAt(address.PageIndex, address.SlotIndex, RowEncoder.EncodeRow(table.StoredColumns, values, table.Heap), undoLog);
     }
 
     /// <summary>

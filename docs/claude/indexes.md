@@ -164,12 +164,12 @@ It **declines** — falling back to the full scan — for:
 A SNAPSHOT / RCSI reader sees the version visible at its snapshot, which can carry a *different key* than the live heap row — so a live-key-only bucket lookup could miss a row whose key was changed out from under the snapshot.
 Rather than declining table-wide whenever the version store is non-empty (which under a busy RCSI workload meant nearly every point lookup full-scanned — a measured ~90–235× regression from a single live version chain), the seek runs and materializes through the version store (`MaterializeSnapshotCandidates`):
 
-- **Bucket candidates** (live rows whose *current* key matched the probe) each resolve to their snapshot-visible version via `VersionStore.ResolveVisibleVersion`, dropping out when not visible.
+- **Bucket candidates** (live rows whose *current* key matched the probe) each resolve to their snapshot-visible version via `VersionStore.ReadSnapshotSlot`, dropping out when not visible.
 - **A version-chain sweep** over `HeapTable.RowVersions` adds every slot carrying a chain — those are exactly the rows whose snapshot-visible key can differ from their live key, plus tombstoned slots a pre-delete snapshot still sees (`ResolveTombstonedSlotForSnapshot`).
   Deduplicated by slot against the bucket candidates.
 
 The matched equality conjuncts stay in the residual WHERE, so any candidate whose *resolved* version doesn't actually match the probe (e.g. a live-bucket row whose snapshot-visible version carries the old key) is filtered there — no false positives, and the sweep eliminates false negatives.
-The extra cost is O(|`RowVersions`|), which a read-mostly RCSI workload keeps small (the version-store GC trims versions no open snapshot needs); the whole-table scan this replaces *already* walks `RowVersions` in its own second pass, so the version-aware seek is never more expensive than the scan it supplants.
+The extra cost is O(|`RowVersions`|), which a read-mostly RCSI workload keeps small (the version-store GC trims versions no open snapshot needs); the whole-table scan this replaces reads every slot, those among them, so the version-aware seek is never more expensive than the scan it supplants.
 `ResolveSnapshotXidForRead` is called unconditionally regardless of whether the read seeks or scans, for its snapshot-pinning side effects.
 
 ### Range seeks

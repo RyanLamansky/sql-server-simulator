@@ -98,6 +98,7 @@ Every non-NULL variable-length column carries a 1-byte inline/pointer marker; LO
 Allocation is a flat page list (no IAM/PFS).
 **The scan and encode/decode paths are measured hot spots**: `Heap.EnumerateRowsWithAddress` (every table scan), `RowDecoder.ColumnsFor` / `DecodeColumn`, and the `RowEncoder.EncodeRow` / `EncodeRowInto` overloads carry XML docs saying what not to undo and why.
 Read them before touching those members → [`heap-storage.md`](docs/claude/heap-storage.md).
+**Sessions write one heap at once under IX**, so every page mutation runs under the heap's latch (`Heap.EnterLatch`), which is never held across a wait on another session, and readers take none — they validate against its sequence; a new page-writing path takes the latch, and a new insert site goes through `Simulation.InsertRow` so its row lock and version entry publish with the row → [`heap-storage.md`](docs/claude/heap-storage.md#concurrent-writers-the-heap-latch).
 
 ### Type system
 `SqlType` / `SqlValue` is the storage-layer pair.
@@ -325,7 +326,7 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **Partitioning** — `CREATE` / `ALTER` / `DROP PARTITION FUNCTION` and `SCHEME`, `$PARTITION`, tables and indexes `ON scheme(column)`, the per-partition catalog, `TRUNCATE … WITH (PARTITIONS …)`, `ALTER TABLE … SWITCH`, and `ALTER DATABASE … ADD | REMOVE FILEGROUP`.
   A partition is a **logical assignment** computed from the row's partition column, never a separate store, so every per-partition count reads the whole table → [`partitioning.md`](docs/claude/partitioning.md).
 - **Table hints (`WITH (NOLOCK …)`) and statement `OPTION (…)` hints**, including `FORCESEEK`'s nested form, the plans real refuses under `FORCESEEK` / `FORCESCAN` (Msg 8622, settled while the batch compiles) and the legacy no-`WITH` parenthesized form → [`query-hints.md`](docs/claude/query-hints.md).
-- **Heap page lifecycle** — reclamation / reuse, tail-only shrink, `DBCC SHRINKDATABASE` / `SHRINKFILE`, `Heap.RowCount`, and which callers may take the reused encode buffer → [`heap-storage.md`](docs/claude/heap-storage.md).
+- **Heap page lifecycle** — reclamation / reuse, tail-only shrink, `DBCC SHRINKDATABASE` / `SHRINKFILE`, `Heap.RowCount`, which callers may take the reused encode buffer, the heap latch concurrent writers share and the optimistic reads beside it, and why a freed LOB chain waits for every statement that began before it was freed → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **DBCC and `CHECKPOINT`** — the cache commands, `USEROPTIONS`, `OPENTRAN`, `SQLPERF`, `LOGINFO`, the `TRACE*` trio, `HELP`, `CHECKCONSTRAINTS`, the consistency checks and table maintenance, with their messages, permissions and `@@ROWCOUNT` rules.
   A `WITH` word that is no DBCC option stops the batch at compile, everything else raises as the statement runs → [`dbcc.md`](docs/claude/dbcc.md).
 - **Per-`Simulation` plan cache and token memo** — the two reuse layers over a repeated `CommandText`; the plan cache holds SELECT sequences and per-statement `INSERT … VALUES` / `UPDATE` / `DELETE` / `MERGE` plans.

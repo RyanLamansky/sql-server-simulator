@@ -30,6 +30,7 @@ public sealed partial class Simulation
     public Simulation()
     {
         RandomNumberGenerator.Fill(this.newSequentialIdAnchor);
+        this.LobReclamation = new(this);
         // The lock manager sweeps abandoned sessions before every acquisition,
         // which is what unblocks a live session waiting on a leaked one's lock.
         this.LockManager.OwningSimulation = this;
@@ -683,8 +684,21 @@ public sealed partial class Simulation
     private long transactionCommitCounter;
 
     /// <summary>
-    /// Allocates the next transaction commit id used by SNAPSHOT and
-    /// READ_COMMITTED_SNAPSHOT visibility. Monotonic, <b>instance-scoped</b>,
+    /// Serializes committing transactions' version-store stamping: the
+    /// committer draws <see cref="NextTransactionCommitId"/>, stamps every row
+    /// it wrote, and only then publishes the id with
+    /// <see cref="PublishTransactionCommitId"/>, all under this lock. A
+    /// snapshot taken while the stamps land still reads the old counter, so it
+    /// sees none of the transaction's rows; one taken after sees them all.
+    /// Publishing first would let a snapshot read a stamp whose rows are still
+    /// marked in flight, see them hidden, and see them appear on its next read.
+    /// Ordered before the tables' version gates and nothing else.
+    /// </summary>
+    internal readonly Lock CommitGate = new();
+
+    /// <summary>
+    /// The commit id the next committing transaction stamps its rows with,
+    /// read under <see cref="CommitGate"/>. Monotonic, <b>instance-scoped</b>,
     /// never reused — one sequence for every database, mirroring real SQL
     /// Server's server-wide transaction sequence number (its version store
     /// lives in <c>tempdb</c>, not per database). Instance scope is what makes
@@ -697,7 +711,10 @@ public sealed partial class Simulation
     /// at zero so the implicit "Xmin = 0" for rows that pre-date the first
     /// SI / RCSI read is visible to any snapshot.
     /// </summary>
-    internal long AllocateTransactionCommitId() => Interlocked.Increment(ref this.transactionCommitCounter);
+    internal long NextTransactionCommitId => this.transactionCommitCounter + 1;
+
+    /// <summary>Makes <paramref name="commitId"/>, whose rows are stamped, the current stamp; under <see cref="CommitGate"/>.</summary>
+    internal void PublishTransactionCommitId(long commitId) => Interlocked.Exchange(ref this.transactionCommitCounter, commitId);
 
     private long transactionIdCounter;
 
@@ -811,6 +828,9 @@ public sealed partial class Simulation
     /// fields and reaches its connection only weakly.
     /// </remarks>
     internal readonly HashSet<SessionToken> Sessions = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>When a LOB chain a write gave up may go to another row (see <see cref="Storage.LobReclamation"/>).</summary>
+    internal readonly LobReclamation LobReclamation;
 
     /// <summary>Registers a connection's session at construction time.</summary>
     internal void RegisterConnection(SimulatedDbConnection connection)
@@ -1801,6 +1821,8 @@ public sealed partial class Simulation
                 // does a parsed one.
                 var queryStore = BeginQueryStoreCapture(batch, io: null);
                 var queryStoreIo = queryStore is not null ? connection.StatementIo = new IoStatistics() : null;
+                // As the dispatch loop's statements do (see LobReclamation).
+                var announcedReader = connection.Simulation.LobReclamation.Enter(connection.Session);
                 try
                 {
                     executed = DataMasking.ForClient(selection.Execute(batch), selection.ColumnMasks, batch).WithRowCountLimit(connection.RowCountLimit);
@@ -1833,6 +1855,8 @@ public sealed partial class Simulation
                 {
                     if (queryStoreIo is not null)
                         connection.StatementIo = null;
+                    if (announcedReader)
+                        LobReclamation.Leave(connection.Session);
                 }
                 connection.LastStatementRowCount = rowCount;
                 var replayed = selection.IsAssignmentOnly
@@ -4056,7 +4080,7 @@ public sealed partial class Simulation
         // roll back as a single unit. Under an explicit transaction the shared
         // tx.UndoLog already gives that, so this is the auto-commit path.
         var enclosingTriggerLog = tx is null ? context.Connection.TriggerStatementUndoLog : null;
-        var log = tx?.UndoLog ?? enclosingTriggerLog ?? new UndoLog();
+        var log = tx?.UndoLog ?? enclosingTriggerLog ?? new UndoLog(context.Connection.Simulation.LobReclamation);
         var marker = log.Position;
         // Table variables get a parallel per-statement undo log so multi-row
         // mutations roll back atomically on mid-statement failure (probe-
@@ -4064,7 +4088,7 @@ public sealed partial class Simulation
         // level errors). The log is dropped on statement success, so
         // ROLLBACK TRAN never sees these entries — matches the non-
         // transactional invariant.
-        var tableVarLog = new UndoLog();
+        var tableVarLog = new UndoLog(reclamation: null);
         // Auto-commit statements get a statement-scoped pending-version
         // list; explicit transactions route entries onto the tx's
         // accumulating list (finalized at COMMIT, discarded at ROLLBACK).
@@ -4120,6 +4144,9 @@ public sealed partial class Simulation
         }
         catch
         {
+            // The heap rewinds before the pending versions go, as a
+            // transaction's rollback does.
+            log.RollbackTo(marker);
             if (statementVersionEntries is { } autoCommitEntries)
             {
                 Storage.VersionStore.DiscardPendingEntries(autoCommitEntries);
@@ -4130,7 +4157,6 @@ public sealed partial class Simulation
                 tx.PendingVersionEntries.RemoveRange(versionEntriesMarker, tx.PendingVersionEntries.Count - versionEntriesMarker);
                 Storage.VersionStore.DiscardPendingEntries(added);
             }
-            log.RollbackTo(marker);
             tableVarLog.Rollback();
             throw;
         }

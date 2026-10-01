@@ -268,12 +268,7 @@ partial class Simulation
 
             table.OwningDatabase?.RejectWriteWhenReadOnly();
             var length = RowEncoder.EncodeRowInto(table.StoredColumns, storedValues, table.Heap, ref encoded);
-            var (pageIndex, slotIndex) = table.Heap.Insert(encoded.AsSpan(0, length), batch.CurrentUndoLog);
-            if (IsLockableTable(table))
-            {
-                batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.Insert);
-                VersionStore.CaptureWrite(batch, table, (pageIndex, slotIndex), oldRid: null, oldPayload: null, VersionWriteKind.Insert);
-            }
+            _ = InsertRow(batch, table, encoded.AsSpan(0, length), batch.CurrentUndoLog);
             table.ChangeTracking?.RecordRow(batch, table, rowValues, ChangeTrackingOperation.Insert);
             if (identityColumn is not null && !keepIdentity)
                 lastIdentity = IdentityState.FromSqlValue(rowValues[identityOrdinal]);

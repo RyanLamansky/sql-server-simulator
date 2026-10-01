@@ -447,9 +447,7 @@ partial class Simulation
                 var historyRow = new SqlValue[oldFull.Length];
                 Array.Copy(oldFull, historyRow, oldFull.Length);
                 historyRow[pc.EndOrdinal] = stampedNow;
-                var (newPage, newSlot) = historyTable.Heap.Insert(RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
-                if (IsLockableTable(historyTable))
-                    context.Batch.AcquireRowLockTxScoped(historyTable, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
+                _ = InsertRow(context.Batch, historyTable, RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
             }
         }
         var lockableTable = IsLockableTable(table);
@@ -464,10 +462,11 @@ partial class Simulation
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.Delete);
                 context.Batch.NoteSupersededRow(table, pageIndex, slotIndex);
             }
-            var oldBytes = captureVersions ? table.Heap.ReadSlotBytes(pageIndex, slotIndex) : null;
-            table.Heap.DeleteAt(pageIndex, slotIndex, undoLog, ReclaimSuperseded(table, context));
-            if (oldBytes is not null)
+            // Captured ahead of the tombstone, so a snapshot never misses the
+            // row before the chain carries its pre-delete version.
+            if (captureVersions && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } oldBytes)
                 Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytes, Storage.VersionWriteKind.Delete);
+            table.Heap.DeleteAt(pageIndex, slotIndex, undoLog, ReclaimSuperseded(table, context));
             // Row-lock dict cleanup: the slot is tombstoned and slot ids
             // never get reused (`Heap.DeleteAt` doesn't recycle directory
             // entries), so the per-row LockResource has no future relevance.

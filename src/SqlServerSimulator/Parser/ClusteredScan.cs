@@ -153,7 +153,7 @@ internal static class ClusteredScan
         var seen = new HashSet<(int, int)>();
         foreach (var address in order)
         {
-            if (seen.Add(address) && !heap.IsSlotTombstoned(address.Page, address.Slot) && heap.ReadSlotBytes(address.Page, address.Slot) is { } bytes)
+            if (seen.Add(address) && heap.ReadLiveRow(address.Page, address.Slot) is { } bytes)
             {
                 counts?.Enter(address.Page, ref lastPage);
                 addresses?.Record(bytes, address.Page, address.Slot);
@@ -184,7 +184,7 @@ internal static class ClusteredScan
         var seen = new HashSet<(int, int)>();
         foreach (var (page, slot) in order)
         {
-            if (seen.Add((page, slot)) && !heap.IsSlotTombstoned(page, slot) && heap.ReadSlotBytes(page, slot) is { } bytes)
+            if (seen.Add((page, slot)) && heap.ReadLiveRow(page, slot) is { } bytes)
             {
                 counts?.Enter(page, ref lastPage);
                 yield return (page, slot, bytes);

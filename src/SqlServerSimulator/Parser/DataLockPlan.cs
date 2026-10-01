@@ -117,7 +117,7 @@ internal enum RowLockPurpose
     /// <summary>A reader's S / U / X on a row it reads.</summary>
     Read,
 
-    /// <summary>A new row's X, taken after it lands.</summary>
+    /// <summary>A new row's key-range test, taken before it lands.</summary>
     Insert,
 
     /// <summary>The X on a row about to be deleted.</summary>

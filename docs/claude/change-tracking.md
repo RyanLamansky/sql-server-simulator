@@ -11,6 +11,7 @@ Everything below was probed against SQL Server 2025 on 2026-09-27; version numbe
 - **Pending writes** ride the undo log as `PendingRowChange` entries.
   Rollback (whole, to a savepoint, or of a failed statement) drops them with the rest of the log; `UndoLog.Commit` draws **one version per database whose tracked tables the transaction changed** and publishes the entries under it, in log order.
   So an autocommit statement, its triggers and its cascades share one version, a transaction touching only untracked tables draws none, and a statement that matches no row draws none.
+  The version becomes current (`CHANGE_TRACKING_CURRENT_VERSION()`) only once its entries are published, one committer per database at a time (`Database.CommitChangeTracking`): drawing it first let a client read a version whose changes weren't visible yet, sync to it, and skip them for good.
 - `ENABLE` / `DISABLE` ride the `ALTER TABLE` table snapshot, so both roll back with their transaction; a re-enable starts an empty history at the current version.
 
 ## The database and table switches

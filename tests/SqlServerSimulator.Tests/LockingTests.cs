@@ -150,6 +150,30 @@ public sealed class LockingTests
     }
 
     [TestMethod]
+    public async Task ReadCommittedScan_WaitingOutARolledBackUpdate_ReadsTheRowAsItStands()
+    {
+        // The scan reads the row before it meets the writer's X; once the
+        // rollback releases it, the row it returns is the restored one, not
+        // the image it read while the update was in flight.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int, v int); insert t values (1, 1)");
+        using var writer = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+        using var observer = sim.CreateOpenConnection();
+        var readerSpid = (short)reader.CreateCommand("select @@spid").ExecuteScalar()!;
+        _ = writer.CreateCommand("begin tran; update t set v = 2").ExecuteNonQuery();
+
+        var readTask = Task.Run(() => reader.CreateCommand("select v from t").ExecuteScalar(), TestContext.CancellationToken);
+        AreEqual(1, await PollUntil(
+            () => (int)observer.CreateCommand($"select count(*) from sys.dm_os_waiting_tasks where session_id = {readerSpid}").ExecuteScalar()!,
+            waits => waits == 1,
+            TestContext.CancellationToken));
+
+        _ = writer.CreateCommand("rollback").ExecuteNonQuery();
+        AreEqual(1, await readTask);
+    }
+
+    [TestMethod]
     public async Task TxScopedX_LockTimeoutZero_ReadRaisesMsg1222()
     {
         // Same setup as the blocking test, but the reader has SET

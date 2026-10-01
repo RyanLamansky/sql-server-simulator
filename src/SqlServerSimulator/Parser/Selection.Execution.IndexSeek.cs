@@ -1260,7 +1260,7 @@ internal sealed partial class Selection
                 batch.PollCancellation();
                 continue;
             }
-            if (heap.ReadSlotBytes(page, slot) is not { } bytes)
+            if (heap.ReadLiveRow(page, slot) is not { } bytes)
                 continue;
             addresses?.Record(bytes, page, slot);
             yield return bytes;
@@ -2766,7 +2766,7 @@ internal sealed partial class Selection
         {
             if (!seen.Add((page, slot)) || table.Heap.IsSlotTombstoned(page, slot))
                 continue;
-            if (!batch.TouchRowForRead(table, page, slot, plan) || table.Heap.ReadSlotBytes(page, slot) is not { } bytes)
+            if (!batch.TouchRowForRead(table, page, slot, plan) || table.Heap.ReadLiveRow(page, slot) is not { } bytes)
                 continue;
             addresses?.Record(bytes, page, slot);
             io?.Enter(page, ref lastPage);
@@ -3059,9 +3059,9 @@ internal sealed partial class Selection
         var seen = new HashSet<(int, int)>();
         foreach (var (page, slot) in candidates)
         {
-            if (!seen.Add((page, slot)) || table.Heap.IsSlotTombstoned(page, slot))
+            if (!seen.Add((page, slot)))
                 continue;
-            if (table.Heap.ReadSlotBytes(page, slot) is { } bytes)
+            if (table.Heap.ReadLiveRow(page, slot) is { } bytes)
             {
                 io?.Enter(page, ref lastPage);
                 yield return (page, slot, bytes);
@@ -3081,8 +3081,10 @@ internal sealed partial class Selection
     //      whose pre-delete version a pre-delete snapshot still sees. Bounded by
     //      |RowVersions|, which a read-mostly RCSI workload keeps small (the GC
     //      trims versions no open snapshot needs). The whole-table scan this
-    //      replaces already walks RowVersions in its own second pass, so the
-    //      seek is never more expensive than the scan it supplants.
+    //      replaces reads every slot, each of these among them, so the seek is
+    //      never more expensive than the scan it supplants.
+    // Each slot resolves once, against its chain as it stood with the slot
+    // (VersionStore.ReadSnapshotSlot), as the scan's do.
     // The matched equality conjuncts stay in the residual WHERE, so any candidate
     // whose resolved version doesn't actually match the probe is filtered there.
     private static IEnumerable<byte[]> MaterializeSnapshotCandidates(
@@ -3091,7 +3093,7 @@ internal sealed partial class Selection
         var io = batch.Connection.StatementIo?.Touch(table);
         _ = io?.ScanCount += seeks;
         var lastPage = -1;
-        var tx = batch.Connection.CurrentTransaction;
+        var reader = batch.Connection.Session;
         var seen = new HashSet<(int, int)>();
         var addresses = batch.CurrentStatement.RowAddresses;
 
@@ -3099,8 +3101,8 @@ internal sealed partial class Selection
         {
             if (!seen.Add((page, slot)))
                 continue;
-            if (table.Heap.ReadSlotBytes(page, slot) is { } live
-                && Storage.VersionStore.ResolveVisibleVersion(table, (page, slot), live, snapshotXid, tx) is { } resolved)
+            _ = table.Heap.TryReadSlot(page, slot, out var current, out var sequence);
+            if (Storage.VersionStore.ReadSnapshotSlot(table, (page, slot), current, sequence, snapshotXid, reader) is { } resolved)
             {
                 io?.Enter(page, ref lastPage);
                 addresses?.Record(resolved, page, slot);
@@ -3108,19 +3110,13 @@ internal sealed partial class Selection
             }
         }
 
-        foreach (var kv in table.RowVersions)
+        foreach (var (address, _) in table.RowVersions)
         {
-            var page = kv.Key.PageIndex;
-            var slot = kv.Key.SlotIndex;
+            var (page, slot) = address;
             if (!seen.Add((page, slot)))
                 continue;
-
-            var resolved = table.Heap.IsSlotTombstoned(page, slot)
-                ? Storage.VersionStore.ResolveTombstonedSlotForSnapshot(kv.Value, snapshotXid, tx)
-                : table.Heap.ReadSlotBytes(page, slot) is { } live
-                    ? Storage.VersionStore.ResolveVisibleVersion(table, (page, slot), live, snapshotXid, tx)
-                    : null;
-            if (resolved is { } bytes)
+            _ = table.Heap.TryReadSlot(page, slot, out var current, out var sequence);
+            if (Storage.VersionStore.ReadSnapshotSlot(table, (page, slot), current, sequence, snapshotXid, reader) is { } bytes)
             {
                 addresses?.Record(bytes, page, slot);
                 yield return bytes;

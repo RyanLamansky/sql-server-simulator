@@ -56,7 +56,12 @@ internal enum SlotRewriteKind
 /// entries either — it's a known asymmetry with temp DDL that's
 /// transactional; document it where the temp behavior is described.
 /// </remarks>
-internal sealed class UndoLog
+/// <param name="reclamation">
+/// Defers the reuse of the off-row chains the log frees until no running
+/// statement can hold an image naming them; null for a table variable's log,
+/// whose rows only its own session reads.
+/// </param>
+internal sealed class UndoLog(LobReclamation? reclamation)
 {
     private readonly List<UndoEntry> entries = [];
 
@@ -212,7 +217,7 @@ internal sealed class UndoLog
             return;
 
         for (var i = this.entries.Count - 1; i >= position; i--)
-            this.entries[i].Undo();
+            this.entries[i].Undo(reclamation);
 
         // Undo rewinds heap state by mutating pages directly — it produces no
         // reversing seek-journal events and doesn't advance MutationGeneration,
@@ -255,7 +260,7 @@ internal sealed class UndoLog
             this.recordsChangeTracking = false;
         }
         for (var i = 0; i < this.entries.Count; i++)
-            this.entries[i].Commit();
+            this.entries[i].Commit(reclamation);
         this.entries.Clear();
     }
 
@@ -268,27 +273,43 @@ internal sealed class UndoLog
     /// </summary>
     private void PublishChangeTracking()
     {
-        Dictionary<Database, long>? versions = null;
+        var databases = new List<Database>(1);
+        foreach (var entry in this.entries)
+        {
+            var database = entry switch
+            {
+                ChangeTrackingRow row => row.Change.Database,
+                ChangeTrackingTruncation truncation => truncation.Database,
+                _ => null,
+            };
+            if (database is not null && !databases.Contains(database))
+                databases.Add(database);
+        }
+        foreach (var database in databases)
+            database.CommitChangeTracking(version => this.PublishChangeTracking(database, version));
+    }
+
+    // Applies this log's tracked changes to one database under the version
+    // its commit draws; returns whether any change drew it.
+    private bool PublishChangeTracking(Database database, long version)
+    {
+        var drawn = false;
         foreach (var entry in this.entries)
         {
             switch (entry)
             {
-                case ChangeTrackingRow row:
-                    versions ??= [];
-                    var database = row.Change.Database;
-                    if (!versions.TryGetValue(database, out var version))
-                        versions[database] = version = database.AllocateChangeTrackingVersion();
+                case ChangeTrackingRow row when row.Change.Database == database:
                     row.Change.Tracking.Apply(row.Change, version);
+                    drawn = true;
                     break;
-                case ChangeTrackingTruncation truncation:
-                    truncation.Tracking.Reset(versions is not null && versions.TryGetValue(truncation.Database, out var drawn)
-                        ? drawn - 1
-                        : truncation.Database.ChangeTrackingVersion);
+                case ChangeTrackingTruncation truncation when truncation.Database == database:
+                    truncation.Tracking.Reset(version - 1);
                     break;
                 default:
                     break;
             }
         }
+        return drawn;
     }
 
     /// <summary>
@@ -297,29 +318,29 @@ internal sealed class UndoLog
     /// chains to the heap's free-list. No-op when the heap carries no
     /// reclaim layout (no off-row-capable column, or a bare scratch heap).
     /// </summary>
-    private static void FreeChainsAtSlot(Heap heap, int page, int slot)
+    private static void FreeChainsAtSlot(Heap heap, int page, int slot, LobReclamation? reclamation)
     {
         if (heap.ReclaimColumns is null)
             return;
         var bytes = heap.ReadSlotBytes(page, slot);
         if (bytes is not null)
-            FreeChainsInBytes(heap, bytes);
+            FreeChainsInBytes(heap, bytes, reclamation);
     }
 
     /// <summary>Frees the off-row LOB chains referenced by an already-materialized row image.</summary>
-    private static void FreeChainsInBytes(Heap heap, ReadOnlySpan<byte> rowBytes)
+    private static void FreeChainsInBytes(Heap heap, ReadOnlySpan<byte> rowBytes, LobReclamation? reclamation)
     {
         if (heap.ReclaimColumns is not { } columns)
             return;
         var heads = new List<int>(1);
         RowDecoder.CollectLobHeads(columns, rowBytes, heads);
         for (var i = 0; i < heads.Count; i++)
-            heap.FreeLobChain(heads[i]);
+            heap.RetireLobChain(heads[i], reclamation);
     }
 
     private abstract class UndoEntry
     {
-        public abstract void Undo();
+        public abstract void Undo(LobReclamation? reclamation);
 
         /// <summary>
         /// The heap this entry mutates, or null for entries that touch no heap
@@ -332,7 +353,7 @@ internal sealed class UndoLog
         /// Runs when the enclosing transaction commits. Default no-op; the
         /// slot-mutation entries override it to reclaim superseded LOB chains.
         /// </summary>
-        public virtual void Commit()
+        public virtual void Commit(LobReclamation? reclamation)
         {
         }
     }
@@ -347,8 +368,9 @@ internal sealed class UndoLog
 
         public override Heap? AffectedHeap => this.Heap;
 
-        public override void Undo()
+        public override void Undo(LobReclamation? reclamation)
         {
+            using var latch = this.Heap.EnterLatch();
             var page = this.Heap.Pages[this.PageIndex];
             switch (this.Kind)
             {
@@ -362,7 +384,7 @@ internal sealed class UndoLog
                     // so Compact packs the row-payload bytes away and later
                     // inserts reuse the space, instead of leaking a slot's worth
                     // of bytes per rolled-back insert.
-                    FreeChainsAtSlot(this.Heap, this.PageIndex, this.SlotIndex);
+                    FreeChainsAtSlot(this.Heap, this.PageIndex, this.SlotIndex, reclamation);
                     page.DeleteSlot(this.SlotIndex);
                     page.MarkSlotReclaimable(this.SlotIndex);
                     this.Heap.MarkPageReclaimable(this.PageIndex);
@@ -375,7 +397,7 @@ internal sealed class UndoLog
             }
         }
 
-        public override void Commit()
+        public override void Commit(LobReclamation? reclamation)
         {
             if (this.Kind != UndoKind.Delete)
                 return;
@@ -385,8 +407,9 @@ internal sealed class UndoLog
             // pack away the row-payload bytes and reuse the space — independent
             // of versioning, since snapshot history reads a version-store copy,
             // not the live (now tombstoned) slot.
+            using var latch = this.Heap.EnterLatch();
             if (this.FreeOnCommit)
-                FreeChainsAtSlot(this.Heap, this.PageIndex, this.SlotIndex);
+                FreeChainsAtSlot(this.Heap, this.PageIndex, this.SlotIndex, reclamation);
             this.Heap.Pages[this.PageIndex].MarkSlotReclaimable(this.SlotIndex);
             this.Heap.MarkPageReclaimable(this.PageIndex);
         }
@@ -412,8 +435,9 @@ internal sealed class UndoLog
 
         public override Heap? AffectedHeap => this.Heap;
 
-        public override void Undo()
+        public override void Undo(LobReclamation? reclamation)
         {
+            using var latch = this.Heap.EnterLatch();
             var page = this.Heap.Pages[this.PageIndex];
             switch (this.Kind)
             {
@@ -421,7 +445,7 @@ internal sealed class UndoLog
                     // At this point the slot holds the (rolled-back) new payload;
                     // free its chains before overwriting with the old image,
                     // whose chains were never freed (Commit didn't run).
-                    FreeChainsAtSlot(this.Heap, this.PageIndex, this.SlotIndex);
+                    FreeChainsAtSlot(this.Heap, this.PageIndex, this.SlotIndex, reclamation);
                     page.RewriteSlotInPlace(this.SlotIndex, this.OldPayload);
                     break;
                 case SlotRewriteKind.ForwardInstall:
@@ -442,14 +466,14 @@ internal sealed class UndoLog
             }
         }
 
-        public override void Commit()
+        public override void Commit(LobReclamation? reclamation)
         {
             // InPlaceRewrite / ForwardInstall both supersede the original
             // row, whose pre-update image is OldPayload — reclaim its off-row
             // chains when no version owns them. ForwardRetarget carries no
             // superseded payload of its own (its old target rides a Delete).
             if (this.FreeOnCommit && this.Kind != SlotRewriteKind.ForwardRetarget)
-                FreeChainsInBytes(this.Heap, this.OldPayload);
+                FreeChainsInBytes(this.Heap, this.OldPayload, reclamation);
         }
     }
 
@@ -469,14 +493,16 @@ internal sealed class UndoLog
 
         public override Heap? AffectedHeap => this.Heap;
 
-        public override void Undo()
+        public override void Undo(LobReclamation? reclamation)
         {
+            using var latch = this.Heap.EnterLatch();
             this.Heap.Pages[this.PageIndex].UndeleteSlot(this.SlotIndex);
             this.Heap.ReinstateForwardTargetForUndo(this.Target);
         }
 
-        public override void Commit()
+        public override void Commit(LobReclamation? reclamation)
         {
+            using var latch = this.Heap.EnterLatch();
             this.Heap.Pages[this.PageIndex].MarkSlotReclaimable(this.SlotIndex);
             this.Heap.MarkPageReclaimable(this.PageIndex);
         }
@@ -484,7 +510,7 @@ internal sealed class UndoLog
 
     private sealed class UniquifierChange(Heap heap, (int Page, int Slot) address, long previous) : UndoEntry
     {
-        public override void Undo()
+        public override void Undo(LobReclamation? reclamation)
         {
             if (previous == 0)
                 _ = heap.Uniquifiers!.TryRemove(address, out _);
@@ -495,7 +521,7 @@ internal sealed class UndoLog
 
     private sealed class IdentityReseed(IdentityState state, (Int128? HighWaterMark, Int128? ReseededStart) snapshot) : UndoEntry
     {
-        public override void Undo() => state.RestoreReseed(snapshot);
+        public override void Undo(LobReclamation? reclamation) => state.RestoreReseed(snapshot);
     }
 
     private sealed class TempTableCreation(ConcurrentDictionary<string, HeapTable> owner, string name) : UndoEntry
@@ -503,7 +529,7 @@ internal sealed class UndoLog
         public readonly ConcurrentDictionary<string, HeapTable> Owner = owner;
         public readonly string Name = name;
 
-        public override void Undo() => this.Owner.TryRemove(this.Name, out _);
+        public override void Undo(LobReclamation? reclamation) => this.Owner.TryRemove(this.Name, out _);
     }
 
     private sealed class LocalTempTableCreation(SimulatedDbConnection connection, HeapTable table) : UndoEntry
@@ -511,7 +537,7 @@ internal sealed class UndoLog
         public readonly SimulatedDbConnection Connection = connection;
         public readonly HeapTable Table = table;
 
-        public override void Undo() => this.Connection.RemoveTempTable(this.Table);
+        public override void Undo(LobReclamation? reclamation) => this.Connection.RemoveTempTable(this.Table);
     }
 
     private sealed class LocalTempTableRemoval(SimulatedDbConnection connection, HeapTable table) : UndoEntry
@@ -519,7 +545,7 @@ internal sealed class UndoLog
         public readonly SimulatedDbConnection Connection = connection;
         public readonly HeapTable Table = table;
 
-        public override void Undo() => this.Connection.ReinstateTempTable(this.Table);
+        public override void Undo(LobReclamation? reclamation) => this.Connection.ReinstateTempTable(this.Table);
     }
 
     // Neither change tracking entry has anything to undo: dropping the entry
@@ -528,7 +554,7 @@ internal sealed class UndoLog
     {
         public readonly PendingRowChange Change = change;
 
-        public override void Undo()
+        public override void Undo(LobReclamation? reclamation)
         {
         }
     }
@@ -539,7 +565,7 @@ internal sealed class UndoLog
 
         public readonly Database Database = database;
 
-        public override void Undo()
+        public override void Undo(LobReclamation? reclamation)
         {
         }
     }
@@ -549,7 +575,7 @@ internal sealed class UndoLog
         public readonly Simulation Simulation = simulation;
         public readonly Action Reverse = undo;
 
-        public override void Undo()
+        public override void Undo(LobReclamation? reclamation)
         {
             this.Reverse();
             this.Simulation.BumpSchemaVersion();
@@ -562,7 +588,7 @@ internal sealed class UndoLog
         public readonly string Name = name;
         public readonly HeapTable Table = table;
 
-        public override void Undo() => this.Owner[this.Name] = this.Table;
+        public override void Undo(LobReclamation? reclamation) => this.Owner[this.Name] = this.Table;
     }
 
     /// <summary>
@@ -580,15 +606,14 @@ internal sealed class UndoLog
     {
         public override Heap? AffectedHeap => heap;
 
-        public override void Undo()
+        public override void Undo(LobReclamation? reclamation)
         {
-            heap.Pages.Clear();
-            heap.Pages.AddRange(oldPages);
+            using var latch = heap.EnterLatch();
+            heap.Pages.Replace(oldPages);
             _ = heap.RecomputeRowCount();
             heap.LobPages.Clear();
             heap.LobPages.AddRange(oldLobPages);
-            heap.ForwardTargets.Clear();
-            heap.ForwardTargets.UnionWith(oldForwardTargets);
+            heap.RestoreForwardTargets(oldForwardTargets);
             // The restored LobPages are indexed by their original positions, so
             // the pre-truncate free-list indices are valid again.
             heap.RestoreFreeLobPages(oldFreeLobPages);

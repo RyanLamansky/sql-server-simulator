@@ -454,12 +454,8 @@ partial class Simulation
                         : SqlValue.Null(column.Type);
             }
             var undoLog = target.IsTableVariable ? batch.CurrentTableVarUndoLog : batch.CurrentUndoLog;
-            var (newPage, newSlot) = target.Heap.Insert(
-                RowEncoder.EncodeRow(target.StoredColumns, targetValues, target.Heap),
-                undoLog);
+            _ = Simulation.InsertRow(batch, target, RowEncoder.EncodeRow(target.StoredColumns, targetValues, target.Heap), undoLog);
             batch.Connection.StatementIo?.CountWrite(target);
-            if (Simulation.IsLockableTable(target))
-                batch.AcquireRowLockTxScoped(target, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
             target.ChangeTracking?.RecordRow(batch, target, targetValues, ChangeTrackingOperation.Insert);
         }
     }

@@ -249,9 +249,9 @@ internal sealed class HeapSeekCache
         var seen = candidates.Count > 1 ? new HashSet<(int, int)>() : null;
         foreach (var (page, slot) in candidates)
         {
-            if ((seen is not null && !seen.Add((page, slot))) || heap.IsSlotTombstoned(page, slot))
+            if (seen is not null && !seen.Add((page, slot)))
                 continue;
-            if (heap.ReadSlotBytes(page, slot) is { } bytes
+            if (heap.ReadLiveRow(page, slot) is { } bytes
                 && TryComputeKey(bytes, ordinals, commons, schema, heap, out var liveKey)
                 && liveKey.Equals(probeKey))
             {

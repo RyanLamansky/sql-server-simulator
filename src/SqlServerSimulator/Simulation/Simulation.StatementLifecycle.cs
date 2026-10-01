@@ -134,6 +134,7 @@ partial class Simulation
         public SimulatedSqlException? Error;
 
         private int? savedThreadId;
+        private bool announcedReader;
         private IoStatistics? enclosingIo;
         private FunctionBodyShape? shape;
         private bool opensConditional;
@@ -240,6 +241,10 @@ partial class Simulation
             var connection = batch.Connection;
             this.savedThreadId = connection.CurrentExecutingThreadId;
             connection.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
+            // The outermost statement holds row images for its whole run, a
+            // nested one's included, so it alone pins the LOB chains retired
+            // meanwhile.
+            this.announcedReader = connection.Simulation.LobReclamation.Enter(connection.Session);
             // SET STATISTICS IO: the statement gathers its own reads, its caller's
             // put aside until it completes.
             // Query Store times the statement and counts its reads the same way,
@@ -287,6 +292,8 @@ partial class Simulation
             var connection = batch.Connection;
             batch.ReleaseStatementSchemaLocks();
             connection.CurrentExecutingThreadId = this.savedThreadId;
+            if (this.announcedReader)
+                LobReclamation.Leave(connection.Session);
             if (this.ReportsStatistics)
                 connection.StatementIo = this.enclosingIo;
             if (this.opensConditional)

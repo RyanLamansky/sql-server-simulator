@@ -267,14 +267,17 @@ internal sealed class LockManager
     /// increments the existing hold's count; same-connection acquire of a
     /// different mode appends a separate hold (no upgrade — the two
     /// modes are tracked independently and release individually).
+    /// <paramref name="sweepAbandoned"/> is false for a lock no abandoned
+    /// session can hold — a just-inserted row's — taken under a heap's latch,
+    /// where a teardown, which rolls back other tables, must not run.
     /// </summary>
     /// <exception cref="SimulatedSqlException">
     /// Msg 1205 (deadlock) on same-thread conflict or detected
     /// waiter-graph cycle; Msg 1222 (lock timeout) if the wait elapses.
     /// </exception>
-    public void Acquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis)
+    public void Acquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned = true)
     {
-        switch (this.TryAcquire(resource, mode, owner, timeoutMillis))
+        switch (this.TryAcquire(resource, mode, owner, timeoutMillis, sweepAbandoned))
         {
             case LockAcquireOutcome.TimedOut:
                 throw SimulatedSqlException.LockRequestTimeOutExceeded(TimeoutState(resource));
@@ -313,9 +316,10 @@ internal sealed class LockManager
     /// Distinguishes <see cref="LockAcquireOutcome.GrantedAfterWait"/> from
     /// an immediate grant for sp_getapplock's return-code 1.
     /// </summary>
-    public LockAcquireOutcome TryAcquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis)
+    public LockAcquireOutcome TryAcquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned = true)
     {
-        this.SweepAbandonedSessions();
+        if (sweepAbandoned)
+            this.SweepAbandonedSessions();
         lock (this.gate)
         {
             // Same-owner / same-mode re-entrance: bump the existing hold's

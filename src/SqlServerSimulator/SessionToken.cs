@@ -68,6 +68,13 @@ internal sealed class SessionToken(int spid)
     public int? CurrentExecutingThreadId;
 
     /// <summary>
+    /// The <see cref="Storage.LobReclamation"/> epoch the session's running
+    /// outermost statement began at, or <see cref="long.MaxValue"/> between
+    /// statements: no LOB chain retired after it is reused until it ends.
+    /// </summary>
+    public long StatementEpoch = long.MaxValue;
+
+    /// <summary>
     /// The <see cref="LockResource"/> this session is currently blocked on, or
     /// <c>null</c> when it isn't waiting. Set and cleared inside
     /// <c>LockManager</c>'s gate so the cycle detector reads a consistent

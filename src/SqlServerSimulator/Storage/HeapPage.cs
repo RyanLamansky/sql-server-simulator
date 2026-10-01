@@ -332,18 +332,30 @@ internal sealed class HeapPage
     /// ignoring the tombstone bit (so callers reading a deleted slot get
     /// the still-resident payload — useful for the version store's
     /// post-DELETE history capture). Returns null when the slot is past
-    /// <see cref="SlotCount"/>.
+    /// <see cref="SlotCount"/> or compaction reclaimed it.
     /// </summary>
     public byte[]? ReadSlotBytes(int slotIndex)
     {
-        if (slotIndex < 0 || slotIndex >= this.SlotCount)
+        var slotCount = this.SlotCount;
+        if (slotIndex < 0 || slotIndex >= slotCount)
             return null;
         var rowStart = this.ReadSlotOffset(slotIndex);
-        var rowEnd = slotIndex + 1 < this.SlotCount
+        var rowEnd = slotIndex + 1 < slotCount
             ? this.ReadSlotOffset(slotIndex + 1)
             : this.FreeSpacePointer;
-        return this.Bytes.AsSpan(rowStart, rowEnd - rowStart).ToArray();
+        // A committed delete's slot that compaction reclaimed holds nothing.
+        return rowEnd == rowStart ? null : this.CopyExtent(rowStart, rowEnd);
     }
+
+    /// <summary>
+    /// The bytes between two offsets read from the page. A reader that takes
+    /// no latch can read them mid-write — a compaction moving the offsets, an
+    /// insert advancing the free-space pointer — so a pair out of order yields
+    /// an empty row rather than a throw; that reader discards it and reads
+    /// again (see <see cref="Heap"/>'s optimistic reads).
+    /// </summary>
+    private byte[] CopyExtent(int rowStart, int rowEnd) =>
+        rowStart <= rowEnd && rowEnd <= PageSize ? this.Bytes.AsSpan(rowStart, rowEnd - rowStart).ToArray() : [];
 
     /// <summary>
     /// Returns true when the slot is past the slot directory's high-water
@@ -375,7 +387,7 @@ internal sealed class HeapPage
 
         var rowStart = raw & SlotOffsetMask;
         var rowEnd = slotIndex + 1 < this.SlotCount ? this.ReadSlotOffset(slotIndex + 1) : this.FreeSpacePointer;
-        bytes = this.Bytes.AsSpan(rowStart, rowEnd - rowStart).ToArray();
+        bytes = this.CopyExtent(rowStart, rowEnd);
         forwarded = (raw & SlotForwardBit) != 0;
         return true;
     }
@@ -391,6 +403,9 @@ internal sealed class HeapPage
     public (int PageIndex, int SlotIndex) ReadForwardTarget(int slotIndex)
     {
         var offset = this.ReadSlotOffset(slotIndex);
+        // Only a read torn by a concurrent writer lands this close to the end.
+        if (offset > PageSize - 6)
+            return (-1, -1);
         var page = BinaryPrimitives.ReadInt32LittleEndian(this.Bytes.AsSpan(offset, 4));
         var slot = BinaryPrimitives.ReadInt16LittleEndian(this.Bytes.AsSpan(offset + 4, 2));
         return (page, slot);

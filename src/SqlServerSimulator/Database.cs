@@ -260,11 +260,26 @@ internal sealed partial class Database
     // ChangeTracking.
     private long changeTrackingVersion;
 
+    private readonly Lock changeTrackingCommitGate = new();
+
     /// <summary>
-    /// Allocates the version a committing transaction's tracked changes carry:
-    /// one per transaction that changed a tracked table of this database.
+    /// Runs <paramref name="publish"/> with the version a committing
+    /// transaction's tracked changes carry — one per transaction that changed
+    /// a tracked table of this database — and makes it current only once
+    /// <paramref name="publish"/> returns true, having applied them; one
+    /// committer at a time. A reader of <see cref="ChangeTrackingVersion"/>
+    /// therefore never holds a version whose changes aren't all visible yet,
+    /// which a client syncing from it would skip for good.
     /// </summary>
-    public long AllocateChangeTrackingVersion() => Interlocked.Increment(ref this.changeTrackingVersion);
+    public void CommitChangeTracking(Func<long, bool> publish)
+    {
+        lock (this.changeTrackingCommitGate)
+        {
+            var version = this.changeTrackingVersion + 1;
+            if (publish(version))
+                _ = Interlocked.Exchange(ref this.changeTrackingVersion, version);
+        }
+    }
 
     /// <summary>The last change tracking version committed, which <c>CHANGE_TRACKING_CURRENT_VERSION()</c> reports.</summary>
     public long ChangeTrackingVersion => Interlocked.Read(ref this.changeTrackingVersion);
