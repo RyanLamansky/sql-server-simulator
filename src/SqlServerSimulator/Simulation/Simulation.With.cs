@@ -184,7 +184,7 @@ partial class Simulation
             // reference in the first branch resolves to a null-Plan
             // binding without IsRecursivePartParse set, raising Msg 252
             // (no top-level UNION ALL with a valid anchor).
-            var binding = new CteBinding(cteName.Value, []);
+            var binding = new CteBinding(cteName.Value, [], context.CurrentDatabase);
             bindings[cteName.Value] = binding;
 
             var body = ParseCteBodyRecordingReads(context, binding, renameList);

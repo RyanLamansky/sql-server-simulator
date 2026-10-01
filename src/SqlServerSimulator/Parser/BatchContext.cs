@@ -320,14 +320,6 @@ internal sealed class BatchContext
     /// </summary>
     public bool CalledFunctionBody;
 
-    /// <summary>
-    /// Set while a DML statement through a windowed view or CTE runs the body
-    /// to pair its rows, in order, with the base rows they came from, so the
-    /// window stage yields them in arrival order rather than in the order
-    /// real's window sort leaves a query's rows.
-    /// </summary>
-    public bool WindowRowsInArrivalOrder;
-
     /// <summary>The <c>#</c> / <c>##</c> tables a create-time bind has seen a statement create.</summary>
     private HashSet<string>? tempTablesCreatedWhileBinding;
 
@@ -1579,6 +1571,22 @@ internal sealed class BatchContext
         if (hold == TargetRowHold.Update)
             this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, LockMode.Update, countedForEscalation: false);
         return hold != TargetRowHold.Gone;
+    }
+
+    /// <summary>
+    /// Takes and keeps U on a row a <c>MERGE</c> into a join view reads its
+    /// written table through, as real's target read does (probed 2026-10-01
+    /// against SQL Server 2025: it waits <c>LCK_M_U</c> on the writer's key),
+    /// so the row stays as read until the statement's write converts the U to
+    /// X; the caller gives it back with <see cref="ReleaseTargetRow"/> once
+    /// the statement has written. Answers the row as it stands once taken —
+    /// null when another session's write deleted it.
+    /// </summary>
+    public byte[]? HoldTargetRowForUpdate(HeapTable table, int pageIndex, int slotIndex)
+    {
+        if (Simulation.IsLockableTable(table))
+            this.AcquireRowLock(table, pageIndex, slotIndex, LockMode.Update, countForEscalation: false);
+        return table.Heap.ReadLiveRow(pageIndex, slotIndex);
     }
 
     /// <summary>

@@ -53,26 +53,23 @@ partial class Simulation
         var target = ParseDmlTarget(context, RemoteWriteKind.Delete);
         var (leadingIdent, remoteWrite, leadingView, leadingTable) = (target.Name, target.Remote, target.View, target.Table);
         RejectQueryAfterDeleteTarget(context);
-        if (leadingView is not null)
-        {
-            switch (RouteViewWrite(context.Batch, leadingView, TriggerActions.Delete))
-            {
-                case DmlViewRoute.InsteadOf:
-                    {
-                        // An INSTEAD OF DELETE trigger takes the write whatever the
-                        // view's shape, reading the view's own rows.
-                        context.MoveNextOptional();
-                        var insteadOfHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
-                        Selection.ValidateDmlTargetHints(insteadOfHints);
-                        return ExecuteInsteadOfViewDelete(context, leadingIdent, leadingView, top, insteadOfHints.Serializable);
-                    }
-                case DmlViewRoute.Refused:
-                    throw NonUpdatableViewError(leadingView, leadingIdent.ToString());
-            }
-        }
+        if (leadingView is not null && RouteViewWrite(context.Batch, leadingView, TriggerActions.Delete) == DmlViewRoute.Refused)
+            throw NonUpdatableViewError(leadingView, leadingIdent.ToString());
         context.MoveNextOptional();
         var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
         Selection.ValidateDmlTargetHints(targetHints);
+        // A target the FROM clause names — an alias, or a view written through
+        // in a join — is read from that clause ahead of the OUTPUT clause,
+        // which binds against the table it reaches.
+        var preParsedFrom = remoteWrite is null && (leadingTable is null || leadingView is not null)
+            ? Selection.PreParseMutationFrom(context, fromCursor: true)
+            : null;
+        if (preParsedFrom is not null && (leadingView is not null || (leadingTable is null && JoinedViewTargetIndex(context, preParsedFrom, leadingIdent, leadingView: null) >= 0)))
+            return ExecuteJoinedViewTargetDelete(context, leadingIdent, leadingView, top, preParsedFrom);
+        // An INSTEAD OF DELETE trigger on a view takes the write whatever the
+        // view's shape, reading the view's own rows.
+        if (leadingView is not null && HasInsteadOfTrigger(context.Batch, leadingView, TriggerActions.Delete))
+            return ExecuteInsteadOfViewDelete(context, leadingIdent, leadingView, top, targetHints.Serializable);
         // Phase 1a: lock the resolved DELETE target. Skipped when
         // leadingTable is null (multi-source alias form — target determined
         // post-FROM, deferred to 1b).
@@ -86,14 +83,10 @@ partial class Simulation
             SettleRemoteMutation(context, remoteWrite, remoteWrite);
         // INSERTED isn't a valid qualifier in DELETE OUTPUT (probe-confirmed
         // Msg 4104).
-        var output = ParseMutationOutput(context, leadingIdent, leadingTable, leadingView, TriggerActions.Delete);
+        var output = ParseMutationOutput(context, leadingIdent, leadingTable ?? JoinedTargetTable(context, preParsedFrom, leadingIdent), leadingView, TriggerActions.Delete);
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
-        {
-            return leadingView is not null
-                ? throw new NotSupportedException($"Multi-source DELETE through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled — target the underlying table directly.")
-                : ExecuteJoinedDelete(context, leadingIdent, leadingTable, output, top);
-        }
+            return ExecuteJoinedDelete(context, leadingIdent, leadingTable, output, top, preParsedFrom);
 
         var table = RequireMutationTable(context, leadingIdent, leadingTable, "DELETE");
         return ExecuteDeleteAgainstTable(context, leadingIdent, table, output, top, targetHints.Serializable, leadingView);
@@ -232,7 +225,7 @@ partial class Simulation
             // so `DELETE t WHERE id = 1/0` raises over an empty table.
             RunUpdateStartupConstants(context, table, [where], []);
         }
-        var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, table, positionedCursor is not null);
+        var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, positionedCursor is not null);
         // A seek chose its rows from the images they carried; one a wait here
         // let settle may carry another.
         if (positionedCursor is null && !readsNoRow && !table.SupersededKeyImages.IsEmptyLockFree()
@@ -331,18 +324,27 @@ partial class Simulation
         MultiPartName leadingIdent,
         HeapTable? leadingTable,
         OutputProjection? output,
-        Selection.DmlTopLimit? top)
+        Selection.DmlTopLimit? top,
+        Selection.PreParsedFrom? preParsedFrom)
     {
-        var sourcesList = new List<FromSource>();
-        var joinsList = new List<JoinSpec>();
-        // Real leaves NEXT VALUE FOR legal in a joined UPDATE / DELETE's own
-        // FROM-clause derived table, where every other derived table refuses it
-        // (probe-confirmed 2026-08-05, both spellings, against the Msg 11719
-        // the SELECT / INSERT … SELECT / MERGE … USING forms take).
-        using (ParserScope.Enter(ref context.AllowNextValueForInFromClause, true))
+        var sourcesList = preParsedFrom?.Sources ?? [];
+        var joinsList = preParsedFrom?.Joins ?? [];
+        if (preParsedFrom is not null)
         {
-            context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
-            Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourcesList, joinsList);
+            // The OUTPUT clause's binding already read the sources; resume past them.
+            context.RestoreCheckpoint(preParsedFrom.After);
+        }
+        else
+        {
+            // Real leaves NEXT VALUE FOR legal in a joined UPDATE / DELETE's own
+            // FROM-clause derived table, where every other derived table refuses it
+            // (probe-confirmed 2026-08-05, both spellings, against the Msg 11719
+            // the SELECT / INSERT … SELECT / MERGE … USING forms take).
+            using (ParserScope.Enter(ref context.AllowNextValueForInFromClause, true))
+            {
+                context.Batch.BindErrors?.EnterClause(context.Token, BindClause.From);
+                Selection.ParseSourcesAndJoins(context, QueryScope.Statement, sourcesList, joinsList);
+            }
         }
         if (ReadJoinedTailPastMissingTarget(context, sourcesList, joinsList, leadingIdent, leadingTable))
             return new SimulatedNonQuery(0);

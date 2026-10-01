@@ -208,6 +208,10 @@ partial class Simulation
 
         var (baseTable, baseColumnOrdinals, rejectionReason, visibilityCheck, checkOptionCheck, isJoinUpdatable) =
             AnalyzeViewUpdatability(context.CurrentDatabase.Collation, bodySelection, withCheckOption);
+        // A stored UNION ALL view is a partitioned view to real, refused by
+        // that feature's own rules, which aren't built.
+        if (rejectionReason == ViewUpdatabilityRejection.UnionAll)
+            rejectionReason = ViewUpdatabilityRejection.UnsupportedShape;
 
         var (upstreamView, upstreamOrdinals) = baseTable is null ? (null, []) : UpstreamLinkOf(context.CurrentDatabase.Collation, bodySelection);
         var view = new View(
@@ -229,9 +233,8 @@ partial class Simulation
             DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
-            DerivedOutputColumns = baseTable is null && rejectionReason != ViewUpdatabilityRejection.MultipleSources
-                ? DerivedOutputColumnsOf(bodySelection)
-                : null,
+            DerivedOutputColumns = DerivedOutputColumnsFor(bodySelection, baseTable, rejectionReason, outputColumns.Length),
+            UnionOwnerName = UnionOwnerNameOf(bodySelection, rejectionReason, viewName.Leaf),
             IsRowLimited = IsRowLimitedBody(bodySelection),
             IsWindowed = IsWindowedBody(bodySelection),
             VolatileColumns = bodySelection.VolatileColumns,

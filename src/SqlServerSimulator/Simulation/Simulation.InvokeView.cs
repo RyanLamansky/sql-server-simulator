@@ -145,13 +145,14 @@ partial class Simulation
 
     /// <summary>
     /// The propagating form of <see cref="TryParseViewBodyPlan"/>, used by
-    /// DML through a join view: the statement is about to write through the
-    /// body, so a body that won't parse or bind is the statement's own error
-    /// rather than something to fall back from. Statement schema locks stay
-    /// held for the rest of the statement.
+    /// DML through a view: the statement is about to write through the body,
+    /// so a body that won't parse or bind is the statement's own error rather
+    /// than something to fall back from. Statement schema locks stay held for
+    /// the rest of the statement. A CTE's unstored view answers the body the
+    /// statement parsed.
     /// </summary>
     internal Selection ParseViewBodyPlan(BatchContext outerBatch, View view) =>
-        ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: false);
+        view.UnstoredBody ?? ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: false);
 
     private Selection ParseViewBodyPlan(BatchContext outerBatch, View view, bool releaseStatementSchemaLocks)
     {
@@ -245,6 +246,28 @@ partial class Simulation
             var effective = pushedPredicates is null
                 ? bodySelection
                 : bodySelection.PredicatePushdown?.Invoke(pushedPredicates) ?? bodySelection;
+            // A plan drained for its rows' base addresses reading this view
+            // asks for the address behind each view row, which the
+            // re-encoding below would lose: the body then runs carrying the
+            // address of its own first source's row, and each encoded row
+            // is recorded against it.
+            if (outerBatch.RowAddressProbe is not null && outerBatch.CurrentStatement.RowAddresses is { } outerAddresses)
+            {
+                var bodySchema = effective.Schema;
+                var width = Math.Min(columnCount, bodySchema.Length);
+                var leadingSchema = width == bodySchema.Length ? bodySchema : bodySchema[..width];
+                foreach (var values in effective.ExecuteWithRowAddresses(innerBatch))
+                {
+                    var bytes = RowEncoder.EncodeRow(leadingSchema, values.AsSpan(0, width));
+                    if (values.Length > bodySchema.Length && !values[bodySchema.Length].IsNull)
+                    {
+                        var (page, slot) = RowLocator.Unpack(values[bodySchema.Length].AsInt64);
+                        outerAddresses.Record(bytes, page, slot);
+                    }
+                    yield return bytes;
+                }
+                yield break;
+            }
             var resultSet = effective.Execute(innerBatch, outerResolver: null);
             if (resultSet.Schema.Length > columnCount)
             {

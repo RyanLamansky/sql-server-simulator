@@ -100,9 +100,9 @@ partial class Simulation
         var level = view;
         while (true)
         {
-            var profile = (level.UnstoredBody ?? batch.Connection.Simulation.ParseViewBodyPlan(batch, level)).UpdatabilityProfile;
+            var profile = batch.Connection.Simulation.ParseViewBodyPlan(batch, level).UpdatabilityProfile;
             levels.Add((level, profile?.Projections));
-            if (profile?.Sources is not [{ BackingView: { } lower }])
+            if (profile?.Sources is not [var lowerSource] || lowerSource.UpdatableView() is not { } lower)
                 break;
             level = lower;
         }

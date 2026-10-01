@@ -68,7 +68,8 @@ A plan whose query block reads a locator installs one as it starts (`Selection.I
 With no map installed, each producer tests one local it read once per enumeration.
 
 Because the address is a projected value, it passes through a `TOP`, a sort or a window stage with its row, which is what lets a write through a row-limited or windowed body name the base row behind each row the body yields ([`programmable.md`](programmable.md#updatable-views-dml-through-views)).
-A body whose rows arrive through another view carries no address of its own: the view's rows are re-encoded, so the locator reads NULL there and the consumer falls back to pairing.
+A body whose rows arrive through another view, a CTE or a derived table reads them re-encoded, so the address rides through that re-encoding too: while an `ExecuteWithRowAddresses` run drains, a view the run reads runs its own body the same way and records each row it encodes against its body's address (`Simulation.InvokeViewCore`), and a single-source query body the run executes as a source does likewise (`Selection.ExecuteCarryingRowAddresses`, gated on `Selection.CarriesRowAddresses`), down any depth of nesting.
+Outside such a run `Selection.Execute` pays one field read for the gate.
 
 Measured on the index replay (2.1M records): **62.2 / 60.7 s** without the mechanism and **62.2 / 60.8 s** with it, and none of the producers' loops gained an allocation.
 

@@ -211,7 +211,10 @@ partial class Selection
         var excluders = new List<BooleanExpression>(shape.Excluders.Count + bound.Count);
         excluders.AddRange(shape.Excluders);
         excluders.AddRange(bound);
-        return new Selection(
+        // The plan the closure belongs to, for recognizing a row-address run
+        // of it (see ExecuteWithRowAddresses); assigned once the plan exists.
+        Selection? self = null;
+        var pushed = new Selection(
             shape.Schema,
             shape.ColumnNames,
             hasOrderBy: false,
@@ -223,9 +226,14 @@ partial class Selection
                 execSources = ReduceGroupedBodiesByJoinKeys(execSources, shape.Joins, excluders, batch, outerResolver);
                 execSources = MaterializeUncorrelatedDeferredSources(execSources, shape.Joins, batch, outerResolver);
                 return ProjectSqlRows(
-                    execSources, shape.Joins, shape.Expressions, excluders, shape.ColumnNames, shape.OrderBy,
+                    execSources, shape.Joins, ReferenceEquals(batch.RowAddressProbe, self) ? [.. shape.Expressions, new RowAddress(0)] : shape.Expressions, excluders, shape.ColumnNames, shape.OrderBy,
                     distinct: false, top: default, offsetCount: null, fetchCount: null, batch: batch, outerResolver: outerResolver);
-            });
+            })
+        {
+            CarriesRowAddresses = shape.Sources.Length == 1,
+        };
+        self = pushed;
+        return pushed;
     }
 
     /// <summary>

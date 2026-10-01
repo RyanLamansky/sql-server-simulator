@@ -2090,6 +2090,7 @@ internal sealed partial class Selection
             selection.CursorOrderBy = orderBy;
         self = selection;
         selection.InstallsRowAddresses = installsRowAddresses;
+        selection.CarriesRowAddresses = updatabilityProfile is { Sources.Length: 1 };
         selection.ColumnNullability = columnNullability;
         selection.ProjectionExpressions = [.. expressions];
         var drawnProjection = PassThroughDrawnColumns(expressions, sources);

@@ -161,18 +161,19 @@ public sealed class BatchErrorContinuationTests
 
         Wire.ExecInProc(simulation, "create table dbo.bt (a int)");
         Wire.ExecInProc(simulation, "create view dbo.v as select a from dbo.bt");
+        Wire.ExecInProc(simulation, "create trigger dbo.trv on dbo.v instead of delete as select 1");
 
         // No SimulatedSqlException factory produces a class >= 17 (batch/
         // connection-terminating) severity, and deadlock (class 13) needs
         // concurrent sessions to provoke; NotSupportedException is the
-        // reachable batch-aborting case here (a multi-source DELETE through a
-        // view), surfacing as a Msg 50000 error token that ends the batch. The
-        // insert after it must NOT run — the contrast with continued errors
-        // above.
+        // reachable batch-aborting case here (a DELETE whose FROM clause names
+        // only a view an INSTEAD OF trigger writes), surfacing as a Msg 50000
+        // error token that ends the batch. The insert after it must NOT run —
+        // the contrast with continued errors above.
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
         {
             await using var command = new SqlCommand(
-                "create table #t (a int); delete dbo.v from dbo.bt; insert #t values (1)",
+                "create table #t (a int); delete dbo.v from dbo.v; insert #t values (1)",
                 connection);
             _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
         });

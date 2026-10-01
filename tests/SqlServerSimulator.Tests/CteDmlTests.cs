@@ -101,4 +101,137 @@ public sealed class CteDmlTests
         _ = simulation.ExecuteNonQuery("delete vfilter where rn = 2");
         AreEqual("1:-5,2:9", simulation.ExecuteScalar("select string_agg(concat(id, ':', v), ',') within group (order by id) from x"));
     }
+
+    private const string JoinSetup = """
+        create table j (id int primary key, v int, k int); create table m (k int primary key, n int);
+        insert j values (1, 10, 1), (2, 20, 2), (3, 30, 3), (4, 40, 1); insert m values (1, 100), (2, 200), (5, 500);
+        """;
+
+    private const string JRows = "; select string_agg(concat(id, ':', v), ' ') within group (order by id) from j";
+    private const string MRows = "; select string_agg(concat(k, ':', n), ' ') within group (order by k) from m";
+
+    /// <summary>
+    /// A CTE reading several sources writes through as a join view does: an
+    /// UPDATE or INSERT to the one table its columns land in, a MERGE likewise,
+    /// a DELETE from the first table of its FROM (probed 2026-10-01 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("with c as (select j.id, j.v, m.n from j join m on m.k = j.k) update c set v = n where id < 4" + JRows, "1:100 2:200 3:30 4:40")]
+    [DataRow("with c as (select j.id, j.v, m.n from j join m on m.k = j.k) update c set n = 7 where id = 1" + MRows, "1:7 2:200 5:500")]
+    [DataRow("with c as (select j.id, j.v, m.n from j left join m on m.k = j.k) update c set n = 7" + MRows, "1:7 2:7 5:500")]
+    [DataRow("with c as (select j.id, j.v, m.n from j, m where m.k = j.k) update c set v = 0" + JRows, "1:0 2:0 3:30 4:0")]
+    [DataRow("with c as (select j.id, j.v, m.n from j join m on m.k = j.k where m.n > 150) update c set v = 0" + JRows, "1:10 2:0 3:30 4:40")]
+    [DataRow("with c as (select j.id, j.v, j.k, m.n from j join m on m.k = j.k) insert into c (id, v, k) values (9, 90, 1)" + JRows, "1:10 2:20 3:30 4:40 9:90")]
+    [DataRow("with c as (select j.id, j.v, m.n from j join m on m.k = j.k) merge c using (values (1, 5)) s (id, v) on c.id = s.id when matched then update set v = s.v;" + JRows, "1:5 2:20 3:30 4:40")]
+    [DataRow("with c as (select j.id, j.v, m.n from j join m on m.k = j.k) merge c using (values (1)) s (id) on c.id = s.id when matched then delete;" + JRows, "2:20 3:30 4:40")]
+    [DataRow("with c as (select j.id, j.v, m.n from j join m on m.k = j.k), c2 as (select id, v from c where n > 100) update c2 set v = 9" + JRows, "1:10 2:9 3:30 4:40")]
+    public void MultiSourceBody_WritesTheTableItsColumnsLandIn(string sql, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(JoinSetup + sql));
+
+    [TestMethod]
+    public void MultiSourceBody_OverAJoinView()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(JoinSetup, "create view vj as select j.id, j.v, m.n from j join m on m.k = j.k");
+        AreEqual("1:7 2:200 5:500", simulation.ExecuteScalar("with c as (select * from vj) update c set n = 7 where id = 1" + MRows));
+    }
+
+    [TestMethod]
+    [DataRow("with c as (select j.id, j.v, m.n from j join m on m.k = j.k) update c set n = 7, v = 1", 4405, "View or function 'c' is not updatable because the modification affects multiple base tables.")]
+    [DataRow("with c as (select j.id, j.v, m.n from j join m on m.k = j.k) delete from c", 4405, "View or function 'c' is not updatable because the modification affects multiple base tables.")]
+    [DataRow("with c as (select j.id, j.v, j.k, m.n from j join m on m.k = j.k) insert into c (id, n) values (9, 90)", 4405, "View or function 'c' is not updatable because the modification affects multiple base tables.")]
+    [DataRow("with c as (select j.id, j.v + m.n as s from j join m on m.k = j.k) update c set s = 1", 4406, "Update or insert of view or function 'c' failed because it contains a derived or constant field.")]
+    public void MultiSourceBody_Refusals(string sql, int number, string message)
+        => new Simulation().AssertSqlError(JoinSetup + sql, number, message);
+
+    /// <summary>
+    /// A body a <c>UNION</c> tops derives every column, so an UPDATE, INSERT or
+    /// MERGE writing one is Msg 4406, and a DELETE is Msg 4426 — the same under
+    /// an <c>EXCEPT</c> or <c>INTERSECT</c> above it but for the DELETE, Msg
+    /// 4403 as a plain <c>EXCEPT</c> takes. Through a view over a stored
+    /// <c>UNION</c> view, Msg 4406 names the stored one (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("with c as (select id, v from j union select k, n from m) update c set v = 1", 4406, "c")]
+    [DataRow("with c as (select id, v from j union all select k, n from m) update c set v = 1", 4406, "c")]
+    [DataRow("with c as (select id, v from j union select k, n from m) insert c values (1, 1)", 4406, "c")]
+    [DataRow("with c as (select id, v from j union select k, n from m) insert c (id) values (1)", 4406, "c")]
+    [DataRow("with c as (select id, v from j union select k, n from m) delete c", 4426, "c")]
+    [DataRow("with c as (select id, v from j union all select k, n from m) delete c", 4426, "c")]
+    [DataRow("with c as (select id, v from j union select k, n from m) merge c using (values (1)) s (x) on c.id = s.x when matched then delete;", 4426, "c")]
+    [DataRow("with c as (select id, v from j union all select k, n from m) merge c using (values (1)) s (x) on c.id = s.x when matched then update set v = 1;", 4406, "c")]
+    [DataRow("with c as (select id, v from j union select k, n from m except select 1, 1) update c set v = 1", 4406, "c")]
+    [DataRow("with c as (select id, v from j union select k, n from m except select 1, 1) delete c", 4403, "c")]
+    [DataRow("with c as (select id, v from j except select 1, 1 union select k, n from m) delete c", 4426, "c")]
+    [DataRow("with c as (select id, v from j except select k, n from m) update c set v = 1", 4403, "c")]
+    [DataRow("with c as (select id, v from j union select k, n from m), c2 as (select * from c) delete c2", 4426, "c2")]
+    [DataRow("with c as (select id, v from j union select k, n from m), c2 as (select * from c) update c2 set v = 1", 4406, "c2")]
+    [DataRow("with c2 as (select * from (select id, v from j union select k, n from m) d) delete c2", 4426, "c2")]
+    [DataRow("create view vun as select id, v from j union select k, n from m;\ndelete vun", 4426, "vun")]
+    [DataRow("create view vun as select id, v from j union select k, n from m;\nupdate vun set v = 1", 4406, "vun")]
+    [DataRow("create view vun as select id, v from j union select k, n from m;\ncreate view vo as select * from vun;\ndelete vo", 4426, "vo")]
+    [DataRow("create view vun as select id, v from j union select k, n from m;\ncreate view vo as select * from vun;\nupdate vo set v = 1", 4406, "vun")]
+    [DataRow("create view vun as select id, v from j union select k, n from m;\ncreate view vo as select * from vun;\nwith c as (select * from vo) update c set v = 1", 4406, "vun")]
+    public void UnionBody_RefusesTheWrite(string sql, int number, string name)
+    {
+        var simulation = new Simulation();
+        var batches = sql.Split("\n");
+        simulation.ExecuteBatches(JoinSetup);
+        simulation.ExecuteBatches(batches[..^1]);
+        var message = number switch
+        {
+            4403 => $"Cannot update the view or function '{name}' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator.",
+            4406 => $"Update or insert of view or function '{name}' failed because it contains a derived or constant field.",
+            _ => $"View '{name}' is not updatable because the definition contains a UNION operator.",
+        };
+        simulation.AssertSqlError(batches[^1], number, message);
+    }
+
+    /// <summary>
+    /// A body limiting rows it reads through another view, CTE or derived
+    /// table writes the row its limit chose, even between rows its projection
+    /// can't tell apart (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("delete vt", "1:5:100 1:9:200 1:7:300")]
+    [DataRow("update vt2 set id = 9", "1:5:100 9:9:200 9:7:300 2:1:400")]
+    [DataRow("delete vrn where rn > 1", "1:9:200 2:1:400")]
+    [DataRow("merge vt2 as t using (values (1)) s (k) on t.id = s.k when matched then update set id = 5;", "1:5:100 5:9:200 5:7:300 2:1:400")]
+    [DataRow("with c as (select top 1 id from v1 where id = 1 order by v desc) delete c", "1:5:100 1:7:300 2:1:400")]
+    [DataRow("with a as (select id, v from x), c as (select top 1 id from a order by v desc) update c set id = 8", "1:5:100 8:9:200 1:7:300 2:1:400")]
+    [DataRow("with c as (select top 1 id from v1w order by v) delete c", "1:5:100 1:9:200 1:7:300")]
+    [DataRow("delete vvt", "1:9:200 1:7:300 2:1:400")]
+    [DataRow("delete vt2 output deleted.id", "1:5:100 2:1:400")]
+    public void LimitOverAnotherView_WritesTheChosenRow(string sql, string expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table x (id int, v int, w int); insert x values (1, 5, 100), (1, 9, 200), (1, 7, 300), (2, 1, 400)",
+            "create view v1 as select id, v from x",
+            "create view v1w as select id, v, w from x where w > 100",
+            "create view vt as select top 1 id from v1 order by v",
+            "create view vt2 as select top 2 id from v1 order by v desc",
+            "create view vrn as select id, row_number() over (partition by id order by v desc) rn from v1",
+            "create view vv as select id, v from v1 where id = 1",
+            "create view vvt as select top 1 id from vv order by v");
+        _ = simulation.ExecuteNonQuery(sql);
+        AreEqual(expected, simulation.ExecuteScalar("select string_agg(concat(id, ':', v, ':', w), ' ') within group (order by w) from x"));
+    }
+
+    /// <summary>
+    /// A view whose body is a CTE passes a write through to the table the CTE
+    /// reads, as real does (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CteBodiedView_PassesWritesThrough()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(JoinSetup, "create view vcte as with c as (select id, v, k from j where id > 1) select id, v from c");
+        AreEqual(1, simulation.ExecuteNonQuery("update vcte set v = 99 where id = 2"));
+        AreEqual(1, simulation.ExecuteNonQuery("delete vcte where id = 4"));
+        AreEqual(1, simulation.ExecuteNonQuery("insert vcte values (9, 9)"));
+        AreEqual("1:10 2:99 3:30 9:9", simulation.ExecuteScalar("select string_agg(concat(id, ':', v), ' ') within group (order by id) from j"));
+    }
 }

@@ -554,8 +554,8 @@ Divergences in what the lock DMVs show:
 An UPDATE, a DELETE and a MERGE read their target under U: a row another session holds X on is waited out in U and judged as that session's write leaves it, and a row that qualifies is written under X, so no other writer changes it between the judgement and the write (probed 2026-10-01 against SQL Server 2025: a MERGE, seeking or scanning, waits `LCK_M_U` on the writer's key; an UPDATE scanning a heap waits `LCK_M_U` on another session's written row however its own predicate reads, and already holds X on the rows it passed).
 The target walk once read rows with no lock at all and the write took X at commit, so an UPDATE judged a row another session was rewriting by that session's uncommitted image — `SET v = v + 1` over a write that then rolled back wrote 51 for 6 — and two sessions incrementing one row lost increments; a MERGE matched, or failed to match, uncommitted values.
 
-The joined forms read their target the same way: `UPDATE … FROM` / `DELETE … FROM` with the target on either side of a join or an APPLY, aliased or not, and an UPDATE through a join view.
-Real waits in U on the target row whichever side it sits, holding S on the partner row it read, and the partner waits in S (probed 2026-10-01 against SQL Server 2025, for each of those shapes, a CTE over a join and a correlated `EXISTS` included).
+The joined forms read their target the same way: `UPDATE … FROM` / `DELETE … FROM` with the target on either side of a join or an APPLY, aliased or not, an UPDATE through a join view, and a joined write whose target is a view or CTE in its FROM clause.
+Real waits in U on the target row whichever side it sits, holding S on the partner row it read, and the partner waits in S (probed 2026-10-01 against SQL Server 2025, for each of those shapes, a CTE over a join, a correlated `EXISTS`, a MERGE into a join view and a joined UPDATE or DELETE through a single-table or join view included).
 EF Core's ExecuteUpdate / ExecuteDelete emit exactly this shape — `UPDATE [m] SET … FROM [Members] AS [m] INNER JOIN [Teams] AS [t] ON …`, `DELETE TOP(@p) FROM [m] FROM …` — whenever the LINQ query filters through a navigation.
 They once judged the target off whatever image the heap held and took X only in the commit, so eight sessions each running `UPDATE t SET v = t.v + 1 FROM t JOIN …` forty times ended at 70–112 of 320, and eight draining one queue with a joined `DELETE TOP (3)` deleted 467–613 rows of 200.
 
@@ -567,6 +567,12 @@ The pieces, each shared by the single-table and joined forms:
   UPDATE and DELETE let the U go once the waited row is read (`BatchContext.AwaitTargetRowWriters`) and take every qualifying row's X after the walk and its `TOP`, in walk order (`Simulation.HoldQualifyingRows`), reading a row again and judging it afresh when the heap's `MutationGeneration` has moved.
   Holding the walk's U, a session could keep a later row while its X waited on an earlier one, held by another session whose X waited on the later: eight sessions each updating the same two rows forty times deadlocked one to seventeen times per run, single-table or joined, where real meets no deadlock because its walk takes U on every row in order.
   MERGE takes X inline, matched row by matched row, right after the U it waited in, which keeps the same order; its actions take it again re-entrantly.
+- **A view target read as the view yields it.**
+  A joined write whose target is a single-table view or CTE reads the target as the view's rows — its filter, row limit and window applied (`Simulation.MaterializeViewTarget`) — through a body read that would wait in S, so it waits out in U first every row another session holds, and every in-flight delete or rewrite whose prior image the view shows, then reads; a row whose image moved between the body's read and the slot's is shown as the image reads.
+  The walk then judges and holds rows as the table forms do.
+- **A MERGE into a join view holds its U.**
+  It matches the view's rows as a whole before writing any, so the walk can't let a row go between its match and its write the way UPDATE does: `Simulation.LoadJoinViewMergeRows` takes U on each written-table row the join reaches as it meets it (`BatchContext.HoldTargetRowForUpdate`), reads a row a wait found changed again from its settled image, and gives the U back once the statement has written, its writes holding X.
+  Without it eight sessions each running `MERGE` into a join view forty times lost increments.
 - **Rows the walk can't reach.**
   A row another session has deleted — the walk never meets a tombstoned slot — or rewritten so a seek or the join no longer reaches it, or the WHERE no longer passes it, is invisible to the wait above; real's read meets the deleted key, or the old index key, under that session's X, waits on it in U and, after a rollback, writes the restored row (probed 2026-10-01 against SQL Server 2025 for a scan and a seek over a deleted row, a nonclustered seek on a key moved away, and a joined write whose ON or WHERE the uncommitted image fails).
   Before the walk, each such row in flight (`HeapTable.SupersededKeyImages`) whose prior image the statement's predicate passes is waited out in U (`Simulation.AwaitSupersededTargetRows`), so the walk meets it settled; a seek is computed again after any such wait.
@@ -594,10 +600,7 @@ Divergences:
 - **A qualifying row's X comes after the walk**, real's as the plan writes the row; a MERGE holds X on a matched row an `AND` condition then declines, where real's U is released.
 - **The prior image a rewrite registry entry carries** is the row before the session's latest write of it, so a row a transaction rewrote twice is tested on its intermediate image rather than its committed one.
 
-Not modeled yet:
-
-- **The target of a joined write named through a view or a CTE in its FROM** (`UPDATE v SET … FROM v JOIN …`) and **`OUTPUT` on an alias-form joined DELETE** raise `NotSupportedException` (see [`programmable.md`](programmable.md) and [`dml.md`](dml.md)); a CTE reading several sources refuses an UPDATE real passes through (see [`ctes.md`](ctes.md)).
-- **A MERGE into a join view** reads the view's rows up front through the raw heap walk, without the target wait above, so it can match a row off another session's uncommitted image.
+- **A MERGE into a join view keeps U on every row the join reached** until it has written, where real's scan releases the U on a row it doesn't write; and a joined write through a single-table view waits on every row of the table another session holds before its read, where real's scan waits on the rows it reaches.
 
 ## Granularity approximations
 

@@ -11,7 +11,9 @@ partial class Simulation
     /// The stack of view levels a write passes through when the bottom of the
     /// chain reads several sources. Index 0 is that multi-source (join) view,
     /// each higher index a single-source view reading the one below it, and
-    /// the last is the view the statement names.
+    /// the last is the view the statement names. A joined statement naming a
+    /// join view in its <c>FROM</c> clause is a chain of no levels over the
+    /// statement's own sources, the view nested at its target source.
     /// </summary>
     /// <remarks>
     /// A join view has no single base table, so the
@@ -21,31 +23,56 @@ partial class Simulation
     /// heap anyway: each level's projections are expressions over the level
     /// below, and the bottom's are expressions over the join tuple.
     /// </remarks>
-    private sealed class JoinViewChain(View[] views, ViewUpdatabilityProfile[] profiles)
+    private sealed class JoinViewChain
     {
-        public readonly View[] Views = views;
+        public JoinViewChain(View[] views, ViewUpdatabilityProfile[] profiles)
+            : this(views, profiles, (FromSource[])profiles[0].Sources.Clone(), profiles[0].Joins, $"{views[^1].Schema.Name}.{views[^1].Name}")
+        {
+        }
+
+        /// <summary>
+        /// A statement's own <c>FROM</c> clause as a chain of no levels, its
+        /// target source nesting the view the statement writes through: its
+        /// <c>WHERE</c> and <c>SET</c> read the sources directly.
+        /// </summary>
+        public JoinViewChain(FromSource[] sources, JoinSpec[] joins, string targetName)
+            : this([], [], sources, joins, targetName)
+        {
+        }
+
+        private JoinViewChain(View[] views, ViewUpdatabilityProfile[] profiles, FromSource[] sources, JoinSpec[] joins, string targetName)
+        {
+            this.Views = views;
+            this.Profiles = profiles;
+            this.Sources = sources;
+            this.Joins = joins;
+            this.Nested = new JoinViewChain?[sources.Length];
+            this.TargetName = targetName;
+        }
+
+        public readonly View[] Views;
 
         /// <summary>Body profile of <see cref="Views"/> at the same index.</summary>
-        public readonly ViewUpdatabilityProfile[] Profiles = profiles;
+        public readonly ViewUpdatabilityProfile[] Profiles;
 
         /// <summary>
         /// The bottom level's FROM sources, cloned so the UPDATE path can swap
         /// the target slot for an address-tracking wrapper without disturbing
         /// the parsed profile.
         /// </summary>
-        public readonly FromSource[] Sources = (FromSource[])profiles[0].Sources.Clone();
+        public readonly FromSource[] Sources;
 
-        public readonly JoinSpec[] Joins = profiles[0].Joins;
+        public readonly JoinSpec[] Joins;
 
         /// <summary>
         /// Per bottom source, the chain of the join view that source reads,
         /// built when a written column descends into it — the level stack a
         /// join view over a join view nests.
         /// </summary>
-        public readonly JoinViewChain?[] Nested = new JoinViewChain?[profiles[0].Sources.Length];
+        public readonly JoinViewChain?[] Nested;
 
         /// <summary>Name the DML errors report — the view the statement named, as it wrote it.</summary>
-        public string TargetName = $"{views[^1].Schema.Name}.{views[^1].Name}";
+        public string TargetName;
 
         /// <summary>
         /// The heap a write along <paramref name="path"/> reaches: one bottom
@@ -114,7 +141,7 @@ partial class Simulation
             // a nested chain: one source, no joins.
             if (nested && profile.Sources is [{ BackingTable: not null }])
                 break;
-            if (profile.Sources is not [{ BackingView: { } lower }])
+            if (profile.Sources is not [var lowerSource] || lowerSource.UpdatableView() is not { } lower)
                 throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(viewName);
             level = lower;
         }
@@ -197,9 +224,11 @@ partial class Simulation
     /// time. A level whose projection isn't a direct column reference is
     /// <strong>Msg 4406</strong> naming the statement's view (probe-confirmed
     /// — the derived column may sit at any level and real still reports the
-    /// one written).
+    /// one written). A chain of no levels — a joined statement's own
+    /// <c>FROM</c> clause — starts at the column of source
+    /// <paramref name="targetSource"/>, the one the statement writes.
     /// </summary>
-    private static (int[] Path, int ColumnIndex) DescendToBaseColumn(BatchContext batch, JoinViewChain chain, string columnName)
+    private static (int[] Path, int ColumnIndex) DescendToBaseColumn(BatchContext batch, JoinViewChain chain, string columnName, int targetSource = -1)
     {
         var collation = batch.CurrentDatabase.Collation;
         var path = new List<int>();
@@ -208,26 +237,39 @@ partial class Simulation
         var level = current.Views.Length - 1;
         while (true)
         {
-            var ordinal = IndexOfViewOutputColumn(collation, current.Views[level], name);
-            if (ordinal < 0)
-                throw SimulatedSqlException.InvalidColumnName(name);
-            if (UnwrapDirectRef(current.Profiles[level].Projections[ordinal]) is not { ReferencedName: { } referenced })
-                throw SimulatedSqlException.ViewDmlTouchesDerivedField(chain.TargetName);
-            if (level > 0)
+            int sourceIndex, columnIndex;
+            if (level < 0)
             {
-                name = referenced.Leaf;
-                level--;
-                continue;
+                // A chain of no levels — a statement's own FROM clause — names
+                // a column of the source the statement writes.
+                sourceIndex = targetSource;
+                columnIndex = Array.FindIndex(current.Sources[sourceIndex].ColumnNames, column => collation.Equals(column, name));
+                if (columnIndex < 0)
+                    throw SimulatedSqlException.InvalidColumnName(name);
             }
+            else
+            {
+                var ordinal = IndexOfViewOutputColumn(collation, current.Views[level], name);
+                if (ordinal < 0)
+                    throw SimulatedSqlException.InvalidColumnName(name);
+                if (UnwrapDirectRef(current.Profiles[level].Projections[ordinal]) is not { ReferencedName: { } referenced })
+                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(chain.TargetName);
+                if (level > 0)
+                {
+                    name = referenced.Leaf;
+                    level--;
+                    continue;
+                }
 
-            var (sourceIndex, columnIndex) = Selection.FindSourceColumn(current.Sources, referenced);
-            if (sourceIndex < 0)
-                throw SimulatedSqlException.InvalidColumnName(referenced);
+                (sourceIndex, columnIndex) = Selection.FindSourceColumn(current.Sources, referenced);
+                if (sourceIndex < 0)
+                    throw SimulatedSqlException.InvalidColumnName(referenced);
+            }
             path.Add(sourceIndex);
 
             // A source that is itself a join view flattens into the write:
             // the column descends through that view's own level stack.
-            if (current.Sources[sourceIndex] is not { BackingTable: null, BackingView: { } inner } || !ReadsThroughChain(inner))
+            if (current.Sources[sourceIndex] is not { BackingTable: null } source || source.UpdatableView() is not { } inner || !ReadsThroughChain(inner))
                 return ([.. path], columnIndex);
             current = current.Nested[sourceIndex] ??= BuildJoinViewChain(batch, inner, nested: true);
             name = current.Views[^1].OutputColumns[columnIndex].Name;

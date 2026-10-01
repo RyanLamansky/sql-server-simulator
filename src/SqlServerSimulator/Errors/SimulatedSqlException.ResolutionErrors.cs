@@ -381,15 +381,30 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server's Msg 4405 — DML through a view whose body has
     /// multiple base tables (JOIN form) and the modification affects more
-    /// than one of them. The simulator's v1 of updatable views rejects
-    /// JOIN-bodied views uniformly with this Msg even for single-base-table
-    /// modifications (SQL Server is more permissive — single-base UPDATE
-    /// through a JOIN view works there — but the simpler always-reject
-    /// shape is closer to the common case in real apps). Probe-confirmed
-    /// verbatim wording against SQL Server 2025.
+    /// than one of them: a DELETE always, an UPDATE or INSERT whose columns
+    /// land in two. Probe-confirmed verbatim wording against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException ViewUpdateAffectsMultipleTables(string viewName) =>
         new($"View or function '{viewName}' is not updatable because the modification affects multiple base tables.", 4405, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4426 — a DELETE through a view or CTE whose body
+    /// a <c>UNION</c> tops, named as the statement wrote it (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ViewWithUnionNotUpdatable(string viewName) =>
+        new($"View '{viewName}' is not updatable because the definition contains a UNION operator.", 4426, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 414 (<paramref name="isDelete"/> false) and Msg
+    /// 415 — a joined UPDATE or DELETE whose target is a view carrying an
+    /// <c>INSTEAD OF</c> trigger for the action, the view named bare (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InsteadOfViewInJoin(string viewName, bool isDelete) =>
+        isDelete
+            ? new($"DELETE is not allowed because the statement updates view \"{viewName}\" which participates in a join and has an INSTEAD OF DELETE trigger.", 415, 16, 1)
+            : new($"UPDATE is not allowed because the statement updates view \"{viewName}\" which participates in a join and has an INSTEAD OF UPDATE trigger.", 414, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4406 — INSERT or UPDATE through a view

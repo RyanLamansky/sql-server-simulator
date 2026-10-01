@@ -29,6 +29,7 @@ What stays per verb is where the verbs differ:
   The simulator dedupes by `(page, slot)` via a side-channel byte[]→address map.
   LEFT JOIN with no right-side match still surfaces the target (RHS sees NULL).
   The same dedupe carries **UPDATE through a view over a join** — real accepts one whose SET list lands entirely in a single base table, and the join-multiplied target updates once there too — see [`programmable.md`](programmable.md#dml-through-a-join-view).
+  A **target that is a view or CTE** in the FROM clause writes through it to its base table, reading its rows as the view yields them → [`programmable.md`](programmable.md#a-joined-write-through-a-view).
 - **A SET assignment target admits one qualifier: the write target as written.**
   The leading name, its alias when it has one, and any schema / database prefix in front of it (`UPDATE t SET dbo.t.v = 5` binds; `UPDATE a SET t.v = 5 FROM t a` does not, the alias having hidden the table name).
   Everything else is **Msg 4104** naming the whole dotted form, ahead of the leaf lookup and whether or not the leaf names a real column; a matching qualifier with an unknown leaf is the ordinary Msg 207.
@@ -36,7 +37,8 @@ What stays per verb is where the verbs differ:
   A fifth segment is Msg 4104 with the whole name, from `MultiPartName` itself.
   Probed against SQL Server 2025 (2026-08-05); oracle `DmlTargetQualifierTests`.
 - **A `VALUES` cell has no column scope at all**, so every qualified reference in one is Msg 4104 — the insert target's own name included (`INSERT INTO t (id, v) VALUES (t.id, 1)`) — while an unqualified unknown name stays Msg 207.
-- **OUTPUT** supported only when the leading identifier resolves to a real table name; OUTPUT + alias-form multi-source → `NotSupportedException` (EF doesn't combine those).
+- **OUTPUT** binds against the target table; the alias form's clause, written ahead of the FROM clause that names the table, binds once the statement has read that clause (`Selection.PreParseMutationFrom`), and a trigger's Msg 334 names the alias (probed 2026-10-01 against SQL Server 2025).
+  Neither form reads the other FROM sources' columns yet (`OUTPUT u.n` is Msg 4104 here, a column on real), and an alias naming a derived table raises `NotSupportedException`.
 - **Multi-column SET evaluates RHS against pre-update snapshot** — `UPDATE t SET a = 100, b = a + 1` over `(a=10, b=20)` → `(a=100, b=11)`.
   Scalar subquery RHS sees pre-update state.
 - **Variables in the SET list** (`@x = expr`, `@x += expr`, `@x = col = expr`) are assigned first for each row, in written order and against the pre-update row, and only then are the columns evaluated, reading the variables as just assigned — so `SET v = @x, @x = @x + 1` writes the incremented value, and `SET @x = v = v + @x` is the running total.

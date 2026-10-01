@@ -101,6 +101,25 @@ internal sealed partial class Selection
     /// follows, that's a syntax error).
     /// </summary>
     /// <summary>
+    /// How a write through a body that is this set operation is refused: a
+    /// <c>UNION</c> at its top as <see cref="ViewUpdatabilityRejection.Union"/>
+    /// or <see cref="ViewUpdatabilityRejection.UnionAll"/>, an <c>EXCEPT</c>
+    /// or <c>INTERSECT</c> over one as
+    /// <see cref="ViewUpdatabilityRejection.SetOperationOverUnion"/>, and any
+    /// other as the catch-all.
+    /// </summary>
+    private static ViewUpdatabilityRejection SetOperationRejection(SetOpKind kind, Selection left, Selection right) =>
+        kind switch
+        {
+            SetOpKind.Union => ViewUpdatabilityRejection.Union,
+            SetOpKind.UnionAll => ViewUpdatabilityRejection.UnionAll,
+            _ when left.UpdatabilityRejection is ViewUpdatabilityRejection.Union or ViewUpdatabilityRejection.UnionAll or ViewUpdatabilityRejection.SetOperationOverUnion
+                || right.UpdatabilityRejection is ViewUpdatabilityRejection.Union or ViewUpdatabilityRejection.UnionAll or ViewUpdatabilityRejection.SetOperationOverUnion
+                => ViewUpdatabilityRejection.SetOperationOverUnion,
+            _ => ViewUpdatabilityRejection.UnsupportedShape,
+        };
+
+    /// <summary>
     /// The operator name Msg 468 embeds for a set operation — upper-case,
     /// unlike the lower-cased comparison / <c>like</c> names the same message
     /// uses elsewhere (probe-confirmed: <c>"… in the UNION operation."</c>).
@@ -305,7 +324,7 @@ internal sealed partial class Selection
                 rows = SortSetOpRows(rows, combinedSchema);
             // Computed whole before the first row goes out; see IsBareConstantRow.
             return isBareConstantRows ? [.. rows] : rows;
-        }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema)
+        }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema, updatabilityRejection: SetOperationRejection(kind, left, right))
         {
             IsBareConstantRow = isBareConstantRows,
             ReadsStorage = readsStorage,

@@ -206,12 +206,17 @@ partial class Simulation
 
     /// <summary>
     /// A view real can't write through, named as the statement wrote it: Msg
-    /// 4405 when its body reads several sources, Msg 4403 otherwise.
+    /// 4405 when its body reads several sources, Msg 4426 when a <c>UNION</c>
+    /// tops it — what a <c>DELETE</c> meets, an <c>UPDATE</c> or <c>INSERT</c>
+    /// naming one of its derived columns first — and Msg 4403 otherwise.
     /// </summary>
     private static SimulatedSqlException NonUpdatableViewError(View view, string writtenName) =>
-        view.RejectionReason == ViewUpdatabilityRejection.MultipleSources
-            ? SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName)
-            : SimulatedSqlException.CannotUpdateNonUpdatableView(writtenName);
+        view.RejectionReason switch
+        {
+            ViewUpdatabilityRejection.MultipleSources => SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName),
+            ViewUpdatabilityRejection.Union or ViewUpdatabilityRejection.UnionAll => SimulatedSqlException.ViewWithUnionNotUpdatable(writtenName),
+            _ => SimulatedSqlException.CannotUpdateNonUpdatableView(writtenName),
+        };
 
     /// <summary>
     /// The name Msg 334 gives a write's target: the table as written, or,
@@ -225,9 +230,10 @@ partial class Simulation
     /// The <c>OUTPUT</c> clause of an <c>UPDATE</c> or <c>DELETE</c>, which
     /// binds against a resolved target — through a view, <c>INSERTED</c> /
     /// <c>DELETED</c> take the view's columns, read off the base rows — and
-    /// is Msg 334 to the client over a triggered one. An unresolved target's
-    /// clause is stepped over: only a <c>FROM</c> after it makes the name an
-    /// alias, and the alias form with an <c>OUTPUT</c> isn't modeled.
+    /// is Msg 334 to the client over a triggered one. An alias form's target
+    /// is the table its <c>FROM</c> clause names, read ahead by the caller; a
+    /// target still unresolved has its clause stepped over, and one a
+    /// <c>FROM</c> follows — an alias naming no table — isn't modeled.
     /// </summary>
     private static OutputProjection? ParseMutationOutput(ParserContext context, MultiPartName name, HeapTable? table, View? view, TriggerActions action)
     {
@@ -246,7 +252,7 @@ partial class Simulation
             // nothing to bind.
             SkipOutputClause(context);
             if (context.Token is ReservedKeyword { Keyword: Keyword.From })
-                throw new NotSupportedException($"OUTPUT with alias-form multi-source {(action == TriggerActions.Delete ? "DELETE" : "UPDATE")} isn't modeled — re-emit with the table name as the target if OUTPUT is required.");
+                throw new NotSupportedException($"OUTPUT with an alias-form {(action == TriggerActions.Delete ? "DELETE" : "UPDATE")} whose alias names no table isn't modeled.");
         }
         return null;
     }

@@ -188,22 +188,30 @@ internal sealed class View(
     public bool[]? DerivedOutputColumns;
 
     /// <summary>
+    /// For a view whose columns a <c>UNION</c> derives, the stored view whose
+    /// body that <c>UNION</c> is — this one or one it reads — which real's Msg
+    /// 4406 names in place of the view written (probed 2026-10-01 against SQL
+    /// Server 2025: an UPDATE through <c>SELECT * FROM vun</c> names
+    /// <c>vun</c>); null when there is none, a CTE's <c>UNION</c> naming the
+    /// target as written.
+    /// </summary>
+    public string? UnionOwnerName;
+
+    /// <summary>
     /// The body (or a view it reads) limits its rows with <c>TOP</c> /
     /// <c>OFFSET</c>. Real writes through such a view to the rows the limit
-    /// yields; the per-base-row write path takes every row the view's filter
-    /// admits, so an <c>UPDATE</c> / <c>DELETE</c> / <c>MERGE</c> through it
-    /// raises <see cref="NotSupportedException"/> unless it is positioned
-    /// (<c>WHERE CURRENT OF</c>), and an <c>INSERT</c>, which the limit
-    /// doesn't reach, goes through.
+    /// yields, so an <c>UPDATE</c> / <c>DELETE</c> / <c>MERGE</c> through it
+    /// runs the body once and writes the base rows its output rows came from;
+    /// a positioned write (<c>WHERE CURRENT OF</c>) names its row, and an
+    /// <c>INSERT</c>, which the limit doesn't reach, goes through.
     /// </summary>
     public bool IsRowLimited;
 
     /// <summary>
-    /// The body (or a view it reads) projects a window function. A
-    /// <c>DELETE</c> / <c>UPDATE</c> through it runs the body once and writes
-    /// to the base rows its output rows came from, reading the window columns
-    /// off them; a <c>MERGE</c> through it raises
-    /// <see cref="NotSupportedException"/>.
+    /// The body (or a view it reads) projects a window function. An
+    /// <c>UPDATE</c> / <c>DELETE</c> / <c>MERGE</c> through it runs the body
+    /// once and writes to the base rows its output rows came from, reading the
+    /// window columns off them.
     /// </summary>
     public bool IsWindowed;
 

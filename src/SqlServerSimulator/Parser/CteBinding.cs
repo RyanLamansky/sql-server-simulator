@@ -25,9 +25,12 @@ namespace SqlServerSimulator.Parser;
 /// simulator is single-threaded per Simulation.
 /// </para>
 /// </remarks>
-internal sealed class CteBinding(string name, string[] columnNames)
+internal sealed class CteBinding(string name, string[] columnNames, Database database)
 {
     public readonly string Name = name;
+
+    /// <summary>The database whose statement declared the CTE, whose <c>dbo</c> a write through it names.</summary>
+    public readonly Database Database = database;
 
     /// <summary>
     /// The body's projected column names (or the rename list when present).

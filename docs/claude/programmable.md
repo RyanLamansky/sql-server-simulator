@@ -448,14 +448,13 @@ Captured at CREATE VIEW time via `AnalyzeViewUpdatability` (in `Simulation.Creat
 Probed against SQL Server 2025.
 
 **Eligible shape** (each level in a view-on-view chain must satisfy all):
-- Exactly one FROM source (a heap table OR another updatable view) — a multi-source body, and a chain whose bottom is one, take the [join-view DML](#dml-through-a-join-view) path instead.
+- Exactly one FROM source (a heap table, another updatable view, or a CTE, which the analysis reads as the unstored view `Simulation.CteDmlView` builds for it) — a multi-source body, and a chain whose bottom is one, take the [join-view DML](#dml-through-a-join-view) path instead.
 - No DISTINCT, no aggregates, no GROUP BY, no HAVING, no window functions, no set-op chain.
   ORDER BY alone is allowed (it only affects reads).
   A TOP / OFFSET / FETCH row limit or a window function leaves the body updatable on real, but only to the rows the body yields (`DELETE` through a `TOP 1` view deletes one row; `DELETE … WHERE rn > 1` through a `ROW_NUMBER()` view dedupes — probed 2026-09-25).
   Such a view is marked (`View.IsRowLimited` / `View.IsWindowed`), and an `UPDATE`, `DELETE` or `MERGE` through it runs the body once with each output row's base address carried through its row-limit or window stage (`MaterializeRowSelectiveViewRows` over `Selection.ExecuteWithRowAddresses`; see [`heap-storage.md`](heap-storage.md#row-addresses-reach-expressions-through-a-row-locator)).
   The write then takes exactly those rows — the one a `TOP 1 id … ORDER BY v` chose between two `id = 1` rows included — and its `WHERE` / `SET` (and a `MERGE`'s `ON`) read the body's derived columns (`rn`) off them; writing a derived column is still Msg 4406 (probed 2026-09-30 against SQL Server 2025).
-  A view over a row-limited or windowed view runs the lower view's rows through its own projection, its filter applying to the base row.
-  A body that limits or windows rows it reads through another view (`TOP 1 … FROM v1`) carries no address, the view's rows being re-encoded, and falls back to pairing its rows with the base rows — a windowed body's by heap order, a row-limited body's by matching direct columns — which raises `NotSupportedException` when the limit chose between rows its projection can't tell apart.
+  A body reading another view or a CTE — over a row-limited or windowed one, or itself limiting rows it reads through one (`TOP 1 id FROM v1 ORDER BY v`) — carries the address through that source's re-encoding (see [`heap-storage.md`](heap-storage.md#row-addresses-reach-expressions-through-a-row-locator)), so the write takes the row its limit chose there too, between rows its projection can't tell apart included (probed 2026-10-01 against SQL Server 2025, through views, CTEs and a view over a filtered view).
   A positioned write (`WHERE CURRENT OF`) names its row exactly, and an `INSERT` isn't reached by the limit, so both go through as before.
 - Every column referenced in any WHERE clause up the chain maps to a real base-table column (no WHERE that references an upstream derived projection).
 
@@ -489,6 +488,10 @@ DELETE never fires Msg 550 (a row leaving the view is fine).
   One naming a derived column (an aggregate, an expression, or a column an underlying view derived; an INSERT without a list names them all) is Msg 4406 instead, and an unknown name Msg 207, since real binds the written columns before refusing (`View.DerivedOutputColumns`, probed 2026-09-25).
   These refusals name the view as the statement wrote it, and in a batch whose compile deferred the target (a `#temp` the batch creates) they end the batch as real's compile-time refusal does.
   Body of the message names the view (`"Cannot update the view or function 'dbo.v' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator."`).
+- **Msg 4426** (`View 'c' is not updatable because the definition contains a UNION operator.`): DELETE through a view or CTE whose body a `UNION` or `UNION ALL` tops, or that reads one; an UPDATE or INSERT through one is Msg 4406, every column being derived, and an unknown column Msg 207 first.
+  An `EXCEPT` or `INTERSECT` over a `UNION` is Msg 4406 to an UPDATE and Msg 4403 to a DELETE, as a plain `EXCEPT` is to both (probed 2026-10-01 against SQL Server 2025, MERGE taking the refusal of its actions).
+  Through a view reading a stored `UNION` view, Msg 4406 names the `UNION` view rather than the one written (`View.UnionOwnerName`), where a CTE's names the target as written.
+  A stored `UNION ALL` view is a partitioned view to real, refused by that feature's own rules (Msg 4436, 4440 …), which aren't built, so it stays Msg 4403 here.
 - **Msg 4405**: DELETE through a multi-source view, an INSERT whose column list doesn't name one base table's columns, and an UPDATE whose SET list spans two of them.
   Real raises the same for all three (state 1, `"View or function 'dbo.v' is not updatable because the modification affects multiple base tables."`) — a DELETE removes a whole row and so touches every base table whatever the view projects.
 - **Msg 4406**: INSERT or UPDATE touched a derived projection column.
@@ -511,12 +514,30 @@ The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row sele
 
 **Fidelity gaps**:
 - **A derived view column read in an `UPDATE … SET` value** — `UPDATE v SET o = s2` where `s2` is `s + ''` in the view — is Msg 207 here; real reads it (probed 2026-09-27 against SQL Server 2025).
-- **Multi-source UPDATE / DELETE** (alias-form `UPDATE alias SET ... FROM ...` where the alias resolves to a view) raises `NotSupportedException` — the alias-form FROM clause can't compose with the view's visibility predicate in the existing joined-update infrastructure.
 - **WHERE referencing a derived upstream column** (a chained view's WHERE that references an expression-projected column from the level below) marks the view as not-updatable with `ViewUpdatabilityRejection.UnsupportedShape` → Msg 4403 at DML.
   Real SQL Server's behavior on this specific niche shape isn't probe-confirmed; the simulator errs on the side of rejection.
-- **A CTE-bodied view is not updatable** — `INSERT` / `UPDATE` / `DELETE` through `CREATE VIEW v AS WITH c AS (SELECT … FROM t) SELECT … FROM c` reports Msg 4403 where real (probe-confirmed) passes all three through to the base table.
-  The analysis reads the body's FROM source, which is the CTE rather than a base table; seeing through the CTE's own plan is what's missing.
-  Reading such a view ships in full — see [`ctes.md`](ctes.md#where-a-prefix-may-appear).
+- **A derived table** — read by a view or CTE body, or named as a joined write's target (`UPDATE d SET … FROM (SELECT …) d`) — passes no write through: the body is Msg 4403 and the target `NotSupportedException`, where real writes through both and refuses a target with its own Msg 4417 / 4418 / 4420 / 4421 (`Derived table 'd' is not updatable because …`, probed 2026-10-01 against SQL Server 2025).
+- **A FROM clause naming only a view whose `INSTEAD OF` trigger takes the write** (`UPDATE vi SET … FROM vi WHERE …`) raises `NotSupportedException`, where real fires the trigger as for the form with no FROM.
+
+## A joined write through a view
+
+A joined `UPDATE` / `DELETE` whose target is a view or CTE writes through it: the leading name aliases a FROM source reading one (`UPDATE a SET … FROM v AS a JOIN u …`, EF Core's ExecuteUpdate shape over an entity mapped onto a view), names the view the clause reads (`UPDATE v SET … FROM v JOIN u …`), or names one the clause never introduced, which joins as an implicitly cross-joined source as a table target does.
+Probed 2026-10-01 against SQL Server 2025; `Simulation.JoinedViewTarget.cs` holds both verbs, entered from `ParseUpdate` / `ParseDelete` once they have read the FROM clause ahead of the SET list or the `OUTPUT` clause (`Selection.PreParseMutationFrom`).
+
+- **The target is the view's rows.**
+  Real reads the target as the view yields it — its filter, row limit and window applied — and writes the base rows those show, each once however many partners it joins (the first one's values, as for a table), so `@@ROWCOUNT` counts base rows and the base table's triggers fire once.
+  A single-table view or CTE stands in its slot as its body's rows, each carrying its base address (`MaterializeViewTarget` over `ViewRowsWithAddresses`), so a `TOP` view's limit and a derived column (`a.d`) read as the view reads them; a join view runs the [join-view machinery](#dml-through-a-join-view) with the statement's own FROM clause as a chain of no levels whose target source nests the view.
+- **Refusals name the target as written** — the alias, or the leading name as spelled (`'v'`, `'dbo.v'`): a derived SET target is Msg 4406, a join view's SET list spanning two tables or any DELETE through it Msg 4405, an aggregate view Msg 4403.
+  A view carrying an `INSTEAD OF` trigger for the action is **Msg 414** (UPDATE) / **415** (DELETE) naming the view bare (`UPDATE is not allowed because the statement updates view "vi" which participates in a join and has an INSTEAD OF UPDATE trigger.`), whether the FROM clause joins it or not; another action's trigger leaves the write to the base table.
+- **`WITH CHECK OPTION`** judges the written row through the view (Msg 550), a view joined to itself included.
+- **`OUTPUT`** reads the view's columns as the forms without a FROM clause do — through a join view `INSERTED` refusing the other table's columns (Msg 404) and `DELETED` reading the row's join — and the base table's triggers refuse it to the client with Msg 334 naming that table.
+  The alias form's `OUTPUT`, written ahead of the FROM clause naming its target, binds once that clause is read, a table target's included, whose Msg 334 names the alias.
+
+## Writes through a CTE
+
+A CTE target is the unstored view `Simulation.CteDmlView` builds from the CTE's body with the analysis `CREATE VIEW` runs, cached on its `CteBinding`, so every rule above applies to it — a body over a join writes the one table its columns land in, a body over another CTE descends into that one, and a source reading a CTE reads it through the same view (`FromSource.UpdatableView`).
+A stored view whose body is a CTE passes writes through the same way.
+See [`ctes.md`](ctes.md#dml-through-a-cte).
 
 ## DML through a join view
 
@@ -572,7 +593,7 @@ The DML errors name the view as written, qualified or not (probed 2026-09-30).
 
 **Positioned DML follows for free.** `WHERE CURRENT OF` through a join-view cursor binds via the identity slot the cursor stamped with that view, so a single-base positioned UPDATE writes through, a SET list spanning both base tables is Msg 4405, a positioned DELETE is Msg 4405, and naming the base table under the view is Msg 16933 — see [`cursors.md`](cursors.md#where-current-of).
 
-**MERGE** into a join view matches and acts on the **view's own rows**, the way a MERGE into a view with INSTEAD OF triggers does, and then carries each action to the base row that view row shows (`Simulation.Merge.JoinView.cs`).
+**MERGE** into a join view matches and acts on the **view's own rows**, the way a MERGE into a view with INSTEAD OF triggers does, and then carries each action to the base row that view row shows (`Simulation.Merge.JoinView.cs`); the written table's rows are read under a U it keeps until it has written (see [`locking.md`](locking.md#a-writers-target-read)).
 Every action must land in one base table — the `UPDATE SET` targets and the `INSERT` column list, bound left to right across the `WHEN` clauses as the UPDATE path binds its SET list, a split across two being Msg 4405 and a derived target Msg 4406, both naming the view as written.
 An `INSERT` with no column list, or `DEFAULT VALUES`, names no table and is Msg 4405.
 A `DELETE` removes the row from the table the other actions write, or with no other action from the **first table in the bottom view's `FROM`** (probed 2026-09-27 and 2026-09-28 against SQL Server 2025).

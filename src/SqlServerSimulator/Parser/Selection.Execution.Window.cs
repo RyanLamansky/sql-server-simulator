@@ -124,7 +124,7 @@ internal sealed partial class Selection
         // bind each window's per-tuple result, then project. From here on,
         // mirror ProjectBuffered's DISTINCT / ORDER BY / OFFSET / TAKE
         // post-processing.
-        var emitOrder = orderBy.Count == 0 && !batch.WindowRowsInArrivalOrder ? WindowEmitOrder(sources, windows, perWindowKeys, buffered.Count) : null;
+        var emitOrder = orderBy.Count == 0 ? WindowEmitOrder(sources, windows, perWindowKeys, buffered.Count) : null;
         var projectionSources = ProjectionSourceReferences(expressions);
         var projectedBuffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>(buffered.Count);
         for (var position = 0; position < buffered.Count; position++)

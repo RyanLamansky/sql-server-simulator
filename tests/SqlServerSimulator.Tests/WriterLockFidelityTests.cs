@@ -32,6 +32,12 @@ public sealed class WriterLockFidelityTests
         insert c5 values (1, 1, 1), (5, 5, 5); insert c6 values (1, 1, 1), (5, 5, 5); insert hu values (1, 1), (5, 5);
         """;
 
+    private static readonly string[] Views =
+    [
+        "create view c1v as select c1.k, c1.v, d1.w from c1 join d1 on c1.k = d1.k",
+        "create view c1s as select k, v from c1",
+    ];
+
     // A session's row and key locks: type, mode, and a KEY's description.
     private static string RowAndKeyLocks(DbConnection connection, int? spid = null) =>
         (string)connection.CreateCommand($"""
@@ -117,12 +123,18 @@ public sealed class WriterLockFidelityTests
     [DataRow("update h3 set v = 50 where k = 1", "update h3 set v = 9 from h3 join d1 on h3.k = d1.k", "RID U WAIT", DisplayName = "Joined UPDATE of a heap")]
     [DataRow("update c1 set v = 50 where k = 5", "delete c1 from c1 join d1 on c1.k = d1.k", "KEY U WAIT (5)", DisplayName = "Joined DELETE")]
     [DataRow("update d1 set w = 9 where k = 5", "update c1 set v = 9 from c1 join d1 on c1.k = d1.k", "KEY S WAIT (5)", DisplayName = "Joined UPDATE reading a written partner")]
+    [DataRow("update c1 set v = 50 where k = 5", "merge c1v t using (values (5)) s (k) on t.k = s.k when matched then update set v = t.v + 1;", "KEY U WAIT (5)", DisplayName = "MERGE into a join view")]
+    [DataRow("update c1 set v = 50 where k = 5", "update a set v = a.v + 1 from c1s a join d1 on a.k = d1.k", "KEY U WAIT (5)", DisplayName = "Joined UPDATE through a view")]
+    [DataRow("update c1 set v = 50 where k = 5", "update x set v = x.v + 1 from c1v x join d1 on x.k = d1.k", "KEY U WAIT (5)", DisplayName = "Joined UPDATE through a join view")]
+    [DataRow("update c1 set v = 50 where k = 5", "with x as (select c1.k, c1.v from c1 join d1 on c1.k = d1.k) update x set v = v + 1", "KEY U WAIT (5)", DisplayName = "UPDATE of a CTE over a join")]
+    [DataRow("update c1 set v = 50 where k = 5", "delete a from c1s a join d1 on a.k = d1.k where a.v = 5", "KEY U WAIT (5)", DisplayName = "Joined DELETE through a view")]
     [DataRow("insert c5 values (3, 7, 3)", "insert c5 values (4, 7, 4)", "KEY U WAIT (7)", DisplayName = "IGNORE_DUP_KEY second insert of a key")]
     [DataRow("insert c5 values (3, 3, 3)", "insert c5 values (4, 4, 4)", "KEY RangeS-U WAIT (5)", DisplayName = "IGNORE_DUP_KEY insert into the same gap")]
     public async Task SecondWriter_WaitsWhereRealWaits(string first, string second, string expected)
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery(Shapes);
+        simulation.ExecuteBatches(Views);
         using var holder = simulation.CreateOpenConnection();
         using var waiter = simulation.CreateOpenConnection();
         using var observer = simulation.CreateOpenConnection();
@@ -157,10 +169,15 @@ public sealed class WriterLockFidelityTests
     [DataRow("update c1 set v = c1.v + 1 from c1 join d1 on c1.k = d1.k where c1.v = 5", "6", DisplayName = "Joined UPDATE, the write hiding the row from WHERE")]
     [DataRow("update c1 set v = c1.v + 1 from d1 join c1 on c1.k = d1.k and c1.v = 5", "6", DisplayName = "Joined UPDATE, the write hiding the row from ON")]
     [DataRow("delete c1 from c1 join d1 on c1.k = d1.k where c1.v = 5", "", DisplayName = "Joined DELETE")]
+    [DataRow("merge c1v t using (values (5)) s (k) on t.k = s.k and t.v = 5 when matched then update set v = t.v + 1;", "6", DisplayName = "MERGE into a join view")]
+    [DataRow("update a set v = a.v + 1 from c1s a join d1 on a.k = d1.k where a.v = 5", "6", DisplayName = "Joined UPDATE through a view")]
+    [DataRow("update x set v = x.v + 1 from c1v x join d1 on x.k = d1.k where x.v = 5", "6", DisplayName = "Joined UPDATE through a join view")]
+    [DataRow("delete a from c1s a join d1 on a.k = d1.k where a.v = 5", "", DisplayName = "Joined DELETE through a view")]
     public async Task TargetRead_WaitsOutAnUncommittedWrite(string write, string expected)
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery(Shapes);
+        simulation.ExecuteBatches(Views);
         using var holder = simulation.CreateOpenConnection();
         using var writer = simulation.CreateOpenConnection();
         using var observer = simulation.CreateOpenConnection();
@@ -186,10 +203,13 @@ public sealed class WriterLockFidelityTests
     [DataRow("update h3 set k = 2 where k = 1", "update h3 set v = 9 where k = 1", "h3", "1:9 5:5", DisplayName = "Heap UPDATE seeking an index key moved away")]
     [DataRow("delete c1 where k = 5", "merge c1 t using (values (5)) s (k) on t.k = s.k when matched then update set v = t.v + 1;", "c1", "1:1 5:6", DisplayName = "MERGE matching a deleted key")]
     [DataRow("update c3 set n = 2 where k = 1", "merge c3 t using (values (1)) s (n) on t.n = s.n when matched then update set v = 9;", "c3", "1:9 5:5", DisplayName = "MERGE matching an index key moved away")]
+    [DataRow("delete c1 where k = 5", "merge c1v t using (values (5)) s (k) on t.k = s.k when matched then update set v = t.v + 1;", "c1", "1:1 5:6", DisplayName = "MERGE into a join view matching a deleted row")]
+    [DataRow("delete c1 where k = 5", "update a set v = a.v + 1 from c1s a join d1 on a.k = d1.k", "c1", "1:2 5:6", DisplayName = "Joined UPDATE through a view over a delete")]
     public async Task TargetRead_WaitsOutAWriteThatHidTheRow(string hidingWrite, string write, string table, string expected)
     {
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery(Shapes);
+        simulation.ExecuteBatches(Views);
         using var holder = simulation.CreateOpenConnection();
         using var writer = simulation.CreateOpenConnection();
         using var observer = simulation.CreateOpenConnection();
@@ -222,6 +242,12 @@ public sealed class WriterLockFidelityTests
     [DataRow("update h set v = h.v + 1 from h join d on h.k = d.k", DisplayName = "Joined UPDATE, heap")]
     [DataRow("update c set v = c.v + 1 from c where k = 1", DisplayName = "UPDATE … FROM the target alone")]
     [DataRow("update cv set v = v + 1", DisplayName = "UPDATE through a join view")]
+    [DataRow("merge cv t using (values (1)) s (k) on t.k = s.k when matched then update set v = t.v + 1;", DisplayName = "MERGE into a join view")]
+    [DataRow("merge cv t using d s on t.k = s.k when matched then update set v = t.v + 1;", DisplayName = "MERGE of two rows into a join view")]
+    [DataRow("update a set v = a.v + 1 from sv a join d on a.k = d.k", DisplayName = "Joined UPDATE through a view")]
+    [DataRow("update x set v = x.v + 1 from cv x join d on x.k = d.k", DisplayName = "Joined UPDATE through a join view")]
+    [DataRow("with x as (select c.k, c.v from c join d on c.k = d.k) update x set v = v + 1", DisplayName = "UPDATE of a CTE over a join")]
+    [DataRow("with x as (select k, v from c) update x set v = x.v + 1 from x join d on x.k = d.k", DisplayName = "Joined UPDATE of a CTE")]
     [DataRow("with x as (select k, v from c where exists (select 1 from d where d.k = c.k)) update x set v = v + 1", DisplayName = "UPDATE of a CTE")]
     [DataRow("update c set v = c.v + 1 from c cross apply (select d.k from d where d.k = c.k) s", DisplayName = "UPDATE with CROSS APPLY")]
     public void ConcurrentIncrements_AllLand(string increment)
@@ -234,6 +260,7 @@ public sealed class WriterLockFidelityTests
             create table d (k int primary key); insert d values (1), (2);
             """);
         _ = simulation.ExecuteNonQuery("create view cv as select c.k, c.v from c join d on c.k = d.k");
+        _ = simulation.ExecuteNonQuery("create view sv as select k, v from c");
         var table = increment.Contains(" h ", StringComparison.Ordinal) ? "h" : "c";
         _ = Parallel.For(0, Workers, new ParallelOptions { MaxDegreeOfParallelism = Workers, CancellationToken = TestContext.CancellationToken }, _ =>
         {
@@ -254,6 +281,8 @@ public sealed class WriterLockFidelityTests
     [DataRow("delete top (3) q where exists (select 1 from d where d.k = q.k and d.k = @p)", DisplayName = "DELETE, correlated subquery")]
     [DataRow("delete top (3) q from q join d on q.k = d.k where d.k = @p", DisplayName = "Joined DELETE")]
     [DataRow("delete top (3) a from d join q a on a.k = d.k where d.k = @p", DisplayName = "Joined DELETE, aliased target on the right")]
+    [DataRow("delete top (3) a from qv a join d on a.k = d.k where d.k = @p", DisplayName = "Joined DELETE through a view")]
+    [DataRow("with x as (select id, k from q) delete top (3) x from x join d on x.k = d.k where d.k = @p", DisplayName = "Joined DELETE of a CTE")]
     public void ConcurrentDeletes_DeleteEachRowOnce(string dequeue)
     {
         const int Workers = 8, Rows = 200;
@@ -263,6 +292,7 @@ public sealed class WriterLockFidelityTests
             insert q select value, value % 2 from generate_series(1, {Rows});
             create table d (k int primary key); insert d values (0), (1);
             """);
+        _ = simulation.ExecuteNonQuery("create view qv as select id, k from q");
         var deleted = 0;
         _ = Parallel.For(0, Workers, new ParallelOptions { MaxDegreeOfParallelism = Workers, CancellationToken = TestContext.CancellationToken }, worker =>
         {

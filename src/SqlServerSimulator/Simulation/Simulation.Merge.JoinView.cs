@@ -40,6 +40,9 @@ partial class Simulation
         /// </summary>
         public readonly Dictionary<(int Page, int Slot), (int Page, int Slot)?> Addresses = [];
 
+        /// <summary>The written table's rows the statement holds U on, given back once it has written.</summary>
+        public readonly List<(int Page, int Slot)> HeldRows = [];
+
         public readonly bool ChecksOption = chain.HasCheckOptionAlong(path);
     }
 
@@ -123,7 +126,7 @@ partial class Simulation
             while (true)
             {
                 first.Add(0);
-                if (current.Sources[0] is not { BackingTable: null, BackingView: { } inner } || !ReadsThroughChain(inner))
+                if (current.Sources[0] is not { BackingTable: null } source || source.UpdatableView() is not { } inner || !ReadsThroughChain(inner))
                     break;
                 current = current.Nested[0] ??= BuildJoinViewChain(batch, inner, nested: true);
             }
@@ -157,18 +160,31 @@ partial class Simulation
     /// own join tuples rather than a read of the view, which is what ties each
     /// one to a base-row address.
     /// </summary>
+    /// <remarks>
+    /// The written table is read under U, as real reads a MERGE's target
+    /// (probed 2026-10-01 against SQL Server 2025): each row the join reaches
+    /// is held in U until the statement writes, a row another session holds
+    /// waited out first and its view rows read again from the row as that
+    /// session left it — so the match never reads an uncommitted image, and no
+    /// other writer changes a row between its match and its write. Rows other
+    /// sessions' in-flight deletes and rewrites hid, whose earlier image the
+    /// view showed, are waited out before the read.
+    /// </remarks>
     private static void LoadJoinViewMergeRows(BatchContext batch, JoinViewMergePlan plan, HeapTable viewRows)
     {
         var chain = plan.Chain;
         var path = plan.Path;
+        var table = plan.Table;
         var addresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
         var rowMaps = new Dictionary<byte[], byte[]?[]>[path.Length - 1];
-        var sources = SourcesAlongPath(batch, chain, path, 0, original => WrapSourceWithAddressTracking(original, plan.Table, addresses, batch.Connection.StatementIo), rowMaps);
+        var sources = SourcesAlongPath(batch, chain, path, 0, original => WrapSourceWithAddressTracking(original, table, addresses, batch.Connection.StatementIo), rowMaps);
 
         // Hoisted scaffolding: one mutable tuple slot and one resolver per
-        // level, reused across the walk.
+        // level, reused across the walk and the reads of single rows.
         byte[]?[] tuple = [];
-        SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, tuple, name, batch);
+        var tupleSources = sources;
+        var tupleMaps = rowMaps;
+        SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(tupleSources, tuple, name, batch);
         var (resolvers, belowRuntimes) = BuildChainResolvers(batch, chain, resolveTuple);
         var topLevel = chain.Views.Length - 1;
         var columns = viewRows.Columns;
@@ -176,11 +192,65 @@ partial class Simulation
         for (var i = 0; i < names.Length; i++)
             names[i] = new MultiPartName(chain.Views[topLevel].OutputColumns[i].Name);
 
+        if (!table.SupersededKeyImages.IsEmptyLockFree())
+            _ = AwaitSupersededTargetRows(batch, table, (address, prior) => LoadRowsOf(address, prior, load: false));
+
+        // Each row of the written table the join reaches is held in U as the
+        // walk meets it; one whose image a wait found changed is read again
+        // once the walk is done, from the image as it stands.
+        var held = new HashSet<(int Page, int Slot)>();
+        var changed = new Dictionary<(int Page, int Slot), byte[]?>();
+        tupleSources = sources;
+        tupleMaps = rowMaps;
         foreach (var candidate in Selection.EnumerateJoinedRows(sources, chain.Joins, batch, outerResolver: null))
         {
             tuple = candidate;
             if (!ChainLevelsPass(chain, belowRuntimes, topLevel))
                 continue;
+            (int Page, int Slot)? address = null;
+            if (TargetBytesAlongPath(candidate, path, rowMaps) is { } target && addresses.TryGetValue(target, out var found))
+            {
+                if (held.Add(found))
+                {
+                    plan.HeldRows.Add(found);
+                    var current = batch.HoldTargetRowForUpdate(table, found.Page, found.Slot);
+                    if (current is null || !current.AsSpan().SequenceEqual(target))
+                        changed[found] = current;
+                }
+                if (changed.ContainsKey(found))
+                    continue;
+                address = found;
+            }
+            Load(address);
+        }
+        foreach (var (address, image) in changed)
+        {
+            if (image is not null)
+                _ = LoadRowsOf(address, image, load: true);
+        }
+
+        // The view rows the written table's row at address shows as image,
+        // loaded when load is set; whether there is any.
+        bool LoadRowsOf((int Page, int Slot) address, byte[] image, bool load)
+        {
+            tupleMaps = new Dictionary<byte[], byte[]?[]>[path.Length - 1];
+            tupleSources = SourcesAlongPath(batch, chain, path, 0, original => SingleRowSource(original, image, original.LobStore), tupleMaps);
+            var any = false;
+            foreach (var candidate in Selection.EnumerateJoinedRows(tupleSources, chain.Joins, batch, outerResolver: null))
+            {
+                tuple = candidate;
+                if (!ChainLevelsPass(chain, belowRuntimes, topLevel) || TargetBytesAlongPath(candidate, path, tupleMaps) is null)
+                    continue;
+                if (!load)
+                    return true;
+                any = true;
+                Load(address);
+            }
+            return any;
+        }
+
+        void Load((int Page, int Slot)? address)
+        {
             var values = new SqlValue[columns.Length];
             for (var i = 0; i < values.Length; i++)
             {
@@ -189,9 +259,6 @@ partial class Simulation
                     : value.IsNull ? SqlValue.Null(columns[i].Type)
                     : value.CoerceTo(columns[i].Type);
             }
-            (int Page, int Slot)? address = TargetBytesAlongPath(candidate, path, rowMaps) is { } target && addresses.TryGetValue(target, out var found)
-                ? found
-                : null;
             var slot = viewRows.Heap.Insert(RowEncoder.EncodeRow(viewRows.StoredColumns, ProjectStoredValues(viewRows, values), viewRows.Heap), undoLog: null);
             plan.Addresses[slot] = address;
         }

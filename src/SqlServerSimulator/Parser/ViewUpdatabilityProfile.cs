@@ -12,13 +12,16 @@ namespace SqlServerSimulator.Parser;
 /// — Msg 4403 ("aggregates, or a DISTINCT or GROUP BY clause").</item>
 /// <item><see cref="MultipleSources"/> — Msg 4405 ("multiple base tables").
 /// A view whose body reads several sources carries this even though an
-/// UPDATE whose SET list lands entirely in one of them is accepted: the
-/// UPDATE path re-reads the body's profile and routes to that base table,
-/// while INSERT and DELETE — which real refuses on a multi-source view
-/// whatever they touch — raise off this reason.</item>
-/// <item><see cref="UnsupportedShape"/> — catch-all (set ops, window
-/// functions, HAVING, derived-table-as-source, CTE) — DML raises
-/// Msg 4403 as the closest message.</item>
+/// UPDATE or INSERT whose columns land entirely in one of them is accepted:
+/// those re-read the body's profile and route to that base table, while a
+/// DELETE — which real refuses on a multi-source view whatever it names —
+/// raises off this reason.</item>
+/// <item><see cref="Union"/> / <see cref="UnionAll"/> /
+/// <see cref="SetOperationOverUnion"/> — a body over a <c>UNION</c>, whose
+/// columns are all derived.</item>
+/// <item><see cref="UnsupportedShape"/> — catch-all (<c>EXCEPT</c> /
+/// <c>INTERSECT</c>, HAVING, a derived-table source) — DML raises Msg 4403
+/// as the closest message.</item>
 /// <item><see cref="None"/> — the profile is non-null.</item>
 /// </list>
 /// Note Msg 4406 ("derived or constant field") is per-touched-column, not
@@ -33,6 +36,28 @@ internal enum ViewUpdatabilityRejection
     GroupBy,
     MultipleSources,
     UnsupportedShape,
+
+    /// <summary>
+    /// A <c>UNION</c> at the top of the body: every column is derived, so an
+    /// <c>UPDATE</c> or <c>INSERT</c> is Msg 4406, and a <c>DELETE</c> is Msg
+    /// 4426 (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    Union,
+
+    /// <summary>
+    /// <see cref="Union"/> for <c>UNION ALL</c>, which a stored view takes as a
+    /// partitioned view instead — whose rules aren't built, so a stored view
+    /// records <see cref="UnsupportedShape"/> for it.
+    /// </summary>
+    UnionAll,
+
+    /// <summary>
+    /// An <c>EXCEPT</c> or <c>INTERSECT</c> at the top of a body holding a
+    /// <c>UNION</c> below it: an <c>UPDATE</c> or <c>INSERT</c> is Msg 4406 as
+    /// for <see cref="Union"/>, a <c>DELETE</c> Msg 4403 as for a plain
+    /// <c>EXCEPT</c> (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    SetOperationOverUnion,
 }
 
 /// <summary>

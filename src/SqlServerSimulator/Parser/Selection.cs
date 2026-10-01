@@ -210,6 +210,15 @@ internal sealed partial class Selection
     internal bool InstallsRowAddresses;
 
     /// <summary>
+    /// Whether this plan reads one FROM source through a plain projection, so
+    /// a <see cref="ExecuteWithRowAddresses"/> run can ask it for the address
+    /// of that source's row behind each row it yields — a write passes through
+    /// such a body. Set post-construction by <see cref="BuildSqlProjection"/>
+    /// and by a pushed copy of one.
+    /// </summary>
+    internal bool CarriesRowAddresses;
+
+    /// <summary>
     /// The SELECT's ORDER BY items, captured for the updatable-cursor
     /// enumeration path (<c>EnumerateForCursor</c>) so KEYSET / DYNAMIC
     /// cursors and positioned DML can order rows the same way a read would.
@@ -569,6 +578,12 @@ internal sealed partial class Selection
     /// per-batch / per-session / per-database access.
     /// </summary>
     public SimulatedSqlResultSet Execute(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver = null) =>
+        batch.RowAddressProbe is { } probe && !ReferenceEquals(probe, this) && this.CarriesRowAddresses
+            && batch.CurrentStatement.RowAddresses is { } addresses
+            ? this.ExecuteCarryingRowAddresses(batch, outerResolver, addresses)
+            : this.ExecuteRows(batch, outerResolver);
+
+    private SimulatedSqlResultSet ExecuteRows(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver) =>
         this.valueRowSource is { } values
             ? new SimulatedSqlResultSet(this.Schema, this.ColumnNames, values(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse }
             : new SimulatedSqlResultSet(this.Schema, this.ColumnNames, this.rowSource!(batch, outerResolver)) { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse };
@@ -589,6 +604,33 @@ internal sealed partial class Selection
         using var probe = ParserScope.Enter(ref batch.RowAddressProbe, this);
         batch.CurrentStatement.RowAddresses ??= new();
         return [.. this.Execute(batch).RowValues];
+    }
+
+    /// <summary>
+    /// Runs this plan as a source a <see cref="ExecuteWithRowAddresses"/> run
+    /// reads — a CTE or derived table whose body a write can pass through —
+    /// carrying the address of its own first source's row the way the run's
+    /// plan does, and recording each row it yields against that address, so
+    /// the run's locator reads through the re-encoding to the base row. A view
+    /// does the same in <c>Simulation.InvokeView</c>.
+    /// </summary>
+    private SimulatedSqlResultSet ExecuteCarryingRowAddresses(BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, RowAddressMap addresses)
+    {
+        IEnumerable<SqlValue[]> rows;
+        using (ParserScope.Enter(ref batch.RowAddressProbe, this))
+            rows = this.ExecuteRows(batch, outerResolver).RowValues;
+        var schema = this.Schema;
+        return new SimulatedSqlResultSet(schema, this.ColumnNames, rows.Select(values =>
+        {
+            var bytes = RowEncoder.EncodeRow(schema, values.AsSpan(0, schema.Length));
+            if (values.Length > schema.Length && !values[schema.Length].IsNull)
+            {
+                var (page, slot) = RowLocator.Unpack(values[schema.Length].AsInt64);
+                addresses.Record(bytes, page, slot);
+            }
+            return bytes;
+        }))
+        { ColumnNullability = this.ColumnNullability, ColumnReportsNumeric = this.ColumnReportsNumeric, ColumnAliasTypes = this.ColumnAliasTypes, ColumnIdentitySources = this.ColumnIdentitySources, ColumnWireFlags = this.ColumnWireFlags, HiddenColumnCount = this.HiddenColumnCount, Browse = this.Browse };
     }
 
     /// <summary>
@@ -2371,14 +2413,17 @@ internal sealed partial class Selection
     /// keyword, so a <c>SET</c> subquery reading the target's alias binds
     /// (probed 2026-09-28 against SQL Server 2025: EF Core's <c>UPDATE [b] SET
     /// [b].[n] = (SELECT COUNT(*) FROM [p] WHERE [b].[Id] = [p].[BlogId]) FROM
-    /// [Blogs] AS [b]</c>). Speculative in the way the <c>SELECT</c> pre-pass
-    /// is: null when there is no such clause or it doesn't parse on its own,
-    /// and the statement then parses it in place.
+    /// [Blogs] AS [b]</c>) — or, <paramref name="fromCursor"/>, a
+    /// <c>DELETE</c>'s, entered and left on the token after its target, ahead
+    /// of the <c>OUTPUT</c> clause binding against the table it names.
+    /// Speculative in the way the <c>SELECT</c> pre-pass is: null when there is
+    /// no such clause or it doesn't parse on its own, and the statement then
+    /// parses it in place.
     /// </summary>
-    internal static PreParsedFrom? PreParseMutationFrom(ParserContext context)
+    internal static PreParsedFrom? PreParseMutationFrom(ParserContext context, bool fromCursor = false)
     {
         var atSet = context.SaveCheckpoint();
-        if (!context.MoveNext() || FindOwnFromClause(context) is not { } fromCheckpoint)
+        if ((!fromCursor && !context.MoveNext()) || FindOwnFromClause(context) is not { } fromCheckpoint)
         {
             context.RestoreCheckpoint(atSet);
             return null;
@@ -3503,7 +3548,8 @@ internal sealed partial class Selection
                         // diagnostics report the CTE rather than the alias the
                         // reference wrote — `FROM c AS q` names `c` (probed
                         // 2026-08-08, GROUP BY containment and XQuery alike).
-                        writtenObjectName: cteBinding.Name);
+                        writtenObjectName: cteBinding.Name,
+                        cte: cteBinding);
                 }
 
                 // Past a CTE the name is an object — a table, view, table

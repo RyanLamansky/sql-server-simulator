@@ -338,14 +338,28 @@ partial class Simulation
             CheckMergePermissions(context.Batch, plan.DestinationName, plan.TriggerTarget, plan.WhenClauses, joinWrite, plan.OnPredicate, plan.TargetAlias);
         if (joinWrite is not null && !context.Batch.IsSkipping)
         {
-            LoadJoinViewMergeRows(context.Batch, joinWrite, destinationTable);
+            // The written table's rows the load holds in U go once the
+            // statement has written, its writes holding X.
+            try
+            {
+                LoadJoinViewMergeRows(context.Batch, joinWrite, destinationTable);
+                return Execute();
+            }
+            finally
+            {
+                foreach (var (page, slot) in joinWrite.HeldRows)
+                    context.Batch.ReleaseTargetRow(joinWrite.Table, page, slot, TargetRowHold.Update);
+                joinWrite.HeldRows.Clear();
+            }
         }
-        else if (viewRowsTarget is not null && !context.Batch.IsSkipping)
+        if (viewRowsTarget is not null && !context.Batch.IsSkipping)
         {
             foreach (var row in ReadViewRows(context.Batch, viewRowsTarget, destinationTable.Columns))
                 _ = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, row), destinationTable.Heap), undoLog: null);
         }
-        return ExecuteMerge(
+        return Execute();
+
+        SimulatedStatementOutcome Execute() => ExecuteMerge(
             context, destinationTable, plan.SourceView, plan.TargetAlias, plan.MaterializeSource, plan.SourceAlias, plan.SourceColumnNames, plan.SourceSchema,
             plan.OnPredicate, plan.WhenClauses, plan.Output, plan.SerializableHint, viewRowsTarget, joinWrite, plan.Top);
     }
@@ -403,7 +417,7 @@ partial class Simulation
                     _ => false,
                 };
                 if (derivedTarget)
-                    return SimulatedSqlException.ViewDmlTouchesDerivedField(writtenName.ToString());
+                    return SimulatedSqlException.ViewDmlTouchesDerivedField(view.UnionOwnerName ?? writtenName.ToString());
             }
         }
         return NonUpdatableViewError(view, writtenName.ToString());
@@ -1662,7 +1676,7 @@ partial class Simulation
         // action, and the body's derived columns (a ROW_NUMBER()'s rn) read off
         // the view row each base row showed as (probed 2026-09-30 against SQL
         // Server 2025).
-        var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, destinationTable, positioned: false);
+        var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, positioned: false);
         var viewRowOf = viewRows is null ? null : new Dictionary<SqlValue[], SqlValue[]>(ReferenceEqualityComparer.Instance);
         bool TryReadDerivedTargetColumn(SqlValue[]? targetValues, string leaf, out SqlValue value)
         {

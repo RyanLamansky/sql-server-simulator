@@ -63,14 +63,14 @@ partial class Simulation
             for (var i = 0; i < source.Columns.Length; i++)
                 sourceColumnToBaseOrdinal[i] = i;
         }
-        else if (source.BackingView is { BaseTable: { } upstreamBaseTable } upstreamView)
+        else if (source.UpdatableView() is { BaseTable: { } upstreamBaseTable } upstreamView)
         {
             baseTable = upstreamBaseTable;
             sourceColumnToBaseOrdinal = upstreamView.BaseColumnOrdinals;
             upstreamVisibility = upstreamView.VisibilityCheck;
             upstreamCheckOption = upstreamView.CheckOptionCheck;
         }
-        else if (source.BackingView is { IsJoinUpdatable: true })
+        else if (source.UpdatableView() is { IsJoinUpdatable: true })
         {
             // The chain bottoms out in a multi-source view, which has no
             // single base table for this level to compose through. The write
@@ -80,10 +80,12 @@ partial class Simulation
         }
         else
         {
-            // Source is a derived table, CTE, OPENJSON, TVF, catalog view,
-            // or a non-updatable view — none of which support DML
+            // A view or CTE over a set operation refuses as that body does
+            // (probed 2026-10-01 against SQL Server 2025: a CTE over a UNION
+            // CTE is Msg 4426 naming the outer one); a derived table, OPENJSON,
+            // TVF, catalog view or other non-updatable view supports no DML
             // pass-through.
-            return (null, [], ViewUpdatabilityRejection.UnsupportedShape, null, null, false);
+            return (null, [], UnionRejectionOf(source) ?? ViewUpdatabilityRejection.UnsupportedShape, null, null, false);
         }
 
         var baseColumnOrdinals = new int[profile.Projections.Length];
@@ -194,6 +196,54 @@ partial class Simulation
     };
 
     /// <summary>
+    /// The set-operation refusal a source's body carries — its own when it is
+    /// a set operation read as a derived table, or its view's or CTE's — or
+    /// null when it carries none.
+    /// </summary>
+    private static ViewUpdatabilityRejection? UnionRejectionOf(FromSource source)
+    {
+        var rejection = source.UpdatableView()?.RejectionReason
+            ?? (source is { LateralIsQueryBody: true, LateralPlan: { } plan } ? plan.UpdatabilityRejection : ViewUpdatabilityRejection.None);
+        return IsUnionRejection(rejection) ? rejection : null;
+    }
+
+    /// <summary>
+    /// Whether a body's refusal comes of a <c>UNION</c> in it, which makes every
+    /// column derived: an <c>UPDATE</c> or <c>INSERT</c> through it is Msg 4406
+    /// whichever columns it names (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static bool IsUnionRejection(ViewUpdatabilityRejection rejection) =>
+        rejection is ViewUpdatabilityRejection.Union or ViewUpdatabilityRejection.UnionAll or ViewUpdatabilityRejection.SetOperationOverUnion;
+
+    /// <summary>
+    /// <see cref="View.UnionOwnerName"/> for a view named
+    /// <paramref name="name"/> over <paramref name="body"/>: its own name for a
+    /// stored view whose body is a <c>UNION</c>, else the one its single
+    /// source's view carries.
+    /// </summary>
+    private static string? UnionOwnerNameOf(Selection body, ViewUpdatabilityRejection rejection, string? name) =>
+        !IsUnionRejection(rejection) ? null
+        : body.UpdatabilityProfile is { Sources: [var source] } ? source.UpdatableView()?.UnionOwnerName
+        : name;
+
+    /// <summary>
+    /// <see cref="View.DerivedOutputColumns"/> for a body that names no single
+    /// base table: every column for a body over a <c>UNION</c>, else
+    /// <see cref="DerivedOutputColumnsOf"/>, and null for a body reaching one
+    /// base table or reading several.
+    /// </summary>
+    private static bool[]? DerivedOutputColumnsFor(Selection body, HeapTable? baseTable, ViewUpdatabilityRejection rejection, int width)
+    {
+        if (baseTable is not null || rejection == ViewUpdatabilityRejection.MultipleSources)
+            return null;
+        if (!IsUnionRejection(rejection))
+            return DerivedOutputColumnsOf(body);
+        var derived = new bool[width];
+        Array.Fill(derived, true);
+        return derived;
+    }
+
+    /// <summary>
     /// Builds a per-level WHERE evaluator: given a base-table row's
     /// <see cref="SqlValue"/> array (indexed by base-table column ordinal)
     /// and a <see cref="BatchContext"/>, returns true iff every excluder
@@ -256,7 +306,7 @@ partial class Simulation
                 continue;
             }
             var (s, c) = Selection.FindSourceColumn(sources, reference.ReferencedName);
-            derived[i] = s < 0 || (sources[s].BackingView?.DerivedOutputColumns is { } underlying && underlying[c]);
+            derived[i] = s < 0 || (sources[s].UpdatableView()?.DerivedOutputColumns is { } underlying && underlying[c]);
         }
         return derived;
     }
@@ -296,7 +346,7 @@ partial class Simulation
                 }
             }
             if (anyDerived)
-                return SimulatedSqlException.ViewDmlTouchesDerivedField(viewLabel);
+                return SimulatedSqlException.ViewDmlTouchesDerivedField(view.UnionOwnerName ?? viewLabel);
         }
         return NonUpdatableViewError(view, viewLabel);
     }
@@ -315,7 +365,7 @@ partial class Simulation
     /// </summary>
     private static bool IsRowLimitedBody(Selection body) =>
         body.HasTopOrOffsetOrFetch
-        || (body.UpdatabilityProfile is { Sources: [{ BackingView.IsRowLimited: true }] });
+        || (body.UpdatabilityProfile is { Sources: [var source] } && source.UpdatableView() is { IsRowLimited: true });
 
     /// <summary>
     /// Whether a view body projects a window function, directly or through
@@ -323,7 +373,7 @@ partial class Simulation
     /// </summary>
     private static bool IsWindowedBody(Selection body) =>
         body.HasWindows
-        || (body.UpdatabilityProfile is { Sources: [{ BackingView.IsWindowed: true }] });
+        || (body.UpdatabilityProfile is { Sources: [var source] } && source.UpdatableView() is { IsWindowed: true });
 
     /// <summary>
     /// The rows a windowed or row-limited view or CTE yields, keyed by the base
@@ -339,161 +389,49 @@ partial class Simulation
     /// limit or window stage as a projected value
     /// (<see cref="Selection.ExecuteWithRowAddresses"/>), so a limit choosing
     /// between rows its projection can't tell apart still names the row it
-    /// chose. A body whose rows arrive through another view (a view over a
-    /// row-limited view) carries no address of its own, and falls back to
-    /// pairing (<see cref="PairRowSelectiveViewRows"/>).
+    /// chose — through a view, CTE or derived table the body reads too, whose
+    /// rows carry the address the same way (probed 2026-10-01 against SQL
+    /// Server 2025: <c>DELETE</c> through <c>SELECT TOP 1 id FROM v1 ORDER BY
+    /// v</c> removes the one row the limit chose between two <c>id = 1</c>
+    /// rows).
     /// </remarks>
-    private static Dictionary<(int Page, int Slot), SqlValue[]>? MaterializeRowSelectiveViewRows(ParserContext context, View? view, HeapTable table, bool positioned)
+    private static Dictionary<(int Page, int Slot), SqlValue[]>? MaterializeRowSelectiveViewRows(ParserContext context, View? view, bool positioned)
     {
         if (view is not ({ IsWindowed: true } or { IsRowLimited: true }) || positioned || context.Batch.IsSkipping)
             return null;
-        var body = view.UnstoredBody ?? context.Connection.Simulation.ParseViewBodyPlan(context.Batch, view);
-        if (!body.HasTopOrOffsetOrFetch && !body.HasWindows
-            && body.UpdatabilityProfile is { Sources: [{ BackingView: { } lower }], Projections: var projections }
-            && lower is { IsWindowed: true } or { IsRowLimited: true })
-        {
-            return ProjectLowerViewRows(context, lower, projections, MaterializeRowSelectiveViewRows(context, lower, table, positioned: false)!);
-        }
+        var rows = new Dictionary<(int Page, int Slot), SqlValue[]>();
+        foreach (var (row, address) in ViewRowsWithAddresses(context.Batch, view))
+            rows[address ?? throw RowWithoutAddressNotModeled(view.Name)] = row;
+        return rows;
+    }
+
+    /// <summary>
+    /// The rows a single-base view or CTE yields, each with the address of the
+    /// base row it shows: the body runs once, carrying the address through
+    /// every stage (<see cref="Selection.ExecuteWithRowAddresses"/>), so a row
+    /// limit or window applies exactly as a read of the view applies it. An
+    /// address is null for a row that came from no heap row.
+    /// </summary>
+    private static List<(SqlValue[] Row, (int Page, int Slot)? Address)> ViewRowsWithAddresses(BatchContext batch, View view)
+    {
+        var body = batch.Connection.Simulation.ParseViewBodyPlan(batch, view);
         var width = body.ColumnNames.Length;
-        var outputRows = body.ExecuteWithRowAddresses(context.Batch);
-        var rows = new Dictionary<(int Page, int Slot), SqlValue[]>();
-        foreach (var row in outputRows)
+        var rows = new List<(SqlValue[] Row, (int Page, int Slot)? Address)>();
+        foreach (var row in body.ExecuteWithRowAddresses(batch))
         {
-            if (row.Length != width + 1 || row[width].IsNull)
-                return PairRowSelectiveViewRows(context, view, table, body);
-            rows[RowLocator.Unpack(row[width].AsInt64)] = row;
+            rows.Add(row.Length != width + 1 || row[width].IsNull
+                ? (row, null)
+                : (row, RowLocator.Unpack(row[width].AsInt64)));
         }
         return rows;
     }
 
     /// <summary>
-    /// The rows of a view whose limit or window sits in the view it reads,
-    /// keyed by base address: each of the lower view's rows run through this
-    /// view's own projection, whose names read the lower row's columns. This
-    /// view's filter reads only direct columns, so the caller's
-    /// <see cref="View.VisibilityCheck"/> applies it to the base row (probed
-    /// 2026-09-30 against SQL Server 2025).
+    /// A write through a view whose body yielded a row carrying no base
+    /// address, which only a body reaching no single base table could.
     /// </summary>
-    private static Dictionary<(int Page, int Slot), SqlValue[]> ProjectLowerViewRows(
-        ParserContext context, View lower, Expression[] projections, Dictionary<(int Page, int Slot), SqlValue[]> lowerRows)
-    {
-        var batch = context.Batch;
-        var collation = batch.CurrentDatabase.Collation;
-        SqlValue[] lowerRow = [];
-        SqlValue resolve(MultiPartName name) =>
-            IndexOfViewOutputColumn(collation, lower, name.Leaf) is var ordinal and >= 0 ? lowerRow[ordinal] : throw SimulatedSqlException.InvalidColumnName(name);
-        var runtime = new RuntimeContext(resolve, batch);
-        var rows = new Dictionary<(int Page, int Slot), SqlValue[]>(lowerRows.Count);
-        foreach (var (address, row) in lowerRows)
-        {
-            lowerRow = row;
-            var values = new SqlValue[projections.Length];
-            for (var k = 0; k < values.Length; k++)
-                values[k] = projections[k].Run(runtime);
-            rows[address] = values;
-        }
-        return rows;
-    }
-
-    /// <summary>
-    /// <see cref="MaterializeRowSelectiveViewRows"/> for a body whose rows
-    /// carry no address: runs it again and pairs its rows with the base rows
-    /// the view's filter admits — a windowed body's in the base heap's order
-    /// (the window stage places each result back on its input row and, under
-    /// <see cref="BatchContext.WindowRowsInArrivalOrder"/>, yields in that
-    /// order), a row-limited body's by matching an unclaimed base row whose
-    /// direct columns agree. When two candidates differ in a column the body
-    /// didn't project, which one the limit chose can't be told from its
-    /// output, and the write refuses rather than guess.
-    /// </summary>
-    private static Dictionary<(int Page, int Slot), SqlValue[]> PairRowSelectiveViewRows(ParserContext context, View view, HeapTable table, Selection body)
-    {
-        List<SqlValue[]> outputRows;
-        using (ParserScope.Enter(ref context.Batch.WindowRowsInArrivalOrder, true))
-            outputRows = [.. body.Execute(context.Batch, null).RowValues];
-        var visible = new List<((int Page, int Slot) Address, SqlValue[] Values)>();
-        foreach (var (page, slot, bytes) in table.Heap.EnumerateRowsWithAddress())
-        {
-            var values = DecodeFullRow(table, bytes);
-            EvaluateComputedColumns(table, values, context.Batch);
-            if (view.VisibilityCheck is not { } isVisible || isVisible(values, context.Batch))
-                visible.Add(((page, slot), values));
-        }
-
-        var rows = new Dictionary<(int Page, int Slot), SqlValue[]>();
-        if (!view.IsRowLimited)
-        {
-            if (visible.Count != outputRows.Count)
-                throw RowSelectiveViewWriteNotModeled(view.Name);
-            for (var i = 0; i < visible.Count; i++)
-            {
-                if (!DirectColumnsAgree(view, outputRows[i], visible[i].Values))
-                    throw RowSelectiveViewWriteNotModeled(view.Name);
-                rows[visible[i].Address] = outputRows[i];
-            }
-            return rows;
-        }
-
-        var claimed = new bool[visible.Count];
-        foreach (var output in outputRows)
-        {
-            var match = -1;
-            for (var i = 0; i < visible.Count; i++)
-            {
-                if (claimed[i] || !DirectColumnsAgree(view, output, visible[i].Values))
-                    continue;
-                if (match < 0)
-                    match = i;
-                else if (!IdenticalRows(visible[match].Values, visible[i].Values))
-                    throw RowSelectiveViewWriteNotModeled(view.Name);
-            }
-            if (match < 0)
-                throw RowSelectiveViewWriteNotModeled(view.Name);
-            claimed[match] = true;
-            rows[visible[match].Address] = output;
-        }
-        return rows;
-    }
-
-    /// <summary>Two base rows equal in every column, strings compared ordinally.</summary>
-    private static bool IdenticalRows(SqlValue[] left, SqlValue[] right)
-    {
-        for (var k = 0; k < left.Length; k++)
-        {
-            if (left[k].IsNull != right[k].IsNull)
-                return false;
-            if (left[k].IsNull)
-                continue;
-            if (SqlType.IsStringCategory(left[k].Type)
-                ? !string.Equals(left[k].AsString, right[k].AsString, StringComparison.Ordinal)
-                : !left[k].Equals(right[k]))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static bool DirectColumnsAgree(View view, SqlValue[] viewRow, SqlValue[] baseRow)
-    {
-        for (var v = 0; v < view.BaseColumnOrdinals.Length; v++)
-        {
-            if (view.BaseColumnOrdinals[v] is var ordinal and >= 0
-                && (viewRow[v].IsNull != baseRow[ordinal].IsNull || (!viewRow[v].IsNull && !viewRow[v].Equals(baseRow[ordinal]))))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /// <summary>
-    /// The write real makes through a body whose <c>TOP</c> / <c>OFFSET</c> or
-    /// window function picks its rows, which the simulator refuses rather than
-    /// write to every row the body reads.
-    /// </summary>
-    private static NotSupportedException RowSelectiveViewWriteNotModeled(string viewLabel) =>
-        new($"DML through '{viewLabel}' isn't modeled for this shape: its body selects rows with TOP / OFFSET or computes over them with a window function, and SQL Server writes only to the rows that body yields.");
+    private static NotSupportedException RowWithoutAddressNotModeled(string viewLabel) =>
+        new($"DML through '{viewLabel}' isn't modeled for this shape: a row its body yields carries no base row to write.");
 
     /// <summary>The leaf names an UPDATE's SET list assigns, read from the cursor on; null when no SET follows.</summary>
     private static List<string>? PeekSetTargets(ParserContext context)
@@ -574,47 +512,59 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Resolves a DML target named by one of the statement's own CTEs as an
-    /// unstored view over the CTE's body: real writes through a CTE exactly as
-    /// through a view with that body — a plain single-table projection passes
-    /// through to the table, a derived column is Msg 4406 and an aggregate body
-    /// Msg 4403 (probed 2026-09-25 against SQL Server 2025). A CTE reading
-    /// several sources doesn't take the join-view path, which re-parses a
-    /// stored view's text.
+    /// Resolves a DML target named by one of the statement's own CTEs as the
+    /// unstored view over the CTE's body (<see cref="CteDmlView"/>): real writes
+    /// through a CTE exactly as through a view with that body — a plain
+    /// single-table projection passes through to the table, one reading several
+    /// sources writes the one base table its columns land in, a derived column
+    /// is Msg 4406 and an aggregate body Msg 4403 (probed 2026-09-25 and
+    /// 2026-10-01 against SQL Server 2025).
     /// </summary>
     private static bool TryResolveCteTarget(ParserContext context, MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out View? view)
     {
         view = null;
-        if (name.Count != 1 || context.CteBindings is not { } bindings || !bindings.TryGetValue(name.Leaf, out var binding) || binding.Plan is not { } body)
+        if (name.Count != 1 || context.CteBindings is not { } bindings || !bindings.TryGetValue(name.Leaf, out var binding) || binding.Plan is null)
             return false;
-        if (binding.DmlTarget is null)
-        {
-            var collation = context.CurrentDatabase.Collation;
-            var (baseTable, baseColumnOrdinals, rejection, visibilityCheck, checkOptionCheck, _) = AnalyzeViewUpdatability(collation, body, withCheckOption: false);
-            binding.DmlTarget = new View(
-                context.CurrentDatabase.Schemas[Database.DefaultSchemaName],
-                binding.Name,
-                objectId: 0,
-                ComputeViewOutputColumns(collation, body, [.. binding.ColumnNames], binding.Name),
-                bodyText: string.Empty,
-                withCheckOption: false,
-                isSchemaBound: false,
-                createDate: default,
-                baseTable,
-                baseColumnOrdinals,
-                rejection,
-                visibilityCheck,
-                checkOptionCheck,
-                isJoinUpdatable: false)
-            {
-                DerivedOutputColumns = baseTable is null && rejection != ViewUpdatabilityRejection.MultipleSources ? DerivedOutputColumnsOf(body) : null,
-                IsRowLimited = IsRowLimitedBody(body),
-                IsWindowed = IsWindowedBody(body),
-                VolatileColumns = body.VolatileColumns,
-                UnstoredBody = body,
-            };
-        }
-        view = binding.DmlTarget;
+        view = CteDmlView(binding);
         return true;
+    }
+
+    /// <summary>
+    /// A CTE analyzed as the unstored view a write through it — or through a
+    /// body reading it — passes down, with the same analysis <c>CREATE
+    /// VIEW</c> runs; built once per binding, after the CTEs its body reads.
+    /// </summary>
+    internal static View CteDmlView(CteBinding binding)
+    {
+        if (binding.DmlTarget is { } built)
+            return built;
+        var body = binding.Plan!;
+        var database = binding.Database;
+        var collation = database.Collation;
+        var (baseTable, baseColumnOrdinals, rejection, visibilityCheck, checkOptionCheck, isJoinUpdatable) = AnalyzeViewUpdatability(collation, body, withCheckOption: false);
+        var outputColumns = ComputeViewOutputColumns(collation, body, [.. binding.ColumnNames], binding.Name);
+        return binding.DmlTarget = new View(
+            database.Schemas[Database.DefaultSchemaName],
+            binding.Name,
+            objectId: 0,
+            outputColumns,
+            bodyText: string.Empty,
+            withCheckOption: false,
+            isSchemaBound: false,
+            createDate: default,
+            baseTable,
+            baseColumnOrdinals,
+            rejection,
+            visibilityCheck,
+            checkOptionCheck,
+            isJoinUpdatable)
+        {
+            DerivedOutputColumns = DerivedOutputColumnsFor(body, baseTable, rejection, outputColumns.Length),
+            UnionOwnerName = UnionOwnerNameOf(body, rejection, name: null),
+            IsRowLimited = IsRowLimitedBody(body),
+            IsWindowed = IsWindowedBody(body),
+            VolatileColumns = body.VolatileColumns,
+            UnstoredBody = body,
+        };
     }
 }

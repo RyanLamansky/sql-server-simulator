@@ -82,8 +82,10 @@ Both refuse.
 ## DML through a CTE
 
 A DML statement whose target is one of its own CTEs writes through it exactly as through a view with that body (probed 2026-09-25 against SQL Server 2025): `WITH d AS (SELECT id, v FROM t WHERE id = 1) DELETE FROM d WHERE v = 2` deletes from `t`, `UPDATE d` and `INSERT INTO d` pass through too, a derived column is Msg 4406 and an aggregate body Msg 4403.
-`Simulation.TryResolveCteTarget` builds the unstored view from the CTE's plan with the same analysis `CREATE VIEW` runs, so every rule under [updatable views](programmable.md#updatable-views-dml-through-views) applies — including the row-limited and windowed bodies, which is what makes the dedupe idiom `WITH d AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY v) rn FROM t) DELETE FROM d WHERE rn > 1` work.
-A CTE reading several sources refuses where real would pass an `UPDATE` through to one of them, since the join-view path re-parses a stored view's text.
+`Simulation.CteDmlView` builds the unstored view from the CTE's plan with the same analysis `CREATE VIEW` runs, so every rule under [updatable views](programmable.md#updatable-views-dml-through-views) applies — including the row-limited and windowed bodies, which is what makes the dedupe idiom `WITH d AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY k ORDER BY v) rn FROM t) DELETE FROM d WHERE rn > 1` work.
+A CTE reading several sources takes the [join-view path](programmable.md#dml-through-a-join-view) as a stored join view does — an `UPDATE`, `INSERT` or `MERGE` writes the one table its columns land in, a `DELETE` is Msg 4405 and a `MERGE`'s lone `DELETE` removes from the first table of its FROM — and a CTE over another CTE descends into that one, the join-view machinery reading a CTE level's body off the binding rather than re-parsing stored text (probed 2026-10-01 against SQL Server 2025).
+A CTE named as a joined write's target in its FROM clause writes through as a view there does → [`programmable.md`](programmable.md#a-joined-write-through-a-view).
+A body over a `UNION` is Msg 4406 to an `UPDATE` or `INSERT` and Msg 4426 to a `DELETE`, naming the CTE as written.
 
 ## Where a prefix may appear
 
@@ -108,6 +110,4 @@ Two body-side interactions live in their own features:
 - **Schema binding** excludes the names a body's own WITH prefix declares from the Msg 4512 two-part-name rule — a one-part CTE reference is the CTE even when the default schema holds a table of that name, whereas a real one-part table reference *inside* a CTE definition still trips it → [`programmable.md`](programmable.md#schema-binding-with-schemabinding).
 - **A CTE-bearing view can't be indexed**: `CREATE INDEX` on it is **Msg 10137**, naming the first CTE the body declares → [`indexes.md`](indexes.md).
 
-### Not modeled yet
-
-DML through a CTE-bodied view (`INSERT` / `UPDATE` / `DELETE` against `CREATE VIEW v AS WITH c AS (SELECT … FROM t) SELECT … FROM c`) reports Msg 4403, where real passes it through to the base table → [`programmable.md`](programmable.md#updatable-views-dml-through-views).
+DML through a CTE-bodied view (`INSERT` / `UPDATE` / `DELETE` against `CREATE VIEW v AS WITH c AS (SELECT … FROM t) SELECT … FROM c`) passes through to the base table as real does, the analysis reading the CTE through its unstored view (probed 2026-10-01 against SQL Server 2025).

@@ -50,7 +50,8 @@ internal sealed class FromSource(
     MultiPartName? unaliasedName = null,
     bool catalogSeek = false,
     CatalogRowSet? catalogRows = null,
-    VolatileProjection? volatileRefresh = null)
+    VolatileProjection? volatileRefresh = null,
+    CteBinding? cte = null)
 {
     public readonly string? Qualifier = qualifier;
 
@@ -198,6 +199,22 @@ internal sealed class FromSource(
     /// tracking for the source (a synonym takes no column grants at all).
     /// </summary>
     public readonly Synonym? ViaSynonym = viaSynonym;
+
+    /// <summary>
+    /// The <c>WITH</c> binding this source reads, when it is a reference to one
+    /// of the statement's CTEs; null otherwise, the recursive member's
+    /// self-reference included. A write through a body reading the CTE reads
+    /// it as the unstored view <see cref="UpdatableView"/> builds.
+    /// </summary>
+    public readonly CteBinding? Cte = cte;
+
+    /// <summary>
+    /// The view a write through this source passes down: a stored view
+    /// (<see cref="BackingView"/>), or a CTE analyzed as the unstored view
+    /// real writes through it as. Null for every other source.
+    /// </summary>
+    public View? UpdatableView() =>
+        this.BackingView ?? (this.Cte is { Plan: not null } binding ? Simulation.CteDmlView(binding) : null);
 
     /// <summary>
     /// When non-null, this source is the right side of a <c>CROSS APPLY</c>
@@ -355,7 +372,7 @@ internal sealed class FromSource(
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
             lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte);
 
     /// <summary>
     /// Returns a copy of this source reading <paramref name="rows"/> — the same
@@ -373,7 +390,7 @@ internal sealed class FromSource(
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
             lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte);
 
     /// <summary>
     /// Returns a copy of this source with its deferred <see cref="LateralPlan"/>
@@ -390,7 +407,7 @@ internal sealed class FromSource(
             lateralPlan: null, backingTable: this.BackingTable, backingView: this.BackingView,
             heapPlan: this.HeapPlan, materializeOnce: false, viaSynonym: this.ViaSynonym,
             autoElementName: this.AutoElementName, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogRows: catalogRows, volatileRefresh: this.VolatileRefresh);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogRows: catalogRows, volatileRefresh: this.VolatileRefresh, cte: this.Cte);
 }
 
 /// <summary>

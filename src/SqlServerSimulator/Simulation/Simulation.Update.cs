@@ -61,10 +61,8 @@ partial class Simulation
 
         // View target: route to base table with view-aware column lookups,
         // visibility filtering, and (optional) WITH CHECK OPTION enforcement.
-        // Joined-source UPDATEs through views (alias-form + FROM clause)
-        // aren't supported — EF Core doesn't emit that shape and it would
-        // require composing the view's visibility predicate with a multi-
-        // source join, which the existing alias-form path can't represent.
+        // A FROM clause makes it the joined form, whose target is a source of
+        // that clause (ExecuteJoinedViewTargetUpdate).
         DmlViewRoute? viewRoute = null;
         if (leadingView is not null)
         {
@@ -84,11 +82,18 @@ partial class Simulation
         context.MoveNextRequired();
         var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
         Selection.ValidateDmlTargetHints(targetHints);
+        // A target the FROM clause names — an alias, or a view written through
+        // in a join — is read from that clause ahead of the SET list, whose
+        // values bind against its sources.
+        var preParsedFrom = context.Token is ReservedKeyword { Keyword: Keyword.Set } && (leadingTable is null || leadingView is not null)
+            ? Selection.PreParseMutationFrom(context)
+            : null;
+        var joinedView = leadingView is not null && preParsedFrom is not null;
         // Phase 1a: when the leading identifier resolved to a concrete table
         // (the simple `UPDATE t SET …` case), lock it now. The
         // multi-table-alias form's target is determined later via the FROM
         // clause; that path's lock is deferred to phase 1b.
-        if (leadingTable is not null)
+        if (leadingTable is not null && !joinedView)
             LockWriteTable(context.Batch, leadingTable, "UPDATE");
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -115,15 +120,13 @@ partial class Simulation
         // Restored right after the loop; a throw in between aborts the whole
         // statement, so there is no later parse to see a stale scope.
         var savedOuterTypeResolver = context.OuterTypeResolver;
-        Selection.PreParsedFrom? preParsedFrom = null;
-        if (leadingTable is { } scopeTable)
+        if (leadingTable is { } scopeTable && !joinedView)
         {
             var enclosing = savedOuterTypeResolver;
             context.OuterTypeResolver = name => ResolveUpdateTargetColumnType(context.Batch, leadingIdent, scopeTable, name, enclosing);
         }
-        else if (leadingView is null && Selection.PreParseMutationFrom(context) is { } preFrom)
+        else if (preParsedFrom is { } preFrom)
         {
-            preParsedFrom = preFrom;
             context.OuterTypeResolver = Selection.ColumnTypeResolverFor([.. preFrom.Sources], savedOuterTypeResolver);
         }
 
@@ -261,6 +264,11 @@ partial class Simulation
             SettleRemoteMutation(context, remoteTarget, remoteWrite);
         }
 
+        // A view or CTE the FROM clause names as the target writes through it
+        // joined to the clause's other sources.
+        if (preParsedFrom is not null && (joinedView || (leadingTable is null && JoinedViewTargetIndex(context, preParsedFrom, leadingIdent, leadingView: null) >= 0)))
+            return ExecuteJoinedViewTargetUpdate(context, leadingIdent, leadingView, rawAssignments, top, preParsedFrom);
+
         // An INSTEAD OF UPDATE trigger on a view takes the write, reading the
         // view's own rows; a multi-source view's SET list names the base
         // table it writes, so its OUTPUT binds only once that is known.
@@ -269,14 +277,10 @@ partial class Simulation
         if (leadingView is not null && viewRoute == DmlViewRoute.JoinView)
             return ExecuteJoinViewUpdate(context, leadingIdent, leadingView, rawAssignments, top);
 
-        var output = ParseMutationOutput(context, leadingIdent, leadingTable, leadingView, TriggerActions.Update);
+        var output = ParseMutationOutput(context, leadingIdent, leadingTable ?? JoinedTargetTable(context, preParsedFrom, leadingIdent), leadingView, TriggerActions.Update);
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
-        {
-            return leadingView is not null
-                ? throw new NotSupportedException($"Multi-source UPDATE through a view ('{leadingView.Schema.Name}.{leadingView.Name}') isn't modeled — the alias-form FROM clause can't compose with the view's visibility predicate. Target the underlying table directly.")
-                : ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output, top, preParsedFrom);
-        }
+            return ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output, top, preParsedFrom);
 
         var table = RequireMutationTable(context, leadingIdent, leadingTable, "UPDATE");
         return ExecuteUpdateAgainstTable(context, leadingIdent, table, rawAssignments, output, top, targetHints.Serializable, leadingView);
@@ -621,7 +625,7 @@ partial class Simulation
             rowSource = [];
         else if (positionedCursor is null && Selection.MutationPlanStarts(table, where))
             RunUpdateStartupConstants(context, table, where is null ? [] : [where], assignments);
-        var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, table, positionedCursor is not null);
+        var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, positionedCursor is not null);
         // A seek chose its rows from the images they carried; one a wait here
         // let settle may carry another.
         if (positionedCursor is null && !readsNoRow && !table.SupersededKeyImages.IsEmptyLockFree()
@@ -1656,7 +1660,8 @@ partial class Simulation
         HeapTable table,
         Database database,
         View? sourceView = null,
-        BindErrorReport? bindErrors = null)
+        BindErrorReport? bindErrors = null,
+        string? derivedLabel = null)
     {
         var assignments = new List<(int Ordinal, Expression Expr)>(rawAssignments.Count);
         var assigned = new HashSet<int>();
@@ -1690,7 +1695,7 @@ partial class Simulation
                 }
                 columnOrdinal = sourceView.BaseColumnOrdinals[viewOrd];
                 if (columnOrdinal < 0)
-                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(DerivedFieldViewLabel(sourceView));
+                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(derivedLabel ?? DerivedFieldViewLabel(sourceView));
             }
             else
             {
