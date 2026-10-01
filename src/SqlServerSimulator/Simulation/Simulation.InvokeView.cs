@@ -246,6 +246,16 @@ partial class Simulation
             var effective = pushedPredicates is null
                 ? bodySelection
                 : bodySelection.PredicatePushdown?.Invoke(pushedPredicates) ?? bodySelection;
+            // A level over a partitioned view a write reads for one member
+            // reads only that member's branch, in the view's own types.
+            Selection? memberBranch = null;
+            if (outerBatch.PartitionedMemberRun is { } memberRun)
+            {
+                if (ReferenceEquals(memberRun.Partitioned, view))
+                    memberBranch = bodySelection.UnionAllBranches![memberRun.Member];
+                else
+                    innerBatch.PartitionedMemberRun = memberRun;
+            }
             // A plan drained for its rows' base addresses reading this view
             // asks for the address behind each view row, which the
             // re-encoding below would lose: the body then runs carrying the
@@ -256,8 +266,17 @@ partial class Simulation
                 var bodySchema = effective.Schema;
                 var width = Math.Min(columnCount, bodySchema.Length);
                 var leadingSchema = width == bodySchema.Length ? bodySchema : bodySchema[..width];
-                foreach (var values in effective.ExecuteWithRowAddresses(innerBatch))
+                foreach (var values in (memberBranch ?? effective).ExecuteWithRowAddresses(innerBatch))
                 {
+                    if (memberBranch is not null)
+                    {
+                        for (var i = 0; i < width; i++)
+                        {
+                            var type = leadingSchema[i];
+                            if (values[i].Type != type)
+                                values[i] = values[i].IsNull ? SqlValue.Null(type) : values[i].CoerceTo(type);
+                        }
+                    }
                     var bytes = RowEncoder.EncodeRow(leadingSchema, values.AsSpan(0, width));
                     if (values.Length > bodySchema.Length && !values[bodySchema.Length].IsNull)
                     {

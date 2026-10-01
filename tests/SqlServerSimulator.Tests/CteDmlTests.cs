@@ -149,9 +149,11 @@ public sealed class CteDmlTests
     /// A body a <c>UNION</c> tops derives every column, so an UPDATE, INSERT or
     /// MERGE writing one is Msg 4406, and a DELETE is Msg 4426 — the same under
     /// an <c>EXCEPT</c> or <c>INTERSECT</c> above it but for the DELETE, Msg
-    /// 4403 as a plain <c>EXCEPT</c> takes. Through a view over a stored
-    /// <c>UNION</c> view, Msg 4406 names the stored one (probed 2026-10-01
-    /// against SQL Server 2025).
+    /// 4403 as a plain <c>EXCEPT</c> takes, and Msg 4405 when the union's
+    /// first branch joins (a <c>MERGE</c>'s delete aside). Through a view over
+    /// a stored <c>UNION</c> view, Msg 4406 names the stored one bare, and
+    /// otherwise the target as written (probed 2026-10-01 against SQL Server
+    /// 2025).
     /// </summary>
     [TestMethod]
     [DataRow("with c as (select id, v from j union select k, n from m) update c set v = 1", 4406, "c")]
@@ -174,6 +176,19 @@ public sealed class CteDmlTests
     [DataRow("create view vun as select id, v from j union select k, n from m;\ncreate view vo as select * from vun;\ndelete vo", 4426, "vo")]
     [DataRow("create view vun as select id, v from j union select k, n from m;\ncreate view vo as select * from vun;\nupdate vo set v = 1", 4406, "vun")]
     [DataRow("create view vun as select id, v from j union select k, n from m;\ncreate view vo as select * from vun;\nwith c as (select * from vo) update c set v = 1", 4406, "vun")]
+    [DataRow("create view vun as select id, v from j union select k, n from m;\nupdate dbo.vun set v = 1", 4406, "dbo.vun")]
+    [DataRow("create view vun as select id, v from j union select k, n from m;\ncreate view vo as select * from vun;\nupdate dbo.vo set v = 1", 4406, "vun")]
+    [DataRow("create view vuj as select j.id, j.v from j join m on m.k = j.k union select k, n from m;\ndelete vuj", 4405, "vuj")]
+    [DataRow("create view vuj as select j.id, j.v from j, m union all select k, n from m;\ncreate view vo as select * from vuj;\ndelete dbo.vo", 4405, "dbo.vo")]
+    [DataRow("create view vjl as select k, n from m union all select j.id, j.v from j join m on m.k = j.k;\ndelete vjl", 4426, "vjl")]
+    [DataRow("with c as (select j.id, j.v from j join m on m.k = j.k union all select k, n from m) delete c", 4405, "c")]
+    [DataRow("delete d from (select j.id, j.v from j join m on m.k = j.k union all select k, n from m) d", 4405, "d")]
+    [DataRow("create view vuj as select j.id, j.v from j join m on m.k = j.k union select k, n from m;\nmerge vuj using (values (1)) s (x) on vuj.id = s.x when matched then delete;", 4426, "vuj")]
+    [DataRow("create view vd as select id, v + 1 d from j;\nupdate vd set d = 1", 4406, "vd")]
+    [DataRow("create view vd as select id, v + 1 d from j;\ninsert dbo.vd values (1, 1)", 4406, "dbo.vd")]
+    [DataRow("create view vd as select id, v + 1 d from j;\ninsert vd (id, d) values (1, 1)", 4406, "vd")]
+    [DataRow("create view vd as select id, v + 1 d from j;\nmerge vd using (values (1)) s (x) on vd.id = s.x when matched then update set d = 1;", 4406, "vd")]
+    [DataRow("create view vd as select id, v + 1 d from j;\ncreate view vd2 as select id, d from vd;\nupdate vd2 set d = 1", 4406, "vd2")]
     public void UnionBody_RefusesTheWrite(string sql, int number, string name)
     {
         var simulation = new Simulation();
@@ -183,6 +198,7 @@ public sealed class CteDmlTests
         var message = number switch
         {
             4403 => $"Cannot update the view or function '{name}' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator.",
+            4405 => $"View or function '{name}' is not updatable because the modification affects multiple base tables.",
             4406 => $"Update or insert of view or function '{name}' failed because it contains a derived or constant field.",
             _ => $"View '{name}' is not updatable because the definition contains a UNION operator.",
         };

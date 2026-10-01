@@ -149,7 +149,11 @@ partial class Simulation
     /// </summary>
     private static SimulatedNonQuery ProcessInsteadOfInsertOnView(View destinationView, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName)
     {
+        // Through a view or CTE over the triggered view the statement names
+        // the level's columns, each landing on the triggered view's own.
+        var level = InsteadOfLevel(context.Batch, ref destinationView, ref destinationName, TriggerActions.Insert);
         var viewColumns = destinationView.OutputColumns;
+        var statementColumns = level?.Columns ?? viewColumns;
 
         HeapColumn[] destinationColumns;
         var hasExplicitColumnList = context.Token is Operator { Character: '(' };
@@ -162,7 +166,7 @@ partial class Simulation
                     throw SimulatedSqlException.SyntaxErrorNear(context);
 
                 var columnName = column.Value;
-                var resolved = ResolveViewColumnForInsteadOf(context.Batch.CurrentDatabase.Collation, columnName, viewColumns);
+                var resolved = ResolveViewColumnForInsteadOf(context.Batch.CurrentDatabase.Collation, columnName, statementColumns);
                 if (usedColumns.Contains(resolved))
                     throw SimulatedSqlException.ColumnAssignedMoreThanOnce(resolved.Name);
                 usedColumns.Add(resolved);
@@ -178,7 +182,7 @@ partial class Simulation
         }
         else
         {
-            destinationColumns = viewColumns;
+            destinationColumns = statementColumns;
         }
 
         // OUTPUT reads the rows the trigger is handed, and its INTO rows land
@@ -220,16 +224,8 @@ partial class Simulation
             for (var i = 0; i < destinationColumns.Length; i++)
             {
                 var targetColumn = destinationColumns[i];
-                var ordinal = -1;
-                for (var j = 0; j < viewColumns.Length; j++)
-                {
-                    if (ReferenceEquals(viewColumns[j], targetColumn))
-                    {
-                        ordinal = j;
-                        break;
-                    }
-                }
-                rowValues[ordinal] = CoerceForInsert(sourceRow[i], targetColumn);
+                var ordinal = level?.ViewOrdinalOf(context.Batch.CurrentDatabase.Collation, targetColumn.Name) ?? Array.IndexOf(viewColumns, targetColumn);
+                rowValues[ordinal] = CoerceForInsert(sourceRow[i], viewColumns[ordinal]);
             }
             insertedRows.Add(rowValues);
             _ = output?.ProjectRow(context.Batch, insertedValues: rowValues, deletedValues: null);
@@ -311,7 +307,7 @@ partial class Simulation
                 try
                 {
                     tableColumn = joinViewPlan is null
-                        ? ResolveInsertTargetColumn(context.Batch.CurrentDatabase.Collation, columnName, destinationTable, destinationView)
+                        ? ResolveInsertTargetColumn(context.Batch.CurrentDatabase.Collation, columnName, destinationTable, destinationView, destinationName.ToString())
                         : joinViewPlan.Columns[columnName];
                 }
                 catch (SimulatedSqlException missing) when (bindErrors is not null && missing.Number == 207 && bindErrors.Covers(column))
@@ -362,7 +358,7 @@ partial class Simulation
             // the view doesn't project pick up their defaults or
             // implicit-NULL via the standard insert path.
             destinationColumns = destinationView is not null
-                ? BuildImplicitInsertColumnsForView(destinationView, destinationTable)
+                ? BuildImplicitInsertColumnsForView(destinationView, destinationTable, destinationName.ToString())
                 : [.. destinationTable.Columns.Where(IsImplicitInsertColumn)];
         }
 
@@ -1287,20 +1283,19 @@ partial class Simulation
         HeapColumn? identityColumn = null,
         HeapTable? destinationTable = null)
     {
-        var depth = 0;
-        while (context.Token is Operator { Character: '(' })
-        {
-            depth++;
+        // Only the parentheses wrapping the whole source are the source's own:
+        // in `(SELECT 1) UNION ALL (SELECT 2)` they open the first branch.
+        var depth = Selection.CountWrappingParentheses(context);
+        for (var i = 0; i < depth; i++)
             context.MoveNextRequired();
-        }
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.Select })
+        if (context.Token is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         // The parenthesized position is what makes the query parser read the
         // closing `)` as its terminator rather than as a stray token, and what
         // refuses the source query's own ORDER BY / FOR clause (Msg 156) while
         // anything nested inside it keeps the ordinary rules.
-        var rows = ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, QueryPosition.ParenthesizedInsertSource);
+        var rows = ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, depth > 0 ? QueryPosition.ParenthesizedInsertSource : QueryPosition.InsertSource);
 
         while (depth > 0)
         {
@@ -1584,7 +1579,7 @@ partial class Simulation
     /// — the per-touched-column gate matching SQL Server's "INSERT through
     /// view with a derived field touched" rejection.
     /// </summary>
-    private static HeapColumn ResolveInsertTargetColumn(Collation collation, string columnName, HeapTable destinationTable, View? destinationView)
+    private static HeapColumn ResolveInsertTargetColumn(Collation collation, string columnName, HeapTable destinationTable, View? destinationView, string writtenName)
     {
         if (destinationView is null)
         {
@@ -1598,7 +1593,7 @@ partial class Simulation
             {
                 var baseOrd = destinationView.BaseColumnOrdinals[i];
                 return baseOrd < 0
-                    ? throw SimulatedSqlException.ViewDmlTouchesDerivedField(DerivedFieldViewLabel(destinationView))
+                    ? throw SimulatedSqlException.ViewDmlTouchesDerivedField(writtenName)
                     : destinationTable.Columns[baseOrd];
             }
         }
@@ -1640,7 +1635,7 @@ partial class Simulation
         return [.. implicitList];
     }
 
-    private static HeapColumn[] BuildImplicitInsertColumnsForView(View destinationView, HeapTable baseTable)
+    private static HeapColumn[] BuildImplicitInsertColumnsForView(View destinationView, HeapTable baseTable, string writtenName)
     {
         var implicitList = new List<HeapColumn>();
         for (var i = 0; i < destinationView.OutputColumns.Length; i++)
@@ -1651,7 +1646,7 @@ partial class Simulation
             // than skipping the slot — Msg 4406 whatever the value count
             // (probe-confirmed against both a matching and a mismatching one).
             if (baseOrd < 0)
-                throw SimulatedSqlException.ViewDmlTouchesDerivedField(destinationView.Name);
+                throw SimulatedSqlException.ViewDmlTouchesDerivedField(writtenName);
             var col = baseTable.Columns[baseOrd];
             // The base table's identity and computed columns drop out of the
             // positional list; a projected rowversion / GENERATED ALWAYS column

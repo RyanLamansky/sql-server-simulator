@@ -25,6 +25,7 @@ The delegate's files are only ever read.
 
 `BULK INSERT target FROM 'file' [WITH ( option [, …] )]`: the target is a table, a synonym or an updatable view (a table variable is Msg 102), the path a string literal (a variable is Msg 102).
 The whole statement parses before the target resolves, so a syntax error outranks a missing table, which is **Msg 208 at state 160**.
+A partitioned view, or a view over one, is **Msg 4437** — see [`programmable.md`](programmable.md#partitioned-views).
 Options parse as [`BulkOptions`](../../src/SqlServerSimulator/Parser/BulkOptions.cs) documents: each at most once (**Msg 4130**), numbers as unsigned integer literals and text as string literals, else Msg 102; `CODEPAGE` is **Msg 16202** (class 15, at compile).
 `TABLOCK`, `ORDER`, `ROWS_PER_BATCH` and `KILOBYTES_PER_BATCH` carry no effect; an `ORDER` column the table lacks is Msg 4817, class 0, and the hint is ignored.
 

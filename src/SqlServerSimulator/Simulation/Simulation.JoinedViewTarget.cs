@@ -24,7 +24,7 @@ partial class Simulation
         for (var s = 0; s < sources.Count; s++)
         {
             if (sources[s].Qualifier is { } qualifier && collation.Equals(qualifier, leadingIdent.Leaf))
-                return sources[s].UpdatableView() is not null ? s : -1;
+                return sources[s].WriteTargetView() is not null ? s : -1;
         }
         if (leadingView is null)
             return -1;
@@ -120,8 +120,8 @@ partial class Simulation
         var targetIndex = JoinedViewTargetIndex(context, from, leadingIdent, leadingView);
         var sources = from.Sources.ToArray();
         var joins = from.Joins.ToArray();
-        var view = sources[targetIndex].UpdatableView()!;
-        if (sources.Length == 1 && HasInsteadOfTrigger(batch, view, TriggerActions.Update))
+        var view = sources[targetIndex].WriteTargetView()!;
+        if (sources.Length == 1 && (HasInsteadOfTrigger(batch, view, TriggerActions.Update) || InsteadOfTriggerViewUnder(batch, view, TriggerActions.Update) is not null))
             return ExecuteInsteadOfViewUpdate(context, InsteadOfTargetName(leadingIdent, sources[0], view), view, rawAssignments, top, serializableHint: false, from);
         if (view.PartitionedBase is not null && !HasInsteadOfTrigger(batch, view, TriggerActions.Update))
             return ExecutePartitionedViewUpdate(context, leadingIdent, view, rawAssignments, top, from, targetIndex, partitionedReads ?? []);
@@ -169,39 +169,45 @@ partial class Simulation
         Func<MultiPartName, SqlValue> resolveTuple = resolveAcrossTuple;
         var runtime = new RuntimeContext(resolveTuple, batch);
 
-        foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, batch, outerResolver: null))
+        // An APPLY's correlated body yields its rows as the join runs it,
+        // each carrying its base address into the statement's map.
+        using (ParserScope.Enter(ref batch.RowAddressProbe, target.Correlated ? Selection.AddressCarryingWalk : batch.RowAddressProbe))
         {
-            currentTuple = tuple;
-            if (where is not null && where.Run(runtime) != true)
-                continue;
-            if (tuple[targetIndex] is not { } viewRow || !target.Addresses.TryGetValue(viewRow, out var address) || !seen.Add(address))
-                continue;
+            foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, batch, outerResolver: null))
+            {
+                currentTuple = tuple;
+                if (where is not null && where.Run(runtime) != true)
+                    continue;
+                if (tuple[targetIndex] is not { } viewRow || !target.TryAddress(viewRow, out var address) || !seen.Add(address))
+                    continue;
 
-            // Judged as another session's write leaves it: the walk waits out,
-            // in U, a row that session holds, and judges it again.
-            var baseImage = target.Images[address];
-            var rowBytes = baseImage;
-            if (!batch.AwaitTargetRowWriters(table, address.Page, address.Slot, ref rowBytes))
-                continue;
-            var judged = ReferenceEquals(rowBytes, baseImage) || rowBytes.AsSpan().SequenceEqual(baseImage)
-                ? JudgeTuple(baseImage)
-                : Rejudge(address, rowBytes);
-            if (judged is not { } entry)
-                continue;
-            affected.Add((address.Page, address.Slot, entry.NewValues, entry.OldSnapshot));
-            judgedRows.Add((address.Page, address.Slot, rowBytes));
-            partners?.Note(address, currentTuple);
+                // Judged as another session's write leaves it: the walk waits out,
+                // in U, a row that session holds, and judges it again.
+                if (target.ImageAt(address) is not { } baseImage)
+                    continue;
+                var rowBytes = baseImage;
+                if (!batch.AwaitTargetRowWriters(table, address.Page, address.Slot, ref rowBytes))
+                    continue;
+                var judged = ReferenceEquals(rowBytes, baseImage) || rowBytes.AsSpan().SequenceEqual(baseImage)
+                    ? JudgeTuple(baseImage)
+                    : Rejudge(address, rowBytes);
+                if (judged is not { } entry)
+                    continue;
+                affected.Add((address.Page, address.Slot, entry.NewValues, entry.OldSnapshot));
+                judgedRows.Add((address.Page, address.Slot, rowBytes));
+                partners?.Note(address, currentTuple);
+            }
+
+            ApplyDmlTopCap(top, affected, batch);
+            HoldQualifyingRows(batch, table, affected, judgedRows, walkGeneration, RowLockPurpose.UpdatePreImage, (i, rowBytes) =>
+            {
+                if (Rejudge((affected[i].PageIndex, affected[i].SlotIndex), rowBytes) is not { } judged)
+                    return false;
+                affected[i] = (affected[i].PageIndex, affected[i].SlotIndex, judged.NewValues, judged.OldSnapshot);
+                partners?.Note((affected[i].PageIndex, affected[i].SlotIndex), currentTuple);
+                return true;
+            });
         }
-
-        ApplyDmlTopCap(top, affected, batch);
-        HoldQualifyingRows(batch, table, affected, judgedRows, walkGeneration, RowLockPurpose.UpdatePreImage, (i, rowBytes) =>
-        {
-            if (Rejudge((affected[i].PageIndex, affected[i].SlotIndex), rowBytes) is not { } judged)
-                return false;
-            affected[i] = (affected[i].PageIndex, affected[i].SlotIndex, judged.NewValues, judged.OldSnapshot);
-            partners?.Note((affected[i].PageIndex, affected[i].SlotIndex), currentTuple);
-            return true;
-        });
 
         return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], rowsLocked: true, partners: partners);
 
@@ -226,6 +232,8 @@ partial class Simulation
         // the join and WHERE, made current; null when none does.
         byte[]?[]? QualifyingTuple((int Page, int Slot) address, byte[] rowBytes)
         {
+            if (target.Correlated)
+                return CorrelatedQualifyingTuple(target, sources, joins, targetIndex, where, address, ref currentTuple, runtime);
             if (target.ViewRowOf(address, rowBytes) is not { } viewRow)
                 return null;
             foreach (var tuple in Selection.EnumerateJoinedRows(WithTargetNarrowedTo(sources, targetIndex, viewRow), joins, batch, outerResolver: null))
@@ -275,8 +283,8 @@ partial class Simulation
         var targetIndex = JoinedViewTargetIndex(context, from, leadingIdent, leadingView);
         var sources = from.Sources.ToArray();
         var joins = from.Joins.ToArray();
-        var view = sources[targetIndex].UpdatableView()!;
-        if (sources.Length == 1 && HasInsteadOfTrigger(batch, view, TriggerActions.Delete))
+        var view = sources[targetIndex].WriteTargetView()!;
+        if (sources.Length == 1 && (HasInsteadOfTrigger(batch, view, TriggerActions.Delete) || InsteadOfTriggerViewUnder(batch, view, TriggerActions.Delete) is not null))
             return ExecuteInsteadOfViewDelete(context, InsteadOfTargetName(leadingIdent, sources[0], view), view, top, serializableHint: false, from);
         if (view.PartitionedBase is not null && !HasInsteadOfTrigger(batch, view, TriggerActions.Delete))
             return ExecutePartitionedViewDelete(context, leadingIdent, view, top, from, targetIndex);
@@ -315,37 +323,43 @@ partial class Simulation
         SqlValue resolveAcrossTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, currentTuple, name, batch);
         var runtime = new RuntimeContext(resolveAcrossTuple, batch);
 
-        foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, batch, outerResolver: null))
+        // An APPLY's correlated body yields its rows as the join runs it,
+        // each carrying its base address into the statement's map.
+        using (ParserScope.Enter(ref batch.RowAddressProbe, target.Correlated ? Selection.AddressCarryingWalk : batch.RowAddressProbe))
         {
-            currentTuple = tuple;
-            if (where is not null && where.Run(runtime) != true)
-                continue;
-            if (tuple[targetIndex] is not { } viewRow || !target.Addresses.TryGetValue(viewRow, out var address) || !seen.Add(address))
-                continue;
+            foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, batch, outerResolver: null))
+            {
+                currentTuple = tuple;
+                if (where is not null && where.Run(runtime) != true)
+                    continue;
+                if (tuple[targetIndex] is not { } viewRow || !target.TryAddress(viewRow, out var address) || !seen.Add(address))
+                    continue;
 
-            // Judged as another session's write leaves it, as the joined
-            // UPDATE's are.
-            var baseImage = target.Images[address];
-            var rowBytes = baseImage;
-            if (!batch.AwaitTargetRowWriters(table, address.Page, address.Slot, ref rowBytes))
-                continue;
-            if (!ReferenceEquals(rowBytes, baseImage) && !rowBytes.AsSpan().SequenceEqual(baseImage) && !Qualifies(address, rowBytes))
-                continue;
-            deleted.Add((address.Page, address.Slot, FullImage(rowBytes)));
-            judgedRows.Add((address.Page, address.Slot, rowBytes));
-            partners?.Note(address, currentTuple);
+                // Judged as another session's write leaves it, as the joined
+                // UPDATE's are.
+                if (target.ImageAt(address) is not { } baseImage)
+                    continue;
+                var rowBytes = baseImage;
+                if (!batch.AwaitTargetRowWriters(table, address.Page, address.Slot, ref rowBytes))
+                    continue;
+                if (!ReferenceEquals(rowBytes, baseImage) && !rowBytes.AsSpan().SequenceEqual(baseImage) && !Qualifies(address, rowBytes))
+                    continue;
+                deleted.Add((address.Page, address.Slot, FullImage(rowBytes)));
+                judgedRows.Add((address.Page, address.Slot, rowBytes));
+                partners?.Note(address, currentTuple);
+            }
+
+            ApplyDmlTopCap(top, deleted, batch);
+            HoldQualifyingRows(batch, table, deleted, judgedRows, walkGeneration, RowLockPurpose.Delete, (i, rowBytes) =>
+            {
+                var (page, slot, _) = deleted[i];
+                if (!Qualifies((page, slot), rowBytes))
+                    return false;
+                deleted[i] = (page, slot, FullImage(rowBytes));
+                partners?.Note((page, slot), currentTuple);
+                return true;
+            });
         }
-
-        ApplyDmlTopCap(top, deleted, batch);
-        HoldQualifyingRows(batch, table, deleted, judgedRows, walkGeneration, RowLockPurpose.Delete, (i, rowBytes) =>
-        {
-            var (page, slot, _) = deleted[i];
-            if (!Qualifies((page, slot), rowBytes))
-                return false;
-            deleted[i] = (page, slot, FullImage(rowBytes));
-            partners?.Note((page, slot), currentTuple);
-            return true;
-        });
 
         return CommitDelete(context, table, deleted, output, rowsLocked: true, partners: partners);
 
@@ -363,6 +377,8 @@ partial class Simulation
         // and passes the join and WHERE with some partner.
         bool Qualifies((int Page, int Slot) address, byte[] rowBytes)
         {
+            if (target.Correlated)
+                return CorrelatedQualifyingTuple(target, sources, joins, targetIndex, where, address, ref currentTuple, runtime) is not null;
             if (target.ViewRowOf(address, rowBytes) is not { } viewRow)
                 return false;
             foreach (var tuple in Selection.EnumerateJoinedRows(WithTargetNarrowedTo(sources, targetIndex, viewRow), joins, batch, outerResolver: null))
@@ -373,6 +389,32 @@ partial class Simulation
             }
             return false;
         }
+    }
+
+    /// <summary>
+    /// The first tuple a joined write through an <c>APPLY</c>'s correlated
+    /// body yields whose target row shows the base row at
+    /// <paramref name="address"/> and passes the <c>WHERE</c>, made current;
+    /// null when none does. The body's rows depend on the left side's, so the
+    /// whole join runs again rather than one narrowed to the row.
+    /// </summary>
+    private static byte[]?[]? CorrelatedQualifyingTuple(
+        ViewTargetRows target,
+        FromSource[] sources,
+        JoinSpec[] joins,
+        int targetIndex,
+        BooleanExpression? where,
+        (int Page, int Slot) address,
+        ref byte[]?[] currentTuple,
+        RuntimeContext runtime)
+    {
+        foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, runtime.Batch, outerResolver: null))
+        {
+            currentTuple = tuple;
+            if (tuple[targetIndex] is { } viewRow && target.TryAddress(viewRow, out var at) && at == address && (where is null || where.Run(runtime) == true))
+                return tuple;
+        }
+        return null;
     }
 
     /// <summary>
@@ -464,7 +506,7 @@ partial class Simulation
                     throw SimulatedSqlException.ViewDmlTouchesDerivedField(view.IsDerivedTable ? written : view.UnionOwnerName ?? written, view.IsDerivedTable);
             }
         }
-        throw NonUpdatableViewError(view, written);
+        throw NonUpdatableViewError(view, written, action == TriggerActions.Delete);
     }
 
     /// <summary>
@@ -599,6 +641,30 @@ partial class Simulation
         private Func<SqlValue[], int, SqlValue>? readDerived;
 
         /// <summary>
+        /// An <c>APPLY</c>'s correlated body (<see cref="View.IsCorrelated"/>),
+        /// whose rows the join yields as it runs the body against each left
+        /// row, each recorded against its base address in the statement's
+        /// <see cref="StatementContext.RowAddresses"/> map.
+        /// </summary>
+        public readonly bool Correlated = view.IsCorrelated;
+
+        /// <summary>The base address the target slot's <paramref name="viewRow"/> shows.</summary>
+        public bool TryAddress(byte[] viewRow, out (int Page, int Slot) address) =>
+            this.Addresses.TryGetValue(viewRow, out address)
+            || (this.Correlated && batch.CurrentStatement.RowAddresses is { } map && map.TryGet(viewRow, out address));
+
+        /// <summary>The image the base row at <paramref name="address"/> is judged on, read when the join first reaches it.</summary>
+        public byte[]? ImageAt((int Page, int Slot) address)
+        {
+            if (this.Images.TryGetValue(address, out var image))
+                return image;
+            if (!this.Correlated || table.Heap.ReadLiveRow(address.Page, address.Slot) is not { } live)
+                return null;
+            this.Images[address] = live;
+            return live;
+        }
+
+        /// <summary>
         /// The view row the base row at <paramref name="address"/> shows as
         /// <paramref name="baseImage"/>, encoded for the target slot: each
         /// direct column read off the image, a derived one computed from it —
@@ -661,6 +727,11 @@ partial class Simulation
 
         var source = sources[targetIndex];
         var target = new ViewTargetRows(batch, view, table, source);
+        if (target.Correlated)
+        {
+            batch.CurrentStatement.RowAddresses ??= new();
+            return target;
+        }
         var rows = new List<byte[]>();
         foreach (var (row, address) in ViewRowsWithAddresses(batch, view))
         {

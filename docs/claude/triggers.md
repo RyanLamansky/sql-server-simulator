@@ -154,6 +154,7 @@ INSERTED / DELETED are the view's own columns, derived ones computed as the view
   A positioned UPDATE / DELETE (`WHERE CURRENT OF`) through an updatable view keeps the base-row path, where a derived column reads NULL in the pseudo-tables.
 - **MERGE** into a view whose INSTEAD OF triggers take its actions matches against the view's rows under its column names, and hands the triggers view-shaped rows the same way (`Simulation.Merge.cs`, the view-rows target).
   A MERGE into a view real can't write through, with no trigger to take it, binds its `WHEN` clauses against the view's columns first: a derived `UPDATE SET` target or `INSERT` column — listed or implied — is Msg 4406, anything else the view's Msg 4403 / 4405.
+- **A level over the triggered view** — a view, CTE or derived table reading it as its single source — hands the trigger the rows it shows, its statement naming the level's columns → [`programmable.md`](programmable.md#writes-through-a-cte-or-derived-table).
 - **OUTPUT**: to the client it is Msg 334 as on any triggered target; `OUTPUT … INTO` lands its rows before the body runs.
   INSERT's `INSERTED` reads the rows handed to the trigger, `DELETED` reads the view's rows, and `INSERTED` under an UPDATE — or under any MERGE into a triggered view, an INSERT-only one included — is **Msg 404** per column, the would-be row never being formed.
   A table target with an INSTEAD OF UPDATE / DELETE trigger writes its `OUTPUT … INTO` rows too, and fires on an UPDATE matching no row.

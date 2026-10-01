@@ -119,11 +119,33 @@ partial class Simulation
         View? insteadOfView = null;
         if (batch.TryResolveView(name, out var view))
         {
+            // A partitioned view, or a view over one, takes no bulk load once
+            // its members qualify (Msg 4437), which real settles as it compiles
+            // the statement, a file it can't read deferring that (probed
+            // 2026-10-01 against SQL Server 2025).
+            if (view.PartitionedBase is { } partitioned)
+            {
+                if (batch.Connection.Simulation.ReadBulkFile(path) is null)
+                {
+                    if (batch.IsSkipping)
+                        yield break;
+                    if (!batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.AdministerBulkOperations))
+                        throw SimulatedSqlException.BulkLoadPermissionDenied();
+                    _ = ReadBulkFileFor(batch, path, missingState: 1);
+                }
+                _ = AnalyzePartitionedView(batch, partitioned, PartitionedMembers(batch, partitioned, name.ToString(), PartitionedWrite.Insert));
+                throw SimulatedSqlException.PartitionedViewBulkTarget(PartitionedViewLabel(partitioned));
+            }
+
             // FIRE_TRIGGERS hands a view's rows to its INSTEAD OF trigger;
             // without it they reach the base table (probed 2026-09-29).
             if (options.FireTriggers && HasInsteadOfTrigger(batch, view, TriggerActions.Insert))
                 insteadOfView = view;
-            table = view.BaseTable ?? throw NonUpdatableViewError(view, name.ToString());
+            // A load fills every column, so a derived one refuses it as an
+            // INSERT without a column list is refused (Msg 4406).
+            table = view.BaseTable ?? throw (view.DerivedOutputColumns is { } derived && Array.IndexOf(derived, true) >= 0
+                ? SimulatedSqlException.ViewDmlTouchesDerivedField(view.UnionOwnerName ?? name.ToString())
+                : NonUpdatableViewError(view, name.ToString()));
             fileColumns = view.OutputColumns;
             baseOrdinals = view.BaseColumnOrdinals;
         }

@@ -48,7 +48,23 @@ partial class SimulatedSqlException
     /// ending the session and rolling its transaction back with no
     /// <c>CATCH</c> able to intercept it (probed 2026-09-30 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException SessionKilled()
+    internal static SimulatedSqlException SessionKilled() => KillState(attention: true);
+
+    /// <summary>
+    /// What real answers a joined <c>UPDATE</c> whose target is a table value
+    /// constructor on an <c>APPLY</c>'s right side reading its left side,
+    /// <c>UPDATE d SET id = 5 FROM u CROSS APPLY (VALUES (u.id)) d(id)</c>:
+    /// the session ends, even when the batch only compiles the statement
+    /// (probed 2026-10-01 against SQL Server 2025). The caller marks the
+    /// connection so the command closes it once this has been delivered.
+    /// </summary>
+    internal static SimulatedSqlException ConstructedRowsApplyUpdateEndsSession() => KillState(attention: false);
+
+    /// <summary>
+    /// Msg 596 at severity 21, then the severity-20 Msg 0 SqlClient reports a
+    /// severed command with, ending the session and rolling its transaction back.
+    /// </summary>
+    private static SimulatedSqlException KillState(bool attention)
     {
         List<SimulatedError> entries =
         [
@@ -59,7 +75,7 @@ partial class SimulatedSqlException
         {
             AbortsTransaction = true,
             EndsSession = true,
-            IsAttention = true,
+            IsAttention = attention,
         };
     }
 

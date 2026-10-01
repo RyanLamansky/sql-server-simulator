@@ -486,15 +486,18 @@ DELETE never fires Msg 550 (a row leaving the view is fine).
 **Errors** (all probe-confirmed verbatim against SQL Server 2025):
 - **Msg 4403**: INSERT / UPDATE / DELETE through a view with aggregate / DISTINCT / GROUP BY — when the write names only plain columns.
   One naming a derived column (an aggregate, an expression, or a column an underlying view derived; an INSERT without a list names them all) is Msg 4406 instead, and an unknown name Msg 207, since real binds the written columns before refusing (`View.DerivedOutputColumns`, probed 2026-09-25).
-  These refusals name the view as the statement wrote it, and in a batch whose compile deferred the target (a `#temp` the batch creates) they end the batch as real's compile-time refusal does.
+  These refusals name the view as the statement wrote it — `v` or `dbo.v`, Msg 4406 included (probed 2026-10-01 against SQL Server 2025) — and in a batch whose compile deferred the target (a `#temp` the batch creates) they end the batch as real's compile-time refusal does.
   Body of the message names the view (`"Cannot update the view or function 'dbo.v' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator."`).
 - **Msg 4426** (`View 'c' is not updatable because the definition contains a UNION operator.`): DELETE through a view or CTE whose body a `UNION` or `UNION ALL` tops, or that reads one; an UPDATE or INSERT through one is Msg 4406, every column being derived, and an unknown column Msg 207 first.
+  When the union's **first** branch reads several sources, a `DELETE` is Msg 4405 instead, through a view over it, a CTE and a derived table alike — a later branch's join and a `MERGE`'s delete keep 4426 (`View.UnionLeadsWithJoin`, probed 2026-10-01 against SQL Server 2025).
   An `EXCEPT` or `INTERSECT` over a `UNION` is Msg 4406 to an UPDATE and Msg 4403 to a DELETE, as a plain `EXCEPT` is to both (probed 2026-10-01 against SQL Server 2025, MERGE taking the refusal of its actions).
-  Through a view reading a stored `UNION` view, Msg 4406 names the `UNION` view rather than the one written (`View.UnionOwnerName`), where a CTE's names the target as written.
+  Through a view reading a stored `UNION` view, Msg 4406 names the `UNION` view bare rather than the one written (`View.UnionOwnerName`), where the `UNION` view itself and a CTE are named as written.
   A stored `UNION ALL` view each of whose branches reads one table plainly is a [partitioned view](#partitioned-views), refused by that feature's own rules when its members don't qualify; one with a filtered, joined, grouped or view-reading branch, or a member with a computed column, refuses as a plain union.
 - **Msg 4405**: DELETE through a multi-source view, an INSERT whose column list doesn't name one base table's columns, and an UPDATE whose SET list spans two of them.
   Real raises the same for all three (state 1, `"View or function 'dbo.v' is not updatable because the modification affects multiple base tables."`) — a DELETE removes a whole row and so touches every base table whatever the view projects.
 - **Msg 4406**: INSERT or UPDATE touched a derived projection column.
+  A body reading a table value constructor or a built-in rowset function — `VALUES`, `OPENJSON`, `STRING_SPLIT`, directly or through a view, CTE or derived table — takes every column as derived, so every write through it is Msg 4406, a `DELETE` included, and an `UPDATE` of a derived table Msg 4421; a joined write naming the constructor or rowset function itself as its target refuses the same way (`ViewUpdatabilityRejection.ConstructedRows`, `FromSource.ConstructsRows`, probed 2026-10-01 against SQL Server 2025).
+  An `UPDATE` of a constructor reading an `APPLY`'s left side — `UPDATE d SET id = 5 FROM u CROSS APPLY (VALUES (u.id)) d(id)` — ends the session on real, even in a branch the batch never takes, and here too.
   Per-column gate — a view with mixed direct + derived columns accepts INSERT/UPDATE on the direct columns and DELETE through it works fine.
   Msg 4405 and Msg 4406 are both raised as the **left-to-right walk of the list meets them**, so a derived target beside a single other one reports 4406 whichever order they appear in, and only a list whose earlier pair already spans two base tables reports 4405 ahead of a derived column behind it (probe-confirmed on both verbs).
 - **Msg 550**: WITH CHECK OPTION violation (covers chain spans).
@@ -514,11 +517,8 @@ The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row sele
 
 **Fidelity gaps**:
 - **A derived view column read in an `UPDATE … SET` value** — `UPDATE v SET o = s2` where `s2` is `s + ''` in the view — is Msg 207 here; real reads it (probed 2026-09-27 against SQL Server 2025).
-- **WHERE referencing a derived upstream column** (a chained view's WHERE that references an expression-projected column from the level below) marks the view as not-updatable with `ViewUpdatabilityRejection.UnsupportedShape` → Msg 4403 at DML.
-  Real SQL Server's behavior on this specific niche shape isn't probe-confirmed; the simulator errs on the side of rejection.
-- **An `APPLY`'s derived table as a joined write's target** (`UPDATE d SET … FROM u CROSS APPLY (SELECT … FROM t WHERE t.id = u.id) d`), a table value constructor's and a rowset function's raise `NotSupportedException`, where real writes the first through and refuses the others with Msg 4421 / 4406.
-- **A body over a rowset function or a table value constructor** — a view over `OPENJSON` or `VALUES`, or a derived table over one — is Msg 4403 / 4418 here, where real takes every column as derived: Msg 4406 / 4421, a `DELETE` included (probed 2026-10-01 against SQL Server 2025).
-- **An `INSTEAD OF` trigger on a view a derived table reads** (`UPDATE vi SET … FROM (SELECT * FROM vi) vi`) is passed by, the write reaching the base table, where real fires the trigger.
+- **WHERE referencing a derived upstream column** (a chained view's WHERE that references an expression-projected column from the level below) marks the view as not-updatable with `ViewUpdatabilityRejection.UnsupportedShape`, refused at DML.
+  Real writes through it: probed 2026-10-01 against SQL Server 2025, `UPDATE ww SET v = rn` through `SELECT k, v, rn FROM w WHERE c > 0`, `c` a `COUNT(*) OVER ()` of the view below over a partitioned view, updates every row, where the simulator raises Msg 4406.
 
 ## A joined write through a view
 
@@ -545,7 +545,13 @@ A stored view whose body is a CTE passes writes through the same way.
 See [`ctes.md`](ctes.md#dml-through-a-cte).
 
 A derived table is the same unstored view over its body (`DerivedTableDmlView`, cached on the source's `DerivedTableBinding`), so a view, CTE or join view reading one writes through it to the table it reads, its filter and row limit applied, and a joined write may name one as its target (probed 2026-10-01 against SQL Server 2025).
-An `APPLY`'s correlated body carries no binding, so nothing writes through it.
+
+An `APPLY`'s correlated body is a derived table only to a joined write naming it as its target (`DerivedTableBinding.Correlated`, `FromSource.WriteTargetView`), which real writes through to the table it reads, each base row once, a row-limited body's `TOP` picking per left row (probed 2026-10-01 against SQL Server 2025).
+Its rows depend on the left row, so they can't be read once up front: the walk installs `Selection.AddressCarryingWalk` as the row-address probe, so the body records each row it yields against its base address as the join runs it, and a row another session's write changed is judged again by running the whole join (`CorrelatedQualifyingTuple`).
+Its `WHERE` reads the left side, so the analysis reads no visibility check off it (`View.IsCorrelated`).
+
+A view, CTE or derived table whose single source is a view carrying an `INSTEAD OF` trigger for the action hands that trigger the view's rows it shows — its filter applied, the statement's `WHERE`, `SET` and `INSERT` column list naming its columns — as a write naming the triggered view would, for the joined form naming it alone and the forms with no `FROM` clause; a derived column it adds is Msg 4406 (4421 for a derived table), and nothing reaches the base table (`InsteadOfLevelView`, probed 2026-10-01 against SQL Server 2025 for `UPDATE`, `DELETE` and `INSERT`).
+Only the level directly over the triggered view is looked through.
 
 ## DML through a join view
 
@@ -634,19 +640,32 @@ There is no catalog surface: real exposes no `OBJECTPROPERTY` for it.
 - A member without a primary key is Msg 4440; a key column the union carries converted (a member's type differs from the union's, a string's or binary's length aside) or not at all Msg 4444; keys in other view columns than the first member's Msg 4445.
 - The partitioning column is the first view column that every member carries as itself and whose trusted, enabled CHECK constraints over that column alone keep the members' values — NULL included — apart, read through `ValueDomain` with real's partitioned-view reading: `NOT`, `<>`, `NOT BETWEEN` and `NOT IN` over an exact shape are the complement, and an integer bounded by a fraction (`k < 10.5`) rounds.
   `LIKE`, a function of the column, a CHECK over two columns or a disabled / untrusted / `NOT FOR REPLICATION` one constrain nothing.
+  Real reads each constraint alone, never several's intersection: two members are apart when one constraint of each keeps them so, and `k < 12` beside `k NOT BETWEEN 10 AND 11` partitions nothing from a `10 … 19` member (probed 2026-10-01 against SQL Server 2025).
   None is Msg 4436 state 12, and one found outside the primary keys state 13.
+- A member column converted to the type it already has — `CAST(v AS int)` or `CONVERT(int, v)` over an `int` column — is the column itself to a write, though a key column so written still fails the key check (Msg 4444, probed 2026-10-01).
 
 **What the write may do** comes after (`RefusePartitionedWrite`): a written column the union derives is Msg 271 (state 3 on `INSERT`, 2 on `UPDATE`); a member column the view doesn't deliver Msg 4438 (state 17 / 16 / 14 / 18 for an `INSERT`, an `UPDATE`, an `UPDATE` of the partitioning column and a `DELETE`); a member's identity column refuses an `INSERT` (4433), a member's `rowversion` column an `INSERT` or `UPDATE` (4431), and a member's `INSTEAD OF` trigger every write (4434).
 An `UPDATE` of the partitioning column may move a row to another member, which inserts the row whole: every column must then be one the union doesn't derive (Msg 271, checked after 4438), and it is refused by a member's identity (4450), a cascading key referencing a member (4452), a member's DML trigger (4453) and member column types that differ (4454 for the partitioning column, 4456 for another; an `INSERT` takes 4454 too).
 Ahead of all of it: `OUTPUT` is Msg 489, `TOP` Msg 417, a `DEFAULT` (or `DEFAULT VALUES`) Msg 4449, a statement reading a member table — in its source, `WHERE`, `SET` values or another `FROM` source, the view itself counting as its first member — Msg 4439, and a `MERGE` target Msg 5317.
 An `INSERT` naming fewer than every column is Msg 4448, after the members' checks.
 
-**Routing**: each row goes to the member whose constraints admit its partitioning value; a row none admits, NULL included, is **Msg 4457**, which ends the batch with an open transaction left standing and is raised only after the members' own writes, whose errors (a duplicate key) come first whatever the row order.
+**Routing**: each row goes to the first member, in the union's order, whose **first-created** constraint over the partitioning column admits its partitioning value — the others meet it there, so with `k >= 0` created ahead of `k < 10` a `12` lands in that member and fails the second with Msg 547 (probed 2026-10-01 against SQL Server 2025); a row none admits, NULL included, is **Msg 4457**, which ends the batch with an open transaction left standing and is raised only after the members' own writes, whose errors (a duplicate key) come first whatever the row order.
 An `UPDATE` deletes every row it moves out of its member first, then updates the rows staying put, then inserts the moved rows into their new members, so rows trading members pass; a moved row's constraint refusals name the `UPDATE`.
 The members are written last to first, which is the order their triggers fire in, each only for its own rows, and `@@ROWCOUNT` counts the view's rows.
 `WITH CHECK OPTION` on a view over the partitioned view isn't enforced, as on real.
 
-**Not modeled yet**: a positioned write, a level over the partitioned view that limits its rows or projects a window, and a statement reading a column such a level derives raise `NotSupportedException`; `BULK INSERT` into one is the plain union's Msg 4426 where real raises Msg 4437; real's routing of a member carrying two CHECKs over the partitioning column follows only one of them (`k >= 0` and `k < 10` routes `12` to it, then fails the other with Msg 547), where the simulator intersects them; a no-op `CAST(v AS int)` over an `int` member column reads as derived here and direct on real; and a view body written `(SELECT …) UNION ALL (SELECT …)` is Msg 156 at `CREATE VIEW` here, where real creates it.
+**A level over the partitioned view that limits its rows, projects a window or derives a column** shows each member's rows as its body yields them for that member alone, which is how real evaluates it (probed 2026-10-01 against SQL Server 2025): a `TOP` picks each member's own rows (`UPDATE` through `SELECT TOP 1 … ORDER BY v DESC` over two members writes two rows), and a window numbers and frames each member's rows apart, in the order the member reads them, its `ORDER BY` ignored — `ROW_NUMBER()` counts in key order, `RANK()` is 1 everywhere, `COUNT(*) OVER ()` is the member's count, while `PARTITION BY` keeps its meaning.
+The walk runs the level's body once per member with `BatchContext.PartitionedMemberRun` set, under which the partitioned view's reference yields only that member's branch (`InvokeViewCore`) and the window engine gives every row the first row's order keys; a derived column the statement reads is the level's own value.
+
+**A positioned write** never passes: a cursor reading a partitioned view is a `Snapshot | Read Only` cursor, so naming a level over it is Msg 16929 and naming another table Msg 16933, each followed by Msg 3621.
+Naming the partitioned view itself while the cursor reads it — directly, through a view, a derived table or a join, opened or not — ends the session on real (Msg 596 then the severity-20 Msg 0, its transaction rolled back, probed 2026-10-01 against SQL Server 2025), and here too (`Cursor.PartitionedViewsRead`).
+
+**`BULK INSERT`** into a partitioned view or a view over one is Msg 4437 state 4 naming the partitioned view, once its members qualify; real settles it while the batch compiles when the file can be read, so an untaken branch holding it ends the batch, and a missing file is Msg 4860 first (probed 2026-10-01).
+Into a union that is no partitioned view the load meets the refusal an `INSERT` naming every column does — Msg 4406, naming the view as written.
+
+**Divergences**: real's session-ending answer to a positioned write drops the row count of the statement before it, which the simulator still sends.
+
+**Not modeled yet**: distributed members over a linked server.
 
 ## Stored procedures
 `CREATE [OR ALTER] PROCEDURE schema.name [(@p type [= default] [OUTPUT], ...)] [WITH options] AS body` lives in `Schema.Procedures`.

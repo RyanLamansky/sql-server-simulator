@@ -531,12 +531,14 @@ internal abstract class BooleanExpression : ExpressionNode
         // Redundant parentheses around the subquery are legal at any depth —
         // EXISTS((SELECT ...)), EXISTS(((SELECT ...))), … (probe-confirmed
         // against SQL Server 2025; DacFx emits the doubly-parenthesized form
-        // in its extended-properties reverse-engineering query). Consume the
-        // extra opening parens and demand a matching close-paren count.
-        var extraParens = 0;
-        while (context.GetNextRequired() is Operator { Character: '(' })
-            extraParens++;
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.Select })
+        // in its extended-properties reverse-engineering query) — and so is a
+        // set operation of parenthesized branches, EXISTS((SELECT 1) UNION
+        // (SELECT 2)); the query parse reads both.
+        context.MoveNextRequired();
+        var extraParens = Selection.CountWrappingParentheses(context);
+        for (var i = 0; i < extraParens; i++)
+            context.MoveNextRequired();
+        if (context.Token is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var inner = Expression.ParseSubqueryRejectingNextValueFor(context, QueryPosition.Exists);
         for (var i = 0; i <= extraParens; i++)
@@ -655,8 +657,11 @@ internal abstract class BooleanExpression : ExpressionNode
             var kind = quantifier == Keyword.All ? QuantifiedKind.All : QuantifiedKind.Any;
             if (context.GetNextRequired() is not Operator { Character: '(' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select }
+                && !(context.Token is Operator { Character: '(' } && Selection.LeadsParenthesizedQuery(context, closeCounts: true)))
+            {
                 throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
             var inner = Expression.ParseSubqueryRejectingNextValueFor(context);
             context.SubqueriesParsed++;
             if (inner.Schema.Length != 1)
@@ -829,7 +834,13 @@ internal abstract class BooleanExpression : ExpressionNode
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Select })
+        // `IN ((SELECT …))` stays a list of one parenthesized subquery.
+        if (context.Token switch
+        {
+            ReservedKeyword { Keyword: Keyword.Select } => true,
+            Operator { Character: '(' } => Selection.LeadsParenthesizedQuery(context, closeCounts: false),
+            _ => false,
+        })
         {
             var inner = Expression.ParseSubqueryRejectingNextValueFor(context);
             if (inner.Schema.Length != 1)
@@ -843,7 +854,7 @@ internal abstract class BooleanExpression : ExpressionNode
 
         var report = context.Batch.BindErrors;
         List<(int Start, int End)>? elementSpans = report is null ? null : [];
-        var elementStart = context.Token?.StartIndex ?? 0;
+        var elementStart = context.Token!.StartIndex;
         var candidates = new List<Expression> { Expression.Parse(context) };
         while (context.Token is Operator { Character: ',' })
         {

@@ -362,6 +362,16 @@ internal sealed class BatchContext
     public Selection? RowAddressProbe;
 
     /// <summary>
+    /// Set while a write through a level over a partitioned view reads that
+    /// level's rows for one member, which real evaluates per member: a
+    /// reference to the partitioned view then yields only that member's rows,
+    /// and a window function numbers or frames them with its <c>ORDER BY</c>
+    /// ignored (see <c>Simulation.PartitionedView.cs</c>). A view body the run
+    /// reads inherits it. Null otherwise.
+    /// </summary>
+    public PartitionedMemberRun? PartitionedMemberRun;
+
+    /// <summary>
     /// Binder errors gathered while a module body or a batch binds, non-null
     /// only on the bind batch (<see cref="CreateTimeBinding"/>). Real reports <em>every</em>
     /// binder error a body contains rather than stopping at the first

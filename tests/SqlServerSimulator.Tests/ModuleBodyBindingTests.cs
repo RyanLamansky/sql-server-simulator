@@ -485,13 +485,9 @@ public sealed class ModuleBodyBindingTests
     public void UnmodeledFeatureInBody_DoesNotBlockTheCreate()
     {
         var sim = WithFixture();
-        sim.ExecuteBatches(
-            "create table dbo.pm1 (k int not null primary key check (k < 10), v int)",
-            "create table dbo.pm2 (k int not null primary key check (k >= 10), v int)",
-            "create view dbo.vpm as select k, v from dbo.pm1 union all select k, v from dbo.pm2",
-            // A positioned write through a partitioned view is the unmodeled
-            // shape here; it binds cleanly and only the execution finds the gap.
-            "create procedure dbo.punmodeled as update dbo.vpm set v = 1 where current of c");
+        // DBCC PAGE is the unmodeled shape here; it binds cleanly and only the
+        // execution finds the gap.
+        sim.ExecuteBatches("create procedure dbo.punmodeled as dbcc page (0, 1, 0, 0)");
         AreEqual(1, ObjectCount(sim, "punmodeled"));
         _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("exec dbo.punmodeled"));
     }

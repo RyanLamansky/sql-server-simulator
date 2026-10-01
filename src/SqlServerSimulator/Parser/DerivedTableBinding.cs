@@ -6,8 +6,15 @@ namespace SqlServerSimulator.Parser;
 /// view's or CTE's source, and as a joined <c>UPDATE</c> / <c>DELETE</c>'s
 /// target (probed 2026-10-01 against SQL Server 2025).
 /// </summary>
-internal sealed class DerivedTableBinding(Selection body, string alias, string[] columnNames, Database database)
+internal sealed class DerivedTableBinding(Selection body, string alias, string[] columnNames, Database database, bool correlated = false)
 {
+    /// <summary>
+    /// An <c>APPLY</c>'s right side, whose rows depend on the left side's
+    /// current row: only a joined write naming it as its target writes
+    /// through it (<see cref="FromSource.WriteTargetView"/>).
+    /// </summary>
+    public readonly bool Correlated = correlated;
+
     public readonly Selection Body = body;
 
     /// <summary>The alias, which every refusal of a write through the derived table names.</summary>

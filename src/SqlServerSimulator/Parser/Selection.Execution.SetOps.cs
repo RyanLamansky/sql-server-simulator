@@ -151,7 +151,7 @@ internal sealed partial class Selection
     /// </param>
     internal static Selection CombineSetOps(Selection left, Selection right, SetOpKind kind, bool namesOwnCollation)
     {
-        if (left.HasOrderBy)
+        if (left.HasOrderBy && !left.OrdersOwnRows)
         {
             var setOpKeyword = kind switch
             {

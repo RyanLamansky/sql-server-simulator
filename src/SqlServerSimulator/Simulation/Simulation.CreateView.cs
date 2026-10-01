@@ -126,13 +126,12 @@ partial class Simulation
         // statement-starting keyword OR the trailing WITH CHECK OPTION.
         context.MoveNextRequired();
         // The body may be parenthesized, to any depth (probed 2026-09-25
-        // against SQL Server 2025); the stored body is the query inside.
-        var bodyParens = 0;
-        while (context.Token is Operator { Character: '(' })
-        {
-            bodyParens++;
+        // against SQL Server 2025); the stored body is the query inside. A
+        // body opening with a parenthesized set-operation branch,
+        // `(SELECT …) UNION ALL (SELECT …)`, keeps those parentheses.
+        var bodyParens = Selection.CountWrappingParentheses(context);
+        for (var i = 0; i < bodyParens; i++)
             context.MoveNextRequired();
-        }
         var commandText = context.Command.CommandText;
         var bodyStart = context.Token?.StartIndex
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -239,7 +238,8 @@ partial class Simulation
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             DerivedOutputColumns = DerivedOutputColumnsFor(bodySelection, baseTable, rejectionReason, outputColumns.Length),
-            UnionOwnerName = UnionOwnerNameOf(bodySelection, rejectionReason, viewName.Leaf),
+            UnionOwnerName = UnionOwnerNameOf(bodySelection, rejectionReason),
+            UnionLeadsWithJoin = UnionLeadsWithJoinOf(bodySelection, rejectionReason),
             IsRowLimited = IsRowLimitedBody(bodySelection),
             IsWindowed = IsWindowedBody(bodySelection),
             VolatileColumns = bodySelection.VolatileColumns,

@@ -7,6 +7,18 @@ namespace SqlServerSimulator;
 // statement wrote; the states that vary by statement are the caller's.
 partial class SimulatedSqlException
 {
+    /// <summary>
+    /// What real answers a positioned <c>UPDATE</c> / <c>DELETE</c> naming a
+    /// partitioned view while its cursor reads that view, by any path (directly,
+    /// through a view, a derived table or a join), opened or not: the session
+    /// ends — Msg 596 at severity 21, then the severity-20 Msg 0 SqlClient
+    /// reports a severed command with — its transaction rolled back and no
+    /// <c>CATCH</c> able to intercept it (probed 2026-10-01 against SQL Server
+    /// 2025). The caller marks the connection so the command closes it once
+    /// this has been delivered.
+    /// </summary>
+    internal static SimulatedSqlException PositionedWriteThroughPartitionedViewEndsSession() => KillState(attention: false);
+
     /// <summary>Mimics SQL Server's Msg 417 — <c>TOP</c> on an <c>UPDATE</c> or <c>DELETE</c> through a partitioned view.</summary>
     internal static SimulatedSqlException TopOnPartitionedView() =>
         new("TOP is not allowed in an UPDATE or DELETE statement against a partitioned view.", 417, 16, 1);
@@ -34,6 +46,10 @@ partial class SimulatedSqlException
     /// <summary>Mimics SQL Server's Msg 4436 — no column the members' CHECK constraints partition (state 12), or one outside their primary keys (state 13).</summary>
     internal static SimulatedSqlException UnionAllViewNoPartitioningColumn(string view, byte state) =>
         new($"UNION ALL view '{view}' is not updatable because a partitioning column was not found.", 4436, 16, state);
+
+    /// <summary>Mimics SQL Server's Msg 4437 — a <c>BULK INSERT</c> into a partitioned view, or a view over one, naming the partitioned view.</summary>
+    internal static SimulatedSqlException PartitionedViewBulkTarget(string view) =>
+        new($"Partitioned view '{view}' is not updatable as the target of a bulk operation.", 4437, 16, 4);
 
     /// <summary>Mimics SQL Server's Msg 4438 — a member has a column the view doesn't deliver.</summary>
     internal static SimulatedSqlException PartitionedViewMissingColumns(string view, byte state) =>

@@ -42,7 +42,7 @@ partial class Simulation
     /// </para>
     /// </remarks>
     private static (HeapTable? BaseTable, int[] BaseColumnOrdinals, ViewUpdatabilityRejection Rejection, Func<SqlValue[], BatchContext, bool>? VisibilityCheck, Func<SqlValue[], BatchContext, bool>? CheckOptionCheck, bool IsJoinUpdatable, View? PartitionedBase)
-        AnalyzeViewUpdatability(Collation collation, Selection bodySelection, bool withCheckOption)
+        AnalyzeViewUpdatability(Collation collation, Selection bodySelection, bool withCheckOption, bool correlated = false)
     {
         if (bodySelection.UpdatabilityProfile is not { } profile)
             return (null, [], bodySelection.UpdatabilityRejection, null, null, false, null);
@@ -94,10 +94,14 @@ partial class Simulation
         {
             // A view or CTE over a set operation refuses as that body does
             // (probed 2026-10-01 against SQL Server 2025: a CTE over a UNION
-            // CTE is Msg 4426 naming the outer one); an APPLY's correlated body,
-            // OPENJSON, TVF, catalog view or other non-updatable view supports
-            // no DML pass-through.
-            return (null, [], UnionRejectionOf(source) ?? ViewUpdatabilityRejection.UnsupportedShape, null, null, false, null);
+            // CTE is Msg 4426 naming the outer one), one over VALUES or a
+            // rowset function takes every column as derived; an APPLY's
+            // correlated body, TVF, catalog view or other non-updatable view
+            // supports no DML pass-through.
+            return (null, [], UnionRejectionOf(source)
+                ?? (source.ConstructsRows || source.UpdatableView() is { RejectionReason: ViewUpdatabilityRejection.ConstructedRows }
+                    ? ViewUpdatabilityRejection.ConstructedRows
+                    : ViewUpdatabilityRejection.UnsupportedShape), null, null, false, null);
         }
 
         var baseColumnOrdinals = new int[profile.Projections.Length];
@@ -136,7 +140,11 @@ partial class Simulation
         for (var j = 0; j < source.ColumnNames.Length; j++)
             nameToBaseOrdinal[source.ColumnNames[j]] = sourceColumnToBaseOrdinal[j];
 
-        foreach (var excluder in profile.Excluders)
+        // An APPLY's correlated body filters its rows against the left side's
+        // current row as the join runs them, so its WHERE is no check a base
+        // row can be put to on its own.
+        var excluders = correlated ? [] : profile.Excluders;
+        foreach (var excluder in excluders)
         {
             var unmappable = false;
             excluder.VisitOperandExpressions(operand => operand.VisitColumnReferences(name =>
@@ -148,7 +156,7 @@ partial class Simulation
                 return (null, [], ViewUpdatabilityRejection.UnsupportedShape, null, null, false, null);
         }
 
-        var thisLevelCheck = MakeWhereCheck(profile.Excluders, nameToBaseOrdinal);
+        var thisLevelCheck = MakeWhereCheck(excluders, nameToBaseOrdinal);
 
         var combinedVisibility = ComposeAnd(thisLevelCheck, upstreamVisibility);
 
@@ -231,15 +239,23 @@ partial class Simulation
         rejection is ViewUpdatabilityRejection.Union or ViewUpdatabilityRejection.UnionAll or ViewUpdatabilityRejection.SetOperationOverUnion;
 
     /// <summary>
-    /// <see cref="View.UnionOwnerName"/> for a view named
-    /// <paramref name="name"/> over <paramref name="body"/>: its own name for a
-    /// stored view whose body is a <c>UNION</c>, else the one its single
-    /// source's view carries.
+    /// <see cref="View.UnionLeadsWithJoin"/> for a view over <paramref name="body"/>.
     /// </summary>
-    private static string? UnionOwnerNameOf(Selection body, ViewUpdatabilityRejection rejection, string? name) =>
-        !IsUnionRejection(rejection) ? null
-        : body.UpdatabilityProfile is { Sources: [var source] } ? source.UpdatableView()?.UnionOwnerName
-        : name;
+    private static bool UnionLeadsWithJoinOf(Selection body, ViewUpdatabilityRejection rejection) =>
+        rejection is ViewUpdatabilityRejection.Union or ViewUpdatabilityRejection.UnionAll
+        && (body.UpdatabilityProfile is { Sources: [var source] }
+            ? source.UpdatableView() is { UnionLeadsWithJoin: true }
+            : body.BranchFromSources is { Length: > 1 });
+
+    /// <summary>
+    /// <see cref="View.UnionOwnerName"/> for a view over <paramref name="body"/>:
+    /// when its single source is a view, the stored view that source's
+    /// <c>UNION</c> belongs to — that view itself, or the one it reads.
+    /// </summary>
+    private static string? UnionOwnerNameOf(Selection body, ViewUpdatabilityRejection rejection) =>
+        IsUnionRejection(rejection) && body.UpdatabilityProfile is { Sources: [var source] } && source.UpdatableView() is { } inner
+            ? inner.UnionOwnerName ?? (inner.UnstoredBody is null ? inner.Name : null)
+            : null;
 
     /// <summary>
     /// <see cref="View.DerivedOutputColumns"/> for a body that names no single
@@ -251,7 +267,7 @@ partial class Simulation
     {
         if (baseTable is not null || rejection == ViewUpdatabilityRejection.MultipleSources)
             return null;
-        if (!IsUnionRejection(rejection))
+        if (!IsUnionRejection(rejection) && rejection != ViewUpdatabilityRejection.ConstructedRows)
             return DerivedOutputColumnsOf(body);
         var derived = new bool[width];
         Array.Fill(derived, true);
@@ -365,14 +381,6 @@ partial class Simulation
         }
         return NonUpdatableViewError(view, viewLabel);
     }
-
-    /// <summary>
-    /// The name a Msg 4406 over an updatable view's derived column carries: a
-    /// CTE target bare, as its statement wrote it, and a stored view
-    /// schema-qualified — where real names the stored view as written too.
-    /// </summary>
-    private static string DerivedFieldViewLabel(View view) =>
-        view.ObjectId == 0 ? view.Name : $"{view.Schema.Name}.{view.Name}";
 
     /// <summary>
     /// Whether a view body limits its rows, directly or through the single
@@ -558,13 +566,13 @@ partial class Simulation
     /// binding.
     /// </summary>
     internal static View DerivedTableDmlView(DerivedTableBinding binding) =>
-        binding.DmlTarget ??= UnstoredDmlView(binding.Body, binding.Database, binding.Alias, binding.ColumnNames, isDerivedTable: true);
+        binding.DmlTarget ??= UnstoredDmlView(binding.Body, binding.Database, binding.Alias, binding.ColumnNames, isDerivedTable: true, binding.Correlated);
 
     /// <summary>The unstored view over <paramref name="body"/> that a CTE or derived table named <paramref name="name"/> is to a write.</summary>
-    private static View UnstoredDmlView(Selection body, Database database, string name, string[] columnNames, bool isDerivedTable)
+    private static View UnstoredDmlView(Selection body, Database database, string name, string[] columnNames, bool isDerivedTable, bool correlated = false)
     {
         var collation = database.Collation;
-        var (baseTable, baseColumnOrdinals, rejection, visibilityCheck, checkOptionCheck, isJoinUpdatable, partitionedBase) = AnalyzeViewUpdatability(collation, body, withCheckOption: false);
+        var (baseTable, baseColumnOrdinals, rejection, visibilityCheck, checkOptionCheck, isJoinUpdatable, partitionedBase) = AnalyzeViewUpdatability(collation, body, withCheckOption: false, correlated);
         var outputColumns = ComputeViewOutputColumns(collation, body, [.. columnNames], name);
         return new View(
             database.Schemas[Database.DefaultSchemaName],
@@ -583,12 +591,14 @@ partial class Simulation
             isJoinUpdatable)
         {
             DerivedOutputColumns = DerivedOutputColumnsFor(body, baseTable, rejection, outputColumns.Length),
-            UnionOwnerName = UnionOwnerNameOf(body, rejection, name: null),
+            UnionOwnerName = UnionOwnerNameOf(body, rejection),
+            UnionLeadsWithJoin = UnionLeadsWithJoinOf(body, rejection),
             IsRowLimited = IsRowLimitedBody(body),
             IsWindowed = IsWindowedBody(body),
             VolatileColumns = body.VolatileColumns,
             UnstoredBody = body,
             IsDerivedTable = isDerivedTable,
+            IsCorrelated = correlated,
             PartitionedBase = partitionedBase,
         };
     }

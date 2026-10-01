@@ -2527,14 +2527,15 @@ public sealed partial class Simulation
     /// statement's transaction (Msg 6549, 3991, 3992; probed 2026-09-28), and so
     /// does a scalar subquery answering more than one row (Msg 512) inside a
     /// writing statement (probed 2026-09-28), and so does a positioned update
-    /// or delete through a read-only cursor (Msg 16929; probed 2026-09-29).
+    /// or delete through a read-only cursor (Msg 16929; probed 2026-09-29) or
+    /// naming a table the cursor doesn't update (Msg 16933; probed 2026-10-01).
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number is 1505 or 4457
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite)
-            && (error.Number is 127 or 220 or 232 or 512 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16947
+            && (error.Number is 127 or 220 or 232 or 512 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16933 or 16947
                 || (error.Number == 208 && error.RaisedRunningFunctionBody)));
 
     /// <summary>

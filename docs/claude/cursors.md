@@ -271,7 +271,7 @@ A view over a JOIN carries its own rule with it: a positioned UPDATE whose SET l
 | Condition | Error |
 |-----------|-------|
 | cursor is read-only (STATIC / FAST_FORWARD / `FOR READ ONLY`) | **Msg 16929** `The cursor is READ ONLY.` + **Msg 3621** (probed 2026-09-29) |
-| the reference isn't one the cursor reads, or a `FOR UPDATE OF` list names none of the slot's surface columns | **Msg 16933** `The cursor does not include the table being modified or the table is not updatable through the cursor.` |
+| the reference isn't one the cursor reads, or a `FOR UPDATE OF` list names none of the slot's surface columns | **Msg 16933** `The cursor does not include the table being modified or the table is not updatable through the cursor.` + **Msg 3621** (probed 2026-10-01) |
 | the reference reaches more than one identity slot (self-join, including a self-joined view) | **Msg 16961**, severity 0 info — binds the *first* instance and continues |
 | cursor isn't positioned on a row (before first FETCH, past the end) | **Msg 16931** `There are no rows in the current fetch buffer.` |
 | the target's slot is the NULL-extended side of an outer join or an empty OUTER APPLY, **or** the cursor sits on a keyset hole (last FETCH reported `-2`) | **Msg 16947** + **Msg 3621** `No rows were updated or deleted.` |
@@ -281,6 +281,7 @@ A view over a JOIN carries its own rule with it: a positioned UPDATE whose SET l
 All probe-confirmed, including the split real makes between 16933 and 16931: naming an unrelated table is 16933 even when the cursor *is* positioned, while naming a correct table before any FETCH is 16931.
 The off-a-row cases split by cause, also probe-confirmed: before the first FETCH and past the end are 16931, while a keyset hole is 16947 — the member is gone, so there is nothing to update rather than nothing in the buffer (`Cursor.OnKeysetHole`, set from the FETCH status).
 Msg 16947 without the descriptive 16934 is the NULL-extended / keyset-hole case; the OPTIMISTIC conflict adds 16934 — and that detection reaches a base row behind a view, since it reads the flattened address the cursor recorded.
+A cursor reading a partitioned view is a read-only snapshot, and a positioned write naming the partitioned view while one reads it ends the session — see [`programmable.md`](programmable.md#partitioned-views).
 
 ## Scope: GLOBAL vs LOCAL
 

@@ -54,7 +54,7 @@ partial class Simulation
         var (leadingIdent, remoteWrite, leadingView, leadingTable) = (target.Name, target.Remote, target.View, target.Table);
         RejectQueryAfterDeleteTarget(context);
         if (leadingView is not null && RouteViewWrite(context.Batch, leadingView, TriggerActions.Delete) == DmlViewRoute.Refused)
-            throw NonUpdatableViewError(leadingView, leadingIdent.ToString());
+            throw NonUpdatableViewError(leadingView, leadingIdent.ToString(), delete: true);
         context.MoveNextOptional();
         var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
         Selection.ValidateDmlTargetHints(targetHints);
@@ -68,7 +68,7 @@ partial class Simulation
             return ExecuteJoinedViewTargetDelete(context, leadingIdent, leadingView, top, preParsedFrom);
         // An INSTEAD OF DELETE trigger on a view takes the write whatever the
         // view's shape, reading the view's own rows.
-        if (leadingView is not null && HasInsteadOfTrigger(context.Batch, leadingView, TriggerActions.Delete))
+        if (leadingView is not null && RouteViewWrite(context.Batch, leadingView, TriggerActions.Delete) == DmlViewRoute.InsteadOf)
             return ExecuteInsteadOfViewDelete(context, leadingIdent, leadingView, top, targetHints.Serializable);
         if (leadingView is { PartitionedBase: not null })
             return ExecutePartitionedViewDelete(context, leadingIdent, leadingView, top, from: null, targetIndex: 0);
@@ -353,7 +353,7 @@ partial class Simulation
         var targetIndex = FindOrAppendMutationTarget(context, sourcesList, joinsList, leadingIdent, leadingTable);
         // A leading name that is a table's but aliases a view, CTE or derived
         // table in the FROM clause writes through that source.
-        if (output is null && sourcesList[targetIndex] is { BackingTable: null } aliased && aliased.UpdatableView() is not null)
+        if (output is null && sourcesList[targetIndex] is { BackingTable: null } aliased && aliased.WriteTargetView() is not null)
             return ExecuteJoinedViewTargetDelete(context, leadingIdent, leadingView: null, top, new Selection.PreParsedFrom(sourcesList, joinsList, context.SaveCheckpoint()));
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();

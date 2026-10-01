@@ -199,10 +199,12 @@ partial class Simulation
     /// <summary>
     /// Routes a write of <paramref name="action"/> through <paramref name="view"/>.
     /// A <c>DELETE</c> through a join view is refused: it removes a whole row
-    /// and so reaches every base table (Msg 4405).
+    /// and so reaches every base table (Msg 4405). A write through a view or
+    /// CTE over a view carrying an <c>INSTEAD OF</c> trigger for it goes to
+    /// that trigger.
     /// </summary>
     private static DmlViewRoute RouteViewWrite(BatchContext batch, View view, TriggerActions action) =>
-        HasInsteadOfTrigger(batch, view, action) ? DmlViewRoute.InsteadOf
+        HasInsteadOfTrigger(batch, view, action) || InsteadOfTriggerViewUnder(batch, view, action) is not null ? DmlViewRoute.InsteadOf
         : view.PartitionedBase is not null ? DmlViewRoute.Partitioned
         : view.BaseTable is not null ? DmlViewRoute.BaseTable
         : view.IsJoinUpdatable && action != TriggerActions.Delete ? DmlViewRoute.JoinView
@@ -212,13 +214,18 @@ partial class Simulation
     /// A view real can't write through, named as the statement wrote it: Msg
     /// 4405 when its body reads several sources, Msg 4426 when a <c>UNION</c>
     /// tops it — what a <c>DELETE</c> meets, an <c>UPDATE</c> or <c>INSERT</c>
-    /// naming one of its derived columns first — and Msg 4403 otherwise; a
-    /// derived table's own messages for the last two.
+    /// naming one of its derived columns first, and a <c>DELETE</c> meeting
+    /// 4405 instead when the union's first branch joins — Msg 4406 when it
+    /// reads <c>VALUES</c> or a rowset function, whose every column is
+    /// derived, and Msg 4403 otherwise; a derived table's own messages for
+    /// the union and the last.
     /// </summary>
-    private static SimulatedSqlException NonUpdatableViewError(View view, string writtenName) =>
+    private static SimulatedSqlException NonUpdatableViewError(View view, string writtenName, bool delete = false) =>
         view.RejectionReason switch
         {
             ViewUpdatabilityRejection.MultipleSources => SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName),
+            ViewUpdatabilityRejection.Union or ViewUpdatabilityRejection.UnionAll when delete && view.UnionLeadsWithJoin => SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName),
+            ViewUpdatabilityRejection.ConstructedRows => SimulatedSqlException.ViewDmlTouchesDerivedField(writtenName),
             ViewUpdatabilityRejection.Union or ViewUpdatabilityRejection.UnionAll => SimulatedSqlException.ViewWithUnionNotUpdatable(writtenName, view.IsDerivedTable),
             _ => SimulatedSqlException.CannotUpdateNonUpdatableView(writtenName, view.IsDerivedTable),
         };
@@ -298,6 +305,27 @@ partial class Simulation
     }
 
     /// <summary>
+    /// What real answers a joined write whose target is a table value
+    /// constructor or a rowset function, naming its alias: every column is
+    /// derived, so an <c>UPDATE</c> is Msg 4421 and a <c>DELETE</c> Msg 4406 —
+    /// but an <c>UPDATE</c> of a constructor whose cells read the left side of
+    /// an <c>APPLY</c> ends the session, even as the batch compiles (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static SimulatedSqlException ConstructedRowsTargetError(BatchContext batch, FromSource target, string alias, string verb)
+    {
+        if (verb == "DELETE")
+            return SimulatedSqlException.ViewDmlTouchesDerivedField(alias);
+        // A statement reading an object the batch hasn't created yet compiles
+        // only as it runs, where the session ends; the refusal held here
+        // waits with it.
+        if (!target.ConstructorReadsOuterRow || (batch.IsSkipping && batch.CurrentStatement.BindsDeferredSource))
+            return SimulatedSqlException.ViewDmlTouchesDerivedField(alias, derivedTable: true);
+        batch.Connection.SessionEnding = true;
+        return SimulatedSqlException.ConstructedRowsApplyUpdateEndsSession();
+    }
+
+    /// <summary>
     /// The table a joined <c>UPDATE</c> / <c>DELETE</c> writes, once its
     /// <c>FROM</c> clause has named it — so the write is classified for a
     /// function body's Msg 443 here rather than at the leading identifier. The
@@ -311,7 +339,10 @@ partial class Simulation
     /// </summary>
     private static HeapTable BindJoinedMutationTable(ParserContext context, FromSource[] sources, int targetIndex, string verb)
     {
-        var table = sources[targetIndex].BackingTable
+        var target = sources[targetIndex];
+        if (target is { ConstructsRows: true, Qualifier: { } alias })
+            throw ConstructedRowsTargetError(context.Batch, target, alias, verb);
+        var table = target.BackingTable
             ?? throw new NotSupportedException("A joined UPDATE / DELETE whose target is an APPLY's derived table, a table value constructor or a rowset function isn't modeled, nor one whose OUTPUT clause bound a table its alias names.");
         FunctionBodyShape.NoteTableWrite(context.Batch, verb, table);
         if (!context.Batch.IsSkipping)

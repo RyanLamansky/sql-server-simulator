@@ -283,6 +283,7 @@ Source-kind dispatch after the OUTPUT-clause parse: `Values` token → existing 
 Both funnel into one shared per-row encode loop (defaults / identity / rowversion / computed / constraints / OUTPUT).
 
 **A parenthesized source** — `INSERT INTO t (cols) (SELECT …)`, nesting to any depth — is accepted, and the query inside is parsed at the open-paren count so the closing `)` reads as its terminator rather than a stray token.
+Only the parentheses wrapping the whole source count: in `INSERT INTO t (a) (SELECT 1) UNION ALL (SELECT 2)` they open the first branch of an ordinary source (probed 2026-10-01 against SQL Server 2025).
 Those parens are only reachable once an explicit column list has been consumed: with no column list the leading `(` is read as the start of one, and the `SELECT` inside it is Msg 102 — which is what real reports for `INSERT INTO t (SELECT …)` too, from the same ambiguity.
 
 **The source query may not carry an `ORDER BY`** — real refuses it as **Msg 156** on the keyword, and refuses it even with the `TOP` that licenses one in a derived table, so this is stricter than the [Msg 1033 rule](ctes.md) the nested constructs take.

@@ -177,7 +177,9 @@ partial class Simulation
             if (context.GetNextRequired() is not Operator { Character: '(' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
-            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Select })
+            // A body may open with a parenthesized branch,
+            // `AS ((SELECT 1) UNION ALL (SELECT 2))`, which the branch parse reads.
+            if (context.GetNextRequired() is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
             // Register the sentinel before parsing the body. A self-

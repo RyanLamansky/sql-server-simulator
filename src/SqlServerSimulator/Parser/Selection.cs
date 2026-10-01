@@ -219,6 +219,13 @@ internal sealed partial class Selection
     internal bool CarriesRowAddresses;
 
     /// <summary>
+    /// Set on a parenthesized set-operation branch whose <c>ORDER BY</c>
+    /// chooses the rows its <c>TOP</c> or <c>OFFSET</c> takes, which a nested
+    /// query's branch may carry where a bare one may not.
+    /// </summary>
+    internal bool OrdersOwnRows;
+
+    /// <summary>
     /// The SELECT's ORDER BY items, captured for the updatable-cursor
     /// enumeration path (<c>EnumerateForCursor</c>) so KEYSET / DYNAMIC
     /// cursors and positioned DML can order rows the same way a read would.
@@ -607,6 +614,14 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// The <see cref="BatchContext.RowAddressProbe"/> a joined write installs
+    /// while it walks an <c>APPLY</c>'s correlated body as its target: no plan
+    /// is it, so the body — and every single-source plan the walk runs —
+    /// carries its rows' base addresses into the statement's map.
+    /// </summary>
+    internal static readonly Selection AddressCarryingWalk = ForValuesConstructor([], [], []);
+
+    /// <summary>
     /// Runs this plan as a source a <see cref="ExecuteWithRowAddresses"/> run
     /// reads — a CTE or derived table whose body a write can pass through —
     /// carrying the address of its own first source's row the way the run's
@@ -957,16 +972,191 @@ internal sealed partial class Selection
         if (context.Token is not Operator { Character: '(' })
             return ParseSingleSelectStatement(context, scope, allowOrderBy);
 
+        // Each parenthesis recurses, so a deep stack of them meets the probe
+        // deep expressions do (Msg 8631) rather than the process's limit.
+        Expression.EnsureParseStack();
+
         // Only a query opens inside: `(VALUES …)`, `(WITH …)` and a value are
         // the syntax error at their first token, which is also how a
         // statement `(-1)` fails (probed 2026-10-01 against SQL Server 2025).
         if (context.GetNextRequired() is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        var inner = ParseUnionExceptChain(context, scope.InParentheses());
+        var parenthesized = scope.InParentheses();
+        var inner = ParseUnionExceptChain(context, parenthesized);
+
+        // An ORDER BY after a chain the parentheses hold orders that chain,
+        // as it would a statement; at a statement it is refused as any ORDER
+        // BY in the parentheses is.
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Order } orderKeyword)
+        {
+            if (RefusesParenthesizedOrderBy(context, parenthesized))
+                throw SimulatedSqlException.SyntaxErrorNearKeyword(orderKeyword);
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var orderBy = new List<OrderBySpec>();
+            ParseOrderByItems(context, orderBy);
+            var tail = new FromClause();
+            ConsumeOffsetFetch(context, tail);
+            inner = ApplyTopLevelOrderBy(inner, orderBy, tail.OffsetExpression, tail.FetchExpression);
+        }
+
+        // A nested query's parenthesized branch may order the rows its TOP or
+        // OFFSET takes; without one the ORDER BY is Msg 1033.
+        if (inner.HasOrderBy)
+        {
+            if (!inner.HasTopOrOffsetOrFetch)
+                throw SimulatedSqlException.OrderByInvalidInCte();
+            inner.OrdersOwnRows = true;
+        }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
         return inner;
+    }
+
+    /// <summary>
+    /// Whether an <c>ORDER BY</c> inside <paramref name="scope"/>'s parentheses
+    /// is refused (<see cref="QueryScope.ParenthesizedInStatement"/>): a
+    /// statement's own query, but not a view or inline function body, which
+    /// parses at that position too.
+    /// </summary>
+    private static bool RefusesParenthesizedOrderBy(ParserContext context, QueryScope scope) =>
+        scope.ParenthesizedInStatement && !context.BindingViewDefinition && context.Batch.UdfFrame is null;
+
+    /// <summary>
+    /// Whether the <c>(</c> under the cursor opens a query expression: a
+    /// <c>SELECT</c>, or a parenthesized query that a set operator or the
+    /// closing parenthesis follows — <c>((SELECT 1) UNION (SELECT 2))</c> and
+    /// <c>((SELECT 1))</c>, but not <c>((SELECT 1) d JOIN …)</c>, whose
+    /// parentheses group a join. Every position that opens a query with its
+    /// own <c>(</c> (a derived table, an <c>APPLY</c> body, a subquery, a CTE)
+    /// reads a set-operation chain of parenthesized branches through it
+    /// (probed 2026-10-01 against SQL Server 2025). Restores the cursor.
+    /// </summary>
+    internal static bool OpensParenthesizedQuery(ParserContext context) =>
+        ScanParenthesizedQuery(context, enclosingLevel: false, closeCounts: true);
+
+    /// <summary>
+    /// Whether the <c>(</c> under the cursor, the first token inside another
+    /// parenthesis, opens a query that a set operator follows — the first
+    /// branch of <c>((SELECT 1) UNION (SELECT 2))</c> — or, with
+    /// <paramref name="closeCounts"/>, the enclosing parenthesis's close, as
+    /// in <c>((SELECT 1))</c>. Restores the cursor; a site reaching the inner
+    /// <c>(</c> anyway asks here so an ordinary grouping pays a token test.
+    /// </summary>
+    internal static bool LeadsParenthesizedQuery(ParserContext context, bool closeCounts) =>
+        ScanParenthesizedQuery(context, enclosingLevel: true, closeCounts);
+
+    /// <summary>
+    /// One forward pass from the <c>(</c> under the cursor answering whether it
+    /// — or, with <paramref name="enclosingLevel"/>, the parenthesis enclosing
+    /// it — holds a query. The innermost of the leading parentheses holds one
+    /// when a <c>SELECT</c> opens it; each one out holds one when a set
+    /// operator or its own close follows the close of the one inside it, the
+    /// enclosing parenthesis's own close counting only with
+    /// <paramref name="closeCounts"/>. Iterative, so no depth of nesting
+    /// reaches the stack. Restores the cursor.
+    /// </summary>
+    private static bool ScanParenthesizedQuery(ParserContext context, bool enclosingLevel, bool closeCounts)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        // Levels count from the cursor's parenthesis as 1; the enclosing one is 0.
+        var target = enclosingLevel ? 0 : 1;
+        var depth = 1;
+        var token = context.GetNextOptional();
+        while (token is Operator { Character: '(' })
+        {
+            depth++;
+            token = context.GetNextOptional();
+        }
+
+        // Every level from queryLevel in holds a query.
+        var queryLevel = depth;
+        var opens = token is ReservedKeyword { Keyword: Keyword.Select };
+        while (opens && queryLevel > target)
+        {
+            if (context.GetNextOptional() is not { } current)
+            {
+                opens = false;
+                break;
+            }
+            if (current is Operator { Character: '(' })
+            {
+                depth++;
+                continue;
+            }
+            if (current is not Operator { Character: ')' } || --depth >= queryLevel)
+                continue;
+
+            // Level queryLevel just closed: what follows settles the one around it.
+            while (true)
+            {
+                var next = context.GetNextOptional();
+                if (next is ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect })
+                {
+                    queryLevel--;
+                    break;
+                }
+                if (next is not Operator { Character: ')' } || (queryLevel == 1 && !closeCounts))
+                {
+                    opens = false;
+                    break;
+                }
+                if (--queryLevel <= target)
+                    break;
+                depth--;
+            }
+        }
+        context.RestoreCheckpoint(checkpoint);
+        return opens;
+    }
+
+    /// <summary>
+    /// How many of the parentheses opening a module body wrap all of it, which
+    /// the body's text leaves out: in <c>((SELECT 1) UNION (SELECT 2))</c> one
+    /// does, in <c>(SELECT 1) UNION (SELECT 2)</c> none — the first branch's
+    /// parentheses belong to the body (probed 2026-10-01 against SQL Server
+    /// 2025). The outermost wraps unless a set operator follows its close; each
+    /// further one only when the enclosing one's close follows its own.
+    /// Restores the cursor.
+    /// </summary>
+    internal static int CountWrappingParentheses(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var leading = 0;
+        var token = context.Token;
+        while (token is Operator { Character: '(' })
+        {
+            leading++;
+            token = context.GetNextOptional();
+        }
+
+        // One pass: the leading parentheses close innermost first, and those
+        // wrapping the body are the ones whose closes run back to back into
+        // the outermost's — which no set operator may follow.
+        var depth = leading;
+        var open = leading;
+        var run = 0;
+        var afterLeadingClose = false;
+        while (open > 0 && token is not null)
+        {
+            var closesLeading = false;
+            if (token is Operator { Character: '(' })
+            {
+                depth++;
+            }
+            else if (token is Operator { Character: ')' } && --depth < open)
+            {
+                run = afterLeadingClose ? run + 1 : 1;
+                open = depth;
+                closesLeading = true;
+            }
+            afterLeadingClose = closesLeading;
+            token = context.GetNextOptional();
+        }
+        var count = open == 0 && token is not ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect } ? run : 0;
+        context.RestoreCheckpoint(checkpoint);
+        return count;
     }
 
     /// <summary>
@@ -2815,7 +3005,9 @@ internal sealed partial class Selection
     /// constructor) or <c>WITH</c> (a CTE prefix, which no query in a
     /// parenthesized position may carry — routing it to the derived-table
     /// branch is what gets it real's Msg 156 instead of a join group's
-    /// Msg 102). Entered with the cursor on the token preceding the source
+    /// Msg 102), nor a parenthesized query (<see cref="OpensParenthesizedQuery"/>,
+    /// a derived table over a set operation of parenthesized branches).
+    /// Entered with the cursor on the token preceding the source
     /// (<c>FROM</c> / a JOIN keyword / a comma / the group's own <c>(</c> when
     /// this is an interior leftmost), matching the one-token lookahead
     /// <see cref="ParseSingleFromSource"/> consumes; the checkpoint is restored
@@ -2824,10 +3016,14 @@ internal sealed partial class Selection
     private static bool NextSourceIsJoinGroup(ParserContext context)
     {
         var checkpoint = context.SaveCheckpoint();
-        var opensParen = context.GetNextOptional() is Operator { Character: '(' };
-        var interior = context.GetNextOptional();
+        var opensGroup = context.GetNextOptional() is Operator { Character: '(' } && context.GetNextOptional() switch
+        {
+            null or ReservedKeyword { Keyword: Keyword.Select or Keyword.Values or Keyword.With } => false,
+            Operator { Character: '(' } => !LeadsParenthesizedQuery(context, closeCounts: true),
+            _ => true,
+        };
         context.RestoreCheckpoint(checkpoint);
-        return opensParen && interior is not (null or ReservedKeyword { Keyword: Keyword.Select or Keyword.Values or Keyword.With });
+        return opensGroup;
     }
 
     /// <summary>
@@ -3143,7 +3339,7 @@ internal sealed partial class Selection
             return AcrossApplyBoundary(context, leftSnapshot, () => ParseValuesDerivedTable(context, chainedResolver));
         }
 
-        if (afterApplyParen is not ReservedKeyword { Keyword: Keyword.Select })
+        if (afterApplyParen is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         // The body projects the left side's masked columns as its own.
@@ -3174,7 +3370,8 @@ internal sealed partial class Selection
             lobStore: null,
             rows: [],
             lateralPlan: lateralPlan,
-            lateralIsQueryBody: true);
+            lateralIsQueryBody: true,
+            derivedTable: alias is null ? null : new DerivedTableBinding(lateralPlan, alias, columnNames, context.CurrentDatabase, correlated: true));
     }
 
     /// <summary>
@@ -3862,7 +4059,7 @@ internal sealed partial class Selection
                 if (afterOpenParen is ReservedKeyword { Keyword: Keyword.Values })
                     return ParseValuesDerivedTable(context, context.OuterTypeResolver ?? scope.OuterTypeResolver);
 
-                if (afterOpenParen is not ReservedKeyword { Keyword: Keyword.Select })
+                if (afterOpenParen is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
                 {
                     // A CTE prefix inside a derived table is real's Msg 156
                     // rather than the generic Msg 102 — a WITH may only
@@ -4074,7 +4271,10 @@ internal sealed partial class Selection
             storageOrdinals: null,
             lobStore: null,
             rows: [],
-            lateralPlan: plan);
+            lateralPlan: plan)
+        {
+            ConstructsRows = true,
+        };
     }
 
     /// <summary>
@@ -4213,7 +4413,11 @@ internal sealed partial class Selection
             storageOrdinals: null,
             lobStore: null,
             rows: [],
-            lateralPlan: ForValuesConstructor(schema, columnNames, tuples));
+            lateralPlan: ForValuesConstructor(schema, columnNames, tuples))
+        {
+            ConstructsRows = true,
+            ConstructorReadsOuterRow = tuples.Exists(static tuple => Array.Exists(tuple, static cell => cell.ReadsAnyColumn())),
+        };
     }
 
     /// <summary>
@@ -4587,7 +4791,7 @@ internal sealed partial class Selection
         // A parenthesized INSERT source's own query may not carry an ORDER BY
         // (Msg 156 on the keyword); a derived table or subquery nested inside
         // it parses at its own position and keeps the ordinary rules.
-        if (scope.RefusesTrailingClauses
+        if ((scope.RefusesTrailingClauses || RefusesParenthesizedOrderBy(context, scope))
             && context.Token is ReservedKeyword { Keyword: Keyword.Order } orderKeyword)
         {
             throw SimulatedSqlException.SyntaxErrorNearKeyword(orderKeyword);

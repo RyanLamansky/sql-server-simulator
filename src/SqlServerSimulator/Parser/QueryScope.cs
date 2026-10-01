@@ -137,4 +137,15 @@ internal readonly struct QueryScope(QueryPosition position, Func<MultiPartName, 
     /// (probed 2026-08-06 and, for <c>FOR</c>, 2026-09-23).
     /// </summary>
     public bool RefusesTrailingClauses => this.Position is QueryPosition.ParenthesizedInsertSource;
+
+    /// <summary>
+    /// Whether this is a parenthesized part of a statement's own query or an
+    /// <c>INSERT</c> source, whose <c>ORDER BY</c> real refuses as Msg 156 on
+    /// the keyword even beside a <c>TOP</c> — where a nested query's
+    /// parenthesized branch may order the rows its <c>TOP</c> takes (probed
+    /// 2026-10-01 against SQL Server 2025). A module body's query, which
+    /// parses at the statement position, takes the nested rule; the caller
+    /// tells it apart.
+    /// </summary>
+    public bool ParenthesizedInStatement => this.inParentheses && this.Position is QueryPosition.Statement or QueryPosition.InsertSource or QueryPosition.ParenthesizedInsertSource;
 }

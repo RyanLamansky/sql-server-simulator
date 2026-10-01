@@ -1322,6 +1322,14 @@ internal abstract class Expression : ExpressionNode
     internal void VisitColumnReferences(Action<MultiPartName> visit) =>
         this.VisitColumnReferences(new ColumnReferenceVisitor(visit, coversSubtree: null));
 
+    /// <summary>Whether <see cref="VisitColumnReferences(Action{MultiPartName})"/> meets any column reference.</summary>
+    internal bool ReadsAnyColumn()
+    {
+        var found = false;
+        this.VisitColumnReferences(_ => found = true);
+        return found;
+    }
+
     /// <summary>
     /// <see cref="VisitColumnReferences(Action{MultiPartName})"/> with the
     /// visitor's <see cref="ColumnReferenceVisitor.CoversSubtree"/> asked at
@@ -1633,7 +1641,15 @@ internal abstract class Expression : ExpressionNode
     private static Expression ParseGroupedExpression(ParserContext context)
     {
         context.MoveNextRequired();
-        var isSubquery = context.Token is ReservedKeyword { Keyword: Keyword.Select };
+        // `((SELECT 1) UNION (SELECT 2))` is a subquery too, over a set
+        // operation of parenthesized branches; `((SELECT 1))` stays a
+        // parenthesized subquery, each level spending its nesting budget.
+        var isSubquery = context.Token switch
+        {
+            ReservedKeyword { Keyword: Keyword.Select } => true,
+            Operator { Character: '(' } => Selection.LeadsParenthesizedQuery(context, closeCounts: false),
+            _ => false,
+        };
         var cost = isSubquery ? SubqueryNestingCost : ParenNestingCost;
         context.NestingDepth += cost;
         if (context.NestingDepth > MaxNestingDepth)

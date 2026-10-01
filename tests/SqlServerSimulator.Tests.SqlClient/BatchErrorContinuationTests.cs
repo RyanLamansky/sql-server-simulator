@@ -159,21 +159,16 @@ public sealed class BatchErrorContinuationTests
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
         await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
 
-        Wire.ExecInProc(simulation, "create table dbo.p1 (a int not null primary key check (a < 10))");
-        Wire.ExecInProc(simulation, "create table dbo.p2 (a int not null primary key check (a >= 10))");
-        Wire.ExecInProc(simulation, "create view dbo.v as select a from dbo.p1 union all select a from dbo.p2");
-
-        // No SimulatedSqlException factory produces a class >= 17 (batch/
-        // connection-terminating) severity, and deadlock (class 13) needs
-        // concurrent sessions to provoke; NotSupportedException is the
-        // reachable batch-aborting case here (a positioned DELETE through a
-        // partitioned view), surfacing as a Msg 50000
-        // error token that ends the batch. The insert after it must NOT run —
-        // the contrast with continued errors above.
+        // No SimulatedSqlException factory short of ending the session produces
+        // a class >= 17 (batch / connection-terminating) severity, and deadlock
+        // (class 13) needs concurrent sessions to provoke; NotSupportedException
+        // is the reachable batch-aborting case here (DBCC PAGE), surfacing as a
+        // Msg 50000 error token that ends the batch. The insert after it must
+        // NOT run — the contrast with continued errors above.
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
         {
             await using var command = new SqlCommand(
-                "create table #t (a int); delete dbo.v where current of c; insert #t values (1)",
+                "create table #t (a int); dbcc page (0, 1, 0, 0); insert #t values (1)",
                 connection);
             _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
         });

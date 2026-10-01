@@ -737,7 +737,8 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// Every table and view a <c>FROM</c> clause names while one is installed,
     /// subqueries and derived tables included — what a write through a
     /// partitioned view reads besides its target, which real refuses when it
-    /// reaches a member table (Msg 4439). Null otherwise.
+    /// reaches a member table (Msg 4439), and the partitioned views a cursor's
+    /// query reads. Null otherwise.
     /// </summary>
     public List<Schemas.SchemaObject>? PartitionedWriteReads;
 

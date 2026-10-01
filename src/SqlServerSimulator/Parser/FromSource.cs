@@ -63,6 +63,16 @@ internal sealed class FromSource(
     public bool ForPath;
 
     /// <summary>
+    /// A table value constructor or a built-in rowset function (<c>OPENJSON</c>,
+    /// <c>STRING_SPLIT</c>, …), every column of which a write through a body
+    /// reading it takes as derived (Msg 4406, a <c>DELETE</c> included).
+    /// </summary>
+    public bool ConstructsRows;
+
+    /// <summary>A table value constructor whose cells read an enclosing or <c>APPLY</c>-left row.</summary>
+    public bool ConstructorReadsOuterRow;
+
+    /// <summary>
     /// The table hints of a base-table source written with <c>FORCESEEK</c>,
     /// or with <c>FORCESCAN</c> beside an <c>INDEX</c> hint, which the query
     /// is checked against once it has parsed (Msg 8622 when real's optimizer
@@ -225,8 +235,17 @@ internal sealed class FromSource(
     public View? UpdatableView() =>
         this.BackingView
         ?? (this.Cte is { Plan: not null } binding ? Simulation.CteDmlView(binding)
-            : this.DerivedTable is { } derived ? Simulation.DerivedTableDmlView(derived)
+            : this.DerivedTable is { Correlated: false } derived ? Simulation.DerivedTableDmlView(derived)
             : null);
+
+    /// <summary>
+    /// The view a joined <c>UPDATE</c> / <c>DELETE</c> naming this source as
+    /// its target writes through: <see cref="UpdatableView"/>, or an
+    /// <c>APPLY</c>'s correlated body analyzed as a derived table, which real
+    /// writes through too (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    public View? WriteTargetView() =>
+        this.UpdatableView() ?? (this.DerivedTable is { Correlated: true } applied ? Simulation.DerivedTableDmlView(applied) : null);
 
     /// <summary>
     /// When non-null, this source is the right side of a <c>CROSS APPLY</c>

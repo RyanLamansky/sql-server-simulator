@@ -202,7 +202,7 @@ partial class Simulation
         onPredicate.Bind(context.Batch, ResolveTypeBoth);
 
         // WHEN clauses.
-        var whenClauses = ParseMergeWhenClauses(context, destinationTable, sourceView, targetAlias, defaultTargetName, sourceAlias, sourceColumnNames, sourceSchema);
+        var whenClauses = ParseMergeWhenClauses(context, destinationTable, sourceView, destinationName.ToString(), targetAlias, defaultTargetName, sourceAlias, sourceColumnNames, sourceSchema);
 
         // Which actions INSTEAD OF triggers take is settled while compiling:
         // some but not all of the statement's is Msg 5316.
@@ -959,6 +959,7 @@ partial class Simulation
         ParserContext context,
         HeapTable destinationTable,
         View? sourceView,
+        string writtenName,
         string targetAlias,
         string defaultTargetName,
         string sourceAlias,
@@ -1106,7 +1107,7 @@ partial class Simulation
 
             // An action reads its clause's side too, and misses there with the
             // ordinary binder errors (probed 2026-09-28).
-            clauses.Add(ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, targetAlias, kind switch
+            clauses.Add(ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, writtenName, targetAlias, kind switch
             {
                 WhenClauseKind.Matched => ResolveType,
                 WhenClauseKind.NotMatchedByTarget => ResolveSourceOnly,
@@ -1123,6 +1124,7 @@ partial class Simulation
         BooleanExpression? searchCondition,
         HeapTable destinationTable,
         View? sourceView,
+        string writtenName,
         string targetAlias,
         Func<MultiPartName, SqlType> resolveType)
     {
@@ -1143,8 +1145,8 @@ partial class Simulation
         {
             clause = context.Token switch
             {
-                ReservedKeyword { Keyword: Keyword.Insert } => ParseMergeInsertAction(context, kind, searchCondition, destinationTable, sourceView, resolveType),
-                ReservedKeyword { Keyword: Keyword.Update } => ParseMergeUpdateAction(context, kind, searchCondition, destinationTable, sourceView, targetAlias, resolveType),
+                ReservedKeyword { Keyword: Keyword.Insert } => ParseMergeInsertAction(context, kind, searchCondition, destinationTable, sourceView, writtenName, resolveType),
+                ReservedKeyword { Keyword: Keyword.Update } => ParseMergeUpdateAction(context, kind, searchCondition, destinationTable, sourceView, writtenName, targetAlias, resolveType),
                 ReservedKeyword { Keyword: Keyword.Delete } => ParseMergeDeleteAction(context, kind, searchCondition),
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
@@ -1162,6 +1164,7 @@ partial class Simulation
         BooleanExpression? searchCondition,
         HeapTable destinationTable,
         View? sourceView,
+        string writtenName,
         Func<MultiPartName, SqlType> resolveType)
     {
         if (kind == WhenClauseKind.Matched)
@@ -1192,7 +1195,7 @@ partial class Simulation
                 HeapColumn col;
                 try
                 {
-                    col = ResolveInsertTargetColumn(context.Batch.CurrentDatabase.Collation, colTok.Value, destinationTable, sourceView);
+                    col = ResolveInsertTargetColumn(context.Batch.CurrentDatabase.Collation, colTok.Value, destinationTable, sourceView, writtenName);
                 }
                 catch (SimulatedSqlException missing) when (missing.Number == 207 && context.Batch.BindErrors is { } report && report.Covers(colTok))
                 {
@@ -1300,6 +1303,7 @@ partial class Simulation
         BooleanExpression? searchCondition,
         HeapTable destinationTable,
         View? sourceView,
+        string writtenName,
         string targetAlias,
         Func<MultiPartName, SqlType> resolveType)
     {
@@ -1366,7 +1370,7 @@ partial class Simulation
 
                 // A target already reported binds no further; its value still
                 // does.
-                if (unboundTarget || ResolveMergeSetOrdinal(context, first, columnName, destinationTable, sourceView) is not { } ordinal)
+                if (unboundTarget || ResolveMergeSetOrdinal(context, first, columnName, destinationTable, sourceView, writtenName) is not { } ordinal)
                 {
                     if (!setsDefault)
                         _ = rhs.GetSqlType(context.Batch, resolveType);
@@ -1404,7 +1408,7 @@ partial class Simulation
     /// nothing answers is Msg 207 — recorded, with null returned, while the
     /// statement is read for its whole bind error report.
     /// </summary>
-    private static int? ResolveMergeSetOrdinal(ParserContext context, Token target, string columnName, HeapTable destinationTable, View? sourceView)
+    private static int? ResolveMergeSetOrdinal(ParserContext context, Token target, string columnName, HeapTable destinationTable, View? sourceView, string writtenName)
     {
         var collation = context.Batch.CurrentDatabase.Collation;
         if (sourceView is not null)
@@ -1415,7 +1419,7 @@ partial class Simulation
                 {
                     return sourceView.BaseColumnOrdinals[i] is var baseOrdinal and >= 0
                         ? baseOrdinal
-                        : throw SimulatedSqlException.ViewDmlTouchesDerivedField(DerivedFieldViewLabel(sourceView));
+                        : throw SimulatedSqlException.ViewDmlTouchesDerivedField(writtenName);
                 }
             }
         }

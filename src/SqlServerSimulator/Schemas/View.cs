@@ -188,14 +188,23 @@ internal sealed class View(
     public bool[]? DerivedOutputColumns;
 
     /// <summary>
-    /// For a view whose columns a <c>UNION</c> derives, the stored view whose
-    /// body that <c>UNION</c> is — this one or one it reads — which real's Msg
-    /// 4406 names in place of the view written (probed 2026-10-01 against SQL
-    /// Server 2025: an UPDATE through <c>SELECT * FROM vun</c> names
-    /// <c>vun</c>); null when there is none, a CTE's <c>UNION</c> naming the
-    /// target as written.
+    /// For a view whose columns a <c>UNION</c> in a view it reads derives, the
+    /// stored view whose body that <c>UNION</c> is, which real's Msg 4406 names
+    /// bare in place of the view written (probed 2026-10-01 against SQL Server
+    /// 2025: an UPDATE through <c>SELECT * FROM vun</c> names <c>vun</c>); null
+    /// when the <c>UNION</c> is the view's own body, or a CTE's, which names
+    /// the target as written.
     /// </summary>
     public string? UnionOwnerName;
+
+    /// <summary>
+    /// For a view whose body is a <c>UNION</c>, or reads one through a view,
+    /// whether the union's first branch reads several sources: a <c>DELETE</c>
+    /// through it is then Msg 4405 rather than 4426, as through a join view
+    /// (probed 2026-10-01 against SQL Server 2025; a later branch's join, and
+    /// a <c>MERGE</c>'s delete, leave it 4426).
+    /// </summary>
+    public bool UnionLeadsWithJoin;
 
     /// <summary>
     /// The body (or a view it reads) limits its rows with <c>TOP</c> /
@@ -255,6 +264,13 @@ internal sealed class View(
     /// either way (probed 2026-10-01 against SQL Server 2025).
     /// </summary>
     public bool IsDerivedTable;
+
+    /// <summary>
+    /// An <c>APPLY</c>'s correlated body as a joined write's target: its rows
+    /// change with the left side's row, so the write reads them as the join
+    /// runs the body rather than once up front.
+    /// </summary>
+    public bool IsCorrelated;
 
     /// <summary>
     /// True when the body reads several FROM sources but is otherwise

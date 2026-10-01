@@ -432,6 +432,19 @@ internal sealed partial class Selection
 
             var orderByList = new List<OrderBySpec>(win.OrderBy);
 
+            // A level over a partitioned view a write reads per member numbers
+            // and frames each member's rows in the order the member reads
+            // them, every row a peer: real ignores the window's ORDER BY there
+            // (probed 2026-10-01 against SQL Server 2025). Every row takes the
+            // first row's keys. WITHIN GROUP's ordering is the percentile's
+            // operand, not a window order.
+            if (batch.PartitionedMemberRun is not null && orderByList.Count > 0 && rowCount > 0 && win.Kind is not (WindowKind.PercentileCont or WindowKind.PercentileDisc))
+            {
+                var peerKeys = perWindowKeys[0][w].OrderKeys;
+                for (var i = 1; i < rowCount; i++)
+                    perWindowKeys[i][w].OrderKeys = peerKeys;
+            }
+
             switch (win.Kind)
             {
                 case WindowKind.RowNumber:

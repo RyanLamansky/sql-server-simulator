@@ -194,4 +194,157 @@ public sealed class PartitionedViewTests
         Contains("The UPDATE statement conflicted with the CHECK constraint \"ck_v\"", error.Errors[0].Message);
         AreEqual("1:10 2:20 | 150:1500", simulation.ExecuteScalar(Members));
     }
+
+    /// <summary>
+    /// A body whose branches are written in parentheses is the same
+    /// partitioned view.
+    /// </summary>
+    [TestMethod]
+    public void ParenthesizedBranches_RouteToTheMembers()
+    {
+        var simulation = Setup();
+        simulation.ExecuteBatches("create view ppv as (select k, v from m1) union all (select k, v from m2)");
+        AreEqual(2, simulation.ExecuteNonQuery("insert ppv values (3, 30), (160, 1600)"));
+        AreEqual(1, simulation.ExecuteNonQuery("update ppv set v = 0 where k = 160"));
+        AreEqual(1, simulation.ExecuteNonQuery("delete ppv where k = 1"));
+        AreEqual("2:20 3:30 | 150:1500 160:0", simulation.ExecuteScalar(Members));
+    }
+
+    /// <summary>
+    /// A level over the partitioned view that limits its rows or projects a
+    /// window is evaluated per member when a write reads it: a <c>TOP</c>
+    /// picks each member's own rows, and a window numbers and frames each
+    /// member's rows apart in the order the member reads them, its
+    /// <c>ORDER BY</c> ignored.
+    /// </summary>
+    [TestMethod]
+    [DataRow("update top1 set v = v + 1", 2, "1:10 2:21 | 150:1501", DisplayName = "TOP picks per member")]
+    [DataRow("delete top1", 2, "1:10 | ", DisplayName = "TOP, DELETE")]
+    [DataRow("update numbered set v = rn * 100 + c", 3, "1:102 2:202 | 150:101", DisplayName = "Window per member, order ignored")]
+    [DataRow("delete numbered where rn = 1", 2, "2:20 | ", DisplayName = "Window per member, DELETE")]
+    [DataRow("with q as (select top 1 * from pv order by v) delete q", 2, "2:20 | ", DisplayName = "CTE with TOP")]
+    [DataRow("update d set v = d.r from (select k, v, rank() over (order by v) r from pv) d", 3, "1:1 2:1 | 150:1", DisplayName = "Derived table, every row a peer")]
+    public void RowLimitedOrWindowedLevel_EvaluatedPerMember(string statement, int rowCount, string expected)
+    {
+        var simulation = Setup();
+        simulation.ExecuteBatches(
+            "create view top1 as select top 1 k, v from pv order by v desc",
+            "create view numbered as select k, v, row_number() over (order by v desc) rn, count(*) over () c from pv");
+        AreEqual(rowCount, simulation.ExecuteNonQuery(statement));
+        AreEqual(expected, simulation.ExecuteScalar(Members));
+    }
+
+    /// <summary>A statement reading a column a level over the partitioned view derives reads it as the level computes it.</summary>
+    [TestMethod]
+    public void DerivedColumnOfALevel_ReadAsTheLevelComputesIt()
+    {
+        var simulation = Setup();
+        simulation.ExecuteBatches("create view doubled as select k, v, v * 2 as d from pv");
+        AreEqual(2, simulation.ExecuteNonQuery("update doubled set v = d + 1 where d > 30"));
+        AreEqual(1, simulation.ExecuteNonQuery("delete doubled where d = 20"));
+        AreEqual(1, simulation.ExecuteNonQuery("update x set v = x.d from doubled x join u on u.id = x.k where u.x = 6"));
+        AreEqual("2:41 | 150:6002", simulation.ExecuteScalar(Members));
+    }
+
+    /// <summary>
+    /// A cursor reading a partitioned view is a read-only snapshot: a
+    /// positioned write naming a level over it is Msg 16929 and one naming
+    /// another table Msg 16933, each followed by Msg 3621 — but one naming
+    /// the partitioned view itself while the cursor reads it ends the session.
+    /// </summary>
+    [TestMethod]
+    public void PositionedWrite_RefusedOrEndsTheSession()
+    {
+        var simulation = Setup();
+        simulation.ExecuteBatches("create view pvw as select k, v from pv where v > 0");
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("declare c cursor for select k from pv; open c; fetch c").ExecuteNonQuery();
+        AreEqual("TSQL | Snapshot | Read Only | Global (0)", connection.CreateCommand("select properties from sys.dm_exec_cursors(@@spid)").ExecuteScalar());
+        var readOnly = Throws<SimulatedSqlException>(() => connection.CreateCommand("delete pvw where current of c").ExecuteNonQuery());
+        AreEqual(16929, readOnly.Number);
+        AreEqual(3621, readOnly.Errors[1].Number);
+        _ = connection.CreateCommand("close c; deallocate c; declare c2 cursor for select k from m1; open c2; fetch c2").ExecuteNonQuery();
+        AreEqual(16933, Throws<SimulatedSqlException>(() => connection.CreateCommand("update pv set v = 0 where current of c2").ExecuteNonQuery()).Number);
+        _ = connection.CreateCommand("close c2; deallocate c2").ExecuteNonQuery();
+
+        using var command = connection.CreateCommand(
+            "declare c3 cursor for select pv.k from pv join u on u.id = pv.k; begin tran; insert m1 values (7, 70); update pv set v = 0 where current of c3; insert m1 values (8, 80)");
+        var ended = Throws<SimulatedSqlException>(() => command.ExecuteNonQuery());
+        AreEqual(
+            "596/21/1|0/20/0",
+            string.Join("|", ended.Errors.Cast<SimulatedError>().Select(error => $"{error.Number}/{error.Class}/{error.State}")));
+        AreEqual(System.Data.ConnectionState.Closed, connection.State);
+        AreEqual("1:10 2:20 | 150:1500", simulation.ExecuteScalar(Members));
+    }
+
+    /// <summary>
+    /// <c>BULK INSERT</c> into a partitioned view, or a view over one, is Msg
+    /// 4437 naming the partitioned view once its members qualify — settled as
+    /// the batch compiles when the file can be read — while one into a union
+    /// that is no partitioned view takes the refusal of an <c>INSERT</c>
+    /// naming every column.
+    /// </summary>
+    [TestMethod]
+    public void BulkInsert_RefusedWithMsg4437()
+    {
+        var simulation = BulkInsertTests.WithFiles(("/rows.csv", "1,1\n"));
+        simulation.ExecuteBatches(
+            "create table m1 (k int not null check (k < 10), v int, primary key (k)); create table m2 (k int not null check (k >= 10), v int, primary key (k)); create table h (k int, v int)",
+            "create view pv as select k, v from m1 union all select k, v from m2",
+            "create view over_pv as select k, v from pv",
+            "create view plain as select k, v from h union all select k, v from m1",
+            "create view joined as select h.k, h.v from h join m1 on h.k = m1.k union all select k, v from m2");
+        simulation.AssertSqlError("bulk insert pv from '/rows.csv' with (fieldterminator = ',')", 4437, "Partitioned view 'simulated.dbo.pv' is not updatable as the target of a bulk operation.");
+        simulation.AssertSqlError("bulk insert over_pv from '/rows.csv' with (fieldterminator = ',')", 4437, "Partitioned view 'simulated.dbo.pv' is not updatable as the target of a bulk operation.");
+        simulation.AssertSqlError("select 1; if 1 = 0 bulk insert pv from '/rows.csv' with (fieldterminator = ',')", 4437, "Partitioned view 'simulated.dbo.pv' is not updatable as the target of a bulk operation.");
+        _ = simulation.AssertSqlError("bulk insert pv from '/missing.csv'", 4860);
+        simulation.AssertSqlError("bulk insert plain from '/rows.csv' with (fieldterminator = ',')", 4440, "UNION ALL view 'simulated.dbo.plain' is not updatable because a primary key was not found on table '[simulated].[dbo].[h]'.");
+        simulation.AssertSqlError("bulk insert joined from '/rows.csv' with (fieldterminator = ',')", 4406, "Update or insert of view or function 'joined' failed because it contains a derived or constant field.");
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from pv"));
+    }
+
+    /// <summary>
+    /// Each member's CHECK constraints over the partitioning column count one
+    /// at a time: a member qualifies when one of them keeps it apart from the
+    /// others, never their intersection, and a row is routed by the first
+    /// created, meeting the rest in that member (Msg 547).
+    /// </summary>
+    [TestMethod]
+    public void TwoChecksOnAMember_RoutedByTheFirst()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table r1 (k int primary key, v int, constraint r1b check (k < 10), constraint r1a check (k >= 0)); create table r2 (k int primary key check (k between 10 and 19), v int)",
+            "create view pr as select k, v from r1 union all select k, v from r2",
+            "create table s1 (k int primary key, v int, constraint s1a check (k >= 0), constraint s1b check (k < 10)); create table s2 (k int primary key check (k between 10 and 19), v int)",
+            "create view ps as select k, v from s1 union all select k, v from s2",
+            "create table w1 (k int primary key, v int, constraint w1a check (k < 12), constraint w1b check (k not between 10 and 11)); create table w2 (k int primary key check (k between 10 and 19), v int)",
+            "create view pw as select k, v from w1 union all select k, v from w2");
+        AreEqual(1, simulation.ExecuteNonQuery("insert pr values (12, 1)"));
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from r2"));
+        Contains("\"r1a\"", simulation.AssertSqlError("insert pr values (-5, 1)", 547).Errors[0].Message);
+        Contains("\"s1b\"", simulation.AssertSqlError("insert ps values (12, 1)", 547).Errors[0].Message);
+        _ = simulation.AssertSqlError("insert ps values (-5, 1)", 4457);
+        _ = simulation.AssertSqlError("insert pw values (5, 1)", 4436);
+    }
+
+    /// <summary>
+    /// A member column converted to the type it already has is the column
+    /// itself to a write, though a key column so converted still fails the
+    /// key check (Msg 4444).
+    /// </summary>
+    [TestMethod]
+    public void NoOpConversion_IsTheColumnItself()
+    {
+        var simulation = Setup();
+        simulation.ExecuteBatches(
+            "create view pc as select k, cast(v as int) v from m1 union all select k, convert(int, v) v from m2",
+            "create view pck as select cast(k as int) k, v from m1 union all select k, v from m2",
+            "create view pcb as select k, cast(v as bigint) v from m1 union all select k, v from m2");
+        AreEqual(2, simulation.ExecuteNonQuery("insert pc values (3, 30), (160, 1600)"));
+        AreEqual(5, simulation.ExecuteNonQuery("update pc set v = 0"));
+        AreEqual("1:0 2:0 3:0 | 150:0 160:0", simulation.ExecuteScalar(Members));
+        _ = simulation.AssertSqlError("update pck set v = 1", 4444);
+        _ = simulation.AssertSqlError("insert pcb values (4, 4)", 271);
+    }
 }

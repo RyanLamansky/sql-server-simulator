@@ -700,4 +700,77 @@ public sealed class SetOperationTests
     [TestMethod]
     public void ParenthesizedBareProjection_UnderAnUnusedCte_IsMsg422()
         => new Simulation().AssertSqlError("with c as (select 1 a) (select 7)", 422);
+
+    /// <summary>
+    /// Every position that opens a query with its own parenthesis reads a set
+    /// operation whose first branch is parenthesized — a derived table, an
+    /// <c>APPLY</c> body, a CTE, a subquery, <c>IN</c>, <c>EXISTS</c>, a
+    /// quantified comparison, <c>INSERT</c>'s source — while one whose
+    /// parentheses group a join, or are followed by <c>ORDER BY</c>, is not
+    /// a query (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from ((select 1 a) union all (select 2)) d", "1,2", DisplayName = "Derived table")]
+    [DataRow("select * from (((select 1 a)) union ((select 2))) d", "1,2", DisplayName = "Derived table, doubled parentheses")]
+    [DataRow("select * from ((select 1 a)) d", "1", DisplayName = "Derived table, wrapped")]
+    [DataRow("select z from ((select 1 a) union all (select 2)) d(z)", "1,2", DisplayName = "Derived table, column list")]
+    [DataRow("select a from ((select 1 a) x cross join (select 2 b) y)", "1", DisplayName = "Join group led by a derived table")]
+    [DataRow("select b from (values (1)) v(x) cross apply ((select x b) union all (select 2)) y", "1,2", DisplayName = "APPLY body")]
+    [DataRow("with c as ((select 1 a) union all (select 2)) select * from c", "1,2", DisplayName = "CTE")]
+    [DataRow("with c(n) as ((select 1) union all (select n + 1 from c where n < 3)) select * from c", "1,2,3", DisplayName = "Recursive CTE")]
+    [DataRow("select ((select 1) union all (select 1 where 0 = 1))", "1", DisplayName = "Scalar subquery")]
+    [DataRow("select 1 where 1 in ((select 1) union (select 2))", "1", DisplayName = "IN")]
+    [DataRow("select 1 where 1 in ((select 1), 2)", "1", DisplayName = "IN list led by a subquery")]
+    [DataRow("select 1 where exists ((select 1) union (select 2))", "1", DisplayName = "EXISTS")]
+    [DataRow("select 1 where 1 = any ((select 1) union (select 2))", "1", DisplayName = "Quantified comparison")]
+    public void ParenthesizedFirstBranch_InEveryQueryPosition(string sql, string expected)
+    {
+        using var reader = new Simulation().ExecuteReader(sql);
+        var values = new List<string>();
+        while (reader.Read())
+            values.Add($"{reader.GetValue(0)}");
+        AreEqual(expected, string.Join(",", values));
+    }
+
+    /// <summary>
+    /// A view or inline function body may open with a parenthesized branch, as
+    /// may an <c>INSERT</c> source after its column list; a body's wrapping
+    /// parentheses are left out of what it stores.
+    /// </summary>
+    [TestMethod]
+    public void ParenthesizedFirstBranch_InModuleBodiesAndInsertSources()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int)",
+            "create view v1 as (select 1 a) union all (select 2)",
+            "create view v2 as ((select 3 a) union (select 4))",
+            "create function f1() returns table as return (select 5 a) union all (select 6)",
+            "create function f2() returns table as return ((select 7 a)) union all (select 8)");
+        AreEqual("1,2|3,4|5,6|7,8", simulation.ExecuteScalar(
+            "select concat_ws('|', (select string_agg(a, ',') from v1), (select string_agg(a, ',') from v2), (select string_agg(a, ',') from f1()), (select string_agg(a, ',') from f2()))"));
+        AreEqual("((select 3 a) union (select 4))", simulation.ExecuteScalar("select substring(definition, charindex('((', definition), 100) from sys.sql_modules where object_id = object_id('v2')"));
+        AreEqual(2, simulation.ExecuteNonQuery("insert into t (a) (select 1) union all (select 2)"));
+        AreEqual(2, simulation.ExecuteNonQuery("insert t (a) ((select 3) union all (select 4))"));
+        AreEqual("1,2,3,4", simulation.ExecuteScalar("select string_agg(a, ',') within group (order by a) from t"));
+        _ = simulation.AssertSqlError("select * from ((select 1 a) order by a) d", 156);
+    }
+
+    /// <summary>
+    /// A nested query's parenthesized branch may carry the <c>ORDER BY</c> its
+    /// <c>TOP</c> or <c>OFFSET</c> takes rows by (Msg 1033 without one), where
+    /// any <c>ORDER BY</c> inside a statement's own parentheses is Msg 156 on
+    /// the keyword (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void OrderByInParenthesizedBranch()
+    {
+        var simulation = new Simulation();
+        AreEqual("0,2,3", simulation.ExecuteScalar("select string_agg(a, ',') within group (order by a) from ((select top 2 a from (values (3), (1), (2)) v(a) order by a desc) union all (select 0)) d"));
+        AreEqual(2, simulation.ExecuteScalar("with c as ((select top 1 1 a order by 1) union all (select 2)) select count(*) from c"));
+        simulation.AssertSqlError("select * from ((select 1 a order by 1) union all (select 2)) d", 1033, "The ORDER BY clause is invalid in views, inline functions, derived tables, subqueries, and common table expressions, unless TOP, OFFSET or FOR XML is also specified.");
+        simulation.AssertSqlError("(select top 1 1 a order by 1) union (select 2)", 156, "Incorrect syntax near the keyword 'order'.");
+        simulation.AssertSqlError("select 1 union (select top 1 2 a order by 1)", 156, "Incorrect syntax near the keyword 'order'.");
+        simulation.AssertSqlError("(select top 1 1 a order by 1)", 156, "Incorrect syntax near the keyword 'order'.");
+    }
 }

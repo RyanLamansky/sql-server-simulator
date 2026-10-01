@@ -443,7 +443,7 @@ internal sealed class CursorSourcePlan
         }
 
         if (spec.Expr is not Expressions.Reference reference)
-            return ReadsAnyColumn(spec.Expr!) ? null : (null, -1);
+            return spec.Expr!.ReadsAnyColumn() ? null : (null, -1);
 
         var name = reference.ReferencedName;
         if (name.ImmediateQualifier is null)
@@ -472,7 +472,7 @@ internal sealed class CursorSourcePlan
         var projection = projections[index] is Expressions.NamedExpression named ? named.Inner : projections[index];
         return projection is Expressions.Reference reference
             ? ResolveSourceColumn(sources, slots, reference.ReferencedName)
-            : ReadsAnyColumn(projection) ? null : (null, -1);
+            : projection.ReadsAnyColumn() ? null : (null, -1);
     }
 
     /// <summary>
@@ -505,15 +505,6 @@ internal sealed class CursorSourcePlan
         return columnIndex < nested.Projections.Length
             ? ResolveProjectedColumn(nested.Sources, nested.Slots, nested.Projections, columnIndex)
             : null;
-    }
-
-    /// <summary>Whether an expression reads any column at all; a constant one
-    /// imposes no ordering.</summary>
-    private static bool ReadsAnyColumn(Expression expression)
-    {
-        var found = false;
-        expression.VisitColumnReferences(_ => found = true);
-        return found;
     }
 
     /// <summary>

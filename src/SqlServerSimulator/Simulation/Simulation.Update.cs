@@ -540,7 +540,7 @@ partial class Simulation
         View? sourceView = null)
     {
         BindDeferredXmlMutators(context, table, rawAssignments, targetName.ToString());
-        var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView, context.Batch.BindErrors);
+        var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, sourceView, context.Batch.BindErrors, derivedLabel: targetName.ToString());
         // Through a view, a name is the view's column and masks as the base
         // column it reads (probed 2026-09-27 against SQL Server 2025).
         var setMasks = UpdateSetMasks(context.Batch, assignments, name =>
@@ -909,7 +909,7 @@ partial class Simulation
         var targetIndex = FindOrAppendMutationTarget(context, sourcesList, joinsList, leadingIdent, leadingTable);
         // A leading name that is a table's but aliases a view, CTE or derived
         // table in the FROM clause writes through that source.
-        if (output is null && sourcesList[targetIndex] is { BackingTable: null } aliased && aliased.UpdatableView() is not null)
+        if (output is null && sourcesList[targetIndex] is { BackingTable: null } aliased && aliased.WriteTargetView() is not null)
             return ExecuteJoinedViewTargetUpdate(context, leadingIdent, leadingView: null, rawAssignments, top, new Selection.PreParsedFrom(sourcesList, joinsList, context.SaveCheckpoint()));
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();
@@ -1732,7 +1732,7 @@ partial class Simulation
                 }
                 columnOrdinal = sourceView.BaseColumnOrdinals[viewOrd];
                 if (columnOrdinal < 0)
-                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(derivedLabel ?? DerivedFieldViewLabel(sourceView), sourceView.IsDerivedTable);
+                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(derivedLabel ?? sourceView.Name, sourceView.IsDerivedTable);
             }
             else
             {

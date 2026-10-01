@@ -548,10 +548,12 @@ partial class Simulation
 
         // Optional `(` before the SELECT; if present, the matching `)` ends
         // the body. Otherwise the body extends to the end of the batch (or
-        // the next statement-starting keyword).
+        // the next statement-starting keyword). A body opening with a
+        // parenthesized set-operation branch, `(SELECT …) UNION ALL (SELECT …)`,
+        // takes the second form.
         context.MoveNextRequired();
         var commandText = context.Command.CommandText;
-        var openedParen = context.Token is Operator { Character: '(' };
+        var openedParen = Selection.CountWrappingParentheses(context) > 0;
         if (openedParen)
             context.MoveNextRequired();
 
@@ -652,6 +654,9 @@ partial class Simulation
         var depth = openedParen ? 1 : 0;
         var lastBodyEnd = context.Token!.EndIndex;
         var afterSetOperator = false;
+        // A parenthesized first branch opens a level the loop below closes.
+        if (context.Token is Operator { Character: '(' })
+            depth++;
         context.MoveNextOptional();
         while (context.Token is not null)
         {

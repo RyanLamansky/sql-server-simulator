@@ -59,6 +59,15 @@ internal enum ViewUpdatabilityRejection
     /// <c>EXCEPT</c> (probed 2026-10-01 against SQL Server 2025).
     /// </summary>
     SetOperationOverUnion,
+
+    /// <summary>
+    /// A body reading a table value constructor or a built-in rowset function,
+    /// directly or through a view, CTE or derived table: every column is
+    /// derived, so every write is Msg 4406 — a <c>DELETE</c> and a derived
+    /// table included, though an <c>UPDATE</c> of a derived table names it
+    /// with Msg 4421 (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    ConstructedRows,
 }
 
 /// <summary>

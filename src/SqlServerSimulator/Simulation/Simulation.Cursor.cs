@@ -132,7 +132,9 @@ partial class Simulation
 
         context.MoveNextRequired(); // consume FOR
         Selection selection;
+        var reads = new List<SchemaObject>();
         using (ParserScope.Enter(ref context.CursorStatement, true))
+        using (ParserScope.Enter(ref context.PartitionedWriteReads, reads))
         {
             selection = ParseBodyQuery(context);
         }
@@ -320,6 +322,7 @@ partial class Simulation
             DeclaringStart = batch.CurrentStatement.StartIndex,
             DeclaringEnd = Math.Max(batch.CurrentStatement.StartIndex, batch.Parser.PreviousTokenEnd - 1),
             DeclaredLocal = localScope,
+            PartitionedViewsRead = [.. reads.OfType<View>().Select(view => view.PartitionedBase).OfType<View>().Distinct()],
         };
         cursor.StatementIdentity = QueryStoreStatementIdentity(batch, cursor.DeclaringText[cursor.DeclaringStart..(cursor.DeclaringEnd + 1)]);
 

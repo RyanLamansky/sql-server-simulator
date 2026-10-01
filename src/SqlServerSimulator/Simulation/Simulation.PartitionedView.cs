@@ -44,7 +44,10 @@ partial class Simulation
         /// </summary>
         public readonly int[] Ordinals = ordinals;
 
-        /// <summary>The values the member's CHECK constraints admit for the partitioning column.</summary>
+        /// <summary>
+        /// The values the member's first-created CHECK constraint over the
+        /// partitioning column admits, which is what real routes a row by.
+        /// </summary>
         public ValueDomain? Partition;
 
         /// <summary>The view row a row of the member's table shows.</summary>
@@ -160,6 +163,38 @@ partial class Simulation
         return true;
     }
 
+    /// <summary>
+    /// The member column <paramref name="projection"/> converts to the type it
+    /// already has — <c>CAST(v AS int)</c> over an <c>int</c> column — or -1.
+    /// </summary>
+    private static int KeptColumnOrdinal(Expression projection, HeapTable table, Collation collation)
+    {
+        while (projection is NamedExpression named)
+            projection = named.Inner;
+        SqlType? TypeOf(MultiPartName name) => Array.Find(table.Columns, column => collation.Equals(column.Name, name.Leaf))?.Type;
+        var kept = projection switch
+        {
+            Cast cast => cast.ColumnKeptAsIs(TypeOf),
+            ConvertExpression convert => convert.ColumnKeptAsIs(TypeOf),
+            _ => null,
+        };
+        return kept is null ? -1 : Array.FindIndex(table.Columns, column => collation.Equals(column.Name, kept.ReferencedName.Leaf));
+    }
+
+    /// <summary>
+    /// The view column carrying a member's key column <paramref name="ordinal"/>
+    /// bare, which the key checks require, or -1.
+    /// </summary>
+    private static int KeyPosition(PartitionedMember member, int ordinal)
+    {
+        for (var i = 0; i < member.Ordinals.Length; i++)
+        {
+            if (member.Ordinals[i] == ordinal && member.BareOrdinals[i] == ordinal)
+                return i;
+        }
+        return -1;
+    }
+
     /// <summary>A partitioned view as its refusals name it: <c>db.schema.view</c>.</summary>
     private static string PartitionedViewLabel(View view) => $"{view.Schema.Database.Name}.{view.Schema.Name}.{view.Name}";
 
@@ -245,7 +280,11 @@ partial class Simulation
                 bare[i] = UnwrapDirectRef(projections[i]) is { ReferencedName: var name }
                     ? Array.FindIndex(table.Columns, column => collation.Equals(column.Name, name.Leaf))
                     : -1;
-                direct[i] = bare[i] >= 0 && SameTypeLengthAside(table.Columns[bare[i]].Type, columns[i].Type) ? bare[i] : -1;
+                // A conversion to the type the column already has is the column
+                // itself to a write, though not to the key checks below
+                // (probed 2026-10-01 against SQL Server 2025).
+                var written = bare[i] >= 0 ? bare[i] : KeptColumnOrdinal(projections[i], table, collation);
+                direct[i] = written >= 0 && SameTypeLengthAside(table.Columns[written].Type, columns[i].Type) ? written : -1;
             }
             members[m] = new PartitionedMember(table, projections, bare, direct);
         }
@@ -270,7 +309,7 @@ partial class Simulation
             var positions = new List<int>();
             foreach (var ordinal in primaryKey.FullOrdinals)
             {
-                var position = Array.IndexOf(member.Ordinals, ordinal);
+                var position = KeyPosition(member, ordinal);
                 if (position < 0)
                     throw SimulatedSqlException.UnionAllViewPrimaryKeyNotProjected(label, PartitionedMemberLabel(batch, member.Table));
                 positions.Add(position);
@@ -298,42 +337,50 @@ partial class Simulation
         if (partitionColumn < 0)
             throw SimulatedSqlException.UnionAllViewNoPartitioningColumn(label, outsideKey ? (byte)13 : (byte)12);
         foreach (var member in members)
-            member.Partition = MemberDomain(member, partitionColumn);
+            member.Partition = MemberDomains(member, partitionColumn)[0];
         return new PartitionedPlan(members, partitionColumn, columns);
 
-        // Whether view column i is one each member carries as itself, with
-        // trusted CHECK constraints whose values — NULL included — no two
-        // members share.
+        // Whether view column i is one each member carries as itself, and
+        // whose values — NULL included — each two members' trusted CHECK
+        // constraints keep apart: real reads each constraint alone, never
+        // their intersection, so one constraint of each must do it (probed
+        // 2026-10-01 against SQL Server 2025: k < 12 beside
+        // k NOT BETWEEN 10 AND 11 partitions nothing from 10 to 19).
         bool PartitionsOn(int i)
         {
-            var domains = new ValueDomain[members.Length];
+            var domains = new List<ValueDomain>[members.Length];
             for (var m = 0; m < members.Length; m++)
             {
                 if (members[m].Ordinals[i] < 0)
                     return false;
-                domains[m] = MemberDomain(members[m], i);
+                domains[m] = MemberDomains(members[m], i);
                 for (var other = 0; other < m; other++)
                 {
-                    if (!domains[m].IsDisjointFrom(domains[other]))
+                    if (!domains[m].Exists(domain => domains[other].Exists(domain.IsDisjointFrom)))
                         return false;
                 }
             }
             return true;
         }
 
-        // What a member's constraints admit for view column i, read in the
-        // view's type so members whose lengths differ compare.
-        ValueDomain MemberDomain(PartitionedMember member, int i)
+        // What each of a member's constraints over view column i admits, in
+        // the order they were created, read in the view's type so members
+        // whose lengths differ compare; a member with none admits anything.
+        // The first is what real routes a row by, so a row it admits goes to
+        // that member and meets the others there (Msg 547).
+        List<ValueDomain> MemberDomains(PartitionedMember member, int i)
         {
             var column = member.Table.Columns[member.Ordinals[i]];
             var asViewColumn = new HeapColumn(column.Name, columns[i].Type, maxLength: null, nullable: column.Nullable);
-            var domain = ValueDomain.All(asViewColumn);
+            var domains = new List<ValueDomain>();
             foreach (var check in member.Table.CheckConstraints)
             {
                 if (!check.IsDisabled && !check.IsNotTrusted && SoleColumn(batch, check.Predicate, member.Table) == column)
-                    domain = domain.Intersect(ValueDomain.OfPredicate(batch, check.Predicate, asViewColumn, asPartitionedView: true));
+                    domains.Add(ValueDomain.OfPredicate(batch, check.Predicate, asViewColumn, asPartitionedView: true));
             }
-            return domain;
+            if (domains.Count == 0)
+                domains.Add(ValueDomain.All(asViewColumn));
+            return domains;
         }
     }
 
@@ -646,7 +693,7 @@ partial class Simulation
         }
         var resolver = Selection.ColumnTypeResolverFor(sources);
         BindSetValues(batch, plan.Members[0].Table, assignments[0], resolver, _ => false);
-        CheckPartitionedWritePermissions(batch, name, view, "UPDATE", where is not null || rawAssignments.Exists(assignment => ReadsAColumn(assignment.Expr)));
+        CheckPartitionedWritePermissions(batch, name, view, "UPDATE", where is not null || rawAssignments.Exists(static assignment => assignment.Expr.ReadsAnyColumn()));
         foreach (var member in plan.Members)
         {
             FunctionBodyShape.NoteTableWrite(batch, "UPDATE", member.Table);
@@ -654,7 +701,7 @@ partial class Simulation
         }
         if (batch.IsSkipping)
             return new SimulatedNonQuery(0);
-        RefuseUnmodeledPartitionedTarget(partitioned, view, positioned, sources, targetIndex, where, rawAssignments);
+        RefusePositionedPartitionedWrite(batch, partitioned, view, positioned);
 
         var walk = WalkPartitionedTarget(context, view, plan, sources, joins, targetIndex, where, RowLockPurpose.UpdatePreImage, (m, fullValues, resolve) =>
         {
@@ -767,7 +814,7 @@ partial class Simulation
         }
         if (batch.IsSkipping)
             return new SimulatedNonQuery(0);
-        RefuseUnmodeledPartitionedTarget(partitioned, view, positioned, sources, targetIndex, where, rawAssignments: null);
+        RefusePositionedPartitionedWrite(batch, partitioned, view, positioned);
 
         var walk = WalkPartitionedTarget(context, view, plan, sources, joins, targetIndex, where, RowLockPurpose.Delete, (_, fullValues, _) => fullValues);
         var total = 0;
@@ -788,7 +835,7 @@ partial class Simulation
     /// lone source standing for the target, and the <c>WHERE</c> bound against
     /// them while <paramref name="reads"/> records what the clause reads.
     /// </summary>
-    private static (FromSource[] Sources, JoinSpec[] Joins, BooleanExpression? Where, bool Positioned) ReadPartitionedTarget(
+    private static (FromSource[] Sources, JoinSpec[] Joins, BooleanExpression? Where, CursorReference? Positioned) ReadPartitionedTarget(
         ParserContext context,
         MultiPartName name,
         View view,
@@ -823,7 +870,7 @@ partial class Simulation
 
         using var recording = ParserScope.Enter(ref context.PartitionedWriteReads, reads);
         if (from is not null)
-            return (sources, joins, ParseJoinedViewTargetWhere(context, from.After, sources, joins, Selection.ColumnTypeResolverFor(sources)), false);
+            return (sources, joins, ParseJoinedViewTargetWhere(context, from.After, sources, joins, Selection.ColumnTypeResolverFor(sources)), null);
         if (IsWhereCurrentOf(context))
         {
             // WHERE CURRENT OF [GLOBAL] cursor, which the statement binds and
@@ -833,8 +880,7 @@ partial class Simulation
             if (context.Token is not ReservedKeyword { Keyword: Keyword.Of })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
-            _ = ReadCursorReference(context);
-            return (sources, joins, null, true);
+            return (sources, joins, null, ReadCursorReference(context));
         }
         BooleanExpression? where = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
@@ -843,35 +889,29 @@ partial class Simulation
             context.MoveNextRequired();
             where = Selection.ParseAndBindPredicate(context, Selection.ColumnTypeResolverFor(sources), sources, joins);
         }
-        return (sources, joins, where, false);
+        return (sources, joins, where, null);
     }
 
     /// <summary>
-    /// The shapes of an <c>UPDATE</c> / <c>DELETE</c> through a partitioned
-    /// view that aren't modeled, refused as the statement runs so a module
-    /// holding one still binds: a positioned write, a view over the
-    /// partitioned view that limits its rows or projects a window, and a
-    /// statement reading a column such a view derives.
+    /// A positioned <c>UPDATE</c> / <c>DELETE</c> through a partitioned view,
+    /// refused as the statement runs so a module holding one still binds. It
+    /// never passes: a cursor reading a partitioned view is a read-only
+    /// snapshot, so naming a level over the view is Msg 16929 and another
+    /// table Msg 16933 as for any cursor — but naming the partitioned view
+    /// itself while the cursor reads it ends the session (probed 2026-10-01
+    /// against SQL Server 2025).
     /// </summary>
-    private static void RefuseUnmodeledPartitionedTarget(
-        View partitioned,
-        View view,
-        bool positioned,
-        FromSource[] sources,
-        int targetIndex,
-        BooleanExpression? where,
-        List<(string? ColumnName, Expression Expr)>? rawAssignments)
+    private static void RefusePositionedPartitionedWrite(BatchContext batch, View partitioned, View view, CursorReference? positioned)
     {
-        if (positioned)
-            throw new NotSupportedException($"A positioned write through the partitioned view '{partitioned.Name}' isn't modeled.");
-        if (view.IsRowLimited || view.IsWindowed)
-            throw new NotSupportedException($"A write through '{view.Name}', which limits the rows of the partitioned view '{partitioned.Name}' or projects a window over them, isn't modeled.");
-        CollectTargetColumnReads(sources, targetIndex, where, rawAssignments, column =>
+        if (positioned is not { } reference)
+            return;
+        var cursor = ResolveCursor(batch, reference);
+        if (ReferenceEquals(view, partitioned) && Array.IndexOf(cursor.PartitionedViewsRead, partitioned) >= 0)
         {
-            var ordinal = Array.FindIndex(sources[targetIndex].ColumnNames, name => ReferenceEquals(name, column));
-            if (ordinal >= 0 && view.BaseColumnOrdinals[ordinal] < 0)
-                throw new NotSupportedException($"A write through '{view.Name}' reading its derived column '{column}' over the partitioned view '{partitioned.Name}' isn't modeled.");
-        });
+            batch.Connection.SessionEnding = true;
+            throw SimulatedSqlException.PositionedWriteThroughPartitionedViewEndsSession();
+        }
+        throw cursor.ReadOnly ? SimulatedSqlException.CursorIsReadOnly() : SimulatedSqlException.CursorTableNotIncluded();
     }
 
     /// <summary>A joined write through a partitioned view reading a member table as another of its sources (Msg 4439).</summary>
@@ -908,14 +948,6 @@ partial class Simulation
         PermissionEnforcement.CheckSchemaObject(batch, verb, securable);
     }
 
-    /// <summary>Whether <paramref name="expression"/> reads any column.</summary>
-    private static bool ReadsAColumn(Expression expression)
-    {
-        var reads = false;
-        expression.VisitColumnReferences(_ => reads = true);
-        return reads;
-    }
-
     /// <summary>
     /// Walks an <c>UPDATE</c> / <c>DELETE</c> through a partitioned view: the
     /// target source stands as every member's rows the view shows, each
@@ -943,6 +975,16 @@ partial class Simulation
         var images = new Dictionary<(int Member, int Page, int Slot), byte[]>();
         var rows = new List<byte[]>();
         var generations = new long[members.Length];
+
+        // A level that limits its rows, projects a window or derives a column
+        // shows each member's rows as its body yields them for that member
+        // alone, which is how real evaluates it: a TOP picks each member's own
+        // rows and a window numbers each member's rows apart (probed
+        // 2026-10-01 against SQL Server 2025).
+        var partitioned = view.PartitionedBase!;
+        var levelRows = !ReferenceEquals(view, partitioned) && (view.IsRowLimited || view.IsWindowed || Array.IndexOf(view.BaseColumnOrdinals, -1) >= 0)
+            ? new Dictionary<(int Page, int Slot), SqlValue[]>?[members.Length]
+            : null;
         for (var m = 0; m < members.Length; m++)
         {
             var table = members[m].Table;
@@ -955,7 +997,7 @@ partial class Simulation
                 var bytes = scanned;
                 if (waits && !batch.AwaitTargetRowWriters(table, page, slot, ref bytes))
                     continue;
-                if (ShownRow(m, bytes) is not { } shown)
+                if (ShownRowAt(m, page, slot, bytes, reread: !ReferenceEquals(bytes, scanned)) is not { } shown)
                     continue;
                 addresses[shown] = (m, page, slot);
                 images[(m, page, slot)] = bytes;
@@ -995,7 +1037,7 @@ partial class Simulation
             var rowBytes = image;
             if (!batch.AwaitTargetRowWriters(members[m].Table, page, slot, ref rowBytes))
                 continue;
-            if (!ReferenceEquals(rowBytes, image) && !rowBytes.AsSpan().SequenceEqual(image) && !Requalifies(m, rowBytes))
+            if (!ReferenceEquals(rowBytes, image) && !rowBytes.AsSpan().SequenceEqual(image) && !Requalifies(m, page, slot, rowBytes))
                 continue;
             walked[m].Add(Judge(m, page, slot, rowBytes));
             judged[m].Add((page, slot, rowBytes));
@@ -1007,7 +1049,7 @@ partial class Simulation
             var memberRows = walked[member];
             HoldQualifyingRows(batch, members[member].Table, memberRows, judged[member], generations[member], purpose, (i, rowBytes) =>
             {
-                if (!Requalifies(member, rowBytes))
+                if (!Requalifies(member, memberRows[i].PageIndex, memberRows[i].SlotIndex, rowBytes))
                     return false;
                 memberRows[i] = Judge(member, memberRows[i].PageIndex, memberRows[i].SlotIndex, rowBytes);
                 return true;
@@ -1015,8 +1057,31 @@ partial class Simulation
         }
         return walked;
 
+        // The target-slot row the member row at (page, slot) shows as image,
+        // or null when the level hides it; reread says the image changed since
+        // the level's rows were read, which then reads them again.
+        byte[]? ShownRowAt(int member, int page, int slot, byte[] image, bool reread)
+        {
+            if (levelRows is null)
+                return ShownRow(member, image);
+            if (reread || levelRows[member] is null)
+            {
+                var memberRows = new Dictionary<(int Page, int Slot), SqlValue[]>();
+                using (ParserScope.Enter(ref batch.PartitionedMemberRun, new PartitionedMemberRun(partitioned, member)))
+                {
+                    foreach (var (row, address) in ViewRowsWithAddresses(batch, view))
+                    {
+                        if (address is { } at)
+                            memberRows[at] = row;
+                    }
+                }
+                levelRows[member] = memberRows;
+            }
+            return levelRows[member]!.TryGetValue((page, slot), out var levelRow) ? EncodeFor(source, levelRow) : null;
+        }
+
         // The target-slot row a member row shows, or null when the view's
-        // filter hides it.
+        // filter hides it, its derived columns NULL.
         byte[]? ShownRow(int member, byte[] image)
         {
             var full = DecodeFullRow(members[member].Table, image);
@@ -1035,9 +1100,9 @@ partial class Simulation
 
         // Whether the member row as rowBytes still shows and passes the join
         // and WHERE with some partner, which is left current.
-        bool Requalifies(int member, byte[] rowBytes)
+        bool Requalifies(int member, int page, int slot, byte[] rowBytes)
         {
-            if (ShownRow(member, rowBytes) is not { } shown)
+            if (ShownRowAt(member, page, slot, rowBytes, reread: true) is not { } shown)
                 return false;
             foreach (var tuple in Selection.EnumerateJoinedRows(WithTargetNarrowedTo(sources, targetIndex, shown), joins, batch, outerResolver: null))
             {
@@ -1054,4 +1119,16 @@ partial class Simulation
             return (page, slot, judge(member, full, resolveTuple), full);
         }
     }
+}
+
+/// <summary>
+/// One member of a partitioned view whose rows a level over it is evaluated
+/// against (<see cref="Parser.BatchContext.PartitionedMemberRun"/>).
+/// </summary>
+internal sealed class PartitionedMemberRun(View partitioned, int member)
+{
+    public readonly View Partitioned = partitioned;
+
+    /// <summary>The member's branch among the partitioned view's <c>UNION ALL</c> branches.</summary>
+    public readonly int Member = member;
 }

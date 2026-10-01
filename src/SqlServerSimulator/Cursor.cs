@@ -159,6 +159,10 @@ internal sealed class Cursor(
 
     public bool IsOpen;
 
+    /// <summary>The partitioned views the cursor's query reads, by any path —
+    /// a positioned write naming one ends the session on real.</summary>
+    public View[] PartitionedViewsRead = [];
+
     /// <summary>The session-scoped number <c>sp_describe_cursor</c> reports as
     /// <c>cursor_handle</c>, drawn at declaration.</summary>
     public int Handle;

@@ -48,6 +48,8 @@ partial class Simulation
         Selection.PreParsedFrom? from = null)
     {
         var batch = context.Batch;
+        var statementView = view;
+        var level = InsteadOfLevel(batch, ref view, ref targetName, TriggerActions.Update);
         var columns = ViewColumnsFor(batch, view, targetName);
         var collation = batch.CurrentDatabase.Collation;
 
@@ -60,14 +62,16 @@ partial class Simulation
                 assignments.Add((-1, expr));
                 continue;
             }
-            var ordinal = Array.FindIndex(columns, column => collation.Equals(column.Name, columnName));
+            var ordinal = level is null
+                ? Array.FindIndex(columns, column => collation.Equals(column.Name, columnName))
+                : level.ViewOrdinalOf(collation, columnName);
             if (ordinal < 0)
                 throw SimulatedSqlException.InvalidColumnName(columnName);
             assignments.Add((ordinal, expr));
             updatedOrdinals.Add(ordinal);
         }
 
-        var typeResolver = from is null ? Selection.ViewOutputColumnTypeResolver(batch, view) : Selection.ColumnTypeResolverFor([.. from.Sources]);
+        var typeResolver = from is null ? Selection.ViewOutputColumnTypeResolver(batch, statementView) : Selection.ColumnTypeResolverFor([.. from.Sources]);
         foreach (var (_, expr) in rawAssignments)
             UnresolvedCollation.RequireAssignable(expr.GetSqlType(batch, typeResolver));
 
@@ -95,17 +99,18 @@ partial class Simulation
 
         var deletedRows = new List<SqlValue[]>();
         var insertedRows = new List<SqlValue[]>();
+        var statementColumns = level?.Columns ?? columns;
         SqlValue[] current = [];
         SqlValue Resolve(MultiPartName name)
         {
-            var ordinal = Array.FindIndex(columns, column => collation.Equals(column.Name, name.Leaf));
+            var ordinal = Array.FindIndex(statementColumns, column => collation.Equals(column.Name, name.Leaf));
             return ordinal < 0 ? throw SimulatedSqlException.InvalidColumnName(name) : current[ordinal];
         }
         var runtime = new RuntimeContext(Resolve, batch);
 
-        foreach (var row in DmlTopIsZero(top, batch) ? [] : ReadViewRows(batch, view, columns))
+        foreach (var (row, levelRow) in DmlTopIsZero(top, batch) ? [] : ReadInsteadOfRows(batch, view, columns, level))
         {
-            current = row;
+            current = levelRow;
             if (where is not null && where.Run(runtime) != true)
                 continue;
 
@@ -164,6 +169,8 @@ partial class Simulation
         Selection.PreParsedFrom? from = null)
     {
         var batch = context.Batch;
+        var statementView = view;
+        var level = InsteadOfLevel(batch, ref view, ref targetName, TriggerActions.Delete);
         var columns = ViewColumnsFor(batch, view, targetName);
         var collation = batch.CurrentDatabase.Collation;
 
@@ -184,7 +191,7 @@ partial class Simulation
                 : throw new NotSupportedException($"A positioned DELETE through '{view.Name}', whose INSTEAD OF DELETE trigger takes the write, isn't modeled with an OUTPUT clause or over a view with no single base table.");
         }
 
-        var where = ParseInsteadOfViewWhere(context, from is null ? Selection.ViewOutputColumnTypeResolver(batch, view) : Selection.ColumnTypeResolverFor([.. from.Sources]));
+        var where = ParseInsteadOfViewWhere(context, from is null ? Selection.ViewOutputColumnTypeResolver(batch, statementView) : Selection.ColumnTypeResolverFor([.. from.Sources]));
         if (!batch.IsSkipping
             && PermissionEnforcement.SecurableFor(batch, targetName, view) is { } securable
             && PermissionEnforcement.Applies(batch, batch.DatabaseFor(securable)))
@@ -197,16 +204,17 @@ partial class Simulation
             return new SimulatedNonQuery(0);
 
         var deletedRows = new List<SqlValue[]>();
+        var statementColumns = level?.Columns ?? columns;
         SqlValue[] current = [];
         SqlValue Resolve(MultiPartName name)
         {
-            var ordinal = Array.FindIndex(columns, column => collation.Equals(column.Name, name.Leaf));
+            var ordinal = Array.FindIndex(statementColumns, column => collation.Equals(column.Name, name.Leaf));
             return ordinal < 0 ? throw SimulatedSqlException.InvalidColumnName(name) : current[ordinal];
         }
         var runtime = new RuntimeContext(Resolve, batch);
-        foreach (var row in DmlTopIsZero(top, batch) ? [] : ReadViewRows(batch, view, columns))
+        foreach (var (row, levelRow) in DmlTopIsZero(top, batch) ? [] : ReadInsteadOfRows(batch, view, columns, level))
         {
-            current = row;
+            current = levelRow;
             if (where is null || where.Run(runtime) == true)
                 deletedRows.Add(row);
         }
@@ -244,6 +252,110 @@ partial class Simulation
         context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Where);
         context.MoveNextRequired();
         return Selection.ParseAndBindPredicate(context, typeResolver);
+    }
+
+    /// <summary>
+    /// A view, CTE or derived table written through whose single source is a
+    /// view carrying an <c>INSTEAD OF</c> trigger for the action: real hands
+    /// that trigger the view's rows the level shows, its filter applied, as a
+    /// write naming the view would (probed 2026-10-01 against SQL Server
+    /// 2025, <c>UPDATE d … FROM (SELECT * FROM vi WHERE id = 1) d</c>,
+    /// <c>WITH c AS (SELECT * FROM vi) DELETE c</c>, an <c>INSERT</c> through
+    /// such a CTE and an <c>UPDATE</c> through a stored view over <c>vi</c>).
+    /// </summary>
+    private sealed class InsteadOfLevelView(HeapColumn[] columns, HeapColumn[] viewColumns, Expression[] projections, BooleanExpression[] excluders, string writtenName, bool isDerivedTable)
+    {
+        /// <summary>The level's columns, which the statement's <c>WHERE</c>, <c>SET</c> list and <c>INSERT</c> column list name.</summary>
+        public readonly HeapColumn[] Columns = columns;
+
+        private readonly HeapColumn[] viewColumns = viewColumns;
+        private readonly Expression[] projections = projections;
+        private readonly BooleanExpression[] excluders = excluders;
+        private readonly string writtenName = writtenName;
+        private readonly bool isDerivedTable = isDerivedTable;
+
+        /// <summary>
+        /// The trigger view's column a level column passes through bare; -1
+        /// when the level has no such column, and a derived one refused with
+        /// Msg 4406 (4421 through a derived table) naming the level as written.
+        /// </summary>
+        public int ViewOrdinalOf(Collation collation, string levelColumn)
+        {
+            var i = Array.FindIndex(this.Columns, column => collation.Equals(column.Name, levelColumn));
+            if (i < 0)
+                return -1;
+            return UnwrapDirectRef(this.projections[i]) is { ReferencedName: var name }
+                && Array.FindIndex(this.viewColumns, column => collation.Equals(column.Name, name.Leaf)) is var ordinal and >= 0
+                ? ordinal
+                : throw SimulatedSqlException.ViewDmlTouchesDerivedField(this.writtenName, this.isDerivedTable);
+        }
+
+        /// <summary>The level's row over a trigger view row, or null when its filter hides it.</summary>
+        public SqlValue[]? RowOver(SqlValue[] viewRow, BatchContext batch)
+        {
+            var collation = batch.CurrentDatabase.Collation;
+            var columns = this.viewColumns;
+            var runtime = new RuntimeContext(name =>
+                Array.FindIndex(columns, column => collation.Equals(column.Name, name.Leaf)) is var ordinal and >= 0
+                    ? viewRow[ordinal]
+                    : throw SimulatedSqlException.InvalidColumnName(name), batch);
+            foreach (var excluder in this.excluders)
+            {
+                if (excluder.Run(runtime) != true)
+                    return null;
+            }
+            var row = new SqlValue[this.projections.Length];
+            for (var i = 0; i < row.Length; i++)
+                row[i] = this.projections[i].Run(runtime);
+            return row;
+        }
+    }
+
+    /// <summary>
+    /// The view carrying an <c>INSTEAD OF</c> trigger for
+    /// <paramref name="action"/> that <paramref name="level"/> — a view, CTE
+    /// or derived table — reads as its single source, or null.
+    /// </summary>
+    private static View? InsteadOfTriggerViewUnder(BatchContext batch, View level, TriggerActions action) =>
+        (level.UnstoredBody is { UpdatabilityProfile.Sources: [var source] } ? source.UpdatableView() : level.UpstreamView) is { UnstoredBody: null } inner
+        && HasInsteadOfTrigger(batch, inner, action)
+            ? inner
+            : null;
+
+    /// <summary>
+    /// When <paramref name="view"/> is a level <see cref="InsteadOfTriggerViewUnder"/>
+    /// finds a trigger view under, turns the write onto that view —
+    /// <paramref name="view"/> and <paramref name="targetName"/> become its —
+    /// and answers the level the statement names; null otherwise.
+    /// </summary>
+    private static InsteadOfLevelView? InsteadOfLevel(BatchContext batch, ref View view, ref MultiPartName targetName, TriggerActions action)
+    {
+        if (InsteadOfTriggerViewUnder(batch, view, action) is not { } triggerView)
+            return null;
+        var profile = (view.UnstoredBody ?? batch.Connection.Simulation.ParseViewBodyPlan(batch, view)).UpdatabilityProfile!;
+        var written = view.UnstoredBody is null ? targetName.ToString() : view.Name;
+        targetName = new MultiPartName(triggerView.Schema.Name).WithAddedPart(triggerView.Name);
+        var level = new InsteadOfLevelView(view.OutputColumns, ViewColumnsFor(batch, triggerView, targetName), profile.Projections, profile.Excluders, written, view.IsDerivedTable);
+        view = triggerView;
+        return level;
+    }
+
+    /// <summary>
+    /// Every row the trigger view yields, each beside the row the statement
+    /// reads it as: itself, or through <paramref name="level"/>, whose filter
+    /// drops the rows it hides.
+    /// </summary>
+    private static List<(SqlValue[] Row, SqlValue[] LevelRow)> ReadInsteadOfRows(BatchContext batch, View view, HeapColumn[] columns, InsteadOfLevelView? level)
+    {
+        var rows = new List<(SqlValue[] Row, SqlValue[] LevelRow)>();
+        foreach (var row in ReadViewRows(batch, view, columns))
+        {
+            if (level is null)
+                rows.Add((row, row));
+            else if (level.RowOver(row, batch) is { } levelRow)
+                rows.Add((row, levelRow));
+        }
+        return rows;
     }
 
     /// <summary>Every row the view yields, decoded to its columns.</summary>

@@ -291,6 +291,13 @@ internal sealed class Cast : Expression
 
     internal override bool ResultReportsNumeric => this.targetReportsNumeric;
 
+    /// <summary>
+    /// The bare column this cast converts to the type <paramref name="typeOf"/>
+    /// says it already has — a conversion that changes nothing — or null.
+    /// </summary>
+    internal Reference? ColumnKeptAsIs(Func<MultiPartName, SqlType?> typeOf) =>
+        this.source is Reference column && typeOf(column.ReferencedName) == this.targetType && this.targetMaxLength is null ? column : null;
+
     internal override void Describe(NodeShape shape) => shape.Local(this.tryMode).Local(this.targetType).Local(this.targetMaxLength).Local(this.targetReportsNumeric).Child(this.source);
 
     /// <summary>
