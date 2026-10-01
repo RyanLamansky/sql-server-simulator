@@ -437,16 +437,40 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
 
     /// <summary>
     /// The values for which <paramref name="predicate"/> isn't FALSE — what a
-    /// CHECK constraint lets through — and whether NULL gets through.
+    /// CHECK constraint lets through — and whether NULL gets through. With
+    /// <paramref name="asPartitionedView"/> it reads as real's partitioned-view
+    /// analysis does (probed 2026-10-01 against SQL Server 2025), where
+    /// <c>ALTER TABLE … SWITCH</c>'s admits every value: a <c>NOT</c>,
+    /// <c>&lt;&gt;</c>, <c>NOT BETWEEN</c> or <c>NOT IN</c> over a shape the
+    /// reasoning reads exactly is the complement, and an integer column's
+    /// range bound by a fraction (<c>k &lt; 10.5</c>) rounds to the integers
+    /// it admits.
     /// </summary>
-    public static ValueDomain OfPredicate(BatchContext batch, BooleanExpression predicate, HeapColumn column)
+    public static ValueDomain OfPredicate(BatchContext batch, BooleanExpression predicate, HeapColumn column, bool asPartitionedView = false)
     {
-        var (values, nullOutcome) = Analyze(batch, predicate, column);
+        var (values, nullOutcome, _) = Analyze(batch, predicate, column, asPartitionedView);
         return new ValueDomain(Normalize(values), column.Nullable && nullOutcome != false);
     }
 
     public ValueDomain Intersect(ValueDomain other) =>
         new(Normalize(IntersectIntervals(this.Intervals, other.Intervals)), this.AdmitsNull && other.AdmitsNull);
+
+    /// <summary>Whether no value — NULL included — is admitted by both this and <paramref name="other"/>.</summary>
+    public bool IsDisjointFrom(ValueDomain other) =>
+        !(this.AdmitsNull && other.AdmitsNull) && IntersectIntervals(this.Intervals, other.Intervals).Count == 0;
+
+    /// <summary>
+    /// Whether <paramref name="value"/>, a value of <paramref name="columnType"/>,
+    /// lies in this domain; NULL lies in it when it admits NULL.
+    /// </summary>
+    public bool Admits(SqlValue value, SqlType columnType)
+    {
+        if (value.IsNull)
+            return this.AdmitsNull;
+        var point = DomainValue(value, columnType);
+        var probe = new ValueInterval(point, true, point, true);
+        return this.Intervals.Exists(interval => Contains(interval, probe));
+    }
 
     /// <summary>Whether every value this admits — NULL included — <paramref name="outer"/> admits too.</summary>
     public bool IsWithin(ValueDomain outer)
@@ -461,7 +485,12 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
         return true;
     }
 
-    private static (List<ValueInterval> Values, bool? NullOutcome) Analyze(BatchContext batch, BooleanExpression predicate, HeapColumn column)
+    /// <summary>
+    /// The values <paramref name="predicate"/> doesn't rule out, the verdict it
+    /// gives NULL, and whether those values are exactly the ones it holds TRUE
+    /// for rather than a conservative superset.
+    /// </summary>
+    private static (List<ValueInterval> Values, bool? NullOutcome, bool Exact) Analyze(BatchContext batch, BooleanExpression predicate, HeapColumn column, bool asPartitionedView)
     {
         var all = new List<ValueInterval> { new(null, false, null, false) };
         var conjuncts = new List<BooleanExpression>();
@@ -470,13 +499,15 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
         {
             var values = all;
             bool? outcome = true;
+            var exact = true;
             foreach (var conjunct in conjuncts)
             {
-                var (part, partNull) = Analyze(batch, conjunct, column);
+                var (part, partNull, partExact) = Analyze(batch, conjunct, column, asPartitionedView);
                 values = IntersectIntervals(values, part);
                 outcome = outcome == false || partNull == false ? false : outcome == true && partNull == true ? true : null;
+                exact &= partExact;
             }
-            return (values, outcome);
+            return (values, outcome, exact);
         }
         var disjuncts = new List<BooleanExpression>();
         predicate.CollectDisjuncts(disjuncts);
@@ -484,29 +515,35 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
         {
             var values = new List<ValueInterval>();
             bool? outcome = false;
+            var exact = true;
             foreach (var disjunct in disjuncts)
             {
-                var (part, partNull) = Analyze(batch, disjunct, column);
+                var (part, partNull, partExact) = Analyze(batch, disjunct, column, asPartitionedView);
                 values.AddRange(part);
                 outcome = outcome == true || partNull == true ? true : outcome == false && partNull == false ? false : null;
+                exact &= partExact;
             }
-            return (values, outcome);
+            return (values, outcome, exact);
         }
 
+        if (asPartitionedView && predicate.TryGetComplement(out var positive))
+        {
+            var (values, nullOutcome, exact) = Analyze(batch, positive, column, asPartitionedView);
+            return exact ? (Complement(Normalize(values)), nullOutcome is { } verdict ? !verdict : null, true) : (all, null, false);
+        }
         if (predicate.TryGetNullTest(out var tested, out var isNotNull) && IsColumn(batch, tested, column))
-            return (isNotNull ? all : [], !isNotNull);
+            return (isNotNull ? all : [], !isNotNull, true);
         if (predicate.TryGetEqualityOperands(out var left, out var right))
         {
             var point = IsColumn(batch, left, column) ? Constant(batch, right, column) : IsColumn(batch, right, column) ? Constant(batch, left, column) : null;
-            return point is { } value ? ([new ValueInterval(value, true, value, true)], null) : (all, null);
+            return point is { } value ? ([new ValueInterval(value, true, value, true)], null, true) : (all, null, false);
         }
         if (predicate.TryGetRangeOperands(out var rangeLeft, out var op, out var rangeRight))
         {
             var columnLeft = IsColumn(batch, rangeLeft, column);
             if (!columnLeft && !IsColumn(batch, rangeRight, column))
-                return (all, null);
-            if (Constant(batch, columnLeft ? rangeRight : rangeLeft, column) is not { } bound)
-                return (all, null);
+                return (all, null, false);
+            var bound = Constant(batch, columnLeft ? rangeRight : rangeLeft, column);
             if (!columnLeft)
             {
                 op = op switch
@@ -517,6 +554,10 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
                     _ => RangeComparison.GreaterOrEqual,
                 };
             }
+            if (bound is null && asPartitionedView && IntegerRangeBound(batch, columnLeft ? rangeRight : rangeLeft, column, op) is { } rounded)
+                (bound, op) = rounded;
+            if (bound is null)
+                return (all, null, false);
             ValueInterval interval = op switch
             {
                 RangeComparison.Greater => new(bound, false, null, false),
@@ -524,13 +565,13 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
                 RangeComparison.Less => new(null, false, bound, false),
                 _ => new(null, false, bound, true),
             };
-            return ([interval], null);
+            return ([interval], null, true);
         }
         if (predicate.TryGetBetweenOperands(out var subject, out var lower, out var upper) && IsColumn(batch, subject, column))
         {
             return Constant(batch, lower, column) is { } low && Constant(batch, upper, column) is { } high
-                ? ([new ValueInterval(low, true, high, true)], null)
-                : (all, null);
+                ? ([new ValueInterval(low, true, high, true)], null, true)
+                : (all, null, false);
         }
         if (predicate.TryGetEqualityFamily(out var pairs))
         {
@@ -539,12 +580,63 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
             {
                 var point = IsColumn(batch, pairLeft, column) ? Constant(batch, pairRight, column) : IsColumn(batch, pairRight, column) ? Constant(batch, pairLeft, column) : null;
                 if (point is not { } value)
-                    return (all, null);
+                    return (all, null, false);
                 points.Add(new ValueInterval(value, true, value, true));
             }
-            return (points, null);
+            return (points, null, true);
         }
-        return (all, null);
+        return (all, null, false);
+    }
+
+    /// <summary>
+    /// An integer column's bound from a fractional constant, rounded to the
+    /// integers <paramref name="op"/> admits — <c>&lt; 10.5</c> is
+    /// <c>&lt;= 10</c> and <c>&gt; 10.5</c> is <c>&gt;= 11</c> — or null when
+    /// the column isn't an integer or the constant isn't a number.
+    /// </summary>
+    private static (SqlValue Bound, RangeComparison Op)? IntegerRangeBound(BatchContext batch, Expression expression, HeapColumn column, RangeComparison op)
+    {
+        if (!SqlType.IsIntegerCategory(column.Type))
+            return null;
+        var readsColumn = false;
+        expression.VisitColumnReferences(_ => readsColumn = true);
+        if (readsColumn)
+            return null;
+        try
+        {
+            var raw = expression.Run(new RuntimeContext(Simulation.NoColumnResolver, batch));
+            if (raw.IsNull || raw.Type.Category is not (SqlTypeCategory.Decimal or SqlTypeCategory.Approximate or SqlTypeCategory.Money))
+                return null;
+            var value = raw.CoerceTo(SqlType.Float).AsDouble;
+            return op is RangeComparison.Less or RangeComparison.LessOrEqual
+                ? (SqlValue.FromInt64((long)Math.Floor(value) - (op == RangeComparison.Less && Math.Floor(value) == value ? 1 : 0)), RangeComparison.LessOrEqual)
+                : (SqlValue.FromInt64((long)Math.Ceiling(value) + (op == RangeComparison.Greater && Math.Ceiling(value) == value ? 1 : 0)), RangeComparison.GreaterOrEqual);
+        }
+        catch (Exception error) when (error is SimulatedSqlException or OverflowException or FormatException or NotSupportedException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The values between and around <paramref name="normalized"/>'s sorted, merged intervals.</summary>
+    private static List<ValueInterval> Complement(List<ValueInterval> normalized)
+    {
+        var gaps = new List<ValueInterval>(normalized.Count + 1);
+        SqlValue? low = null;
+        var lowInclusive = false;
+        var unboundedBelow = true;
+        foreach (var interval in normalized)
+        {
+            if (interval.Low is { } start)
+                gaps.Add(new ValueInterval(unboundedBelow ? null : low, lowInclusive, start, !interval.LowInclusive));
+            if (interval.High is not { } end)
+                return gaps;
+            low = end;
+            lowInclusive = !interval.HighInclusive;
+            unboundedBelow = false;
+        }
+        gaps.Add(new ValueInterval(unboundedBelow ? null : low, lowInclusive, null, false));
+        return gaps;
     }
 
     private static bool IsColumn(BatchContext batch, Expression expression, HeapColumn column) =>

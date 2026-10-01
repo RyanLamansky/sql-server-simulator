@@ -1207,8 +1207,8 @@ partial class SimulatedSqlException
     /// the UNION-result wording is part of the standard text even though the
     /// simulator only triggers it from the computed-column path.
     /// </summary>
-    internal static SimulatedSqlException ColumnCannotBeModified(string columnName) =>
-        new($"The column \"{columnName}\" cannot be modified because it is either a computed column or is the result of a UNION operator.", 271, 16, 1);
+    internal static SimulatedSqlException ColumnCannotBeModified(string columnName, byte state = 1) =>
+        new($"The column \"{columnName}\" cannot be modified because it is either a computed column or is the result of a UNION operator.", 271, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 1759: a computed column's expression refers

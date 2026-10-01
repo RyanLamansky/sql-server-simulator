@@ -189,6 +189,9 @@ partial class Simulation
         /// <summary>Through the one base table of a join view the statement's columns name.</summary>
         JoinView,
 
+        /// <summary>To the members of the partitioned view the view's chain reaches (<see cref="View.PartitionedBase"/>).</summary>
+        Partitioned,
+
         /// <summary>Real's refusal: Msg 4403 / 4405, or 4406 for a derived column.</summary>
         Refused,
     }
@@ -200,6 +203,7 @@ partial class Simulation
     /// </summary>
     private static DmlViewRoute RouteViewWrite(BatchContext batch, View view, TriggerActions action) =>
         HasInsteadOfTrigger(batch, view, action) ? DmlViewRoute.InsteadOf
+        : view.PartitionedBase is not null ? DmlViewRoute.Partitioned
         : view.BaseTable is not null ? DmlViewRoute.BaseTable
         : view.IsJoinUpdatable && action != TriggerActions.Delete ? DmlViewRoute.JoinView
         : DmlViewRoute.Refused;
@@ -208,14 +212,15 @@ partial class Simulation
     /// A view real can't write through, named as the statement wrote it: Msg
     /// 4405 when its body reads several sources, Msg 4426 when a <c>UNION</c>
     /// tops it — what a <c>DELETE</c> meets, an <c>UPDATE</c> or <c>INSERT</c>
-    /// naming one of its derived columns first — and Msg 4403 otherwise.
+    /// naming one of its derived columns first — and Msg 4403 otherwise; a
+    /// derived table's own messages for the last two.
     /// </summary>
     private static SimulatedSqlException NonUpdatableViewError(View view, string writtenName) =>
         view.RejectionReason switch
         {
             ViewUpdatabilityRejection.MultipleSources => SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName),
-            ViewUpdatabilityRejection.Union or ViewUpdatabilityRejection.UnionAll => SimulatedSqlException.ViewWithUnionNotUpdatable(writtenName),
-            _ => SimulatedSqlException.CannotUpdateNonUpdatableView(writtenName),
+            ViewUpdatabilityRejection.Union or ViewUpdatabilityRejection.UnionAll => SimulatedSqlException.ViewWithUnionNotUpdatable(writtenName, view.IsDerivedTable),
+            _ => SimulatedSqlException.CannotUpdateNonUpdatableView(writtenName, view.IsDerivedTable),
         };
 
     /// <summary>
@@ -231,18 +236,20 @@ partial class Simulation
     /// binds against a resolved target — through a view, <c>INSERTED</c> /
     /// <c>DELETED</c> take the view's columns, read off the base rows — and
     /// is Msg 334 to the client over a triggered one. An alias form's target
-    /// is the table its <c>FROM</c> clause names, read ahead by the caller; a
+    /// is the table its <c>FROM</c> clause names, read ahead by the caller as
+    /// <paramref name="from"/>, whose other sources the clause may read; a
     /// target still unresolved has its clause stepped over, and one a
     /// <c>FROM</c> follows — an alias naming no table — isn't modeled.
     /// </summary>
-    private static OutputProjection? ParseMutationOutput(ParserContext context, MultiPartName name, HeapTable? table, View? view, TriggerActions action)
+    private static OutputProjection? ParseMutationOutput(ParserContext context, MultiPartName name, HeapTable? table, View? view, TriggerActions action, Selection.PreParsedFrom? from)
     {
         if (table is not null)
         {
             var viewShape = view is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output }
                 ? SingleBaseViewOutputShape(context.Batch, view, name, table)
                 : null;
-            var output = TryParseOutputClauseForMutation(context, table, allowInserted: action != TriggerActions.Delete, allowDeleted: true, viewShape);
+            var partners = from is null ? null : new OutputPartnerScope(from.Sources, FindMutationTargetIndex(context.Batch.CurrentDatabase.Collation, from.Sources, name.Leaf, table));
+            var output = TryParseOutputClauseForMutation(context, table, allowInserted: action != TriggerActions.Delete, allowDeleted: true, viewShape, partners: partners);
             RejectClientOutputOnTriggeredTarget(context.Batch, table, action, TriggeredOutputTargetName(name, table, view), output is { HasTarget: false });
             return output;
         }
@@ -305,7 +312,7 @@ partial class Simulation
     private static HeapTable BindJoinedMutationTable(ParserContext context, FromSource[] sources, int targetIndex, string verb)
     {
         var table = sources[targetIndex].BackingTable
-            ?? throw new NotSupportedException("UPDATE / DELETE target must be a table — derived-table targets aren't modeled.");
+            ?? throw new NotSupportedException("A joined UPDATE / DELETE whose target is an APPLY's derived table, a table value constructor or a rowset function isn't modeled, nor one whose OUTPUT clause bound a table its alias names.");
         FunctionBodyShape.NoteTableWrite(context.Batch, verb, table);
         if (!context.Batch.IsSkipping)
         {

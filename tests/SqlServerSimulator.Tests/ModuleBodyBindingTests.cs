@@ -486,12 +486,12 @@ public sealed class ModuleBodyBindingTests
     {
         var sim = WithFixture();
         sim.ExecuteBatches(
-            "create view dbo.vbt as select id, nm from dbo.bt",
-            "create trigger dbo.trvbt on dbo.vbt instead of delete as select 1",
-            // A FROM clause naming only a view whose INSTEAD OF trigger takes
-            // the write is the unmodeled shape here; it binds cleanly and only
-            // the execution finds the gap.
-            "create procedure dbo.punmodeled as delete dbo.vbt from dbo.vbt");
+            "create table dbo.pm1 (k int not null primary key check (k < 10), v int)",
+            "create table dbo.pm2 (k int not null primary key check (k >= 10), v int)",
+            "create view dbo.vpm as select k, v from dbo.pm1 union all select k, v from dbo.pm2",
+            // A positioned write through a partitioned view is the unmodeled
+            // shape here; it binds cleanly and only the execution finds the gap.
+            "create procedure dbo.punmodeled as update dbo.vpm set v = 1 where current of c");
         AreEqual(1, ObjectCount(sim, "punmodeled"));
         _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("exec dbo.punmodeled"));
     }

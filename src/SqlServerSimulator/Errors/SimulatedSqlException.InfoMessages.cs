@@ -34,8 +34,9 @@ partial class SimulatedSqlException
         // Server 2025).
         // A CLR trigger's throw reports it at the trigger's line 1 as well, as
         // does its context connection ending the firing statement's
-        // transaction.
-        if (error is { Number: 1505 } or { EndedColumnRewrite: true } or { Number: 3991 or 3992 or 6522 or 6549, EndedTriggerBody: true })
+        // transaction, and a partitioned view's write a row fits no member of
+        // (probed 2026-10-01).
+        if (error is { Number: 1505 or 4457 } or { EndedColumnRewrite: true } or { Number: 3991 or 3992 or 6522 or 6549, EndedTriggerBody: true })
             message.LineNumber = 1;
         return message;
     }

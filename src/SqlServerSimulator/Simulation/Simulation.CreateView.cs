@@ -206,12 +206,17 @@ partial class Simulation
 
         var outputColumns = ComputeViewOutputColumns(context.CurrentDatabase.Collation, bodySelection, renameList, viewName.Leaf);
 
-        var (baseTable, baseColumnOrdinals, rejectionReason, visibilityCheck, checkOptionCheck, isJoinUpdatable) =
+        var (baseTable, baseColumnOrdinals, rejectionReason, visibilityCheck, checkOptionCheck, isJoinUpdatable, partitionedBase) =
             AnalyzeViewUpdatability(context.CurrentDatabase.Collation, bodySelection, withCheckOption);
-        // A stored UNION ALL view is a partitioned view to real, refused by
-        // that feature's own rules, which aren't built.
-        if (rejectionReason == ViewUpdatabilityRejection.UnionAll)
-            rejectionReason = ViewUpdatabilityRejection.UnsupportedShape;
+        // A stored UNION ALL view whose every branch reads one table plainly
+        // is a partitioned view: a write through it routes to its members.
+        var isPartitioned = IsPartitionedViewShape(bodySelection);
+        if (isPartitioned)
+        {
+            baseColumnOrdinals = new int[outputColumns.Length];
+            for (var i = 0; i < baseColumnOrdinals.Length; i++)
+                baseColumnOrdinals[i] = i;
+        }
 
         var (upstreamView, upstreamOrdinals) = baseTable is null ? (null, []) : UpstreamLinkOf(context.CurrentDatabase.Collation, bodySelection);
         var view = new View(
@@ -240,7 +245,10 @@ partial class Simulation
             VolatileColumns = bodySelection.VolatileColumns,
             UpstreamView = upstreamView,
             UpstreamColumnOrdinals = upstreamOrdinals,
+            PartitionedBase = partitionedBase,
         };
+        if (isPartitioned)
+            view.PartitionedBase = view;
         var replacedBases = replaced?.ReferencedBaseTables;
         if (replaced is not null)
         {

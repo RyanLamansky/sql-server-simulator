@@ -132,6 +132,7 @@ partial class Simulation
             DmlViewRoute.InsteadOf => ProcessInsteadOfInsertOnView(destinationView, context, top, destinationName),
             DmlViewRoute.BaseTable => ProcessHeapInsert(destinationView.BaseTable!, context, top, destinationName, destinationView),
             DmlViewRoute.JoinView => ProcessJoinViewInsert(destinationView, context, top, destinationName),
+            DmlViewRoute.Partitioned => ProcessPartitionedViewInsert(destinationView, context, destinationName),
             _ => throw RefuseNonUpdatableViewWrite(context, destinationView, destinationName, isUpdate: false),
         };
     }
@@ -471,9 +472,17 @@ partial class Simulation
         HeapColumn[] destinationColumns,
         OutputProjection? output,
         Selection.DmlTopLimit? top,
-        List<Expression[]>? valueTuples) : DmlStatementPlan
+        List<Expression[]>? valueTuples,
+        string verb = "INSERT") : DmlStatementPlan
     {
         public readonly HeapTable DestinationTable = destinationTable;
+
+        /// <summary>
+        /// The statement a constraint's refusal names: <c>INSERT</c>, or the
+        /// <c>UPDATE</c> that moved a row into another member of a partitioned
+        /// view (probed 2026-10-01 against SQL Server 2025).
+        /// </summary>
+        public readonly string Verb = verb;
         public readonly View? DestinationView = destinationView;
         public readonly JoinViewInsertPlan? JoinViewPlan = joinViewPlan;
         public readonly HeapColumn[] DestinationColumns = destinationColumns;
@@ -749,8 +758,8 @@ partial class Simulation
             EvaluateComputedColumns(destinationTable, rowValues, context.Batch);
             if (!insteadOfActive)
             {
-                EnforceNotNull(destinationTable, rowValues);
-                EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
+                EnforceNotNull(destinationTable, rowValues, plan.Verb);
+                EnforceCheckConstraints(destinationTable, rowValues, context.Batch, plan.Verb);
             }
 
             // WITH CHECK OPTION: the post-row-construction row must satisfy
@@ -780,8 +789,8 @@ partial class Simulation
                         continue;
                     }
 
-                    EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, "INSERT");
-                    EnforceEdgeConstraints(destinationTable, rowValues, context, "INSERT");
+                    EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, plan.Verb);
+                    EnforceEdgeConstraints(destinationTable, rowValues, context, plan.Verb);
                     destinationTable.OwningDatabase?.RejectWriteWhenReadOnly();
                     var image = RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap);
                     // The key-range probe runs before the heap write, not after:

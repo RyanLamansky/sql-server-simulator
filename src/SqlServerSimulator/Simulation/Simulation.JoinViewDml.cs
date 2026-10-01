@@ -74,6 +74,9 @@ partial class Simulation
         /// <summary>Name the DML errors report — the view the statement named, as it wrote it.</summary>
         public string TargetName;
 
+        /// <summary>Whether the target is a derived table, whose refusals are real's derived-table messages.</summary>
+        public bool TargetIsDerivedTable;
+
         /// <summary>
         /// The heap a write along <paramref name="path"/> reaches: one bottom
         /// source index per nested chain, outermost first.
@@ -253,7 +256,7 @@ partial class Simulation
                 if (ordinal < 0)
                     throw SimulatedSqlException.InvalidColumnName(name);
                 if (UnwrapDirectRef(current.Profiles[level].Projections[ordinal]) is not { ReferencedName: { } referenced })
-                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(chain.TargetName);
+                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(chain.TargetName, chain.TargetIsDerivedTable);
                 if (level > 0)
                 {
                     name = referenced.Leaf;

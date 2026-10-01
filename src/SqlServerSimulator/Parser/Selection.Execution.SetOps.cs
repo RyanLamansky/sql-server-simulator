@@ -19,6 +19,13 @@ internal sealed partial class Selection
     /// </summary>
     internal bool IsSetOperationResult;
 
+    /// <summary>
+    /// The branches of a <c>UNION ALL</c> chain this plan tops, nested
+    /// <c>UNION ALL</c> chains flattened, in order — the members a write
+    /// through a partitioned view routes to; null on every other plan.
+    /// </summary>
+    internal Selection[]? UnionAllBranches;
+
     /// <summary>Whether the query aggregates or groups, so its columns name no base row.</summary>
     internal bool IsGrouped;
 
@@ -340,6 +347,7 @@ internal sealed partial class Selection
             // ApplyTopLevelOrderBy).
             ProjectionExpressions = left.ProjectionExpressions,
             BranchFromSources = left.BranchFromSources,
+            UnionAllBranches = kind == SetOpKind.UnionAll ? [.. left.UnionAllBranches ?? [left], .. right.UnionAllBranches ?? [right]] : null,
             IsSetOperationResult = true,
             // AUTO over a set-op result flattens to a single level named after
             // the first branch's first FROM source — its alias when it has one

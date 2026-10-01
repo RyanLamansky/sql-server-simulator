@@ -1529,6 +1529,19 @@ internal abstract class BooleanExpression : ExpressionNode
     }
 
     /// <summary>
+    /// The predicate this one negates — <c>NOT p</c>'s operand, and the
+    /// positive forms of <c>&lt;&gt;</c>, <c>NOT BETWEEN</c> and <c>NOT IN</c>
+    /// — or false for every other node. For a non-NULL operand the two always
+    /// answer opposite verdicts, which is what lets the partitioned-view
+    /// reasoning read a member's CHECK written as a negation.
+    /// </summary>
+    internal virtual bool TryGetComplement([NotNullWhen(true)] out BooleanExpression? complement)
+    {
+        complement = null;
+        return false;
+    }
+
+    /// <summary>
     /// Exposes the tested operand and the <c>NOT</c> when this predicate is
     /// <c>expr IS [NOT] NULL</c>; returns false otherwise. Lets the
     /// <c>ALTER TABLE … SWITCH</c> constraint reasoning read whether a CHECK
@@ -1996,6 +2009,12 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class InExpression(Expression source, Expression[] candidates, bool negated, bool selfReferenced) : BooleanExpression
     {
+        internal override bool TryGetComplement([NotNullWhen(true)] out BooleanExpression? complement)
+        {
+            complement = negated ? new InExpression(source, candidates, negated: false, selfReferenced) : null;
+            return negated;
+        }
+
         internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) =>
             probe.IsSeekColumn(source) && Array.TrueForAll(candidates, probe.IsValueSide);
 
@@ -2180,6 +2199,12 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class BetweenExpression(Expression value, Expression lower, Expression upper, bool negated) : BooleanExpression
     {
+        internal override bool TryGetComplement([NotNullWhen(true)] out BooleanExpression? complement)
+        {
+            complement = negated ? new BetweenExpression(value, lower, upper, negated: false) : null;
+            return negated;
+        }
+
         internal override bool ParallelSafe => this.OperandExpressionsParallelSafe;
 
         // `v BETWEEN lo AND hi` is `lo <= v AND v <= hi`, so a column on
@@ -2720,6 +2745,12 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class NotExpression(BooleanExpression inner) : BooleanExpression
     {
+        internal override bool TryGetComplement([NotNullWhen(true)] out BooleanExpression? complement)
+        {
+            complement = inner;
+            return true;
+        }
+
         internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) => inner.OffersSeek(probe, !negated);
 
         internal override bool IsWrittenConstant => inner.IsWrittenConstant;
@@ -3017,6 +3048,12 @@ internal abstract class BooleanExpression : ExpressionNode
 
     private sealed class InequalityExpression(Expression left, Expression right) : CompareExpression(left, right)
     {
+        internal override bool TryGetComplement([NotNullWhen(true)] out BooleanExpression? complement)
+        {
+            complement = new EqualityExpression(left, right);
+            return true;
+        }
+
         public override bool? Run(RuntimeContext runtime) =>
             ComparePromoted(runtime, static (l, r) => !l.Equals(r));
 

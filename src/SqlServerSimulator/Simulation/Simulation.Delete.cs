@@ -61,7 +61,7 @@ partial class Simulation
         // A target the FROM clause names — an alias, or a view written through
         // in a join — is read from that clause ahead of the OUTPUT clause,
         // which binds against the table it reaches.
-        var preParsedFrom = remoteWrite is null && (leadingTable is null || leadingView is not null)
+        var preParsedFrom = remoteWrite is null && (leadingTable is null || leadingView is not null || context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             ? Selection.PreParseMutationFrom(context, fromCursor: true)
             : null;
         if (preParsedFrom is not null && (leadingView is not null || (leadingTable is null && JoinedViewTargetIndex(context, preParsedFrom, leadingIdent, leadingView: null) >= 0)))
@@ -70,6 +70,8 @@ partial class Simulation
         // view's shape, reading the view's own rows.
         if (leadingView is not null && HasInsteadOfTrigger(context.Batch, leadingView, TriggerActions.Delete))
             return ExecuteInsteadOfViewDelete(context, leadingIdent, leadingView, top, targetHints.Serializable);
+        if (leadingView is { PartitionedBase: not null })
+            return ExecutePartitionedViewDelete(context, leadingIdent, leadingView, top, from: null, targetIndex: 0);
         // Phase 1a: lock the resolved DELETE target. Skipped when
         // leadingTable is null (multi-source alias form — target determined
         // post-FROM, deferred to 1b).
@@ -83,7 +85,7 @@ partial class Simulation
             SettleRemoteMutation(context, remoteWrite, remoteWrite);
         // INSERTED isn't a valid qualifier in DELETE OUTPUT (probe-confirmed
         // Msg 4104).
-        var output = ParseMutationOutput(context, leadingIdent, leadingTable ?? JoinedTargetTable(context, preParsedFrom, leadingIdent), leadingView, TriggerActions.Delete);
+        var output = ParseMutationOutput(context, leadingIdent, leadingTable ?? JoinedTargetTable(context, preParsedFrom, leadingIdent), leadingView, TriggerActions.Delete, preParsedFrom);
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
             return ExecuteJoinedDelete(context, leadingIdent, leadingTable, output, top, preParsedFrom);
@@ -349,6 +351,10 @@ partial class Simulation
         if (ReadJoinedTailPastMissingTarget(context, sourcesList, joinsList, leadingIdent, leadingTable))
             return new SimulatedNonQuery(0);
         var targetIndex = FindOrAppendMutationTarget(context, sourcesList, joinsList, leadingIdent, leadingTable);
+        // A leading name that is a table's but aliases a view, CTE or derived
+        // table in the FROM clause writes through that source.
+        if (output is null && sourcesList[targetIndex] is { BackingTable: null } aliased && aliased.UpdatableView() is not null)
+            return ExecuteJoinedViewTargetDelete(context, leadingIdent, leadingView: null, top, new Selection.PreParsedFrom(sourcesList, joinsList, context.SaveCheckpoint()));
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();
 
@@ -395,6 +401,7 @@ partial class Simulation
             || table.SystemVersioning is not null
             || table.IncomingForeignKeys.Count > 0
             || table.GraphKind == GraphTableKind.Node;
+        var partners = output is { ReadsPartners: true } ? new OutputPartnerRows(sources) : null;
 
         // Hoisted per-row scaffolding — see ExecuteJoinedUpdate.
         byte[]?[] currentTuple = [];
@@ -430,6 +437,7 @@ partial class Simulation
                 continue;
             deleted.Add((addr.Page, addr.Slot, fullOld));
             judgedRows.Add((addr.Page, addr.Slot, rowBytes));
+            partners?.Note(addr, currentTuple);
         }
 
         ApplyDmlTopCap(top, deleted, context.Batch);
@@ -438,10 +446,11 @@ partial class Simulation
             if (!Rejudge(rowBytes, out var fullOld))
                 return false;
             deleted[i] = (deleted[i].PageIndex, deleted[i].SlotIndex, fullOld);
+            partners?.Note((deleted[i].PageIndex, deleted[i].SlotIndex), currentTuple);
             return true;
         });
 
-        return CommitDelete(context, table, deleted, output, sourceView: null, rowsLocked: true);
+        return CommitDelete(context, table, deleted, output, sourceView: null, rowsLocked: true, partners);
 
         // The target row's full image, when something reads it.
         SqlValue[]? FullImage(byte[] targetBytes)
@@ -485,7 +494,8 @@ partial class Simulation
         List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> deleted,
         OutputProjection? output,
         View? sourceView = null,
-        bool rowsLocked = false)
+        bool rowsLocked = false,
+        OutputPartnerRows? partners = null)
     {
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
@@ -507,7 +517,7 @@ partial class Simulation
         {
             // OUTPUT INTO's rows land before the body runs (probed 2026-09-27
             // against SQL Server 2025); to the client it is Msg 334.
-            var outputRows = output is null ? null : ProjectDeleteOutput(deleted, output, context.Batch);
+            var outputRows = output is null ? null : ProjectDeleteOutput(deleted, output, context.Batch, partners);
             FireInsteadOfDeleteTrigger(context, table, sourceView, deleted);
             return output is null || output.HasTarget
                 ? new SimulatedNonQuery(deleted.Count)
@@ -548,7 +558,7 @@ partial class Simulation
 
         if (output is not null)
         {
-            var rows = ProjectDeleteOutput(deleted, output, context.Batch);
+            var rows = ProjectDeleteOutput(deleted, output, context.Batch, partners);
             // OUTPUT INTO @t suppresses the result set (probe-confirmed).
             if (!output.HasTarget)
             {
@@ -616,12 +626,13 @@ partial class Simulation
     private static List<byte[]> ProjectDeleteOutput(
         List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> deleted,
         OutputProjection output,
-        BatchContext batch)
+        BatchContext batch,
+        OutputPartnerRows? partners = null)
     {
         var rows = new List<byte[]>(deleted.Count);
-        foreach (var (_, _, fullOld) in deleted)
+        foreach (var (page, slot, fullOld) in deleted)
         {
-            var projectedBytes = output.ProjectRow(batch, insertedValues: null, deletedValues: fullOld);
+            var projectedBytes = output.ProjectRow(batch, insertedValues: null, deletedValues: fullOld, partners: partners?.For(page, slot));
             if (projectedBytes is not null)
                 rows.Add(projectedBytes);
         }

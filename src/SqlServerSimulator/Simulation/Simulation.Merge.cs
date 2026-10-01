@@ -86,6 +86,10 @@ partial class Simulation
         View? sourceView = null;
         View? viewRowsTarget = null;
         HeapTable destinationTable;
+        // A partitioned view is no MERGE target, whatever its members (probed
+        // 2026-10-01 against SQL Server 2025).
+        if (resolvedView is { PartitionedBase: not null } && !HasAnyInsteadOfTrigger(context.Batch, resolvedView))
+            throw SimulatedSqlException.MergeTargetIsPartitionedView();
         if (resolvedView is not null)
         {
             // A view with no single base table is always matched as its own

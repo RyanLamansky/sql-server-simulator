@@ -373,27 +373,38 @@ partial class SimulatedSqlException
     /// wording fires for INSERT, UPDATE, and DELETE through such a view —
     /// the simulator collapses these into one factory matching SQL Server's
     /// uniform message. Probe-confirmed verbatim against SQL Server 2025
-    /// (2026-05-12).
+    /// (2026-05-12). Through a derived table named as a joined write's target
+    /// (<paramref name="derivedTable"/>) it is Msg 4418 (probed 2026-10-01).
     /// </summary>
-    internal static SimulatedSqlException CannotUpdateNonUpdatableView(string viewName) =>
-        new($"Cannot update the view or function '{viewName}' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator.", 4403, 16, 1);
+    internal static SimulatedSqlException CannotUpdateNonUpdatableView(string viewName, bool derivedTable = false) =>
+        derivedTable
+            ? new($"Derived table '{viewName}' is not updatable because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator.", 4418, 16, 1)
+            : new($"Cannot update the view or function '{viewName}' because it contains aggregates, or a DISTINCT or GROUP BY clause, or PIVOT or UNPIVOT operator.", 4403, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4405 — DML through a view whose body has
     /// multiple base tables (JOIN form) and the modification affects more
     /// than one of them: a DELETE always, an UPDATE or INSERT whose columns
     /// land in two. Probe-confirmed verbatim wording against SQL Server 2025.
+    /// An UPDATE through a derived table named as a joined write's target
+    /// (<paramref name="derivedTable"/>) is Msg 4420, where a DELETE through
+    /// one stays Msg 4405 (probed 2026-10-01).
     /// </summary>
-    internal static SimulatedSqlException ViewUpdateAffectsMultipleTables(string viewName) =>
-        new($"View or function '{viewName}' is not updatable because the modification affects multiple base tables.", 4405, 16, 1);
+    internal static SimulatedSqlException ViewUpdateAffectsMultipleTables(string viewName, bool derivedTable = false) =>
+        derivedTable
+            ? new($"Derived table '{viewName}' is not updatable because the modification affects multiple base tables.", 4420, 16, 1)
+            : new($"View or function '{viewName}' is not updatable because the modification affects multiple base tables.", 4405, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4426 — a DELETE through a view or CTE whose body
     /// a <c>UNION</c> tops, named as the statement wrote it (probed 2026-10-01
-    /// against SQL Server 2025).
+    /// against SQL Server 2025); through a derived table named as a joined
+    /// write's target (<paramref name="derivedTable"/>) it is Msg 4417.
     /// </summary>
-    internal static SimulatedSqlException ViewWithUnionNotUpdatable(string viewName) =>
-        new($"View '{viewName}' is not updatable because the definition contains a UNION operator.", 4426, 16, 1);
+    internal static SimulatedSqlException ViewWithUnionNotUpdatable(string viewName, bool derivedTable = false) =>
+        derivedTable
+            ? new($"Derived table '{viewName}' is not updatable because the definition contains a UNION operator.", 4417, 16, 1)
+            : new($"View '{viewName}' is not updatable because the definition contains a UNION operator.", 4426, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 414 (<paramref name="isDelete"/> false) and Msg
@@ -413,10 +424,13 @@ partial class SimulatedSqlException
     /// a whole may still be updatable (other projections can be direct
     /// refs), and DELETE through such a view works fine — the rejection
     /// is per-touched-column. Probe-confirmed verbatim against SQL Server
-    /// 2025.
+    /// 2025. Through a derived table named as a joined write's target
+    /// (<paramref name="derivedTable"/>) it is Msg 4421 (probed 2026-10-01).
     /// </summary>
-    internal static SimulatedSqlException ViewDmlTouchesDerivedField(string viewName) =>
-        new($"Update or insert of view or function '{viewName}' failed because it contains a derived or constant field.", 4406, 16, 1);
+    internal static SimulatedSqlException ViewDmlTouchesDerivedField(string viewName, bool derivedTable = false) =>
+        derivedTable
+            ? new($"Derived table '{viewName}' is not updatable because a column of the derived table is derived or constant.", 4421, 16, 1)
+            : new($"Update or insert of view or function '{viewName}' failed because it contains a derived or constant field.", 4406, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 550 — INSERT or UPDATE through a view with

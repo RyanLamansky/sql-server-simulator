@@ -103,7 +103,8 @@ partial class Simulation
         bool allowInserted,
         bool allowDeleted,
         ViewOutputShape? view = null,
-        OutputProjection? logged = null)
+        OutputProjection? logged = null,
+        OutputPartnerScope? partners = null)
     {
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
@@ -112,7 +113,54 @@ partial class Simulation
         // clauses real names in that message.
         using var rejection = context.EnterNextValueForScope(NextValueForScope.Clause);
         context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Output);
-        return ParseOutputClauseBody(context, table, allowInserted, allowDeleted, view, logged);
+        return ParseOutputClauseBody(context, table, allowInserted, allowDeleted, view, logged, partners);
+    }
+
+    /// <summary>
+    /// The <c>FROM</c> clause of a joined <c>UPDATE</c> / <c>DELETE</c> as its
+    /// <c>OUTPUT</c> clause binds against it: a column of any source but the
+    /// target, named through its qualifier, is the value the row the target
+    /// row was written with — the first partner, as the <c>SET</c> values
+    /// read — and a source's <c>*</c> expands to its columns; the target's own
+    /// name or alias is Msg 4104 and an unqualified name Msg 207 as anywhere
+    /// in the clause (probed 2026-10-01 against SQL Server 2025).
+    /// <paramref name="targetIndex"/> is -1 for a target the clause doesn't
+    /// introduce.
+    /// </summary>
+    private sealed class OutputPartnerScope(IReadOnlyList<FromSource> sources, int targetIndex)
+    {
+        /// <summary>The source <paramref name="qualifier"/> names other than the target, or -1.</summary>
+        public int SourceNamed(Collation collation, string qualifier)
+        {
+            for (var s = 0; s < sources.Count; s++)
+            {
+                if (s != targetIndex && sources[s].Qualifier is { } named && collation.Equals(named, qualifier))
+                    return s;
+            }
+            return -1;
+        }
+
+        public FromSource this[int index] => sources[index];
+    }
+
+    /// <summary>
+    /// The partner row each written row of a joined <c>UPDATE</c> /
+    /// <c>DELETE</c> took its values from, by the written row's address, over
+    /// the sources the statement enumerated — what an <c>OUTPUT</c> clause
+    /// reading those sources reads (see <see cref="OutputPartnerScope"/>).
+    /// </summary>
+    private sealed class OutputPartnerRows(FromSource[] sources)
+    {
+        public readonly FromSource[] Sources = sources;
+
+        public readonly Dictionary<(int Page, int Slot), byte[]?[]> Tuples = [];
+
+        /// <summary>Notes <paramref name="tuple"/>, which the join reuses, as the row at <paramref name="address"/>'s partners.</summary>
+        public void Note((int Page, int Slot) address, byte[]?[] tuple) => this.Tuples[address] = (byte[]?[])tuple.Clone();
+
+        /// <summary>The noted partners of the row at (<paramref name="page"/>, <paramref name="slot"/>), or null.</summary>
+        public (FromSource[] Sources, byte[]?[] Tuple)? For(int page, int slot) =>
+            this.Tuples.TryGetValue((page, slot), out var tuple) ? (this.Sources, tuple) : null;
     }
 
     /// <summary>Body of <see cref="TryParseOutputClauseForMutation"/>.</summary>
@@ -122,8 +170,11 @@ partial class Simulation
         bool allowInserted,
         bool allowDeleted,
         ViewOutputShape? view,
-        OutputProjection? logged)
+        OutputProjection? logged,
+        OutputPartnerScope? partners)
     {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        var readsPartners = false;
         var columns = view?.Columns ?? table.Columns;
         var expressions = new List<Expression>();
         var names = new List<string>();
@@ -134,6 +185,13 @@ partial class Simulation
             {
                 var insertedRef = BuiltInToken.Equals(starQualifier, "INSERTED");
                 var deletedRef = BuiltInToken.Equals(starQualifier, "DELETED");
+                if (!insertedRef && !deletedRef && partners?.SourceNamed(collation, starQualifier) is >= 0 and var partner)
+                {
+                    readsPartners = true;
+                    AppendStarExpansion(starQualifier, partners[partner].ColumnNames, expressions, names);
+                    context.MoveNextOptional();
+                    continue;
+                }
                 if ((insertedRef && !allowInserted) || (deletedRef && !allowDeleted) || (!insertedRef && !deletedRef))
                     throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound($"{starQualifier}.*");
                 var columnNameList = new string[columns.Length];
@@ -171,6 +229,13 @@ partial class Simulation
             var insertedRef = BuiltInToken.Equals(reference.ImmediateQualifier, "INSERTED");
             var deletedRef = BuiltInToken.Equals(reference.ImmediateQualifier, "DELETED");
 
+            if (!insertedRef && !deletedRef && reference.Count == 2 && partners?.SourceNamed(collation, reference.ImmediateQualifier!) is >= 0 and var partner)
+            {
+                readsPartners = true;
+                var source = partners[partner];
+                var column = Array.FindIndex(source.ColumnNames, name => collation.Equals(name, reference.Leaf));
+                return column >= 0 ? source.Columns[column].Type : throw SimulatedSqlException.InvalidColumnName(new MultiPartName(reference.Leaf));
+            }
             if (insertedRef && !allowInserted)
                 throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(reference.ToString());
             if (deletedRef && !allowDeleted)
@@ -200,9 +265,12 @@ partial class Simulation
         }
         view?.ThrowRefusals();
 
-        var projection = NoteClientOutput(context.Batch, new OutputProjection([.. expressions], [.. names], schema, table, source: null, context.Batch, outputTarget, view: view, logged: logged));
+        var projection = NoteClientOutput(context.Batch, new OutputProjection([.. expressions], [.. names], schema, table, source: null, context.Batch, outputTarget, view: view, logged: logged)
+        {
+            ReadsPartners = readsPartners || logged?.ReadsPartners == true,
+        });
         return IsClientOutputAfterInto(context, projection)
-            ? TryParseOutputClauseForMutation(context, table, allowInserted, allowDeleted, view, logged: projection)
+            ? TryParseOutputClauseForMutation(context, table, allowInserted, allowDeleted, view, logged: projection, partners)
             : projection;
     }
 
@@ -675,6 +743,13 @@ partial class Simulation
         /// </summary>
         public bool HasTarget => outputTarget is not null;
 
+        /// <summary>
+        /// Whether this clause, or the <c>OUTPUT … INTO</c> clause it follows,
+        /// reads a joined write's other sources (see <see cref="OutputPartnerScope"/>),
+        /// so the write notes each row's partners for it.
+        /// </summary>
+        public bool ReadsPartners;
+
         /// <summary>True when this clause, or the <c>OUTPUT … INTO</c> clause it follows, writes a target.</summary>
         public bool WritesTarget => outputTarget is not null || logged is not null;
 
@@ -709,6 +784,11 @@ partial class Simulation
         /// MERGE's per-row <c>$action</c> verb, or null when the statement has
         /// no <c>$action</c> to report.
         /// </param>
+        /// <param name="partners">
+        /// A joined write's sources and the partner row the written row took
+        /// its values from, for the clause's reads of those sources; null
+        /// elsewhere.
+        /// </param>
         /// <remarks>
         /// A reference to a side the statement doesn't have reads as a typed
         /// NULL rather than throwing. The parser already rejects the
@@ -722,11 +802,12 @@ partial class Simulation
             SqlValue[]? insertedValues,
             SqlValue[]? deletedValues,
             SqlValue[]? sourceValues = null,
-            string? action = null)
+            string? action = null,
+            (FromSource[] Sources, byte[]?[] Tuple)? partners = null)
         {
             // The OUTPUT … INTO clause a client-bound one follows writes its
             // row first; it returns nothing.
-            _ = logged?.ProjectRow(batch, insertedValues, deletedValues, sourceValues, action);
+            _ = logged?.ProjectRow(batch, insertedValues, deletedValues, sourceValues, action, partners);
 
             SqlValue Resolve(MultiPartName name)
             {
@@ -754,6 +835,10 @@ partial class Simulation
                         if (batch.CurrentDatabase.Collation.Equals(sourceCols[i], name.Leaf))
                             return sourceValues is null ? SqlValue.Null(sourceTypes[i]) : sourceValues[i];
                     }
+                }
+                else if (partners is var (partnerSources, tuple))
+                {
+                    return ResolveAcrossMutationTuple(partnerSources, tuple, name, batch);
                 }
                 throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
             }

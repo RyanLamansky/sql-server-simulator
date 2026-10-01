@@ -3225,6 +3225,7 @@ internal sealed partial class Selection
     private static Schemas.Synonym? RecordSecurableRead(ParserContext context, Schemas.SchemaObject obj, MultiPartName name, Selection? moduleBody = null)
     {
         var synonym = context.Batch.TryResolveSynonym(name, out var resolved) ? resolved : null;
+        context.PartitionedWriteReads?.Add(obj);
         if (context.SecurableSink is { } sink && !name.Leaf.StartsWith('#'))
         {
             var securable = (Schemas.SchemaObject?)synonym ?? obj;
@@ -3949,7 +3950,8 @@ internal sealed partial class Selection
                     lobStore: null,
                     rows: [],
                     lateralPlan: derivedSelection,
-                    lateralIsQueryBody: true);
+                    lateralIsQueryBody: true,
+                    derivedTable: new DerivedTableBinding(derivedSelection, derivedQualifier, derivedNames, context.CurrentDatabase));
 
             case ReservedKeyword { Keyword: Keyword.OpenXml }:
                 // OPENXML dispatch: the pre-OPENJSON XML rowset, read over a

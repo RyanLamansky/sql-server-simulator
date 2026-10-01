@@ -734,6 +734,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public ForXmlNamespaces? XmlNamespaces;
 
     /// <summary>
+    /// Every table and view a <c>FROM</c> clause names while one is installed,
+    /// subqueries and derived tables included — what a write through a
+    /// partitioned view reads besides its target, which real refuses when it
+    /// reaches a member table (Msg 4439). Null otherwise.
+    /// </summary>
+    public List<Schemas.SchemaObject>? PartitionedWriteReads;
+
+    /// <summary>
     /// Accumulates the real tables / views / TVFs a query reads, so the
     /// outermost <see cref="Selection.Parse"/> can attach them to the built
     /// <see cref="Selection.ReferencedSecurables"/> for the execution-time

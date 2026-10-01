@@ -79,7 +79,41 @@ partial class Simulation
         View? leadingView,
         List<(string? ColumnName, Expression Expr)> rawAssignments,
         Selection.DmlTopLimit? top,
-        Selection.PreParsedFrom from)
+        Selection.PreParsedFrom from,
+        List<SchemaObject>? partitionedReads = null)
+    {
+        try
+        {
+            return JoinedViewTargetUpdate(context, leadingIdent, leadingView, rawAssignments, top, from, partitionedReads);
+        }
+        catch (SimulatedSqlException) when (ResumePastFrom(context, from))
+        {
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Leaves the parser past a joined write's <c>FROM</c> clause when a
+    /// refusal raised while it still sat ahead of it, the clause having been
+    /// read already — so the batch resumes after the statement rather than
+    /// inside a derived table's body. Answers false, letting the error go on.
+    /// </summary>
+    private static bool ResumePastFrom(ParserContext context, Selection.PreParsedFrom from)
+    {
+        if (context.SaveCheckpoint().Index < from.After.Index)
+            context.RestoreCheckpoint(from.After);
+        return false;
+    }
+
+    /// <summary>The body of <see cref="ExecuteJoinedViewTargetUpdate"/>.</summary>
+    private static SimulatedStatementOutcome JoinedViewTargetUpdate(
+        ParserContext context,
+        MultiPartName leadingIdent,
+        View? leadingView,
+        List<(string? ColumnName, Expression Expr)> rawAssignments,
+        Selection.DmlTopLimit? top,
+        Selection.PreParsedFrom from,
+        List<SchemaObject>? partitionedReads)
     {
         var batch = context.Batch;
         var written = leadingIdent.ToString();
@@ -87,7 +121,11 @@ partial class Simulation
         var sources = from.Sources.ToArray();
         var joins = from.Joins.ToArray();
         var view = sources[targetIndex].UpdatableView()!;
-        RefuseJoinedViewWrite(context, view, sources.Length, TriggerActions.Update, written, [.. SetColumnNames(rawAssignments)]);
+        if (sources.Length == 1 && HasInsteadOfTrigger(batch, view, TriggerActions.Update))
+            return ExecuteInsteadOfViewUpdate(context, InsteadOfTargetName(leadingIdent, sources[0], view), view, rawAssignments, top, serializableHint: false, from);
+        if (view.PartitionedBase is not null && !HasInsteadOfTrigger(batch, view, TriggerActions.Update))
+            return ExecutePartitionedViewUpdate(context, leadingIdent, view, rawAssignments, top, from, targetIndex, partitionedReads ?? []);
+        RefuseJoinedViewWrite(context, view, TriggerActions.Update, written, [.. SetColumnNames(rawAssignments)]);
         if (view.BaseTable is not { } table)
             return ExecuteJoinedJoinViewUpdate(context, written, view, sources, joins, targetIndex, rawAssignments, top, from.After);
 
@@ -102,7 +140,7 @@ partial class Simulation
 
         // The OUTPUT clause sits ahead of the FROM clause the statement has
         // already read; INSERTED / DELETED are the view's columns.
-        var output = ParseJoinedViewTargetOutput(context, leadingIdent, view, table, TriggerActions.Update);
+        var output = ParseJoinedViewTargetOutput(context, leadingIdent, view, table, TriggerActions.Update, new OutputPartnerScope(sources, targetIndex));
         var where = ParseJoinedViewTargetWhere(context, from.After, sources, joins, tupleTypeResolver);
         CheckJoinedViewTargetPermissions(batch, sources, targetIndex, view, table, TriggerActions.Update, rawAssignments);
         if (batch.IsSkipping)
@@ -122,6 +160,7 @@ partial class Simulation
             || HasInsteadOfTrigger(batch, table, TriggerActions.Update)
             || table.SystemVersioning is not null
             || table.IncomingForeignKeys.Count > 0;
+        var partners = output is { ReadsPartners: true } ? new OutputPartnerRows(sources) : null;
 
         // Hoisted per-row scaffolding: one mutable tuple slot, one cached
         // delegate and one runtime, so the per-row loop allocates none.
@@ -151,6 +190,7 @@ partial class Simulation
                 continue;
             affected.Add((address.Page, address.Slot, entry.NewValues, entry.OldSnapshot));
             judgedRows.Add((address.Page, address.Slot, rowBytes));
+            partners?.Note(address, currentTuple);
         }
 
         ApplyDmlTopCap(top, affected, batch);
@@ -159,10 +199,11 @@ partial class Simulation
             if (Rejudge((affected[i].PageIndex, affected[i].SlotIndex), rowBytes) is not { } judged)
                 return false;
             affected[i] = (affected[i].PageIndex, affected[i].SlotIndex, judged.NewValues, judged.OldSnapshot);
+            partners?.Note((affected[i].PageIndex, affected[i].SlotIndex), currentTuple);
             return true;
         });
 
-        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], rowsLocked: true);
+        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], rowsLocked: true, partners: partners);
 
         // The current tuple's target row's new values, and its old image when
         // something reads that.
@@ -211,19 +252,41 @@ partial class Simulation
         Selection.DmlTopLimit? top,
         Selection.PreParsedFrom from)
     {
+        try
+        {
+            return JoinedViewTargetDelete(context, leadingIdent, leadingView, top, from);
+        }
+        catch (SimulatedSqlException) when (ResumePastFrom(context, from))
+        {
+            throw;
+        }
+    }
+
+    /// <summary>The body of <see cref="ExecuteJoinedViewTargetDelete"/>.</summary>
+    private static SimulatedStatementOutcome JoinedViewTargetDelete(
+        ParserContext context,
+        MultiPartName leadingIdent,
+        View? leadingView,
+        Selection.DmlTopLimit? top,
+        Selection.PreParsedFrom from)
+    {
         var batch = context.Batch;
         var written = leadingIdent.ToString();
         var targetIndex = JoinedViewTargetIndex(context, from, leadingIdent, leadingView);
         var sources = from.Sources.ToArray();
         var joins = from.Joins.ToArray();
         var view = sources[targetIndex].UpdatableView()!;
-        RefuseJoinedViewWrite(context, view, sources.Length, TriggerActions.Delete, written, setColumns: null);
+        if (sources.Length == 1 && HasInsteadOfTrigger(batch, view, TriggerActions.Delete))
+            return ExecuteInsteadOfViewDelete(context, InsteadOfTargetName(leadingIdent, sources[0], view), view, top, serializableHint: false, from);
+        if (view.PartitionedBase is not null && !HasInsteadOfTrigger(batch, view, TriggerActions.Delete))
+            return ExecutePartitionedViewDelete(context, leadingIdent, view, top, from, targetIndex);
+        RefuseJoinedViewWrite(context, view, TriggerActions.Delete, written, setColumns: null);
         var table = view.BaseTable!;
         FunctionBodyShape.NoteTableWrite(batch, "DELETE", table);
         LockWriteTable(batch, table, "DELETE", checkFilegroup: true);
         batch.RejectReferentialDeleteIntoVectorIndex(table);
 
-        var output = ParseJoinedViewTargetOutput(context, leadingIdent, view, table, TriggerActions.Delete);
+        var output = ParseJoinedViewTargetOutput(context, leadingIdent, view, table, TriggerActions.Delete, new OutputPartnerScope(sources, targetIndex));
         var where = ParseJoinedViewTargetWhere(context, from.After, sources, joins, Selection.ColumnTypeResolverFor(sources));
         CheckJoinedViewTargetPermissions(batch, sources, targetIndex, view, table, TriggerActions.Delete, rawAssignments: null);
         if (batch.IsSkipping)
@@ -246,6 +309,7 @@ partial class Simulation
             || table.SystemVersioning is not null
             || table.IncomingForeignKeys.Count > 0
             || table.GraphKind == GraphTableKind.Node;
+        var partners = output is { ReadsPartners: true } ? new OutputPartnerRows(sources) : null;
 
         byte[]?[] currentTuple = [];
         SqlValue resolveAcrossTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, currentTuple, name, batch);
@@ -269,6 +333,7 @@ partial class Simulation
                 continue;
             deleted.Add((address.Page, address.Slot, FullImage(rowBytes)));
             judgedRows.Add((address.Page, address.Slot, rowBytes));
+            partners?.Note(address, currentTuple);
         }
 
         ApplyDmlTopCap(top, deleted, batch);
@@ -278,10 +343,11 @@ partial class Simulation
             if (!Qualifies((page, slot), rowBytes))
                 return false;
             deleted[i] = (page, slot, FullImage(rowBytes));
+            partners?.Note((page, slot), currentTuple);
             return true;
         });
 
-        return CommitDelete(context, table, deleted, output, rowsLocked: true);
+        return CommitDelete(context, table, deleted, output, rowsLocked: true, partners: partners);
 
         // The base row's full image, when something reads it.
         SqlValue[]? FullImage(byte[] baseImage)
@@ -329,9 +395,9 @@ partial class Simulation
         ParserContext.Checkpoint afterFrom)
     {
         var batch = context.Batch;
-        var chain = new JoinViewChain(sources, joins, written);
+        var chain = new JoinViewChain(sources, joins, written) { TargetIsDerivedTable = view.IsDerivedTable };
         var (path, assignments) = ResolveJoinViewSetTargets(batch, chain, rawAssignments, written, targetIndex);
-        var table = chain.TableAt(path) ?? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(written);
+        var table = chain.TableAt(path) ?? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(written, view.IsDerivedTable);
         var nested = chain.Nested[targetIndex]!;
 
         BindDeferredXmlMutators(context, table, rawAssignments, written);
@@ -347,7 +413,7 @@ partial class Simulation
         {
             tuplesByRow = new(ReferenceEqualityComparer.Instance);
             var shape = JoinViewOutputShape(batch, sources[targetIndex].Columns, nested, nested.Sources, path[1..], table, tuplesByRow);
-            output = TryParseOutputClauseForMutation(context, table, allowInserted: true, allowDeleted: true, shape);
+            output = TryParseOutputClauseForMutation(context, table, allowInserted: true, allowDeleted: true, shape, partners: new OutputPartnerScope(sources, targetIndex));
             RejectClientOutputOnTriggeredTarget(batch, table, TriggerActions.Update, table.Name, output is { HasTarget: false });
         }
         var where = ParseJoinedViewTargetWhere(context, afterFrom, sources, joins, tupleTypeResolver);
@@ -364,22 +430,27 @@ partial class Simulation
     }
 
     /// <summary>
+    /// The name a joined write through a view whose <c>INSTEAD OF</c> trigger
+    /// takes it reports the view by: as the leading name wrote it, or, when
+    /// that is the <c>FROM</c> clause's alias for it, as the clause wrote it.
+    /// </summary>
+    private static MultiPartName InsteadOfTargetName(MultiPartName leadingIdent, FromSource source, View view) =>
+        source.UnaliasedName is not null ? leadingIdent : new MultiPartName(view.Schema.Name).WithAddedPart(view.Name);
+
+    /// <summary>
     /// Real's refusals of a joined write through a view, ahead of anything it
     /// reads: a view carrying an <c>INSTEAD OF</c> trigger for the action
-    /// beside another source is Msg 414 / 415 naming the view; a <c>DELETE</c>
+    /// beside another source is Msg 414 / 415 naming the view — one the
+    /// <c>FROM</c> clause names alone takes the trigger instead; a <c>DELETE</c>
     /// through one reading several base tables Msg 4405, and a view no write
     /// passes through its own refusal — an <c>UPDATE</c>'s unknown column Msg
     /// 207 and derived one Msg 4406 first — all naming the target as written
     /// (probed 2026-10-01 against SQL Server 2025).
     /// </summary>
-    private static void RefuseJoinedViewWrite(ParserContext context, View view, int sourceCount, TriggerActions action, string written, List<string>? setColumns)
+    private static void RefuseJoinedViewWrite(ParserContext context, View view, TriggerActions action, string written, List<string>? setColumns)
     {
         if (HasInsteadOfTrigger(context.Batch, view, action))
-        {
-            throw sourceCount > 1
-                ? SimulatedSqlException.InsteadOfViewInJoin(view.Name, action == TriggerActions.Delete)
-                : new NotSupportedException($"A joined {(action == TriggerActions.Delete ? "DELETE" : "UPDATE")} through '{view.Name}', whose INSTEAD OF trigger takes the write, isn't modeled with a FROM clause naming the view alone.");
-        }
+            throw SimulatedSqlException.InsteadOfViewInJoin(view.Name, action == TriggerActions.Delete);
         if (view.BaseTable is not null || (view.IsJoinUpdatable && action != TriggerActions.Delete))
             return;
         if (action != TriggerActions.Delete && view.DerivedOutputColumns is { } derived)
@@ -390,7 +461,7 @@ partial class Simulation
                 if (ordinal < 0)
                     throw SimulatedSqlException.InvalidColumnName(column);
                 if (derived[ordinal])
-                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(view.UnionOwnerName ?? written);
+                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(view.IsDerivedTable ? written : view.UnionOwnerName ?? written, view.IsDerivedTable);
             }
         }
         throw NonUpdatableViewError(view, written);
@@ -399,14 +470,15 @@ partial class Simulation
     /// <summary>
     /// The <c>OUTPUT</c> clause of a joined write through a single-base view
     /// or CTE, where the cursor sits: <c>INSERTED</c> / <c>DELETED</c> are the
-    /// view's columns read off the base rows, and the base table's triggers
-    /// refuse it to the client with Msg 334 naming that table.
+    /// view's columns read off the base rows, the statement's other sources
+    /// are read as <paramref name="partners"/> scopes them, and the base
+    /// table's triggers refuse it to the client with Msg 334 naming that table.
     /// </summary>
-    private static OutputProjection? ParseJoinedViewTargetOutput(ParserContext context, MultiPartName leadingIdent, View view, HeapTable table, TriggerActions action)
+    private static OutputProjection? ParseJoinedViewTargetOutput(ParserContext context, MultiPartName leadingIdent, View view, HeapTable table, TriggerActions action, OutputPartnerScope partners)
     {
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
-        var output = TryParseOutputClauseForMutation(context, table, allowInserted: action != TriggerActions.Delete, allowDeleted: true, SingleBaseViewOutputShape(context.Batch, view, leadingIdent, table));
+        var output = TryParseOutputClauseForMutation(context, table, allowInserted: action != TriggerActions.Delete, allowDeleted: true, SingleBaseViewOutputShape(context.Batch, view, leadingIdent, table), partners: partners);
         RejectClientOutputOnTriggeredTarget(context.Batch, table, action, table.Name, output is { HasTarget: false });
         return output;
     }

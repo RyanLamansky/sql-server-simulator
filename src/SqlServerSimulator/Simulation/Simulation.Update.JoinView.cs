@@ -162,6 +162,8 @@ partial class Simulation
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
         var rowMaps = new Dictionary<byte[], byte[]?[]>[path.Length - 1];
         sources = SourcesAlongPath(batch, chain, path, 0, original => WrapSourceWithAddressTracking(original, table, targetAddresses, batch.Connection.StatementIo), rowMaps);
+        // A joined statement's OUTPUT may read its own other sources.
+        var partners = output is { ReadsPartners: true } ? new OutputPartnerRows(sources) : null;
         foreach (var candidate in Selection.EnumerateJoinedRows(sources, chain.Joins, batch, outerResolver: null))
         {
             tuple = candidate;
@@ -190,6 +192,7 @@ partial class Simulation
                 continue;
             affected.Add((address.Page, address.Slot, entry.NewValues, entry.OldSnapshot));
             judgedRows.Add((address.Page, address.Slot, rowBytes));
+            partners?.Note(address, tuple);
         }
 
         ApplyDmlTopCap(top, affected, batch);
@@ -198,10 +201,11 @@ partial class Simulation
             if (Rejudge(rowBytes) is not { } judged)
                 return false;
             affected[i] = (affected[i].PageIndex, affected[i].SlotIndex, judged.NewValues, judged.OldSnapshot);
+            partners?.Note((affected[i].PageIndex, affected[i].SlotIndex), tuple);
             return true;
         });
 
-        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], rowsLocked: true);
+        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], rowsLocked: true, partners: partners);
 
         // The target row the current tuple shows when every level's own WHERE
         // passes it — together they gate candidacy exactly as the composed
@@ -282,7 +286,7 @@ partial class Simulation
             }
             var (columnPath, columnIndex) = DescendToBaseColumn(batch, chain, columnName, targetSource);
             if (path is not null && !path.AsSpan().SequenceEqual(columnPath))
-                throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName);
+                throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName, chain.TargetIsDerivedTable);
             path = columnPath;
 
             if (chain.TableAt(columnPath) is { } backing)
@@ -291,7 +295,7 @@ partial class Simulation
         }
 
         return path is null
-            ? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName)
+            ? throw SimulatedSqlException.ViewUpdateAffectsMultipleTables(writtenName, chain.TargetIsDerivedTable)
             : (path, assignments);
     }
 

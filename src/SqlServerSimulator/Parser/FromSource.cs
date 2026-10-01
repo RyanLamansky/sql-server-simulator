@@ -51,7 +51,8 @@ internal sealed class FromSource(
     bool catalogSeek = false,
     CatalogRowSet? catalogRows = null,
     VolatileProjection? volatileRefresh = null,
-    CteBinding? cte = null)
+    CteBinding? cte = null,
+    DerivedTableBinding? derivedTable = null)
 {
     public readonly string? Qualifier = qualifier;
 
@@ -209,12 +210,23 @@ internal sealed class FromSource(
     public readonly CteBinding? Cte = cte;
 
     /// <summary>
+    /// The derived table this source is, <c>(SELECT …) alias</c>; null for
+    /// every other source, an <c>APPLY</c>'s correlated body included. A write
+    /// through a body reading it reads it as the unstored view
+    /// <see cref="UpdatableView"/> builds.
+    /// </summary>
+    public readonly DerivedTableBinding? DerivedTable = derivedTable;
+
+    /// <summary>
     /// The view a write through this source passes down: a stored view
-    /// (<see cref="BackingView"/>), or a CTE analyzed as the unstored view
-    /// real writes through it as. Null for every other source.
+    /// (<see cref="BackingView"/>), or a CTE or derived table analyzed as the
+    /// unstored view real writes through it as. Null for every other source.
     /// </summary>
     public View? UpdatableView() =>
-        this.BackingView ?? (this.Cte is { Plan: not null } binding ? Simulation.CteDmlView(binding) : null);
+        this.BackingView
+        ?? (this.Cte is { Plan: not null } binding ? Simulation.CteDmlView(binding)
+            : this.DerivedTable is { } derived ? Simulation.DerivedTableDmlView(derived)
+            : null);
 
     /// <summary>
     /// When non-null, this source is the right side of a <c>CROSS APPLY</c>
@@ -372,7 +384,7 @@ internal sealed class FromSource(
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
             lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable);
 
     /// <summary>
     /// Returns a copy of this source reading <paramref name="rows"/> — the same
@@ -390,7 +402,7 @@ internal sealed class FromSource(
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
             lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable);
 
     /// <summary>
     /// Returns a copy of this source with its deferred <see cref="LateralPlan"/>
@@ -407,7 +419,7 @@ internal sealed class FromSource(
             lateralPlan: null, backingTable: this.BackingTable, backingView: this.BackingView,
             heapPlan: this.HeapPlan, materializeOnce: false, viaSynonym: this.ViaSynonym,
             autoElementName: this.AutoElementName, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogRows: catalogRows, volatileRefresh: this.VolatileRefresh, cte: this.Cte);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogRows: catalogRows, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable);
 }
 
 /// <summary>

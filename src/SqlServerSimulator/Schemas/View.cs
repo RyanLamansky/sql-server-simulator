@@ -233,8 +233,28 @@ internal sealed class View(
     /// <summary>Each output column's ordinal (0-based) in <see cref="UpstreamView"/>'s output, or <c>-1</c> for a derived column.</summary>
     public int[] UpstreamColumnOrdinals = [];
 
-    /// <summary>The parsed body of a CTE target, which has no stored text to re-parse; null for a stored view.</summary>
+    /// <summary>The parsed body of a CTE or derived table, which has no stored text to re-parse; null for a stored view.</summary>
     public Parser.Selection? UnstoredBody;
+
+    /// <summary>
+    /// The partitioned view a write through this view reaches — the view
+    /// itself when it is one: a stored <c>UNION ALL</c> view each of whose
+    /// branches reads one table plainly, or a single-source level over one,
+    /// whose <see cref="BaseColumnOrdinals"/>, <see cref="VisibilityCheck"/>
+    /// and <see cref="CheckOptionCheck"/> then index that view's columns.
+    /// Whether the members qualify is settled at each write, since their
+    /// constraints may change; see <c>Simulation.PartitionedView.cs</c>.
+    /// </summary>
+    public View? PartitionedBase;
+
+    /// <summary>
+    /// The unstored view a derived table is to a write: as a joined write's
+    /// target it is refused with real's derived-table messages (Msg 4417 /
+    /// 4418 / 4420 / 4421) where a view or CTE takes Msg 4426 / 4403 / 4405 /
+    /// 4406 — save a <c>DELETE</c> through one over a join, which is Msg 4405
+    /// either way (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    public bool IsDerivedTable;
 
     /// <summary>
     /// True when the body reads several FROM sources but is otherwise

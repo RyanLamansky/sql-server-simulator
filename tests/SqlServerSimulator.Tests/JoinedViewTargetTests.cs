@@ -140,6 +140,35 @@ public sealed class JoinedViewTargetTests
         AreEqual(0, simulation.ExecuteScalar("select count(*) from log1"));
     }
 
+    /// <summary>
+    /// A FROM clause naming the view alone, aliased or not, hands the view's
+    /// rows its WHERE picks to the <c>INSTEAD OF</c> trigger, as the form with
+    /// no FROM clause does: <c>INSERTED</c> / <c>DELETED</c> hold the view's
+    /// rows, <c>@@ROWCOUNT</c> counts them, and <c>OUTPUT INSERTED</c> is Msg
+    /// 404.
+    /// </summary>
+    [TestMethod]
+    public void InsteadOfTrigger_TakesAFromClauseNamingTheViewAlone()
+    {
+        var simulation = Setup();
+        simulation.ExecuteBatches(
+            "create view vi as select id, v, k from t",
+            "create trigger tr_vi on vi instead of update, delete as insert log1 select concat('i', id, ':', v) from inserted union all select concat('d', id, ':', v) from deleted");
+        const string Log = "select string_agg(msg, ' ') within group (order by msg) from log1; delete log1";
+        AreEqual(2, simulation.ExecuteScalar("update vi set v = v + 1 from vi where id < 3; select @@rowcount"));
+        AreEqual("d1:10 d2:20 i1:11 i2:21", simulation.ExecuteScalar(Log));
+        AreEqual(1, simulation.ExecuteScalar("update a set v = 0 from vi a where a.id = 3; select @@rowcount"));
+        AreEqual("d3:30 i3:0", simulation.ExecuteScalar(Log));
+        AreEqual(1, simulation.ExecuteScalar("delete vi from vi where id = 1; select @@rowcount"));
+        AreEqual(1, simulation.ExecuteScalar("delete a from vi a where a.id = 2; select @@rowcount"));
+        AreEqual("d1:10 d2:20", simulation.ExecuteScalar(Log));
+        AreEqual(0, simulation.ExecuteScalar("update vi set v = 7 from vi where id > 30; select @@rowcount"));
+        AreEqual("1:10 2:20 3:30 4:40", simulation.ExecuteScalar(Rows));
+        _ = simulation.AssertSqlError("update vi set v = 7 output inserted.id from vi where id = 1", 404);
+        _ = simulation.AssertSqlError("update vi set v = 7 output deleted.v from vi where id = 1", 334);
+        _ = simulation.AssertSqlError("update vi set v = 1 from vi, vi b where vi.id = b.id", 414);
+    }
+
     [TestMethod]
     public void BaseTableTriggers_FireOnce()
     {

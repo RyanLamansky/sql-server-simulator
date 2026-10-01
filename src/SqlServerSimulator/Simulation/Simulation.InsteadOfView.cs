@@ -30,7 +30,10 @@ partial class Simulation
     /// The trigger fires even when no row qualifies. <c>OUTPUT</c> may name
     /// <c>DELETED</c> but not <c>INSERTED</c> (Msg 404, one per column), and
     /// its <c>INTO</c> rows land before the trigger body runs. A <c>FROM</c>
-    /// clause is <strong>Msg 414</strong>. A positioned UPDATE
+    /// clause naming the view alone — <paramref name="from"/>, read ahead of the
+    /// <c>SET</c> list — picks the rows as the <c>WHERE</c> does, aliased or
+    /// not, while one joining the view to another source is <strong>Msg
+    /// 414</strong> (probed 2026-10-01 against SQL Server 2025). A positioned UPDATE
     /// (<c>WHERE CURRENT OF</c>) through an updatable view keeps the base-row
     /// path it had.
     /// </para>
@@ -41,7 +44,8 @@ partial class Simulation
         View view,
         List<(string? ColumnName, Expression Expr)> rawAssignments,
         Selection.DmlTopLimit? top,
-        bool serializableHint)
+        bool serializableHint,
+        Selection.PreParsedFrom? from = null)
     {
         var batch = context.Batch;
         var columns = ViewColumnsFor(batch, view, targetName);
@@ -63,7 +67,7 @@ partial class Simulation
             updatedOrdinals.Add(ordinal);
         }
 
-        var typeResolver = Selection.ViewOutputColumnTypeResolver(batch, view);
+        var typeResolver = from is null ? Selection.ViewOutputColumnTypeResolver(batch, view) : Selection.ColumnTypeResolverFor([.. from.Sources]);
         foreach (var (_, expr) in rawAssignments)
             UnresolvedCollation.RequireAssignable(expr.GetSqlType(batch, typeResolver));
 
@@ -72,7 +76,9 @@ partial class Simulation
             context, shapeTable, allowInserted: true, allowDeleted: true, new ViewOutputShape(columns, read: null, insertedRefused: static _ => true));
         RejectClientOutputOnTriggeredTarget(batch, view, TriggerActions.Update, targetName.ToString(), output is { HasTarget: false });
 
-        if (context.Token is ReservedKeyword { Keyword: Keyword.From })
+        if (from is not null)
+            context.RestoreCheckpoint(from.After);
+        else if (context.Token is ReservedKeyword { Keyword: Keyword.From })
             throw SimulatedSqlException.InsteadOfViewInJoinedUpdate(view.Name);
 
         if (IsWhereCurrentOf(context))
@@ -145,14 +151,17 @@ partial class Simulation
     /// are <c>DELETED</c>, and the trigger runs over them, whether or not the
     /// view is one real could delete through (probed 2026-09-27 against SQL
     /// Server 2025). <c>OUTPUT DELETED</c> reads the view's rows, its
-    /// <c>INTO</c> rows landing before the body runs.
+    /// <c>INTO</c> rows landing before the body runs. A <c>FROM</c> clause
+    /// naming the view alone is <paramref name="from"/>, as for the
+    /// <c>UPDATE</c>.
     /// </summary>
     private static SimulatedStatementOutcome ExecuteInsteadOfViewDelete(
         ParserContext context,
         MultiPartName targetName,
         View view,
         Selection.DmlTopLimit? top,
-        bool serializableHint)
+        bool serializableHint,
+        Selection.PreParsedFrom? from = null)
     {
         var batch = context.Batch;
         var columns = ViewColumnsFor(batch, view, targetName);
@@ -163,7 +172,9 @@ partial class Simulation
             context, shapeTable, allowInserted: false, allowDeleted: true, new ViewOutputShape(columns, read: null, insertedRefused: null));
         RejectClientOutputOnTriggeredTarget(batch, view, TriggerActions.Delete, targetName.ToString(), output is { HasTarget: false });
 
-        if (context.Token is ReservedKeyword { Keyword: Keyword.From })
+        if (from is not null)
+            context.RestoreCheckpoint(from.After);
+        else if (context.Token is ReservedKeyword { Keyword: Keyword.From })
             throw new NotSupportedException($"Multi-source DELETE through a view ('{view.Schema.Name}.{view.Name}') isn't modeled — target the underlying table directly.");
 
         if (IsWhereCurrentOf(context))
@@ -173,7 +184,7 @@ partial class Simulation
                 : throw new NotSupportedException($"A positioned DELETE through '{view.Name}', whose INSTEAD OF DELETE trigger takes the write, isn't modeled with an OUTPUT clause or over a view with no single base table.");
         }
 
-        var where = ParseInsteadOfViewWhere(context, Selection.ViewOutputColumnTypeResolver(batch, view));
+        var where = ParseInsteadOfViewWhere(context, from is null ? Selection.ViewOutputColumnTypeResolver(batch, view) : Selection.ColumnTypeResolverFor([.. from.Sources]));
         if (!batch.IsSkipping
             && PermissionEnforcement.SecurableFor(batch, targetName, view) is { } securable
             && PermissionEnforcement.Applies(batch, batch.DatabaseFor(securable)))

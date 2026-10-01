@@ -20,7 +20,7 @@ namespace SqlServerSimulator.Parser;
 /// <see cref="SetOperationOverUnion"/> — a body over a <c>UNION</c>, whose
 /// columns are all derived.</item>
 /// <item><see cref="UnsupportedShape"/> — catch-all (<c>EXCEPT</c> /
-/// <c>INTERSECT</c>, HAVING, a derived-table source) — DML raises Msg 4403
+/// <c>INTERSECT</c>, HAVING, a rowset-function source) — DML raises Msg 4403
 /// as the closest message.</item>
 /// <item><see cref="None"/> — the profile is non-null.</item>
 /// </list>
@@ -45,9 +45,10 @@ internal enum ViewUpdatabilityRejection
     Union,
 
     /// <summary>
-    /// <see cref="Union"/> for <c>UNION ALL</c>, which a stored view takes as a
-    /// partitioned view instead — whose rules aren't built, so a stored view
-    /// records <see cref="UnsupportedShape"/> for it.
+    /// <see cref="Union"/> for <c>UNION ALL</c>, which a stored view whose
+    /// branches each read one table plainly takes as a partitioned view
+    /// instead (<see cref="Schemas.View.PartitionedBase"/>), keeping this
+    /// refusal for every path that doesn't route to its members.
     /// </summary>
     UnionAll,
 

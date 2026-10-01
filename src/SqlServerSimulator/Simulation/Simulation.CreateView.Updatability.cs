@@ -41,17 +41,18 @@ partial class Simulation
     /// view carries the same pair, so the chain can be any depth.
     /// </para>
     /// </remarks>
-    private static (HeapTable? BaseTable, int[] BaseColumnOrdinals, ViewUpdatabilityRejection Rejection, Func<SqlValue[], BatchContext, bool>? VisibilityCheck, Func<SqlValue[], BatchContext, bool>? CheckOptionCheck, bool IsJoinUpdatable)
+    private static (HeapTable? BaseTable, int[] BaseColumnOrdinals, ViewUpdatabilityRejection Rejection, Func<SqlValue[], BatchContext, bool>? VisibilityCheck, Func<SqlValue[], BatchContext, bool>? CheckOptionCheck, bool IsJoinUpdatable, View? PartitionedBase)
         AnalyzeViewUpdatability(Collation collation, Selection bodySelection, bool withCheckOption)
     {
         if (bodySelection.UpdatabilityProfile is not { } profile)
-            return (null, [], bodySelection.UpdatabilityRejection, null, null, false);
+            return (null, [], bodySelection.UpdatabilityRejection, null, null, false, null);
 
         if (profile.Sources.Length > 1)
-            return (null, [], ViewUpdatabilityRejection.MultipleSources, null, null, true);
+            return (null, [], ViewUpdatabilityRejection.MultipleSources, null, null, true, null);
 
         var source = profile.Sources[0];
-        HeapTable baseTable;
+        HeapTable? baseTable = null;
+        View? partitionedBase = null;
         int[] sourceColumnToBaseOrdinal;
         Func<SqlValue[], BatchContext, bool>? upstreamVisibility = null;
         Func<SqlValue[], BatchContext, bool>? upstreamCheckOption = null;
@@ -70,22 +71,33 @@ partial class Simulation
             upstreamVisibility = upstreamView.VisibilityCheck;
             upstreamCheckOption = upstreamView.CheckOptionCheck;
         }
+        else if (source.UpdatableView() is { PartitionedBase: { } partitioned } partitionedLevel)
+        {
+            // A level over a partitioned view composes through that view's
+            // columns as it would through a base table's: real routes a write
+            // through it to the members (probed 2026-10-01 against SQL Server
+            // 2025, through a view, a CTE and a derived table).
+            partitionedBase = partitioned;
+            sourceColumnToBaseOrdinal = partitionedLevel.BaseColumnOrdinals;
+            upstreamVisibility = partitionedLevel.VisibilityCheck;
+            upstreamCheckOption = partitionedLevel.CheckOptionCheck;
+        }
         else if (source.UpdatableView() is { IsJoinUpdatable: true })
         {
             // The chain bottoms out in a multi-source view, which has no
             // single base table for this level to compose through. The write
             // walks the level stack at the statement instead, so this level
             // carries the same pair the join view itself does.
-            return (null, [], ViewUpdatabilityRejection.MultipleSources, null, null, true);
+            return (null, [], ViewUpdatabilityRejection.MultipleSources, null, null, true, null);
         }
         else
         {
             // A view or CTE over a set operation refuses as that body does
             // (probed 2026-10-01 against SQL Server 2025: a CTE over a UNION
-            // CTE is Msg 4426 naming the outer one); a derived table, OPENJSON,
-            // TVF, catalog view or other non-updatable view supports no DML
-            // pass-through.
-            return (null, [], UnionRejectionOf(source) ?? ViewUpdatabilityRejection.UnsupportedShape, null, null, false);
+            // CTE is Msg 4426 naming the outer one); an APPLY's correlated body,
+            // OPENJSON, TVF, catalog view or other non-updatable view supports
+            // no DML pass-through.
+            return (null, [], UnionRejectionOf(source) ?? ViewUpdatabilityRejection.UnsupportedShape, null, null, false, null);
         }
 
         var baseColumnOrdinals = new int[profile.Projections.Length];
@@ -133,7 +145,7 @@ partial class Simulation
                     unmappable = true;
             }));
             if (unmappable)
-                return (null, [], ViewUpdatabilityRejection.UnsupportedShape, null, null, false);
+                return (null, [], ViewUpdatabilityRejection.UnsupportedShape, null, null, false, null);
         }
 
         var thisLevelCheck = MakeWhereCheck(profile.Excluders, nameToBaseOrdinal);
@@ -147,7 +159,10 @@ partial class Simulation
         var thisLevelCheckOption = withCheckOption ? combinedVisibility : null;
         var combinedCheckOption = ComposeAnd(thisLevelCheckOption, upstreamCheckOption);
 
-        return (baseTable, baseColumnOrdinals, ViewUpdatabilityRejection.None, combinedVisibility, combinedCheckOption, false);
+        // A level over a partitioned view keeps the UNION ALL refusal for every
+        // path that doesn't route to the members.
+        var rejection = partitionedBase is null ? ViewUpdatabilityRejection.None : ViewUpdatabilityRejection.UnionAll;
+        return (baseTable, baseColumnOrdinals, rejection, combinedVisibility, combinedCheckOption, false, partitionedBase);
     }
 
     /// <summary>
@@ -534,18 +549,26 @@ partial class Simulation
     /// body reading it — passes down, with the same analysis <c>CREATE
     /// VIEW</c> runs; built once per binding, after the CTEs its body reads.
     /// </summary>
-    internal static View CteDmlView(CteBinding binding)
+    internal static View CteDmlView(CteBinding binding) =>
+        binding.DmlTarget ??= UnstoredDmlView(binding.Plan!, binding.Database, binding.Name, binding.ColumnNames, isDerivedTable: false);
+
+    /// <summary>
+    /// A derived table analyzed as the unstored view a write through it passes
+    /// down, as <see cref="CteDmlView"/> analyzes a CTE; built once per
+    /// binding.
+    /// </summary>
+    internal static View DerivedTableDmlView(DerivedTableBinding binding) =>
+        binding.DmlTarget ??= UnstoredDmlView(binding.Body, binding.Database, binding.Alias, binding.ColumnNames, isDerivedTable: true);
+
+    /// <summary>The unstored view over <paramref name="body"/> that a CTE or derived table named <paramref name="name"/> is to a write.</summary>
+    private static View UnstoredDmlView(Selection body, Database database, string name, string[] columnNames, bool isDerivedTable)
     {
-        if (binding.DmlTarget is { } built)
-            return built;
-        var body = binding.Plan!;
-        var database = binding.Database;
         var collation = database.Collation;
-        var (baseTable, baseColumnOrdinals, rejection, visibilityCheck, checkOptionCheck, isJoinUpdatable) = AnalyzeViewUpdatability(collation, body, withCheckOption: false);
-        var outputColumns = ComputeViewOutputColumns(collation, body, [.. binding.ColumnNames], binding.Name);
-        return binding.DmlTarget = new View(
+        var (baseTable, baseColumnOrdinals, rejection, visibilityCheck, checkOptionCheck, isJoinUpdatable, partitionedBase) = AnalyzeViewUpdatability(collation, body, withCheckOption: false);
+        var outputColumns = ComputeViewOutputColumns(collation, body, [.. columnNames], name);
+        return new View(
             database.Schemas[Database.DefaultSchemaName],
-            binding.Name,
+            name,
             objectId: 0,
             outputColumns,
             bodyText: string.Empty,
@@ -565,6 +588,8 @@ partial class Simulation
             IsWindowed = IsWindowedBody(body),
             VolatileColumns = body.VolatileColumns,
             UnstoredBody = body,
+            IsDerivedTable = isDerivedTable,
+            PartitionedBase = partitionedBase,
         };
     }
 }

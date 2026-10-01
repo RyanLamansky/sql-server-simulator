@@ -136,6 +136,11 @@ partial class Simulation
         var setAggregates = new List<AggregateExpression>();
         context.AggregateCollector = setAggregates;
 
+        // A write through a partitioned view refuses a SET value reading one
+        // of its members (Msg 4439), so the list's reads are recorded.
+        var partitionedReads = viewRoute == DmlViewRoute.Partitioned || WritesPartitionedSource(context, preParsedFrom, leadingIdent) ? new List<SchemaObject>() : null;
+        using var recordingReads = ParserScope.Enter(ref context.PartitionedWriteReads, partitionedReads);
+
         while (true)
         {
             if (context.GetNextRequired() is AtPrefixedString variable)
@@ -267,7 +272,9 @@ partial class Simulation
         // A view or CTE the FROM clause names as the target writes through it
         // joined to the clause's other sources.
         if (preParsedFrom is not null && (joinedView || (leadingTable is null && JoinedViewTargetIndex(context, preParsedFrom, leadingIdent, leadingView: null) >= 0)))
-            return ExecuteJoinedViewTargetUpdate(context, leadingIdent, leadingView, rawAssignments, top, preParsedFrom);
+            return ExecuteJoinedViewTargetUpdate(context, leadingIdent, leadingView, rawAssignments, top, preParsedFrom, partitionedReads);
+        if (leadingView is not null && viewRoute == DmlViewRoute.Partitioned)
+            return ExecutePartitionedViewUpdate(context, leadingIdent, leadingView, rawAssignments, top, from: null, targetIndex: 0, partitionedReads!);
 
         // An INSTEAD OF UPDATE trigger on a view takes the write, reading the
         // view's own rows; a multi-source view's SET list names the base
@@ -277,13 +284,34 @@ partial class Simulation
         if (leadingView is not null && viewRoute == DmlViewRoute.JoinView)
             return ExecuteJoinViewUpdate(context, leadingIdent, leadingView, rawAssignments, top);
 
-        var output = ParseMutationOutput(context, leadingIdent, leadingTable ?? JoinedTargetTable(context, preParsedFrom, leadingIdent), leadingView, TriggerActions.Update);
+        // A table target's OUTPUT clause may read the other sources of a FROM
+        // clause that follows it, which is read ahead for it.
+        if (preParsedFrom is null && remoteWrite is null && leadingTable is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
+            preParsedFrom = Selection.PreParseMutationFrom(context, fromCursor: true);
+        var output = ParseMutationOutput(context, leadingIdent, leadingTable ?? JoinedTargetTable(context, preParsedFrom, leadingIdent), leadingView, TriggerActions.Update, preParsedFrom);
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
             return ExecuteJoinedUpdate(context, leadingIdent, leadingTable, rawAssignments, output, top, preParsedFrom);
 
         var table = RequireMutationTable(context, leadingIdent, leadingTable, "UPDATE");
         return ExecuteUpdateAgainstTable(context, leadingIdent, table, rawAssignments, output, top, targetHints.Serializable, leadingView);
+    }
+
+    /// <summary>
+    /// Whether an alias-form joined write's target, the source of
+    /// <paramref name="from"/> the leading name aliases, reaches a partitioned
+    /// view.
+    /// </summary>
+    private static bool WritesPartitionedSource(ParserContext context, Selection.PreParsedFrom? from, MultiPartName leadingIdent)
+    {
+        if (from is null || leadingIdent.Count != 1)
+            return false;
+        foreach (var source in from.Sources)
+        {
+            if (source.Qualifier is { } qualifier && context.CurrentDatabase.Collation.Equals(qualifier, leadingIdent.Leaf))
+                return source.UpdatableView() is { PartitionedBase: not null };
+        }
+        return false;
     }
 
     /// <summary>
@@ -879,6 +907,10 @@ partial class Simulation
         if (ReadJoinedTailPastMissingTarget(context, sourcesList, joinsList, leadingIdent, leadingTable))
             return new SimulatedNonQuery(0);
         var targetIndex = FindOrAppendMutationTarget(context, sourcesList, joinsList, leadingIdent, leadingTable);
+        // A leading name that is a table's but aliases a view, CTE or derived
+        // table in the FROM clause writes through that source.
+        if (output is null && sourcesList[targetIndex] is { BackingTable: null } aliased && aliased.UpdatableView() is not null)
+            return ExecuteJoinedViewTargetUpdate(context, leadingIdent, leadingView: null, rawAssignments, top, new Selection.PreParsedFrom(sourcesList, joinsList, context.SaveCheckpoint()));
         var sources = sourcesList.ToArray();
         var joins = joinsList.ToArray();
 
@@ -925,6 +957,7 @@ partial class Simulation
             || HasAfterTrigger(context.Batch, table, TriggerActions.Update)
             || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Update)
             || table.SystemVersioning is not null;
+        var partners = output is { ReadsPartners: true } ? new OutputPartnerRows(sources) : null;
 
         // Hoisted per-row scaffolding: one mutable tuple slot, one cached
         // delegate and one runtime, so the per-row loop allocates none.
@@ -962,6 +995,7 @@ partial class Simulation
                 continue;
             affected.Add((addr.Page, addr.Slot, entry.NewValues, entry.OldSnapshot));
             judgedRows.Add((addr.Page, addr.Slot, rowBytes));
+            partners?.Note(addr, currentTuple);
         }
 
         ApplyDmlTopCap(top, affected, context.Batch);
@@ -970,10 +1004,11 @@ partial class Simulation
             if (Rejudge(rowBytes) is not { } judged)
                 return false;
             affected[i] = (affected[i].PageIndex, affected[i].SlotIndex, judged.NewValues, judged.OldSnapshot);
+            partners?.Note((affected[i].PageIndex, affected[i].SlotIndex), currentTuple);
             return true;
         });
 
-        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], sourceView: null, rowsLocked: true);
+        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], sourceView: null, rowsLocked: true, partners);
 
         // The target row of the current tuple's new values, and its old image
         // when something reads that.
@@ -1171,7 +1206,8 @@ partial class Simulation
         OutputProjection? output,
         IReadOnlyList<int> updatedColumnOrdinals,
         View? sourceView = null,
-        bool rowsLocked = false)
+        bool rowsLocked = false,
+        OutputPartnerRows? partners = null)
     {
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
@@ -1209,7 +1245,7 @@ partial class Simulation
         {
             // OUTPUT INTO's rows land before the body runs (probed 2026-09-27
             // against SQL Server 2025); to the client it is Msg 334.
-            var outputRows = output is null ? null : ProjectMutationOutput(affected, output, context.Batch);
+            var outputRows = output is null ? null : ProjectMutationOutput(affected, output, context.Batch, partners);
             FireInsteadOfUpdateTrigger(context, table, sourceView, affected);
             return output is null || output.HasTarget
                 ? new SimulatedNonQuery(affected.Count)
@@ -1313,7 +1349,7 @@ partial class Simulation
 
         if (output is not null)
         {
-            var rows = ProjectMutationOutput(affected, output, context.Batch);
+            var rows = ProjectMutationOutput(affected, output, context.Batch, partners);
             // OUTPUT INTO @t suppresses the result set (probe-confirmed).
             if (!output.HasTarget)
             {
@@ -1483,12 +1519,13 @@ partial class Simulation
     private static List<byte[]> ProjectMutationOutput(
         List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
         OutputProjection output,
-        BatchContext batch)
+        BatchContext batch,
+        OutputPartnerRows? partners = null)
     {
         var rows = new List<byte[]>(affected.Count);
-        foreach (var (_, _, fullNew, fullOld) in affected)
+        foreach (var (page, slot, fullNew, fullOld) in affected)
         {
-            var projectedBytes = output.ProjectRow(batch, insertedValues: fullNew, deletedValues: fullOld);
+            var projectedBytes = output.ProjectRow(batch, insertedValues: fullNew, deletedValues: fullOld, partners: partners?.For(page, slot));
             if (projectedBytes is not null)
                 rows.Add(projectedBytes);
         }
@@ -1695,7 +1732,7 @@ partial class Simulation
                 }
                 columnOrdinal = sourceView.BaseColumnOrdinals[viewOrd];
                 if (columnOrdinal < 0)
-                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(derivedLabel ?? DerivedFieldViewLabel(sourceView));
+                    throw SimulatedSqlException.ViewDmlTouchesDerivedField(derivedLabel ?? DerivedFieldViewLabel(sourceView), sourceView.IsDerivedTable);
             }
             else
             {
@@ -2021,7 +2058,8 @@ partial class Simulation
         SqlValue[] fullValues,
         List<(int Ordinal, Expression Expr)> assignments,
         Func<MultiPartName, SqlValue> resolver,
-        MaskingFunction?[]? setMasks = null)
+        MaskingFunction?[]? setMasks = null,
+        bool enforceConstraints = true)
     {
         var newValues = new SqlValue[table.Columns.Length];
         Array.Copy(fullValues, newValues, fullValues.Length);
@@ -2067,8 +2105,11 @@ partial class Simulation
             newValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
 
         EvaluateComputedColumns(table, newValues, context.Batch);
-        EnforceNotNull(table, newValues, "UPDATE");
-        EnforceCheckConstraints(table, newValues, context.Batch, "UPDATE");
+        if (enforceConstraints)
+        {
+            EnforceNotNull(table, newValues, "UPDATE");
+            EnforceCheckConstraints(table, newValues, context.Batch, "UPDATE");
+        }
 
         return newValues;
     }
