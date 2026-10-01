@@ -106,6 +106,16 @@ partial class Simulation
 
         var seen = new HashSet<(int Page, int Slot)>();
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
+        var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
+        var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
+
+        // The view's own INSTEAD OF triggers took their own path, so the only
+        // one that can claim the write is the base table's.
+        var oldSnapshotNeeded = output is not null
+            || HasAfterTrigger(batch, table, TriggerActions.Update)
+            || HasInsteadOfTrigger(batch, table, TriggerActions.Update)
+            || table.SystemVersioning is not null
+            || table.IncomingForeignKeys.Count > 0;
 
         // Hoisted scaffolding: one mutable tuple slot, one resolver per level,
         // one RuntimeContext each reused across the loop — see CLAUDE.md's
@@ -125,18 +135,13 @@ partial class Simulation
         var tuples = batch.IsSkipping
             ? []
             : Selection.EnumerateJoinedRows(sources, chain.Joins, batch, outerResolver: null);
+        if (positionedCursor is null && !table.SupersededKeyImages.IsEmptyLockFree())
+            _ = AwaitSupersededTargetRows(batch, table, (_, prior) => QualifyingTuple(prior) is not null);
         foreach (var candidate in tuples)
         {
             tuple = candidate;
 
-            // Every level's own WHERE decides which join tuples that level
-            // shows, so together they gate candidacy exactly as the composed
-            // VisibilityCheck does on the single-base path.
-            if (!ChainLevelsPass(chain, belowRuntimes, topLevel))
-                continue;
-
-            var targetBytes = TargetBytesAlongPath(candidate, path, rowMaps);
-            if (targetBytes is null)
+            if (TuplePasses(rowMaps) is not { } targetBytes)
                 continue;
             if (!targetAddresses.TryGetValue(targetBytes, out var address))
                 continue;
@@ -147,6 +152,41 @@ partial class Simulation
             if (!seen.Add(address))
                 continue;
 
+            // Judged as another session's write leaves it, as a joined
+            // UPDATE's are.
+            var rowBytes = targetBytes;
+            if (!batch.AwaitTargetRowWriters(table, address.Page, address.Slot, ref rowBytes))
+                continue;
+            var judged = ReferenceEquals(rowBytes, targetBytes) || rowBytes.AsSpan().SequenceEqual(targetBytes)
+                ? JudgeTuple(targetBytes)
+                : Rejudge(rowBytes);
+            if (judged is not { } entry)
+                continue;
+            affected.Add((address.Page, address.Slot, entry.NewValues, entry.OldSnapshot));
+            judgedRows.Add((address.Page, address.Slot, rowBytes));
+        }
+
+        ApplyDmlTopCap(top, affected, batch);
+        HoldQualifyingRows(batch, table, affected, judgedRows, walkGeneration, RowLockPurpose.UpdatePreImage, (i, rowBytes) =>
+        {
+            if (Rejudge(rowBytes) is not { } judged)
+                return false;
+            affected[i] = (affected[i].PageIndex, affected[i].SlotIndex, judged.NewValues, judged.OldSnapshot);
+            return true;
+        });
+
+        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], rowsLocked: true);
+
+        // The target row the current tuple shows when every level's own WHERE
+        // passes it — together they gate candidacy exactly as the composed
+        // VisibilityCheck does on the single-base path — else null.
+        byte[]? TuplePasses(Dictionary<byte[], byte[]?[]>[] tupleRowMaps) =>
+            ChainLevelsPass(chain, belowRuntimes, topLevel) ? TargetBytesAlongPath(tuple, path, tupleRowMaps) : null;
+
+        // The target row of the current tuple's new values, and its old image
+        // when something reads that.
+        (SqlValue[] NewValues, SqlValue[]? OldSnapshot) JudgeTuple(byte[] targetBytes)
+        {
             var fullValues = DecodeFullRow(table, targetBytes);
             EvaluateComputedColumns(table, fullValues, batch);
 
@@ -158,21 +198,28 @@ partial class Simulation
                 throw SimulatedSqlException.ViewCheckOptionViolation();
 
             if (tuplesByRow is { } recordedTuples)
-                recordedTuples[fullValues] = (byte[]?[])candidate.Clone();
-
-            // The view's own INSTEAD OF triggers took their own path, so the
-            // only one that can claim the write is the base table's.
-            var oldSnapshotNeeded = output is not null
-                || HasAfterTrigger(batch, table, TriggerActions.Update)
-                || HasInsteadOfTrigger(batch, table, TriggerActions.Update)
-                || table.SystemVersioning is not null
-                || table.IncomingForeignKeys.Count > 0;
-            affected.Add((address.Page, address.Slot, newValues, oldSnapshotNeeded ? fullValues : null));
+                recordedTuples[fullValues] = (byte[]?[])tuple.Clone();
+            return (newValues, oldSnapshotNeeded ? fullValues : null);
         }
 
-        ApplyDmlTopCap(top, affected, batch);
+        // The target row as rowBytes, judged again against its partners.
+        (SqlValue[] NewValues, SqlValue[]? OldSnapshot)? Rejudge(byte[] rowBytes) =>
+            QualifyingTuple(rowBytes) is { } targetBytes ? JudgeTuple(targetBytes) : null;
 
-        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)]);
+        // The target row as rowBytes when every level and the WHERE still show
+        // it with some partner, the first such tuple current; else null.
+        byte[]? QualifyingTuple(byte[] rowBytes)
+        {
+            var narrowedMaps = new Dictionary<byte[], byte[]?[]>[path.Length - 1];
+            var narrowed = SourcesAlongPath(batch, chain, path, 0, original => SingleRowSource(original, rowBytes, original.LobStore), narrowedMaps);
+            foreach (var candidate in Selection.EnumerateJoinedRows(narrowed, chain.Joins, batch, outerResolver: null))
+            {
+                tuple = candidate;
+                if (TuplePasses(narrowedMaps) is { } targetBytes && (where is null || where.Run(runtime) == true))
+                    return targetBytes;
+            }
+            return null;
+        }
     }
 
     /// <summary>

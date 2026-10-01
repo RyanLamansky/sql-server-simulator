@@ -346,16 +346,7 @@ partial class Simulation
         var probeRow = RowEncoder.EncodeRow(table.StoredColumns, ProjectStoredValues(table, newValues));
         var sources = SourcesAlongPath(
             batch, chain, remaining, 0,
-            original => new FromSource(
-                qualifier: original.Qualifier,
-                columnNames: original.ColumnNames,
-                columns: original.Columns,
-                storedSchema: original.StoredSchema,
-                storageOrdinals: original.StorageOrdinals,
-                lobStore: null,
-                rows: [probeRow],
-                backingTable: original.BackingTable,
-                unaliasedName: original.UnaliasedName),
+            original => SingleRowSource(original, probeRow, lobStore: null),
             rowMaps);
 
         var throughLevel = HighestCheckOptionLevel(chain);

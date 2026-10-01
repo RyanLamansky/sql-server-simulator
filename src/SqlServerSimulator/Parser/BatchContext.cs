@@ -1562,6 +1562,26 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// <see cref="AwaitTargetRow"/> for a statement that takes its rows' X
+    /// only once its walk is done, in walk order
+    /// (<see cref="HoldQualifyingTargetRow"/>): the U a wait took goes as soon
+    /// as the row is read, so the walk holds nothing. Holding it, the walk
+    /// could keep a later row while its X waits on an earlier one another
+    /// session holds, that session's X waiting on the later — a deadlock real
+    /// never meets, since its walk takes U on every row in order (probed
+    /// 2026-10-01 against SQL Server 2025: eight sessions each updating the
+    /// same two rows forty times, single-table or joined, meet none). False
+    /// when the row was deleted while the walk waited.
+    /// </summary>
+    public bool AwaitTargetRowWriters(HeapTable table, int pageIndex, int slotIndex, ref byte[] rowBytes)
+    {
+        var hold = this.AwaitTargetRow(table, pageIndex, slotIndex, ref rowBytes);
+        if (hold == TargetRowHold.Update)
+            this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, LockMode.Update, countedForEscalation: false);
+        return hold != TargetRowHold.Gone;
+    }
+
+    /// <summary>
     /// The key lock an INSERT's check of a nonclustered PRIMARY KEY / UNIQUE
     /// constraint or unique index with <c>IGNORE_DUP_KEY</c> takes: real reads
     /// that index for the key under a SERIALIZABLE U — U on the key when a row
@@ -1597,13 +1617,43 @@ internal sealed class BatchContext
             this.StatementSchemaLocks.Add((resource, mode));
     }
 
+    /// <summary>
+    /// The rows of <paramref name="table"/> other sessions have rewritten or
+    /// deleted and still hold X on, each with the image it carried before
+    /// that write and the lock (<see cref="HeapTable.SupersededKeyImages"/>);
+    /// null when there are none, which costs one lock-free read.
+    /// </summary>
+    public List<((int Page, int Slot) Address, byte[] PriorImage, LockResource Lock)>? SupersededTargetRows(HeapTable table)
+    {
+        if (table.SupersededKeyImages.IsEmptyLockFree() || !Simulation.IsLockableTable(table))
+            return null;
+        var session = this.Connection.Session;
+        List<((int Page, int Slot) Address, byte[] PriorImage, LockResource Lock)>? rows = null;
+        foreach (var (owner, images) in table.SupersededKeyImages)
+        {
+            if (ReferenceEquals(owner, session))
+                continue;
+            foreach (var (address, (image, resource)) in images)
+                (rows ??= []).Add((address, image, resource));
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Waits in U for the session holding <paramref name="resource"/>, the X
+    /// on a row it rewrote or deleted, as real's target read meets that row;
+    /// true when there was someone to wait for.
+    /// </summary>
+    public bool AwaitSupersededTargetRow(HeapTable table, LockResource resource) =>
+        this.AwaitRowWriters(table, resource, LockMode.Update);
+
     /// <summary>Gives back what <paramref name="hold"/> took on a row the statement then turned away.</summary>
     public void ReleaseTargetRow(HeapTable table, int pageIndex, int slotIndex, TargetRowHold hold)
     {
         if ((hold & TargetRowHold.Exclusive) != 0)
             this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, LockMode.Exclusive);
         if ((hold & TargetRowHold.Update) != 0)
-            this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, LockMode.Update);
+            this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, LockMode.Update, countedForEscalation: false);
     }
 
     /// <summary>
@@ -1652,8 +1702,10 @@ internal sealed class BatchContext
     /// lock a tx-scoped read took on a row that turned out not to qualify,
     /// which real releases rather than keeping to the transaction's end. A
     /// row the read took no lock on (the table escalated) gives back nothing.
+    /// <paramref name="countedForEscalation"/> false for an acquisition that
+    /// didn't count toward escalation, as a target read's U doesn't.
     /// </summary>
-    public void ReleaseRowLockAcquisition(HeapTable table, int pageIndex, int slotIndex, LockMode mode)
+    public void ReleaseRowLockAcquisition(HeapTable table, int pageIndex, int slotIndex, LockMode mode, bool countedForEscalation = true)
     {
         if (!table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource))
             return;
@@ -1664,7 +1716,7 @@ internal sealed class BatchContext
             return;
         held.RemoveAt(index);
         connection.Simulation.LockManager.Release(resource, mode, connection.Session);
-        if (this.CurrentStatement.LockTallies is { } tallies && tallies.TryGetValue(table, out var tally) && !tally.RowsKeyLocked)
+        if (countedForEscalation && this.CurrentStatement.LockTallies is { } tallies && tallies.TryGetValue(table, out var tally) && !tally.RowsKeyLocked)
             tally.Count--;
     }
 

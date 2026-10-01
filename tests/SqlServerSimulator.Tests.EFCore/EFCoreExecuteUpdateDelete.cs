@@ -20,7 +20,11 @@ public class EFCoreExecuteUpdateDelete
     public TestContext TestContext { get; set; } = null!;
 
     [ClassInitialize]
-    public static void WarmModel(TestContext _) => AssemblyHooks.WarmModel(() => new UserContext(new Simulation()));
+    public static void WarmModel(TestContext _)
+    {
+        AssemblyHooks.WarmModel(() => new UserContext(new Simulation()));
+        AssemblyHooks.WarmModel(() => new TeamContext(new Simulation()));
+    }
 
     private sealed class User
     {
@@ -151,5 +155,99 @@ public class EFCoreExecuteUpdateDelete
         var affected = context.Users.Where(u => u.Id < 0).ExecuteDelete();
         Assert.AreEqual(0, affected);
         Assert.AreEqual(4, context.Users.Count());
+    }
+
+    private sealed class Team
+    {
+        public int Id { get; set; }
+
+        [Column(TypeName = "nvarchar(30)")]
+        public string Name { get; set; } = "";
+    }
+
+    private sealed class Member
+    {
+        public int Id { get; set; }
+
+        public int TeamId { get; set; }
+
+        public Team Team { get; set; } = null!;
+
+        public int Points { get; set; }
+    }
+
+    private sealed class TeamContext(Simulation simulation) : DbContext
+    {
+        public Simulation Simulation { get; } = simulation;
+
+        public DbSet<Member> Members => Set<Member>();
+
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+        {
+            _ = optionsBuilder.UseSqlServer(this.Simulation.CreateDbConnection());
+        }
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            _ = modelBuilder.Entity<Team>().ToTable("Teams").Property(t => t.Id).ValueGeneratedNever();
+            _ = modelBuilder.Entity<Member>().Property(m => m.Id).ValueGeneratedNever();
+        }
+    }
+
+    // Two teams, red and blue, with the members 1 through memberCount
+    // alternating between them.
+    private static Simulation CreateTeams(int memberCount)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"""
+            create table Teams (Id int not null primary key, Name nvarchar(30) not null);
+            create table Members (Id int not null primary key, TeamId int not null references Teams (Id), Points int not null);
+            insert Teams values (0, N'red'), (1, N'blue');
+            insert Members select value, value % 2, 0 from generate_series(1, {memberCount});
+            """);
+        return simulation;
+    }
+
+    /// <summary>
+    /// An ExecuteUpdate filtered through a navigation is EF's joined
+    /// <c>UPDATE … FROM [Members] AS [m] INNER JOIN [Teams] AS [t]</c>, and
+    /// contexts running it at once never lose an increment.
+    /// </summary>
+    [TestMethod]
+    public void ExecuteUpdate_ThroughNavigation_ConcurrentIncrementsAllLand()
+    {
+        const int Workers = 8, Rounds = 20;
+        var simulation = CreateTeams(4);
+        _ = Parallel.For(0, Workers, new ParallelOptions { MaxDegreeOfParallelism = Workers, CancellationToken = TestContext.CancellationToken }, _ =>
+        {
+            using var context = new TeamContext(simulation);
+            for (var round = 0; round < Rounds; round++)
+                Assert.AreEqual(2, context.Members.Where(m => m.Team.Name == "red").ExecuteUpdate(s => s.SetProperty(m => m.Points, m => m.Points + 1)));
+        });
+        using var check = new TeamContext(simulation);
+        CollectionAssert.AreEqual(
+            new[] { 0, Workers * Rounds, 0, Workers * Rounds },
+            check.Members.OrderBy(m => m.Id).Select(m => m.Points).ToArray());
+    }
+
+    /// <summary>
+    /// An ExecuteDelete filtered through a navigation is EF's joined
+    /// <c>DELETE TOP(@p) FROM [m] FROM [Members] AS [m] INNER JOIN [Teams] AS [t]</c>,
+    /// and contexts draining one team at once delete each member once.
+    /// </summary>
+    [TestMethod]
+    public void ExecuteDelete_ThroughNavigation_ConcurrentDeletesEachRowOnce()
+    {
+        const int Workers = 8, MemberCount = 200;
+        var simulation = CreateTeams(MemberCount);
+        var deleted = 0;
+        _ = Parallel.For(0, Workers, new ParallelOptions { MaxDegreeOfParallelism = Workers, CancellationToken = TestContext.CancellationToken }, worker =>
+        {
+            using var context = new TeamContext(simulation);
+            var team = worker % 2 == 0 ? "red" : "blue";
+            while (context.Members.Any(m => m.Team.Name == team))
+                _ = Interlocked.Add(ref deleted, context.Members.Where(m => m.Team.Name == team).Take(3).ExecuteDelete());
+        });
+        Assert.AreEqual(MemberCount, deleted);
     }
 }

@@ -607,9 +607,7 @@ partial class Simulation
         // Seek the target when WHERE carries an indexable equality / range
         // (positioned UPDATE leaves where null, so it keeps the full scan). The
         // loop re-runs WHERE below, so the seek only narrows the rows considered.
-        var rowSource = where is not null
-            ? Selection.SeekMutationTarget(table, where, context.Batch) ?? ClusteredScan.RowsWithAddress(table, context.Connection.StatementIo)
-            : ClusteredScan.RowsWithAddress(table, context.Connection.StatementIo);
+        var rowSource = MutationRowSource(table, where, context.Batch);
         // Skip mode commits nothing (CommitUpdate returns early), so the walk
         // is pure cost — and running WHERE / SET against live rows can raise a
         // runtime error (a division by zero, a conversion failure) on behalf of
@@ -618,13 +616,22 @@ partial class Simulation
         // bind needs — the target, the SET column ordinals, the predicate — was
         // resolved above.
         // TOP (0) reads no row at all, so nothing per row can raise either.
-        if (context.Batch.IsSkipping || DmlTopIsZero(top, context.Batch))
+        var readsNoRow = context.Batch.IsSkipping || DmlTopIsZero(top, context.Batch);
+        if (readsNoRow)
             rowSource = [];
         else if (positionedCursor is null && Selection.MutationPlanStarts(table, where))
             RunUpdateStartupConstants(context, table, where is null ? [] : [where], assignments);
         var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, table, positionedCursor is not null);
+        // A seek chose its rows from the images they carried; one a wait here
+        // let settle may carry another.
+        if (positionedCursor is null && !readsNoRow && !table.SupersededKeyImages.IsEmptyLockFree()
+            && AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, predicateOnly: true) is not null)
+            && where is not null)
+        {
+            rowSource = MutationRowSource(table, where, context.Batch);
+        }
         var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
-        var judgedRows = new List<(int PageIndex, int SlotIndex, TargetRowHold Hold, byte[] Bytes)>();
+        var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
         foreach (var (pageIndex, slotIndex, scannedBytes) in rowSource)
         {
             context.Batch.PollCancellation();
@@ -633,19 +640,16 @@ partial class Simulation
             if (positionedCursor is { } positioned && !CursorRowMatches(positioned, (pageIndex, slotIndex)))
                 continue;
 
-            // Judged under the U a writer reads its target with: a row another
-            // session is writing is judged as that write leaves it.
+            // Judged as another session's write leaves it: the walk waits out,
+            // in U, a row that session holds.
             var rowBytes = scannedBytes;
-            var hold = context.Batch.AwaitTargetRow(table, pageIndex, slotIndex, ref rowBytes);
-            if (hold == TargetRowHold.Gone)
-                continue;
-            if (JudgeRow(pageIndex, slotIndex, rowBytes) is not { } judged)
+            if (!context.Batch.AwaitTargetRowWriters(table, pageIndex, slotIndex, ref rowBytes)
+                || JudgeRow(pageIndex, slotIndex, rowBytes) is not { } judged)
             {
-                context.Batch.ReleaseTargetRow(table, pageIndex, slotIndex, hold);
                 continue;
             }
             affected.Add((pageIndex, slotIndex, judged.NewValues, judged.OldSnapshot));
-            judgedRows.Add((pageIndex, slotIndex, hold, rowBytes));
+            judgedRows.Add((pageIndex, slotIndex, rowBytes));
         }
 
         ApplyDmlTopCap(top, affected, context.Batch);
@@ -672,8 +676,10 @@ partial class Simulation
         return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], sourceView, rowsLocked: true);
 
         // The row's new values and, when something reads the pre-update image,
-        // that image; null for a row the statement doesn't update.
-        (SqlValue[] NewValues, SqlValue[]? OldSnapshot)? JudgeRow(int pageIndex, int slotIndex, byte[] rowBytes)
+        // that image; null for a row the statement doesn't update. With
+        // predicateOnly the row is only tested, its decoded image standing in
+        // for the new values, and nothing in the SET list runs.
+        (SqlValue[] NewValues, SqlValue[]? OldSnapshot)? JudgeRow(int pageIndex, int slotIndex, byte[] rowBytes, bool predicateOnly = false)
         {
             var fullValues = DecodeFullRow(table, rowBytes);
             EvaluateComputedColumns(table, fullValues, context.Batch);
@@ -693,6 +699,8 @@ partial class Simulation
 
             if (where is not null && where.Run(new RuntimeContext(ResolveOriginal, context.Batch)) != true)
                 return null;
+            if (predicateOnly)
+                return (fullValues, null);
 
             // Per-row stamp bump for NEXT VALUE FOR in the SET-list expressions.
             context.Batch.BumpRowStamp();
@@ -907,18 +915,27 @@ partial class Simulation
 
         var seen = new HashSet<(int Page, int Slot)>();
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
+        var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
+        var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
+        var oldSnapshotNeeded = output is not null
+            || HasAfterTrigger(context.Batch, table, TriggerActions.Update)
+            || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Update)
+            || table.SystemVersioning is not null;
 
-        // Hoisted per-row scaffolding: one mutable tuple slot and one cached
-        // delegate, so the per-row loop allocates neither.
+        // Hoisted per-row scaffolding: one mutable tuple slot, one cached
+        // delegate and one runtime, so the per-row loop allocates none.
         byte[]?[] currentTuple = [];
-        SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch);
+        SqlValue resolveAcrossTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch);
+        Func<MultiPartName, SqlValue> resolveTuple = resolveAcrossTuple;
+        var runtime = new RuntimeContext(resolveTuple, context.Batch);
 
+        if (!table.SupersededKeyImages.IsEmptyLockFree())
+            _ = AwaitSupersededTargetRows(context.Batch, table, (_, prior) => QualifyingTuple(prior) is not null);
         foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, context.Batch, outerResolver: null))
         {
             currentTuple = tuple;
-            var ResolveTuple = resolveTuple;
 
-            if (where is not null && where.Run(new RuntimeContext(ResolveTuple, context.Batch)) != true)
+            if (where is not null && where.Run(runtime) != true)
                 continue;
 
             var targetBytes = tuple[targetIndex];
@@ -929,52 +946,175 @@ partial class Simulation
             if (!seen.Add(addr))
                 continue;
 
+            // Judged as another session's write leaves it: the walk waits out,
+            // in U, a row that session holds, and judges it again.
+            var rowBytes = targetBytes;
+            if (!context.Batch.AwaitTargetRowWriters(table, addr.Page, addr.Slot, ref rowBytes))
+                continue;
+            var judged = ReferenceEquals(rowBytes, targetBytes) || rowBytes.AsSpan().SequenceEqual(targetBytes)
+                ? JudgeTuple(targetBytes)
+                : Rejudge(rowBytes);
+            if (judged is not { } entry)
+                continue;
+            affected.Add((addr.Page, addr.Slot, entry.NewValues, entry.OldSnapshot));
+            judgedRows.Add((addr.Page, addr.Slot, rowBytes));
+        }
+
+        ApplyDmlTopCap(top, affected, context.Batch);
+        HoldQualifyingRows(context.Batch, table, affected, judgedRows, walkGeneration, RowLockPurpose.UpdatePreImage, (i, rowBytes) =>
+        {
+            if (Rejudge(rowBytes) is not { } judged)
+                return false;
+            affected[i] = (affected[i].PageIndex, affected[i].SlotIndex, judged.NewValues, judged.OldSnapshot);
+            return true;
+        });
+
+        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], sourceView: null, rowsLocked: true);
+
+        // The target row of the current tuple's new values, and its old image
+        // when something reads that.
+        (SqlValue[] NewValues, SqlValue[]? OldSnapshot) JudgeTuple(byte[] targetBytes)
+        {
             var fullValues = DecodeFullRow(table, targetBytes);
             EvaluateComputedColumns(table, fullValues, context.Batch);
 
             // Per-row stamp bump for NEXT VALUE FOR in the SET-list.
             context.Batch.BumpRowStamp();
-            var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveTuple, setMasks);
-            var oldSnapshotNeeded = output is not null
-                || HasAfterTrigger(context.Batch, table, TriggerActions.Update)
-                || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Update)
-                || table.SystemVersioning is not null;
-            var oldSnapshot = oldSnapshotNeeded ? fullValues : null;
-            affected.Add((addr.Page, addr.Slot, newValues, oldSnapshot));
+            var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, resolveTuple, setMasks);
+            return (newValues, oldSnapshotNeeded ? fullValues : null);
         }
 
-        ApplyDmlTopCap(top, affected, context.Batch);
+        // The target row as rowBytes, judged again against its partners.
+        (SqlValue[] NewValues, SqlValue[]? OldSnapshot)? Rejudge(byte[] rowBytes) =>
+            QualifyingTuple(rowBytes) is { } targetBytes ? JudgeTuple(targetBytes) : null;
 
-        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], sourceView: null);
+        // The target row as rowBytes when the join and WHERE still pass it
+        // with some partner, the first such tuple current; else null.
+        byte[]? QualifyingTuple(byte[] rowBytes)
+        {
+            foreach (var tuple in Selection.EnumerateJoinedRows(WithTargetNarrowedTo(sources, targetIndex, rowBytes), joins, context.Batch, outerResolver: null))
+            {
+                currentTuple = tuple;
+                if (tuple[targetIndex] is { } targetBytes && (where is null || where.Run(runtime) == true))
+                    return targetBytes;
+            }
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The rows a single-target UPDATE or DELETE walks: a seek when
+    /// <paramref name="where"/> carries an indexable equality or range, the
+    /// table's scan otherwise.
+    /// </summary>
+    private static IEnumerable<(int Page, int Slot, byte[] Bytes)> MutationRowSource(HeapTable table, BooleanExpression? where, BatchContext batch) =>
+        (where is null ? null : Selection.SeekMutationTarget(table, where, batch))
+            ?? ClusteredScan.RowsWithAddress(table, batch.Connection.StatementIo);
+
+    /// <summary>
+    /// <paramref name="sources"/> with the joined write's target source at
+    /// <paramref name="targetIndex"/> standing for the one row
+    /// <paramref name="rowBytes"/>, to judge that row again against its
+    /// partners.
+    /// </summary>
+    private static FromSource[] WithTargetNarrowedTo(FromSource[] sources, int targetIndex, byte[] rowBytes)
+    {
+        var narrowed = (FromSource[])sources.Clone();
+        narrowed[targetIndex] = SingleRowSource(sources[targetIndex], rowBytes, sources[targetIndex].LobStore);
+        return narrowed;
+    }
+
+    /// <summary>
+    /// <paramref name="original"/> yielding only <paramref name="row"/>, its
+    /// off-row values read from <paramref name="lobStore"/>.
+    /// </summary>
+    private static FromSource SingleRowSource(FromSource original, byte[] row, Heap? lobStore) =>
+        new(
+            qualifier: original.Qualifier,
+            columnNames: original.ColumnNames,
+            columns: original.Columns,
+            storedSchema: original.StoredSchema,
+            storageOrdinals: original.StorageOrdinals,
+            lobStore: lobStore,
+            rows: [row],
+            backingTable: original.BackingTable,
+            unaliasedName: original.UnaliasedName);
+
+    /// <summary>
+    /// Readies a writer's target read for the rows it can't reach. The walk
+    /// reaches a target row through the image it carries — a seek by its key,
+    /// a join pairing it, a scan, which never meets a deleted slot — and waits
+    /// in U only on the rows it reaches, as real's plan does (probed
+    /// 2026-10-01 against SQL Server 2025: a joined UPDATE waits
+    /// <c>LCK_M_U</c> on a joining row another session holds and passes a
+    /// non-joining one). That misses a row another session has deleted, or
+    /// rewritten so the walk no longer reaches or qualifies it, whose image
+    /// before that write would have qualified, where real's read meets the
+    /// deleted key or the old index key under that session's X, waits in U
+    /// and, after a rollback, writes the restored row. So each such row still
+    /// in flight (<see cref="HeapTable.SupersededKeyImages"/>) whose prior
+    /// image <paramref name="priorQualifies"/> is waited out in U here, before
+    /// the walk, which then judges the row as that session left it — the same
+    /// outcome as real's wait at the row's turn, moved earlier within the
+    /// statement. True when it waited. Callers test
+    /// <see cref="HeapTable.SupersededKeyImages"/> for emptiness first, a
+    /// lock-free read, so a statement with no such write in flight on
+    /// <paramref name="table"/> doesn't build <paramref name="priorQualifies"/>.
+    /// </summary>
+    private static bool AwaitSupersededTargetRows(BatchContext batch, HeapTable table, Func<(int Page, int Slot), byte[], bool> priorQualifies)
+    {
+        if (batch.IsSkipping || batch.SupersededTargetRows(table) is not { } superseded)
+            return false;
+        var waited = false;
+        foreach (var (address, priorImage, resource) in superseded)
+        {
+            bool qualifies;
+            try
+            {
+                qualifies = priorQualifies(address, priorImage);
+            }
+            catch (SimulatedSqlException)
+            {
+                // An image the statement never judges can't raise for it;
+                // whether the row qualifies is the settled row's to say.
+                qualifies = true;
+            }
+            if (qualifies)
+                waited |= batch.AwaitSupersededTargetRow(table, resource);
+        }
+        return waited;
     }
 
     /// <summary>
     /// Takes the X each row a writer's target walk judged qualifying is
     /// written under (<see cref="BatchContext.HoldQualifyingTargetRow"/>), once
-    /// the walk and its TOP are done, so the walk's own locks never send a
-    /// later row off <see cref="BatchContext.AwaitTargetRow"/>'s lock-free
-    /// check and a row TOP drops is never locked. A row another session changed
-    /// since its judgement is judged again by <paramref name="rejudge"/>,
-    /// which replaces its entry and says whether it still qualifies; one that
-    /// doesn't, or is gone, is dropped. <paramref name="judged"/> runs beside
-    /// <paramref name="rows"/>: each row's address, the U its walk already
-    /// took, and the image it was judged on — past the end of
-    /// <paramref name="rows"/> for a row TOP dropped, whose U is let go.
+    /// the walk and its TOP are done, in walk order, so the walk's own locks
+    /// never send a later row off <see cref="BatchContext.AwaitTargetRow"/>'s
+    /// lock-free check, a row TOP drops is never locked, and sessions running
+    /// one statement over the same rows never wait on each other in a cycle
+    /// (<see cref="BatchContext.AwaitTargetRowWriters"/>). A row another
+    /// session changed since its judgement is judged again by
+    /// <paramref name="rejudge"/>, which replaces its entry and says whether
+    /// it still qualifies; one that doesn't, or is gone, is dropped.
+    /// <paramref name="judged"/> runs beside <paramref name="rows"/>: each
+    /// row's address and the image it was judged on — past the end of
+    /// <paramref name="rows"/> for a row TOP dropped.
     /// </summary>
     private static void HoldQualifyingRows<TRow>(
         BatchContext batch,
         HeapTable table,
         List<TRow> rows,
-        List<(int PageIndex, int SlotIndex, TargetRowHold Hold, byte[] Bytes)> judged,
+        List<(int PageIndex, int SlotIndex, byte[] Bytes)> judged,
         long walkGeneration,
         RowLockPurpose purpose,
         Func<int, byte[], bool> rejudge)
     {
         var kept = 0;
-        for (var i = 0; i < judged.Count; i++)
+        for (var i = 0; i < rows.Count; i++)
         {
-            var (pageIndex, slotIndex, hold, rowBytes) = judged[i];
-            var qualifies = i < rows.Count;
+            var (pageIndex, slotIndex, rowBytes) = judged[i];
+            var hold = TargetRowHold.None;
+            var qualifies = true;
             while (qualifies && !batch.HoldQualifyingTargetRow(table, pageIndex, slotIndex, ref hold, ref rowBytes, walkGeneration, purpose))
                 qualifies = hold != TargetRowHold.Gone && rejudge(i, rowBytes);
             if (qualifies)

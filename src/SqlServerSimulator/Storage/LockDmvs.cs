@@ -441,7 +441,7 @@ internal static class LockDmvs
         var entityVal = SqlValue.FromInt64(entityId);
         // GRANT rows from current holders. A U its holder has since taken X
         // over is real's lock converted, reported as the X alone.
-        foreach (var hold in resource.Holders)
+        foreach (var hold in resource.Holders.ToArray())
         {
             var mode = hold.Mode;
             if (mode == LockMode.Update && HoldsExclusive(resource, hold.Owner))
@@ -500,7 +500,7 @@ internal static class LockDmvs
 
     private static bool HoldsExclusive(LockResource resource, SessionToken owner)
     {
-        foreach (var hold in resource.Holders)
+        foreach (var hold in resource.Holders.ToArray())
         {
             if (hold.Mode == LockMode.Exclusive && ReferenceEquals(hold.Owner, owner))
                 return true;
@@ -520,7 +520,7 @@ internal static class LockDmvs
     {
         if (waiter.WaitingForMode is not { } mode)
             return null;
-        foreach (var hold in resource.Holders)
+        foreach (var hold in resource.Holders.ToArray())
         {
             if (ReferenceEquals(hold.Owner, waiter.Session))
                 continue;

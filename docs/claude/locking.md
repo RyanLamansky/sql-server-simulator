@@ -551,29 +551,53 @@ Divergences in what the lock DMVs show:
 
 ## A writer's target read
 
-An UPDATE, a DELETE and a MERGE read their target under U: a row another session holds X on is waited out in U and judged as that session's write leaves it, and a row that qualifies is written under X taken right after its judgement, so no other writer changes it between the two (probed 2026-10-01 against SQL Server 2025: a MERGE, seeking or scanning, waits `LCK_M_U` on the writer's key; an UPDATE scanning a heap waits `LCK_M_U` on another session's written row however its own predicate reads, and already holds X on the rows it passed).
+An UPDATE, a DELETE and a MERGE read their target under U: a row another session holds X on is waited out in U and judged as that session's write leaves it, and a row that qualifies is written under X, so no other writer changes it between the judgement and the write (probed 2026-10-01 against SQL Server 2025: a MERGE, seeking or scanning, waits `LCK_M_U` on the writer's key; an UPDATE scanning a heap waits `LCK_M_U` on another session's written row however its own predicate reads, and already holds X on the rows it passed).
 The target walk once read rows with no lock at all and the write took X at commit, so an UPDATE judged a row another session was rewriting by that session's uncommitted image — `SET v = v + 1` over a write that then rolled back wrote 51 for 6 — and two sessions incrementing one row lost increments; a MERGE matched, or failed to match, uncommitted values.
 
-`BatchContext.AwaitTargetRow` is the wait, skipped lock-free while `HeapTable.ActiveDataWriters` and its U companion `ActiveUpdateLocks` read zero; `BatchContext.HoldQualifyingTargetRow` takes the X and, when the heap's `MutationGeneration` has moved since the walk began, reads the row again and hands it back to be judged afresh.
-UPDATE and DELETE take their rows' X once the walk and its `TOP` are done (`Simulation.HoldQualifyingRows`), so the walk's own locks never send a later row off the lock-free check; the commit then takes nothing more.
-MERGE takes it inline, matched row by matched row, and its actions take it again re-entrantly.
+The joined forms read their target the same way: `UPDATE … FROM` / `DELETE … FROM` with the target on either side of a join or an APPLY, aliased or not, and an UPDATE through a join view.
+Real waits in U on the target row whichever side it sits, holding S on the partner row it read, and the partner waits in S (probed 2026-10-01 against SQL Server 2025, for each of those shapes, a CTE over a join and a correlated `EXISTS` included).
+EF Core's ExecuteUpdate / ExecuteDelete emit exactly this shape — `UPDATE [m] SET … FROM [Members] AS [m] INNER JOIN [Teams] AS [t] ON …`, `DELETE TOP(@p) FROM [m] FROM …` — whenever the LINQ query filters through a navigation.
+They once judged the target off whatever image the heap held and took X only in the commit, so eight sessions each running `UPDATE t SET v = t.v + 1 FROM t JOIN …` forty times ended at 70–112 of 320, and eight draining one queue with a joined `DELETE TOP (3)` deleted 467–613 rows of 200.
 
-Measured 2026-10-01 against the build before it, one case per process, the best of five processes:
+The pieces, each shared by the single-table and joined forms:
+
+- **The walk** waits on a row it reaches only when another session holds a lock U conflicts with (`BatchContext.AwaitTargetRow`, skipped lock-free while `HeapTable.ActiveDataWriters` and its U companion `ActiveUpdateLocks` read zero).
+  A joined form waits once a tuple has passed the join and the WHERE, so it waits only on a row that joins, as real's plan seeking the target by its join key does, and judges a row the wait changed again against its partners, re-running the join with the target narrowed to that row (`WithTargetNarrowedTo`, the join-view path's `SourcesAlongPath` with a one-row source).
+- **The walk holds nothing.**
+  UPDATE and DELETE let the U go once the waited row is read (`BatchContext.AwaitTargetRowWriters`) and take every qualifying row's X after the walk and its `TOP`, in walk order (`Simulation.HoldQualifyingRows`), reading a row again and judging it afresh when the heap's `MutationGeneration` has moved.
+  Holding the walk's U, a session could keep a later row while its X waited on an earlier one, held by another session whose X waited on the later: eight sessions each updating the same two rows forty times deadlocked one to seventeen times per run, single-table or joined, where real meets no deadlock because its walk takes U on every row in order.
+  MERGE takes X inline, matched row by matched row, right after the U it waited in, which keeps the same order; its actions take it again re-entrantly.
+- **Rows the walk can't reach.**
+  A row another session has deleted — the walk never meets a tombstoned slot — or rewritten so a seek or the join no longer reaches it, or the WHERE no longer passes it, is invisible to the wait above; real's read meets the deleted key, or the old index key, under that session's X, waits on it in U and, after a rollback, writes the restored row (probed 2026-10-01 against SQL Server 2025 for a scan and a seek over a deleted row, a nonclustered seek on a key moved away, and a joined write whose ON or WHERE the uncommitted image fails).
+  Before the walk, each such row in flight (`HeapTable.SupersededKeyImages`) whose prior image the statement's predicate passes is waited out in U (`Simulation.AwaitSupersededTargetRows`), so the walk meets it settled; a seek is computed again after any such wait.
+  It costs one lock-free read of the registry while no other session has a delete or rewrite in flight on the table, and otherwise a predicate test per registry entry.
+
+Measured 2026-10-01 against the build whose joined forms judged off the heap's image, one case per process, five processes (ten for the 20,000-row case and the single-row UPDATE), each process's best of seven rounds:
 
 | Case | Before | After |
 | ---- | ------ | ----- |
-| `UPDATE` of one row by its clustered key, plan-cached | 4.37 µs | 4.42 µs |
-| `MERGE` upsert of one matched row, plan-cached | 5.12 µs | 5.22 µs |
-| `DELETE` + `INSERT` of one row by its clustered key | 6.61 µs | 6.69 µs |
-| `UPDATE` scanning a 1,000-row heap for one row | 103.9 µs | 103.1 µs |
-| `UPDATE` of every row of a 20,000-row table | 16.2 ms | 17.0 ms |
-| `UPDATE` scanning 20,000 rows, none qualifying | 2.93 ms | 3.05 ms |
+| joined `UPDATE` of one row of a 1,000-row table | 186–298 µs | 189–257 µs |
+| joined `DELETE` + `INSERT` of one row of a 1,000-row table | 201–290 µs | 207–287 µs |
+| joined `UPDATE` of every row of a 20,000-row table (median) | 23.7 ms | 25.0 ms |
+| `UPDATE` of one row by its clustered key, plan-cached (median) | 4.59 µs | 4.56 µs |
+| EF Core ExecuteUpdate through a navigation, 10 of 1,000 rows | 517–646 µs | 497–649 µs |
+| EF Core ExecuteDelete through a navigation, one row, re-inserted | 513–648 µs | 499–630 µs |
+
+The joined forms walk their target as a full scan (`WrapSourceWithAddressTracking`), which is what the per-statement figures are; the 20,000-row case pays the post-walk X pass the single-table form already paid.
 
 Divergences:
 
-- **The joined forms** — `UPDATE … FROM` / `DELETE … FROM` with a join, and DML through a join view — still read their target through the READ COMMITTED reader's probe, waiting in S and judging the committed row, but take X only at commit, so two of them can still both judge a row before either writes it.
-- **A seek through a nonclustered index waits on the row's own lock**, the clustered key or the RID, where real's waits on the index key it read through.
-- **A qualifying row's X comes at its judgement**, real's as the plan writes the row; a MERGE holds X on a matched row an `AND` condition then declines, where real's U is released.
+- **The partner row's S** — real holds S on the row of the other source it read while it waits on the target; the simulator's READ COMMITTED read of the partner holds nothing by then.
+- **A non-joining row**: the joined forms wait only on rows that join, where real's scan of a target it can't seek — a heap, an unindexed join column — waits on every row another session holds; the outcome is the same.
+- **A joined UPDATE whose partner is a constant derived table** (`FROM t JOIN (SELECT 1 id) s ON …`) waits in U, where real's plan writes the row without a separate read and waits in X.
+- **A seek through a nonclustered index** waits on the row's own lock, the clustered key or the RID; real holds U on the index key it read and waits on the row — the same row and mode, the index key's U missing here — or, when the holder changed that key, waits on the index key itself, which the simulator reports as the row.
+- **A qualifying row's X comes after the walk**, real's as the plan writes the row; a MERGE holds X on a matched row an `AND` condition then declines, where real's U is released.
+- **The prior image a rewrite registry entry carries** is the row before the session's latest write of it, so a row a transaction rewrote twice is tested on its intermediate image rather than its committed one.
+
+Not modeled yet:
+
+- **The target of a joined write named through a view or a CTE in its FROM** (`UPDATE v SET … FROM v JOIN …`) and **`OUTPUT` on an alias-form joined DELETE** raise `NotSupportedException` (see [`programmable.md`](programmable.md) and [`dml.md`](dml.md)); a CTE reading several sources refuses an UPDATE real passes through (see [`ctes.md`](ctes.md)).
+- **A MERGE into a join view** reads the view's rows up front through the raw heap walk, without the target wait above, so it can match a row off another session's uncommitted image.
 
 ## Granularity approximations
 

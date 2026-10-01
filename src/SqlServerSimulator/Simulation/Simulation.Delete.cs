@@ -215,14 +215,13 @@ partial class Simulation
         // (positioned DELETE leaves where null, so it keeps the full scan — the
         // cursor already fixed one row). The loop re-runs WHERE below, so the
         // seek only narrows the rows considered.
-        var rowSource = where is not null
-            ? Selection.SeekMutationTarget(table, where, context.Batch) ?? ClusteredScan.RowsWithAddress(table, context.Connection.StatementIo)
-            : ClusteredScan.RowsWithAddress(table, context.Connection.StatementIo);
+        var rowSource = MutationRowSource(table, where, context.Batch);
         // Skip mode commits nothing (CommitDelete returns early) — same reason
         // the UPDATE path drops its row source, including the runtime errors a
         // never-run statement's WHERE would otherwise raise while a module body
         // binds at CREATE time.
-        if (context.Batch.IsSkipping || DmlTopIsZero(top, context.Batch))
+        var readsNoRow = context.Batch.IsSkipping || DmlTopIsZero(top, context.Batch);
+        if (readsNoRow)
         {
             // TOP (0) reads no row at all, so nothing per row can raise either.
             rowSource = [];
@@ -234,8 +233,16 @@ partial class Simulation
             RunUpdateStartupConstants(context, table, [where], []);
         }
         var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, table, positionedCursor is not null);
+        // A seek chose its rows from the images they carried; one a wait here
+        // let settle may carry another.
+        if (positionedCursor is null && !readsNoRow && !table.SupersededKeyImages.IsEmptyLockFree()
+            && AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, out _))
+            && where is not null)
+        {
+            rowSource = MutationRowSource(table, where, context.Batch);
+        }
         var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
-        var judgedRows = new List<(int PageIndex, int SlotIndex, TargetRowHold Hold, byte[] Bytes)>();
+        var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
         foreach (var (pageIndex, slotIndex, scannedBytes) in rowSource)
         {
             context.Batch.PollCancellation();
@@ -243,18 +250,15 @@ partial class Simulation
             if (positionedCursor is { } positioned && !CursorRowMatches(positioned, (pageIndex, slotIndex)))
                 continue;
 
-            // Judged under the U a writer reads its target with, as UPDATE's are.
+            // Judged as another session's write leaves it, as UPDATE's are.
             var rowBytes = scannedBytes;
-            var hold = context.Batch.AwaitTargetRow(table, pageIndex, slotIndex, ref rowBytes);
-            if (hold == TargetRowHold.Gone)
-                continue;
-            if (!JudgeRow(pageIndex, slotIndex, rowBytes, out var fullOld))
+            if (!context.Batch.AwaitTargetRowWriters(table, pageIndex, slotIndex, ref rowBytes)
+                || !JudgeRow(pageIndex, slotIndex, rowBytes, out var fullOld))
             {
-                context.Batch.ReleaseTargetRow(table, pageIndex, slotIndex, hold);
                 continue;
             }
             deleted.Add((pageIndex, slotIndex, fullOld));
-            judgedRows.Add((pageIndex, slotIndex, hold, rowBytes));
+            judgedRows.Add((pageIndex, slotIndex, rowBytes));
         }
 
         ApplyDmlTopCap(top, deleted, context.Batch);
@@ -374,18 +378,34 @@ partial class Simulation
 
         var seen = new HashSet<(int Page, int Slot)>();
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
+        var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
+        var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
 
-        // Hoisted per-row scaffolding — see ExecuteJoinedUpdate for why the
-        // delegate is cached rather than a per-call local-function conversion.
+        // The incoming-FK term is load-bearing, not an optimization:
+        // CommitDelete's parent-side enforcement reads the decoded old rows,
+        // and skips silently when every one of them is null. Without it a
+        // joined DELETE tombstones a referenced parent row and leaves the
+        // child orphaned — where the no-FROM path raises Msg 547 — so the two
+        // forms have to agree on when the full row is needed.
+        var needsFull = output is not null
+            || HasAfterTrigger(context.Batch, table, TriggerActions.Delete)
+            || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Delete)
+            || table.SystemVersioning is not null
+            || table.IncomingForeignKeys.Count > 0
+            || table.GraphKind == GraphTableKind.Node;
+
+        // Hoisted per-row scaffolding — see ExecuteJoinedUpdate.
         byte[]?[] currentTuple = [];
-        SqlValue resolveTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch);
+        SqlValue resolveAcrossTuple(MultiPartName name) => ResolveAcrossMutationTuple(sources, currentTuple, name, context.Batch);
+        var runtime = new RuntimeContext(resolveAcrossTuple, context.Batch);
 
+        if (!table.SupersededKeyImages.IsEmptyLockFree())
+            _ = AwaitSupersededTargetRows(context.Batch, table, (_, prior) => Rejudge(prior, out var _));
         foreach (var tuple in Selection.EnumerateJoinedRows(sources, joins, context.Batch, outerResolver: null))
         {
             currentTuple = tuple;
-            var ResolveTuple = resolveTuple;
 
-            if (where is not null && where.Run(new RuntimeContext(ResolveTuple, context.Batch)) != true)
+            if (where is not null && where.Run(runtime) != true)
                 continue;
 
             var targetBytes = tuple[targetIndex];
@@ -396,30 +416,57 @@ partial class Simulation
             if (!seen.Add(addr))
                 continue;
 
-            SqlValue[]? fullValues = null;
-            // The incoming-FK term is load-bearing, not an optimization:
-            // CommitDelete's parent-side enforcement reads the decoded old
-            // rows, and skips silently when every one of them is null. Without
-            // it a joined DELETE tombstones a referenced parent row and leaves
-            // the child orphaned — where the no-FROM path raises Msg 547 — so
-            // the two forms have to agree on when the full row is needed.
-            var needsFull = output is not null
-                || HasAfterTrigger(context.Batch, table, TriggerActions.Delete)
-                || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Delete)
-                || table.SystemVersioning is not null
-                || table.IncomingForeignKeys.Count > 0
-                || table.GraphKind == GraphTableKind.Node;
-            if (needsFull)
-            {
-                fullValues = DecodeFullRow(table, targetBytes);
-                EvaluateComputedColumns(table, fullValues, context.Batch);
-            }
-            deleted.Add((addr.Page, addr.Slot, fullValues));
+            // Judged as another session's write leaves it, as the joined
+            // UPDATE's are.
+            var rowBytes = targetBytes;
+            if (!context.Batch.AwaitTargetRowWriters(table, addr.Page, addr.Slot, ref rowBytes))
+                continue;
+            SqlValue[]? fullOld;
+            if (ReferenceEquals(rowBytes, targetBytes) || rowBytes.AsSpan().SequenceEqual(targetBytes))
+                fullOld = FullImage(targetBytes);
+            else if (!Rejudge(rowBytes, out fullOld))
+                continue;
+            deleted.Add((addr.Page, addr.Slot, fullOld));
+            judgedRows.Add((addr.Page, addr.Slot, rowBytes));
         }
 
         ApplyDmlTopCap(top, deleted, context.Batch);
+        HoldQualifyingRows(context.Batch, table, deleted, judgedRows, walkGeneration, RowLockPurpose.Delete, (i, rowBytes) =>
+        {
+            if (!Rejudge(rowBytes, out var fullOld))
+                return false;
+            deleted[i] = (deleted[i].PageIndex, deleted[i].SlotIndex, fullOld);
+            return true;
+        });
 
-        return CommitDelete(context, table, deleted, output, sourceView: null);
+        return CommitDelete(context, table, deleted, output, sourceView: null, rowsLocked: true);
+
+        // The target row's full image, when something reads it.
+        SqlValue[]? FullImage(byte[] targetBytes)
+        {
+            if (!needsFull)
+                return null;
+            var fullValues = DecodeFullRow(table, targetBytes);
+            EvaluateComputedColumns(table, fullValues, context.Batch);
+            return fullValues;
+        }
+
+        // Whether the target row as rowBytes still qualifies, judged again
+        // against its partners, with its full image.
+        bool Rejudge(byte[] rowBytes, out SqlValue[]? fullOld)
+        {
+            foreach (var tuple in Selection.EnumerateJoinedRows(WithTargetNarrowedTo(sources, targetIndex, rowBytes), joins, context.Batch, outerResolver: null))
+            {
+                currentTuple = tuple;
+                if (tuple[targetIndex] is { } targetBytes && (where is null || where.Run(runtime) == true))
+                {
+                    fullOld = FullImage(targetBytes);
+                    return true;
+                }
+            }
+            fullOld = null;
+            return false;
+        }
     }
 
     /// <summary>

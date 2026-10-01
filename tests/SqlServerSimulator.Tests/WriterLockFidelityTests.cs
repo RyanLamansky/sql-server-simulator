@@ -26,6 +26,7 @@ public sealed class WriterLockFidelityTests
         create table c5 (k int primary key, u int, v int); create unique index ix_c5 on c5 (u) with (ignore_dup_key = on);
         create table c6 (k int primary key, n int, v int); create index ix_c6 on c6 (n) include (v);
         create table hu (k int, v int, constraint uq_hu unique (k) with (ignore_dup_key = on));
+        create table d1 (k int primary key, w int); insert d1 values (1, 0), (5, 0);
         insert h2 values (1, 1), (5, 5); insert h3 values (1, 1), (5, 5); insert c1 values (1, 1), (5, 5);
         insert c2 values (1, 1, 1), (5, 5, 5); insert c3 values (1, 1, 1), (5, 5, 5); insert c4 values (1, 1, 1), (5, 200, 5);
         insert c5 values (1, 1, 1), (5, 5, 5); insert c6 values (1, 1, 1), (5, 5, 5); insert hu values (1, 1), (5, 5);
@@ -111,6 +112,11 @@ public sealed class WriterLockFidelityTests
     [DataRow("update c2 set v = 50 where k = 5", "merge c2 t using (values (5)) s (k) on t.k = s.k when matched then update set v = 9;", "KEY U WAIT (5)", DisplayName = "MERGE matching a written row")]
     [DataRow("update c2 set v = 50 where k = 5", "merge c2 t using (values (5)) s (k) on t.v = s.k when matched then update set v = 9;", "KEY U WAIT (5)", DisplayName = "MERGE scanning past a written row")]
     [DataRow("update h3 set v = 50 where k = 1", "update h3 set v = 9 where v = 5", "RID U WAIT", DisplayName = "UPDATE scanning past a written row")]
+    [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 from c1 join d1 on c1.k = d1.k", "KEY U WAIT (5)", DisplayName = "Joined UPDATE")]
+    [DataRow("update c1 set v = 50 where k = 5", "update c1 set v = 9 from d1 join c1 on c1.k = d1.k", "KEY U WAIT (5)", DisplayName = "Joined UPDATE, target on the right")]
+    [DataRow("update h3 set v = 50 where k = 1", "update h3 set v = 9 from h3 join d1 on h3.k = d1.k", "RID U WAIT", DisplayName = "Joined UPDATE of a heap")]
+    [DataRow("update c1 set v = 50 where k = 5", "delete c1 from c1 join d1 on c1.k = d1.k", "KEY U WAIT (5)", DisplayName = "Joined DELETE")]
+    [DataRow("update d1 set w = 9 where k = 5", "update c1 set v = 9 from c1 join d1 on c1.k = d1.k", "KEY S WAIT (5)", DisplayName = "Joined UPDATE reading a written partner")]
     [DataRow("insert c5 values (3, 7, 3)", "insert c5 values (4, 7, 4)", "KEY U WAIT (7)", DisplayName = "IGNORE_DUP_KEY second insert of a key")]
     [DataRow("insert c5 values (3, 3, 3)", "insert c5 values (4, 4, 4)", "KEY RangeS-U WAIT (5)", DisplayName = "IGNORE_DUP_KEY insert into the same gap")]
     public async Task SecondWriter_WaitsWhereRealWaits(string first, string second, string expected)
@@ -147,6 +153,10 @@ public sealed class WriterLockFidelityTests
     [DataRow("merge c1 t using (values (5)) s (k) on t.k = s.k and t.v = 5 when matched then update set v = t.v + 1;", "6", DisplayName = "MERGE seeking")]
     [DataRow("merge c1 t using (values (5)) s (v) on t.v = s.v when matched then update set v = t.v + 1;", "6", DisplayName = "MERGE scanning")]
     [DataRow("delete c1 where v = 5", "", DisplayName = "DELETE")]
+    [DataRow("update c1 set v = c1.v + 1 from c1 join d1 on c1.k = d1.k where c1.k = 5", "6", DisplayName = "Joined UPDATE")]
+    [DataRow("update c1 set v = c1.v + 1 from c1 join d1 on c1.k = d1.k where c1.v = 5", "6", DisplayName = "Joined UPDATE, the write hiding the row from WHERE")]
+    [DataRow("update c1 set v = c1.v + 1 from d1 join c1 on c1.k = d1.k and c1.v = 5", "6", DisplayName = "Joined UPDATE, the write hiding the row from ON")]
+    [DataRow("delete c1 from c1 join d1 on c1.k = d1.k where c1.v = 5", "", DisplayName = "Joined DELETE")]
     public async Task TargetRead_WaitsOutAnUncommittedWrite(string write, string expected)
     {
         var simulation = new Simulation();
@@ -162,18 +172,68 @@ public sealed class WriterLockFidelityTests
     }
 
     /// <summary>
-    /// Sessions incrementing one row from its own value never lose an
-    /// increment: each holds the row under U from its read until its write.
+    /// A writer meeting a row another session deleted, or rewrote so the
+    /// write's own predicate or seek no longer reaches it, waits for that
+    /// session and, once it rolls back, writes the restored row.
+    /// </summary>
+    [TestMethod]
+    [DataRow("delete c1 where k = 5", "update c1 set v = c1.v + 1 from c1 join d1 on c1.k = d1.k", "c1", "1:2 5:6", DisplayName = "Joined UPDATE over a delete")]
+    [DataRow("delete c1 where k = 5", "update c1 set v = v + 1 where v = 5", "c1", "1:1 5:6", DisplayName = "UPDATE scanning over a delete")]
+    [DataRow("delete c1 where k = 5", "update c1 set v = v + 1 where k = 5", "c1", "1:1 5:6", DisplayName = "UPDATE seeking a deleted key")]
+    [DataRow("delete c1 where k = 5", "update c1 set v = v + 1", "c1", "1:2 5:6", DisplayName = "UPDATE of every row over a delete")]
+    [DataRow("update c3 set n = 2 where k = 1", "update c3 set v = 9 where n = 1", "c3", "1:9 5:5", DisplayName = "UPDATE seeking an index key moved away")]
+    [DataRow("update c3 set n = 2 where k = 1", "delete c3 where n = 1", "c3", "5:5", DisplayName = "DELETE seeking an index key moved away")]
+    [DataRow("update h3 set k = 2 where k = 1", "update h3 set v = 9 where k = 1", "h3", "1:9 5:5", DisplayName = "Heap UPDATE seeking an index key moved away")]
+    [DataRow("delete c1 where k = 5", "merge c1 t using (values (5)) s (k) on t.k = s.k when matched then update set v = t.v + 1;", "c1", "1:1 5:6", DisplayName = "MERGE matching a deleted key")]
+    [DataRow("update c3 set n = 2 where k = 1", "merge c3 t using (values (1)) s (n) on t.n = s.n when matched then update set v = 9;", "c3", "1:9 5:5", DisplayName = "MERGE matching an index key moved away")]
+    public async Task TargetRead_WaitsOutAWriteThatHidTheRow(string hidingWrite, string write, string table, string expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(Shapes);
+        using var holder = simulation.CreateOpenConnection();
+        using var writer = simulation.CreateOpenConnection();
+        using var observer = simulation.CreateOpenConnection();
+        _ = holder.CreateCommand("begin tran; " + hidingWrite).ExecuteNonQuery();
+        var blocked = StartBlocked(writer, write, observer);
+        Contains(" U WAIT", RowAndKeyLocks(observer, Spid(writer)));
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+        await blocked;
+        AreEqual(expected, simulation.ExecuteScalar($"select string_agg(concat(k, ':', v), ' ') within group (order by k) from {table}"));
+    }
+
+    /// <summary>
+    /// Sessions incrementing rows from their own value never lose an increment
+    /// — each waits out another's write of a row and judges it afresh — and,
+    /// where a statement writes two rows, never deadlock, as on SQL Server
+    /// 2025: each takes its rows' X in the order its walk met them.
     /// </summary>
     [TestMethod]
     [DataRow("update c set v = v + 1 where k = 1", DisplayName = "UPDATE, clustered")]
     [DataRow("update h set v = v + 1 where k = 1", DisplayName = "UPDATE, heap scan")]
+    [DataRow("update c set v = v + 1", DisplayName = "UPDATE of every row, clustered")]
+    [DataRow("update h set v = v + 1", DisplayName = "UPDATE of every row, heap")]
     [DataRow("merge c t using (values (1)) s (k) on t.k = s.k when matched then update set v = t.v + 1;", DisplayName = "MERGE")]
+    [DataRow("merge c t using d s on t.k = s.k when matched then update set v = t.v + 1;", DisplayName = "MERGE of two rows")]
+    [DataRow("update c set v = v + 1 where exists (select 1 from d where d.k = c.k)", DisplayName = "UPDATE, correlated subquery")]
+    [DataRow("update c set v = c.v + 1 from c join d on c.k = d.k", DisplayName = "Joined UPDATE")]
+    [DataRow("update c set v = c.v + 1 from d join c on c.k = d.k", DisplayName = "Joined UPDATE, target on the right")]
+    [DataRow("update c set v = c.v + 1 from c join (select 1 k) s on c.k = s.k", DisplayName = "Joined UPDATE, derived table")]
+    [DataRow("update a set v = a.v + 1 from c a join d on a.k = d.k", DisplayName = "Joined UPDATE, aliased target")]
+    [DataRow("update h set v = h.v + 1 from h join d on h.k = d.k", DisplayName = "Joined UPDATE, heap")]
+    [DataRow("update c set v = c.v + 1 from c where k = 1", DisplayName = "UPDATE … FROM the target alone")]
+    [DataRow("update cv set v = v + 1", DisplayName = "UPDATE through a join view")]
+    [DataRow("with x as (select k, v from c where exists (select 1 from d where d.k = c.k)) update x set v = v + 1", DisplayName = "UPDATE of a CTE")]
+    [DataRow("update c set v = c.v + 1 from c cross apply (select d.k from d where d.k = c.k) s", DisplayName = "UPDATE with CROSS APPLY")]
     public void ConcurrentIncrements_AllLand(string increment)
     {
         const int Workers = 8, Rounds = 40;
         var simulation = new Simulation();
-        _ = simulation.ExecuteNonQuery("create table c (k int primary key, v int); insert c values (1, 0), (2, 0); create table h (k int, v int); insert h values (1, 0), (2, 0)");
+        _ = simulation.ExecuteNonQuery("""
+            create table c (k int primary key, v int); insert c values (1, 0), (2, 0);
+            create table h (k int, v int); insert h values (1, 0), (2, 0);
+            create table d (k int primary key); insert d values (1), (2);
+            """);
+        _ = simulation.ExecuteNonQuery("create view cv as select c.k, c.v from c join d on c.k = d.k");
         var table = increment.Contains(" h ", StringComparison.Ordinal) ? "h" : "c";
         _ = Parallel.For(0, Workers, new ParallelOptions { MaxDegreeOfParallelism = Workers, CancellationToken = TestContext.CancellationToken }, _ =>
         {
@@ -182,6 +242,38 @@ public sealed class WriterLockFidelityTests
                 _ = connection.CreateCommand(increment).ExecuteNonQuery();
         });
         AreEqual(Workers * Rounds, simulation.ExecuteScalar($"select v from {table} where k = 1"));
+        AreEqual(0, simulation.ExecuteScalar($"select count(*) from {table} where v not in (0, {Workers * Rounds})"));
+    }
+
+    /// <summary>
+    /// Sessions draining one queue never both delete a row: each judges a row
+    /// another is deleting as that delete leaves it, so the rows deleted add
+    /// up to the rows there were.
+    /// </summary>
+    [TestMethod]
+    [DataRow("delete top (3) q where exists (select 1 from d where d.k = q.k and d.k = @p)", DisplayName = "DELETE, correlated subquery")]
+    [DataRow("delete top (3) q from q join d on q.k = d.k where d.k = @p", DisplayName = "Joined DELETE")]
+    [DataRow("delete top (3) a from d join q a on a.k = d.k where d.k = @p", DisplayName = "Joined DELETE, aliased target on the right")]
+    public void ConcurrentDeletes_DeleteEachRowOnce(string dequeue)
+    {
+        const int Workers = 8, Rows = 200;
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"""
+            create table q (id int primary key, k int);
+            insert q select value, value % 2 from generate_series(1, {Rows});
+            create table d (k int primary key); insert d values (0), (1);
+            """);
+        var deleted = 0;
+        _ = Parallel.For(0, Workers, new ParallelOptions { MaxDegreeOfParallelism = Workers, CancellationToken = TestContext.CancellationToken }, worker =>
+        {
+            using var connection = simulation.CreateOpenConnection();
+            // Half the sessions drain each parity, so each keeps meeting rows
+            // another is deleting.
+            var command = connection.CreateCommand(dequeue.Replace("@p", (worker % 2).ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal));
+            while ((int)connection.CreateCommand("select count(*) from q").ExecuteScalar()! > 0)
+                _ = Interlocked.Add(ref deleted, command.ExecuteNonQuery());
+        });
+        AreEqual(Rows, deleted);
     }
 
     /// <summary>

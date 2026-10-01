@@ -1854,6 +1854,24 @@ partial class Simulation
         }
         bool OnMatches(RuntimeContext runtime) => onConjuncts is null ? onPredicate.Run(runtime) == true : MergeResidualMatches(onConjuncts, runtime);
 
+        // A target row another session's write in flight hid from the match —
+        // deleted, or rewritten off the seek or the ON — is waited out first
+        // when its prior image matches a source row, or whatever it held when
+        // NOT MATCHED BY SOURCE visits every target row.
+        if (readsTarget && !destinationTable.SupersededKeyImages.IsEmptyLockFree())
+            _ = AwaitSupersededTargetRows(context.Batch, destinationTable, (_, prior) => hasNotMatchedBySource || PriorImageMatches(prior));
+        bool PriorImageMatches(byte[] prior)
+        {
+            var priorValues = DecodeFullRow(destinationTable, prior);
+            EvaluateComputedColumns(destinationTable, priorValues, context.Batch);
+            foreach (var sourceValues in sourceRows)
+            {
+                if (OnMatches(new RuntimeContext(name => ResolveCombined(priorValues, sourceValues, name), context.Batch)))
+                    return true;
+            }
+            return false;
+        }
+
         if (!readsTarget)
         {
             JoinDiagnostics.Sink?.Add("Merge:NoTargetRead");
