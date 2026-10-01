@@ -259,9 +259,23 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// <summary>
     /// Depth of <c>IF</c> / <c>WHILE</c> conditions being parsed, which open no
     /// implicit transaction whatever they read (see
-    /// <see cref="BatchContext.BeginImplicitTransaction"/>).
+    /// <see cref="BatchContext.BeginImplicitTransaction"/>) and inline no
+    /// scalar function (see <see cref="InlinedScalarCalls"/>).
     /// </summary>
     public int ConditionDepth;
+
+    /// <summary>
+    /// The number <see cref="InlinedScalarCalls.OpenBlock"/> gave the query
+    /// block being parsed, which a scalar function call it holds carries; 0
+    /// outside any, or when nothing gathers calls.
+    /// </summary>
+    public int InliningBlock;
+
+    /// <summary>
+    /// The clause of <see cref="InliningBlock"/> being parsed, as far as real's
+    /// scalar UDF inlining tells clauses apart.
+    /// </summary>
+    public InliningClause InliningClause;
 
     /// <summary>
     /// When non-null, every <see cref="Expressions.AggregateExpression"/>

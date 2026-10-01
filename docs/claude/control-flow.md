@@ -233,6 +233,8 @@ The report follows real's two phases:
 - Binder errors are gathered across every statement, in order (`IsBinderError`: severity 16, plus the severity-15 Msg 1087, which real gathers too), each statement contributing its whole report — see [`errors.md`](errors.md#a-statements-whole-binder-report).
   An `IF` / `WHILE` condition's report comes first and its branches report as statements of their own after it.
 - A parse-phase error — a syntax error, an undeclared variable — preempts the report and comes back alone.
+  So does a `DECLARE`'s missing or oversized type, real's parse phase too though severity 16: a batch or module body carrying one reports every such Msg 2715 (with its 2724 note) and every Msg 1087, wherever they sit, and none of its binder errors (`SimulatedSqlException.PreemptsBinderErrors`, probed 2026-09-30 against SQL Server 2025).
+- A scalar function call the compile inlines but whose body no longer binds adds a non-aborting Msg 208 that goes out ahead of everything the batch runs, or joins a failing compile's report where the call bound — see [`programmable.md`](programmable.md#inlining-a-call-as-the-query-compiles).
 
 A statement naming an object that doesn't exist when the batch compiles — a table the batch itself creates, a `#temp` a `SELECT … INTO` makes — binds when it runs, so the statements before it have run by then.
 Skip mode's placeholder source is that deferral, and a binder error in a statement over one defers with it (`StatementContext.BindsDeferredSource`).

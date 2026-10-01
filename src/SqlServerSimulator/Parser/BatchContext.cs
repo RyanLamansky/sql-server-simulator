@@ -416,6 +416,22 @@ internal sealed class BatchContext
     public FunctionBodyShape? FunctionBodyShape;
 
     /// <summary>
+    /// The scalar function calls the text being read would inline, non-null
+    /// only while a batch compiles (<c>Simulation.CompileBatch</c>), a
+    /// statement compiles as it runs, or a function body is read as real
+    /// inlines it, and handed to the child batch a view's body binds on; null
+    /// everywhere else, so a call site costs one null check.
+    /// </summary>
+    public InlinedScalarCalls? InlinedCalls;
+
+    /// <summary>
+    /// The statements of this batch's text that compile again as they run,
+    /// by where each starts: set from <c>Simulation.CompileBatch</c>, and null
+    /// when the batch has none, so a statement's dispatch costs one null check.
+    /// </summary>
+    public StatementsCompiledOnRun? StatementsCompiledOnRun;
+
+    /// <summary>
     /// In-flight loop-flow signal. <see cref="LoopControl.Break"/> /
     /// <see cref="LoopControl.Continue"/> set by their dispatch sites;
     /// <see cref="LoopControl.None"/> the default. Only the
@@ -2984,6 +3000,7 @@ internal sealed class BatchContext
             }
             this.HasSessionScopedReference = true;
             this.CurrentStatement.ReadsTemporaryObject = true;
+            this.CurrentStatement.ReadsTableVariable = true;
             return this.TableVariables.TryGetValue(name.Leaf[1..], out table);
         }
 

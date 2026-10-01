@@ -307,7 +307,7 @@ partial class Simulation
             var compile = new BatchContext(command, new Dictionary<string, VariableSlot>(variables, BatchContext.VariableNameComparer), this.triggerFrame);
             if (this.isFunction)
                 compile.FunctionBodyShape = new FunctionBodyShape { ContextConnection = true };
-            if (this.simulation.CompileBatch(compile, key: null) is { } compileError)
+            if (this.simulation.CompileBatch(compile, key: null, out _) is { } compileError)
                 return compileError;
             if (compile.FunctionBodyShape is { } shape)
             {

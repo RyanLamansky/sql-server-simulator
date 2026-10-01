@@ -25,6 +25,9 @@ partial class Simulation
         public bool ReturnsNullOnNullInput;
         public string? ExecuteAs;
 
+        /// <summary>The <c>INLINE = ON | OFF</c> setting written; null when absent.</summary>
+        public bool? Inline;
+
         /// <summary>
         /// The first option written that a CLR module refuses —
         /// <c>ENCRYPTION</c>, <c>RECOMPILE</c> or <c>NATIVE_COMPILATION</c> —
@@ -102,6 +105,7 @@ partial class Simulation
                     var setting = context.GetNextRequired();
                     if (setting is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
+                    options.Inline = setting is ReservedKeyword { Keyword: Keyword.On };
                     context.MoveNextRequired();
                     written.Add(("INLINE", true));
                     break;

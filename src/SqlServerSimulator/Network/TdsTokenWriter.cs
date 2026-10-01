@@ -255,11 +255,26 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     public void WriteDone(ushort status, long rowCount) => this.WriteDoneToken(Tds.TokenDone, status, rowCount);
 
     /// <summary>
+    /// Marks the next DONE token written with <c>DONE_ERROR</c> and clears its
+    /// <c>DONE_COUNT</c>, keeping the count itself — what real does to the DONE
+    /// that follows an error sent with no DONE of its own, a compile's
+    /// non-aborting one (captured 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    public void CarryErrorToNextDone() => this.errorCarriedToNextDone = true;
+
+    private bool errorCarriedToNextDone;
+
+    /// <summary>
     /// DONE, DONEPROC, and DONEINPROC share one 13-byte layout. <paramref name="curCmd"/>
     /// is the kind of statement that produced the token (<see cref="StatementDoneKind"/>).
     /// </summary>
     public void WriteDoneToken(byte token, ushort status, long rowCount, ushort curCmd = 0)
     {
+        if (this.errorCarriedToNextDone)
+        {
+            this.errorCarriedToNextDone = false;
+            status = (ushort)((status | Tds.DoneError) & ~Tds.DoneCount);
+        }
         if (token == Tds.TokenDone)
             this.trailingDoneAt = this.length;
         this.WriteByte(token);

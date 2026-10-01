@@ -22,6 +22,7 @@ partial class Simulation
     {
         shape.LastStatementLine = batch.CurrentStatement.StartLine;
         shape.StatementReadsData = false;
+        shape.BeginStatement();
 
         var isReturn = false;
         var isTransparentBlock = false;

@@ -25,9 +25,9 @@ partial class Simulation
         // A function body may write a table variable but nothing persistent
         // (Msg 443). An INSERT / MERGE target is always a written name, never a
         // FROM-clause alias, so the name alone settles it.
-        if (!BatchContext.IsTableVariableName(destinationName.Leaf))
-            FunctionBodyShape.NoteSideEffect(context.Batch, "INSERT", FunctionBodyShape.StatementOperatorState);
-        else
+        var writesTableVariable = BatchContext.IsTableVariableName(destinationName.Leaf);
+        FunctionBodyShape.NoteWrite(context.Batch, "INSERT", persistent: !writesTableVariable);
+        if (writesTableVariable)
             context.Batch.CurrentStatement.TransactedWrite = false;
 
         // Advance past the target name so the optional WITH (hint …) clause

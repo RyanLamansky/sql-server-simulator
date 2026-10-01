@@ -210,4 +210,45 @@ public sealed class RowVersionTests
         using var reader = update.ExecuteReader();
         IsFalse(reader.Read());
     }
+    /// <summary>
+    /// A column written as just <c>timestamp</c> — bracketed or not, with or
+    /// without a nullability — is a timestamp column named timestamp, in a
+    /// table, a table variable and a table type (probed 2026-09-30 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table x (a int, timestamp); insert x (a) values (1); select type_name(system_type_id) + ':' + name from sys.columns where object_id = object_id('x') and column_id = 2")]
+    [DataRow("create table x (a int, [timestamp] not null, b int); select type_name(system_type_id) + ':' + name from sys.columns where object_id = object_id('x') and column_id = 2")]
+    [DataRow("declare @t table (timestamp, a int); insert @t (a) values (1); select 'timestamp:' + cast(datalength(timestamp) as varchar) from @t")]
+    public void ATypelessTimestampColumn_IsNamedTimestamp(string sql)
+        => StartsWith("timestamp:", (string)new Simulation().ExecuteScalar(sql)!);
+
+    [TestMethod]
+    public void ATypelessTimestampColumn_InATableType()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create type tt as table (a int, timestamp)");
+        AreEqual("timestamp", simulation.ExecuteScalar("select c.name from sys.table_types t join sys.columns c on c.object_id = t.type_table_object_id where t.name = 'tt' and c.column_id = 2"));
+    }
+
+    /// <summary>
+    /// A variable takes a timestamp from an integer, an exact number or a
+    /// binary value; a string is Msg 257 and the rest Msg 206 (probed
+    /// 2026-09-30 against SQL Server 2025, one member of each class).
+    /// </summary>
+    [TestMethod]
+    [DataRow("'abc'", 257)]
+    [DataRow("N'abc'", 257)]
+    [DataRow("getdate()", 257)]
+    [DataRow("cast(1 as float)", 206)]
+    [DataRow("newid()", 206)]
+    [DataRow("cast(getdate() as date)", 206)]
+    [DataRow("cast(1 as sql_variant)", 206)]
+    [DataRow("cast('a' as text)", 206)]
+    public void AssigningToATimestampVariable_IsRefused(string value, int number)
+        => _ = new Simulation().AssertSqlError($"declare @t timestamp = {value}", number);
+
+    [TestMethod]
+    public void AssigningToATimestampVariable_TakesIntegersExactNumbersAndBinary()
+        => AreEqual(4, new Simulation().ExecuteScalar("declare @a timestamp = 1, @b timestamp = 1.5, @c timestamp = 0x01, @d timestamp = cast(1 as bit); select 4"));
 }

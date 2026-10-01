@@ -29,6 +29,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
     private RowCursor cursor = EmptyCursor.Instance;
     private int recordsAffected;
     private bool anyRecordsAffected;
+    private CompileErrorCount compileError;
     private bool closed;
 
     internal SimulatedDbDataReader(IEnumerable<SimulatedStatementOutcome> outcomes, SimulatedDbConnection? connection)
@@ -106,7 +107,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
                     // it closed.
                     this.currentResult = null;
                     this.cursor = EmptyCursor.Instance;
-                    throw initial ? this.GatherUpToNextResult(error.Exception) : error.Exception;
+                    throw initial ? this.GatherRestOfBatch(error.Exception) : error.Exception;
             }
         }
 
@@ -523,6 +524,8 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// </summary>
     private void Accumulate(SimulatedStatementOutcome outcome)
     {
+        if (!this.compileError.Admits(outcome))
+            return;
         var contribution = outcome.ClientRecordsAffected;
         if (contribution < 0)
             return;
@@ -602,33 +605,29 @@ public sealed class SimulatedDbDataReader : DbDataReader
     internal Action? AfterClose;
 
     /// <summary>
-    /// Reads on from an error <c>ExecuteReader</c> met to the next result set,
-    /// gathering the errors and messages on the way into the one exception
-    /// SqlClient raises for that stretch: its errors first, then its messages.
-    /// The outcome that ended the stretch is set aside for the next advance.
+    /// Reads the rest of the batch after an error <c>ExecuteReader</c> met,
+    /// gathering every error and message on the way into the one exception
+    /// SqlClient raises: its errors first, then its messages. SqlClient hands
+    /// out no reader then and drains the response, so the result sets that
+    /// follow are read past, their statements' errors and messages joining the
+    /// exception (probed 2026-09-30 against SQL Server 2025).
     /// </summary>
-    private SimulatedSqlException GatherUpToNextResult(SimulatedSqlException first)
+    private SimulatedSqlException GatherRestOfBatch(SimulatedSqlException first)
     {
         List<SimulatedSqlException> errors = [first];
         List<SimulatedError> messages = [];
         while (this.MoveToNextOutcome(out var outcome))
         {
+            this.Accumulate(outcome);
             switch (outcome)
             {
                 case SimulatedInfoOutcome info:
                     messages.Add(info.Message);
-                    continue;
+                    break;
                 case SimulatedErrorOutcome error:
                     errors.Add(error.Exception);
-                    continue;
-                case SimulatedQueryResult:
-                    this.pendingOutcome = outcome;
                     break;
-                default:
-                    this.Accumulate(outcome);
-                    continue;
             }
-            break;
         }
         return SimulatedSqlException.ForClient(errors, messages);
     }

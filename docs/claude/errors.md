@@ -50,7 +50,7 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 - **Severity 10 arrives as class 0**; severities 1-9 keep their number.
 - **An error carries the messages of its stretch of the batch.**
   `ExecuteNonQuery` / `ExecuteScalar` read the whole batch and, if anything failed, throw one exception holding every error and then every message, in order — a `PRINT` ahead of the first error included.
-  `ExecuteReader` fires the messages ahead of its error as events and throws the error with the messages after it, up to the next result set.
+  `ExecuteReader` fires the messages ahead of its error as events and throws the error with everything the rest of the batch sends: SqlClient hands out no reader then and drains the response, so the later statements' errors and messages join the exception, result sets read past (probed 2026-09-30 against SQL Server 2025).
   `NextResult` and `Read` throw the error alone; what follows fires on the next advance.
   `Message` joins every entry with `Environment.NewLine`, as SqlClient's does.
 - **Msg 3621** (`The statement has been terminated.`, class 0, state 0) follows an execution error that ends a row-writing statement — `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SELECT … INTO`, and `ALTER TABLE … ALTER COLUMN`'s rewrite — but not a compilation error (Msg 206 / 213 / 544), a `SELECT`'s own error, a batch-ending one (a conversion failure, anything under `XACT_ABORT ON`) or one a `TRY` / `CATCH` handles.
@@ -64,6 +64,7 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
   So do `SUM` and `AVG`: an overflowing total NULLs only its own group, and a sliding window frame answers again once the overflowing row has left it.
   `SET ARITHIGNORE ON` keeps the NULLs and sends neither message ([`session-options.md`](session-options.md#arithignore-and-arithabort)).
 - **Msg 5701** follows every `USE`, even of the current database, and **Msg 5703** every `SET LANGUAGE`.
+- **A compile's non-aborting error** — the Msg 208 of a scalar function call real couldn't inline — goes out ahead of everything its batch runs with no DONE of its own, the next DONE carrying its error bit and losing its count flag; see [`programmable.md`](programmable.md#inlining-a-call-as-the-query-compiles).
 
 ### Not modeled yet
 

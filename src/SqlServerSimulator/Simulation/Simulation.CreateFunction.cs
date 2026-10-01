@@ -455,6 +455,11 @@ partial class Simulation
             context, functionName.Leaf, parameters, returnType, bodyText,
             CountNewlines(commandText, 0, bodyStart), commandText[bodyEnd..(bodyEnd + 3)]));
 
+        // INLINE = ON over a body that can't inline is refused after the body
+        // binds and ahead of the name check (probed 2026-10-01 against SQL
+        // Server 2025).
+        if (options.Inline == true && !ModuleInlining.IsInlineableScalar(bodyText, functionName.Leaf, executeAsClause))
+            throw SimulatedSqlException.InlineOptionNotValid();
         var replaced = ResolveFunctionAlterTarget<ScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
         RejectTimestampParameters(parameters);
 
@@ -480,6 +485,8 @@ partial class Simulation
             ReturnSpelledNumeric = returnSpelledNumeric,
             ReturnAliasType = returnAliasType,
             ReturnMaxLength = returnMaxLength,
+            BodyLineOffset = CountNewlines(commandText, 0, bodyStart),
+            InlineOption = options.Inline,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -858,6 +865,7 @@ partial class Simulation
         SqlType paramType;
         int? paramMaxLength;
         AliasType? aliasType;
+        var typeResolved = true;
         try
         {
             paramType = ParseFunctionReturnType(context, ordinal, "@" + name, out paramMaxLength, out aliasType);
@@ -866,6 +874,7 @@ partial class Simulation
         {
             declarationErrors.Add(error);
             (paramType, paramMaxLength, aliasType) = (SqlType.Int32, null, null);
+            typeResolved = false;
         }
         spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
 
@@ -874,9 +883,35 @@ partial class Simulation
         {
             context.MoveNextRequired();
             defaultExpression = Expression.Parse(context);
+            if (typeResolved)
+                NoteUnassignableDefault(context.Batch, defaultExpression, paramType, declarationErrors);
         }
         _ = NoteReadOnlyScalarParameter(context, variable, declarationErrors);
         return new UdfParameter(name, paramType, defaultExpression) { SpelledNumeric = spelledNumeric, AliasType = aliasType, DeclaredMaxLength = paramMaxLength, LineNumber = variable.LineNumber };
+    }
+
+    /// <summary>
+    /// Notes on <paramref name="declarationErrors"/> a parameter default that
+    /// can't be assigned to the parameter's type — Msg 206, or Msg 257 for a
+    /// conversion real makes only explicitly — which real refuses the module's
+    /// <c>CREATE</c> or <c>ALTER</c> with ahead of anything else it would
+    /// report (probed 2026-09-30 against SQL Server 2025, for every function
+    /// kind and a procedure; see <see cref="HeldDeclarationErrors"/>).
+    /// </summary>
+    private static void NoteUnassignableDefault(BatchContext batch, Expression defaultExpression, SqlType parameterType, List<SimulatedSqlException> declarationErrors)
+    {
+        try
+        {
+            AssignmentRules.RequireAssignable(defaultExpression, defaultExpression.GetSqlType(batch, NoColumnTypeResolver), parameterType);
+        }
+        catch (SimulatedSqlException refusal) when (refusal.Number is 206 or 257)
+        {
+            declarationErrors.Add(refusal);
+        }
+        catch (SimulatedSqlException)
+        {
+            // A default that doesn't type at all raises where it is used.
+        }
     }
 
     /// <summary>
@@ -903,10 +938,16 @@ partial class Simulation
     /// 2026-09-30 against SQL Server 2025). A <c>timestamp</c> return type is
     /// Msg 2733 alone, at the line the statement ends on; otherwise every
     /// parameter's Msg 346 and Msg 2715 (with its Msg 2724 note), in parameter
-    /// order. Null when there are none.
+    /// order. A parameter default that can't be assigned to its type
+    /// (<see cref="NoteUnassignableDefault"/>) is reported alone, the first
+    /// one, when no parameter's type is missing. Null when there are none.
     /// </summary>
     private static SimulatedSqlException? HeldDeclarationErrors(List<SimulatedSqlException> declarationErrors, SqlType? returnType = null, int endLine = 0)
     {
+        var unassignableDefault = declarationErrors.Find(static held => held.Number is 206 or 257);
+        if (unassignableDefault is not null && !declarationErrors.Exists(static held => held.Number == 2715))
+            return unassignableDefault;
+        _ = declarationErrors.RemoveAll(static held => held.Number is 206 or 257);
         if (returnType == SqlType.RowVersion)
         {
             var refusal = SimulatedSqlException.TimestampReturnTypeInvalid();

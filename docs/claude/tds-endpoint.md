@@ -132,6 +132,7 @@ The rules the capture showed:
 - **Errors.**
   A statement-terminating error closes its statement's DONE with `DONE_ERROR` and a count of 0, Msg 3621 ahead of it; an error that ends the batch is followed by the batch's `0x00FD` DONE instead, whatever scope raised it, and no scope it abandoned sends its DONEPROC.
   A caught error's statement still sends its DONE, the bit clear — a `THROW` or `RAISERROR` as `0x00F6`.
+  An error a compile sends without ending anything — a scalar function call it couldn't inline — has no DONE of its own: the next DONE written, whatever statement sends it (a `SET`, a `BEGIN TRY`), carries `DONE_ERROR` and drops `DONE_COUNT`, keeping the count (`TdsTokenWriter.CarryErrorToNextDone`; captured 2026-09-30 against SQL Server 2025, see [`programmable.md`](programmable.md#inlining-a-call-as-the-query-compiles)).
   A `RAISERROR … WITH LOG` at severity 20 sends Msg 2745 and Msg 596 (line 0, no procedure) after its own, then a DONE carrying `DONE_ERROR | DONE_SRVERROR`; the severity-20 Msg 0 SqlClient reports is SqlClient's own and never goes on the wire (`SimulatedSqlException.EndsSession`).
 - **`INSERT … EXEC`.**
   The executed body's statements send DONEINPROCs with no count — its rows went to the table — and no RETURNSTATUS or DONEPROC, ahead of the `INSERT`'s own DONE.

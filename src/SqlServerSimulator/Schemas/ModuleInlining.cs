@@ -110,13 +110,20 @@ internal static class ModuleInlining
         // A CLR routine has no sys.sql_modules row at all, so it never
         // reaches here; the guard keeps the token scan off an empty body.
         ClrScalarFunction => (false, false),
-        ScalarFunction scalar => IsInlineableScalar(scalar) ? (true, true) : (false, false),
+        ScalarFunction scalar => IsInlineableScalar(scalar) ? (scalar.InlineOption != false, true) : (false, false),
         _ => (false, false),
     };
 
     private static bool IsInlineableScalar(ScalarFunction function) =>
-        (function.ExecuteAsClause is null || function.ExecuteAsClause.Equals("CALLER", StringComparison.OrdinalIgnoreCase))
-        && Scan(function.BodyText, function.Name);
+        IsInlineableScalar(function.BodyText, function.Name, function.ExecuteAsClause);
+
+    /// <summary>
+    /// Whether a scalar function with this body, leaf name and <c>EXECUTE AS</c>
+    /// clause is inlineable — what <c>WITH INLINE = ON</c> requires at CREATE.
+    /// </summary>
+    internal static bool IsInlineableScalar(string body, string functionName, string? executeAsClause) =>
+        (executeAsClause is null || executeAsClause.Equals("CALLER", StringComparison.OrdinalIgnoreCase))
+        && Scan(body, functionName);
 
     /// <summary>
     /// Re-tokenizes <paramref name="body"/> and reports whether it stayed

@@ -42,24 +42,24 @@ partial class SqlType
         "..........C.CCCC.CCCC"u8 // bit
         + "..........C.CCCC.CCCC"u8 // integer
         + "..........C.CCCC.CCCC"u8 // exact numeric
-        + "..........C.CCCC.CCCC"u8 // approximate
-        + "......V.............."u8 // ansi string
-        + "......V.............."u8 // unicode string
+        + ".........CC.CCCC.CCCC"u8 // approximate
+        + "......V..V..........."u8 // ansi string
+        + "......V..V..........."u8 // unicode string
         + "...C........VVV....CC"u8 // binary
-        + "....................."u8 // text
+        + ".........C..........."u8 // text
         + "....................."u8 // image
         + "...C.C....C.CCCCCCC.."u8 // timestamp
-        + "CCCC.......CCCCC.CCCC"u8 // uniqueidentifier
-        + "VVVV..V...C....C.CCCC"u8 // datetime / smalldatetime
-        + "CCCC..V...C..C.C.CCCC"u8 // date
-        + "CCCC..V...C.C..C.CCCC"u8 // time
-        + "CCCC..V...C....C.CCCC"u8 // datetime2 / datetimeoffset
-        + "CCCCVVV...CCCCC.CCCCC"u8 // xml
-        + "VVVVVVV...VVVVVC.CCCC"u8 // sql_variant
-        + "CCCCVVV...CCCCCCC.CCC"u8 // hierarchyid
-        + "CCCCVVV...CCCCCCCC.CC"u8 // spatial
-        + "CCCC..C...CCCCCCCCC.."u8 // vector
-        + "CCCCVVC...CCCCCCCCC.."u8; // json
+        + "CCCC.....C.CCCCC.CCCC"u8 // uniqueidentifier
+        + "VVVV..V..VC....C.CCCC"u8 // datetime / smalldatetime
+        + "CCCC..V..CC..C.C.CCCC"u8 // date
+        + "CCCC..V..CC.C..C.CCCC"u8 // time
+        + "CCCC..V..CC....C.CCCC"u8 // datetime2 / datetimeoffset
+        + "CCCCVVV..CCCCCC.CCCCC"u8 // xml
+        + "VVVVVVV..CVVVVVC.CCCC"u8 // sql_variant
+        + "CCCCVVV..CCCCCCCC.CCC"u8 // hierarchyid
+        + "CCCCVVV..CCCCCCCCC.CC"u8 // spatial
+        + "CCCC..C..CCCCCCCCCC.."u8 // vector
+        + "CCCCVVC..CCCCCCCCCC.."u8; // json
 
     private static ReadOnlySpan<byte> UnifyGrid =>
         ".......cc.c.CCCC.CCcC"u8 // bit

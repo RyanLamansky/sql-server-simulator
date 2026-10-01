@@ -182,7 +182,17 @@ partial class Simulation
             // resolver throws Msg 137 for an unbound name.
             var defaultValue = param.Default.Run(
                 new RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), outerBatch));
-            boundValues[i] = defaultValue.CoerceTo(param.Type);
+            // A default that fails to convert is the call's binding error, at
+            // line 0 under the procedure, as an argument's is (probed
+            // 2026-09-30 against SQL Server 2025).
+            try
+            {
+                boundValues[i] = defaultValue.CoerceTo(param.Type);
+            }
+            catch (SimulatedSqlException conversion)
+            {
+                throw BindingError(conversion);
+            }
         }
         if (unknownArgument is not null)
             throw BindingError(SimulatedSqlException.NotAParameterForProcedure(unknownArgument, procedure.Name));

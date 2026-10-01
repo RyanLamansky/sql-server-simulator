@@ -200,6 +200,49 @@ public sealed class FunctionBodyShapeTests
     }
 
     /// <summary>
+    /// A DML statement whose <c>OUTPUT</c> clause has no <c>INTO</c> would send
+    /// rows to the client, which makes even a table variable's write Msg 443
+    /// under its own verb — once, though the write also reaches a persistent
+    /// table — in either function kind (probed 2026-09-30 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @t table (a int); insert @t output inserted.a values (1); return 1", "INSERT")]
+    [DataRow("declare @t table (a int); update @t set a = 2 output inserted.a, deleted.a; return 1", "UPDATE")]
+    [DataRow("declare @t table (a int); delete @t output deleted.*; return 1", "DELETE")]
+    [DataRow("declare @t table (a int); delete @t output 1; return 1", "DELETE")]
+    [DataRow("declare @t table (a int); declare @u table (a int); delete @t output deleted.a from @t join @u on 1 = 1; return 1", "DELETE")]
+    [DataRow("declare @t table (a int); merge @t t using (select 1 a) s on t.a = s.a when not matched then insert values (s.a) output $action; return 1", "MERGE")]
+    [DataRow("delete dbo.t output deleted.b; return 1", "DELETE")]
+    public void OutputWithoutInto_IsMsg443(string body, string verb)
+    {
+        var ex = AssertScalarBodyError(body, 443);
+        AreEqual(1, ex.Errors.Count);
+        AreEqual($"Invalid use of a side-effecting operator '{verb}' within a function.", ex.Message);
+        AreEqual(15, ex.State);
+    }
+
+    [TestMethod]
+    public void OutputWithoutInto_IsMsg443_InAMultiStatementFunction_AtItsStatementsLine()
+    {
+        var ex = WithFixture().AssertSqlError("create function dbo.f() returns @r table (a int) as begin insert @r values (1);\ndelete @r\noutput deleted.*; return end", 443);
+        AreEqual("Invalid use of a side-effecting operator 'DELETE' within a function.", ex.Message);
+        AreEqual(2, ex.LineNumber);
+    }
+
+    /// <summary><c>OUTPUT … INTO</c> a table variable is legal, as the same clause in a procedure is without <c>INTO</c>.</summary>
+    [TestMethod]
+    public void OutputInto_AndAProcedure_TakeIt()
+    {
+        var sim = WithFixture();
+        sim.ExecuteBatches(
+            "create function dbo.f() returns @r table (a int) as begin declare @t table (a int); insert @t output inserted.a into @r values (1); return end",
+            "create procedure dbo.p as begin declare @t table (a int); insert @t output inserted.a values (5) end");
+        AreEqual(1, sim.ExecuteScalar("select a from dbo.f()"));
+        AreEqual(5, sim.ExecuteScalar("exec dbo.p"));
+    }
+
+    /// <summary>
     /// The side-effecting built-ins, named the way real names them (state 1) —
     /// the date / time readers stay legal even though the indexed-view
     /// determinism battery rejects them. A function body is the one place

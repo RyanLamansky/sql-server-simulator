@@ -176,6 +176,7 @@ partial class Simulation
             }
         }
 
+        SimulatedSqlException.DropBinderErrorsBehindDeclarations(bindErrors);
         if (bindErrors.Count > 0)
         {
             // Each body statement settled its own report as it bound.

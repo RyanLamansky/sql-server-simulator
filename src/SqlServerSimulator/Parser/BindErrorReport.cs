@@ -369,6 +369,23 @@ internal sealed class BindErrorReport(string command)
         return true;
     }
 
+    /// <summary>
+    /// Whether an error recorded so far sorts ahead of
+    /// <paramref name="position"/> in the binder's order: real binds nothing
+    /// more of a scalar function it meets after a failure, so it inlines no
+    /// call there.
+    /// </summary>
+    public bool AnyErrorSortsBefore(int position)
+    {
+        var key = this.KeyOf(position, null);
+        foreach (var entry in this.entries)
+        {
+            if (CompareKeys(this.KeyOf(entry.SortPosition, entry.Clause), key) < 0)
+                return true;
+        }
+        return false;
+    }
+
     /// <summary>Whether a name error was recorded at <paramref name="position"/>.</summary>
     public bool FailedAt(int position)
     {

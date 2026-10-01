@@ -55,7 +55,7 @@ internal sealed class ScopedConfigurationOption(int id, string name, ScopedConfi
 /// every option <c>sys.database_scoped_configurations</c> lists, as the text
 /// real reports (<c>"1"</c>, <c>"WHEN_SUPPORTED"</c>), a null secondary
 /// meaning the primary's value applies. Only
-/// <c>VERBOSE_TRUNCATION_WARNINGS</c> and <c>PREVIEW_FEATURES</c> drive behavior; the rest are recorded
+/// <c>VERBOSE_TRUNCATION_WARNINGS</c>, <c>PREVIEW_FEATURES</c> and <c>TSQL_SCALAR_UDF_INLINING</c> drive behavior; the rest are recorded
 /// for the catalog.
 /// </summary>
 internal sealed class DatabaseScopedConfiguration
@@ -168,6 +168,14 @@ internal sealed class DatabaseScopedConfiguration
     public bool VerboseTruncationWarnings => this.primary[VerboseTruncationWarningsIndex] == "1";
 
     private static readonly int PreviewFeaturesIndex = IndexOf("PREVIEW_FEATURES");
+
+    private static readonly int TsqlScalarUdfInliningIndex = IndexOf("TSQL_SCALAR_UDF_INLINING");
+
+    /// <summary>
+    /// <c>TSQL_SCALAR_UDF_INLINING</c>, without which the optimizer inlines no
+    /// scalar function into a query compiled in the database.
+    /// </summary>
+    public bool TsqlScalarUdfInlining => this.primary[TsqlScalarUdfInliningIndex] == "1";
 
     /// <summary>
     /// <c>PREVIEW_FEATURES</c>, which admits SQL Server 2025's preview

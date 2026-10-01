@@ -1435,6 +1435,14 @@ partial class SimulatedSqlException
         new($"Column '{columnName}' in table '{tableName}' is of a type that is invalid for use as a key column in an index.", 1919, 16, state);
 
     /// <summary>
+    /// Mimics SQL Server error 16203: a scalar function declared
+    /// <c>WITH INLINE = ON</c> has a body the optimizer can't inline (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InlineOptionNotValid() =>
+        new("The option \"INLINE=ON\" is not valid for this function. Check the documentation for the constructs supported with INLINE option in a function.", 16203, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1977: <c>CREATE INDEX</c> keyed an <c>xml</c>
     /// column, which only an XML index may index (probed 2026-09-30 against
     /// SQL Server 2025).

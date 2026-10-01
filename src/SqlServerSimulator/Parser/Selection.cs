@@ -663,6 +663,7 @@ internal sealed partial class Selection
 
         var sequenceDrawsBefore = context.SequenceDrawsParsed;
         var unwindowedSequenceDrawsBefore = context.UnwindowedSequenceDrawsParsed;
+        var inlinedCallsBefore = context.Batch.InlinedCalls?.Calls.Count ?? 0;
         var combined = ParseUnionExceptChain(context, scope);
 
         // Msg 422 is settled against the shape of the whole statement, so the
@@ -691,6 +692,9 @@ internal sealed partial class Selection
             ConsumeOffsetFetch(context, topLevelTail);
             if (topLevelTail.OffsetExpression is not null && context.SequenceDrawsParsed > sequenceDrawsBefore)
                 throw SimulatedSqlException.NextValueForNotAllowedWithRowLimit();
+            // An ordered set operation inlines none of its branches' calls.
+            if (combined.IsSetOperationResult)
+                context.Batch.InlinedCalls?.DropFrom(inlinedCallsBefore);
             combined = ApplyTopLevelOrderBy(combined, orderBy, topLevelTail.OffsetExpression, topLevelTail.FetchExpression);
             bareProjectionStatement = false;
         }
@@ -958,6 +962,8 @@ internal sealed partial class Selection
         var aggregates = new List<AggregateExpression>();
         var windows = new List<WindowExpression>();
         using var queryBlock = context.EnterQueryBlock(aggregates, windows);
+        using var inliningBlock = ParserScope.Enter(ref context.InliningBlock, context.Batch.InlinedCalls?.OpenBlock() ?? 0);
+        using var inliningClause = ParserScope.Enter(ref context.InliningClause, InliningClause.Other);
         var bindErrors = context.Batch.BindErrors;
         bindErrors?.OpenScope(context.Token);
         try
@@ -1570,6 +1576,7 @@ internal sealed partial class Selection
         // took) is complete.
         var elementExpected = true;
         fromClause.ProjectionRefsStart = context.DeferredNextValueRefs?.Count ?? 0;
+        using var selectList = ParserScope.Enter(ref context.InliningClause, InliningClause.SelectList);
         do
         {
             // A keyword standing where an element belongs means the list never
@@ -1900,6 +1907,7 @@ internal sealed partial class Selection
                     plan.SemiJoin = TryBuildSemiJoinShape(
                         context.Batch, plan, [.. sources], joinArray, expressions, fromClause,
                         distinct, topExpression, aggregates, windows, scope.OuterTypeResolver);
+                    context.Batch.InlinedCalls?.SettleBlock(context.InliningBlock, distinct && fromClause.OrderBy.Count > 0);
                     return plan;
 
                 // SELECT projection INTO target [FROM ...] — captures the
@@ -1993,6 +2001,12 @@ internal sealed partial class Selection
         if (topWithTies && fromClause.OrderBy.Count == 0)
             throw SimulatedSqlException.TopWithTiesRequiresOrderBy();
         RejectSequenceDrawUnderOrderBy(context, fromClause, expressions, sequenceDrawsBefore, unwindowedSequenceDrawsBefore);
+
+        // A SELECT reading no FROM or WHERE that only assigns variables is a
+        // SET to real, whose operands inline nothing.
+        context.Batch.InlinedCalls?.SettleBlock(
+            context.InliningBlock,
+            (distinct && fromClause.OrderBy.Count > 0) || (fromClause.Excluders.Count == 0 && ResolveAssignmentMode(expressions)));
 
         // A source-less SELECT that aggregates, groups, filters groups or
         // windows takes the ordinary projection builder over an empty source
@@ -2413,6 +2427,7 @@ internal sealed partial class Selection
         // A FROM clause at any nesting depth is what makes a function body's
         // rejected SELECT real's Msg 444 state 2 rather than state 3.
         FunctionBodyShape.NoteRowsetRead(context);
+        using var clause = ParserScope.Enter(ref context.InliningClause, InliningClause.Other);
         // Every column reference a non-APPLY source's own arguments name, kept
         // until the whole FROM is parsed — a source may name a sibling written
         // after it, so the check can't run per source. Local to this FROM, so a
@@ -3035,6 +3050,7 @@ internal sealed partial class Selection
             // genuine syntax error (Msg 102, probe-confirmed).
             if (isFunctionCallShape && context.Batch.IsSkipping)
             {
+                InlinedScalarCalls.NoteMissingObject(context.Batch, resolvedName, context.Token?.LineNumber ?? 0);
                 // The compile pass carries on past the missing function so a
                 // syntax error later in the statement outranks its Msg 208,
                 // as it does for a missing table (probed 2026-09-29).
@@ -3617,6 +3633,10 @@ internal sealed partial class Selection
                                 outputColumns = [.. outputColumns.Select(column => column.WithDerivedMask(DataMask.Merge(column.DerivedMask, taint)))];
                         }
                         _ = RecordSecurableRead(context, function, objectName);
+                        // An inline function's body expands into the query, and
+                        // the scalar functions it calls inline with it.
+                        if (function is InlineTableValuedFunction expanded)
+                            InlinedScalarCalls.Note(context, expanded);
                         var lateralPlan = function switch
                         {
                             InlineTableValuedFunction inlineTvf => Selection.ForInlineTvf(inlineTvf, tvfArgs, objectName),
@@ -3649,6 +3669,7 @@ internal sealed partial class Selection
                     // executes, so the placeholder's shape is immaterial.
                     if (context.Batch.IsSkipping)
                     {
+                        InlinedScalarCalls.NoteMissingObject(context.Batch, objectName, context.Token?.LineNumber ?? 0);
                         var probe = context.SaveCheckpoint();
                         context.MoveNextOptional();
                         if (context.Token is Operator { Character: '(' })
@@ -4493,6 +4514,7 @@ internal sealed partial class Selection
     /// </remarks>
     private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy, QueryScope scope)
     {
+        using var clause = ParserScope.Enter(ref context.InliningClause, InliningClause.Other);
         // A parenthesized INSERT source's own query may not carry an ORDER BY
         // (Msg 156 on the keyword); a derived table or subquery nested inside
         // it parses at its own position and keeps the ordinary rules.
@@ -4752,6 +4774,7 @@ internal sealed partial class Selection
     /// </summary>
     private static void ParseGroupByList(ParserContext context, FromClause fromClause)
     {
+        using var clause = ParserScope.Enter(ref context.InliningClause, InliningClause.GroupBy);
         var itemContributions = new List<List<Expression[]>>();
         do
         {
@@ -5121,6 +5144,7 @@ internal sealed partial class Selection
     {
         // A reference in an ORDER BY item is refused where it parses.
         using var deferral = ParserScope.Enter(ref context.DeferNextValueRefusals, false);
+        using var clause = ParserScope.Enter(ref context.InliningClause, InliningClause.OrderBy);
         ParseOrderByItemsCore(context, orderBy);
     }
 

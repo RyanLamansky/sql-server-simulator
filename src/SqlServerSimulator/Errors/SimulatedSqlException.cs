@@ -248,6 +248,35 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool EndedFunctionWrite;
 
     /// <summary>
+    /// Set when a scalar function's body raised this error as it ran, which
+    /// makes a missing object there (Msg 208) an execution error of the
+    /// calling statement rather than its compile's: a write it ends earns
+    /// Msg 3621 (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal bool RaisedRunningFunctionBody;
+
+    /// <summary>
+    /// Set on a <c>DECLARE</c>'s missing or oversized type, which real meets
+    /// parsing the batch rather than binding it: a batch or module body
+    /// carrying one reports every such error and none of its binder errors
+    /// (probed 2026-09-30 against SQL Server 2025). See
+    /// <see cref="DropBinderErrorsBehindDeclarations"/>.
+    /// </summary>
+    internal bool PreemptsBinderErrors;
+
+    /// <summary>
+    /// Leaves <paramref name="errors"/> as real reports them: when one preempts
+    /// the binder's (<see cref="PreemptsBinderErrors"/>), only those and the
+    /// Msg 1087 of a table variable used without a declaration, which real
+    /// meets parsing too (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static void DropBinderErrorsBehindDeclarations(List<SimulatedSqlException> errors)
+    {
+        if (errors.Exists(static error => error.PreemptsBinderErrors))
+            _ = errors.RemoveAll(static error => !error.PreemptsBinderErrors && error.Number != 1087);
+    }
+
+    /// <summary>
     /// Set by the first dispatch frame that sees this error, which is the
     /// scope whose statement raised it. Only that scope's procedure counts the
     /// error toward the status it returns without a <c>RETURN</c> value

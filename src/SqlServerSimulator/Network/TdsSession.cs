@@ -1136,6 +1136,15 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 closed = true;
                 unclosedError = false;
             }
+            else if (outcome is SimulatedErrorOutcome { RaisedWhileCompiling: true } compiling)
+            {
+                // A compile's non-aborting error has no DONE of its own; the
+                // next DONE carries its error bit.
+                WriteErrors(writer, compiling.Exception);
+                writer.CarryErrorToNextDone();
+                closed = false;
+                hasOutcome = Advance();
+            }
             else if (outcome is SimulatedErrorOutcome errorOutcome)
             {
                 // Statement-terminating error the engine chose to continue past

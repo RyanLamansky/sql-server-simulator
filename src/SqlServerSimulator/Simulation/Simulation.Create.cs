@@ -1559,7 +1559,18 @@ partial class Simulation
     {
         if (context.Token is not Name columnName)
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        var atColumnName = context.SaveCheckpoint();
         context.MoveNextRequired();
+
+        // A column written as just `timestamp` is a timestamp column named
+        // timestamp (probed 2026-09-30 against SQL Server 2025, in a table, a
+        // table variable, a table type and a function's return table): the
+        // word is read again as the type.
+        if (BuiltInToken.Equals(columnName.Value, "TIMESTAMP")
+            && context.Token is Operator { Character: ',' or ')' } or ReservedKeyword { Keyword: Keyword.Not or Keyword.Null or Keyword.Constraint or Keyword.Primary or Keyword.Unique or Keyword.Default or Keyword.Check })
+        {
+            context.RestoreCheckpoint(atColumnName);
+        }
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })
         {

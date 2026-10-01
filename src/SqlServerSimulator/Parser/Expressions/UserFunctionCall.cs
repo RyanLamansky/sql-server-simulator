@@ -134,6 +134,7 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
         // non-query contexts (SET / IF operands) have no active sink and stay
         // unchecked — a documented gap.
         context.SecurableSink?.Add(new ReferencedSecurable(function.Schema.Database, function.ObjectId, function.SchemaId, function.Name, function.Schema.Name, "EXECUTE"));
+        InlinedScalarCalls.Note(context, function);
         var simulation = context.Batch.Connection.Simulation;
         return new(function, ParseFunctionArguments(function, context))
         {

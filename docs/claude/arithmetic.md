@@ -60,6 +60,7 @@ An integer literal meets these operators as the `int` it is — the decimal-part
 A value entering a typed target — a variable (`DECLARE … =`, `SET`, `SELECT @v =`), a column an `INSERT … VALUES` / `INSERT … SELECT`, `UPDATE` or `MERGE` writes, a column's `DEFAULT`, a scalar function's `RETURN` or argument, `ISNULL`'s replacement — takes the `Assign` grid, source down the rows and target across (`Parser/AssignmentRules.cs`).
 It is not the unification grid: `decimal` and `datetime` unify (so `COALESCE` answers) while `datetime` → `decimal` is Msg 257, which is also what `ISNULL(<decimal>, <datetime>)` reports.
 Probed 2026-09-24 against SQL Server 2025 over every ordered pair of 31 types by declaring a variable of each initialized from one of every other; all 930 cells, message text included, match, and a bare `NULL` is always assignable.
+The `timestamp` target column was probed 2026-09-30 the same way: an integer, an exact number, a binary, an `image` and a `timestamp` assign, a string or `datetime` is Msg 257, and every other class — `float`, `text` and `sql_variant` included — Msg 206.
 Inside a function body a shape violation's Msg 443 reports alone, ahead of the return value's assignment error.
 A procedure's or `sp_executesql`'s arguments take it too, but when the call runs rather than while compiling, since the target is only known then; the `NULL` keyword is exempt there, while a NULL an ADO.NET or RPC parameter carries is typed and judged.
 

@@ -527,7 +527,10 @@ partial class Simulation
     private static OutputProjection NoteClientOutput(BatchContext batch, OutputProjection projection)
     {
         if (!projection.HasTarget)
+        {
             batch.CurrentStatement.ClientOutputShape = (projection.Schema, projection.ColumnNames);
+            FunctionBodyShape.NoteClientOutput(batch);
+        }
         return projection;
     }
 

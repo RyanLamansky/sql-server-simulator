@@ -341,6 +341,26 @@ internal sealed class StatementContext
     public bool BindsDeferredSource;
 
     /// <summary>
+    /// Set by <c>OPTION (USE HINT ('DISABLE_TSQL_SCALAR_UDF_INLINING'))</c>,
+    /// which keeps the statement's scalar function calls from inlining (see
+    /// <see cref="InlinedScalarCalls"/>).
+    /// </summary>
+    public bool DisablesScalarUdfInlining;
+
+    /// <summary>
+    /// Set by <c>OPTION (RECOMPILE)</c>, which compiles the statement again
+    /// every time it runs (see <see cref="InlinedScalarCalls"/>).
+    /// </summary>
+    public bool Recompiles;
+
+    /// <summary>
+    /// Set as the statement resolves a table variable, which real compiles
+    /// again when the statement first runs, once it knows the variable's rows
+    /// (see <see cref="InlinedScalarCalls"/>).
+    /// </summary>
+    public bool ReadsTableVariable;
+
+    /// <summary>
     /// Set as the statement resolves a permanent table or view, and as it
     /// resolves a <c>#temp</c> table or a table variable; read through
     /// <see cref="FoldsConstantsAtCompile"/>.
@@ -442,6 +462,9 @@ internal sealed class StatementContext
         this.ClientOutputShape = null;
         this.TransactedWrite = false;
         this.BindsDeferredSource = false;
+        this.DisablesScalarUdfInlining = false;
+        this.Recompiles = false;
+        this.ReadsTableVariable = false;
         this.ReadsPermanentObject = this.ReadsTemporaryObject = false;
         this.OpensTransaction = false;
         this.BeganImplicitTransaction = false;

@@ -269,12 +269,18 @@ public sealed partial class StatisticsIoTimeTests
             Run(connection, "create view v as select 1 a"));
     }
 
+    /// <summary>
+    /// The failed statement reports its time after its error and ahead of
+    /// Msg 3621, and <c>ExecuteReader</c>'s exception carries the rest of the
+    /// batch's messages, the next statement's time included (probed 2026-09-30
+    /// against SQL Server 2025).
+    /// </summary>
     [TestMethod]
     public void Time_FailedStatementReportsAfterItsErrorAheadOfMsg3621()
     {
         using var connection = Open("create table t (id int primary key); insert t values (1); set statistics time on");
         var error = Throws<SimulatedSqlException>(() => Run(connection, "insert t values (1); select 'next'"));
-        AreEqual("2627,3612,3621", string.Join(",", error.Errors.Cast<SimulatedError>().Select(static e => e.Number)));
+        AreEqual("2627,3612,3621,3612", string.Join(",", error.Errors.Cast<SimulatedError>().Select(static e => e.Number)));
     }
 
     [TestMethod]

@@ -34,19 +34,32 @@ partial class Simulation
     /// variable), which it reports alone (probed 2026-09-24 against SQL Server
     /// 2025).
     /// </summary>
+    /// <param name="compileBatch">The throwaway context the walk reads the batch on.</param>
+    /// <param name="key">The batch's plan-cache key, under which a compile is remembered; null when it has none.</param>
+    /// <param name="inliningFailures">
+    /// The non-aborting errors the compile sends ahead of everything the batch
+    /// runs when it compiles: one per scalar function call it couldn't inline
+    /// (see <see cref="InlinedScalarCalls"/>), in binding order; null when there
+    /// are none, or when a compile of the same text sent them before. A batch
+    /// that doesn't compile carries them in its report instead, among its
+    /// binder errors.
+    /// </param>
     /// <returns>The error or errors that stop the batch, or <see langword="null"/> when it compiled.</returns>
     /// <remarks>
     /// Real keeps compiling the statements after one it defers; the walk stops at
     /// a deferred DML target, because its recovery scan can't tell where that
     /// statement ended, so an error past it surfaces when its statement runs.
     /// </remarks>
-    private SimulatedSqlException? CompileBatch(BatchContext compileBatch, PlanCacheKey? key)
+    private SimulatedSqlException? CompileBatch(BatchContext compileBatch, PlanCacheKey? key, out List<SimulatedSqlException>? inliningFailures)
     {
+        inliningFailures = null;
         var schemaVersion = Volatile.Read(ref this.SchemaVersion);
         if (key is { } cached && this.compiledBatches.TryGetValue(cached, out var compiledUnder) && compiledUnder == schemaVersion)
             return null;
 
         var errors = new List<SimulatedSqlException>();
+        var inlined = new InlinedScalarCalls(errors, body: false);
+        compileBatch.InlinedCalls = inlined;
         compileBatch.CurrentStatement.UtcNow = DateTime.UtcNow;
         compileBatch.CompilingForRun = true;
         // A USE the walk meets switches the database it binds in.
@@ -54,7 +67,8 @@ partial class Simulation
         var enteredDatabase = connection.CurrentDatabase;
         try
         {
-            _ = this.BindWithoutRunning(compileBatch, errors);
+            if (!this.BindWithoutRunning(compileBatch, errors) || compileBatch.BatchAborted)
+                inlined.CompileOnRunFrom(compileBatch.Parser.Token?.StartIndex ?? int.MaxValue);
         }
         catch (SimulatedSqlException parsePhase)
         {
@@ -76,8 +90,20 @@ partial class Simulation
             connection.CurrentDatabase = enteredDatabase;
         }
 
+        var failures = this.InliningFailuresOf(compileBatch, inlined);
+        if (errors.Exists(static error => error.PreemptsBinderErrors))
+        {
+            SimulatedSqlException.DropBinderErrorsBehindDeclarations(errors);
+            failures = null;
+        }
         if (errors.Count > 0)
         {
+            // Each failure goes where its call bound among the binder errors.
+            if (failures is not null)
+            {
+                for (var i = failures.Count - 1; i >= 0; i--)
+                    errors.Insert(failures[i].Position, failures[i].Failure);
+            }
             var report = SimulatedSqlException.Aggregate(errors);
             report.CatchReadsFirstEntry = true;
             return report;
@@ -85,7 +111,15 @@ partial class Simulation
         if (compileBatch.DeferredOptimizerError is { } optimizerError && !compileBatch.WalkMetDdl)
             return optimizerError;
 
-        if (key is { } compiled && !compileBatch.ResolvedTempTable)
+        compileBatch.StatementsCompiledOnRun = inlined.CompiledOnRun;
+        if (failures is not null && (inlined.RecompilesEveryRun || this.SendsInliningFailures(enteredDatabase, compileBatch.Parser.Command.CommandText)))
+        {
+            inliningFailures = new List<SimulatedSqlException>(failures.Count);
+            foreach (var (_, failure) in failures)
+                inliningFailures.Add(failure);
+        }
+
+        if (key is { } compiled && !compileBatch.ResolvedTempTable && !inlined.RecompilesEveryRun)
         {
             if (this.compiledBatches.ContainsKey(compiled))
                 this.compiledBatches[compiled] = schemaVersion;

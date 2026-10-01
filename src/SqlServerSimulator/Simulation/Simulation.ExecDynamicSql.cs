@@ -695,12 +695,14 @@ partial class Simulation
             // compiling it is the EXEC's own, and the caller carries on.
             var compileContext = CompileContextFor(innerBatch, dynCommand);
             StatementClock? compileClock = connection.StatisticsTime && ReportsStatistics(outerBatch) ? StatementClock.Start(connection) : null;
-            if (this.CompileBatch(compileContext, key: null) is { } compileError)
+            if (this.CompileBatch(compileContext, key: null, out var inliningFailures) is { } compileError)
             {
                 compileError.EndedCalledBatch = true;
                 throw compileError;
             }
             compiled = true;
+            innerBatch.StatementsCompiledOnRun = compileContext.StatementsCompiledOnRun;
+            outcomes.AddRange(CompileFailuresSent(innerBatch, inliningFailures));
             if (compileClock is not null)
                 outcomes.Add(new SimulatedInfoOutcome(CompileTime(innerBatch, compileClock, compileContext.LastTopLevelStatementLine, innerBatch.ErrorProcedureName)));
 

@@ -37,6 +37,7 @@ partial class Simulation
 
         var parser = batch.Parser;
         var failedAt = parser.SaveCheckpoint();
+        var inlinedCallsBefore = batch.InlinedCalls?.Calls.Count ?? 0;
         var (report, stopper, completed) = ReadForBindErrors(batch, start, () =>
         {
             foreach (var _ in this.DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart))
@@ -44,6 +45,7 @@ partial class Simulation
                 // Skip mode yields nothing; the enumeration drives the parse.
             }
         });
+        batch.InlinedCalls?.DropBehindErrors(report, inlinedCallsBefore);
 
         // The re-read gets at least as far as the first read did, so even an
         // unfinished one leaves the recovery scan less of the statement.

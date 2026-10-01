@@ -131,6 +131,7 @@ partial class Simulation
                 // Server 2025.
                 var batch = context.Batch;
                 missingType.ResolveDiagnostics(batch.CurrentStatement.StartLine, batch.LineOffset, batch.ErrorProcedureName);
+                missingType.PreemptsBinderErrors = true;
                 bindErrors.Add(missingType);
                 SkipPastTypeSpec(context);
                 (declaredType, declaredMaxLength, xmlSchemaCollection) = (SqlType.SqlVariant, null, null);
@@ -420,7 +421,19 @@ partial class Simulation
         // against SQL Server 2025). Only CREATE FUNCTION's RETURNS @r TABLE
         // caller uses the skip signal, to avoid registering the function.
         var pendingIndexes = new List<PendingInlineIndex>();
-        _ = TryParseTableVariableColumnsAndConstraints(context, fullName, out var columns, out var keyConstraints, out var checkConstraints, pendingIndexes);
+        HeapColumn[] columns;
+        KeyConstraint[] keyConstraints;
+        CheckConstraint[] checkConstraints;
+        try
+        {
+            _ = TryParseTableVariableColumnsAndConstraints(context, fullName, out columns, out keyConstraints, out checkConstraints, pendingIndexes);
+        }
+        catch (SimulatedSqlException missingType) when (missingType.Number == 2715)
+        {
+            // Parse-phase on real, as a scalar DECLARE's is: it stands alone.
+            missingType.PreemptsBinderErrors = true;
+            throw;
+        }
         if (Array.Exists(columns, static column => column.Type == SqlType.RowVersion))
             FunctionBodyShape.NoteSideEffect(context.Batch, "TIMESTAMP", FunctionBodyShape.TimestampColumnState);
         var internalName = context.Connection.Simulation.AllocateTableVariableInternalName();

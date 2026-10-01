@@ -140,6 +140,21 @@ partial class Simulation
         private bool resumedAtStatementEnd;
 
         /// <summary>
+        /// What the enclosing statement let its scalar function calls inline
+        /// into, and how many calls the compile had gathered, when this one
+        /// began (see <see cref="InlinedScalarCalls"/>).
+        /// </summary>
+        private InliningStatement enclosingInlining;
+        private int inlinedCallsBefore;
+
+        /// <summary>
+        /// The calls gathered as this statement compiles while it runs — one
+        /// its batch's compile deferred, or one carrying <c>OPTION
+        /// (RECOMPILE)</c> — whose failures go out ahead of what it sends.
+        /// </summary>
+        public InlinedScalarCalls? CompiledOnRun;
+
+        /// <summary>
         /// Begins the statement at the cursor: resets the statement frame and
         /// reads off its leading tokens what the rest of the lifecycle needs.
         /// </summary>
@@ -242,6 +257,23 @@ partial class Simulation
             // Leave, since Run materializes every outcome.
             this.shape = batch.FunctionBodyShape;
             this.opensConditional = this.shape is not null && NoteFunctionBodyStatement(batch, this.shape);
+            var inlining = batch.Parser.Token switch
+            {
+                ReservedKeyword { Keyword: Keyword.With or Keyword.Create or Keyword.Alter } => InliningStatement.Barred,
+                ReservedKeyword { Keyword: Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge } or Operator { Character: '(' } => InliningStatement.Query,
+                _ => InliningStatement.NonQuery,
+            };
+            if (inlining == InliningStatement.Query && !batch.IsSkipping && batch.InlinedCalls is null && batch.StatementsCompiledOnRun is { } compiledOnRun
+                && this.StatementStart.Token is { } first && compiledOnRun.CompilesNow(first.StartIndex))
+            {
+                batch.InlinedCalls = this.CompiledOnRun = new InlinedScalarCalls(errors: null, body: false);
+            }
+            if (batch.InlinedCalls is { Body: false } inlined)
+            {
+                this.enclosingInlining = inlined.Statement;
+                this.inlinedCallsBefore = inlined.Calls.Count;
+                inlined.Statement = inlining;
+            }
             if (this.opensConditional)
                 this.shape!.ConditionalDepth++;
         }
@@ -259,6 +291,39 @@ partial class Simulation
                 connection.StatementIo = this.enclosingIo;
             if (this.opensConditional)
                 this.shape!.ConditionalDepth--;
+            if (batch.InlinedCalls is { Body: false } inlined)
+            {
+                // A query real binds only once it runs, or one told not to,
+                // inlines nothing as the batch compiles.
+                if (inlined.Statement != InliningStatement.NonQuery)
+                {
+                    var deferred = this.Ending == StatementEnding.Deferred || batch.CurrentStatement.BindsDeferredSource;
+                    if (deferred || batch.CurrentStatement.DisablesScalarUdfInlining)
+                        inlined.DropFrom(this.inlinedCallsBefore);
+                    // A statement the compile deferred compiles once it runs, as
+                    // does one reading a table variable from compatibility
+                    // level 150 on (deferred compilation, probed 2026-09-30
+                    // against SQL Server 2025: its calls fail twice), and one
+                    // carrying OPTION (RECOMPILE) every time it runs.
+                    if (inlined.CompilesBatch && this.StatementStart.Token is { } first)
+                    {
+                        if (deferred)
+                        {
+                            inlined.CompileOnRun(first.StartIndex, everyRun: false);
+                        }
+                        else if (inlined.KeepsAnyFrom(this.inlinedCallsBefore))
+                        {
+                            if (batch.CurrentStatement.Recompiles)
+                                inlined.CompileOnRun(first.StartIndex, everyRun: true);
+                            else if (batch.CurrentStatement.ReadsTableVariable && batch.CurrentDatabase.CompatibilityLevel >= CompatibilityLevel.Sql150)
+                                inlined.CompileOnRun(first.StartIndex, everyRun: false);
+                        }
+                    }
+                }
+                inlined.Statement = this.enclosingInlining;
+                if (ReferenceEquals(inlined, this.CompiledOnRun))
+                    batch.InlinedCalls = null;
+            }
         }
 
         /// <summary>
@@ -340,6 +405,9 @@ partial class Simulation
             // carries; real reports them all, so the statement is read
             // again for the whole report before anything below judges it.
             var ex = thrown;
+            // The report reads the statement again, gathering its calls afresh.
+            if (batch.InlinedCalls is { Body: false } inlined && !thrown.BindReportSettled && BindErrorReport.StartsReport(thrown))
+                inlined.TruncateTo(this.inlinedCallsBefore);
             if (!thrown.BindReportSettled)
                 (ex, this.resumedAtStatementEnd) = simulation.ReportEveryBindError(batch, thrown, this.StatementStart, requireSemicolonBeforeCte, atBatchStart);
 
@@ -361,6 +429,8 @@ partial class Simulation
             // 2026-09-28 against SQL Server 2025).
             if (batch.SuppressDiagnosticsResolution && batch.CurrentStatement.WritesRows && !batch.IsSkipping)
                 ex.EndedFunctionWrite = true;
+            if (batch.CalledFunctionBody && batch.UdfFrame is not null && !batch.IsSkipping)
+                ex.RaisedRunningFunctionBody = true;
             if (!batch.SuppressDiagnosticsResolution)
             {
                 var diagnosticLine = ex.Class == 15

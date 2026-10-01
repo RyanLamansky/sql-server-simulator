@@ -63,6 +63,24 @@ internal abstract class UserDefinedFunction(
     /// call.
     /// </summary>
     public readonly string BodyText = bodyText;
+
+    /// <summary>
+    /// Newlines between the start of the batch that created the function and
+    /// its body, which places a body line in that batch's text.
+    /// </summary>
+    public int BodyLineOffset;
+
+    /// <summary>
+    /// What an attempt to inline the body — or, for an inline table-valued
+    /// function, to expand it — meets, settled by
+    /// <c>Simulation.ScalarInliningFailures</c> and kept while
+    /// <see cref="InliningFailuresSchemaVersion"/> is current; empty when the
+    /// body inlines.
+    /// </summary>
+    public InliningFailure[] InliningFailures = [];
+
+    /// <summary>The <c>Simulation.SchemaVersion</c> <see cref="InliningFailures"/> was settled at; -1 before the first.</summary>
+    public long InliningFailuresSchemaVersion = -1;
 }
 
 /// <summary>
@@ -132,6 +150,15 @@ internal sealed class ScalarFunction(
 
     /// <summary>Whether the body is one the optimizer inlines (<see cref="ModuleInlining"/>), read on first use.</summary>
     public bool? BodyInlines;
+
+    /// <summary>
+    /// The <c>WITH INLINE = ON | OFF</c> setting; null when not written. OFF
+    /// keeps an inlineable body from inlining, which <c>sys.sql_modules</c>
+    /// reports as <c>inline_type</c> 0 beside <c>is_inlineable</c> 1 (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    public bool? InlineOption;
+
 }
 
 /// <summary>

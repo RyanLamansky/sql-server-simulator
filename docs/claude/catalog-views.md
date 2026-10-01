@@ -320,7 +320,8 @@ A named user the database doesn't hold stores NULL; real refuses the CREATE outr
 The scalar-UDF-inlining pair, computed by `Schemas/ModuleInlining.cs`.
 An inline TVF and a plain scalar function both report 1 / 1; a procedure, view, DML or DDL trigger, and multi-statement TVF report 0 / 0 (all probe-confirmed).
 Neither column is compatibility-level gated: a scalar function created at level 140 still reports 1 / 1, and lowering the level afterwards doesn't move it — the level gates whether the optimizer actually inlines, not what the catalog records.
-`is_inlineable` answers whether the body *could* be inlined and `inline_type` whether it *would* be; the two part only on `WITH INLINE = OFF` (0 / 1), an option the simulator's `CREATE FUNCTION` grammar doesn't accept, so they always agree here.
+`is_inlineable` answers whether the body *could* be inlined and `inline_type` whether it *would* be; the two part only on `WITH INLINE = OFF` (0 / 1), which also keeps a call from inlining (probed 2026-10-01 against SQL Server 2025).
+`WITH INLINE = ON` over a body that can't inline is Msg 16203 at `CREATE` / `ALTER`, after the body's binder errors and ahead of the name check.
 
 The analysis re-tokenizes the stored body the way [`IsDeterministic`](#isdeterministic) does, and covers the disqualifiers probed against SQL Server 2025 — a body whose only disqualifying construct sits outside that set reports 1 where real reports 0:
 

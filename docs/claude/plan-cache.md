@@ -47,6 +47,9 @@ Given a `sql_handle` (the value `sys.dm_exec_requests.sql_handle` reports), `FRE
 The `internal` pool and a plan handle name nothing, the simulator exposing no plans; `DbccPlanCacheTests` (Tests.Internal) pins each scope.
 A session with `STATISTICS IO` or `TIME` on neither reads nor fills either cache, so its every batch compiles and reports ([`session-options.md`](session-options.md#statistics-time)).
 
+What a compile sends rather than refuses rides on whether it happens: the Msg 208 a scalar function call that couldn't inline earns goes out only when its batch's text compiles, so a cache hit sends nothing, as real's plan reuse does; the texts that sent theirs are remembered under the schema version they compiled under (`Simulation.SendsInliningFailures`) for the compiles no cache skips, and the three clearings above forget them too.
+A batch holding an `OPTION (RECOMPILE)` statement with such a call is never remembered as compiled, since real compiles it afresh every time ([`programmable.md`](programmable.md#inlining-a-call-as-the-query-compiles)).
+
 ## Promotion happens inline in the SELECT arm
 
 The natural place for cache-add would be "after the dispatch loop, before the iterator returns".

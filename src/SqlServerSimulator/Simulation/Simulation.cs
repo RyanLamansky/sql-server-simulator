@@ -1406,7 +1406,7 @@ public sealed partial class Simulation
             // nothing runs.
             if (ScanParseTimeOptions(command, batch))
             {
-                if (this.CompileBatch(CompileContextFor(batch, command), key: null) is { Class: 15 } syntaxError)
+                if (this.CompileBatch(CompileContextFor(batch, command), key: null, out _) is { Class: 15 } syntaxError)
                 {
                     batch.Connection.LastErrorNumber = syntaxError.Number;
                     yield return new SimulatedErrorOutcome(syntaxError);
@@ -1418,12 +1418,15 @@ public sealed partial class Simulation
             // batch's whole response, raised at ExecuteReader like real's.
             var compileContext = CompileContextFor(batch, command);
             StatementClock? compileClock = batch.Connection.StatisticsTime ? StatementClock.Start(batch.Connection) : null;
-            if (this.CompileBatch(compileContext, cacheKey) is { } compileError)
+            if (this.CompileBatch(compileContext, cacheKey, out var inliningFailures) is { } compileError)
             {
                 batch.Connection.LastErrorNumber = compileError.Number;
                 yield return new SimulatedErrorOutcome(compileError);
                 yield break;
             }
+            batch.StatementsCompiledOnRun = compileContext.StatementsCompiledOnRun;
+            foreach (var failure in CompileFailuresSent(batch, inliningFailures))
+                yield return failure;
             if (compileClock is not null)
                 yield return new SimulatedInfoOutcome(CompileTime(batch, compileClock, compileContext.LastTopLevelStatementLine, BatchCreatedModuleName(command) ?? batch.ErrorProcedureName));
 
@@ -1617,6 +1620,8 @@ public sealed partial class Simulation
             if (Matches(key) && this.dmlPlanSets.TryRemove(key, out _))
                 _ = Interlocked.Decrement(ref this.dmlPlanSetCount);
         }
+        if (sqlHandle is null)
+            this.ForgetSentInliningFailures(database);
         if (sqlHandle is null && database is null)
         {
             this.TokenMemo.Clear();
@@ -2326,6 +2331,15 @@ public sealed partial class Simulation
         lifecycle.Enter(batch);
         List<SimulatedStatementOutcome> outcomes = [];
         lifecycle.Run(this, batch, outcomes, requireSemicolonBeforeCte, atBatchStart);
+        // A statement compiling as it runs sends its inlining failures ahead of
+        // everything it sends, unless the compile itself failed — a binder
+        // error stops real before any call inlines.
+        if (lifecycle.CompiledOnRun is { } compiledOnRun
+            && !(lifecycle.Error is { RaisedRunningFunctionBody: false } compileError && IsDeferredCompileError(compileError))
+            && this.InliningFailuresOf(batch, compiledOnRun) is { } failures)
+        {
+            outcomes.InsertRange(0, failures.Select(failure => new SimulatedErrorOutcome(failure.Failure, raisedWhileCompiling: true)));
+        }
 
         if (lifecycle.QueryStore is { } capture && lifecycle.Ending is not (StatementEnding.Deferred or StatementEnding.GatheredBindError))
             EndFramedQueryStoreCapture(batch, capture, lifecycle.QueryStoreIo, lifecycle.Error, lifecycle.StatementStart);
@@ -2493,7 +2507,8 @@ public sealed partial class Simulation
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite)
-            && error.Number is 127 or 220 or 232 or 512 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 8152 or 8705 or 13921 or 16929 or 16947);
+            && (error.Number is 127 or 220 or 232 or 512 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 8152 or 8705 or 13921 or 16929 or 16947
+                || (error.Number == 208 && error.RaisedRunningFunctionBody)));
 
     /// <summary>
     /// True for the parse-time error real SQL Server defers to bind time —

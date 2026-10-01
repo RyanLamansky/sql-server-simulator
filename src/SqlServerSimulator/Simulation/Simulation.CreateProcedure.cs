@@ -384,6 +384,7 @@ partial class Simulation
         SqlType paramType;
         int? declaredMaxLength;
         AliasType? aliasType;
+        var typeResolved = true;
         try
         {
             (paramType, declaredMaxLength, aliasType) = ParseProcedureParameterType(context, ordinal, "@" + name);
@@ -394,6 +395,7 @@ partial class Simulation
             // HeldDeclarationErrors.
             declarationErrors.Add(error);
             (paramType, declaredMaxLength, aliasType) = (SqlType.Int32, null, null);
+            typeResolved = false;
         }
         spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
 
@@ -402,6 +404,8 @@ partial class Simulation
         {
             context.MoveNextRequired();
             defaultExpression = Expression.Parse(context);
+            if (typeResolved)
+                NoteUnassignableDefault(context.Batch, defaultExpression, paramType, declarationErrors);
         }
         var readOnly = NoteReadOnlyScalarParameter(context, variable, declarationErrors);
 

@@ -887,6 +887,8 @@ internal sealed partial class Selection
         }
         if (context.Token is null || !OptionHintFirstWordLookup.Contains(context.Token.Source))
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.Token.Source.Equals("RECOMPILE", StringComparison.OrdinalIgnoreCase))
+            context.Batch.CurrentStatement.Recompiles = true;
         context.MoveNextRequired();
         while (context.Token is not (Operator { Character: ')' } or Operator { Character: ',' }))
         {
@@ -906,7 +908,9 @@ internal sealed partial class Selection
     /// the generic Msg 102, e.g. <c>USE HINT()</c> → <c>near ')'</c>,
     /// <c>USE HINT(123)</c> → <c>near '123'</c>) whose value is in
     /// <see cref="ValidUseHintNames"/> (case-insensitive) — an unknown name
-    /// raises Msg 10715. The hint itself is otherwise parse-and-discard.
+    /// raises Msg 10715. The hint itself is otherwise parse-and-discard, but
+    /// for <c>DISABLE_TSQL_SCALAR_UDF_INLINING</c>, which keeps the statement's
+    /// scalar function calls from inlining.
     /// </summary>
     private static void ConsumeUseHint(ParserContext context)
     {
@@ -919,6 +923,8 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             if (!ValidUseHintNames.Contains(value.AsString))
                 throw SimulatedSqlException.InvalidUseHint(value.AsString);
+            if (value.AsString.Equals("DISABLE_TSQL_SCALAR_UDF_INLINING", StringComparison.OrdinalIgnoreCase))
+                context.Batch.CurrentStatement.DisablesScalarUdfInlining = true;
             switch (context.GetNextRequired())
             {
                 case Operator { Character: ')' }:

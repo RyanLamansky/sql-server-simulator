@@ -75,6 +75,25 @@ public sealed class StatementDoneTokenTests
             Batch(fixture, "exec r"));
     }
 
+    /// <summary>
+    /// A compile's non-aborting error — a scalar function call it couldn't
+    /// inline — goes out first with no DONE of its own; the next DONE, whatever
+    /// statement sends it, carries DONE_ERROR and drops DONE_COUNT, keeping
+    /// the count (captured 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CompileFailure_SendsNoDone_TheNextDoneCarriesItsErrorBit()
+    {
+        using var fixture = new TdsSessionFixture();
+        _ = fixture.RunBatch("create function dbo.f() returns int as begin declare @x int; select @x = count(*) from nosuch; return @x end");
+        CollectionAssert.AreEqual(
+            new[] { "ERR 208", "ROWS", "DONE C1 MORE|ERROR 1", "ROWS", "ERR 208", "DONE C1 ERROR 0" },
+            Batch(fixture, "select 1; select dbo.f()"));
+        CollectionAssert.AreEqual(
+            new[] { "ERR 208", "DONE 15D MORE|ERROR 0", "ROWS", "DONE C1 MORE|COUNT 0", "DONE 15E MORE 0", "ROWS", "DONE C1 MORE|COUNT 1", "DONE 15F FINAL 0" },
+            Batch(fixture, "begin try select dbo.f() end try begin catch select error_number() end catch"));
+    }
+
     [TestMethod]
     public void StatementError_ClosesWithItsKind_TerminationNoticeAheadOfTheDone()
     {

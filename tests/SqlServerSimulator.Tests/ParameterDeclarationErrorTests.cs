@@ -155,4 +155,79 @@ public sealed class ParameterDeclarationErrorTests
         AreEqual(6, columnError.State);
         HasCount(1, columnError.Errors);
     }
+    /// <summary>
+    /// A parameter default that can't be assigned to its type refuses the
+    /// <c>CREATE</c> or <c>ALTER</c> ahead of everything else the statement
+    /// carries — Msg 206 state 2, or Msg 257 state 3 for a conversion real
+    /// makes only explicitly — the first one alone, for every function kind
+    /// and a procedure; a parameter whose type is missing reports that instead
+    /// (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create function f(@p date = 1) returns int as begin return 1 end", 206, "Operand type clash: int is incompatible with date")]
+    [DataRow("create function f(@p int = 1, @q date = 1) returns int as begin return nosuch end", 206, "Operand type clash: int is incompatible with date")]
+    [DataRow("create function f(@p date = 1, @q timestamp) returns int as begin return 1 end", 206, "Operand type clash: int is incompatible with date")]
+    [DataRow("create function f(@p xml = 1, @q date = 1) returns table as return select 1 a", 206, "Operand type clash: int is incompatible with xml")]
+    [DataRow("create function f(@p int = 'a', @q date = 1.5) returns @r table (a int) as begin return end", 206, "Operand type clash: numeric is incompatible with date")]
+    [DataRow("create function f(@p timestamp = 'abc') returns int as begin return 1 end", 257, "Implicit conversion from data type varchar to timestamp is not allowed. Use the CONVERT function to run this query.")]
+    [DataRow("create procedure p @p date = 1, @q xml = 1 as select 1", 206, "Operand type clash: int is incompatible with date")]
+    [DataRow("create procedure p @p timestamp = 'x' as select 1", 257, "Implicit conversion from data type varchar to timestamp is not allowed. Use the CONVERT function to run this query.")]
+    public void UnassignableDefault_RefusesTheModule(string sql, int number, string message)
+    {
+        var error = new Simulation().AssertSqlError(sql, number);
+        HasCount(1, error.Errors);
+        AreEqual(message, error.Errors[0].Message);
+        AreEqual(number == 206 ? 2 : 3, error.State);
+        AreEqual(sql.Contains("procedure", StringComparison.Ordinal) ? "p" : "f", error.Procedure);
+    }
+
+    [TestMethod]
+    public void UnassignableDefault_YieldsToAMissingTypeAndASyntaxError()
+    {
+        var simulation = new Simulation();
+        CollectionAssert.AreEqual(new[] { 2715, 2724 }, Numbers(simulation.AssertSqlError("create function f(@q nosuchtype, @p date = 1) returns int as begin return 1 end", 2715)));
+        simulation.AssertSqlError("create function f(@p date = 1) returns int as begin return 1 + end", 156, "Incorrect syntax near the keyword 'end'.");
+        simulation.ExecuteBatches(
+            "create function f(@p int = 'abc', @q date = null, @r varbinary(10) = 1.5) returns int as begin return 1 end",
+            "create function g(@p int) returns int as begin return 1 end");
+        _ = simulation.AssertSqlError("alter function g(@p date = 1) returns int as begin return 1 end", 206);
+    }
+
+    /// <summary>
+    /// A procedure default that fails to convert as the call binds is the
+    /// call's error, at line 0 under the procedure, as an argument's is.
+    /// </summary>
+    [TestMethod]
+    public void ProcedureDefaultFailingToConvert_IsTheCallsError()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create procedure p @p int = 'abc' as select @p");
+        var error = simulation.AssertSqlError("\nexec p", 245);
+        AreEqual(0, error.LineNumber);
+        AreEqual("p", error.Procedure);
+    }
+
+    /// <summary>
+    /// A <c>DECLARE</c>'s missing type is a parse-phase error on real: the
+    /// batch or module body reports every one of them, and a table variable
+    /// used without a declaration (Msg 1087), but none of its binder errors.
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @a nosuch; select nosuchcol from sys.objects", new[] { 2715, 2724 })]
+    [DataRow("select nosuchcol from sys.objects; declare @a nosuch", new[] { 2715, 2724 })]
+    [DataRow("declare @a nosuch, @b nosuch2; select nosuchcol from sys.objects; select * from nosuchtable", new[] { 2715, 2715, 2724, 2724 })]
+    [DataRow("declare @a dbo.nosuchtt; insert @a values (5); select nosuchcol from sys.objects", new[] { 2715, 1087, 2724 })]
+    [DataRow("declare @t table (a nosuch); select nosuchcol from sys.objects", new[] { 2715 })]
+    [DataRow("create procedure p as declare @a nosuch; select nosuchcol from sys.objects", new[] { 2715, 2724 })]
+    public void DeclaredMissingType_SilencesTheBinder(string sql, int[] numbers)
+        => CollectionAssert.AreEqual(numbers, Numbers(new Simulation().AssertSqlError(sql, 2715)));
+
+    /// <summary>A syntax error and an undeclared variable still outrank it.</summary>
+    [TestMethod]
+    public void DeclaredMissingType_YieldsToTheParser()
+    {
+        var simulation = new Simulation();
+        simulation.ValidateSyntaxError("declare @a nosuch; select 1 +", "+");
+        _ = simulation.AssertSqlError("declare @a nosuch; select @undeclared", 137);
+    }
 }

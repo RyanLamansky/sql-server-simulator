@@ -135,12 +135,66 @@ internal sealed class FunctionBodyShape
     /// Records a DML statement's write. A write to a <em>table variable</em> is
     /// legal inside a function (probe-confirmed for both a scalar UDF's own
     /// <c>DECLARE @t TABLE</c> and a multi-statement TVF's return table), so
-    /// only a write reaching a persistent table is a violation.
+    /// only a write reaching a persistent table is a violation — or one whose
+    /// <c>OUTPUT</c> clause sends rows to the client (see
+    /// <see cref="NoteClientOutput"/>).
     /// </summary>
-    public static void NoteTableWrite(BatchContext batch, string operatorName, HeapTable? table)
+    public static void NoteTableWrite(BatchContext batch, string operatorName, HeapTable? table) =>
+        NoteWrite(batch, operatorName, persistent: table is not { IsTableVariable: true });
+
+    /// <summary>
+    /// Records a DML statement's write, <paramref name="persistent"/> when it
+    /// reaches anything but a table variable.
+    /// </summary>
+    public static void NoteWrite(BatchContext batch, string operatorName, bool persistent)
     {
-        if (table is not { IsTableVariable: true })
-            NoteSideEffect(batch, operatorName, StatementOperatorState);
+        if (batch.FunctionBodyShape is not { } shape)
+            return;
+        shape.statementWrite = operatorName;
+        shape.statementWritePersists = persistent;
+        shape.SettleStatementWrite(batch);
+    }
+
+    /// <summary>
+    /// Records a DML statement's <c>OUTPUT</c> clause without <c>INTO</c>,
+    /// which would send the written rows to the client: the write is Msg 443
+    /// state 15 under its own verb even when it reaches only a table variable,
+    /// once per statement whatever else refuses it (probed 2026-09-30 against
+    /// SQL Server 2025, for <c>INSERT</c>, <c>UPDATE</c>, <c>DELETE</c> and
+    /// <c>MERGE</c> in both function kinds; a procedure takes it, and
+    /// <c>OUTPUT … INTO</c> a table variable is legal).
+    /// </summary>
+    public static void NoteClientOutput(BatchContext batch)
+    {
+        if (batch.FunctionBodyShape is not { } shape)
+            return;
+        shape.statementSendsOutput = true;
+        shape.SettleStatementWrite(batch);
+    }
+
+    /// <summary>The verb of the write the statement being dispatched makes; null before it names one.</summary>
+    private string? statementWrite;
+    private bool statementWritePersists, statementSendsOutput, statementWriteRefused;
+
+    /// <summary>Clears what <see cref="NoteWrite"/> and <see cref="NoteClientOutput"/> recorded, as a statement begins.</summary>
+    public void BeginStatement()
+    {
+        this.statementWrite = null;
+        this.statementWritePersists = this.statementSendsOutput = this.statementWriteRefused = false;
+    }
+
+    /// <summary>
+    /// Refuses the statement's write once its verb is known and either it
+    /// reaches a persistent object or its rows go to the client — in whichever
+    /// order the parse meets the two, since a joined <c>DELETE</c>'s
+    /// <c>OUTPUT</c> precedes the <c>FROM</c> that names its target.
+    /// </summary>
+    private void SettleStatementWrite(BatchContext batch)
+    {
+        if (this.statementWriteRefused || this.statementWrite is not { } verb || !(this.statementWritePersists || this.statementSendsOutput))
+            return;
+        this.statementWriteRefused = true;
+        NoteSideEffect(batch, verb, StatementOperatorState);
     }
 
     /// <summary>

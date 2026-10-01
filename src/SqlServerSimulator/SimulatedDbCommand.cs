@@ -158,8 +158,11 @@ public sealed class SimulatedDbCommand : DbCommand
         List<SimulatedError>? messages = null;
         var affected = 0;
         var counted = false;
+        var compileError = new CompileErrorCount();
         foreach (var outcome in simulation.CreateResultSetsForCommand(this))
         {
+            if (!compileError.Admits(outcome) && outcome is not SimulatedErrorOutcome)
+                continue;
             switch (outcome)
             {
                 case SimulatedErrorOutcome error:

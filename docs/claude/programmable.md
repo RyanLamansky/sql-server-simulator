@@ -94,7 +94,7 @@ The walk that binds the body gathers them into `FunctionBodyShape` (`Parser/Func
   An assignment-only `SELECT @v = …` is legal; `SELECT … INTO` is Msg 443 instead.
 - **Msg 443** class 16, *"Invalid use of a side-effecting operator '&lt;name&gt;' within a function."*
   The name is real's own spelling, and the state groups the operator family: **15** for writing / state-changing statements — `INSERT` / `UPDATE` / `DELETE` / `MERGE`, `TRUNCATE TABLE`, `SELECT INTO`, `BEGIN TRANSACTION` / `COMMIT TRANSACTION` / `ROLLBACK TRANSACTION` / `SAVEPOINT`, and every `SET` form (`SET OPTION ON` / `SET OPTION OFF` for the boolean toggles, `SET TRANSACTION ISOLATION LEVEL`, `SET ROW COUNT`, `SET TEXTSIZE`, `SET STATISTICS ON` / `OFF`, `SET IDENTITY_INSERT ON` / `OFF`, and `SET COMMAND` for the remaining value-taking ones); **14** for `PRINT`, `RAISERROR`, `THROW`, `WAITFOR`, `EXECUTE STRING` (the `EXEC (…)` form) and the `BEGIN TRY` / `END TRY` / `BEGIN CATCH` / `END CATCH` delimiters; **1** for a side-effecting built-in, named the way the catalog spells it — `newid`, `newsequentialid`, `rand`, `Crypt_Gen_Random`.
-  A DML write whose target is a **table variable** is legal, in a scalar UDF's own `DECLARE @t TABLE` and a TVF's return table alike, so only a write reaching a persistent table is recorded.
+  A DML write whose target is a **table variable** is legal, in a scalar UDF's own `DECLARE @t TABLE` and a TVF's return table alike, so only a write reaching a persistent table is recorded — or one whose `OUTPUT` clause has no `INTO`, which would send its rows to the client: that is Msg 443 state 15 under the statement's own verb even over a table variable, once per statement whatever else refuses it (probed 2026-09-30 against SQL Server 2025; `OUTPUT … INTO @r` is legal, and a procedure takes the bare clause).
   `EXEC <proc>` and `EXEC sp_executesql` stay creatable (the runtime Msg 557 is a separate story), as do the current-time readers.
 
 A fourth rule sits in real's **parse** phase rather than beside these, and behaves accordingly:
@@ -185,13 +185,16 @@ What real refuses in a module's declaration, and where it reports it (probed 202
 - **Msg 2724** state 3 for a function parameter declared `timestamp` / `rowversion`, naming the first; a procedure takes the type.
 - **Msg 2733** for a scalar function returning `timestamp`, at the line the statement ends on.
 - **Msg 443** state 16, the `TIMESTAMP` operator, for a `timestamp` column in a multi-statement function's return table (at the return variable's line) or in a table variable a scalar or multi-statement function's body declares — a shape violation, so it follows the body's binder errors.
+  A column written as just `timestamp` is such a column, named timestamp.
+- **Msg 206** state 2, or **Msg 257** state 3 for a conversion real makes only explicitly, for a parameter default that can't be assigned to the parameter's type — every function kind and a procedure, on `CREATE` and `ALTER` alike (`@p date = 1`, `@p timestamp = 'abc'`).
 
-The order: the parameter list's and return type's errors are held until the whole statement has parsed (`HeldDeclarationErrors`), so a syntax error in the body outranks them, and then preempt the body's bind — Msg 2733 alone if the return type raises it, else every parameter's 346 and 2715 in parameter order.
+The order: the parameter list's and return type's errors are held until the whole statement has parsed (`HeldDeclarationErrors`), so a syntax error in the body outranks them, and then preempt the body's bind — a missing type's 2715s if any parameter has one; else the first unassignable default alone, ahead of a `timestamp` parameter's 2724 too; else Msg 2733 alone if the return type raises it; else every parameter's 346 in parameter order.
 Msg 2724 comes after a clean bind of the body and after the name-collision check, so a binder error or Msg 2714 outranks it, and an `ALTER` it refuses leaves the function as it was.
 A CLR module resolves its assembly first (a missing one is Msg 6528 over a `READONLY` parameter or a `timestamp` return); past a resolved assembly the held errors come next, which is unprobed.
 
+A procedure default that converts at the call but fails to (`@p int = 'abc'`) is the call's binding error, at line 0 under the procedure, as an argument's is.
+
 **Divergences.**
-- A default real can't convert to the parameter's type is Msg 257 ahead of Msg 2724 on real (`@p timestamp = 'abc'`); the simulator doesn't check a function parameter's default, so it reports the 2724.
 - Real reports a return-table `timestamp` column's Msg 443 *ahead* of the Msg 207 raised inside an `INSERT` into that table, which the simulator reports behind it, as it does every other binder error.
 
 ## Scalar user-defined functions
@@ -231,6 +234,32 @@ Probed against SQL Server 2025.
 **Fidelity gaps**:
 - **`@@ROWCOUNT` inside a UDF body** isn't isolated — body statements overwrite the caller's `LastStatementRowCount`.
   Real SQL Server preserves it across the call.
+
+### Inlining a call as the query compiles
+
+From compatibility level 150 real inlines an inlineable scalar function (one [`catalog-views.md`](catalog-views.md#inline_type--is_inlineable)'s `inline_type` reports as inlining) into the query calling it as that query compiles, so a body that no longer binds — it names an object since dropped — fails while the **batch compiles** (probed 2026-09-30 against SQL Server 2025).
+The failure is a **non-aborting Msg 208** attributed to the function, at the reference's line in the batch that created it (line **13** for any qualified name, real's own constant), sent once per call ahead of everything the batch runs — an earlier statement's rows included, past any `TRY`, and for a call a false conjunct never reaches; the statement then runs and raises its own Msg 208 when it calls the body, a write it ends earning Msg 3621.
+`InlinedScalarCalls` (`Parser/InlinedScalarCalls.cs`) gathers the calls the compile walk binds, and `Simulation.ScalarInliningFailures` reads a function's body as it binds at `CREATE` to find what it would meet: its first missing object, or failing that the failures of the functions it calls, which inline with it (a nested call fails under the inner function).
+An inline function's or view's body expands into the query, so its calls inline too.
+
+Which calls inline was probed site by site, and the rule set is on `InlinedScalarCalls`' XML docs: a query or DML statement's calls, and a subquery's anywhere but an `IF` / `WHILE` condition; never an `ORDER BY` or `GROUP BY` call, a `DECLARE` / `SET` / `PRINT` operand, a statement led by a common table expression or carrying `USE HINT ('DISABLE_TSQL_SCALAR_UDF_INLINING')`, nor the select list of a variable-assigning `SELECT` without `FROM` or `WHERE`, of a `DISTINCT` ordered query, or of an ordered set operation's branches.
+`TSQL_SCALAR_UDF_INLINING` off, compatibility level 140, `WITH INLINE = OFF` or a non-inlineable body (`WHILE`, `GETDATE` …) sends nothing.
+
+**When it is sent.**
+Real sends the failures only as a plan compiles: the batch's compile, a deferred statement's when it first runs (a table created in the batch, a table variable from level 150, whose statements compile again once their rows are known — such a call fails twice), and an `OPTION (RECOMPILE)` statement's every time it runs, whose batch compiles afresh every time too.
+A batch that compiled reuses its plan, so running the same text again sends nothing — dynamic SQL included — until the schema changes or the plan cache is cleared (`InlinedScalarCalls.CompileOnRun`, `Simulation.SendsInliningFailures`).
+A batch that fails to compile carries the failures among its binder errors where each call bound, and none at all after a syntax error or a binder error met ahead of the call.
+
+**How it is sent.**
+The failure is a `SimulatedErrorOutcome` marked `RaisedWhileCompiling`, with no DONE of its own: on the wire the next DONE, whatever statement sends it, carries `DONE_ERROR` and drops `DONE_COUNT` while keeping its count, so SqlClient raises no `StatementCompleted` for that statement and leaves its rows out of `RecordsAffected` — and the in-process surface leaves them out too (`CompileErrorCount`).
+`@@ERROR` reads 208 until the first statement ends.
+In-process, the failure is an error like any other, so `ExecuteReader` raises it with the rest of the batch's errors (see [`errors.md`](errors.md#the-message-stream)).
+
+**Not modeled yet.**
+- A procedure's or trigger's body compiles at its first `EXEC` on real, sending its calls' failures then; here a module body's calls send nothing.
+- A body whose column no longer exists fails on real too, sending its whole binder report twice; here such a body inlines.
+- Real sends nothing for a deferred statement over an empty `#temp` table created in the batch, where one over an empty permanent table does; both send here.
+- A statement whose `GROUP BY` raises Msg 164 reports it alone here, where real reports the earlier calls' failures first.
 
 ## Inline table-valued functions
 `CREATE FUNCTION schema.name(@p type [= default], ...) RETURNS TABLE [WITH SCHEMABINDING | ENCRYPTION] AS RETURN [(] <SELECT> [)]`, called from a FROM clause.

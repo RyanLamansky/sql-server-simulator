@@ -55,6 +55,7 @@ What stays per verb is where the verbs differ:
   Unbound qualifier on `.*` raises Msg 4104, same as `<qualifier>.<col>`.
   The expansion runs before `Expression.Parse`, so the alias-suffix shape (`INSERTED.* AS x`) inherits real SQL Server's Msg 102 rejection naturally — the cursor advances past `*` to either `,` or the end-of-OUTPUT terminator.
   `OUTPUT … INTO @t [(cols)]` ships for INSERT / UPDATE / DELETE / MERGE — see [Table variables](table-variables.md).
+  A statement carrying both an `OUTPUT … INTO` and a client `OUTPUT` (`UPDATE @t SET a = 1 OUTPUT inserted.a INTO @u OUTPUT inserted.a`), which real accepts, is not modeled yet: the second clause is Msg 102 here.
   All four route through one `OutputProjection` and one `TryParseOutputIntoTarget`; an INTO target consumes the rows, so the statement reports as a non-query rather than leaving an empty result set behind.
   For MERGE this is also the only legal way to emit OUTPUT against a table carrying an enabled trigger, since [Msg 334](triggers.md#output-on-a-triggered-target--msg-334) forbids the client-returning form.
 - **One projection type backs all four statements.** `Simulation.Output.cs`'s `OutputProjection` resolves `INSERTED` / `DELETED` and — for MERGE — the source alias and `$action`, with a reference to a side the statement doesn't have reading as a typed NULL rather than throwing.
@@ -228,6 +229,8 @@ Inserts a single row with every column defaulted.
 8-byte big-endian database-scoped monotonic counter; advances on every INSERT into a rowversion-bearing table and every UPDATE affecting one.
 Storage type name surfaces as `timestamp` in `information_schema` regardless of declaration.
 Explicit insert → Msg 273; explicit update → Msg 272; second column on a table → Msg 2738.
+A column written as just `timestamp` (bracketed or not) is one, named timestamp — in a table, a table variable, a table type and a function's return table (probed 2026-09-30 against SQL Server 2025).
+A variable takes a value from an integer, an exact number or a binary; a string or `datetime` is Msg 257 and every other class Msg 206 (`SqlType.PairRules.cs`'s assign grid).
 The column keeps its position in an INSERT's positional column list and accepts the `DEFAULT` keyword there (and in a column list naming it) — see [INSERT value counts](#insert-value-counts).
 Outbound CAST: `varbinary(N)`/`binary(N)` copy 8 bytes; `bigint` reads big-endian.
 `Promote(RowVersion, Varbinary) → Varbinary` so EF's `WHERE [rv] = @originalRv` parameter works directly.
