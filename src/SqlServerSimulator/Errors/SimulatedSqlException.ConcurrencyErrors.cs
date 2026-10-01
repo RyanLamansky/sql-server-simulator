@@ -265,6 +265,18 @@ partial class SimulatedSqlException
         new($"Snapshot isolation transaction failed accessing database '{databaseName}' because snapshot isolation is not allowed in this database. Use ALTER DATABASE to allow snapshot isolation.", 3952, 16, 1);
 
     /// <summary>
+    /// Msg 3961 — a SNAPSHOT transaction reaching, to read or write, a table
+    /// another transaction created or redefined after its snapshot was taken
+    /// (probed 2026-10-01 against SQL Server 2025). Uncaught it ends the
+    /// batch and rolls the transaction back; caught, it dooms it.
+    /// </summary>
+    internal static SimulatedSqlException SnapshotTableDefinitionChanged(string databaseName) =>
+        new($"Snapshot isolation transaction failed in database '{databaseName}' because the object accessed by the statement has been modified by a DDL statement in another concurrent transaction since the start of this transaction.  It is disallowed because the metadata is not versioned. A concurrent update to metadata can lead to inconsistency if mixed with snapshot isolation.", 3961, 16, 1)
+        {
+            AbortsAsUnderXactAbort = true,
+        };
+
+    /// <summary>
     /// Msg 3960 — raised when a SNAPSHOT-isolation transaction attempts to
     /// write a row whose live version was committed by a different
     /// transaction after this transaction's snapshot was taken. Probe-

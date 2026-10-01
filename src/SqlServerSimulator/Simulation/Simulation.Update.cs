@@ -623,7 +623,9 @@ partial class Simulation
         else if (positionedCursor is null && Selection.MutationPlanStarts(table, where))
             RunUpdateStartupConstants(context, table, where is null ? [] : [where], assignments);
         var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, table, positionedCursor is not null);
-        foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
+        var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
+        var judgedRows = new List<(int PageIndex, int SlotIndex, TargetRowHold Hold, byte[] Bytes)>();
+        foreach (var (pageIndex, slotIndex, scannedBytes) in rowSource)
         {
             context.Batch.PollCancellation();
             // Positioned UPDATE (WHERE CURRENT OF): target only the row the
@@ -631,6 +633,48 @@ partial class Simulation
             if (positionedCursor is { } positioned && !CursorRowMatches(positioned, (pageIndex, slotIndex)))
                 continue;
 
+            // Judged under the U a writer reads its target with: a row another
+            // session is writing is judged as that write leaves it.
+            var rowBytes = scannedBytes;
+            var hold = context.Batch.AwaitTargetRow(table, pageIndex, slotIndex, ref rowBytes);
+            if (hold == TargetRowHold.Gone)
+                continue;
+            if (JudgeRow(pageIndex, slotIndex, rowBytes) is not { } judged)
+            {
+                context.Batch.ReleaseTargetRow(table, pageIndex, slotIndex, hold);
+                continue;
+            }
+            affected.Add((pageIndex, slotIndex, judged.NewValues, judged.OldSnapshot));
+            judgedRows.Add((pageIndex, slotIndex, hold, rowBytes));
+        }
+
+        ApplyDmlTopCap(top, affected, context.Batch);
+        HoldQualifyingRows(context.Batch, table, affected, judgedRows, walkGeneration, RowLockPurpose.UpdatePreImage, (i, rowBytes) =>
+        {
+            var (pageIndex, slotIndex, _, _) = affected[i];
+            if (JudgeRow(pageIndex, slotIndex, rowBytes) is not { } judged)
+                return false;
+            affected[i] = (pageIndex, slotIndex, judged.NewValues, judged.OldSnapshot);
+            return true;
+        });
+
+        // SI writer pre-flight: any row visible at our snapshot but
+        // deleted by a concurrent committed tx (or in-flight foreign
+        // delete) whose pre-delete payload matches WHERE is a conflict.
+        // Msg 3960 fires before any heap mutation; auto-rolls back the SI
+        // tx. Probe-confirmed against SQL Server 2025: UPDATE / DELETE on
+        // an RC-deleted row that matches our snapshot raises 3960 even
+        // though the live row is tombstoned. Skipped for positioned updates —
+        // the cursor already fixed a single live row.
+        if (positionedCursor is null)
+            CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
+
+        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], sourceView, rowsLocked: true);
+
+        // The row's new values and, when something reads the pre-update image,
+        // that image; null for a row the statement doesn't update.
+        (SqlValue[] NewValues, SqlValue[]? OldSnapshot)? JudgeRow(int pageIndex, int slotIndex, byte[] rowBytes)
+        {
             var fullValues = DecodeFullRow(table, rowBytes);
             EvaluateComputedColumns(table, fullValues, context.Batch);
 
@@ -638,17 +682,17 @@ partial class Simulation
             // candidates for UPDATE through it. AND-of-WHEREs up the chain
             // (no-op when sourceView is null or the chain has no WHERE).
             if (sourceView?.VisibilityCheck is { } vis && !vis(fullValues, context.Batch))
-                continue;
+                return null;
 
             // A windowed or row-limited target writes only to the rows its body yields.
             SqlValue[]? viewRow = null;
             if (viewRows is not null && !viewRows.TryGetValue((pageIndex, slotIndex), out viewRow))
-                continue;
+                return null;
 
             SqlValue ResolveOriginal(MultiPartName name) => ReadTargetRowColumn(context.Batch, table, sourceView, fullValues, viewRow, (pageIndex, slotIndex), name);
 
             if (where is not null && where.Run(new RuntimeContext(ResolveOriginal, context.Batch)) != true)
-                continue;
+                return null;
 
             // Per-row stamp bump for NEXT VALUE FOR in the SET-list expressions.
             context.Batch.BumpRowStamp();
@@ -670,23 +714,8 @@ partial class Simulation
                 || table.SystemVersioning is not null
                 || table.IncomingForeignKeys.Count > 0;
             var oldSnapshot = oldSnapshotNeeded ? fullValues : null;
-            affected.Add((pageIndex, slotIndex, newValues, oldSnapshot));
+            return (newValues, oldSnapshot);
         }
-
-        ApplyDmlTopCap(top, affected, context.Batch);
-
-        // SI writer pre-flight: any row visible at our snapshot but
-        // deleted by a concurrent committed tx (or in-flight foreign
-        // delete) whose pre-delete payload matches WHERE is a conflict.
-        // Msg 3960 fires before any heap mutation; auto-rolls back the SI
-        // tx. Probe-confirmed against SQL Server 2025: UPDATE / DELETE on
-        // an RC-deleted row that matches our snapshot raises 3960 even
-        // though the live row is tombstoned. Skipped for positioned updates —
-        // the cursor already fixed a single live row.
-        if (positionedCursor is null)
-            CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
-
-        return CommitUpdate(context, table, affected, output, [.. SetColumnOrdinals(assignments)], sourceView);
     }
 
     /// <summary>
@@ -920,6 +949,43 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Takes the X each row a writer's target walk judged qualifying is
+    /// written under (<see cref="BatchContext.HoldQualifyingTargetRow"/>), once
+    /// the walk and its TOP are done, so the walk's own locks never send a
+    /// later row off <see cref="BatchContext.AwaitTargetRow"/>'s lock-free
+    /// check and a row TOP drops is never locked. A row another session changed
+    /// since its judgement is judged again by <paramref name="rejudge"/>,
+    /// which replaces its entry and says whether it still qualifies; one that
+    /// doesn't, or is gone, is dropped. <paramref name="judged"/> runs beside
+    /// <paramref name="rows"/>: each row's address, the U its walk already
+    /// took, and the image it was judged on — past the end of
+    /// <paramref name="rows"/> for a row TOP dropped, whose U is let go.
+    /// </summary>
+    private static void HoldQualifyingRows<TRow>(
+        BatchContext batch,
+        HeapTable table,
+        List<TRow> rows,
+        List<(int PageIndex, int SlotIndex, TargetRowHold Hold, byte[] Bytes)> judged,
+        long walkGeneration,
+        RowLockPurpose purpose,
+        Func<int, byte[], bool> rejudge)
+    {
+        var kept = 0;
+        for (var i = 0; i < judged.Count; i++)
+        {
+            var (pageIndex, slotIndex, hold, rowBytes) = judged[i];
+            var qualifies = i < rows.Count;
+            while (qualifies && !batch.HoldQualifyingTargetRow(table, pageIndex, slotIndex, ref hold, ref rowBytes, walkGeneration, purpose))
+                qualifies = hold != TargetRowHold.Gone && rejudge(i, rowBytes);
+            if (qualifies)
+                rows[kept++] = rows[i];
+            else
+                batch.ReleaseTargetRow(table, pageIndex, slotIndex, hold);
+        }
+        rows.RemoveRange(kept, rows.Count - kept);
+    }
+
+    /// <summary>
     /// Trims an affected-row list to the DML <c>TOP</c> cap in place. Always
     /// resolves the limit (even when the list is empty) so a bad value
     /// (negative / non-integer / out-of-range percent) raises before commit,
@@ -960,7 +1026,8 @@ partial class Simulation
         List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
         OutputProjection? output,
         IReadOnlyList<int> updatedColumnOrdinals,
-        View? sourceView = null)
+        View? sourceView = null,
+        bool rowsLocked = false)
     {
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
@@ -1056,7 +1123,9 @@ partial class Simulation
             tracking?.RecordUpdate(context.Batch, table, keyOrdinals, fullOld ?? DecodeFullRow(table, table.Heap.ReadSlotBytes(pageIndex, slotIndex)!), fullNew, trackedColumns, ref keyMoves);
             if (lockableTable)
             {
-                context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
+                // A row the target walk held is under its X already.
+                if (!rowsLocked)
+                    context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
                 context.Batch.NoteSupersededRow(table, pageIndex, slotIndex);
             }
             var storedNew = ProjectStoredValues(table, fullNew);
@@ -1127,16 +1196,25 @@ partial class Simulation
         ParserContext context,
         UndoLog? undoLog)
     {
-        var stampedNow = SqlValue.FromDateTime2(parent.Columns[period.EndOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
         foreach (var (_, _, _, oldFull) in affected)
         {
-            if (oldFull is null)
-                continue;
-            var historyRow = new SqlValue[oldFull.Length];
-            Array.Copy(oldFull, historyRow, oldFull.Length);
-            historyRow[period.EndOrdinal] = stampedNow;
-            _ = InsertRow(context.Batch, historyTable, RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
+            if (oldFull is not null)
+                WriteHistoryRow(parent, historyTable, period, oldFull, context, undoLog);
         }
+    }
+
+    /// <summary>
+    /// Writes <paramref name="oldFull"/>, a row of system-versioned
+    /// <paramref name="parent"/> a statement is about to rewrite or delete, to
+    /// its history sibling, its ROW END the statement's frozen UtcNow — the
+    /// end of the half-open interval during which it was current.
+    /// </summary>
+    internal static void WriteHistoryRow(
+        HeapTable parent, HeapTable historyTable, (int StartOrdinal, int EndOrdinal) period, SqlValue[] oldFull, ParserContext context, UndoLog? undoLog)
+    {
+        var historyRow = (SqlValue[])oldFull.Clone();
+        historyRow[period.EndOrdinal] = SqlValue.FromDateTime2(parent.Columns[period.EndOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
+        _ = InsertRow(context.Batch, historyTable, RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
     }
 
     /// <summary>
@@ -1678,7 +1756,7 @@ partial class Simulation
     /// (non-persisted computed) slots. The caller then runs
     /// <see cref="EvaluateComputedColumns"/> to fill in computed values.
     /// </summary>
-    private static SqlValue[] DecodeFullRow(HeapTable table, byte[] rowBytes)
+    internal static SqlValue[] DecodeFullRow(HeapTable table, byte[] rowBytes)
     {
         var fullValues = new SqlValue[table.Columns.Length];
         var storedColumns = table.StoredColumns;

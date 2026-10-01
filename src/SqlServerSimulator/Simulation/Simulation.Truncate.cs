@@ -95,10 +95,11 @@ partial class Simulation
         if (table.GraphKind == GraphTableKind.Node && EdgeConstraintsReferencing(context.Batch.DatabaseFor(table), table).Count > 0)
             throw SimulatedSqlException.CannotTruncateNodeTableReferencedByEdgeConstraint(name.Written);
 
-        // Sch-M on the target for the duration of the statement — waits for
-        // any concurrent Sch-S holders to drain before the destructive page-
-        // swap and identity reset proceed.
-        batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+        // Sch-M on the target — waits for every concurrent reader and open
+        // writer to drain before the destructive page-swap and identity
+        // reset proceed.
+        batch.AcquireTableRedefinitionLock(table);
+        VersionStore.NoteDefinitionChange(batch, table);
 
         // WITH (PARTITIONS …) deletes the listed partitions' rows instead.
         if (partitions is not null)

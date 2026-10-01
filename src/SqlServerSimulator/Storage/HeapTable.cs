@@ -658,6 +658,15 @@ internal sealed class HeapTable : SchemaObject
     public int ActiveDataWriters;
 
     /// <summary>
+    /// The <see cref="ActiveDataWriters"/> companion for U: holds of
+    /// <see cref="LockMode.Update"/> live on this table's row locks or its
+    /// <see cref="TableDataLock"/>, maintained the same way. A writer's
+    /// target read reads both lock-free and skips its per-row probe at zero
+    /// (<c>BatchContext.AwaitTargetRow</c>).
+    /// </summary>
+    public int ActiveUpdateLocks;
+
+    /// <summary>
     /// Returns the <see cref="LockResource"/> for <paramref name="pageIndex"/>
     /// / <paramref name="slotIndex"/>, allocating one (back-referenced to this
     /// table) on first reference.
@@ -745,6 +754,17 @@ internal sealed class HeapTable : SchemaObject
     /// a sweep frees the chains it dropped after leaving it.
     /// </summary>
     internal readonly Lock RowVersionsGate = new();
+
+    /// <summary>
+    /// The commit stamp of the transaction that last created or redefined
+    /// this table — any <c>ALTER TABLE</c>, index DDL, a trigger or rename,
+    /// <c>TRUNCATE</c> or <c>SWITCH</c> — or zero when none did since a
+    /// database allowing snapshot isolation could have seen it. Metadata isn't
+    /// versioned, so a SNAPSHOT transaction whose snapshot is older than this
+    /// can't reach the table (Msg 3961, see
+    /// <see cref="VersionStore.NoteDefinitionChange"/>).
+    /// </summary>
+    public long DefinitionXid;
 
     internal string DebugDisplay() => $"{this.Name} ({string.Join(", ", this.Columns.Select(c => c.Name))})";
 

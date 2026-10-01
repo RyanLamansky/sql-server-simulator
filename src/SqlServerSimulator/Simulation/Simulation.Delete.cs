@@ -234,43 +234,38 @@ partial class Simulation
             RunUpdateStartupConstants(context, table, [where], []);
         }
         var viewRows = MaterializeRowSelectiveViewRows(context, sourceView, table, positionedCursor is not null);
-        foreach (var (pageIndex, slotIndex, rowBytes) in rowSource)
+        var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
+        var judgedRows = new List<(int PageIndex, int SlotIndex, TargetRowHold Hold, byte[] Bytes)>();
+        foreach (var (pageIndex, slotIndex, scannedBytes) in rowSource)
         {
             context.Batch.PollCancellation();
             // Positioned DELETE (WHERE CURRENT OF): only the cursor's row.
             if (positionedCursor is { } positioned && !CursorRowMatches(positioned, (pageIndex, slotIndex)))
                 continue;
 
-            SqlValue[]? fullValues = null;
-            if (where is not null || output is not null || sourceView is not null || needsFullForTriggers || needsFullForHistory || needsFullForFk)
-            {
-                fullValues = DecodeFullRow(table, rowBytes);
-                EvaluateComputedColumns(table, fullValues, context.Batch);
-            }
-
-            // View visibility filter: rows not visible in the view aren't
-            // candidates for DELETE through it. AND-of-WHEREs up the chain.
-            if (sourceView?.VisibilityCheck is { } vis && !vis(fullValues!, context.Batch))
+            // Judged under the U a writer reads its target with, as UPDATE's are.
+            var rowBytes = scannedBytes;
+            var hold = context.Batch.AwaitTargetRow(table, pageIndex, slotIndex, ref rowBytes);
+            if (hold == TargetRowHold.Gone)
                 continue;
-
-            // A windowed or row-limited target writes only to the rows its body yields.
-            SqlValue[]? viewRow = null;
-            if (viewRows is not null && !viewRows.TryGetValue((pageIndex, slotIndex), out viewRow))
-                continue;
-
-            if (where is not null)
+            if (!JudgeRow(pageIndex, slotIndex, rowBytes, out var fullOld))
             {
-                var localValues = fullValues!;
-                SqlValue Resolve(MultiPartName name) => ReadTargetRowColumn(context.Batch, table, sourceView, localValues, viewRow, (pageIndex, slotIndex), name);
-
-                if (where.Run(new RuntimeContext(Resolve, context.Batch)) != true)
-                    continue;
+                context.Batch.ReleaseTargetRow(table, pageIndex, slotIndex, hold);
+                continue;
             }
-
-            deleted.Add((pageIndex, slotIndex, (output is null && !needsFullForTriggers && !needsFullForHistory && !needsFullForFk) ? null : fullValues));
+            deleted.Add((pageIndex, slotIndex, fullOld));
+            judgedRows.Add((pageIndex, slotIndex, hold, rowBytes));
         }
 
         ApplyDmlTopCap(top, deleted, context.Batch);
+        HoldQualifyingRows(context.Batch, table, deleted, judgedRows, walkGeneration, RowLockPurpose.Delete, (i, rowBytes) =>
+        {
+            var (pageIndex, slotIndex, _) = deleted[i];
+            if (!JudgeRow(pageIndex, slotIndex, rowBytes, out var fullOld))
+                return false;
+            deleted[i] = (pageIndex, slotIndex, fullOld);
+            return true;
+        });
 
         // SI writer pre-flight: scan the version chain for snapshot-visible
         // tombstoned rows. A pre-delete payload matching WHERE means
@@ -282,7 +277,42 @@ partial class Simulation
         if (positionedCursor is null)
             CheckSnapshotConflictOnTombstonedRows(context, table, where, sourceView);
 
-        return CommitDelete(context, table, deleted, output, sourceView);
+        return CommitDelete(context, table, deleted, output, sourceView, rowsLocked: true);
+
+        // Whether the statement deletes the row, with the full image the
+        // statement keeps of it when something reads that.
+        bool JudgeRow(int pageIndex, int slotIndex, byte[] rowBytes, out SqlValue[]? fullOld)
+        {
+            fullOld = null;
+            SqlValue[]? fullValues = null;
+            if (where is not null || output is not null || sourceView is not null || needsFullForTriggers || needsFullForHistory || needsFullForFk)
+            {
+                fullValues = DecodeFullRow(table, rowBytes);
+                EvaluateComputedColumns(table, fullValues, context.Batch);
+            }
+
+            // View visibility filter: rows not visible in the view aren't
+            // candidates for DELETE through it. AND-of-WHEREs up the chain.
+            if (sourceView?.VisibilityCheck is { } vis && !vis(fullValues!, context.Batch))
+                return false;
+
+            // A windowed or row-limited target writes only to the rows its body yields.
+            SqlValue[]? viewRow = null;
+            if (viewRows is not null && !viewRows.TryGetValue((pageIndex, slotIndex), out viewRow))
+                return false;
+
+            if (where is not null)
+            {
+                var localValues = fullValues!;
+                SqlValue Resolve(MultiPartName name) => ReadTargetRowColumn(context.Batch, table, sourceView, localValues, viewRow, (pageIndex, slotIndex), name);
+
+                if (where.Run(new RuntimeContext(Resolve, context.Batch)) != true)
+                    return false;
+            }
+
+            fullOld = (output is null && !needsFullForTriggers && !needsFullForHistory && !needsFullForFk) ? null : fullValues;
+            return true;
+        }
     }
 
     /// <summary>
@@ -405,7 +435,8 @@ partial class Simulation
         HeapTable table,
         List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)> deleted,
         OutputProjection? output,
-        View? sourceView = null)
+        View? sourceView = null,
+        bool rowsLocked = false)
     {
         if (context.Batch.IsSkipping)
             return new SimulatedNonQuery(0);
@@ -439,45 +470,14 @@ partial class Simulation
         // history with ROW END = UtcNow before tombstoning the current row.
         if (table.SystemVersioning is { } historyTable && table.PeriodColumns is { } pc)
         {
-            var stampedNow = SqlValue.FromDateTime2(table.Columns[pc.EndOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
             foreach (var (_, _, oldFull) in deleted)
             {
-                if (oldFull is null)
-                    continue;
-                var historyRow = new SqlValue[oldFull.Length];
-                Array.Copy(oldFull, historyRow, oldFull.Length);
-                historyRow[pc.EndOrdinal] = stampedNow;
-                _ = InsertRow(context.Batch, historyTable, RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
+                if (oldFull is not null)
+                    WriteHistoryRow(table, historyTable, pc, oldFull, context, undoLog);
             }
         }
-        var lockableTable = IsLockableTable(table);
-        var captureVersions = Storage.VersionStore.IsVersioningEnabled(context.Batch.DatabaseFor(table)) && lockableTable;
-        var tracking = table.ChangeTracking;
         foreach (var (pageIndex, slotIndex, fullOld) in deleted)
-        {
-            table.OwningDatabase?.RejectWriteWhenReadOnly();
-            tracking?.RecordRow(context.Batch, table, fullOld ?? DecodeFullRow(table, table.Heap.ReadSlotBytes(pageIndex, slotIndex)!), ChangeTrackingOperation.Delete);
-            if (lockableTable)
-            {
-                context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.Delete);
-                context.Batch.NoteSupersededRow(table, pageIndex, slotIndex);
-            }
-            // Captured ahead of the tombstone, so a snapshot never misses the
-            // row before the chain carries its pre-delete version.
-            if (captureVersions && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } oldBytes)
-                Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytes, Storage.VersionWriteKind.Delete);
-            table.Heap.DeleteAt(pageIndex, slotIndex, undoLog, ReclaimSuperseded(table, context));
-            // Row-lock dict cleanup: the slot is tombstoned and slot ids
-            // never get reused (`Heap.DeleteAt` doesn't recycle directory
-            // entries), so the per-row LockResource has no future relevance.
-            // Drop the dict entry here even though our row-X is still held
-            // — the holder reference in `tx.HeldLocks` / `StatementSchemaLocks`
-            // keeps the resource alive until release; concurrent accessors
-            // can't reach a tombstoned slot (heap iteration skips them, and
-            // SI / RCSI tombstoned-slot resolution bypasses locks entirely).
-            if (lockableTable)
-                _ = table.RowLocks.TryRemove((pageIndex, slotIndex), out _);
-        }
+            DeleteRowAt(context, table, pageIndex, slotIndex, fullOld, undoLog, rowsLocked);
 
         // Incoming-FK cascade: parent-side DELETE fires the matching FK's
         // DELETE action on every child table whose FK columns reference one
@@ -509,6 +509,59 @@ partial class Simulation
         }
         FireAfterDeleteTriggers(context, table, deleted);
         return new SimulatedNonQuery(deleted.Count);
+    }
+
+    /// <summary>
+    /// Deletes one row a statement removes — a DELETE's own, or one a foreign
+    /// key's or an edge constraint's cascade takes with it — as every other
+    /// session must see it: change-tracked, under the row's X with its
+    /// pre-image noted for the uniqueness checks and scans that wait on an
+    /// uncommitted delete, and with its pre-delete version captured ahead of
+    /// the tombstone, so a snapshot never misses the row before the chain
+    /// carries it. <paramref name="fullOld"/> is the row's full image when the
+    /// caller decoded one; <paramref name="rowLocked"/> says the caller holds
+    /// the row's X already.
+    /// </summary>
+    internal static void DeleteRowAt(ParserContext context, HeapTable table, int pageIndex, int slotIndex, SqlValue[]? fullOld, UndoLog? undoLog, bool rowLocked = false)
+    {
+        table.OwningDatabase?.RejectWriteWhenReadOnly();
+        table.ChangeTracking?.RecordRow(context.Batch, table, fullOld ?? DecodeFullRow(table, table.Heap.ReadSlotBytes(pageIndex, slotIndex)!), ChangeTrackingOperation.Delete);
+        var lockable = IsLockableTable(table);
+        if (lockable)
+        {
+            if (!rowLocked)
+                context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.Delete);
+            context.Batch.NoteSupersededRow(table, pageIndex, slotIndex);
+            if (VersionStore.WillCaptureVersions(context.Batch.DatabaseFor(table), table) && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } oldBytes)
+                VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytes, VersionWriteKind.Delete);
+        }
+        table.Heap.DeleteAt(pageIndex, slotIndex, undoLog, ReclaimSuperseded(table, context));
+        // The slot is tombstoned and slot ids are never reused, so the row's
+        // lock entry has no future lookup; the hold in the session's lock list
+        // keeps the resource alive until release, and what still has to find
+        // it — the waits on an uncommitted delete, the lock DMVs — reaches it
+        // through HeapTable.SupersededKeyImages.
+        if (lockable)
+            _ = table.RowLocks.TryRemove((pageIndex, slotIndex), out _);
+    }
+
+    /// <summary>
+    /// Rewrites one row a foreign key's referential action changes, as an
+    /// UPDATE rewrites its own: under the row's X with its pre-image noted,
+    /// the new image tested against the key ranges a SERIALIZABLE reader
+    /// holds, and the pre-update version captured ahead of the write.
+    /// </summary>
+    internal static void RewriteRowAt(ParserContext context, HeapTable table, int pageIndex, int slotIndex, byte[] rewritten, UndoLog? undoLog)
+    {
+        if (IsLockableTable(table))
+        {
+            context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
+            context.Batch.NoteSupersededRow(table, pageIndex, slotIndex);
+            context.Batch.ProbeKeyLocksForUpdate(table, pageIndex, slotIndex, rewritten);
+            if (VersionStore.WillCaptureVersions(context.Batch.DatabaseFor(table), table) && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } oldBytes)
+                VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytes, VersionWriteKind.Update);
+        }
+        table.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(table, context));
     }
 
     private static List<byte[]> ProjectDeleteOutput(

@@ -435,6 +435,7 @@ partial class Simulation
             heapTable.OwnerSession = context.Batch.Connection.Session;
         if (isLocalTempTable)
             heapTable.TempScopeId = context.Batch.TempTableScopeId();
+        VersionStore.NoteDefinitionChange(context.Batch, heapTable);
         if (!(isLocalTempTable ? context.Batch.Connection.TryAddTempTable(heapTable) : destination.TryAdd(heapTable.Name, heapTable)))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(heapTable.Name);
         // A local temp created inside a module body (proc / trigger / dynamic
@@ -1257,6 +1258,7 @@ partial class Simulation
             PeriodInheritedFromBase = true,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
         };
+        VersionStore.NoteDefinitionChange(context.Batch, history);
         // Real gives every engine-built history table a non-unique clustered
         // index named ix_<history leaf> on (period end, period start) — in that
         // order, so aged-version cleanup seeks on the end column — and that

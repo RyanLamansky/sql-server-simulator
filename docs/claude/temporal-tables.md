@@ -25,6 +25,7 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
 - **UPDATE** on a system-versioned parent: pre-update full row is captured (`oldSnapshotNeeded` forced true), the post-SET row's ROW START is bumped to UtcNow, then `WriteHistoryRowsForUpdate` writes the captured pre-update row to the history sibling with ROW END overwritten to UtcNow (the period during which the row was current).
   Setting a GENERATED ALWAYS column in SET raises Msg 13537.
 - **DELETE** on a system-versioned parent: pre-delete full row captured (`needsFullForHistory` forced true), then history row written with ROW END = UtcNow before tombstoning the current row.
+- **A foreign key's referential action** on a system-versioned child versions the child as the matching DML does (`Simulation.WriteHistoryRow`): a cascaded delete writes the row to history, and a CASCADE / SET NULL / SET DEFAULT rewrite writes the old row to history and starts the new one's period at the statement's time (probed 2026-10-01 against SQL Server 2025).
 - **`SELECT *`** excludes hidden columns (probe-confirmed: real SQL Server omits `IsHidden` columns from star expansion).
   Explicit references continue to bind by name, including in INSERT column lists and OUTPUT clauses (EF Core 10 emits `OUTPUT INSERTED.[PeriodEnd], INSERTED.[PeriodStart]` and lists period columns by name in tracked-entity SELECTs).
 - **`FROM <table> FOR SYSTEM_TIME <form> [AS] <alias>`** — all five forms ship, each a filter over the union of the parent's and the history sibling's rows.

@@ -128,6 +128,27 @@ internal enum RowLockPurpose
 }
 
 /// <summary>
+/// What a writer's target read holds on the row it is judging
+/// (<see cref="BatchContext.AwaitTargetRow"/>,
+/// <see cref="BatchContext.HoldQualifyingTargetRow"/>).
+/// </summary>
+[Flags]
+internal enum TargetRowHold : byte
+{
+    /// <summary>Nothing yet: no other session's lock stood in the way.</summary>
+    None = 0,
+
+    /// <summary>The U the read waited in, held until the row's X or its rejection.</summary>
+    Update = 1,
+
+    /// <summary>The X the row's write takes, held to the transaction's end.</summary>
+    Exclusive = 2,
+
+    /// <summary>The row was deleted while the read waited on its writer.</summary>
+    Gone = 4,
+}
+
+/// <summary>
 /// Who takes a key fence, which decides how a hit on a unique key is locked:
 /// a reader takes the plain key lock real takes there, a writer — an UPDATE,
 /// a DELETE, a MERGE's probe — nothing past the X its write takes (probed

@@ -143,6 +143,10 @@ For each FK:
 Statement-level atomicity continues to apply: a Msg 547 raised mid-cascade unwinds via the undo log, leaving the entire statement's mutations reverted.
 Cascade chains recurse up to `MaxCascadeDepth` (32) and then raise `NotSupportedException`.
 
+**An action writes its child rows as a DELETE or UPDATE of them does** (`Simulation.DeleteRowAt` / `RewriteRowAt`, probed 2026-10-01 against SQL Server 2025): under each row's X with its pre-image noted, its version captured for a SNAPSHOT or RCSI reader — who reads the children as they were through the cascade's commit — and a system-versioned child's old row written to its history, the rewritten row's period starting at the statement's time.
+A SNAPSHOT transaction whose cascade meets a child another transaction changed since its snapshot raises Msg 3960 naming the child table.
+The writes once skipped the version store, so a snapshot read the cascade's effect while it was still in flight, and a delete cascade took no row X at all.
+
 ## A referential action fires the child's triggers
 
 A cascade is part of the firing statement, not nested work under it, and the child table's AFTER triggers fire accordingly (probe-confirmed against SQL Server 2025):

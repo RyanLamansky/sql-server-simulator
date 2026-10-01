@@ -386,11 +386,9 @@ partial class Simulation
             // Unlike a foreign key's cascade, this one fires no DELETE trigger
             // on the edge table (probed 2026-09-27 against SQL Server 2025).
             var undoLog = context.Batch.CurrentUndoLog;
+            CheckCascadeSnapshotConflicts(context.Batch, edge, reaching);
             foreach (var (pageIndex, slotIndex, full) in reaching)
-            {
-                edge.ChangeTracking?.RecordRow(context.Batch, edge, full, ChangeTrackingOperation.Delete);
-                edge.Heap.DeleteAt(pageIndex, slotIndex, undoLog, ReclaimSuperseded(edge, context));
-            }
+                DeleteRowAt(context, edge, pageIndex, slotIndex, full, undoLog);
         }
     }
 

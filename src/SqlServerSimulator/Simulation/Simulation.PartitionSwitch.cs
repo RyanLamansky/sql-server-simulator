@@ -63,7 +63,8 @@ partial class Simulation
         if (ReferenceEquals(source, target))
             throw SimulatedSqlException.SwitchSameTable(source.Name, target.Name);
         target.OwningDatabase?.RejectWriteWhenReadOnly();
-        batch.AcquireStatementLock(target.SchemaLock, LockMode.SchemaModification);
+        batch.AcquireTableRedefinitionLock(source);
+        batch.AcquireTableRedefinitionLock(target);
 
         var sourceText = SwitchTableName(batch, source);
         var targetText = SwitchTableName(batch, target);
@@ -90,6 +91,9 @@ partial class Simulation
 
         RequireSwitchShapesMatch(batch.CurrentDatabase.Collation, source, sourceText, target, targetText);
         RequireSwitchConstraintsFit(batch, source, sourceText, sourceNumber, target, targetText, targetNumber);
+
+        VersionStore.NoteDefinitionChange(batch, source);
+        VersionStore.NoteDefinitionChange(batch, target);
 
         // Move the rows.
         var undoLog = context.Connection.CurrentTransaction?.UndoLog;

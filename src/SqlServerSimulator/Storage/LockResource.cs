@@ -108,6 +108,14 @@ internal sealed class LockResource
     public (int PageIndex, int SlotIndex)? RowAddress;
 
     /// <summary>
+    /// The session that inserted the row this row lock locks, while its X on
+    /// the new row is held: the row entered every index, whose keys real
+    /// locks too, which the lock DMVs report from here
+    /// (<see cref="LockDmvs"/>). Cleared with that X's final release.
+    /// </summary>
+    public SessionToken? InsertedBy;
+
+    /// <summary>
     /// The key or index this resource is a key lock of, for a
     /// <see cref="KeyLockGroup"/> anchor; <c>null</c> otherwise. Lets
     /// <see cref="LockManager"/> keep <see cref="KeyLockGroup.Holds"/> and
@@ -490,6 +498,12 @@ internal sealed class LockManager
                                 _ = Interlocked.Decrement(ref table.ActiveDataWriters);
                                 if (resource.RowAddress is { } address)
                                     table.RetireSupersededKeyImage(owner, address);
+                                if (ReferenceEquals(resource.InsertedBy, owner))
+                                    resource.InsertedBy = null;
+                            }
+                            else if (mode == LockMode.Update)
+                            {
+                                _ = Interlocked.Decrement(ref table.ActiveUpdateLocks);
                             }
                             if (resource.KeyGroup is { } group)
                             {
@@ -531,6 +545,8 @@ internal sealed class LockManager
         {
             if (mode is LockMode.Exclusive or LockMode.RangeExclusiveExclusive)
                 _ = Interlocked.Increment(ref table.ActiveDataWriters);
+            else if (mode == LockMode.Update)
+                _ = Interlocked.Increment(ref table.ActiveUpdateLocks);
             if (resource.KeyGroup is { } group)
             {
                 _ = Interlocked.Increment(ref group.Holds);

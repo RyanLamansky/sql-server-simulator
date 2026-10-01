@@ -95,6 +95,7 @@ partial class Simulation
         // raises Msg 2714 just as another table would (probe-confirmed).
         if (schema is not null && schema.HasNameInSharedNamespace(leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
+        VersionStore.NoteDefinitionChange(batch, destTable);
         if (!(isLocalTemp ? batch.Connection.TryAddTempTable(destTable) : destination.TryAdd(leaf, destTable)))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(leaf);
         // The new table joins the catalog views without passing the DDL arm.

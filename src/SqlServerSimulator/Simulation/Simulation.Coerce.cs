@@ -859,6 +859,8 @@ partial class Simulation
                 (scanned ??= []).Add(constraint);
                 continue;
             }
+            if (constraint.IgnoreDupKey && !constraint.IsClustered)
+                batch.LockIgnoreDupKeyProbe(destinationTable, constraint, probe);
             AwaitUncommittedKeyWriters(batch, destinationTable, constraint.StorageOrdinals, commons, probe);
 
             if (HeapSeekCache.For(destinationTable.Heap).AnyRowMatches(
@@ -1003,8 +1005,28 @@ partial class Simulation
     {
         if (batch.IsSkipping)
             return;
-        batch.AwaitSupersededKeyHolders(table, storageOrdinals, commons, probe, mode);
-        _ = batch.AwaitLiveKeyHolders(table, storageOrdinals, commons, probe, mode);
+        // Real waits on the key's lock in the unique index that holds it,
+        // which is where the lock DMVs report the wait.
+        var reportedKey = IsUniqueKeyTuple(table, storageOrdinals);
+        batch.AwaitSupersededKeyHolders(table, storageOrdinals, commons, probe, mode, reportedKey);
+        _ = batch.AwaitLiveKeyHolders(table, storageOrdinals, commons, probe, mode, reportedKey);
+    }
+
+    // Whether storageOrdinals are exactly the key of one of the table's
+    // PRIMARY KEY / UNIQUE constraints or unique indexes.
+    private static bool IsUniqueKeyTuple(HeapTable table, int[] storageOrdinals)
+    {
+        foreach (var constraint in table.KeyConstraints)
+        {
+            if (constraint.StorageOrdinals.AsSpan().SequenceEqual(storageOrdinals))
+                return true;
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (index.IsUnique && index.KeyStorageOrdinals.AsSpan().SequenceEqual(storageOrdinals))
+                return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -1122,6 +1144,8 @@ partial class Simulation
 
             if (TryPrepareKeySeek(destinationTable, index.KeyStorageOrdinals, storedRowValues, out var commons, out var probe))
             {
+                if (index.IgnoreDupKey && !index.IsClustered)
+                    batch.LockIgnoreDupKeyProbe(destinationTable, index, probe);
                 AwaitUncommittedKeyWriters(batch, destinationTable, index.KeyStorageOrdinals, commons, probe);
                 foreach (var (_, _, bytes) in HeapSeekCache.For(lobStore)
                     .MatchingRows(lobStore, storedColumns, index.KeyStorageOrdinals, commons, probe))

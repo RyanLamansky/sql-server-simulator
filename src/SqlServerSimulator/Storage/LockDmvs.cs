@@ -42,6 +42,24 @@ internal static class LockDmvs
     };
 
     /// <summary>
+    /// The <c>wait_type</c> real reports for a lock wait in
+    /// <paramref name="mode"/>: <c>LCK_M_</c> and the mode, the schema and
+    /// range modes in real's own abbreviations (probed 2026-10-01 against
+    /// SQL Server 2025: <c>LCK_M_SCH_M</c>, <c>LCK_M_RS_S</c>,
+    /// <c>LCK_M_RS_U</c>, <c>LCK_M_RIn_NL</c>).
+    /// </summary>
+    internal static string WaitType(LockMode mode) => mode switch
+    {
+        LockMode.SchemaStability => "LCK_M_SCH_S",
+        LockMode.SchemaModification => "LCK_M_SCH_M",
+        LockMode.RangeSharedShared => "LCK_M_RS_S",
+        LockMode.RangeSharedUpdate => "LCK_M_RS_U",
+        LockMode.RangeExclusiveExclusive => "LCK_M_RX_X",
+        LockMode.RangeInsertNull => "LCK_M_RIn_NL",
+        _ => "LCK_M_" + ModeAbbreviation(mode),
+    };
+
+    /// <summary>
     /// Yields one row per granted or waiting lock across every schema
     /// object + every per-row LockResource in the simulator. Walks
     /// schemas / heap tables / views / functions / procedures / sequences
@@ -68,26 +86,19 @@ internal static class LockDmvs
         // doesn't, save the infinity anchor's.
         var keyType = SqlValue.FromNVarchar("KEY");
 
-        var waitsByResource = SnapshotWaiters(sim);
+        var waitsByResource = SnapshotWaiters(sim, out var keyWaits);
 
         foreach (var (_, schema) in database.Schemas)
         {
             foreach (var (_, t) in schema.HeapTables)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, t.ObjectId, t.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, t.ObjectId, t.SchemaLock, waitsByResource, grantStatus, waitStatus, SchemaLocksBesideDataLock(t)))
                     yield return row;
                 foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, t.ObjectId, t.TableDataLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
-                // A row of a clustered table is its clustered key, which is
-                // what real locks and reports as KEY; only a heap's row is a RID.
-                var rowType = KeyLockGroup.ClusteredOwner(t) is null ? ridType : keyType;
                 var folded = FoldRowLocksIntoKeyLocks(t);
-                foreach (var kv in t.RowLocks)
-                {
-                    var desc = $"{kv.Key.PageIndex}:{kv.Key.SlotIndex}";
-                    foreach (var row in EmitRowsForResource(rowType, dbId, desc, t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus, folded))
-                        yield return row;
-                }
+                foreach (var row in EmitRowLocks(batch, t, ridType, keyType, dbId, waitsByResource, keyWaits, grantStatus, waitStatus, folded))
+                    yield return row;
                 foreach (var (_, group) in t.KeyLockGroups)
                 {
                     foreach (var row in EmitRowsForResource(keyType, dbId, KeyLockGroup.Describe(null), t.ObjectId, group.Infinity, waitsByResource, grantStatus, waitStatus, folded))
@@ -186,8 +197,8 @@ internal static class LockDmvs
             yield return new SqlValue[]
             {
                 SqlValue.FromInt16((short)conn.Spid),
-                SqlValue.FromNVarchar($"LCK_M_{ModeAbbreviation(mode).Replace("-", "_", StringComparison.Ordinal)}"),
-                SqlValue.FromNVarchar(DescribeResource(sim, resource)),
+                SqlValue.FromNVarchar(WaitType(mode)),
+                SqlValue.FromNVarchar(conn.Session.WaitingOnKey is { } key && resource.OwningTable is { } keyed ? $"KEY: {keyed.Name} {key}" : DescribeResource(sim, resource)),
                 blockerSpid is int bSpid ? SqlValue.FromInt16((short)bSpid) : SqlValue.Null(SqlType.SmallInt),
             };
         }
@@ -197,20 +208,219 @@ internal static class LockDmvs
     /// Reverse-lookup map: for each connection currently waiting, find
     /// the resource it's blocked on. Used by
     /// <see cref="EnumerateDmTranLocks"/> to emit WAIT rows alongside the
-    /// GRANT rows for that same resource.
+    /// GRANT rows for that same resource. A wait for a key another row
+    /// carries (<see cref="SessionToken.WaitingOnKey"/>) goes to
+    /// <paramref name="keyWaits"/> instead, reported on the key.
     /// </summary>
-    private static Dictionary<LockResource, List<SimulatedDbConnection>> SnapshotWaiters(Simulation sim)
+    private static Dictionary<LockResource, List<SimulatedDbConnection>> SnapshotWaiters(Simulation sim, out List<(SimulatedDbConnection Waiter, LockResource Resource, string Key)>? keyWaits)
     {
         var map = new Dictionary<LockResource, List<SimulatedDbConnection>>(ReferenceEqualityComparer.Instance);
+        keyWaits = null;
         foreach (var conn in sim.SnapshotConnections())
         {
             if (conn.WaitingOnResource is not { } resource)
                 continue;
+            if (conn.Session.WaitingOnKey is { } key)
+            {
+                (keyWaits ??= []).Add((conn, resource, key));
+                continue;
+            }
             if (!map.TryGetValue(resource, out var list))
                 map[resource] = list = [];
             list.Add(conn);
         }
         return map;
+    }
+
+    /// <summary>
+    /// The row locks of <paramref name="table"/> — a clustered table's as
+    /// <c>KEY</c> resources described by the clustered key, a heap's as
+    /// <c>RID</c> — and the index key locks real takes beside a written row,
+    /// which the simulator folds into the row's X:
+    /// <list type="bullet">
+    /// <item>an inserted row's key in every index it entered;</item>
+    /// <item>a deleted row's key in every index it left;</item>
+    /// <item>an updated row's old and new key in every index whose row the
+    /// update changed — key, <c>INCLUDE</c> or clustered-key columns — the
+    /// clustered key included when it moved;</item>
+    /// <item>a filtered index only for the images its filter admits.</item>
+    /// </list>
+    /// Probed 2026-10-01 against SQL Server 2025 over heaps and clustered
+    /// tables with unique, non-unique, filtered and <c>INCLUDE</c> indexes.
+    /// A locking read's X locks only its row. A row a session deleted left
+    /// the row-lock dictionary with its slot and is found through
+    /// <see cref="HeapTable.SupersededKeyImages"/>.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EmitRowLocks(
+        BatchContext batch,
+        HeapTable table,
+        SqlValue ridType,
+        SqlValue keyType,
+        SqlValue dbIdVal,
+        Dictionary<LockResource, List<SimulatedDbConnection>> waitersByResource,
+        List<(SimulatedDbConnection Waiter, LockResource Resource, string Key)>? keyWaits,
+        SqlValue grantStatus,
+        SqlValue waitStatus,
+        Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded)
+    {
+        // A row of a clustered table is its clustered key, which is what real
+        // locks and reports as KEY; only a heap's row is a RID.
+        var rowGroup = KeyLockGroup.RowGroupOf(table);
+        var rowType = rowGroup is null ? ridType : keyType;
+        var rows = new List<((int PageIndex, int SlotIndex) Address, LockResource Lock)>();
+        foreach (var kv in table.RowLocks)
+            rows.Add((kv.Key, kv.Value));
+        if (!table.SupersededKeyImages.IsEmptyLockFree())
+        {
+            HashSet<LockResource>? seen = null;
+            foreach (var (_, images) in table.SupersededKeyImages)
+            {
+                foreach (var (address, (_, resource)) in images)
+                {
+                    if (!(table.RowLocks.TryGetValue(address, out var live) && ReferenceEquals(live, resource))
+                        && (seen ??= new(ReferenceEqualityComparer.Instance)).Add(resource))
+                    {
+                        rows.Add((address, resource));
+                    }
+                }
+            }
+        }
+
+        foreach (var (address, resource) in rows)
+        {
+            var holders = resource.Holders.ToArray();
+            if (holders.Length == 0 && !waitersByResource.ContainsKey(resource))
+                continue;
+            var live = table.Heap.ReadLiveRow(address.PageIndex, address.SlotIndex);
+            var description = rowGroup is not null && (live ?? PreImageOf(table, address, holders)) is { } image
+                ? DescribeImageKey(table, rowGroup, image)
+                : $"{address.PageIndex}:{address.SlotIndex}";
+            foreach (var row in EmitRowsForResource(rowType, dbIdVal, description, table.ObjectId, resource, waitersByResource, grantStatus, waitStatus, folded))
+                yield return row;
+            foreach (var hold in holders)
+            {
+                if (hold.Mode != LockMode.Exclusive)
+                    continue;
+                var spid = SqlValue.FromInt32(hold.Owner.Spid);
+                foreach (var key in IndexKeysWritten(batch, table, rowGroup, address, resource, hold.Owner, live))
+                {
+                    yield return
+                    [
+                        keyType,
+                        dbIdVal,
+                        SqlValue.FromNVarchar(key),
+                        SqlValue.FromInt64(table.ObjectId),
+                        SqlValue.FromNVarchar(ModeAbbreviation(LockMode.Exclusive)),
+                        grantStatus,
+                        spid,
+                    ];
+                }
+            }
+        }
+
+        if (keyWaits is null)
+            yield break;
+        foreach (var (waiter, resource, key) in keyWaits)
+        {
+            if (!ReferenceEquals(resource.OwningTable, table) || waiter.WaitingForMode is not { } waitMode)
+                continue;
+            yield return
+            [
+                keyType,
+                dbIdVal,
+                SqlValue.FromNVarchar(key),
+                SqlValue.FromInt64(table.ObjectId),
+                SqlValue.FromNVarchar(ModeAbbreviation(waitMode)),
+                waitStatus,
+                SqlValue.FromInt32(waiter.Spid),
+            ];
+        }
+    }
+
+    // The image a holder of the row's lock superseded, for a row whose slot no
+    // longer holds a live one.
+    private static byte[]? PreImageOf(HeapTable table, (int PageIndex, int SlotIndex) address, LockResource.Hold[] holders)
+    {
+        foreach (var hold in holders)
+        {
+            if (table.SupersededKeyImages.TryGetValue(hold.Owner, out var images) && images.TryGetValue(address, out var entry))
+                return entry.Image;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The index keys <paramref name="owner"/>'s write of the row at
+    /// <paramref name="address"/> locks beside the row itself, described as
+    /// <see cref="KeyLockGroup.Describe"/> describes an anchor (see
+    /// <see cref="EmitRowLocks"/>). A key the session holds a key lock on
+    /// already is reported by that lock's own row.
+    /// </summary>
+    private static List<string> IndexKeysWritten(
+        BatchContext batch, HeapTable table, KeyLockGroup? rowGroup, (int PageIndex, int SlotIndex) address, LockResource resource, SessionToken owner, byte[]? live)
+    {
+        var keys = new List<string>();
+        var pre = table.SupersededKeyImages.TryGetValue(owner, out var images) && images.TryGetValue(address, out var entry) ? entry.Image : null;
+        var inserted = ReferenceEquals(resource.InsertedBy, owner);
+        if (pre is null && !inserted)
+            return keys;
+
+        // A moved clustered key leaves its old key locked beside the new one,
+        // which the row lock itself reports.
+        if (rowGroup is not null && pre is not null && live is not null
+            && DescribeImageKey(table, rowGroup, pre) is var oldKey && oldKey != DescribeImageKey(table, rowGroup, live))
+        {
+            AddKey(rowGroup, pre, oldKey, filter: null);
+        }
+
+        foreach (var constraint in table.KeyConstraints)
+        {
+            if (!constraint.IsDisabled && !constraint.IsClustered)
+                AddIndexKeys(constraint, filter: null);
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (!index.IsDisabled && !index.IsClustered)
+                AddIndexKeys(index, index.Filter);
+        }
+        return keys;
+
+        void AddIndexKeys(object indexOwner, Parser.BooleanExpression? filter)
+        {
+            if (KeyLockGroup.For(table, indexOwner) is not { } group)
+                return;
+            var changed = pre is not null && live is not null && group.RowChanges(pre, live);
+            if (live is not null && (inserted || changed))
+                AddKey(group, live, DescribeImageKey(table, group, live), filter);
+            if (pre is not null && (live is null || changed))
+                AddKey(group, pre, DescribeImageKey(table, group, pre), filter);
+        }
+
+        void AddKey(KeyLockGroup group, byte[] image, string description, Parser.BooleanExpression? filter)
+        {
+            if (filter is not null && Simulation.EvaluateIndexFilter(filter, table, Simulation.DecodeFullRow(table, image), batch) != true)
+                return;
+            if (group.TryReadKey(image, out var anchorKey) && group.Find(anchorKey) is { } anchor)
+            {
+                foreach (var hold in anchor.Holders.ToArray())
+                {
+                    if (ReferenceEquals(hold.Owner, owner))
+                        return;
+                }
+            }
+            if (!keys.Contains(description))
+                keys.Add(description);
+        }
+    }
+
+    // An image's key tuple in group, NULL components included, as an anchor
+    // on it is described.
+    private static string DescribeImageKey(HeapTable table, KeyLockGroup group, byte[] image)
+    {
+        var components = new SqlValue[group.Ordinals.Length];
+        for (var i = 0; i < components.Length; i++)
+            components[i] = RowDecoder.DecodeColumn(table.StoredColumns, image, group.Ordinals[i], table.Heap);
+        return KeyLockGroup.Describe(new Parser.SqlValueKey(components));
     }
 
     private static IEnumerable<SqlValue[]> EmitRowsForResource(
@@ -229,10 +439,13 @@ internal static class LockDmvs
             yield break;
         var descVal = SqlValue.FromNVarchar(description);
         var entityVal = SqlValue.FromInt64(entityId);
-        // GRANT rows from current holders.
+        // GRANT rows from current holders. A U its holder has since taken X
+        // over is real's lock converted, reported as the X alone.
         foreach (var hold in resource.Holders)
         {
             var mode = hold.Mode;
+            if (mode == LockMode.Update && HoldsExclusive(resource, hold.Owner))
+                continue;
             if (folded is not null && folded.TryGetValue((resource, hold.Owner, mode), out var reported))
             {
                 if (reported is not { } shown)
@@ -269,6 +482,30 @@ internal static class LockDmvs
                 };
             }
         }
+    }
+
+    // Real's object lock is one resource; the simulator's two meet in a
+    // statement redefining the table (BatchContext.AcquireTableRedefinitionLock),
+    // whose Sch-M then shows once, on the data lock that outlives the statement.
+    private static Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? SchemaLocksBesideDataLock(HeapTable table)
+    {
+        Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded = null;
+        foreach (var hold in table.TableDataLock.Holders.ToArray())
+        {
+            if (hold.Mode == LockMode.SchemaModification)
+                (folded ??= [])[(table.SchemaLock, hold.Owner, LockMode.SchemaModification)] = null;
+        }
+        return folded;
+    }
+
+    private static bool HoldsExclusive(LockResource resource, SessionToken owner)
+    {
+        foreach (var hold in resource.Holders)
+        {
+            if (hold.Mode == LockMode.Exclusive && ReferenceEquals(hold.Owner, owner))
+                return true;
+        }
+        return false;
     }
 
     /// <summary>

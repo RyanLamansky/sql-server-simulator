@@ -198,9 +198,9 @@ internal static class VersionStore
     /// <see cref="RowVersionChain.IsDeletedLive"/>.</item>
     /// </list>
     /// </summary>
-    internal static void FinalizePendingEntries(List<PendingVersionEntry> entries, Simulation simulation)
+    internal static void FinalizePendingEntries(List<PendingVersionEntry> entries, Simulation simulation, List<HeapTable>? definitionChanges = null)
     {
-        if (entries.Count == 0)
+        if (entries.Count == 0 && definitionChanges is null)
             return;
         // One commit id for the whole transaction, whatever mix of databases it
         // wrote to: the counter is instance-wide, so a cross-database write
@@ -215,9 +215,46 @@ internal static class VersionStore
                 lock (entry.Table.RowVersionsGate)
                     Finalize(entry, commitXid);
             }
+            if (definitionChanges is not null)
+            {
+                foreach (var table in definitionChanges)
+                    Volatile.Write(ref table.DefinitionXid, commitXid);
+            }
             simulation.PublishTransactionCommitId(commitXid);
         }
         entries.Clear();
+    }
+
+    /// <summary>
+    /// Records that the statement running is creating or redefining
+    /// <paramref name="table"/>. Metadata isn't versioned, so a SNAPSHOT
+    /// transaction whose snapshot predates the change refuses to reach the
+    /// table once it commits — reading or writing, and through a view too —
+    /// with Msg 3961, which dooms the transaction (probed 2026-10-01 against
+    /// SQL Server 2025: every <c>ALTER TABLE</c> form, <c>CREATE</c> /
+    /// <c>DROP</c> / <c>ALTER INDEX</c>, a DML trigger's DDL, a column
+    /// rename, <c>TRUNCATE</c> and both sides of a <c>SWITCH</c>, and a table
+    /// dropped and created again; not <c>CREATE</c> / <c>UPDATE
+    /// STATISTICS</c>, a <c>GRANT</c>, a rolled-back change, nor a snapshot
+    /// taken after the change committed). Inside a transaction the stamp
+    /// waits for its commit; otherwise the statement draws one now.
+    /// </summary>
+    internal static void NoteDefinitionChange(BatchContext batch, HeapTable table)
+    {
+        if (!Simulation.IsLockableTable(table) || !batch.DatabaseFor(table).AllowSnapshotIsolation)
+            return;
+        if (batch.Connection.CurrentTransaction is { } transaction)
+        {
+            (transaction.DefinitionChanges ??= []).Add(table);
+            return;
+        }
+        var simulation = batch.Connection.Simulation;
+        lock (simulation.CommitGate)
+        {
+            var commitXid = simulation.NextTransactionCommitId;
+            Volatile.Write(ref table.DefinitionXid, commitXid);
+            simulation.PublishTransactionCommitId(commitXid);
+        }
     }
 
     private static void Finalize(PendingVersionEntry entry, long commitXid)

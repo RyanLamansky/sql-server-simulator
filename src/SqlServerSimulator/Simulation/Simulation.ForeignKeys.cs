@@ -295,10 +295,14 @@ partial class Simulation
     {
         var childTable = fk.ChildTable;
         var undoLog = childTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
+        CheckCascadeSnapshotConflicts(context.Batch, childTable, matchingChildRows);
         foreach (var (pageIndex, slotIndex, full) in matchingChildRows)
         {
-            childTable.ChangeTracking?.RecordRow(context.Batch, childTable, full, ChangeTrackingOperation.Delete);
-            childTable.Heap.DeleteAt(pageIndex, slotIndex, undoLog, ReclaimSuperseded(childTable, context));
+            // A system-versioned child keeps the deleted row in its history,
+            // as a DELETE of it does (probed 2026-10-01 against SQL Server 2025).
+            if (childTable.SystemVersioning is { } history && childTable.PeriodColumns is { } period)
+                WriteHistoryRow(childTable, history, period, full, context, undoLog);
+            DeleteRowAt(context, childTable, pageIndex, slotIndex, full, undoLog);
         }
         // Recurse: the just-deleted child rows may themselves be parents of
         // further FKs pointing at this child table.
@@ -311,6 +315,20 @@ partial class Simulation
         // recursion above, and the parent's own AFTER trigger fires once this
         // whole cascade returns — real's order, probe-confirmed.
         FireCascadeTriggers(childTable, TriggerActions.Delete, insertedRows: null, deletedRows: oldRows, updatedColumnOrdinals: null, context);
+    }
+
+    /// <summary>
+    /// A SNAPSHOT transaction's cascade meeting a child row another
+    /// transaction changed since its snapshot is an update conflict like any
+    /// write of that row: Msg 3960 naming the child table (probed 2026-10-01
+    /// against SQL Server 2025), checked before the cascade writes anything.
+    /// </summary>
+    private static void CheckCascadeSnapshotConflicts(BatchContext batch, HeapTable childTable, List<(int PageIndex, int SlotIndex, SqlValue[] FullValues)> rows)
+    {
+        if (batch.Connection.SessionIsolationLevel != System.Data.IsolationLevel.Snapshot)
+            return;
+        foreach (var (pageIndex, slotIndex, _) in rows)
+            VersionStore.CheckSnapshotUpdateConflict(batch, childTable, (pageIndex, slotIndex));
     }
 
     /// <summary>
@@ -434,6 +452,11 @@ partial class Simulation
         var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(childTable);
         var trackedColumns = tracking?.UpdatedColumns(childTable, keyOrdinals, fk.ChildColumnOrdinals);
         List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
+        if (context.Batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Snapshot)
+        {
+            foreach (var (pageIndex, slotIndex, _, _) in matching)
+                VersionStore.CheckSnapshotUpdateConflict(context.Batch, childTable, (pageIndex, slotIndex));
+        }
         foreach (var (pageIndex, slotIndex, full, parentNew) in matching)
         {
             var oldClone = (SqlValue[])full.Clone();
@@ -452,16 +475,17 @@ partial class Simulation
             // The FK columns just moved, so anything computed from them has to
             // move with them — a PERSISTED computed column otherwise keeps the
             // pre-cascade value on disk (probe-confirmed: real recomputes).
+            // A system-versioned child starts the rewritten row's period now
+            // and keeps the old one in its history, as an UPDATE of it does.
+            if (childTable.SystemVersioning is { } history && childTable.PeriodColumns is { } period)
+            {
+                newRow[period.StartOrdinal] = SqlValue.FromDateTime2(childTable.Columns[period.StartOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
+                WriteHistoryRow(childTable, history, period, oldClone, context, undoLog);
+            }
             EvaluateComputedColumns(childTable, newRow, context.Batch);
             var rewritten = RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap);
-            if (IsLockableTable(childTable))
-            {
-                context.Batch.AcquireRowLockTxScoped(childTable, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
-                context.Batch.NoteSupersededRow(childTable, pageIndex, slotIndex);
-                context.Batch.ProbeKeyLocksForUpdate(childTable, pageIndex, slotIndex, rewritten);
-            }
             tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldClone, newRow, trackedColumns, ref keyMoves);
-            childTable.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(childTable, context));
+            RewriteRowAt(context, childTable, pageIndex, slotIndex, rewritten, undoLog);
             ClusteredScan.NoteKeyAssignment(childTable, fk.ChildColumnOrdinals, (pageIndex, slotIndex), undoLog);
             newPairs.Add((oldClone, newRow));
         }
@@ -513,6 +537,7 @@ partial class Simulation
         var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(childTable);
         var trackedColumns = tracking?.UpdatedColumns(childTable, keyOrdinals, fk.ChildColumnOrdinals);
         List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
+        CheckCascadeSnapshotConflicts(context.Batch, childTable, matchingChildRows);
         foreach (var (pageIndex, slotIndex, full) in matchingChildRows)
         {
             var oldClone = (SqlValue[])full.Clone();
@@ -524,16 +549,17 @@ partial class Simulation
                     ? EvaluateColumnDefault(childTable.Columns[ord], context)
                     : SqlValue.Null(childTable.Columns[ord].Type);
             }
+            // A system-versioned child starts the rewritten row's period now
+            // and keeps the old one in its history, as an UPDATE of it does.
+            if (childTable.SystemVersioning is { } history && childTable.PeriodColumns is { } period)
+            {
+                newRow[period.StartOrdinal] = SqlValue.FromDateTime2(childTable.Columns[period.StartOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
+                WriteHistoryRow(childTable, history, period, oldClone, context, undoLog);
+            }
             EvaluateComputedColumns(childTable, newRow, context.Batch);
             var rewritten = RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap);
-            if (IsLockableTable(childTable))
-            {
-                context.Batch.AcquireRowLockTxScoped(childTable, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);
-                context.Batch.NoteSupersededRow(childTable, pageIndex, slotIndex);
-                context.Batch.ProbeKeyLocksForUpdate(childTable, pageIndex, slotIndex, rewritten);
-            }
             tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldClone, newRow, trackedColumns, ref keyMoves);
-            childTable.Heap.UpdateAt(pageIndex, slotIndex, rewritten, undoLog, ReclaimSuperseded(childTable, context));
+            RewriteRowAt(context, childTable, pageIndex, slotIndex, rewritten, undoLog);
             ClusteredScan.NoteKeyAssignment(childTable, fk.ChildColumnOrdinals, (pageIndex, slotIndex), undoLog);
             newPairs.Add((oldClone, newRow));
         }

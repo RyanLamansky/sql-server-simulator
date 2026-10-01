@@ -290,6 +290,13 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal readonly List<PendingVersionEntry> PendingVersionEntries = [];
 
     /// <summary>
+    /// The tables this transaction created or redefined, which its commit
+    /// stamps (<see cref="HeapTable.DefinitionXid"/>) so an older snapshot
+    /// can't reach them; a rollback forgets them. Null until one is.
+    /// </summary>
+    internal List<HeapTable>? DefinitionChanges;
+
+    /// <summary>
     /// The cursors opened while this transaction was the session's, which
     /// <c>SET CURSOR_CLOSE_ON_COMMIT ON</c> closes as it ends by commit or
     /// rollback; null until one opens.
@@ -469,7 +476,8 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal void EndCommit()
     {
         var db = this.Owner.CurrentDatabase;
-        Storage.VersionStore.FinalizePendingEntries(this.PendingVersionEntries, this.simulation);
+        Storage.VersionStore.FinalizePendingEntries(this.PendingVersionEntries, this.simulation, this.DefinitionChanges);
+        this.DefinitionChanges = null;
         // Commit() (vs the former discard-only Clear) reclaims the off-row LOB
         // chains superseded by this tx's committed UPDATE/DELETEs in the
         // unversioned case; under SNAPSHOT/RCSI those chains are pinned by the
@@ -500,6 +508,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         // reads past the rolled-back rows to the versions they superseded.
         this.UndoLog.Rollback();
         Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
+        this.DefinitionChanges = null;
         this.TranCount = 0;
         this.CloseCursorsOnEnd();
         ReleaseAllLocks();

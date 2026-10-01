@@ -1456,7 +1456,7 @@ internal static partial class BuiltInResources
             if (!isSelf && session.CurrentExecutingThreadId is null && lockWait is null)
                 continue;
 
-            var waitType = lockWait is var (_, waitMode) ? $"LCK_M_{LockDmvs.ModeAbbreviation(waitMode).Replace("-", "_", StringComparison.Ordinal)}"
+            var waitType = lockWait is var (_, waitMode) ? LockDmvs.WaitType(waitMode)
                 : inWaitFor ? "WAITFOR"
                 : null;
             var blocker = lockWait is var (waitResource, _) ? LockDmvs.FindFirstBlocker(waitResource, connection) ?? 0 : 0;

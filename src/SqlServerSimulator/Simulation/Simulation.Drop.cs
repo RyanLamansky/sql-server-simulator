@@ -417,7 +417,11 @@ partial class Simulation
         if (!schema.Triggers.TryRemove(name.Leaf, out var removed) && !ifExists)
             throw SimulatedSqlException.CannotDropTriggerDoesNotExist(name.ToString());
         if (removed is not null)
+        {
             RecordSlotUndo(context, schema.Triggers, name.Leaf, removed);
+            if (existing.Parent is HeapTable parentTable)
+                VersionStore.NoteDefinitionChange(context.Batch, parentTable);
+        }
         RecordDdlEvent(
             context, "DROP_TRIGGER", schema.Name, name.Leaf, "TRIGGER",
             existing.Parent.Name,

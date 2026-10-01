@@ -1718,7 +1718,7 @@ partial class Simulation
             {
                 throw SimulatedSqlException.AlterTablePermissionDenied(tableName.Leaf);
             }
-            context.Batch.AcquireStatementLock(alterTarget.SchemaLock, LockMode.SchemaModification);
+            context.Batch.AcquireTableRedefinitionLock(alterTarget);
             RecordTableDdlUndo(context, alterTarget);
         }
 

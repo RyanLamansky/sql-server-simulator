@@ -348,6 +348,8 @@ partial class Simulation
             trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         triggerSchema.Triggers[triggerName.Leaf] = trigger;
         RecordSlotUndo(context, triggerSchema.Triggers, triggerName.Leaf, existed ? existing : null);
+        if (parent is HeapTable redefined)
+            VersionStore.NoteDefinitionChange(context.Batch, redefined);
         RecordDdlEvent(
             context,
             existed ? "ALTER_TRIGGER" : "CREATE_TRIGGER",

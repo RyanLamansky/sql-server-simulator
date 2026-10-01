@@ -1827,6 +1827,9 @@ partial class Simulation
         var hasNotMatchedBySource = whenClauses.Any(c => c.Kind == WhenClauseKind.NotMatchedBySource);
         var readsTarget = hasNotMatchedBySource
             || !(onPredicate.IsNeverTrue || (ConstantFolding.TryFoldPredicate(onPredicate, context, out var onConstant) && onConstant != true));
+        // The heap's generation before the match reads any target row: a row
+        // held with the heap unwritten since is the row as it was read.
+        var walkGeneration = Volatile.Read(ref destinationTable.Heap.MutationGeneration);
         var targetSeek = readsTarget && sourceView is null
             ? Selection.TryPrepareMergeTargetSeek(destinationTable, targetAlias, onPredicate, context.Batch)
             : null;
@@ -1868,17 +1871,31 @@ partial class Simulation
             for (var si = 0; si < sourceRows.Count; si++)
             {
                 var sourceValues = sourceRows[si];
-                foreach (var (page, slot, rowBytes) in targetSeek(name => ResolveCombined(null, sourceValues, name)))
+                foreach (var (page, slot, candidateBytes) in targetSeek(name => ResolveCombined(null, sourceValues, name)))
                 {
-                    var candidateValues = DecodeFullRow(destinationTable, rowBytes);
-                    EvaluateComputedColumns(destinationTable, candidateValues, context.Batch);
-                    if (!OnMatches(new RuntimeContext(name => ResolveCombined(candidateValues, sourceValues, name), context.Batch)))
-                        continue;
+                    // Matched under the U a writer reads its target with (see
+                    // BatchContext.AwaitTargetRow), so a row another session
+                    // is writing matches as that write leaves it.
+                    var rowBytes = candidateBytes;
+                    var hold = context.Batch.AwaitTargetRow(destinationTable, page, slot, ref rowBytes);
+                    while (hold != TargetRowHold.Gone)
+                    {
+                        var candidateValues = DecodeFullRow(destinationTable, rowBytes);
+                        EvaluateComputedColumns(destinationTable, candidateValues, context.Batch);
+                        if (!OnMatches(new RuntimeContext(name => ResolveCombined(candidateValues, sourceValues, name), context.Batch)))
+                        {
+                            context.Batch.ReleaseTargetRow(destinationTable, page, slot, hold);
+                            break;
+                        }
+                        if (!context.Batch.HoldQualifyingTargetRow(destinationTable, page, slot, ref hold, ref rowBytes, walkGeneration))
+                            continue;
 
-                    sourceMatched[si] = true;
-                    if (!matchedByTarget.TryGetValue((page, slot), out var sources))
-                        matchedByTarget[(page, slot)] = sources = [];
-                    sources.Add(si);
+                        sourceMatched[si] = true;
+                        if (!matchedByTarget.TryGetValue((page, slot), out var sources))
+                            matchedByTarget[(page, slot)] = sources = [];
+                        sources.Add(si);
+                        break;
+                    }
                 }
             }
 
@@ -1888,13 +1905,26 @@ partial class Simulation
                 // their precomputed source list, unmatched rows fall to WHEN NOT
                 // MATCHED BY SOURCE. Heap-order interleaving matches the scan path's
                 // discovery order, but with no per-target source loop.
-                foreach (var (pageIndex, slotIndex, rowBytes) in ClusteredScan.RowsWithAddress(destinationTable, context.Connection.StatementIo))
+                foreach (var (pageIndex, slotIndex, scannedBytes) in ClusteredScan.RowsWithAddress(destinationTable, context.Connection.StatementIo))
                 {
                     context.Batch.PollCancellation();
+                    // A matched row holds its X already; an unmatched one takes
+                    // it for its NOT MATCHED BY SOURCE action, read again when
+                    // another session changed it first.
+                    var rowBytes = scannedBytes;
+                    var matched = matchedByTarget.TryGetValue((pageIndex, slotIndex), out var matchedSources);
+                    if (!matched)
+                    {
+                        var hold = context.Batch.AwaitTargetRow(destinationTable, pageIndex, slotIndex, ref rowBytes);
+                        if (hold != TargetRowHold.Gone)
+                            _ = context.Batch.HoldQualifyingTargetRow(destinationTable, pageIndex, slotIndex, ref hold, ref rowBytes, walkGeneration);
+                        if (hold == TargetRowHold.Gone)
+                            continue;
+                    }
                     var targetValues = DecodeFullRow(destinationTable, rowBytes);
                     EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
-                    Step(matchedByTarget.TryGetValue((pageIndex, slotIndex), out var matchedSources)
-                        ? new MergeStep(matchedSources[0], pageIndex, slotIndex, targetValues, matchedSources)
+                    Step(matched
+                        ? new MergeStep(matchedSources![0], pageIndex, slotIndex, targetValues, matchedSources)
                         : new MergeStep(sourceRows.Count, pageIndex, slotIndex, targetValues, null));
                 }
             }
@@ -1931,9 +1961,22 @@ partial class Simulation
             // source row may fire before a target row asks.
             MergeSourceHash? sourceHash = null;
 
-            foreach (var (pageIndex, slotIndex, rowBytes) in ClusteredScan.RowsWithAddress(destinationTable, context.Connection.StatementIo))
+            foreach (var (pageIndex, slotIndex, scannedBytes) in ClusteredScan.RowsWithAddress(destinationTable, context.Connection.StatementIo))
             {
                 context.Batch.PollCancellation();
+                // Matched under the U a writer reads its target with (see
+                // BatchContext.AwaitTargetRow); a row an action may write takes
+                // its X, and is matched again when it changed first.
+                var rowBytes = scannedBytes;
+                var hold = context.Batch.AwaitTargetRow(destinationTable, pageIndex, slotIndex, ref rowBytes);
+                while (hold != TargetRowHold.Gone && !MatchTargetRow(pageIndex, slotIndex, ref hold, ref rowBytes))
+                    context.Batch.PollCancellation();
+            }
+
+            // Matches one target row against the source and queues its step;
+            // false when the row changed before it could be held, to match again.
+            bool MatchTargetRow(int pageIndex, int slotIndex, ref TargetRowHold hold, ref byte[] rowBytes)
+            {
                 var targetValues = DecodeFullRow(destinationTable, rowBytes);
                 EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
 
@@ -1942,11 +1985,17 @@ partial class Simulation
                 // BY-SOURCE enumeration. Mirrors UPDATE / DELETE through view
                 // semantics.
                 if (sourceView?.VisibilityCheck is { } vis && !vis(targetValues, context.Batch))
-                    continue;
+                {
+                    context.Batch.ReleaseTargetRow(destinationTable, pageIndex, slotIndex, hold);
+                    return true;
+                }
                 if (viewRows is not null)
                 {
                     if (!viewRows.TryGetValue((pageIndex, slotIndex), out var viewRow))
-                        continue;
+                    {
+                        context.Batch.ReleaseTargetRow(destinationTable, pageIndex, slotIndex, hold);
+                        return true;
+                    }
                     viewRowOf![targetValues] = viewRow;
                 }
 
@@ -1970,7 +2019,6 @@ partial class Simulation
                             continue;
                         }
                         matchedSources.Add(si);
-                        sourceMatched[si] = true;
                     }
                 }
                 else
@@ -1978,16 +2026,25 @@ partial class Simulation
                     for (var si = 0; si < sourceRows.Count; si++)
                     {
                         if (OnMatches(new RuntimeContext(name => ResolveCombined(targetValues, sourceRows[si], name), context.Batch)))
-                        {
                             matchedSources.Add(si);
-                            sourceMatched[si] = true;
-                        }
                     }
                 }
 
+                // A row no action can reach is let go; any other takes its X
+                // before it counts as matched.
+                if (matchedSources.Count == 0 && !hasNotMatchedBySource)
+                {
+                    context.Batch.ReleaseTargetRow(destinationTable, pageIndex, slotIndex, hold);
+                    return true;
+                }
+                if (!context.Batch.HoldQualifyingTargetRow(destinationTable, pageIndex, slotIndex, ref hold, ref rowBytes, walkGeneration))
+                    return false;
+                foreach (var si in matchedSources)
+                    sourceMatched[si] = true;
                 Step(matchedSources.Count > 0
                     ? new MergeStep(matchedSources[0], pageIndex, slotIndex, targetValues, matchedSources)
                     : new MergeStep(sourceRows.Count, pageIndex, slotIndex, targetValues, null));
+                return true;
             }
         }
 

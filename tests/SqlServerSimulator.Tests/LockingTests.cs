@@ -659,11 +659,11 @@ public sealed class LockingTests
     [TestMethod]
     public async Task UpdateOfDifferentRows_DoesNotBlock_AtRowGranularity()
     {
-        // Phase 1b's row-X grants per RID: two writers on different rows
-        // of the same table proceed in parallel (both take table-IX, then
-        // disjoint row-X on disjoint RIDs).
+        // Two writers seeking different rows of the same table proceed in
+        // parallel (both take table-IX, then disjoint row-X). A scan would
+        // meet the other's row and wait — see the heap-scan test below.
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (id int, v int); insert t values (1, 10), (2, 20)");
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int); insert t values (1, 10), (2, 20)");
         using var connA = sim.CreateOpenConnection();
         using var connB = sim.CreateOpenConnection();
 

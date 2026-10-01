@@ -1217,6 +1217,25 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// The Sch-M a statement that redefines <paramref name="table"/> or
+    /// rewrites its rows wholesale — <c>ALTER TABLE</c>, <c>TRUNCATE</c>,
+    /// <c>SWITCH</c> — takes: on its schema lock for the statement, and on its
+    /// data lock to the transaction's end, which waits out every transaction
+    /// still holding the table's intent lock and holds new readers and writers
+    /// off until this one settles, as real's object Sch-M does (probed
+    /// 2026-10-01 against SQL Server 2025: a <c>TRUNCATE</c> behind an open
+    /// insert waits <c>LCK_M_SCH_M</c> on the object until it commits).
+    /// Without the second, the statement swapped the rows out from under an
+    /// open writer, whose rollback then wrote into pages that were gone.
+    /// </summary>
+    public void AcquireTableRedefinitionLock(HeapTable table)
+    {
+        this.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+        if (Simulation.IsLockableTable(table))
+            this.AcquireTransactionLock(table.TableDataLock, LockMode.SchemaModification);
+    }
+
+    /// <summary>
     /// Acquires <paramref name="mode"/> on <paramref name="resource"/> for
     /// the current connection and records the acquisition against the
     /// active <see cref="SimulatedDbTransaction"/>, so the lock releases at
@@ -1353,6 +1372,16 @@ internal sealed class BatchContext
         if (!isWrite && (hints.NoLock || isolation == System.Data.IsolationLevel.ReadUncommitted))
             return DataLockPlan.NoLock;
 
+        // A snapshot older than the table's definition can't reach it, since
+        // metadata isn't versioned (see VersionStore.NoteDefinitionChange); a
+        // NOLOCK read reads no snapshot and goes ahead (probed 2026-10-01).
+        if (isolation == System.Data.IsolationLevel.Snapshot
+            && connection.CurrentTransaction is { SnapshotXid: { } snapshotXid }
+            && Volatile.Read(ref table.DefinitionXid) > snapshotXid)
+        {
+            throw SimulatedSqlException.SnapshotTableDefinitionChanged(this.DatabaseFor(table).Name);
+        }
+
         // TABLOCKX: table-X tx-scoped; no per-row work.
         if (hints.TabLockX)
         {
@@ -1479,10 +1508,14 @@ internal sealed class BatchContext
     /// before taking the latch. No session can hold a lock on an address
     /// that didn't exist, so the acquisition never waits.
     /// </summary>
-    public void AcquireInsertedRowLock(HeapTable table, int pageIndex, int slotIndex) =>
+    public void AcquireInsertedRowLock(HeapTable table, int pageIndex, int slotIndex)
+    {
         this.AcquireRowLock(table, pageIndex, slotIndex, LockMode.Exclusive, underLatch: true);
+        if (table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource))
+            resource.InsertedBy = this.Connection.Session;
+    }
 
-    private void AcquireRowLock(HeapTable table, int pageIndex, int slotIndex, LockMode mode, bool underLatch = false)
+    private void AcquireRowLock(HeapTable table, int pageIndex, int slotIndex, LockMode mode, bool underLatch = false, bool countForEscalation = true)
     {
         if (this.EscalatedModeOf(table) is { } escalated && (escalated == LockMode.Exclusive || mode == LockMode.Shared))
             return;
@@ -1493,7 +1526,124 @@ internal sealed class BatchContext
             activeTx.HeldLocks.Add((resource, mode));
         else
             this.StatementSchemaLocks.Add((resource, mode));
-        this.CountLocksForEscalation(table, 1, exclusive: mode != LockMode.Shared, rowLock: true);
+        if (countForEscalation)
+            this.CountLocksForEscalation(table, 1, exclusive: mode != LockMode.Shared, rowLock: true);
+    }
+
+    /// <summary>
+    /// Readies a row a writer's target read is about to judge — an UPDATE's,
+    /// a DELETE's or a MERGE's. Real reads its target under U, so a row
+    /// another session is writing is waited out in U and judged as that write
+    /// left it (probed 2026-10-01 against SQL Server 2025: a MERGE, seeking or
+    /// scanning, waits <c>LCK_M_U</c> on the writer's key, and an UPDATE whose
+    /// row was being rewritten by a transaction that then rolled back writes
+    /// from the restored row). Here the wait happens only when the row holds
+    /// a lock U conflicts with; otherwise nothing is taken yet, and the lock
+    /// a qualifying row needs comes from <see cref="HoldQualifyingTargetRow"/>.
+    /// <paramref name="rowBytes"/> becomes the row as it stands after a wait.
+    /// </summary>
+    public TargetRowHold AwaitTargetRow(HeapTable table, int pageIndex, int slotIndex, ref byte[] rowBytes)
+    {
+        if ((Volatile.Read(ref table.ActiveDataWriters) == 0 && Volatile.Read(ref table.ActiveUpdateLocks) == 0)
+            || !table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource)
+            || !Simulation.IsLockableTable(table)
+            || !this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(resource, LockMode.Update, this.Connection.Session))
+        {
+            return TargetRowHold.None;
+        }
+        this.AcquireRowLock(table, pageIndex, slotIndex, LockMode.Update, countForEscalation: false);
+        if (table.Heap.ReadLiveRow(pageIndex, slotIndex) is not { } current)
+        {
+            this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, LockMode.Update);
+            return TargetRowHold.Gone;
+        }
+        rowBytes = current;
+        return TargetRowHold.Update;
+    }
+
+    /// <summary>
+    /// The key lock an INSERT's check of a nonclustered PRIMARY KEY / UNIQUE
+    /// constraint or unique index with <c>IGNORE_DUP_KEY</c> takes: real reads
+    /// that index for the key under a SERIALIZABLE U — U on the key when a row
+    /// carries it, <c>RangeS-U</c> on the next key past it when none does —
+    /// and keeps it to the transaction's end, the insert then splitting the
+    /// range so its own key takes <c>RangeX-X</c> (probed 2026-10-01 against
+    /// SQL Server 2025; a clustered key with the option takes none). So a
+    /// second writer of the key waits in U, and one writing another key into
+    /// the same gap waits in <c>RangeS-U</c>, until the first settles.
+    /// </summary>
+    public void LockIgnoreDupKeyProbe(HeapTable table, object keyOwner, SqlValueKey probe)
+    {
+        if (this.IsSkipping
+            || !Simulation.IsLockableTable(table)
+            || this.EscalatedModeOf(table) == LockMode.Exclusive
+            || KeyLockGroup.For(table, keyOwner) is not { } group)
+        {
+            return;
+        }
+        var heap = table.Heap;
+        var cache = HeapSeekCache.For(heap);
+        var (resource, mode) = cache.AnyRowMatches(heap, table.StoredColumns, group.Ordinals, group.Commons, probe)
+            ? (group.GetOrCreate(probe), LockMode.Update)
+            : (group.GetOrCreate(cache.NextKeyAbove(heap, table.StoredColumns, heap, group.Ordinals, group.Commons, probe)), LockMode.RangeSharedUpdate);
+        var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
+        if (manager.IsHeldBy(resource, mode, connection.Session))
+            return;
+        manager.Acquire(resource, mode, connection.Session, this.LockTimeoutFor(table));
+        if (connection.CurrentTransaction is { } tx)
+            tx.HeldLocks.Add((resource, mode));
+        else
+            this.StatementSchemaLocks.Add((resource, mode));
+    }
+
+    /// <summary>Gives back what <paramref name="hold"/> took on a row the statement then turned away.</summary>
+    public void ReleaseTargetRow(HeapTable table, int pageIndex, int slotIndex, TargetRowHold hold)
+    {
+        if ((hold & TargetRowHold.Exclusive) != 0)
+            this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, LockMode.Exclusive);
+        if ((hold & TargetRowHold.Update) != 0)
+            this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, LockMode.Update);
+    }
+
+    /// <summary>
+    /// Takes the X a target row the statement judged qualifying is written
+    /// under, as real converts its U to X writing the row (probed 2026-10-01
+    /// against SQL Server 2025: an UPDATE scanning past another session's row
+    /// already holds X on the rows before it), so no other writer changes the
+    /// row between the judgement and the write — two sessions updating one
+    /// row from its own value each see the other's write — and the write
+    /// itself takes nothing more. <paramref name="purpose"/> is the write's,
+    /// for the key-range tests. False when the row changed since
+    /// <paramref name="rowBytes"/> was read, the X having waited out the
+    /// session that changed it: <paramref name="rowBytes"/> is then the row as
+    /// it stands, to judge again, and <paramref name="hold"/> is
+    /// <see cref="TargetRowHold.Gone"/> when that write deleted it. A heap
+    /// whose <see cref="Heap.MutationGeneration"/> still reads
+    /// <paramref name="walkGeneration"/>, noted before the walk read any row,
+    /// has had no row written since — a rollback only restores an image some
+    /// write moved the generation past — so the row isn't read again.
+    /// </summary>
+    public bool HoldQualifyingTargetRow(
+        HeapTable table, int pageIndex, int slotIndex, ref TargetRowHold hold, ref byte[] rowBytes, long walkGeneration, RowLockPurpose purpose = RowLockPurpose.UpdatePreImage)
+    {
+        if ((hold & TargetRowHold.Exclusive) != 0 || !Simulation.IsLockableTable(table))
+            return true;
+        this.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, purpose);
+        hold |= TargetRowHold.Exclusive;
+        if (Volatile.Read(ref table.Heap.MutationGeneration) == walkGeneration)
+            return true;
+        var current = table.Heap.ReadLiveRow(pageIndex, slotIndex);
+        if (current is not null && current.AsSpan().SequenceEqual(rowBytes))
+            return true;
+        if (current is null)
+        {
+            this.ReleaseTargetRow(table, pageIndex, slotIndex, hold);
+            hold = TargetRowHold.Gone;
+            return false;
+        }
+        rowBytes = current;
+        return false;
     }
 
     /// <summary>
@@ -1583,8 +1733,10 @@ internal sealed class BatchContext
     /// the way real's insert of a key waits on that key's lock — in
     /// <paramref name="mode"/>, X for a uniqueness check and S for a foreign
     /// key's. Cheap when no other session has one pending on the table.
+    /// <paramref name="reportedKey"/>, when the tuple is a unique key, is
+    /// where the lock DMVs report the wait (<see cref="SessionToken.WaitingOnKey"/>).
     /// </summary>
-    public void AwaitSupersededKeyHolders(HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe, LockMode mode)
+    public void AwaitSupersededKeyHolders(HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe, LockMode mode, bool reportedKey = false)
     {
         if (table.SupersededKeyImages.IsEmptyLockFree())
             return;
@@ -1604,7 +1756,7 @@ internal sealed class BatchContext
         if (holders is not null)
         {
             foreach (var resource in holders)
-                _ = this.AwaitRowWriters(table, resource, mode);
+                _ = this.AwaitRowWriters(table, resource, mode, reportedKey ? probe : null);
         }
     }
 
@@ -1615,10 +1767,10 @@ internal sealed class BatchContext
     /// second insert of a key waits on the first's lock rather than failing
     /// at once, requesting X on it; probed 2026-10-01 against SQL Server
     /// 2025). <paramref name="mode"/> is
-    /// <see cref="AwaitSupersededKeyHolders"/>'s. True when it waited, so the
-    /// caller checks again.
+    /// <see cref="AwaitSupersededKeyHolders"/>'s, as is <paramref name="reportedKey"/>.
+    /// True when it waited, so the caller checks again.
     /// </summary>
-    public bool AwaitLiveKeyHolders(HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe, LockMode mode)
+    public bool AwaitLiveKeyHolders(HeapTable table, int[] storageOrdinals, SqlType[] commons, SqlValueKey probe, LockMode mode, bool reportedKey = false)
     {
         if (Volatile.Read(ref table.ActiveDataWriters) == 0)
             return false;
@@ -1626,7 +1778,7 @@ internal sealed class BatchContext
         foreach (var (page, slot, _) in HeapSeekCache.For(table.Heap).MatchingRows(table.Heap, table.StoredColumns, storageOrdinals, commons, probe))
         {
             if (table.RowLocks.TryGetValue((page, slot), out var resource))
-                waited |= this.AwaitRowWriters(table, resource, mode);
+                waited |= this.AwaitRowWriters(table, resource, mode, reportedKey ? probe : null);
         }
         return waited;
     }
@@ -1648,15 +1800,25 @@ internal sealed class BatchContext
     /// </summary>
     public void AwaitRowWritersOf(HeapTable table, LockResource resource) => _ = this.AwaitRowWriters(table, resource);
 
-    // True when there was someone to wait for.
-    private bool AwaitRowWriters(HeapTable table, LockResource resource, LockMode mode = LockMode.Shared)
+    // True when there was someone to wait for. A wait for a key some row
+    // carries names the key, for the lock DMVs.
+    private bool AwaitRowWriters(HeapTable table, LockResource resource, LockMode mode = LockMode.Shared, SqlValueKey? waitingOnKey = null)
     {
         var connection = this.Connection;
         var manager = connection.Simulation.LockManager;
         if (!manager.HasIncompatibleHolderOtherThan(resource, mode, connection.Session))
             return false;
-        manager.Acquire(resource, mode, connection.Session, this.LockTimeoutFor(table));
-        manager.Release(resource, mode, connection.Session);
+        var session = connection.Session;
+        session.WaitingOnKey = waitingOnKey is { } key ? KeyLockGroup.Describe(key) : null;
+        try
+        {
+            manager.Acquire(resource, mode, session, this.LockTimeoutFor(table));
+        }
+        finally
+        {
+            session.WaitingOnKey = null;
+        }
+        manager.Release(resource, mode, session);
         return true;
     }
 

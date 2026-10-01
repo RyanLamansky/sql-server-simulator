@@ -42,10 +42,13 @@ partial class Simulation
     /// <see cref="RecordDdlUndo(BatchContext, Action)"/> for a statement about to change
     /// <paramref name="table"/> in place — the <c>ALTER TABLE</c> family, index
     /// DDL, a column or index rename — capturing it whole first. A table
-    /// variable is left alone, since its changes never roll back.
+    /// variable is left alone, since its changes never roll back. The change
+    /// also keeps an older snapshot out of the table
+    /// (<see cref="VersionStore.NoteDefinitionChange"/>).
     /// </summary>
     internal static void RecordTableDdlUndo(BatchContext batch, HeapTable table)
     {
+        VersionStore.NoteDefinitionChange(batch, table);
         if (batch.Connection.CurrentTransaction is null || table.IsTableVariable)
             return;
         var snapshot = new HeapTableSnapshot(table, table.OwningDatabase ?? batch.CurrentDatabase);

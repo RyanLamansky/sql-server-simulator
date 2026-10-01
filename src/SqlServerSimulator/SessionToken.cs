@@ -89,6 +89,15 @@ internal sealed class SessionToken(int spid)
     public LockMode? WaitingForMode;
 
     /// <summary>
+    /// The key a uniqueness or foreign-key check waits on while it waits on
+    /// <see cref="WaitingOnResource"/>, the lock of the row that carries the
+    /// key: real waits on the key's own lock in that index, which is where
+    /// the lock DMVs report the wait — on a heap, and for a unique
+    /// nonclustered index, a resource other than the row's. Null otherwise.
+    /// </summary>
+    public string? WaitingOnKey;
+
+    /// <summary>
     /// <c>Environment.TickCount64</c> when the session's current wait began —
     /// a blocked lock acquisition or a <c>WAITFOR</c> — read as
     /// <c>sys.dm_exec_requests.wait_time</c>. Meaningful only while waiting.
