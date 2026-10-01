@@ -122,6 +122,58 @@ public sealed class StringLiteralWidthWireTests
     public async Task LengthDerivingFunctions_ComputeWidth(string sql, int expected)
         => AreEqual(expected, await ColumnSizeAsync(sql));
 
+    // A non-string argument types the result at its conversion width (int 12,
+    // decimal 41, the date types 40, a binary its byte length, varbinary(max)
+    // MAX), and a bare NULL as varchar(1) — probed 2026-10-01 against SQL
+    // Server 2025.
+    [TestMethod]
+    [DataRow("select upper(12) as x", 12)]
+    [DataRow("select reverse(123.450) as x", 41)]
+    [DataRow("select left(cast('2024-01-15' as date), 50) as x", 40)]
+    [DataRow("select left(cast(1 as bit), 2) as x", 1)]
+    [DataRow("select replicate(12345, 2) as x", 24)]
+    [DataRow("select replicate(0x414243, 2) as x", 6)]
+    [DataRow("select upper(cast(0x41 as varbinary(max))) as x", int.MaxValue)]
+    [DataRow("select stuff(12345, 2, 1, 9) as x", 23)]
+    [DataRow("select concat(0x4142, 'x') as x", 3)]
+    [DataRow("select left(null, 5) as x", 1)]
+    [DataRow("select upper(null) as x", 1)]
+    [DataRow("select replicate(null, 2) as x", 2)]
+    [DataRow("select soundex('Robert') as x", 5)]
+    public async Task NonStringArgument_TypesAtConversionWidth(string sql, int expected)
+        => AreEqual(expected, await ColumnSizeAsync(sql));
+
+    // A length sizes the result only when it folds to an int constant: a
+    // computed one does, a decimal, bigint or variable doesn't. A start past
+    // STUFF's input or a non-positive count has its own width.
+    [TestMethod]
+    [DataRow("select left('abcdef', 1 + 1) as x", 2)]
+    [DataRow("select left('abcdef', len('ab')) as x", 2)]
+    [DataRow("select left('abcdef', cast(2 as int)) as x", 2)]
+    [DataRow("select left('abcdef', 2.9) as x", 6)]
+    [DataRow("select left('abcdef', cast(2 as bigint)) as x", 6)]
+    [DataRow("select substring('abcdef', 2.7, 2.2) as x", 6)]
+    [DataRow("select space(2.0) as x", 8000)]
+    [DataRow("select replicate('a', 2.9) as x", 8000)]
+    [DataRow("select space(-1) as x", 1)]
+    [DataRow("select replicate('abcdefgh', 0) as x", 2)]
+    [DataRow("select replicate(N'abcdefgh', -1) as x", 1)]
+    [DataRow("select stuff('abc', 2, -1, 'x') as x", 5)]
+    [DataRow("select stuff('abc', -1, 1, 'x') as x", 3)]
+    [DataRow("select stuff('abc', 4, 1, 'x') as x", 8000)]
+    [DataRow("select stuff('abc', 2, 1, null) as x", 3)]
+    [DataRow("select stuff('abcdef', 2.9, 1.9, 'x') as x", 8000)]
+    public async Task FoldedLength_SizesResult(string sql, int expected)
+        => AreEqual(expected, await ColumnSizeAsync(sql));
+
+    // STRING_SPLIT's value column is the input's variable form, a bare NULL's
+    // varchar(1).
+    [TestMethod]
+    [DataRow("select value from string_split(cast('a b' as char(5)), ' ')", 5)]
+    [DataRow("select value from string_split(null, ',')", 1)]
+    public async Task StringSplit_ValueWidth(string sql, int expected)
+        => AreEqual(expected, await ColumnSizeAsync(sql));
+
     // REPLACE can grow the input, so it stays the family container (8000).
     [TestMethod]
     public async Task Replace_StaysContainerWidth()

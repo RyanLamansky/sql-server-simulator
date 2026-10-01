@@ -39,7 +39,9 @@ internal sealed class Soundex : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = StringScalars.BindArgument(this.input, batch, resolveColumnType, "soundex");
-        return SqlType.Varchar;
+        // A four-character code typed varchar(5), whatever the argument
+        // (probed 2026-10-01 against SQL Server 2025).
+        return VarcharSqlType.Get(5, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
     }
 
     internal override string DebugDisplay() => $"SOUNDEX({this.input.DebugDisplay()})";
@@ -240,11 +242,14 @@ internal sealed class Str : Expression
     /// part and sign leave, so <c>STR(99.99, 4, 1)</c> rounds to
     /// <c>100.0</c> and overflows to <c>****</c> rather than falling back to
     /// <c>100</c>.
-    /// The double's exact value is truncated to 17 significant digits and
+    /// The double's exact value is cut to 17 significant digits — rounding up
+    /// only for a remainder past one half, so an exact tie goes down — and
     /// only then rounded half away from zero at the decimals, zero-filling
     /// past the 17th digit: <c>STR(2.675, 5, 2)</c> is <c>2.67</c>,
-    /// <c>STR(2.5, 1)</c> is <c>3</c>, and <c>1234567890123456.75</c> keeps
-    /// <c>.7</c> at five decimals.
+    /// <c>STR(2.5, 1)</c> is <c>3</c>, <c>1234567890123456.75</c> keeps
+    /// <c>.7</c> at one or five decimals, and <c>1.2345678901234567</c> (a
+    /// double just above <c>…566.9</c>) reads <c>…567</c> at sixteen (probed
+    /// 2026-09-23 and 2026-10-01).
     /// </summary>
     private static string Format(double num, int length, int decimals)
     {
@@ -282,8 +287,9 @@ internal sealed class Str : Expression
 
     /// <summary>
     /// The first 17 significant digits of <paramref name="magnitude"/>'s exact
-    /// value, truncated, as an integer in <c>[10^16, 10^17)</c>, with the
-    /// decimal exponent of the leading digit; zero is <c>(0, 0)</c>.
+    /// value, rounded up only when what follows them is more than half a unit,
+    /// as an integer in <c>[10^16, 10^17)</c>, with the decimal exponent of the
+    /// leading digit; zero is <c>(0, 0)</c>.
     /// </summary>
     private static (BigInteger Digits, int Exponent) LeadingDigits(double magnitude)
     {
@@ -307,15 +313,22 @@ internal sealed class Str : Expression
         while (true)
         {
             var shift = 16 - exponent;
-            var digits = shift >= 0
-                ? numerator * BigInteger.Pow(10, shift) / denominator
-                : numerator / (denominator * BigInteger.Pow(10, -shift));
+            var scaledDenominator = shift >= 0 ? denominator : denominator * BigInteger.Pow(10, -shift);
+            var digits = BigInteger.DivRem(shift >= 0 ? numerator * BigInteger.Pow(10, shift) : numerator, scaledDenominator, out var remainder);
             if (digits >= upper)
+            {
                 exponent++;
+            }
             else if (digits < lower)
+            {
                 exponent--;
+            }
             else
-                return (digits, exponent);
+            {
+                if (remainder * 2 > scaledDenominator)
+                    digits += 1;
+                return digits == upper ? (lower, exponent + 1) : (digits, exponent);
+            }
         }
     }
 

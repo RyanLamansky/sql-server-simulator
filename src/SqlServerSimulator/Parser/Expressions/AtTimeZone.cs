@@ -8,8 +8,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// the LHS to <c>datetimeoffset</c> in the supplied time zone. Result type is
 /// <c>datetimeoffset</c> with the LHS's fractional precision preserved
 /// (<c>datetime2(N)</c> / <c>datetimeoffset(N)</c> stay at precision <c>N</c>;
-/// <c>datetime</c> lands at <c>datetimeoffset(3)</c>, matching the legacy
-/// type's milliseconds resolution). <c>date</c> and <c>time</c> LHS raise
+/// <c>datetime</c> lands at <c>datetimeoffset(3)</c> and <c>smalldatetime</c>
+/// at <c>datetimeoffset(0)</c>). <c>date</c> and <c>time</c> LHS raise
 /// <c>Msg 8116</c>; unrecognized zone names raise <c>Msg 9820</c>. NULL on
 /// either side propagates to NULL of the result type.
 /// </summary>
@@ -24,11 +24,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <item><c>datetimeoffset AT TIME ZONE 'X'</c>: preserves the UTC instant
 /// and re-expresses it in zone X (offset and wall-clock both change to match).</item>
 /// </list>
-/// <para>Time-zone names route through .NET 6+'s
-/// <see cref="TimeZoneInfo.FindSystemTimeZoneById"/>, which accepts both
-/// Windows-style identifiers (<c>"Pacific Standard Time"</c>) and IANA names
-/// (<c>"America/Los_Angeles"</c>) cross-platform via ICU. The lookup result is
-/// cached per zone-name string to keep per-row overhead at a hashtable lookup.</para>
+/// <para>A zone name must be one of the Windows ids <c>sys.time_zone_info</c>
+/// lists (<see cref="BuiltInResources.FindWindowsTimeZone"/>), resolved
+/// through ICU's Windows-to-IANA mapping. The lookup result is cached per
+/// zone-name string to keep per-row overhead at a hashtable lookup.</para>
 /// <para>Zone-name binding is tighter than <c>+</c> (probe-confirmed: <c>expr AT
 /// TIME ZONE 'UT' + 'C'</c> raises Msg 402 because real SQL Server parses it as
 /// <c>(expr AT TIME ZONE 'UT') + 'C'</c>, not <c>expr AT TIME ZONE 'UTC'</c>).
@@ -81,7 +80,7 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
         var wall = input.Type == SqlType.DateTime ? input.AsDateTime
             : input.Type == SqlType.SmallDateTime ? input.AsSmallDateTime
             : input.Type is DateTime2SqlType ? input.AsDateTime2
-            : throw SimulatedSqlException.AtTimeZoneInvalidArgument(input.Type.ToString()!);
+            : throw SimulatedSqlException.AtTimeZoneInvalidArgument(SimulatedSqlException.FamilyRootName(input.Type));
 
         wall = DateTime.SpecifyKind(wall, DateTimeKind.Unspecified);
         DateTimeOffset zoned;
@@ -120,27 +119,14 @@ internal sealed class AtTimeZone(Expression source, Expression zoneNameExpressio
         return SqlValue.FromDateTimeOffset(resultType, zoned);
     }
 
-    private static SqlType ResolveResultType(SqlType lhs) => lhs switch
-    {
-        DateTime2SqlType dt2 => SqlType.GetDateTimeOffset(dt2.precision),
-        DateTimeOffsetSqlType dto => SqlType.GetDateTimeOffset(dto.precision),
-        _ when lhs == SqlType.DateTime || lhs == SqlType.SmallDateTime => SqlType.GetDateTimeOffset(3),
-        // Fallback for date / time (which raise Msg 8116 at runtime) and
-        // unknown LHS types — GetSqlType requires a non-throwing answer for
-        // projection-schema resolution that may not be reached at runtime.
-        _ => SqlType.GetDateTimeOffset(7),
-    };
+    // date / time (which raise Msg 8116 at runtime) and unknown LHS types
+    // fall back to datetimeoffset(7) — GetSqlType requires a non-throwing
+    // answer for projection-schema resolution that may not be reached at
+    // runtime.
+    private static SqlType ResolveResultType(SqlType lhs) => SwitchOffset.ResultTypeFor(lhs);
 
-    private static TimeZoneInfo ResolveZone(string name)
-    {
-        var resolved = ZoneCache.GetOrAdd(name, static n =>
-        {
-            try { return TimeZoneInfo.FindSystemTimeZoneById(n); }
-            catch (TimeZoneNotFoundException) { return null; }
-            catch (InvalidTimeZoneException) { return null; }
-        });
-        return resolved ?? throw SimulatedSqlException.InvalidTimeZoneParameter(name);
-    }
+    private static TimeZoneInfo ResolveZone(string name) =>
+        ZoneCache.GetOrAdd(name, BuiltInResources.FindWindowsTimeZone) ?? throw SimulatedSqlException.InvalidTimeZoneParameter(name);
 
     /// <summary>
     /// Parses the <c>AT TIME ZONE &lt;tz-expr&gt;</c> postfix when invoked

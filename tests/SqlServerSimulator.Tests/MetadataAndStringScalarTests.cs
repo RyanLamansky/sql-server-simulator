@@ -104,4 +104,28 @@ public sealed class MetadataAndStringScalarTests
     [TestMethod]
     public void Translate_UnequalLengths_RaisesMsg9828()
         => new Simulation().AssertSqlError("select translate('abcd', 'abc', 'xy')", 9828);
+
+    /// <summary>
+    /// PARSENAME reads the name as an identifier: delimited parts unquote,
+    /// an empty part answers NULL, and a name it can't read — more than four
+    /// parts, a trailing dot, a stray bracket, an unterminated quote —
+    /// answers NULL for every part.
+    /// </summary>
+    [TestMethod]
+    [DataRow("'a.b.c.d'", 1, "d")]
+    [DataRow("'a.b.c.d.e'", 1, null)]
+    [DataRow("'[a.b].c'", 2, "a.b")]
+    [DataRow("'\"a.b\".c'", 2, "a.b")]
+    [DataRow("'[a]]b].c'", 2, "a]b")]
+    [DataRow("'a..c'", 2, null)]
+    [DataRow("'a...d'", 4, "a")]
+    [DataRow("'.a'", 1, "a")]
+    [DataRow("'a.b.'", 2, null)]
+    [DataRow("''", 1, null)]
+    [DataRow("'[a'", 1, null)]
+    [DataRow("'a]'", 1, null)]
+    [DataRow("'[a]x'", 1, null)]
+    [DataRow("' a . b '", 1, " b ")]
+    public void ParseName_ReadsIdentifierSyntax(string name, int part, string? expected)
+        => AreEqual(expected is null ? DBNull.Value : expected, new Simulation().ExecuteScalar($"select parsename({name}, {part})"));
 }

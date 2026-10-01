@@ -159,7 +159,7 @@ internal static class MathScalars
     /// </summary>
     public static SqlValue FromDecimal38OrMoney(SqlType resultType, in Decimal38 value) =>
         resultType.Category == SqlTypeCategory.Money
-            ? SqlValue.FromMoney(resultType, value)
+            ? SqlValue.FromMoneyComputation(resultType, value)
             : SqlValue.FromDecimal(resultType, value);
 
     /// <summary>
@@ -167,16 +167,24 @@ internal static class MathScalars
     /// type, reading the operand's exact binary value and rounding half away
     /// from zero at the declared scale. A magnitude the type can't hold is
     /// real's Msg 8115 at state 2 — the arithmetic-overflow shape, since the
-    /// value came out of a computation rather than a conversion.
+    /// value came out of a computation rather than a conversion — except
+    /// where <paramref name="convertsFromFloat"/> says the function converts
+    /// its float result to a decimal one, which real reports as that
+    /// conversion: <c>POWER(10.0, 38)</c> is state 6 naming float (probed
+    /// 2026-10-01 against SQL Server 2025).
     /// </summary>
-    public static SqlValue FromDoubleAsDecimalOrMoney(SqlType resultType, double value)
+    public static SqlValue FromDoubleAsDecimalOrMoney(SqlType resultType, double value, bool convertsFromFloat = false)
     {
         var (precision, scale) = resultType is DecimalSqlType d
             ? (d.precision, d.scale)
             : (MoneySqlType.Precision, MoneySqlType.Scale);
-        return Decimal38.TryFromDouble(value, precision, scale, out var converted)
-            ? FromDecimal38OrMoney(resultType, converted)
-            : throw SimulatedSqlException.ArithmeticOverflow(resultType is DecimalSqlType ? "numeric" : resultType.ToString()!);
+        if (Decimal38.TryFromDouble(value, precision, scale, out var converted))
+            return FromDecimal38OrMoney(resultType, converted);
+        throw resultType is DecimalSqlType
+            ? convertsFromFloat
+                ? SimulatedSqlException.ArithmeticOverflowConverting(SqlType.Float, "numeric", 6)
+                : SimulatedSqlException.ArithmeticOverflow("numeric")
+            : SimulatedSqlException.ArithmeticOverflow(resultType.ToString()!);
     }
 
     /// <summary>

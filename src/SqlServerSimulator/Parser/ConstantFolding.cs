@@ -190,7 +190,16 @@ internal static class ConstantFolding
     /// <see langword="false"/> so the shape reports the error at runtime the
     /// way real does.
     /// </summary>
-    internal static bool TryFold(Expression expression, ParserContext context, out SqlValue value)
+    internal static bool TryFold(Expression expression, ParserContext context, out SqlValue value) =>
+        TryFold(expression, context.Batch, out value);
+
+    /// <summary>
+    /// <see cref="TryFold(Expression, ParserContext, out SqlValue)"/> for a
+    /// caller that holds the batch rather than the parser — an
+    /// <see cref="Expression.GetSqlType"/> override sizing its result from a
+    /// folded argument.
+    /// </summary>
+    internal static bool TryFold(Expression expression, BatchContext batch, out SqlValue value)
     {
         if (expression.IsWrittenConstant)
         {
@@ -200,8 +209,8 @@ internal static class ConstantFolding
                 // unreachable rather than merely unused. Typing it first lets
                 // a compile-time refusal (a JSON function's Msg 8116) stand in
                 // for a Run that would otherwise meet a value it never checks.
-                _ = expression.GetSqlType(context.Batch, static _ => throw new NotSupportedException());
-                value = expression.Run(new RuntimeContext(static _ => throw new NotSupportedException(), context.Batch));
+                _ = expression.GetSqlType(batch, static _ => throw new NotSupportedException());
+                value = expression.Run(new RuntimeContext(static _ => throw new NotSupportedException(), batch));
                 return true;
             }
             catch (Exception e) when (e is SimulatedSqlException or NotSupportedException)

@@ -1103,10 +1103,10 @@ NULL on any arg propagates.
 NULL → NULL; unknown id / name → NULL.
 Type names follow SQL Server's lowercase conventions (`int`, `nvarchar`, `datetime2`, etc.).
 
-**`PARSENAME('a.b.c.d', segment_index)`**: dot-split on the input, return the `segment_index`-from-the-right segment (1-based, so 1 = leaf, 4 = server).
+**`PARSENAME('a.b.c.d', segment_index)`**: reads the input as a one- to four-part identifier and returns the `segment_index`-from-the-right part (1-based, so 1 = leaf, 4 = server).
 Result type `sysname`.
-Empty / NULL input → NULL; out-of-range index → NULL.
-Treats bracket-quoting at the segment level (`'[a.b].c'` keeps the dotted segment intact when the outer quotes balance).
+Empty / NULL input → NULL; out-of-range index → NULL; an empty part → NULL.
+A `[…]` or `"…"` part unquotes with its doubled closer (`'[a.b].c'` part 2 is `a.b`), and text that is no such name answers NULL for every part — five parts, a trailing dot, a stray bracket or quote, an unterminated delimiter, a part past 128 characters (probed 2026-10-01 against SQL Server 2025).
 Common use in dynamic-SQL identifier manipulation.
 
 **File / filegroup metadata scalars** (`Parser/Expressions/DatabaseScalarFunctions.cs`, `FilegroupProperty.cs`, `FileProperty.cs`) — return types probe-confirmed against SQL Server 2025:

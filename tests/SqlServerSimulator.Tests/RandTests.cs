@@ -27,4 +27,19 @@ public sealed class RandTests
         AreEqual(0.9457197353968156, connection.CreateCommand("select rand()").ExecuteScalar());
         AreEqual(0.7057602239353887, connection.CreateCommand("select rand()").ExecuteScalar());
     }
+
+    /// <summary>
+    /// A seed whose magnitude reaches the first generator's modulus restarts
+    /// it as a zero seed does.
+    /// </summary>
+    [TestMethod]
+    [DataRow(2147483647)]
+    [DataRow(2147483563)]
+    [DataRow(-2147483648)]
+    public void Rand_SeedPastModulus_ActsAsZero(int seed)
+        => AreEqual(new Simulation().ExecuteScalar("select rand(0)"), new Simulation().ExecuteScalar($"select rand({seed})"));
+
+    [TestMethod]
+    public void Rand_SeedBelowModulus_Seeds()
+        => AreEqual(0.7135547277360684, new Simulation().ExecuteScalar("select rand(2147483562)"));
 }

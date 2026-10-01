@@ -125,5 +125,18 @@ public sealed class SoundexStrTests
     [DataRow("'[a]'")]
     public void Soundex_OfAStringNotStartingWithALetter_IsZeros(string value)
         => AreEqual("0000", new Simulation().ExecuteScalar($"select soundex({value})"));
-}
 
+    /// <summary>
+    /// STR cuts the double to 17 significant digits — up only past a half,
+    /// so an exact tie goes down — and then rounds half away at the decimals.
+    /// </summary>
+    [TestMethod]
+    [DataRow("1.23456789012345678e0, 30, 16", "1.2345678901234567")]
+    [DataRow("9.87654321098765432e0, 30, 16", "9.8765432109876539")]
+    [DataRow("1234567890123456.75e0, 30, 1", "1234567890123456.7")]
+    [DataRow("123456789012345.875e0, 30, 2", "123456789012345.87")]
+    [DataRow("123456789012345.65625e0, 30, 3", "123456789012345.660")]
+    [DataRow("1234567890123456.5e0, 30, 0", "1234567890123457")]
+    public void Str_SeventeenDigitCut(string arguments, string expected)
+        => AreEqual(expected, ((string)new Simulation().ExecuteScalar($"select str({arguments})")!).Trim());
+}

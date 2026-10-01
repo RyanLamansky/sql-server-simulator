@@ -1674,13 +1674,18 @@ internal readonly partial struct SqlValue
     /// (<c>CAST(CAST(370.93049074045129 AS decimal(18, 14)) AS
     /// decimal(38, 37))</c>), state 8 where it stays inside 38 and merely
     /// exceeds the declared precision (<c>CAST(CAST(123456 AS decimal(9, 0)) AS
-    /// decimal(5, 0))</c>). Every other source family reports state 8.
+    /// decimal(5, 0))</c>). An integer source splits the same way while naming
+    /// its own family — <c>CAST(1 AS decimal(38, 38))</c> is state 6,
+    /// <c>CAST(1 AS decimal(37, 37))</c> state 8 (probed 2026-10-01 against SQL
+    /// Server 2025). Every other source family reports state 8.
     /// </remarks>
-    private static SimulatedSqlException DecimalConversionOverflow(in Decimal38 value, DecimalSqlType target, SqlType source) =>
-        source is DecimalSqlType
-            ? SimulatedSqlException.ArithmeticOverflowToTarget(
-                "numeric", Decimal38.TryRescale(value, Decimal38.MaxPrecision, target.scale, out _) ? (byte)8 : (byte)6)
-            : SimulatedSqlException.ArithmeticOverflowConverting(source, "numeric", state: 8);
+    private static SimulatedSqlException DecimalConversionOverflow(in Decimal38 value, DecimalSqlType target, SqlType source)
+    {
+        var state = Decimal38.TryRescale(value, Decimal38.MaxPrecision, target.scale, out _) ? (byte)8 : (byte)6;
+        return source is DecimalSqlType
+            ? SimulatedSqlException.ArithmeticOverflowToTarget("numeric", state)
+            : SimulatedSqlException.ArithmeticOverflowConverting(source, "numeric", SqlType.IsIntegerCategory(source) && source != SqlType.Bit ? state : (byte)8);
+    }
 
     /// <summary>
     /// A <c>decimal</c> read as a fractional day count for the legacy

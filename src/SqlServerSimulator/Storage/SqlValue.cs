@@ -649,20 +649,39 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// a <c>decimal</c> reports; a conversion whose source family reports
     /// something else settles that at its own call site.
     /// </summary>
-    public static SqlValue FromMoney(SqlType type, Decimal38 value)
+    public static SqlValue FromMoney(SqlType type, Decimal38 value) =>
+        TryFromMoney(type, value, out var money)
+            ? money
+            : throw SimulatedSqlException.ArithmeticOverflowToTarget(type.ToString()!, state: 4);
+
+    /// <summary>
+    /// <see cref="FromMoney(SqlType, Decimal38)"/> for a value an arithmetic
+    /// operator or a math function computed: one past the type's range is
+    /// real's Msg 8115 at state 2 against the expression — <c>$922337203685477
+    /// + $1</c>, <c>ABS</c> of money's minimum, a <c>SUM</c> that outgrows it
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    public static SqlValue FromMoneyComputation(SqlType type, Decimal38 value) =>
+        TryFromMoney(type, value, out var money)
+            ? money
+            : throw SimulatedSqlException.ArithmeticOverflow(type.ToString()!);
+
+    private static bool TryFromMoney(SqlType type, Decimal38 value, out SqlValue money)
     {
         if (type != SqlType.Money && type != SqlType.SmallMoney)
             throw new ArgumentException($"{type} is not a money type.", nameof(type));
+        money = default;
         if (!Decimal38.TryRescale(value, Decimal38.MaxPrecision, MoneySqlType.Scale, out var scaled)
             || scaled.Magnitude > (scaled.IsNegative ? (UInt128)long.MaxValue + 1 : long.MaxValue))
         {
-            throw SimulatedSqlException.ArithmeticOverflowToTarget(type.ToString()!, state: 4);
+            return false;
         }
 
         var units = scaled.IsNegative ? unchecked(-(long)scaled.Magnitude) : (long)scaled.Magnitude;
-        return type == SqlType.SmallMoney && units is < int.MinValue or > int.MaxValue
-            ? throw SimulatedSqlException.ArithmeticOverflowToTarget("smallmoney", state: 4)
-            : new(type, units, null, isNull: false);
+        if (type == SqlType.SmallMoney && units is < int.MinValue or > int.MaxValue)
+            return false;
+        money = new(type, units, null, isNull: false);
+        return true;
     }
 
     /// <summary>Non-NULL SQL <c>money</c> / <c>smallmoney</c> value from a .NET <see cref="decimal"/>.</summary>

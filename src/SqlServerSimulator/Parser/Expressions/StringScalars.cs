@@ -177,11 +177,12 @@ internal static class StringScalars
     /// <see cref="BindArgument"/> for the two-argument <c>LTRIM</c> /
     /// <c>RTRIM</c> shape: the source is argument 1 and the optional character
     /// set argument 2, mirroring <see cref="ResolveTrimCharacters"/>'s runtime
-    /// gate. Returns the source's type.
+    /// gate. Returns the source's type, a bare NULL's as
+    /// <see cref="BindSource"/> reads it.
     /// </summary>
     public static SqlType BindTrimmed(Expression source, Expression? trimChars, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionLowerName)
     {
-        var type = BindArgument(source, batch, resolveColumnType, functionLowerName);
+        var type = BindSource(source, batch, resolveColumnType, functionLowerName, coerced: false);
         if (trimChars is not null)
             _ = BindArgument(trimChars, batch, resolveColumnType, functionLowerName, argumentIndex: 2);
         return type;
@@ -240,7 +241,78 @@ internal static class StringScalars
     public static SqlType ResolveResultType(SqlType sourceType, BatchContext batch) =>
         SqlType.IsStringCategory(sourceType) || !IsCoerceableToVarchar(sourceType)
             ? sourceType
-            : VarcharSqlType.Get(0, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+            : VarcharSqlType.Get(ConvertedWidth(sourceType), batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+
+    /// <summary>
+    /// The width a value of <paramref name="type"/> has once it converts to a
+    /// string — the width a string scalar over a non-string argument reports
+    /// (<c>UPPER(12)</c> is <c>varchar(12)</c>, <c>LEFT(&lt;date&gt;, 50)</c>
+    /// <c>varchar(40)</c>, <c>REPLICATE(0x4142, 3)</c> <c>varchar(6)</c>) and the
+    /// width a <c>CONCAT</c> argument contributes. A string type contributes its
+    /// declared length, a binary its byte length (a <c>varbinary(max)</c>
+    /// <see cref="SqlType.MaxLengthSentinel"/>), and the fixed-width types their
+    /// conversion maxima: bit 1, tinyint 4, smallint 6, int 12, bigint 24,
+    /// real / float 23, money / smallmoney 40, decimal / numeric 41, the date
+    /// and time types and uniqueidentifier 40 (probed 2026-07-22 and
+    /// 2026-10-01 against SQL Server 2025). A var-family string or binary of no
+    /// declared length answers 0.
+    /// </summary>
+    public static int ConvertedWidth(SqlType type) => type switch
+    {
+        VarcharSqlType v => v.length,
+        NVarcharSqlType nv => nv.length,
+        CharSqlType c => c.length,
+        NCharSqlType nc => nc.length,
+        VarbinarySqlType vb => vb.length,
+        BinarySqlType b => b.length,
+        SystemNameSqlType => 128,
+        _ when type == SqlType.Bit => 1,
+        _ when type == SqlType.TinyInt => 4,
+        _ when type == SqlType.SmallInt => 6,
+        _ when type == SqlType.Int32 => 12,
+        _ when type == SqlType.BigInt => 24,
+        _ => type.Category switch
+        {
+            SqlTypeCategory.Approximate => 23,
+            SqlTypeCategory.Decimal => 41,
+            SqlTypeCategory.DateTime => 40,
+            SqlTypeCategory.Money => 40,
+            SqlTypeCategory.UniqueIdentifier => 40,
+            _ => 0,
+        },
+    };
+
+    /// <summary>
+    /// <see cref="BindArgument"/> / <see cref="BindCoercedArgument"/> for the
+    /// string a scalar transforms — the operand its result is typed from. A bare
+    /// <c>NULL</c> there has no type of its own and reads as <c>varchar(1)</c>,
+    /// so <c>UPPER(NULL)</c> and <c>LEFT(NULL, 5)</c> are <c>varchar(1)</c> and
+    /// <c>REPLICATE(NULL, 2)</c> <c>varchar(2)</c> (probed 2026-10-01 against
+    /// SQL Server 2025).
+    /// </summary>
+    public static SqlType BindSource(Expression argument, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string functionLowerName, bool coerced, bool propagatesUnresolvedCollation = false)
+    {
+        var type = coerced
+            ? BindCoercedArgument(argument, batch, resolveColumnType, functionLowerName, propagatesUnresolvedCollation: propagatesUnresolvedCollation)
+            : BindArgument(argument, batch, resolveColumnType, functionLowerName, propagatesUnresolvedCollation: propagatesUnresolvedCollation);
+        return Expression.IsUntypedNullLiteral(argument)
+            ? VarcharSqlType.Get(1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault)
+            : type;
+    }
+
+    /// <summary>
+    /// Clips a string a scalar or operator built past its result's bound — a
+    /// <c>+</c> / <c>||</c> / <c>CONCAT</c> / <c>CONCAT_WS</c> / <c>REPLACE</c> /
+    /// <c>STUFF</c> / <c>REGEXP_REPLACE</c> result whose type isn't MAX — to
+    /// the family maximum, 8000 for the <c>varchar</c> family and 4000 for
+    /// <c>nvarchar</c>. Real truncates silently rather than raising Msg 8152:
+    /// <c>REPLICATE('a', 8000) + 'b'</c> is 8000 bytes long (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    public static string ClipToFamilyCap(string value, SqlType resultType) =>
+        IsMaxForm(resultType) || value.Length <= FamilyCap(resultType)
+            ? value
+            : value[..FamilyCap(resultType)];
 
     /// <summary>
     /// Resolves the trim-character set for the two-argument <c>LTRIM</c> /
@@ -349,34 +421,32 @@ internal static class StringScalars
     };
 
     /// <summary>
-    /// Extracts a compile-time-constant non-negative <see cref="int"/> from an
-    /// integer / decimal / money numeric literal argument (a bare
-    /// <see cref="Value"/> node) so length-deriving scalars can compute their
-    /// projected width the way SQL Server does when the count / length is a
-    /// literal. Returns <see langword="false"/> for a non-constant, non-numeric,
-    /// NULL, or negative operand — the caller falls back to a family-width
-    /// (container) result, matching real SQL Server's non-constant behavior.
+    /// The value of a length / count / position argument that real folds while
+    /// compiling, so a length-deriving scalar can report the width SQL Server
+    /// does. Real folds a written constant whose type is exactly <c>int</c> —
+    /// a literal, <c>(2)</c>, <c>1 + 1</c>, <c>-(-2)</c>, <c>CAST(2 AS int)</c>,
+    /// <c>ABS(-2)</c>, <c>LEN('ab')</c> — and nothing else: a decimal
+    /// (<c>2.0</c>), a <c>bigint</c> or <c>tinyint</c> and a binary leave the
+    /// width at the container (probed 2026-10-01 against SQL Server 2025). The
+    /// value may be negative; a NULL or a fold that raises answers
+    /// <see langword="null"/>. Callers fold once, while parsing.
     /// </summary>
-    public static bool TryConstantCount(Expression expression, out int value)
+    public static int? FoldCount(Expression expression, BatchContext batch)
     {
-        value = 0;
-        if (expression is not Value { Constant: { IsNull: false } constant })
-            return false;
-        var t = constant.Type;
-        if (!(SqlType.IsIntegerCategory(t) || t is DecimalSqlType || SqlType.IsMoneyCategory(t)))
-            return false;
+        if (Expression.IsUntypedNullLiteral(expression) || !expression.IsWrittenConstant)
+            return null;
         try
         {
-            var i = constant.CoerceTo(SqlType.Int32).AsInt32;
-            if (i < 0)
-                return false;
-            value = i;
-            return true;
+            if (expression.GetSqlType(batch, static _ => throw new NotSupportedException()) != SqlType.Int32)
+                return null;
         }
-        catch (OverflowException)
+        catch (Exception e) when (e is SimulatedSqlException or NotSupportedException)
         {
-            return false;
+            return null;
         }
+        return ConstantFolding.TryFold(expression, batch, out var folded) && !folded.IsNull
+            ? folded.CoerceTo(SqlType.Int32).AsInt32
+            : null;
     }
 
     /// <summary>

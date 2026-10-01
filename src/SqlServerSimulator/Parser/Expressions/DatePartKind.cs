@@ -300,24 +300,44 @@ internal static class DatePartKinds
         // or a smalldatetime's millisecond.
         var refused = functionLowerName switch
         {
+            // DATE_BUCKET counts in nothing finer than a millisecond and in no
+            // day-of-year, weekday, ISO week or offset, for every type
+            // (probed 2026-10-01 against SQL Server 2025).
+            "Date_Bucket" => kind is DatePartKind.DayOfYear or DatePartKind.Weekday or DatePartKind.IsoWeek or DatePartKind.TzOffset
+                or DatePartKind.Microsecond or DatePartKind.Nanosecond,
             "dateadd" => kind is DatePartKind.IsoWeek or DatePartKind.TzOffset
                 || (legacy && kind is DatePartKind.Microsecond or DatePartKind.Nanosecond),
             "datetrunc" => kind is DatePartKind.Weekday or DatePartKind.TzOffset or DatePartKind.Nanosecond
                 || (legacy && kind == DatePartKind.Microsecond)
-                || (type == SqlType.SmallDateTime && kind == DatePartKind.Millisecond),
+                || (type == SqlType.SmallDateTime && kind == DatePartKind.Millisecond)
+                // Nor a part finer than the type's precision holds: a
+                // millisecond below precision 3, a microsecond below 6
+                // (probed 2026-10-01 against SQL Server 2025).
+                || (FractionalPrecision(type) is int precision
+                    && ((kind == DatePartKind.Millisecond && precision < 3) || (kind == DatePartKind.Microsecond && precision < 6))),
             _ => false,
         };
         if (refused)
             throw SimulatedSqlException.DatepartNotSupportedForType(CanonicalName(kind), functionLowerName, FamilyRootName(type), FunctionRefusalState(functionLowerName, type));
     }
 
+    private static int? FractionalPrecision(SqlType type) => type switch
+    {
+        DateTime2SqlType d => d.precision,
+        TimeSqlType t => t.precision,
+        DateTimeOffsetSqlType o => o.precision,
+        _ => null,
+    };
+
     /// <summary>
     /// The state of a function-level Msg 9810, which names the operand type:
     /// DATEADD's 0 / 3 / 2 for datetime / smalldatetime / the rest, DATETRUNC's
-    /// 9 / 8 / 11 likewise (probed 2026-09-26 against SQL Server 2025).
+    /// 9 / 8 / 11 likewise (probed 2026-09-26 against SQL Server 2025), and
+    /// DATE_BUCKET's 1 for all of them (probed 2026-10-01).
     /// </summary>
     private static byte FunctionRefusalState(string functionName, SqlType type) => functionName switch
     {
+        "Date_Bucket" => 1,
         "dateadd" => type == SqlType.DateTime ? (byte)0 : type == SqlType.SmallDateTime ? (byte)3 : (byte)2,
         _ => type == SqlType.DateTime ? (byte)9 : type == SqlType.SmallDateTime ? (byte)8 : (byte)11,
     };
@@ -588,24 +608,45 @@ internal static class DatePartKinds
         return SqlValue.FromDate(added);
     }
 
+    /// <summary>
+    /// A <c>time</c> wraps around midnight rather than overflowing:
+    /// <c>DATEADD(hour, 25, '23:00')</c> is 00:00 and <c>DATEADD(minute, -1,
+    /// '00:00')</c> 23:59, whatever the interval's size (probed 2026-10-01
+    /// against SQL Server 2025), and <c>DATEADD(ms, -1, CAST('00:00' AS
+    /// time(2)))</c> rounds back up to 00:00. The interval is reduced to
+    /// within a day first, so no product can overflow.
+    /// </summary>
     private static SqlValue AddToTime(SqlValue value, DatePartKind kind, long n)
     {
-        // checked so an interval overflowing the 100-ns tick range raises
-        // Msg 517 via Add's catch rather than silently wrapping.
-        var ticks = checked(value.AsTime.Ticks + (kind switch
+        var unitTicks = kind switch
         {
-            DatePartKind.Hour => n * TimeSpan.TicksPerHour,
-            DatePartKind.Minute => n * TimeSpan.TicksPerMinute,
-            DatePartKind.Second => n * TimeSpan.TicksPerSecond,
-            DatePartKind.Millisecond => n * TimeSpan.TicksPerMillisecond,
-            DatePartKind.Microsecond => n * 10L,
-            DatePartKind.Nanosecond => n / 100L,
+            DatePartKind.Hour => TimeSpan.TicksPerHour,
+            DatePartKind.Minute => TimeSpan.TicksPerMinute,
+            DatePartKind.Second => TimeSpan.TicksPerSecond,
+            DatePartKind.Millisecond => TimeSpan.TicksPerMillisecond,
+            DatePartKind.Microsecond => 10L,
+            DatePartKind.Nanosecond => 1L,
             _ => throw new NotSupportedException($"DATEADD({kind}) on time isn't implemented."),
-        }));
-        return ticks is < 0 or >= TimeSpan.TicksPerDay
-            ? throw SimulatedSqlException.DateAddOverflow("time")
-            : SqlValue.FromTime(value.Type, new TimeSpan(ticks));
+        };
+        if (kind == DatePartKind.Nanosecond)
+            n = NanosecondTicks(n);
+        var delta = n % (TimeSpan.TicksPerDay / unitTicks) * unitTicks;
+        var ticks = (value.AsTime.Ticks + delta) % TimeSpan.TicksPerDay;
+        if (ticks < 0)
+            ticks += TimeSpan.TicksPerDay;
+        // The sum rounds to the type's precision before it wraps, so a
+        // millisecond before midnight at time(2) is midnight itself.
+        var precisionUnit = ((TimeSqlType)value.Type).ticksPerUnit;
+        ticks = (ticks + (precisionUnit / 2)) / precisionUnit * precisionUnit % TimeSpan.TicksPerDay;
+        return SqlValue.FromTime(value.Type, new TimeSpan(ticks));
     }
+
+    /// <summary>
+    /// A nanosecond interval in 100-ns ticks, rounded half away from zero:
+    /// <c>DATEADD(ns, 50, …)</c> adds one tick and <c>DATEADD(ns, -49, …)</c>
+    /// none (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static long NanosecondTicks(long n) => checked(n + (n < 0 ? -50 : 50)) / 100;
 
     private static DateTime AddToDateTime(DateTime input, DatePartKind kind, long n) => kind switch
     {
@@ -619,7 +660,7 @@ internal static class DatePartKinds
         DatePartKind.Second => input.AddSeconds(n),
         DatePartKind.Millisecond => input.AddMilliseconds(n),
         DatePartKind.Microsecond => input.AddTicks(checked(n * 10L)),
-        DatePartKind.Nanosecond => input.AddTicks(n / 100L),
+        DatePartKind.Nanosecond => input.AddTicks(NanosecondTicks(n)),
         _ => throw new NotSupportedException($"DATEADD({kind}) on datetime isn't implemented."),
     };
 
@@ -635,7 +676,7 @@ internal static class DatePartKinds
         DatePartKind.Second => input.AddSeconds(n),
         DatePartKind.Millisecond => input.AddMilliseconds(n),
         DatePartKind.Microsecond => input.AddTicks(checked(n * 10L)),
-        DatePartKind.Nanosecond => input.AddTicks(n / 100L),
+        DatePartKind.Nanosecond => input.AddTicks(NanosecondTicks(n)),
         DatePartKind.TzOffset => input.ToOffset(input.Offset + TimeSpan.FromMinutes(n)),
         _ => throw new NotSupportedException($"DATEADD({kind}) on datetimeoffset isn't implemented."),
     };

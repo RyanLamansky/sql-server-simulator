@@ -49,7 +49,8 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
     /// of range.</item>
     /// <item>Only the newer types take more than three fractional digits (a
     /// digit past the seventh rounds), an offset (<c>±h:mm</c>, at most
-    /// fourteen hours), a <c>Z</c> after a time that follows a date, or a space
+    /// fourteen hours, after a time or attached to an ISO date), a <c>Z</c>
+    /// after a time that follows a date, or a space
     /// before the ISO <c>T</c>.</item>
     /// </list>
     /// Both take a <c>Z</c> attached to an ISO date and after a time standing
@@ -143,6 +144,16 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
                     return DateTimeTextError.Syntax;
                 scanner.Advance();
                 offset = TimeSpan.Zero;
+            }
+            else if (!legacy && !spaced && isoDashes && scanner.Peek is '+' or '-')
+            {
+                // The newer types take an offset attached to an ISO date as they
+                // take its Z: '2024-01-05+05:00' (probed 2026-10-01 against SQL
+                // Server 2025).
+                var offsetError = scanner.ParseOffset(out var parsedOffset);
+                if (offsetError != DateTimeTextError.None)
+                    return offsetError;
+                offset = parsedOffset;
             }
             else if (!scanner.AtEnd)
             {

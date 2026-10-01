@@ -35,6 +35,8 @@ internal sealed class ParseFunction : Expression
         Cast.RequireAs(context, tryMode ? "try_parse" : "parse");
         var typeName = context.GetNextRequired<Tokens.Name>();
         (this.targetType, _) = Cast.ParseTargetTypeSpec(context, typeName);
+        if (!IsParseTarget(this.targetType))
+            throw SimulatedSqlException.InvalidParseTargetType(this.targetType.SqlServerName ?? this.targetType.ToString()!, tryMode ? "TRY_PARSE" : "PARSE");
         // Optional USING 'culture'
         if (context.Token is Tokens.UnquotedString { ContextualKeyword: ContextualKeyword.Using })
         {
@@ -94,12 +96,25 @@ internal sealed class ParseFunction : Expression
         if (target == SqlType.DateTime) return SqlValue.FromDateTime(DateTime.Parse(input, culture));
         if (target == SqlType.SmallDateTime) return SqlValue.FromSmallDateTime(DateTime.Parse(input, culture));
         if (target is DateTime2SqlType) return SqlValue.FromDateTime2(target, DateTime.Parse(input, culture));
-        if (target is TimeSqlType) return SqlValue.FromTime(target, TimeSpan.Parse(input, culture));
-        if (target is DateTimeOffsetSqlType) return SqlValue.FromDateTimeOffset(target, DateTimeOffset.Parse(input, culture));
-        // Fall back to CAST's path for types PARSE doesn't add a culture-aware
-        // route for (strings, binaries, etc.)
-        return SqlValue.FromNVarchar(input).CoerceTo(target);
+        // A time reads the way a date-time does, so '1:30 PM' is 13:30 (probed
+        // 2026-10-01 against SQL Server 2025).
+        if (target is TimeSqlType) return SqlValue.FromTime(target, DateTime.Parse(input, culture).TimeOfDay);
+        return target is DateTimeOffsetSqlType
+            ? SqlValue.FromDateTimeOffset(target, DateTimeOffset.Parse(input, culture))
+            : throw new InvalidOperationException($"PARSE admits no {target} target.");
     }
+
+    /// <summary>
+    /// The targets <c>PARSE</c> converts to: the numbers other than
+    /// <c>bit</c>, and the date and time types; anything else is Msg 10761
+    /// while compiling (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static bool IsParseTarget(SqlType target) => target.Category switch
+    {
+        SqlTypeCategory.Integer => target != SqlType.Bit,
+        SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate or SqlTypeCategory.DateTime => true,
+        _ => false,
+    };
 
     /// <summary>
     /// The exact-numeric target, at the full 38 digits real reads there

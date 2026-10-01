@@ -122,14 +122,33 @@ public sealed class AtTimeZoneTests
         AssertSqlError("select cast('2026-05-09T12:00:00' as datetime2) at time zone ''", 9820,
             "The time zone parameter '' provided to AT TIME ZONE clause is invalid.");
 
+    /// <summary>
+    /// Only the Windows ids <c>sys.time_zone_info</c> lists are zone names, in
+    /// any case — an IANA name is refused, and so is a padded one.
+    /// </summary>
     [TestMethod]
-    public void IanaZoneName_AcceptedCrossPlatform()
-    {
-        // .NET 6+ accepts both Windows and IANA names cross-platform via ICU.
-        var result = (DateTimeOffset)ExecuteScalar("select cast('2026-07-15T12:00:00+00:00' as datetimeoffset) at time zone 'America/Los_Angeles'")!;
-        AreEqual(new DateTime(2026, 7, 15, 5, 0, 0), result.DateTime);
-        AreEqual(TimeSpan.FromHours(-7), result.Offset);
-    }
+    [DataRow("America/Los_Angeles")]
+    [DataRow("Etc/UTC")]
+    [DataRow(" UTC")]
+    public void NonWindowsZoneName_RaisesMsg9820(string zone) =>
+        AssertSqlError($"select cast('2026-07-15T12:00:00+00:00' as datetimeoffset) at time zone '{zone}'", 9820,
+            $"The time zone parameter '{zone}' provided to AT TIME ZONE clause is invalid.");
+
+    [TestMethod]
+    [DataRow("pacific standard time", -420)]
+    [DataRow("India Standard Time", 330)]
+    [DataRow("Nepal Standard Time", 345)]
+    [DataRow("Myanmar Standard Time", 390)]
+    public void WindowsZoneName_ResolvesAnyCase(string zone, int offsetMinutes) =>
+        AreEqual(TimeSpan.FromMinutes(offsetMinutes),
+            ((DateTimeOffset)ExecuteScalar($"select cast('2026-07-15T12:00:00+00:00' as datetimeoffset) at time zone '{zone}'")!).Offset);
+
+    [TestMethod]
+    [DataRow("cast('2024-07-01 12:00' as smalldatetime)", 0)]
+    [DataRow("cast('2024-07-01 12:00' as datetime)", 3)]
+    [DataRow("cast('2024-07-01 12:00' as datetime2(2))", 2)]
+    public void ResultPrecision_FollowsSource(string source, int scale) =>
+        AreEqual(scale, ExecuteScalar($"select sql_variant_property(cast({source} at time zone 'UTC' as sql_variant), 'Scale')"));
 
     [TestMethod]
     public void ParenthesizedZoneNameExpression_Accepted()

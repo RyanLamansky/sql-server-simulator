@@ -250,4 +250,27 @@ public sealed class StringPlusOperatorTests
             insert t values ('foo', null);
             select a + b from t
             """));
+
+    /// <summary>
+    /// A bounded concatenation stops at the family maximum rather than
+    /// growing past it: 8000 bytes for varchar, 4000 characters for nvarchar,
+    /// whichever operator or function built it.
+    /// </summary>
+    [TestMethod]
+    [DataRow("replicate('a', 8000) + 'b'", 8000)]
+    [DataRow("replicate(N'a', 4000) + N'b'", 8000)]
+    [DataRow("replicate('a', 8000) + N'b'", 8000)]
+    [DataRow("cast(replicate('a', 5000) as varchar(5000)) + cast(replicate('b', 5000) as varchar(5000))", 8000)]
+    [DataRow("concat(replicate('a', 8000), 'b')", 8000)]
+    [DataRow("concat_ws(',', replicate('a', 5000), replicate('b', 5000))", 8000)]
+    [DataRow("replicate('a', 6000) || replicate('b', 6000)", 8000)]
+    [DataRow("replace(replicate('a', 5000), 'a', 'bb')", 8000)]
+    [DataRow("replace(replicate(N'a', 3000), N'a', N'bb')", 8000)]
+    [DataRow("stuff(replicate('a', 8000), 1, 0, 'x')", 8000)]
+    public void BoundedResult_ClippedToFamilyMaximum(string expression, int bytes)
+        => AreEqual(bytes, new Simulation().ExecuteScalar($"select datalength({expression})"));
+
+    [TestMethod]
+    public void MaxResult_NotClipped()
+        => AreEqual(8001L, new Simulation().ExecuteScalar("select datalength(cast(replicate('a', 8000) as varchar(max)) + 'b')"));
 }

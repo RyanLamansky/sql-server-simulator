@@ -66,4 +66,19 @@ public sealed class ChooseTests
     [TestMethod]
     public void Choose_StringIndexCoerced_Works()
         => AreEqual("b", new Simulation().ExecuteScalar("select choose('2', 'a', 'b', 'c')"));
+
+    /// <summary>
+    /// The values unify as CASE arms do: an integer literal sizes by its digit
+    /// count against a decimal sibling rather than as a ten-digit int.
+    /// </summary>
+    [TestMethod]
+    [DataRow("choose(1, 1, 2.5)", 2, 1)]
+    [DataRow("choose(1, cast(1 as decimal(10, 2)), 2)", 10, 2)]
+    [DataRow("choose(1, 2147483648, 1.5)", 11, 1)]
+    public void Choose_IntegerLiteralSizesAgainstDecimal(string expression, int precision, int scale)
+    {
+        var simulation = new Simulation();
+        AreEqual(precision, simulation.ExecuteScalar($"select sql_variant_property(cast({expression} as sql_variant), 'Precision')"));
+        AreEqual(scale, simulation.ExecuteScalar($"select sql_variant_property(cast({expression} as sql_variant), 'Scale')"));
+    }
 }

@@ -114,7 +114,7 @@ internal readonly partial struct SqlValue
             22 => $"{date:MM/dd/yy} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', "", spaceBeforeAmPm: true)}",
             // smalldatetime's ISO 8601 form carries no fraction (probed
             // 2026-09-26 against SQL Server 2025).
-            126 or 127 => $"{date:yyyy-MM-dd}T{Format24HourTime(time, '.', sourceTypeWord == "smalldatetime" ? "" : frac)}",
+            126 or 127 => $"{date:yyyy-MM-dd}T{Format24HourTime(time, '.', sourceTypeWord == "smalldatetime" ? "" : IsoFraction(frac))}",
             8 or 24 or 108 => Format24HourTime(time, '.', ""),
             14 or 114 => Format24HourTime(time, ':', frac),
             130 => $"{FormatHijriDateOnly(dt, withMonthName: true)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, ':', frac, spaceBeforeAmPm: false)}",
@@ -142,7 +142,7 @@ internal readonly partial struct SqlValue
             20 or 120 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', "")}",
             21 or 25 or 121 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', frac)}",
             22 => $"{date:MM/dd/yy} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', "", spaceBeforeAmPm: true)}",
-            126 or 127 => $"{date:yyyy-MM-dd}T{Format24HourTime(time, '.', frac)}",
+            126 or 127 => $"{date:yyyy-MM-dd}T{Format24HourTime(time, '.', IsoFraction(frac))}",
             8 or 24 or 108 => Format24HourTime(time, '.', ""),
             14 or 114 => Format24HourTime(time, '.', frac),
             130 => $"{FormatHijriDateOnly(dt, withMonthName: true)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', frac, spaceBeforeAmPm: false)}",
@@ -173,7 +173,8 @@ internal readonly partial struct SqlValue
             22 => " " + FormatAmPm12HourTime(time, paddedHour: false, includeSeconds: true, '.', "", spaceBeforeAmPm: true),
             130 or 131 => " " + FormatAmPm12HourTime(time, paddedHour: false, includeSeconds: true, '.', frac, spaceBeforeAmPm: false),
             8 or 24 or 108 or 20 or 120 => Format24HourTime(time, '.', ""),
-            13 or 113 or 14 or 114 or 21 or 25 or 121 or 126 or 127 => Format24HourTime(time, '.', frac),
+            13 or 113 or 14 or 114 or 21 or 25 or 121 => Format24HourTime(time, '.', frac),
+            126 or 127 => Format24HourTime(time, '.', IsoFraction(frac)),
             // Date-bearing styles fail with Msg 8114 — source can't supply the date portion (probe-confirmed).
             1 or 2 or 3 or 4 or 5 or 6 or 7 or 10 or 11 or 12 or 23 or 101 or 102 or 103 or 104 or 105 or 106 or 107 or 110 or 111 or 112 => throw SimulatedSqlException.ConvertingDataTypeError("time", "varchar"),
             _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "time"),
@@ -213,9 +214,19 @@ internal readonly partial struct SqlValue
 
     private static string FormatIsoDateTimeOffset(DateTimeOffset dto, int precision, bool withOffset) =>
         dto.ToString(
-            (precision == 0 ? "yyyy-MM-ddTHH:mm:ss" : "yyyy-MM-ddTHH:mm:ss." + new string('f', precision))
+            (precision == 0 || dto.Ticks % TimeSpan.TicksPerSecond == 0 ? "yyyy-MM-ddTHH:mm:ss" : "yyyy-MM-ddTHH:mm:ss." + new string('f', precision))
             + (withOffset ? "zzz" : ""),
             CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// The ISO 8601 styles 126 / 127 drop a fraction that is all zeros, where
+    /// every other style writes the source's full width: a <c>datetime</c>,
+    /// <c>datetime2</c>, <c>datetimeoffset</c> or <c>time</c> on a whole second
+    /// reads <c>…T10:30:00</c>, while a nonzero fraction keeps every digit
+    /// (<c>.500</c>; probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static string IsoFraction(string fraction) =>
+        fraction.AsSpan().TrimStart('0').IsEmpty ? "" : fraction;
 
     /// <summary>
     /// Legacy <c>"Mmm d yyyy"</c> with the day right-aligned in 2 chars

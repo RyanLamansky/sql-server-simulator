@@ -53,4 +53,17 @@ public sealed class IsDateTests
         => AssertSqlError("select ISDATE(SYSDATETIMEOFFSET())", 8116);
 
     [TestMethod] public void FloatInput_ReturnsZero() => AreEqual(0, ExecuteScalar<int>("select ISDATE(cast(1.5 as float))"));
+
+    /// <summary>
+    /// Spaces alone aren't a date, and a time the datetime rounding carries
+    /// past 9999-12-31 is out of range.
+    /// </summary>
+    [TestMethod]
+    [DataRow("' '", 0)]
+    [DataRow("cast(' ' as char(5))", 0)]
+    [DataRow("'  2024-01-01'", 1)]
+    [DataRow("'9999-12-31 23:59:59.998'", 1)]
+    [DataRow("'9999-12-31 23:59:59.999'", 0)]
+    public void Spaces_AndRoundingOverflow(string expression, int expected)
+        => AreEqual(expected, ExecuteScalar<int>($"select isdate({expression})"));
 }

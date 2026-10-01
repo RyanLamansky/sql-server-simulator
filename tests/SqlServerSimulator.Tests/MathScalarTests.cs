@@ -283,4 +283,50 @@ public sealed class MathScalarTests
     [TestMethod]
     public void DegreesPastTheFloatRange_IsMsg8115()
         => new Simulation().AssertSqlError("select degrees(1e308)", 8115, "Arithmetic overflow error converting expression to data type float.");
+
+    /// <summary>
+    /// ROUND over a float decides by the double's exact binary value, so a
+    /// decimal tie written in the literal that the double stores just below
+    /// rounds down.
+    /// </summary>
+    [TestMethod]
+    [DataRow("round(2.675e0, 2)", 2.67)]
+    [DataRow("round(-2.675e0, 2)", -2.67)]
+    [DataRow("round(1.45e0, 1)", 1.4)]
+    [DataRow("round(1.15e0, 1)", 1.1)]
+    [DataRow("round(2.665e0, 2)", 2.67)]
+    [DataRow("round(0.29e0, 2, 1)", 0.28)]
+    [DataRow("round(2.5e0, 0)", 3.0)]
+    [DataRow("round(2.5e-300, 300)", 2e-300)]
+    public void Round_Float_DecidesByExactValue(string expression, double expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
+    /// <summary>A bare NULL length types ROUND's result float, whatever the value.</summary>
+    [TestMethod]
+    [DataRow("round(1.5, null)", "float")]
+    [DataRow("round(5, null)", "float")]
+    [DataRow("round(1.5, cast(null as int))", "decimal")]
+    public void Round_NullLength_ResultType(string expression, string typeName)
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var reader = connection.CreateCommand($"select {expression}").ExecuteReader();
+        AreEqual(typeName, reader.GetDataTypeName(0));
+    }
+
+    /// <summary>
+    /// POWER's bigint result overflows at 2^63, and a decimal result that
+    /// outgrows numeric reports the float conversion it came through.
+    /// </summary>
+    [TestMethod]
+    public void Power_BigintOverflow_Raises8115()
+        => AreEqual("Arithmetic overflow error converting expression to data type bigint.",
+            new Simulation().AssertSqlError("select power(cast(2 as bigint), 63)", 8115).Message);
+
+    [TestMethod]
+    public void Power_DecimalOverflow_NamesFloatSource()
+    {
+        var ex = new Simulation().AssertSqlError("select power(10.0, 40)", 8115);
+        AreEqual("Arithmetic overflow error converting float to data type numeric.", ex.Message);
+        AreEqual(6, ex.State);
+    }
 }

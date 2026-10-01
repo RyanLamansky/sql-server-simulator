@@ -24,7 +24,7 @@ internal sealed class Concatenate(Expression left, Expression right) : Expressio
         var resultType = ResolveResultType(leftValue.Type, rightValue.Type);
         return leftValue.IsNull || rightValue.IsNull
             ? SqlValue.Null(resultType)
-            : SqlValue.FromString(resultType, Stringify(leftValue, resultType) + Stringify(rightValue, resultType));
+            : SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(Stringify(leftValue, resultType) + Stringify(rightValue, resultType), resultType));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>

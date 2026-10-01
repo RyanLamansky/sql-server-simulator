@@ -66,12 +66,30 @@ internal sealed class IsDate(ParserContext context) : Expression
     /// to year 1); ISDATE specifically rejects pre-1753 values to match the
     /// legacy <c>datetime</c> domain. Empty string short-circuits to false:
     /// the shared parser treats <c>""</c> as datetime base-date for CAST
-    /// support, but ISDATE specifically rejects it (probe-confirmed).
+    /// support, but ISDATE specifically rejects it (probe-confirmed), and a
+    /// string of nothing but spaces with it. A time the datetime rounding
+    /// carries past 9999-12-31 is out of range too: <c>ISDATE('9999-12-31
+    /// 23:59:59.999')</c> is 0 (both probed 2026-10-01 against SQL Server
+    /// 2025).
     /// </summary>
-    internal static bool TryParseLegacyDateTimeInRange(string value) =>
-        !string.IsNullOrEmpty(value)
-        && SqlValue.TryParseLegacyDateTime(value, out var dt)
-        && dt.Year is >= 1753 and <= 9999;
+    internal static bool TryParseLegacyDateTimeInRange(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || !SqlValue.TryParseLegacyDateTime(value, out var dt)
+            || dt.Year is < 1753 or > 9999)
+        {
+            return false;
+        }
+        try
+        {
+            _ = SqlValue.FromDateTime(dt);
+            return true;
+        }
+        catch (SimulatedSqlException)
+        {
+            return false;
+        }
+    }
 
     internal override string DebugDisplay() => $"ISDATE({this.operand.DebugDisplay()})";
 

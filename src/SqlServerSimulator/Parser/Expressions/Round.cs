@@ -38,14 +38,18 @@ internal sealed class Round : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = MathScalars.CoerceImplicit(this.value.Run(runtime));
-        var resultType = MathScalars.WidenForResult(v.Type);
+        var resultType = IsUntypedNullLiteral(this.length) ? SqlType.Float : MathScalars.WidenForResult(v.Type);
         if (v.IsNull) return SqlValue.Null(resultType);
 
         var lenValue = this.length.Run(runtime);
         if (lenValue.IsNull) return SqlValue.Null(resultType);
         // A decimal, money or float length truncates to int the way CAST does
         // (probed 2026-09-25: ROUND(12.345, 2.7) rounds to 2 places).
-        var len = Math.Clamp(ScalarArguments.CoerceToInt(lenValue), -Decimal38.MaxPrecision, Decimal38.MaxPrecision);
+        // An exact-numeric length clamps to numeric's 38 digits; a float's
+        // reaches as far as a double has digits (ROUND(2.5e-300, 300) is
+        // 2E-300, probed 2026-10-01), past which every double is whole or zero.
+        var lengthLimit = resultType.Category == SqlTypeCategory.Approximate ? 400 : Decimal38.MaxPrecision;
+        var len = Math.Clamp(ScalarArguments.CoerceToInt(lenValue), -lengthLimit, lengthLimit);
 
         var truncate = false;
         if (this.function is not null)
@@ -73,7 +77,11 @@ internal sealed class Round : Expression
         ScalarArguments.RequireNumericSlot(this.length, batch, resolveColumnType, "round", 2, NumericSlot.AnyNumber);
         if (this.function is not null)
             ScalarArguments.RequireNumericSlot(this.function, batch, resolveColumnType, "round", 3, NumericSlot.AnyNumber);
-        return MathScalars.WidenForResult(AssignmentRules.ArgumentType(this.value, SqlType.Float, batch, resolveColumnType));
+        var valueType = MathScalars.WidenForResult(AssignmentRules.ArgumentType(this.value, SqlType.Float, batch, resolveColumnType));
+        // A bare NULL length types the result float whatever the value (probed
+        // 2026-10-01 against SQL Server 2025: ROUND(1.5, NULL) and ROUND(5,
+        // NULL) are float, ROUND(1.5, CAST(NULL AS int)) numeric(2, 1)).
+        return IsUntypedNullLiteral(this.length) ? SqlType.Float : valueType;
     }
 
     internal override bool ResultReportsNumeric => this.value.ResultReportsNumeric;
@@ -126,6 +134,16 @@ internal sealed class Round : Expression
         }
     }
 
+    /// <summary>
+    /// Rounds (or truncates) a <c>float</c> at <paramref name="length"/>
+    /// decimal places, deciding by the double's exact binary value rather
+    /// than by its scaled product: <c>ROUND(2.675e0, 2)</c> is 2.67 because
+    /// 2.675 is stored as 2.67499999…, and <c>ROUND(1.45e0, 1)</c> is 1.4
+    /// (probed 2026-10-01 against SQL Server 2025). The scaled product decides
+    /// on its own when it lies clear of a rounding boundary; only a value
+    /// within reach of one takes the exact path. The result is the double
+    /// nearest the rounded decimal.
+    /// </summary>
     private static double RoundDouble(double value, int length, bool truncate)
     {
         if (length >= 0)
@@ -138,12 +156,68 @@ internal sealed class Round : Expression
             var scaledUp = value * p;
             if (double.IsInfinity(scaledUp) || Math.Abs(scaledUp) >= 4503599627370496.0)
                 return value;
-            return truncate ? Math.Truncate(scaledUp) / p : Math.Round(scaledUp, MidpointRounding.AwayFromZero) / p;
+            return ClearOfBoundary(scaledUp, truncate)
+                ? (truncate ? Math.Truncate(scaledUp) : Math.Round(scaledUp, MidpointRounding.AwayFromZero)) / p
+                : RoundExactly(value, length, truncate);
         }
+        // A double's magnitude stays below 10^309, so it rounds to zero there.
+        if (length < -308)
+            return 0;
         var scale = Math.Pow(10, -length);
         var scaled = value / scale;
+        if (!ClearOfBoundary(scaled, truncate))
+            return RoundExactly(value, length, truncate);
         var rounded = truncate ? Math.Truncate(scaled) : Math.Round(scaled, MidpointRounding.AwayFromZero);
         return rounded * scale;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="scaled"/>'s fraction is far enough from the
+    /// boundary the operation turns on — one half when rounding, a whole
+    /// number when truncating — that the error the scaling put into it can't
+    /// move it across.
+    /// </summary>
+    private static bool ClearOfBoundary(double scaled, bool truncate)
+    {
+        var fraction = Math.Abs(scaled - Math.Truncate(scaled));
+        var margin = Math.Max(1e-9, Math.Abs(scaled) * 1e-12);
+        return truncate
+            ? fraction > margin && 1 - fraction > margin
+            : Math.Abs(fraction - 0.5) > margin;
+    }
+
+    /// <summary>
+    /// <see cref="RoundDouble"/>'s exact path: the double as the fraction
+    /// <c>m·2^e</c> scaled by <c>10^length</c>, rounded half away from zero (or
+    /// truncated) as an integer, and read back as the nearest double.
+    /// </summary>
+    private static double RoundExactly(double value, int length, bool truncate)
+    {
+        if (value == 0 || !double.IsFinite(value))
+            return value;
+        var bits = BitConverter.DoubleToInt64Bits(value);
+        var exponentBits = (int)((bits >> 52) & 0x7FF);
+        var mantissa = bits & 0xFFFFFFFFFFFFFL;
+        if (exponentBits == 0)
+            exponentBits = 1;
+        else
+            mantissa |= 1L << 52;
+        var exponent = exponentBits - 1075;
+        var numerator = new System.Numerics.BigInteger(mantissa);
+        var denominator = System.Numerics.BigInteger.One;
+        if (exponent >= 0)
+            numerator <<= exponent;
+        else
+            denominator <<= -exponent;
+        if (length >= 0)
+            numerator *= System.Numerics.BigInteger.Pow(10, length);
+        else
+            denominator *= System.Numerics.BigInteger.Pow(10, -length);
+        var whole = System.Numerics.BigInteger.DivRem(numerator, denominator, out var remainder);
+        if (!truncate && remainder * 2 >= denominator)
+            whole += 1;
+        var magnitude = double.Parse($"{whole}E{-length}", System.Globalization.CultureInfo.InvariantCulture);
+        return value < 0 ? -magnitude : magnitude;
     }
 
     private static long Pow10Long(int exponent)

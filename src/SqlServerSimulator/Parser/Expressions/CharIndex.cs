@@ -36,8 +36,9 @@ internal sealed class CharIndex : Expression
         // (probe-confirmed 2026-05-22: CHARINDEX('2', 12345) = 2). Needle
         // (arg 1) stays strict — real rejects non-string with Msg 8116.
         var h = StringScalars.CoerceToVarchar(haystack.Run(runtime), runtime.Batch, "charindex", argumentIndex: 2, allowLegacyLob: true);
+        var resultType = ResultType(h.Type);
         if (n.IsNull || h.IsNull)
-            return SqlValue.Null(SqlType.Int32);
+            return SqlValue.Null(resultType);
         if (!SqlType.IsStringCategory(n.Type) || n.Type == SqlType.Text || n.Type == SqlType.NText)
             throw SimulatedSqlException.InvalidArgumentDataType(n.Type.SqlServerName, argumentIndex: 1, "charindex");
 
@@ -54,21 +55,21 @@ internal sealed class CharIndex : Expression
         {
             var startValue = start.Run(runtime);
             if (startValue.IsNull)
-                return SqlValue.Null(SqlType.Int32);
+                return SqlValue.Null(resultType);
             startUnits = Math.Max(0, StringScalars.CoerceLengthArgument(startValue) - 1);
         }
         var startCu = isSc
             ? SupplementaryCharacters.CodepointToCodeUnit(haystackStr, startUnits)
             : startUnits;
-        if (startCu >= haystackStr.Length)
-            return SqlValue.FromInt32(0);
-
-        var foundCu = StringScalars.CollationFor(runtime.Batch, h.Type, n.Type).IndexOf(haystackStr, needleStr, startCu, out _);
-        return SqlValue.FromInt32(foundCu < 0
+        var foundCu = startCu >= haystackStr.Length
+            ? -1
+            : StringScalars.CollationFor(runtime.Batch, h.Type, n.Type).IndexOf(haystackStr, needleStr, startCu, out _);
+        var position = foundCu < 0
             ? 0
             : isSc
                 ? SupplementaryCharacters.CodeUnitToCodepoint(haystackStr, foundCu) + 1
-                : foundCu + 1);
+                : foundCu + 1;
+        return resultType == SqlType.BigInt ? SqlValue.FromInt64(position) : SqlValue.FromInt32(position);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
@@ -87,8 +88,19 @@ internal sealed class CharIndex : Expression
         StringScalars.RequireSettledCollation(haystackType, "charindex");
         if (start is not null)
             ScalarArguments.RequireNumericSlot(start, batch, resolveColumnType, "charindex", 3, NumericSlot.IntegerOrDecimal);
-        return SqlType.Int32;
+        return ResultType(haystackType);
     }
+
+    /// <summary>
+    /// <c>bigint</c> over a <c>varchar(max)</c> / <c>nvarchar(max)</c>
+    /// haystack, <c>int</c> otherwise — a <c>text</c> / <c>ntext</c> one
+    /// included, and whatever the needle (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static SqlType ResultType(SqlType haystackType) =>
+        haystackType is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel }
+            ? SqlType.BigInt
+            : SqlType.Int32;
 
     internal override string DebugDisplay() => start is null
         ? $"CHARINDEX({needle.DebugDisplay()}, {haystack.DebugDisplay()})"

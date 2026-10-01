@@ -23,6 +23,10 @@ internal sealed class Stuff : Expression
     private readonly Expression length;
     private readonly Expression replacement;
 
+    // The start and length real fold while compiling, which size the result.
+    private readonly int? constantStart;
+    private readonly int? constantLength;
+
     public Stuff(ParserContext context)
     {
         this.input = Parse(context);
@@ -35,6 +39,8 @@ internal sealed class Stuff : Expression
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.replacement = Parse(context.MoveNextRequiredReturnSelf());
+        this.constantStart = StringScalars.FoldCount(this.start, context.Batch);
+        this.constantLength = StringScalars.FoldCount(this.length, context.Batch);
     }
 
     public override SqlValue Run(RuntimeContext runtime)
@@ -74,15 +80,19 @@ internal sealed class Stuff : Expression
         var sliceStartCu = isSc ? SupplementaryCharacters.CodepointToCodeUnit(s, startIndex - 1) : startIndex - 1;
         var sliceEndCu = isSc ? SupplementaryCharacters.CodepointToCodeUnit(s, startIndex - 1 + deleteCount) : startIndex - 1 + deleteCount;
         var result = string.Concat(s.AsSpan(0, sliceStartCu), insertText, s.AsSpan(sliceEndCu));
-        return SqlValue.FromString(resultType, result);
+        return SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(result, resultType));
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var inputType = StringScalars.ResolveResultType(StringScalars.BindCoercedArgument(this.input, batch, resolveColumnType, "stuff"), batch);
+        var inputType = StringScalars.ResolveResultType(StringScalars.BindSource(this.input, batch, resolveColumnType, "stuff", coerced: true), batch);
         _ = this.start.GetSqlType(batch, resolveColumnType);
         _ = this.length.GetSqlType(batch, resolveColumnType);
         var replacementType = StringScalars.ResolveResultType(StringScalars.BindCoercedArgument(this.replacement, batch, resolveColumnType, "stuff", argumentIndex: 4), batch);
+        // A bare NULL replacement inserts nothing but is typed as one
+        // character (probed 2026-10-01 against SQL Server 2025).
+        if (IsUntypedNullLiteral(this.replacement))
+            replacementType = VarcharSqlType.Get(1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
         ScalarArguments.RequireNumericSlot(this.start, batch, resolveColumnType, "stuff", 2, NumericSlot.IntegerOrDecimal);
         ScalarArguments.RequireNumericSlot(this.length, batch, resolveColumnType, "stuff", 3, NumericSlot.IntegerOrDecimal);
         return ResolveResultType(inputType, replacementType, batch);
@@ -97,9 +107,10 @@ internal sealed class Stuff : Expression
     /// characters remain to delete), <c>STUFF(varchar(10), 2, 0, 'ZZZZ')</c> →
     /// <c>varchar(14)</c> (pure insert). The family is the <c>nvarchar</c>-wins
     /// promotion of input + replacement, and either operand being MAX carries
-    /// MAX through. When <c>start</c> or <c>length</c> isn't a constant (or a
-    /// width is unspecified), the result falls back to the family container,
-    /// matching real's non-constant behavior.
+    /// MAX through. When <c>start</c> or <c>length</c> isn't a constant real
+    /// folds (see <see cref="StringScalars.FoldCount"/>), a start lies past the
+    /// input's width, or a width is unspecified, the result falls back to the
+    /// family container, matching real.
     /// </summary>
     private SqlType ResolveResultType(SqlType inputType, SqlType replacementType, BatchContext batch)
     {
@@ -110,14 +121,18 @@ internal sealed class Stuff : Expression
         var inputWidth = StringScalars.DeclaredWidth(inputType);
         var replacementWidth = StringScalars.DeclaredWidth(replacementType);
         if (inputWidth <= 0 || replacementWidth <= 0
-            || !StringScalars.TryConstantCount(this.start, out var start)
-            || !StringScalars.TryConstantCount(this.length, out var deleteLength))
+            || this.constantStart is not int start
+            || this.constantLength is not int deleteLength
+            || start > inputWidth)
         {
             return StringScalars.ContainerResultType(promoted, batch);
         }
 
-        var clampedDelete = Math.Min(deleteLength, Math.Max(0, inputWidth - start + 1));
-        var width = Math.Max(0, inputWidth - clampedDelete) + replacementWidth;
+        // A start at or below zero still sizes (the call answers NULL), and a
+        // negative length widens the result by its magnitude: STUFF('abc', 2,
+        // -1, 'x') is varchar(5) (probed 2026-10-01 against SQL Server 2025).
+        var clampedDelete = Math.Min(deleteLength, inputWidth - start + 1);
+        var width = inputWidth - clampedDelete + replacementWidth;
         return StringScalars.SizedResultType(promoted, width, batch);
     }
 

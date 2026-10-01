@@ -97,11 +97,12 @@ internal sealed class Add : TwoSidedExpression
             resultType = UnresolvedCollation.Settle(resultType, left.Type, right.Type, "add");
 
         // Only one NULL reads as empty: two NULLs still concatenate to NULL.
+        // A bounded result past the family maximum is clipped to it.
         if (!concatNullYieldsNull && left.IsNull != right.IsNull)
-            return SqlValue.FromString(resultType, (left.IsNull ? "" : left.AsString) + (right.IsNull ? "" : right.AsString));
+            return SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap((left.IsNull ? "" : left.AsString) + (right.IsNull ? "" : right.AsString), resultType));
         return left.IsNull || right.IsNull
             ? SqlValue.Null(resultType)
-            : SqlValue.FromString(resultType, left.AsString + right.AsString);
+            : SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(left.AsString + right.AsString, resultType));
     }
 
     /// <summary>

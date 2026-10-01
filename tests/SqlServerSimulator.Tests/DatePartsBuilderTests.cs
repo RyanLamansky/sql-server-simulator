@@ -230,4 +230,44 @@ public sealed class DatePartsBuilderTests
             insert t values ('2026-02-15');
             select eomonth(d) from t
             """));
+
+    /// <summary>
+    /// The builders' precision argument reports Msg 1002 at class 16 state 2.
+    /// </summary>
+    [TestMethod]
+    [DataRow("timefromparts(1, 2, 3, 4, 8)", 8)]
+    [DataRow("datetime2fromparts(2024, 1, 1, 1, 2, 3, 4, 8)", 8)]
+    [DataRow("datetimeoffsetfromparts(2024, 1, 1, 1, 2, 3, 4, 0, 0, -1)", -1)]
+    public void FromParts_InvalidPrecision_Class16State2(string expression, int precision)
+    {
+        var ex = new Simulation().AssertSqlError($"select {expression}", 1002);
+        AreEqual($"Line 1: Specified scale {precision} is invalid.", ex.Message);
+        AreEqual(16, ex.Class);
+        AreEqual(2, ex.State);
+    }
+
+    /// <summary>Offsets of the same sign add: (-5, -30) is -05:30.</summary>
+    [TestMethod]
+    [DataRow(-5, -30, -330)]
+    [DataRow(0, -30, -30)]
+    [DataRow(5, 30, 330)]
+    public void DateTimeOffsetFromParts_OffsetsAdd(int hours, int minutes, int total)
+        => AreEqual(TimeSpan.FromMinutes(total), ((DateTimeOffset)new Simulation().ExecuteScalar(
+            $"select datetimeoffsetfromparts(2024, 1, 1, 0, 0, 0, 0, {hours}, {minutes}, 3)")!).Offset);
+
+    /// <summary>
+    /// A value whose UTC instant or datetime rounding leaves the type's range
+    /// is the builder's own Msg 289, not a crash or the conversion's Msg 242.
+    /// </summary>
+    [TestMethod]
+    [DataRow("datetimeoffsetfromparts(1, 1, 1, 0, 0, 0, 0, 1, 0, 0)", "datetimeoffset", 6)]
+    [DataRow("datetimeoffsetfromparts(9999, 12, 31, 23, 0, 0, 0, -1, 0, 0)", "datetimeoffset", 6)]
+    [DataRow("datetimefromparts(9999, 12, 31, 23, 59, 59, 999)", "datetime", 3)]
+    [DataRow("smalldatetimefromparts(2079, 6, 7, 0, 0)", "smalldatetime", 4)]
+    public void FromParts_OutOfRangeResult_Raises289(string expression, string typeName, int state)
+    {
+        var ex = new Simulation().AssertSqlError($"select {expression}", 289);
+        AreEqual($"Cannot construct data type {typeName}, some of the arguments have values which are not valid.", ex.Message);
+        AreEqual(state, ex.State);
+    }
 }

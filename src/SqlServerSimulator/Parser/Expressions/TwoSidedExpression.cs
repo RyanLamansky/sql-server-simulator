@@ -625,7 +625,7 @@ internal abstract class TwoSidedExpression : Expression
     /// <c>$5 * 3 → money</c>). Same-money-pair preserves the wider of the
     /// two; mixed money / smallmoney widens to money. Math runs on the
     /// underlying decimal values; the result re-rounds half-away-from-zero
-    /// to scale 4 inside <see cref="SqlValue.FromMoney(SqlType, Decimal38)"/> — except division,
+    /// to scale 4 inside <see cref="SqlValue.FromMoneyComputation"/> — except division,
     /// which truncates toward zero at scale 4 the way the decimal family's
     /// does (<c>$1.00 / 7</c> is real's <c>0.1428</c>), leaving that rounding
     /// nothing to do.
@@ -638,8 +638,8 @@ internal abstract class TwoSidedExpression : Expression
         if (left.IsNull || right.IsNull)
             return SqlValue.Null(resultType);
 
-        var l = MoneyOrIntegerToDecimal38(left);
-        var r = MoneyOrIntegerToDecimal38(right);
+        var l = MoneyOrIntegerToDecimal38(left, resultType);
+        var r = MoneyOrIntegerToDecimal38(right, resultType);
         if (r.IsZero && op is '/' or '%')
             throw SimulatedSqlException.DivideByZero();
 
@@ -658,12 +658,25 @@ internal abstract class TwoSidedExpression : Expression
         };
 
         return computed
-            ? SqlValue.FromMoney(resultType, raw)
+            ? SqlValue.FromMoneyComputation(resultType, raw)
             : throw SimulatedSqlException.ArithmeticOverflow(resultType.ToString()!);
     }
 
-    private static Decimal38 MoneyOrIntegerToDecimal38(SqlValue v) =>
-        SqlType.IsMoneyCategory(v.Type) ? v.AsMoneyDecimal38 : Decimal38.FromInt64(SqlValue.AsInt64Widened(v));
+    /// <summary>
+    /// A money operand's value, or an integer operand's once it converts to
+    /// the money result type — which a <c>smallmoney</c> result can refuse:
+    /// <c>CAST(1 AS smallmoney) * 300000</c> is Msg 220 naming the integer
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static Decimal38 MoneyOrIntegerToDecimal38(SqlValue v, SqlType resultType)
+    {
+        if (SqlType.IsMoneyCategory(v.Type))
+            return v.AsMoneyDecimal38;
+        var integer = SqlValue.AsInt64Widened(v);
+        return resultType == SqlType.SmallMoney && integer is < -214748 or > 214748
+            ? throw SimulatedSqlException.ArithmeticOverflowForDataType("smallmoney", integer.ToString(System.Globalization.CultureInfo.InvariantCulture), state: 3)
+            : Decimal38.FromInt64(integer);
+    }
 
     private protected static SqlValue ApproximateArithmetic(SqlValue left, SqlValue right, char op)
     {

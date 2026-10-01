@@ -89,8 +89,9 @@ internal sealed class Rand : Expression
 /// constant <c>4.656613e-10</c> rather than an exact <c>1/2147483563</c>.
 /// <c>RAND(n)</c> restarts the first generator at <c>|n|</c> (12345 for 0,
 /// so <c>RAND(0)</c> equals <c>RAND(12345)</c> and <c>RAND(-1)</c> equals
-/// <c>RAND(1)</c>) and the second at 67890, then draws; <c>RAND(1)</c> is
-/// <c>0.7135919932129235</c>.
+/// <c>RAND(1)</c>, and at 12345 too once <c>|n|</c> reaches the first
+/// modulus, 2147483563 — probed 2026-10-01) and the second at 67890, then
+/// draws; <c>RAND(1)</c> is <c>0.7135919932129235</c>.
 /// </summary>
 internal sealed class RandGenerator
 {
@@ -108,7 +109,8 @@ internal sealed class RandGenerator
 
     public double Seed(int seed)
     {
-        this.state1 = seed == 0 ? 12345 : Math.Abs((long)seed);
+        var magnitude = Math.Abs((long)seed);
+        this.state1 = magnitude is 0 or >= Modulus1 ? 12345 : magnitude;
         this.state2 = 67890;
         return this.Next();
     }

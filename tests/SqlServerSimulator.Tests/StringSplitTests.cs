@@ -236,4 +236,31 @@ public sealed class StringSplitTests
         using var reader = conn.CreateCommand($"select * from STRING_SPLIT('a,b', ',', {enableOrdinal})").ExecuteReader();
         AreEqual(2, reader.FieldCount);
     }
+
+    /// <summary>
+    /// A fixed-width input splits into unpadded values of the variable form.
+    /// </summary>
+    [TestMethod]
+    public void CharInput_SplitsIntoVarcharValues()
+    {
+        using var conn = new Simulation().CreateOpenConnection();
+        using var reader = conn.CreateCommand("select value from string_split(cast('a b' as char(5)), ' ')").ExecuteReader();
+        AreEqual("varchar", reader.GetDataTypeName(0));
+        var values = new List<string>();
+        while (reader.Read())
+            values.Add(reader.GetString(0));
+        CollectionAssert.AreEqual(new[] { "a", "b", "", "" }, values);
+    }
+
+    /// <summary>Only a non-LOB string splits; anything else is Msg 8116.</summary>
+    [TestMethod]
+    [DataRow("12345", "int")]
+    [DataRow("1.5", "numeric")]
+    [DataRow("cast('2024-01-01' as date)", "date")]
+    [DataRow("cast(0x612C62 as varbinary(10))", "varbinary")]
+    public void NonStringInput_Raises8116(string input, string typeName)
+        => new Simulation().AssertSqlError(
+            $"select * from string_split({input}, ',')",
+            8116,
+            $"Argument data type {typeName} is invalid for argument 1 of string_split function.");
 }

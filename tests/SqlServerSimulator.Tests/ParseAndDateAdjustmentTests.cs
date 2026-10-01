@@ -75,4 +75,90 @@ public sealed class ParseAndDateAdjustmentTests
         var result = (DateTimeOffset)new Simulation().ExecuteScalar("select todatetimeoffset(cast('2024-01-15T12:00:00' as datetime2), 0)")!;
         AreEqual(new DateTimeOffset(2024, 1, 15, 12, 0, 0, TimeSpan.Zero), result);
     }
+
+    /// <summary>
+    /// SWITCHOFFSET and TODATETIMEOFFSET keep the source's fractional
+    /// precision: datetime2(n) and datetimeoffset(n) their own, datetime 3,
+    /// smalldatetime 0, a string or date 7.
+    /// </summary>
+    [TestMethod]
+    [DataRow("switchoffset(cast('2024-01-01 10:00' as datetime2(3)), '+01:00')", 3)]
+    [DataRow("switchoffset(cast('2024-01-01' as datetime), '+01:00')", 3)]
+    [DataRow("switchoffset(cast('2024-01-01' as smalldatetime), '+01:00')", 0)]
+    [DataRow("switchoffset('2024-01-01 10:00', '+01:00')", 7)]
+    [DataRow("todatetimeoffset(cast('2024-01-01 10:00' as datetime), '-08:00')", 3)]
+    [DataRow("todatetimeoffset(cast('2024-01-01 10:00' as datetime2(2)), 60)", 2)]
+    [DataRow("todatetimeoffset(cast('2024-01-01' as smalldatetime), 0)", 0)]
+    [DataRow("todatetimeoffset(cast('2024-01-01' as date), 0)", 7)]
+    public void OffsetFunctions_KeepSourcePrecision(string expression, int scale)
+        => AreEqual(scale, new Simulation().ExecuteScalar($"select sql_variant_property(cast({expression} as sql_variant), 'Scale')"));
+
+    /// <summary>An offset that carries the value out of range is Msg 9813.</summary>
+    [TestMethod]
+    [DataRow("switchoffset(cast('9999-12-31 23:00 +00:00' as datetimeoffset), '+05:00')", "switchoffset", 0)]
+    [DataRow("switchoffset(cast('0001-01-01 00:30 +00:00' as datetimeoffset), '-05:00')", "switchoffset", 0)]
+    [DataRow("todatetimeoffset(cast('0001-01-01 00:30' as datetime2), '+05:00')", "todatetimeoffset", 2)]
+    [DataRow("todatetimeoffset(cast('9999-12-31 23:30' as datetime2), '-05:00')", "todatetimeoffset", 2)]
+    public void OffsetOverflow_Raises9813(string expression, string function, int state)
+    {
+        var ex = new Simulation().AssertSqlError($"select {expression}", 9813);
+        AreEqual($"The timezone provided to builtin function {function} would cause the datetimeoffset to overflow the range of valid date range in either UTC or local time.", ex.Message);
+        AreEqual(state, ex.State);
+    }
+
+    /// <summary>
+    /// DATETRUNC refuses a part finer than the operand's precision, types a
+    /// bare NULL as datetime2(7), and reports a week starting before
+    /// 0001-01-01 as Msg 9837.
+    /// </summary>
+    [TestMethod]
+    [DataRow("millisecond", "datetime2(2)", "datetime2")]
+    [DataRow("microsecond", "datetime2(3)", "datetime2")]
+    [DataRow("millisecond", "time(2)", "time")]
+    [DataRow("millisecond", "datetimeoffset(2)", "datetimeoffset")]
+    public void DateTrunc_PartFinerThanPrecision_Raises9810(string part, string type, string typeName)
+    {
+        var ex = new Simulation().AssertSqlError($"select datetrunc({part}, cast('2024-01-01 10:00:00' as {type}))", 9810);
+        AreEqual($"The datepart {part} is not supported by date function datetrunc for data type {typeName}.", ex.Message);
+        AreEqual(11, ex.State);
+    }
+
+    [TestMethod]
+    public void DateTrunc_BareNull_IsDateTime2()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var reader = connection.CreateCommand("select datetrunc(year, null)").ExecuteReader();
+        AreEqual("datetime2", reader.GetDataTypeName(0));
+    }
+
+    [TestMethod]
+    [DataRow("date", "date")]
+    [DataRow("datetime2", "datetime2")]
+    public void DateTrunc_WeekBeforeYearOne_Raises9837(string type, string typeName)
+        => new Simulation().AssertSqlError(
+            $"select datetrunc(week, cast('0001-01-03' as {type}))",
+            9837,
+            $"An invalid {typeName} value was encountered: The date value is less than the minimum date value allowed for the data type.");
+
+    /// <summary>PARSE converts to the numeric and date / time types alone.</summary>
+    [TestMethod]
+    [DataRow("parse('1' as varchar(10))", "varchar", "PARSE")]
+    [DataRow("parse('1' as nvarchar(5))", "nvarchar", "PARSE")]
+    [DataRow("parse('1' as char(5))", "char", "PARSE")]
+    [DataRow("parse('true' as bit)", "bit", "PARSE")]
+    [DataRow("parse('6F9619FF-8B86-D011-B42D-00C04FC964FF' as uniqueidentifier)", "uniqueidentifier", "PARSE")]
+    [DataRow("try_parse('1' as varbinary(5))", "varbinary", "TRY_PARSE")]
+    public void Parse_NonNumericNonDateTarget_Raises10761(string expression, string typeName, string function)
+    {
+        var ex = new Simulation().AssertSqlError($"select {expression}", 10761);
+        AreEqual($"Invalid data type {typeName} in function {function}.", ex.Message);
+        AreEqual(15, ex.Class);
+    }
+
+    [TestMethod]
+    [DataRow("parse('1:30 PM' as time)", "13:30:00")]
+    [DataRow("parse('1:30:15 AM' as time(0))", "01:30:15")]
+    [DataRow("parse('2024-01-01 10:00' as time)", "10:00:00")]
+    public void Parse_Time_ReadsLikeADateTime(string expression, string expected)
+        => AreEqual(TimeSpan.Parse(expected, System.Globalization.CultureInfo.InvariantCulture), new Simulation().ExecuteScalar($"select {expression}"));
 }

@@ -107,4 +107,26 @@ public sealed class DateTimeStringTests
             "select cast(N'9999-12-31 23:59:59 -05:00' as datetimeoffset)",
             8114,
             "Error converting data type nvarchar to datetimeoffset.");
+
+    /// <summary>
+    /// The newer types take an offset attached to an ISO date, as they take
+    /// its Z; datetime, a spaced offset and the unseparated form don't.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast('2024-01-05+05:00' as date)")]
+    [DataRow("cast('2024-01-05-05:00' as datetime2)")]
+    public void IsoDateWithOffset_Accepted(string expression)
+        => AreEqual(new DateTime(2024, 1, 5), new Simulation().ExecuteScalar($"select {expression}"));
+
+    [TestMethod]
+    public void IsoDateWithOffset_KeepsOffsetForDateTimeOffset()
+        => AreEqual(new DateTimeOffset(2024, 1, 5, 0, 0, 0, TimeSpan.FromHours(5)),
+            new Simulation().ExecuteScalar("select cast('2024-01-05+05:00' as datetimeoffset)"));
+
+    [TestMethod]
+    [DataRow("cast('2024-01-05+05:00' as datetime)")]
+    [DataRow("cast('2024-01-05 +05:00' as date)")]
+    [DataRow("cast('20240105+05:00' as date)")]
+    public void IsoDateWithOffset_RefusedElsewhere(string expression)
+        => new Simulation().AssertSqlError($"select {expression}", 241);
 }

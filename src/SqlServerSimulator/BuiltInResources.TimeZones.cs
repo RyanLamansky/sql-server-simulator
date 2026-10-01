@@ -158,6 +158,20 @@ partial class BuiltInResources
         "Yukon Standard Time",
     ];
 
+    // Declared after the id list in the same file, so the list is in place
+    // when this initializer runs.
+    private static readonly FrozenSet<string> WindowsTimeZoneIdSet = WindowsTimeZoneIds.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The zone <c>AT TIME ZONE</c> names: one of the Windows ids
+    /// <c>sys.time_zone_info</c> lists, matched without regard to case and
+    /// with no surrounding spaces, or <see langword="null"/>. An IANA name such
+    /// as <c>America/New_York</c> is refused as real refuses it (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static TimeZoneInfo? FindWindowsTimeZone(string name) =>
+        WindowsTimeZoneIdSet.TryGetValue(name, out var id) ? ResolveWindowsTimeZone(id) : null;
+
     /// <summary>
     /// IANA fallbacks for the Windows ids .NET can't resolve on this host — the
     /// ICU mapping covers 132 of the 141 directly. Each alias was checked

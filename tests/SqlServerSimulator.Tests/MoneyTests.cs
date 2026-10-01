@@ -222,4 +222,32 @@ public sealed class MoneyTests
     [DataRow("'N2'", "1.00")]
     public void Format_MoneyValue_FormatsTheScaleFourDecimal(string format, string expected) =>
         AreEqual(expected, ExecuteScalar($"select format(cast(1 as money), {format})"));
+
+    /// <summary>
+    /// A money value an operator or a function computes past the type's range
+    /// is the arithmetic overflow against the expression, state 2 — not the
+    /// conversion-from-numeric state 4 a CAST reports.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select $922337203685477 + $1", "money")]
+    [DataRow("select abs(cast(-922337203685477.5808 as money))", "money")]
+    [DataRow("select -cast(-922337203685477.5808 as money)", "money")]
+    [DataRow("select ceiling(cast(922337203685477.5 as money))", "money")]
+    [DataRow("select sum(v) from (values (cast(922337203685477 as money)), ($1)) t(v)", "money")]
+    [DataRow("select cast(214748 as smallmoney) + cast(1 as smallmoney)", "smallmoney")]
+    public void ComputedOverflow_IsExpressionState2(string sql, string typeName)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 8115);
+        AreEqual($"Arithmetic overflow error converting expression to data type {typeName}.", ex.Message);
+        AreEqual(2, ex.State);
+    }
+
+    /// <summary>An integer operand that can't become the smallmoney result is Msg 220.</summary>
+    [TestMethod]
+    public void SmallMoneyTimesOversizedInteger_Raises220()
+    {
+        var ex = new Simulation().AssertSqlError("select cast(1 as smallmoney) * 300000", 220);
+        AreEqual("Arithmetic overflow error for data type smallmoney, value = 300000.", ex.Message);
+        AreEqual(3, ex.State);
+    }
 }

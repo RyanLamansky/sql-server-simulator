@@ -65,4 +65,51 @@ public sealed class DateBucketTests
     public void ADateTimeOffsetBucket_KeepsTheDatesOffset()
         => AreEqual("2024-02-26 14:00:00.0000000 +14:00", new Simulation().ExecuteScalar(
             "select convert(varchar(40), date_bucket(week, 2, cast('2024-02-29T23:59:59.9999999+14:00' as datetimeoffset)), 121)"));
+
+    [TestMethod]
+    [DataRow(0)]
+    [DataRow(-5)]
+    public void WidthNotPositive_Raises9834(int width)
+        => new Simulation().AssertSqlError(
+            $"select date_bucket(day, {width}, cast('2024-01-10' as date))",
+            9834,
+            "Invalid bucket width value passed to date_bucket function. Only positive values are allowed.");
+
+    [TestMethod]
+    public void BareNullWidth_Raises8116()
+        => new Simulation().AssertSqlError(
+            "select date_bucket(day, null, cast('2024-01-10' as date))",
+            8116,
+            "Argument data type NULL is invalid for argument 2 of Date_Bucket function.");
+
+    /// <summary>A NULL origin buckets from the default one.</summary>
+    [TestMethod]
+    public void NullOrigin_UsesDefault()
+        => AreEqual(new DateTime(2024, 1, 10), new Simulation().ExecuteScalar(
+            "select date_bucket(day, 1, cast('2024-01-10 13:00' as datetime2), cast(null as datetime2))"));
+
+    /// <summary>
+    /// A millisecond count from the default origin is past int's range, and
+    /// buckets all the same.
+    /// </summary>
+    [TestMethod]
+    [DataRow("date_bucket(ms, 250, cast('2024-01-10 13:37:12.1234567' as datetime2(7)))", "2024-01-10 13:37:12.0000000")]
+    [DataRow("date_bucket(ms, 100, cast('13:37:12.1234567' as time))", "13:37:12.1000000")]
+    [DataRow("date_bucket(second, 7, cast('13:37:12.1234567' as time))", "13:37:08.0000000")]
+    public void Milliseconds_Bucket(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select convert(varchar(30), {expression}, 121)"));
+
+    [TestMethod]
+    [DataRow("microsecond", "datetime2")]
+    [DataRow("nanosecond", "datetime2")]
+    [DataRow("dayofyear", "date")]
+    [DataRow("weekday", "datetime2")]
+    [DataRow("iso_week", "datetime2")]
+    [DataRow("tzoffset", "datetimeoffset")]
+    public void UnsupportedDatepart_Raises9810State1(string part, string typeName)
+    {
+        var ex = new Simulation().AssertSqlError($"select date_bucket({part}, 1, cast('2024-01-10' as {typeName}))", 9810);
+        AreEqual($"The datepart {part} is not supported by date function Date_Bucket for data type {typeName}.", ex.Message);
+        AreEqual(1, ex.State);
+    }
 }

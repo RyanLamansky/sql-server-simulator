@@ -1132,4 +1132,22 @@ public sealed class CastTests
         AreEqual("78003DD8", Convert.ToHexString((byte[])reader.GetValue(4)));
         AreEqual(55357, reader.GetInt32(5));
     }
+
+    /// <summary>
+    /// An integer converting to a decimal it can't fit reports state 6 when
+    /// the value would need more than numeric's 38 digits at the target's
+    /// scale, state 8 when it only exceeds the declared precision.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast(1 as decimal(38, 38))", "int", 6)]
+    [DataRow("cast(10 as decimal(38, 37))", "int", 6)]
+    [DataRow("cast(cast(1 as bigint) as decimal(38, 38))", "bigint", 6)]
+    [DataRow("cast(1 as decimal(37, 37))", "int", 8)]
+    [DataRow("cast(10 as decimal(5, 4))", "int", 8)]
+    public void IntegerToDecimalOverflow_StateByDomain(string expression, string source, int state)
+    {
+        var ex = AssertSqlError($"select {expression}", 8115);
+        AreEqual($"Arithmetic overflow error converting {source} to data type numeric.", ex.Message);
+        AreEqual(state, ex.State);
+    }
 }

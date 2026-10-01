@@ -34,10 +34,13 @@ internal sealed class DateBucket : Expression
         if (context.GetNextRequired() is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.bucketWidth = Parse(context.MoveNextRequiredReturnSelf());
+        // Neither the width nor the date takes a bare NULL (Msg 8116, probed
+        // 2026-09-24 and, for the width, 2026-10-01 against SQL Server 2025).
+        if (IsUntypedNullLiteral(this.bucketWidth))
+            throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, "Date_Bucket");
         if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.date = Parse(context.MoveNextRequiredReturnSelf());
-        // A bare NULL has no type to accept (Msg 8116, probed 2026-09-24).
         if (IsUntypedNullLiteral(this.date))
             throw SimulatedSqlException.InvalidArgumentDataType("NULL", 3, "Date_Bucket");
         if (context.Token is Operator { Character: ',' })
@@ -59,10 +62,10 @@ internal sealed class DateBucket : Expression
             return SqlValue.Null(dateValue.Type);
         var widthInt = ScalarArguments.CoerceToInt(width);
         if (widthInt < 1)
-            throw SimulatedSqlException.DateAddOverflow("int");
-        var originValue = this.origin?.Run(runtime) ?? DefaultOriginFor(dateValue.Type);
-        if (originValue.IsNull)
-            return SqlValue.Null(dateValue.Type);
+            throw SimulatedSqlException.DateBucketWidthNotPositive();
+        // A NULL origin is the default one rather than a NULL answer (probed
+        // 2026-10-01 against SQL Server 2025).
+        var originValue = this.origin?.Run(runtime) is { IsNull: false } written ? written : DefaultOriginFor(dateValue.Type);
         // The bucket is the latest origin + k * width at or before the date,
         // counted in whole spans — probe-confirmed 2026-09-23: weeks are
         // 7-day spans from the origin (1900-01-01 is a Monday), not the
@@ -71,12 +74,14 @@ internal sealed class DateBucket : Expression
         // boundary count is a starting estimate at most one step out, which
         // the two loops settle.
         var distance = DatePartKinds.Diff(this.kind, originValue, dateValue);
+        // The offset stays a long: a millisecond count from 1900 is past int's
+        // range, and narrowing it sent the settling loops round forever.
         var bucketOffset = (long)Math.Floor((double)distance / widthInt) * widthInt;
-        var bucket = DatePartKinds.Add(this.kind, originValue, (int)bucketOffset);
+        var bucket = DatePartKinds.Add(this.kind, originValue, bucketOffset);
         while (Later(bucket, dateValue))
         {
             bucketOffset -= widthInt;
-            bucket = DatePartKinds.Add(this.kind, originValue, (int)bucketOffset);
+            bucket = DatePartKinds.Add(this.kind, originValue, bucketOffset);
         }
         while (NextBucketStart(originValue, bucketOffset + widthInt) is { } next && !Later(next, dateValue))
         {
@@ -94,7 +99,7 @@ internal sealed class DateBucket : Expression
     {
         try
         {
-            return DatePartKinds.Add(this.kind, origin, (int)offset);
+            return DatePartKinds.Add(this.kind, origin, offset);
         }
         catch (SimulatedSqlException)
         {
@@ -112,6 +117,8 @@ internal sealed class DateBucket : Expression
         : type == SqlType.SmallDateTime ? SqlValue.FromSmallDateTime(DefaultOriginDateTime)
         : type is DateTime2SqlType ? SqlValue.FromDateTime2(type, DefaultOriginDateTime)
         : type is DateTimeOffsetSqlType ? SqlValue.FromDateTimeOffset(type, new DateTimeOffset(DefaultOriginDateTime, TimeSpan.Zero))
+        // A time buckets from midnight and stays a time (probed 2026-10-01).
+        : type is TimeSqlType ? SqlValue.FromTime(type, TimeSpan.Zero)
         : SqlValue.FromDateTime(DefaultOriginDateTime);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>

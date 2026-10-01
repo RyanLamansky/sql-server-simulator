@@ -32,11 +32,23 @@ internal sealed class DateTrunc : Expression
         var raw = this.source.Run(runtime);
         _ = DatePartKinds.RequireDateArgument(this.source, raw.Type, 2, "datetrunc", acceptsString: true, acceptsTime: true);
         if (raw.IsNull)
-            return SqlValue.Null(raw.Type);
+            return SqlValue.Null(IsUntypedNullLiteral(this.source) ? SqlType.GetDateTime2(7) : raw.Type);
         var value = DatePartKinds.CoerceDateArgumentImplicit(raw);
         var t = value.Type;
         DatePartKinds.RequireCompatible(this.kind, t, "datetrunc");
-        var dateFirst = runtime.Batch.Connection.DateFirst;
+        try
+        {
+            return this.Truncate(value, t, runtime.Batch.Connection.DateFirst);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            // A week that starts before 0001-01-01 (probed 2026-10-01).
+            throw SimulatedSqlException.DateValueBelowMinimum(SimulatedSqlException.FamilyRootName(t));
+        }
+    }
+
+    private SqlValue Truncate(SqlValue value, SqlType t, int dateFirst)
+    {
         if (t is TimeSqlType)
             return SqlValue.FromTime(t, TruncateDateTime(new DateTime(1900, 1, 1).Add(value.AsTime), this.kind, dateFirst).TimeOfDay);
         if (t == SqlType.Date)
@@ -56,8 +68,12 @@ internal sealed class DateTrunc : Expression
         throw new NotSupportedException($"DATETRUNC on {t} not supported.");
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        DatePartKinds.ResolveImplicitDateType(DatePartKinds.RequireDateArgument(this.source, this.source.GetSqlType(batch, resolveColumnType), 2, "datetrunc", acceptsString: true, acceptsTime: true));
+    // A bare NULL reads as datetime2(7), as a string does (probed 2026-10-01).
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var type = DatePartKinds.ResolveImplicitDateType(DatePartKinds.RequireDateArgument(this.source, this.source.GetSqlType(batch, resolveColumnType), 2, "datetrunc", acceptsString: true, acceptsTime: true));
+        return IsUntypedNullLiteral(this.source) ? SqlType.GetDateTime2(7) : type;
+    }
 
     internal override string DebugDisplay() => $"DATETRUNC({this.keywordText}, {this.source.DebugDisplay()})";
 
@@ -116,17 +132,37 @@ internal sealed class SwitchOffset : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = this.dtoArg.Run(runtime);
+        var resultType = ResultTypeFor(v.Type);
         if (v.IsNull)
-            return SqlValue.Null(v.Type is DateTimeOffsetSqlType t ? t : SqlType.GetDateTimeOffset(7));
+            return SqlValue.Null(resultType);
         if (v.Type is not DateTimeOffsetSqlType)
-            v = v.CoerceTo(SqlType.GetDateTimeOffset(7));
+            v = v.CoerceTo(resultType);
         var off = this.offsetArg.Run(runtime);
         if (off.IsNull)
-            return SqlValue.Null(v.Type);
+            return SqlValue.Null(resultType);
         var offsetMinutes = ParseOffsetMinutes(off, "switchoffset");
-        var adjusted = v.AsDateTimeOffset.ToOffset(TimeSpan.FromMinutes(offsetMinutes));
-        return SqlValue.FromDateTimeOffset(v.Type, adjusted);
+        var utc = v.AsDateTimeOffset.UtcDateTime;
+        var localTicks = utc.Ticks + (offsetMinutes * TimeSpan.TicksPerMinute);
+        if (localTicks < DateTime.MinValue.Ticks || localTicks > DateTime.MaxValue.Ticks)
+            throw SimulatedSqlException.TimeZoneOverflowsDateTimeOffset("switchoffset", 0);
+        return SqlValue.FromDateTimeOffset(resultType, v.AsDateTimeOffset.ToOffset(TimeSpan.FromMinutes(offsetMinutes)));
     }
+
+    /// <summary>
+    /// The <c>datetimeoffset</c> a date-time value becomes in
+    /// <c>SWITCHOFFSET</c>, <c>TODATETIMEOFFSET</c> and <c>AT TIME ZONE</c>:
+    /// its own fractional precision, 3 for a <c>datetime</c>, 0 for a
+    /// <c>smalldatetime</c>, and 7 for anything else — a string or a
+    /// <c>date</c> (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SqlType ResultTypeFor(SqlType source) => SqlType.GetDateTimeOffset(source switch
+    {
+        DateTimeOffsetSqlType o => o.precision,
+        DateTime2SqlType d => d.precision,
+        _ when source == SqlType.DateTime => 3,
+        _ when source == SqlType.SmallDateTime => 0,
+        _ => 7,
+    });
 
     /// <summary>
     /// Reads the offset argument of <paramref name="functionName"/>
@@ -167,7 +203,7 @@ internal sealed class SwitchOffset : Expression
     {
         var type = DateArgumentType(this.dtoArg, SqlType.GetDateTimeOffset(7), batch, resolveColumnType);
         _ = AssignmentRules.ArgumentType(this.offsetArg, SqlType.SmallInt, batch, resolveColumnType);
-        return type is DateTimeOffsetSqlType t ? t : SqlType.GetDateTimeOffset(7);
+        return ResultTypeFor(type);
     }
 
     /// <summary>
@@ -200,8 +236,6 @@ internal sealed class SwitchOffset : Expression
 /// </summary>
 internal sealed class ToDateTimeOffset : Expression
 {
-    private static readonly SqlType ResultType = SqlType.GetDateTimeOffset(7);
-
     private readonly Expression dtArg;
     private readonly Expression offsetArg;
 
@@ -218,8 +252,9 @@ internal sealed class ToDateTimeOffset : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var v = this.dtArg.Run(runtime);
+        var resultType = SwitchOffset.ResultTypeFor(v.Type);
         if (v.IsNull)
-            return SqlValue.Null(ResultType);
+            return SqlValue.Null(resultType);
         // The value converts before the offset is read, so a string that
         // isn't a date outranks a bad offset (probed 2026-09-26 against SQL
         // Server 2025).
@@ -230,16 +265,22 @@ internal sealed class ToDateTimeOffset : Expression
             : v.CoerceTo(SqlType.GetDateTime2(7)).AsDateTime2;
         var off = this.offsetArg.Run(runtime);
         if (off.IsNull)
-            return SqlValue.Null(ResultType);
+            return SqlValue.Null(resultType);
         var offsetMinutes = SwitchOffset.ParseOffsetMinutes(off, "todatetimeoffset");
-        return SqlValue.FromDateTimeOffset(ResultType, new DateTimeOffset(dt, TimeSpan.FromMinutes(offsetMinutes)));
+        var utcTicks = dt.Ticks - (offsetMinutes * TimeSpan.TicksPerMinute);
+        if (utcTicks < DateTime.MinValue.Ticks || utcTicks > DateTime.MaxValue.Ticks)
+            throw SimulatedSqlException.TimeZoneOverflowsDateTimeOffset("todatetimeoffset", 2);
+        return SqlValue.FromDateTimeOffset(resultType, new DateTimeOffset(dt, TimeSpan.FromMinutes(offsetMinutes)));
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
+        SwitchOffset.ResultTypeFor(this.GetArgumentType(batch, resolveColumnType));
+
+    private SqlType GetArgumentType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        _ = SwitchOffset.DateArgumentType(this.dtArg, SqlType.GetDateTime2(7), batch, resolveColumnType);
+        var type = SwitchOffset.DateArgumentType(this.dtArg, SqlType.GetDateTime2(7), batch, resolveColumnType);
         _ = AssignmentRules.ArgumentType(this.offsetArg, SqlType.SmallInt, batch, resolveColumnType);
-        return ResultType;
+        return type;
     }
 
     internal override string DebugDisplay() => $"TODATETIMEOFFSET({this.dtArg.DebugDisplay()}, {this.offsetArg.DebugDisplay()})";

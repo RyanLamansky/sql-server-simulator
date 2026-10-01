@@ -12,10 +12,19 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </list>
 /// </summary>
 /// <remarks>Reference: https://learn.microsoft.com/en-us/sql/t-sql/functions/space-transact-sql</remarks>
-internal sealed class Space(ParserContext context) : Expression
+internal sealed class Space : Expression
 {
     private const int MaxBytes = 8000;
-    private readonly Expression count = Parse(context);
+    private readonly Expression count;
+
+    // The count real folds while compiling, which sizes the result.
+    private readonly int? constantCount;
+
+    public Space(ParserContext context)
+    {
+        this.count = Parse(context);
+        this.constantCount = StringScalars.FoldCount(this.count, context.Batch);
+    }
 
     public override SqlValue Run(RuntimeContext runtime)
     {
@@ -45,7 +54,7 @@ internal sealed class Space(ParserContext context) : Expression
     /// <c>varchar(8000)</c> container, matching real.
     /// </summary>
     private SqlType ResolveResultType(BatchContext batch) =>
-        StringScalars.TryConstantCount(this.count, out var n)
+        this.constantCount is int n
             ? StringScalars.SizedResultType(SqlType.Varchar, Math.Min(MaxBytes, n), batch)
             : StringScalars.ContainerResultType(SqlType.Varchar, batch);
 

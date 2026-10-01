@@ -16,12 +16,16 @@ internal sealed class Right : Expression
     private SqlType? boundSourceType;
     private readonly Expression count;
 
+    // The count real folds while compiling, which sizes the result.
+    private readonly int? constantCount;
+
     public Right(ParserContext context)
     {
         this.source = Parse(context);
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.count = Parse(context.MoveNextRequiredReturnSelf());
+        this.constantCount = StringScalars.FoldCount(this.count, context.Batch);
     }
 
     internal override bool ParallelSafe => this.source.ParallelSafe && this.count.ParallelSafe;
@@ -49,7 +53,7 @@ internal sealed class Right : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var sourceType = StringScalars.BindArgument(source, batch, resolveColumnType, "right");
+        var sourceType = StringScalars.BindSource(source, batch, resolveColumnType, "right", coerced: false);
         this.boundSourceType = sourceType;
         _ = AssignmentRules.ArgumentType(this.count, SqlType.Int32, batch, resolveColumnType);
         return ResolveResultType(sourceType, batch);
@@ -69,8 +73,8 @@ internal sealed class Right : Expression
         if (StringScalars.IsMaxForm(stringType))
             return stringType;
         var inputWidth = StringScalars.DeclaredWidth(stringType);
-        return inputWidth > 0 && StringScalars.TryConstantCount(count, out var n)
-            ? StringScalars.SizedResultType(stringType, Math.Min(inputWidth, n), batch)
+        return inputWidth > 0 && this.constantCount is int n
+            ? StringScalars.SizedResultType(stringType, Math.Min(inputWidth, Math.Max(0, n)), batch)
             : stringType;
     }
 

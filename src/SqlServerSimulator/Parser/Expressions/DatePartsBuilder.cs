@@ -103,7 +103,7 @@ internal sealed class DatePartsBuilder : Expression
             if (precisionConstant is not { IsNull: false } constant || constant.Type.Category != SqlTypeCategory.Integer || constant.Type is BitSqlType)
                 this.scaleError = SimulatedSqlException.ScaleArgumentNotValid(TargetTypeName(kind));
             else if (ScalarArguments.CoerceToInt(constant) is var written and (< 0 or > 7))
-                this.scaleError = SimulatedSqlException.InvalidScale(written, line: 1);
+                this.scaleError = SimulatedSqlException.FromPartsInvalidScale(written);
             else
                 p = ScalarArguments.CoerceToInt(constant);
             this.parsedPrecision = p;
@@ -192,8 +192,9 @@ internal sealed class DatePartsBuilder : Expression
         }
         // Construct via the standard FromDateTime path — it applies the
         // legacy 1/300s rounding that yields the probe-observed ms-999
-        // → next-day rollover.
-        return SqlValue.FromDateTime(new DateTime(year, month, day, hour, minute, second, millisecond));
+        // → next-day rollover, which past 9999-12-31 is this builder's own
+        // Msg 289 (probed 2026-10-01 against SQL Server 2025).
+        return RangeChecked("datetime", 3, () => SqlValue.FromDateTime(new DateTime(year, month, day, hour, minute, second, millisecond)));
     }
 
     private static SqlValue BuildDateTime2(int year, int month, int day, int hour, int minute, int second, int fractions, int precision)
@@ -231,9 +232,16 @@ internal sealed class DatePartsBuilder : Expression
         {
             throw SimulatedSqlException.CannotConstructFromParts("datetimeoffset", state: 6);
         }
-        var totalOffsetMinutes = (hourOffset * 60) + (hourOffset < 0 ? -minuteOffset : minuteOffset);
+        // The two offsets share a sign, so they simply add: (-5, -30) is
+        // -05:30 (probed 2026-10-01 against SQL Server 2025).
+        var totalOffsetMinutes = (hourOffset * 60) + minuteOffset;
         var ticks = fractions * Pow10(7 - precision);
         var local = new DateTime(year, month, day, hour, minute, second).AddTicks(ticks);
+        // A local time whose UTC instant falls outside the type's range is
+        // Msg 289 too (DATETIMEOFFSETFROMPARTS(1, 1, 1, 0, 0, 0, 0, 1, 0, 0)).
+        var utcTicks = local.Ticks - (totalOffsetMinutes * TimeSpan.TicksPerMinute);
+        if (utcTicks < DateTime.MinValue.Ticks || utcTicks > DateTime.MaxValue.Ticks)
+            throw SimulatedSqlException.CannotConstructFromParts("datetimeoffset", state: 6);
         var dto = new DateTimeOffset(local, TimeSpan.FromMinutes(totalOffsetMinutes));
         return SqlValue.FromDateTimeOffset(SqlType.GetDateTimeOffset(precision), dto);
     }
@@ -243,12 +251,27 @@ internal sealed class DatePartsBuilder : Expression
         if (year is < 1900 or > 2079 || month is < 1 or > 12 || day < 1 || day > DaysInMonthClamped(year, month)
             || hour is < 0 or > 23 || minute is < 0 or > 59)
         {
-            // Real SQL Server reuses State 3 for smalldatetime; not separately
-            // probed, but smalldatetime traces follow datetime's State by
-            // convention. Accept State 3 to avoid an over-claim.
             throw SimulatedSqlException.CannotConstructFromParts("smalldatetime", state: 4);
         }
-        return SqlValue.FromSmallDateTime(new DateTime(year, month, day, hour, minute, 0));
+        // A date past 2079-06-06 in an accepted year is the same Msg 289
+        // (probed 2026-10-01 against SQL Server 2025).
+        return RangeChecked("smalldatetime", 4, () => SqlValue.FromSmallDateTime(new DateTime(year, month, day, hour, minute, 0)));
+    }
+
+    /// <summary>
+    /// Runs a legacy-type construction whose range check raises the
+    /// conversion's Msg 242, reporting this builder's Msg 289 instead.
+    /// </summary>
+    private static SqlValue RangeChecked(string typeName, byte state, Func<SqlValue> build)
+    {
+        try
+        {
+            return build();
+        }
+        catch (SimulatedSqlException e) when (e.Number == 242)
+        {
+            throw SimulatedSqlException.CannotConstructFromParts(typeName, state);
+        }
     }
 
     private static SqlValue BuildTime(int hour, int minute, int second, int fractions, int precision)

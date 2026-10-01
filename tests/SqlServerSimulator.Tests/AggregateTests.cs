@@ -811,4 +811,16 @@ public sealed class AggregateTests
         var error = new Simulation().AssertSqlError(select, int.Parse(expected.Split(',')[0], System.Globalization.CultureInfo.InvariantCulture));
         AreEqual(expected, string.Join(", ", error.Errors.Select(static e => e.Number.ToString(System.Globalization.CultureInfo.InvariantCulture))));
     }
+
+    /// <summary>
+    /// Msg 9829's state tells the result family apart: 0 for a varchar
+    /// aggregate, 1 for an nvarchar one.
+    /// </summary>
+    [TestMethod]
+    [DataRow("'a'", "','", 0)]
+    [DataRow("N'a'", "N','", 1)]
+    public void StringAgg_Overflow_StateByFamily(string unit, string separator, int state)
+        => AreEqual(state, new Simulation().AssertSqlError($"""
+            select string_agg(v, {separator}) from (values (replicate({unit}, 3000)), (replicate({unit}, 3000)), (replicate({unit}, 3000))) t(v)
+            """, 9829).State);
 }

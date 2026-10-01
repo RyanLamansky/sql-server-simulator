@@ -44,7 +44,8 @@ public sealed class ExpressionNestingLimitTests
     [TestMethod]
     [Timeout(60000)]
     public void ConcatChain_ExtremeDepth_Evaluates()
-        => AreEqual(new string('a', 20000), new Simulation().ExecuteScalar(
+        // A bounded concatenation stops growing at varchar's 8000.
+        => AreEqual(new string('a', 8000), new Simulation().ExecuteScalar(
             "select " + string.Join(" + ", Enumerable.Repeat("'a'", 20000))));
 
     [TestMethod]

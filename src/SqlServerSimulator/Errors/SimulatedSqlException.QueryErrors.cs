@@ -539,11 +539,16 @@ partial class SimulatedSqlException
     /// outside the date/time type's representable range. The type-name slot
     /// is the *input* column's type (e.g. <c>'date'</c>), not the abstract
     /// SQL-server type family — verified by probe. The state splits by family:
-    /// 1 for the legacy <c>datetime</c> / <c>smalldatetime</c>, 3 for the rest
-    /// (probe-confirmed 2026-09-23).
+    /// 1 for the legacy <c>datetime</c>, 2 for <c>smalldatetime</c>, 3 for the
+    /// rest (probe-confirmed 2026-09-23 and, for smalldatetime, 2026-10-01).
     /// </summary>
     internal static SimulatedSqlException DateAddOverflow(string typeName) =>
-        new($"Adding a value to a '{typeName}' column caused an overflow.", 517, 16, typeName is "datetime" or "smalldatetime" ? (byte)1 : (byte)3);
+        new($"Adding a value to a '{typeName}' column caused an overflow.", 517, 16, typeName switch
+        {
+            "datetime" => 1,
+            "smalldatetime" => 2,
+            _ => 3,
+        });
 
     /// <summary>
     /// Mimics SQL Server error 517 as <c>EOMONTH</c> raises it when its month
@@ -1426,10 +1431,12 @@ partial class SimulatedSqlException
     /// bounded (non-MAX) string type produced a concatenation exceeding 8000
     /// bytes. Real SQL Server raises this rather than truncating; a MAX-typed
     /// operand streams unbounded and never trips it. Wording and Level 16
-    /// probe-confirmed against SQL Server 2025.
+    /// probe-confirmed against SQL Server 2025; the state is 1 for an
+    /// <c>nvarchar</c> result and 0 for a <c>varchar</c> one (probed
+    /// 2026-10-01).
     /// </summary>
-    internal static SimulatedSqlException StringAggResultExceededLimit() =>
-        new("STRING_AGG aggregation result exceeded the limit of 8000 bytes. Use LOB types to avoid result truncation.", 9829, 16, 1);
+    internal static SimulatedSqlException StringAggResultExceededLimit(bool national) =>
+        new("STRING_AGG aggregation result exceeded the limit of 8000 bytes. Use LOB types to avoid result truncation.", 9829, 16, national ? (byte)1 : (byte)0);
 
     /// <summary>
     /// Mimics SQL Server error 11535: the executed module sent more result

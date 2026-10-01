@@ -54,8 +54,10 @@ internal sealed class Replace : Expression
         // REPLACE can grow the input (a longer replacement per match), so the
         // result type is the family container (varchar(8000) / nvarchar(4000))
         // regardless of the input's declared width — probe-confirmed against
-        // SQL Server 2025 (REPLACE(varchar(3), 'a', 'XY') → varchar(8000)).
-        return SqlValue.FromString(ResultType(i.Type, rawOld.Type, rawNew.Type, runtime.Batch), replaced);
+        // SQL Server 2025 (REPLACE(varchar(3), 'a', 'XY') → varchar(8000)) —
+        // and a result grown past that container is clipped to it.
+        var resultType = ResultType(i.Type, rawOld.Type, rawNew.Type, runtime.Batch);
+        return SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(replaced, resultType));
     }
 
     /// <summary>

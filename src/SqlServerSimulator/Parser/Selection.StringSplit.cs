@@ -82,12 +82,6 @@ internal sealed partial class Selection
         }
         if (inputValue.IsNull)
             yield break;
-        if (!SqlType.IsStringCategory(inputValue.Type))
-        {
-            // Non-string input is implicitly coerced by SQL Server to the
-            // declared string family of the parse-time-resolved value column.
-            inputValue = inputValue.CoerceTo(valueColumnType);
-        }
         var inputString = inputValue.AsString;
 
         // Empty-input behavior: probe shows STRING_SPLIT('', ',') returns one
@@ -194,12 +188,21 @@ internal sealed partial class Selection
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
 
-        // Project the value column with the input's static string family
-        // (varchar → varchar; nvarchar → nvarchar). Non-string input maps
-        // to nvarchar — SQL Server's behavior is to silently CONVERT the
-        // first arg to nvarchar; the simulator follows the same routing.
+        // Project the value column in the input's string family at its width,
+        // a fixed-width input as the variable form (a char(5) input splits into
+        // varchar(5) values, unpadded) and a bare NULL as varchar(1). Anything
+        // but a non-LOB string is Msg 8116 while compiling — a number, a date,
+        // a binary, text and ntext alike (probed 2026-10-01 against SQL Server
+        // 2025).
         var inputType = input.GetSqlType(context.Batch, outerTypeResolver ?? (_ => SqlType.NVarchar));
-        var valueColumnType = SqlType.IsStringCategory(inputType) ? inputType : SqlType.NVarchar;
+        var valueColumnType = inputType switch
+        {
+            _ when Expression.IsUntypedNullLiteral(input) => VarcharSqlType.Get(1, context.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault),
+            CharSqlType fixedChar => VarcharSqlType.Get(fixedChar.length, fixedChar.Collation, fixedChar.Coercibility),
+            NCharSqlType fixedNChar => NVarcharSqlType.Get(fixedNChar.length, fixedNChar.Collation, fixedNChar.Coercibility),
+            VarcharSqlType or NVarcharSqlType or SystemNameSqlType => inputType,
+            _ => throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(inputType, input), 1, "string_split"),
+        };
         return FromStringSplit(input, separator, emitOrdinal, valueColumnType);
     }
 }

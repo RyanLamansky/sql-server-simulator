@@ -180,6 +180,15 @@ partial class SimulatedSqlException
         new($"Line {line}: Specified scale {requested} is invalid.", 1002, 15, 1);
 
     /// <summary>
+    /// Msg 1002 as a <c>*FROMPARTS</c> builder's precision argument raises it:
+    /// the same wording at class 16 state 2, always naming line 1 (probed
+    /// 2026-10-01 against SQL Server 2025 across <c>TIMEFROMPARTS</c>,
+    /// <c>DATETIME2FROMPARTS</c> and <c>DATETIMEOFFSETFROMPARTS</c>).
+    /// </summary>
+    internal static SimulatedSqlException FromPartsInvalidScale(int requested) =>
+        new($"Line 1: Specified scale {requested} is invalid.", 1002, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server error 289: a <c>*FROMPARTS</c> builder received
     /// argument values outside the legal range for the constructed type
     /// (e.g. <c>DATEFROMPARTS(2025, 2, 30)</c>, <c>TIMEFROMPARTS(24, ...)</c>).
@@ -851,6 +860,32 @@ partial class SimulatedSqlException
         new($"The timezone provided to builtin function {function} is invalid.", 9812, 16, state);
 
     /// <summary>
+    /// Mimics SQL Server error 9813: <c>SWITCHOFFSET</c> (state 0) or
+    /// <c>TODATETIMEOFFSET</c> (state 2) produced a value whose UTC or local
+    /// time falls outside the type's range — <c>SWITCHOFFSET('9999-12-31
+    /// 23:00 +00:00', '+05:00')</c> (probed 2026-10-01 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException TimeZoneOverflowsDateTimeOffset(string function, byte state) =>
+        new($"The timezone provided to builtin function {function} would cause the datetimeoffset to overflow the range of valid date range in either UTC or local time.", 9813, 16, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 9834: <c>DATE_BUCKET</c>'s width is zero or
+    /// negative (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DateBucketWidthNotPositive() =>
+        new("Invalid bucket width value passed to date_bucket function. Only positive values are allowed.", 9834, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 9837: a date function's result fell before the
+    /// first day the operand's type holds — <c>DATETRUNC(week, '0001-01-03')</c>
+    /// reaches back to a Sunday before 0001-01-01. The message names the type
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DateValueBelowMinimum(string typeName) =>
+        new($"An invalid {typeName} value was encountered: The date value is less than the minimum date value allowed for the data type.", 9837, 16, 3);
+
+    /// <summary>
     /// A hierarchyid method refused its input for a reason real never reports,
     /// because its own binder refuses the shape first — an argument count or a
     /// receiver type no parse can produce. Kept as the 6522 real's library
@@ -1112,6 +1147,16 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException TranslateUnequalChars(bool national) =>
         new("The second and third arguments of the TRANSLATE built-in function must contain an equal number of characters.", 9828, 16, national ? (byte)3 : (byte)1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10761: <c>PARSE</c> / <c>TRY_PARSE</c> named a
+    /// target outside the numeric and date-time families — a string, a
+    /// binary, <c>bit</c>, <c>uniqueidentifier</c> — while compiling, the
+    /// function named as written in upper case (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InvalidParseTargetType(string typeName, string functionName) =>
+        new($"Invalid data type {typeName} in function {functionName}.", 10761, 15, 2);
 
     /// <summary>
     /// Mimics SQL Server's Msg 9819 (variant used by <c>PARSE</c>) — fires

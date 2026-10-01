@@ -166,7 +166,7 @@ internal sealed class StringConcat : Expression
                     continue;
                 _ = sb.Append(StringifyForConcat(values[i], resultType));
             }
-            return SqlValue.FromString(resultType, sb.ToString());
+            return SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(sb.ToString(), resultType));
         }
 
         // CONCAT_WS: values[0] is the separator. NULL separator silently
@@ -184,7 +184,7 @@ internal sealed class StringConcat : Expression
             _ = output.Append(StringifyForConcat(values[i], resultType));
             emittedAny = true;
         }
-        return SqlValue.FromString(resultType, output.ToString());
+        return SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(output.ToString(), resultType));
     }
 
     /// <summary>
@@ -201,15 +201,17 @@ internal sealed class StringConcat : Expression
 
 
     /// <summary>
-    /// A MAX-form argument (<c>varchar(max)</c> / <c>nvarchar(max)</c> or a
-    /// <c>text</c> / <c>ntext</c> LOB) makes CONCAT / CONCAT_WS return a MAX
-    /// result — probe-confirmed against SQL Server 2025. A bounded / literal
-    /// argument does not.
+    /// A MAX-form argument (<c>varchar(max)</c> / <c>nvarchar(max)</c> /
+    /// <c>varbinary(max)</c> or a <c>text</c> / <c>ntext</c> LOB) makes CONCAT /
+    /// CONCAT_WS return a MAX result — probe-confirmed against SQL Server 2025.
+    /// A bounded / literal argument does not, and a bounded result past the
+    /// family maximum is clipped to it.
     /// </summary>
     private static bool IsMaxForm(SqlType type) =>
         type.IsLob
             || type is NVarcharSqlType { length: SqlType.MaxLengthSentinel }
-            || type is VarcharSqlType { length: SqlType.MaxLengthSentinel };
+            || type is VarcharSqlType { length: SqlType.MaxLengthSentinel }
+            || type is VarbinarySqlType { length: SqlType.MaxLengthSentinel };
 
     /// <summary>
     /// National family wins <c>nvarchar</c> over <c>varchar</c>; a MAX input
@@ -317,40 +319,20 @@ internal sealed class StringConcat : Expression
 
     /// <summary>
     /// The maximum string width a single CONCAT / CONCAT_WS argument of
-    /// <paramref name="type"/> contributes to the result length — probe-confirmed
-    /// against SQL Server 2025 (2026-07-22). A string type contributes its
-    /// declared length; the fixed-width types contribute their documented
-    /// implicit-conversion maxima (bit 1, tinyint 4, smallint 6, int 12,
-    /// bigint 24, real / float 23, money / smallmoney 40, decimal / numeric 41,
-    /// date / time / datetime / datetimeoffset / uniqueidentifier 40).
-    /// A var-family string of no declared length contributes
+    /// <paramref name="type"/> contributes to the result length — the width
+    /// <see cref="StringScalars.ConvertedWidth"/> gives the argument once it
+    /// converts to a string, a binary's byte length included. A var-family
+    /// string or binary of no declared length contributes
     /// <see cref="UnspecifiedWidth"/>, which drives the whole result to the
     /// family container. MAX-form arguments never drive the width — they route
     /// through <see cref="IsMaxForm"/> and force a MAX result before the sum is
     /// read. A bare untyped NULL literal contributes 0 (the caller
     /// special-cases it via <see cref="Expression.IsBareNullLiteral"/>).
     /// </summary>
-    private static int ArgumentWidth(SqlType type) => type switch
+    private static int ArgumentWidth(SqlType type) => StringScalars.ConvertedWidth(type) switch
     {
-        VarcharSqlType v => v.length > 0 ? v.length : UnspecifiedWidth,
-        NVarcharSqlType nv => nv.length > 0 ? nv.length : UnspecifiedWidth,
-        CharSqlType c => c.length,
-        NCharSqlType nc => nc.length,
-        SystemNameSqlType => 128,
-        _ when type == SqlType.Bit => 1,
-        _ when type == SqlType.TinyInt => 4,
-        _ when type == SqlType.SmallInt => 6,
-        _ when type == SqlType.Int32 => 12,
-        _ when type == SqlType.BigInt => 24,
-        _ => type.Category switch
-        {
-            SqlTypeCategory.Approximate => 23,
-            SqlTypeCategory.Decimal => 41,
-            SqlTypeCategory.DateTime => 40,
-            SqlTypeCategory.Money => 40,
-            SqlTypeCategory.UniqueIdentifier => 40,
-            _ => 8000,
-        },
+        > 0 and var width => width,
+        _ => type is VarcharSqlType or NVarcharSqlType or VarbinarySqlType ? UnspecifiedWidth : 8000,
     };
 
     private static string LowercaseName(StringConcatKind kind) => kind switch

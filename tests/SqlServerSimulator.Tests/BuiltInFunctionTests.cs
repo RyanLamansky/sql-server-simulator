@@ -480,7 +480,7 @@ public sealed class BuiltInFunctionTests
     [TestMethod]
     [DataRow("'2024-01-01'", "datetime", 1)]
     [DataRow("cast('2024-01-01' as date)", "date", 3)]
-    [DataRow("cast('2024-01-01' as smalldatetime)", "smalldatetime", 1)]
+    [DataRow("cast('2024-01-01' as smalldatetime)", "smalldatetime", 2)]
     [DataRow("cast('2024-01-01' as datetime2)", "datetime2", 3)]
     public void DateAdd_Overflow_StateByFamily(string source, string typeName, int state)
     {
@@ -492,4 +492,27 @@ public sealed class BuiltInFunctionTests
     [TestMethod]
     public void Len_MaxArgument_IsBigint()
         => AreEqual(3L, ExecuteScalar("select len(cast('abc' as varchar(max)))"));
+
+    /// <summary>
+    /// A nanosecond interval rounds to the nearest 100-ns tick, half away from
+    /// zero, before the result rounds to the type's precision.
+    /// </summary>
+    [TestMethod]
+    [DataRow("dateadd(ns, 49, cast('2024-01-01' as datetime2(7)))", "2024-01-01 00:00:00.0000000")]
+    [DataRow("dateadd(ns, 50, cast('2024-01-01' as datetime2(7)))", "2024-01-01 00:00:00.0000001")]
+    [DataRow("dateadd(ns, -50, cast('2024-01-01' as datetime2(7)))", "2023-12-31 23:59:59.9999999")]
+    [DataRow("dateadd(ns, 1999, cast('2024-01-01' as datetime2(7)))", "2024-01-01 00:00:00.0000020")]
+    [DataRow("dateadd(ns, 49999, cast('2024-01-01' as datetime2(4)))", "2024-01-01 00:00:00.0001")]
+    public void DateAdd_Nanoseconds_RoundToTicks(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select convert(varchar(30), {expression}, 121)"));
+
+    /// <summary>A time wraps around midnight however large the interval.</summary>
+    [TestMethod]
+    [DataRow("dateadd(hour, 25, cast('23:00' as time(0)))", "00:00:00")]
+    [DataRow("dateadd(minute, -1, cast('00:00' as time(0)))", "23:59:00")]
+    [DataRow("dateadd(hour, 2147483647, cast('00:00' as time(0)))", "07:00:00")]
+    [DataRow("dateadd(ns, -100, cast('00:00' as time(7)))", "23:59:59.9999999")]
+    [DataRow("dateadd(ms, -1, cast('00:00' as time(2)))", "00:00:00.00")]
+    public void DateAdd_Time_WrapsAroundMidnight(string expression, string expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select convert(varchar(30), {expression}, 114)"));
 }

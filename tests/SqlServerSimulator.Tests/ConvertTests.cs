@@ -827,4 +827,19 @@ public sealed class ConvertTests
         AreEqual(0.0, command.ExecuteScalar());
         AreEqual("Warning: the floating point value '5e-324' is too small. It will be interpreted as 0.", messages.Single());
     }
+
+    /// <summary>
+    /// The ISO 8601 styles drop a fraction that is all zeros and keep every
+    /// digit of one that isn't.
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast('2024-01-15 10:30' as datetime)", 126, "2024-01-15T10:30:00")]
+    [DataRow("cast('2024-01-15 10:30' as datetime2(7))", 126, "2024-01-15T10:30:00")]
+    [DataRow("cast('2024-01-15 10:30 +05:30' as datetimeoffset(3))", 126, "2024-01-15T10:30:00+05:30")]
+    [DataRow("cast('2024-01-15 10:30 +05:30' as datetimeoffset(3))", 127, "2024-01-15T05:00:00Z")]
+    [DataRow("cast('10:30' as time(3))", 126, "10:30:00")]
+    [DataRow("cast('2024-01-15 10:30:00.5' as datetimeoffset(3))", 126, "2024-01-15T10:30:00.500+00:00")]
+    [DataRow("cast('2024-01-15 10:30:00.0000001' as datetime2(7))", 126, "2024-01-15T10:30:00.0000001")]
+    public void IsoStyles_DropAllZeroFraction(string source, int style, string expected)
+        => AreEqual(expected, ExecuteScalar($"select convert(varchar(40), {source}, {style})"));
 }

@@ -279,7 +279,7 @@ internal abstract class Decimal38Aggregator : NumericAggregatorBase
         var finalized = Finalize(this.Accumulator, this.Count);
         return this.ResultType is DecimalSqlType
             ? SqlValue.FromDecimal(this.ResultType, finalized)
-            : SqlValue.FromMoney(this.ResultType, finalized);
+            : SqlValue.FromMoneyComputation(this.ResultType, finalized);
     }
 
     /// <summary>

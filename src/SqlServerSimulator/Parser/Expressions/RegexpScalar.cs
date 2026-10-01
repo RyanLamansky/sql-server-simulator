@@ -189,7 +189,7 @@ internal sealed class RegexpScalar : Expression
         {
             RegexpScalarKind.Count => SqlValue.FromInt32(RegexpArguments.Matches(regex, text, startIndex).Count()),
             RegexpScalarKind.Instr => SqlValue.FromInt32(Position(regex, text, startIndex, occurrence, returnOption, group)),
-            RegexpScalarKind.Replace => SqlValue.FromString(resultType, Truncate(Replace(regex, text, replacement, startIndex, occurrence), resultType)),
+            RegexpScalarKind.Replace => SqlValue.FromString(resultType, StringScalars.ClipToFamilyCap(Replace(regex, text, replacement, startIndex, occurrence), resultType)),
             _ => Substring(regex, text, startIndex, occurrence, group, resultType),
         };
     }
@@ -252,18 +252,6 @@ internal sealed class RegexpScalar : Expression
             ? SqlValue.FromString(resultType, captured.Value)
             : SqlValue.Null(resultType);
     }
-
-    /// <summary>
-    /// Clips a grown <c>REGEXP_REPLACE</c> result to its declared width. Real
-    /// truncates silently rather than raising Msg 8152 — probe-confirmed: a
-    /// 5000-character <c>varchar</c> input whose every character doubles comes
-    /// back 8000 characters long, and the <c>nvarchar</c> form comes back 4000.
-    /// A MAX-form input has no bound.
-    /// </summary>
-    private static string Truncate(string value, SqlType resultType) =>
-        StringScalars.IsMaxForm(resultType) || value.Length <= StringScalars.FamilyCap(resultType)
-            ? value
-            : value[..StringScalars.FamilyCap(resultType)];
 
     /// <summary>
     /// <c>REGEXP_REPLACE</c>'s result. Text before <paramref name="startIndex"/>

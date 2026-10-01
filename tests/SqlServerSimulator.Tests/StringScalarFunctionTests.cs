@@ -216,4 +216,17 @@ public sealed class StringScalarFunctionTests
     [TestMethod]
     public void Space_HugeCount_TruncatesAt8000()
         => AreEqual(8000, ExecuteScalar<int>("select datalength(SPACE(10000))"));
+
+    /// <summary>
+    /// CHARINDEX over a MAX haystack answers bigint; a text / ntext haystack
+    /// or a MAX needle leaves it int.
+    /// </summary>
+    [TestMethod]
+    [DataRow("charindex('b', cast('abc' as varchar(max)))", 2L)]
+    [DataRow("charindex('b', cast('abc' as nvarchar(max)))", 2L)]
+    [DataRow("charindex('z', cast('abc' as varchar(max)))", 0L)]
+    [DataRow("charindex(cast('b' as varchar(max)), 'abc')", 2)]
+    [DataRow("charindex('b', 'abc')", 2)]
+    public void CharIndex_MaxHaystack_IsBigint(string expression, object expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
 }

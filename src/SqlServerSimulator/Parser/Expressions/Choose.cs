@@ -48,21 +48,12 @@ internal sealed class Choose : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = AssignmentRules.ArgumentType(this.indexExpr, SqlType.Int32, batch, resolveColumnType);
-        // A bare NULL has no type to contribute (probed 2026-09-25 against
-        // SQL Server 2025: CHOOSE(2, NULL, 'x') is 'x').
-        SqlType? t = null;
-        Expression? tSource = null;
-        foreach (var value in this.values)
-        {
-            var type = value.GetSqlType(batch, resolveColumnType);
-            if (IsUntypedNullLiteral(value))
-                continue;
-            if (t is null)
-                (t, tSource) = (type, value);
-            else
-                t = SqlType.PromoteOperands(new(t, tSource), new(type, value));
-        }
-        t ??= this.values[0].GetSqlType(batch, resolveColumnType);
+        // The values unify as CASE arms do, so an integer literal sizes by its
+        // digit count against a decimal sibling (CHOOSE(1, 1, 2.5) is
+        // numeric(2, 1); probed 2026-10-01), and a bare NULL has no type to
+        // contribute (probed 2026-09-25 against SQL Server 2025: CHOOSE(2,
+        // NULL, 'x') is 'x').
+        var t = PromoteValueArms(this.values, batch, resolveColumnType);
         this.cachedResultType = t;
         this.namingArm = FirstDecimalArm(this.values, batch, resolveColumnType);
         return t;

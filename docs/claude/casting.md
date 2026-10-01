@@ -109,6 +109,7 @@ A value that doesn't fit reports **Msg 8115** naming the source family, at a sta
 Text wider than 38 digits is not an error by itself: `CAST('0.00000000000000000000000000000000000000000005' AS decimal(38, 38))` is `0`.
 
 A **`decimal` source** narrowing to a `decimal` target runs the split on the *rescaled value* instead — state 6 where restating it at the target's scale would need more than 38 digits, state 8 where it stays inside 38 — and names itself `numeric` on both sides.
+An **integer source** splits the same way while naming its own family: `CAST(1 AS decimal(38, 38))` is state 6, `CAST(1 AS decimal(37, 37))` state 8 (probed 2026-10-01 against SQL Server 2025).
 
 ## `PARSE` / `TRY_PARSE` (culture-aware conversion)
 
@@ -122,8 +123,8 @@ An exact-numeric target reads at the full 38 digits: the culture's group separat
 So `PARSE('99.999.999.999.999.999.999.999.999.999.999.999.999' AS decimal(38, 0) USING 'de-DE')` answers, and `NumberStyles.Number`'s grammar still decides what the culture accepts (a trailing sign reads, `'(1234.56)'` and `'$1,234.56'` do not).
 Excess fractional digits round as they do for `CAST`, but **text carrying more than 38 digits is refused outright rather than rounded into range** — `PARSE('1.0000000000000000000000000000000000000005' AS decimal(38, 2))` raises Msg 9819 where the `CAST` answers `1.00`.
 
-Accepted target types: `int` / `bigint` / `smallint` / `tinyint` / `decimal(p, s)` / `numeric(p, s)` / `float` / `real` / `money` / `smallmoney` / `bit` / `date` / `datetime` / `datetime2(N)` / `smalldatetime` / `datetimeoffset(N)` / `time(N)` / `uniqueidentifier`.
-String targets (`varchar` / `nvarchar` / `char` / `nchar`) raise Msg 9819 since PARSE only handles parsing INTO a non-string type — matches real SQL Server's rejection.
+Accepted target types: `int` / `bigint` / `smallint` / `tinyint` / `decimal(p, s)` / `numeric(p, s)` / `float` / `real` / `money` / `smallmoney` / `date` / `datetime` / `datetime2(N)` / `smalldatetime` / `datetimeoffset(N)` / `time(N)`.
+Any other target — a string, a binary, `bit`, `uniqueidentifier` — is Msg 10761 class 15 while compiling, naming the type and the function as written (`Invalid data type bit in function PARSE.`), and a `time` target reads its text as a date-time does, so `'1:30 PM'` is 13:30 (probed 2026-10-01 against SQL Server 2025).
 
 NULL input → NULL (both forms).
 Result type: the requested target type with declared precision / scale preserved.
@@ -302,7 +303,7 @@ Five category-specific style families dispatch from `ConvertExpression.Run`'s st
 | 21 / 25 / 121 | `yyyy-MM-dd HH:mm:ss.fff…` (period sep) | ODBC canonical + ms; modern types use source precision (datetime2(0) suppresses fractional entirely) |
 | 22 | `MM/dd/yy h:mm:ss AM/PM` | single space between date and AM/PM-time, single space before `AM`/`PM` |
 | 23 | `yyyy-MM-dd` | date-only ISO |
-| 126 / 127 | `yyyy-MM-ddTHH:mm:ss.fff…` | ISO 8601 with `T` separator; `datetimeoffset` style 126 keeps the offset, 127 projects to UTC with `Z` suffix |
+| 126 / 127 | `yyyy-MM-ddTHH:mm:ss.fff…` | ISO 8601 with `T` separator; `datetimeoffset` style 126 keeps the offset, 127 projects to UTC with `Z` suffix; a fraction of all zeros is dropped, for every source family (probed 2026-10-01) |
 | 130 / 131 | Hijri (Kuwaiti/tabular) date + AM/PM time | 130 emits Arabic month name (e.g. `ذو القعدة`); 131 emits zero-padded numeric month with `/` separators. SQL Server uses .NET's `HijriCalendar` (default `HijriAdjustment = 0`), NOT `UmAlQuraCalendar` — the two differ by ±1 day in some months |
 
 Fractional-second separator follows the **source family**: legacy `datetime` / `smalldatetime` use COLON in 9/13/14/109/113/114/130/131 (e.g. `14:25:36:123`) and PERIOD in 21/25/121/126/127; `datetime2(N)` / `datetimeoffset(N)` / `time(N)` always use PERIOD with source-precision digits.

@@ -162,11 +162,12 @@ internal sealed class StringAggAggregator : Aggregator
     {
         if (!IsMaxForm(this.resultType))
         {
-            var byteLength = this.resultType is NVarcharSqlType or NCharSqlType || this.resultType == SqlType.NText
+            var national = this.resultType is NVarcharSqlType or NCharSqlType || this.resultType == SqlType.NText;
+            var byteLength = national
                 ? result.Length * 2
                 : (this.resultType.Collation ?? Collation.Baseline).StorageEncoding.GetByteCount(result);
             if (byteLength > MaxResultBytes)
-                throw SimulatedSqlException.StringAggResultExceededLimit();
+                throw SimulatedSqlException.StringAggResultExceededLimit(national);
         }
 
         return SqlValue.FromString(this.resultType, result);

@@ -20,12 +20,16 @@ internal sealed class Replicate : Expression
     private readonly Expression input;
     private readonly Expression count;
 
+    // The count real folds while compiling, which sizes the result.
+    private readonly int? constantCount;
+
     public Replicate(ParserContext context)
     {
         this.input = Parse(context);
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         this.count = Parse(context.MoveNextRequiredReturnSelf());
+        this.constantCount = StringScalars.FoldCount(this.count, context.Batch);
     }
 
     public override SqlValue Run(RuntimeContext runtime)
@@ -73,7 +77,7 @@ internal sealed class Replicate : Expression
     {
         // REPLICATE copies its input without comparing it, so an unresolved
         // collation propagates into the result (probe-confirmed).
-        var inputType = StringScalars.BindCoercedArgument(this.input, batch, resolveColumnType, "replicate", propagatesUnresolvedCollation: true);
+        var inputType = StringScalars.BindSource(this.input, batch, resolveColumnType, "replicate", coerced: true, propagatesUnresolvedCollation: true);
         _ = AssignmentRules.ArgumentType(this.count, SqlType.Int32, batch, resolveColumnType);
         return ResolveResultType(inputType, batch);
     }
@@ -94,9 +98,14 @@ internal sealed class Replicate : Expression
         if (IsMaxForm(stringType))
             return stringType;
         var inputWidth = StringScalars.DeclaredWidth(stringType);
-        return inputWidth > 0 && StringScalars.TryConstantCount(this.count, out var times)
-            ? StringScalars.SizedResultType(stringType, (int)Math.Min((long)inputWidth * times, StringScalars.FamilyCap(stringType)), batch)
-            : StringScalars.ContainerResultType(stringType, batch);
+        if (inputWidth <= 0 || this.constantCount is not int times)
+            return StringScalars.ContainerResultType(stringType, batch);
+        // A count of zero or below answers NULL or the empty string, and real
+        // types it as two bytes whatever the input's width: varchar(2),
+        // nvarchar(1) (probed 2026-10-01 against SQL Server 2025).
+        if (times <= 0)
+            return StringScalars.SizedResultType(stringType, stringType is NVarcharSqlType or NCharSqlType ? 1 : 2, batch);
+        return StringScalars.SizedResultType(stringType, (int)Math.Min((long)inputWidth * times, StringScalars.FamilyCap(stringType)), batch);
     }
 
     /// <summary>

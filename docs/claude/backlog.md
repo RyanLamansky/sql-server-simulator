@@ -268,6 +268,14 @@ The harness is local-only and not checked in; its three connection-killing findi
   Most misses have a repeated digit in the first code — `DIFFERENCE('aababab', 'babab')` (`A111`, `B110`) is 3 where the rule gives 2, `A112` against any `A12x` is 4 — and `DIFFERENCE('', x)` is 3 for a code with no digits, 2 for one or two and 0 for three, so padding and repeats are what the rule still gets wrong.
 - `REGEXP_COUNT` / `REGEXP_INSTR` / `REGEXP_SUBSTR` with a `datetime` pattern or start position kill the session on real (severity 21); here they are Msg 8116, which is the answer kept.
 
+**Scalar-function sweep** — a second corpus of 1,638 small cases over the date, string, conversion, math and logical built-ins, compared value and result-column type alike (probed 2026-10-01 against SQL Server 2025); what it left open:
+
+- **A written-constant CASE family types as the arm it takes, for strings.**
+  `IIF(1 = 1, CAST('a' AS char(5)), CAST('b' AS varchar(2)))` is `char(5)` on real and `varchar(5)` here, `CASE WHEN 1 = 1 THEN 'ab' ELSE 'abcde' END` is `varchar(2)` where both arms unify to `varchar(5)` here, and `COALESCE(CAST('a' AS char(5)), CAST('b' AS varchar(10)))` is `char(5)` against `varchar(10)`.
+  The same calls over a variable or a column unify as the simulator does, and a numeric pair keeps the unified type even when folded (`CASE WHEN 1 = 1 THEN 1 ELSE 2.5 END` is `numeric(2, 1)` on both), so the fold changes only a string result's type and width.
+- **`TRANSLATE` over surrogate code units** maps them in a way not yet explained: `TRANSLATE(N'a😀', N'😀', N'xy')` is `axx` on real (`axy` here), `TRANSLATE(N'😀😁', N'😁', N'xy')` is `xxxx`, a lone low surrogate looked up in a list holding only the high one translates (`TRANSLATE(N'a' + NCHAR(56832), NCHAR(55357), N'x')` is `ax`), yet `TRANSLATE(N'😀', N'x😀', N'abc')` leaves the input unchanged.
+- **`AT TIME ZONE` before a zone's first rule** reads Windows' rules extended backwards on real and the host's IANA history here — see [`scalars.md`](scalars.md#at-time-zone).
+
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 
 Both clauses ship (see [`xml.md`](xml.md#for-xml-result-serialization), [`json.md`](json.md#for-json-result-serialization)); these are the parts that don't:

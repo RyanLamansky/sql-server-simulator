@@ -30,6 +30,9 @@ internal sealed class Substring : Expression
     // Null for the two-argument form, which reads to the end.
     private readonly Expression? length;
 
+    // The length real folds while compiling, which sizes the result.
+    private readonly int? constantLength;
+
     public Substring(ParserContext context)
     {
         this.source = Parse(context);
@@ -43,6 +46,7 @@ internal sealed class Substring : Expression
             return;
         ExpectArgumentSeparator(context);
         this.length = Parse(context.MoveNextRequiredReturnSelf());
+        this.constantLength = StringScalars.FoldCount(this.length, context.Batch);
     }
 
     // A comma separates SUBSTRING's arguments; the ANSI `SUBSTRING(x FROM a
@@ -149,8 +153,8 @@ internal sealed class Substring : Expression
             throw SimulatedSqlException.NegativeLengthNotAllowed("substring", 8);
         if (sourceType is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel })
             return sourceType;
-        var n = 0;
-        var hasConstantLength = length is not null && StringScalars.TryConstantCount(length, out n);
+        var n = Math.Max(0, this.constantLength ?? 0);
+        var hasConstantLength = this.constantLength is not null;
         if (sourceType.IsLob)
         {
             return hasConstantLength
@@ -183,7 +187,7 @@ internal sealed class Substring : Expression
             BinarySqlType b => b.length,
             _ => 8000,
         };
-        return length is not null && StringScalars.TryConstantCount(length, out var n)
+        return this.constantLength is int n
             ? VarbinarySqlType.Get(Math.Max(1, Math.Min(sourceWidth, n)))
             : VarbinarySqlType.Get(sourceWidth);
     }

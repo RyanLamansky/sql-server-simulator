@@ -58,7 +58,7 @@ internal sealed class Power : Expression
             : resultType.Category switch
             {
                 SqlTypeCategory.Approximate => SqlValue.FromDouble(raw),
-                SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDoubleAsDecimalOrMoney(resultType, raw),
+                SqlTypeCategory.Decimal or SqlTypeCategory.Money => MathScalars.FromDoubleAsDecimalOrMoney(resultType, raw, convertsFromFloat: true),
                 _ => CoerceIntegerResult(raw, resultType),
             };
     }
@@ -71,7 +71,10 @@ internal sealed class Power : Expression
     /// and names <c>float</c> either way.
     /// </summary>
     private static SqlValue CoerceIntegerResult(double raw, SqlType resultType) => resultType == SqlType.BigInt
-        ? raw is < long.MinValue or > long.MaxValue
+        // 2^63 is the first double past bigint's range: long.MaxValue reads as
+        // it, so the bound is written out (POWER(CAST(2 AS bigint), 63) is
+        // Msg 8115, probed 2026-10-01 against SQL Server 2025).
+        ? raw is < -9223372036854775808.0 or >= 9223372036854775808.0
             ? throw SimulatedSqlException.ArithmeticOverflow("bigint")
             : SqlValue.FromInt64((long)raw)
         : raw is < int.MinValue or > int.MaxValue

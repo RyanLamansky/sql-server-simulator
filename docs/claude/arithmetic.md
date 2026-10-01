@@ -394,11 +394,14 @@ String and binary literals type at their **exact value width**, and that width f
 - **ISNULL** fixes the result to the **first** argument's declared type/width (`ISNULL('ab', 'wxyz')` → `varchar(2)`), unlike COALESCE's joint promote — see [`dml.md`](dml.md)/`IsNullExpression`.
 
 ### Per-function widths (`StringScalars` helpers)
-Length-deriving scalars compute their projected width the way SQL Server does when the count/length argument is a **constant literal** (const-folded via `StringScalars.TryConstantCount`), else fall back to the family container:
+Length-deriving scalars compute their projected width the way SQL Server does when the count/length argument is a constant real folds while compiling, else fall back to the family container.
+Real folds a written constant (`Expression.IsWrittenConstant`) whose type is exactly `int` — `2`, `(2)`, `1 + 1`, `CAST(2 AS int)`, `LEN('ab')` — and nothing else, so `LEFT('abcdef', 2.9)`, a `bigint` or `tinyint` count and a variable all leave the width at the input's or the container (probed 2026-10-01 against SQL Server 2025; `StringScalars.FoldCount`, folded once while parsing):
 - `LEFT` / `RIGHT` / `SUBSTRING` → `min(inputWidth, n)` (start does not affect SUBSTRING's width); width 0 floors to 1.
-- `REPLICATE` → `min(cap, inputWidth × count)`; `REPLICATE(varchar(5), 3)` → `varchar(15)`; a `varchar(MAX)` input carries MAX through.
-- `SPACE` → `varchar(min(8000, n))`; `SPACE(0)` → `varchar(1)`.
-- `STUFF` → `inputWidth − min(length, inputWidth − start + 1) + replacementWidth`, capped; `STUFF(varchar(10), 8, 5, 'XY')` → `varchar(9)` (only 3 chars remain to delete).
+- `REPLICATE` → `min(cap, inputWidth × count)`; `REPLICATE(varchar(5), 3)` → `varchar(15)`; a `varchar(MAX)` input carries MAX through; a count of zero or below is two bytes whatever the input (`varchar(2)`, `nvarchar(1)`).
+- `SPACE` → `varchar(min(8000, n))`; `SPACE(0)` and a negative count → `varchar(1)`.
+- `STUFF` → `inputWidth − min(length, inputWidth − start + 1) + replacementWidth`, capped; `STUFF(varchar(10), 8, 5, 'XY')` → `varchar(9)` (only 3 chars remain to delete), a negative length widens it (`STUFF('abc', 2, -1, 'x')` → `varchar(5)`), a start at or below zero still sizes, and a start past the input's width is the container.
+- **A non-string operand** is the width it converts to — int 12, bigint 24, decimal 41, float 23, money 40, the date types and `uniqueidentifier` 40, a binary its byte length, `varbinary(max)` MAX (`StringScalars.ConvertedWidth`, shared with `CONCAT`) — so `UPPER(12)` is `varchar(12)` and `REPLICATE(0x4142, 3)` `varchar(6)`; a **bare `NULL`** operand is `varchar(1)` (`UPPER(NULL)`, `REPLICATE(NULL, 2)` → `varchar(2)`).
+- **A bounded result never grows past its family's maximum**: `+`, `||`, `CONCAT`, `CONCAT_WS`, `REPLACE` and `STUFF` clip silently at 8000 bytes / 4000 characters (`StringScalars.ClipToFamilyCap`), so `REPLICATE('a', 8000) + 'b'` is 8000 long; only a MAX operand lets the value grow.
 - `REPLACE` / `TRANSLATE` → family container (`varchar(8000)` / `nvarchar(4000)`) always — they can grow the input by an unbounded factor.
   `UPPER` / `LOWER` / `LTRIM` / `RTRIM` / `TRIM` / `REVERSE` preserve the input width.
   `QUOTENAME` → `nvarchar(258)` fixed.
@@ -421,4 +424,3 @@ If a future length-0 crash vector surfaces, prefer per-scalar retyping over the 
 
 ### Residual divergences
 - `@@VERSION` and the built-in message scalars stay container-class (`nvarchar(4000)`), not real's exact `nvarchar(300)` — retyping the built-in catalog *wholesale* to real's exact widths was weighed and rejected as broad churn (see the rejected flip); per-scalar retyping stays the route when a specific width is shown to matter.
-- `TRANSLATE` projects `nvarchar` container even for a `varchar` input (a family divergence — it coerces to nvarchar internally); real keeps the `varchar` family.

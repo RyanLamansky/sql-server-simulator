@@ -16,13 +16,16 @@ Probe-confirmed against SQL Server 2025.
 The widening rule treats string input as float for projection-schema parity.
 Two per-function nuances: `POWER`'s result type follows the **first** arg's widen rule (so `POWER('2', 3) → float` but `POWER(2, '3') → int` with truncation toward zero); `ROUND`'s **value** arg coerces but the `length` / `function` args stay strict-int (Msg 8116 on string, matching real).
 
-**`ROUND`'s length argument** clamps to ±38 — `numeric`'s own digit domain — and the rounded result settles back into the **argument's declared precision**, so a carry out of it is Msg 8115 state 2: `ROUND(CAST(7.2 AS decimal(2, 1)), -1)` raises where the same value declared `decimal(3, 1)` answers `10.0`, and `ROUND(CAST(94.5 AS decimal(3, 1)), -2)` raises.
+**`ROUND` over a `float`** decides by the double's exact binary value, so `ROUND(2.675e0, 2)` is 2.67 (2.675 is stored as 2.67499…) and `ROUND(1.45e0, 1)` 1.4, and its length reaches as far as a double has digits (`ROUND(2.5e-300, 300)` is 2E-300); a bare `NULL` length types the result `float` whatever the value (all probed 2026-10-01 against SQL Server 2025).
+
+**`ROUND`'s length argument** over an exact numeric clamps to ±38 — `numeric`'s own digit domain — and the rounded result settles back into the **argument's declared precision**, so a carry out of it is Msg 8115 state 2: `ROUND(CAST(7.2 AS decimal(2, 1)), -1)` raises where the same value declared `decimal(3, 1)` answers `10.0`, and `ROUND(CAST(94.5 AS decimal(3, 1)), -2)` raises.
 
 Errors: `SQRT(neg)` / `LOG(<= 0)` / `LOG10(<= 0)` / `LOG(x, 1)` / `POWER(neg, frac)` → Msg 3623.
 `POWER(0, neg)` → Msg 8134.
 `EXP` / `SQUARE` overflow → Msg 8115 float.
 `ABS(int.MinValue)` / `ABS(bigint.MinValue)` → Msg 8115 with the result type's family.
-`POWER` int-result overflow → Msg 232.
+`POWER` int-result overflow → Msg 232, a bigint result past 2^63 Msg 8115 state 2, and a decimal result past `numeric`'s range Msg 8115 state 6 naming the `float` it was computed in.
+A money result an operator, an aggregate or a math function computes past the type's range is Msg 8115 state 2 against the expression (`ABS` of money's minimum, `$922337203685477 + $1`), where a `CAST` from `numeric` reports state 4; an integer that can't become a `smallmoney` result is Msg 220 (probed 2026-10-01 against SQL Server 2025).
 
 **Trig family** (`SIN`/`COS`/`TAN`/`ASIN`/`ACOS`/`ATAN`/`ATN2`/`COT`/`PI`/`SQUARE`) always returns `float`.
 Domain errors → Msg 3623 (including `ATN2(0, 0)`, which diverges from .NET's `Math.Atan2(0, 0) = 0`).
@@ -41,13 +44,16 @@ The integer arm truncates toward zero, `money` comes back at its own scale of 4,
   Localized names follow .NET's `CultureInfo.InvariantCulture` — month names in English, weekday names in English, numeric parts as base-10 strings.
 - **`DATETRUNC(part, date)`** (`Parser/Expressions/DateTimeAdjustments.cs`) — floor to start of the named part.
   Supported parts: `year`/`quarter`/`month`/`week`/`day`/`hour`/`minute`/`second` plus the millisecond/microsecond/nanosecond family.
-  Result preserves the input's type (`datetime` → `datetime`, `datetime2(N)` → `datetime2(N)`); `date` source rejects time-bearing parts via Msg 9810 (reused factory).
+  Result preserves the input's type (`datetime` → `datetime`, `datetime2(N)` → `datetime2(N)`, a bare `NULL` → `datetime2(7)`); `date` source rejects time-bearing parts via Msg 9810 (reused factory), and so does a part finer than the operand's precision — a millisecond below precision 3, a microsecond below 6 — at state 11.
+  A week that would start before 0001-01-01 is Msg 9837 naming the type (probed 2026-10-01 against SQL Server 2025).
 - **`SWITCHOFFSET(dto, offset)`** — adjust a `datetimeoffset`'s offset while preserving the UTC instant; both offset (numeric `±N` minutes or string `'±HH:MM'`) forms accepted.
   Result type = input precision preserved (`datetimeoffset(N)`).
 - **`TODATETIMEOFFSET(dt, offset)`** — attach an offset to a `datetime` / `datetime2` value, treating the input wall-clock as already in the named zone.
   Result `datetimeoffset(N)` matching input precision.
+- Both — and `AT TIME ZONE` — keep the source's fractional precision: `datetime2(N)` / `datetimeoffset(N)` their own, `datetime` 3, `smalldatetime` 0, a string or a `date` 7 (`SwitchOffset.ResultTypeFor`); a value the offset carries out of range in UTC or local time is Msg 9813, state 0 for `SWITCHOFFSET` and 2 for `TODATETIMEOFFSET` (probed 2026-10-01 against SQL Server 2025).
 - **`DATE_BUCKET(part, bucket_width, date [, origin])`** (`Parser/Expressions/DateBucket.cs`) — bucket-aligned floor.
-  `origin` defaults to `1900-01-01` for date/datetime inputs and `1900-01-01 00:00:00` for time-bearing types; `bucket_width` must be positive.
+  `origin` defaults to `1900-01-01` for date/datetime inputs, `1900-01-01 00:00:00` for time-bearing types and midnight for a `time`, and a NULL origin is the default one; `bucket_width` must be positive (Msg 9834) and refuses a bare `NULL` (Msg 8116), while a typed NULL width answers NULL.
+  The parts are year through millisecond: a day of year, weekday, ISO week, offset, microsecond or nanosecond is Msg 9810 state 1 for every type (probed 2026-10-01 against SQL Server 2025).
   Returns the same type as `date`.
 - **`CURRENT_DATE`** — parens-less, dispatched directly from `Expression.Parse`'s expression-start switch (same shape as `CURRENT_TIMESTAMP`).
   Returns `date`.
@@ -61,7 +67,9 @@ Result types: `DATEPART` → int; `DATEADD` preserves input type; `DATEDIFF` →
 `DATEPART`/`DATEADD` enforce per-type keyword compatibility: `date` accepts only date parts; `time(N)` only time parts; `datetime`/`smalldatetime`/`datetime2(N)` accept both; `datetimeoffset(N)` adds `tzoffset`.
 On top of what a type holds, `DATEADD` and `DATETRUNC` refuse parts of their own — each with a state naming the operand type — and `DATEPART` / `DATENAME` read a `datetime2`'s offset as zero (`DatePartKinds.RequireCompatible`; probed 2026-09-26 against SQL Server 2025).
 Wrong combination → Msg 9810.
-`DATEADD`'s interval count is `bigint` (`DatePartKinds.CoerceCount` → `CoerceTo(BigInt)`) — real accepts an interval exceeding int32 (`DATEADD(second, 2147483648, …)` lands in 2092); only an interval that pushes the *result* past the target type's range raises **Msg 517** (the `Add`/`checked` narrowing re-wraps it).
+`DATEADD`'s interval count is `bigint` (`DatePartKinds.CoerceCount` → `CoerceTo(BigInt)`) — real accepts an interval exceeding int32 (`DATEADD(second, 2147483648, …)` lands in 2092); only an interval that pushes the *result* past the target type's range raises **Msg 517** (the `Add`/`checked` narrowing re-wraps it), at state 1 for `datetime`, 2 for `smalldatetime` and 3 for the rest.
+A `time` never overflows: it wraps around midnight, rounding to its precision first, so `DATEADD(hour, 25, '23:00')` is 00:00 and `DATEADD(ms, -1, CAST('00:00' AS time(2)))` 00:00 too.
+A nanosecond interval rounds to whole 100-ns ticks half away from zero — 50 adds one tick, -49 none (probed 2026-10-01 against SQL Server 2025).
 ### `SET DATEFIRST` and the parts that read it
 
 `SET DATEFIRST n` names the weekday the week starts on, 1..7, default 7 (Sunday — the us_english setting a fresh session gets under SqlClient and sqlcmd alike).
@@ -103,7 +111,6 @@ Inside a `BEGIN TRY` block real swallows the failure outright — nothing raised
 `ParseDateTime2` also accepts a **bare time-of-day string** (`HH:mm[:ss[.fffffff]]`, anchored to 1900-01-01), so `DATEDIFF(second, '11:15:00', <time>)` / `DATEPART(microsecond, '11:15:00')` coerce like real (a Django DurationField/TimeField pattern) rather than raising Msg 241.
 Probe-confirmed against SQL Server 2025: `DATEPART(year, 0) = 1900`, `DATEADD(day, 1, 0) = 1900-01-02`, `DATEDIFF(day, 0, '2024-01-31') = 45320`.
 `DATEADD`'s offset (second) arg stays strict-int — string offsets raise Msg 9810 ("Argument data type varchar is invalid for argument 2 of dateadd function") just like real SQL Server.
-Minor projection-schema quirk: real SQL Server reports `DATEADD(day, 1, '2024-01-15')` as `datetime`; the simulator reports it as `datetime2(7)` (the convention from `DATEDIFF`'s existing string path).
 
 `DATEDIFF`/`DATEDIFF_BIG` count `datepart`-unit *boundaries crossed*, not elapsed time — `datediff(year, '2023-12-31', '2024-01-01')` = 1.
 More permissive than DATEPART/DATEADD: every datepart works against every date/time-family combo.
@@ -169,9 +176,10 @@ That CLR path now works (see [`clr-assemblies.md`](clr-assemblies.md)), so the s
 ## Date-construction scalars: `*FROMPARTS` family + `EOMONTH`
 Six builders (`DATE`/`DATETIME`/`DATETIME2`/`DATETIMEOFFSET`/`SMALLDATETIME`/`TIME` + `FROMPARTS`).
 Shared shape: NULL on any non-precision arg propagates; non-int operands coerce through CAST; out-of-range → Msg 289 with type-specific State (1=date, 2=time, 3=datetime, 5=datetime2, 6=datetimeoffset).
-Variable-precision builders (`datetime2`/`datetimeoffset`/`time`) take the precision as a constant-foldable expression — column refs → Msg 10760; out-of-`[0, 7]` → Msg 1002.
+Variable-precision builders (`datetime2`/`datetimeoffset`/`time`) take the precision as a constant-foldable expression — column refs → Msg 10760; out-of-`[0, 7]` → Msg 1002 at class 16 state 2.
+A result the legacy rounding or the offset carries out of range is the builder's own Msg 289 rather than a conversion error: `DATETIMEFROMPARTS(9999, 12, 31, 23, 59, 59, 999)`, `SMALLDATETIMEFROMPARTS(2079, 6, 7, 0, 0)`, a `DATETIMEOFFSETFROMPARTS` whose UTC instant leaves years 1–9999 (probed 2026-10-01 against SQL Server 2025).
 
-Per-builder quirks: `DATETIMEFROMPARTS` ms 999 + h23:m59:s59 rolls to next day (1/300s tick rounding); `DATETIMEOFFSETFROMPARTS` enforces sign-consistency between hour/minute_offset (mixed → Msg 289 St 6) and |offset| ≤ 14:00.
+Per-builder quirks: `DATETIMEFROMPARTS` ms 999 + h23:m59:s59 rolls to next day (1/300s tick rounding); `DATETIMEOFFSETFROMPARTS` enforces sign-consistency between hour/minute_offset (mixed → Msg 289 St 6) and |offset| ≤ 14:00, and adds the two (`-5, -30` is `-05:30`).
 `EOMONTH(start_date [, month_offset])` always returns `date` and silently treats NULL `month_offset` as zero (NULL `start_date` propagates normally).
 
 ## `AT TIME ZONE`
@@ -180,12 +188,15 @@ Postfix operator; LHS-type-discriminated semantics:
   Skipped (spring-forward) wall-clocks shift forward by DST delta with post-transition offset; ambiguous (fall-back) picks daylight (pre-fall-back).
 - `datetimeoffset AT TIME ZONE 'X'`: preserves UTC instant; both offset and wall-clock change.
 
-Result is always `datetimeoffset` with LHS fractional precision preserved (`datetime2(N)`/`datetimeoffset(N)` → `datetimeoffset(N)`; legacy `datetime`/`smalldatetime` → `datetimeoffset(3)`).
+Result is always `datetimeoffset` with LHS fractional precision preserved (`datetime2(N)`/`datetimeoffset(N)` → `datetimeoffset(N)`; legacy `datetime` → `datetimeoffset(3)`, `smalldatetime` → `datetimeoffset(0)`).
 `date`/`time` LHS → Msg 8116.
 Unrecognized zone → Msg 9820.
 NULL on either side propagates.
 
-Zone-name resolution via `TimeZoneInfo.FindSystemTimeZoneById` (accepts both Windows-style and IANA names cross-platform via ICU); cached in a process-static `ConcurrentDictionary`.
+A zone name must be one of the Windows ids `sys.time_zone_info` lists, in any case and without surrounding spaces; an IANA name (`America/New_York`, `Etc/UTC`) is Msg 9820 as on real (probed 2026-10-01 against SQL Server 2025).
+The id resolves through ICU's Windows-to-IANA mapping with the `BuiltInResources.WindowsTimeZoneIanaFallbacks` aliases for the ids it lacks, cached in a process-static `ConcurrentDictionary`.
+
+**Divergence:** the offsets come from the host's IANA history where real reads Windows' rules, which reach back unchanged before the first rule — `'1800-07-01 12:00' AT TIME ZONE 'Pacific Standard Time'` is `-07:00` on real (summer time applied in 1800) and the local-mean-time `-07:53` here; `1900`, `1920` and `1880` Tokyo (`+09:18`) differ the same way, while the zones' modern rules agree.
 
 **Precedence**: `AT TIME ZONE` binds tighter than `+`.
 The zone-name slot parses as a primary expression only — literals, `@variables`, single-segment column refs, or parenthesized full expressions.
@@ -225,9 +236,10 @@ Varbinary/binary route through `SqlValue.CoerceBinaryToStringWithStyle(target, 0
 **Image stays rejected** (Msg 8116) — real SQL Server rejects too, and `IsCoerceableToVarchar` deliberately excludes the legacy LOB form.
 Probe-confirmed against SQL Server 2025: `LOWER(12345) = '12345'`, `LEN(CAST('2024-01-15' AS DATE)) = 10`, `LOWER(CAST('2024-01-15 12:34:56' AS DATETIME)) = 'jan 15 2024 12:34pm'` (legacy datetime default format), `REPLACE(CAST('2024-01-15' AS DATE), '-', '/') = '2024/01/15'`.
 Source families outside the coerce-able set (varbinary, xml, spatial, table types) raise Msg 8116 via `InvalidArgumentDataType`.
-The projection-schema result type for `LEN` is always `int`; the other functions project as `varchar` for non-string sources and preserve the input string type otherwise — except that `UPPER` / `LOWER` / `LTRIM` / `RTRIM` / `TRIM` / `REVERSE` turn a fixed-width `char(n)` / `nchar(n)` into `varchar(n)` / `nvarchar(n)`, which is what lets a trim shed the padding (`DATALENGTH(RTRIM(CAST(N'a' AS nchar(5))))` is 2; probed 2026-09-30 against SQL Server 2025).
+The projection-schema result type for `LEN` is always `int`; the other functions project as `varchar` of the width the source converts to for non-string sources (see [`arithmetic.md`](arithmetic.md#per-function-widths-stringscalars-helpers)) and preserve the input string type otherwise — except that `UPPER` / `LOWER` / `LTRIM` / `RTRIM` / `TRIM` / `REVERSE` turn a fixed-width `char(n)` / `nchar(n)` into `varchar(n)` / `nvarchar(n)`, which is what lets a trim shed the padding (`DATALENGTH(RTRIM(CAST(N'a' AS nchar(5))))` is 2; probed 2026-09-30 against SQL Server 2025).
 `REPLACE` runs the coerce per argument with the matching argument index in the Msg 8116 wording.
 `CHARINDEX`'s **haystack** (arg 2) coerces (`CHARINDEX('2', 12345) = 2`); the **needle** (arg 1) and **start** (arg 3) stay strict-int / strict-string respectively, matching real's Msg 8116 rejection.
+Its result is `bigint` over a `varchar(max)` / `nvarchar(max)` haystack and `int` otherwise, a `text` / `ntext` haystack or a MAX needle included (probed 2026-10-01 against SQL Server 2025).
 
 **`UPPER` / `LOWER` map by the argument's collation** (`CaseMap`), and none of real's tables is the modern Unicode one .NET's `TextInfo` applies (probed 2026-09-28 against SQL Server 2025, every BMP character under two dozen collations).
 There are three, chosen by the collation's version and the same under every suffix, binary included: the unversioned, `_90` and `SQL_` collations share one, `_100` has another and `_140` a third — `UPPER(N'µ')` is `µ` under the default collation and `Μ` under `Japanese_XJIS_140_CI_AS`, and `LOWER(NCHAR(4256))` (Georgian `Ⴀ`) is U+10D0 under the default and U+2D00 under `_100`.
@@ -456,7 +468,7 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
   `ISNUMERIC` and `ISDATE` refuse the legacy LOBs, `xml`, `sql_variant` and the post-2008 date and time types with Msg 8116 while compiling, and answer 0 for the other types they can't read.
   Anything that doesn't fully consume after trimming whitespace returns 0.
 - **`ISDATE(expression)`** returns `int` (1 / 0) and validates against the legacy `datetime` range (1753-9999).
-  Empty string short-circuits to 0 (the shared `TryParseLegacyDateTime` treats `""` as datetime base-date for CAST support, but ISDATE specifically rejects).
+  Empty or all-space string short-circuits to 0 (the shared `TryParseLegacyDateTime` treats `""` as datetime base-date for CAST support, but ISDATE specifically rejects), and so does a time the datetime rounding carries past 9999-12-31 (`'9999-12-31 23:59:59.999'`; probed 2026-10-01).
   Modern `date` / `time` / `datetimeoffset` raise Msg 8116 — ISDATE intentionally lives in the legacy datetime domain.
   Integer input is implicitly stringified and re-parsed (so `ISDATE(20260512)` = 1 via `'20260512'` matching `yyyyMMdd`; `ISDATE(1)` = 0 because `'1'` parses to year 1 < 1753).
   Float / decimal / non-integer-non-string types always return 0.
@@ -464,7 +476,7 @@ This is the *argument* rule; the slots these types can't reach at all — sortin
   The defining behavior is the **runtime-constant** rule: a call site that reads no row — `RAND()`, or a literal or variable seed — produces ONE value reused across every row of the query, and distinct call sites in the same projection each get their own.
   The freeze lives in the executing statement's frame (`StatementContext.StatementScopedValues`), so a plan-cached statement draws afresh per execution.
   A seed that reads the row reseeds per row instead: `RAND(b)` over `b` = 1, 2, 3 answers `RAND(1)`, `RAND(2)`, `RAND(3)` (probed 2026-09-28 against SQL Server 2025).
-  The generator is real's own (`RandGenerator` documents the reverse-engineered algorithm), so a seeded call answers real's value.
+  The generator is real's own (`RandGenerator` documents the reverse-engineered algorithm), so a seeded call answers real's value — a seed whose magnitude reaches 2147483563 included, which restarts it as `RAND(0)` does.
   NULL seed → NULL output.
 - **`CRYPT_GEN_RANDOM(length [, seed])`** draws fresh bytes per row as `varbinary(8000)`, unlike `RAND`'s per-site constant.
   It takes only an `int` length and a `varbinary` seed, stricter than the shared integer-argument seam (`tinyint` is Msg 8116 too), and a non-empty seed shorter than the length answers NULL as an out-of-range length does (probed 2026-09-26 against SQL Server 2025).
@@ -482,7 +494,7 @@ Probed 2026-09-26 against SQL Server 2025; none is gated on the compatibility le
 
 ## SOUNDEX-family + STR + TRANSLATE + STRING_ESCAPE
 
-- **`SOUNDEX(s)`** (`Parser/Expressions/SoundexStrAdditions.cs`) — returns a 4-character `varchar` SOUNDEX code under the standard algorithm (first letter uppercased, then the consonant-digit map B/F/P/V=1, C/G/J/K/Q/S/X/Z=2, D/T=3, L=4, M/N=5, R=6, vowels/H/W skipped, runs of identical-code letters collapsed, padded with `0` or truncated to length 4).
+- **`SOUNDEX(s)`** (`Parser/Expressions/SoundexStrAdditions.cs`) — returns a 4-character SOUNDEX code typed `varchar(5)` whatever the argument (probed 2026-10-01) under the standard algorithm (first letter uppercased, then the consonant-digit map B/F/P/V=1, C/G/J/K/Q/S/X/Z=2, D/T=3, L=4, M/N=5, R=6, vowels/H/W skipped, runs of identical-code letters collapsed, padded with `0` or truncated to length 4).
   A string whose first character isn't a letter is `0000` — a leading space included (probed 2026-09-25 against SQL Server 2025).
   Empty input → `'0000'`.
   NULL → NULL.
@@ -492,7 +504,7 @@ Probed 2026-09-26 against SQL Server 2025; none is gated on the compatibility le
 - **`STR(float [, length [, decimals]])`** — right-aligned fixed-width numeric-to-string.
   Defaults: length 10, decimals 0.
   Overflow (formatted value exceeds `length`) returns a string of `*` characters of length `length`.
-  The decimals shrink to fit the width *before* rounding, and rounding reads the double's exact value truncated to 17 significant digits, so `STR(99.99, 4, 1)` overflows and `STR(2.675, 5, 2)` is `2.67` — the full rule set is on `Str.Format` (probed 2026-09-23).
+  The decimals shrink to fit the width *before* rounding, and rounding reads the double's exact value cut to 17 significant digits — rounded up only past a half, so an exact tie goes down — so `STR(99.99, 4, 1)` overflows, `STR(2.675, 5, 2)` is `2.67` and `STR(1234567890123456.75, 30, 1)` ends `.7` — the full rule set is on `Str.Format` (probed 2026-09-23 and 2026-10-01).
   NULL → NULL, as are a length outside 1..8000 and negative decimals.
   Projects `varchar(length)` — a constant `length` (default 10, a negated literal included) clamped to 1..8000, else the `varchar(8000)` container (probe-confirmed against SQL Server 2025: `STR(3.14159, 6, 2)` → `varchar(6)`, `STR(x, 0)` → `varchar(1)` though it answers NULL, a variable length → `varchar(8000)`).
 - **`TRANSLATE(input, chars, translations)`** (`Parser/Expressions/StringScalarAdditions.cs`) — character-by-character substitution.
@@ -501,11 +513,8 @@ Probed 2026-09-26 against SQL Server 2025; none is gated on the compatibility le
   The input converts from any type, where the two character lists must be strings (Msg 8116).
   The result is `varchar(8000)`, or `nvarchar(4000)` when any argument is Unicode, and MAX only when the input is — `REPLACE` follows the same Unicode rule (probed 2026-09-25 against SQL Server 2025).
   NULL on any operand → NULL.
-  Result is the length family of `input`: a MAX-form input (`varchar(max)` / `nvarchar(max)` / `text` / `ntext`) projects `SqlType.NVarcharMax` so a large result streams as PLP; a bounded input keeps the length-0 `nvarchar` shape.
-  (The simulator coerces every input to nvarchar before processing — a minor family divergence from real, which keeps the varchar family for varchar input.)
 - **`STRING_ESCAPE(text, 'json')`** — JSON-string escape pass on `text` (escapes `"` `\` `\b` `\f` `\n` `\r` `\t`, `/`, control chars as `\uXXXX`).
   The type is `json` in any case; another string is Msg 13622 and a non-string or bare NULL Msg 8116 (probed 2026-09-26 against SQL Server 2025).
-  Documentation says only `'json'` is a valid mode; the simulator accepts any string for the mode and treats it as `'json'` (real SQL Server raises Msg 9806 on unknown mode — minor divergence).
   NULL `text` → NULL.
   Result `nvarchar(max)` (`SqlType.NVarcharMax`, probe-confirmed against SQL Server 2025) — escaping can more than double the input, so the result must stream as PLP.
 
@@ -514,7 +523,7 @@ Probed 2026-09-26 against SQL Server 2025; none is gated on the compatibility le
 - **`CHOOSE(index, val1, val2, ...)`** (`Parser/Expressions/Choose.cs`) — 1-based index into the trailing value list.
   Out-of-range (negative / zero / above the value count) → NULL.
   NULL `index` → NULL.
-  Result type follows the standard CASE-style promotion across the value list (`SqlType.Promote` over all values).
+  Result type is the CASE arms' unification over the value list (`Expression.PromoteValueArms`), so an integer literal sizes by its digit count against a decimal sibling: `CHOOSE(1, 1, 2.5)` is `numeric(2, 1)` (probed 2026-10-01).
   Sibling of `IIF`; both translate two-branch / multi-branch conditionals.
 
 ## Bit manipulation: `BIT_COUNT` / `GET_BIT` / `SET_BIT` / `LEFT_SHIFT` / `RIGHT_SHIFT`
@@ -874,7 +883,7 @@ Yields one row per substring split on the single-character separator.
   What a split *consumes* is one separator character, not however much of the input the match ate — which is where it parts company with `REPLACE`; see [`collations.md`](collations.md#the-character-matching-string-scalars-search-under-the-collation-too).
 - Non-int third argument → Msg 8116; `enable_ordinal` literal outside {0, 1, NULL} → Msg 4199.
 - Composes with `CROSS APPLY` / `OUTER APPLY` via the lateral-dispatch fast path: `ParseLateralFromSource` recognizes `STRING_SPLIT` (and `OPENJSON`) by name and routes back through `ParseSingleFromSource` with the chained outer-type resolver that includes left-side sources (so `STRING_SPLIT(t.col, ',')` correctly resolves `t.col` against the APPLY's left side).
-- Input column type determines the `value` column's string family at parse time (`varchar` → `varchar`; `nvarchar` → `nvarchar`); non-string input maps to `nvarchar`.
+- Input column type determines the `value` column's string family at parse time (`varchar` → `varchar`; `nvarchar` → `nvarchar`), a fixed-width input splits into unpadded values of the variable form (`char(5)` → `varchar(5)`), and a bare `NULL` is `varchar(1)`; any other input — a number, a date, a binary, `text` / `ntext` — is Msg 8116 while compiling (probed 2026-10-01 against SQL Server 2025).
   The value column inherits MAX-ness from the input's parse-time `GetSqlType` against the outer-type resolver (`ParseStringSplit`).
 
 ## Built-in TVF: `GENERATE_SERIES`
