@@ -164,7 +164,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         bindErrors?.EnterClause(context.Token, BindClause.MergeSource);
 
-        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks) = ParseMergeSource(context);
+        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, replayableSource) = ParseMergeSource(context);
         if (context.Batch.CurrentDatabase.Collation.Equals(sourceAlias, targetAlias))
             throw SimulatedSqlException.MergeSourceAndTargetShareAName();
 
@@ -266,8 +266,76 @@ partial class Simulation
         // (probed 2026-09-30).
         if (context.Token is not Operator { Character: ';' })
             throw EndsStatement(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
+
+        var plan = new MergePlan(
+            destinationName, triggerTarget, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema,
+            onPredicate, whenClauses, output, serializableHint, viewRowsTarget, joinWrite, top);
+        // Which INSTEAD OF triggers take the actions is settled above from
+        // their enabled state, which no schema change records, so a target
+        // carrying any keeps its statements parsing.
+        NoteDmlPlan(
+            context,
+            plan,
+            admitted: replayableSource
+                && viewRowsTarget is null
+                && !Array.Exists(TriggersAttachedTo(context.Batch, destinationTable), trigger => trigger.Timing == TriggerTiming.InsteadOf)
+                && !whenClauses.Exists(clause => clause.Assignments?.Exists(assignment => assignment.Expr is JsonModify) == true)
+                && AdmitsDmlPlan(context.Batch, destinationTable, sourceView, output));
+        return RunMerge(context, plan);
+    }
+
+    /// <summary>
+    /// A <c>MERGE</c>'s parse, which <see cref="RunMerge"/> executes — once as
+    /// the statement parses, and again for each replay of a cached plan.
+    /// </summary>
+    private sealed class MergePlan(
+        MultiPartName destinationName,
+        SchemaObject triggerTarget,
+        HeapTable destinationTable,
+        View? sourceView,
+        string targetAlias,
+        Func<BatchContext, List<SqlValue[]>> materializeSource,
+        string sourceAlias,
+        string[] sourceColumnNames,
+        SqlType[] sourceSchema,
+        BooleanExpression onPredicate,
+        List<WhenClause> whenClauses,
+        OutputProjection? output,
+        bool serializableHint,
+        View? viewRowsTarget,
+        JoinViewMergePlan? joinWrite,
+        Selection.DmlTopLimit? top) : DmlStatementPlan
+    {
+        public readonly MultiPartName DestinationName = destinationName;
+        public readonly SchemaObject TriggerTarget = triggerTarget;
+        public readonly HeapTable DestinationTable = destinationTable;
+        public readonly View? SourceView = sourceView;
+        public readonly string TargetAlias = targetAlias;
+        public readonly Func<BatchContext, List<SqlValue[]>> MaterializeSource = materializeSource;
+        public readonly string SourceAlias = sourceAlias;
+        public readonly string[] SourceColumnNames = sourceColumnNames;
+        public readonly SqlType[] SourceSchema = sourceSchema;
+        public readonly BooleanExpression OnPredicate = onPredicate;
+        public readonly List<WhenClause> WhenClauses = whenClauses;
+        public readonly OutputProjection? Output = output;
+        public readonly bool SerializableHint = serializableHint;
+        public readonly View? ViewRowsTarget = viewRowsTarget;
+        public readonly JoinViewMergePlan? JoinWrite = joinWrite;
+        public readonly Selection.DmlTopLimit? Top = top;
+
+        public override SimulatedStatementOutcome Run(ParserContext context) => RunMerge(context, this);
+    }
+
+    /// <summary>
+    /// The execution half of <c>MERGE</c>: the permission checks real makes as
+    /// the statement starts, a view target's rows, then the match and the
+    /// actions. Reads no tokens.
+    /// </summary>
+    private static SimulatedStatementOutcome RunMerge(ParserContext context, MergePlan plan)
+    {
+        var (destinationTable, viewRowsTarget, joinWrite) = (plan.DestinationTable, plan.ViewRowsTarget, plan.JoinWrite);
         if (!context.Batch.IsSkipping)
-            CheckMergePermissions(context.Batch, destinationName, triggerTarget, whenClauses, joinWrite, onPredicate, targetAlias);
+            CheckMergePermissions(context.Batch, plan.DestinationName, plan.TriggerTarget, plan.WhenClauses, joinWrite, plan.OnPredicate, plan.TargetAlias);
         if (joinWrite is not null && !context.Batch.IsSkipping)
         {
             LoadJoinViewMergeRows(context.Batch, joinWrite, destinationTable);
@@ -277,7 +345,9 @@ partial class Simulation
             foreach (var row in ReadViewRows(context.Batch, viewRowsTarget, destinationTable.Columns))
                 _ = destinationTable.Heap.Insert(RowEncoder.EncodeRow(destinationTable.StoredColumns, ProjectStoredValues(destinationTable, row), destinationTable.Heap), undoLog: null);
         }
-        return ExecuteMerge(context, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema, onPredicate, whenClauses, output, serializableHint, viewRowsTarget, joinWrite, top);
+        return ExecuteMerge(
+            context, destinationTable, plan.SourceView, plan.TargetAlias, plan.MaterializeSource, plan.SourceAlias, plan.SourceColumnNames, plan.SourceSchema,
+            plan.OnPredicate, plan.WhenClauses, plan.Output, plan.SerializableHint, viewRowsTarget, joinWrite, plan.Top);
     }
 
     /// <summary>Whether the view carries an INSTEAD OF trigger for any action.</summary>
@@ -527,7 +597,7 @@ partial class Simulation
     /// first column name as the would-be hint name) and the simulator
     /// matches by routing through <see cref="Selection.ParseOptionalTableHints"/>.
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks) ParseMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable) ParseMergeSource(ParserContext context)
     {
         context.MoveNextRequired();
         return context.Token is Operator { Character: '(' }
@@ -547,7 +617,7 @@ partial class Simulation
     /// WITH. The prefix belongs ahead of the MERGE itself
     /// (<c>WITH c AS (…) MERGE … USING c</c>), which ships.
     /// </remarks>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks) ParseParenthesizedMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable) ParseParenthesizedMergeSource(ParserContext context)
     {
         context.MoveNextRequired();
 
@@ -648,7 +718,9 @@ partial class Simulation
             }
         }
 
-        return (materialize, alias, columnNames, sourceSchema, masks);
+        // A query source is a nested query, which no cached plan holds (see
+        // NoteDmlPlan); a VALUES list is replayable.
+        return (materialize, alias, columnNames, sourceSchema, masks, Replayable: true);
     }
 
     /// <summary>
@@ -664,7 +736,7 @@ partial class Simulation
     /// table / view object. Cursor on exit: the next un-consumed token
     /// (typically <c>ON</c>).
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks) ParseBareTableMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable) ParseBareTableMergeSource(ParserContext context)
     {
         var objectName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
 
@@ -694,7 +766,7 @@ partial class Simulation
                     rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
                 return rows;
             };
-            return (materialize, cteAlias, columnNames, sourceSchema, ctePlan.ColumnMasks);
+            return (materialize, cteAlias, columnNames, sourceSchema, ctePlan.ColumnMasks, Replayable: false);
         }
 
         // A linked server's table reads through the same remote query a FROM
@@ -775,7 +847,9 @@ partial class Simulation
                 }
                 return rows;
             };
-            return (materialize, alias, columnNames, sourceSchema, masks);
+            // Another database's table answers permission checks the session's
+            // standing here says nothing about.
+            return (materialize, alias, columnNames, sourceSchema, masks, Replayable: ReferenceEquals(context.Batch.DatabaseFor(sourceTable), context.Batch.CurrentDatabase));
         }
         else
         {
@@ -786,7 +860,7 @@ partial class Simulation
 
         var defaultAlias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
         _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
-        return (materialize, defaultAlias, columnNames, sourceSchema, masks);
+        return (materialize, defaultAlias, columnNames, sourceSchema, masks, Replayable: false);
     }
 
     /// <summary>
@@ -1571,6 +1645,18 @@ partial class Simulation
         var sourceMatched = new bool[sourceRows.Count];
         var defaultTargetName = sourceView?.Name ?? destinationTable.Name;
 
+        // A non-persisted computed column of the target is evaluated only where
+        // the statement reads it for a row — the ON, a WHEN condition, an action
+        // — so an expression failing for some row raises when one of them reads
+        // it there, and not when nothing does (probed 2026-10-01 against SQL
+        // Server 2025). The row decode leaves a failing one NULL, so a read of
+        // a NULL evaluates it again, raising if it failed.
+        var lazilyComputed = LazilyComputedColumns(destinationTable);
+        SqlValue ReadTargetColumn(SqlValue[] targetValues, int ordinal) =>
+            lazilyComputed?[ordinal] == true && targetValues[ordinal].IsNull
+                ? EvaluateComputedColumn(destinationTable, targetValues, ordinal, context.Batch)
+                : targetValues[ordinal];
+
         // A MERGE through a row-limited or windowed view matches against the
         // rows the view yields, so its row limit or window applies to every
         // action, and the body's derived columns (a ROW_NUMBER()'s rn) read off
@@ -1609,7 +1695,7 @@ partial class Simulation
                 || context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, defaultTargetName))
             {
                 if (TryLookupTargetColumn(context.Batch.CurrentDatabase.Collation, name.Leaf, destinationTable, sourceView, out var targetOrdinal, out var targetType))
-                    return targetValues is null ? SqlValue.Null(targetType) : targetValues[targetOrdinal];
+                    return targetValues is null ? SqlValue.Null(targetType) : ReadTargetColumn(targetValues, targetOrdinal);
                 if (TryReadDerivedTargetColumn(targetValues, name.Leaf, out var derived))
                     return derived;
             }
@@ -1624,7 +1710,7 @@ partial class Simulation
             if (name.Count == 1)
             {
                 if (TryLookupTargetColumn(context.Batch.CurrentDatabase.Collation, name.Leaf, destinationTable, sourceView, out var targetOrdinal, out var targetType))
-                    return targetValues is null ? SqlValue.Null(targetType) : targetValues[targetOrdinal];
+                    return targetValues is null ? SqlValue.Null(targetType) : ReadTargetColumn(targetValues, targetOrdinal);
                 if (TryReadDerivedTargetColumn(targetValues, name.Leaf, out var derived))
                     return derived;
                 for (var i = 0; i < sourceColumnNames.Length; i++)
@@ -1748,6 +1834,23 @@ partial class Simulation
         if (readsTarget)
             context.Connection.StatementIo?.UseWorktable();
 
+        // Real filters by every other ON conjunct before it computes a
+        // computed column for one (probed 2026-10-01: `ON p.c = 1 AND s.x = 0`
+        // and `ON p.c = 1 AND p.price = 5` raise nothing for a row the other
+        // conjunct turns away, while `ON p.c = 1 OR p.id = s.x` does), so a
+        // conjunct reading one is tried last.
+        var sides = readsTarget
+            ? new MergeSides(context.Batch.CurrentDatabase.Collation, destinationTable, sourceView, targetAlias, defaultTargetName, sourceAlias, sourceColumnNames, sourceSchema)
+            : null;
+        BooleanExpression[]? onConjuncts = null;
+        if (sides is not null && lazilyComputed is not null)
+        {
+            var conjuncts = new List<BooleanExpression>();
+            onPredicate.CollectConjuncts(conjuncts);
+            onConjuncts = ComputedReadsLast([.. conjuncts], sides, lazilyComputed);
+        }
+        bool OnMatches(RuntimeContext runtime) => onConjuncts is null ? onPredicate.Run(runtime) == true : MergeResidualMatches(onConjuncts, runtime);
+
         if (!readsTarget)
         {
             JoinDiagnostics.Sink?.Add("Merge:NoTargetRead");
@@ -1769,7 +1872,7 @@ partial class Simulation
                 {
                     var candidateValues = DecodeFullRow(destinationTable, rowBytes);
                     EvaluateComputedColumns(destinationTable, candidateValues, context.Batch);
-                    if (onPredicate.Run(new RuntimeContext(name => ResolveCombined(candidateValues, sourceValues, name), context.Batch)) != true)
+                    if (!OnMatches(new RuntimeContext(name => ResolveCombined(candidateValues, sourceValues, name), context.Batch)))
                         continue;
 
                     sourceMatched[si] = true;
@@ -1817,9 +1920,8 @@ partial class Simulation
             // aren't such an equality as a residual re-checked per probed pair.
             // With no such conjunct the match stays the target × source scan,
             // running the whole ON per pair.
-            var matchPlan = TryPlanMergeMatch(onPredicate, new MergeSides(
-                context.Batch.CurrentDatabase.Collation, destinationTable, sourceView,
-                targetAlias, defaultTargetName, sourceAlias, sourceColumnNames, sourceSchema));
+            var matchPlan = TryPlanMergeMatch(onPredicate, sides!);
+            var residual = matchPlan is null ? [] : lazilyComputed is null ? matchPlan.Residual : ComputedReadsLast(matchPlan.Residual, sides!, lazilyComputed);
             JoinDiagnostics.Sink?.Add(matchPlan is null
                 ? "Merge:Scan"
                 : $"Merge:HashMatch(keys={matchPlan.Keys.Length},residual={matchPlan.Residual.Length})");
@@ -1854,10 +1956,16 @@ partial class Simulation
                 if (matchPlan is not null && sourceRows.Count > 0)
                 {
                     sourceHash ??= new MergeSourceHash(matchPlan.Keys, sourceRows);
+                    // A key the target computes is read for every row probed.
+                    if (lazilyComputed is not null)
+                    {
+                        foreach (var key in matchPlan.Keys)
+                            targetValues[key.TargetOrdinal] = ReadTargetColumn(targetValues, key.TargetOrdinal);
+                    }
                     for (var si = sourceHash.FirstCandidate(targetValues); si >= 0; si = sourceHash.NextCandidate(si))
                     {
-                        if (matchPlan.Residual.Length > 0
-                            && !MergeResidualMatches(matchPlan.Residual, new RuntimeContext(name => ResolveCombined(targetValues, sourceRows[si], name), context.Batch)))
+                        if (residual.Length > 0
+                            && !MergeResidualMatches(residual, new RuntimeContext(name => ResolveCombined(targetValues, sourceRows[si], name), context.Batch)))
                         {
                             continue;
                         }
@@ -1869,8 +1977,7 @@ partial class Simulation
                 {
                     for (var si = 0; si < sourceRows.Count; si++)
                     {
-                        var pred = onPredicate.Run(new RuntimeContext(name => ResolveCombined(targetValues, sourceRows[si], name), context.Batch));
-                        if (pred == true)
+                        if (OnMatches(new RuntimeContext(name => ResolveCombined(targetValues, sourceRows[si], name), context.Batch)))
                         {
                             matchedSources.Add(si);
                             sourceMatched[si] = true;
@@ -1914,6 +2021,55 @@ partial class Simulation
 
         // Phase C: commit mutations.
         return CommitMerge(context, destinationTable, sourceView, pendingInserts, pendingUpdates, pendingDeletes, output, outputOrder, whenClauses, viewRowsTarget, joinWrite);
+    }
+
+    /// <summary>
+    /// Per column of <paramref name="table"/>, whether it is a non-persisted
+    /// computed column no key or index holds — the kind a row decode evaluates
+    /// without raising (see <see cref="EvaluateComputedColumns"/>); null when
+    /// the table has none.
+    /// </summary>
+    private static bool[]? LazilyComputedColumns(HeapTable table)
+    {
+        bool[]? lazy = null;
+        for (var i = 0; i < table.Columns.Length; i++)
+        {
+            if (table.Columns[i] is { Computed: not null, IsPersisted: false } && !IsKeyedColumn(table, i))
+                (lazy ??= new bool[table.Columns.Length])[i] = true;
+        }
+        return lazy;
+    }
+
+    /// <summary>
+    /// <paramref name="conjuncts"/> with those reading one of the target's
+    /// <paramref name="lazilyComputed"/> columns moved after the rest, each
+    /// group in written order.
+    /// </summary>
+    private static BooleanExpression[] ComputedReadsLast(BooleanExpression[] conjuncts, MergeSides sides, bool[] lazilyComputed)
+    {
+        var readsComputed = new bool[conjuncts.Length];
+        var any = false;
+        for (var i = 0; i < conjuncts.Length; i++)
+        {
+            var reads = false;
+            conjuncts[i].VisitOperandExpressions(operand => operand.VisitColumnReferences(name =>
+                reads |= sides.TryClassify(name, out var isTarget, out var ordinal, out _) && isTarget && lazilyComputed[ordinal]));
+            any |= readsComputed[i] = reads;
+        }
+        if (!any)
+            return conjuncts;
+        var ordered = new List<BooleanExpression>(conjuncts.Length);
+        for (var i = 0; i < conjuncts.Length; i++)
+        {
+            if (!readsComputed[i])
+                ordered.Add(conjuncts[i]);
+        }
+        for (var i = 0; i < conjuncts.Length; i++)
+        {
+            if (readsComputed[i])
+                ordered.Add(conjuncts[i]);
+        }
+        return [.. ordered];
     }
 
     /// <summary>

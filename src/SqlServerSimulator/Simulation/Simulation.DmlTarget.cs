@@ -417,11 +417,12 @@ partial class Simulation
 
     /// <summary>
     /// The shape half of whether a DML statement's plan may be cached: a
-    /// table target (not a view), no <c>OUTPUT … INTO</c>, whose target has
-    /// to be resolved per batch, and nothing <see cref="BlocksDmlPlan"/> names.
+    /// table target (not a view), an <c>OUTPUT … INTO</c> target a plan can
+    /// hold, and nothing <see cref="BlocksDmlPlan"/> names — the client
+    /// <c>OUTPUT</c> half of it only when rows go to the client.
     /// </summary>
     private static bool AdmitsDmlPlan(BatchContext batch, HeapTable table, View? view, OutputProjection? output) =>
         view is null
-        && output is not { WritesTarget: true }
-        && !BlocksDmlPlan(batch, table, clientOutput: output is not null);
+        && output is not { TargetBlocksDmlPlan: true }
+        && !BlocksDmlPlan(batch, table, clientOutput: output is { HasTarget: false });
 }

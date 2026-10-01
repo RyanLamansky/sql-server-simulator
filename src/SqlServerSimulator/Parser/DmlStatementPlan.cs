@@ -2,11 +2,12 @@ namespace SqlServerSimulator.Parser;
 
 /// <summary>
 /// The parsed half of a DML statement, re-executable against any batch: what
-/// an <c>INSERT … VALUES</c>, <c>UPDATE</c> or <c>DELETE</c> parse resolved
-/// (the target, its columns, the expressions, the <c>OUTPUT</c> projection),
-/// handed to the execution half that every run of the statement shares. A
-/// cached plan is one object executed by many commands, possibly at once, so
-/// under the shared-plan contract nothing an execution varies may live on it.
+/// an <c>INSERT … VALUES</c>, <c>UPDATE</c>, <c>DELETE</c> or <c>MERGE</c>
+/// parse resolved (the target, its columns, the expressions, the
+/// <c>OUTPUT</c> projection), handed to the execution half that every run of
+/// the statement shares. A cached plan is one object executed by many
+/// commands, possibly at once, so under the shared-plan contract nothing an
+/// execution varies may live on it.
 /// </summary>
 internal abstract class DmlStatementPlan
 {
@@ -44,7 +45,7 @@ internal sealed class DmlPlanRecording
     public ReplayedLock[] Locks = [];
 
     /// <summary>The statement-frame state the parse settled; see <see cref="DmlPlanEntry"/>.</summary>
-    public bool OpensTransaction, CallsUserFunction, ReadsPermanentObject, ReadsTemporaryObject;
+    public bool OpensTransaction, CallsUserFunction, ReadsPermanentObject, ReadsTemporaryObject, ReadsTableVariable;
 
     /// <summary>The client-bound <c>OUTPUT</c> shape the parse noted, if any.</summary>
     public (Storage.SqlType[] Schema, string[] ColumnNames)? ClientOutputShape;
@@ -65,6 +66,7 @@ internal sealed class DmlPlanEntry(DmlPlanRecording recording, long schemaVersio
     public readonly ReplayedLock[] Locks = recording.Locks;
     private readonly bool opensTransaction = recording.OpensTransaction, callsUserFunction = recording.CallsUserFunction;
     private readonly bool readsPermanentObject = recording.ReadsPermanentObject, readsTemporaryObject = recording.ReadsTemporaryObject;
+    private readonly bool readsTableVariable = recording.ReadsTableVariable;
     private readonly (Storage.SqlType[] Schema, string[] ColumnNames)? clientOutputShape = recording.ClientOutputShape;
 
     /// <summary>The <see cref="Simulation.SchemaVersion"/> the statement parsed under.</summary>
@@ -91,6 +93,7 @@ internal sealed class DmlPlanEntry(DmlPlanRecording recording, long schemaVersio
         statement.CallsUserFunction |= this.callsUserFunction;
         statement.ReadsPermanentObject |= this.readsPermanentObject;
         statement.ReadsTemporaryObject |= this.readsTemporaryObject;
+        statement.ReadsTableVariable |= this.readsTableVariable;
         if (this.clientOutputShape is { } shape)
             statement.ClientOutputShape = shape;
         return this.Plan!.Run(context);

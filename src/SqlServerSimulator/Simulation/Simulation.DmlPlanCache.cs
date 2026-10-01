@@ -8,8 +8,8 @@ partial class Simulation
     /// <summary>
     /// The DML statement plans cached per command text, beside
     /// <see cref="planCache"/>'s SELECT sequences and keyed the same way. A set
-    /// holds one plan per top-level <c>INSERT … VALUES</c>, <c>UPDATE</c> or
-    /// <c>DELETE</c> in the text, so a batch mixing them with statements that
+    /// holds one plan per top-level <c>INSERT … VALUES</c>, <c>UPDATE</c>,
+    /// <c>DELETE</c> or <c>MERGE</c> in the text, so a batch mixing them with statements that
     /// have no plan (<c>SET NOCOUNT ON</c>, a <c>DECLARE</c>) still skips
     /// parsing the ones that do. Capped and cleared as the plan cache is.
     /// </summary>
@@ -179,6 +179,7 @@ partial class Simulation
         recording.CallsUserFunction = statement.CallsUserFunction;
         recording.ReadsPermanentObject = statement.ReadsPermanentObject;
         recording.ReadsTemporaryObject = statement.ReadsTemporaryObject;
+        recording.ReadsTableVariable = statement.ReadsTableVariable;
         recording.ClientOutputShape = statement.ClientOutputShape;
     }
 

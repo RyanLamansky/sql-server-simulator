@@ -97,8 +97,8 @@ public sealed class DmlPlanCacheTests
             ("@p0", 5), ("@p1", 1)));
 
     [TestMethod]
-    public void EfInsertIntoTableVariable_Reparses()
-        => AreEqual(0, ReplaysOverThreeRuns("""
+    public void EfInsertIntoTableVariable_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns("""
             SET NOCOUNT ON;
             DECLARE @inserted0 TABLE ([id] int);
             INSERT INTO [t] ([name], [v])
@@ -107,6 +107,51 @@ public sealed class DmlPlanCacheTests
             VALUES (@p0, @p1);
             SELECT [i].[id] FROM @inserted0 i;
             """, parameters: [("@p0", "x"), ("@p1", 1)]));
+
+    [TestMethod]
+    public void EfMerge_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns(
+            "SET IMPLICIT_TRANSACTIONS OFF;\nSET NOCOUNT ON;\nMERGE [t] USING (\nVALUES (@p0, @p1, 0),\n(@p2, @p3, 1)) AS i ([name], [v], _Position) ON 1=0\nWHEN NOT MATCHED THEN\nINSERT ([name], [v])\nVALUES (i.[name], i.[v])\nOUTPUT INSERTED.[id], i._Position;",
+            parameters: [("@p0", "x"), ("@p1", 1), ("@p2", "y"), ("@p3", 2)]));
+
+    [TestMethod]
+    public void EfMergeIntoTableVariable_OnATriggeredTable_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns(
+            "SET NOCOUNT ON;\nDECLARE @inserted0 TABLE ([id] int, [_Position] [int]);\nMERGE [t] USING (\nVALUES (@p0, @p1, 0),\n(@p2, @p3, 1)) AS i ([name], [v], _Position) ON 1=0\nWHEN NOT MATCHED THEN\nINSERT ([name], [v])\nVALUES (i.[name], i.[v])\nOUTPUT INSERTED.[id], i._Position\nINTO @inserted0;\nSELECT [i].[id] FROM @inserted0 i\nORDER BY [i].[_Position];",
+            "create trigger t_after on t after insert as return",
+            ("@p0", "x"), ("@p1", 1), ("@p2", "y"), ("@p3", 2)));
+
+    [TestMethod]
+    public void MergeFromATable_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns(
+            "merge t using p on t.pid = p.id when matched then update set v = v + @d when not matched by source then delete;",
+            parameters: ("@d", 1)));
+
+    [TestMethod]
+    public void MergeFromAQuery_Reparses()
+        => AreEqual(0, ReplaysOverThreeRuns(
+            "merge t using (select id from p where id = @id) s on t.pid = s.id when matched then update set v = 0;",
+            parameters: ("@id", 1)));
+
+    [TestMethod]
+    public void MergeIntoATableWithAnInsteadOfTrigger_Reparses()
+        => AreEqual(0, ReplaysOverThreeRuns(
+            "merge t using (values (@n, 1)) s (name, v) on t.name = s.name when not matched then insert (name, v) values (s.name, s.v);",
+            "create trigger t_instead on t instead of insert as return",
+            ("@n", "x")));
+
+    [TestMethod]
+    public void MergeThroughAView_Reparses()
+        => AreEqual(0, ReplaysOverThreeRuns(
+            "merge tv using (values (@n, 1)) s (name, v) on tv.name = s.name when not matched then insert (name, v) values (s.name, s.v);",
+            "create view tv as select name, v from t",
+            ("@n", "x")));
+
+    [TestMethod]
+    public void MergeIntoATableVariable_Reparses()
+        => AreEqual(0, ReplaysOverThreeRuns(
+            "declare @m table (id int); merge @m m using (values (@id)) s (id) on m.id = s.id when not matched then insert values (s.id);",
+            parameters: ("@id", 1)));
 
     [TestMethod]
     public void ClientOutputOnATriggeredTable_Reparses()

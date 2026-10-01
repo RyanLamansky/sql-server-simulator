@@ -439,6 +439,14 @@ The opt-in `JoinDiagnostics` trace records the choice (`Merge:NoTargetRead` / `M
 - **Target × source scan** — no equality splits across the two sides at all (`ON t.id < s.id`, `ON t.a = t.b`, an ON whose operands are computed).
   The whole ON runs per pair.
 
+**A target's non-persisted computed column is evaluated where a row is read through it**, so one that fails for some row (`c AS 10 / (price - 1)` at `price = 1`) is Msg 8134 exactly when the statement reads it for that row (probed 2026-10-01 against SQL Server 2025).
+The ON raises for every target row it pairs with a source row, a hash key on the column for every row probed; a seek or an equality key reads only the rows it finds, and a WHEN condition or an action only its own rows, so `ON p.id = s.x AND p.c = 1` raises only when `s.x` finds the failing row.
+Nothing raises when nothing pairs: an empty source, or an ON settled non-TRUE with no WHEN NOT MATCHED BY SOURCE clause, whose target isn't read at all.
+Real filters by every other ON conjunct first, wherever written — `ON p.c = 1 AND s.x = 0` and `ON p.c = 1 AND p.price = 5` raise nothing for a row the other conjunct turns away — so the match tries the conjuncts reading such a column last, while an `OR` evaluates in written order (`p.c = 1 OR p.id = s.x` raises, `p.id = s.x OR p.c = 1` doesn't for a row the first operand matches).
+The statement ends before any write, trigger or `OUTPUT` row.
+A persisted column can't hold a failing row: the insert that would store it raises.
+The row decode leaves a failing column NULL, and a read of a NULL there evaluates it again (`ExecuteMerge`'s `ReadTargetColumn`).
+
 Measured on WideWorldImporters (`.vs/workload`, `merge.*` in `complex4-wwi.sql`), MERGE into a `SELECT … INTO`-built `#temp` — the shape with no index to seek:
 
 | target × source | scan | source hash | live |

@@ -2938,7 +2938,7 @@ public sealed partial class Simulation
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Merge }:
-                outcome = RunMutation(context, ParseMerge);
+                outcome = this.RunDmlStatement(context, ParseMerge);
                 context.RejectTrailingToken();
                 if (!batch.IsSkipping)
                 {

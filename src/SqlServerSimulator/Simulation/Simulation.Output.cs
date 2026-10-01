@@ -285,12 +285,19 @@ partial class Simulation
         // ("must declare the table variable"), regular -> Msg 208 ("invalid
         // object name") — same convention the DML routing uses.
         var targetName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+        var enteredSessionScoped = context.Batch.HasSessionScopedReference;
         if (!context.Batch.TryResolveTable(targetName, out var targetTable))
         {
             throw BatchContext.IsTableVariableName(targetName.Leaf)
                 ? SimulatedSqlException.MustDeclareTableVariable(targetName.Leaf)
                 : SimulatedSqlException.InvalidObjectName(targetName);
         }
+        // A table variable the batch declares is found again by name in each
+        // batch that runs the statement (see OutputTarget), so naming one leaves
+        // the statement's plan shareable; a parameter's rows are another matter.
+        var declaredTableVariable = targetTable is { IsTableVariable: true, IsTableValuedParameter: false };
+        if (declaredTableVariable)
+            context.Batch.HasSessionScopedReference = enteredSessionScoped;
         context.MoveNextOptional();
 
         int[] columnOrdinals;
@@ -360,23 +367,45 @@ partial class Simulation
             columnOrdinals = [.. fillable];
         }
 
-        return new OutputTarget(targetTable, columnOrdinals);
+        return new OutputTarget(
+            targetTable,
+            columnOrdinals,
+            declaredTableVariable ? targetName.Leaf : null,
+            replayable: declaredTableVariable || (!targetTable.IsTableVariable && !BlocksDmlPlan(context.Batch, targetTable, clientOutput: false)));
     }
 
     /// <summary>
-    /// Resolved <c>OUTPUT … INTO &lt;target&gt;</c> binding. <see cref="Target"/>
-    /// is the heap table the projection appends rows to (table variable or
-    /// regular table); <see cref="ProjectionToTargetOrdinal"/> maps projection
+    /// Resolved <c>OUTPUT … INTO &lt;target&gt;</c> binding: the heap table the
+    /// projection appends rows to (table variable or regular table), and
+    /// <see cref="ProjectionToTargetOrdinal"/>, which maps projection
     /// column index to target table column ordinal (positional fill if INTO
     /// had no explicit column list).
     /// </summary>
-    private sealed class OutputTarget(HeapTable target, int[] projectionToTargetOrdinal)
+    private sealed class OutputTarget(HeapTable target, int[] projectionToTargetOrdinal, string? tableVariable, bool replayable)
     {
-        public readonly HeapTable Target = target;
+        /// <summary>
+        /// The table written, unless it is a table variable: that one belongs
+        /// to the batch that declared it, so a plan shared across batches holds
+        /// its name instead and finds it in the executing batch
+        /// (<see cref="TargetIn"/>). Every batch running the same text declares
+        /// it the same way, so the column mapping holds for each.
+        /// </summary>
+        private readonly HeapTable? table = tableVariable is null ? target : null;
         public readonly int[] ProjectionToTargetOrdinal = projectionToTargetOrdinal;
 
         /// <summary>
-        /// Appends one row to <see cref="Target"/>. Columns named in the
+        /// Whether a cached DML plan may hold this target: a table variable the
+        /// batch declares, or a table nothing in <see cref="BlocksDmlPlan"/> names.
+        /// </summary>
+        public readonly bool Replayable = replayable;
+
+        /// <summary>The table this target writes in <paramref name="batch"/>.</summary>
+        private HeapTable TargetIn(BatchContext batch) =>
+            this.table
+            ?? (batch.TableVariables.TryGetValue(tableVariable![1..], out var declared) ? declared : throw SimulatedSqlException.MustDeclareTableVariable(tableVariable));
+
+        /// <summary>
+        /// Appends one row to the target table. Columns named in the
         /// projection map by ordinal via <see cref="ProjectionToTargetOrdinal"/>;
         /// any target column not covered generates an identity value if it is
         /// an identity column, else evaluates the column's <c>DEFAULT</c>
@@ -392,8 +421,9 @@ partial class Simulation
         /// </summary>
         public void Append(SqlValue[] projectedValues, BatchContext batch)
         {
-            var targetValues = new SqlValue[this.Target.Columns.Length];
-            var covered = new bool[this.Target.Columns.Length];
+            var target = this.TargetIn(batch);
+            var targetValues = new SqlValue[target.Columns.Length];
+            var covered = new bool[target.Columns.Length];
             for (var i = 0; i < projectedValues.Length; i++)
             {
                 var ordinal = this.ProjectionToTargetOrdinal[i];
@@ -406,14 +436,14 @@ partial class Simulation
                 // encoder's type check as a bare ArgumentException, which over
                 // the wire aborts the response mid-stream and the client
                 // reports a severe protocol error rather than anything useful.
-                targetValues[ordinal] = CoerceForInsert(projectedValues[i], this.Target.Columns[ordinal]);
+                targetValues[ordinal] = CoerceForInsert(projectedValues[i], target.Columns[ordinal]);
                 covered[ordinal] = true;
             }
             for (var i = 0; i < targetValues.Length; i++)
             {
                 if (covered[i])
                     continue;
-                var column = this.Target.Columns[i];
+                var column = target.Columns[i];
                 // An uncovered identity column generates its own value, as it
                 // does for a direct INSERT that omits it — the positional map
                 // skips identity columns entirely, and a column list may too.
@@ -423,14 +453,14 @@ partial class Simulation
                         ? CoerceForInsert(defaultExpression.Run(new RuntimeContext(NoColumnResolver, batch)), column)
                         : SqlValue.Null(column.Type);
             }
-            var undoLog = this.Target.IsTableVariable ? batch.CurrentTableVarUndoLog : batch.CurrentUndoLog;
-            var (newPage, newSlot) = this.Target.Heap.Insert(
-                RowEncoder.EncodeRow(this.Target.StoredColumns, targetValues, this.Target.Heap),
+            var undoLog = target.IsTableVariable ? batch.CurrentTableVarUndoLog : batch.CurrentUndoLog;
+            var (newPage, newSlot) = target.Heap.Insert(
+                RowEncoder.EncodeRow(target.StoredColumns, targetValues, target.Heap),
                 undoLog);
-            batch.Connection.StatementIo?.CountWrite(this.Target);
-            if (Simulation.IsLockableTable(this.Target))
-                batch.AcquireRowLockTxScoped(this.Target, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
-            this.Target.ChangeTracking?.RecordRow(batch, this.Target, targetValues, ChangeTrackingOperation.Insert);
+            batch.Connection.StatementIo?.CountWrite(target);
+            if (Simulation.IsLockableTable(target))
+                batch.AcquireRowLockTxScoped(target, newPage, newSlot, LockMode.Exclusive, RowLockPurpose.Insert);
+            target.ChangeTracking?.RecordRow(batch, target, targetValues, ChangeTrackingOperation.Insert);
         }
     }
 
@@ -637,6 +667,12 @@ partial class Simulation
 
         /// <summary>True when this clause, or the <c>OUTPUT … INTO</c> clause it follows, writes a target.</summary>
         public bool WritesTarget => outputTarget is not null || logged is not null;
+
+        /// <summary>
+        /// Whether the target this clause or the one it follows writes keeps a
+        /// cached DML plan from being shared (see <see cref="OutputTarget.Replayable"/>).
+        /// </summary>
+        public bool TargetBlocksDmlPlan => outputTarget is { Replayable: false } || logged?.TargetBlocksDmlPlan == true;
 
         // A non-persisted computed column is evaluated when OUTPUT reads it,
         // so an expression that fails for the row raises here rather than
