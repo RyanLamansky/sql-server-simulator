@@ -245,6 +245,136 @@ public sealed class ScalarUdfInliningTests
         var error = Throws<SimulatedSqlException>(() => connection.CreateCommand("update t set a = dbo.f(); select 'after'").ExecuteNonQuery());
         AreEqual("208 L6 f, 208 L1, 3621 L1", Entries(error));
     }
+
+    /// <summary>
+    /// A procedure's body compiles when a call first runs it, sending its
+    /// calls' failures ahead of its first statement and past any <c>TRY</c> in
+    /// it, and later calls reuse the plan (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create procedure p as select dbo.f() x", "208 L6 f, 208 L1 p", "208 L1 p")]
+    [DataRow("create procedure p as select 'a'\nselect dbo.f() x", "208 L6 f, 208 L2 p", "208 L2 p")]
+    [DataRow("create procedure p as begin try select dbo.f() x end try begin catch select error_number() end catch", "208 L6 f", "none")]
+    [DataRow("create procedure p as declare @v int; set @v = dbo.f()", "208 L1 p", "208 L1 p")]
+    public void AProcedureBody_FailsAsItsFirstCallCompilesIt(string procedure, string first, string again)
+    {
+        using var connection = Open(procedure);
+        AreEqual(first, ReaderError(connection, "exec p"));
+        AreEqual(again, ReaderError(connection, "exec p"));
+    }
+
+    [TestMethod]
+    public void ANestedCall_CompilesTheInnerProcedureOnce()
+    {
+        using var connection = Open("create procedure p as select dbo.f() x", "create procedure p2 as select 0 a; exec p");
+        AreEqual("208 L6 f, 208 L1 p", ReaderError(connection, "exec p2"));
+        AreEqual("208 L1 p", ReaderError(connection, "exec p2"));
+    }
+
+    /// <summary>
+    /// The plan goes with the cache, an <c>sp_recompile</c> of the procedure
+    /// or of a table it reads, and a change to an object it depends on —
+    /// directly or through a function it calls.
+    /// </summary>
+    [TestMethod]
+    [DataRow("dbcc freeproccache")]
+    [DataRow("exec sp_recompile 'p'")]
+    [DataRow("exec sp_recompile 't'")]
+    [DataRow("alter table t add b int")]
+    [DataRow("alter function dbo.f() returns int as begin declare @x int; select @x = count(*)\nfrom nosuch; return @x end")]
+    public void AProcedurePlanThatNoLongerStands_CompilesAgain(string change)
+    {
+        using var connection = Open("create procedure p as select dbo.f() x from t");
+        StartsWith("208 L6 f", ReaderError(connection, "exec p"));
+        _ = connection.CreateCommand(change).ExecuteNonQuery();
+        Contains(" f, 208 L1 p", ReaderError(connection, "exec p"));
+        AreEqual("208 L1 p", ReaderError(connection, "exec p"));
+    }
+
+    [TestMethod]
+    [DataRow("create table other (a int)")]
+    [DataRow("exec sp_recompile 'dbo.f'")]
+    public void AnUnrelatedChange_LeavesTheProcedurePlanStanding(string change)
+    {
+        using var connection = Open("create procedure p as select dbo.f() x from t");
+        StartsWith("208 L6 f", ReaderError(connection, "exec p"));
+        _ = connection.CreateCommand(change).ExecuteNonQuery();
+        AreEqual("208 L1 p", ReaderError(connection, "exec p"));
+    }
+
+    /// <summary>
+    /// The plan depends on what a function it inlines reads: a table dropped
+    /// from under the function recompiles the caller, which then fails.
+    /// </summary>
+    [TestMethod]
+    public void DroppingWhatACalledFunctionReads_RecompilesTheProcedure()
+    {
+        using var connection = Open(
+            "create table src (a int)",
+            "create function dbo.g() returns int as begin return (select max(a) from dbo.src) end",
+            "create procedure p as select dbo.g() x");
+        AreEqual("none", ReaderError(connection, "exec p"));
+        _ = connection.CreateCommand("drop table src").ExecuteNonQuery();
+        AreEqual("208 L13 g, 208 L1 p", ReaderError(connection, "exec p"));
+        AreEqual("208 L1 p", ReaderError(connection, "exec p"));
+    }
+
+    /// <summary>
+    /// <c>EXEC … WITH RECOMPILE</c> compiles afresh without replacing the
+    /// plan, and a procedure created <c>WITH RECOMPILE</c> compiles on every
+    /// call.
+    /// </summary>
+    [TestMethod]
+    public void WithRecompile_CompilesTheCallAfresh()
+    {
+        using var connection = Open("create procedure p as select dbo.f() x", "create procedure r with recompile as select dbo.f() x");
+        AreEqual("208 L6 f, 208 L1 p", ReaderError(connection, "exec p"));
+        AreEqual("208 L6 f, 208 L1 p", ReaderError(connection, "exec p with recompile"));
+        AreEqual("208 L1 p", ReaderError(connection, "exec p"));
+        AreEqual("208 L6 f, 208 L1 r", ReaderError(connection, "exec r"));
+        AreEqual("208 L6 f, 208 L1 r", ReaderError(connection, "exec r"));
+    }
+
+    /// <summary>
+    /// A statement the body's compile deferred fails as the plan first runs
+    /// it, and a recompiling one every time it runs.
+    /// </summary>
+    [TestMethod]
+    public void ABodysDeferredAndRecompilingStatements_FailAsTheyRun()
+    {
+        using var connection = Open(
+            "create procedure p as create table #u (a int); insert #u values (1); select dbo.f() from #u",
+            "create procedure q as select 'a'; select dbo.f() option (recompile)");
+        AreEqual("208 L6 f, 208 L1 p", ReaderError(connection, "exec p"));
+        AreEqual("208 L1 p", ReaderError(connection, "exec p"));
+        AreEqual("208 L6 f, 208 L6 f, 208 L1 q", ReaderError(connection, "exec q"));
+        AreEqual("208 L6 f, 208 L1 q", ReaderError(connection, "exec q"));
+    }
+
+    /// <summary>A DML trigger's body compiles as it first fires.</summary>
+    [TestMethod]
+    public void ATriggerBody_FailsAsItFirstFires()
+    {
+        using var connection = Open("create table tr (a int)", "create trigger trg on tr after insert as select dbo.f() from inserted");
+        StartsWith("208 L6 f, 208 L1 trg", ReaderError(connection, "insert tr values (1)"));
+        StartsWith("208 L1 trg", ReaderError(connection, "insert tr values (1)"));
+        _ = connection.CreateCommand("exec sp_recompile 'trg'").ExecuteNonQuery();
+        StartsWith("208 L6 f, 208 L1 trg", ReaderError(connection, "insert tr values (1)"));
+    }
+
+    /// <summary>
+    /// <c>@@ERROR</c> reads the compile's failure in the body until its first
+    /// statement ends.
+    /// </summary>
+    [TestMethod]
+    public void AtAtError_InTheBody_ReadsTheFailure()
+    {
+        using var connection = Open("create procedure p as insert t values (@@error); select a from t where 1 = 0 and dbo.f() = 1");
+        AreEqual("208 L6 f", ReaderError(connection, "exec p"));
+        AreEqual(208, connection.CreateCommand("select max(a) from t").ExecuteScalar());
+    }
+
     /// <summary>
     /// <c>WITH INLINE = OFF</c> keeps an inlineable body from inlining, so only
     /// the statement's own Msg 208 is raised, and <c>sys.sql_modules</c> reads

@@ -95,6 +95,9 @@ internal sealed class Trigger(
     /// </summary>
     public ClrEntryPoint? ClrEntry;
 
+    /// <summary>The plan the body compiled to when it last fired uncached, while it stands.</summary>
+    public ModulePlan? CompiledPlan;
+
     /// <summary>
     /// The table or view this trigger is attached to. Always one of
     /// <see cref="HeapTable"/> (AFTER or INSTEAD OF) or <see cref="View"/>

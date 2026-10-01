@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
@@ -50,11 +51,12 @@ internal static class QuantifiedCall
             {
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Within }:
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                // Real names the quantifier, in lowercase, rather than the OVER.
-                case ReservedKeyword { Keyword: Keyword.Over } when distinct:
-                    throw SimulatedSqlException.SyntaxErrorNearText("distinct");
+                // Real names the quantifier, in lowercase, rather than the
+                // OVER, once the clause has parsed.
                 case ReservedKeyword { Keyword: Keyword.Over }:
-                    SkipWindowClause(context);
+                    WindowExpression.ParseClauseSyntax(context);
+                    if (distinct)
+                        throw SimulatedSqlException.SyntaxErrorNearText("distinct");
                     break;
                 default:
                     context.RestoreCheckpoint(closing);
@@ -119,25 +121,27 @@ internal static class QuantifiedCall
         // One operand, then the closing paren: a second argument, a
         // JSON_OBJECTAGG key's colon or an in-paren ORDER BY is a syntax error
         // at that token.
+        Expression operand;
         using (ParserScope.Enter(ref context.StopExpressionAtBareColon, kind == AggregateKind.JsonObjectAgg))
         {
             context.MoveNextRequired();
-            _ = Expression.Parse(context);
+            operand = Expression.Parse(context);
         }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
+        var callEnd = context.Token.StartIndex;
         var closingParen = context.SaveCheckpoint();
         switch (context.GetNextOptional())
         {
             case UnquotedString { ContextualKeyword: ContextualKeyword.Within }:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            case ReservedKeyword { Keyword: Keyword.Over } when kind is not null && distinct:
-                throw SimulatedSqlException.DistinctNotAllowedInOver();
-            // Otherwise the call is refused only once its window clause has
-            // parsed, so a syntax error inside that clause wins.
+            // The call is refused only once its window clause has parsed, so a
+            // syntax error inside that clause wins.
             case ReservedKeyword { Keyword: Keyword.Over }:
-                SkipWindowClause(context);
+                WindowExpression.ParseClauseSyntax(context);
+                if (kind is not null && distinct)
+                    throw SimulatedSqlException.DistinctNotAllowedInOver();
                 break;
             default:
                 context.RestoreCheckpoint(closingParen);
@@ -152,8 +156,49 @@ internal static class QuantifiedCall
             AggregateKind.ApproxCountDistinct => throw SimulatedSqlException.ApproxCountDistinctRefusesDistinct(),
             AggregateKind.ApproxPercentileCont => Owe(SimulatedSqlException.PercentileInputNotConstant("APPROX_PERCENTILE_CONT"), context),
             AggregateKind.ApproxPercentileDisc => Owe(SimulatedSqlException.PercentileInputNotConstant("APPROX_PERCENTILE_DISC"), context),
-            _ => Owe(SimulatedSqlException.InsufficientArgumentsToFunction(AggregateExpression.LowerNameOf(kind.GetValueOrDefault())), context),
+            _ => OweInReport(SimulatedSqlException.InsufficientArgumentsToFunction(AggregateExpression.LowerNameOf(kind.GetValueOrDefault())), context, callEnd, operand),
         };
+    }
+
+    /// <summary>
+    /// <see cref="Owe"/> for the Msg 313 of a quantified <c>STRING_AGG</c> or
+    /// JSON aggregate, which a statement's binder report carries where the
+    /// call's closing paren sits, and only while nothing ahead of that has
+    /// failed, the call's own operand included, which binds as the call does
+    /// (probed 2026-10-01 against SQL Server 2025: <c>STRING_AGG(DISTINCT s),
+    /// x1</c> reports Msg 313 then Msg 207, <c>x1, STRING_AGG(DISTINCT s)</c>,
+    /// a <c>HAVING</c> over <c>x1</c> and <c>STRING_AGG(DISTINCT x1)</c> the
+    /// Msg 207 alone, an <c>ORDER BY</c> over <c>x1</c> both).
+    /// </summary>
+    private static RefusedAggregate OweInReport(SimulatedSqlException error, ParserContext context, int callEnd, Expression operand)
+    {
+        if (context.Batch.BindErrors is { } report && report.Covers(context.Token ?? context.LastToken))
+            report.RecordUnlessPreceded(error, callEnd);
+        else
+            _ = Owe(error, context);
+        return new RefusedAggregate(operand);
+    }
+
+    /// <summary>
+    /// The stand-in for a refused quantified aggregate call, which binds its
+    /// operand — so a name error there is reported — and is never evaluated:
+    /// the statement fails with the call's own error. The operand is local
+    /// state rather than a child, since no rule a walk applies (grouping,
+    /// aggregate placement) reads a call real refuses.
+    /// </summary>
+    private sealed class RefusedAggregate(Expression operand) : Expression
+    {
+        public override SqlValue Run(RuntimeContext runtime) => SqlValue.Null(SqlType.Int32);
+
+        public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+        {
+            _ = operand.GetSqlType(batch, resolveColumnType);
+            return SqlType.Int32;
+        }
+
+        internal override string DebugDisplay() => $"<refused>({operand.DebugDisplay()})";
+
+        internal override void Describe(NodeShape shape) => shape.Local(operand);
     }
 
     /// <summary>
@@ -167,29 +212,5 @@ internal static class QuantifiedCall
             throw error;
         context.PendingBindError ??= error;
         return Value.UntypedNullPlaceholder();
-    }
-
-    /// <summary>
-    /// Consumes an <c>OVER</c> clause for its syntax alone, from the
-    /// <c>OVER</c> keyword to its closing paren or window name, raising Msg 102
-    /// at the batch's last token when the parens never balance.
-    /// </summary>
-    private static void SkipWindowClause(ParserContext context)
-    {
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            return;
-        var depth = 1;
-        while (depth > 0)
-        {
-            switch (context.GetNextRequired())
-            {
-                case Operator { Character: '(' }:
-                    depth++;
-                    break;
-                case Operator { Character: ')' }:
-                    depth--;
-                    break;
-            }
-        }
     }
 }

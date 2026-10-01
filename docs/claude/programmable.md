@@ -250,13 +250,18 @@ Real sends the failures only as a plan compiles: the batch's compile, a deferred
 A batch that compiled reuses its plan, so running the same text again sends nothing — dynamic SQL included — until the schema changes or the plan cache is cleared (`InlinedScalarCalls.CompileOnRun`, `Simulation.SendsInliningFailures`).
 A batch that fails to compile carries the failures among its binder errors where each call bound, and none at all after a syntax error or a binder error met ahead of the call.
 
+**In a procedure or trigger body.**
+A procedure's body compiles when a call first runs it — a nested `EXEC`, `EXEC ('…')` and `sp_executesql` alike — and a DML trigger's when it first fires, so the failures go out then, inside the call ahead of the body's first statement and past any `TRY` in it, taking that statement's `DONEINPROC` count as a batch's take its first `DONE` (probed 2026-10-01 against SQL Server 2025).
+Later calls reuse the plan and send nothing until it no longer stands; `ModulePlan` on `Procedure.CompiledPlan` / `Trigger.CompiledPlan` carries the rules: `DBCC FREEPROCCACHE`, `sp_recompile` of the module or of a table it reads (which also moves the table's `modify_date`), and a change to an object it depends on — a table it reads altered or dropped, a function it calls altered, or an object such a function reads dropped — while an unrelated `CREATE` or `DROP` and `sp_recompile` of a called function leave it standing.
+`EXEC … WITH RECOMPILE` compiles afresh without replacing the plan, a procedure created `WITH RECOMPILE` compiles on every call, and the body's deferred and `OPTION (RECOMPILE)` statements compile as the plan runs them, as a batch's do.
+`Simulation.CompileModuleBody` reads the body with the batch compile's own walk, so a body that doesn't compile sends nothing and raises as its statements run.
+
 **How it is sent.**
 The failure is a `SimulatedErrorOutcome` marked `RaisedWhileCompiling`, with no DONE of its own: on the wire the next DONE, whatever statement sends it, carries `DONE_ERROR` and drops `DONE_COUNT` while keeping its count, so SqlClient raises no `StatementCompleted` for that statement and leaves its rows out of `RecordsAffected` — and the in-process surface leaves them out too (`CompileErrorCount`).
 `@@ERROR` reads 208 until the first statement ends.
 In-process, the failure is an error like any other, so `ExecuteReader` raises it with the rest of the batch's errors (see [`errors.md`](errors.md#the-message-stream)).
 
 **Not modeled yet.**
-- A procedure's or trigger's body compiles at its first `EXEC` on real, sending its calls' failures then; here a module body's calls send nothing.
 - A body whose column no longer exists fails on real too, sending its whole binder report twice; here such a body inlines.
 - Real sends nothing for a deferred statement over an empty `#temp` table created in the batch, where one over an empty permanent table does; both send here.
 - A statement whose `GROUP BY` raises Msg 164 reports it alone here, where real reports the earlier calls' failures first.

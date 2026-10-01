@@ -33,8 +33,16 @@ partial class Simulation
     /// fails at the first column name.
     /// </para>
     /// </remarks>
-    private static ResultSetsContract? ParseExecuteOptions(BatchContext batch, bool insertExecSource)
+    private static ResultSetsContract? ParseExecuteOptions(BatchContext batch, bool insertExecSource) =>
+        ParseExecuteOptions(batch, insertExecSource, out _);
+
+    /// <inheritdoc cref="ParseExecuteOptions(BatchContext, bool)"/>
+    /// <param name="batch">The batch whose parser stands after the call's arguments.</param>
+    /// <param name="insertExecSource">Whether the EXECUTE is an <c>INSERT … EXEC</c> source.</param>
+    /// <param name="recompile">Whether the list carries <c>RECOMPILE</c>.</param>
+    private static ResultSetsContract? ParseExecuteOptions(BatchContext batch, bool insertExecSource, out bool recompile)
     {
+        recompile = false;
         var context = batch.Parser;
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             return null;
@@ -52,6 +60,7 @@ partial class Simulation
         {
             if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Recompile })
             {
+                recompile = true;
                 context.MoveNextOptional();
             }
             else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Result } && contract is null)

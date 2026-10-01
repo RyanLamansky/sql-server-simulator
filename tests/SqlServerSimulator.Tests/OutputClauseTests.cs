@@ -1,3 +1,5 @@
+using System.Data.Common;
+
 namespace SqlServerSimulator;
 
 /// <summary>
@@ -525,4 +527,99 @@ public class OutputClauseTests
     [DataRow("insert t (v) output inserted.v into u (a, b) values (1)", 120)]
     public void OutputIntoAColumnList_MeasuresTheProjectionAgainstIt(string statement, int number)
         => new Simulation().AssertSqlError("create table t (id int identity, v int); create table u (a int, b int); " + statement, number);
+
+    /// <summary>
+    /// Every result set <paramref name="sql"/> returns, each as its column
+    /// names then its rows, values joined by <c>|</c>.
+    /// </summary>
+    private static string ResultSets(DbConnection connection, string sql)
+    {
+        using var reader = connection.CreateCommand(sql).ExecuteReader();
+        List<string> sets = [];
+        do
+        {
+            List<string> lines = [string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetName))];
+            while (reader.Read())
+                lines.Add(string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? "NULL" : Convert.ToString(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture))));
+            sets.Add(string.Join(";", lines));
+        }
+        while (reader.NextResult());
+        return string.Join(" / ", sets);
+    }
+
+    /// <summary>
+    /// A client <c>OUTPUT</c> may follow an <c>OUTPUT … INTO</c>: the statement
+    /// writes the target and returns the second clause's rows (probed
+    /// 2026-10-01 against SQL Server 2025 for all four verbs).
+    /// </summary>
+    [TestMethod]
+    [DataRow(
+        "declare @log table (a int); insert t output inserted.a into @log output inserted.a, 'client' as c values (1), (2); select @@rowcount r; select a from @log",
+        "a|c;1|client;2|client / r;2 / a;1;2")]
+    [DataRow(
+        "create table logt (a int, b int default 9); insert t output inserted.a into logt (a) output inserted.a select 7 union all select 8; select a, b from logt",
+        "a;7;8 / a|b;7|9;8|9")]
+    [DataRow(
+        "declare @log table (a int); insert t values (1), (2); update t set a = a + 1 output inserted.a into @log output deleted.a, inserted.a; select @@rowcount r; select a from @log order by a",
+        "a|a;1|2;2|3 / r;2 / a;2;3")]
+    [DataRow(
+        "declare @log table (a int); insert t values (1), (2), (3); delete t output deleted.a into @log output deleted.a where a > 1; select a from @log order by a; select a from t",
+        "a;2;3 / a;2;3 / a;1")]
+    [DataRow(
+        "declare @log table (a int, act nvarchar(10)); insert t values (11); merge t using (values (11), (50)) s (x) on t.a = s.x when matched then update set a = 12 when not matched then insert (a) values (s.x) output inserted.a, $action into @log output $action, inserted.a, s.x, deleted.a; select @@rowcount r; select a, act from @log order by a",
+        "$action|a|x|a;UPDATE|12|11|11;INSERT|50|50|NULL / r;2 / a|act;12|UPDATE;50|INSERT")]
+    public void OutputInto_ThenAClientOutput_WritesTheTargetAndReturnsTheRows(string sql, string expected)
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        Assert.AreEqual(expected, ResultSets(connection, sql));
+    }
+
+    [TestMethod]
+    public void OutputInto_ThenAClientOutput_ThroughAViewAndAProcedure()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int)",
+            "create view v as select a from t",
+            "create table logt (a int)",
+            "create procedure p as insert t output inserted.a into logt output inserted.a * 10 x values (4)");
+        using var connection = simulation.CreateOpenConnection();
+        Assert.AreEqual("a|;21|v", ResultSets(connection, "declare @log table (a int); insert v output inserted.a into @log output inserted.a, 'v' values (21)"));
+        Assert.AreEqual("x;40", ResultSets(connection, "exec p"));
+        Assert.AreEqual("x;40", ResultSets(connection, "exec p"));
+        Assert.AreEqual(2, connection.CreateCommand("select count(*) from logt").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// Only that order parses: a second <c>OUTPUT</c> after a client one is
+    /// read as its column alias, a second <c>INTO</c> is the syntax error at
+    /// the keyword, and a third clause at its <c>OUTPUT</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert t output inserted.a output inserted.a into @log values (3)", "inserted")]
+    [DataRow("insert t output inserted.a as x output inserted.a into @log values (3)", "output")]
+    [DataRow("insert t output inserted.a into @log (a) output inserted.a into @log values (3)", "into")]
+    [DataRow("insert t output inserted.a into @log output inserted.a output inserted.a values (3)", "inserted")]
+    [DataRow("insert t output inserted.a into @log output * values (3)", "*")]
+    public void OutputClauses_InAnyOtherShape_AreSyntaxErrors(string statement, string near)
+    {
+        var error = new Simulation().AssertSqlError("create table t (a int); declare @log table (a int); " + statement, near == "into" ? 156 : 102);
+        Assert.Contains($"'{near}'", error.Message);
+    }
+
+    /// <summary>
+    /// The client clause is what a triggered target refuses (Msg 334), and a
+    /// function body refuses the statement as it refuses any write (Msg 443).
+    /// </summary>
+    [TestMethod]
+    public void TheClientClause_IsRefusedWhereAClientOutputIs()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (a int)", "create trigger trg on t after insert as select 1 x where 1 = 0");
+        _ = simulation.AssertSqlError("declare @log table (a int); insert t output inserted.a into @log output inserted.a values (1)", 334);
+        _ = simulation.AssertSqlError(
+            "create function f() returns @r table (a int) as begin declare @log table (a int); insert @r output inserted.a into @log output inserted.a values (1); return end",
+            443);
+    }
 }

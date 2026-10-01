@@ -637,6 +637,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     }
 
     /// <summary>
+    /// Where a statement that is about to raise found its own end on a
+    /// <c>(</c> opening the next statement (its start index), or -1: the
+    /// cursor-recovery scan past a deferred statement otherwise reads that
+    /// <c>(</c> as more of the failed statement and skips the next one.
+    /// </summary>
+    public int StatementEndedOnParen = -1;
+
+    /// <summary>
     /// Parse-time chain of outer-scope column-type resolvers, used to plan
     /// the output schema of a correlated subquery whose projection references
     /// an enclosing SELECT's columns. Set by <see cref="Selection"/>'s

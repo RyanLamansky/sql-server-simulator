@@ -639,9 +639,15 @@ partial class Simulation
             // @@ERROR / InFlightError mutation — a skipped statement is
             // conceptually never compiled, not run-and-failed, and a gathered
             // bind error belongs to the CREATE the bind serves.
+            // A bind's re-read that reached the statement's end, or a deferred
+            // statement read to its end, left the cursor at the next
+            // statement, which may open with a `(`.
             var parser = batch.Parser;
-            while (parser.Token is not null && !IsStatementBoundary(parser.Token))
-                parser.MoveNextOptional();
+            if (!(parser.Token is Operator { Character: '(' } paren && (this.resumedAtStatementEnd || parser.StatementEndedOnParen == paren.StartIndex)))
+            {
+                while (parser.Token is not null && !IsStatementBoundary(parser.Token))
+                    parser.MoveNextOptional();
+            }
             // A scan that stopped on a separator (or ran out of body) resumed
             // where a statement really begins; one that stopped on a keyword
             // guessed, and the bind reads a later severity-15 error from a

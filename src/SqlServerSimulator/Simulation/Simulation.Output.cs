@@ -102,7 +102,8 @@ partial class Simulation
         HeapTable table,
         bool allowInserted,
         bool allowDeleted,
-        ViewOutputShape? view = null)
+        ViewOutputShape? view = null,
+        OutputProjection? logged = null)
     {
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
@@ -111,7 +112,7 @@ partial class Simulation
         // clauses real names in that message.
         using var rejection = context.EnterNextValueForScope(NextValueForScope.Clause);
         context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Output);
-        return ParseOutputClauseBody(context, table, allowInserted, allowDeleted, view);
+        return ParseOutputClauseBody(context, table, allowInserted, allowDeleted, view, logged);
     }
 
     /// <summary>Body of <see cref="TryParseOutputClauseForMutation"/>.</summary>
@@ -120,7 +121,8 @@ partial class Simulation
         HeapTable table,
         bool allowInserted,
         bool allowDeleted,
-        ViewOutputShape? view)
+        ViewOutputShape? view,
+        OutputProjection? logged)
     {
         var columns = view?.Columns ?? table.Columns;
         var expressions = new List<Expression>();
@@ -159,7 +161,7 @@ partial class Simulation
             names.Add(expr.Name);
         } while (context.Token is Operator { Character: ',' });
 
-        var outputTarget = TryParseOutputIntoTarget(context, expressions.Count, table.Name);
+        var outputTarget = TryParseOutputIntoTarget(context, expressions.Count, table.Name, logged);
 
         SqlType ResolveOutputType(MultiPartName reference)
         {
@@ -198,8 +200,23 @@ partial class Simulation
         }
         view?.ThrowRefusals();
 
-        return NoteClientOutput(context.Batch, new OutputProjection([.. expressions], [.. names], schema, table, source: null, context.Batch, outputTarget, view: view));
+        var projection = NoteClientOutput(context.Batch, new OutputProjection([.. expressions], [.. names], schema, table, source: null, context.Batch, outputTarget, view: view, logged: logged));
+        return IsClientOutputAfterInto(context, projection)
+            ? TryParseOutputClauseForMutation(context, table, allowInserted, allowDeleted, view, logged: projection)
+            : projection;
     }
+
+    /// <summary>
+    /// Whether a client-bound <c>OUTPUT</c> clause follows an <c>OUTPUT … INTO</c>
+    /// one, which real accepts in that order only: the statement writes the
+    /// target and returns the second clause's rows (probed 2026-10-01 against
+    /// SQL Server 2025 for all four verbs). The reverse order reads the second
+    /// <c>OUTPUT</c> as the first clause's column alias, so it is the syntax
+    /// error at the token after it, and a second <c>INTO</c> is Msg 156 at that
+    /// keyword (see <see cref="TryParseOutputIntoTarget"/>).
+    /// </summary>
+    private static bool IsClientOutputAfterInto(ParserContext context, OutputProjection projection) =>
+        projection.HasTarget && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output };
 
     /// <summary>Parses one <c>OUTPUT</c> item, where a subquery is Msg 10705.</summary>
     private static Expression ParseOutputItem(ParserContext context)
@@ -248,10 +265,19 @@ partial class Simulation
     /// <see cref="OutputTarget.Append"/>.
     /// </para>
     /// </remarks>
-    private static OutputTarget? TryParseOutputIntoTarget(ParserContext context, int projectionColumnCount, string mutationTargetName)
+    /// <param name="context">Parser state, positioned after the clause's projection list.</param>
+    /// <param name="projectionColumnCount">How many columns the clause projects.</param>
+    /// <param name="mutationTargetName">The DML statement's own target, which Msg 544 names.</param>
+    /// <param name="logged">
+    /// The <c>OUTPUT … INTO</c> clause this one follows, if any: only one clause
+    /// may write a target, so an <c>INTO</c> here is the syntax error at it.
+    /// </param>
+    private static OutputTarget? TryParseOutputIntoTarget(ParserContext context, int projectionColumnCount, string mutationTargetName, OutputProjection? logged)
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Into })
             return null;
+        if (logged is not null)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
         // Accept both @t (table variable) and regular heap-table targets. The
@@ -419,7 +445,8 @@ partial class Simulation
     /// <param name="destinationTable">The INSERT target — supplies the columns reachable through <c>INSERTED</c>.</param>
     /// <param name="sourceColumnNames">For MERGE only: the source alias's column names. <see langword="null"/> for plain INSERT.</param>
     /// <param name="view">The shape <c>INSERTED</c> takes when the INSERT writes through a view; null for a table.</param>
-    private static OutputProjection? TryParseOutputClause(ParserContext context, HeapTable destinationTable, (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? sourceColumnNames, ViewOutputShape? view = null)
+    /// <param name="logged">The <c>OUTPUT … INTO</c> clause a client-bound one follows; see <see cref="IsClientOutputAfterInto"/>.</param>
+    private static OutputProjection? TryParseOutputClause(ParserContext context, HeapTable destinationTable, (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? sourceColumnNames, ViewOutputShape? view = null, OutputProjection? logged = null)
     {
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
@@ -427,11 +454,11 @@ partial class Simulation
         // Msg 11720, as on the mutation-side OUTPUT entry above.
         using var rejection = context.EnterNextValueForScope(NextValueForScope.Clause);
         context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Output);
-        return ParseInsertOutputClauseBody(context, destinationTable, sourceColumnNames, view);
+        return ParseInsertOutputClauseBody(context, destinationTable, sourceColumnNames, view, logged);
     }
 
     /// <summary>Body of <see cref="TryParseOutputClause"/>.</summary>
-    private static OutputProjection? ParseInsertOutputClauseBody(ParserContext context, HeapTable destinationTable, (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? sourceColumnNames, ViewOutputShape? view)
+    private static OutputProjection? ParseInsertOutputClauseBody(ParserContext context, HeapTable destinationTable, (string SourceAlias, string[] SourceColumns, SqlType[] SourceTypes)? sourceColumnNames, ViewOutputShape? view, OutputProjection? logged)
     {
         var columns = view?.Columns ?? destinationTable.Columns;
         var expressions = new List<Expression>();
@@ -502,7 +529,7 @@ partial class Simulation
         }
         while (context.Token is Operator { Character: ',' });
 
-        var outputTarget = TryParseOutputIntoTarget(context, expressions.Count, destinationTable.Name);
+        var outputTarget = TryParseOutputIntoTarget(context, expressions.Count, destinationTable.Name, logged);
 
         var schema = new SqlType[expressions.Count];
         try
@@ -516,7 +543,10 @@ partial class Simulation
         }
         view?.ThrowRefusals();
 
-        return NoteClientOutput(context.Batch, new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames, context.Batch, outputTarget, view: view));
+        var projection = NoteClientOutput(context.Batch, new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames, context.Batch, outputTarget, view: view, logged: logged));
+        return IsClientOutputAfterInto(context, projection)
+            ? TryParseOutputClause(context, destinationTable, sourceColumnNames, view, logged: projection)
+            : projection;
     }
 
     /// <summary>
@@ -551,7 +581,8 @@ partial class Simulation
         BatchContext parseBatch,
         OutputTarget? outputTarget,
         DataMask?[]? sourceMasks = null,
-        ViewOutputShape? view = null)
+        ViewOutputShape? view = null,
+        OutputProjection? logged = null)
     {
         public readonly SqlType[] Schema = schema;
 
@@ -598,9 +629,14 @@ partial class Simulation
         /// The dispatching caller suppresses the per-row result-set yield in
         /// this case and surfaces the statement as a non-query (matches real
         /// SQL Server: <c>OUTPUT … INTO target</c> directs rows to the target
-        /// only, without returning them to the client).
+        /// only, without returning them to the client). A client-bound clause
+        /// following an <c>INTO</c> one is false here and true for
+        /// <see cref="WritesTarget"/>.
         /// </summary>
         public bool HasTarget => outputTarget is not null;
+
+        /// <summary>True when this clause, or the <c>OUTPUT … INTO</c> clause it follows, writes a target.</summary>
+        public bool WritesTarget => outputTarget is not null || logged is not null;
 
         // A non-persisted computed column is evaluated when OUTPUT reads it,
         // so an expression that fails for the row raises here rather than
@@ -642,6 +678,10 @@ partial class Simulation
             SqlValue[]? sourceValues = null,
             string? action = null)
         {
+            // The OUTPUT … INTO clause a client-bound one follows writes its
+            // row first; it returns nothing.
+            _ = logged?.ProjectRow(batch, insertedValues, deletedValues, sourceValues, action);
+
             SqlValue Resolve(MultiPartName name)
             {
                 if (BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED"))

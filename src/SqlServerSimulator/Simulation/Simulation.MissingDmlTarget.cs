@@ -140,8 +140,10 @@ partial class Simulation
     /// <summary>A token that neither ends a statement nor starts the next is Msg 102 (156 for a reserved word).</summary>
     private static void RejectStrayToken(ParserContext context)
     {
-        if (!IsStatementBoundary(context.Token))
+        if (!EndsStatement(context.Token))
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.Token is Operator { Character: '(' } paren)
+            context.StatementEndedOnParen = paren.StartIndex;
     }
 
     /// <summary>
@@ -312,7 +314,7 @@ partial class Simulation
             SkipOutputClause(context);
         SkipOptionClause(context);
         if (context.Token is not Operator { Character: ';' })
-            throw IsStatementBoundary(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
+            throw EndsStatement(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
     }
 
     /// <summary>

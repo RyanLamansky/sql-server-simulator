@@ -69,6 +69,38 @@ public sealed class ScalarUdfInliningWireTests
     }
 
     /// <summary>
+    /// A procedure's body compiles as its first call runs it, so the failure
+    /// goes out inside the call, ahead of the body's first statement, whose
+    /// <c>DONEINPROC</c> it takes (probed 2026-10-01 against SQL Server 2025);
+    /// the next call sends nothing.
+    /// </summary>
+    [TestMethod]
+    public async Task AProcedureBody_FailsAsItsFirstCallCompilesIt()
+    {
+        var simulation = WithBrokenFunction();
+        using (var setup = simulation.CreateDbConnection())
+        {
+            setup.Open();
+            using var create = setup.CreateCommand();
+            create.CommandText = "create procedure p as update t set a = a; select 1 where 1 = 0 and dbo.f() = 1; update t set a = a";
+            _ = create.ExecuteNonQuery();
+        }
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        connection.FireInfoMessageEventOnUserErrors = true;
+        List<string> sent = [];
+        connection.InfoMessage += (_, e) => sent.AddRange(e.Errors.Cast<SqlError>().Select(static error => $"{error.Number} L{error.LineNumber} {error.Procedure}"));
+        await using var command = new SqlCommand("exec p", connection);
+        command.StatementCompleted += (_, e) => sent.Add($"completed {e.RecordCount}");
+
+        _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        AreEqual("208 L4 f / completed 0 / completed 3", string.Join(" / ", sent));
+        sent.Clear();
+        _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        AreEqual("completed 3 / completed 0 / completed 3", string.Join(" / ", sent));
+    }
+
+    /// <summary>
     /// Without the event, <c>ExecuteReader</c> raises the failure with
     /// everything the rest of the batch raised, as SqlClient drains a
     /// response it hands no reader for.

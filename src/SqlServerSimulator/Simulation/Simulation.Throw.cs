@@ -90,7 +90,7 @@ partial class Simulation
         // `THROW 50000, 'm', 1 zzz` reports near 'zzz', never message 'm').
         // The dispatch loop's own trailing-token check runs too late here,
         // since a raising statement never returns to it.
-        if (!IsStatementBoundary(context.Token))
+        if (!EndsStatement(context.Token))
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         if (batch.IsSkipping)

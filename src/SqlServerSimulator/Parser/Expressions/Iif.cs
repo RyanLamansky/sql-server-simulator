@@ -42,14 +42,18 @@ internal sealed class Iif : Expression
     {
         // A condition that isn't a predicate is reported near IIF's own
         // opening parenthesis, whatever follows it (probed 2026-09-26 against
-        // SQL Server 2025).
+        // SQL Server 2025) — save a stray `(` ending the value, which is the
+        // syntax error at it, as inside any parentheses (`IIF([abs](1) = 1, …)`,
+        // probed 2026-10-01).
         try
         {
             this.condition = BooleanExpression.Parse(context);
         }
         catch (SimulatedSqlException error) when (error.Number == 4145)
         {
-            throw SimulatedSqlException.NonBooleanInConditionContext("(");
+            throw context.Token is Tokens.Operator { Character: '(' }
+                ? SimulatedSqlException.SyntaxErrorNear(context)
+                : SimulatedSqlException.NonBooleanInConditionContext("(");
         }
         if (context.Token is not Tokens.Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);

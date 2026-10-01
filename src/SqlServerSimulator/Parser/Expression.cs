@@ -594,17 +594,16 @@ internal abstract class Expression : ExpressionNode
                             return expression;
 
                         // A delimited one-part name (`[abs](1)`, `"abs"(1)`)
-                        // doesn't name a function to real's grammar: the call is
-                        // a syntax error at the first token inside the parens
-                        // past any nested `(` (probed 2026-09-27 against SQL
-                        // Server 2025 — a few positions name the `(` instead;
-                        // see grammar.md).
+                        // doesn't name a function to real's grammar: the
+                        // expression ends at the name, and the `(` is whatever
+                        // the enclosing construct makes of a stray one — see
+                        // grammar.md. A scalar-only operand (PRINT's) has
+                        // already refused the name by then.
                         if (reference.ReferencedName is { Count: 1, LeafDelimited: true })
                         {
-                            while (context.GetNextRequired() is Operator { Character: '(' })
-                            {
-                            }
-                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                            return context.ScalarOnlyColumnReference is null
+                                ? expression
+                                : throw ScalarOnlyOperandError(context);
                         }
 
                         context.MoveNextRequired(); // Move past (

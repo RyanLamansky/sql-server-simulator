@@ -246,6 +246,7 @@ A body starts under `SET XACT_ABORT ON` whatever the session says — `@@OPTIONS
 ### Not modeled yet
 
 - **Msg 3621 after a non-writing statement's error in a body that turned `XACT_ABORT` off** — real sends it for the firing statement; here only an error escaping the body earns it.
+- **Msg 3621 after an error escaping the body** carries the trigger as its `Procedure` on real (Msg 8134 from `SELECT 1/0`), and isn't sent at all after a Msg 208 a function the body calls raises as it runs; here it follows unattributed in both (probed 2026-10-01 against SQL Server 2025).
 
 ## Change-detection intrinsics
 

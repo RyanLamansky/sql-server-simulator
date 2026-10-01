@@ -271,6 +271,21 @@ internal static class ModuleDependencies
         return bySchema != 0 ? bySchema : Collation.Catalog.Compare(a.EntityName, b.EntityName);
     }
 
+    /// <summary>
+    /// The objects of <paramref name="database"/> that <paramref name="bodyText"/>
+    /// names and that exist, each once — what a compiled module body depends on.
+    /// </summary>
+    internal static List<SchemaObject> ObjectsNamedBy(Database database, string bodyText)
+    {
+        List<SchemaObject> objects = [];
+        foreach (var reference in AnalyzeBody(database, bodyText, isSchemaBound: false))
+        {
+            if (reference.DatabaseName is null && reference.ServerName is null && reference.Resolved is { } resolved && !objects.Contains(resolved))
+                objects.Add(resolved);
+        }
+        return objects;
+    }
+
     private static void AddModule(
         Database database, List<Entity> entities, SchemaObject module,
         string schemaName, string bodyText, bool isSchemaBound) =>

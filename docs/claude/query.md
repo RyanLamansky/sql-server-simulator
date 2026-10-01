@@ -545,14 +545,15 @@ Real's grammar reads `name(DISTINCT expr)` and `name(ALL expr)` as an aggregate 
 - The aggregates that take `DISTINCT`, and the functions with a grammar of their own (`COALESCE`, `CONVERT`, `TRY_CONVERT`, `LEFT`, `RIGHT`, `NULLIF`, which refuse the keyword where it stands with Msg 156), parse as they always do.
 - Any other one-part name takes exactly one operand, so a second argument is Msg 102 at its comma (`group_concat(DISTINCT x, ':')`, `STRING_AGG(DISTINCT x, ',')`, `ISNULL(DISTINCT x, 1)`), a `WITHIN GROUP` after the call is Msg 102 at `WITHIN`, and `CAST(DISTINCT x AS int)` is Msg 156 at the `AS`.
 - A scalar built-in or an unknown name is **Msg 195** "is not a recognized aggregate function", named as written, raised while parsing — so it outranks a later syntax error and fires in a dead branch — but only after any `OVER` clause has parsed.
-- `STRING_AGG` and the two JSON aggregates are Msg 313 state 2 and the approximate percentiles Msg 8726, both binding errors held in `ParserContext.PendingBindError`, so a later syntax error or the FROM clause's Msg 208 outranks them; with `DISTINCT` and an `OVER` they are Msg 10759 instead.
+  That clause is read for its grammar alone (`WindowExpression.ParseClauseSyntax`): a syntax error inside it wins, a frame standing without `PARTITION BY` or `ORDER BY` and a window name refined by nothing among them, while what binding settles — a missing column, a constant ordering term, a frame's bounds, the window a name refers to, a missing sequence — doesn't (probed 2026-10-01 against SQL Server 2025).
+- `STRING_AGG` and the two JSON aggregates are Msg 313 state 2 and the approximate percentiles Msg 8726, both binding errors held in `ParserContext.PendingBindError`, so a later syntax error or the FROM clause's Msg 208 outranks them; with `DISTINCT` and an `OVER` they are Msg 10759 instead, once the clause has parsed.
+  The Msg 313 joins a statement's binder report where the call's closing paren sits, and only while nothing ahead of it in the binder's order has failed — its operand, which binds as the call does, included: `STRING_AGG(DISTINCT s), x1` reports Msg 313 then Msg 207, `x1, STRING_AGG(DISTINCT s)`, a `HAVING` over `x1` and `STRING_AGG(DISTINCT x1)` the Msg 207 alone, an `ORDER BY` over `x1` both, and a second refused call nothing more (probed 2026-10-01).
+  A Msg 8726 never joins one; a report holding anything else drops it.
 - `APPROX_COUNT_DISTINCT(DISTINCT x)` is Msg 16200 while parsing; its `ALL` is harmless, and is what admits an `OVER` clause.
 - A schema-qualified name is a user-defined aggregate, which takes a whole argument list and is Msg 208 state 214 when absent — even when the name is a scalar UDF — deferred like any missing object, so a dead branch compiles.
-  With `DISTINCT` and an `OVER` it is Msg 102 near `'distinct'`, in lowercase.
+  With `DISTINCT` and an `OVER` it is Msg 102 near `'distinct'`, in lowercase, once the clause has parsed.
 
-**Divergences.**
-The skipped `OVER` clause is checked only for balanced parentheses, so a syntax error inside one (`OVER (ORDER BY x x)`) is Msg 195 here.
-A held Msg 313 is dropped when the same statement also has a binder report (`STRING_AGG(DISTINCT s), nosuchcol` reports only the Msg 207 here, where real reports both).
+**Divergence.**
 `APPROX_PERCENTILE_DISC(ALL 0.5) OVER ()` kills the session on real (severity 21, probed 2026-09-27); here it is Msg 8726.
 
 ### The approximate aggregates
@@ -950,7 +951,7 @@ A FROM-less `SELECT COUNT(*) WHERE 1 = 0 GROUP BY ALL ()` doesn't warn either, w
   That makes a running total / sliding window O(n) per partition rather than O(n²).
   `Remove` is supported by SUM/AVG/COUNT/COUNT_BIG/STDEV*/VAR* (arithmetic / moment subtraction), CHECKSUM_AGG (XOR self-inverse), and MIN/MAX (a directional multiset built only when the frame start can advance — GROUP BY and forward-cumulative windows keep the cheaper single-extreme path).
   Frames whose start is pinned at `UNBOUNDED PRECEDING` (the default ORDER BY frame, and `ROWS/RANGE UNBOUNDED PRECEDING TO …`) never remove, so they're a pure forward accumulation valid for every aggregator.
-  Frame rejection paths: ranking + LAG/LEAD with a frame → Msg 10752; frame without ORDER BY → Msg 10756; `BETWEEN ... FOLLOWING AND ... PRECEDING` → Msg 4193; `BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING` / `BETWEEN UNBOUNDED FOLLOWING AND ...` → Msg 102 syntax.
+  Frame rejection paths: ranking + LAG/LEAD with a frame → Msg 10752; frame without ORDER BY → Msg 10756; `BETWEEN ... FOLLOWING AND ... PRECEDING` → Msg 4193; `BETWEEN CURRENT ROW AND UNBOUNDED PRECEDING` / `BETWEEN UNBOUNDED FOLLOWING AND ...` → Msg 102 near the direction word; an offset that isn't an `int` literal (`1.5`, `3000000000`) → Msg 102 near it (probed 2026-10-01 against SQL Server 2025).
   An `OVER` with no `ORDER BY` for a function that needs one is Msg 4112 naming it, as is a frame after `PARTITION BY` for `FIRST_VALUE` / `LAST_VALUE`; Msg 10752's state is 3 for the ranking and distribution family and 1 for `LAG` / `LEAD` (probed 2026-09-24 against SQL Server 2025).
 - **The star-count exemption from the frame-needs-ORDER-BY gate.** `COUNT(*)` and `COUNT_BIG(*)` — the two aggregates that carry no operand — may frame an unordered partition, and the frame applies (probe-confirmed against SQL Server 2025: `COUNT(*) OVER (PARTITION BY g ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` climbs 1, 2, 3 through each partition).
   The exemption is the star operand's, not `COUNT`'s: `COUNT(1)` is a constant argument and raises Msg 10756 with `COUNT(v)` / `SUM(v)` / `MIN(v)`.

@@ -14,11 +14,13 @@ partial class Simulation
         this.InvokeRefreshModule(batch, "sp_refreshview", "viewname", viewsOnly: true);
 
     /// <summary>
-    /// <c>sp_recompile @objname</c>: there are no cached plans to mark beyond
-    /// the plan cache's own schema-versioning, so it only answers — the class-0
-    /// Msg 15070 for an object in the schema namespace, Msg 15165 otherwise,
-    /// each naming the argument as passed (probed 2026-09-25 against SQL
-    /// Server 2025).
+    /// <c>sp_recompile @objname</c>: answers the class-0 Msg 15070 for an
+    /// object in the schema namespace, Msg 15165 otherwise, each naming the
+    /// argument as passed (probed 2026-09-25 against SQL Server 2025). A
+    /// procedure or trigger named drops its compiled plan, and a table named
+    /// takes a new <c>modify_date</c>, which every plan reading it sees as a
+    /// change; a function named changes nothing a caller's plan depends on
+    /// (probed 2026-10-01; see <see cref="ModulePlan"/>).
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpRecompile(BatchContext batch, string procedureName)
     {
@@ -31,9 +33,22 @@ partial class Simulation
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_recompile", "objname");
         if (!Parser.Expressions.ObjectId.TryParseObjectName(objectName, out var name)
             || !batch.TryResolveSchema(name, out var schema)
-            || !schema.TryFindInSharedNamespace(name.Leaf, out _))
+            || !schema.TryFindInSharedNamespace(name.Leaf, out var marked))
         {
             throw SimulatedSqlException.CouldNotFindObjectOrNoPermission(objectName);
+        }
+        switch (marked)
+        {
+            case Procedure procedure:
+                procedure.CompiledPlan = null;
+                break;
+            case Trigger trigger:
+                trigger.CompiledPlan = null;
+                break;
+            case Storage.HeapTable table:
+                table.ModifyDate = batch.CurrentStatement.UtcNow;
+                batch.Connection.Simulation.BumpSchemaVersion();
+                break;
         }
         batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MarkedForRecompilationMessage(batch, procedureName, objectName));
     }

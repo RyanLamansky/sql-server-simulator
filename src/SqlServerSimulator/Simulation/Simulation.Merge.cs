@@ -265,7 +265,7 @@ partial class Simulation
         // A stray word where the ; belongs is a syntax error at the word
         // (probed 2026-09-30).
         if (context.Token is not Operator { Character: ';' })
-            throw IsStatementBoundary(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
+            throw EndsStatement(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
         if (!context.Batch.IsSkipping)
             CheckMergePermissions(context.Batch, destinationName, triggerTarget, whenClauses, joinWrite, onPredicate, targetAlias);
         if (joinWrite is not null && !context.Batch.IsSkipping)
@@ -1364,7 +1364,8 @@ partial class Simulation
         string[] sourceColumnNames,
         SqlType[] sourceSchema,
         DataMask?[]? sourceMasks,
-        ViewOutputShape? view)
+        ViewOutputShape? view,
+        OutputProjection? logged = null)
     {
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             return null;
@@ -1472,7 +1473,7 @@ partial class Simulation
         OutputTarget? outputTarget;
         try
         {
-            outputTarget = TryParseOutputIntoTarget(context, expressions.Count, destinationTable.Name);
+            outputTarget = TryParseOutputIntoTarget(context, expressions.Count, destinationTable.Name, logged);
         }
         catch (SimulatedSqlException error) when (view?.Refusals is { Count: > 0 } refusals)
         {
@@ -1481,9 +1482,12 @@ partial class Simulation
         }
         view?.ThrowRefusals();
 
-        return NoteClientOutput(context.Batch, new OutputProjection(
+        var projection = NoteClientOutput(context.Batch, new OutputProjection(
             [.. expressions], [.. columnNames], schema, destinationTable,
-            (sourceAlias, sourceColumnNames, sourceSchema), context.Batch, outputTarget, sourceMasks, view));
+            (sourceAlias, sourceColumnNames, sourceSchema), context.Batch, outputTarget, sourceMasks, view, logged));
+        return IsClientOutputAfterInto(context, projection)
+            ? TryParseMergeOutputClause(context, destinationTable, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, view, logged: projection)
+            : projection;
     }
 
     /// <summary>

@@ -86,6 +86,92 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// Bumped as <see cref="ClearPlanCache"/> empties the cache, which every
+    /// <see cref="ModulePlan"/> compiled before then outlives.
+    /// </summary>
+    private long modulePlanGeneration;
+
+    /// <summary>
+    /// Compiles a procedure's or DML trigger's body as its call is about to run
+    /// it, when it has no standing <paramref name="plan"/>, answering the
+    /// inlining failures the compile sends ahead of the body's first statement
+    /// (see <see cref="ModulePlan"/>). The statements the compile leaves to
+    /// compile as they run go on <paramref name="body"/>, from the plan when it
+    /// stands. A body that doesn't compile — its errors raise as its statements
+    /// run — sends nothing.
+    /// </summary>
+    /// <param name="body">The batch the body is about to run on.</param>
+    /// <param name="database">The database the body binds in.</param>
+    /// <param name="plan">The module's standing plan, which a compile replaces when <paramref name="keepsPlan"/>.</param>
+    /// <param name="parent">A trigger's table, whose change the plan depends on too; null for a procedure.</param>
+    /// <param name="recompile">Whether the call compiles the body whatever plan stands — <c>EXEC … WITH RECOMPILE</c> or a procedure created <c>WITH RECOMPILE</c>.</param>
+    /// <param name="keepsPlan">Whether the compile becomes the module's plan, which <c>EXEC … WITH RECOMPILE</c>'s doesn't.</param>
+    private List<SimulatedSqlException>? CompileModuleBody(BatchContext body, Database database, ref ModulePlan? plan, SchemaObject? parent, bool recompile, bool keepsPlan)
+    {
+        // Nothing inlines in a database that doesn't inline scalar functions,
+        // so there is nothing such a compile could send.
+        if (database is not { CompatibilityLevel: >= CompatibilityLevel.Sql150, ScopedConfiguration.TsqlScalarUdfInlining: true })
+            return null;
+        var generation = Volatile.Read(ref this.modulePlanGeneration);
+        if (!recompile && plan is { } standing && standing.Stands(Volatile.Read(ref this.SchemaVersion), generation))
+        {
+            body.StatementsCompiledOnRun = standing.CompiledOnRun;
+            return null;
+        }
+
+        var schemaVersion = Volatile.Read(ref this.SchemaVersion);
+        var compileContext = CompileContextFor(body, body.Parser.Command);
+        var compileError = this.CompileBatch(compileContext, key: null, out var failures, sendsOnce: false);
+        var compiledOnRun = compileError is null ? compileContext.StatementsCompiledOnRun : null;
+        body.StatementsCompiledOnRun = compiledOnRun;
+        if (keepsPlan)
+        {
+            List<SchemaObject> dependencies = parent is null ? [] : [parent];
+            AddBodyDependencies(database, body.Parser.Command.CommandText, dependencies, compileContext.InlinedCalls?.Calls);
+            plan = new ModulePlan(schemaVersion, generation, ModulePlan.Track(database, dependencies), compiledOnRun);
+        }
+        return compileError is null ? failures : null;
+    }
+
+    /// <summary>
+    /// Adds what <paramref name="bodyText"/> names to <paramref name="dependencies"/>,
+    /// and, through every function or view among them, what those bodies name in
+    /// turn: a scalar function inlines with its body, so the plan depends on the
+    /// objects that body reads (probed 2026-10-01 against SQL Server 2025:
+    /// dropping a table only a called function reads recompiles the procedure).
+    /// </summary>
+    private static void AddBodyDependencies(Database database, string bodyText, List<SchemaObject> dependencies, List<InlinedScalarCall>? inlined)
+    {
+        var start = dependencies.Count;
+        foreach (var named in ModuleDependencies.ObjectsNamedBy(database, bodyText))
+        {
+            if (!dependencies.Contains(named))
+                dependencies.Add(named);
+        }
+        foreach (var call in inlined ?? [])
+        {
+            if (!dependencies.Contains(call.Function))
+                dependencies.Add(call.Function);
+        }
+        for (var i = start; i < dependencies.Count; i++)
+        {
+            var text = dependencies[i] switch
+            {
+                UserDefinedFunction function => function.BodyText,
+                View view => view.BodyText,
+                _ => null,
+            };
+            if (text is null)
+                continue;
+            foreach (var named in ModuleDependencies.ObjectsNamedBy(database, text))
+            {
+                if (!dependencies.Contains(named))
+                    dependencies.Add(named);
+            }
+        }
+    }
+
     /// <summary>The line real reports an inlining failure on when the missing object's name is qualified.</summary>
     private const int QualifiedInliningFailureLine = 13;
 
@@ -171,4 +257,89 @@ partial class Simulation
             return function.InliningFailures;
         }
     }
+}
+
+/// <summary>
+/// The plan a procedure's or DML trigger's body compiled to. Real compiles such
+/// a body when a call first runs it, sending then the non-aborting Msg 208 of
+/// each scalar function call it couldn't inline — ahead of the body's first
+/// statement, past any <c>TRY</c> in it — and later calls reuse the plan and
+/// send nothing, a nested call's included (probed 2026-10-01 against SQL Server
+/// 2025). The plan stands until the cache is cleared
+/// (<c>DBCC FREEPROCCACHE</c>), <c>sp_recompile</c> names the module or a table
+/// it reads, or an object it depends on changes: a table it reads is altered,
+/// dropped or recreated, a function it calls is altered, or one of those
+/// functions' own objects is — but not an unrelated <c>CREATE</c> or
+/// <c>DROP</c>, nor <c>sp_recompile</c> of a function it calls. A
+/// statement the compile deferred compiles on the plan's first run of it, and
+/// one carrying <c>OPTION (RECOMPILE)</c> on every run (see
+/// <see cref="StatementsCompiledOnRun"/>).
+/// </summary>
+internal sealed class ModulePlan(long schemaVersion, long generation, ModulePlanDependency[] dependencies, StatementsCompiledOnRun? compiledOnRun)
+{
+    /// <summary>The schema version the plan was last found standing under, which spares a call under it the dependency check.</summary>
+    private long schemaVersion = schemaVersion;
+    private readonly long generation = generation;
+    private readonly ModulePlanDependency[] dependencies = dependencies;
+
+    /// <summary>The statements the body compiles as they run, shared by every call the plan serves.</summary>
+    public readonly StatementsCompiledOnRun? CompiledOnRun = compiledOnRun;
+
+    /// <summary>
+    /// Whether the plan still stands under <paramref name="currentSchemaVersion"/>
+    /// and the cache's <paramref name="currentGeneration"/>: no schema change at
+    /// all, or none to an object it depends on.
+    /// </summary>
+    public bool Stands(long currentSchemaVersion, long currentGeneration)
+    {
+        if (currentGeneration != this.generation)
+            return false;
+        if (currentSchemaVersion == Volatile.Read(ref this.schemaVersion))
+            return true;
+        foreach (var dependency in this.dependencies)
+        {
+            if (!dependency.Unchanged())
+                return false;
+        }
+        Volatile.Write(ref this.schemaVersion, currentSchemaVersion);
+        return true;
+    }
+
+    /// <summary>Snapshots each of <paramref name="objects"/> as the plan depends on it now.</summary>
+    public static ModulePlanDependency[] Track(Database database, List<SchemaObject> objects)
+    {
+        var tracked = new List<ModulePlanDependency>(objects.Count);
+        foreach (var dependency in objects)
+        {
+            foreach (var (_, schema) in database.Schemas)
+            {
+                if (schema.SchemaId == dependency.SchemaId)
+                {
+                    tracked.Add(new ModulePlanDependency(schema, dependency));
+                    break;
+                }
+            }
+        }
+        return [.. tracked];
+    }
+}
+
+/// <summary>
+/// One object a <see cref="ModulePlan"/> depends on, as it stood when the plan
+/// compiled: the object its schema held under the name, its modification time,
+/// and for a table its column set, which <c>ALTER TABLE</c> replaces.
+/// </summary>
+internal readonly struct ModulePlanDependency(Schema schema, SchemaObject dependency)
+{
+    private readonly Schema schema = schema;
+    private readonly SchemaObject dependency = dependency;
+    private readonly DateTime modifyDate = dependency.ModifyDate;
+    private readonly Storage.HeapColumn[]? columns = (dependency as Storage.HeapTable)?.Columns;
+
+    /// <summary>Whether the schema still holds the same object under its name, unmodified.</summary>
+    public bool Unchanged() =>
+        this.schema.TryFindInSharedNamespace(this.dependency.Name, out var current)
+        && ReferenceEquals(current, this.dependency)
+        && current.ModifyDate == this.modifyDate
+        && ReferenceEquals((current as Storage.HeapTable)?.Columns, this.columns);
 }

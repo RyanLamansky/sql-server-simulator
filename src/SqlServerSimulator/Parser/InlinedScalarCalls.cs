@@ -313,23 +313,34 @@ internal sealed class StatementsCompiledOnRun
     private readonly Dictionary<int, bool> pending = [];
     private HashSet<int>? compiled;
 
-    /// <summary>Where the compile stopped short; every statement starting past it compiles on its first run.</summary>
+    /// <summary>
+    /// Where the compile stopped short — the next statement's start, the scan
+    /// past the deferred one having found it — so every statement starting
+    /// there or later compiles on its first run.
+    /// </summary>
     public int From = int.MaxValue;
 
     public void Add(int start, bool everyRun) => this.pending[start] = everyRun;
 
-    /// <summary>Whether the statement starting at <paramref name="start"/> compiles as it runs this time.</summary>
+    /// <summary>
+    /// Whether the statement starting at <paramref name="start"/> compiles as
+    /// it runs this time. A procedure's or trigger's plan shares one instance
+    /// among the sessions calling it, hence the lock.
+    /// </summary>
     public bool CompilesNow(int start)
     {
-        if (this.pending.TryGetValue(start, out var everyRun))
+        lock (this.pending)
         {
-            if (!everyRun)
+            if (this.pending.TryGetValue(start, out var everyRun))
             {
-                _ = this.pending.Remove(start);
-                _ = (this.compiled ??= []).Add(start);
+                if (!everyRun)
+                {
+                    _ = this.pending.Remove(start);
+                    _ = (this.compiled ??= []).Add(start);
+                }
+                return true;
             }
-            return true;
+            return start >= this.From && (this.compiled ??= []).Add(start);
         }
-        return start > this.From && (this.compiled ??= []).Add(start);
     }
 }

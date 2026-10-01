@@ -14,14 +14,14 @@ Procedures and triggers instead swallow a trailing statement into the body.
 See [Where a module statement may sit in its batch](programmable.md#where-a-module-statement-may-sit-in-its-batch).
 
 The dispatch loop drains optional `;`s at the top of each iteration and trusts each parser to leave `Token` at its first un-consumed token (the `ParserContext` lookahead-position contract).
-Parsers that historically ended on the last token they consumed (DBCC's closing `)`, SET-session-state's `ON`/`OFF`) get a one-token advance via `IsStatementBoundary` after dispatch — Token already at `;`, end-of-batch, or a recognized statement-starting keyword is left alone.
+Parsers that historically ended on the last token they consumed (DBCC's closing `)`, SET-session-state's `ON`/`OFF`) get a one-token advance via `EndsStatement` after dispatch — Token already at `;`, end-of-batch, a recognized statement-starting keyword or a `(` opening a parenthesized query statement is left alone (see [A `(` opens a statement](#a--opens-a-statement)).
 
 `Simulation.IsStatementBoundary(Token?)` is the **single source of truth** for "does this token begin a new top-level statement (or a hard boundary — `null` / `;` / the contextual `THROW`)?"
 It answers `true` for the full statement-keyword set: SELECT / INSERT / UPDATE / DELETE / MERGE / BEGIN / COMMIT / ROLLBACK / SAVE / CREATE / DROP / ALTER / DBCC / SET / DECLARE / WITH / IF / ELSE / END / WHILE / BREAK / CONTINUE / RETURN / PRINT / RAISERROR / WAITFOR / TRUNCATE / USE / GRANT / REVOKE / DENY / OPEN / FETCH / CLOSE / DEALLOCATE / EXEC / EXECUTE / RECONFIGURE / REVERT / CHECKPOINT / GOTO / BULK / KILL / READTEXT / WRITETEXT / UPDATETEXT / BACKUP / RESTORE / SHUTDOWN, and for a `GOTO` label's declaration (`UnquotedString.IsLabelDeclaration`), so a label directly after a statement ends it (probed 2026-09-30 against SQL Server 2025).
 Four consumers route through it so a new statement keyword is added in exactly one place:
 
 - the dispatch loop's post-statement cursor normalization + error-recovery scans;
-- `Selection.Parse`'s two projection-list terminator switches (the `WITH` case is checked *before* the shared predicate so its more-specific Msg 319 wins; the switch matches only `ReservedKeyword`, so a following statement's keyword ends the projection while column-name-like contextual keywords are unaffected);
+- `Selection.Parse`'s two projection-list terminator switches (the `WITH` case is checked *before* the shared predicate so its more-specific Msg 319 wins; the switch matches only `ReservedKeyword`, so a following statement's keyword ends the projection while column-name-like contextual keywords are unaffected; a `(` after a complete element ends it too, outside parentheses);
 - `ParseExecArguments` — an EXEC argument list stops at any statement start (reserved statement keywords can't be bare argument values, so this never truncates a legitimate literal / `@var` / DEFAULT / OUTPUT / NULL / `@@`-niladic arg);
 - `ConsumeToStatementBoundary` — the principal-DDL parse-and-discard tail (`FROM LOGIN` / `WITH PASSWORD` / `DEFAULT_SCHEMA`).
 
@@ -343,11 +343,27 @@ A parenthesized *boolean* followed by an operator only a value takes is a syntax
 ## A delimited one-part name doesn't call anything
 
 `[abs](-1)` and `"abs"(1)` are syntax errors on real, built-in name or not, where a schema-qualified `[dbo].[f](1)` calls `dbo.f` as usual (probed 2026-09-27 against SQL Server 2025).
-The postfix loop's call arm raises Msg 102 at the first token inside the parens past any nested `(` — `near '-'`, `near '1'` for `[abs]((1))`, `near ')'` for `[abs]()` — which is where real names it in the select list, `SET`, `ORDER BY`, `GROUP BY` and a comparison's right side.
+Real's expression simply ends at the name, and the `(` is whatever the construct around it makes of a stray one — which is the whole of its position rule (probed 2026-10-01 over fifty positions):
+- Inside parentheses (a function's arguments, a subquery, `VALUES`, an `IN` list, `IIF`, `TOP (…)`, a parenthesized condition), a `CASE` or a `BETWEEN`'s first operand, it is Msg 102 at the `(`.
+- Opening a condition at the top of a `WHERE`, `HAVING`, `ON`, `IF`, `WHILE` or `CASE WHEN` — the call anywhere before the comparison operator — it is Msg 4145 near `'('`, and the parser reads on from the `(` as a statement, so nothing more is reported.
+- In `PRINT` the name itself is Msg 128 first.
+- Where the statement could end — a select item, a `SET` / `DECLARE` value, an `ORDER BY` or `GROUP BY` item, a comparison's right side — the `(` opens the next statement (see below), so `[abs](-1)` is Msg 102 at the `-`, and `SELECT [abs](SELECT 1)` is two statements and Msg 207 for the column.
+
+The postfix loop's call arm returns the reference rather than calling, and every one of those follows from the enclosing parser.
+
+## A `(` opens a statement
+
+A statement may begin with a parenthesized query (`(SELECT 1) UNION (SELECT 2)`), so a `(` where a complete statement could end opens the next one: `SELECT 1 (SELECT 2)`, `UPDATE t SET a = 1 (SELECT 2)` and `INSERT t VALUES (1) (SELECT 2)` are two statements each, and `DECLARE @x int = 1 (-1)` is Msg 102 at the `-` (probed 2026-10-01 against SQL Server 2025).
+`Simulation.EndsStatement` is the boundary test the dispatch normalizer and the statement parsers that reject their own trailing token share; `IsStatementBoundary` itself stays keyword-only, since a scan stopping at every `(` would end inside a statement.
+Only a query fills the parens: `(VALUES (1))` and `(WITH …)` are Msg 156 at the keyword, and a `)` a SELECT statement leaves behind (`(SELECT 1))`, a CTE-led `… FROM c)`) Msg 102.
+A `(` after a FROM source that names an object is that source's own argument or legacy hint list instead, where a query is Msg 156 at its `SELECT` (`FROM t (SELECT 3)`, `FROM t x (SELECT 3)`, `DELETE t (SELECT 2)`), and a common table expression's list is Msg 215 without an alias and a hint list with one.
 
 ## Divergences
 
-- **A delimited one-part call names a different token in a few positions**: real reports `near '('` inside `VALUES`, a `CASE` arm and an `IN` list, Msg 4145 near `'('` where the call opens a predicate (`WHERE [abs](1) = 1`), and Msg 128 in `PRINT`; each is Msg 102 at the first token inside the parens here (probed 2026-09-27).
+- **A `(` after an `ORDER BY` or `GROUP BY` name** reads as a call to it, which real parses through its arguments first — `ORDER BY a (SELECT 3)` is Msg 156 at the `SELECT` on real and Msg 195 here.
+- **A `(` after a `DELETE` target** that holds no query is Msg 102 at the `(`, state 31, on real; here it is Msg 102 at the token inside it.
+- **A delimited one-part call as an `sp_executesql` argument** (`EXEC sp_executesql N'SELECT 1', N'@p int', [abs](1)`) is Msg 102 at the name here, where real takes the name as the argument and fails at the `1` of the next statement's `(1)`.
+- **Syntax-error recovery past a `(WITH …)` statement** misses the Msg 422 real's restart at the `WITH` reports for a common table expression nothing reads.
 - **Multi-statement-TVF bodies treat a `SET QUOTED_IDENTIFIER` as top-level** rather than rejecting it (real SQL Server disallows `SET QUOTED_IDENTIFIER` inside a function body).
 
 ## Expression depth limits (Msg 8631 / Msg 191 / Msg 125)

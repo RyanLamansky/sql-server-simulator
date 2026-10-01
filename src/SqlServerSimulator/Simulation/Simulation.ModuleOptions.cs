@@ -23,6 +23,7 @@ partial class Simulation
         public bool SchemaBinding;
         public bool NativeCompilation;
         public bool ReturnsNullOnNullInput;
+        public bool Recompile;
         public string? ExecuteAs;
 
         /// <summary>The <c>INLINE = ON | OFF</c> setting written; null when absent.</summary>
@@ -166,6 +167,9 @@ partial class Simulation
                     break;
                 case "NATIVE_COMPILATION":
                     options.NativeCompilation = true;
+                    break;
+                case "RECOMPILE":
+                    options.Recompile = true;
                     break;
                 case "SCHEMABINDING":
                     options.SchemaBinding = true;

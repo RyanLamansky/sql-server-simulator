@@ -61,10 +61,10 @@ partial class Simulation
     /// another object kind holds, Msg 2010.
     /// </para>
     /// <para>
-    /// <strong>Fidelity gaps</strong>: <c>WITH RECOMPILE</c> / <c>EXECUTE
-    /// AS</c> / <c>ENCRYPTION</c> / <c>FOR REPLICATION</c> parse and are
-    /// silently ignored — they affect query-planner / security / replication
-    /// behavior the simulator doesn't model.
+    /// <strong>Fidelity gaps</strong>: <c>FOR REPLICATION</c> parses and is
+    /// silently ignored. <c>WITH RECOMPILE</c> compiles the body on every
+    /// call, which is what sends its scalar inlining failures each time (see
+    /// <see cref="ModulePlan"/>).
     /// </para>
     /// </remarks>
     private static bool TryParseCreateProcedure(ParserContext context, bool isAlter, bool createOrAlter)
@@ -205,6 +205,7 @@ partial class Simulation
                 UsesQuotedIdentifier = context.QuotedIdentifiers,
                 UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
                 GroupNumber = groupNumber,
+                RecompilesEveryCall = options.Recompile,
             });
             return true;
         }
@@ -241,6 +242,7 @@ partial class Simulation
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             // The group's numbered procedures stay with it across an ALTER.
             Numbered = replaced?.Numbered,
+            RecompilesEveryCall = options.Recompile,
         };
         if (replaced is not null)
             procedure.ModifyDate = context.Batch.CurrentStatement.UtcNow;

@@ -49,7 +49,8 @@ partial class Simulation
         string? returnCodeVariableName,
         string attributionName,
         Synonym? viaSynonym = null,
-        bool framesScope = false)
+        bool framesScope = false,
+        bool recompile = false)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -346,6 +347,11 @@ partial class Simulation
                 var compiles = connection.StatisticsTime && ReportsStatistics(outerBatch);
                 try
                 {
+                    // The body compiles as the call is about to run it, unless
+                    // its plan stands; what it couldn't inline goes out first.
+                    var recompiles = recompile || procedure.RecompilesEveryCall;
+                    if (this.CompileModuleBody(innerBatch, procedure.Schema.Database, ref procedure.CompiledPlan, parent: null, recompiles, keepsPlan: !recompiles) is { } failures)
+                        outcomes.AddRange(CompileFailuresSent(innerBatch, failures));
                     var parser = innerBatch.Parser;
                     parser.MoveNextOptional();
                     foreach (var outcome in DispatchStatementsUntil(innerBatch, endKeyword: null))

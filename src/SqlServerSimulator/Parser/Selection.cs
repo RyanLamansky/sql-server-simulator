@@ -915,7 +915,11 @@ internal sealed partial class Selection
         if (context.Token is not Operator { Character: '(' })
             return ParseSingleSelectStatement(context, scope, allowOrderBy);
 
-        context.MoveNextRequired();
+        // Only a query opens inside: `(VALUES …)`, `(WITH …)` and a value are
+        // the syntax error at their first token, which is also how a
+        // statement `(-1)` fails (probed 2026-10-01 against SQL Server 2025).
+        if (context.GetNextRequired() is not (ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' }))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
         var inner = ParseUnionExceptChain(context, scope.InParentheses());
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1598,7 +1602,11 @@ internal sealed partial class Selection
             // taken, so a further value token is one too many for a single
             // element — `SELECT 1 xyz 2` is Msg 102 at the `2`, not a second
             // column. Only a comma or a clause keyword may follow a complete,
-            // aliased element (probe-confirmed).
+            // aliased element (probe-confirmed) — or a `(` outside
+            // parentheses, which opens the next statement, a parenthesized
+            // query, as it does after an unaliased element below.
+            if (!elementExpected && context.Token is Operator { Character: '(' } && !scope.Parenthesized)
+                goto ExitWhileTokenLoop;
             if (!elementExpected && StartsProjectionElement(context.Token) && !IsWindowClauseAhead(context) && context.Token is not UnquotedString { IsLabelDeclaration: true })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
@@ -1967,8 +1975,11 @@ internal sealed partial class Selection
                 // In a statement's own query, the start of another statement
                 // terminates this SELECT — the dispatch loop picks up there.
                 // Inside parentheses these keywords stay invalid (fall through
-                // to the generic Msg 102 below).
+                // to the generic Msg 102 below). A `(` after an element opens
+                // a parenthesized query statement the same way.
                 case ReservedKeyword statementStart when !scope.Parenthesized && Simulation.IsStatementBoundary(statementStart):
+                    goto ExitWhileTokenLoop;
+                case Operator { Character: '(' } when !scope.Parenthesized:
                     goto ExitWhileTokenLoop;
 
                 // A boolean-predicate keyword directly after a complete
@@ -3466,6 +3477,16 @@ internal sealed partial class Selection
                         if (context.GetNextOptional() is Name nextCte)
                             throw SimulatedSqlException.CteAfterUnterminatedStatement(nextCte.Value);
                         context.RestoreCheckpoint(afterWith);
+                    }
+                    // A parenthesized list after it is the legacy hint form
+                    // once an alias is written, and an argument list (Msg 215)
+                    // without one, even for a hint name (probed 2026-10-01
+                    // against SQL Server 2025).
+                    if (context.Token is Operator { Character: '(' })
+                    {
+                        if (cteAlias is null)
+                            RefuseArgumentList(context, cteBinding.Name, reportsNames: false);
+                        _ = ParseOptionalTableHints(context, commitOnLegacyParen: true);
                     }
 
                     return new FromSource(

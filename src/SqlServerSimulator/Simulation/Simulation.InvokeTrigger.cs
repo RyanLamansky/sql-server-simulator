@@ -424,6 +424,13 @@ partial class Simulation
                     if (connection.StatisticsTime)
                         compileAt = outerBatch.PendingTriggerOutcomes?.Count ?? 0;
                 }
+                // A DML trigger's body compiles as it first fires, unless its
+                // plan stands; what it couldn't inline goes out first.
+                if (frame.Trigger is { } compiled
+                    && this.CompileModuleBody(innerBatch, bodyDatabase, ref compiled.CompiledPlan, compiled.Parent, recompile: false, keepsPlan: true) is { } failures)
+                {
+                    (outerBatch.PendingTriggerOutcomes ??= []).AddRange(CompileFailuresSent(innerBatch, failures));
+                }
                 var parser = innerBatch.Parser;
                 parser.MoveNextOptional();
                 foreach (var bodyOutcome in DispatchStatementsUntil(innerBatch, endKeyword: null))

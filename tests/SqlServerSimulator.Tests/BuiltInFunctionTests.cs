@@ -21,6 +21,71 @@ public sealed class BuiltInFunctionTests
     public void ADelimitedOnePartCall_IsASyntaxError(string commandText, string message)
         => new Simulation().AssertSqlError(commandText, 102, message);
 
+    /// <summary>
+    /// The expression ends at the delimited name, so the <c>(</c> is whatever
+    /// the enclosing construct makes of a stray one: inside parentheses, a
+    /// <c>CASE</c> or a <c>BETWEEN</c> it is the syntax error at the <c>(</c>,
+    /// opening a condition it is Msg 4145 there, and where the statement could
+    /// end it opens the next statement — so <c>PRINT</c>'s Msg 128 for the
+    /// name comes first, and the statement above names the first token inside
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from (values ([abs](-1))) v(a)", 102, "Incorrect syntax near '('.")]
+    [DataRow("select case when 1 = 1 then [abs](-1) end", 102, "Incorrect syntax near '('.")]
+    [DataRow("select case [abs](-1) when 1 then 2 end", 102, "Incorrect syntax near '('.")]
+    [DataRow("select 1 where 1 in (2, [abs](-1))", 102, "Incorrect syntax near '('.")]
+    [DataRow("select 1 where 1 between [abs](1) and 2", 102, "Incorrect syntax near '('.")]
+    [DataRow("select abs([abs](-1))", 102, "Incorrect syntax near '('.")]
+    [DataRow("select (select [abs](-1))", 102, "Incorrect syntax near '('.")]
+    [DataRow("select iif([abs](1) = 1, 1, 2)", 102, "Incorrect syntax near '('.")]
+    [DataRow("select 1 where ([abs](1) = 1)", 102, "Incorrect syntax near '('.")]
+    [DataRow("select 1 where [abs](1) = 1", 4145, "An expression of non-boolean type specified in a context where a condition is expected, near '('.")]
+    [DataRow("select 1 where [abs](1) is null", 4145, "An expression of non-boolean type specified in a context where a condition is expected, near '('.")]
+    [DataRow("if 1 + [abs](1) > 1 print 1", 4145, "An expression of non-boolean type specified in a context where a condition is expected, near '('.")]
+    [DataRow("print 'a' + [abs](1)", 128, "The name \"abs\" is not permitted in this context. Valid expressions are constants, constant expressions, and (in some contexts) variables. Column names are not permitted.")]
+    [DataRow("print ([abs](1))", 128, "The name \"abs\" is not permitted in this context. Valid expressions are constants, constant expressions, and (in some contexts) variables. Column names are not permitted.")]
+    [DataRow("select 1 where 1 = [abs](1)", 102, "Incorrect syntax near '1'.")]
+    [DataRow("declare @x int; set @x = [abs](-1)", 102, "Incorrect syntax near '-'.")]
+    [DataRow("select [abs](select 1)", 207, "Invalid column name 'abs'.")]
+    public void ADelimitedOnePartCall_IsAStrayParenWhereItStands(string commandText, int number, string message)
+    {
+        var error = new Simulation().AssertSqlError(commandText, number);
+        AreEqual(message, error.Message);
+        HasCount(1, error.Errors);
+    }
+
+    /// <summary>
+    /// A <c>(</c> where a statement could end opens a parenthesized query
+    /// statement, which only a query may fill (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AParenWhereAStatementCouldEnd_OpensTheNextStatement()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table t (a int)").ExecuteNonQuery();
+        AreEqual(2, connection.CreateCommand("update t set a = 1 (select 2)").ExecuteScalar());
+        AreEqual(2, connection.CreateCommand("insert t values (1) (select 2)").ExecuteScalar());
+        AreEqual(3, connection.CreateCommand("declare @x int = 1 (select 3)").ExecuteScalar());
+        using var reader = connection.CreateCommand("select 1 a (select 2 b)").ExecuteReader();
+        AreEqual("a", reader.GetName(0));
+        IsTrue(reader.NextResult());
+        AreEqual("b", reader.GetName(0));
+    }
+
+    [TestMethod]
+    [DataRow("(values (1))", 156, "Incorrect syntax near the keyword 'values'.")]
+    [DataRow("(select 1))", 102, "Incorrect syntax near ')'.")]
+    [DataRow("with c as (select 1 x) select * from c)", 102, "Incorrect syntax near ')'.")]
+    [DataRow("with c as (select 1 x) select * from c (select 2)", 156, "Incorrect syntax near the keyword 'select'.")]
+    [DataRow("with c as (select 1 x) select * from c (nolock)", 215, "Parameters supplied for object 'c' which is not a function. If the parameters are intended as a table hint, a WITH keyword is required.")]
+    [DataRow("create table t (a int); select * from t (select 3)", 156, "Incorrect syntax near the keyword 'select'.")]
+    [DataRow("create table t (a int); select * from t x (select 3)", 156, "Incorrect syntax near the keyword 'select'.")]
+    [DataRow("create table t (a int); delete t (select 2)", 156, "Incorrect syntax near the keyword 'select'.")]
+    public void AParenthesizedStatement_HoldsOnlyAQuery(string commandText, int number, string message)
+        => new Simulation().AssertSqlError(commandText, number, message);
+
     [TestMethod]
     [DataRow("abs")]
     [DataRow("datalength")]

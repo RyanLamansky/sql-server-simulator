@@ -44,13 +44,18 @@ partial class Simulation
     /// that doesn't compile carries them in its report instead, among its
     /// binder errors.
     /// </param>
+    /// <param name="sendsOnce">
+    /// Whether the failures go out only the first time the text compiles under
+    /// the current schema, as a batch's and dynamic SQL's do; a module body's
+    /// caller keeps its own compiled plan and decides instead.
+    /// </param>
     /// <returns>The error or errors that stop the batch, or <see langword="null"/> when it compiled.</returns>
     /// <remarks>
     /// Real keeps compiling the statements after one it defers; the walk stops at
     /// a deferred DML target, because its recovery scan can't tell where that
     /// statement ended, so an error past it surfaces when its statement runs.
     /// </remarks>
-    private SimulatedSqlException? CompileBatch(BatchContext compileBatch, PlanCacheKey? key, out List<SimulatedSqlException>? inliningFailures)
+    private SimulatedSqlException? CompileBatch(BatchContext compileBatch, PlanCacheKey? key, out List<SimulatedSqlException>? inliningFailures, bool sendsOnce = true)
     {
         inliningFailures = null;
         var schemaVersion = Volatile.Read(ref this.SchemaVersion);
@@ -112,7 +117,7 @@ partial class Simulation
             return optimizerError;
 
         compileBatch.StatementsCompiledOnRun = inlined.CompiledOnRun;
-        if (failures is not null && (inlined.RecompilesEveryRun || this.SendsInliningFailures(enteredDatabase, compileBatch.Parser.Command.CommandText)))
+        if (failures is not null && (!sendsOnce || inlined.RecompilesEveryRun || this.SendsInliningFailures(enteredDatabase, compileBatch.Parser.Command.CommandText)))
         {
             inliningFailures = new List<SimulatedSqlException>(failures.Count);
             foreach (var (_, failure) in failures)
@@ -133,8 +138,8 @@ partial class Simulation
     /// The throwaway context <see cref="CompileBatch"/> walks
     /// <paramref name="executing"/>'s text on: the same command, a copy of the
     /// variables and table variables its parameters seeded (so the walk's own
-    /// <c>DECLARE</c>s don't collide with the run's), and the same frame and
-    /// error attribution.
+    /// <c>DECLARE</c>s don't collide with the run's), and the same frame —
+    /// a trigger body's firing frame included — and error attribution.
     /// </summary>
     private static BatchContext CompileContextFor(BatchContext executing, SimulatedDbCommand command)
     {
@@ -147,6 +152,8 @@ partial class Simulation
         compile.LineOffset = executing.LineOffset;
         compile.ErrorProcedureName = executing.ErrorProcedureName;
         compile.ForceTempTableScope = executing.ForceTempTableScope;
+        // A trigger body binds inserted / deleted against the firing frame.
+        compile.TriggerFrame = executing.TriggerFrame;
         return compile;
     }
 
@@ -211,9 +218,16 @@ partial class Simulation
         // one rather than as an error, doesn't reset.
         List<int> errorOffsets = [errorToken.StartIndex];
         int? countFrom = first.Number is 4145 or 137 ? restart : null;
+        // A Msg 4145 raised on a `(` ended the condition before it, so the
+        // parser reads on from that `(` as the start of a statement, a query
+        // or not: `WHERE [abs](1) IS NULL` reports nothing past the 4145
+        // (probed 2026-10-01 against SQL Server 2025).
+        var readOnInPlace = first.Number == 4145 && errorToken is Parser.Tokens.Operator { Character: '(' };
         for (var attempts = 0; attempts < 64; attempts++)
         {
-            restart = NextStatementStart(text, restart);
+            if (!readOnInPlace)
+                restart = NextStatementStart(text, restart);
+            readOnInPlace = false;
             if (restart >= text.Length)
                 break;
             countFrom ??= restart;

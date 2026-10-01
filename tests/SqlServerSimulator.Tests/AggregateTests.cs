@@ -762,4 +762,53 @@ public sealed class AggregateTests
         using var connection = new Simulation().CreateOpenConnection();
         AreEqual(1, connection.CreateCommand("if 1 = 0 select dbo.frog(distinct a) from (values (1)) t(a); select 1").ExecuteScalar());
     }
+
+    /// <summary>
+    /// A refused quantified call's <c>OVER</c> clause is read for its grammar
+    /// before the refusal, so a syntax error inside it wins, while what binding
+    /// would settle there doesn't (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("foo(distinct 1) over (order by a a)", 102, "Incorrect syntax near 'a'.")]
+    [DataRow("foo(all 1) over (rows unbounded preceding)", 102, "Incorrect syntax near 'rows'.")]
+    [DataRow("foo(all 1) over (partition by)", 102, "Incorrect syntax near ')'.")]
+    [DataRow("foo(all 1) over (order by (select 1 +))", 102, "Incorrect syntax near ')'.")]
+    [DataRow("foo(all 1) over (w)", 102, "Incorrect syntax near ')'.")]
+    [DataRow("foo(all 1) over (order by a rows between unbounded following and current row)", 102, "Incorrect syntax near 'following'.")]
+    [DataRow("foo(all 1) over (order by a rows 1.5 preceding)", 102, "Incorrect syntax near '1.5'.")]
+    [DataRow("dbo.foo(distinct 1) over (order by a a)", 102, "Incorrect syntax near 'a'.")]
+    [DataRow("string_agg(all a) over (order by a a)", 102, "Incorrect syntax near 'a'.")]
+    [DataRow("string_agg(distinct a) over (order by a a)", 102, "Incorrect syntax near 'a'.")]
+    [DataRow("approx_percentile_cont(all 0.5) over (order by a a)", 102, "Incorrect syntax near 'a'.")]
+    [DataRow("foo(all 1) over (order by nosuch)", 195, "'foo' is not a recognized aggregate function.")]
+    [DataRow("foo(all 1) over (partition by a rows unbounded preceding)", 195, "'foo' is not a recognized aggregate function.")]
+    [DataRow("foo(all 1) over (order by a rows between 1 following and 1 preceding)", 195, "'foo' is not a recognized aggregate function.")]
+    [DataRow("foo(all 1) over (order by next value for nosuch)", 195, "'foo' is not a recognized aggregate function.")]
+    [DataRow("foo(all 1) over (w partition by a)", 195, "'foo' is not a recognized aggregate function.")]
+    [DataRow("string_agg(distinct a) over (order by a)", 10759, "Use of DISTINCT is not allowed with the OVER clause.")]
+    public void AQuantifiedCallsOverClause_IsReadForItsGrammar(string call, int number, string message)
+        => new Simulation().AssertSqlError($"select {call} from (values (1)) t(a)", number, message);
+
+    /// <summary>
+    /// A quantified <c>STRING_AGG</c>'s Msg 313 joins the statement's binder
+    /// report where its call ends, and only while nothing ahead of it in the
+    /// binder's order failed, its own operand included (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select string_agg(distinct s), x1 from (values ('a')) v(s)", "313, 207")]
+    [DataRow("select x1, string_agg(distinct s) from (values ('a')) v(s)", "207")]
+    [DataRow("select count(*), string_agg(distinct s), x1, x2 from (values ('a')) v(s)", "313, 207, 207")]
+    [DataRow("select string_agg(distinct s), sum(x1) from (values ('a')) v(s)", "313, 207")]
+    [DataRow("select string_agg(distinct s), q.x from (values ('a')) v(s)", "313, 4104")]
+    [DataRow("select string_agg(distinct s) from (values ('a')) v(s) order by x1", "313, 207")]
+    [DataRow("select string_agg(distinct s) from (values ('a')) v(s) group by s having x1 = 1", "207")]
+    [DataRow("select string_agg(distinct x1) from (values ('a')) v(s)", "207")]
+    [DataRow("select string_agg(distinct s), string_agg(distinct x1) from (values ('a')) v(s)", "313, 207")]
+    [DataRow("select string_agg(distinct s), json_arrayagg(distinct s) from (values ('a')) v(s)", "313")]
+    public void AHeldMsg313_JoinsTheBinderReport(string select, string expected)
+    {
+        var error = new Simulation().AssertSqlError(select, int.Parse(expected.Split(',')[0], System.Globalization.CultureInfo.InvariantCulture));
+        AreEqual(expected, string.Join(", ", error.Errors.Select(static e => e.Number.ToString(System.Globalization.CultureInfo.InvariantCulture))));
+    }
 }

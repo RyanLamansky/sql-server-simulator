@@ -126,6 +126,7 @@ What it carries past the blanking, each probed 2026-09-30 against SQL Server 202
   The three-token count runs on across such an `END`.
 - **Msg 4145 and Msg 137 send the parser on in place** rather than into recovery, so the tokens after them count toward the next report.
   A Msg 4145 (a non-boolean expression where a condition belongs) is always reported and its own token counts, since the parser raised it on reading that token — which is what reports `SELECT 1 WHERE 1; SELECT 2 +`'s Msg 102.
+  One raised on a `(` ended the condition before it, so the parser reads on from that `(` as a statement, query or not — `WHERE [abs](1) IS NULL` reports nothing more (probed 2026-10-01 against SQL Server 2025).
   A Msg 137 (an undeclared variable) counts through its variable, so `DECLARE @a int = @b + @c` reports only `@b` while `SELECT @nope; SELECT @nope2` reports both, and a variable whose `DECLARE` a syntax error cost is Msg 137 where it is next read.
   A binder error after either still waits for a batch that parses.
 - **An error at the end of the text** counts every token before it and names the last one — `WITH CUBE` read as a common table expression after a refused `GROUP BY ALL` is its Msg 319 — except in a scalar or multi-statement function body, captured without its closing `END`, where it is Msg 156 near that `END`, as written and at its line.

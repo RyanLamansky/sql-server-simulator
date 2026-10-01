@@ -345,7 +345,10 @@ internal sealed partial class Selection
             // was consumed at the call site.
             if (commitOnLegacyParen)
             {
-                context.MoveNextRequired();
+                // A query there is the syntax error at its SELECT (probed
+                // 2026-10-01: `FROM t x (SELECT 3)` is Msg 156).
+                if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Select })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
                 ConsumeTableHintListBody(context, ref info, legacyForm: true);
                 return info;
             }
@@ -376,10 +379,28 @@ internal sealed partial class Selection
     internal static TableHintInfo ParseOptionalFromSourceHints(ParserContext context, bool aliasConsumed, string writtenObjectName)
     {
         var info = ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: aliasConsumed);
-        if (context.Token is not Operator { Character: '(' })
-            return info;
+        if (context.Token is Operator { Character: '(' })
+            RefuseArgumentList(context, writtenObjectName, reportsNames: true);
+        return info;
+    }
 
-        context.MoveNextRequired();
+    /// <summary>
+    /// The argument list a FROM source that is no function was written with —
+    /// see <see cref="ParseOptionalFromSourceHints"/>. A query opening it is
+    /// the syntax error at its <c>SELECT</c>, which also keeps a parenthesized
+    /// query statement after the source from reading as one (probed 2026-10-01
+    /// against SQL Server 2025: <c>FROM t (SELECT 3)</c> is Msg 156).
+    /// </summary>
+    /// <param name="context">Parser state, on the list's <c>(</c>.</param>
+    /// <param name="writtenObjectName">The source as written, which Msg 215 names.</param>
+    /// <param name="reportsNames">
+    /// Whether a name inside reports its Msg 207 ahead of the Msg 215: a
+    /// table's or view's does, a common table expression's doesn't.
+    /// </param>
+    internal static void RefuseArgumentList(ParserContext context, string writtenObjectName, bool reportsNames)
+    {
+        if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Select })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
 
         // A bare name is a column reference; one followed by `(` is a function
         // call and one followed by or preceded by `.` is part of a qualified
@@ -394,7 +415,8 @@ internal sealed partial class Selection
             var token = context.Token;
             if (pending is not null && token is not Operator { Character: '(' or '.' })
             {
-                errors.Add(SimulatedSqlException.InvalidColumnName(pending.Value));
+                if (reportsNames)
+                    errors.Add(SimulatedSqlException.InvalidColumnName(pending.Value));
                 pending = null;
             }
 

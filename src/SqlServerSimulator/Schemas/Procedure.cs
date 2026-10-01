@@ -64,6 +64,15 @@ internal sealed class Procedure(
     public ClrEntryPoint? ClrEntry;
 
     /// <summary>
+    /// Whether the procedure was created <c>WITH RECOMPILE</c>, which compiles
+    /// its body afresh on every call and keeps no <see cref="CompiledPlan"/>.
+    /// </summary>
+    public bool RecompilesEveryCall;
+
+    /// <summary>The plan the body compiled to on its last uncached call, while it stands.</summary>
+    public ModulePlan? CompiledPlan;
+
+    /// <summary>
     /// Declared parameters in source order. Each carries name, type, optional
     /// default expression, and an <c>IsOutput</c> flag for <c>OUTPUT</c> /
     /// <c>OUT</c>-declared params (which writeback to the caller's argument

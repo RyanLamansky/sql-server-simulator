@@ -887,6 +887,99 @@ internal sealed class WindowExpression : Expression
     }
 
     /// <summary>
+    /// Reads an <c>OVER</c> clause for its grammar alone, from the <c>OVER</c>
+    /// keyword to its closing paren or window name, for a call refused once the
+    /// clause has parsed (<see cref="QuantifiedCall"/>): a syntax error inside
+    /// the clause outranks the refusal, while what binding would settle — a
+    /// constant ordering term, a frame's bounds or its missing ordering beside
+    /// a partition, the window a name refers to — doesn't (probed 2026-10-01
+    /// against SQL Server 2025). A frame standing alone is the syntax error at
+    /// its keyword, and so is a window name refined by nothing.
+    /// </summary>
+    internal static void ParseClauseSyntax(ParserContext context)
+    {
+        var afterOver = context.GetNextRequired();
+        if (afterOver is Name bareName && !IsWindowBodyKeyword(bareName))
+            return;
+        if (afterOver is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var opening = context.SaveCheckpoint();
+        try
+        {
+            ParseClauseBodySyntax(context);
+        }
+        catch (SimulatedSqlException error) when (error.Class > 15)
+        {
+            // A term that fails to bind as it parses (a missing sequence's
+            // NEXT VALUE FOR) is something real meets only binding, after the
+            // refusal; the rest of the clause is read for its parens alone.
+            context.RestoreCheckpoint(opening);
+            for (var depth = 1; depth > 0;)
+            {
+                depth += context.GetNextRequired() switch
+                {
+                    Operator { Character: '(' } => 1,
+                    Operator { Character: ')' } => -1,
+                    _ => 0,
+                };
+            }
+        }
+    }
+
+    /// <summary>The body of <see cref="ParseClauseSyntax"/>, from its <c>(</c> to its <c>)</c>.</summary>
+    private static void ParseClauseBodySyntax(ParserContext context)
+    {
+        context.MoveNextRequired();
+        var refines = context.Token is Name referenceName && !IsWindowBodyKeyword(referenceName);
+        if (refines)
+            context.MoveNextRequired();
+        var elements = false;
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Partition })
+        {
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            _ = ParseExpressionList(context);
+            elements = true;
+        }
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
+        {
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            do
+            {
+                context.MoveNextRequired();
+                _ = Parse(context);
+                if (context.Token is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc })
+                    context.MoveNextRequired();
+            }
+            while (context.Token is Operator { Character: ',' });
+            elements = true;
+        }
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Rows or ContextualKeyword.Range })
+        {
+            if (!elements && !refines)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Between })
+            {
+                context.MoveNextRequired();
+                _ = ParseFrameBound(context, refusedUnbounded: ContextualKeyword.Following);
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.And })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                _ = ParseFrameBound(context, refusedUnbounded: ContextualKeyword.Preceding);
+            }
+            else
+            {
+                _ = ParseFrameBound(context, refusedUnbounded: ContextualKeyword.Following);
+            }
+            elements = true;
+        }
+        if (context.Token is not Operator { Character: ')' } || (refines && !elements))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+    }
+
+    /// <summary>
     /// Returns true when an identifier-shaped token opens a window-body element
     /// rather than naming a window — <c>PARTITION</c>, <c>ROWS</c> and
     /// <c>RANGE</c> are contextual keywords, so they tokenize as names.
@@ -1090,27 +1183,18 @@ internal sealed class WindowExpression : Expression
         if (context.Token is ReservedKeyword { Keyword: Keyword.Between })
         {
             context.MoveNextRequired();
-            start = ParseFrameBound(context);
-            // Start side can't be UNBOUNDED FOLLOWING — real SQL Server
-            // rejects at parse with Msg 102 ("near 'following'"); the
-            // simulator surfaces the same Msg 102 at the post-bound cursor
-            // position.
-            if (start.Kind == FrameBoundKind.UnboundedFollowing)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
+            // Start side can't be UNBOUNDED FOLLOWING, nor the end side
+            // UNBOUNDED PRECEDING — Msg 102 near the direction word.
+            start = ParseFrameBound(context, refusedUnbounded: ContextualKeyword.Following);
             if (context.Token is not ReservedKeyword { Keyword: Keyword.And })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
-            end = ParseFrameBound(context);
-            // End side can't be UNBOUNDED PRECEDING — probe-confirmed Msg 102.
-            if (end.Kind == FrameBoundKind.UnboundedPreceding)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
+            end = ParseFrameBound(context, refusedUnbounded: ContextualKeyword.Preceding);
         }
         else
         {
             // Single-bound shorthand: ROWS x  ≡  ROWS BETWEEN x AND CURRENT ROW.
-            start = ParseFrameBound(context);
-            if (start.Kind == FrameBoundKind.UnboundedFollowing)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
+            start = ParseFrameBound(context, refusedUnbounded: ContextualKeyword.Following);
             end = FrameBound.CurrentRow;
         }
 
@@ -1125,14 +1209,22 @@ internal sealed class WindowExpression : Expression
     /// (start can't be <c>UNBOUNDED FOLLOWING</c>; end can't be
     /// <c>UNBOUNDED PRECEDING</c>) happens later in
     /// <see cref="ValidateFrameBounds"/>. Cursor advances past the bound.
+    /// <paramref name="refusedUnbounded"/> names the direction an
+    /// <c>UNBOUNDED</c> bound can't take on this side, which is the syntax
+    /// error at that word (probed 2026-10-01 against SQL Server 2025: near
+    /// <c>'following'</c> for a starting <c>UNBOUNDED FOLLOWING</c>), as is
+    /// an offset that isn't an <c>int</c> literal (near <c>'1.5'</c>, near
+    /// <c>'3000000000'</c>).
     /// </summary>
-    private static FrameBound ParseFrameBound(ParserContext context)
+    private static FrameBound ParseFrameBound(ParserContext context, ContextualKeyword refusedUnbounded)
     {
         switch (context.Token)
         {
             case UnquotedString { ContextualKeyword: ContextualKeyword.Unbounded }:
                 {
                     context.MoveNextRequired();
+                    if (context.Token is UnquotedString { ContextualKeyword: var direction } && direction == refusedUnbounded)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
                     switch (context.Token)
                     {
                         case UnquotedString { ContextualKeyword: ContextualKeyword.Preceding }:
@@ -1155,7 +1247,7 @@ internal sealed class WindowExpression : Expression
                     context.MoveNextOptional();
                     return FrameBound.CurrentRow;
                 }
-            case Numeric { Value: { IsNull: false } numericValue }:
+            case Numeric { Value: { IsNull: false, Type.Category: SqlTypeCategory.Integer } numericValue }:
                 {
                     // Frame offset literals are integers per probe (SQL Server
                     // rejects non-integer offsets at parse). CoerceTo handles

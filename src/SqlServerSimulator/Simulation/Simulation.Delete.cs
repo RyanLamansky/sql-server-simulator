@@ -23,6 +23,24 @@ partial class Simulation
     /// once (probe-confirmed). The simulator dedupes by (page, slot)
     /// during enumeration to match.
     /// </remarks>
+    /// <summary>
+    /// A parenthesized list directly after a <c>DELETE</c> target is a legacy
+    /// hint list real refuses, so a query there is the syntax error at its
+    /// <c>SELECT</c> rather than the next statement (probed 2026-10-01 against
+    /// SQL Server 2025: <c>DELETE t (SELECT 2)</c> is Msg 156). Leaves the
+    /// cursor on the target's name.
+    /// </summary>
+    private static void RejectQueryAfterDeleteTarget(ParserContext context)
+    {
+        var onTarget = context.SaveCheckpoint();
+        if (context.GetNextOptional() is Operator { Character: '(' })
+        {
+            if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Select })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        context.RestoreCheckpoint(onTarget);
+    }
+
     private static SimulatedStatementOutcome ParseDelete(ParserContext context)
     {
         // Real binds FROM, then WHERE, then OUTPUT (probed 2026-09-27).
@@ -34,6 +52,7 @@ partial class Simulation
 
         var target = ParseDmlTarget(context, RemoteWriteKind.Delete);
         var (leadingIdent, remoteWrite, leadingView, leadingTable) = (target.Name, target.Remote, target.View, target.Table);
+        RejectQueryAfterDeleteTarget(context);
         if (leadingView is not null)
         {
             switch (RouteViewWrite(context.Batch, leadingView, TriggerActions.Delete))

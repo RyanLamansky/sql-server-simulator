@@ -400,7 +400,7 @@ partial class Simulation
         // syntax errors still fire), but suppresses the invocation itself.
         // The trailing WITH option list parses on the same terms.
         var arguments = ParseExecArguments(context, batch);
-        var resultSets = ParseExecuteOptions(batch, insertExecSource);
+        var resultSets = ParseExecuteOptions(batch, insertExecSource, out var recompile);
 
         if (batch.IsSkipping)
             yield break;
@@ -438,7 +438,7 @@ partial class Simulation
 
         var invocation = this.InvokeProcedure(
             batch, procedure, arguments, returnCodeVar, execSynonym is null ? writtenName : $"{procedure.Schema.Name}.{procedure.Name}", execSynonym,
-            framesScope: batch.Connection.FramesEveryStatement && !insertExecSource);
+            framesScope: batch.Connection.FramesEveryStatement && !insertExecSource, recompile: recompile);
         foreach (var outcome in resultSets is null ? invocation : ApplyResultSetsContract(invocation, resultSets))
             yield return outcome;
         batch.CurrentStatement.SuppressErrorReset = true;

@@ -422,6 +422,6 @@ partial class Simulation
     /// </summary>
     private static bool AdmitsDmlPlan(BatchContext batch, HeapTable table, View? view, OutputProjection? output) =>
         view is null
-        && output is not { HasTarget: true }
+        && output is not { WritesTarget: true }
         && !BlocksDmlPlan(batch, table, clientOutput: output is not null);
 }

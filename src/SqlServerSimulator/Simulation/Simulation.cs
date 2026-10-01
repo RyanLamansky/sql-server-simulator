@@ -1621,7 +1621,10 @@ public sealed partial class Simulation
                 _ = Interlocked.Decrement(ref this.dmlPlanSetCount);
         }
         if (sqlHandle is null)
+        {
             this.ForgetSentInliningFailures(database);
+            _ = Interlocked.Increment(ref this.modulePlanGeneration);
+        }
         if (sqlHandle is null && database is null)
         {
             this.TokenMemo.Clear();
@@ -3330,7 +3333,7 @@ public sealed partial class Simulation
         // A label begins the next statement as a keyword does (probed
         // 2026-09-28 against SQL Server 2025: `DECLARE @i int = 0` and
         // `GOTO l` each run on into a label on the next line).
-        if (!IsStatementBoundary(context.Token) && !IsLabelDeclaration(context))
+        if (!EndsStatement(context.Token) && !IsLabelDeclaration(context))
         {
             if (rejectTrailingToken)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -3463,9 +3466,11 @@ public sealed partial class Simulation
         // well-formed SELECT never ends on one, nor on a comma
         // (`SELECT 1 WHERE 1 IN (NULL), 2` is near ',', probed
         // 2026-09-26), nor on an AS (`(SELECT 1) AS q` is near the
-        // keyword 'as', probed 2026-09-30); any other token is left to
-        // the generic end-of-dispatch normalizer.
-        if (context.Token is (Numeric or Literal or Name or Operator { Character: ',' } or ReservedKeyword { Keyword: Keyword.As }) and not UnquotedString { IsLabelDeclaration: true })
+        // keyword 'as', probed 2026-09-30), nor on a closing paren
+        // (`(SELECT 1))` and a CTE-led `… FROM c)` are near ')', probed
+        // 2026-10-01); any other token is left to the generic
+        // end-of-dispatch normalizer.
+        if (context.Token is (Numeric or Literal or Name or Operator { Character: ',' or ')' } or ReservedKeyword { Keyword: Keyword.As }) and not UnquotedString { IsLabelDeclaration: true })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (!batch.IsSkipping)
             PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
@@ -3629,6 +3634,17 @@ public sealed partial class Simulation
         or UnquotedString { ContextualKeyword: ContextualKeyword.Throw }
         // A GOTO label declaration starts the next statement too.
         or UnquotedString { IsLabelDeclaration: true };
+
+    /// <summary>
+    /// Whether <paramref name="token"/>, standing where a complete statement
+    /// ends, lets it end: a <see cref="IsStatementBoundary">boundary</see>, or
+    /// a <c>(</c>, which opens a parenthesized query statement — <c>SELECT 1
+    /// (SELECT 2)</c> and <c>UPDATE t SET a = 1 (SELECT 2)</c> are two
+    /// statements each, and <c>SET @x = 1 (-1)</c> is the syntax error at the
+    /// <c>-</c> (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static bool EndsStatement(Token? token) =>
+        IsStatementBoundary(token) || token is Operator { Character: '(' };
 
     /// <summary>
     /// At end-of-batch, copies the final values of every InputOutput /
