@@ -280,6 +280,16 @@ internal sealed partial class Selection
         /// <c>FORCESEEK</c> names — the two can't meet (Msg 10747).
         /// </summary>
         public bool IndexNamed;
+        /// <summary>
+        /// <c>SNAPSHOT</c> — a memory-optimized table read at SNAPSHOT
+        /// isolation, the hint a disk-based table refuses (Msg 367).
+        /// </summary>
+        public bool Snapshot;
+        /// <summary>
+        /// The first hint written that a memory-optimized table refuses (Msg
+        /// 10794), lower-cased as real names it; null when none was.
+        /// </summary>
+        public string? RefusedByMemoryOptimized;
     }
 
     /// <summary>
@@ -583,6 +593,37 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// The name, lower-cased, Msg 10794 gives a table hint a memory-optimized
+    /// table refuses; null for one it takes — <c>NOLOCK</c>, the isolation
+    /// hints <c>SNAPSHOT</c>, <c>REPEATABLEREAD</c> and <c>SERIALIZABLE</c>,
+    /// and the index hints (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static string? MemoryOptimizedRefusedHint(ReadOnlySpan<char> name)
+    {
+        if (name.Length > 24)
+            return null;
+        Span<char> upper = stackalloc char[name.Length];
+        _ = name.ToUpperInvariant(upper);
+        return upper switch
+        {
+            "HOLDLOCK" => "holdlock",
+            "NOEXPAND" => "noexpand",
+            "NOWAIT" => "nowait",
+            "PAGLOCK" => "paglock",
+            "READCOMMITTED" => "readcommitted",
+            "READCOMMITTEDLOCK" => "readcommittedlock",
+            "READPAST" => "readpast",
+            "READUNCOMMITTED" => "readuncommitted",
+            "ROWLOCK" => "rowlock",
+            "TABLOCK" => "tablock",
+            "TABLOCKX" => "tablockx",
+            "UPDLOCK" => "updlock",
+            "XLOCK" => "xlock",
+            _ => null,
+        };
+    }
+
+    /// <summary>
     /// Validates and consumes a single table-hint entry: <c>name</c>,
     /// <c>name = literal</c>, or <c>name (arg-list)</c>. Unknown name →
     /// Msg 321. Cursor advances to the trailing <c>,</c> or <c>)</c>. Updates
@@ -610,6 +651,9 @@ internal sealed partial class Selection
         // granularity. READPAST skips blocked rows instead of waiting, and
         // NOWAIT zeroes the lock timeout for the hinted table so a conflict
         // raises Msg 1222 at once. Everything else parses-and-discards.
+        info.RefusedByMemoryOptimized ??= MemoryOptimizedRefusedHint(sourceSpan);
+        if (sourceSpan.Equals("SNAPSHOT", StringComparison.OrdinalIgnoreCase))
+            info.Snapshot = true;
         switch (kind)
         {
             case TableHintKind.NoLock: info.NoLock = true; break;

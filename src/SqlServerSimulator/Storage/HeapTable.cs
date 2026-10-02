@@ -336,6 +336,24 @@ internal sealed class HeapTable : SchemaObject
     public bool IsHistoryTable;
 
     /// <summary>
+    /// A memory-optimized table (<c>WITH (MEMORY_OPTIMIZED = ON)</c>), or the
+    /// backing table of a memory-optimized table type. Its rows live on the
+    /// ordinary heap; what changes is the surface — the DDL it refuses, its
+    /// hash indexes, its catalog — and how it is reached: every read is a
+    /// snapshot read and no write ever waits, a conflicting one failing at
+    /// once with Msg 41302 instead (see <c>docs/claude/memory-optimized.md</c>).
+    /// </summary>
+    public bool IsMemoryOptimized;
+
+    /// <summary>
+    /// A memory-optimized table's <c>DURABILITY</c>: 0 for
+    /// <c>SCHEMA_AND_DATA</c>, 1 for <c>SCHEMA_ONLY</c>, as
+    /// <c>sys.tables.durability</c> reports it. Both keep their rows for the
+    /// life of the simulation, which has no restart to lose them in.
+    /// </summary>
+    public byte Durability;
+
+    /// <summary>
     /// The catalog's shape of a table type's backing type table
     /// (<c>TableType.CatalogShape</c>): its constraints and indexes report
     /// under the <c>sys</c> schema and as <c>is_ms_shipped</c>.
@@ -467,6 +485,16 @@ internal sealed class HeapTable : SchemaObject
     /// has no B-tree storage.
     /// </summary>
     public readonly List<Index> Indexes = [];
+
+    /// <summary>
+    /// Hypothetical indexes (<c>CREATE INDEX … WITH STATISTICS_ONLY = n</c>):
+    /// listed apart from <see cref="Indexes"/> so nothing that reads, seeks or
+    /// enforces an index meets one. They take index ids and report through
+    /// <see cref="IndexIdentities"/> — a clustered one as <c>CLUSTERED</c> but
+    /// without displacing the heap row — and hold no storage (probed
+    /// 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    public readonly List<Index> HypotheticalIndexes = [];
 
     /// <summary>
     /// <c>CREATE STATISTICS</c>-declared standalone statistics, in creation
@@ -850,6 +878,13 @@ internal sealed class HeapTable : SchemaObject
                 else
                     _ = used.Add(index.IndexId);
             }
+            foreach (var index in this.HypotheticalIndexes)
+            {
+                if (index.IndexId < 2)
+                    pending.Add((index.ObjectId, null, index));
+                else
+                    _ = used.Add(index.IndexId);
+            }
             pending.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
             var next = 2;
             foreach (var (_, key, index) in pending)
@@ -876,6 +911,8 @@ internal sealed class HeapTable : SchemaObject
             _ = used.Add(key.IndexId);
         foreach (var index in this.Indexes)
             _ = used.Add(index.IndexId);
+        foreach (var index in this.HypotheticalIndexes)
+            _ = used.Add(index.IndexId);
         var next = 2;
         while (used.Contains(next))
             next++;
@@ -890,19 +927,22 @@ internal sealed class HeapTable : SchemaObject
             entries.Add((k.IndexId, k.IsClustered, k, null));
         foreach (var ix in this.Indexes)
             entries.Add((ix.IndexId, ix.IsClustered, null, ix));
+        foreach (var ix in this.HypotheticalIndexes)
+            entries.Add((ix.IndexId, ix.IsClustered, null, ix));
         entries.Sort(static (a, b) => a.IndexId.CompareTo(b.IndexId));
 
         var result = new List<IndexIdentity>(entries.Count + 1);
-        if (entries.Count == 0 || !entries[0].Clustered)
+        if (entries.Count == 0 || entries[0].IndexId != 1)
         {
             result.Add(new IndexIdentity(0, 0, null, null, null));
         }
         foreach (var entry in entries)
         {
             var columnstore = entry.Index is { IsColumnstore: true };
+            var hash = entry.Key?.IsHash ?? entry.Index!.IsHash;
             result.Add(new IndexIdentity(
                 entry.IndexId,
-                entry.Clustered ? (columnstore ? (byte)5 : (byte)1) : (columnstore ? (byte)6 : (byte)2),
+                entry.Clustered ? (columnstore ? (byte)5 : (byte)1) : columnstore ? (byte)6 : hash ? (byte)7 : (byte)2,
                 entry.Key is not null ? entry.Key.Name : entry.Index!.Name,
                 entry.Key,
                 entry.Index));
@@ -917,8 +957,8 @@ internal sealed class HeapTable : SchemaObject
 /// allocation authority (<see cref="HeapTable.IndexIdentities"/>). Exactly one
 /// of <see cref="Constraint"/> / <see cref="Index"/> is non-null for a real
 /// index row; both are null for the synthetic HEAP row. <c>type</c> is 0
-/// (HEAP), 1 (CLUSTERED), 2 (NONCLUSTERED), 5 (CLUSTERED COLUMNSTORE) or 6
-/// (NONCLUSTERED COLUMNSTORE).
+/// (HEAP), 1 (CLUSTERED), 2 (NONCLUSTERED), 5 (CLUSTERED COLUMNSTORE), 6
+/// (NONCLUSTERED COLUMNSTORE) or 7 (NONCLUSTERED HASH).
 /// </summary>
 internal readonly struct IndexIdentity(int indexId, byte type, string? name, KeyConstraint? constraint, Index? index)
 {

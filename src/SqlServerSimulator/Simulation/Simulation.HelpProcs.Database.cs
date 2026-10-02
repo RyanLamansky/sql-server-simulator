@@ -255,7 +255,7 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         foreach (var file in database.FilesInOrder())
         {
-            if (fileId is not null && file.FileId != fileId)
+            if ((fileId is not null && file.FileId != fileId) || file.IsContainer)
                 continue;
             var filegroup = file.IsLog ? nullFilegroup
                 : database.Filegroups.FirstOrDefault(entry => entry.Value == file.DataSpaceId).Key is { } filegroupName

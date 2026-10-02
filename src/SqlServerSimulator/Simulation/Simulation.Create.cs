@@ -179,8 +179,12 @@ partial class Simulation
             fileStreamOn = true;
         }
         SystemVersioningOptions? systemVersioning = null;
+        var memoryOptimization = default(MemoryOptimizationOptions);
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-            systemVersioning = ParseTableOptions(context);
+            systemVersioning = ParseTableOptions(context, tableDataSpace is not null, out memoryOptimization);
+        var memoryOptimized = memoryOptimization.MemoryOptimized;
+        if (memoryOptimized && (BatchContext.IsLocalTempName(tableName.Leaf) || BatchContext.IsGlobalTempName(tableName.Leaf)))
+            throw SimulatedSqlException.TemporaryMemoryOptimizedTable();
 
         // Pass 2: resolve computed columns now that every column's name has
         // been seen. The resolver throws Msg 1759 for any reference to another
@@ -372,6 +376,7 @@ partial class Simulation
         if (!isTempTable && schema!.HasNameInSharedNamespace(tableName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(tableName.Leaf);
         RejectTakenConstraintNames(isTempTable ? null : schema, tableName.Leaf, heapColumns!, pendingKeys, pendingChecks, pendingForeignKeys, isTempTable ? context.Connection : null);
+        ValidateTableDeclaration(createTargetDatabase, tableName.Leaf, memoryOptimization, heapColumns, pendingKeys, pendingIndexes);
 
         var (keyObjectIds, indexObjectIds) = AllocateDeclarationObjectIds(context.CurrentDatabase, pendingKeys, pendingIndexes);
         var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow, keyObjectIds);
@@ -430,6 +435,8 @@ partial class Simulation
             OwningDatabase = owningDatabase,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             GraphKind = graphKind,
+            IsMemoryOptimized = memoryOptimized,
+            Durability = memoryOptimization.Durability,
         };
         AttachGraphColumns(heapTable);
         PlaceNewTable(context.Batch, heapTable, tableDataSpace, textImageOn, fileStreamOn);
@@ -585,18 +592,25 @@ partial class Simulation
 
     /// <summary>
     /// Parses the trailing <c>WITH (option, …)</c> list after a CREATE TABLE
-    /// column list: <c>SYSTEM_VERSIONING = ON […]</c>, which is load-bearing,
-    /// and the storage options SSMS scripts carry — <c>DATA_COMPRESSION =
-    /// {NONE | ROW | PAGE}</c> and <c>XML_COMPRESSION = {ON | OFF}</c> — which
-    /// are parsed and discarded, the simulator storing no compressed pages. Cursor on entry:
-    /// the <c>WITH</c> keyword. Cursor on exit: the list's closing <c>)</c>.
-    /// Returns the system-versioning options, or null when none were given.
+    /// column list: <c>SYSTEM_VERSIONING = ON […]</c> and
+    /// <c>MEMORY_OPTIMIZED</c> / <c>DURABILITY</c>
+    /// (<paramref name="memoryOptimization"/>), which are load-bearing, and the
+    /// storage options SSMS scripts carry — <c>DATA_COMPRESSION = {NONE | ROW
+    /// | PAGE}</c> and <c>XML_COMPRESSION = {ON | OFF}</c> — which are parsed
+    /// and discarded, the simulator storing no compressed pages.
+    /// <paramref name="placed"/> says an <c>ON</c> clause came before the list.
+    /// Cursor on entry: the <c>WITH</c> keyword. Cursor on exit: the list's
+    /// closing <c>)</c>. Returns the system-versioning options, or null when
+    /// none were given.
     /// </summary>
-    private static SystemVersioningOptions? ParseTableOptions(ParserContext context)
+    private static SystemVersioningOptions? ParseTableOptions(ParserContext context, bool placed, out MemoryOptimizationOptions memoryOptimization)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         SystemVersioningOptions? systemVersioning = null;
+        bool? memoryOptimized = null;
+        byte? durability = null;
+        var dataCompression = false;
         while (true)
         {
             var option = context.GetNextRequired();
@@ -618,11 +632,24 @@ partial class Simulation
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     }
                     RejectOnPartitions(context);
+                    dataCompression = true;
                     break;
                 case StringToken name when name.Span.Equals("XML_COMPRESSION", StringComparison.OrdinalIgnoreCase):
                     if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     RejectOnPartitions(context);
+                    break;
+                case StringToken name when name.Span.Equals("MEMORY_OPTIMIZED", StringComparison.OrdinalIgnoreCase):
+                    memoryOptimized = context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.On or Keyword.Off } toggle
+                        ? toggle.Keyword == Keyword.On
+                        : throw SimulatedSqlException.SyntaxErrorNear(context);
+                    break;
+                case StringToken name when name.Span.Equals("DURABILITY", StringComparison.OrdinalIgnoreCase):
+                    durability = context.GetNextRequired() is StringToken { Span: var value }
+                        ? value.Equals("SCHEMA_ONLY", StringComparison.OrdinalIgnoreCase) ? (byte)1
+                            : value.Equals("SCHEMA_AND_DATA", StringComparison.OrdinalIgnoreCase) ? (byte)0
+                            : throw SimulatedSqlException.SyntaxErrorNear(context)
+                        : throw SimulatedSqlException.SyntaxErrorNear(context);
                     break;
                 case StringToken name:
                     throw new NotSupportedException($"The CREATE TABLE option {name.Span.ToString().ToUpperInvariant()} isn't modeled.");
@@ -632,9 +659,31 @@ partial class Simulation
             if (context.GetNextRequired() is not Operator { Character: ',' })
                 break;
         }
-        return context.Token is Operator { Character: ')' }
-            ? systemVersioning
-            : throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+
+        // DURABILITY belongs to a memory-optimized table, and such a table
+        // takes no placement or compression (probed 2026-10-02 against SQL
+        // Server 2025).
+        if (durability is { } writtenDurability && memoryOptimized != true)
+            throw SimulatedSqlException.DurabilityWithoutMemoryOptimized(writtenDurability);
+        if (memoryOptimized == true && placed)
+            throw SimulatedSqlException.NotSupportedWithMemoryOptimized("The feature 'ON'", 1);
+        if (memoryOptimized == true && dataCompression)
+            throw SimulatedSqlException.NotSupportedWithMemoryOptimized("The option 'DATA_COMPRESSION'", 2);
+        memoryOptimization = new(memoryOptimized == true, durability ?? 0);
+        return systemVersioning;
+    }
+
+    /// <summary>
+    /// What a <c>CREATE TABLE</c> or <c>CREATE TYPE … AS TABLE</c> option list
+    /// said about memory optimization: <c>MEMORY_OPTIMIZED = ON</c> and the
+    /// <c>DURABILITY</c> (0 <c>SCHEMA_AND_DATA</c>, 1 <c>SCHEMA_ONLY</c>).
+    /// </summary>
+    internal readonly struct MemoryOptimizationOptions(bool memoryOptimized, byte durability)
+    {
+        public readonly bool MemoryOptimized = memoryOptimized;
+        public readonly byte Durability = durability;
     }
 
     /// <summary>
@@ -925,14 +974,36 @@ partial class Simulation
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             return default;
-        if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.FillFactor })
+        // The legacy unparenthesized list: FILLFACTOR and, for CREATE INDEX,
+        // the hypothetical index's STATISTICS_ONLY, in any order (probed
+        // 2026-10-02 against SQL Server 2025).
+        context.MoveNextRequired();
+        if (context.Token is ReservedKeyword { Keyword: Keyword.FillFactor } || IsLegacyStatisticsOnly(context, statement))
         {
-            if (context.GetNextRequired() is not Operator { Character: '=' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextRequired();
-            var legacyFillFactor = ReadFillFactor(context);
-            context.MoveNextOptional();
-            return new IndexOptions(false, legacyFillFactor, null);
+            byte? legacyFillFactor = null;
+            var legacyStatisticsOnly = false;
+            while (true)
+            {
+                var isFillFactor = context.Token is ReservedKeyword { Keyword: Keyword.FillFactor };
+                if (!isFillFactor && !IsLegacyStatisticsOnly(context, statement))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Operator { Character: '=' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                if (isFillFactor)
+                {
+                    legacyFillFactor = ReadFillFactor(context);
+                }
+                else
+                {
+                    ReadStatisticsOnlyValue(context);
+                    legacyStatisticsOnly = true;
+                }
+                if (context.GetNextOptional() is not Operator { Character: ',' })
+                    break;
+                context.MoveNextRequired();
+            }
+            return new IndexOptions(false, legacyFillFactor, null, statisticsOnly: legacyStatisticsOnly);
         }
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -945,6 +1016,8 @@ partial class Simulation
         bool? allowPageLocks = null;
         bool? optimizeForSequentialKey = null;
         bool? statisticsNoRecompute = null;
+        var statisticsOnly = false;
+        int? bucketCount = null;
         var depth = 1;
         // Two-token lookbehind over the balanced skip: the option name, then its
         // '='. Only a name at the list's own depth counts — a nested group is
@@ -1024,6 +1097,19 @@ partial class Simulation
                 case Numeric or Operator { Character: '-' } when sawEquals && namedOption == "FILLFACTOR":
                     fillFactor = ReadFillFactor(context);
                     break;
+                case Numeric or Operator { Character: '-' } when sawEquals && namedOption == "BUCKET_COUNT":
+                    bucketCount = ReadBucketCount(context);
+                    break;
+                case StringToken name when depth == 1 && name.Span.Equals("BUCKET_COUNT", StringComparison.OrdinalIgnoreCase):
+                    namedOption = "BUCKET_COUNT";
+                    continue;
+                case Numeric or Operator { Character: '-' } when sawEquals && namedOption == "STATISTICS_ONLY":
+                    ReadStatisticsOnlyValue(context);
+                    statisticsOnly = true;
+                    break;
+                case StringToken name when depth == 1 && statement == IndexOptionStatement.CreateIndex && name.Span.Equals("STATISTICS_ONLY", StringComparison.OrdinalIgnoreCase):
+                    namedOption = "STATISTICS_ONLY";
+                    continue;
                 case Operator { Character: '-' } when sawEquals && namedOption == "COMPRESSION_DELAY":
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 case Numeric delay when sawEquals && namedOption == "COMPRESSION_DELAY":
@@ -1103,7 +1189,63 @@ partial class Simulation
                 throw SimulatedSqlException.ColumnstoreResumable();
         }
         context.MoveNextOptional();
-        return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting, compressionDelay, columnstoreArchive, allowRowLocks, allowPageLocks, optimizeForSequentialKey, statisticsNoRecompute: statisticsNoRecompute);
+        return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting, compressionDelay, columnstoreArchive, allowRowLocks, allowPageLocks, optimizeForSequentialKey, statisticsNoRecompute: statisticsNoRecompute, statisticsOnly: statisticsOnly, bucketCount: bucketCount);
+    }
+
+    /// <summary>
+    /// Reads a hash index's <c>BUCKET_COUNT</c>, which must be a positive
+    /// integer no larger than 2^30 (Msg 41303, raised compiling the batch —
+    /// probed 2026-10-02 against SQL Server 2025), leaving the cursor on its
+    /// last token.
+    /// </summary>
+    private static int ReadBucketCount(ParserContext context)
+    {
+        if (context.Token is Operator { Character: '-' })
+        {
+            context.MoveNextRequired();
+            throw SimulatedSqlException.BucketCountOutOfRange();
+        }
+        return context.Token is Numeric { Value: var value } && value.Type.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal
+            && value.CoerceTo(SqlType.Float).AsDouble is >= 1 and <= 1073741824 and var count
+            ? (int)count
+            : throw SimulatedSqlException.BucketCountOutOfRange();
+    }
+
+    /// <summary>
+    /// Consumes a <c>HASH</c> word after an index's or key's clustering, true
+    /// when there was one.
+    /// </summary>
+    private static bool ConsumeHashKeyword(ParserContext context)
+    {
+        if (context.Token is not StringToken { Span: var word } || !word.Equals("HASH", StringComparison.OrdinalIgnoreCase))
+            return false;
+        context.MoveNextRequired();
+        return true;
+    }
+
+    /// <summary>
+    /// The <c>BUCKET_COUNT</c> a hash index can't do without (Msg 10789,
+    /// raised compiling the batch, naming an unnamed key's index as the empty
+    /// string — probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static IndexOptions RequireBucketCount(IndexOptions options, string? indexName, string tableName) =>
+        !options.IsHash || options.BucketCount is not null
+            ? options
+            : throw SimulatedSqlException.BucketCountRequired(indexName ?? "", tableName);
+
+    private static bool IsLegacyStatisticsOnly(ParserContext context, IndexOptionStatement statement) =>
+        statement == IndexOptionStatement.CreateIndex && context.Token is StringToken { Span: var name } && name.Equals("STATISTICS_ONLY", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Reads <c>STATISTICS_ONLY</c>'s integer value, a leading minus sign
+    /// included, leaving the cursor on its last token.
+    /// </summary>
+    private static void ReadStatisticsOnlyValue(ParserContext context)
+    {
+        if (context.Token is Operator { Character: '-' })
+            context.MoveNextRequired();
+        if (context.Token is not Numeric)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
     /// <summary>
@@ -1131,11 +1273,13 @@ partial class Simulation
         switch (statement)
         {
             case IndexOptionStatement.CreateIndex:
-                if (!known)
+                if (!known && !name.Equals("STATISTICS_ONLY", StringComparison.OrdinalIgnoreCase))
                     throw SimulatedSqlException.UnrecognizedIndexOption(name, "CREATE INDEX");
                 break;
             case IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.RebuildJsonIndex:
-                if (!known)
+                // BUCKET_COUNT reaches the target, which refuses it as a
+                // memory-optimized table's index (Msg 10794).
+                if (!known && !name.Equals("BUCKET_COUNT", StringComparison.OrdinalIgnoreCase))
                     throw SimulatedSqlException.UnrecognizedIndexOption(name, "ALTER INDEX");
                 if (name.Equals("DROP_EXISTING", StringComparison.OrdinalIgnoreCase)
                     || name.Equals("OPTIMIZE_FOR_SEQUENTIAL_KEY", StringComparison.OrdinalIgnoreCase)
@@ -1145,7 +1289,7 @@ partial class Simulation
                 }
                 break;
             case IndexOptionStatement.AlterTable:
-                if (!known || name.Equals("DROP_EXISTING", StringComparison.OrdinalIgnoreCase))
+                if ((!known && !name.Equals("BUCKET_COUNT", StringComparison.OrdinalIgnoreCase)) || name.Equals("DROP_EXISTING", StringComparison.OrdinalIgnoreCase))
                     throw SimulatedSqlException.UnrecognizedIndexOption(name, "ALTER TABLE");
                 break;
             case IndexOptionStatement.CreateColumnstoreIndex or IndexOptionStatement.RebuildColumnstoreIndex:
@@ -1586,7 +1730,8 @@ partial class Simulation
         ref int identityCount,
         List<PendingInlineIndex>? pendingIndexes = null,
         List<int>? withValuesColumns = null,
-        int ordinalOffset = 0)
+        int ordinalOffset = 0,
+        HeapColumn[]? existingColumns = null)
     {
         if (context.Token is not Name columnName)
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1624,7 +1769,7 @@ partial class Simulation
             pendingComputed.Add((computedIndex, columnName.Value, computed, persisted, computedNullable, computedDefinition));
             heapColumns.Add(null);
             explicitNull.Add(false);
-            ParseComputedColumnInlineConstraint(context, tableName, columnName.Value, computedIndex, persisted, pendingKeys, pendingChecks, pendingForeignKeys);
+            ParseComputedColumnInlineConstraint(context, tableName, columnName.Value, computedIndex, persisted, heapColumns, pendingComputed, existingColumns, pendingKeys, pendingChecks, pendingForeignKeys);
             return;
         }
 
@@ -1703,6 +1848,7 @@ partial class Simulation
         var inlineKeyClustered = (bool?)null;
         var inlineKeyOptions = default(IndexOptions);
         string? inlineKeyName = null;
+        var inlineKeyColumns = new List<(string Name, bool Descending)>();
         string? inlineFkName = null;
         string? inlineDefaultName = null;
         // One column definition admits at most one inline CHECK (Msg 8148);
@@ -1793,6 +1939,8 @@ partial class Simulation
                         case ReservedKeyword { Keyword: Keyword.Null } when !nullable.HasValue:
                             nullable = false;
                             break;
+                        case ReservedKeyword { Keyword: Keyword.Null }:
+                            throw SimulatedSqlException.MultipleNullConstraints(columnName.Value, tableName);
                         case ReservedKeyword { Keyword: Keyword.For } when identitySpec is not null && !identityNotForReplication:
                             // IDENTITY(s, i) NOT FOR REPLICATION — replication
                             // isn't modeled, so the clause round-trips as
@@ -1831,6 +1979,10 @@ partial class Simulation
                     nullable = true;
                     context.MoveNextOptional();
                     continue;
+                // A second nullability marker, either spelling (probed
+                // 2026-10-02 against SQL Server 2025).
+                case ReservedKeyword { Keyword: Keyword.Null }:
+                    throw SimulatedSqlException.MultipleNullConstraints(columnName.Value, tableName);
                 case ReservedKeyword { Keyword: Keyword.Default } when defaultExpression is null:
                     context.MoveNextRequired();
                     var defaultStart = context.Token.StartIndex;
@@ -1885,7 +2037,7 @@ partial class Simulation
                             throw SimulatedSqlException.BothPrimaryKeyAndUniqueOnColumn(columnName.Value, tableName);
                         case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
                             inlineKeyName = namedConstraint.Value;
-                            (inlineKeyKind, inlineKeyClustered, inlineKeyOptions) = ParseInlineKeyKindAndModifiers(context);
+                            (inlineKeyKind, inlineKeyClustered, inlineKeyOptions) = ParseInlineKeyKindAndModifiers(context, inlineKeyColumns);
                             continue;
                         default:
                             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1902,7 +2054,7 @@ partial class Simulation
                     pendingIndexes.Add(columnLevelIndex);
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } when inlineKeyKind is null:
-                    (inlineKeyKind, inlineKeyClustered, inlineKeyOptions) = ParseInlineKeyKindAndModifiers(context);
+                    (inlineKeyKind, inlineKeyClustered, inlineKeyOptions) = ParseInlineKeyKindAndModifiers(context, inlineKeyColumns);
                     // The inline column-level form takes no direction — only
                     // the table-level column list does. Real raises Msg 156
                     // near the keyword for `a int PRIMARY KEY DESC`
@@ -1931,8 +2083,14 @@ partial class Simulation
                 case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References } referencesKw when isTableVariable || isTableType:
                     throw SimulatedSqlException.SyntaxErrorNearKeyword(referencesKw.Keyword == Keyword.Foreign ? "FOREIGN" : "REFERENCES");
                 case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References }:
-                    ConsumeOptionalForeignKeyNoisePhrase(context);
-                    ParseInlineForeignKeyTail(context, columnName.Value, heapColumns.Count, inlineFkName: inlineFkName, pendingForeignKeys);
+                    if (ConsumeOptionalForeignKeyNoisePhrase(context, tableName) is { } listedFkColumn)
+                    {
+                        ParseInlineForeignKeyTail(context, tableName, listedFkColumn, ResolveColumnLevelKeyList(context, heapColumns, pendingComputed, existingColumns, columnName.Value, [(listedFkColumn, false)])[0], inlineFkName: inlineFkName, pendingForeignKeys);
+                    }
+                    else
+                    {
+                        ParseInlineForeignKeyTail(context, tableName, columnName.Value, heapColumns.Count, inlineFkName: inlineFkName, pendingForeignKeys);
+                    }
                     inlineFkName = null;
                     continue;
             }
@@ -1942,7 +2100,7 @@ partial class Simulation
         // A sparse column must be nullable as written; the NOT NULL an inline
         // PRIMARY KEY implies is the key's refusal (Msg 1919) instead.
         var writtenNotNull = nullable == false;
-        if (inlineKeyKind == KeyConstraintKind.PrimaryKey)
+        if (inlineKeyKind == KeyConstraintKind.PrimaryKey && inlineKeyColumns.Count == 0)
         {
             if (nullable == true)
                 throw SimulatedSqlException.PrimaryKeyOnNullableColumn(tableName);
@@ -1968,7 +2126,11 @@ partial class Simulation
             && (isTableVariable || isTableType || withValuesColumns is not null || DefaultsColumnsToNull(context, tableName)));
 
         if (inlineKeyKind is KeyConstraintKind kind)
-            pendingKeys.Add((kind, inlineKeyName, [heapColumns.Count], inlineKeyClustered, inlineKeyOptions, []));
+        {
+            pendingKeys.Add(inlineKeyColumns.Count == 0
+                ? (kind, inlineKeyName, [heapColumns.Count], inlineKeyClustered, inlineKeyOptions, [])
+                : (kind, inlineKeyName, ResolveColumnLevelKeyList(context, heapColumns, pendingComputed, existingColumns, columnName.Value, inlineKeyColumns), inlineKeyClustered, inlineKeyOptions, [.. inlineKeyColumns.Select(column => column.Descending)]));
+        }
 
         IdentityState? identity = null;
         if (identitySpec is { } spec)
@@ -2212,6 +2374,9 @@ partial class Simulation
         string columnName,
         int computedIndex,
         bool persisted,
+        List<HeapColumn?> heapColumns,
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
+        HeapColumn[]? existingColumns,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
         List<PendingForeignKey>? pendingForeignKeys)
@@ -2231,8 +2396,11 @@ partial class Simulation
             switch (context.Token)
             {
                 case ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique }:
-                    var (inlineKind, inlineClustered, inlineOptions) = ParseInlineKeyKindAndModifiers(context);
-                    pendingKeys.Add((inlineKind, constraintName, [computedIndex], inlineClustered, inlineOptions, []));
+                    var keyColumns = new List<(string Name, bool Descending)>();
+                    var (inlineKind, inlineClustered, inlineOptions) = ParseInlineKeyKindAndModifiers(context, keyColumns);
+                    pendingKeys.Add(keyColumns.Count == 0
+                        ? (inlineKind, constraintName, [computedIndex], inlineClustered, inlineOptions, [])
+                        : (inlineKind, constraintName, ResolveColumnLevelKeyList(context, heapColumns, pendingComputed, existingColumns, columnName, keyColumns), inlineClustered, inlineOptions, [.. keyColumns.Select(column => column.Descending)]));
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Check }:
                     if (!persisted)
@@ -2246,8 +2414,8 @@ partial class Simulation
                 case ReservedKeyword { Keyword: Keyword.Foreign or Keyword.References }:
                     if (!persisted)
                         throw SimulatedSqlException.ComputedColumnConstraintRequiresPersisted();
-                    ConsumeOptionalForeignKeyNoisePhrase(context);
-                    ParseInlineForeignKeyTail(context, columnName, computedIndex, constraintName, pendingForeignKeys);
+                    var listedColumn = ConsumeOptionalForeignKeyNoisePhrase(context, tableName);
+                    ParseInlineForeignKeyTail(context, tableName, listedColumn ?? columnName, listedColumn is null ? computedIndex : ResolveColumnLevelKeyList(context, heapColumns, pendingComputed, existingColumns, columnName, [(listedColumn, false)])[0], constraintName, pendingForeignKeys);
                     continue;
                 default:
                     // No further constraint — the cursor is on the column
@@ -2262,18 +2430,75 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Resolves the column list a column-level <c>PRIMARY KEY</c> / <c>UNIQUE</c>
+    /// names to ordinals: a column declared before it, the column carrying it
+    /// (<paramref name="currentColumn"/>, not yet in
+    /// <paramref name="heapColumns"/> unless computed), or — for <c>ALTER
+    /// TABLE … ADD</c> — one the table already has
+    /// (<paramref name="existingColumns"/>, numbered below zero so the
+    /// caller's shift by the existing count lands it). A name none of them
+    /// holds is Msg 1911, and a repeated one Msg 1909, each followed by Msg
+    /// 1750 (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static int[] ResolveColumnLevelKeyList(
+        ParserContext context,
+        List<HeapColumn?> heapColumns,
+        List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> pendingComputed,
+        HeapColumn[]? existingColumns,
+        string currentColumn,
+        List<(string Name, bool Descending)> keyColumns)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        var ordinals = new int[keyColumns.Count];
+        for (var i = 0; i < keyColumns.Count; i++)
+        {
+            var name = keyColumns[i].Name;
+            var found = FindDeclaredColumnOrdinal(context, heapColumns, pendingComputed, name, out _);
+            if (found < 0 && collation.Equals(name, currentColumn))
+                found = heapColumns.Count;
+            var existing = found < 0 && existingColumns is not null ? Array.FindIndex(existingColumns, column => collation.Equals(column.Name, name)) : -1;
+            if (existing >= 0)
+                found = existing - existingColumns!.Length;
+            else if (found < 0)
+                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.IndexColumnMissing(name));
+            for (var j = 0; j < i; j++)
+            {
+                if (ordinals[j] == found)
+                    throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.DuplicateIndexColumn(name, state: 1));
+            }
+            ordinals[i] = found;
+        }
+        return ordinals;
+    }
+
+    /// <summary>
     /// Consumes the optional <c>FOREIGN KEY</c> noise phrase an inline
     /// column-level foreign key may carry ahead of <c>REFERENCES</c>, leaving
     /// the cursor on <c>REFERENCES</c> either way.
     /// </summary>
-    private static void ConsumeOptionalForeignKeyNoisePhrase(ParserContext context)
+    private static string? ConsumeOptionalForeignKeyNoisePhrase(ParserContext context, string tableName)
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Foreign })
-            return;
+            return null;
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Key })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.References })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        // The phrase may name its column as the table-level form does; more
+        // than one is Msg 8140 (probed 2026-10-02 against SQL Server 2025).
+        string? listed = null;
+        if (context.GetNextRequired() is Operator { Character: '(' })
+        {
+            if (context.GetNextRequired() is not Name column)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            listed = column.Value;
+            if (context.GetNextRequired() is Operator { Character: ',' })
+                throw SimulatedSqlException.ColumnForeignKeyHasManyKeys(tableName);
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+        }
+        return context.Token is ReservedKeyword { Keyword: Keyword.References }
+            ? listed
+            : throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
     /// <summary>
@@ -2678,7 +2903,7 @@ partial class Simulation
     /// UNIQUE</c> puts the clause at the end of the batch where CREATE TABLE's
     /// closing paren always follows it.
     /// </summary>
-    private static (KeyConstraintKind Kind, bool? Clustered, IndexOptions Options) ParseInlineKeyKindAndModifiers(ParserContext context)
+    private static (KeyConstraintKind Kind, bool? Clustered, IndexOptions Options) ParseInlineKeyKindAndModifiers(ParserContext context, List<(string Name, bool Descending)>? keyColumns = null)
     {
         KeyConstraintKind kind;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Primary })
@@ -2698,8 +2923,28 @@ partial class Simulation
             clustered = modifier.Keyword == Keyword.Clustered;
             context.MoveNextOptional();
         }
+        var hash = ConsumeHashKeyword(context);
+        // A column-level key may name its columns as a table-level one does —
+        // `b bigint UNIQUE (a, b)` keys on both, the column carrying it only
+        // when listed (probed 2026-10-02 against SQL Server 2025).
+        if (keyColumns is not null && context.Token is Operator { Character: '(' })
+        {
+            do
+            {
+                if (context.GetNextRequired() is not Name keyColumn)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                keyColumns.Add((keyColumn.Value, context.Token is ReservedKeyword { Keyword: Keyword.Desc }));
+                if (context.Token is ReservedKeyword { Keyword: Keyword.Asc or Keyword.Desc })
+                    context.MoveNextRequired();
+            } while (context.Token is Operator { Character: ',' });
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+        }
         // A column-level key takes its own ON clause as a table-level one does.
-        return (kind, clustered, ParseOptionalIndexWithClause(context).WithDataSpace(ParseOptionalDataSpaceClause(context, out _)));
+        var options = ParseOptionalIndexWithClause(context).WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
+        return (kind, clustered, hash ? options.AsHash() : options);
     }
 
     /// <summary>
@@ -2747,7 +2992,7 @@ partial class Simulation
         }
         // The table-level form's WITH clause follows the column list, so the
         // inline parser's own lookahead finds nothing here; it is read below.
-        var (kind, clustered, _) = ParseInlineKeyKindAndModifiers(context);
+        var (kind, clustered, modifiers) = ParseInlineKeyKindAndModifiers(context);
 
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -2785,6 +3030,8 @@ partial class Simulation
         // ON [PRIMARY]` for inline table-level PK / UNIQUE constraints; the
         // ON clause places the key's index.
         var indexOptions = ParseOptionalIndexWithClause(context).WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
+        if (modifiers.IsHash)
+            indexOptions = indexOptions.AsHash();
 
         pendingKeys.Add((kind, constraintName, [.. ordinals], clustered, indexOptions, [.. descending]));
     }
@@ -2961,6 +3208,7 @@ partial class Simulation
     /// </summary>
     private static void ParseInlineForeignKeyTail(
         ParserContext context,
+        string tableName,
         string columnName,
         int childFullOrdinal,
         string? inlineFkName,
@@ -2984,6 +3232,8 @@ partial class Simulation
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
+            if (referencedColumns.Count > 1)
+                throw SimulatedSqlException.ColumnForeignKeyHasManyKeys(tableName);
         }
         var (delAction, updAction, notForReplication) = ParseOnDeleteOnUpdateActions(context);
         pendingForeignKeys.Add(new PendingForeignKey(
@@ -3327,6 +3577,7 @@ partial class Simulation
             context.MoveNextRequired();
         }
         var isClustered = ParseOptionalIndexClustering(context);
+        var isHash = ConsumeHashKeyword(context);
         if (context.Token is UnquotedString { Span: var word } && word.Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase))
             return ParseInlineColumnstoreIndexBody(context, indexName, tableName, isUnique, isClustered, columnLevelKey, refusesColumnstore);
         (string, bool)[] columns;
@@ -3354,11 +3605,14 @@ partial class Simulation
             } while (context.Token is Operator { Character: ',' });
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextRequired();
+            // ALTER TABLE … ADD INDEX may end the batch here.
+            context.MoveNextOptional();
             columns = [.. keyList];
         }
 
         var (includeColumnNames, filter, filterDefinition, options) = ParseIndexTail(context, indexName, tableName, acceptsInclude: columnLevelKey is null);
+        if (isHash)
+            options = options.AsHash();
         if (isClustered && includeColumnNames.Count > 0)
             throw SimulatedSqlException.IncludedColumnsOnClusteredIndex(inline: true);
         if (options.IgnoreDupKey && !isUnique)
@@ -3632,6 +3886,18 @@ partial class Simulation
                     pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)),
                     pf.ReferencedTable.ToString());
             }
+            // A memory-optimized table's foreign key reaches only another
+            // memory-optimized table, takes no referential action and no NOT
+            // FOR REPLICATION (probed 2026-10-02 against SQL Server 2025).
+            if (childTable.IsMemoryOptimized || referencedTable.IsMemoryOptimized)
+            {
+                if (childTable.IsMemoryOptimized != referencedTable.IsMemoryOptimized)
+                    throw SimulatedSqlException.ForeignKeyAcrossTableKinds();
+                if ((pf.DeleteAction != ReferentialAction.NoAction ? pf.DeleteAction : pf.UpdateAction) is var action and not ReferentialAction.NoAction)
+                    throw SimulatedSqlException.NotSupportedWithMemoryOptimized($"The option '{action switch { ReferentialAction.Cascade => "CASCADE", ReferentialAction.SetNull => "SET NULL", _ => "SET DEFAULT" }}'", 134);
+                if (pf.NotForReplication)
+                    throw SimulatedSqlException.NotSupportedWithMemoryOptimized("The option 'NOT FOR REPLICATION'", 128);
+            }
             // FK column count = referenced column count. If the referenced
             // column list was omitted, default to the parent's PRIMARY KEY
             // columns (real SQL Server's behavior).
@@ -3681,6 +3947,15 @@ partial class Simulation
                     : SimulatedSqlException.ForeignKeyNoMatchingKey(
                         referencedTable.Name,
                         pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)));
+            }
+
+            // A memory-optimized table's foreign key must reference the primary
+            // key itself (Msg 10780).
+            if (childTable.IsMemoryOptimized && (ResolvePrimaryKey(referencedTable) is not { } referencedKey || !referencedKey.FullOrdinals.AsSpan().SequenceEqual(refOrdinals)))
+            {
+                throw SimulatedSqlException.MemoryOptimizedForeignKeyNeedsPrimaryKey(
+                    referencedTable.Name,
+                    pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)));
             }
 
             // Referenced columns must form a PRIMARY KEY or UNIQUE constraint,

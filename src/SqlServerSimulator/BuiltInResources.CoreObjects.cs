@@ -87,6 +87,7 @@ internal static partial class BuiltInResources
             _ => retentionInfinite,
         };
         var durabilityDescSchemaAndData = SqlValue.FromString(nvarchar60Catalog, "SCHEMA_AND_DATA");
+        var durabilityDescSchemaOnly = SqlValue.FromString(nvarchar60Catalog, "SCHEMA_ONLY");
         Sys("tables",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -104,18 +105,19 @@ internal static partial class BuiltInResources
             new("temporal_type_desc", nvarchar60Catalog, 60, true),
             new("history_table_id", SqlType.Int32, null, true),
             // Table-flavor flags SMO's Object-Explorer Tables node filters on.
-            // is_node / is_edge report a graph table; the other kinds
-            // (memory-optimized, filetable, external/PolyBase, ledger) aren't
-            // modeled, so each ships as a constant 0. ledger_type is tinyint (0 = NON_LEDGER_TABLE,
+            // is_node / is_edge report a graph table and is_memory_optimized a
+            // memory-optimized one; the other kinds (filetable,
+            // external/PolyBase, ledger) aren't modeled, so each ships as a
+            // constant 0. ledger_type is tinyint (0 = NON_LEDGER_TABLE,
             // probe-confirmed non-null on SQL Server 2025). See docs/claude/catalog-views.md.
             new("is_memory_optimized", SqlType.Bit, null, true),
             new("is_filetable", SqlType.Bit, null, true),
             new("is_external", SqlType.Bit, null, false),
             new("is_node", SqlType.Bit, null, true),
             new("is_edge", SqlType.Bit, null, true),
-            // Only memory-optimized tables have a non-default durability; every
-            // simulator table is disk-based, so durability is a constant 0 /
-            // SCHEMA_AND_DATA. SMO's CREATE-scripting table query reads it.
+            // Only memory-optimized tables have a non-default durability, a
+            // SCHEMA_ONLY one reporting 1. SMO's CREATE-scripting table query
+            // reads it.
             new("durability", SqlType.TinyInt, null, true),
             new("durability_desc", nvarchar60Catalog, 60, true),
             new("ledger_type", SqlType.TinyInt, null, true),
@@ -211,13 +213,13 @@ internal static partial class BuiltInResources
                         tt,
                         ttd,
                         htid,
-                        falseTableFlag,
+                        SqlValue.FromBoolean(t.IsMemoryOptimized),
                         falseTableFlag,
                         falseTableFlag,
                         SqlValue.FromBoolean(t.GraphKind == GraphTableKind.Node),
                         SqlValue.FromBoolean(t.GraphKind == GraphTableKind.Edge),
-                        SqlValue.FromByte(0),
-                        durabilityDescSchemaAndData,
+                        SqlValue.FromByte(t.Durability),
+                        t.Durability == 1 ? durabilityDescSchemaOnly : durabilityDescSchemaAndData,
                         ledgerTypeNone,
                         SqlValue.Null(SqlType.Int32),
                         SqlValue.FromBoolean(t.UsesAnsiNulls),
@@ -233,7 +235,9 @@ internal static partial class BuiltInResources
                         // sql_variant leave it 0) — the partition scheme's id
                         // for a table on one (probed 2026-09-27 against SQL
                         // Server 2025).
-                        SqlValue.FromInt32(t.HasLobColumn() ? t.Partitioning?.Scheme.DataSpaceId ?? t.LobFilegroupId : 0),
+                        // A memory-optimized table keeps no LOB allocation unit
+                        // on a rows filegroup.
+                        SqlValue.FromInt32(t.HasLobColumn() && !t.IsMemoryOptimized ? t.Partitioning?.Scheme.DataSpaceId ?? t.LobFilegroupId : 0),
                         SqlValue.FromInt32(t.MaxColumnIdUsed),
                         falseTableFlag, // is_replicated
                         SqlValue.FromBoolean(t.LockOnBulkLoad), // lock_on_bulk_load

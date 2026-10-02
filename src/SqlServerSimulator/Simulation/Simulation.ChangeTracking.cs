@@ -70,6 +70,7 @@ partial class Simulation
             return true;
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+        RejectOnMemoryOptimized(table, "The feature 'CHANGE_TRACKING'", 124);
 
         if (disable)
         {

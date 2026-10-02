@@ -363,8 +363,6 @@ partial class Simulation
     /// </summary>
     private static void CheckCascadeSnapshotConflicts(BatchContext batch, HeapTable childTable, List<(int PageIndex, int SlotIndex, SqlValue[] FullValues)> rows)
     {
-        if (batch.Connection.SessionIsolationLevel != System.Data.IsolationLevel.Snapshot)
-            return;
         foreach (var (pageIndex, slotIndex, _) in rows)
             VersionStore.CheckSnapshotUpdateConflict(batch, childTable, (pageIndex, slotIndex));
     }
@@ -492,11 +490,8 @@ partial class Simulation
         var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(childTable);
         var trackedColumns = tracking?.UpdatedColumns(childTable, keyOrdinals, fk.ChildColumnOrdinals);
         List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
-        if (context.Batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Snapshot)
-        {
-            foreach (var (pageIndex, slotIndex, _, _) in matching)
-                VersionStore.CheckSnapshotUpdateConflict(context.Batch, childTable, (pageIndex, slotIndex));
-        }
+        foreach (var (pageIndex, slotIndex, _, _) in matching)
+            VersionStore.CheckSnapshotUpdateConflict(context.Batch, childTable, (pageIndex, slotIndex));
         foreach (var (pageIndex, slotIndex, full, parentNew) in matching)
         {
             var oldClone = (SqlValue[])full.Clone();

@@ -86,6 +86,9 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextOptional();
+        var memoryOptimization = context.Token is ReservedKeyword { Keyword: Keyword.With }
+            ? ParseTableTypeOptions(context)
+            : default;
 
         // Pass 2: computed-column resolution. Same logic as DECLARE @t TABLE
         // (and CREATE TABLE) — resolve each pending computed expression
@@ -158,6 +161,9 @@ partial class Simulation
 
         if (TypeNameIsTaken(context, schema, typeName))
             throw SimulatedSqlException.TypeAlreadyExists(typeName.ToString());
+        // A memory-optimized table type needs an index, though no primary key
+        // or container (probed 2026-10-02 against SQL Server 2025).
+        ValidateTableDeclaration(database: null, typeName.Leaf, new(memoryOptimization.MemoryOptimized, durability: 1), heapColumns, pendingKeys, pendingIndexes);
 
         var typeTableObjectId = context.CurrentDatabase.AllocateObjectId();
         var createDate = context.Batch.CurrentStatement.UtcNow;
@@ -178,7 +184,10 @@ partial class Simulation
             columns: [.. heapColumns!],
             pendingKeys: [.. pendingKeys],
             pendingChecks: [.. pendingChecks],
-            pendingIndexes: [.. pendingIndexes]);
+            pendingIndexes: [.. pendingIndexes])
+        {
+            IsMemoryOptimized = memoryOptimization.MemoryOptimized,
+        };
         // The catalog describes the type's own constraints and indexes on its
         // backing type table, resolved once so their ids hold; each @t clone
         // resolves copies of its own.
@@ -190,6 +199,7 @@ partial class Simulation
             isTableVariable: true)
         {
             IsTypeTable = true,
+            IsMemoryOptimized = memoryOptimization.MemoryOptimized,
         };
         AddInlineIndexes(context.Batch, shape, backingName, tableType.PendingIndexes, indexObjectIds);
         tableType.CatalogShape = shape;
@@ -197,6 +207,40 @@ partial class Simulation
         RecordSlotUndo<TableType>(context, schema.TableTypes, typeName.Leaf, null);
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");
         return true;
+    }
+
+    /// <summary>
+    /// Parses a table type's <c>WITH (MEMORY_OPTIMIZED = ON | OFF)</c> option
+    /// list, entered on <c>WITH</c> and leaving the cursor past its <c>)</c>.
+    /// A table type takes no <c>DURABILITY</c> (Msg 10788, raised compiling
+    /// the batch — probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static MemoryOptimizationOptions ParseTableTypeOptions(ParserContext context)
+    {
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        bool memoryOptimized;
+        while (true)
+        {
+            var option = context.GetNextRequired();
+            if (context.GetNextRequired() is not Operator { Character: '=' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var value = context.GetNextRequired();
+            memoryOptimized = option switch
+            {
+                StringToken name when name.Span.Equals("MEMORY_OPTIMIZED", StringComparison.OrdinalIgnoreCase) => value is ReservedKeyword { Keyword: Keyword.On or Keyword.Off } toggle
+                    ? toggle.Keyword == Keyword.On
+                    : throw SimulatedSqlException.SyntaxErrorNear(context),
+                StringToken name when name.Span.Equals("DURABILITY", StringComparison.OrdinalIgnoreCase) => throw SimulatedSqlException.DurabilityOnTableType(),
+                _ => throw SimulatedSqlException.SyntaxErrorNear(option),
+            };
+            if (context.GetNextRequired() is not Operator { Character: ',' })
+                break;
+        }
+        if (context.Token is not Operator { Character: ')' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextOptional();
+        return new(memoryOptimized, durability: 0);
     }
 
     /// <summary>

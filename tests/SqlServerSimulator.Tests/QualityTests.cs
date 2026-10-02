@@ -585,7 +585,7 @@ public partial class QualityTests
         8711, 8968, 9341,
         10343, 11406, 11509, 11521, 11525, 13519, 13643, 13656, 15249, 15457, 15459, 15460,
         15461, 15477, 15574, 15575, 15622, 16909, 16930, 16945, 16956, 16961,
-        22001, 41337,
+        22001, 12311, 41305, 41325,
     ];
 
     /// <summary>Any 3-to-5-digit literal in an error-factory source; message numbers are the only ones that shape occurs in there.</summary>

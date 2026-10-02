@@ -59,7 +59,7 @@ The results are **bit-exact** to real's, which took reverse-engineering its SIMD
 ## Client surface
 
 The simulator core doesn't reference SqlClient, so the in-process reader can't hand back `SqlVector<float>`: it surfaces the text form (`GetFieldType` string, `GetDataTypeName` `vector`, `GetValue` / `GetString` the text).
-The TDS endpoint acknowledges no vector feature extension and sends a vector column the way real sends it to a client without vector support: `varchar(max)` collated `Latin1_General_100_BIN2_UTF8`, holding the text form.
+Over the TDS endpoint a client that negotiates vector support (SqlClient 6.1+) receives a float32 vector as the native type and reads `SqlVector<float>`; a float16 vector, and any vector sent to a client that didn't negotiate, travels as `varchar(max)` collated `Latin1_General_100_BIN2_UTF8` holding the text form, as real sends it (captured 2026-10-02 through SqlClient 7.0.2) — see [`tds-endpoint.md`](tds-endpoint.md).
 
 ## The float16 base type
 
@@ -139,8 +139,6 @@ Duplicated vectors are the other gap: of several identical vectors real can leav
 
 ## Divergences
 
-- **A vector-aware client reads text.**
-  Real sends SqlClient 6.1+ the binary vector type (`SqlVector<float>`); the endpoint sends every client the down-level `varchar(max)`, so a new client's `GetDataTypeName` is `varchar` where real's is `vector`.
 - **The describe surfaces always answer as for a vector-aware client** (`vector(n)`, 165 / 255, TDS 245); to an old client real answers `varchar(max)` there too.
 - **`VECTOR_SEARCH` answers exactly** where real's DiskANN graph approximates, above — and a statement with more than one binder error can repeat real's leading one (a sibling reference in its arguments is Msg 4104 three times on real, once here).
 - **Real ends the session** for an inline function whose body is a `VECTOR_SEARCH` (Msg 596 and a stack dump, probed 2026-09-29); the simulator runs it.

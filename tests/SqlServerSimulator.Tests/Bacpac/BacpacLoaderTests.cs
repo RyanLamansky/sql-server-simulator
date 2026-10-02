@@ -2509,6 +2509,32 @@ public class BacpacLoaderTests
     }
 
     /// <summary>
+    /// A memory-optimized table lands as one, created with its primary key and
+    /// given its indexes through ALTER TABLE, in a database whose
+    /// MEMORY_OPTIMIZED_DATA filegroup the import gives a container —
+    /// WideWorldImporters-Full's shape.
+    /// </summary>
+    [TestMethod]
+    public void MemoryOptimizedTable_LandsAsOne()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .MemoryOptimizedFilegroup("MO")
+            .Table("dbo", "T", t => t.Column("Id", "int").Column("V", "int").MemoryOptimized()
+                .PrimaryKey("PK_T", "Id").Index("IX_T_V", ["V"])
+                .Row(1, 10).Row(2, 20))
+            .Build();
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual("1|2|FX|1", sim.ExecuteScalar("""
+            select concat(cast(t.is_memory_optimized as int), '|', (select count(*) from dbo.T), '|',
+                (select type from sys.filegroups where name = 'MO'), '|', (select count(*) from sys.database_files where type = 2))
+            from sys.tables t where t.name = 'T'
+            """));
+        AreEqual("PK_T,IX_T_V", sim.ExecuteScalar("select string_agg(name, ',') within group (order by index_id) from sys.indexes where object_id = object_id('dbo.T') and index_id > 0"));
+    }
+
+    /// <summary>
     /// A model's database options land as DacFx's import leaves them: the
     /// async statistics switch it carries, torn-page protection off leaving
     /// CHECKSUM, and — for the two it omits at their model defaults — Service

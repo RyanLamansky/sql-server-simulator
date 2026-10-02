@@ -1032,4 +1032,50 @@ public sealed class CreateIndexTests
             select string_agg(concat(left(name, 2) + case when name like '%[_][_]%' then '' else substring(name, 3, 10) end, ':', index_id), ',') within group (order by index_id)
             from sys.indexes where object_id = object_id('t') and index_id > 0
             """));
+
+    /// <summary>
+    /// <c>STATISTICS_ONLY</c>, any value and either option form, makes the
+    /// index hypothetical: listed with its statistic, never built, its
+    /// uniqueness unenforced (probed 2026-10-02).
+    /// </summary>
+    [TestMethod]
+    public void StatisticsOnly_MakesAHypotheticalIndex()
+        => AreEqual("ixh:2:1:0|ixu:3:1:0|2", new Simulation().ExecuteScalar("""
+            create table t (id int, v int);
+            create index ixh on t (id) with statistics_only = -1;
+            create unique index ixu on t (v) with (statistics_only = 0);
+            insert t values (1, 1), (2, 1);
+            select string_agg(concat(name, ':', index_id, ':', cast(is_hypothetical as int), ':', data_space_id), '|') within group (order by index_id)
+                + '|' + cast((select count(*) from sys.stats where object_id = object_id('t')) as varchar)
+            from sys.indexes where object_id = object_id('t') and index_id > 0
+            """));
+
+    [TestMethod]
+    public void HypotheticalIndex_IsNoIndexHintTarget()
+        => _ = new Simulation().AssertSqlError("""
+            create table t (id int);
+            create index ixh on t (id) with statistics_only = -1;
+            select * from t with (index (ixh))
+            """, 308);
+
+    [TestMethod]
+    public void HypotheticalIndex_HelpIndexAndProperty()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int); create unique index ixh on t (id) with statistics_only = -1, fillfactor = 50");
+        AreEqual(1, sim.ExecuteScalar("select indexproperty(object_id('t'), 'ixh', 'IsHypothetical')"));
+        using var reader = sim.ExecuteReader("exec sp_helpindex 't'");
+        IsTrue(reader.Read());
+        AreEqual("nonclustered, unique, hypothetical", reader.GetString(1));
+    }
+
+    [TestMethod]
+    public void HypotheticalIndex_DropsAndTakesItsName()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table t (id int);
+            create index ixh on t (id) with statistics_only = -1;
+            alter index ixh on t rebuild;
+            drop index ixh on t;
+            select count(*) from sys.indexes where object_id = object_id('t') and index_id > 0
+            """));
 }

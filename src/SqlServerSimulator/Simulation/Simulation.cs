@@ -2624,7 +2624,8 @@ public sealed partial class Simulation
     /// and the two unconditional classes (deadlock victim, and the
     /// transaction-aborting errors) already rolled back above. An error
     /// marked <see cref="SimulatedSqlException.AbortsAsUnderXactAbort"/> takes
-    /// this path with the option off too.
+    /// this path with the option off too. An error raised inside a natively
+    /// compiled module's atomic block ends the batch alone.
     /// </summary>
     private static void ApplyXactAbortPromotion(SimulatedDbConnection connection, SimulatedSqlException ex, bool changesTableStructure = false, int framesThatCannotCatch = 0)
     {
@@ -2641,6 +2642,18 @@ public sealed partial class Simulation
         // under XACT_ABORT, dooming it when caught, from a procedure body too
         // (probed 2026-09-28 against SQL Server 2025).
         var arithmeticAbort = connection.Arithabort && !connection.AnsiWarnings && ex.Number is 220 or 232 or 8115 or 8134 && !ex.IsIdentityOverflow;
+        // An error inside a natively compiled module's atomic block rolls the
+        // block back — its own transaction, or its savepoint in the caller's
+        // (ParseBeginAtomicBlock) — and, uncaught, ends the batch, leaving the
+        // caller's transaction committable (probed 2026-10-02 against SQL
+        // Server 2025).
+        if (connection.AtomicBlockDepth > 0 && !(connection.XactAbort || ex.AbortsAsUnderXactAbort || structuralFailure || arithmeticAbort)
+            && !ex.XactAbortPromoted && !ex.AbortsTransaction && ex.Class is (>= 11 and <= 14) or 16 && ex.Number != 1205)
+        {
+            if (connection.OpenTryFrames - framesThatCannotCatch == 0 && !ex.RaisedByRaiserror)
+                ex.XactAbortPromoted = true;
+            return;
+        }
         if (!(connection.XactAbort || ex.AbortsAsUnderXactAbort || structuralFailure || arithmeticAbort)
             || ex.XactAbortPromoted
             || ex.AbortsTransaction
@@ -2680,6 +2693,11 @@ public sealed partial class Simulation
         if (ex.RaisedByRaiserror || (ex.Class == 11 && !structuralFailure && !ex.AbortsAsUnderXactAbort))
             return;
         ex.XactAbortPromoted = true;
+        if (ex.DoomsWhenUncaught && connection.CurrentTransaction is { } doomedAtEnd)
+        {
+            doomedAtEnd.Doomed = true;
+            return;
+        }
         connection.CurrentTransaction?.EndRollback();
     }
 

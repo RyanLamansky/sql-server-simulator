@@ -61,7 +61,7 @@ partial class Simulation
         // Phase 1b: acquire table-IX on the INSERT target (escalates to
         // table-X via TABLOCK*); row-X is taken per inserted row in
         // ProcessHeapInsert.
-        _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, targetHints, isWrite: true);
+        _ = context.Batch.AcquireDataLockIfApplicable(destinationTable, targetHints, isWrite: true, readsRows: false);
         return ProcessHeapInsert(destinationTable, context, top, destinationName);
     }
 

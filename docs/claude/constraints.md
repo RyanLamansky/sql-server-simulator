@@ -66,6 +66,17 @@ All probe-confirmed against SQL Server 2025.
 
 **Divergence**: the message names the table by the leaf the parser carries, where real echoes the name as written (`table 'dbo.t'` for a schema-qualified CREATE) — shared with the sibling column-definition errors (Msg 8141 / 8147).
 
+A second nullability marker on one column, `NULL` or `NOT NULL` in any pairing, is **Msg 8150** (probed 2026-10-02 against SQL Server 2025).
+
+## A column-level key naming its columns
+
+A column-level `PRIMARY KEY` or `UNIQUE` may carry a column list, `b bigint CONSTRAINT ux UNIQUE (a, b)`, and is then the key the list names, as a table-level one would be: the column carrying it takes part only when listed, and a primary key makes NOT NULL only the columns it lists (probed 2026-10-02 against SQL Server 2025).
+The list sits between the clustering and the `WITH` options, a direction after it is Msg 156, and a name it lacks or repeats is Msg 1911 or 1909, each then Msg 1750.
+In `ALTER TABLE … ADD` the list reaches the table's existing columns too.
+A column-level `FOREIGN KEY (col) REFERENCES` names its referencing column the same way, and more than one column on either side is **Msg 8140**.
+
+**Not modeled yet**: a list naming a column declared later in the statement, which real accepts — here, as for a table-level key, the name must already be declared.
+
 ## Constraint naming metadata
 
 `sys.check_constraints.is_system_named` is 1 for every server-generated name and 0 for a `CONSTRAINT name` one, on both declaration paths — CREATE TABLE (inline column tail and table-level list) and `ALTER TABLE … ADD` — matching real (probe-confirmed against SQL Server 2025, which reports the same split for `sys.default_constraints` and `sys.key_constraints`).

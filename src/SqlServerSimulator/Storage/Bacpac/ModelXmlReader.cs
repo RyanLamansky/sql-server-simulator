@@ -162,9 +162,13 @@ internal static class ModelXmlReader
         // only exists once phase 8 has run. Retried there.
         var deferredFullTextIndexes = new List<XElement>();
 
+        // A memory-optimized table is created with its primary key, which it
+        // can't be without; the key's own element is then passed over.
+        var memoryOptimizedKeys = MemoryOptimizedPrimaryKeys(elements);
+
         const int LastPhase = 9;
         for (var phase = 1; phase <= LastPhase; phase++)
-            RunPhase(elements, connection, result, phase, viewNames, bracketedDb, deferredComputedTables, deferredFullTextIndexes, isLastPhase: phase == LastPhase);
+            RunPhase(elements, connection, result, phase, viewNames, bracketedDb, deferredComputedTables, deferredFullTextIndexes, memoryOptimizedKeys, isLastPhase: phase == LastPhase);
     }
 
     /// <summary>
@@ -175,7 +179,7 @@ internal static class ModelXmlReader
     /// </summary>
     private static string BracketName(string name) => $"[{name.Replace("]", "]]", StringComparison.Ordinal)}]";
 
-    private static void RunPhase(List<XElement> elements, DbConnection connection, BacpacImportResult result, int phase, HashSet<string> viewNames, string bracketedDb, HashSet<string> deferredComputedTables, List<XElement> deferredFullTextIndexes, bool isLastPhase)
+    private static void RunPhase(List<XElement> elements, DbConnection connection, BacpacImportResult result, int phase, HashSet<string> viewNames, string bracketedDb, HashSet<string> deferredComputedTables, List<XElement> deferredFullTextIndexes, Dictionary<string, XElement?> memoryOptimizedKeys, bool isLastPhase)
     {
         // Inline TVFs whose first CREATE attempt failed; drained at the end of
         // the phase, once their siblings exist.
@@ -211,8 +215,12 @@ internal static class ModelXmlReader
                     // other no-dep objects. Its indexes land in phase 8 (they
                     // need the KEY INDEX + catalog).
                     ("SqlFullTextCatalog", 1) => Run(() => EmitFullTextCatalog(element, name, connection)),
-                    ("SqlTable", 2) => Run(() => EmitTable(element, name, connection, result, deferredComputedTables)),
-                    ("SqlPrimaryKeyConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: true)),
+                    ("SqlTable", 2) => Run(() => EmitTable(element, name, connection, result, deferredComputedTables, memoryOptimizedKeys)),
+                    ("SqlPrimaryKeyConstraint", 3) => Run(() =>
+                    {
+                        if (!memoryOptimizedKeys.ContainsValue(element))
+                            EmitKeyConstraint(element, name, connection, isPrimary: true);
+                    }),
                     ("SqlUniqueConstraint", 3) => Run(() => EmitKeyConstraint(element, name, connection, isPrimary: false)),
                     ("SqlCheckConstraint", 3) => Run(() => EmitCheckConstraint(element, name, connection)),
                     ("SqlDefaultConstraint", 3) => Run(() => EmitDefaultConstraint(element, name, connection)),
@@ -243,7 +251,7 @@ internal static class ModelXmlReader
                     // ALTERs) come before SqlIndex entries in document order,
                     // so the per-SqlTable computed-column pass completes
                     // before the first SqlIndex emission runs.
-                    ("SqlIndex", 8) => Run(() => EmitIndex(element, name, connection, result)),
+                    ("SqlIndex", 8) => Run(() => EmitIndex(element, name, connection, result, memoryOptimizedKeys)),
                     // Statistics follow the indexes so their stats_ids land
                     // past every index id, the numbering real reports.
                     ("SqlStatistic", 9) => Run(() => EmitStatistic(element, name, connection)),
@@ -626,6 +634,7 @@ internal static class ModelXmlReader
         "IsReadCommittedSnapshot" => $"ALTER DATABASE {bracketedDb} SET READ_COMMITTED_SNAPSHOT {OnOff(value)};",
         "IsAllowSnapshotIsolation" => $"ALTER DATABASE {bracketedDb} SET ALLOW_SNAPSHOT_ISOLATION {OnOff(value)};",
         "IsAutoUpdateStatisticsAsyncOn" => $"ALTER DATABASE {bracketedDb} SET AUTO_UPDATE_STATISTICS_ASYNC {OnOff(value)};",
+        "IsMemoryOptimizedElevatedToSnapshot" => $"ALTER DATABASE {bracketedDb} SET MEMORY_OPTIMIZED_ELEVATE_TO_SNAPSHOT {OnOff(value)};",
         // The database's compatibility level gates real behavior — the
         // simulator's own compat-170 surface among it — so a model that
         // declares one has to reach the database, or every import runs at the
@@ -771,6 +780,9 @@ internal static class ModelXmlReader
             }
         }
 
+        // A memory-optimized table type's primary key is nonclustered, and its
+        // indexes are declared with it.
+        var memoryOptimized = ReadBoolProperty(element, "IsMemoryOptimized", defaultValue: false);
         var pkClauses = new List<string>();
         var constraintsRel = element.Elements(Ns + "Relationship")
             .FirstOrDefault(r => r.Attribute("Name")?.Value == "Constraints");
@@ -795,14 +807,31 @@ internal static class ModelXmlReader
                     cols.Add(Leaf(colRef));
                 }
                 if (cols.Count > 0)
-                    pkClauses.Add($"PRIMARY KEY ({string.Join(", ", cols)})");
+                    pkClauses.Add($"PRIMARY KEY{(memoryOptimized ? " NONCLUSTERED" : "")} ({string.Join(", ", cols)})");
+            }
+        }
+        if (memoryOptimized)
+        {
+            var indexesRel = element.Elements(Ns + "Relationship").FirstOrDefault(r => r.Attribute("Name")?.Value == "Indexes");
+            foreach (var index in indexesRel?.Elements(Ns + "Entry").Elements(Ns + "Element") ?? [])
+            {
+                if (index.Attribute("Type")?.Value != "SqlTableTypeIndex" || index.Attribute("Name")?.Value is not { } indexName)
+                    continue;
+                var keys = index.Elements(Ns + "Relationship")
+                    .FirstOrDefault(r => r.Attribute("Name")?.Value == "ColumnSpecifications")
+                    ?.Elements(Ns + "Entry").Elements(Ns + "Element")
+                    .Select(ReadIndexedColumn)
+                    .OfType<string>()
+                    .ToList() ?? [];
+                if (keys.Count > 0)
+                    pkClauses.Add($"INDEX {Leaf(indexName)} {(ReadBoolProperty(index, "IsUnique", defaultValue: false) ? "UNIQUE " : "")}NONCLUSTERED ({string.Join(", ", keys)})");
             }
         }
 
         var body = string.Join(", ", columnDdls.Concat(pkClauses));
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"CREATE TYPE {qualifiedName} AS TABLE ({body});";
+        command.CommandText = $"CREATE TYPE {qualifiedName} AS TABLE ({body}){(memoryOptimized ? " WITH (MEMORY_OPTIMIZED = ON)" : "")};";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }
@@ -1027,7 +1056,7 @@ internal static class ModelXmlReader
     /// arrive as separate top-level Elements; they layer onto the table later
     /// via <c>ALTER TABLE … ADD CONSTRAINT</c>.
     /// </summary>
-    private static void EmitTable(XElement element, string? qualifiedName, DbConnection connection, BacpacImportResult result, HashSet<string> deferredComputedTables)
+    private static void EmitTable(XElement element, string? qualifiedName, DbConnection connection, BacpacImportResult result, HashSet<string> deferredComputedTables, Dictionary<string, XElement?> memoryOptimizedKeys)
     {
         if (string.IsNullOrEmpty(qualifiedName))
             throw new InvalidDataException("bacpac: SqlTable element missing Name attribute.");
@@ -1102,13 +1131,24 @@ internal static class ModelXmlReader
         var inlineDdls = new List<string>(columns.Select(c => c.Ddl));
         if (periodClause is not null)
             inlineDdls.Add(periodClause);
+        // A memory-optimized table carries its primary key and its options
+        // from the start (see docs/claude/memory-optimized.md).
+        var options = "";
+        if (memoryOptimizedKeys.TryGetValue(qualifiedName, out var memoryOptimizedKey))
+        {
+            if (memoryOptimizedKey is not null)
+                inlineDdls.Add(KeyConstraintClause(memoryOptimizedKey, memoryOptimizedKey.Attribute("Name")?.Value, isPrimary: true));
+            options = ReadStringProperty(element, "Durability") == "1"
+                ? " WITH (MEMORY_OPTIMIZED = ON, DURABILITY = SCHEMA_ONLY)"
+                : " WITH (MEMORY_OPTIMIZED = ON)";
+        }
 
         try
         {
             // The model names the LOB filegroup for a table holding a LOB
             // column; the stripped retry below may have dropped the only one,
             // so only this attempt places it.
-            ExecuteCreateTable(qualifiedName, inlineDdls, connection, PlacementClause(element, partitionedOnly: true) + TextImageClause(element));
+            ExecuteCreateTable(qualifiedName, inlineDdls, connection, options.Length > 0 ? options : PlacementClause(element, partitionedOnly: true) + TextImageClause(element));
             // Inline succeeded: HeapTable.Columns is in model order, so the
             // alias side-map keeps a slot per model column (computed slots are
             // false and never read — BCP filters computed columns out before
@@ -1462,6 +1502,22 @@ internal static class ModelXmlReader
     {
         var definingTable = ReadSingleReference(element, "DefiningTable")
             ?? throw new InvalidDataException($"bacpac: {(isPrimary ? "SqlPrimaryKeyConstraint" : "SqlUniqueConstraint")} missing DefiningTable.");
+        using var command = connection.CreateCommand();
+#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
+        command.CommandText = $"ALTER TABLE {definingTable} ADD {KeyConstraintClause(element, constraintName, isPrimary)};";
+#pragma warning restore CA2100
+        _ = command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// The <c>[CONSTRAINT name] PRIMARY KEY | UNIQUE [CLUSTERED | NONCLUSTERED
+    /// [HASH]] (cols) [WITH (BUCKET_COUNT = n)] [ON …]</c> clause of a key
+    /// constraint element, for <c>ALTER TABLE … ADD</c> or a memory-optimized
+    /// table's <c>CREATE TABLE</c>.
+    /// </summary>
+    private static string KeyConstraintClause(XElement element, string? constraintName, bool isPrimary)
+    {
+        var definingTable = ReadSingleReference(element, "DefiningTable");
         var columnRefs = element.Elements(Ns + "Relationship")
             .FirstOrDefault(r => r.Attribute("Name")?.Value == "ColumnSpecifications")
             ?.Elements(Ns + "Entry").Elements(Ns + "Element")
@@ -1480,12 +1536,32 @@ internal static class ModelXmlReader
         // TABLE ADD CONSTRAINT expects the unqualified leaf — the constraint
         // lives in its DefiningTable's schema by default.
         var constraintPrefix = string.IsNullOrEmpty(constraintName) ? "" : $"CONSTRAINT {Leaf(constraintName)} ";
+        var bucketCount = ReadStringProperty(element, "BucketCount");
+        var hashClause = bucketCount is null ? "" : " HASH";
+        var bucketClause = bucketCount is null ? "" : $" WITH (BUCKET_COUNT = {bucketCount})";
+        return $"{constraintPrefix}{kind}{clusteringClause}{hashClause} ({columnLeaves}){bucketClause}{PlacementClause(element, partitionedOnly: false)}";
+    }
 
-        using var command = connection.CreateCommand();
-#pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"ALTER TABLE {definingTable} ADD {constraintPrefix}{kind}{clusteringClause} ({columnLeaves}){PlacementClause(element, partitionedOnly: false)};";
-#pragma warning restore CA2100
-        _ = command.ExecuteNonQuery();
+    /// <summary>
+    /// The memory-optimized tables of a model (<c>IsMemoryOptimized</c>), each
+    /// with the primary key element it is created with, null when it has none.
+    /// </summary>
+    private static Dictionary<string, XElement?> MemoryOptimizedPrimaryKeys(List<XElement> elements)
+    {
+        var keys = new Dictionary<string, XElement?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var element in elements)
+        {
+            if (element.Attribute("Type")?.Value == "SqlTable" && element.Attribute("Name")?.Value is { } name && ReadBoolProperty(element, "IsMemoryOptimized", defaultValue: false))
+                keys[name] = null;
+        }
+        if (keys.Count == 0)
+            return keys;
+        foreach (var element in elements)
+        {
+            if (element.Attribute("Type")?.Value == "SqlPrimaryKeyConstraint" && ReadSingleReference(element, "DefiningTable") is { } table && keys.ContainsKey(table))
+                keys[table] = element;
+        }
+        return keys;
     }
 
     /// <summary>
@@ -2076,7 +2152,7 @@ internal static class ModelXmlReader
     /// phase-8 emission), which the CREATE INDEX parser routes to the view
     /// path (see <c>docs/claude/indexes.md</c>).
     /// </summary>
-    private static void EmitIndex(XElement element, string? indexName, DbConnection connection, BacpacImportResult result)
+    private static void EmitIndex(XElement element, string? indexName, DbConnection connection, BacpacImportResult result, Dictionary<string, XElement?> memoryOptimizedKeys)
     {
         if (string.IsNullOrEmpty(indexName))
             throw new InvalidDataException("bacpac: SqlIndex missing Name attribute.");
@@ -2109,8 +2185,12 @@ internal static class ModelXmlReader
         var whereClause = string.IsNullOrWhiteSpace(filterPredicate) ? "" : $" WHERE {filterPredicate}";
 
         using var command = connection.CreateCommand();
+        // A memory-optimized table takes its indexes through ALTER TABLE.
+        var bucketCount = ReadStringProperty(element, "BucketCount");
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
-        command.CommandText = $"CREATE {uniqueClause}{clusteringClause}INDEX {Leaf(indexName)} ON {indexedObject} ({keyList}){includeClause}{whereClause}{PlacementClause(element, partitionedOnly: false)};";
+        command.CommandText = memoryOptimizedKeys.ContainsKey(indexedObject)
+            ? $"ALTER TABLE {indexedObject} ADD INDEX {Leaf(indexName)} {uniqueClause}{(bucketCount is null ? $"NONCLUSTERED ({keyList})" : $"HASH ({keyList}) WITH (BUCKET_COUNT = {bucketCount})")};"
+            : $"CREATE {uniqueClause}{clusteringClause}INDEX {Leaf(indexName)} ON {indexedObject} ({keyList}){includeClause}{whereClause}{PlacementClause(element, partitionedOnly: false)};";
 #pragma warning restore CA2100
         try
         {
@@ -2295,9 +2375,12 @@ internal static class ModelXmlReader
             throw new InvalidDataException("bacpac: SqlFilegroup element missing Name attribute.");
         var database = ((SimulatedDbConnection)connection).CurrentDatabase;
         var filegroup = Unbracket(elementName);
-        _ = database.RegisterFilegroup(filegroup);
-        if (ReadBoolProperty(element, "ContainsMemoryOptimizedData", defaultValue: false))
-            return;
+        var dataSpaceId = database.RegisterFilegroup(filegroup);
+        // A MEMORY_OPTIMIZED_DATA filegroup gets one container, the directory
+        // its memory-optimized tables need, in place of a data file.
+        var memoryOptimized = ReadBoolProperty(element, "ContainsMemoryOptimizedData", defaultValue: false);
+        if (memoryOptimized)
+            database.MemoryOptimizedFilegroupId = dataSpaceId;
         var hash = Simulation.Fnv1a32.Initial;
         hash.Mix(database.Name);
         hash.Mix(filegroup);
@@ -2305,7 +2388,7 @@ internal static class ModelXmlReader
         using var command = connection.CreateCommand();
 #pragma warning disable CA2100 // bacpac content is caller-trusted; the loader is a translator, not an end-user input handler
         command.CommandText = $"ALTER DATABASE CURRENT ADD FILE (NAME = N'{fileName.Replace("'", "''", StringComparison.Ordinal)}', "
-            + $"FILENAME = N'/var/opt/mssql/data/{$"{database.Name}_{fileName}".Replace("'", "''", StringComparison.Ordinal)}.mdf') TO FILEGROUP {BracketName(filegroup)};";
+            + $"FILENAME = N'/var/opt/mssql/data/{$"{database.Name}_{fileName}".Replace("'", "''", StringComparison.Ordinal)}{(memoryOptimized ? "" : ".mdf")}') TO FILEGROUP {BracketName(filegroup)};";
 #pragma warning restore CA2100
         _ = command.ExecuteNonQuery();
     }

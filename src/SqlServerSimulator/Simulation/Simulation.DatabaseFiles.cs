@@ -224,6 +224,36 @@ partial class Simulation
     }
 
     /// <summary>The file <paramref name="spec"/> describes, with the defaults a file written without <c>SIZE</c> / <c>MAXSIZE</c> / <c>FILEGROWTH</c> takes.</summary>
+    /// <summary>
+    /// A container of the <c>MEMORY_OPTIMIZED_DATA</c> filegroup
+    /// <paramref name="dataSpaceId"/>: the lowest free id from 65537, with no
+    /// size, ceiling or growth (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static DatabaseFile NewContainer(Database database, FileSpecification spec, int dataSpaceId)
+    {
+        var id = 65537;
+        while (database.FindFile(id) is not null)
+            id++;
+        return new(id, isLog: false, spec.Name!, spec.FileName!, dataSpaceId, sizePages: 0, maxSizePages: -1, growth: 0, isPercentGrowth: false, isContainer: true);
+    }
+
+    /// <summary>
+    /// Refuses a container specification giving a size or growth (Msg 5509)
+    /// or a ceiling other than <c>UNLIMITED</c> (Msg 41873, then Msg 5009),
+    /// which a <c>MEMORY_OPTIMIZED_DATA</c> container can't have (probed
+    /// 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static void RejectContainerSizes(List<FileSpecification> specs)
+    {
+        foreach (var spec in specs)
+        {
+            if (spec.SizePages is not null || spec.Growth is not null)
+                throw SimulatedSqlException.FilestreamFileSizeOption(spec.Name!);
+            if (spec.MaxSizePages is not (null or -1))
+                throw SimulatedSqlException.FollowedByFilesNotInitialized(SimulatedSqlException.MemoryOptimizedContainerMaxSize());
+        }
+    }
+
     private static DatabaseFile NewFile(int fileId, bool isLog, FileSpecification spec, int dataSpaceId, int sizePages) =>
         new(fileId, isLog, spec.Name!, spec.FileName!, isLog ? 0 : dataSpaceId, sizePages,
             spec.MaxSizePages ?? -1, spec.Growth ?? BuiltInResources.FileGrowthPages, spec.GrowthIsPercent);
@@ -284,6 +314,9 @@ partial class Simulation
         }
         if (!isLog && target.IsFilegroupReadOnly(dataSpaceId))
             throw SimulatedSqlException.FilegroupIsReadOnly(FilegroupNameOf(target, dataSpaceId), 1);
+        var container = !isLog && dataSpaceId == target.MemoryOptimizedFilegroupId;
+        if (container)
+            RejectContainerSizes(specs);
 
         var simulation = context.Connection.Simulation;
         lock (simulation.Databases)
@@ -298,7 +331,7 @@ partial class Simulation
                     if (target.Collation.Equals(specs[j].Name!, spec.Name!))
                         throw SimulatedSqlException.LogicalFileNameInUse(spec.Name!, 9);
                 }
-                if (CreatedFileRefusal(spec, spec.SizePages ?? BuiltInResources.NewFileSizePages) is { } refusal)
+                if (!container && CreatedFileRefusal(spec, spec.SizePages ?? BuiltInResources.NewFileSizePages) is { } refusal)
                     throw SimulatedSqlException.FollowedByFilesNotInitialized(refusal);
                 if (PhysicalPathInUse(simulation, spec.FileName!))
                     throw SimulatedSqlException.AddFilePathExists(spec.FileName!);
@@ -306,7 +339,7 @@ partial class Simulation
             lock (target.Files)
             {
                 foreach (var spec in specs)
-                    target.Files.Add(NewFile(NextFileId(target), isLog, spec, dataSpaceId, spec.SizePages ?? BuiltInResources.NewFileSizePages));
+                    target.Files.Add(container ? NewContainer(target, spec, dataSpaceId) : NewFile(NextFileId(target), isLog, spec, dataSpaceId, spec.SizePages ?? BuiltInResources.NewFileSizePages));
             }
         }
         return true;
@@ -362,7 +395,7 @@ partial class Simulation
         var count = 0;
         foreach (var file in database.FilesInOrder())
         {
-            if (!file.IsLog && file.DataSpaceId == dataSpaceId)
+            if (!file.IsLog && !file.IsContainer && file.DataSpaceId == dataSpaceId)
                 count++;
         }
         return count;
@@ -533,6 +566,15 @@ partial class Simulation
 
         if (property is "READ_ONLY" or "READ_WRITE" && dataSpaceId == Database.PrimaryFilegroupId)
             throw SimulatedSqlException.PrimaryFilegroupReadOnlyChange();
+        // The MEMORY_OPTIMIZED_DATA filegroup already reports itself default,
+        // and its access mode is fixed (probed 2026-10-02 against SQL Server
+        // 2025).
+        if (dataSpaceId == target.MemoryOptimizedFilegroupId)
+        {
+            throw property is "READ_ONLY" or "READ_WRITE"
+                ? SimulatedSqlException.MemoryOptimizedFilegroupAccessMode()
+                : SimulatedSqlException.FilegroupPropertyAlreadySet(property, 3);
+        }
         if (FileCount(target, dataSpaceId) == 0)
             throw SimulatedSqlException.EmptyFilegroupProperty(currentName);
         lock (target.Filegroups)

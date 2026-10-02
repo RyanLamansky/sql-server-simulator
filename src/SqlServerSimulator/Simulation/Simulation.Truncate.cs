@@ -80,6 +80,7 @@ partial class Simulation
 
         // TRUNCATE deallocates pages, so a read-only database refuses it even
         // when the table already holds no rows (probe-confirmed).
+        RejectOnMemoryOptimized(table, "The statement 'TRUNCATE TABLE'", 88);
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         if (table.VectorIndexes.Count > 0)
             throw SimulatedSqlException.VectorIndexedTableTruncate(table.Name);

@@ -60,7 +60,8 @@ partial class Simulation
                 this.PendingForeignKeys,
                 ref this.identityCount,
                 withValuesColumns: this.WithValuesColumns,
-                ordinalOffset: this.Table.Columns.Length);
+                ordinalOffset: this.Table.Columns.Length,
+                existingColumns: this.Table.Columns);
     }
 
     /// <summary>
@@ -926,7 +927,9 @@ partial class Simulation
         // KEY and a statistic block a change of type, a change of size other
         // than a variable-length type growing, and NULL to NOT NULL; a PRIMARY
         // KEY blocks NOT NULL to NULL as well. Restating the column as it is
-        // passes all of them (probed 2026-09-30 against SQL Server 2025).
+        // passes all of them (probed 2026-09-30 against SQL Server 2025). A
+        // memory-optimized table's index blocks the growth too (probed
+        // 2026-10-02).
         var isTypeChange = existingCol.Type.GetType() != newType.GetType()
             || !Equals(existingCol.Type.Collation, newType.Collation)
             || Parser.Expressions.StringScalars.IsMaxForm(existingCol.Type) != Parser.Expressions.StringScalars.IsMaxForm(newType)
@@ -939,7 +942,7 @@ partial class Simulation
             (VarbinarySqlType before, VarbinarySqlType after) => before.length > 0 && after.length > before.length,
             _ => false,
         };
-        var keyBlocks = isTypeChange || (isSizeChange && !isVariableLengthGrowth) || (existingCol.Nullable && !newNullable);
+        var keyBlocks = isTypeChange || (isSizeChange && (!isVariableLengthGrowth || table.IsMemoryOptimized)) || (existingCol.Nullable && !newNullable);
         var blockers = CollectColumnBlockers(
             context.Batch.CurrentDatabase, table, ordinal, existingCol,
             includeCheckAndDefault: isTypeChange,

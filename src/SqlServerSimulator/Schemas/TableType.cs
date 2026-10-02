@@ -69,6 +69,15 @@ internal sealed class TableType(
     public HeapTable CatalogShape = null!;
 
     /// <summary>
+    /// A memory-optimized table type (<c>WITH (MEMORY_OPTIMIZED = ON)</c>),
+    /// whose variables are memory-optimized table variables: the catalog says
+    /// so, and they otherwise behave as any table variable (probed 2026-10-02
+    /// against SQL Server 2025: untouched by a rollback, readable under any
+    /// isolation level).
+    /// </summary>
+    public bool IsMemoryOptimized;
+
+    /// <summary>
     /// The backing type table's name — <c>TT_&lt;type&gt;_&lt;object_id:X8&gt;</c>,
     /// the convention real uses and <c>sys.objects</c> reports.
     /// </summary>
@@ -141,6 +150,7 @@ internal sealed class TableType(
             isTableValuedParameter: isTableValuedParameter)
         {
             InternalName = internalName,
+            IsMemoryOptimized = this.IsMemoryOptimized,
         };
         Simulation.AddInlineIndexes(batch, table, fullName, this.PendingIndexes);
         return table;

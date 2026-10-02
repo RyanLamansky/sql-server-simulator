@@ -53,6 +53,7 @@ internal static class Tds
     public const byte TokenInfo = 0xAB;
     public const byte TokenReturnValue = 0xAC;
     public const byte TokenLoginAck = 0xAD;
+    public const byte TokenFeatureExtAck = 0xAE;
     public const byte TokenRow = 0xD1;
     public const byte TokenEnvChange = 0xE3;
     public const byte TokenDone = 0xFD;

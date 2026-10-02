@@ -676,6 +676,15 @@ internal sealed partial class Database
     public int DefaultFilegroupId = PrimaryFilegroupId;
 
     /// <summary>
+    /// The <c>data_space_id</c> of the database's <c>MEMORY_OPTIMIZED_DATA</c>
+    /// filegroup, 0 while it has none. A database holds at most one (Msg
+    /// 10797), and its files are the containers memory-optimized tables need
+    /// (Msg 41337 without one). It can't be removed short of dropping the
+    /// database.
+    /// </summary>
+    public int MemoryOptimizedFilegroupId;
+
+    /// <summary>
     /// The <c>data_space_id</c>s of the filegroups marked <c>READ_ONLY</c>,
     /// whose files refuse change; read and written under a lock on
     /// <see cref="Filegroups"/>.

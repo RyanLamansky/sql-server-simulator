@@ -19,6 +19,18 @@ internal sealed class Login7Request
     public readonly string AppName;
     public readonly string Database;
 
+    /// <summary>
+    /// The JSON support version the client's feature extension asked for
+    /// (<c>FEATUREEXT_JSONSUPPORT</c>, 0x0D), 0 when it asked for none.
+    /// </summary>
+    public byte JsonSupportVersion;
+
+    /// <summary>
+    /// The vector support version the client's feature extension asked for
+    /// (<c>FEATUREEXT_VECTORSUPPORT</c>, 0x0E), 0 when it asked for none.
+    /// </summary>
+    public byte VectorSupportVersion;
+
     private Login7Request(uint tdsVersion, int packetSize, string hostName, string userName, string password, string appName, string database)
     {
         this.TdsVersion = tdsVersion;
@@ -52,7 +64,45 @@ internal sealed class Login7Request
         var appName = ReadField(payload, 48);
         var database = ReadField(payload, 68);
 
-        return new Login7Request(tdsVersion, packetSize, hostName, userName, password, appName, database);
+        var request = new Login7Request(tdsVersion, packetSize, hostName, userName, password, appName, database);
+        ReadFeatureExtension(payload, request);
+        return request;
+    }
+
+    /// <summary>
+    /// Reads the feature extension block a client flags with OptionFlags3's
+    /// fExtension bit: the offset pair at 56 locates a DWORD holding the
+    /// block's own offset, and the block is a run of feature id, DWORD
+    /// length and data, ended by 0xFF (MS-TDS 2.2.6.4). Only the JSON and
+    /// vector support versions are kept; every other feature goes
+    /// unacknowledged.
+    /// </summary>
+    private static void ReadFeatureExtension(ReadOnlySpan<byte> payload, Login7Request request)
+    {
+        if ((payload[27] & 0x10) == 0)
+            return;
+        var pointerOffset = BinaryPrimitives.ReadUInt16LittleEndian(payload[56..]);
+        if (pointerOffset + 4 > payload.Length)
+            throw new InvalidDataException("LOGIN7 feature extension pointer extends past the end of the payload.");
+        var offset = (int)BinaryPrimitives.ReadUInt32LittleEndian(payload[pointerOffset..]);
+        while (offset < payload.Length && payload[offset] != 0xFF)
+        {
+            if (offset + 5 > payload.Length)
+                throw new InvalidDataException("LOGIN7 feature extension entry extends past the end of the payload.");
+            var featureId = payload[offset];
+            var length = (int)BinaryPrimitives.ReadUInt32LittleEndian(payload[(offset + 1)..]);
+            var data = payload.Slice(offset + 5, length);
+            switch (featureId)
+            {
+                case 0x0D when length >= 1:
+                    request.JsonSupportVersion = data[0];
+                    break;
+                case 0x0E when length >= 1:
+                    request.VectorSupportVersion = data[0];
+                    break;
+            }
+            offset += 5 + length;
+        }
     }
 
     /// <summary>

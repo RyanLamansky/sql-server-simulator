@@ -987,6 +987,7 @@ partial class Simulation
             throw SimulatedSqlException.CannotDropIndexDoesNotExist(tableName.ToString(), indexName, state: 6);
         }
 
+        RejectOnMemoryOptimized(table, "The operation 'DROP INDEX'", 106);
         RecordTableDdlUndo(context, table);
 
         // DROP INDEX is gated on ALTER of the parent table; real reports the
@@ -1019,6 +1020,15 @@ partial class Simulation
                 RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
                 return;
             }
+        }
+
+        var hypothetical = table.HypotheticalIndexes.FindIndex(index => context.Batch.CurrentDatabase.Collation.Equals(index.Name, indexName));
+        if (hypothetical >= 0)
+        {
+            table.OwningDatabase?.RejectWriteWhenReadOnly();
+            table.HypotheticalIndexes.RemoveAt(hypothetical);
+            RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
+            return;
         }
 
         if (DropXmlOrSpatialIndex(context, table, indexName, tableName, oldSyntax))

@@ -281,7 +281,7 @@ partial class Simulation
                 continue;
             rows.Add([
                 SqlValue.FromSystemName(identity.Name!),
-                SqlValue.FromString(HelpIndexDescriptionType, HelpIndexDescription(identity, target.Object is HeapTable table ? PlacementLocation(batch, table, identity) : HelpFilegroupName)),
+                SqlValue.FromString(HelpIndexDescriptionType, HelpIndexDescription(identity, target.Object is HeapTable table ? PlacementLocation(batch, table, identity) : HelpFilegroupName, target.Object is HeapTable { IsMemoryOptimized: true })),
                 // A columnstore index has no key to list (probed 2026-09-26
                 // against SQL Server 2025).
                 identity.Index is { IsColumnstore: true }
@@ -302,22 +302,28 @@ partial class Simulation
 
     // The attribute phrase, in real's fixed clause order: clustered-ness,
     // columnstore, ignore-duplicate-keys, uniqueness, the constraint role, then
-    // the filegroup. The hypothetical / hash / auto-create /
-    // stats-no-recompute clauses real can also emit have no simulator
-    // counterpart, so they never appear. An index on a partition scheme is
-    // located on the scheme (probed 2026-09-27 against SQL Server 2025).
-    private static string HelpIndexDescription(IndexIdentity identity, string location)
+    // the filegroup. A hypothetical index ends at its uniqueness with
+    // ", hypothetical" and no location (probed 2026-10-02 against SQL Server
+    // 2025). The auto-create / stats-no-recompute clauses real can also emit
+    // have no simulator counterpart, so they never appear. An index on a
+    // partition scheme is located on the scheme (probed 2026-09-27 against SQL
+    // Server 2025). A memory-optimized table's index is located in MEMORY, a
+    // trailing space after it, and a hash index reads "nonclustered hash"
+    // (probed 2026-10-02).
+    private static string HelpIndexDescription(IndexIdentity identity, string location, bool memoryOptimized)
     {
         var ignoreDupKey = identity.Constraint?.IgnoreDupKey ?? identity.Index!.IgnoreDupKey;
         var isUnique = identity.Constraint is not null || identity.Index!.IsUnique;
         var kind = identity.Constraint?.Kind;
         return (identity.IndexId == 1 ? "clustered" : "nonclustered")
+            + (identity.Type == 7 ? " hash" : "")
             + (identity.Index is { IsColumnstore: true } ? ", columnstore" : "")
             + (ignoreDupKey ? ", ignore duplicate keys" : "")
             + (isUnique ? ", unique" : "")
+            + (identity.Index is { IsHypothetical: true } ? ", hypothetical" : "")
             + (kind == KeyConstraintKind.PrimaryKey ? ", primary key" : "")
             + (kind == KeyConstraintKind.Unique ? ", unique key" : "")
-            + " located on " + location;
+            + (identity.Index is { IsHypothetical: true } ? "" : memoryOptimized ? " located in MEMORY " : " located on " + location);
     }
 
     /// <summary>

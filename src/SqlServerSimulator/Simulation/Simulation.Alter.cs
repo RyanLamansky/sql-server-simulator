@@ -556,6 +556,7 @@ partial class Simulation
         ["QUOTED_IDENTIFIER"] = AlterDatabaseOptionKind.OnOff,
         ["TORN_PAGE_DETECTION"] = AlterDatabaseOptionKind.OnOff,
         ["TEMPORAL_HISTORY_RETENTION"] = AlterDatabaseOptionKind.OnOff,
+        ["MEMORY_OPTIMIZED_ELEVATE_TO_SNAPSHOT"] = AlterDatabaseOptionKind.OnOff,
         ["AUTO_CLOSE"] = AlterDatabaseOptionKind.OnOff,
         ["AUTO_SHRINK"] = AlterDatabaseOptionKind.OnOff,
         ["AUTO_CREATE_STATISTICS"] = AlterDatabaseOptionKind.OnOff,
@@ -689,6 +690,7 @@ partial class Simulation
             "CONCAT_NULL_YIELDS_NULL" => DatabaseSwitches.ConcatNullYieldsNull,
             "CURSOR_CLOSE_ON_COMMIT" => DatabaseSwitches.CursorCloseOnCommit,
             "DATE_CORRELATION_OPTIMIZATION" => DatabaseSwitches.DateCorrelationOptimization,
+            "MEMORY_OPTIMIZED_ELEVATE_TO_SNAPSHOT" => DatabaseSwitches.MemoryOptimizedElevateToSnapshot,
             "NUMERIC_ROUNDABORT" => DatabaseSwitches.NumericRoundAbort,
             "QUOTED_IDENTIFIER" => DatabaseSwitches.QuotedIdentifier,
             "TEMPORAL_HISTORY_RETENTION" => DatabaseSwitches.TemporalHistoryRetention,
@@ -1807,6 +1809,10 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Alter }:
                 if (withCheckExplicit.HasValue)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
+                var beforeAlterTarget = context.SaveCheckpoint();
+                if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Index })
+                    return TryParseAlterTableAlterIndex(context, tableName);
+                context.RestoreCheckpoint(beforeAlterTarget);
                 return TryParseAlterTableAlterColumn(context, tableName);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Rebuild }:
                 if (withCheckExplicit.HasValue)
@@ -1934,6 +1940,7 @@ partial class Simulation
             {
                 if (!context.Batch.TryResolveTable(tableName, out var escalatingTable))
                     throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+                RejectOnMemoryOptimized(escalatingTable, "The option 'LOCK_ESCALATION'", 127);
                 escalatingTable.LockEscalation = escalation;
             }
             if (afterOption is Operator { Character: ')' })
@@ -2149,6 +2156,7 @@ partial class Simulation
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+        RejectOnMemoryOptimized(table, "The operation 'ALTER TABLE REBUILD'", 126);
         if (namedPartitionList && table.Partitioning is null)
             throw SimulatedSqlException.PartitionNumberOnUnpartitionedTable(table.Name);
         if (namedPartition)

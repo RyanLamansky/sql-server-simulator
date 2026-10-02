@@ -799,4 +799,63 @@ public sealed class KeyConstraintTests
     [TestMethod]
     public void TempTableConstraintName_CollidesAcrossTempTables()
         => _ = new Simulation().AssertSqlError("create table #t (a int constraint pk_tmp primary key); create table #u (a int constraint pk_tmp primary key)", 2714);
+
+    /// <summary>A column-level key may name its columns, keying on all of them (probed 2026-10-02).</summary>
+    [TestMethod]
+    public void ColumnLevelKey_WithColumnList_KeysOnTheList()
+        => AreEqual("ux:a,b", new Simulation().ExecuteScalar("""
+            create table t (a int not null, b bigint constraint ux unique (a, b));
+            insert t values (1, 1), (1, 2);
+            select i.name + ':' + string_agg(c.name, ',') within group (order by ic.key_ordinal)
+            from sys.indexes i join sys.index_columns ic on ic.object_id = i.object_id and ic.index_id = i.index_id
+            join sys.columns c on c.object_id = i.object_id and c.column_id = ic.column_id
+            where i.object_id = object_id('t') group by i.name
+            """));
+
+    /// <summary>The column carrying a listed primary key stays nullable unless listed (probed 2026-10-02).</summary>
+    [TestMethod]
+    public void ColumnLevelPrimaryKey_WithColumnList_PromotesOnlyListedColumns()
+        => AreEqual("x:0,y:1", new Simulation().ExecuteScalar("""
+            create table t (x int, y int primary key (x));
+            select string_agg(name + ':' + cast(is_nullable as varchar), ',') within group (order by column_id) from sys.columns where object_id = object_id('t')
+            """));
+
+    [TestMethod]
+    public void ColumnLevelKey_ListNamingMissingColumn_IsMsg1911()
+        => _ = new Simulation().AssertSqlError("create table t (x int not null, y int not null unique (zz))", 1911);
+
+    [TestMethod]
+    public void ColumnLevelKey_ListRepeatingColumn_IsMsg1909()
+        => _ = new Simulation().AssertSqlError("create table t (x int not null, y int not null, z int unique (x, y, x))", 1909);
+
+    [TestMethod]
+    public void ColumnLevelKey_ListOnAddedColumn_ReachesExistingColumns()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table t (x int not null, y int not null);
+            alter table t add z int not null constraint k unique (x, z);
+            select count(*) from sys.index_columns where object_id = object_id('t') and index_id = indexproperty(object_id('t'), 'k', 'IndexID') and column_id = 1
+            """));
+
+    [TestMethod]
+    public void ColumnLevelForeignKey_NamingTwoColumns_IsMsg8140()
+        => _ = new Simulation().AssertSqlError("""
+            create table p (x int not null, y int not null, primary key (x, y));
+            create table c (x int, y int foreign key (x, y) references p (x, y))
+            """, 8140);
+
+    [TestMethod]
+    public void ColumnLevelForeignKey_NamingAnotherColumn_KeysOnIt()
+        => AreEqual("a", new Simulation().ExecuteScalar("""
+            create table p (x int not null primary key);
+            create table c (a int, y int foreign key (a) references p (x));
+            select col_name(parent_object_id, parent_column_id) from sys.foreign_key_columns
+            """));
+
+    [TestMethod]
+    public void SecondNullabilityMarker_IsMsg8150()
+    {
+        var simulation = new Simulation();
+        simulation.AssertSqlError("create table t (y int null not null)", 8150, "Multiple NULL constraints were specified for column 'y', table 't'.");
+        AreEqual(0, simulation.AssertSqlError("create table t (y int not null null)", 8150).State);
+    }
 }

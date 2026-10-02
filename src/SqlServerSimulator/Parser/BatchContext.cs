@@ -1337,13 +1337,35 @@ internal sealed class BatchContext
     /// that case so the caller's per-row logic naturally short-circuits.
     /// </para>
     /// </remarks>
-    public DataLockPlan AcquireDataLockIfApplicable(HeapTable table, Selection.TableHintInfo hints, bool isWrite)
+    public DataLockPlan AcquireDataLockIfApplicable(HeapTable table, Selection.TableHintInfo hints, bool isWrite, bool readsRows = true)
     {
         // A vector index makes its table read-only, which real settles
         // optimizing the writing statement — an un-taken branch included
         // when the batch compiles before it runs — and which ends the batch.
         if (isWrite && table.VectorIndexes.Count > 0)
             this.RejectOptimizedWrite(SimulatedSqlException.VectorIndexedTableIsReadOnly(table.Name));
+
+        // The table hints a memory-optimized table refuses, and the SNAPSHOT
+        // hint only one takes, are refused compiling the batch (probed
+        // 2026-10-02 against SQL Server 2025).
+        if (table.IsMemoryOptimized)
+        {
+            if (hints.RefusedByMemoryOptimized is { } refusedHint)
+                throw SimulatedSqlException.NotSupportedWithMemoryOptimized($"The table option '{refusedHint}'", 82);
+            if (table.IsTableVariable)
+                return DataLockPlan.Bypass;
+            if (this.IsSkipping)
+                return DataLockPlan.Bypass;
+            this.CheckMemoryOptimizedIsolation(table, hints, readsRows);
+            // No table lock and no reader lock: every read is a snapshot read
+            // (ResolveSnapshotXidForRead), and a write's row lock only detects
+            // a conflict, which AcquireOnTable turns into Msg 41302.
+            return isWrite
+                ? new DataLockPlan(rowMode: LockMode.Exclusive, rowTxScoped: true, skipBlockedRows: false, noLockReader: false)
+                : DataLockPlan.NoLock;
+        }
+        if (hints.Snapshot && !table.IsTableVariable)
+            throw SimulatedSqlException.SnapshotHintOnDiskTable();
 
         // A skipped statement — an un-taken branch, or a batch compiling before
         // it runs — touches no rows, and a transaction-scoped lock taken for it
@@ -1507,7 +1529,7 @@ internal sealed class BatchContext
             else
                 this.TestKeyLocksForWrite(table, liveImage, purpose);
         }
-        this.AcquireRowLock(table, pageIndex, slotIndex, mode);
+        this.AcquireRowLock(table, pageIndex, slotIndex, mode, conflictIsDelete: purpose == RowLockPurpose.Delete);
     }
 
     /// <summary>
@@ -1524,18 +1546,20 @@ internal sealed class BatchContext
             resource.InsertedBy = this.Connection.Session;
     }
 
-    private void AcquireRowLock(HeapTable table, int pageIndex, int slotIndex, LockMode mode, bool underLatch = false, bool countForEscalation = true)
+    private void AcquireRowLock(HeapTable table, int pageIndex, int slotIndex, LockMode mode, bool underLatch = false, bool countForEscalation = true, bool conflictIsDelete = false)
     {
         if (this.EscalatedModeOf(table) is { } escalated && (escalated == LockMode.Exclusive || mode == LockMode.Shared))
             return;
         var connection = this.Connection;
         var resource = table.GetOrCreateRowLock(pageIndex, slotIndex);
-        connection.Simulation.LockManager.Acquire(resource, mode, connection.Session, this.LockTimeoutFor(table), sweepAbandoned: !underLatch);
+        this.AcquireOnTable(table, resource, mode, connection.Session, sweepAbandoned: !underLatch, conflictIsDelete);
         if (connection.CurrentTransaction is { } activeTx)
             activeTx.HeldLocks.Add((resource, mode));
         else
             this.StatementSchemaLocks.Add((resource, mode));
-        if (countForEscalation)
+        // A memory-optimized table's row locks only detect write conflicts,
+        // so they never escalate.
+        if (countForEscalation && !table.IsMemoryOptimized)
             this.CountLocksForEscalation(table, 1, exclusive: mode != LockMode.Shared, rowLock: true);
     }
 
@@ -1550,10 +1574,13 @@ internal sealed class BatchContext
     /// a lock U conflicts with; otherwise nothing is taken yet, and the lock
     /// a qualifying row needs comes from <see cref="HoldQualifyingTargetRow"/>.
     /// <paramref name="rowBytes"/> becomes the row as it stands after a wait.
+    /// A memory-optimized table's target read waits for nothing: a row
+    /// another session writes is a conflict the write itself meets.
     /// </summary>
     public TargetRowHold AwaitTargetRow(HeapTable table, int pageIndex, int slotIndex, ref byte[] rowBytes)
     {
-        if ((Volatile.Read(ref table.ActiveDataWriters) == 0 && Volatile.Read(ref table.ActiveUpdateLocks) == 0)
+        if (table.IsMemoryOptimized
+            || (Volatile.Read(ref table.ActiveDataWriters) == 0 && Volatile.Read(ref table.ActiveUpdateLocks) == 0)
             || !table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource)
             || !Simulation.IsLockableTable(table)
             || !this.Connection.Simulation.LockManager.HasIncompatibleHolderOtherThan(resource, LockMode.Update, this.Connection.Session))
@@ -1635,7 +1662,7 @@ internal sealed class BatchContext
         var manager = connection.Simulation.LockManager;
         if (manager.IsHeldBy(resource, mode, connection.Session))
             return;
-        manager.Acquire(resource, mode, connection.Session, this.LockTimeoutFor(table));
+        this.AcquireOnTable(table, resource, mode, connection.Session);
         if (connection.CurrentTransaction is { } tx)
             tx.HeldLocks.Add((resource, mode));
         else
@@ -1650,7 +1677,7 @@ internal sealed class BatchContext
     /// </summary>
     public List<((int Page, int Slot) Address, byte[] PriorImage, LockResource Lock)>? SupersededTargetRows(HeapTable table)
     {
-        if (table.SupersededKeyImages.IsEmptyLockFree() || !Simulation.IsLockableTable(table))
+        if (table.SupersededKeyImages.IsEmptyLockFree() || !Simulation.IsLockableTable(table) || table.IsMemoryOptimized)
             return null;
         var session = this.Connection.Session;
         List<((int Page, int Slot) Address, byte[] PriorImage, LockResource Lock)>? rows = null;
@@ -1889,7 +1916,7 @@ internal sealed class BatchContext
         session.WaitingOnKey = waitingOnKey is { } key ? KeyLockGroup.Describe(key) : null;
         try
         {
-            manager.Acquire(resource, mode, session, this.LockTimeoutFor(table));
+            this.AcquireOnTable(table, resource, mode, session);
         }
         finally
         {
@@ -2152,7 +2179,7 @@ internal sealed class BatchContext
                 {
                     if (table.RowLocks.TryGetValue(rid, out var rowLock) && manager.HasIncompatibleHolderOtherThan(rowLock, rowMode, session))
                     {
-                        manager.Acquire(rowLock, rowMode, session, this.LockTimeoutFor(table));
+                        this.AcquireOnTable(table, rowLock, rowMode, session);
                         manager.Release(rowLock, rowMode, session);
                     }
                 }
@@ -2228,7 +2255,7 @@ internal sealed class BatchContext
             return true;
         if (skipIfBlocked)
             return false;
-        manager.Acquire(resource, mode, connection.Session, this.LockTimeoutFor(table));
+        this.AcquireOnTable(table, resource, mode, connection.Session);
         manager.Release(resource, mode, connection.Session);
         return true;
     }
@@ -2447,7 +2474,15 @@ internal sealed class BatchContext
         var isolation = connection.SessionIsolationLevel;
         var simulation = connection.Simulation;
 
-        if (isolation == System.Data.IsolationLevel.Snapshot)
+        // A memory-optimized table is always read at a snapshot: the
+        // transaction's, taken at its first such read, or the statement's
+        // outside one.
+        if (table.IsMemoryOptimized && connection.CurrentTransaction is null)
+        {
+            this.RcsiStatementSnapshotXid ??= simulation.CurrentTransactionCommitId;
+            return this.RcsiStatementSnapshotXid;
+        }
+        if (isolation == System.Data.IsolationLevel.Snapshot || table.IsMemoryOptimized)
         {
             if (connection.CurrentTransaction is { } tx)
             {
@@ -2563,7 +2598,7 @@ internal sealed class BatchContext
         // Wait for the row's writers to drain. Transient acquire-release
         // matches real SQL Server's RC pattern: "block until committed,
         // then release immediately."
-        manager.Acquire(resource, LockMode.Shared, connection.Session, this.LockTimeoutFor(table));
+        this.AcquireOnTable(table, resource, LockMode.Shared, connection.Session);
         manager.Release(resource, LockMode.Shared, connection.Session);
         return true;
     }
@@ -2597,7 +2632,60 @@ internal sealed class BatchContext
     /// session's own <see cref="SimulatedDbConnection.LockTimeoutMillis"/>.
     /// </summary>
     private int LockTimeoutFor(HeapTable table)
-        => this.noWaitTables.Count != 0 && this.noWaitTables.Contains(table) ? 0 : this.Connection.LockTimeoutMillis;
+        => table.IsMemoryOptimized || (this.noWaitTables.Count != 0 && this.noWaitTables.Contains(table)) ? 0 : this.Connection.LockTimeoutMillis;
+
+    /// <summary>
+    /// The isolation rules a memory-optimized table is reached under (probed
+    /// 2026-10-02 against SQL Server 2025), each ending the batch and rolling
+    /// back as under <c>XACT_ABORT</c>: a SNAPSHOT session is refused outright
+    /// (Msg 41332) and a READ UNCOMMITTED one too (Msg 10794); a REPEATABLE
+    /// READ or SERIALIZABLE session needs the <c>SNAPSHOT</c> hint (Msg
+    /// 41333); and a READ COMMITTED read inside an explicit or implicit
+    /// transaction needs an isolation hint or the database's
+    /// <c>MEMORY_OPTIMIZED_ELEVATE_TO_SNAPSHOT</c> (Msg 41368) — a write that
+    /// reads nothing, an <c>INSERT</c>'s target, needs neither. A natively
+    /// compiled module's atomic block sets its own level and is exempt.
+    /// </summary>
+    private void CheckMemoryOptimizedIsolation(HeapTable table, Selection.TableHintInfo hints, bool readsRows)
+    {
+        var connection = this.Connection;
+        if (connection.AtomicBlockDepth > 0)
+            return;
+        switch (connection.SessionIsolationLevel)
+        {
+            case System.Data.IsolationLevel.Snapshot:
+                throw SimulatedSqlException.MemoryOptimizedUnderSnapshotSession();
+            case System.Data.IsolationLevel.ReadUncommitted:
+                throw SimulatedSqlException.IsolationLevelNotSupportedWithMemoryOptimized("READ UNCOMMITTED");
+            case System.Data.IsolationLevel.RepeatableRead or System.Data.IsolationLevel.Serializable:
+                if (!hints.Snapshot)
+                    throw SimulatedSqlException.MemoryOptimizedNeedsSnapshot();
+                return;
+        }
+        if (!readsRows || hints.Snapshot || hints.Repeatable || hints.Serializable || connection.CurrentTransaction is null)
+            return;
+        if ((this.DatabaseFor(table).Switches & DatabaseSwitches.MemoryOptimizedElevateToSnapshot) == 0)
+            throw SimulatedSqlException.MemoryOptimizedReadCommittedInTransaction();
+    }
+
+    /// <summary>
+    /// Acquires <paramref name="mode"/> on <paramref name="resource"/>, one of
+    /// <paramref name="table"/>'s locks, under the table's timeout. A
+    /// memory-optimized table never waits: a lock another session holds is the
+    /// write conflict real refuses at once (Msg 41302) rather than the
+    /// timeout (Msg 1222) a zero wait would otherwise raise.
+    /// </summary>
+    private void AcquireOnTable(HeapTable table, LockResource resource, LockMode mode, SessionToken session, bool sweepAbandoned = true, bool conflictIsDelete = false)
+    {
+        try
+        {
+            this.Connection.Simulation.LockManager.Acquire(resource, mode, session, this.LockTimeoutFor(table), sweepAbandoned);
+        }
+        catch (SimulatedSqlException timeout) when (timeout.Number == 1222 && table.IsMemoryOptimized)
+        {
+            throw SimulatedSqlException.MemoryOptimizedWriteConflict(conflictIsDelete);
+        }
+    }
 
     public bool IsSkipping => this.SkipsForControlFlow || this.NoExecActive;
 
@@ -3259,6 +3347,18 @@ internal sealed class BatchContext
     /// </para>
     /// </remarks>
     public bool TryResolveTable(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapTable? table)
+    {
+        if (!this.TryResolveTableCore(name, out table))
+            return false;
+        // A natively compiled module reaches memory-optimized tables only
+        // (Msg 10775 as it binds at CREATE, naming the table as written —
+        // probed 2026-10-02 against SQL Server 2025).
+        if (this.NativelyCompiledBody && this.CreateTimeBinding && !table.IsMemoryOptimized && !table.IsTableVariable)
+            throw SimulatedSqlException.NativeModuleDiskTable(name.ToString());
+        return true;
+    }
+
+    private bool TryResolveTableCore(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapTable? table)
     {
         // Trigger pseudo-tables INSERTED / DELETED resolve first when a
         // trigger body is in flight. 1-part names only (probe-confirmed:

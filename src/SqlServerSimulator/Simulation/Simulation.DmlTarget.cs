@@ -172,13 +172,17 @@ partial class Simulation
     /// then its table-level write lock, taken transaction-scoped inside an
     /// explicit transaction. An <c>INSERT</c> locks first and checks after.
     /// </summary>
-    private static void LockWriteTable(BatchContext batch, HeapTable table, string verb, bool checkFilegroup = false)
+    private static void LockWriteTable(BatchContext batch, HeapTable table, string verb, bool checkFilegroup = false, Selection.TableHintInfo hints = default)
     {
+        // A memory-optimized table can't be a MERGE target, refused compiling
+        // the batch (probed 2026-10-02 against SQL Server 2025).
+        if (verb == "MERGE")
+            RejectOnMemoryOptimized(table, "The operation 'MERGE'", 94);
         RejectDisabledClusteredIndex(table);
         RejectIncorrectSetOptionsForWrite(table, batch, verb);
         if (checkFilegroup)
             RejectWriteToUnwritableFilegroup(table, batch, verb);
-        _ = batch.AcquireDataLockIfApplicable(table, default, isWrite: true);
+        _ = batch.AcquireDataLockIfApplicable(table, hints, isWrite: true);
     }
 
     /// <summary>How an <c>INSERT</c>, <c>UPDATE</c> or <c>DELETE</c> writes through a view.</summary>

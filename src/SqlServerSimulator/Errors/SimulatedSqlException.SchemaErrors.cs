@@ -2554,6 +2554,22 @@ partial class SimulatedSqlException
         new($"A full-text index for table or indexed view '{writtenTableName}' has already been created.", 7652, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 8150: one column definition carries two
+    /// nullability markers, <c>NULL</c> or <c>NOT NULL</c> in any pairing
+    /// (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException MultipleNullConstraints(string columnName, string tableName) =>
+        new($"Multiple NULL constraints were specified for column '{columnName}', table '{tableName}'.", 8150, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 8140: a column-level <c>FOREIGN KEY</c> names
+    /// more than one column, on its own side or the referenced one (probed
+    /// 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ColumnForeignKeyHasManyKeys(string tableName) =>
+        new($"More than one key specified in column level FOREIGN KEY constraint, table '{tableName}'.", 8140, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1909: an index names one column twice — state 1
     /// within its key list, state 2 when the <c>INCLUDE</c> list repeats a key
     /// or itself — naming the repeat as written (probed 2026-09-25 against

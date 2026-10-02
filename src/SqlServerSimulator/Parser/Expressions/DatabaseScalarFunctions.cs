@@ -239,7 +239,10 @@ internal sealed class FileId : Expression
         // internal = comparison); the modeled names carry no trailing spaces,
         // so trimming the argument is sufficient.
         var name = value.CoerceTo(SqlType.NVarchar).AsString.TrimEnd(' ');
-        if (runtime.Batch.CurrentDatabase.FindFile(name) is not { FileId: var fileId })
+        // A memory-optimized container's id, from 65537, is past smallint:
+        // FILE_ID answers NULL for it and FILE_IDEX the id (probed 2026-10-02
+        // against SQL Server 2025).
+        if (runtime.Batch.CurrentDatabase.FindFile(name) is not { FileId: var fileId } || (!this.extended && fileId > short.MaxValue))
             return SqlValue.Null(resultType);
         return this.extended ? SqlValue.FromInt32(fileId) : SqlValue.FromInt16((short)fileId);
     }

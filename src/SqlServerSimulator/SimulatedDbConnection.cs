@@ -1114,6 +1114,14 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal int NestingLevel;
 
+    /// <summary>
+    /// How many natively compiled modules' <c>BEGIN ATOMIC</c> blocks the
+    /// session is running inside. A memory-optimized table reached there runs
+    /// at the block's own isolation level, so the session-level rules real
+    /// applies elsewhere (Msg 41368 / 41333 / 41332) don't.
+    /// </summary>
+    internal int AtomicBlockDepth;
+
     /// <summary>Real SQL Server's combined nesting cap (probe-confirmed).</summary>
     internal const int MaxNestingLevel = 32;
 

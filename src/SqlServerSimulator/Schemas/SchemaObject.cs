@@ -161,6 +161,14 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     public bool UsesAnsiNulls = true;
 
     /// <summary>
+    /// A natively compiled module — a procedure, scalar function or trigger
+    /// declared <c>WITH NATIVE_COMPILATION, SCHEMABINDING</c>, whose body is
+    /// one <c>BEGIN ATOMIC</c> block. It runs as the interpreted module would;
+    /// <c>sys.sql_modules</c> reports it schema-bound and natively compiled.
+    /// </summary>
+    public bool IsNativelyCompiled;
+
+    /// <summary>
     /// The database principal a module's <c>WITH EXECUTE AS</c> clause
     /// resolved to at CREATE, or <see langword="null"/> for <c>CALLER</c> and
     /// for a module with no clause. <c>OWNER</c> stores the sentinel

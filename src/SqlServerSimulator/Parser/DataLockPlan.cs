@@ -4,7 +4,7 @@ namespace SqlServerSimulator.Parser;
 
 /// <summary>
 /// Per-row lock strategy returned by
-/// <see cref="BatchContext.AcquireDataLockIfApplicable(HeapTable, Selection.TableHintInfo, bool)"/>
+/// <see cref="BatchContext.AcquireDataLockIfApplicable(HeapTable, Selection.TableHintInfo, bool, bool)"/>
 /// after acquiring the appropriate table-level data lock. Encodes
 /// what the per-row enumeration / mutation code should do at each row
 /// touch — acquire a particular mode tx-scoped, probe-only with optional

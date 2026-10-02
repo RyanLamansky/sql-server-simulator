@@ -393,10 +393,12 @@ partial class Simulation
         if (context.GetNextRequired() is not Name name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+        var memoryOptimized = false;
         if (add && context.Token is ReservedKeyword { Keyword: Keyword.Contains })
         {
             if (context.GetNextRequired() is not (Name or ReservedKeyword))
                 throw SimulatedSqlException.SyntaxErrorNear(context);
+            memoryOptimized = context.Token is Name { Value: var contentKind } && BuiltInToken.Equals(contentKind, "MEMORY_OPTIMIZED_DATA");
             context.MoveNextOptional();
         }
         if (context.Batch.IsSkipping)
@@ -407,13 +409,21 @@ partial class Simulation
         {
             if (target.Filegroups.ContainsKey(name.Value))
                 throw SimulatedSqlException.FilegroupAlreadyExists(name.Value);
-            _ = target.RegisterFilegroup(name.Value);
+            if (memoryOptimized && target.MemoryOptimizedFilegroupId != 0)
+                throw SimulatedSqlException.SecondMemoryOptimizedFilegroup();
+            var registered = target.RegisterFilegroup(name.Value);
+            if (memoryOptimized)
+                target.MemoryOptimizedFilegroupId = registered;
             return true;
         }
         if (!target.Filegroups.TryGetValue(name.Value, out var dataSpaceId))
             throw SimulatedSqlException.FilegroupDoesNotExist(name.Value, target.Name);
         if (dataSpaceId == Database.PrimaryFilegroupId)
             throw SimulatedSqlException.FilegroupNotEmpty(name.Value, state: 6);
+        // A MEMORY_OPTIMIZED_DATA filegroup goes only with its database (probed
+        // 2026-10-02 against SQL Server 2025).
+        if (dataSpaceId == target.MemoryOptimizedFilegroupId)
+            throw SimulatedSqlException.FilegroupNotEmpty(name.Value, state: 8);
         if (FileCount(target, dataSpaceId) > 0)
             throw SimulatedSqlException.FilegroupHasFiles(name.Value);
         if (target.PartitionSchemes.EnumerateValues().Any(scheme => scheme.NextUsed == dataSpaceId || scheme.Destinations.Contains(dataSpaceId)))

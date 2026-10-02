@@ -626,23 +626,29 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses a <c>BEGIN ATOMIC [WITH (option [, option ...])] body END</c>
-    /// block — the body shape natively-compiled procedures use. Cursor on
-    /// entry: the <c>BEGIN</c> keyword. Cursor on exit: the first token
-    /// after <c>END</c>.
+    /// Parses a <c>BEGIN ATOMIC WITH (option [, option ...]) body END</c>
+    /// block — the body of a natively compiled module. Cursor on entry: the
+    /// <c>BEGIN</c> keyword. Cursor on exit: the first token after
+    /// <c>END</c>.
     /// </summary>
     /// <remarks>
-    /// The WITH options (TRANSACTION ISOLATION LEVEL, LANGUAGE, DATEFORMAT,
-    /// DATEFIRST, DELAYED_DURABILITY) are parse-and-discard. The simulator
-    /// doesn't enforce per-block isolation overrides or language-specific
-    /// date parsing inside the block, and DELAYED_DURABILITY has no
-    /// performance meaning in an in-process emulator. The body dispatches
-    /// statements like a regular BEGIN…END block — the atomic-transaction
-    /// boundary that real SQL Server enforces (the block is its own
-    /// transaction) is approximated by the simulator's implicit
-    /// per-statement undo plus any outer explicit transaction; explicit
-    /// COMMIT / ROLLBACK inside the body would surprise a caller but isn't
-    /// rejected.
+    /// <para>
+    /// The block's <c>WITH</c> list must name a <c>TRANSACTION ISOLATION
+    /// LEVEL</c> — SNAPSHOT, REPEATABLE READ or SERIALIZABLE, READ COMMITTED
+    /// being Msg 10794 — and a <c>LANGUAGE</c> (Msg 10784 for either missing),
+    /// checked as the module binds at <c>CREATE</c> (probed 2026-10-02 against
+    /// SQL Server 2025); <c>DATEFORMAT</c>, <c>DATEFIRST</c> and
+    /// <c>DELAYED_DURABILITY</c> parse and are discarded.
+    /// </para>
+    /// <para>
+    /// Running, the block is one transaction: its own when none is open,
+    /// committed when the body ends, else a savepoint in the caller's. An
+    /// error inside it rolls the block back and, uncaught, ends the batch,
+    /// leaving the caller's transaction committable (probed 2026-10-02 against
+    /// SQL Server 2025). A memory-optimized table read
+    /// inside runs at the block's level, so the session's isolation rules
+    /// don't reach it (<see cref="SimulatedDbConnection.AtomicBlockDepth"/>).
+    /// </para>
     /// </remarks>
     private IEnumerable<SimulatedStatementOutcome> ParseBeginAtomicBlock(BatchContext batch)
     {
@@ -658,33 +664,7 @@ partial class Simulation
         if (batch.CreateTimeBinding && !batch.CompilingForRun && !batch.NativelyCompiledBody)
             throw SimulatedSqlException.BeginAtomicOutsideNativeModule();
         context.MoveNextRequired(); // consume ATOMIC
-
-        // Optional WITH (...) options block. Real SQL Server requires this
-        // for natively-compiled procs but the grammar allows omission for
-        // future ATOMIC use cases. Skip token-by-token with paren balancing —
-        // the options have no semantic effect in the simulator, so loose
-        // consumption avoids per-option dispatch.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-        {
-            context.MoveNextRequired();
-            if (context.Token is not Operator { Character: '(' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            var depth = 1;
-            context.MoveNextRequired();
-            while (depth > 0)
-            {
-                if (context.Token is null)
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                if (context.Token is Operator op)
-                {
-                    if (op.Character == '(')
-                        depth++;
-                    else if (op.Character == ')')
-                        depth--;
-                }
-                context.MoveNextRequired();
-            }
-        }
+        ParseAtomicBlockOptions(context, validate: batch.CreateTimeBinding && !batch.CompilingForRun);
 
         // Body dispatch mirrors ParseBeginBlock — leading separators drained,
         // empty body rejected, statements dispatched until END.
@@ -695,8 +675,41 @@ partial class Simulation
         if (context.Token is ReservedKeyword { Keyword: Keyword.End })
             throw SimulatedSqlException.SyntaxErrorNear(context.Token);
 
-        foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
-            yield return o;
+        var connection = batch.Connection;
+        var runs = !batch.IsSkipping && !batch.CreateTimeBinding;
+        var outerTransaction = runs ? connection.CurrentTransaction : null;
+        var ownTransaction = runs && outerTransaction is null ? connection.StartTransaction(System.Data.IsolationLevel.Unspecified) : null;
+        // Inside the caller's transaction the block is a savepoint, under a
+        // name no SAVE TRANSACTION can write.
+        var savepoint = $"\u0001atomic{connection.AtomicBlockDepth}";
+        outerTransaction?.SetSavepoint(savepoint);
+        if (runs)
+            connection.AtomicBlockDepth++;
+        var completed = false;
+        try
+        {
+            foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
+                yield return o;
+            completed = true;
+        }
+        finally
+        {
+            if (runs)
+                connection.AtomicBlockDepth--;
+            // The block settles its own transaction, and an error rolls the
+            // caller's back to where the block began.
+            if (ownTransaction is not null && ReferenceEquals(connection.CurrentTransaction, ownTransaction))
+            {
+                if (completed && !ownTransaction.Doomed)
+                    ownTransaction.EndCommit();
+                else
+                    ownTransaction.EndRollback();
+            }
+            else if (!completed && outerTransaction is { Doomed: false } && ReferenceEquals(connection.CurrentTransaction, outerTransaction))
+            {
+                _ = outerTransaction.TryRollbackToSavepoint(savepoint);
+            }
+        }
 
         if (batch.ReturnSignaled || batch.BatchAborted || batch.PendingGotoLabel is not null)
             yield break;
@@ -704,5 +717,61 @@ partial class Simulation
         if (context.Token is not ReservedKeyword { Keyword: Keyword.End })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional(); // consume END
+    }
+
+    /// <summary>
+    /// Reads a <c>BEGIN ATOMIC</c> block's <c>WITH (option = value, …)</c>
+    /// list, entered on the token after <c>ATOMIC</c> and leaving the cursor
+    /// past the list's <c>)</c>. With <paramref name="validate"/> — the module
+    /// binding at <c>CREATE</c> — a missing <c>TRANSACTION ISOLATION LEVEL</c>
+    /// or <c>LANGUAGE</c> is Msg 10784 and READ COMMITTED Msg 10794.
+    /// </summary>
+    internal static void ParseAtomicBlockOptions(ParserContext context, bool validate)
+    {
+        var isolation = false;
+        var language = false;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        {
+            if (context.GetNextRequired() is not Operator { Character: '(' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            while (true)
+            {
+                context.MoveNextRequired();
+                if (context.Token is ReservedKeyword { Keyword: Keyword.Transaction })
+                {
+                    if (context.GetNextRequired() is not UnquotedString { Value: var isolationWord } || !BuiltInToken.Equals(isolationWord, "ISOLATION")
+                        || context.GetNextRequired() is not UnquotedString { Value: var levelWord } || !BuiltInToken.Equals(levelWord, "LEVEL")
+                        || context.GetNextRequired() is not Operator { Character: '=' })
+                    {
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    }
+                    var first = context.GetNextRequired().Source;
+                    var readCommitted = first.Equals("READ", StringComparison.OrdinalIgnoreCase);
+                    if (readCommitted || first.Equals("REPEATABLE", StringComparison.OrdinalIgnoreCase))
+                        context.MoveNextRequired();
+                    if (validate && readCommitted)
+                        throw SimulatedSqlException.ReadCommittedNativeModule();
+                    isolation = true;
+                }
+                else
+                {
+                    if (context.Token is not (Name or UnquotedString))
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    language |= context.Token is UnquotedString { Value: var option } && BuiltInToken.Equals(option, "LANGUAGE");
+                    if (context.GetNextRequired() is not Operator { Character: '=' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    context.MoveNextRequired();
+                }
+                if (context.GetNextRequired() is not Operator { Character: ',' })
+                    break;
+            }
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextRequired();
+        }
+        if (validate && !isolation)
+            throw SimulatedSqlException.AtomicBlockOptionRequired("transaction isolation level");
+        if (validate && !language)
+            throw SimulatedSqlException.AtomicBlockOptionRequired("language");
     }
 }

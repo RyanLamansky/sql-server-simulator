@@ -60,6 +60,8 @@ partial class Simulation
             throw SimulatedSqlException.CannotFindObjectForAlterTable(sourceName.ToString());
         if (!batch.TryResolveTable(targetName, out var target))
             throw SimulatedSqlException.SwitchTargetNotFound(targetName.Leaf);
+        RejectOnMemoryOptimized(source, "The operation 'ALTER TABLE SWITCH'", 125);
+        RejectOnMemoryOptimized(target, "The operation 'ALTER TABLE SWITCH'", 125);
         if (ReferenceEquals(source, target))
             throw SimulatedSqlException.SwitchSameTable(source.Name, target.Name);
         target.OwningDatabase?.RejectWriteWhenReadOnly();

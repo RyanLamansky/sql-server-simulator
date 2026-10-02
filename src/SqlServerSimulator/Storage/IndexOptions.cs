@@ -19,7 +19,10 @@ internal readonly struct IndexOptions(
     bool? allowPageLocks = null,
     bool? optimizeForSequentialKey = null,
     Schemas.DataSpaceClause? dataSpace = null,
-    bool? statisticsNoRecompute = null)
+    bool? statisticsNoRecompute = null,
+    bool statisticsOnly = false,
+    int? bucketCount = null,
+    bool isHash = false)
 {
     public readonly bool IgnoreDupKey = ignoreDupKey;
 
@@ -52,11 +55,40 @@ internal readonly struct IndexOptions(
     /// <summary><c>STATISTICS_NORECOMPUTE</c>, when given: <c>sys.stats.no_recompute</c> of the index's statistic.</summary>
     public readonly bool? StatisticsNoRecompute = statisticsNoRecompute;
 
+    /// <summary>
+    /// <c>STATISTICS_ONLY = n</c>, undocumented and any value alike: the index
+    /// is hypothetical — a catalog entry and a statistic, never built.
+    /// </summary>
+    public readonly bool StatisticsOnly = statisticsOnly;
+
+    /// <summary>
+    /// A memory-optimized hash index's <c>BUCKET_COUNT</c> as written, when
+    /// given; real rounds it up to a power of two.
+    /// </summary>
+    public readonly int? BucketCount = bucketCount;
+
+    /// <summary>The index or key was declared <c>HASH</c>.</summary>
+    public readonly bool IsHash = isHash;
+
+    /// <summary>
+    /// The bucket count a hash index declared with <paramref name="options"/>
+    /// keeps: its <c>BUCKET_COUNT</c> rounded up to a power of two (probed
+    /// 2026-10-02 against SQL Server 2025: 100 keeps 128), or 0 for any other
+    /// index.
+    /// </summary>
+    public static int BucketCountFor(IndexOptions options) =>
+        options.IsHash && options.BucketCount is int count ? (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)count) : 0;
+
+    /// <summary>These options declared <c>HASH</c>.</summary>
+    public IndexOptions AsHash() =>
+        new(this.IgnoreDupKey, this.FillFactor, this.PadIndex, this.DropExisting, this.CompressionDelay, this.ColumnstoreArchive,
+            this.AllowRowLocks, this.AllowPageLocks, this.OptimizeForSequentialKey, this.DataSpace, this.StatisticsNoRecompute, this.StatisticsOnly, this.BucketCount, isHash: true);
+
     /// <summary>The <c>ON</c> placement clause written after the options, if any.</summary>
     public readonly Schemas.DataSpaceClause? DataSpace = dataSpace;
 
     /// <summary>These options with <paramref name="clause"/> as the placement.</summary>
     public IndexOptions WithDataSpace(Schemas.DataSpaceClause? clause) =>
         new(this.IgnoreDupKey, this.FillFactor, this.PadIndex, this.DropExisting, this.CompressionDelay, this.ColumnstoreArchive,
-            this.AllowRowLocks, this.AllowPageLocks, this.OptimizeForSequentialKey, clause, this.StatisticsNoRecompute);
+            this.AllowRowLocks, this.AllowPageLocks, this.OptimizeForSequentialKey, clause, this.StatisticsNoRecompute, this.StatisticsOnly, this.BucketCount, this.IsHash);
 }

@@ -68,6 +68,19 @@ public sealed class TableBuilder
     }
 
     /// <summary>
+    /// Marks the table memory-optimized, DacFx's <c>IsMemoryOptimized</c>
+    /// property, its primary key written <c>IsClustered=False</c> as a
+    /// memory-optimized table's always is.
+    /// </summary>
+    public TableBuilder MemoryOptimized()
+    {
+        memoryOptimized = true;
+        return this;
+    }
+
+    private bool memoryOptimized;
+
+    /// <summary>
     /// Names the filegroup holding the table's LOB data, DacFx's
     /// <c>FilegroupForTextImage</c> relationship.
     /// </summary>
@@ -237,6 +250,8 @@ public sealed class TableBuilder
             new XAttribute("Type", "SqlTable"),
             new XAttribute("Name", $"[{SchemaName}].[{TableName}]"),
             columnsRelationship);
+        if (memoryOptimized)
+            tableElement.Add(PropertyElement(ns, "IsMemoryOptimized", "True"));
 
         if (partitioning is var (scheme, column))
         {
@@ -362,7 +377,7 @@ public sealed class TableBuilder
         // diverges from the default when the IsClustered property is set.
         // Builder follows the loader's default by leaving the property
         // absent unless the test demands non-default behavior (future).
-        if (!isPrimary)
+        if (!isPrimary || memoryOptimized)
         {
             // For UNIQUE, emit IsClustered=False explicitly to mirror DACFx
             // output — keeps probe-vs-builder cross-checks honest if we

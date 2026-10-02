@@ -60,6 +60,14 @@ An index naming one column twice is **Msg 1909** — state 1 within the key list
 Column resolution, name-collision (Msg 1913 via `IndexAlreadyExists`, naming the table as the statement wrote it) and a missing column (Msg 1911 via `IndexColumnMissing`), and one-clustered-per-table (Msg 1902) run inside the CREATE TABLE atomic block, so a bad inline index rolls the table back.
 Table variables and table types take inline indexes too (a table type builds them per instance); a multi-statement function's return table raises `NotSupportedException` for one.
 
+## Hypothetical indexes
+
+`CREATE INDEX … WITH STATISTICS_ONLY = n` — any value, in the parenthesized list or the legacy unparenthesized one beside `FILLFACTOR` — makes the index hypothetical, the kind the Database Engine Tuning Advisor creates (probed 2026-10-02 against SQL Server 2025).
+It is listed and never built: `sys.indexes` reports it with `is_hypothetical` 1 and `data_space_id` 0 (a clustered one as `CLUSTERED` at an ordinary index id, the heap row staying), `sys.index_columns` lists its keys, `sys.stats` its statistic, `INDEXPROPERTY(…, 'IsHypothetical')` answers 1 and `sp_helpindex` describes it `…, hypothetical` with no location, while `sys.partitions` and the other storage views leave it out.
+Nothing reads, seeks or enforces it — a `UNIQUE` one admits duplicates, and an `INDEX` hint naming it is Msg 308 — so it sits in `HeapTable.HypotheticalIndexes`, apart from `HeapTable.Indexes`.
+It takes its name and an index id (Msg 1913 for an index of the same name either way), `ALTER INDEX` accepts every form on it and changes nothing, and `DROP INDEX` removes it.
+EF Core's scaffolder skips it through `is_hypothetical = 0`.
+
 ## Disabled indexes
 
 `DISABLE` takes an index out of service and `REBUILD` puts it back; both live in `Simulation.AlterIndex.cs` alongside the `SET` form, and the state is `Index.IsDisabled` / `KeyConstraint.IsDisabled` (real allows disabling a constraint's backing index even though it refuses to change that constraint's `IGNORE_DUP_KEY` — Msg 1979).

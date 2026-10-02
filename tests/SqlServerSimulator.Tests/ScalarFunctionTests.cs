@@ -331,12 +331,14 @@ public sealed class ScalarFunctionTests
         AreEqual(7, simulation.ExecuteScalar("select dbo.safe_add(3, 4)"));
     }
 
-    /// <summary>A natively compiled function isn't modeled; one missing its SCHEMABINDING is real's Msg 10796.</summary>
+    /// <summary>
+    /// A natively compiled function's body is one BEGIN ATOMIC block (Msg
+    /// 10783 otherwise), and one missing its SCHEMABINDING is real's Msg 10796.
+    /// </summary>
     [TestMethod]
     public void CreateFunction_NativeCompilation()
     {
-        _ = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "create function dbo.bad(@v int) returns int with native_compilation, schemabinding as begin return @v end"));
+        _ = new Simulation().AssertSqlError("create function dbo.bad(@v int) returns int with native_compilation, schemabinding as begin return @v end", 10783);
         _ = new Simulation().AssertSqlError("create function dbo.bad(@v int) returns int with native_compilation as begin return @v end", 10796);
     }
 

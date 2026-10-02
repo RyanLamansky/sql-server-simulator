@@ -51,7 +51,7 @@ internal sealed class FileProperty : Expression
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
         var database = runtime.Batch.CurrentDatabase;
 
-        return database.FindFile(name.TrimEnd(' ')) is { } file
+        return database.FindFile(name.TrimEnd(' ')) is { IsContainer: false } file
             && EvaluateFileProperty(database, file, prop.TrimEnd(' ')) is int result
             ? SqlValue.FromInt32(result)
             : SqlValue.Null(SqlType.Int32);

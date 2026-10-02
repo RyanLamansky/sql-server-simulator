@@ -77,7 +77,7 @@ partial class Simulation
         // post-FROM, deferred to 1b).
         if (leadingTable is not null)
         {
-            LockWriteTable(context.Batch, leadingTable, "DELETE");
+            LockWriteTable(context.Batch, leadingTable, "DELETE", hints: targetHints);
             context.Batch.RejectReferentialDeleteIntoVectorIndex(leadingTable);
         }
 
@@ -507,11 +507,8 @@ partial class Simulation
 
         // SNAPSHOT isolation write-conflict: a DELETE on a row modified
         // since this SI tx's snapshot raises Msg 3960 and auto-rolls-back.
-        if (context.Batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Snapshot)
-        {
-            foreach (var (pageIndex, slotIndex, _) in deleted)
-                Storage.VersionStore.CheckSnapshotUpdateConflict(context.Batch, table, (pageIndex, slotIndex));
-        }
+        foreach (var (pageIndex, slotIndex, _) in deleted)
+            Storage.VersionStore.CheckSnapshotUpdateConflict(context.Batch, table, (pageIndex, slotIndex), delete: true);
 
         if (insteadOfActive)
         {

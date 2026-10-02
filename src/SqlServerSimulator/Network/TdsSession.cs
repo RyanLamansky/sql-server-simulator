@@ -36,6 +36,12 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     private SmpMultiplexer? multiplexer;
     private int marsPacketSize = Tds.DefaultPacketSize;
 
+    /// <summary>The JSON support version acknowledged at login, 0 for none.</summary>
+    private byte jsonSupportVersion;
+
+    /// <summary>The vector support version acknowledged at login, 0 for none.</summary>
+    private byte vectorSupportVersion;
+
     /// <summary>
     /// Closes the socket; the session task observes the closure at its next
     /// I/O operation and runs its normal cleanup.
@@ -152,7 +158,12 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             if (login.PacketSize is >= 512 and <= 32767)
                 transport.PacketSize = login.PacketSize;
 
-            writer = new TdsTokenWriter(transport);
+            // The native json and vector types go to a client that asked for
+            // them, at the highest version modeled (captured 2026-10-02 against
+            // SQL Server 2025 through SqlClient 7.0.2).
+            this.jsonSupportVersion = Math.Min(login.JsonSupportVersion, (byte)1);
+            this.vectorSupportVersion = Math.Min(login.VectorSupportVersion, (byte)1);
+            writer = new TdsTokenWriter(transport) { NativeJson = this.jsonSupportVersion > 0, NativeVector = this.vectorSupportVersion > 0 };
             if (simulation.RefuseLogin(login.UserName, login.Password) is { } refusal)
             {
                 // Probe-confirmed shape: one error at severity 14 state 1 — Msg
@@ -540,6 +551,17 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             checked((byte)ReferenceBuild.Version.Minor),
             checked((ushort)ReferenceBuild.Version.Build));
         writer.WriteEnvChange(Tds.EnvPacketSize, packetSize.ToString(System.Globalization.CultureInfo.InvariantCulture), Tds.DefaultPacketSize.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        // Real acknowledges a requested feature after the packet-size change.
+        if (this.jsonSupportVersion > 0 || this.vectorSupportVersion > 0)
+        {
+            Span<(byte, byte)> features = stackalloc (byte, byte)[2];
+            var count = 0;
+            if (this.jsonSupportVersion > 0)
+                features[count++] = (0x0D, this.jsonSupportVersion);
+            if (this.vectorSupportVersion > 0)
+                features[count++] = (0x0E, this.vectorSupportVersion);
+            writer.WriteFeatureExtAck(features[..count]);
+        }
         writer.WriteDone(Tds.DoneFinal, 0);
     }
 
@@ -639,7 +661,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             Spid = unchecked((ushort)this.connection!.Spid),
             Counters = this.connection.Transport,
         };
-        var writer = new TdsTokenWriter(transport) { DeferFlush = true };
+        var writer = new TdsTokenWriter(transport) { DeferFlush = true, NativeJson = this.jsonSupportVersion > 0, NativeVector = this.vectorSupportVersion > 0 };
         try
         {
             while (true)

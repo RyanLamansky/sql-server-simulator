@@ -209,7 +209,9 @@ partial class Simulation
 
         if (target.Object is HeapTable helpTable)
         {
-            List<SqlValue[]> filegroup = [[SqlValue.FromSystemName(helpTable.Partitioning?.Scheme.Name ?? FilegroupName(DatabaseOf(batch, helpTable), helpTable.FilegroupId))]];
+            // A memory-optimized table sits on no filegroup (probed 2026-10-02
+            // against SQL Server 2025).
+            List<SqlValue[]> filegroup = [[SqlValue.FromSystemName(helpTable.IsMemoryOptimized ? "not applicable" : helpTable.Partitioning?.Scheme.Name ?? FilegroupName(DatabaseOf(batch, helpTable), helpTable.FilegroupId))]];
             yield return HelpBlankLine(batch, procedureName, 202);
             yield return new SimulatedSqlResultSet(SingleSystemNameColumn, SpHelpFilegroupColumnNames, filegroup) { ColumnNullability = SingleNotNullColumn };
             yield return HelpBlankLine(batch, procedureName, 204);

@@ -798,9 +798,12 @@ public sealed class StoredProcedureTests
     // -- WITH NATIVE_COMPILATION / SCHEMABINDING + BEGIN ATOMIC body --
     // Tests cover the natively-compiled procedure shape SqlPackage emits in
     // bacpacs (WWI-Full's Website.RecordColdRoomTemperatures is the canonical
-    // example). The simulator's semantic model doesn't change: NATIVE_COMPILATION
-    // is parse-and-discard, BEGIN ATOMIC is parsed as a regular block whose
-    // WITH (...) options block is consumed without enforcement.
+    // example); the rules themselves are MemoryOptimizedTableTests'.
+
+    private const string MemoryOptimizedContainer = """
+        alter database current add filegroup fx contains memory_optimized_data;
+        alter database current add file (name = 'c1', filename = '/data/c1') to filegroup fx
+        """;
 
     [TestMethod]
     public void Create_With_NativeCompilation_Schemabinding_Parses()
@@ -824,13 +827,14 @@ public sealed class StoredProcedureTests
         // a body that inserts into a table should land the row when EXEC'd.
         var sim = new Simulation();
         sim.ExecuteBatches(
-            "create table t (id int primary key, v int)",
+            MemoryOptimizedContainer,
+            "create table dbo.t (id int not null primary key nonclustered, v int) with (memory_optimized = on)",
             """
             create procedure dbo.add_row @id int, @v int
             with native_compilation, schemabinding, execute as owner
             as
             begin atomic with (transaction isolation level = snapshot, language = N'us_english')
-                insert into t (id, v) values (@id, @v);
+                insert into dbo.t (id, v) values (@id, @v);
             end
             """,
             "exec dbo.add_row 1, 100",
@@ -846,7 +850,8 @@ public sealed class StoredProcedureTests
         // BEGIN ATOMIC WITH (...) wrapping a BEGIN TRY / BEGIN CATCH block.
         var sim = new Simulation();
         sim.ExecuteBatches(
-            "create table failures (msg nvarchar(200))",
+            MemoryOptimizedContainer,
+            "create table dbo.failures (id int identity not null primary key nonclustered, msg nvarchar(200)) with (memory_optimized = on)",
             """
             create procedure dbo.try_or_log @raise bit
             with native_compilation, schemabinding, execute as owner
@@ -857,7 +862,7 @@ public sealed class StoredProcedureTests
                         throw 51000, N'boom', 1;
                 end try
                 begin catch
-                    insert into failures (msg) values (error_message());
+                    insert into dbo.failures (msg) values (error_message());
                 end catch
             end
             """,
@@ -867,25 +872,17 @@ public sealed class StoredProcedureTests
         AreEqual("boom", sim.ExecuteScalar("select msg from failures"));
     }
 
+    /// <summary>The atomic block's options are required (Msg 10784, probed 2026-10-02 against SQL Server 2025).</summary>
     [TestMethod]
-    public void BeginAtomic_Without_With_Options_Block_Parses()
-    {
-        // The grammar allows BEGIN ATOMIC without a WITH (...) options
-        // block. Verify the path doesn't reject.
-        var sim = new Simulation();
-        sim.ExecuteBatches(
-            "create table t (id int)",
-            """
+    public void BeginAtomic_Without_With_Options_Block_IsMsg10784()
+        => _ = new Simulation().AssertSqlError("""
             create procedure dbo.p
             with native_compilation, schemabinding
             as
             begin atomic
-                insert into t values (42);
+                select 42;
             end
-            """,
-            "exec dbo.p");
-        AreEqual(42, sim.ExecuteScalar("select id from t"));
-    }
+            """, 10784);
 
     [TestMethod]
     public void BeginAtomic_Empty_Body_RaisesSyntax_At_Create()

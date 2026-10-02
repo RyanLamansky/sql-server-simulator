@@ -183,6 +183,7 @@ partial class Simulation
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterIndex(tableName.ToString());
+        RejectOnMemoryOptimized(table, "The operation 'ALTER INDEX'", 8);
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         RecordTableDdlUndo(context, table);
         // ALTER INDEX is gated on ALTER of the parent table — the same Msg 1088
@@ -247,6 +248,11 @@ partial class Simulation
                     return true;
                 }
             }
+
+            // A hypothetical index takes every form and nothing changes
+            // (probed 2026-10-02 against SQL Server 2025).
+            if (table.HypotheticalIndexes.Exists(hypothetical => collation.Equals(hypothetical.Name, indexName)))
+                return true;
 
             // Real takes no ALTER INDEX form on a vector index (probed
             // 2026-09-29 against SQL Server 2025).

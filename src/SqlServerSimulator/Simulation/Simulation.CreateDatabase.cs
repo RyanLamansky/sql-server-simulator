@@ -10,13 +10,20 @@ partial class Simulation
     /// <c>CREATE DATABASE</c> file list, or the leading <c>PRIMARY</c> one
     /// (null <see cref="Name"/>), with the file specifications under it.
     /// </summary>
-    private sealed class DeclaredFilegroup(string? name, bool isDefault, bool containsSpecialData)
+    private sealed class DeclaredFilegroup(string? name, bool isDefault, bool containsSpecialData, bool memoryOptimized = false)
     {
         public readonly string? Name = name;
         public readonly bool IsDefault = isDefault;
 
-        /// <summary>A <c>CONTAINS FILESTREAM</c> / <c>MEMORY_OPTIMIZED_DATA</c> group, whose files aren't rows files and aren't recorded.</summary>
+        /// <summary>
+        /// A <c>CONTAINS FILESTREAM</c> / <c>MEMORY_OPTIMIZED_DATA</c> group,
+        /// whose files aren't rows files: a FILESTREAM group's aren't recorded,
+        /// a memory-optimized one's become its containers.
+        /// </summary>
         public readonly bool ContainsSpecialData = containsSpecialData;
+
+        /// <summary>The <c>CONTAINS MEMORY_OPTIMIZED_DATA</c> group.</summary>
+        public readonly bool MemoryOptimized = memoryOptimized;
 
         public readonly List<FileSpecification> Files = [];
     }
@@ -176,16 +183,19 @@ partial class Simulation
             {
                 var name = context.GetNextRequired() is Name groupName ? groupName.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
                 var containsSpecialData = false;
+                var memoryOptimized = false;
                 if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Contains })
                 {
                     containsSpecialData = true;
-                    _ = context.GetNextRequired();
+                    memoryOptimized = context.GetNextRequired() is Name { Value: var contentKind } && BuiltInToken.Equals(contentKind, "MEMORY_OPTIMIZED_DATA");
                     context.MoveNextRequired();
                 }
                 var isDefault = context.Token is ReservedKeyword { Keyword: Keyword.Default };
                 if (isDefault)
                     context.MoveNextRequired();
-                groups.Add(new(name, isDefault, containsSpecialData));
+                if (memoryOptimized && groups.Exists(static group => group.MemoryOptimized))
+                    throw SimulatedSqlException.SecondMemoryOptimizedFilegroup();
+                groups.Add(new(name, isDefault, containsSpecialData, memoryOptimized));
             }
             groups[^1].Files.Add(ParseFileSpecification(context, FileSpecificationSite.CreateDatabase));
         }
@@ -242,6 +252,14 @@ partial class Simulation
             var dataSpaceId = group.Name is null ? Database.PrimaryFilegroupId : database.RegisterFilegroup(group.Name);
             if (group.IsDefault)
                 database.DefaultFilegroupId = dataSpaceId;
+            if (group.MemoryOptimized)
+            {
+                RejectContainerSizes(group.Files);
+                database.MemoryOptimizedFilegroupId = dataSpaceId;
+                foreach (var spec in group.Files)
+                    database.Files.Add(NewContainer(database, spec, dataSpaceId));
+                continue;
+            }
             if (group.ContainsSpecialData)
                 continue;
             foreach (var spec in group.Files)
@@ -272,7 +290,7 @@ partial class Simulation
         var nextId = 3;
         foreach (var file in ordered)
         {
-            database.Files.Add(file.FileId != 0 ? file
+            database.Files.Add(file.FileId != 0 || file.IsContainer ? file
                 : new(nextId++, file.IsLog, file.Name, file.PhysicalName, file.DataSpaceId, file.SizePages, file.MaxSizePages, file.Growth, file.IsPercentGrowth));
         }
     }

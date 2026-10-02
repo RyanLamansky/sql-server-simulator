@@ -200,6 +200,9 @@ partial class Simulation
             {
                 ModuleOptionHost.View or ModuleOptionHost.InlineFunction => SchemaBoundBody.DefiningQuery,
                 ModuleOptionHost.ScalarFunction or ModuleOptionHost.TableFunction => SchemaBoundBody.Statements,
+                // A natively compiled procedure's or trigger's body is
+                // schema-bound too (Msg 1054 for a star, probed 2026-10-02).
+                ModuleOptionHost.Procedure or ModuleOptionHost.Trigger when options.NativeCompilation => SchemaBoundBody.Statements,
                 _ => SchemaBoundBody.None,
             };
         }

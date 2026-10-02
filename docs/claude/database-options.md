@@ -1,7 +1,7 @@
 # `ALTER DATABASE` SET-option surface
 
 Closed accept-list parser (`RecognizedDatabaseOptions` in `Simulation.Alter.cs`) covering every database-scope toggle SqlPackage emits from a bacpac's `SqlDatabaseOptions` element.
-Most options are recorded without behavior — see [Recorded switches](#recorded-switches) — and only the eight "load-bearing" toggles (`COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY` / `READ_WRITE`, `CHANGE_TRACKING`) drive actual behavior.
+Most options are recorded without behavior — see [Recorded switches](#recorded-switches) — and only the nine "load-bearing" toggles (`COMPATIBILITY_LEVEL`, `ALLOW_SNAPSHOT_ISOLATION`, `READ_COMMITTED_SNAPSHOT`, `RECURSIVE_TRIGGERS`, `TRUSTWORTHY`, `DB_CHAINING`, `READ_ONLY` / `READ_WRITE`, `CHANGE_TRACKING`, `MEMORY_OPTIMIZED_ELEVATE_TO_SNAPSHOT`) drive actual behavior.
 `RECOVERY` is tracked without driving anything — the simulator has no transaction log, but `sys.databases.recovery_model` / `recovery_model_desc` report it, and a bacpac carries the source database's value, so an imported database describes itself the way the original did.
 Real ships `master` / `tempdb` / `msdb` SIMPLE and `model` FULL, which every new user database inherits (probe-confirmed).
 
@@ -74,6 +74,8 @@ These dispatch to dedicated helpers rather than falling into the parse-and-disca
   See [Read-only databases](#read-only-databases).
 - **`CHANGE_TRACKING`** — `= ON [( … )]` / `= OFF` / `( … )` sets `Database.ChangeTracking`, which `ALTER TABLE … ENABLE CHANGE_TRACKING` requires; it must stand alone in its `SET` list.
   See [`change-tracking.md`](change-tracking.md).
+- **`MEMORY_OPTIMIZED_ELEVATE_TO_SNAPSHOT`** — recorded on `Database.Switches` like the others, and read where a READ COMMITTED transaction reaches a memory-optimized table, which it lets read at snapshot rather than refusing (Msg 41368).
+  See [`memory-optimized.md`](memory-optimized.md#isolation).
 
 Both cross-database toggles take the bare `ON` / `OFF` shape (`SET TRUSTWORTHY = ON` is Msg 102, probe-confirmed), and each refuses a set of system databases whatever the value asked for:
 
@@ -321,6 +323,8 @@ A read-only filegroup's files refuse `ADD` / `MODIFY FILE` (Msg 5048).
 **A read-only database** refuses the file forms with Msg 5004 (state 1 adding, 3 removing, 4 modifying) and the filegroup forms with a plain Msg 3906.
 All of these refusals end only their statement.
 
+**A `CONTAINS MEMORY_OPTIMIZED_DATA` filegroup** is recorded with its files as containers, the type-2 `FILESTREAM` rows from file id 65537 that memory-optimized tables need — see [`memory-optimized.md`](memory-optimized.md#the-filegroup-and-its-containers).
+
 ### Divergences
 
 - What a filegroup holds is its tables' and indexes' placement ([`partitioning.md`](partitioning.md#filegroup-placement)), not pages kept per file: `REMOVE FILE` counts any row on the file's filegroup as the file's.
@@ -331,7 +335,7 @@ All of these refusals end only their statement.
 ### Not modeled yet
 
 - `MODIFY FILE … OFFLINE` on a secondary data file raises `NotSupportedException`.
-- `CONTAINS FILESTREAM` / `MEMORY_OPTIMIZED_DATA` filegroups are registered, but their files aren't recorded.
+- A `CONTAINS FILESTREAM` filegroup is registered as a rows filegroup, and its files aren't recorded.
 - A file's contents: rows aren't kept per file, so `DBCC SHRINKFILE` ([`heap-storage.md`](heap-storage.md)) doesn't move the declared sizes.
 - `ALTER DATABASE … MODIFY FILE` on a system database follows the user-database rules unprobed.
 

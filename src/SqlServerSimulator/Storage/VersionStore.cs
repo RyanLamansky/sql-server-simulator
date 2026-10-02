@@ -73,10 +73,12 @@ internal static class VersionStore
     /// LOB chains at commit": when this is <c>false</c> no
     /// <see cref="HistoricalVersion"/> ever pins those chains, so the committing
     /// undo entry owns reclamation; when <c>true</c> the history entry owns them
-    /// until <see cref="RunGarbageCollection"/> trims it.
+    /// until <see cref="RunGarbageCollection"/> trims it. A memory-optimized
+    /// table versions every write whatever the database's flags, since every
+    /// read of it is a snapshot read.
     /// </summary>
     internal static bool WillCaptureVersions(Database database, HeapTable table) =>
-        IsVersioningEnabled(database)
+        (IsVersioningEnabled(database) || table.IsMemoryOptimized)
         && !table.IsTableVariable
         && !BatchContext.IsLocalTempName(table.Name)
         && !Simulation.SystemHeapTables.Values.Contains(table);
@@ -493,23 +495,36 @@ internal static class VersionStore
     /// SI (the caller checks <see cref="SimulatedDbConnection.SessionIsolationLevel"/>
     /// before calling).
     /// </summary>
-    internal static void CheckSnapshotUpdateConflict(BatchContext batch, HeapTable table, (int Page, int Slot) rid)
+    internal static void CheckSnapshotUpdateConflict(BatchContext batch, HeapTable table, (int Page, int Slot) rid, bool delete = false)
     {
         var connection = batch.Connection;
-        if (connection.SessionIsolationLevel != System.Data.IsolationLevel.Snapshot)
-            return;
-        var snapshotXid = connection.CurrentTransaction?.SnapshotXid;
-        if (snapshotXid is not { } sx)
+        if (WriterSnapshotXid(batch, table) is not { } sx)
             return;
         if (!table.RowVersions.TryGetValue(rid, out var chain))
             return;
         if (chain.LiveXmin <= sx && (chain.WriterSession is null || ReferenceEquals(chain.WriterSession, connection.Session)))
             return;
+        // A memory-optimized row's conflict dooms the transaction through the
+        // error's own class rather than rolling it back here.
+        if (table.IsMemoryOptimized)
+            throw SimulatedSqlException.MemoryOptimizedWriteConflict(delete);
         // Row was modified by another tx after my snapshot. Probe-confirmed
         // auto-rollback: the SI tx terminates with @@TRANCOUNT = 0.
         connection.CurrentTransaction?.EndRollback();
         throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.DatabaseFor(table).Name, table.HasClusteredIndex());
     }
+
+    /// <summary>
+    /// The snapshot a write of <paramref name="table"/> is judged against for
+    /// an update conflict: a SNAPSHOT transaction's, or — for a
+    /// memory-optimized table, whose writes are judged at any isolation level
+    /// — the transaction's or else the statement's. Null when the write isn't
+    /// judged, or no read has taken the snapshot yet.
+    /// </summary>
+    internal static long? WriterSnapshotXid(BatchContext batch, HeapTable table) =>
+        table.IsMemoryOptimized ? batch.Connection.CurrentTransaction?.SnapshotXid ?? batch.RcsiStatementSnapshotXid
+        : batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Snapshot ? batch.Connection.CurrentTransaction?.SnapshotXid
+        : null;
 
     /// <summary>
     /// The version a snapshot at <paramref name="snapshotXid"/> reads at

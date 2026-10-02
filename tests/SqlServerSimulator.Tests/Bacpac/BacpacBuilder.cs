@@ -504,6 +504,19 @@ public sealed partial class BacpacBuilder
     }
 
     /// <summary>
+    /// Emits a <c>SqlFilegroup</c> element carrying
+    /// <c>ContainsMemoryOptimizedData=True</c>, the filegroup a memory-optimized
+    /// table needs, which the loader gives one container.
+    /// </summary>
+    public BacpacBuilder MemoryOptimizedFilegroup(string name)
+    {
+        _memoryOptimizedFilegroups.Add(name);
+        return this;
+    }
+
+    private readonly List<string> _memoryOptimizedFilegroups = [];
+
+    /// <summary>
     /// Adds a CREATE TRIGGER … ON DATABASE … emission (database-scope DDL
     /// trigger). The loader dispatches through the same programmable-object
     /// path as DML triggers but routes to <c>Database.DdlTriggers</c> via
@@ -667,6 +680,13 @@ public sealed partial class BacpacBuilder
             model.Add(new XElement(ns + "Element",
                 new XAttribute("Type", elementType),
                 new XAttribute("Name", elementName)));
+        }
+        foreach (var filegroup in _memoryOptimizedFilegroups)
+        {
+            model.Add(new XElement(ns + "Element",
+                new XAttribute("Type", "SqlFilegroup"),
+                new XAttribute("Name", $"[{filegroup}]"),
+                new XElement(ns + "Property", new XAttribute("Name", "ContainsMemoryOptimizedData"), new XAttribute("Value", "True"))));
         }
 
         // Unknown-type elements: dispatcher fails to claim them in any

@@ -45,6 +45,20 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     public bool DeferFlush;
 
     /// <summary>
+    /// The client negotiated vector support at login, so a float32
+    /// <c>vector</c> column or output parameter goes out as the native type
+    /// (<c>0xF5</c>) rather than its down-level <c>varchar(max)</c> text.
+    /// </summary>
+    public bool NativeVector;
+
+    /// <summary>
+    /// The client negotiated JSON support at login, so a <c>json</c> value
+    /// goes out as the native type (<c>0xF4</c>) rather than its down-level
+    /// <c>varchar(max)</c> text.
+    /// </summary>
+    public bool NativeJson;
+
+    /// <summary>
     /// Runs once the response's last packet is ready, just before it is sent:
     /// the MARS path ends the request's in-flight count here, so a client that
     /// acts on the response's end — a commit on another session — never finds
@@ -259,6 +273,23 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
         // SQL Server 2025 reference instance the simulator emulates.
         this.WriteByte((byte)(build >> 8));
         this.WriteByte((byte)(build & 0xFF));
+    }
+
+    /// <summary>
+    /// FEATUREEXTACK (<c>0xAE</c>): each acknowledged feature's id, a DWORD
+    /// data length and its one-byte version, then the 0xFF terminator
+    /// (MS-TDS 2.2.7.11).
+    /// </summary>
+    public void WriteFeatureExtAck(ReadOnlySpan<(byte FeatureId, byte Version)> features)
+    {
+        this.WriteByte(Tds.TokenFeatureExtAck);
+        foreach (var (featureId, version) in features)
+        {
+            this.WriteByte(featureId);
+            this.WriteUInt32(1);
+            this.WriteByte(version);
+        }
+        this.WriteByte(0xFF);
     }
 
     public void WriteDone(ushort status, long rowCount) => this.WriteDoneToken(Tds.TokenDone, status, rowCount);

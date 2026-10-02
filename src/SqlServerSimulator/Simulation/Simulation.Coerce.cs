@@ -1054,10 +1054,12 @@ partial class Simulation
     /// <summary>
     /// The table a duplicate-key message names: schema-qualified, a temp
     /// table or table variable under <c>dbo</c> (probed 2026-09-26 against SQL
-    /// Server 2025: a key on <c>s.p</c> names <c>s.p</c>).
+    /// Server 2025: a key on <c>s.p</c> names <c>s.p</c>). A memory-optimized
+    /// table is named alone (probed 2026-10-02).
     /// </summary>
     internal static string QualifiedForViolation(HeapTable table) =>
-        table.OwningDatabase is { } database && SchemaQualifyTableName(table, database) is var qualified && qualified.Contains('.', StringComparison.Ordinal)
+        table is { IsMemoryOptimized: true, IsTableVariable: false } ? table.Name
+        : table.OwningDatabase is { } database && SchemaQualifyTableName(table, database) is var qualified && qualified.Contains('.', StringComparison.Ordinal)
             ? qualified
             : $"{Database.DefaultSchemaName}.{table.Name}";
 

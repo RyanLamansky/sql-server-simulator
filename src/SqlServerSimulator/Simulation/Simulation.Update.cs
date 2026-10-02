@@ -99,7 +99,7 @@ partial class Simulation
         // multi-table-alias form's target is determined later via the FROM
         // clause; that path's lock is deferred to phase 1b.
         if (leadingTable is not null && !joinedView)
-            LockWriteTable(context.Batch, leadingTable, "UPDATE");
+            LockWriteTable(context.Batch, leadingTable, "UPDATE", hints: targetHints);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Set })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         bindErrors?.EnterClause(context.Token, BindClause.SetValue);
@@ -856,10 +856,7 @@ partial class Simulation
     private static void CheckSnapshotConflictOnTombstonedRows(ParserContext context, HeapTable table, BooleanExpression? where, View? sourceView)
     {
         var batch = context.Batch;
-        if (batch.Connection.SessionIsolationLevel != System.Data.IsolationLevel.Snapshot)
-            return;
-        var snapshotXid = batch.Connection.CurrentTransaction?.SnapshotXid;
-        if (snapshotXid is not { } sx)
+        if (Storage.VersionStore.WriterSnapshotXid(batch, table) is not { } sx)
             return;
         foreach (var kv in table.RowVersions)
         {
@@ -880,6 +877,8 @@ partial class Simulation
             SqlValue Resolve(MultiPartName name) => ReadTargetRowColumn(batch, table, sourceView, fullValues, viewRow: null, (kv.Key.PageIndex, kv.Key.SlotIndex), name);
             if (where is not null && where.Run(new RuntimeContext(Resolve, batch)) != true)
                 continue;
+            if (table.IsMemoryOptimized)
+                throw SimulatedSqlException.MemoryOptimizedWriteConflict(delete: false);
             batch.Connection.CurrentTransaction?.EndRollback();
             throw SimulatedSqlException.SnapshotIsolationUpdateConflict($"{Database.DefaultSchemaName}.{table.Name}", batch.DatabaseFor(table).Name, table.HasClusteredIndex());
         }
@@ -1257,11 +1256,8 @@ partial class Simulation
         // a live version no newer than my snapshot, otherwise Msg 3960
         // fires and the SI tx auto-rolls-back. Probe-confirmed against
         // SQL Server 2025.
-        if (context.Batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.Snapshot)
-        {
-            foreach (var (pageIndex, slotIndex, _, _) in affected)
-                Storage.VersionStore.CheckSnapshotUpdateConflict(context.Batch, table, (pageIndex, slotIndex));
-        }
+        foreach (var (pageIndex, slotIndex, _, _) in affected)
+            Storage.VersionStore.CheckSnapshotUpdateConflict(context.Batch, table, (pageIndex, slotIndex));
 
         if (insteadOfActive)
         {
@@ -1299,7 +1295,7 @@ partial class Simulation
         // Capture pre-update payloads so the version-store CaptureWrite call
         // after UpdateAt can pair each row's stable Rid with its pre-update
         // bytes.
-        var oldBytesPerAffected = Storage.VersionStore.IsVersioningEnabled(context.Batch.DatabaseFor(table)) && lockableTable
+        var oldBytesPerAffected = Storage.VersionStore.WillCaptureVersions(context.Batch.DatabaseFor(table), table) && lockableTable
             ? new byte[affected.Count][]
             : null;
         if (oldBytesPerAffected is not null)
@@ -1904,6 +1900,10 @@ partial class Simulation
     private static void RejectUnmodifiableSetTarget(HeapTable table, int columnOrdinal, Database database)
     {
         var column = table.Columns[columnOrdinal];
+        // A memory-optimized table's primary key columns can't be updated
+        // (probed 2026-10-02 against SQL Server 2025).
+        if (table.IsMemoryOptimized && table.KeyConstraints.Exists(key => key.Kind == KeyConstraintKind.PrimaryKey && Array.IndexOf(key.FullOrdinals, columnOrdinal) >= 0))
+            throw SimulatedSqlException.MemoryOptimizedPrimaryKeyUpdate();
         if (GraphColumns.IsInternal(column.GraphKind))
             throw SimulatedSqlException.InternalGraphColumnAccess(column.Name, state: 3);
         if (column.Identity is not null)

@@ -170,6 +170,17 @@ internal sealed class Index(
     /// </summary>
     public byte FillFactor = options.FillFactor ?? 0;
 
+    /// <summary>
+    /// A memory-optimized hash index's bucket count — <c>BUCKET_COUNT</c>
+    /// rounded up to a power of two, as <c>sys.hash_indexes</c> reports it —
+    /// or 0 for a range index. Mutable for <c>ALTER TABLE … ALTER INDEX …
+    /// REBUILD WITH (BUCKET_COUNT = n)</c>.
+    /// </summary>
+    public int BucketCount = IndexOptions.BucketCountFor(options);
+
+    /// <summary>Whether this is a hash index (<see cref="BucketCount"/> above 0).</summary>
+    public bool IsHash => this.BucketCount > 0;
+
     /// <inheritdoc cref="FillFactor"/>
     public bool IsPadded = options.PadIndex ?? false;
 
@@ -205,6 +216,14 @@ internal sealed class Index(
     /// See <c>docs/claude/indexes.md</c>.
     /// </summary>
     public bool IsDisabled;
+
+    /// <summary>
+    /// A hypothetical index (<c>WITH STATISTICS_ONLY = n</c>), kept in
+    /// <see cref="HeapTable.HypotheticalIndexes"/> rather than
+    /// <see cref="HeapTable.Indexes"/>: the catalog lists it and its statistic,
+    /// but no access path, uniqueness check or index hint ever reaches it.
+    /// </summary>
+    public readonly bool IsHypothetical = options.StatisticsOnly;
 
     /// <summary>
     /// The partition scheme and column a nonclustered one is placed on, or

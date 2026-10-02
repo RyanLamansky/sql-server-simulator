@@ -52,7 +52,8 @@ internal static class TdsTypeCodec
         for (var i = 0; i < schema.Length; i++)
         {
             var type = schema[i];
-            writer.WriteUInt32(type is RowVersionSqlType ? 0x50u : 0u);
+            // A native vector column carries vector's user type, 255.
+            writer.WriteUInt32(type is RowVersionSqlType ? 0x50u : IsNativeVector(writer, type) ? 0xFFu : 0u);
             var notNull = columnNullability is not null && !columnNullability[i];
             // A cursor fetch's hidden ROWSTAT is read-only; browse mode's
             // hidden key and rowversion columns keep their own character.
@@ -310,6 +311,10 @@ internal static class TdsTypeCodec
         writer.LeaveComposite();
     }
 
+    /// <summary>Whether <paramref name="type"/> goes to this client as the native float32 vector type.</summary>
+    private static bool IsNativeVector(TdsTokenWriter writer, SqlType type) =>
+        writer.NativeVector && type is VectorSqlType { IsFloat16: false };
+
     private static void WriteTypeInfo(TdsTokenWriter writer, SqlType type, bool notNull, bool reportsNumeric = false, string databaseName = "")
     {
         // A NOT NULL fixed-width column carries the FIXEDLENTYPE token (single
@@ -443,21 +448,35 @@ internal static class TdsTypeCodec
                 writer.WriteByte(0xF1);
                 writer.WriteByte(0);
                 break;
+            case VectorSqlType vector when IsNativeVector(writer, vector):
+                // The native type a vector-aware client negotiated: the byte
+                // length of the stored form (8-byte header and four bytes an
+                // element) and the element type, 0 for float32 (captured
+                // 2026-10-02 against SQL Server 2025 through SqlClient 7.0.2).
+                writer.WriteByte(0xF5);
+                writer.WriteUInt16(checked((ushort)(VectorSqlType.HeaderLength + (vector.dimensions * 4))));
+                writer.WriteByte(0);
+                break;
             case VectorSqlType:
-                // The endpoint acknowledges no vector feature extension, so a
-                // vector goes out as real sends it to a client without vector
-                // support: varchar(max) holding the text form, collated
+                // A client without vector support — and any float16 vector,
+                // which real sends as text even to a vector-aware one — gets
+                // varchar(max) holding the text form, collated
                 // Latin1_General_100_BIN2_UTF8 (probed 2026-09-26 against SQL
                 // Server 2025 through SqlClient 5.1).
                 writer.WriteByte(0xA7);
                 writer.WriteUInt16(0xFFFF);
                 TdsCollationCodec.For(VectorWireCollation).Write(writer);
                 break;
+            case JsonSqlType when writer.NativeJson:
+                // The native json type is the type byte alone (captured
+                // 2026-10-02 against SQL Server 2025 through SqlClient 7.0.2).
+                writer.WriteByte(0xF4);
+                break;
             case JsonSqlType:
-                // Likewise json, with no json feature extension acknowledged:
-                // real's down-level form for a TDS 7.4 client is the same
-                // varchar(max) collated Latin1_General_100_BIN2_UTF8, per the
-                // json data type's own documentation.
+                // Without json support negotiated, real's down-level form for a
+                // TDS 7.4 client is the same varchar(max) collated
+                // Latin1_General_100_BIN2_UTF8, per the json data type's own
+                // documentation.
                 writer.WriteByte(0xA7);
                 writer.WriteUInt16(0xFFFF);
                 TdsCollationCodec.For(VectorWireCollation).Write(writer);
@@ -720,6 +739,19 @@ internal static class TdsTypeCodec
                     writer.WriteUInt64(ulong.MaxValue);
                 else
                     WritePlpChunks(writer, SystemNameSqlType.Utf16LeBytes(value.AsString));
+                break;
+            case VectorSqlType vector when IsNativeVector(writer, vector):
+                // USHORTLEN: the stored form itself, header included, or 0xFFFF.
+                if (value.IsNull)
+                {
+                    writer.WriteUInt16(0xFFFF);
+                }
+                else
+                {
+                    var bytes = value.AsVectorBytes;
+                    writer.WriteUInt16(checked((ushort)bytes.Length));
+                    writer.WriteBytes(bytes);
+                }
                 break;
             case VectorSqlType:
                 if (value.IsNull)

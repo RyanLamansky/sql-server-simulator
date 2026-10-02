@@ -191,6 +191,15 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool AbortsAsUnderXactAbort { get; private init; }
 
     /// <summary>
+    /// Refines <see cref="AbortsAsUnderXactAbort"/>: uncaught, the error still
+    /// ends the batch, but the transaction is left doomed rather than rolled
+    /// back, so the batch's end rolls it back with Msg 3998. Probe-confirmed
+    /// against SQL Server 2025 (2026-10-02) for a memory-optimized write
+    /// conflict (Msg 41302).
+    /// </summary>
+    internal bool DoomsWhenUncaught { get; private init; }
+
+    /// <summary>
     /// When <see langword="true"/>, this is a cancellation (a
     /// <c>CommandTimeout</c> expiry or a caller's cancel) observed inside a
     /// running statement rather than between two. It ends the batch and no

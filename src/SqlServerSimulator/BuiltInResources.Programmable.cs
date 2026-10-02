@@ -442,8 +442,8 @@ internal static partial class BuiltInResources
         // columns are constant for every table type (probe-confirmed against
         // SQL Server 2025): system_type_id 243, max_length -1, precision 0,
         // scale 0, collation_name NULL, is_nullable 0, is_assembly_type 0,
-        // is_table_type 1; principal_id is the explicit owner, else NULL. is_memory_optimized is a constant
-        // 0 (memory-optimized table types aren't modeled). SMO's UDTT
+        // is_table_type 1; principal_id is the explicit owner, else NULL. is_memory_optimized reports
+        // a memory-optimized table type. SMO's UDTT
         // property-bag / Script query reads tt.max_length / is_nullable /
         // collation_name / principal_id, and its SSMS index/key/FK sub-node
         // queries read is_memory_optimized via (SELECT tt.is_memory_optimized
@@ -900,7 +900,7 @@ internal static partial class BuiltInResources
                     trueBit,
                     schemaId,
                     SqlValue.FromInt32(tt.UserTypeId),
-                    falseBit,
+                    SqlValue.FromBoolean(tt.IsMemoryOptimized),
                     tableTypeSystemTypeId,
                     Ownership.PrincipalIdValue(tt.OwnerPrincipalId),
                     negOneLength,

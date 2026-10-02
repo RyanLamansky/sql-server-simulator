@@ -144,6 +144,7 @@ partial class Simulation
                 : SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
         }
 
+        RejectOnMemoryOptimized(table, "The operation 'CREATE INDEX'", 7);
         RecordTableDdlUndo(context, table);
 
         // CREATE INDEX is gated on ALTER of the table it lands on — Msg 1088
@@ -185,7 +186,8 @@ partial class Simulation
                 replacedConstraint = indexOptions.DropExisting ? kc : throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString());
         }
         if (table.JsonIndexes.Exists(json => context.Batch.CurrentDatabase.Collation.Equals(json.Name, indexName))
-            || table.VectorIndexes.Exists(vector => context.Batch.CurrentDatabase.Collation.Equals(vector.Name, indexName)))
+            || table.VectorIndexes.Exists(vector => context.Batch.CurrentDatabase.Collation.Equals(vector.Name, indexName))
+            || table.HypotheticalIndexes.Exists(hypothetical => context.Batch.CurrentDatabase.Collation.Equals(hypothetical.Name, indexName)))
         {
             throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString());
         }
@@ -200,7 +202,7 @@ partial class Simulation
         // A table can carry at most one clustered index — a clustered PK/UQ
         // constraint or a prior CREATE CLUSTERED INDEX. Msg 1902 names the
         // existing one (a default PK is clustered).
-        if (isClustered && replacedConstraint is null)
+        if (isClustered && replacedConstraint is null && !indexOptions.StatisticsOnly)
         {
             var existingClustered =
                 table.KeyConstraints.FirstOrDefault(k => k.IsClustered)?.Name
@@ -264,6 +266,18 @@ partial class Simulation
         // unaffected (probe-confirmed).
         if ((filter is not null || IndexCoversComputedColumn(table, index)) && IncorrectSetOptionNames(context) is { } setOptions)
             throw SimulatedSqlException.IncorrectSetOptions("CREATE INDEX", setOptions);
+
+        // A hypothetical index is never built: no uniqueness check, no
+        // placement, no storage — a catalog entry and a statistic (probed
+        // 2026-10-02 against SQL Server 2025: a UNIQUE one admits duplicates).
+        if (index.IsHypothetical)
+        {
+            table.SettleIndexIds();
+            table.HypotheticalIndexes.Add(index);
+            table.NoteStatisticsCreated(index.Name, context.CurrentDatabase.Collation);
+            RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
+            return true;
+        }
 
         WarnOfWideIndexKey(context.Batch, table.Columns, [.. resolvedKeyColumns.Select(static key => key.ColumnOrdinal)], indexName, isClustered);
         var placement = PlacementFor(context.Batch, table, index.WrittenDataSpace);

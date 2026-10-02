@@ -95,12 +95,10 @@ The paths are string literals kept as written (`$` without `FOR`), each well-for
 ## Client surface
 
 The in-process reader surfaces the canonical text (`GetFieldType` string, `GetDataTypeName` `json`).
-The TDS endpoint acknowledges no json feature extension and sends a json column as `varchar(max)` collated `Latin1_General_100_BIN2_UTF8`, the form Microsoft's json data type page gives for a TDS 7.4 client without json support.
+Over the TDS endpoint a client that negotiates json support (SqlClient 6+) receives the native json type, `GetDataTypeName` `json`; one that doesn't receives `varchar(max)` collated `Latin1_General_100_BIN2_UTF8`, the form Microsoft's json data type page gives for a TDS 7.4 client without json support — see [`tds-endpoint.md`](tds-endpoint.md).
 
 ## Divergences
 
-- **A json-aware client reads text.**
-  Real sends SqlClient 6+ the native json type; the endpoint sends every client the down-level `varchar(max)`.
 - **The describe surfaces always answer `json`**, as real does to a json-aware client.
 - **Real refuses an `append` path beside another `JSON_MODIFY` over json in one select list** with Msg 13656 (`JSON data type cannot be used when its feature switch is off.`), though either call alone works, and the same Msg 13656 (State 8) meets a `SET @j.modify('append …', …)` that follows a `SELECT @j = …` in its batch (probed 2026-09-27); the simulator runs them.
 - **The size model is fitted, not derived**: documents shaped unlike any probed one (very long property names, objects past 64 KB) may report a different `DATALENGTH`.
@@ -110,4 +108,4 @@ The TDS endpoint acknowledges no json feature extension and sends a json column 
 ## Not modeled yet
 
 - A JSON index's internal table (`json_index_<object_id>_<index_id>` in `sys.objects` and `sys.internal_tables`) and the internal index `sys.indexes` lists beside it.
-- The native json TDS type a json-aware client negotiates, a json parameter sent by such a client over RPC, and json columns in BACPAC import.
+- json columns in BACPAC import.

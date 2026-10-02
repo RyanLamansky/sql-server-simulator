@@ -1274,7 +1274,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(db.TargetRecoveryTimeSeconds),
                 zeroInt,
                 disabled,
-                falseBit, // is_memory_optimized_elevate_to_snapshot_on
+                Switch(DatabaseSwitches.MemoryOptimizedElevateToSnapshot),
                 falseBit, // is_federation_member
                 falseBit, // is_remote_data_archive_enabled
                 falseBit, // is_mixed_page_allocation_on
@@ -1735,8 +1735,8 @@ internal static partial class BuiltInResources
         [
             SqlValue.FromInt32(file.FileId),
             SqlValue.Null(SqlType.UniqueIdentifier),
-            SqlValue.FromByte(file.IsLog ? (byte)1 : (byte)0),
-            SqlValue.FromNVarchar(file.IsLog ? "LOG" : "ROWS"),
+            SqlValue.FromByte(file.IsContainer ? (byte)2 : file.IsLog ? (byte)1 : (byte)0),
+            SqlValue.FromNVarchar(file.IsContainer ? "FILESTREAM" : file.IsLog ? "LOG" : "ROWS"),
             SqlValue.FromInt32(file.DataSpaceId),
             SqlValue.FromNVarchar(file.Name),
             SqlValue.FromNVarchar(file.PhysicalName),

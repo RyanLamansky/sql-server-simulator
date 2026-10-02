@@ -318,11 +318,12 @@ partial class Simulation
         SqlType returnType,
         string bodyText,
         int bodyLineOffset,
-        string closingEnd)
+        string closingEnd,
+        bool nativelyCompiled)
     {
         var variables = SeedFunctionParameters(parameters);
         BindModuleBodyAtCreate(outerContext, bodyText, functionName, bodyLineOffset,
-            bodyCommand => new BatchContext(bodyCommand, variables, new UdfFrame(returnType)),
+            bodyCommand => new BatchContext(bodyCommand, variables, new UdfFrame(returnType)) { NativelyCompiledBody = nativelyCompiled },
             new FunctionBodyShape(),
             rejectsNextValueFor: true,
             closingEnd);
@@ -387,9 +388,10 @@ partial class Simulation
         string triggerName,
         TriggerFrame frame,
         string bodyText,
-        int bodyLineOffset)
+        int bodyLineOffset,
+        bool nativelyCompiled = false)
         => BindModuleBodyAtCreate(outerContext, bodyText, triggerName, bodyLineOffset,
-            bodyCommand => new BatchContext(bodyCommand, frame));
+            bodyCommand => new BatchContext(bodyCommand, frame) { NativelyCompiledBody = nativelyCompiled });
 
     /// <summary>
     /// The masked columns <paramref name="function"/>'s result reads, which a

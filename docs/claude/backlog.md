@@ -231,7 +231,7 @@ Not sim bugs (**fail on real too** — leave alone): boolean-expression `=` comp
 EF Core's own SQL Server functional suite — `test/EFCore.SqlServer.FunctionalTests` at the `v10.0.2` tag, the provider version the repo pins — run unmodified over the wire, real SQL Server 2025 on one side and the TDS endpoint on the other, with only `Test__SqlServer__DefaultConnection` pointing it (harness local-only, see its provenance note).
 The slice is the **whole suite**: 51,446 results over 369 test classes, 391 of them skipped identically on both sides, packed into 12 batches of about 5,000 tests that each side runs in about 15 minutes.
 Measured 2026-10-02: **real fails 0**, so the bar is the simulator failing nothing, and the reverse delta (real-only, the over-permissive direction) was empty before and after.
-The first simulator run failed 3,595 tests in the eleven batches that finished, the twelfth killed after 216 more; after the fixes it fails **14**, all simulator-only.
+The first simulator run failed 3,595 tests in the eleven batches that finished, the twelfth killed after 216 more; after the fixes it fails **2**, both simulator-only and both a plan's row order.
 
 Roots closed, each with its regression test:
 
@@ -246,12 +246,15 @@ Roots closed, each with its regression test:
 - **Parsing**: `((SELECT … ORDER BY a, b) IS NULL AND …)` read as a row constructor ([`grammar.md`](grammar.md)); a table after `APPLY` was refused, which two existing tests had pinned without a probe ([`joins.md`](joins.md)); `OFFSET` / `FETCH` couldn't read an enclosing query's column ([`query.md`](query.md)); `ALTER COLUMN … ADD | DROP HIDDEN` and `ALTER COLUMN … SPARSE` were syntax errors ([`alter-table.md`](alter-table.md)); `CONTAINS` / `FREETEXT` accepted any expression as their condition ([`full-text.md`](full-text.md)).
 - **Smaller semantics**: `ALTER COLUMN` without `COLLATE` kept a declared collation where real resets it, again against an existing test; a computed column's `sys.columns.collation_name`; a history table's hidden columns; one Msg 421 per non-comparable `DISTINCT` column; binary `CHARINDEX` ([`scalars.md`](scalars.md)); Msg 4186 for an `OUTPUT` of a computed column over a data-accessing function ([`dml.md`](dml.md)); Msg 2739 alone for a legacy-LOB variable with an initializer; a primary key yielding `CLUSTERED` to an explicit unique constraint ([`constraints.md`](constraints.md)); full-text `TYPE COLUMN` documents read through the plain-text, HTML and XML filters; sequences over `decimal(38, 0)` and Msg 11708 ([`sequences.md`](sequences.md)).
 
-Remaining, each understood:
+Closed in a second pass, the twelve failures that remained after the first:
 
-- **Memory-optimized tables** (8 tests): the simulator reports `SERVERPROPERTY('IsXTPSupported') = 1` as real does but models none of it — `MEMORY_OPTIMIZED_ELEVATE_TO_SNAPSHOT`, a `MEMORY_OPTIMIZED_DATA` filegroup's type-2 file (EF's migration looks for one, finds none and adds the filegroup again, which fails on its own name), or `CREATE TABLE … WITH (MEMORY_OPTIMIZED = ON)`.
-- **Native `vector` result columns** (2 tests): SqlClient 7 asks for the vector feature extension and real acknowledges it, sending `vector` columns as `0xF5`; the endpoint negotiates no feature extension, so `GetFieldValue<SqlVector<float>>` meets the down-level text (see [`vector.md`](vector.md)); `json` would follow the same path.
-- **`WITH STATISTICS_ONLY = -1`** (1 test): real's undocumented hypothetical index, `sys.indexes.is_hypothetical = 1` and enforcing nothing, is a syntax error here.
-- **A key column list on a column-level constraint** (1 test): real takes `b bigint CONSTRAINT ux UNIQUE (a, b)` and `a int PRIMARY KEY (id, a)` as table-level keys (probed 2026-10-02); here it is Msg 102 at the `(`.
+- **Memory-optimized tables** (8 tests): In-Memory OLTP is modeled — the `MEMORY_OPTIMIZED_DATA` filegroup and its containers, `MEMORY_OPTIMIZED` / `DURABILITY`, hash and range indexes, the declaration and DDL refusals, the isolation rules, `MEMORY_OPTIMIZED_ELEVATE_TO_SNAPSHOT`, natively compiled modules and the catalog surfaces ([`memory-optimized.md`](memory-optimized.md)).
+- **Native `vector` and `json` result columns** (2 tests): the endpoint acknowledges SqlClient 7's feature extensions and sends `0xF5` / `0xF4` where it was asked to ([`tds-endpoint.md`](tds-endpoint.md)).
+- **`WITH STATISTICS_ONLY = -1`** (1 test): a hypothetical index lands in the catalog and enforces nothing ([`indexes.md`](indexes.md#hypothetical-indexes)).
+- **A key column list on a column-level constraint** (1 test): `b bigint CONSTRAINT ux UNIQUE (a, b)` declares a table-level key ([`constraints.md`](constraints.md#a-column-level-key-naming-its-columns)).
+
+Remaining:
+
 - **Row order a plan decides** (2 tests, irreducible): `Select_DTO_constructor_distinct_with_collection_projection_translated_to_server_with_binding_after_client_eval` asserts that real's rows within one `ORDER BY` key come back out of `OrderID` order, which its hash plan produces and the simulator's stable order doesn't.
 
 Gotchas worth keeping:

@@ -49,6 +49,35 @@ internal static partial class BuiltInResources
             new("optimize_for_sequential_key", SqlType.Bit, null, true),
         ], ["object_id"], EnumerateSysIndexes);
 
+        // sys.hash_indexes: sys.indexes' first nineteen columns over the hash
+        // indexes of memory-optimized tables and table types, then each one's
+        // bucket count — BUCKET_COUNT rounded up to a power of two — and
+        // auto_created (probed 2026-10-02 against SQL Server 2025).
+        Sys("hash_indexes",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("name", SqlType.SystemName, 128, true),
+            new("index_id", SqlType.Int32, null, false),
+            new("type", SqlType.TinyInt, null, false),
+            new("type_desc", nvarchar60Catalog, 60, true),
+            new("is_unique", SqlType.Bit, null, true),
+            new("data_space_id", SqlType.Int32, null, false),
+            new("ignore_dup_key", SqlType.Bit, null, true),
+            new("is_primary_key", SqlType.Bit, null, true),
+            new("is_unique_constraint", SqlType.Bit, null, true),
+            new("fill_factor", SqlType.TinyInt, null, false),
+            new("is_padded", SqlType.Bit, null, true),
+            new("is_disabled", SqlType.Bit, null, true),
+            new("is_hypothetical", SqlType.Bit, null, true),
+            new("is_ignored_in_optimization", SqlType.Bit, null, true),
+            new("allow_row_locks", SqlType.Bit, null, true),
+            new("allow_page_locks", SqlType.Bit, null, true),
+            new("has_filter", SqlType.Bit, null, true),
+            new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
+            new("bucket_count", SqlType.Int32, null, false),
+            new("auto_created", SqlType.Bit, null, true),
+        ], EnumerateSysHashIndexes);
+
         // sys.data_spaces: the simulator models a single PRIMARY row-filegroup
         // (data_space_id = 1) — the same id every sys.indexes row reports for
         // data_space_id, so SMO's LEFT JOIN idx.data_space_id → dsidx resolves.
@@ -222,15 +251,10 @@ internal static partial class BuiltInResources
             new("row_count", SqlType.BigInt, null, true),
         ], EnumerateSysDmDbPartitionStats);
 
-        // sys.dm_db_xtp_table_memory_stats: in-memory-OLTP per-table memory DMV.
-        // Memory-optimized tables aren't modeled, so this is an empty view (full
-        // probe-confirmed 5-column shape, SQL Server 2025, 2026-07-16). Load-
-        // bearing for parse binding, not data: SMO's Table DataSpaceUsed /
-        // IndexSpaceUsed queries branch on is_memory_optimized and reference this
-        // view in the (never-taken, but compile-time-bound) memory-optimized arm
-        // — without the view the whole statement failed Msg 208 and the property
-        // errored. The is_memory_optimized = 0 arm (every simulator table) reads
-        // allocation_units / dm_db_partition_stats instead.
+        // sys.dm_db_xtp_table_memory_stats: in-memory-OLTP per-table memory DMV
+        // (probe-confirmed 5-column shape, SQL Server 2025, 2026-07-16), one row
+        // per memory-optimized table. SMO's Table DataSpaceUsed /
+        // IndexSpaceUsed queries read it in their is_memory_optimized arm.
         Sys("dm_db_xtp_table_memory_stats",
         [
             new("object_id", SqlType.Int32, null, true),
@@ -238,7 +262,7 @@ internal static partial class BuiltInResources
             new("memory_used_by_table_kb", SqlType.BigInt, null, true),
             new("memory_allocated_for_indexes_kb", SqlType.BigInt, null, true),
             new("memory_used_by_indexes_kb", SqlType.BigInt, null, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], EnumerateXtpTableMemoryStats);
 
         // sys.stats: one row per index sys.indexes reports, excluding the
         // heap (index_id = 0, which carries no statistics). stats_id =
@@ -288,11 +312,11 @@ internal static partial class BuiltInResources
             new("column_id", SqlType.Int32, null, true),
         ], EnumerateSysStatsColumns);
 
-        // sys.internal_tables / sys.hash_indexes / sys.json_indexes /
+        // sys.internal_tables / sys.json_indexes /
         // sys.index_resumable_operations / sys.selective_xml_index_paths /
         // sys.filetable_system_defined_objects: features the simulator doesn't
-        // model (system internal tables, memory-optimized hash indexes, JSON
-        // indexes, resumable index builds, selective XML indexes, FileTables).
+        // model (system internal tables, JSON indexes, resumable index builds,
+        // selective XML indexes, FileTables).
         // Each ships as an empty view with the probe-confirmed full column
         // shape (SQL Server 2025, 2026-07-15) so that SMO's index-enumeration
         // mega-query — which LEFT JOINs all six and reads specific columns —
@@ -318,30 +342,6 @@ internal static partial class BuiltInResources
             new("parent_minor_id", SqlType.Int32, null, true),
             new("lob_data_space_id", SqlType.Int32, null, false),
             new("filestream_data_space_id", SqlType.Int32, null, true),
-        ], static (_, _) => EmptyCatalogRows);
-        Sys("hash_indexes",
-        [
-            new("object_id", SqlType.Int32, null, false),
-            new("name", SqlType.SystemName, 128, true),
-            new("index_id", SqlType.Int32, null, false),
-            new("type", SqlType.TinyInt, null, false),
-            new("type_desc", nvarchar60Catalog, 60, true),
-            new("is_unique", SqlType.Bit, null, true),
-            new("data_space_id", SqlType.Int32, null, false),
-            new("ignore_dup_key", SqlType.Bit, null, true),
-            new("is_primary_key", SqlType.Bit, null, true),
-            new("is_unique_constraint", SqlType.Bit, null, true),
-            new("fill_factor", SqlType.TinyInt, null, false),
-            new("is_padded", SqlType.Bit, null, true),
-            new("is_disabled", SqlType.Bit, null, true),
-            new("is_hypothetical", SqlType.Bit, null, true),
-            new("is_ignored_in_optimization", SqlType.Bit, null, true),
-            new("allow_row_locks", SqlType.Bit, null, true),
-            new("allow_page_locks", SqlType.Bit, null, true),
-            new("has_filter", SqlType.Bit, null, true),
-            new("filter_definition", NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault), SqlType.MaxLengthSentinel, true),
-            new("bucket_count", SqlType.Int32, null, false),
-            new("auto_created", SqlType.Bit, null, true),
         ], static (_, _) => EmptyCatalogRows);
         Sys("json_indexes",
         [
@@ -622,17 +622,72 @@ internal static partial class BuiltInResources
     {
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
+        var memoryOptimizedType = SqlValue.FromChar(charTwo, "FX");
+        var memoryOptimizedTypeDesc = SqlValue.FromNVarchar("MEMORY_OPTIMIZED_DATA_FILEGROUP");
         foreach (var (name, id) in database.Filegroups.OrderBy(kvp => kvp.Value))
         {
+            // The MEMORY_OPTIMIZED_DATA filegroup reports is_default 1 beside
+            // the default rows filegroup (probed 2026-10-02 against SQL Server
+            // 2025).
+            var memoryOptimized = id == database.MemoryOptimizedFilegroupId;
             yield return
             [
                 SqlValue.FromSystemName(name),
                 SqlValue.FromInt32(id),
-                filegroupType,
-                filegroupTypeDesc,
-                id == database.DefaultFilegroupId ? trueBit : falseBit,
+                memoryOptimized ? memoryOptimizedType : filegroupType,
+                memoryOptimized ? memoryOptimizedTypeDesc : filegroupTypeDesc,
+                memoryOptimized || id == database.DefaultFilegroupId ? trueBit : falseBit,
                 falseBit,
             ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.hash_indexes</c>: the <c>sys.indexes</c> rows of type 7,
+    /// cut to the first nineteen columns, then the index's bucket count and
+    /// <c>auto_created</c>.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysHashIndexes(Parser.BatchContext batch, Database database)
+    {
+        var buckets = new Dictionary<(int ObjectId, int IndexId), int>();
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var table in ConstraintHosts(schema, batch))
+            {
+                foreach (var identity in table.IndexIdentities())
+                {
+                    if (identity.Type == 7)
+                        buckets[(table.ObjectId, identity.IndexId)] = identity.Constraint?.BucketCount ?? identity.Index!.BucketCount;
+                }
+            }
+        }
+        var autoCreated = SqlValue.FromBoolean(false);
+        foreach (var row in EnumerateSysIndexes(batch, database, CatalogFilter.None))
+        {
+            if (row[3].AsByte != 7)
+                continue;
+            yield return [.. row.AsSpan(0, 19), SqlValue.FromInt32(buckets[(row[0].AsInt32, row[2].AsInt32)]), autoCreated];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.dm_db_xtp_table_memory_stats</c>: one per
+    /// memory-optimized table. The figures are the empty-table ones real
+    /// reports — 64 KB allocated for the table and for each index, the heap's
+    /// included, none of it used (probed 2026-10-02 against SQL Server 2025) —
+    /// since rows here hold no memory of their own to measure.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateXtpTableMemoryStats(Parser.BatchContext batch, Database database)
+    {
+        var zero = SqlValue.FromInt64(0);
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var table in CatalogTables(schema, batch).OrderBy(table => table.ObjectId))
+            {
+                if (!table.IsMemoryOptimized)
+                    continue;
+                yield return [SqlValue.FromInt32(table.ObjectId), SqlValue.FromInt64(64), zero, SqlValue.FromInt64(64L * table.IndexIdentities().Count), zero];
+            }
         }
     }
 
@@ -663,6 +718,7 @@ internal static partial class BuiltInResources
         var nonClusteredDesc = SqlValue.FromNVarchar("NONCLUSTERED");
         var clusteredColumnstoreDesc = SqlValue.FromNVarchar("CLUSTERED COLUMNSTORE");
         var nonClusteredColumnstoreDesc = SqlValue.FromNVarchar("NONCLUSTERED COLUMNSTORE");
+        var nonClusteredHashDesc = SqlValue.FromNVarchar("NONCLUSTERED HASH");
         var xmlDesc = SqlValue.FromNVarchar("XML");
         var spatialDesc = SqlValue.FromNVarchar("SPATIAL");
         var primaryDataSpace = SqlValue.FromInt32(1);
@@ -710,6 +766,7 @@ internal static partial class BuiltInResources
                 1 => clusteredDesc,
                 5 => clusteredColumnstoreDesc,
                 6 => nonClusteredColumnstoreDesc,
+                7 => nonClusteredHashDesc,
                 _ => nonClusteredDesc,
             };
             var compressionDelay = identity.Index is { IsColumnstore: true } columnstore
@@ -764,6 +821,12 @@ internal static partial class BuiltInResources
                 if (heapOwner is not null)
                     (allowRowLocks, allowPageLocks) = (heapOwner.HeapAllowRowLocks, heapOwner.HeapAllowPageLocks);
             }
+            // A memory-optimized table's indexes, its heap row included, live in
+            // no data space and take no locks (probed 2026-10-02 against SQL
+            // Server 2025).
+            var memoryOptimized = heapOwner is { IsMemoryOptimized: true };
+            if (memoryOptimized)
+                (allowRowLocks, allowPageLocks) = (false, false);
             return BuildIndexRow(
                 name: name,
                 objectId: objectId,
@@ -771,7 +834,9 @@ internal static partial class BuiltInResources
                 type: SqlValue.FromByte(identity.Type),
                 typeDesc: typeDesc,
                 isUnique: isUnique,
-                dataSpaceId: placement is not null ? SqlValue.FromInt32(placement.Scheme.DataSpaceId)
+                // A hypothetical index lives in no data space.
+                dataSpaceId: identity.Index is { IsHypothetical: true } || memoryOptimized ? SqlValue.FromInt32(0)
+                    : placement is not null ? SqlValue.FromInt32(placement.Scheme.DataSpaceId)
                     : filegroupId == Database.PrimaryFilegroupId ? primaryDataSpace : SqlValue.FromInt32(filegroupId),
                 isPrimaryKey: isPrimaryKey,
                 isUniqueConstraint: isUniqueConstraint,
@@ -780,7 +845,8 @@ internal static partial class BuiltInResources
                 ignoreDupKey: ignoreDupKey,
                 isDisabled: isDisabled,
                 isPadded ? trueBit : falseBit, allowRowLocks ? trueBit : falseBit, allowPageLocks ? trueBit : falseBit,
-                SqlValue.FromByte(fillFactor), compressionDelay, optimizeForSequentialKey ? trueBit : falseBit);
+                SqlValue.FromByte(fillFactor), compressionDelay, optimizeForSequentialKey ? trueBit : falseBit,
+                identity.Index is { IsHypothetical: true } ? trueBit : falseBit);
         }
 
         SqlValue[] AuxiliaryRow(SqlValue objectId, string name, int indexId, byte type, SqlValue typeDesc) =>
@@ -798,14 +864,14 @@ internal static partial class BuiltInResources
                 filterDefinition: nullFilter,
                 ignoreDupKey: falseBit,
                 isDisabled: falseBit,
-                falseBit, trueBit, trueBit, SqlValue.FromByte(0), nullCompressionDelay, falseBit);
+                falseBit, trueBit, trueBit, SqlValue.FromByte(0), nullCompressionDelay, falseBit, falseBit);
 
         SqlValue[] BuildIndexRow(
             SqlValue name, SqlValue objectId, SqlValue indexId, SqlValue type, SqlValue typeDesc,
             SqlValue isUnique, SqlValue dataSpaceId, SqlValue isPrimaryKey, SqlValue isUniqueConstraint,
             SqlValue hasFilter, SqlValue filterDefinition, SqlValue ignoreDupKey, SqlValue isDisabled,
             SqlValue isPadded, SqlValue allowRowLocks, SqlValue allowPageLocks, SqlValue fillFactor, SqlValue compressionDelay,
-            SqlValue optimizeForSequentialKey) =>
+            SqlValue optimizeForSequentialKey, SqlValue isHypothetical) =>
             [
                 objectId,
                 name,
@@ -820,7 +886,7 @@ internal static partial class BuiltInResources
                 fillFactor,
                 isPadded,
                 isDisabled,
-                falseBit, // is_hypothetical
+                isHypothetical,
                 falseBit, // is_ignored_in_optimization
                 allowRowLocks,
                 allowPageLocks,
@@ -866,7 +932,8 @@ internal static partial class BuiltInResources
     /// index keeps the table's data, so it still holds storage.
     /// </summary>
     private static bool HoldsStorage(IndexIdentity identity) =>
-        identity.Type is 0 or 1 or 5 || !(identity.Index?.IsDisabled ?? identity.Constraint?.IsDisabled ?? false);
+        identity.Index is not { IsHypothetical: true }
+        && (identity.Type is 0 or 1 or 5 || !(identity.Index?.IsDisabled ?? identity.Constraint?.IsDisabled ?? false));
 
     private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index, PartitionPlacement? Placement)> EnumerateTableIndexIdentities(Database database, Parser.BatchContext? batch, bool storageOnly = true)
     {

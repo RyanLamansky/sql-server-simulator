@@ -363,8 +363,7 @@ partial class Simulation
         // SCHEMABINDING records on the function for the catalog surfaces
         // without being enforced.
         var options = ParseModuleOptions(context, ModuleOptionHost.ScalarFunction, functionName.Leaf);
-        if (options.NativeCompilation)
-            throw new NotSupportedException("A natively compiled scalar function isn't modeled.");
+        var nativelyCompiled = options.NativeCompilation;
         var returnsNullOnNullInput = options.ReturnsNullOnNullInput;
         var isSchemaBound = options.SchemaBinding;
         var executeAsClause = options.ExecuteAs;
@@ -385,10 +384,21 @@ partial class Simulation
 
         var commandText = context.Command.CommandText;
         context.MoveNextRequired(); // step past BEGIN
-        // A function can't be natively compiled here, so its body can't open
-        // with BEGIN ATOMIC (probed 2026-09-25 against SQL Server 2025).
+        // Only a natively compiled function's body opens with BEGIN ATOMIC,
+        // and it has to (Msg 10782 / 10783, probed 2026-09-25 and 2026-10-02
+        // against SQL Server 2025). The block's options are checked here; its
+        // body runs as any function body does.
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Atomic })
-            throw SimulatedSqlException.BeginAtomicOutsideNativeModule();
+        {
+            if (!nativelyCompiled)
+                throw SimulatedSqlException.BeginAtomicOutsideNativeModule();
+            context.MoveNextRequired();
+            ParseAtomicBlockOptions(context, validate: true);
+        }
+        else if (nativelyCompiled)
+        {
+            throw SimulatedSqlException.NativeModuleBodyNotAtomic();
+        }
         var bodyStart = context.Token.StartIndex;
         var depth = 1;
         var caseDepth = 0;
@@ -453,7 +463,7 @@ partial class Simulation
         // BindModuleBodyAtCreate.
         BindBehindDeclarationErrors(HeldDeclarationErrors(declarationErrors, returnType, endLine), () => context.Simulation.BindScalarFunctionBodyAtCreate(
             context, functionName.Leaf, parameters, returnType, bodyText,
-            CountNewlines(commandText, 0, bodyStart), commandText[bodyEnd..(bodyEnd + 3)]));
+            CountNewlines(commandText, 0, bodyStart), commandText[bodyEnd..(bodyEnd + 3)], nativelyCompiled));
 
         // INLINE = ON over a body that can't inline is refused after the body
         // binds and ahead of the name check (probed 2026-10-01 against SQL
@@ -487,6 +497,7 @@ partial class Simulation
             ReturnMaxLength = returnMaxLength,
             BodyLineOffset = CountNewlines(commandText, 0, bodyStart),
             InlineOption = options.Inline,
+            IsNativelyCompiled = nativelyCompiled,
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;

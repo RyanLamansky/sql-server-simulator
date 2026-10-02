@@ -492,7 +492,8 @@ internal sealed class ObjectProperty : Expression
             "TABLEHASCLUSTINDEX" => Flag(table is not null && ObjectPropertyEx.HasClusteredIndex(table)),
             // Legacy and unmodeled storage options, off on every table.
             "TABLEHASCOLUMNSET" or "TABLEHASVARDECIMALSTORAGEFORMAT" or "TABLEISLOCKEDONBULKLOAD"
-                or "TABLEISMEMORYOPTIMIZED" or "TABLEISPINNED" or "TABLETEXTINROWLIMIT" => 0,
+                or "TABLEISPINNED" or "TABLETEXTINROWLIMIT" => 0,
+            "TABLEISMEMORYOPTIMIZED" => Flag(table is { IsMemoryOptimized: true }),
             "TABLEHASDEFAULTCNST" => Flag(table is not null && Array.Exists(table.Columns, column => column.DefaultConstraint is not null)),
             "TABLEHASDELETETRIGGER" => Flag(table is not null && TableTriggerCount(database, table, TriggerActions.Delete) > 0),
             "TABLEHASFOREIGNKEY" => Flag(table is { OutgoingForeignKeys.Count: > 0 }),

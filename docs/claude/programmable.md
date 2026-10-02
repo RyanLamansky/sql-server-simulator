@@ -681,7 +681,7 @@ Probed against SQL Server 2025.
   Separately, the handlers also capture the *full* original statement text into `SchemaObject.DefinitionText` (verb normalized to `CREATE`) for `OBJECT_DEFINITION` / `sys.sql_modules` / `INFORMATION_SCHEMA.ROUTINES.ROUTINE_DEFINITION` — see [`catalog-views.md`](catalog-views.md).
 - **Parens around parameter list optional**: `CREATE PROC p (@x int)` and `CREATE PROC p @x int` are equivalent.
 - **WITH options**: `EXECUTE AS CALLER|SELF|OWNER|'name'` is applied as an impersonation frame at invocation, a `'name'` no user of the database carries being Msg 15151 at `CREATE` (probed 2026-10-02); `RECOMPILE` and `FOR REPLICATION` parse and are ignored — see [The `WITH` option clause](#the-with-option-clause) for what the clause refuses.
-- **`NATIVE_COMPILATION`** admits a `BEGIN ATOMIC [WITH (…)]` body, which runs as a plain `BEGIN … END` block; real's in-memory OLTP prerequisites (Msg 41337 without a `MEMORY_OPTIMIZED_DATA` filegroup) aren't modeled.
+- **`NATIVE_COMPILATION`** requires a `BEGIN ATOMIC WITH (…)` body, which runs as one transaction or savepoint and reaches only memory-optimized tables — see [`memory-optimized.md`](memory-optimized.md#natively-compiled-modules).
   Anywhere else the block is refused as real refuses it (probed 2026-09-25): a procedure, function or trigger body without it is Msg 10782 as the module binds at `CREATE`, and a batch or dynamic-SQL string is Msg 102 at `ATOMIC`.
 - **`CREATE OR ALTER`** is an upsert: creates when missing, replaces when present — see [Replacing a module](#replacing-a-module--alter--create-or-alter) for what the replacement preserves.
 - **Bare `CREATE PROC` on existing name** raises **Msg 2714** (same factory as duplicate CREATE TABLE).

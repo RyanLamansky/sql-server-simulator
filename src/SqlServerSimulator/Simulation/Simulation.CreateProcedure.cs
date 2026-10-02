@@ -163,6 +163,10 @@ partial class Simulation
         // Empty body is legal — `CREATE PROC p AS` with nothing after AS
         // succeeds in real SQL Server. The body capture below produces an
         // empty string, which the per-call invocation handles cleanly.
+        // A natively compiled procedure's body is one BEGIN ATOMIC block
+        // (Msg 10783, probed 2026-10-02 against SQL Server 2025).
+        if (nativelyCompiled && !IsAtomicBlockAhead(context))
+            throw SimulatedSqlException.NativeModuleBodyNotAtomic();
         var bodyStart = context.Token?.StartIndex ?? commandText.Length;
         var bodyEnd = commandText.Length;
         while (context.Token is not null)
@@ -194,6 +198,10 @@ partial class Simulation
         // an existing name, and rather than Msg 208 for a bare ALTER of a name
         // that doesn't exist.
         BindBehindDeclarationErrors(HeldDeclarationErrors(declarationErrors), () => context.Simulation.BindProcedureBodyAtCreate(context, procName.Leaf, parameters, bodyText, bodyLineOffset, nativelyCompiled));
+        // A natively compiled procedure is schema-bound, so its names are
+        // two-part (Msg 4512, probed 2026-10-02 against SQL Server 2025).
+        if (nativelyCompiled)
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "procedure", $"{schema.Name}.{procName.Leaf}", bodyText);
 
         if (groupNumber > 1)
         {
@@ -207,6 +215,7 @@ partial class Simulation
                 UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
                 GroupNumber = groupNumber,
                 RecompilesEveryCall = options.Recompile,
+                IsNativelyCompiled = nativelyCompiled,
             });
             return true;
         }
@@ -244,6 +253,7 @@ partial class Simulation
             // The group's numbered procedures stay with it across an ALTER.
             Numbered = replaced?.Numbered,
             RecompilesEveryCall = options.Recompile,
+            IsNativelyCompiled = nativelyCompiled,
         };
         if (replaced is not null)
             procedure.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -549,5 +559,18 @@ partial class Simulation
             context.Batch, qualifiedTypeName, typeName, declaredMaxLength, declaredScale,
             index: ordinal, TypeSpecSite.Scalar, columnName: parameterName);
         return (resolvedType, resolvedMaxLength, alias);
+    }
+
+    /// <summary>
+    /// Whether the cursor sits on <c>BEGIN ATOMIC</c>, leaving it there.
+    /// </summary>
+    private static bool IsAtomicBlockAhead(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Begin })
+            return false;
+        var checkpoint = context.SaveCheckpoint();
+        var atomic = context.GetNextOptional() is UnquotedString { ContextualKeyword: ContextualKeyword.Atomic };
+        context.RestoreCheckpoint(checkpoint);
+        return atomic;
     }
 }

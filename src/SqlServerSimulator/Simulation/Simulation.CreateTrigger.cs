@@ -225,6 +225,22 @@ partial class Simulation
             throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString(), triggerName.Leaf, parentView is null ? (byte)4 : (byte)6);
         }
 
+        // A memory-optimized table takes only a natively compiled trigger
+        // (probed 2026-10-02 against SQL Server 2025).
+        if (parent is HeapTable { IsMemoryOptimized: true } && !options.NativeCompilation)
+        {
+            var notNative = SimulatedSqlException.MemoryOptimizedTriggerNotNative();
+            notNative.PreserveDiagnostics(1, triggerName.Leaf);
+            throw notNative;
+        }
+        // A natively compiled trigger is an AFTER trigger.
+        if (options.NativeCompilation && timing == TriggerTiming.InsteadOf)
+        {
+            var insteadOf = SimulatedSqlException.InsteadOfNativeTrigger();
+            insteadOf.PreserveDiagnostics(1, triggerName.Leaf);
+            throw insteadOf;
+        }
+
         // Bind the body against empty INSERTED / DELETED pseudo-tables shaped
         // like the parent, before any of the gates below and before the schema
         // dict is touched — probe-confirmed that real reports a body error
@@ -249,7 +265,8 @@ partial class Simulation
                     MaterializePseudoTable(pseudoColumns, "deleted", [], context.Batch),
                     columnsUpdatedMask: []),
                 bodyText,
-                bodyLineOffset);
+                bodyLineOffset,
+                options.NativeCompilation);
         }
 
         // At most one INSTEAD OF trigger per action per target (Msg 2111).
@@ -343,6 +360,7 @@ partial class Simulation
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             NotForReplication = notForReplication,
+            IsNativelyCompiled = options.NativeCompilation,
         };
         if (existed)
             trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;

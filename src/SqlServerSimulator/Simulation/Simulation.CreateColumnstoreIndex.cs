@@ -63,6 +63,7 @@ partial class Simulation
         if (!context.Batch.TryResolveTable(targetTableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
 
+        RejectOnMemoryOptimized(table, "The operation 'CREATE INDEX'", 7);
         RecordTableDdlUndo(context, table);
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(table), table.ObjectId, table.SchemaId))

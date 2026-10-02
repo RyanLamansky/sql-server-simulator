@@ -30,6 +30,13 @@ internal enum DatabaseSwitches
     DateCorrelationOptimization = 1 << 17,
     TemporalHistoryRetention = 1 << 18,
 
+    /// <summary>
+    /// <c>MEMORY_OPTIMIZED_ELEVATE_TO_SNAPSHOT</c>: a READ COMMITTED
+    /// transaction reads a memory-optimized table under SNAPSHOT rather than
+    /// being refused (Msg 41368). Load-bearing, unlike the rest.
+    /// </summary>
+    MemoryOptimizedElevateToSnapshot = 1 << 19,
+
     /// <summary>What every database, system or user, starts with (probed 2026-09-26 against SQL Server 2025).</summary>
     Defaults = AutoCreateStatistics | AutoUpdateStatistics | TemporalHistoryRetention,
 }

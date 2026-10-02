@@ -353,7 +353,7 @@ internal static partial class BuiltInResources
                 obj.DefinitionText is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(obj.DefinitionText),
                 obj.UsesAnsiNulls ? on : off, // uses_ansi_nulls
                 obj.UsesQuotedIdentifier ? on : off, // uses_quoted_identifier
-                obj is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true } ? on : off, // is_schema_bound
+                obj is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true } || obj.IsNativelyCompiled ? on : off, // is_schema_bound
                 // Real reports every schema-bound module as depending on the
                 // database collation, whatever it reads (probed 2026-09-26),
                 // and a multi-statement function whose return table declares a
@@ -364,7 +364,7 @@ internal static partial class BuiltInResources
                 obj is Procedure { RecompilesEveryCall: true } ? on : off, // is_recompiled
                 obj is ScalarFunction { ReturnsNullOnNullInput: true } ? on : off, // null_on_null_input
                 obj.ExecuteAsPrincipalId is { } principalId ? SqlValue.FromInt32(principalId) : nullPrincipal,
-                off, // uses_native_compilation
+                obj.IsNativelyCompiled ? on : off, // uses_native_compilation
                 inlineType ? on : off,
                 isInlineable ? on : off,
             ];

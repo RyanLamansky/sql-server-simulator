@@ -9,8 +9,17 @@ namespace SqlServerSimulator;
 /// 64 KB extent as real rounds them (probed 2026-09-27 against SQL Server
 /// 2025).
 /// </summary>
-internal sealed class DatabaseFile(int fileId, bool isLog, string name, string physicalName, int dataSpaceId, int sizePages, int maxSizePages, int growth, bool isPercentGrowth)
+internal sealed class DatabaseFile(int fileId, bool isLog, string name, string physicalName, int dataSpaceId, int sizePages, int maxSizePages, int growth, bool isPercentGrowth, bool isContainer = false)
 {
+    /// <summary>
+    /// A container of the <c>MEMORY_OPTIMIZED_DATA</c> filegroup: a directory
+    /// real reports as a <c>FILESTREAM</c> file (<c>type</c> 2), numbered from
+    /// 65537, with no size, growth or ceiling, and which the size-reporting
+    /// surfaces (<c>sp_helpfile</c>, <c>FILE_ID</c>, <c>FILEPROPERTY</c>) leave
+    /// out (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    public readonly bool IsContainer = isContainer;
+
     /// <summary>1 for the primary data file, 2 for the primary log file, then the lowest id no file holds.</summary>
     public readonly int FileId = fileId;
 

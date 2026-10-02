@@ -177,6 +177,7 @@ partial class Simulation
             ReservedKeyword { Keyword: Keyword.Foreign } => ParseAddForeignKeyConstraint(context, tableName, explicitName, withNoCheck),
             ReservedKeyword { Keyword: Keyword.Primary or Keyword.Unique } => ParseAddKeyConstraint(context, tableName, explicitName),
             ReservedKeyword { Keyword: Keyword.Default } => ParseAddDefaultConstraint(context, tableName, explicitName),
+            ReservedKeyword { Keyword: Keyword.Index } when explicitName is null => ParseAddIndex(context, tableName),
             UnquotedString { Value: var word } when word.Equals("CONNECTION", StringComparison.OrdinalIgnoreCase) => ParseAddEdgeConstraint(context, tableName, explicitName, withNoCheck),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
@@ -431,7 +432,7 @@ partial class Simulation
     {
         // As in CREATE TABLE's table-level form, the WITH clause comes after
         // the column list and is read below, not by this lookahead.
-        var (kind, clustered, _) = ParseInlineKeyKindAndModifiers(context);
+        var (kind, clustered, modifiers) = ParseInlineKeyKindAndModifiers(context);
         if (context.Token is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var columnNames = new List<string>();
@@ -459,6 +460,8 @@ partial class Simulation
         // IGNORE_DUP_KEY lands.
         var indexOptions = ParseOptionalIndexWithClause(context, IndexOptionStatement.AlterTable)
             .WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
+        if (modifiers.IsHash)
+            indexOptions = indexOptions.AsHash();
 
         if (context.Batch.IsSkipping)
             return true;
@@ -529,6 +532,7 @@ partial class Simulation
         }
 
         var isClustered = clustered ?? (kind == KeyConstraintKind.PrimaryKey);
+        RejectIndexShapeForTable(table, explicitName, isClustered, isColumnstore: false, indexOptions, hasFilter: false, hasInclude: false);
 
         // One clustered index per table, counting a clustered PK / UNIQUE
         // constraint as well as a CREATE CLUSTERED INDEX. Real raises Msg 1902
@@ -711,7 +715,14 @@ partial class Simulation
             }
 
             if (!seen.Add(new SqlValueKey(key)))
-                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.DuplicateKeyOnCreate(QualifiedForViolation(table), constraint.Name, FormatIndexKeyValues(key)));
+            {
+                // A memory-optimized table reports the duplicate as an insert
+                // would, naming the table alone (probed 2026-10-02 against SQL
+                // Server 2025).
+                throw table.IsMemoryOptimized
+                    ? SimulatedSqlException.ViolationOfKeyConstraint(constraint.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE KEY", constraint.Name, table.Name, FormatIndexKeyValues(key))
+                    : SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.DuplicateKeyOnCreate(QualifiedForViolation(table), constraint.Name, FormatIndexKeyValues(key)));
+            }
         }
     }
 
@@ -856,6 +867,8 @@ partial class Simulation
             return ParseDropColumns(context, tableName);
         if (afterDrop is UnquotedString { ContextualKeyword: ContextualKeyword.Period })
             return ParseDropPeriod(context, tableName);
+        if (afterDrop is ReservedKeyword { Keyword: Keyword.Index })
+            return TryParseAlterTableDropIndexes(context, tableName);
         if (afterDrop is not ReservedKeyword { Keyword: Keyword.Constraint })
             throw new NotSupportedException("ALTER TABLE supports only DROP CONSTRAINT, DROP COLUMN and DROP PERIOD FOR SYSTEM_TIME among its DROP shapes.");
 

@@ -59,7 +59,7 @@ internal sealed class IndexProperty : Expression
     /// <summary>What an index name resolved to, with the answers every property reads.</summary>
     private readonly struct FoundIndex(
         int indexId, bool isUnique, bool isClustered, bool isColumnstore, bool isDisabled, byte fillFactor, bool isPadded,
-        bool allowRowLocks, bool allowPageLocks, bool optimizeForSequentialKey, bool isFullTextKey, bool isStatistics, int? depth)
+        bool allowRowLocks, bool allowPageLocks, bool optimizeForSequentialKey, bool isFullTextKey, bool isStatistics, int? depth, bool isHypothetical = false)
     {
         public readonly int IndexId = indexId;
         public readonly bool IsUnique = isUnique;
@@ -75,6 +75,7 @@ internal sealed class IndexProperty : Expression
         public readonly bool IsStatistics = isStatistics;
         /// <summary>The <c>IndexDepth</c> answer, null where the index has none.</summary>
         public readonly int? Depth = depth;
+        public readonly bool IsHypothetical = isHypothetical;
     }
 
     private static FoundIndex? Resolve(Schemas.SchemaObject? owner, string name)
@@ -100,7 +101,7 @@ internal sealed class IndexProperty : Expression
             {
                 return new(identity.IndexId, index.IsUnique, index.IsClustered, index.IsColumnstore, index.IsDisabled, index.FillFactor, index.IsPadded,
                     index.AllowRowLocks && !index.IsColumnstore, index.AllowPageLocks && !index.IsColumnstore, index.OptimizeForSequentialKey,
-                    fullTextKey is not null && Collation.Baseline.Equals(fullTextKey, index.Name), false, Depth(table, identity));
+                    fullTextKey is not null && Collation.Baseline.Equals(fullTextKey, index.Name), false, Depth(table, identity), index.IsHypothetical);
             }
         }
         if (table is null)
@@ -165,11 +166,12 @@ internal sealed class IndexProperty : Expression
             "INDEXDEPTH" => found.Depth,
             "INDEXFILLFACTOR" => found.FillFactor,
             "INDEXID" => found.IndexId,
-            "ISAUTOSTATISTICS" or "ISHYPOTHETICAL" => 0,
+            "ISAUTOSTATISTICS" => 0,
             "ISCLUSTERED" => Flag(found.IsClustered),
             "ISCOLUMNSTORE" => Flag(found.IsColumnstore),
             "ISDISABLED" => Flag(found.IsDisabled),
             "ISFULLTEXTKEY" => Flag(found.IsFullTextKey),
+            "ISHYPOTHETICAL" => Flag(found.IsHypothetical),
             "ISOPTIMIZEDFORSEQUENTIALKEY" => Flag(found.OptimizeForSequentialKey),
             "ISPADINDEX" => Flag(found.IsPadded),
             "ISPAGELOCKDISALLOWED" => Flag(!found.AllowPageLocks),
