@@ -45,6 +45,14 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     public bool DeferFlush;
 
     /// <summary>
+    /// Runs once the response's last packet is ready, just before it is sent:
+    /// the MARS path ends the request's in-flight count here, so a client that
+    /// acts on the response's end — a commit on another session — never finds
+    /// the request still counted.
+    /// </summary>
+    public Action? BeforeEndOfMessage;
+
+    /// <summary>
     /// Sends every full packet's worth of buffered bytes; when
     /// <paramref name="final"/>, sends the remainder with the end-of-message
     /// bit, completing the response.
@@ -64,6 +72,7 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
 
         if (final)
         {
+            this.BeforeEndOfMessage?.Invoke();
             await this.transport.WritePacketAsync(Tds.PacketTabularResult, this.buffer.AsMemory(offset, this.length - offset), endOfMessage: true, cancellationToken).ConfigureAwait(false);
             offset = this.length;
         }

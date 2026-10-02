@@ -246,7 +246,11 @@ partial class Simulation
             for (var i = 0; i < columns.Length; i++)
             {
                 if (context.Batch.CurrentDatabase.Collation.Equals(columns[i].Name, reference.Leaf))
+                {
+                    if (view is null)
+                        RejectDataAccessingComputedColumn(context.Batch, columns[i], insertedRef ? "inserted" : "deleted");
                     return view?.Admit(i, insertedRef) ?? columns[i].Type;
+                }
             }
             // A pseudo-table's unknown column is Msg 207 on the leaf (probed
             // 2026-09-24 against SQL Server 2025).
@@ -662,7 +666,11 @@ partial class Simulation
                 for (var i = 0; i < columns.Length; i++)
                 {
                     if (context.Batch.CurrentDatabase.Collation.Equals(columns[i].Name, name.Leaf))
+                    {
+                        if (view is null)
+                            RejectDataAccessingComputedColumn(context.Batch, columns[i], "inserted");
                         return view?.Admit(i, inserted: true) ?? columns[i].Type;
+                    }
                 }
                 throw SimulatedSqlException.InvalidColumnName(new MultiPartName(name.Leaf));
             }
@@ -740,6 +748,20 @@ partial class Simulation
         return IsClientOutputAfterInto(context, projection)
             ? TryParseOutputClause(context, destinationTable, sourceColumnNames, view, logged: projection)
             : projection;
+    }
+
+    /// <summary>
+    /// Raises Msg 4186 for an <c>OUTPUT</c> reference to a computed column
+    /// whose definition calls a function real assumes reads data, under the
+    /// pseudo-table's lowercase name whatever the reference's spelling.
+    /// </summary>
+    private static void RejectDataAccessingComputedColumn(BatchContext batch, HeapColumn column, string pseudoTable)
+    {
+        if (column.ComputedDefinition is { } definition
+            && Schemas.ModuleDeterminism.ComputedColumnAccessesData(batch.CurrentDatabase, definition))
+        {
+            throw SimulatedSqlException.OutputComputedColumnAccessesData($"{pseudoTable}.{column.Name}");
+        }
     }
 
     /// <summary>

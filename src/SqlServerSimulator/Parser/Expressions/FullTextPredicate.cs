@@ -64,7 +64,7 @@ internal sealed class FullTextPredicate : BooleanExpression
         var spec = FullTextColumnSpec.Parse(context);
         if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        var condition = Expression.Parse(context.MoveNextRequiredReturnSelf());
+        var condition = ParseLiteralOrVariable(context.MoveNextRequiredReturnSelf(), numberAllowed: false);
 
         // `, LANGUAGE n` selects the stoplist and morphology the condition
         // is read with; without it, the first searched column's language.
@@ -76,7 +76,7 @@ internal sealed class FullTextPredicate : BooleanExpression
             {
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             }
-            language = Expression.Parse(context.MoveNextRequiredReturnSelf());
+            language = ParseLiteralOrVariable(context.MoveNextRequiredReturnSelf(), numberAllowed: true);
         }
 
         if (context.Token is not Operator { Character: ')' })
@@ -87,6 +87,37 @@ internal sealed class FullTextPredicate : BooleanExpression
         var parsed = TryParseLiteralCondition(context, condition, language, binding, freeText);
         return new FullTextPredicate(binding, condition, language, freeText, parsed);
     }
+
+    /// <summary>
+    /// Reads a full-text condition or <c>LANGUAGE</c> argument, which real's
+    /// grammar takes only as a string literal or a variable — and the language
+    /// as a number or a binary (an LCID) too: a column, a function call, a parenthesized or
+    /// concatenated value, a binary literal and <c>NULL</c> are each a syntax
+    /// error at the offending token (probed 2026-10-02 against SQL Server
+    /// 2025). Shared with the rowset forms.
+    /// </summary>
+    internal static Expression ParseLiteralOrVariable(ParserContext context, bool numberAllowed)
+    {
+        var accepted = context.Token switch
+        {
+            Literal { Value.Type.Category: SqlTypeCategory.String } or AtPrefixedString => true,
+            Numeric or Literal { Value.Type: VarbinarySqlType } => numberAllowed,
+            _ => false,
+        };
+        if (!accepted)
+            throw SyntaxErrorAt(context);
+        var checkpoint = context.SaveCheckpoint();
+        context.MoveNextRequired();
+        if (context.Token is not Operator { Character: ',' or ')' })
+            throw SyntaxErrorAt(context);
+        context.RestoreCheckpoint(checkpoint);
+        return Expression.Parse(context);
+    }
+
+    private static SimulatedSqlException SyntaxErrorAt(ParserContext context) =>
+        context.Token is ReservedKeyword keyword
+            ? SimulatedSqlException.SyntaxErrorNearKeyword(keyword)
+            : SimulatedSqlException.SyntaxErrorNear(context);
 
     /// <summary>
     /// Parses the condition ahead of execution when it is a compile-time

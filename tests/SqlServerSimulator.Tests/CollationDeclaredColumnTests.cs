@@ -296,11 +296,12 @@ public sealed class CollationDeclaredColumnTests
             "select cast(null as varchar(10)) collate Latin1_General_BIN"));
 
     /// <summary>
-    /// ALTER COLUMN with no COLLATE clause preserves the column's existing
-    /// declared collation — width change shouldn't reset the comparer.
+    /// ALTER COLUMN with no COLLATE clause resets the column to the database
+    /// default, as real does: the declared collation is part of the column's
+    /// definition, which the restatement replaces.
     /// </summary>
     [TestMethod]
-    public void AlterColumn_WithoutCollateClause_PreservesDeclaredCollation()
+    public void AlterColumn_WithoutCollateClause_ResetsToDatabaseDefault()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
@@ -309,9 +310,8 @@ public sealed class CollationDeclaredColumnTests
             alter table t alter column s varchar(50);
             insert t values ('apple')
             """);
-        // CS_AS preserved: 'Apple' = 'Apple' true, 'Apple' = 'apple' false.
-        AreEqual(1, sim.ExecuteScalar("select count(*) from t where s = 'Apple'"));
-        AreEqual("Latin1_General_CS_AS", sim.ExecuteScalar(
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t where s = 'Apple'"));
+        AreEqual("SQL_Latin1_General_CP1_CI_AS", sim.ExecuteScalar(
             "select collation_name from sys.columns where name = 's'"));
     }
 

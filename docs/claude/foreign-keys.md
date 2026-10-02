@@ -109,7 +109,7 @@ For each FK:
 - A non-NULL tuple that doesn't match any row of the parent on the FK's referenced columns → Msg 547 with the FK name and the parent's qualified table reference.
   Single-column FK appends `, column 'X'`; composite FK omits the column phrase.
   Self-referencing FK substitutes `FOREIGN KEY SAME TABLE` for `FOREIGN KEY`.
-- An INSERT checks a **self-referencing** FK once its rows are written, so a row may reference itself or a later row of the same statement (`INSERT t VALUES (1, 1)`, probed 2026-10-01 against SQL Server 2025).
+- An INSERT or a MERGE checks a **self-referencing** FK once its rows are written, so a row may reference itself or another row of the same statement (`INSERT t VALUES (1, 1)`, probed 2026-10-01 against SQL Server 2025; the MERGE EF Core batches inserts into, probed 2026-10-02).
 
 `ReferencedRowExists` **seeks** the parent rather than scanning it: the referenced columns are always a PK/UNIQUE key, so it probes the parent's per-`Heap` [`HeapSeekCache`](indexes.md) on those columns (the parent's own index, incrementally maintained) and verifies each candidate against live bytes — there's no residual WHERE to discard the cache's stale-entry false-positives, so the verify is mandatory.
 Bulk child inserts against a large parent drop from O(children × parent) to one parent-index build plus O(1) per insert (measured ~67× faster for 2 000 inserts against a 20 000-row parent, and the ratio grows with parent size).
@@ -139,7 +139,7 @@ For each FK:
 
 | Action | Behavior |
 |--------|----------|
-| `NO ACTION` | Raise Msg 547 with `REFERENCE constraint` wording, naming the child table + column. |
+| `NO ACTION` | Raise Msg 547 with `REFERENCE constraint` wording, naming the child table + column — checked once every cascade the statement sets off has run, so a child another path of the same cascade deleted no longer counts (a country cascading to both an eagle and a kiwi that references the eagle deletes cleanly whichever the cascade reaches first, probed 2026-10-02 against SQL Server 2025). |
 | `CASCADE` (DELETE) | Recursively delete the matching child rows (themselves potentially parents — recursion guarded by `MaxCascadeDepth = 32`). |
 | `CASCADE` (UPDATE) | Rewrite each child row's FK columns to the parent's new value. |
 | `SET NULL` | Rewrite each child row's FK columns to NULL. |

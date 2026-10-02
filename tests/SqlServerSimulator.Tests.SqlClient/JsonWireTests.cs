@@ -53,4 +53,32 @@ public sealed class JsonWireTests
         await using var select = new SqlCommand("select datalength(j) from t", connection);
         AreEqual(30, await select.ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    /// <summary>
+    /// A <c>SqlDbType.Json</c> parameter — type token <c>0xF4</c>, which a
+    /// json-aware SqlClient sends whether or not the server acknowledged the
+    /// json feature — binds as <c>json</c>: a <c>.modify()</c> fed it inserts
+    /// JSON, not a string, as EF Core's bulk update of a JSON column needs.
+    /// </summary>
+    [TestMethod]
+    public async Task JsonParameter_BindsAsJson()
+    {
+        var simulation = new Simulation();
+        Wire.ExecInProc(simulation, "create table t (j json); insert t values ('{\"a\":1}')");
+
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using (var update = new SqlCommand("update t set j.modify('$.b', @p)", connection))
+        {
+            _ = update.Parameters.Add(new SqlParameter("@p", System.Data.SqlDbType.Json) { Value = "[1, 2]" });
+            _ = await update.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        }
+        await using (var nulls = new SqlCommand("select iif(@p is null, 'null', 'value')", connection))
+        {
+            _ = nulls.Parameters.Add(new SqlParameter("@p", System.Data.SqlDbType.Json) { Value = DBNull.Value });
+            AreEqual("null", await nulls.ExecuteScalarAsync(TestContext.CancellationToken));
+        }
+        await using var select = new SqlCommand("select cast(j as nvarchar(max)) from t", connection);
+        AreEqual("{\"a\":1,\"b\":[1,2]}", await select.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
 }

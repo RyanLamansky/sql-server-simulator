@@ -478,6 +478,9 @@ internal abstract class BooleanExpression : ExpressionNode
     {
         var checkpoint = context.SaveCheckpoint();
         var depth = 1;
+        // In a parenthesized subquery a depth-1 comma belongs to the query
+        // (a select list, an ORDER BY), not to a row constructor.
+        var subquery = false;
         while (context.MoveNext())
         {
             switch (context.Token)
@@ -485,13 +488,16 @@ internal abstract class BooleanExpression : ExpressionNode
                 case Operator { Character: '(' }:
                     depth++;
                     break;
+                case ReservedKeyword { Keyword: Keyword.Select } when depth == 1:
+                    subquery = true;
+                    break;
                 // A top-level ',' inside the outer parens means the shape
                 // isn't a single value expression — it's a row-constructor
                 // (`(a, b) IN (...)`), a function argument list, or
                 // similar. Route to the boolean-group path so the existing
                 // grammar surfaces its own "near ','" Msg 4145 rather than
                 // partially consuming the first element.
-                case Operator { Character: ',' } when depth == 1:
+                case Operator { Character: ',' } when depth == 1 && !subquery:
                     context.RestoreCheckpoint(checkpoint);
                     return false;
                 case Operator { Character: ')' }:

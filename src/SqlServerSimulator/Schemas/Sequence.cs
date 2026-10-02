@@ -13,11 +13,10 @@ namespace SqlServerSimulator.Schemas;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Sequence values are tracked in <see cref="long"/> regardless of the
-/// declared type — int / bigint / smallint / tinyint all fit, and
-/// <c>decimal(p, 0)</c> values are bounded by their precision (largest
-/// supported is <c>decimal(18, 0)</c> for safety, since long can hold up to
-/// 19 decimal digits).
+/// Sequence values are tracked in <see cref="Int128"/> regardless of the
+/// declared type, which holds every one of them — <c>decimal(38, 0)</c>'s
+/// 38 digits included — while a step past either bound still fits the
+/// overflow check in <see cref="Advance"/>.
 /// <see cref="CurrentValue"/> tracks the next value to emit; first
 /// <c>NEXT VALUE FOR</c> returns <see cref="CurrentValue"/> unchanged and
 /// then advances it by <see cref="Increment"/> (probe-confirmed against
@@ -37,10 +36,10 @@ internal sealed class Sequence(
     int objectId,
     DateTime createDate,
     SqlType declaredType,
-    long startValue,
-    long increment,
-    long minValue,
-    long maxValue,
+    Int128 startValue,
+    Int128 increment,
+    Int128 minValue,
+    Int128 maxValue,
     bool cycle)
     : SchemaObject(name, objectId, schema.SchemaId, createDate)
 {
@@ -66,11 +65,11 @@ internal sealed class Sequence(
     /// most recent declared-or-restarted origin rather than staying pinned to
     /// the CREATE-time value.
     /// </summary>
-    public long StartValue = startValue;
+    public Int128 StartValue = startValue;
 
-    public long Increment = increment;
-    public long MinValue = minValue;
-    public long MaxValue = maxValue;
+    public Int128 Increment = increment;
+    public Int128 MinValue = minValue;
+    public Int128 MaxValue = maxValue;
     public bool Cycle = cycle;
 
     /// <summary>
@@ -93,7 +92,7 @@ internal sealed class Sequence(
     /// bound: cycles back to MinValue/MaxValue if <see cref="Cycle"/>;
     /// otherwise the sequence is exhausted (next call raises Msg 11728).
     /// </summary>
-    public long CurrentValue = startValue;
+    public Int128 CurrentValue = startValue;
 
     /// <summary>
     /// True once the sequence has exhausted its no-cycle range. Sticky — only
@@ -110,7 +109,7 @@ internal sealed class Sequence(
     /// <see cref="CurrentValue"/> is advanced — last_used_value is per-instance
     /// runtime state, not persisted). <c>ALTER SEQUENCE … RESTART</c> clears it.
     /// </summary>
-    public long? LastUsedValue;
+    public Int128? LastUsedValue;
 
     /// <summary>
     /// <c>sys.sequences.current_value</c> as a sql_variant: the most recent
@@ -139,13 +138,13 @@ internal sealed class Sequence(
         : SqlValue.Null(SqlType.SqlVariant);
 
     /// <summary>
-    /// Wraps a <see cref="long"/> as a sql_variant carrying the sequence's
+    /// Wraps a value as a sql_variant carrying the sequence's
     /// declared scalar type — the projection form for the
     /// <c>start_value</c> / <c>increment</c> / <c>minimum_value</c> /
     /// <c>maximum_value</c> / <c>current_value</c> columns of
     /// <c>sys.sequences</c>, each a sql_variant in real SQL Server.
     /// </summary>
-    public SqlValue AsDeclaredVariant(long value) => SqlValue.FromVariant(this.WrapAsDeclaredType(value));
+    public SqlValue AsDeclaredVariant(Int128 value) => SqlValue.FromVariant(this.WrapAsDeclaredType(value));
 
     /// <summary>
     /// Computes and reserves the next value for emission. Caller is
@@ -167,7 +166,8 @@ internal sealed class Sequence(
         if (this.CacheSize == 0 || this.Cycle || this.IsExhausted)
             return false;
         var bound = this.Increment > 0 ? this.MaxValue : this.MinValue;
-        var available = (((Int128)bound - this.CurrentValue) / this.Increment) + 1;
+        // The distance between two decimal(38, 0) bounds can pass Int128.
+        var available = (((System.Numerics.BigInteger)bound - (System.Numerics.BigInteger)this.CurrentValue) / (System.Numerics.BigInteger)this.Increment) + 1;
         return available < (this.CacheSize ?? 50);
     }
 
@@ -203,17 +203,16 @@ internal sealed class Sequence(
     }
 
     /// <summary>
-    /// Wraps a <see cref="long"/> as the sequence's declared type. The
-    /// integer family uses the matching narrow value; decimal types route
-    /// through <see cref="SqlValue.FromDecimal(SqlType, decimal)"/> with scale 0.
+    /// Wraps a value as the sequence's declared type. The integer family uses
+    /// the matching narrow value; decimal types carry it at scale 0.
     /// </summary>
-    private SqlValue WrapAsDeclaredType(long value) => this.DeclaredType switch
+    private SqlValue WrapAsDeclaredType(Int128 value) => this.DeclaredType switch
     {
         TinyIntSqlType => SqlValue.FromByte((byte)value),
         SmallIntSqlType => SqlValue.FromInt16((short)value),
         Int32SqlType => SqlValue.FromInt32((int)value),
-        BigIntSqlType => SqlValue.FromInt64(value),
-        DecimalSqlType d => SqlValue.FromDecimal(d, value),
+        BigIntSqlType => SqlValue.FromInt64((long)value),
+        DecimalSqlType d => SqlValue.FromDecimal(d, Decimal38.FromParts((UInt128)Int128.Abs(value), Int128.IsNegative(value), 0)),
         _ => throw new InvalidOperationException($"Unsupported sequence declared type {this.DeclaredType}."),
     };
 

@@ -763,6 +763,13 @@ partial class SimulatedSqlException
         new($"The sequence object '{fullName}' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0, or any user-defined data type that is based on one of the above integer data types.", 11702, 16, 2);
 
     /// <summary>
+    /// Mimics SQL Server error 11708: a sequence option's value is outside
+    /// the sequence's data type (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SequenceArgumentOutOfRange(string argument) =>
+        new($"An invalid value was specified for argument '{argument}' for the given data type.", 11708, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 11703: <c>CREATE SEQUENCE</c> declared a
     /// <c>START WITH</c> outside the <c>[MINVALUE, MAXVALUE]</c> range
     /// (either explicit values, or one explicit and the other defaulted).
@@ -1920,6 +1927,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotUpdateGeneratedAlways(string qualifiedTableName) =>
         new($"Cannot update GENERATED ALWAYS columns in table '{qualifiedTableName}'.", 13537, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 13735: <c>ALTER COLUMN … { ADD | DROP } HIDDEN</c>
+    /// named a column that isn't a period column (probed 2026-10-02 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException HiddenOnNonGeneratedColumn(string columnName, string tableName) =>
+        new($"Cannot alter HIDDEN attribute on column '{columnName}' in table '{tableName}' because this column is not a generated always column.", 13735, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 13559: a direct <c>INSERT</c> targeted the

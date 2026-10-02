@@ -1265,7 +1265,9 @@ partial class Simulation
                 computedExpression: pc.Computed,
                 isPersisted: pc.IsPersisted,
                 generatedAs: GeneratedAlwaysAsRow.None,
-                isHidden: pc.IsHidden,
+                // A history sibling's period columns are never hidden, whatever
+                // the parent's (probed 2026-10-02 against SQL Server 2025).
+                isHidden: false,
                 collation: pc.Collation,
                 computedDefinition: pc.ComputedDefinition,
                 spelledNumeric: pc.SpelledNumeric)
@@ -2788,6 +2790,30 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Whether key <paramref name="index"/> of one declaration is clustered: as
+    /// written, else a PRIMARY KEY is — unless another key of the same
+    /// declaration asks for CLUSTERED, which leaves the primary key
+    /// nonclustered rather than colliding (probed 2026-10-02 against SQL
+    /// Server 2025: <c>id int PRIMARY KEY, u int UNIQUE CLUSTERED</c> creates
+    /// both; an explicit pair is Msg 8112).
+    /// </summary>
+    private static bool IsClusteredKey(
+        IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
+        int index)
+    {
+        if (pendingKeys[index].Clustered is bool declared)
+            return declared;
+        if (pendingKeys[index].Kind != KeyConstraintKind.PrimaryKey)
+            return false;
+        for (var i = 0; i < pendingKeys.Count; i++)
+        {
+            if (i != index && pendingKeys[i].Clustered == true)
+                return false;
+        }
+        return true;
+    }
+
+    /// <summary>
     /// Validates the queued PK/UNIQUE constraints against the resolved column
     /// list and translates them into <see cref="KeyConstraint"/> records keyed
     /// by storage ordinal. Enforces SQL Server's compile-time rules: at most
@@ -2838,7 +2864,7 @@ partial class Simulation
             // constraints arrive in the same statement. Ordered after the
             // primary-key count check, which outranks it (probe-confirmed: two
             // PKs, both clustered by default, report Msg 8110).
-            if ((pending.Clustered ?? (pending.Kind == KeyConstraintKind.PrimaryKey)) && ++clusteredCount > 1)
+            if (IsClusteredKey(pendingKeys, c) && ++clusteredCount > 1)
                 throw SimulatedSqlException.MultipleClusteredConstraints(tableName);
 
             var constraintName = pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns);
@@ -2885,7 +2911,7 @@ partial class Simulation
                 storageOrdinals[i] = storageOrdinal;
             }
 
-            var isClustered = pending.Clustered ?? (pending.Kind == KeyConstraintKind.PrimaryKey);
+            var isClustered = IsClusteredKey(pendingKeys, c);
             if (isClustered)
                 clusteredAt = c;
             prepared[c] = (constraintName, storageOrdinals, isClustered);
@@ -3269,7 +3295,7 @@ partial class Simulation
         var indexIds = new int[pendingIndexes.Count];
         var clustered = sequence.FindIndex(entry => entry.IsIndex
             ? pendingIndexes[entry.Position].IsClustered
-            : pendingKeys[entry.Position].Clustered ?? (pendingKeys[entry.Position].Kind == KeyConstraintKind.PrimaryKey));
+            : IsClusteredKey(pendingKeys, entry.Position));
         if (clustered >= 0)
             Assign(sequence[clustered]);
         for (var s = sequence.Count - 1; s >= 0; s--)

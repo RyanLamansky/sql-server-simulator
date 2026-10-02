@@ -15,6 +15,7 @@ Sibling deep-dives: [`foreign-keys.md`](foreign-keys.md) (the FK family in full)
   Violations: PK/UNIQUE *constraints* raise Msg 2627; unique *indexes* raise Msg 2601 — the offending key's rendering is [below](#how-the-duplicate-key-value-renders).
   UNIQUE treats NULLs as equal (the signature SQL Server divergence from ANSI).
   A key or index whose columns can together pass 900 bytes clustered or 1700 nonclustered is built with the class-0 **Msg 1945** warning (`WarnOfWideIndexKey`, probed 2026-10-01).
+  A `PRIMARY KEY` written without `CLUSTERED` is clustered unless another key of the same declaration asks for `CLUSTERED`, which leaves the primary key nonclustered rather than colliding; two explicit ones are **Msg 8112** (`IsClusteredKey`, probed 2026-10-02 against SQL Server 2025).
   A temp table's explicitly named constraint shares tempdb's namespace with the session's other temp tables and every global one, so a second `#u (… CONSTRAINT pk_tmp …)` is Msg 2714 (probed 2026-10-01); other sessions' temp tables aren't checked here, where real's tempdb sees them too.
 - `FOREIGN KEY`: inline / table-level / named forms; all four referential actions on `ON DELETE`/`ON UPDATE`; enforced at INSERT/UPDATE/DELETE/MERGE; full `sys.foreign_keys` / `sys.foreign_key_columns`.
   Enforcement **seeks the shared `HeapSeekCache`** (live-byte verified, no residual WHERE).

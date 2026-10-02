@@ -309,7 +309,7 @@ internal sealed class HeapSeekCache
         (int Page, int Slot) lastRid = (-1, -1);
         foreach (var (page, slot, bytes) in heap.EnumerateRowsWithAddress())
         {
-            if (TryComputeKey(bytes, ordinals, commons, schema, lobStore, out var key))
+            if (TryComputeEntryKey(bytes, ordinals, commons, schema, lobStore, out var key))
             {
                 AddRid(buckets, key, (page, slot));
                 if (maxKey is { } max && KeyTupleComparer.Instance.Compare(key, max) < 0)
@@ -330,12 +330,25 @@ internal sealed class HeapSeekCache
         return entry;
     }
 
-    // Decodes this entry's key tuple from a row image, coercing each component
-    // to the entry's promoted type. Returns false when any component is NULL —
-    // a NULL key can never equal a (non-NULL by construction) probe, so the
-    // row joins no bucket.
+    // Decodes a key tuple from a row image, coercing each component to the
+    // entry's promoted type. Returns false when any component is NULL — a NULL
+    // key can never equal a (non-NULL by construction) probe.
     internal static bool TryComputeKey(
-        ReadOnlySpan<byte> image, int[] ordinals, SqlType[] commons, HeapColumn[] schema, Heap? lobStore, out SqlValueKey key)
+        ReadOnlySpan<byte> image, int[] ordinals, SqlType[] commons, HeapColumn[] schema, Heap? lobStore, out SqlValueKey key) =>
+        TryComputeKey(image, ordinals, commons, schema, lobStore, nullAfterLead: false, out key);
+
+    // The key a row files under in an entry's buckets: NULL only in the lead
+    // column keeps it out. A later NULL component still files the row, since a
+    // shorter probe — `WHERE r = 1` against an entry widened to (r, d) by a
+    // uniqueness check — matches on the prefix alone and must reach the rows
+    // whose d is NULL; a full-arity probe never contains NULL, so such a key
+    // never equals one.
+    private static bool TryComputeEntryKey(
+        ReadOnlySpan<byte> image, int[] ordinals, SqlType[] commons, HeapColumn[] schema, Heap? lobStore, out SqlValueKey key) =>
+        TryComputeKey(image, ordinals, commons, schema, lobStore, nullAfterLead: true, out key);
+
+    private static bool TryComputeKey(
+        ReadOnlySpan<byte> image, int[] ordinals, SqlType[] commons, HeapColumn[] schema, Heap? lobStore, bool nullAfterLead, out SqlValueKey key)
     {
         var components = new SqlValue[ordinals.Length];
         for (var i = 0; i < ordinals.Length; i++)
@@ -343,8 +356,14 @@ internal sealed class HeapSeekCache
             var value = RowDecoder.DecodeColumn(schema, image, ordinals[i], lobStore);
             if (value.IsNull)
             {
-                key = default;
-                return false;
+                if (i == 0 || !nullAfterLead)
+                {
+                    key = default;
+                    return false;
+                }
+
+                components[i] = SqlValue.Null(commons[i]);
+                continue;
             }
 
             components[i] = value.CoerceTo(commons[i]);
@@ -378,7 +397,17 @@ internal sealed class HeapSeekCache
             var n = Math.Min(x.ComponentCount, y.ComponentCount);
             for (var i = 0; i < n; i++)
             {
-                var c = x.ComponentAt(i).CompareTo(y.ComponentAt(i));
+                // A NULL component (never the lead, see TryComputeEntryKey)
+                // sorts first, as an index orders it.
+                var a = x.ComponentAt(i);
+                var b = y.ComponentAt(i);
+                if (a.IsNull || b.IsNull)
+                {
+                    if (a.IsNull != b.IsNull)
+                        return a.IsNull ? -1 : 1;
+                    continue;
+                }
+                var c = a.CompareTo(b);
                 if (c != 0)
                     return c;
             }
@@ -485,7 +514,7 @@ internal sealed class HeapSeekCache
                 switch (e.Kind)
                 {
                     case Heap.SeekJournalKind.Insert:
-                        if (TryComputeKey(e.NewImage, this.Ordinals, this.Commons, schema, lobStore, out var insertKey))
+                        if (TryComputeEntryKey(e.NewImage, this.Ordinals, this.Commons, schema, lobStore, out var insertKey))
                         {
                             this.AddRid(insertKey, (e.Page, e.Slot));
                             this.NoteInsert(insertKey, (e.Page, e.Slot));
@@ -496,14 +525,14 @@ internal sealed class HeapSeekCache
                         }
                         break;
                     case Heap.SeekJournalKind.Delete:
-                        if (TryComputeKey(e.OldImage, this.Ordinals, this.Commons, schema, lobStore, out var deleteKey))
+                        if (TryComputeEntryKey(e.OldImage, this.Ordinals, this.Commons, schema, lobStore, out var deleteKey))
                             this.RemoveRid(deleteKey, (e.Page, e.Slot));
                         break;
                     case Heap.SeekJournalKind.Update:
-                        var hadOldKey = TryComputeKey(e.OldImage, this.Ordinals, this.Commons, schema, lobStore, out var oldKey);
+                        var hadOldKey = TryComputeEntryKey(e.OldImage, this.Ordinals, this.Commons, schema, lobStore, out var oldKey);
                         if (hadOldKey)
                             this.RemoveRid(oldKey, (e.Page, e.Slot));
-                        var hasNewKey = TryComputeKey(e.NewImage, this.Ordinals, this.Commons, schema, lobStore, out var newKey);
+                        var hasNewKey = TryComputeEntryKey(e.NewImage, this.Ordinals, this.Commons, schema, lobStore, out var newKey);
                         if (hasNewKey)
                             this.AddRid(newKey, (e.Page, e.Slot));
                         // A row keeps its address across an UPDATE, so only a

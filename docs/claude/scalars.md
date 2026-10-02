@@ -239,6 +239,7 @@ Source families outside the coerce-able set (varbinary, xml, spatial, table type
 The projection-schema result type for `LEN` is always `int`; the other functions project as `varchar` of the width the source converts to for non-string sources (see [`arithmetic.md`](arithmetic.md#per-function-widths-stringscalars-helpers)) and preserve the input string type otherwise — except that `UPPER` / `LOWER` / `LTRIM` / `RTRIM` / `TRIM` / `REVERSE` turn a fixed-width `char(n)` / `nchar(n)` into `varchar(n)` / `nvarchar(n)`, which is what lets a trim shed the padding (`DATALENGTH(RTRIM(CAST(N'a' AS nchar(5))))` is 2; probed 2026-09-30 against SQL Server 2025).
 `REPLACE` runs the coerce per argument with the matching argument index in the Msg 8116 wording.
 `CHARINDEX`'s **haystack** (arg 2) coerces (`CHARINDEX('2', 12345) = 2`); the **needle** (arg 1) and **start** (arg 3) stay strict-int / strict-string respectively, matching real's Msg 8116 rejection.
+A **binary needle** searches bytes — a `binary(n)` haystack's padding included, the result `bigint` over a `varbinary(max)` haystack — and a string haystack beside it is Msg 257 (probed 2026-10-02 against SQL Server 2025; EF Core translates `byte[].Contains` to it).
 Its result is `bigint` over a `varchar(max)` / `nvarchar(max)` haystack and `int` otherwise, a `text` / `ntext` haystack or a MAX needle included (probed 2026-10-01 against SQL Server 2025).
 
 **`UPPER` / `LOWER` map by the argument's collation** (`CaseMap`), and none of real's tables is the modern Unicode one .NET's `TextInfo` applies (probed 2026-09-28 against SQL Server 2025, every BMP character under two dozen collations).
@@ -451,6 +452,7 @@ Binding the argument is also what carries an unknown column's Msg 207 out of a p
 The members that read text without converting anything to reach it — SUBSTRING's source, PATINDEX's subject, TRIM, CHARINDEX's needle, STRING_ESCAPE, ISJSON, JSON_VALUE and COMPRESS — go further through `StringScalars.RequireStringArgument`: a number, a date or a `uniqueidentifier` is Msg 8116 too, naming a literal decimal `numeric` as real does.
 
 The types are column-only besides: a local variable declared `text` / `ntext` / `image` raises **Msg 2739** (`The text, ntext, and image data types are invalid for local variables.`), so a string function only ever sees one through a column or a CAST.
+The variable is declared all the same, so a later reference to it adds no Msg 137 — an initializer or a sibling declarator included (probed 2026-10-02 against SQL Server 2025).
 
 This is the *argument* rule; the slots these types can't reach at all — sorting, grouping, DISTINCT, the deduping set operators, the aggregates and comparison — are tabulated in [`legacy-lob.md`](legacy-lob.md#where-the-types-cant-go).
 

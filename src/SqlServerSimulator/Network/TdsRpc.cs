@@ -108,6 +108,8 @@ internal sealed class TdsRpcRequest
             0xF0 => DecodeClrUdt(reader, name, isOutput, currentDatabase, ordinal),
             0xF1 => DecodeXml(reader, name, isOutput),
             0xF3 => DecodeTableValued(reader, name, isOutput),
+            0xF4 => DecodeJson(reader, name, isOutput),
+            0xF5 => DecodeVector(reader, name, isOutput),
             _ => throw new NotSupportedException($"Unrecognized TDS RPC parameter type token 0x{token:X2}."),
         };
     }
@@ -358,6 +360,54 @@ internal sealed class TdsRpcRequest
         var utcTicks = DateOnly.FromDayNumber(days).ToDateTime(TimeOnly.MinValue).Ticks + ticks;
         var value = new DateTimeOffset(utcTicks + offset.Ticks, offset);
         return new TdsRpcParameter(name, isOutput, DbType.DateTimeOffset, value, scale: scale);
+    }
+
+    /// <summary>
+    /// Decodes a <c>vector</c> RPC parameter (type token <c>0xF5</c>), which a
+    /// vector-aware SqlClient sends for <c>SqlDbTypeExtensions.Vector</c>:
+    /// TYPE_INFO is a 2-byte maximum length and the element-type byte (0
+    /// float32, 1 float16), the value a 2-byte length (<c>0xFFFF</c> = NULL)
+    /// then the vector's own binary form — the header and elements the
+    /// <c>vector</c> type stores (captured from SqlClient 7.0.2, 2026-10-02).
+    /// </summary>
+    private static TdsRpcParameter DecodeVector(TdsValueReader reader, string name, bool isOutput)
+    {
+        var maxLength = reader.ReadUInt16();
+        var float16 = reader.ReadByte() == 1;
+        var length = reader.ReadUInt16();
+        if (length == 0xFFFF)
+        {
+            var dimensions = Math.Max(1, (maxLength - VectorSqlType.HeaderLength) / (float16 ? 2 : 4));
+            return new TdsRpcParameter(name, isOutput, DbType.Object, SqlValue.Null(VectorSqlType.Get(dimensions, float16)));
+        }
+        var bytes = reader.ReadBytes(length).ToArray();
+        var count = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(2));
+        return new TdsRpcParameter(name, isOutput, DbType.Object, SqlValue.FromVector(VectorSqlType.Get(count, float16), bytes));
+    }
+
+    /// <summary>
+    /// Decodes a <c>json</c> RPC parameter (type token <c>0xF4</c>), which a
+    /// json-aware SqlClient sends for <c>SqlDbType.Json</c> whether or not the
+    /// server acknowledged the json feature extension: no TYPE_INFO beyond the
+    /// token, then the document as PLP-chunked UTF-8. It binds as a
+    /// <c>json</c> value, so a <c>.modify()</c> or <c>JSON_MODIFY</c> fed
+    /// the parameter inserts it as JSON rather than as a string; text that
+    /// isn't a JSON document binds as the <c>nvarchar(max)</c> it is.
+    /// </summary>
+    private static TdsRpcParameter DecodeJson(TdsValueReader reader, string name, bool isOutput)
+    {
+        var bytes = TdsWireValue.ReadPlp(reader);
+        if (bytes is null)
+            return new TdsRpcParameter(name, isOutput, DbType.Object, SqlValue.Null(SqlType.Json));
+        var text = Encoding.UTF8.GetString(bytes);
+        try
+        {
+            return new TdsRpcParameter(name, isOutput, DbType.Object, SqlType.Json.ConvertParameter(text));
+        }
+        catch (SimulatedSqlException)
+        {
+            return new TdsRpcParameter(name, isOutput, DbType.String, text, size: -1);
+        }
     }
 
     /// <summary>

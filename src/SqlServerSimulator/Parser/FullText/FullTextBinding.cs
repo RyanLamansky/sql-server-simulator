@@ -9,7 +9,7 @@ namespace SqlServerSimulator.Parser.FullText;
 /// table, the columns the search reads, and the accent fold its catalog
 /// imposes.
 /// </summary>
-internal sealed class FullTextBinding(HeapTable table, int[] columnOrdinals, MultiPartName[] columnNames, FullTextLanguage[] columnLanguages, bool accentSensitive)
+internal sealed class FullTextBinding(HeapTable table, int[] columnOrdinals, MultiPartName[] columnNames, MultiPartName?[] typeColumnNames, FullTextLanguage[] columnLanguages, bool accentSensitive)
 {
     public readonly HeapTable Table = table;
 
@@ -24,10 +24,33 @@ internal sealed class FullTextBinding(HeapTable table, int[] columnOrdinals, Mul
     public readonly MultiPartName[] ColumnNames = columnNames;
 
     /// <summary>
+    /// Per searched column, its <c>TYPE COLUMN</c> — the column naming a
+    /// document's extension — under the same qualifier, or null.
+    /// </summary>
+    public readonly MultiPartName?[] TypeColumnNames = typeColumnNames;
+
+    /// <summary>
     /// Each searched column's full-text language, from its <c>LANGUAGE</c>
     /// in the index: the stoplist its content is indexed under.
     /// </summary>
     public readonly FullTextLanguage[] ColumnLanguages = columnLanguages;
+
+    /// <summary>
+    /// The zero-based ordinal of searched column <paramref name="c"/>'s
+    /// <c>TYPE COLUMN</c>, or -1 when it has none.
+    /// </summary>
+    public int TypeColumnOrdinal(int c)
+    {
+        if (this.Table.FullTextIndex is { } index)
+        {
+            foreach (var column in index.Columns)
+            {
+                if (column.ColumnId == this.ColumnOrdinals[c] + 1)
+                    return column.TypeColumnId is int typeColumnId ? typeColumnId - 1 : -1;
+            }
+        }
+        return -1;
+    }
 
     /// <summary>
     /// The language a condition is read in when the call names none: the
@@ -58,7 +81,7 @@ internal sealed class FullTextBinding(HeapTable table, int[] columnOrdinals, Mul
         var document = new FullTextDocument();
         var stoplist = this.UsesStoplist;
         for (var i = 0; i < this.ColumnNames.Length; i++)
-            document.AddColumn(TextOf(resolveColumn(this.ColumnNames[i])), this.AccentSensitive, stoplist ? this.ColumnLanguages[i] : null);
+            document.AddColumn(TextOf(resolveColumn(this.ColumnNames[i]), this.TypeColumnNames[i] is { } typeColumn ? resolveColumn(typeColumn) : null), this.AccentSensitive, stoplist ? this.ColumnLanguages[i] : null);
         return document;
     }
 
@@ -75,17 +98,110 @@ internal sealed class FullTextBinding(HeapTable table, int[] columnOrdinals, Mul
     /// parse falls back to its raw text.
     /// </para>
     /// <para>
-    /// A <c>TYPE COLUMN</c> pairing indexes a <c>varbinary</c> document that
-    /// real runs through a filter to extract text; the simulator has no filter,
-    /// so such a column contributes nothing rather than word-breaking its bytes.
+    /// A <c>TYPE COLUMN</c> pairing indexes a binary document through the
+    /// filter its extension names; see <see cref="FilteredText"/>.
     /// </para>
     /// </remarks>
-    public static string? TextOf(SqlValue value)
+    public static string? TextOf(SqlValue value, SqlValue? extension = null)
     {
         return value.IsNull ? null
             : value.Type is XmlSqlType ? XmlContentText(value.AsString)
             : SqlType.IsStringCategory(value.Type) ? value.AsString
+            : value.Type is BinarySqlType or VarbinarySqlType or ImageSqlType && extension is { IsNull: false } ext && SqlType.IsStringCategory(ext.Type)
+                ? FilteredText(value.AsBytes, ext.AsString.Trim())
             : null;
+    }
+
+    /// <summary>
+    /// The text real's filters extract from a binary document by extension,
+    /// fitted to probes of SQL Server 2025 on Linux (2026-10-02), which ships
+    /// the <c>.txt</c> / <c>.c</c> / <c>.csv</c>, <c>.htm</c> / <c>.html</c>
+    /// and <c>.xml</c> filters: the plain ones index the decoded text as is,
+    /// markup included; HTML indexes element text with entities decoded, but
+    /// neither tag names, attribute values, comments nor <c>script</c> /
+    /// <c>style</c> bodies; XML indexes text and attribute values. The bytes
+    /// decode by their byte-order mark (UTF-8, UTF-16) or else as code page
+    /// 1252 — a UTF-16 document without a mark yields nothing findable. Any
+    /// other extension, or none, contributes nothing.
+    /// </summary>
+    private static string? FilteredText(byte[] bytes, string extension)
+    {
+        var comparer = StringComparer.OrdinalIgnoreCase;
+        var plain = comparer.Equals(extension, ".txt") || comparer.Equals(extension, ".c") || comparer.Equals(extension, ".csv");
+        var html = comparer.Equals(extension, ".htm") || comparer.Equals(extension, ".html");
+        var xml = comparer.Equals(extension, ".xml");
+        if (!plain && !html && !xml)
+            return null;
+        var text = bytes switch
+        {
+            [0xEF, 0xBB, 0xBF, ..] => System.Text.Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3),
+            [0xFF, 0xFE, ..] => System.Text.Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2),
+            [0xFE, 0xFF, ..] => System.Text.Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2),
+            _ => CharSqlType.Cp1252Encoder.GetString(bytes),
+        };
+        return plain ? text : xml ? XmlContentText(text) : HtmlContentText(text);
+    }
+
+    /// <summary>
+    /// The element text of an HTML document: tags, comments and the bodies of
+    /// <c>script</c> / <c>style</c> elements dropped, entities decoded, each
+    /// dropped span leaving a separator so neighboring words don't fuse.
+    /// </summary>
+    private static string HtmlContentText(string document)
+    {
+        var builder = new System.Text.StringBuilder(document.Length);
+        var i = 0;
+        while (i < document.Length)
+        {
+            if (document[i] != '<')
+            {
+                var next = document.IndexOf('<', i);
+                var end = next < 0 ? document.Length : next;
+                _ = builder.Append(System.Net.WebUtility.HtmlDecode(document[i..end]));
+                i = end;
+                continue;
+            }
+            if (string.CompareOrdinal(document, i, "<!--", 0, 4) == 0)
+            {
+                var close = document.IndexOf("-->", i + 4, StringComparison.Ordinal);
+                i = close < 0 ? document.Length : close + 3;
+            }
+            else
+            {
+                var close = document.IndexOf('>', i + 1);
+                var tagEnd = close < 0 ? document.Length : close + 1;
+                var raw = SkippedElementBody(document, i, tagEnd);
+                i = raw < 0 ? tagEnd : raw;
+            }
+            _ = builder.Append(' ');
+        }
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// Where the matching close tag of a <c>script</c> / <c>style</c> start tag
+    /// spanning <paramref name="start"/> to <paramref name="tagEnd"/> ends, or
+    /// -1 for any other tag.
+    /// </summary>
+    private static int SkippedElementBody(string document, int start, int tagEnd)
+    {
+        foreach (var name in (ReadOnlySpan<string>)["script", "style"])
+        {
+            if (start + 1 + name.Length > document.Length
+                || string.Compare(document, start + 1, name, 0, name.Length, StringComparison.OrdinalIgnoreCase) != 0)
+            {
+                continue;
+            }
+            var after = start + 1 + name.Length;
+            if (after < document.Length && char.IsLetterOrDigit(document[after]))
+                continue;
+            var close = document.IndexOf("</" + name, tagEnd, StringComparison.OrdinalIgnoreCase);
+            if (close < 0)
+                return document.Length;
+            var closeEnd = document.IndexOf('>', close);
+            return closeEnd < 0 ? document.Length : closeEnd + 1;
+        }
+        return -1;
     }
 
     /// <summary>
@@ -222,7 +338,12 @@ internal static class FullTextColumnSpec
 
         List<int> ordinals = [];
         List<MultiPartName> names = [];
+        List<MultiPartName?> typeNames = [];
         List<FullTextLanguage> languages = [];
+        MultiPartName? TypeColumnName(Schemas.FullTextIndexColumn column, string? columnQualifier) =>
+            column.TypeColumnId is int typeColumnId && typeColumnId - 1 < table.Columns.Length
+                ? Qualify(columnQualifier, table.Columns[typeColumnId - 1].Name)
+                : null;
         if (spec.AllColumns)
         {
             foreach (var column in index.Columns)
@@ -232,6 +353,7 @@ internal static class FullTextColumnSpec
                     continue;
                 ordinals.Add(ordinal);
                 names.Add(Qualify(qualifier, table.Columns[ordinal].Name));
+                typeNames.Add(TypeColumnName(column, qualifier));
                 languages.Add(FullTextLanguage.For(column.LanguageId));
             }
         }
@@ -250,23 +372,24 @@ internal static class FullTextColumnSpec
                 }
                 if (ordinal < 0)
                     throw SimulatedSqlException.InvalidColumnName(written.Leaf);
-                var languageId = -1;
+                Schemas.FullTextIndexColumn? indexed = null;
                 foreach (var column in index.Columns)
                 {
                     if (column.ColumnId == ordinal + 1)
                     {
-                        languageId = column.LanguageId;
+                        indexed = column;
                         break;
                     }
                 }
-                if (languageId < 0)
+                if (indexed is not { } entry)
                     throw SimulatedSqlException.FullTextColumnNotIndexed(written.Leaf);
-                languages.Add(FullTextLanguage.For(languageId));
+                languages.Add(FullTextLanguage.For(entry.LanguageId));
                 ordinals.Add(ordinal);
                 names.Add(written.Count > 1 ? written : Qualify(qualifier, table.Columns[ordinal].Name));
+                typeNames.Add(TypeColumnName(entry, written.Count > 1 ? written.ImmediateQualifier : qualifier));
             }
         }
-        return new FullTextBinding(table, [.. ordinals], [.. names], [.. languages], accentSensitive);
+        return new FullTextBinding(table, [.. ordinals], [.. names], [.. typeNames], [.. languages], accentSensitive);
     }
 
     private static MultiPartName Qualify(string? qualifier, string columnName) =>

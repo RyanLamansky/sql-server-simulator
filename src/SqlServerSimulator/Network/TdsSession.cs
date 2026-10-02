@@ -673,15 +673,27 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
                 var serving = this.connection!;
                 serving.BeginMarsRequest();
+                // The request is done once its whole response has gone out,
+                // which for a large result waits on the client: it ends as the
+                // last packet goes, or on the way out if no packet does.
+                var ended = false;
+                writer.BeforeEndOfMessage = () =>
+                {
+                    if (!ended)
+                    {
+                        ended = true;
+                        serving.EndMarsRequest();
+                    }
+                };
                 try
                 {
                     await this.ServeMarsRequestAsync(session, message, batchText, isBulkInsertBegin, writer, cancellationToken).ConfigureAwait(false);
                 }
                 finally
                 {
-                    // The request is done once its whole response has gone
-                    // out, which for a large result waits on the client.
-                    serving.EndMarsRequest();
+                    writer.BeforeEndOfMessage = null;
+                    if (!ended)
+                        serving.EndMarsRequest();
                 }
             }
         }
@@ -713,7 +725,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
     private async ValueTask ExecuteBatchAsync(TdsMessage message, TdsTokenWriter writer, CancellationToken cancellationToken)
     {
-        if ((message.FirstStatus & (Tds.StatusResetConnection | Tds.StatusResetConnectionSkipTran)) != 0)
+        if (this.ResetRequested(message))
         {
             if (!this.TryResetConnection(writer))
                 return;
@@ -1311,6 +1323,17 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             return false;
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="message"/> asks for a pooled connection's reset.
+    /// The skip-transaction form asks to keep the transaction as it is —
+    /// SqlClient sends it on a connection enlisted in an ambient transaction —
+    /// so it resets only a session with no transaction open; with one, the
+    /// session carries on unreset rather than losing the transaction.
+    /// </summary>
+    private bool ResetRequested(TdsMessage message) =>
+        (message.FirstStatus & Tds.StatusResetConnection) != 0
+        || ((message.FirstStatus & Tds.StatusResetConnectionSkipTran) != 0 && this.connection!.CurrentTransaction is null);
 
     private void ResetConnection()
     {

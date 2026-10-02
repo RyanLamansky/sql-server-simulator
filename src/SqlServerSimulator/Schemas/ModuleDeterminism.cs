@@ -263,6 +263,29 @@ internal static partial class ModuleDeterminism
         return true;
     }
 
+    /// <summary>
+    /// Whether a computed column's expression calls a function real assumes
+    /// performs data access — one that isn't schema-bound, or a schema-bound
+    /// one whose body reads user data — which keeps the column out of an
+    /// <c>OUTPUT</c> clause (Msg 4186, probed 2026-10-02 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static bool ComputedColumnAccessesData(Database database, string definition)
+    {
+        _ = Scan(definition, out _, out var referencedModules);
+        foreach (var (qualifier, leaf) in referencedModules)
+        {
+            if (database.Schemas.TryGetValue(qualifier, out var schema)
+                && schema.Functions.TryGetValue(leaf, out var function)
+                && function is not ClrFunction
+                && (!function.IsSchemaBound || SchemaBinding.ReadsUserData(database, function)))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static bool IsDeterministic(Database database, SchemaObject module, HashSet<int> visited)
     {
         // A reference cycle can only be reached through a module the walk is

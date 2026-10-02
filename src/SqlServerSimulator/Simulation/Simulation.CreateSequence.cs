@@ -34,10 +34,10 @@ partial class Simulation
         // resolve after the AS clause picks the type (since the type's natural
         // bounds drive the defaults).
         SqlType declaredType = SqlType.BigInt;
-        long? startValue = null;
-        long increment = 1;
-        long? minValue = null;
-        long? maxValue = null;
+        Int128? startValue = null;
+        Int128 increment = 1;
+        Int128? minValue = null;
+        Int128? maxValue = null;
         var cycle = false;
         long? cacheSize = null;
 
@@ -109,7 +109,7 @@ partial class Simulation
                             // followed. Restore and re-read so the helper
                             // sees CACHE as its anchor.
                             context.RestoreCheckpoint(afterCache);
-                            cacheSize = ReadSignedIntegerLiteral(context);
+                            cacheSize = ReadCacheSize(context);
                         }
                         continue;
                     }
@@ -119,15 +119,26 @@ partial class Simulation
         }
     exitOptionLoop:
 
-        // Type-natural bounds for default min/max.
+        // Type-natural bounds for default min/max; a written value outside
+        // them is Msg 11708, the increment checked first, then the minimum,
+        // the maximum and the start (probed 2026-10-02 against SQL Server 2025).
         var (typeMin, typeMax) = SequenceTypeBounds(declaredType);
+        bool OutOfType(Int128? value) => value < typeMin || value > typeMax;
+        if (increment == 0)
+            throw SimulatedSqlException.SequenceIncrementCannotBeZero(sequenceName.ToString());
+        if (OutOfType(increment))
+            throw SimulatedSqlException.SequenceArgumentOutOfRange("INCREMENT BY");
+        if (OutOfType(minValue))
+            throw SimulatedSqlException.SequenceArgumentOutOfRange("MINVALUE");
+        if (OutOfType(maxValue))
+            throw SimulatedSqlException.SequenceArgumentOutOfRange("MAXVALUE");
+        if (OutOfType(startValue))
+            throw SimulatedSqlException.SequenceArgumentOutOfRange("START WITH");
         var resolvedMin = minValue ?? typeMin;
         var resolvedMax = maxValue ?? typeMax;
         var ascending = increment > 0;
         var resolvedStart = startValue ?? (ascending ? resolvedMin : resolvedMax);
 
-        if (increment == 0)
-            throw SimulatedSqlException.SequenceIncrementCannotBeZero(sequenceName.ToString());
         if (resolvedStart < resolvedMin || resolvedStart > resolvedMax)
             throw SimulatedSqlException.SequenceStartOutOfRange(sequenceName.ToString());
 
@@ -229,7 +240,7 @@ partial class Simulation
     /// <see cref="ParserContext.MoveNext"/> to step forward to the next
     /// option keyword.
     /// </summary>
-    private static long ReadSignedIntegerLiteral(ParserContext context)
+    private static Int128 ReadSignedIntegerLiteral(ParserContext context)
     {
         var first = context.GetNextRequired();
         var negative = false;
@@ -251,18 +262,48 @@ partial class Simulation
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
-        var v = numericToken.Value.CoerceTo(SqlType.BigInt).AsInt64;
-        return negative ? -v : v;
+        var literal = numericToken.Value.CoerceTo(DecimalSqlType.Get(38, 0)).AsDecimal38;
+        var v = (Int128)literal.Magnitude;
+        return negative != literal.IsNegative ? -v : v;
+    }
+
+    /// <summary>
+    /// Reads a <c>CACHE</c> size, which real's grammar takes as an <c>int</c>
+    /// literal: a wider one is a syntax error at the number (probed 2026-10-02
+    /// against SQL Server 2025).
+    /// </summary>
+    private static long ReadCacheSize(ParserContext context)
+    {
+        var value = ReadSignedIntegerLiteral(context);
+        return value > int.MaxValue || value < int.MinValue ? throw SimulatedSqlException.SyntaxErrorNear(context) : (long)value;
+    }
+
+    /// <summary>
+    /// Reads an <c>ALTER SEQUENCE</c> option's value, refusing one outside
+    /// <paramref name="type"/>'s range as Msg 11708 naming
+    /// <paramref name="argument"/>.
+    /// </summary>
+    private static Int128 ReadSequenceArgument(ParserContext context, SqlType type, string argument)
+    {
+        var value = ReadSignedIntegerLiteral(context);
+        return IsOutsideSequenceType(type, value) ? throw SimulatedSqlException.SequenceArgumentOutOfRange(argument) : value;
+    }
+
+    /// <summary>Whether <paramref name="value"/> falls outside a sequence of <paramref name="type"/>'s range.</summary>
+    private static bool IsOutsideSequenceType(SqlType type, Int128 value)
+    {
+        var (min, max) = SequenceTypeBounds(type);
+        return value < min || value > max;
     }
 
     /// <summary>
     /// Natural numeric bounds for a sequence's declared type. Used as the
     /// default <c>MINVALUE</c> / <c>MAXVALUE</c> when the user omits them.
     /// </summary>
-    private static (long Min, long Max) SequenceTypeBounds(SqlType type) => type switch
+    private static (Int128 Min, Int128 Max) SequenceTypeBounds(SqlType type) => type switch
     {
-        TinyIntSqlType => (0L, 255L),
-        SmallIntSqlType => (-32768L, 32767L),
+        TinyIntSqlType => (0, 255),
+        SmallIntSqlType => (-32768, 32767),
         Int32SqlType => (int.MinValue, int.MaxValue),
         BigIntSqlType => (long.MinValue, long.MaxValue),
         DecimalSqlType d => DecimalBounds(d.precision),
@@ -270,15 +311,12 @@ partial class Simulation
     };
 
     /// <summary>
-    /// Computes 10^precision - 1 for decimal sequences, capped at
-    /// <see cref="long.MaxValue"/> (precision &gt;= 19 saturates because the
-    /// simulator tracks sequence state in long). Symmetric negative bound.
+    /// <c>10^precision - 1</c> for a decimal sequence, the negative of it its
+    /// lower bound.
     /// </summary>
-    private static (long Min, long Max) DecimalBounds(byte precision)
+    private static (Int128 Min, Int128 Max) DecimalBounds(byte precision)
     {
-        if (precision >= 19)
-            return (long.MinValue, long.MaxValue);
-        long max = 1;
+        Int128 max = 1;
         for (var i = 0; i < precision; i++)
             max *= 10;
         max -= 1;

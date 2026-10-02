@@ -30,7 +30,7 @@ internal sealed partial class TdsSession
     /// </summary>
     private async ValueTask ExecuteRpcMessageAsync(TdsMessage message, TdsTokenWriter writer, CancellationToken cancellationToken)
     {
-        if ((message.FirstStatus & (Tds.StatusResetConnection | Tds.StatusResetConnectionSkipTran)) != 0)
+        if (this.ResetRequested(message))
         {
             if (!this.TryResetConnection(writer))
                 return;

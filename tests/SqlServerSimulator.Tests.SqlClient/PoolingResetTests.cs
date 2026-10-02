@@ -42,6 +42,33 @@ public sealed class PoolingResetTests
     }
 
     /// <summary>
+    /// A pooled connection's first request after reuse may be SqlClient's
+    /// <c>BeginTransaction</c>, which carries the reset bit on a transaction
+    /// manager request: the reset applies there too, so the prior logical
+    /// connection's <c>SET NOCOUNT ON</c> doesn't silence the next row count.
+    /// </summary>
+    [TestMethod]
+    public async Task PooledReopen_ResetsOnATransactionManagerRequest()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        var connectionString = Wire.PooledConnectionString(listener);
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await using (var set = new SqlCommand("set nocount on; set dateformat dmy", connection))
+            _ = await set.ExecuteNonQueryAsync(TestContext.CancellationToken);
+        await connection.CloseAsync();
+
+        await connection.OpenAsync(TestContext.CancellationToken);
+        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(TestContext.CancellationToken);
+        await using var command = new SqlCommand("declare @t table (a int); insert @t values (1), (2); update @t set a = 3", connection, transaction);
+        AreEqual(4, await command.ExecuteNonQueryAsync(TestContext.CancellationToken));
+        command.CommandText = "select date_format from sys.dm_exec_sessions where session_id = @@spid";
+        AreEqual("mdy", await command.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
     /// The reset clears session state but not the session id, the physical
     /// connection or the client identity LOGIN7 reported: <c>@@SPID</c>,
     /// <c>connection_id</c> and <c>HOST_NAME()</c> read the same after a

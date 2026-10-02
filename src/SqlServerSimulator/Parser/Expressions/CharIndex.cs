@@ -16,6 +16,10 @@ internal sealed class CharIndex : Expression
     private readonly Expression haystack;
     private readonly Expression? start;
 
+    // A binary haystack's value doesn't carry its declared MAX-ness, so the
+    // result type the binding settled is what the run reports.
+    private SqlType? binaryResultType;
+
     public CharIndex(ParserContext context)
     {
         this.needle = Parse(context);
@@ -32,6 +36,8 @@ internal sealed class CharIndex : Expression
     {
         var n = needle.Run(runtime);
         StringScalars.RejectLegacyLob(n, "charindex");
+        if (n.Type is BinarySqlType or VarbinarySqlType)
+            return this.RunBinary(n, runtime);
         // CHARINDEX's haystack (arg 2) implicit-coerces to varchar per real
         // (probe-confirmed 2026-05-22: CHARINDEX('2', 12345) = 2). Needle
         // (arg 1) stays strict — real rejects non-string with Msg 8116.
@@ -72,6 +78,37 @@ internal sealed class CharIndex : Expression
         return resultType == SqlType.BigInt ? SqlValue.FromInt64(position) : SqlValue.FromInt32(position);
     }
 
+    /// <summary>
+    /// A binary needle searches the haystack's bytes — a <c>binary(n)</c>
+    /// one's padding included — returning the 1-based byte position (probed
+    /// 2026-10-02 against SQL Server 2025: <c>CHARINDEX(0x02, 0x010203)</c> is 2,
+    /// and EF Core translates a <c>byte[].Contains</c> to it).
+    /// </summary>
+    private SqlValue RunBinary(SqlValue n, RuntimeContext runtime)
+    {
+        var h = haystack.Run(runtime);
+        if (h.Type is not (BinarySqlType or VarbinarySqlType))
+            h = h.CoerceTo(SqlType.VarbinaryMax);
+        var resultType = this.binaryResultType ?? ResultType(h.Type);
+        if (n.IsNull || h.IsNull)
+            return SqlValue.Null(resultType);
+        var startBytes = 0;
+        if (start is not null)
+        {
+            var startValue = start.Run(runtime);
+            if (startValue.IsNull)
+                return SqlValue.Null(resultType);
+            startBytes = Math.Max(0, StringScalars.CoerceLengthArgument(startValue) - 1);
+        }
+        var needleBytes = n.AsBytes;
+        var haystackBytes = h.AsBytes;
+        var found = needleBytes.Length == 0 || startBytes >= haystackBytes.Length
+            ? -1
+            : haystackBytes.AsSpan(startBytes).IndexOf(needleBytes);
+        var position = found < 0 ? 0 : startBytes + found + 1;
+        return resultType == SqlType.BigInt ? SqlValue.FromInt64(position) : SqlValue.FromInt32(position);
+    }
+
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var needleType = StringScalars.RequireStringArgument(needle, StringScalars.BindArgument(needle, batch, resolveColumnType, "charindex"), "charindex", 1, acceptsBinary: true);
@@ -84,6 +121,8 @@ internal sealed class CharIndex : Expression
         // 2025: Msg 257 naming the haystack's type).
         if (needleType is BinarySqlType or VarbinarySqlType && SqlType.IsStringCategory(haystackType))
             throw SimulatedSqlException.ImplicitConversionNotAllowed(SimulatedSqlException.FamilyRootName(haystackType), "varbinary");
+        if (needleType is BinarySqlType or VarbinarySqlType)
+            return this.binaryResultType = ResultType(haystackType);
         StringScalars.RejectLegacyLobInCoercion(haystackType, "charindex", argumentIndex: 2, allowLegacyLob: true);
         StringScalars.RequireSettledCollation(haystackType, "charindex");
         StringScalars.RequireResolvableCollations("charindex", needleType, haystackType);
@@ -93,13 +132,13 @@ internal sealed class CharIndex : Expression
     }
 
     /// <summary>
-    /// <c>bigint</c> over a <c>varchar(max)</c> / <c>nvarchar(max)</c>
-    /// haystack, <c>int</c> otherwise — a <c>text</c> / <c>ntext</c> one
+    /// <c>bigint</c> over a <c>varchar(max)</c> / <c>nvarchar(max)</c> /
+    /// <c>varbinary(max)</c> haystack, <c>int</c> otherwise — a <c>text</c> / <c>ntext</c> one
     /// included, and whatever the needle (probed 2026-10-01 against SQL
     /// Server 2025).
     /// </summary>
     private static SqlType ResultType(SqlType haystackType) =>
-        haystackType is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel }
+        haystackType is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel }
             ? SqlType.BigInt
             : SqlType.Int32;
 

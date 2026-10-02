@@ -63,6 +63,13 @@ partial class Simulation
     /// UPDATE on the parent goes through <see cref="EnforceIncomingFkOnUpdate"/>
     /// instead, which threads the parent's pre- and post-values together so
     /// ON UPDATE CASCADE can write the new key into each child row.
+    /// <para>
+    /// A NO ACTION key is checked once every cascade the statement sets off has
+    /// run, so a child row another path of the same cascade deletes doesn't
+    /// count against it (probed 2026-10-02 against SQL Server 2025: deleting a
+    /// country cascades to both an eagle and a kiwi referencing that eagle
+    /// with NO ACTION, and succeeds whichever table the cascade reaches first).
+    /// </para>
     /// </remarks>
     private static void EnforceIncomingForeignKeysOnDelete(
         HeapTable parentTable,
@@ -70,6 +77,25 @@ partial class Simulation
         ParserContext context,
         string verb,
         int depth)
+    {
+        if (parentTable.IncomingForeignKeys.Count == 0)
+            return;
+        var noActionChecks = new List<(ForeignKey Key, List<SqlValue[]> ParentRows, string Verb)>();
+        ApplyIncomingDeleteActions(parentTable, affectedOldValues, context, verb, depth, noActionChecks);
+        foreach (var (fk, parentRows, checkVerb) in noActionChecks)
+        {
+            if (MatchChildRowsToParents(fk, parentRows, context.Batch).Any())
+                throw BuildParentSideViolation(fk, context, checkVerb);
+        }
+    }
+
+    private static void ApplyIncomingDeleteActions(
+        HeapTable parentTable,
+        List<SqlValue[]> affectedOldValues,
+        ParserContext context,
+        string verb,
+        int depth,
+        List<(ForeignKey Key, List<SqlValue[]> ParentRows, string Verb)> noActionChecks)
     {
         if (parentTable.IncomingForeignKeys.Count == 0)
             return;
@@ -85,7 +111,12 @@ partial class Simulation
                 continue;
             if (affectedOldValues.Count == 0)
                 continue;
-            ApplyFkActionForKeySet(fk, affectedOldValues, fk.DeleteAction, context, verb, depth);
+            if (fk.DeleteAction == ReferentialAction.NoAction)
+            {
+                noActionChecks.Add((fk, affectedOldValues, verb));
+                continue;
+            }
+            ApplyFkActionForKeySet(fk, affectedOldValues, fk.DeleteAction, context, verb, depth, noActionChecks);
         }
     }
 
@@ -95,7 +126,8 @@ partial class Simulation
         ReferentialAction action,
         ParserContext context,
         string verb,
-        int depth)
+        int depth,
+        List<(ForeignKey Key, List<SqlValue[]> ParentRows, string Verb)> noActionChecks)
     {
         // Find every child row whose FK columns match one of the parent's
         // affected keys, seeking the child's FK columns per parent key when they
@@ -112,7 +144,7 @@ partial class Simulation
             case ReferentialAction.NoAction:
                 throw BuildParentSideViolation(fk, context, verb);
             case ReferentialAction.Cascade:
-                CascadeDeleteChildRows(fk, matchingChildRows, context, depth);
+                CascadeDeleteChildRows(fk, matchingChildRows, context, depth, noActionChecks);
                 break;
             case ReferentialAction.SetNull:
                 CascadeSetChildKeysToValue(fk, matchingChildRows, useDefault: false, context, depth, verb);
@@ -296,7 +328,8 @@ partial class Simulation
         ForeignKey fk,
         List<(int PageIndex, int SlotIndex, SqlValue[] FullValues)> matchingChildRows,
         ParserContext context,
-        int depth)
+        int depth,
+        List<(ForeignKey Key, List<SqlValue[]> ParentRows, string Verb)> noActionChecks)
     {
         var childTable = fk.ChildTable;
         var undoLog = childTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
@@ -314,7 +347,7 @@ partial class Simulation
         var oldRows = new List<SqlValue[]>(matchingChildRows.Count);
         foreach (var (_, _, full) in matchingChildRows)
             oldRows.Add(full);
-        EnforceIncomingForeignKeysOnDelete(childTable, oldRows, context, "DELETE", depth + 1);
+        ApplyIncomingDeleteActions(childTable, oldRows, context, "DELETE", depth + 1, noActionChecks);
 
         // Deepest-first: the grandchild's trigger has already fired inside the
         // recursion above, and the parent's own AFTER trigger fires once this

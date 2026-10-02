@@ -78,6 +78,29 @@ public class EFCoreTemporalTables
         Assert.AreEqual(1, context.Customers.Count());
     }
 
+    /// <summary>
+    /// Several new rows save as one <c>MERGE</c> reading the period columns
+    /// back through its <c>OUTPUT</c>, which has to stamp them as an
+    /// <c>INSERT</c> does — a MERGE once left them NULL, Msg 515.
+    /// </summary>
+    [TestMethod]
+    public void InsertSeveral_StampsEveryRowsPeriod()
+    {
+        using var context = new CustomerContext(CreateSimulation());
+        var alice = new Customer { Id = 1, Name = "alice", Credit = 100m };
+        var bob = new Customer { Id = 2, Name = "bob", Credit = 50m };
+        context.Customers.AddRange(alice, bob);
+        _ = context.SaveChanges();
+
+        foreach (var customer in new[] { alice, bob })
+        {
+            var entry = context.Entry(customer);
+            Assert.AreEqual(9999, ((DateTime)entry.Property("PeriodEnd").CurrentValue!).Year);
+            Assert.IsLessThan((DateTime)entry.Property("PeriodEnd").CurrentValue!, (DateTime)entry.Property("PeriodStart").CurrentValue!);
+        }
+        Assert.AreEqual(2, context.Customers.TemporalAll().Count());
+    }
+
     [TestMethod]
     public void Update_PreservesPriorVersionInHistory()
     {

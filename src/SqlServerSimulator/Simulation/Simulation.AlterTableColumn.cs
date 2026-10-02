@@ -679,16 +679,14 @@ partial class Simulation
 
     /// <summary>
     /// Parses <c>ALTER TABLE … ALTER COLUMN col TYPE[(precision[,scale])]
-    /// [COLLATE coll] [NULL|NOT NULL]</c>. Cursor on the <c>ALTER</c>
+    /// [COLLATE coll] [SPARSE] [MASKED WITH (…)] [NULL|NOT NULL]</c>. Cursor on the <c>ALTER</c>
     /// keyword on entry. Single-column shape only (real SQL Server's
     /// grammar doesn't accept comma-separated multi-column ALTER).
     /// </summary>
     /// <remarks>
     /// <para>
-    /// COLLATE clause is parse-accepted and ignored — the simulator has
-    /// a single default collation. ADD/DROP sub-clause forms
-    /// (PERSISTED / MASKED / ROWGUIDCOL / SPARSE) are not modeled
-    /// and raise <see cref="NotSupportedException"/>.
+    /// The <c>ADD | DROP</c> attribute forms branch off to
+    /// <see cref="TryParseAlterColumnAttribute"/>.
     /// </para>
     /// <para>
     /// Apply pipeline matches probe-confirmed SQL Server semantics:
@@ -771,12 +769,24 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
+        // SPARSE follows COLLATE and precedes MASKED WITH; a restatement
+        // without it makes the column non-sparse (probed 2026-10-02 against
+        // SQL Server 2025).
+        var sparse = false;
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Sparse })
+        {
+            sparse = true;
+            context.MoveNextOptional();
+        }
+
         // A MASKED WITH clause sits between COLLATE and the nullability; a type
         // change without one drops the column's mask, even to the same type
         // (probed 2026-09-27 against SQL Server 2025).
         var maskingFunctionText = context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Masked }
             ? ParseMaskedWithClause(context)
             : null;
+        if (maskingFunctionText is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Sparse })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
 
         bool? nullable = null;
         switch (context.Token)
@@ -792,7 +802,7 @@ partial class Simulation
                 context.MoveNextOptional();
                 break;
         }
-        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Masked })
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Masked or ContextualKeyword.Sparse })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         // A column can't become an identity column (probed 2026-10-01).
         if (context.Token is ReservedKeyword { Keyword: Keyword.Identity } identityKeyword)
@@ -847,11 +857,6 @@ partial class Simulation
         }
         if (newType == SqlType.RowVersion)
             throw SimulatedSqlException.CannotAlterColumnToTimestamp(columnName);
-        // A change no CAST could make is Msg 206, rows or not (probed
-        // 2026-10-01 against SQL Server 2025: date to int, int to date, int to
-        // uniqueidentifier).
-        if (Parser.Expressions.Cast.IsIllegalExplicitConversion(existingCol.Type, newType))
-            throw SimulatedSqlException.OperandTypeClash(existingCol.Type, newType);
         // For ALTER COLUMN, the precedence is: explicit NULL/NOT NULL on the
         // ALTER clause wins; otherwise alias-default; otherwise preserve
         // existing column nullability. Matches column-on-CREATE-TABLE
@@ -862,23 +867,39 @@ partial class Simulation
         // 2025) — unless an alias type says otherwise.
         var newNullable = nullable ?? aliasIsNullable ?? true;
 
-        // Collation: explicit ALTER COLUMN ... COLLATE wins; otherwise
-        // preserve the existing column's collation (when the type stays
-        // string); when transitioning into a string type from non-string,
-        // default to the database default.
+        // A SPARSE the new definition can't carry is refused ahead of the
+        // conversion check (probed 2026-10-02 against SQL Server 2025:
+        // `int` to `text SPARSE` is Msg 1731, not Msg 206).
+        if (sparse)
+        {
+            if (existingCol.Default is not null)
+                throw SimulatedSqlException.CannotMakeColumnSparseWithDefault(columnName, table.Name);
+            if (!newNullable || existingCol.Identity is not null || existingCol.IsRowGuidCol || !SparseEligible(newType))
+                throw SimulatedSqlException.CannotCreateSparseColumn(columnName, table.Name);
+        }
+
+        // A change no CAST could make is Msg 206, rows or not (probed
+        // 2026-10-01 against SQL Server 2025: date to int, int to date, int to
+        // uniqueidentifier).
+        if (Parser.Expressions.Cast.IsIllegalExplicitConversion(existingCol.Type, newType))
+            throw SimulatedSqlException.OperandTypeClash(existingCol.Type, newType);
+
+        // Collation: an explicit COLLATE wins; without one the column takes
+        // the database default, whatever it carried before — a restatement
+        // resets a declared collation (probed 2026-10-02 against SQL Server
+        // 2025).
         string? newCollationStored;
         if (newType.Category == SqlTypeCategory.String)
         {
             var newCollation =
                 (newCollationName is not null ? Collation.TryGet(newCollationName) : null)
-                ?? existingCol.Type.Collation
                 ?? context.Batch.CurrentDatabase.Collation;
             // See the matching gate in Simulation.Create.cs: text has no
             // per-column collation instance to carry the Msg 459 rejection.
             if (newType is TextSqlType)
                 newCollation.RejectIfUnicodeOnly();
             newType = newType.WithCollation(newCollation, Coercibility.Implicit);
-            newCollationStored = newCollationName ?? existingCol.Collation;
+            newCollationStored = newCollationName;
         }
         else
         {
@@ -952,6 +973,7 @@ partial class Simulation
             // change (probe-confirmed), as it does across sp_rename.
             ColumnId = existingCol.ColumnId,
             MaskingFunction = maskingFunction,
+            IsSparse = sparse,
         };
         if (maskingFunction is not null)
             context.Batch.Connection.Simulation.DeclaresDataMasks = true;
@@ -1327,7 +1349,8 @@ partial class Simulation
 
     /// <summary>
     /// Parses <c>ALTER TABLE … ALTER COLUMN &lt;col&gt; { ADD | DROP }
-    /// { ROWGUIDCOL | SPARSE }</c>. Both attributes are metadata here — the
+    /// { ROWGUIDCOL | SPARSE | PERSISTED | MASKED | HIDDEN }</c>.
+    /// ROWGUIDCOL and SPARSE are metadata here — the
     /// <c>$ROWGUID</c> pseudo-column isn't modeled and the row encoder already
     /// omits NULLs — so the toggle is a marker flip with no storage effect, and
     /// the catalog is what observes it.
@@ -1353,6 +1376,7 @@ partial class Simulation
             UnquotedString { ContextualKeyword: ContextualKeyword.Sparse } => ColumnAttribute.Sparse,
             UnquotedString { ContextualKeyword: ContextualKeyword.Persisted } => ColumnAttribute.Persisted,
             UnquotedString { ContextualKeyword: ContextualKeyword.Masked } => ColumnAttribute.Masked,
+            UnquotedString { ContextualKeyword: ContextualKeyword.Hidden } => ColumnAttribute.Hidden,
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
         // ADD MASKED carries a `WITH (FUNCTION = '…')` clause; the others take
@@ -1395,6 +1419,23 @@ partial class Simulation
             return true;
         }
 
+        // HIDDEN is open only to a period column, and toggles the parent's
+        // flag alone: a history sibling's columns are never hidden (probed
+        // 2026-10-02 against SQL Server 2025). Repeating a toggle is a no-op.
+        if (attribute == ColumnAttribute.Hidden)
+        {
+            if (target.GeneratedAs == GeneratedAlwaysAsRow.None)
+                throw SimulatedSqlException.HiddenOnNonGeneratedColumn(target.Name, table.Name);
+            if (target.IsHidden != adding)
+            {
+                var columns = (HeapColumn[])table.Columns.Clone();
+                columns[Array.IndexOf(columns, target)] = target.WithHidden(adding);
+                table.Columns = columns;
+                table.RecomputeStorageProjections();
+            }
+            return true;
+        }
+
         if (attribute == ColumnAttribute.RowGuidCol)
         {
             if (!adding)
@@ -1432,6 +1473,7 @@ partial class Simulation
         Sparse,
         Masked,
         Persisted,
+        Hidden,
     }
 
     /// <summary>

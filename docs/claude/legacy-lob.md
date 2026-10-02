@@ -14,7 +14,7 @@ All of it binds while compiling: probe-confirmed that an **empty** table raises 
 | Slot | `text` / `ntext` / `image` | `xml` | `geography` / `geometry` |
 |------|----------------------------|-------|--------------------------|
 | `ORDER BY`, `GROUP BY` | **Msg 306** state 2 — `The text, ntext, and image data types cannot be compared or sorted, except when using IS NULL or LIKE operator.` | **Msg 305** — the same sentence for one type, capitalized `XML`, and exempting only `IS NULL` | **Msg 249** — `The type "geography" is not comparable. It cannot be used in the ORDER BY clause.`, the one message that names the clause |
-| `DISTINCT` | **Msg 421** — `The text data type cannot be selected as DISTINCT because it is not comparable.` | Msg 421, same wording | Msg 421, same wording |
+| `DISTINCT` | **Msg 421** — `The text data type cannot be selected as DISTINCT because it is not comparable.`, one per such column in select-list order | Msg 421, same wording | Msg 421, same wording |
 | `UNION` / `INTERSECT` / `EXCEPT` | **Msg 5335** — `The data type text cannot be used as an operand to the UNION, INTERSECT or EXCEPT operators because it is not comparable.` | Msg 5335, same wording | Msg 5335, same wording |
 | `MAX` / `MIN` | **Msg 8117** — `Operand data type text is invalid for max operator.` | Msg 8117 | **Msg 6210** `CLR type 'geography' is not fully comparable.`, and then the Msg 8117 |
 | `COUNT` / `COUNT_BIG` | **Msg 8117** state 1 | accepted | accepted |

@@ -1,6 +1,6 @@
 # ALTER TABLE
 
-`ALTER TABLE` ships these modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `SET (LOCK_ESCALATION = TABLE | DISABLE | AUTO)`, `{ ENABLE | DISABLE } TRIGGER { ALL | name [, …] }` (see [`triggers.md`](triggers.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) [, …]` (multi-element constraint list — see [Multi-element ADD](#multi-element-add)), `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)), `ALTER COLUMN col { ADD | DROP } { ROWGUIDCOL | SPARSE }` (see [Column attributes](#column-attributes)), `ALTER COLUMN col { ADD MASKED WITH (…) | DROP MASKED }` (see [`data-masking.md`](data-masking.md#ddl)), `ALTER COLUMN col { ADD | DROP } PERSISTED` (see [PERSISTED](#persisted)), `DROP PERIOD FOR SYSTEM_TIME` (see [DROP PERIOD FOR SYSTEM_TIME](#drop-period-for-system_time)), `REBUILD` (see [REBUILD](#rebuild)), and `SWITCH [PARTITION n] TO target [PARTITION m]` (see [`partitioning.md`](partitioning.md#alter-table--switch)).
+`ALTER TABLE` ships these modeled shapes: `SET (SYSTEM_VERSIONING = OFF | ON (HISTORY_TABLE = name [, DATA_CONSISTENCY_CHECK = ON|OFF]))` (see [`temporal-tables.md`](temporal-tables.md)), `SET (LOCK_ESCALATION = TABLE | DISABLE | AUTO)`, `{ ENABLE | DISABLE } TRIGGER { ALL | name [, …] }` (see [`triggers.md`](triggers.md)), `[WITH CHECK | WITH NOCHECK] ADD [CONSTRAINT name] (PRIMARY KEY | UNIQUE | FOREIGN KEY | CHECK | DEFAULT) [, …]` (multi-element constraint list — see [Multi-element ADD](#multi-element-add)), `DROP CONSTRAINT [IF EXISTS] name [, …]`, `[WITH CHECK | WITH NOCHECK] (CHECK | NOCHECK) CONSTRAINT (ALL | name [, …])` (trust toggling), `ADD [COLUMN] col TYPE [, …]` (multi-column add — see [Column ops](#column-ops)), `DROP COLUMN [IF EXISTS] col [, …]` (multi-column drop with dependency rejection), `ALTER COLUMN col TYPE[(prec[,scale])] [COLLATE coll] [NULL|NOT NULL]` (single-column type / nullability change — see [ALTER COLUMN](#alter-column)), `ALTER COLUMN col { ADD | DROP } { ROWGUIDCOL | SPARSE | HIDDEN }` (see [Column attributes](#column-attributes)), `ALTER COLUMN col { ADD MASKED WITH (…) | DROP MASKED }` (see [`data-masking.md`](data-masking.md#ddl)), `ALTER COLUMN col { ADD | DROP } PERSISTED` (see [PERSISTED](#persisted)), `DROP PERIOD FOR SYSTEM_TIME` (see [DROP PERIOD FOR SYSTEM_TIME](#drop-period-for-system_time)), `REBUILD` (see [REBUILD](#rebuild)), and `SWITCH [PARTITION n] TO target [PARTITION m]` (see [`partitioning.md`](partitioning.md#alter-table--switch)).
 Probe-confirmed against SQL Server 2025.
 
 ## Grammar
@@ -188,6 +188,8 @@ Probed refusals:
 Both Msg 4925 and Msg 4926 are followed by **Msg 1750**, as a failed constraint is.
 
 `ADD | DROP PERSISTED` is [PERSISTED](#persisted)'s, and `ADD | DROP MASKED` is [Dynamic Data Masking](data-masking.md#ddl)'s.
+
+`ADD | DROP HIDDEN` toggles a period column's `is_hidden`, which `SELECT *` reads; repeating a toggle is a no-op, a column that isn't `GENERATED ALWAYS AS ROW START | END` is **Msg 13735**, and the history sibling's columns stay unhidden whatever the parent's (probed 2026-10-02 against SQL Server 2025; EF Core's migration converting a table to temporal emits `ADD HIDDEN`).
 
 ## PERSISTED
 
@@ -421,13 +423,14 @@ The old `Heap` is replaced wholesale (via the mutable `HeapTable.Heap` field).
 
 ```sql
 ALTER TABLE [schema.]table
-    ALTER COLUMN col TYPE[(precision[, scale])] [COLLATE collation] [NULL | NOT NULL]
+    ALTER COLUMN col TYPE[(precision[, scale])] [COLLATE collation] [SPARSE] [MASKED WITH (…)] [NULL | NOT NULL]
 ```
 
 Single-column shape only (real SQL Server's grammar doesn't accept comma-separated multi-column ALTER COLUMN).
 Routed from `TryParseAlterTable` via `Keyword.Alter` into `TryParseAlterTableAlterColumn`.
 The trailing `NULL`/`NOT NULL` keyword is optional — omitting it leaves the column nullable, a NOT NULL one included and under `SET ANSI_NULL_DFLT_ON OFF` too, unless an alias type declares otherwise (probed 2026-10-01 against SQL Server 2025).
-`COLLATE` sets the column's collation, which a CHECK, DEFAULT or index on it refuses as a type change (see [Blockers](#blockers-msg-5074)).
+`COLLATE` sets the column's collation, which a CHECK, DEFAULT or index on it refuses as a type change (see [Blockers](#blockers-msg-5074)); without one the column takes the database default, a declared collation reset included (probed 2026-10-02 against SQL Server 2025).
+`SPARSE` makes the column sparse and a restatement without it makes it non-sparse; it comes after `COLLATE` and before `MASKED WITH`, either other order being a syntax error at `SPARSE`, and its refusals are the [column attribute](#column-attributes)'s, raised ahead of the conversion check — `int` to `text SPARSE` is Msg 1731, not Msg 206 (probed 2026-10-02).
 
 The `ALTER COLUMN col ADD/DROP {ROWGUIDCOL|SPARSE}` sub-clauses are [column attributes](#column-attributes), `MASKED` is [Dynamic Data Masking](data-masking.md#ddl)'s, and `PERSISTED` is [PERSISTED](#persisted)'s.
 A type change drops the column's mask unless the clause restates one (`ALTER COLUMN c varchar(20) MASKED WITH (…) NULL`).

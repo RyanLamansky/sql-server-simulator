@@ -52,6 +52,16 @@ internal sealed partial class TdsSession
 
     private void ExecuteTransactionManagerRequest(TdsMessage message, TdsTokenWriter writer)
     {
+        // A pooled connection's first request after reuse may be this one —
+        // SqlClient's BeginTransaction — and carries the reset as a batch or
+        // an RPC would.
+        if (this.ResetRequested(message))
+        {
+            if (!this.TryResetConnection(writer))
+                return;
+            writer.WriteResetConnectionAck();
+        }
+
         var payload = message.Payload;
         var offset = SkipAllHeaders(payload);
         if (offset + 2 > payload.Length)

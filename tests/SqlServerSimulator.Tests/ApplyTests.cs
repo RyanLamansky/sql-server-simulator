@@ -169,13 +169,20 @@ public sealed class ApplyTests
                 "on b.id = p0.id").ExecuteScalar());
     }
 
+    /// <summary>
+    /// A table after APPLY is a join with nothing to correlate: CROSS APPLY
+    /// pairs every row, OUTER APPLY the same (probed 2026-10-02 against SQL
+    /// Server 2025; EF Core emits <c>OUTER APPLY [t] AS [x]</c> for a nested
+    /// SelectMany).
+    /// </summary>
     [TestMethod]
-    public void Apply_RequiresParenthesizedSelect()
+    [DataRow("select count(*) from blogs as b cross apply posts as p", 12)]
+    [DataRow("select count(*) from blogs as b outer apply dbo.posts p where p.blog_id = b.id", 4)]
+    [DataRow("select count(*) from blogs b outer apply (select p.id from posts p outer apply blogs b2 where b2.id = b.id) q", 12)]
+    public void Apply_OverATable_JoinsEveryRow(string query, int expected)
     {
         using var connection = SeededBlogsPosts();
-        _ = Throws<SimulatedSqlException>(() =>
-            _ = connection.CreateCommand(
-                "select 1 from blogs as b cross apply posts as p").ExecuteScalar());
+        AreEqual(expected, connection.CreateCommand(query).ExecuteScalar());
     }
 
     [TestMethod]

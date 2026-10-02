@@ -752,6 +752,14 @@ partial class SimulatedSqlException
         new($"The type \"{type.SqlServerName}\" is not comparable. It cannot be used in the {clause} clause.", 249, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 4186: an <c>OUTPUT</c> clause read a computed
+    /// column whose definition calls a function that isn't schema-bound or
+    /// reads data (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OutputComputedColumnAccessesData(string qualifiedColumn) =>
+        new($"Column '{qualifiedColumn}' cannot be referenced in the OUTPUT clause because the column definition contains a subquery or references a function that performs user or system data access. A function is assumed by default to perform data access if it is not schemabound. Consider removing the subquery or function from the column definition or removing the column from the OUTPUT clause.", 4186, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 421: a non-comparable type reached a DISTINCT
     /// projection. Unlike the sorting and grouping slots — which split by family
     /// across Msg 306 / 305 / 249 — DISTINCT reports one message for all of

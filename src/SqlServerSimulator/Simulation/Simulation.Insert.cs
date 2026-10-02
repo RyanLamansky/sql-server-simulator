@@ -734,25 +734,7 @@ partial class Simulation
                     rowValues[i] = SqlValue.FromRowVersion(context.Batch.DatabaseFor(destinationTable).AllocateRowVersion());
             }
 
-            // Auto-populate period columns whose ordinals carry the GENERATED
-            // ALWAYS markers: ROW START = the statement's frozen UtcNow, ROW
-            // END = max datetime2 ('9999-12-31 23:59:59.9999999' —
-            // DateTime.MaxValue at datetime2(7) precision). Gating on the
-            // per-column GeneratedAs (not on the table-level SystemVersioning
-            // link) matches real SQL Server's behavior probed 2026-05-13:
-            // after ALTER TABLE … SET (SYSTEM_VERSIONING = OFF), the parent's
-            // GENERATED ALWAYS column markers persist and INSERT continues to
-            // auto-populate. The (former) history sibling never reaches here:
-            // BuildHistoryTable strips the GENERATED markers, so its
-            // PeriodColumns ordinals carry GeneratedAs.None and the gate
-            // skips. (While versioning is still ON, INSERT into the history
-            // sibling is rejected upstream by Msg 13559.)
-            if (destinationTable.PeriodColumns is { } pc
-                && destinationTable.Columns[pc.StartOrdinal].GeneratedAs != GeneratedAlwaysAsRow.None)
-            {
-                rowValues[pc.StartOrdinal] = SqlValue.FromDateTime2(destinationTable.Columns[pc.StartOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
-                rowValues[pc.EndOrdinal] = SqlValue.FromDateTime2(destinationTable.Columns[pc.EndOrdinal].Type, DateTime.MaxValue);
-            }
+            StampInsertedPeriod(destinationTable, rowValues, context.Batch);
 
             // Evaluate computed columns now — both persisted (whose result
             // gets stored) and non-persisted (whose result OUTPUT may reference
@@ -872,6 +854,38 @@ partial class Simulation
         return output is { HasTarget: false } o2
             ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!, insertedCount) { ColumnNullability = o2.Nullability }
             : new SimulatedNonQuery(insertedCount);
+    }
+
+    /// <summary>
+    /// Fills the period columns of a row an INSERT or a MERGE's insert lands:
+    /// ROW START the statement's frozen UtcNow, ROW END max <c>datetime2</c>.
+    /// Gated on the columns' GENERATED ALWAYS markers rather than the
+    /// SYSTEM_VERSIONING link, because those markers outlive
+    /// <c>SET (SYSTEM_VERSIONING = OFF)</c> and real keeps populating through
+    /// them (probed 2026-05-13 against SQL Server 2025); a former history
+    /// sibling has its markers stripped and so is skipped.
+    /// </summary>
+    private static void StampInsertedPeriod(HeapTable table, SqlValue[] rowValues, BatchContext batch)
+    {
+        if (table.PeriodColumns is { } pc && table.Columns[pc.StartOrdinal].GeneratedAs != GeneratedAlwaysAsRow.None)
+        {
+            rowValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, batch.CurrentStatement.UtcNow);
+            rowValues[pc.EndOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.EndOrdinal].Type, DateTime.MaxValue);
+        }
+    }
+
+    /// <summary>
+    /// Advances the ROW START of a row an UPDATE or a MERGE's update rewrites
+    /// to the statement's frozen UtcNow; ROW END stays at max, the row being
+    /// still current.
+    /// Gated like <see cref="StampInsertedPeriod"/> on the GENERATED ALWAYS
+    /// markers, so a table with versioning switched OFF still advances (probed
+    /// 2026-10-02 against SQL Server 2025, UPDATE and MERGE alike).
+    /// </summary>
+    private static void AdvanceUpdatedPeriodStart(HeapTable table, SqlValue[] newValues, BatchContext batch)
+    {
+        if (table.PeriodColumns is { } pc && table.Columns[pc.StartOrdinal].GeneratedAs != GeneratedAlwaysAsRow.None)
+            newValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, batch.CurrentStatement.UtcNow);
     }
 
     /// <summary>

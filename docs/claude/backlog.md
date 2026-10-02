@@ -226,6 +226,43 @@ Worth keeping from that round: the backlog's own statement of the Msg 164 rule w
 
 Not sim bugs (**fail on real too** — leave alone): boolean-expression `=` comparison `WHERE (a<%s)=(b<%s)` → Msg 4145 on both; `CAST(<numeric> AS datetime2)` → Msg 529 on both (Django's DurationField tests expect it); most `get_or_create` `manual_pk`/duplicate IntegrityError tests (the savepoint-rollback-after-constraint pattern was probed identical to real). Not Django-specific: default-path string→date parsing is language-neutral, so `'1/2/3'` raises Msg 241 where real's `us_english` reads it mdy (deliberate — see [`casting.md`](casting.md)).
 
+### EF Core functional-test shakedown
+
+EF Core's own SQL Server functional suite — `test/EFCore.SqlServer.FunctionalTests` at the `v10.0.2` tag, the provider version the repo pins — run unmodified over the wire, real SQL Server 2025 on one side and the TDS endpoint on the other, with only `Test__SqlServer__DefaultConnection` pointing it (harness local-only, see its provenance note).
+The slice is the **whole suite**: 51,446 results over 369 test classes, 391 of them skipped identically on both sides, packed into 12 batches of about 5,000 tests that each side runs in about 15 minutes.
+Measured 2026-10-02: **real fails 0**, so the bar is the simulator failing nothing, and the reverse delta (real-only, the over-permissive direction) was empty before and after.
+The first simulator run failed 3,595 tests in the eleven batches that finished, the twelfth killed after 216 more; after the fixes it fails **14**, all simulator-only.
+
+Roots closed, each with its regression test:
+
+- **MERGE into a system-versioned table** stamped no period and versioned nothing, so every EF multi-row insert into a temporal table was Msg 515 — over 2,000 failures from the temporal fixtures' seeding alone ([`temporal-tables.md`](temporal-tables.md)).
+  An UPDATE after `SYSTEM_VERSIONING = OFF` now advances ROW START as real's does.
+- **A `FOR SYSTEM_TIME` read decoded history rows' off-row values against the parent's heap**, so an old version showed a newer row's text, or Msg 601 when the lengths differed — which EF's retrying strategy turned into a minute per test.
+- **The seek cache filed no row with a NULL past its key's lead column**, so after a uniqueness check widened an entry, `WHERE r = 1` missed every row whose later key column was NULL — silently wrong results ([`indexes.md`](indexes.md)).
+- **Pooled-connection resets** were ignored on a transaction-manager request, SqlClient's `BeginTransaction`, so `SET NOCOUNT ON` from a seeding script leaked and every `ExecuteUpdate` / `ExecuteDelete` returned -1; the skip-transaction reset form now keeps an enlisted transaction ([`tds-endpoint.md`](tds-endpoint.md)).
+- **A MARS request stopped counting as in flight only after its last packet was sent**, so a commit racing it drew a spurious Msg 3981.
+- **`json` and `vector` RPC parameters** (`0xF4`, `0xF5`) were unrecognized and failed the request.
+- **A MERGE's self-referencing foreign key** was checked before the rows landed ([`foreign-keys.md`](foreign-keys.md)), and a **NO ACTION key reached by a cascade** was checked before the cascade's other paths had run.
+- **Parsing**: `((SELECT … ORDER BY a, b) IS NULL AND …)` read as a row constructor ([`grammar.md`](grammar.md)); a table after `APPLY` was refused, which two existing tests had pinned without a probe ([`joins.md`](joins.md)); `OFFSET` / `FETCH` couldn't read an enclosing query's column ([`query.md`](query.md)); `ALTER COLUMN … ADD | DROP HIDDEN` and `ALTER COLUMN … SPARSE` were syntax errors ([`alter-table.md`](alter-table.md)); `CONTAINS` / `FREETEXT` accepted any expression as their condition ([`full-text.md`](full-text.md)).
+- **Smaller semantics**: `ALTER COLUMN` without `COLLATE` kept a declared collation where real resets it, again against an existing test; a computed column's `sys.columns.collation_name`; a history table's hidden columns; one Msg 421 per non-comparable `DISTINCT` column; binary `CHARINDEX` ([`scalars.md`](scalars.md)); Msg 4186 for an `OUTPUT` of a computed column over a data-accessing function ([`dml.md`](dml.md)); Msg 2739 alone for a legacy-LOB variable with an initializer; a primary key yielding `CLUSTERED` to an explicit unique constraint ([`constraints.md`](constraints.md)); full-text `TYPE COLUMN` documents read through the plain-text, HTML and XML filters; sequences over `decimal(38, 0)` and Msg 11708 ([`sequences.md`](sequences.md)).
+
+Remaining, each understood:
+
+- **Memory-optimized tables** (8 tests): the simulator reports `SERVERPROPERTY('IsXTPSupported') = 1` as real does but models none of it — `MEMORY_OPTIMIZED_ELEVATE_TO_SNAPSHOT`, a `MEMORY_OPTIMIZED_DATA` filegroup's type-2 file (EF's migration looks for one, finds none and adds the filegroup again, which fails on its own name), or `CREATE TABLE … WITH (MEMORY_OPTIMIZED = ON)`.
+- **Native `vector` result columns** (2 tests): SqlClient 7 asks for the vector feature extension and real acknowledges it, sending `vector` columns as `0xF5`; the endpoint negotiates no feature extension, so `GetFieldValue<SqlVector<float>>` meets the down-level text (see [`vector.md`](vector.md)); `json` would follow the same path.
+- **`WITH STATISTICS_ONLY = -1`** (1 test): real's undocumented hypothetical index, `sys.indexes.is_hypothetical = 1` and enforcing nothing, is a syntax error here.
+- **A key column list on a column-level constraint** (1 test): real takes `b bigint CONSTRAINT ux UNIQUE (a, b)` and `a int PRIMARY KEY (id, a)` as table-level keys (probed 2026-10-02); here it is Msg 102 at the `(`.
+- **Row order a plan decides** (2 tests, irreducible): `Select_DTO_constructor_distinct_with_collection_projection_translated_to_server_with_binding_after_client_eval` asserts that real's rows within one `ORDER BY` key come back out of `OrderID` order, which its hash plan produces and the simulator's stable order doesn't.
+
+Gotchas worth keeping:
+
+- **Real hung on its first run**: a JSON query waited on `RESOURCE_SEMAPHORE` for the whole hang timeout — the long-running server's memory creep — so restart SQL Server before a measurement run, and run the suite in batches so one hang loses one batch.
+- **Scripted stores persist on real and reseed only under CI**, while the simulator seeds every run: seeding-path bugs (the NOCOUNT leak) show on the simulator side only, and a real-side rerun doesn't revisit them.
+- **MARS is random per store** (`SqlServerTestStore.CreateConnectionString`), so a MARS-only failure flickers between runs.
+- **A transient-error retry loop is the slow path**: EF retries Msg 601 / 1205 with backoff, about a minute per test, and xunit runs a class's tests serially, so one bad class stalled a batch for an hour.
+- **Two existing tests encoded unprobed behavior** (a table after `APPLY`, the preserved collation) and were corrected by the probe; the suite's breadth found them where hand-written tests had agreed with the simulator.
+- **Afterwards drop the suite's databases on real**: its memory-optimized databases keep `sqlservr` busy enough to push the sqllogictest replay past its timing band.
+
 ### Edge-case differential sweep — surfaced gaps
 
 A hand-written corpus of 548 deliberately odd statements, run through the simulator's TDS listener and against SQL Server 2025 (17.0.4065.4) with identical SqlClient code on both sides, a fresh database per case, and every error routed through `InfoMessage` so a whole batch's output compares (probed 2026-09-23).

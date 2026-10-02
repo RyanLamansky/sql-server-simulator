@@ -1222,6 +1222,23 @@ partial class Simulation
         // sequence (NEXT VALUE FOR) will wait on the Sch-M acquire.
         context.Batch.AcquireStatementLock(sequence.SchemaLock, LockMode.SchemaModification);
 
+        // A refused option leaves the sequence as it was, the ones before it
+        // in the statement included.
+        var before = (sequence.StartValue, sequence.CurrentValue, sequence.Increment, sequence.MinValue, sequence.MaxValue, sequence.Cycle, sequence.CacheSize, sequence.IsExhausted, sequence.FirstCacheAllocated, sequence.LastUsedValue);
+        try
+        {
+            return AlterSequenceOptions(context, sequence);
+        }
+        catch (SimulatedSqlException)
+        {
+            (sequence.StartValue, sequence.CurrentValue, sequence.Increment, sequence.MinValue, sequence.MaxValue, sequence.Cycle, sequence.CacheSize, sequence.IsExhausted, sequence.FirstCacheAllocated, sequence.LastUsedValue) = before;
+            throw;
+        }
+    }
+
+    /// <summary>Applies an <c>ALTER SEQUENCE</c>'s options in written order.</summary>
+    private static bool AlterSequenceOptions(ParserContext context, Sequence sequence)
+    {
         while (context.MoveNext())
         {
             switch (context.Token)
@@ -1239,7 +1256,7 @@ partial class Simulation
                             // reports n afterwards, and a later bare RESTART
                             // returns to n rather than to the value the
                             // sequence was declared with.
-                            sequence.StartValue = ReadSignedIntegerLiteral(context);
+                            sequence.StartValue = ReadSequenceArgument(context, sequence.DeclaredType, "RESTART WITH");
                             sequence.CurrentValue = sequence.StartValue;
                         }
                         else
@@ -1259,14 +1276,16 @@ partial class Simulation
                     if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                         return false;
                     sequence.Increment = ReadSignedIntegerLiteral(context);
+                    if (sequence.Increment != 0 && IsOutsideSequenceType(sequence.DeclaredType, sequence.Increment))
+                        throw SimulatedSqlException.SequenceArgumentOutOfRange("INCREMENT BY");
                     if (sequence.Increment == 0)
                         throw SimulatedSqlException.SequenceIncrementCannotBeZero(sequence.FullName);
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.MinValue }:
-                    sequence.MinValue = ReadSignedIntegerLiteral(context);
+                    sequence.MinValue = ReadSequenceArgument(context, sequence.DeclaredType, "MINVALUE");
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.MaxValue }:
-                    sequence.MaxValue = ReadSignedIntegerLiteral(context);
+                    sequence.MaxValue = ReadSequenceArgument(context, sequence.DeclaredType, "MAXVALUE");
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Cycle }:
                     sequence.Cycle = true;
@@ -1299,7 +1318,7 @@ partial class Simulation
                         else
                         {
                             context.RestoreCheckpoint(afterCache);
-                            sequence.CacheSize = ReadSignedIntegerLiteral(context);
+                            sequence.CacheSize = ReadCacheSize(context);
                         }
                         continue;
                     }

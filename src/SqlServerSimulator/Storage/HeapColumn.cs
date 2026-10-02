@@ -288,17 +288,24 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// <c>ALTER TABLE … ALTER COLUMN c { ADD | DROP } PERSISTED</c> swaps in, a
     /// fresh instance so a rolled-back transaction's snapshot keeps the old one.
     /// </summary>
-    internal HeapColumn WithPersisted(bool persisted) => this.With(persisted, this.Nullable);
+    internal HeapColumn WithPersisted(bool persisted) => this.With(persisted, this.Nullable, this.IsHidden);
 
     /// <summary>
     /// This column with <see cref="Nullable"/> replaced by
     /// <paramref name="nullable"/>, every other attribute carried over.
     /// </summary>
-    internal HeapColumn WithNullable(bool nullable) => this.With(this.IsPersisted, nullable);
+    internal HeapColumn WithNullable(bool nullable) => this.With(this.IsPersisted, nullable, this.IsHidden);
 
-    private HeapColumn With(bool persisted, bool nullable) =>
+    /// <summary>
+    /// This column with <see cref="IsHidden"/> replaced by
+    /// <paramref name="hidden"/>, every other attribute carried over — what
+    /// <c>ALTER TABLE … ALTER COLUMN c { ADD | DROP } HIDDEN</c> swaps in.
+    /// </summary>
+    internal HeapColumn WithHidden(bool hidden) => this.With(this.IsPersisted, this.Nullable, hidden);
+
+    private HeapColumn With(bool persisted, bool nullable, bool hidden) =>
         new(this.Name, this.Type, this.MaxLength, nullable, this.Identity, this.Default, this.Computed, persisted,
-            this.GeneratedAs, this.IsHidden, this.Collation, this.ComputedDefinition, this.IsRowGuidCol, this.SpelledNumeric)
+            this.GeneratedAs, hidden, this.Collation, this.ComputedDefinition, this.IsRowGuidCol, this.SpelledNumeric)
         {
             ColumnId = this.ColumnId,
             IsUntypedNull = this.IsUntypedNull,

@@ -337,6 +337,7 @@ A stray token where a closer belongs is the plain syntax error at it — Msg 156
 
 A parenthesized *boolean* followed by an operator only a value takes is a syntax error too (probed 2026-08-05): `WHERE (a = 'a') COLLATE X = 'x'` and `(a = 'a') LIKE 'x'` are Msg 156 on the keyword, `(a = 'a') + 1` Msg 102 on the operator.
 `LookaheadValueLhs` routes those shapes to the value-LHS parse, which fails at the inner `=`; `TrailingOperatorAfterBooleanGroup` then re-reads the group as a predicate and, when a `LIKE` / `COLLATE` keyword or an arithmetic or bitwise operator follows it, raises real's error in place of the inner one.
+Its row-constructor rule — a depth-1 comma means `(a, b)` — skips a group that opens with `SELECT`, whose commas are the query's own: `((SELECT TOP(1) c … ORDER BY a, b) IS NULL AND …)`, EF Core's null-semantics expansion of a subquery comparison, read as a row constructor before.
 `-`, `*`, `/`, `%`, `&`, `|` and `^` share the `+` arm (`-`, `*`, `&` and `|` probed 2026-09-29).
 `IN`, `BETWEEN`, `IS` and `NOT` after a boolean group are Msg 156 on the keyword, and `>`, `<` and `!` (so `<>`, `!=`, `!<` too) Msg 102 on the operator (probed 2026-09-29).
 

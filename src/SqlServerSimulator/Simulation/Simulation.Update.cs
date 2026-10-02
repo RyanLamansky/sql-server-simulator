@@ -2157,12 +2157,9 @@ partial class Simulation
                 newValues[ci] = SqlValue.FromRowVersion(context.Batch.DatabaseFor(table).AllocateRowVersion());
         }
 
-        // Advance the current row's ROW START on a system-versioned UPDATE.
-        // ROW END stays at max (the row is still current). The pre-update
-        // ROW START surfaces in `fullValues` for the history-row copy that
-        // CommitUpdate writes.
-        if (table.PeriodColumns is { } pc && table.SystemVersioning is not null)
-            newValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
+        // The pre-update ROW START surfaces in `fullValues` for the
+        // history-row copy that CommitUpdate writes.
+        AdvanceUpdatedPeriodStart(table, newValues, context.Batch);
 
         EvaluateComputedColumns(table, newValues, context.Batch);
         if (enforceConstraints)

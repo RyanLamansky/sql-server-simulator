@@ -147,7 +147,8 @@ Three folds apply:
   The default is ON, so `café` and `cafe` are distinct terms; the fold strips Latin, Greek and Cyrillic marks and leaves a Devanagari virama or a kana voicing mark alone.
 
 An **`xml` column** contributes its content and not its markup, which is what real indexes: probing `<r kind="cv"><skill>Engineer</skill></r>` found `Engineer` and the attribute *value* `cv`, but neither the element name `skill` nor the attribute name `kind`.
-A **`varbinary` column paired through `TYPE COLUMN`** contributes nothing — real filters the document into text first, and the simulator has no filter, so the column is searchable but empty rather than word-broken as bytes.
+A **`varbinary` column paired through `TYPE COLUMN`** contributes the text the filter its extension names extracts, fitted to SQL Server 2025 on Linux, whose `sys.fulltext_document_types` includes `.c`, `.csv`, `.htm`, `.html`, `.txt` and `.xml` but neither `.docx` nor `.pdf` (probed 2026-10-02): the plain-text ones index the decoded text as is, markup included; HTML indexes element text with entities decoded (`caf&eacute;` finds `café`) but neither tag names, attribute values, comments nor `script` / `style` bodies; XML indexes as an `xml` column does.
+The bytes decode by their byte-order mark (UTF-8, UTF-16) or else as code page 1252, so a UTF-16 document without a mark finds nothing, as on real; any other extension, or a NULL one, contributes nothing (`FullTextBinding.FilteredText`).
 
 **Stopwords** come from each column's language: `FullTextLanguage` carries every system stoplist `sys.fulltext_system_stopwords` reports — 15,829 words over 46 languages, kept verbatim in the embedded `SystemStopwords.tsv` and served by that view.
 English's 154 hold the single letters and digits, which is why `CONTAINS(col, '7')` and `CONTAINS(col, 'o')` match nothing while `CONTAINS(col, '42')` matches; a number's companion is noise when the number is (`nn5`).
@@ -188,6 +189,8 @@ A differential over 44 conditions matched real in every column but `keyword` for
 `keyword` is the term in UTF-16 big-endian, which is real's too except for an accented term, whose keyword real encodes its own way.
 
 ### The `contains_search_condition` grammar
+
+The condition argument itself is a string literal or a variable, and `LANGUAGE`'s a number, binary or string literal or a variable, in all four members: a column, a function call, a parenthesized or concatenated value, a binary condition and `NULL` are each a syntax error at the offending token (probed 2026-10-02 against SQL Server 2025, `FullTextPredicate.ParseLiteralOrVariable`).
 
 ```
 or_expr    ::= and_expr { (OR | '|') and_expr }
@@ -334,12 +337,12 @@ An unknown catalog name or unrecognized property returns NULL; property names ar
 
 - **The `SEMANTIC*` rowsets** (`SEMANTICKEYPHRASETABLE`, `SEMANTICSIMILARITYTABLE`, `SEMANTICSIMILARITYDETAILSTABLE`) — `NotSupportedException` at parse, naming the function. `STATISTICAL_SEMANTICS` on a column is real's Msg 41209, as no semantic language statistics database is ever registered.
 - **Filesystem-placement semantics** (`ON FILEGROUP` / `IN PATH`) — parse-and-discard.
-- **Custom stoplists and search property lists** (`CREATE FULLTEXT STOPLIST`, `CREATE SEARCH PROPERTY LIST`) — `sys.fulltext_stoplists` ships empty, so naming a stoplist or property list is refused as a missing one; `sys.fulltext_document_types` ships empty too.
+- **Custom stoplists and search property lists** (`CREATE FULLTEXT STOPLIST`, `CREATE SEARCH PROPERTY LIST`) — `sys.fulltext_stoplists` ships empty, so naming a stoplist or property list is refused as a missing one.
 - **The index keyword DMVs** — `sys.dm_fts_index_keywords`, `…_by_document`, `…_position_by_document` and `…_by_property` — which the breaker already has what it takes to answer.
 - **`sys.sp_fulltext_load_thesaurus_file`** and a populated thesaurus.
   Probed 2026-09-29: the procedure succeeds silently for a known LCID, refuses to run inside a transaction, and for an unknown or NULL LCID rethrows real's error 30050 (`Both the thesaurus file for lcid '9999' and the global thesaurus could not be loaded.`) as a user error from `sys.sp_fulltext_rethrow_error`.
   A thesaurus of one's own is XML edited into the server's install tree, which no statement reaches.
-- **`TYPE COLUMN` document extraction** — a `varbinary` column paired with an extension column is stored and projected through the catalog views, but its bytes are not filtered into text, so a search over one matches nothing. `xml` columns *are* indexed, by content — see [word breaking](#word-breaking).
+- **Document filters beyond the plain-text, HTML and XML ones** — an Office or PDF document, which real on Windows filters through its installed iFilters, contributes nothing; the `sys.fulltext_document_types` view isn't modeled.
 - **Other languages' breakers and morphologies** — see [Divergences](#divergences).
 
 ## BACPAC round-trip

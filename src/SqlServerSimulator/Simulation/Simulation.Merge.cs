@@ -2306,6 +2306,7 @@ partial class Simulation
                 newValues[ci] = SqlValue.FromRowVersion(context.Batch.DatabaseFor(destinationTable).AllocateRowVersion());
         }
 
+        AdvanceUpdatedPeriodStart(destinationTable, newValues, context.Batch);
         EvaluateComputedColumns(destinationTable, newValues, context.Batch);
         EnforceNotNull(destinationTable, newValues, "UPDATE");
         EnforceCheckConstraints(destinationTable, newValues, context.Batch, "UPDATE", reportedVerb: "MERGE");
@@ -2430,6 +2431,7 @@ partial class Simulation
 
         if (destinationTable.GraphKind != GraphTableKind.None)
             SettleGraphColumns(destinationTable, rowValues, clause.InsertColumns, context.Batch);
+        StampInsertedPeriod(destinationTable, rowValues, context.Batch);
         EvaluateComputedColumns(destinationTable, rowValues, context.Batch);
         if (!insteadOfInsert)
         {
@@ -2536,7 +2538,13 @@ partial class Simulation
 
         // Outgoing FK validation on inserts + updates (the post-image rows
         // that are about to land in the heap). Fires before mutation so a
-        // violation rolls back cleanly via the statement-atomic exception.
+        // violation rolls back cleanly via the statement-atomic exception —
+        // except a key referencing the table itself, checked once the rows
+        // are written so a row may reference itself or another row of the
+        // same MERGE, as an INSERT's may (probed 2026-10-02 against SQL Server
+        // 2025).
+        var selfReferencing = ReferencesItself(destinationTable);
+        List<SqlValue[]>? outgoingRows = null;
         if (destinationTable.OutgoingForeignKeys.Count > 0)
         {
             var newRows = new List<SqlValue[]>(pendingInserts.Count + pendingUpdates.Count);
@@ -2551,7 +2559,10 @@ partial class Simulation
                     newRows.Add(newValues);
             }
             if (newRows.Count > 0)
-                EnforceOutgoingForeignKeys(destinationTable, newRows, context, "MERGE");
+            {
+                EnforceOutgoingForeignKeys(destinationTable, newRows, context, "MERGE", selfReferencing: selfReferencing ? false : null);
+                outgoingRows = newRows;
+            }
         }
 
         // Apply heap operations only for non-INSTEAD-OF actions.
@@ -2564,6 +2575,23 @@ partial class Simulation
             || (!insteadOfInsert && pendingInserts.Count > 0))
         {
             destinationTable.OwningDatabase?.RejectWriteWhenReadOnly();
+        }
+
+        // System-versioned: each row the MERGE deletes or rewrites moves to
+        // history first, its ROW END the statement's UtcNow, as a lone
+        // DELETE or UPDATE would.
+        if (destinationTable.SystemVersioning is { } historyTable && destinationTable.PeriodColumns is { } period)
+        {
+            if (!insteadOfDelete)
+            {
+                foreach (var (_, _, oldValues, _) in pendingDeletes)
+                    WriteHistoryRow(destinationTable, historyTable, period, oldValues, context, undoLog);
+            }
+            if (!insteadOfUpdate)
+            {
+                foreach (var (_, _, oldValues, _, _) in pendingUpdates)
+                    WriteHistoryRow(destinationTable, historyTable, period, oldValues, context, undoLog);
+            }
         }
 
         if (!insteadOfDelete)
@@ -2623,6 +2651,9 @@ partial class Simulation
                 context.Connection.StatementIo?.CountWrite(destinationTable);
             }
         }
+
+        if (selfReferencing && outgoingRows is not null)
+            EnforceOutgoingForeignKeys(destinationTable, outgoingRows, context, "MERGE", selfReferencing: true);
 
         // Incoming-FK cascade for MERGE's DELETE/UPDATE actions on the
         // destination. INSTEAD OF paths bypass (the trigger handles its own

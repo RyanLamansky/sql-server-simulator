@@ -14,7 +14,9 @@ Probed against SQL Server 2025.
   The first `NEXT VALUE FOR` returns `start_value` itself (NOT `start + increment`) — verified.
 - **Default increment**: 1.
 - **Default min/max**: the natural bounds of the declared type.
-  For decimal, `10^precision - 1` capped at long range (precision ≥ 19 saturates to `[long.MinValue, long.MaxValue]` since the simulator tracks values in `long`).
+  For decimal, `10^precision - 1` at every precision through 38: sequence state is tracked in `Int128`, which holds `decimal(38, 0)`'s whole range.
+  A written `INCREMENT BY`, `MINVALUE`, `MAXVALUE`, `START WITH` or `RESTART WITH` outside the declared type is **Msg 11708** naming the argument — checked increment (after its zero check, Msg 11700) then minimum, maximum and start, whatever the written order — and a `CACHE` wider than `int` is a syntax error at the number (probed 2026-10-02 against SQL Server 2025).
+  A refused `ALTER SEQUENCE` leaves the sequence as it was.
 - **`INCREMENT BY 0`** → **Msg 11700**.
 - **`START WITH` outside `[minvalue, maxvalue]`** → **Msg 11703**.
 - **Cycle**: ascending wrap → `minvalue`; descending wrap → `maxvalue`.
@@ -53,11 +55,11 @@ Bump sites:
 ## `sys.sequences` catalog view
 
 Columns: `name`, `object_id`, `schema_id`, `principal_id` (always NULL — ownership follows the schema), `create_date`, `modify_date` (both the ALTER-preserving `SchemaObject` timestamps), `start_value`, `increment`, `minimum_value`, `maximum_value`, `is_cycling`, `is_cached`, `cache_size`, `current_value`, `last_used_value`, `system_type_id`, `user_type_id`, `is_exhausted`, `precision tinyint`, `scale tinyint` (nullable).
-**`last_used_value`** is a genuine `sql_variant` (the one value column that isn't bigint-substituted): NULL until the first `NEXT VALUE FOR` in the process, then the last emitted value wrapped in the sequence's declared type, and reset to NULL by `ALTER SEQUENCE … RESTART`.
+**`last_used_value`** is NULL until the first `NEXT VALUE FOR` in the process, then the last emitted value wrapped in the sequence's declared type, and reset to NULL by `ALTER SEQUENCE … RESTART`.
 Backed by the nullable `Sequence.LastUsedValue` (set to the emitted value in `Advance`), distinct from `current_value` (which tracks the *next* value to emit).
 Probe-confirmed: a fresh sequence reports `last_used_value` NULL even though `current_value` is the start value, and a bacpac-restored sequence reports NULL here (it's per-instance runtime state, not persisted) even when `current_value` is advanced.
 `precision` / `scale` mirror the declared numeric type — `int` → 10/0, `bigint` → 19/0, `decimal(p, s)` → p/s — and the SMO **Sequence property-bag** reads them (projected `AS [NumericPrecision]` / `[NumericScale]`); a single missing column fails the whole bag query Msg 207 and every Sequence property errors.
-The numeric range columns surface as `bigint` because the simulator tracks all sequence state in `long`; real SQL Server uses `sql_variant`, but SqlClient surfaces those as long-typed values for integer sequences anyway.
+The numeric range columns are `sql_variant` carrying the declared type, as real's are.
 Probe-confirmed: HiLo apps that read `current_value` get an `Int64` either way.
 **`create_date` / `principal_id` are load-bearing for the SSMS Sequences node**: SMO's enumeration selects `seq.create_date` and `ISNULL(seq.principal_id, OBJECTPROPERTY(seq.object_id, 'OwnerId'))`; before these columns existed the query raised Msg 207 and the node showed empty even when the database had sequences.
 

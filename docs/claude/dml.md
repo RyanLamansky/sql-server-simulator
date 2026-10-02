@@ -91,6 +91,7 @@ What stays per verb is where the verbs differ:
   A disabled CHECK or foreign key passes.
   A computed target column takes no value: the positional list skips it, and naming it is Msg 271.
 - **An `OUTPUT` item** admits no subquery (Msg 10705) and no aggregate (Msg 158), in all four verbs.
+- **An `OUTPUT` reference to a computed column** whose definition calls a function real assumes reads data — one that isn't schema-bound, or a schema-bound one that reads a table — is **Msg 4186**, naming `inserted.c` / `deleted.c` in lowercase however written (probed 2026-10-02 against SQL Server 2025); EF Core recognizes it as its computed-column-with-function failure.
 - **A client `OUTPUT`'s column nullability** is inferred as a SELECT's is (`InferOutputNullability`, probed 2026-10-01 against SQL Server 2025): `INSERTED.c` / `DELETED.c` take column `c`'s declaration — an identity, a rowversion and an `ISNULL` computed column are NOT NULL — a literal is NOT NULL and arithmetic nullable.
   A MERGE's `INSERTED` reads nullable when a clause deletes, its `DELETED` when one inserts, its source columns when one acts `BY SOURCE` (else as the source projects them), and `$action` never; a joined write's other sources read nullable.
   Nothing a trigger produced reaches it: a target with an enabled trigger refuses a client-bound clause (Msg 334).

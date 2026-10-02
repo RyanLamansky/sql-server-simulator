@@ -27,6 +27,10 @@ partial class Simulation
         // Names this one DECLARE statement has already introduced, so a
         // repeat within the same statement stays Msg 134.
         var declaredHere = new List<string>();
+        // A legacy LOB declarator's Msg 2739, raised once the statement is
+        // read: real still declares the variable, so a later reference to it
+        // doesn't add a Msg 137 (probed 2026-10-02 against SQL Server 2025).
+        SimulatedSqlException? legacyLobRefusal = null;
 
         do
         {
@@ -121,6 +125,11 @@ partial class Simulation
                 (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName, out aliasType);
                 spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
             }
+            catch (SimulatedSqlException legacyLob) when (legacyLob.Number == 2739)
+            {
+                legacyLobRefusal ??= legacyLob;
+                (declaredType, declaredMaxLength, xmlSchemaCollection) = (SqlType.SqlVariant, null, null);
+            }
             catch (SimulatedSqlException missingType) when (missingType.Number is 2715 or 2716 or 2717 or 2750 && context.Batch.CreateTimeBindErrors is { } bindErrors)
             {
                 // Binding without running, real reports the missing type — or
@@ -153,7 +162,7 @@ partial class Simulation
                 context.MoveNextRequired();
                 var initExpression = Expression.Parse(context);
                 initExpressionForMask = initExpression;
-                if (!context.Batch.IsSkipping)
+                if (!context.Batch.IsSkipping && legacyLobRefusal is null)
                 {
                     var initType = initExpression.GetSqlType(context.Batch, NoColumnTypeResolver);
                     UnresolvedCollation.RequireAssignable(initType);
@@ -212,7 +221,7 @@ partial class Simulation
             sawScalar = true;
         } while (context.Token is Operator { Character: ',' });
 
-        return rowsAffected;
+        return legacyLobRefusal is not null ? throw legacyLobRefusal : rowsAffected;
     }
 
     /// <summary>

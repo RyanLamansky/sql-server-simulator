@@ -4,6 +4,7 @@ INNER / bare `JOIN` (= INNER) / LEFT [OUTER] / RIGHT [OUTER] / FULL [OUTER] / CR
 Multi-table chains compose left-to-right.
 ON-predicate UNKNOWN excludes.
 APPLY is the lateral form: the right side is re-executed per outer row and takes no ON clause.
+Its right side may be a plain table or view too, which real accepts as a join with nothing to correlate (probed 2026-10-02 against SQL Server 2025).
 Execution lives in `Selection.Execution.Joins.cs`.
 
 ## Comma-separated FROM (ANSI-89)

@@ -57,7 +57,7 @@ internal sealed partial class Selection
 
         if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        var condition = Expression.Parse(context.MoveNextRequiredReturnSelf());
+        var condition = Expressions.FullTextPredicate.ParseLiteralOrVariable(context.MoveNextRequiredReturnSelf(), numberAllowed: false);
 
         Expression? topByRank = null;
         Expression? language = null;
@@ -69,7 +69,7 @@ internal sealed partial class Selection
             if (context.Token is Name languageToken
                 && context.Batch.CurrentDatabase.Collation.Equals(languageToken.Value, "LANGUAGE"))
             {
-                language = Expression.Parse(context.MoveNextRequiredReturnSelf());
+                language = Expressions.FullTextPredicate.ParseLiteralOrVariable(context.MoveNextRequiredReturnSelf(), numberAllowed: true);
                 continue;
             }
             topByRank = Expression.Parse(context);
@@ -171,8 +171,12 @@ internal sealed partial class Selection
         var table = binding.Table;
         var storedSchema = table.StoredColumns;
         var searchedStorageOrdinals = new int[binding.ColumnOrdinals.Length];
+        var typeStorageOrdinals = new int[binding.ColumnOrdinals.Length];
         for (var i = 0; i < searchedStorageOrdinals.Length; i++)
+        {
             searchedStorageOrdinals[i] = table.StorageOrdinals[binding.ColumnOrdinals[i]];
+            typeStorageOrdinals[i] = binding.TypeColumnOrdinal(i) is >= 0 and var typeOrdinal ? table.StorageOrdinals[typeOrdinal] : -1;
+        }
 
         var documentFrequencies = new int[leaves.Count];
         List<(SqlValue Key, int[] Frequencies, int Length)> matches = [];
@@ -187,7 +191,8 @@ internal sealed partial class Selection
             for (var c = 0; c < searchedStorageOrdinals.Length; c++)
             {
                 var value = RowDecoder.DecodeColumn(storedSchema, bytes, searchedStorageOrdinals[c], table.Heap);
-                document.AddColumn(FullTextBinding.TextOf(value), binding.AccentSensitive, usesStoplist ? binding.ColumnLanguages[c] : null);
+                var extension = typeStorageOrdinals[c] < 0 ? (SqlValue?)null : RowDecoder.DecodeColumn(storedSchema, bytes, typeStorageOrdinals[c], table.Heap);
+                document.AddColumn(FullTextBinding.TextOf(value, extension), binding.AccentSensitive, usesStoplist ? binding.ColumnLanguages[c] : null);
             }
             totalLength += document.Length;
 

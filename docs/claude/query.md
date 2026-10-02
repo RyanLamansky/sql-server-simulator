@@ -249,6 +249,7 @@ The row count is resolved per execution — the operand may carry a parameter or
 The legacy unparenthesized count takes a constant only: `TOP @n` is Msg 102 near the variable.
 
 A `TOP` count may read an enclosing query's columns — a correlated subquery's or an `APPLY` body's `TOP (t.g)` — and then counts per outer row, Msg 1014 for a NULL and 127 for a negative as the row reaches it; a column of the query's own source is Msg 4115 (probed 2026-10-01).
+An `OFFSET` or `FETCH` count may too — EF Core's `ElementAt(column)` writes `OFFSET [s].[Id] ROWS` in a correlated subquery — and an enclosing column of a non-integer type is Msg 10743 for `OFFSET` (probed 2026-10-02).
 
 A **module body** binds without running, so an operand naming a parameter has no value to read.
 Real settles that one from the operand's *declared type* instead, which is why `SELECT TOP (@rows)` over an `int` parameter creates while the `nvarchar` and `decimal(5, 2)` spellings are refused at CREATE — WideWorldImporters' five `Website.SearchFor*` procedures are the shape that turns on it.

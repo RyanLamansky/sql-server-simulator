@@ -538,7 +538,7 @@ public sealed class FullTextQueryTests
     [DataRow("select 1 from dbo.docs where contains(body, '')")]
     [DataRow("select 1 from dbo.docs where contains(body, '   ')")]
     [DataRow("select 1 from dbo.docs where freetext(body, '')")]
-    [DataRow("select 1 from dbo.docs where contains(body, cast(null as nvarchar(10)))")]
+    [DataRow("declare @c nvarchar(10) = null; select 1 from dbo.docs where contains(body, @c)")]
     public void Null_Or_Empty_Predicate_Is_Msg_7645(string sql)
     {
         var ex = Seeded().AssertSqlError(sql, 7645);
@@ -635,16 +635,15 @@ public sealed class FullTextQueryTests
     }
 
     [TestMethod]
-    public void TypeColumn_Binary_Document_Contributes_No_Terms()
+    public void TypeColumn_Binary_Document_Unfiltered_Extension_Contributes_No_Terms()
     {
-        // Real filters the varbinary document into text before indexing it; the
-        // simulator has no filter, so the column is searchable but empty rather
-        // than word-breaking its bytes.
+        // No filter reads a .bin document, so the column is searchable but
+        // empty rather than word-breaking its bytes.
         var sim = new Simulation();
         sim.ExecuteBatches(
             "create fulltext catalog ftcat as default",
             "create table dbo.f (id int not null constraint pk_f primary key, doc varbinary(max), ext nvarchar(10), note nvarchar(100))",
-            "insert into dbo.f values (1, 0x68656C6C6F, N'.txt', N'searchable note')",
+            "insert into dbo.f values (1, 0x68656C6C6F, N'.bin', N'searchable note')",
             "create fulltext index on dbo.f (doc type column ext language 1033, note language 1033) key index pk_f on ftcat");
         Assert.AreEqual(1, sim.ExecuteScalar<int>("select count(*) from dbo.f where contains(note, 'searchable')"));
         Assert.AreEqual(0, sim.ExecuteScalar<int>("select count(*) from dbo.f where contains(doc, 'hello')"));
@@ -701,5 +700,77 @@ public sealed class FullTextQueryTests
         var sim = Seeded();
         _ = sim.ExecuteNonQuery("create table dbo.noft (id int primary key, t nvarchar(100))");
         _ = sim.AssertSqlError("select * from containstable(dbo.noft, t, 'x')", 7601);
+    }
+
+    /// <summary>
+    /// The condition and <c>LANGUAGE</c> arguments are a string literal or a
+    /// variable — the language a number or binary too — and anything else is
+    /// a syntax error at the offending token, in all four members.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1 from dbo.docs d where contains(d.body, d.title)", "d")]
+    [DataRow("select 1 from dbo.docs where contains(body, upper(title))", "upper")]
+    [DataRow("select 1 from dbo.docs where contains(body, ('quick'))", "(")]
+    [DataRow("select 1 from dbo.docs where contains(body, 'qu' + 'ick')", "+")]
+    [DataRow("select 1 from dbo.docs where contains(body, cast('quick' as nvarchar(10)))", "cast")]
+    [DataRow("select 1 from dbo.docs where freetext(body, 12)", "12")]
+    [DataRow("select 1 from dbo.docs where contains(body, 0x41)", "0x41")]
+    [DataRow("select 1 from dbo.docs d where freetext(d.body, 'quick', language d.id)", "d")]
+    [DataRow("select 1 from dbo.docs where contains(body, 'quick', language (1033))", "(")]
+    [DataRow("select count(*) from containstable(dbo.docs, body, 'qu' + 'ick')", "+")]
+    public void Condition_Is_A_Literal_Or_Variable(string sql, string near)
+        => Seeded().ValidateSyntaxError(sql, near);
+
+    [TestMethod]
+    public void Condition_Literal_Or_Variable_Forms_Run()
+    {
+        var sim = Seeded();
+        Assert.AreEqual("1", Hits(sim, "contains(body, 'quick', language 0x409)"));
+        Assert.AreEqual("1", Hits(sim, "freetext(body, N'quick', language 'English')"));
+        using var connection = sim.CreateOpenConnection();
+        using var command = connection.CreateCommand("declare @c nvarchar(10) = N'quick', @l int = 1033; select count(*) from dbo.docs where contains(body, @c, language @l)");
+        Assert.AreEqual(1, command.ExecuteScalar());
+        sim.AssertSqlError("select 1 from dbo.docs where contains(body, null)", 156, "Incorrect syntax near the keyword 'null'.");
+    }
+
+    /// <summary>
+    /// A <c>TYPE COLUMN</c> document indexes through the filter its extension
+    /// names: HTML element text with entities decoded (no tag names,
+    /// attributes, comments, scripts or styles), plain text as is, XML text and
+    /// attribute values, a byte-order mark choosing the encoding; any other
+    /// extension, or none, contributes nothing.
+    /// </summary>
+    [TestMethod]
+    public void TypeColumn_Documents_Index_Through_Their_Filters()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create fulltext catalog ftc as default",
+            "create table dbo.zft (id int constraint pk_zft primary key, ext nvarchar(16), doc varbinary(max))",
+            """
+            insert dbo.zft values
+             (1, '.html', convert(varbinary(max), '<h1 class="zebra">Deploy the Lightmass Bomb</h1><p title="walrus">x &amp; y caf&eacute;</p><!-- hippo -->')),
+             (2, '.txt', convert(varbinary(max), 'plain apple text <b>tagged</b>')),
+             (3, '.txt', convert(varbinary(max), N'unicode banana')),
+             (4, '.xml', convert(varbinary(max), '<r kind="koala"><s>mango</s></r>')),
+             (5, '.zzz', convert(varbinary(max), 'unknown cherry')),
+             (6, '.htm', convert(varbinary(max), '<html><head><title>grape</title><script>var kiwi=1;</script><style>p{lemon:1}</style></head><body>melon</body></html>')),
+             (7, '.txt', 0xFFFE7000650061007200),
+             (8, null, convert(varbinary(max), 'nullext plum'))
+            """,
+            "create fulltext index on dbo.zft (doc type column ext) key index pk_zft");
+
+        string Ids(string word)
+        {
+            using var reader = sim.ExecuteReader($"select id from dbo.zft where contains(doc, N'\"{word}\"') order by id");
+            var ids = new List<string>();
+            while (reader.Read())
+                ids.Add(reader.GetInt32(0).ToString(System.Globalization.CultureInfo.InvariantCulture));
+            return ids.Count == 0 ? "-" : string.Join(",", ids);
+        }
+
+        Assert.AreEqual("1|-|-|-|1|-|2|2|-|-|4|4|-|6|-|-|6|7|-|1", string.Join("|",
+            new[] { "bomb", "zebra", "walrus", "h1", "café", "eacute", "apple", "tagged", "banana", "unicode", "mango", "koala", "cherry", "grape", "kiwi", "lemon", "melon", "pear", "plum", "lightmass" }.Select(Ids)));
+        Assert.AreEqual(1, sim.ExecuteScalar("select count(*) from freetexttable(dbo.zft, doc, 'melon')"));
     }
 }

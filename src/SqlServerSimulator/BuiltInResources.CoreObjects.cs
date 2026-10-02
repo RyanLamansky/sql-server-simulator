@@ -606,9 +606,12 @@ internal static partial class BuiltInResources
         // overrides taking precedence when present.
         var dbDefaultCollation = SqlValue.FromSystemName(database.CollationName);
         _ = defaultCollation;
+        // A computed column reports its expression's collation (probed
+        // 2026-10-02 against SQL Server 2025: `AS 'x' COLLATE German_PhoneBook_CI_AS`).
         SqlValue CollationFor(HeapColumn c) =>
             !SqlType.IsCollatedString(c.Type) ? nullCollation
             : c.Collation is { } overrideName ? SqlValue.FromSystemName(overrideName)
+            : c.Computed is not null && c.Type.Collation is { } computedCollation ? SqlValue.FromSystemName(computedCollation.Name)
             : dbDefaultCollation;
         // One sys.columns row. A table's column carries its stable id (DROP
         // COLUMN leaves a permanent hole in the sequence), identity, computed

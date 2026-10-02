@@ -95,9 +95,10 @@ public sealed class DatabasePropertiesDrainTests
         => new Simulation().AssertSqlError(
             "SELECT f.x FROM (SELECT 1 x) f CROSS APPLY sys.dm_os_volume_stats(1, 2)", 208);
 
-    // A bare (non-function) name after APPLY stays a genuine syntax error.
+    // A bare (non-function) name after APPLY is a table, so a missing one is
+    // Msg 208 (probed 2026-10-02 against SQL Server 2025).
     [TestMethod]
-    public void CrossApplyBareName_StillSyntaxError()
+    public void CrossApplyBareName_MissingTable_RaisesInvalidObjectName()
         => new Simulation().AssertSqlError(
-            "SELECT f.x FROM (SELECT 1 x) f CROSS APPLY sometable", 102);
+            "SELECT f.x FROM (SELECT 1 x) f CROSS APPLY sometable", 208);
 }

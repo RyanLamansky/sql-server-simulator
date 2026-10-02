@@ -54,4 +54,25 @@ public sealed class VectorWireTests
         await using var select = new SqlCommand("select vector_norm(v, 'norm1') from t", connection);
         AreEqual(11.0, await select.ExecuteScalarAsync(TestContext.CancellationToken));
     }
+
+    /// <summary>
+    /// A <c>SqlVector&lt;float&gt;</c> parameter — type token <c>0xF5</c>, a
+    /// 2-byte maximum length and the element-type byte, then a 2-byte length
+    /// and the vector's binary form — binds as <c>vector(n)</c>.
+    /// </summary>
+    [TestMethod]
+    public async Task VectorParameter_BindsAsVector()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken);
+        await using var command = new SqlCommand("select cast(@v as nvarchar(max)), vector_norm(@v, 'norm2'), iif(@n is null, 'null', 'value')", connection);
+        _ = command.Parameters.Add(new SqlParameter("@v", Microsoft.Data.SqlDbTypeExtensions.Vector) { Value = new Microsoft.Data.SqlTypes.SqlVector<float>(new float[] { 1f, 2f, 3f }) });
+        _ = command.Parameters.Add(new SqlParameter("@n", Microsoft.Data.SqlDbTypeExtensions.Vector) { Value = Microsoft.Data.SqlTypes.SqlVector<float>.CreateNull(3) });
+        await using var reader = await command.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual("[1.0000000e+000,2.0000000e+000,3.0000000e+000]", reader.GetString(0));
+        AreEqual(Math.Sqrt(14), reader.GetDouble(1), 1e-12);
+        AreEqual("null", reader.GetString(2));
+    }
 }

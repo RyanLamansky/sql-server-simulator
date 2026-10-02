@@ -1761,12 +1761,20 @@ internal sealed partial class Selection
         // collation reports here — as Msg 446 State 11, which names the
         // producing operator and DISTINCT together rather than taking either
         // the output-column or the consuming-operation wording.
+        // Every non-comparable column reports, in select-list order (probed
+        // 2026-10-02 against SQL Server 2025: two json columns, two Msg 421).
         if (distinct)
         {
+            List<SimulatedSqlException>? incomparable = null;
+            foreach (var type in outputSchema)
+            {
+                if (type.IsIncomparable)
+                    (incomparable ??= []).Add(SimulatedSqlException.TypeCannotBeSelectedAsDistinct(type));
+            }
+            if (incomparable is not null)
+                throw SimulatedSqlException.Aggregate(incomparable);
             for (var i = 0; i < outputSchema.Length; i++)
             {
-                if (outputSchema[i].IsIncomparable)
-                    throw SimulatedSqlException.TypeCannotBeSelectedAsDistinct(outputSchema[i]);
                 if (UnresolvedCollation.On(outputSchema[i]) is { } conflict)
                 {
                     throw SimulatedSqlException.UnresolvedCollationInOperation(

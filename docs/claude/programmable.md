@@ -290,8 +290,8 @@ Probed against SQL Server 2025.
 - **Argument parsing** shares `UserFunctionCall.ParseFunctionArguments` with scalar UDFs — same `DEFAULT` rule (omission → Msg 313), same Msg 313 / 8144 arity errors.
 - **Kind-vs-position routing**: `ScalarFunction` in FROM → **Msg 208** (treated as missing-object, not kind-mismatch).
   `InlineTableValuedFunction` in expression position → **Msg 4121** through the existing factory.
-- **CROSS APPLY / OUTER APPLY**: right side must be a parenthesized derived table OR an inline TVF.
-  `ParseLateralFromSource` peeks; bare table after APPLY → syntax error (matching real SQL Server).
+- **CROSS APPLY / OUTER APPLY**: the right side is a parenthesized derived table, a TVF, or a plain table or view, which joins with nothing to correlate (probed 2026-10-02 against SQL Server 2025; EF Core emits `OUTER APPLY [t] AS [x]` for a nested `SelectMany`).
+  `ParseLateralFromSource` peeks; a missing table there is Msg 208.
 - **Catalog surface**: `sys.objects` `type='IF'` / `type_desc='SQL_INLINE_TABLE_VALUED_FUNCTION'`.
   `sys.columns` emits one row per output column (`is_identity=0`, `is_computed=0`).
   `sys.parameters` skips the `parameter_id=0` return-row (the TABLE shape lives in sys.columns).

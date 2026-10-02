@@ -95,7 +95,10 @@ internal sealed class FullTextCatalogProperty : Expression
                     if (ordinal < 0 || ordinal >= table.Columns.Length || !table.Columns[ordinal].IsStored)
                         continue;
                     var value = RowDecoder.DecodeColumn(table.StoredColumns, bytes, table.StorageOrdinals[ordinal], table.Heap);
-                    if (FullText.FullTextBinding.TextOf(value) is not { } text)
+                    var extension = column.TypeColumnId is int typeColumnId && typeColumnId - 1 < table.Columns.Length && table.Columns[typeColumnId - 1].IsStored
+                        ? RowDecoder.DecodeColumn(table.StoredColumns, bytes, table.StorageOrdinals[typeColumnId - 1], table.Heap)
+                        : (SqlValue?)null;
+                    if (FullText.FullTextBinding.TextOf(value, extension) is not { } text)
                         continue;
                     var language = FullText.FullTextLanguage.For(column.LanguageId);
                     foreach (var term in FullText.FullTextWordBreaker.Break(text, catalog.IsAccentSensitive))

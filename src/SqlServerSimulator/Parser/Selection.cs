@@ -746,7 +746,7 @@ internal sealed partial class Selection
             var orderBy = new List<OrderBySpec>();
             ParseOrderByItems(context, orderBy);
             var topLevelTail = new FromClause();
-            ConsumeOffsetFetch(context, topLevelTail);
+            ConsumeOffsetFetch(context, topLevelTail, scope);
             if (topLevelTail.OffsetExpression is not null && context.SequenceDrawsParsed > sequenceDrawsBefore)
                 throw SimulatedSqlException.NextValueForNotAllowedWithRowLimit();
             // An ordered set operation inlines none of its branches' calls.
@@ -998,7 +998,7 @@ internal sealed partial class Selection
             var orderBy = new List<OrderBySpec>();
             ParseOrderByItems(context, orderBy);
             var tail = new FromClause();
-            ConsumeOffsetFetch(context, tail);
+            ConsumeOffsetFetch(context, tail, scope);
             inner = ApplyTopLevelOrderBy(inner, orderBy, tail.OffsetExpression, tail.FetchExpression);
         }
 
@@ -1421,7 +1421,7 @@ internal sealed partial class Selection
     /// scope (Msg 4115 otherwise) and the operand's type must count; answers
     /// whether the operand read any column, leaving the value to the run.
     /// </summary>
-    private static bool ReadsOuterColumns(Expression expression, bool percent, ParserContext context, Func<MultiPartName, SqlType>? scopeOuter)
+    private static bool ReadsOuterColumns(Expression expression, bool percent, ParserContext context, Func<MultiPartName, SqlType>? scopeOuter, RowLimitKind kind = RowLimitKind.Top)
     {
         MultiPartName? first = null;
         expression.VisitColumnReferences(name => first ??= name);
@@ -1452,6 +1452,7 @@ internal sealed partial class Selection
         }
         return IsRowCountType(declared, expression) || percent
             ? true
+            : kind == RowLimitKind.Offset ? throw SimulatedSqlException.OffsetRequiresInteger()
             : throw SimulatedSqlException.TopFetchRequiresInteger();
     }
 
@@ -3269,10 +3270,8 @@ internal sealed partial class Selection
         // Peek next token. A parenthesized derived table `(SELECT ...)`
         // stays on the dedicated path so the chained outer-type resolver
         // can be wired into the inner Selection's parse. A leading Name
-        // routes to ParseSingleFromSource ONLY when it resolves to an
-        // inline TVF — APPLY requires a derived table or a TVF; a bare
-        // table after APPLY is invalid (probe-confirmed via real SQL
-        // Server, guarded by ApplyTests).
+        // that resolves to a TVF parses with the left sources in scope;
+        // any other name is a plain table or view.
         var checkpoint = context.SaveCheckpoint();
         var next = context.GetNextRequired();
 
@@ -3359,8 +3358,7 @@ internal sealed partial class Selection
             // real SQL Server binds the TVF name lazily, so an un-taken IF
             // branch naming an unknown function (SSMS's EngineEdition-gated
             // `CROSS APPLY sys.dm_os_volume_stats(...)` VolumeFreeSpace probe)
-            // compiles and is discarded. A bare table name after APPLY stays a
-            // genuine syntax error (Msg 102, probe-confirmed).
+            // compiles and is discarded.
             if (isFunctionCallShape && context.Batch.IsSkipping)
             {
                 InlinedScalarCalls.NoteMissingObject(context.Batch, resolvedName, context.Token?.LineNumber ?? 0);
@@ -3375,9 +3373,13 @@ internal sealed partial class Selection
                 var placeholderAlias = ConsumeOptionalAlias(context);
                 return FromSource.DeferredPlaceholder(placeholderAlias ?? resolvedName.Leaf);
             }
-            throw isFunctionCallShape
-                ? SimulatedSqlException.InvalidObjectName(resolvedName)
-                : SimulatedSqlException.SyntaxErrorNear(context);
+            if (isFunctionCallShape)
+                throw SimulatedSqlException.InvalidObjectName(resolvedName);
+            // A table or view after APPLY reads as a cross / outer join with
+            // nothing to correlate (probed 2026-10-02 against SQL Server 2025:
+            // `CROSS APPLY t`, `OUTER APPLY dbo.t AS x`; EF Core emits the
+            // latter for a nested SelectMany).
+            return ParseSingleFromSource(context, scope);
         }
         if (next is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -4981,7 +4983,7 @@ internal sealed partial class Selection
             {
                 ParseOrderByItems(context, fromClause.OrderBy);
             }
-            ConsumeOffsetFetch(context, fromClause);
+            ConsumeOffsetFetch(context, fromClause, scope);
         }
 
         // All `OVER w` references (projection and ORDER BY) and the WINDOW
@@ -5546,8 +5548,18 @@ internal sealed partial class Selection
     /// parse time — non-negativity (Msg 10742) and &gt; 0 (Msg 10744) — and
     /// resolve again per execution (see <see cref="ResolveRowCountLimit"/>).
     /// </summary>
-    private static void ConsumeOffsetFetch(ParserContext context, FromClause fromClause)
+    private static void ConsumeOffsetFetch(ParserContext context, FromClause fromClause, QueryScope scope)
     {
+        // A count may read an enclosing query's columns, as TOP's may; this
+        // query's own columns stay refused (Msg 4115), so the check resolves
+        // through the enclosing scope alone rather than the ORDER BY's.
+        void CheckCount(Expression expression, RowLimitKind kind)
+        {
+            using var enclosing = ParserScope.Enter(ref context.OuterTypeResolver, scope.OuterTypeResolver);
+            if (!ReadsOuterColumns(expression, percent: false, context, scope.OuterTypeResolver, kind))
+                _ = ResolveRowCountLimit(expression, kind, context.Batch);
+        }
+
         // FETCH at this position with no preceding OFFSET → Msg 153.
         if (context.Token is ReservedKeyword { Keyword: Keyword.Fetch })
             throw SimulatedSqlException.FetchInvalidUsageWithoutOffset();
@@ -5559,7 +5571,7 @@ internal sealed partial class Selection
         var aggregatesBefore = context.AggregateCollector?.Count ?? 0;
         var offsetExpression = Expression.Parse(context);
         RefuseRowLimitAggregates(context, aggregatesBefore);
-        _ = ResolveRowCountLimit(offsetExpression, RowLimitKind.Offset, context.Batch);
+        CheckCount(offsetExpression, RowLimitKind.Offset);
         context.RecursiveBranchConstructs.TopOrOffset = true;
         fromClause.OffsetExpression = offsetExpression;
 
@@ -5578,7 +5590,7 @@ internal sealed partial class Selection
         aggregatesBefore = context.AggregateCollector?.Count ?? 0;
         var fetchExpression = Expression.Parse(context);
         RefuseRowLimitAggregates(context, aggregatesBefore);
-        _ = ResolveRowCountLimit(fetchExpression, RowLimitKind.Fetch, context.Batch);
+        CheckCount(fetchExpression, RowLimitKind.Fetch);
         fromClause.FetchExpression = fetchExpression;
 
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Row or ContextualKeyword.Rows })
@@ -6263,10 +6275,14 @@ internal sealed class TemporalRowSource(
         // version disappears from every FOR SYSTEM_TIME form the moment the
         // retention period is set.
         var cutoff = parent.HistoryRetentionCutoff(batch.CurrentStatement.UtcNow) ?? DateTime.MinValue;
+        // The consumer decodes every row of this source against the parent's
+        // heap, so a history row's off-row values — chains on the history
+        // heap — are brought inline first; read through the parent, their
+        // page indexes would name its unrelated chains.
         foreach (var bytes in history.Heap.EnumerateRows())
         {
             if (this.RowMatches(history.StoredColumns, bytes, history.Heap, startStored, endStored, lowerTime, upperTime, cutoff))
-                yield return bytes;
+                yield return RowEncoder.EncodeRow(history.StoredColumns, RowDecoder.DecodeRow(history.StoredColumns, bytes, history.Heap));
         }
     }
 
