@@ -29,18 +29,6 @@ partial class SimulatedSqlException
     }
 
     /// <summary>
-    /// Binary overload of the verbose truncation factory: renders the
-    /// truncated prefix as a SQL hex literal (<c>0xABCD…</c>), matching SQL
-    /// Server's varbinary formatting in Msg 2628.
-    /// </summary>
-    internal static SimulatedSqlException StringOrBinaryWouldBeTruncated(string tableName, string columnName, byte[] value, int max)
-    {
-        var prefix = value.Length <= max ? value : value[..max];
-        var hex = $"0x{Convert.ToHexString(prefix)}";
-        return new($"String or binary data would be truncated in table '{tableName}', column '{columnName}'. Truncated value: '{hex}'.", 2628, 16, 1);
-    }
-
-    /// <summary>
     /// Mimics the legacy SQL Server truncation error (Msg 8152): same trigger
     /// as the verbose factory above but without the table, column, or value
     /// detail, at a state per raising site — 30 for a column write. A

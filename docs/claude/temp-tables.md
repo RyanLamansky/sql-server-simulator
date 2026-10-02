@@ -1,9 +1,11 @@
 # Temp tables and TRUNCATE
 
 ## `TRUNCATE TABLE`
+
 `TRUNCATE TABLE <name>` empties the heap (clears `Pages` / `LobPages`) and resets every identity column's high-water mark to its declared seed — probe-confirmed against SQL Server 2025 that a subsequent INSERT receives the seed, not the next-after-prior-max.
 Routing reuses the same `#`-prefix dispatch as DROP TABLE (`#foo` → connection's `TempTables`; else the named schema's heap-table dict via `Database.Schemas`).
 Missing target raises **Msg 4701** (`"Cannot find the object \"X\" because it does not exist or you do not have permissions."` — note this is distinct from DROP's Msg 3701 and from generic INSERT/UPDATE/DELETE's Msg 208; TRUNCATE has its own error path, and its wording carries **only the leaf** of a multi-part name — probe-confirmed asymmetric with 208 / 3701 which embed the full qualifier).
+A view named there is Msg 4708 (`Could not truncate object 'v' because it is not a table.`, probed 2026-10-01 against SQL Server 2025).
 `@@ROWCOUNT` resets to 0.
 Skip-mode suppresses the entire action including name resolution.
 `WHERE` clause fails at parse (Msg 102 — TRUNCATE doesn't accept predicates).
@@ -40,6 +42,8 @@ Lifecycle, cross-conn isolation, and Msg 208 from other sessions all probe-confi
   Only a second `#foo` in the *same* scope is Msg 2714.
   `SimulatedDbConnection.TempTables` holds the visible table of each name and hides the rest behind it (`TryAddTempTable` / `RemoveTempTable`), each table carrying the scope that created it (`HeapTable.TempScopeId`); a scope drops its tables by object rather than name at exit, since the name may be the caller's again by then.
   Real compiles the inner batch against the table visible *before* it runs, so a column only the inner table has is Msg 207 on both engines (`CREATE TABLE #t (b int); SELECT b FROM #t` inside `EXEC` while the caller holds `#t (a int)`), and so is a `CREATE PROC` whose body does the same in a session holding one.
+- **A name over 116 characters** is Msg 193, the room tempdb leaves beside its twelve-digit suffix; a missing temp table's Msg 208 is at state 0, where a permanent table's is at 1; and `OBJECT_ID('#foo')` is NULL unless tempdb is the current database — `OBJECT_ID('tempdb..#foo')` is the spelling that finds it (probed 2026-10-01 against SQL Server 2025).
+- **A view or function can't read one**: a view's body naming `#foo` is Msg 4508, a function's — scalar, inline or multi-statement — Msg 2772, each at its `CREATE` (probed 2026-10-01).
 - **Bare `#`** is a valid temp-table name (one-char `#`).
   Identity / SCOPE_IDENTITY work identically to regular tables.
   CTE prefix, JOINs across multiple `#`-tables, all queries against `#foo` flow through the same Selection / Insert / Update / Delete / Merge machinery via `TryResolveTable`.

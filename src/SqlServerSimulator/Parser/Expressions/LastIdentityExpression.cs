@@ -42,6 +42,9 @@ internal sealed class LastIdentityExpression : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ResultType;
 
+    /// <summary>The result is <c>numeric(38, 0)</c> by name, as <c>SQL_VARIANT_PROPERTY</c> reports it (probed 2026-10-01).</summary>
+    internal override bool ResultReportsNumeric => true;
+
     internal override string DebugDisplay() => this.scoped ? "SCOPE_IDENTITY()" : "@@IDENTITY";
 
     internal override void Describe(NodeShape shape) { }

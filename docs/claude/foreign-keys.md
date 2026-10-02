@@ -57,7 +57,10 @@ Self-referencing FKs are supported (the parent table is already in its schema di
 3. **Referenced column set must form a PRIMARY KEY or UNIQUE** — multiset compare against `referencedTable.KeyConstraints`.
    Mismatch → Msg 1776; an omitted list over a table without a primary key → Msg 1773.
 4. **Each column pair must agree** — another type → Msg 1778 (`numeric` and `decimal` are two types, an alias type is its base), the same type at another length, precision or scale → Msg 1753, another collation → Msg 1757, each then Msg 1750.
-5. **Cascade-cycle / multiple-path check** — see below. → Msg 1785.
+5. **Cascade-cycle / multiple-path check** — see below. → Msg 1785, then Msg 1750.
+6. **The referencing columns can take the action** — `SET NULL` over a NOT NULL one is Msg 1761 then Msg 1750 (probed 2026-10-01); `SET DEFAULT`'s Msg 1762 is below.
+
+Ahead of resolving the referenced table, a three-part name naming another database is **Msg 1763** and a permanent table's reference to a temporary one **Msg 1766** (named by the constraint or its first column), each then Msg 1750, and a referenced column list of another length than the referencing one **Msg 8139** alone (probed 2026-10-01 against SQL Server 2025).
 
 The validation runs across the full pending FK list *before* mutating either table's `OutgoingForeignKeys` / `IncomingForeignKeys`.
 A failure unwinds the partial `CREATE TABLE` by removing the new table from its dict.
@@ -105,6 +108,7 @@ For each FK:
 - A non-NULL tuple that doesn't match any row of the parent on the FK's referenced columns → Msg 547 with the FK name and the parent's qualified table reference.
   Single-column FK appends `, column 'X'`; composite FK omits the column phrase.
   Self-referencing FK substitutes `FOREIGN KEY SAME TABLE` for `FOREIGN KEY`.
+- An INSERT checks a **self-referencing** FK once its rows are written, so a row may reference itself or a later row of the same statement (`INSERT t VALUES (1, 1)`, probed 2026-10-01 against SQL Server 2025).
 
 `ReferencedRowExists` **seeks** the parent rather than scanning it: the referenced columns are always a PK/UNIQUE key, so it probes the parent's per-`Heap` [`HeapSeekCache`](indexes.md) on those columns (the parent's own index, incrementally maintained) and verifies each candidate against live bytes — there's no residual WHERE to discard the cache's stale-entry false-positives, so the verify is mandatory.
 Bulk child inserts against a large parent drop from O(children × parent) to one parent-index build plus O(1) per insert (measured ~67× faster for 2 000 inserts against a 20 000-row parent, and the ratio grows with parent size).
@@ -138,7 +142,7 @@ For each FK:
 | `CASCADE` (DELETE) | Recursively delete the matching child rows (themselves potentially parents — recursion guarded by `MaxCascadeDepth = 32`). |
 | `CASCADE` (UPDATE) | Rewrite each child row's FK columns to the parent's new value. |
 | `SET NULL` | Rewrite each child row's FK columns to NULL. |
-| `SET DEFAULT` | Rewrite each child row's FK columns to each column's `DEFAULT` expression (NULL if no default). |
+| `SET DEFAULT` | Rewrite each child row's FK columns to each column's `DEFAULT` expression (NULL if no default); a default no parent row carries fails the parent's statement with the child-side Msg 547 (`The DELETE statement conflicted with the FOREIGN KEY constraint …`, probed 2026-10-01). |
 
 Statement-level atomicity continues to apply: a Msg 547 raised mid-cascade unwinds via the undo log, leaving the entire statement's mutations reverted.
 Cascade chains recurse up to `MaxCascadeDepth` (32) and then raise `NotSupportedException`.
@@ -215,6 +219,7 @@ Real also rejects a *non-persisted* computed **referenced** column with **Msg 17
 ## DROP TABLE protection
 
 A table with `IncomingForeignKeys.Count > 0` cannot be dropped — Msg 3726 (`Could not drop object '<name>' because it is referenced by a FOREIGN KEY constraint.`).
+A `DROP TABLE` list reports it and drops the list's other tables, and outside a transaction the batch goes on; inside one it ends the batch and rolls the transaction back as a structural statement's failure does (probed 2026-10-01 against SQL Server 2025).
 Drop the child first, or drop the FK via `ALTER TABLE … DROP CONSTRAINT` (deferred).
 
 On a successful `DROP TABLE`, the dropped table's `OutgoingForeignKeys` are detached from each parent's `IncomingForeignKeys` list so subsequent DROPs on the parent see the up-to-date reference count.
@@ -274,9 +279,11 @@ The simulator's `OBJECT_ID` only recognizes `U` / `FN` / `IF` / `TF` / `V` / `P`
 
 Same FNV-1a hash scheme as PK / UQ / CHECK constraint naming, with a different prefix:
 
-- Single-column FK: `FK__<child-table-first-8>__<column-first-8>__<8 hex>`
-- Composite FK: `FK__<child-table-first-8>__<8 hex>`
+- Single-column FK: `FK__<child-table>__<column>__<8 hex>`
+- Composite FK: `FK__<child-table>__<8 hex>`
 
+Real keeps the name to thirty characters, and so does `FormatAutoConstraintName`, which the CHECK and DEFAULT names share (probed 2026-10-01 against SQL Server 2025): without a column the table keeps sixteen characters; with one the table and the column share fourteen, the table keeping at least nine — `DF__tabletwel__colum__`, `CK__t__abcdefghijklm__`, `CK__abcdefghijklm__x__`.
+A local temp table's name is its underscore-padded name inside tempdb, so `#t` reads `#t___________`.
 The 8-hex suffix is deterministic across runs (FNV-1a over table name + column names + declaration index), so test assertions on the auto-name shape are stable.
 
 ## EF Core integration

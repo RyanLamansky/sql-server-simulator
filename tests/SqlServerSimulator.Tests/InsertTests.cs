@@ -209,9 +209,9 @@ public class InsertTests
         CollectionAssert.AreEqual(new byte[] { 0x01, 0x02, 0x03, 0x04 }, read);
     }
 
-    // Msg 2628 renders the truncated prefix as 0xHEX — varbinary formatting.
+    // Msg 2628 reports a binary's truncated value empty (probed 2026-10-01).
     [TestMethod]
-    public void InsertVarbinary_OverMaxLength_RaisesTruncationWithHexValue()
+    public void InsertVarbinary_OverMaxLength_RaisesTruncationWithEmptyValue()
     {
         using var connection = new Simulation().CreateOpenConnection();
         using var insert = connection.CreateCommand();
@@ -219,7 +219,7 @@ public class InsertTests
         AddTypedParameter(insert, "p", DbType.Binary, new byte[] { 0xDE, 0xAD, 0xBE, 0xEF });
 
         var ex = Throws<SimulatedSqlException>(() => insert.ExecuteNonQuery());
-        AreEqual("String or binary data would be truncated in table 'simulated.dbo.t', column 'v'. Truncated value: '0xDEAD'.", ex.Errors[0].Message);
+        AreEqual("String or binary data would be truncated in table 'simulated.dbo.t', column 'v'. Truncated value: ''.", ex.Errors[0].Message);
     }
 
     [TestMethod]
@@ -827,5 +827,68 @@ public class InsertTests
             insert t values (1), ('2');
             select string_agg(cast(sql_variant_property(v, 'BaseType') as varchar(10)), '|') from t
             """));
-}
 
+    /// <summary>
+    /// A written value whose excess is only trailing spaces, or trailing zero
+    /// bytes of a binary, is cut to fit without Msg 2628 (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("varchar(3)", "'abc   '", "select a + ']' from t", "abc]")]
+    [DataRow("varchar(3)", "'ab    '", "select a + ']' from t", "ab ]")]
+    [DataRow("nvarchar(3)", "N'abc  '", "select a + N']' from t", "abc]")]
+    [DataRow("char(3)", "'ab   '", "select a + ']' from t", "ab ]")]
+    [DataRow("varbinary(2)", "0x010000", "select convert(varchar(10), a, 1) from t", "0x0100")]
+    public void Insert_OnlyPaddingBeyondTheLength_IsCutSilently(string type, string value, string query, string expected)
+        => AreEqual(expected, (string?)new Simulation().ExecuteScalar($"create table t (a {type}); insert t values ({value}); update t set a = {value}; {query}"));
+
+    /// <summary>
+    /// A number, date or uniqueidentifier written to a string column converts
+    /// as a CAST to the column's declared length would (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("varchar(2)", "12345", "*")]
+    [DataRow("char(2)", "12345", "* ")]
+    [DataRow("varchar(1)", "cast(25 as tinyint)", "*")]
+    [DataRow("varchar(5)", "cast('2020-01-01' as date)", "2020-")]
+    public void Insert_NonStringIntoShortString_ConvertsAsCast(string type, string value, string expected)
+        => AreEqual(expected, (string?)new Simulation().ExecuteScalar($"create table t (a {type}); insert t values ({value}); select a from t"));
+
+    [TestMethod]
+    [DataRow("varchar(3)", "cast(123456 as bigint)", 8115)]
+    [DataRow("varchar(2)", "1.2345", 8115)]
+    [DataRow("varchar(3)", "$123.45", 234)]
+    [DataRow("varchar(5)", "newid()", 8170)]
+    [DataRow("nvarchar(2)", "123", 8115)]
+    public void Insert_NonStringIntoShortString_RaisesCastsError(string type, string value, int number)
+        => _ = new Simulation().AssertSqlError($"create table t (a {type}); insert t values ({value})", number);
+
+    [TestMethod]
+    public void Insert_IntIntoShortVarcharThroughUpdate_StoresTheAsterisk()
+        => AreEqual("*", (string?)new Simulation().ExecuteScalar("create table t (a varchar(2)); insert t values ('x'); update t set a = 123; select a from t"));
+
+    /// <summary>
+    /// The out-of-range conversions of a written value and a date overflow end
+    /// the statement with Msg 3621 after them (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("smalldatetime", "'2080-01-01'", 242)]
+    [DataRow("tinyint", "'300'", 244)]
+    [DataRow("int", "'99999999999'", 248)]
+    public void Insert_OutOfRangeConversion_EndsTheStatement(string type, string value, int number)
+    {
+        var ex = new Simulation().AssertSqlError($"create table t (a {type}); insert t values ({value})", number);
+        AreEqual(3621, ex.Errors[1].Number);
+    }
+
+    /// <summary>A constant NULL into a rowversion column reads as DEFAULT; a NULL variable is Msg 273 (probed 2026-10-01).</summary>
+    [TestMethod]
+    public void Insert_ConstantNullIntoRowversion_DrawsAValue()
+    {
+        var simulation = new Simulation();
+        AreEqual(8, simulation.ExecuteScalar<int>("create table t (a int, rv rowversion); insert t values (1, null); insert t (a, rv) values (2, cast(null as binary(8))); select min(datalength(rv)) from t"));
+        _ = simulation.AssertSqlError("declare @n binary(8); insert t (a, rv) values (3, @n)", 273);
+    }
+}

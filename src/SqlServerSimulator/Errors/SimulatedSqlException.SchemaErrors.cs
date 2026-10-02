@@ -5,11 +5,12 @@ namespace SqlServerSimulator;
 partial class SimulatedSqlException
 {
     /// <summary>
-    /// Mimics SQL Server error 1701: the schema declares a fixed-length row
-    /// that cannot ever fit within the per-row size limit (8060 bytes).
+    /// Mimics SQL Server error 1701: a CREATE or ALTER TABLE whose smallest
+    /// row can never fit within the per-row size limit (8060 bytes), naming
+    /// that size and its overhead (probed 2026-10-01 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException RowSizeExceedsMaximum(string tableName, int requested, int max) =>
-        new($"Cannot create the table '{tableName}' because the row size ({requested} bytes) exceeds the maximum allowable table row size ({max} bytes).", 1701, 16, 1);
+    internal static SimulatedSqlException RowSizeExceedsMaximum(string tableName, int minimum, int overhead, int max) =>
+        new($"Creating or altering table '{tableName}' failed because the minimum row size would be {minimum}, including {overhead} bytes of internal overhead. This exceeds the maximum allowable table row size of {max} bytes.", 1701, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 15048: the integer supplied to
@@ -75,8 +76,13 @@ partial class SimulatedSqlException
     /// <paramref name="error"/>'s. The trailer's state varies by the failure
     /// (probed 2026-09-24 against SQL Server 2025).
     /// </summary>
+    /// <remarks>
+    /// The pair ends the batch whatever the first error's own class: nothing
+    /// after a refused constraint runs (probed 2026-10-01 against SQL Server
+    /// 2025 for Msg 1505, 1711, 1761, 1785 and 2714).
+    /// </remarks>
     internal static SimulatedSqlException FollowedByConstraintNotCreated(SimulatedSqlException error, byte state = 1) =>
-        FollowedBy(error, new("Could not create constraint or index. See previous errors.", 1750, 16, state));
+        FollowedBy(error, new("Could not create constraint or index. See previous errors.", 1750, 16, state), endsBatch: true);
 
     /// <summary>
     /// Pairs <paramref name="error"/> with the Msg 3727 real sends after a
@@ -168,15 +174,16 @@ partial class SimulatedSqlException
     /// <summary>
     /// One exception carrying <paramref name="error"/>'s entries then
     /// <paramref name="trailer"/>'s, whose batch-ending behavior is
-    /// <paramref name="error"/>'s; a <c>CATCH</c> reads the trailer, the last
-    /// entry, as real's does.
+    /// <paramref name="error"/>'s, or the batch's end when
+    /// <paramref name="endsBatch"/>; a <c>CATCH</c> reads the trailer, the
+    /// last entry, as real's does.
     /// </summary>
-    private static SimulatedSqlException FollowedBy(SimulatedSqlException error, SimulatedSqlException trailer)
+    private static SimulatedSqlException FollowedBy(SimulatedSqlException error, SimulatedSqlException trailer, bool endsBatch = false)
     {
         List<SimulatedError> entries = [.. error.Errors, .. trailer.Errors];
         return new(string.Join(Environment.NewLine, entries.Select(entry => entry.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(entries))
         {
-            AbortsAsUnderXactAbort = error.AbortsAsUnderXactAbort,
+            AbortsAsUnderXactAbort = endsBatch || error.AbortsAsUnderXactAbort,
             TerminatesBatch = trailer.TerminatesBatch,
         };
     }
@@ -1263,6 +1270,57 @@ partial class SimulatedSqlException
         new($"Explicit value must be specified for identity column in table '{tableName}' either when IDENTITY_INSERT is set to ON or when a replication user is inserting into a NOT FOR REPLICATION identity column.", 545, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 193: a local temp table's name longer than the
+    /// 116 characters tempdb leaves it (probed 2026-10-01 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException TempTableNameTooLong(string name) =>
+        new($"The object or column name starting with '{name}' is too long. The maximum length is 116 characters.", 193, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1702: a CREATE TABLE declaring more than 1024
+    /// columns, naming the first past the limit (probed 2026-10-01 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TooManyColumns(string columnName, string tableName) =>
+        new($"CREATE TABLE failed because column '{columnName}' in table '{tableName}' exceeds the maximum of 1024 columns.", 1702, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 286: a trigger body writing <c>INSERTED</c> or
+    /// <c>DELETED</c> (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PseudoTableWrite() =>
+        new("The logical tables INSERTED and DELETED cannot be updated.", 286, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4508: a view's body names a temporary table
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ViewOnTemporaryTable() =>
+        new("Views or functions are not allowed on temporary tables. Table names that begin with '#' denote temporary tables.", 4508, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2772: a function's body names a temporary
+    /// table (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TemporaryTableInFunction() =>
+        new("Cannot access temporary tables from within a function.", 2772, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1088 at state 11: <c>SET IDENTITY_INSERT</c>
+    /// named an object that doesn't exist, spelled as written.
+    /// </summary>
+    internal static SimulatedSqlException IdentityInsertObjectNotFound(string writtenName) =>
+        new($"Cannot find the object \"{writtenName}\" because it does not exist or you do not have permissions.", 1088, 16, 11);
+
+    /// <summary>
+    /// Mimics SQL Server error 8105: <c>SET IDENTITY_INSERT</c> named an
+    /// object that exists but isn't a user table, a view say.
+    /// </summary>
+    internal static SimulatedSqlException IdentityInsertNotUserTable(string writtenName) =>
+        new($"'{writtenName}' is not a user table. Cannot perform SET operation.", 8105, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 8107: <c>SET IDENTITY_INSERT</c> is already ON
     /// for one table and another <c>SET IDENTITY_INSERT</c> targeted a
     /// different table without first turning the first one OFF.
@@ -1465,16 +1523,7 @@ partial class SimulatedSqlException
     /// implies-nullable shortcut). Real SQL Server uses identical wording.
     /// </summary>
     internal static SimulatedSqlException ComputedColumnPkRequiresPersisted(string columnName, string tableName) =>
-        new($"Cannot define PRIMARY KEY constraint on column '{columnName}' in table '{tableName}'. The computed column has to be persisted and not nullable.{ConstraintFailureSuffix}", 1711, 16, 1);
-
-    /// <summary>
-    /// The sentence real appends to an index-eligibility failure that arrived
-    /// through a <c>PRIMARY KEY</c> / <c>UNIQUE</c> constraint rather than a
-    /// bare <c>CREATE INDEX</c> — the constraint's own creation is what
-    /// "could not be created", and the index error is the "previous error".
-    /// Probe-confirmed on Msg 1711 / 2729 / 2799 alike.
-    /// </summary>
-    private const string ConstraintFailureSuffix = " Could not create constraint or index. See previous errors.";
+        FollowedByConstraintNotCreated(new($"Cannot define PRIMARY KEY constraint on column '{columnName}' in table '{tableName}'. The computed column has to be persisted and not nullable.", 1711, 16, 1), state: 0);
 
     /// <summary>
     /// Mimics SQL Server error 2113: an <c>INSTEAD OF DELETE</c> / <c>UPDATE</c>
@@ -1493,10 +1542,10 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 1787: the same conflict reached from the other
     /// side — a cascading foreign key declared on a table that already carries
     /// an <c>INSTEAD OF DELETE</c> / <c>UPDATE</c> trigger. Names the table
-    /// unqualified and carries the constraint-failure suffix.
+    /// unqualified, followed by Msg 1750 (probed 2026-10-01 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException CascadingForeignKeyOnInsteadOfTriggerTable(string constraintName, string tableName) =>
-        new($"Cannot define foreign key constraint '{constraintName}' with cascaded DELETE or UPDATE on table '{tableName}' because the table has an INSTEAD OF DELETE or UPDATE TRIGGER defined on it.{ConstraintFailureSuffix}", 1787, 16, 1);
+        FollowedByConstraintNotCreated(new($"Cannot define foreign key constraint '{constraintName}' with cascaded DELETE or UPDATE on table '{tableName}' because the table has an INSTEAD OF DELETE or UPDATE TRIGGER defined on it.", 1787, 16, 0));
 
     /// <summary>
     /// Mimics SQL Server error 10609: a filtered index's <c>WHERE</c> predicate
@@ -1511,21 +1560,27 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 2729: a computed column named as an index,
     /// statistics or partition key whose expression isn't deterministic — the
     /// value would differ between the stored key and a fresh evaluation.
-    /// <paramref name="viaConstraint"/> appends real's constraint suffix.
-    /// Probe-confirmed wording against SQL Server 2025.
+    /// Through a constraint, <paramref name="viaConstraint"/>, Msg 1750 follows
+    /// it (probed 2026-10-01 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException ComputedColumnNotDeterministicForIndex(string columnName, string qualifiedTableName, bool viaConstraint) =>
-        new($"Column '{columnName}' in table '{qualifiedTableName}' cannot be used in an index or statistics or as a partition key because it is non-deterministic.{(viaConstraint ? ConstraintFailureSuffix : "")}", 2729, 16, 1);
+    internal static SimulatedSqlException ComputedColumnNotDeterministicForIndex(string columnName, string tableName, bool viaConstraint)
+    {
+        var error = new SimulatedSqlException($"Column '{columnName}' in table '{tableName}' cannot be used in an index or statistics or as a partition key because it is non-deterministic.", 2729, 16, 1);
+        return viaConstraint ? FollowedByConstraintNotCreated(error) : error;
+    }
 
     /// <summary>
     /// Mimics SQL Server error 2799: a non-persisted computed column named as
     /// an index or statistics key whose expression touches <c>float</c> /
     /// <c>real</c> anywhere — real won't key on a value it can't reproduce bit
-    /// for bit. <paramref name="viaConstraint"/> appends real's constraint
-    /// suffix. Probe-confirmed wording against SQL Server 2025.
+    /// for bit. Through a constraint, <paramref name="viaConstraint"/>, Msg
+    /// 1750 follows it (probed 2026-10-01 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException ComputedColumnImpreciseForIndex(string indexName, string qualifiedTableName, string columnName, bool viaConstraint) =>
-        new($"Cannot create index or statistics '{indexName}' on table '{qualifiedTableName}' because the computed column '{columnName}' is imprecise and not persisted. Consider removing column from index or statistics key or marking computed column persisted.{(viaConstraint ? ConstraintFailureSuffix : "")}", 2799, 16, 1);
+    internal static SimulatedSqlException ComputedColumnImpreciseForIndex(string indexName, string tableName, string columnName, bool viaConstraint)
+    {
+        var error = new SimulatedSqlException($"Cannot create index or statistics '{indexName}' on table '{tableName}' because the computed column '{columnName}' is imprecise and not persisted. Consider removing column from index or statistics key or marking computed column persisted.", 2799, 16, 1);
+        return viaConstraint ? FollowedByConstraintNotCreated(error) : error;
+    }
 
     /// <summary>
     /// Mimics SQL Server error 8102: an UPDATE statement targeted an identity
@@ -2065,6 +2120,39 @@ partial class SimulatedSqlException
     /// beside it uses <c>'</c>), and that a *nullable* referencing column
     /// without a default is accepted, since NULL is then the settable value.
     /// Real raises this at CREATE / ALTER, not on the first cascading delete.
+    /// Its SET NULL sibling, Msg 1761, refuses a NOT NULL referencing column
+    /// outright and is followed by Msg 1750 (probed 2026-10-01).
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeySetNullOnNotNullColumn(string foreignKeyName) =>
+        FollowedByConstraintNotCreated(new($"Cannot create the foreign key \"{foreignKeyName}\" with the SET NULL referential action, because one or more referencing columns are not nullable.", 1761, 16, 0));
+
+    /// <summary>
+    /// Mimics SQL Server error 1763, then Msg 1750: a FOREIGN KEY naming a
+    /// table in another database, spelled as written (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyCrossDatabase(string writtenName) =>
+        FollowedByConstraintNotCreated(new($"Cross-database foreign key references are not supported. Foreign key '{writtenName}'.", 1763, 16, 0));
+
+    /// <summary>
+    /// Mimics SQL Server error 1766, then Msg 1750 at state 0: a permanent
+    /// table's FOREIGN KEY referencing a temporary table, named by its first
+    /// referencing column (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyToTemporaryTable(string name) =>
+        FollowedByConstraintNotCreated(new($"Foreign key references to temporary tables are not supported. Foreign key '{name}'.", 1766, 16, 0), state: 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 8139: a FOREIGN KEY whose referenced column
+    /// list differs in length from its own (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyColumnCountMismatch(string tableName) =>
+        new($"Number of referencing columns in foreign key differs from number of referenced columns, table '{tableName}'.", 8139, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 1762 — a FOREIGN KEY declares <c>SET DEFAULT</c>
+    /// with a NOT NULL referencing column that has no default.
     /// </summary>
     internal static SimulatedSqlException ForeignKeySetDefaultWithoutDefault(string foreignKeyName) =>
         new($"Cannot create the foreign key \"{foreignKeyName}\" with the SET DEFAULT referential action, because one or more referencing not-nullable columns lack a default constraint.", 1762, 16, 1);
@@ -2221,7 +2309,7 @@ partial class SimulatedSqlException
     /// CREATE pass.
     /// </summary>
     internal static SimulatedSqlException CascadeCycleOrMultiplePathsRejected(string constraintName, string tableName) =>
-        new($"Introducing FOREIGN KEY constraint '{constraintName}' on table '{tableName}' may cause cycles or multiple cascade paths. Specify ON DELETE NO ACTION or ON UPDATE NO ACTION, or modify other FOREIGN KEY constraints.", 1785, 16, 0);
+        FollowedByConstraintNotCreated(new($"Introducing FOREIGN KEY constraint '{constraintName}' on table '{tableName}' may cause cycles or multiple cascade paths. Specify ON DELETE NO ACTION or ON UPDATE NO ACTION, or modify other FOREIGN KEY constraints.", 1785, 16, 0));
 
     /// <summary>
     /// Mimics SQL Server error 1779: <c>ALTER TABLE … ADD CONSTRAINT … PRIMARY
@@ -2254,7 +2342,15 @@ partial class SimulatedSqlException
     /// Real SQL Server allows at most one default per column.
     /// </summary>
     internal static SimulatedSqlException ColumnAlreadyHasDefault() =>
-        new("Column already has a DEFAULT bound to it.", 1781, 16, 1);
+        FollowedByConstraintNotCreated(new("Column already has a DEFAULT bound to it.", 1781, 16, 1), state: 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 1754, then Msg 1750: a <c>DEFAULT</c> declared
+    /// on an identity column, inline or through <c>ADD … DEFAULT … FOR</c>
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DefaultOnIdentityColumn(string tableName, string columnName) =>
+        FollowedByConstraintNotCreated(new($"Defaults cannot be created on columns with an IDENTITY attribute. Table '{tableName}', column '{columnName}'.", 1754, 16, 0), state: 0);
 
     /// <summary>
     /// Mimics SQL Server error 1752: <c>ALTER TABLE … ADD CONSTRAINT …
@@ -2356,6 +2452,14 @@ partial class SimulatedSqlException
         FollowedByConstraintNotDropped(new($"'{name}' is not a constraint.", 3728, 16, 1));
 
     /// <summary>
+    /// Mimics SQL Server error 3733, then Msg 3727: <c>DROP CONSTRAINT</c>
+    /// naming another table's constraint (probed 2026-10-01 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException ConstraintNotOfTable(string name, string tableName) =>
+        FollowedByConstraintNotDropped(new($"Constraint '{name}' does not belong to table '{tableName}'.", 3733, 16, 2));
+
+    /// <summary>
     /// Mimics SQL Server error 3734: <c>ALTER TABLE … DROP CONSTRAINT</c>
     /// targeted the primary key of a table that still has an XML or spatial
     /// index, followed by Msg 3727 (probed 2026-09-26 against SQL Server 2025).
@@ -2380,7 +2484,22 @@ partial class SimulatedSqlException
     /// wording per the action verb).
     /// </summary>
     internal static SimulatedSqlException ConstraintDoesNotExist(string name) =>
-        new($"Constraint '{name}' does not exist.", 4917, 16, 0);
+        FollowedByConstraintNotToggled(new($"Constraint '{name}' does not exist.", 4917, 16, 0));
+
+    /// <summary>
+    /// Mimics SQL Server error 11415, then Msg 4916: <c>ALTER TABLE … (CHECK |
+    /// NOCHECK) CONSTRAINT</c> naming a key or default constraint, which take
+    /// no such toggle (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ConstraintCannotBeToggled(string name) =>
+        FollowedByConstraintNotToggled(new($"Object '{name}' cannot be disabled or enabled. This action applies only to foreign key and check constraints.", 11415, 16, 1));
+
+    /// <summary>
+    /// Pairs <paramref name="error"/> with the Msg 4916 real sends after a
+    /// constraint toggle it refuses (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static SimulatedSqlException FollowedByConstraintNotToggled(SimulatedSqlException error) =>
+        FollowedBy(error, new("Could not enable or disable the constraint. See previous errors.", 4916, 16, 0));
 
     /// <summary>
     /// Mimics SQL Server error 1913: <c>CREATE INDEX</c> with a name that
@@ -2921,6 +3040,13 @@ partial class SimulatedSqlException
         errors.Add(new($"{(verb.StartsWith("RENAME", StringComparison.Ordinal) ? "" : "ALTER TABLE ")}{verb} {columnName} failed because one or more objects access this column.", 4922, 16, 9));
         return Aggregate(errors);
     }
+
+    /// <summary>
+    /// Mimics SQL Server error 4927: <c>ALTER COLUMN</c> to <c>timestamp</c> /
+    /// <c>rowversion</c> (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CannotAlterColumnToTimestamp(string columnName) =>
+        new($"Cannot alter column '{columnName}' to be data type timestamp.", 4927, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 515: <c>ALTER COLUMN</c> flipped a column to

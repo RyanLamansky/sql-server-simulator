@@ -201,8 +201,25 @@ partial class Simulation
         if (matched is null)
             return false;
 
-        var insertedPseudo = MaterializePseudoTable(pseudoColumns, "inserted", insertedRows ?? [], outerBatch);
-        var deletedPseudo = MaterializePseudoTable(pseudoColumns, "deleted", deletedRows ?? [], outerBatch);
+        // The rows an INSTEAD OF trigger reads were never written, so every
+        // column but a computed one reads as nullable and a rowversion as NULL
+        // (probed 2026-10-01 against SQL Server 2025).
+        var columns = new HeapColumn[pseudoColumns.Length];
+        for (var i = 0; i < columns.Length; i++)
+        {
+            var column = pseudoColumns[i];
+            columns[i] = column.Nullable || column.Computed is not null ? column : column.WithNullable(true);
+            if (column.Type is RowVersionSqlType && insertedRows is { Count: > 0 })
+            {
+                for (var r = 0; r < insertedRows.Count; r++)
+                {
+                    insertedRows[r] = (SqlValue[])insertedRows[r].Clone();
+                    insertedRows[r][i] = SqlValue.Null(column.Type);
+                }
+            }
+        }
+        var insertedPseudo = MaterializePseudoTable(columns, "inserted", insertedRows ?? [], outerBatch);
+        var deletedPseudo = MaterializePseudoTable(columns, "deleted", deletedRows ?? [], outerBatch);
         // An INSTEAD OF trigger's rows wait in a work table, which the firing
         // statement lists and the body's reads of inserted / deleted scan
         // (probed 2026-09-28 against SQL Server 2025).

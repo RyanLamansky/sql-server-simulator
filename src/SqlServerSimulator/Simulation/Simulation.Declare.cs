@@ -437,7 +437,7 @@ partial class Simulation
         if (Array.Exists(columns, static column => column.Type == SqlType.RowVersion))
             FunctionBodyShape.NoteSideEffect(context.Batch, "TIMESTAMP", FunctionBodyShape.TimestampColumnState);
         var internalName = context.Connection.Simulation.AllocateTableVariableInternalName();
-        RenameAutoNamedConstraints(internalName, fullName, columns, keyConstraints, checkConstraints, checkTablePartLength: internalName.Length);
+        RenameAutoNamedConstraints(internalName, fullName, columns, keyConstraints, checkConstraints, tempNamePadding: internalName.Length);
 
         var heapTable = new HeapTable(
             fullName,

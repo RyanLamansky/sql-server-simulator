@@ -599,4 +599,31 @@ public sealed class InsteadOfTriggerTests
         IsTrue(rows["tr_io_table"]);
         IsTrue(rows["tr_io_view"]);
     }
+
+    /// <summary>
+    /// An INSTEAD OF trigger's INSERTED reads every column but a computed one
+    /// as nullable, and a rowversion as NULL (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void InsteadOf_InsertedColumnsAreNullable()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (id int identity, v int not null, rv rowversion, p as isnull(v, 0) persisted)",
+            "create trigger tr on t instead of insert as select id, v, rv, p from inserted");
+        AreEqual("True,True,True,False", string.Join(",", simulation.ColumnNullability("insert t (v) values (5)")));
+        using var reader = simulation.ExecuteReader("insert t (v) values (5)");
+        IsTrue(reader.Read());
+        IsTrue(reader.IsDBNull(2));
+    }
+
+    /// <summary>A trigger body writing INSERTED or DELETED is Msg 286 (probed 2026-10-01).</summary>
+    [TestMethod]
+    public void TriggerBody_WritingInserted_RaisesMsg286()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (v int)");
+        _ = simulation.AssertSqlError("create trigger tr on t after insert as update inserted set v = 1", 286);
+    }
 }

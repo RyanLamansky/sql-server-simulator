@@ -1596,6 +1596,8 @@ internal abstract class Expression : ExpressionNode
             throw ScalarOnlyOperandError(context);
         if (context.InOutputItem)
             throw SimulatedSqlException.SubqueryInOutputClause();
+        if (context.InScalarDefinition)
+            throw SimulatedSqlException.SubqueriesNotAllowedInThisContext();
         Selection subquery;
         using (context.EnterNextValueForScope(NextValueForScope.Nested))
         {

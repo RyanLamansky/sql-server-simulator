@@ -596,19 +596,17 @@ public sealed class AlterTableColumnTests
     }
 
     [TestMethod]
-    public void AlterColumn_NoNullabilityKeyword_PreservesExistingNullability()
+    public void AlterColumn_NoNullabilityKeyword_MakesTheColumnNullable()
     {
+        // Omitting NULL / NOT NULL leaves the column nullable whatever it was
+        // (probed 2026-10-01 against SQL Server 2025).
         var sim = new Simulation();
-        // Probe-confirmed: omitting NULL/NOT NULL keeps the column's existing
-        // nullability. The simulator implements this by carrying over
-        // existingCol.Nullable when the parser produces null.
         _ = sim.ExecuteNonQuery("""
             create table t (v int not null);
             alter table t alter column v bigint;
-            insert t values (1)
+            insert t values (1), (null)
             """);
-        var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("insert t values (null)"));
-        AreEqual(515, ex.Number);
+        AreEqual(2, sim.ExecuteScalar<int>("select count(*) from t"));
     }
 
     // --- ALTER COLUMN — blockers (Msg 5074) ---
@@ -1155,4 +1153,52 @@ public sealed class AlterTableColumnTests
         _ = sim.AssertSqlError("insert p values ('a')", 2627);
         _ = sim.AssertSqlError("insert c values (3, 9)", 547);
     }
+
+    /// <summary>
+    /// ALTER COLUMN converts each value as a write would: a number too wide
+    /// for a varchar is '*', a string cut short is Msg 2628 then 3621, and
+    /// under ANSI_WARNINGS OFF a truncation cuts and an overflow stores NULL
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (a int); insert t values (12345); alter table t alter column a varchar(2); select a from t", "*")]
+    [DataRow("set ansi_warnings off; create table t (a varchar(10)); insert t values ('abcdef'); alter table t alter column a varchar(3); select a from t", "abc")]
+    [DataRow("set ansi_warnings off; create table t (a varbinary(10)); insert t values (0x0102030405); alter table t alter column a varbinary(2); select convert(varchar(10), a, 1) from t", "0x0102")]
+    [DataRow("set ansi_warnings off; create table t (a int); insert t values (300); alter table t alter column a tinyint; select isnull(cast(a as varchar(5)), 'null') from t", "null")]
+    public void AlterColumn_ConvertsAsAWrite(string sql, string expected)
+        => AreEqual(expected, (string?)new Simulation().ExecuteScalar(sql));
+
+    [TestMethod]
+    [DataRow("create table t (a varchar(10)); insert t values ('abcdef'); alter table t alter column a varchar(3)", 2628)]
+    [DataRow("create table t (a varbinary(10)); insert t values (0x0102030405); alter table t alter column a varbinary(2)", 2628)]
+    [DataRow("create table t (a int); insert t values (null); alter table t alter column a int not null", 515)]
+    public void AlterColumn_RefusedValue_EndsTheStatement(string sql, int number)
+    {
+        var ex = new Simulation().AssertSqlError(sql, number);
+        AreEqual(3621, ex.Errors[1].Number);
+    }
+
+    [TestMethod]
+    public void AlterColumn_NullIntoNotNull_NamesTheTableThreePart()
+        => new Simulation().AssertSqlError("create table t (a int); insert t values (null); alter table t alter column a int not null", 515,
+            "Cannot insert the value NULL into column 'a', table 'simulated.dbo.t'; column does not allow nulls. UPDATE fails.");
+
+    [TestMethod]
+    [DataRow("date", "int")]
+    [DataRow("int", "date")]
+    [DataRow("int", "uniqueidentifier")]
+    public void AlterColumn_ConversionNoCastMakes_RaisesMsg206(string from, string to)
+        => new Simulation().AssertSqlError($"create table t (a {from}); alter table t alter column a {to}", 206, $"Operand type clash: {from} is incompatible with {to}");
+
+    [TestMethod]
+    public void AlterColumn_ToRowversion_RaisesMsg4927()
+        => new Simulation().AssertSqlError("create table t (a int, b binary(8)); alter table t alter column b rowversion", 4927, "Cannot alter column 'b' to be data type timestamp.");
+
+    [TestMethod]
+    public void AlterColumn_ToIdentity_IsASyntaxError()
+        => _ = new Simulation().AssertSqlError("create table t (a int); alter table t alter column a int identity", 156);
+
+    [TestMethod]
+    public void AddColumn_PastTheMinimumRowSize_RaisesMsg1701()
+        => _ = new Simulation().AssertSqlError("create table t (a char(8000)); alter table t add b char(100)", 1701);
 }

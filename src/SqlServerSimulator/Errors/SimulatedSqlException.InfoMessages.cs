@@ -24,6 +24,13 @@ partial class SimulatedSqlException
     internal static SimulatedError NullReturnStatusMessage(BatchContext batch, string procedureName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 282, $"The '{procedureName}' procedure attempted to return a status of NULL, which is not allowed. A status of 0 will be returned instead.");
 
+    /// <summary>
+    /// Msg 1945, class 0: an index whose key columns can together exceed what
+    /// its kind holds.
+    /// </summary>
+    internal static SimulatedError WideIndexKeyMessage(BatchContext batch, bool clustered, int limit, string indexName, int length) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 1945, $"Warning! The maximum key length for a {(clustered ? "clustered" : "nonclustered")} index is {limit} bytes. The index '{indexName}' has maximum length of {length} bytes. For some combination of large values, the insert/update operation will fail.");
+
     /// <summary>Msg 3621, after an execution error ends a statement that writes rows.</summary>
     internal static SimulatedError StatementTerminatedMessage(BatchContext batch, SimulatedSqlException? error = null)
     {

@@ -105,6 +105,10 @@ partial class Simulation
         if (context.Token is not Name)
             return false;
         var tableName = BatchContext.ParseObjectName(context);
+        // tempdb pads a local temp table's name to 116 characters plus a
+        // 12-digit suffix, so a longer one is Msg 193 (probed 2026-10-01).
+        if (BatchContext.IsLocalTempName(tableName.Leaf) && tableName.Leaf.Length > 116)
+            throw SimulatedSqlException.TempTableNameTooLong(tableName.Leaf);
 
         // `AS NODE` / `AS EDGE` follows the column list, which an edge table
         // may leave out altogether.
@@ -128,6 +132,9 @@ partial class Simulation
                 heapColumns.AddRange(GraphColumns.Create(graphKind, tableName.Leaf, context.Batch.Connection.CurrentDatabase.Collation));
             if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints))
                 return false;
+            // A table holds at most 1024 columns (probed 2026-10-01).
+            if (heapColumns.Count > 1024)
+                throw SimulatedSqlException.TooManyColumns(heapColumns[1024]?.Name ?? pendingComputed.Find(computed => computed.Index == 1024).Name, tableName.Leaf);
             if (graphKind != GraphTableKind.None)
             {
                 context.MoveNextRequired();
@@ -262,19 +269,7 @@ partial class Simulation
                 spelledNumeric: resolvedType is DecimalSqlType && pending.Expression.ResultReportsNumeric);
         }
 
-        // Schemas whose fixed-width stored columns alone exceed SQL Server's
-        // 8060-byte in-row limit can never hold a row; reject at CREATE TABLE
-        // (Msg 1701). Persisted computed columns of fixed-length type
-        // contribute; non-persisted computed columns have no row storage.
-        var fixedWidthSum = 0;
-        for (var i = 0; i < heapColumns.Count; i++)
-        {
-            var column = heapColumns[i]!;
-            if (column.IsStored && column.Type.IsFixedLength)
-                fixedWidthSum += column.Type.FixedLength;
-        }
-        if (fixedWidthSum > Heap.MaxRowSize)
-            throw SimulatedSqlException.RowSizeExceedsMaximum(tableName.Leaf, fixedWidthSum, Heap.MaxRowSize);
+        RejectOversizedMinimumRow([.. heapColumns!], tableName.Leaf);
 
         // A CHECK predicate — inline or table-level — may not read a
         // non-persisted computed column (Msg 1764). Runs ahead of the Msg 8141
@@ -369,7 +364,7 @@ partial class Simulation
         // database object-name namespace.
         if (!isTempTable && schema!.HasNameInSharedNamespace(tableName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(tableName.Leaf);
-        RejectTakenConstraintNames(isTempTable ? null : schema, tableName.Leaf, heapColumns!, pendingKeys, pendingChecks, pendingForeignKeys);
+        RejectTakenConstraintNames(isTempTable ? null : schema, tableName.Leaf, heapColumns!, pendingKeys, pendingChecks, pendingForeignKeys, isTempTable ? context.Connection : null);
 
         var (keyObjectIds, indexObjectIds) = AllocateDeclarationObjectIds(context.CurrentDatabase, pendingKeys, pendingIndexes);
         var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow, keyObjectIds);
@@ -549,11 +544,36 @@ partial class Simulation
                     adopted.IsHistoryTable = false;
             });
         }
+        foreach (var key in keyConstraints)
+            WarnOfWideIndexKey(context.Batch, heapTable.Columns, key.FullOrdinals, key.Name, key.IsClustered);
         // Real raises no DDL event for a temp table (tempdb owns it), only for
         // a permanent one in the current database.
         if (!isTempTable)
             RecordDdlEvent(context, "CREATE_TABLE", schema?.Name ?? Database.DefaultSchemaName, heapTable.Name, "TABLE");
         return true;
+    }
+
+    /// <summary>
+    /// Sends Msg 1945 when an index's or key's widest key passes what its kind
+    /// can hold — 900 bytes clustered, 1700 nonclustered — the sum of its
+    /// columns' declared byte lengths; the index is built all the same
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static void WarnOfWideIndexKey(BatchContext batch, HeapColumn[] columns, int[] keyFullOrdinals, string indexName, bool clustered)
+    {
+        if (batch.IsSkipping)
+            return;
+        var length = 0;
+        foreach (var ordinal in keyFullOrdinals)
+        {
+            var columnLength = BuiltInResources.GetSysColumnMetadata(columns[ordinal]).MaxLength;
+            if (columnLength < 0)
+                return;
+            length += columnLength;
+        }
+        var limit = clustered ? 900 : 1700;
+        if (length > limit)
+            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.WideIndexKeyMessage(batch, clustered, limit, indexName, length));
     }
 
     /// <summary>
@@ -1580,10 +1600,14 @@ partial class Simulation
             var computedStart = context.Token.StartIndex;
             // A computed column is another construct Msg 11719 names.
             Expression computed;
+            var computedAggregates = new List<Parser.Expressions.AggregateExpression>();
             using (context.EnterNextValueForScope(NextValueForScope.Nested))
+            using (ParserScope.Enter(ref context.InScalarDefinition, true))
+            using (ParserScope.Enter(ref context.AggregateCollector, computedAggregates))
             {
                 computed = Expression.Parse(context);
             }
+            Selection.RefuseClauseAggregates(context.Batch, computedAggregates, SimulatedSqlException.AggregateInComputedOrCheck());
 
             var computedDefinition = context.CanonicalDefinitionFrom(computedStart, predicate: false) ?? EnsureParenthesized(context.SourceTextFrom(computedStart));
             var (persisted, computedNullable) = ParseComputedSuffix(context);
@@ -1708,7 +1732,7 @@ partial class Simulation
                         _ => throw SimulatedSqlException.SyntaxErrorNear(context),
                     }, context.Batch);
                     if (!Collation.IsRecognized(collationName))
-                        throw new NotSupportedException($"COLLATE: collation '{collationName}' isn't on the simulator's recognized list.");
+                        throw SimulatedSqlException.InvalidCollation(collationName, state: 2);
                     columnCollation = collationName;
                     context.MoveNextOptional();
                     continue;
@@ -1947,6 +1971,8 @@ partial class Simulation
             if (!IdentityState.IsIdentityType(resolvedType))
                 throw SimulatedSqlException.IdentityInvalidType(columnName.Value);
             identity = spec.Resolve(resolvedType, columnName.Value, identityNotForReplication);
+            if (defaultExpression is not null)
+                throw SimulatedSqlException.DefaultOnIdentityColumn(tableName, columnName.Value);
         }
 
         if (isSparse && (writtenNotNull || isRowGuidCol || !SparseEligible(resolvedType)))
@@ -1980,7 +2006,8 @@ partial class Simulation
             actualNullable = false;
         }
 
-        if (columnCollation is not null && resolvedType is VectorSqlType or JsonSqlType)
+        // Any non-string column is Msg 447 at state 1 (probed 2026-10-01).
+        if (columnCollation is not null && resolvedType.Category != SqlTypeCategory.String)
             throw SimulatedSqlException.CollateClauseRequiresString(resolvedType.SqlServerName, 1);
         if (resolvedType.Category == SqlTypeCategory.String)
         {
@@ -2285,10 +2312,14 @@ partial class Simulation
         // A CHECK constraint is the first construct real's Msg 11719 names
         // (probe-confirmed 2026-08-05 for the inline column form).
         BooleanExpression predicate;
+        var checkAggregates = new List<Parser.Expressions.AggregateExpression>();
         using (context.EnterNextValueForScope(NextValueForScope.Nested))
+        using (ParserScope.Enter(ref context.InScalarDefinition, true))
+        using (ParserScope.Enter(ref context.AggregateCollector, checkAggregates))
         {
             predicate = BooleanExpression.Parse(context);
         }
+        Selection.RefuseClauseAggregates(context.Batch, checkAggregates, SimulatedSqlException.AggregateInComputedOrCheck());
 
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -2526,7 +2557,7 @@ partial class Simulation
         IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
         Database database,
         DateTime createDate,
-        int checkTablePartLength = 8)
+        int tempNamePadding = 16)
     {
         if (pendingChecks.Count == 0)
             return [];
@@ -2536,7 +2567,7 @@ partial class Simulation
         {
             var pending = pendingChecks[c];
             var column = pending.InlineColumn ?? SingleCheckedColumn(database.Collation, pending.Predicate);
-            var name = pending.Name ?? AutoCheckName(tableName, column, c, checkTablePartLength);
+            var name = pending.Name ?? AutoCheckName(tableName, column, c, tempNamePadding);
             resolved[c] = new CheckConstraint(name, pending.Predicate, column, database.AllocateObjectId(), createDate)
             {
                 Definition = pending.Definition,
@@ -2550,20 +2581,21 @@ partial class Simulation
 
     /// <summary>
     /// Generates an auto-name for an unnamed CHECK constraint. SQL Server
-    /// uses <c>CK__&lt;table8&gt;__&lt;col8&gt;__&lt;8hex&gt;</c> for inline
-    /// and <c>CK__&lt;table8&gt;__&lt;8hex&gt;</c> for table-level; the
+    /// uses <c>CK__&lt;table&gt;__&lt;col&gt;__&lt;8hex&gt;</c> for inline
+    /// and <c>CK__&lt;table&gt;__&lt;8hex&gt;</c> for table-level, cut as
+    /// <see cref="FormatAutoConstraintName"/> describes; the
     /// simulator matches the structure with a deterministic 32-bit FNV-1a
     /// hash of <c>tableName + column + index</c> driving the hex slot. Stable
     /// across runs but non-cryptographic.
     /// </summary>
-    private static string AutoCheckName(string tableName, string? inlineColumn, int declarationIndex, int tablePartLength = 8)
+    private static string AutoCheckName(string tableName, string? inlineColumn, int declarationIndex, int tempNamePadding = 16)
     {
         var h = Fnv1a32.Initial;
         h.MixTableSeed(tableName);
         if (inlineColumn is not null)
             h.Mix(inlineColumn);
         h.Mix((byte)declarationIndex);
-        return FormatAutoConstraintName("CK__", tableName, inlineColumn, h.Value, tablePartLength);
+        return FormatAutoConstraintName("CK__", tableName, inlineColumn, h.Value, tempNamePadding);
     }
 
     /// <summary>
@@ -2603,16 +2635,25 @@ partial class Simulation
 
     /// <summary>
     /// Shared formatter for the 8-hex-suffix auto-name shape used by CK / FK
-    /// / DF: <c>&lt;prefix&gt;&lt;table8&gt;__&lt;hash:X8&gt;</c>, with an
-    /// optional <c>&lt;column8&gt;__</c> middle segment when
-    /// <paramref name="optionalColumn"/> is non-null.
+    /// / DF: <c>&lt;prefix&gt;&lt;table&gt;__[&lt;column&gt;__]&lt;hash:X8&gt;</c>,
+    /// thirty characters at most. Without a column the table keeps sixteen
+    /// characters; with one the two share fourteen, the table keeping at
+    /// least nine and the column the rest (probed 2026-10-01 against SQL
+    /// Server 2025: <c>DF__tabletwel__colum__…</c>, <c>CK__t__abcdefghijklm__…</c>,
+    /// <c>CK__abcdefghijklm__x__…</c>). A local temp table's name is its
+    /// underscore-padded name inside tempdb, padded here to
+    /// <paramref name="tempNamePadding"/>; a table variable's eight-hex name
+    /// passes its own length, which pads nothing.
     /// </summary>
-    internal static string FormatAutoConstraintName(string prefix, string tableName, string? optionalColumn, uint hash, int tablePartLength = 8)
+    internal static string FormatAutoConstraintName(string prefix, string tableName, string? optionalColumn, uint hash, int tempNamePadding = 16)
     {
-        var t8 = AutoNameTablePart(tableName, tablePartLength);
-        return optionalColumn is null
-            ? $"{prefix}{t8}__{hash:X8}"
-            : $"{prefix}{t8}__{(optionalColumn.Length > 8 ? optionalColumn[..8] : optionalColumn)}__{hash:X8}";
+        if (BatchContext.IsLocalTempName(tableName))
+            tableName = tableName.PadRight(tempNamePadding, '_');
+        if (optionalColumn is null)
+            return $"{prefix}{(tableName.Length > 16 ? tableName[..16] : tableName)}__{hash:X8}";
+        var tableLength = tableName.Length <= 9 ? tableName.Length : Math.Min(tableName.Length, Math.Max(9, 14 - optionalColumn.Length));
+        var columnLength = Math.Min(optionalColumn.Length, 14 - tableLength);
+        return $"{prefix}{tableName[..tableLength]}__{optionalColumn[..columnLength]}__{hash:X8}";
     }
 
     /// <summary>
@@ -2822,7 +2863,7 @@ partial class Simulation
                         : SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.KeyColumnInvalidType(column.Name, tableName, state: 2), state: 0);
                 }
                 RejectComputedKeyColumnNotIndexable(
-                    database, heapColumns, $"{Database.DefaultSchemaName}.{tableName}", column, constraintName, viaConstraint: true);
+                    database, heapColumns, tableName, column, constraintName, viaConstraint: true);
 
                 // A non-persisted computed column occupies no storage slot, so
                 // its key entry is -1 — the same sentinel HeapTable's own
@@ -3367,8 +3408,10 @@ partial class Simulation
     /// Rejects a <c>CREATE TABLE</c> that names two of its constraints alike
     /// (Msg 8168), or names one after an object <paramref name="schema"/>
     /// already holds or after the table itself (Msg 2714 then Msg 1750) —
-    /// probed 2026-09-24 against SQL Server 2025. A temp table passes no schema:
-    /// its constraints live in tempdb, which isn't modeled as a namespace.
+    /// probed 2026-09-24 against SQL Server 2025. A temp table passes no schema
+    /// but its session, <paramref name="tempSession"/>: its constraints share
+    /// tempdb's namespace with the session's other temp tables and every
+    /// global one (probed 2026-10-01); other sessions' aren't checked.
     /// </summary>
     private static void RejectTakenConstraintNames(
         Schema? schema,
@@ -3376,7 +3419,8 @@ partial class Simulation
         List<HeapColumn?> heapColumns,
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
-        List<PendingForeignKey> pendingForeignKeys)
+        List<PendingForeignKey> pendingForeignKeys,
+        SimulatedDbConnection? tempSession)
     {
         List<string> names = [];
         foreach (var key in pendingKeys)
@@ -3409,7 +3453,55 @@ partial class Simulation
             }
             if (schema is not null && (schema.HasNameInSharedNamespace(names[i]) || schema.Database.Collation.Equals(names[i], tableName)))
                 throw SimulatedSqlException.ConstraintNameTaken(names[i]);
+            if (tempSession is not null && TempdbHoldsConstraintNamed(tempSession, names[i]))
+                throw SimulatedSqlException.ConstraintNameTaken(names[i]);
         }
+    }
+
+    /// <summary>Whether a temp table the session sees carries a constraint named <paramref name="name"/>.</summary>
+    private static bool TempdbHoldsConstraintNamed(SimulatedDbConnection session, string name)
+    {
+        foreach (var (_, table) in session.TempTables)
+        {
+            if (Schema.TableHasConstraintNamed(table, name, Collation.Baseline))
+                return true;
+        }
+        foreach (var (_, table) in session.Simulation.GlobalTempTables)
+        {
+            if (Schema.TableHasConstraintNamed(table, name, Collation.Baseline))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// A schema whose smallest row can't fit SQL Server's 8060-byte in-row
+    /// limit is Msg 1701. The smallest row is every stored non-sparse
+    /// fixed-width column — <c>bit</c>s eight to a byte — plus 6 bytes of row
+    /// header and column count and the null bitmap's byte per eight stored
+    /// columns; a variable-length column adds nothing to it (probed
+    /// 2026-10-01 against SQL Server 2025). Non-persisted computed columns
+    /// have no row storage.
+    /// </summary>
+    internal static void RejectOversizedMinimumRow(HeapColumn[] columns, string tableName)
+    {
+        int fixedWidth = 0, bits = 0, stored = 0;
+        foreach (var column in columns)
+        {
+            if (!column.IsStored)
+                continue;
+            stored++;
+            if (column.IsSparse || !column.Type.IsFixedLength)
+                continue;
+            if (column.Type is BitSqlType)
+                bits++;
+            else
+                fixedWidth += column.Type.FixedLength;
+        }
+        var overhead = 6 + ((stored + 7) / 8);
+        var minimum = fixedWidth + ((bits + 7) / 8) + overhead;
+        if (minimum > Heap.MaxRowSize)
+            throw SimulatedSqlException.RowSizeExceedsMaximum(tableName, minimum, overhead, Heap.MaxRowSize);
     }
 
     internal static string AutoConstraintName(string tableName, KeyConstraintKind kind, int[] fullOrdinals, IReadOnlyList<HeapColumn> heapColumns)
@@ -3487,6 +3579,15 @@ partial class Simulation
         var resolved = new List<ForeignKey>(pending.Count);
         foreach (var pf in pending)
         {
+            // Another database, or a temporary table from a permanent one, is
+            // refused before the name resolves (probed 2026-10-01).
+            if (pf.ReferencedTable.Count >= 3 && pf.ReferencedTable[pf.ReferencedTable.Count - 3] is { Length: > 0 } databaseName
+                && !context.Batch.CurrentDatabase.Collation.Equals(databaseName, (childTable.OwningDatabase ?? context.Batch.CurrentDatabase).Name))
+            {
+                throw SimulatedSqlException.ForeignKeyCrossDatabase(pf.ReferencedTable.ToString());
+            }
+            if (pf.ReferencedTable.Leaf.StartsWith('#') && !childTable.Name.StartsWith('#'))
+                throw SimulatedSqlException.ForeignKeyToTemporaryTable(pf.ConstraintName ?? pf.ChildColumnNames[0]);
             if (!context.Batch.TryResolveTable(pf.ReferencedTable, out var referencedTable) || referencedTable.IsTableVariable)
             {
                 // Self-referencing FK: the table being created is referenced
@@ -3542,9 +3643,11 @@ partial class Simulation
 
             if (refOrdinals.Length != pf.ChildFullOrdinals.Length)
             {
-                throw SimulatedSqlException.ForeignKeyNoMatchingKey(
-                    referencedTable.Name,
-                    pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)));
+                throw pf.ReferencedColumnNames.Length > 0
+                    ? SimulatedSqlException.ForeignKeyColumnCountMismatch(childTable.Name)
+                    : SimulatedSqlException.ForeignKeyNoMatchingKey(
+                        referencedTable.Name,
+                        pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)));
             }
 
             // Referenced columns must form a PRIMARY KEY or UNIQUE constraint
@@ -3578,6 +3681,15 @@ partial class Simulation
                     throw SimulatedSqlException.ForeignKeyComputedColumnDeleteAction(fkName, childColumn.Name);
                 if (pf.UpdateAction != ReferentialAction.NoAction)
                     throw SimulatedSqlException.ForeignKeyComputedColumnUpdateAction(fkName, childColumn.Name);
+            }
+
+            if (pf.DeleteAction == ReferentialAction.SetNull || pf.UpdateAction == ReferentialAction.SetNull)
+            {
+                foreach (var childOrdinal in pf.ChildFullOrdinals)
+                {
+                    if (!childTable.Columns[childOrdinal].Nullable)
+                        throw SimulatedSqlException.ForeignKeySetNullOnNotNullColumn(fkName);
+                }
             }
 
             // SET DEFAULT needs something to set: a NOT NULL referencing column
@@ -3948,9 +4060,9 @@ partial class Simulation
         RejectComputedKeyColumnNotIndexable(
             batch.CurrentDatabase,
             table.Columns,
-            // Two-part here, unlike most of ALTER TABLE's three-part messages —
-            // real names `dbo.t` in both Msg 2729 and Msg 2799 (probe-confirmed).
-            SchemaQualifyTableName(table, batch.CurrentDatabase),
+            // Bare here, unlike most of ALTER TABLE's three-part messages — real
+            // names `t` in both Msg 2729 and Msg 2799 (probed 2026-10-01).
+            table.Name,
             column,
             indexName,
             viaConstraint);
@@ -3959,7 +4071,7 @@ partial class Simulation
     internal static void RejectComputedKeyColumnNotIndexable(
         Database database,
         IReadOnlyList<HeapColumn> scopeColumns,
-        string qualifiedTableName,
+        string tableName,
         HeapColumn column,
         string indexName,
         bool viaConstraint)
@@ -3969,9 +4081,9 @@ partial class Simulation
 
         HeapColumn[] scope = [.. scopeColumns];
         if (!Schemas.ModuleDeterminism.IsComputedColumnDeterministic(database, scope, definition))
-            throw SimulatedSqlException.ComputedColumnNotDeterministicForIndex(column.Name, qualifiedTableName, viaConstraint);
+            throw SimulatedSqlException.ComputedColumnNotDeterministicForIndex(column.Name, tableName, viaConstraint);
         if (!Schemas.ComputedColumnPrecision.IsPrecise(scope, column.Type, definition))
-            throw SimulatedSqlException.ComputedColumnImpreciseForIndex(indexName, qualifiedTableName, column.Name, viaConstraint);
+            throw SimulatedSqlException.ComputedColumnImpreciseForIndex(indexName, tableName, column.Name, viaConstraint);
     }
 
     private static void RejectNondeterministicPersisted(

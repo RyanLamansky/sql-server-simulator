@@ -251,4 +251,25 @@ public sealed class InsertExecTests
         AreEqual("8134 0", sim.ExecuteScalar(
             "begin try insert t exec p end try begin catch select concat(error_number(), ' ', (select count(*) from t)) end catch"));
     }
+
+    /// <summary>
+    /// A nested INSERT … EXEC fails only its own statement in the executed
+    /// body, which goes on (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void NestedInsertExec_EndsOnlyItsStatement()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (a int); create table u (a int)", "create procedure p as begin insert u exec('select 5'); select 1; end");
+        AreEqual(8164, Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("insert t exec p")).Number);
+        AreEqual("1|0", (string?)simulation.ExecuteScalar("select concat((select count(*) from t where a = 1), '|', (select count(*) from u))"));
+    }
+
+    [TestMethod]
+    public void InsertExecWithOutput_EndsTheBatch()
+    {
+        var simulation = new Simulation();
+        _ = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("create table t (a int); insert t output inserted.a exec ('select 1'); create table after_error (a int)"));
+        AreEqual(0, simulation.ExecuteScalar<int>("select count(*) from sys.tables where name = 'after_error'"));
+    }
 }

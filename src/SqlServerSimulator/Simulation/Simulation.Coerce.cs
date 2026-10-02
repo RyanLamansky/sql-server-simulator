@@ -20,7 +20,7 @@ partial class Simulation
         }
         catch (OverflowException)
         {
-            throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.SqlServerName);
+            throw SimulatedSqlException.IdentityOverflow(identityColumn.SpelledNumeric ? "numeric" : identityColumn.Type.SqlServerName);
         }
     }
 
@@ -38,7 +38,7 @@ partial class Simulation
         }
         catch (OverflowException)
         {
-            throw SimulatedSqlException.IdentityOverflow(identityColumn.Type.SqlServerName);
+            throw SimulatedSqlException.IdentityOverflow(identityColumn.SpelledNumeric ? "numeric" : identityColumn.Type.SqlServerName);
         }
     }
 
@@ -58,13 +58,18 @@ partial class Simulation
     /// Length unit follows the column's storage encoding: CP1252 byte count
     /// for <c>varchar</c> / <c>char(N)</c>, raw byte count for <c>varbinary</c>
     /// / <c>binary(N)</c>, UCS-2 code units (<see cref="string.Length"/>) for
-    /// <c>nvarchar</c> / <c>nchar(N)</c> / <c>sysname</c>. Non-string sources
-    /// fall through (e.g. <c>INSERT INTO varchar(5) VALUES (12345)</c>): the
-    /// integer-to-string format path inside <c>CoerceTo</c> produces a value
-    /// the column can hold for the common cases, and any genuine overflow
-    /// surfaces as a coercion error instead.
+    /// <c>nvarchar</c> / <c>nchar(N)</c> / <c>sysname</c>.
+    /// <para>
+    /// A value whose excess is only trailing spaces (a string) or trailing
+    /// zero bytes (a binary) is cut to fit without an error, and a number,
+    /// date or <c>uniqueidentifier</c> written to a string column converts as
+    /// a <c>CAST</c> to the column's declared length would — an <c>int</c>
+    /// too wide for a <c>varchar(2)</c> stores <c>'*'</c>, a <c>bigint</c> is
+    /// Msg 8115, a <c>date</c> is cut short (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </para>
     /// </remarks>
-    private static SqlValue EnforceMaxLength(SqlValue source, HeapColumn column, HeapTable table, SimulatedDbConnection connection)
+    private static SqlValue EnforceMaxLength(SqlValue source, HeapColumn column, HeapTable table, SimulatedDbConnection connection, bool reportsValue = true)
     {
         if (source.IsNull || column.MaxLength is not int max || max == SqlType.MaxLengthSentinel)
             return source;
@@ -76,24 +81,22 @@ partial class Simulation
                 return source;
             actual = source.AsBytes.Length;
         }
-        else if (column.Type is VarcharSqlType or CharSqlType)
+        else if (column.Type is VarcharSqlType or CharSqlType or NVarcharSqlType or NCharSqlType or SystemNameSqlType)
         {
+            if (source.Type.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money
+                or SqlTypeCategory.Approximate or SqlTypeCategory.DateTime or SqlTypeCategory.UniqueIdentifier)
+            {
+                return Parser.Expressions.Cast.ApplyCoercion(source, column.Type, max, column.Type.Collation);
+            }
             if (source.Type.Category != SqlTypeCategory.String)
                 return source;
             // Route through the column collation's storage encoding so the
             // byte budget reflects what the column will actually store:
             // CP1252 for default / Latin1 / BIN / BIN2, UTF-8 for the three
-            // *_UTF8 collations. Reading the encoding off the collation
-            // (rather than calling GetVariableByteCount on column.Type)
-            // works uniformly for both VarcharSqlType (variable-length) and
-            // CharSqlType (fixed-length, no GetVariableByteCount override).
-            actual = column.Type.Collation!.StorageEncoding.GetByteCount(source.AsString);
-        }
-        else if (column.Type is NVarcharSqlType or NCharSqlType or SystemNameSqlType)
-        {
-            if (source.Type.Category != SqlTypeCategory.String)
-                return source;
-            actual = source.AsString.Length;
+            // *_UTF8 collations.
+            actual = column.Type is VarcharSqlType or CharSqlType
+                ? column.Type.Collation!.StorageEncoding.GetByteCount(source.AsString)
+                : source.AsString.Length;
         }
         else
         {
@@ -107,23 +110,36 @@ partial class Simulation
 
         // Under SET ANSI_WARNINGS OFF the write truncates silently, as a CAST
         // does (probed 2026-09-24 against SQL Server 2025).
-        if (!connection.AnsiWarnings)
-            return TruncatedToColumn(source, column, max);
+        var truncated = TruncatedToColumn(source, column, max);
+        if (!connection.AnsiWarnings || OnlyPaddingCut(source, truncated))
+            return truncated;
 
         // A column write reports the legacy message at state 30, for INSERT and
         // UPDATE alike (probed 2026-09-27 against SQL Server 2025).
         if (!connection.IsVerboseTruncationActive())
             throw SimulatedSqlException.StringOrBinaryWouldBeTruncatedLegacy(30);
 
-        var tableName = QualifyForTruncationMessage(table);
-        throw column.Type is VarbinarySqlType or BinarySqlType
-            ? SimulatedSqlException.StringOrBinaryWouldBeTruncated(tableName, column.Name, source.AsBytes, max)
-            : SimulatedSqlException.StringOrBinaryWouldBeTruncated(
-                tableName,
-                column.Name,
-                source.AsString,
-                max,
-                column.Type is VarcharSqlType or CharSqlType ? column.Type.Collation!.StorageEncoding : null);
+        // A binary's truncated value reports empty (probed 2026-10-01), as
+        // does every one an ALTER COLUMN cuts (probed 2026-09-23).
+        var isBinary = column.Type is VarbinarySqlType or BinarySqlType;
+        throw SimulatedSqlException.StringOrBinaryWouldBeTruncated(
+            QualifyForTruncationMessage(table),
+            column.Name,
+            isBinary || !reportsValue ? string.Empty : source.AsString,
+            max,
+            column.Type is VarcharSqlType or CharSqlType ? column.Type.Collation!.StorageEncoding : null);
+    }
+
+    /// <summary>
+    /// Whether what <paramref name="truncated"/> dropped from
+    /// <paramref name="source"/> is only trailing spaces, or trailing zero
+    /// bytes of a binary — the cut a column write makes without Msg 2628.
+    /// </summary>
+    private static bool OnlyPaddingCut(SqlValue source, SqlValue truncated)
+    {
+        if (source.Type is VarbinarySqlType or BinarySqlType)
+            return !source.AsBytes.AsSpan(truncated.AsBytes.Length).ContainsAnyExcept((byte)0);
+        return !source.AsString.AsSpan(truncated.AsString.Length).ContainsAnyExcept(' ');
     }
 
     /// <summary>
@@ -423,7 +439,13 @@ partial class Simulation
     /// matches the row's column ordinals via case-insensitive name compare,
     /// the same shape <see cref="EvaluateComputedColumns"/> uses.
     /// </summary>
-    private static void EnforceCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch, string verb = "INSERT")
+    /// <summary>
+    /// Judges the bound rules (an INSERT's) and CHECK constraints of a row
+    /// <paramref name="verb"/> writes; <paramref name="reportedVerb"/> is the
+    /// statement Msg 547 names where it isn't that verb — a MERGE's actions
+    /// report <c>MERGE</c> (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static void EnforceCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch, string verb = "INSERT", string? reportedVerb = null)
     {
         // An INSERT writes every column, so every bound rule judges its value;
         // an UPDATE's rules judge only the columns it sets, at the assignment.
@@ -433,7 +455,7 @@ partial class Simulation
                 EnforceRule(destinationTable, rowValues, ordinal, batch);
         }
         if (destinationTable.CheckConstraints.Count > 0)
-            JudgeCheckConstraints(destinationTable, rowValues, batch, verb);
+            JudgeCheckConstraints(destinationTable, rowValues, batch, reportedVerb ?? verb);
     }
 
     // Apart from EnforceCheckConstraints so the closure the resolver captures

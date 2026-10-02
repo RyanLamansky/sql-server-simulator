@@ -170,7 +170,7 @@ public sealed class IdentityTests
             set identity_insert a on;
             set identity_insert b on
             """, 8107,
-            "IDENTITY_INSERT is already ON for table 'a'. Cannot perform SET operation for table 'b'.");
+            "IDENTITY_INSERT is already ON for table 'simulated.dbo.a'. Cannot perform SET operation for table 'b'.");
 
     [TestMethod]
     public void IdentityInsert_OnThenOffThenOn_AllowsSwitching()
@@ -521,5 +521,66 @@ public sealed class IdentityTests
         AreEqual(8115, ex.Number);
         AreEqual(1, ex.Errors[1].LineNumber);
         AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A constant NULL as an explicit identity value is Msg 339 while
+    /// compiling, where a NULL only a run produces is Msg 515 (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert t (id, b) values (null, 1)", 339)]
+    [DataRow("insert t (id, b) values (cast(null as int), 1)", 339)]
+    [DataRow("insert t (id, b) values (1, 1), (null, 2)", 339)]
+    [DataRow("insert t (id, b) select null, 1", 339)]
+    [DataRow("merge t using (values (1)) s(x) on 1 = 0 when not matched then insert (id, b) values (null, 1);", 339)]
+    [DataRow("declare @n int; insert t (id, b) values (@n, 1)", 515)]
+    public void IdentityInsert_NullIdentityValue(string statement, int number)
+        => _ = new Simulation().AssertSqlError($"create table t (id int identity, b int); set identity_insert t on; {statement}", number);
+
+    /// <summary>
+    /// A row whose value fails to convert has drawn its identity value
+    /// already, so the next row's skips it (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert t (b) values (1); insert t (b) values (1000)", 3)]
+    [DataRow("insert t (b) values (1), (2), (1000)", 4)]
+    public void Identity_FailedConversion_ConsumesTheValue(string failing, int next)
+    {
+        var simulation = new Simulation();
+        _ = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery($"create table t (id int identity, b tinyint); {failing}"));
+        AreEqual(next, simulation.ExecuteScalar<int>("insert t (b) values (9); select max(id) from t"));
+    }
+
+    [TestMethod]
+    public void IdentityInsert_View_RaisesMsg8105()
+        => new Simulation().AssertSqlError("create table t (id int identity, a int); exec('create view v as select id, a from t'); set identity_insert v on", 8105, "'v' is not a user table. Cannot perform SET operation.");
+
+    [TestMethod]
+    public void IdentityInsert_MissingObject_RaisesMsg1088()
+        => new Simulation().AssertSqlError("set identity_insert nope on", 1088, "Cannot find the object \"nope\" because it does not exist or you do not have permissions.");
+
+    /// <summary>SCOPE_IDENTITY and IDENT_CURRENT are numeric(38, 0) by name (probed 2026-10-01).</summary>
+    [TestMethod]
+    public void ScopeIdentity_ReportsNumericBaseType()
+        => AreEqual("numeric|numeric", (string?)new Simulation().ExecuteScalar("""
+            create table t (id bigint identity, b int); insert t (b) values (1);
+            select concat(cast(sql_variant_property(scope_identity(), 'BaseType') as varchar(20)), '|', cast(sql_variant_property(ident_current('t'), 'BaseType') as varchar(20)))
+            """));
+
+    [TestMethod]
+    public void IdentityOverflow_NamesANumericColumnNumeric()
+        => new Simulation().AssertSqlError("create table t (id numeric(2, 0) identity(98, 1), b int); insert t (b) values (1), (2), (3)", 8115,
+            "Arithmetic overflow error converting IDENTITY to data type numeric.");
+
+    /// <summary>A DEFAULT on an identity column is Msg 1754 then Msg 1750 (probed 2026-10-01).</summary>
+    [TestMethod]
+    [DataRow("create table t (id int identity default 1, b int)")]
+    [DataRow("create table t (id int identity, b int); alter table t add constraint d default 1 for id")]
+    public void Identity_WithDefault_RaisesMsg1754(string sql)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 1754);
+        AreEqual(("Defaults cannot be created on columns with an IDENTITY attribute. Table 't', column 'id'.", 1750), (ex.Errors[0].Message, ex.Errors[1].Number));
     }
 }

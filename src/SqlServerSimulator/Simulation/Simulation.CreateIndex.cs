@@ -265,6 +265,7 @@ partial class Simulation
         if ((filter is not null || IndexCoversComputedColumn(table, index)) && IncorrectSetOptionNames(context) is { } setOptions)
             throw SimulatedSqlException.IncorrectSetOptions("CREATE INDEX", setOptions);
 
+        WarnOfWideIndexKey(context.Batch, table.Columns, [.. resolvedKeyColumns.Select(static key => key.ColumnOrdinal)], indexName, isClustered);
         var placement = PlacementFor(context.Batch, table, index.WrittenDataSpace);
         var filegroup = FilegroupFor(context.Batch, table, index.WrittenDataSpace);
         if (isUnique)

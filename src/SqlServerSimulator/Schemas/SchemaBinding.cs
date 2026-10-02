@@ -89,6 +89,35 @@ internal static class SchemaBinding
     }
 
     /// <summary>
+    /// The CHECK or DEFAULT constraint whose definition calls
+    /// <paramref name="function"/>, or null. Such a constraint pins the
+    /// function as a schema-bound module would — dropping or altering it is
+    /// Msg 3729 naming the constraint (probed 2026-10-01 against SQL Server
+    /// 2025). The stored definition spells a call <c>[schema].[name](</c>.
+    /// </summary>
+    internal static string? FindReferencingConstraint(Database database, UserDefinedFunction function)
+    {
+        var call = $"[{function.Schema.Name}].[{function.Name}](";
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, table) in schema.HeapTables)
+            {
+                foreach (var check in table.CheckConstraints)
+                {
+                    if (check.Definition?.Contains(call, StringComparison.OrdinalIgnoreCase) == true)
+                        return check.Name;
+                }
+                foreach (var column in table.Columns)
+                {
+                    if (column.DefaultConstraint is { Definition: { } definition } constraint && definition.Contains(call, StringComparison.OrdinalIgnoreCase))
+                        return constraint.Name;
+                }
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
     /// The schema-bound module with the lowest object id whose body calls
     /// <c>$PARTITION.</c><paramref name="functionName"/>, or null when none
     /// does — what refuses a <c>DROP PARTITION FUNCTION</c> (probed 2026-09-27

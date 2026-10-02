@@ -78,6 +78,9 @@ partial class Simulation
         else if (!outerSkipping)
         {
             connection.LastErrorNumber = 0;
+            // So is it for @@ROWCOUNT, which the branch reads as 0 whatever
+            // the condition queried (probed 2026-10-01 against SQL Server 2025).
+            connection.LastStatementRowCount = 0;
             // The condition closes with a DONE of its own, ahead of the branch
             // it chose (probed 2026-09-28 against SQL Server 2025).
             if (connection.FramesEveryStatement)

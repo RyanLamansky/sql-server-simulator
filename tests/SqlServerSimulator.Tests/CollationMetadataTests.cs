@@ -114,19 +114,17 @@ public sealed class CollationMetadataTests
     }
 
     /// <summary>
-    /// Names structurally valid but absent from the catalog raise
-    /// <c>NotSupportedException</c>. <c>Mapudungan_BIN</c> has a known
+    /// Names structurally valid but absent from the catalog are Msg 448 at
+    /// state 2 in a column definition. <c>Mapudungan_BIN</c> has a known
     /// prefix and a recognized suffix grammar but the specific pair
     /// doesn't ship in real SQL Server (probed 2026-05-21: Mapudungan is
     /// v100-only).
     /// </summary>
     [TestMethod]
-    public void Column_Collate_UnrecognizedName_RaisesNotSupported()
+    public void Column_Collate_UnrecognizedName_RaisesMsg448()
     {
-        var ex = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "CREATE TABLE t (a nvarchar(50) COLLATE Mapudungan_BIN)"));
-        Contains("Mapudungan_BIN", ex.Message);
-        Contains("recognized list", ex.Message);
+        var ex = new Simulation().AssertSqlError("CREATE TABLE t (a nvarchar(50) COLLATE Mapudungan_BIN)", 448);
+        AreEqual(("Invalid collation 'Mapudungan_BIN'.", 2), (ex.Errors[0].Message, ex.Errors[0].State));
     }
 
     /// <summary>
@@ -188,15 +186,14 @@ public sealed class CollationMetadataTests
     /// parser validates against the per-prefix tail-set catalog, not just
     /// the suffix grammar. <c>Pashto_CI_AS</c> (unversioned form of a
     /// v100-only locale) and <c>Latin1_General_140_BIN</c> (v140 doesn't
-    /// have BIN/BIN2) are both phantom; both reject.
+    /// have BIN/BIN2) are both phantom; both are Msg 448 (probed 2026-10-01).
     /// </summary>
     [TestMethod]
     [DataRow("Pashto_CI_AS")]
     [DataRow("Latin1_General_140_BIN")]
     [DataRow("Albanian_BIN2_UTF8")]
     public void PhantomCollationName_RejectedByParser(string name)
-        => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            $"CREATE TABLE t (a nvarchar(50) COLLATE {name})"));
+        => new Simulation().AssertSqlError($"CREATE TABLE t (a nvarchar(50) COLLATE {name})", 448, $"Invalid collation '{name}'.");
 
     [TestMethod]
     public void SysDatabases_RowShape_CarriesCompatibilityAndIsolation()

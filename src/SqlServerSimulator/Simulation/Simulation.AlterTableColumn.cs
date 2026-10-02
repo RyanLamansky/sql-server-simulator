@@ -179,6 +179,7 @@ partial class Simulation
         var combined = new HeapColumn[existingCount + newColumns.Length];
         Array.Copy(table.Columns, combined, existingCount);
         Array.Copy(newColumns, 0, combined, existingCount, newColumns.Length);
+        RejectOversizedMinimumRow(combined, table.Name);
         table.Columns = combined;
         table.RecomputeStorageProjections();
         // Each added column takes the next id past the watermark, so it never
@@ -218,6 +219,17 @@ partial class Simulation
             }
 
             RewriteHeapForAddColumns(table, newColumns, existingCount, added.WithValuesColumns, context);
+
+            // The rows the rewrite filled meet the columns' own constraints:
+            // a NOT NULL default a CHECK refuses is Msg 547, and a UNIQUE over
+            // a column every row fills alike — NULL included — Msg 1505
+            // (probed 2026-10-01 against SQL Server 2025).
+            for (var i = originalKeyCount; i < table.KeyConstraints.Count; i++)
+                ValidateExistingRowsForKeyConstraint(table, table.KeyConstraints[i], context.Batch);
+            for (var i = originalCheckCount; i < table.CheckConstraints.Count; i++)
+                ValidateExistingRowsForCheckConstraint(context, table, table.CheckConstraints[i]);
+            for (var i = originalFkCount; i < table.OutgoingForeignKeys.Count; i++)
+                ValidateExistingRowsForForeignKey(context, table, table.OutgoingForeignKeys[i]);
         }
         catch
         {
@@ -755,7 +767,7 @@ partial class Simulation
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             }, context.Batch);
             if (!Collation.IsRecognized(newCollationName))
-                throw new NotSupportedException($"COLLATE: collation '{newCollationName}' isn't on the simulator's recognized list.");
+                throw SimulatedSqlException.InvalidCollation(newCollationName, state: 2);
             context.MoveNextOptional();
         }
 
@@ -782,6 +794,9 @@ partial class Simulation
         }
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Masked })
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        // A column can't become an identity column (probed 2026-10-01).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Identity } identityKeyword)
+            throw SimulatedSqlException.SyntaxErrorNearKeyword(identityKeyword);
 
         if (context.Batch.IsSkipping)
             return true;
@@ -830,11 +845,22 @@ partial class Simulation
         {
             throw vectorError;
         }
+        if (newType == SqlType.RowVersion)
+            throw SimulatedSqlException.CannotAlterColumnToTimestamp(columnName);
+        // A change no CAST could make is Msg 206, rows or not (probed
+        // 2026-10-01 against SQL Server 2025: date to int, int to date, int to
+        // uniqueidentifier).
+        if (Parser.Expressions.Cast.IsIllegalExplicitConversion(existingCol.Type, newType))
+            throw SimulatedSqlException.OperandTypeClash(existingCol.Type, newType);
         // For ALTER COLUMN, the precedence is: explicit NULL/NOT NULL on the
         // ALTER clause wins; otherwise alias-default; otherwise preserve
         // existing column nullability. Matches column-on-CREATE-TABLE
         // semantics for the alias-default propagation step.
-        var newNullable = nullable ?? aliasIsNullable ?? existingCol.Nullable;
+        // A restatement naming neither NULL nor NOT NULL leaves the column
+        // nullable — `ALTER COLUMN a bigint` over a NOT NULL `a`, and under
+        // SET ANSI_NULL_DFLT_ON OFF too (probed 2026-10-01 against SQL Server
+        // 2025) — unless an alias type says otherwise.
+        var newNullable = nullable ?? aliasIsNullable ?? true;
 
         // Collation: explicit ALTER COLUMN ... COLLATE wins; otherwise
         // preserve the existing column's collation (when the type stays
@@ -947,7 +973,7 @@ partial class Simulation
         context.Batch.CurrentStatement.WritesRows = true;
         try
         {
-            RewriteHeapForAlterColumn(table, ordinal, newColumn, originalColumns);
+            RewriteHeapForAlterColumn(table, ordinal, newColumn, originalColumns, context.Batch);
         }
         catch
         {
@@ -1127,7 +1153,7 @@ partial class Simulation
     /// <see cref="OverflowException"/> from in-range integer narrowing is
     /// translated to Msg 220 with the target type name + offending value.
     /// </summary>
-    private static void RewriteHeapForAlterColumn(HeapTable table, int ordinal, HeapColumn newCol, HeapColumn[] originalColumns)
+    private static void RewriteHeapForAlterColumn(HeapTable table, int ordinal, HeapColumn newCol, HeapColumn[] originalColumns, BatchContext batch)
     {
         var oldStorageOrdinal = -1;
         var preAddStoredCount = 0;
@@ -1170,8 +1196,6 @@ partial class Simulation
         // stored-vs-computed shape from the old (we reject computed columns
         // up front, and IsStored is true for everything else).
 
-        var qualifiedTableName = QualifiedForViolation(table);
-
         var oldHeap = table.Heap;
         var newHeap = new Heap();
         // One encoded-row buffer for the rebuild — Insert copies into the page.
@@ -1187,57 +1211,16 @@ partial class Simulation
                     if (decoded.IsNull)
                     {
                         if (!newCol.Nullable)
-                            throw SimulatedSqlException.AlterColumnNullInNonNullColumn(newCol.Name, qualifiedTableName);
+                        {
+                            var nullError = SimulatedSqlException.AlterColumnNullInNonNullColumn(newCol.Name, QualifyForNullMessage(table));
+                            nullError.EndedColumnRewrite = true;
+                            throw nullError;
+                        }
                         newStoredValues[newStorageOrdinal] = SqlValue.Null(newCol.Type);
                     }
                     else
                     {
-                        SqlValue coerced;
-                        try
-                        {
-                            coerced = decoded.CoerceTo(newCol.Type);
-                        }
-                        catch (SimulatedSqlException conversion)
-                        {
-                            conversion.EndedColumnRewrite = true;
-                            throw;
-                        }
-                        catch (OverflowException)
-                        {
-                            // Same source-type-keyed error family as CAST and
-                            // column assignment (probe-confirmed for ALTER
-                            // COLUMN too, 2026-07-31): int-family sources give
-                            // the value-bearing Msg 220, float/real Msg 232,
-                            // a bigint source the generic Msg 8115 naming the
-                            // target, and a non-integer narrowing (decimal
-                            // precision change) Msg 8115's numeric wording.
-                            var overflow = SimulatedSqlException.TryConversionOverflow(decoded, newCol.Type)
-                                ?? (SqlType.IsIntegerCategory(decoded.Type)
-                                    ? SimulatedSqlException.ArithmeticOverflow(newCol.Type.ToString()!)
-                                    : SimulatedSqlException.ArithmeticOverflowToNumeric());
-                            overflow.EndedColumnRewrite = true;
-                            throw overflow;
-                        }
-                        // Bounded-length validation for narrowing varchar /
-                        // nvarchar / varbinary. The CoerceTo path itself is
-                        // length-agnostic at the SqlValue level — bounded vs
-                        // unspecified is a column-level distinction — so the
-                        // truncation check lives here.
-                        // varchar / char budget N bytes of their collation's
-                        // code page; nvarchar budgets N UTF-16 code units.
-                        var narrowingEncoding = newCol.Type is VarcharSqlType or CharSqlType
-                            ? newCol.Type.Collation!.StorageEncoding
-                            : null;
-                        if (newCol.MaxLength is int max
-                            && max != SqlType.MaxLengthSentinel
-                            && (narrowingEncoding?.GetByteCount(coerced.AsString) ?? coerced.AsString.Length) > max)
-                        {
-                            // Real reports no truncated value for ALTER COLUMN
-                            // (probed 2026-09-23).
-                            throw SimulatedSqlException.StringOrBinaryWouldBeTruncated(QualifyForTruncationMessage(table), newCol.Name, string.Empty, max, narrowingEncoding);
-                        }
-
-                        newStoredValues[newStorageOrdinal] = coerced;
+                        newStoredValues[newStorageOrdinal] = ConvertForAlteredColumn(decoded, newCol, table, batch);
                     }
                 }
                 else
@@ -1255,6 +1238,51 @@ partial class Simulation
         }
 
         table.Heap = newHeap;
+    }
+
+    /// <summary>
+    /// One stored value converted for <c>ALTER COLUMN</c>: a write's rules —
+    /// a string or binary too long is Msg 2628 (naming no value), a number
+    /// into a string converts as a <c>CAST</c> would, and under <c>SET
+    /// ANSI_WARNINGS OFF</c> a truncation cuts and an overflow stores NULL
+    /// (probed 2026-10-01 against SQL Server 2025) — with the overflow errors
+    /// the column change reports, each followed by Msg 3621.
+    /// </summary>
+    private static SqlValue ConvertForAlteredColumn(SqlValue value, HeapColumn column, HeapTable table, BatchContext batch)
+    {
+        var owedNotice = batch.CurrentStatement.OwesOverflowNotice;
+        try
+        {
+            var source = EnforceMaxLength(value, column, table, batch.Connection, reportsValue: false);
+            try
+            {
+                return source.CoerceTo(column.Type);
+            }
+            catch (OverflowException)
+            {
+                // Same source-type-keyed error family as CAST and column
+                // assignment (probe-confirmed for ALTER COLUMN too,
+                // 2026-07-31): int-family sources give the value-bearing Msg
+                // 220, float/real Msg 232, a bigint source the generic Msg 8115
+                // naming the target, and a non-integer narrowing (decimal
+                // precision change) Msg 8115's numeric wording.
+                throw SimulatedSqlException.TryConversionOverflow(source, column.Type)
+                    ?? (SqlType.IsIntegerCategory(source.Type)
+                        ? SimulatedSqlException.ArithmeticOverflow(column.Type.ToString()!)
+                        : SimulatedSqlException.ArithmeticOverflowToNumeric());
+            }
+        }
+        catch (SimulatedSqlException overflow) when (batch.AbsorbsArithmeticFault(overflow))
+        {
+            // The column change sends no Msg 3606 for it (probed 2026-10-01).
+            batch.CurrentStatement.OwesOverflowNotice = owedNotice;
+            return Parser.Expressions.Cast.AbsorbedOverflow(column.Type);
+        }
+        catch (SimulatedSqlException conversion)
+        {
+            conversion.EndedColumnRewrite = true;
+            throw;
+        }
     }
 
     private static void RewriteHeapForDropColumns(HeapTable table, HeapColumn[] oldStoredColumns, int[] oldStorageToNew, int newStoredCount)

@@ -264,10 +264,15 @@ partial class Simulation
             refusals.Add(error);
         }
         view?.ThrowRefusals();
+        outputTarget?.RequireAssignable(expressions, schema);
 
         var projection = NoteClientOutput(context.Batch, new OutputProjection([.. expressions], [.. names], schema, table, source: null, context.Batch, outputTarget, view: view, logged: logged)
         {
             ReadsPartners = readsPartners || logged?.ReadsPartners == true,
+            Nullability = outputTarget is null
+                ? InferOutputNullability(context.Batch, expressions, name =>
+                    !BuiltInToken.EqualsAny(name.ImmediateQualifier, "INSERTED", "DELETED") || PseudoColumnIsNullable(collation, columns, name), ResolveOutputType)
+                : null,
         });
         return IsClientOutputAfterInto(context, projection)
             ? TryParseOutputClauseForMutation(context, table, allowInserted, allowDeleted, view, logged: projection, partners)
@@ -286,11 +291,16 @@ partial class Simulation
     private static bool IsClientOutputAfterInto(ParserContext context, OutputProjection projection) =>
         projection.HasTarget && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output };
 
-    /// <summary>Parses one <c>OUTPUT</c> item, where a subquery is Msg 10705.</summary>
+    /// <summary>Parses one <c>OUTPUT</c> item, where a subquery is Msg 10705 and an aggregate Msg 158.</summary>
     private static Expression ParseOutputItem(ParserContext context)
     {
         using var outputItem = ParserScope.Enter(ref context.InOutputItem, true);
-        return Expression.Parse(context);
+        var aggregates = new List<AggregateExpression>();
+        Expression parsed;
+        using (ParserScope.Enter(ref context.AggregateCollector, aggregates))
+            parsed = Expression.Parse(context);
+        Selection.RefuseClauseAggregates(context.Batch, aggregates, SimulatedSqlException.AggregateInOutputClause());
+        return parsed;
     }
 
     /// <summary>
@@ -358,8 +368,11 @@ partial class Simulation
         {
             throw BatchContext.IsTableVariableName(targetName.Leaf)
                 ? SimulatedSqlException.MustDeclareTableVariable(targetName.Leaf)
+                : context.Batch.TryResolveView(targetName, out _) || context.CteBindings?.ContainsKey(targetName.Leaf) == true
+                ? SimulatedSqlException.OutputIntoViewTarget(targetName.ToString())
                 : SimulatedSqlException.InvalidObjectName(targetName);
         }
+        RejectRestrictedOutputIntoTarget(context.Batch, targetTable, targetName.ToString());
         // A table variable the batch declares is found again by name in each
         // batch that runs the statement (see OutputTarget), so naming one leaves
         // the statement's plan shareable; a parameter's rows are another matter.
@@ -387,6 +400,8 @@ partial class Simulation
                 }
                 if (matched < 0)
                     throw SimulatedSqlException.InvalidColumnName(new MultiPartName(columnNameTok.Value));
+                if (targetTable.Columns[matched].Computed is not null)
+                    throw SimulatedSqlException.ColumnCannotBeModified(targetTable.Columns[matched].Name);
                 ordinals.Add(matched);
                 context.MoveNextRequired();
             } while (context.Token is Operator { Character: ',' });
@@ -416,16 +431,20 @@ partial class Simulation
             // fewer is Msg 213, more would have to write the identity column
             // and is Msg 8101 (probe-confirmed matrix against SQL Server 2025 —
             // a target of identity + N plain columns accepts exactly N).
+            // A computed column takes no value either (probed 2026-10-01).
             var fillable = new List<int>(targetTable.Columns.Length);
+            var computed = 0;
             for (var i = 0; i < targetTable.Columns.Length; i++)
             {
-                if (targetTable.Columns[i].Identity is null)
+                if (targetTable.Columns[i].Computed is not null)
+                    computed++;
+                else if (targetTable.Columns[i].Identity is null)
                     fillable.Add(i);
             }
 
             if (projectionColumnCount > fillable.Count)
             {
-                throw fillable.Count == targetTable.Columns.Length
+                throw fillable.Count + computed == targetTable.Columns.Length
                     ? SimulatedSqlException.ColumnCountDoesNotMatchTableDefinition()
                     : SimulatedSqlException.ExplicitIdentityNeedsColumnList(QualifiedOutputTargetName(targetName, targetTable));
             }
@@ -440,6 +459,44 @@ partial class Simulation
             columnOrdinals,
             declaredTableVariable ? targetName.Leaf : null,
             replayable: declaredTableVariable || (!targetTable.IsTableVariable && !BlocksDmlPlan(context.Batch, targetTable, clientOutput: false)));
+    }
+
+    /// <summary>
+    /// Refuses an <c>OUTPUT … INTO</c> target with an enabled trigger (Msg
+    /// 331), on either side of an enabled foreign key (Msg 332), or with an
+    /// enabled check constraint or a bound rule (Msg 333). Real settles these
+    /// as the statement compiles, so a trigger the same batch disables still
+    /// refuses it (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static void RejectRestrictedOutputIntoTarget(BatchContext batch, HeapTable target, string writtenName)
+    {
+        if (target.IsTableVariable)
+            return;
+        foreach (var trigger in TriggersAttachedTo(batch, target))
+        {
+            if (!trigger.IsDisabled)
+                throw SimulatedSqlException.OutputIntoTriggeredTarget(writtenName);
+        }
+        foreach (var key in target.OutgoingForeignKeys)
+        {
+            if (!key.IsDisabled)
+                throw SimulatedSqlException.OutputIntoForeignKeyTarget(writtenName, key.Name);
+        }
+        foreach (var key in target.IncomingForeignKeys)
+        {
+            if (!key.IsDisabled)
+                throw SimulatedSqlException.OutputIntoForeignKeyTarget(writtenName, key.Name);
+        }
+        foreach (var check in target.CheckConstraints)
+        {
+            if (!check.IsDisabled)
+                throw SimulatedSqlException.OutputIntoCheckedTarget(writtenName, check.Name);
+        }
+        foreach (var column in target.Columns)
+        {
+            if (column.BoundRule is { } rule)
+                throw SimulatedSqlException.OutputIntoCheckedTarget(writtenName, rule.Name);
+        }
     }
 
     /// <summary>
@@ -460,6 +517,23 @@ partial class Simulation
         /// </summary>
         private readonly HeapTable? table = tableVariable is null ? target : null;
         public readonly int[] ProjectionToTargetOrdinal = projectionToTargetOrdinal;
+
+        /// <summary>The target's columns, which every batch's table variable of the name shares.</summary>
+        private readonly HeapColumn[] targetColumns = target.Columns;
+
+        /// <summary>
+        /// Each projected column meets its target column's one-way assignment
+        /// rule as the statement compiles — an <c>int</c> into a <c>date</c>
+        /// is Msg 206 (probed 2026-10-01 against SQL Server 2025).
+        /// </summary>
+        public void RequireAssignable(List<Expression> expressions, SqlType[] schema)
+        {
+            for (var i = 0; i < schema.Length && i < this.ProjectionToTargetOrdinal.Length; i++)
+            {
+                if (schema[i] is { } type && !IsMergeActionRef(expressions[i]))
+                    AssignmentRules.RequireAssignable(expressions[i], type, this.targetColumns[this.ProjectionToTargetOrdinal[i]].Type);
+            }
+        }
 
         /// <summary>
         /// Whether a cached DML plan may hold this target: a table variable the
@@ -507,7 +581,7 @@ partial class Simulation
                 // encoder's type check as a bare ArgumentException, which over
                 // the wire aborts the response mid-stream and the client
                 // reports a severe protocol error rather than anything useful.
-                targetValues[ordinal] = CoerceForInsert(projectedValues[i], target.Columns[ordinal]);
+                targetValues[ordinal] = CoerceForInsert(EnforceMaxLength(projectedValues[i], target.Columns[ordinal], target, batch.Connection), target.Columns[ordinal]);
                 covered[ordinal] = true;
             }
             for (var i = 0; i < targetValues.Length; i++)
@@ -520,10 +594,14 @@ partial class Simulation
                 // skips identity columns entirely, and a column list may too.
                 targetValues[i] = column.Identity is not null
                     ? CoerceForIdentity(GenerateIdentity(column), column)
+                    : column.Type == SqlType.RowVersion
+                    ? SqlValue.FromRowVersion(batch.DatabaseFor(target).AllocateRowVersion())
                     : column.Default is { } defaultExpression
                         ? CoerceForInsert(defaultExpression.Run(new RuntimeContext(NoColumnResolver, batch)), column)
                         : SqlValue.Null(column.Type);
             }
+            EvaluateComputedColumns(target, targetValues, batch);
+            EnforceNotNull(target, targetValues);
             var undoLog = target.IsTableVariable ? batch.CurrentTableVarUndoLog : batch.CurrentUndoLog;
             var storedValues = ProjectStoredValues(target, targetValues);
             // A guard per row, so a key set the statement cached for a
@@ -618,7 +696,7 @@ partial class Simulation
                 context.MoveNextOptional();
                 continue;
             }
-            var expr = Expression.Parse(context);
+            var expr = ParseOutputItem(context);
             if (destinationTable.GraphKind != GraphTableKind.None)
                 GraphColumns.BindPseudoReferences(expr, destinationTable.Columns);
             switch (context.Token)
@@ -650,11 +728,51 @@ partial class Simulation
             refusals.Add(error);
         }
         view?.ThrowRefusals();
+        outputTarget?.RequireAssignable(expressions, schema);
 
-        var projection = NoteClientOutput(context.Batch, new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames, context.Batch, outputTarget, view: view, logged: logged));
+        var projection = NoteClientOutput(context.Batch, new OutputProjection(expressions, [.. columnNames], schema, destinationTable, sourceColumnNames, context.Batch, outputTarget, view: view, logged: logged)
+        {
+            Nullability = outputTarget is null
+                ? InferOutputNullability(context.Batch, expressions, name =>
+                    !BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED") || PseudoColumnIsNullable(context.Batch.CurrentDatabase.Collation, columns, name), ResolveOutputType)
+                : null,
+        });
         return IsClientOutputAfterInto(context, projection)
             ? TryParseOutputClause(context, destinationTable, sourceColumnNames, view, logged: projection)
             : projection;
+    }
+
+    /// <summary>
+    /// Each <c>OUTPUT</c> column's nullability on the wire, inferred as a
+    /// <c>SELECT</c> projection's is: <c>INSERTED.c</c> / <c>DELETED.c</c>
+    /// take column <c>c</c>'s declaration, a literal and <c>ISNULL</c> are
+    /// NOT NULL, arithmetic is nullable (probed 2026-10-01 against SQL Server
+    /// 2025). <paramref name="columnIsNullable"/> answers for the names the
+    /// clause reads; a target with enabled triggers refuses a client-bound
+    /// clause (Msg 334), so no trigger's rows reach this inference.
+    /// </summary>
+    private static bool[] InferOutputNullability(BatchContext batch, List<Expression> expressions, Func<MultiPartName, bool> columnIsNullable, Func<MultiPartName, SqlType> columnType)
+    {
+        var context = new NullabilityContext(batch, columnIsNullable, columnType);
+        var nullability = new bool[expressions.Count];
+        for (var i = 0; i < nullability.Length; i++)
+            nullability[i] = !IsMergeActionRef(expressions[i]) && expressions[i].ResultIsNullable(context);
+        return nullability;
+    }
+
+    /// <summary>
+    /// Whether the <c>INSERTED</c> / <c>DELETED</c> column <paramref name="name"/>
+    /// names in <paramref name="columns"/> is declared nullable; an unknown
+    /// name answers nullable.
+    /// </summary>
+    private static bool PseudoColumnIsNullable(Collation collation, HeapColumn[] columns, MultiPartName name)
+    {
+        for (var i = 0; i < columns.Length; i++)
+        {
+            if (collation.Equals(columns[i].Name, name.Leaf))
+                return columns[i].Nullable;
+        }
+        return true;
     }
 
     /// <summary>
@@ -693,6 +811,12 @@ partial class Simulation
         OutputProjection? logged = null)
     {
         public readonly SqlType[] Schema = schema;
+
+        /// <summary>
+        /// Each client-bound column's nullability (see
+        /// <see cref="InferOutputNullability"/>), or null to claim all nullable.
+        /// </summary>
+        public bool[]? Nullability;
 
         /// <summary>
         /// The columns <c>INSERTED</c> / <c>DELETED</c> name: the target

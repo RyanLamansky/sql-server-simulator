@@ -58,6 +58,8 @@ public sealed partial class Simulation
                 && SchemaBinding.FindReferencingModule(context.CurrentDatabase, existing) is { } referencing
                 ? throw SimulatedSqlException.CannotAlterReferencedBySchemaBoundObject(
                     name.ToString(), existing.Name, referencing.Name)
+                : existing is UserDefinedFunction function && SchemaBinding.FindReferencingConstraint(context.CurrentDatabase, function) is { } constraint
+                ? throw SimulatedSqlException.CannotAlterReferencedBySchemaBoundObject(name.ToString(), existing.Name, constraint)
                 : existing;
         }
         return schema.HasNameInSharedNamespace(name.Leaf)

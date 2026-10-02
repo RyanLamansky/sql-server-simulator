@@ -1307,6 +1307,11 @@ public sealed class SimulatedDbConnection : DbConnection
     internal string? IdentityInsertTable;
 
     /// <summary>
+    /// <see cref="IdentityInsertTable"/> three-part, as Msg 8107 names it.
+    /// </summary>
+    internal string? IdentityInsertQualifiedName;
+
+    /// <summary>
     /// Per-session key/value store backing <c>SESSION_CONTEXT(key)</c> and
     /// <c>sp_set_session_context</c>. Keys are case-sensitive (<see cref="StringComparer.Ordinal"/>),
     /// matching SQL Server's binary key comparison regardless of database

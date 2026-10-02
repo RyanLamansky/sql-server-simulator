@@ -22,14 +22,19 @@ partial class Simulation
     /// FK (probe-confirmed semantics). A non-NULL tuple that doesn't match any
     /// row of <see cref="ForeignKey.ReferencedTable"/> on the FK's referenced
     /// columns raises Msg 547 with the constraint name.
+    /// <paramref name="selfReferencing"/> is null to check every key, false for
+    /// only the keys referencing another table, true for only those referencing
+    /// <paramref name="childTable"/> itself, which an INSERT checks once its
+    /// rows are written so a row may reference itself or a later row (probed
+    /// 2026-10-01 against SQL Server 2025).
     /// </summary>
-    private static void EnforceOutgoingForeignKeys(HeapTable childTable, IReadOnlyList<SqlValue[]> newRows, ParserContext context, string verb)
+    private static void EnforceOutgoingForeignKeys(HeapTable childTable, IReadOnlyList<SqlValue[]> newRows, ParserContext context, string verb, bool? selfReferencing = null)
     {
         if (childTable.OutgoingForeignKeys.Count == 0)
             return;
         foreach (var fk in childTable.OutgoingForeignKeys)
         {
-            if (fk.IsDisabled)
+            if (fk.IsDisabled || (selfReferencing is { } self && self != ReferenceEquals(fk.ReferencedTable, childTable)))
                 continue;
             foreach (var newRow in newRows)
             {
@@ -110,10 +115,10 @@ partial class Simulation
                 CascadeDeleteChildRows(fk, matchingChildRows, context, depth);
                 break;
             case ReferentialAction.SetNull:
-                CascadeSetChildKeysToValue(fk, matchingChildRows, useDefault: false, context, depth);
+                CascadeSetChildKeysToValue(fk, matchingChildRows, useDefault: false, context, depth, verb);
                 break;
             case ReferentialAction.SetDefault:
-                CascadeSetChildKeysToValue(fk, matchingChildRows, useDefault: true, context, depth);
+                CascadeSetChildKeysToValue(fk, matchingChildRows, useDefault: true, context, depth, verb);
                 break;
         }
     }
@@ -377,7 +382,8 @@ partial class Simulation
         HeapTable parentTable,
         List<(SqlValue[] OldFull, SqlValue[] NewFull)> affectedPairs,
         ParserContext context,
-        int depth)
+        int depth,
+        string verb = "UPDATE")
     {
         if (parentTable.IncomingForeignKeys.Count == 0)
             return;
@@ -421,7 +427,7 @@ partial class Simulation
             switch (fk.UpdateAction)
             {
                 case ReferentialAction.NoAction:
-                    throw BuildParentSideViolation(fk, context, "UPDATE");
+                    throw BuildParentSideViolation(fk, context, verb);
                 case ReferentialAction.Cascade:
                     RewriteChildFkColumns(fk, matching, context, depth, mode: CascadeWriteMode.MatchParentNew);
                     break;
@@ -429,7 +435,7 @@ partial class Simulation
                     RewriteChildFkColumns(fk, matching, context, depth, mode: CascadeWriteMode.SetNull);
                     break;
                 case ReferentialAction.SetDefault:
-                    RewriteChildFkColumns(fk, matching, context, depth, mode: CascadeWriteMode.SetDefault);
+                    RewriteChildFkColumns(fk, matching, context, depth, mode: CascadeWriteMode.SetDefault, verb);
                     break;
             }
         }
@@ -442,7 +448,8 @@ partial class Simulation
         List<(int PageIndex, int SlotIndex, SqlValue[] Full, SqlValue[] ParentNew)> matching,
         ParserContext context,
         int depth,
-        CascadeWriteMode mode)
+        CascadeWriteMode mode,
+        string verb = "UPDATE")
     {
         var childTable = fk.ChildTable;
         var undoLog = childTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
@@ -489,6 +496,8 @@ partial class Simulation
             ClusteredScan.NoteKeyAssignment(childTable, fk.ChildColumnOrdinals, (pageIndex, slotIndex), undoLog);
             newPairs.Add((oldClone, newRow));
         }
+        if (mode == CascadeWriteMode.SetDefault)
+            RequireDefaultedParents(fk, newPairs, context, verb);
         tracking?.RecordKeyMoves(context.Batch, childTable, keyMoves);
         childTable.NoteColumnsUpdated(fk.ChildColumnOrdinals);
         // Recurse: the child rows just got their FK columns rewritten — if
@@ -527,7 +536,8 @@ partial class Simulation
         List<(int PageIndex, int SlotIndex, SqlValue[] FullValues)> matchingChildRows,
         bool useDefault,
         ParserContext context,
-        int depth)
+        int depth,
+        string verb)
     {
         var childTable = fk.ChildTable;
         var undoLog = childTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
@@ -563,6 +573,8 @@ partial class Simulation
             ClusteredScan.NoteKeyAssignment(childTable, fk.ChildColumnOrdinals, (pageIndex, slotIndex), undoLog);
             newPairs.Add((oldClone, newRow));
         }
+        if (useDefault)
+            RequireDefaultedParents(fk, newPairs, context, verb);
         tracking?.RecordKeyMoves(context.Batch, childTable, keyMoves);
         childTable.NoteColumnsUpdated(fk.ChildColumnOrdinals);
         // For SET NULL / SET DEFAULT under a DELETE on parent, the recursion
@@ -571,6 +583,20 @@ partial class Simulation
         // verb context.
         EnforceIncomingFkOnUpdate(childTable, newPairs, context, depth + 1);
         FireCascadeUpdateTriggers(childTable, fk.ChildColumnOrdinals, newPairs, context);
+    }
+
+    /// <summary>
+    /// A <c>SET DEFAULT</c> action's rewritten child rows must still find a
+    /// parent: a default no parent row carries fails the parent's statement
+    /// with the child-side Msg 547 (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static void RequireDefaultedParents(ForeignKey fk, List<(SqlValue[] OldFull, SqlValue[] NewFull)> rewritten, ParserContext context, string verb)
+    {
+        foreach (var (_, newRow) in rewritten)
+        {
+            if (!FkTupleHasNull(fk.ChildColumnOrdinals, newRow) && !ReferencedRowExists(fk, newRow, context.Batch))
+                throw BuildChildSideViolation(fk, context, verb);
+        }
     }
 
     private static SqlValue EvaluateColumnDefault(HeapColumn column, ParserContext context)

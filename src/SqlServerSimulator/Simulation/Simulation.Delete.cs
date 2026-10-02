@@ -521,7 +521,7 @@ partial class Simulation
             FireInsteadOfDeleteTrigger(context, table, sourceView, deleted);
             return output is null || output.HasTarget
                 ? new SimulatedNonQuery(deleted.Count)
-                : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, deleted.Count);
+                : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, deleted.Count) { ColumnNullability = output.Nullability };
         }
 
         var undoLog = table.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
@@ -563,7 +563,7 @@ partial class Simulation
             if (!output.HasTarget)
             {
                 FireAfterDeleteTriggers(context, table, deleted);
-                return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows, deleted.Count);
+                return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows, deleted.Count) { ColumnNullability = output.Nullability };
             }
         }
         FireAfterDeleteTriggers(context, table, deleted);

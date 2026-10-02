@@ -1062,8 +1062,14 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        // A view is Msg 8105 and a missing object Msg 1088, each naming the
+        // object as written (probed 2026-10-01 against SQL Server 2025).
         if (!context.Batch.TryResolveTable(tableName, out var heapTable))
-            throw SimulatedSqlException.InvalidObjectName(tableName);
+        {
+            throw context.Batch.TryResolveView(tableName, out _)
+                ? SimulatedSqlException.IdentityInsertNotUserTable(tableName.ToString())
+                : SimulatedSqlException.IdentityInsertObjectNotFound(tableName.ToString());
+        }
 
         if (onOff == Keyword.On)
         {
@@ -1071,13 +1077,16 @@ partial class Simulation
             // target — Msg 8106 (probe-confirmed against SQL Server 2025).
             if (heapTable.IdentityOrdinal < 0)
                 throw SimulatedSqlException.TableHasNoIdentityForSet(heapTable.Name);
+            // Msg 8107 names the held table three-part.
             if (context.Connection.IdentityInsertTable is string held && !context.Batch.CurrentDatabase.Collation.Equals(held, heapTable.Name))
-                throw SimulatedSqlException.IdentityInsertAlreadyOn(held, heapTable.Name);
+                throw SimulatedSqlException.IdentityInsertAlreadyOn(context.Connection.IdentityInsertQualifiedName ?? held, heapTable.Name);
             context.Connection.IdentityInsertTable = heapTable.Name;
+            context.Connection.IdentityInsertQualifiedName = QualifyForTruncationMessage(heapTable);
         }
         else if (context.Batch.CurrentDatabase.Collation.Equals(context.Connection.IdentityInsertTable, heapTable.Name))
         {
             context.Connection.IdentityInsertTable = null;
+            context.Connection.IdentityInsertQualifiedName = null;
         }
         return true;
     }

@@ -545,8 +545,10 @@ partial class Simulation
                 // is: real gathers name-resolution errors across the whole
                 // body but stops at a Msg 529, so a body whose first
                 // statement carries one reports it alone even when a later
-                // statement names a missing column (probed 2026-08-05).
-                if (ex.Number is 529 or 8622)
+                // statement names a missing column (probed 2026-08-05). A
+                // MERGE's Msg 5324 is its parser's, so nothing follows it
+                // (probed 2026-10-01).
+                if (ex.Number is 529 or 5324 or 8622)
                     batch.BatchAborted = true;
             }
             else if (CaughtByTryFrame(batch, ex))

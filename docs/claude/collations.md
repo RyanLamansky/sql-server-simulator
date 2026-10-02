@@ -214,7 +214,7 @@ The pseudo-collations **`catalog_default`** and **`database_default`** resolve b
 SMO's system-configuration query uses `name COLLATE catalog_default` to normalize catalog string columns.
 
 The **column-definition** COLLATE sites — CREATE TABLE / ALTER COLUMN / `DECLARE @t TABLE` / CREATE TYPE AS TABLE / `#temp` — resolve the same two keywords through the shared `CollateExpression.ResolvePseudoCollationName(name, batch)` seam, which expands `database_default` → the active database's collation *name* and `catalog_default` → the catalog collation name, storing the concrete name as the column's collation (so `sys.columns.collation_name` reports the resolved name, matching real).
-Any other name passes through unchanged to the per-site `Collation.IsRecognized` gate — an unmodeled-but-valid collation still raises `NotSupportedException` there rather than Msg 448, preserving the modeled-vs-unmodeled distinction.
+Any other name passes through unchanged to the per-site `Collation.IsRecognized` gate, where a name it doesn't know is real's Msg 448 at state 2, as it is for a postfix `COLLATE` at state 1 (probed 2026-10-01 against SQL Server 2025).
 The keyword match is case-insensitive (`COLLATE DATABASE_DEFAULT` works).
 Resolution at bind time is plan-cache-safe: column DDL isn't plan-cached, and the cache keys per database regardless.
 The SSMS Disk Usage report declares `nvarchar(…) COLLATE database_default` table variables; before this seam those were rejected.

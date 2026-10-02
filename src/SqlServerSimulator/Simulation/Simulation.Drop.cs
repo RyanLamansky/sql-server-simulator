@@ -100,42 +100,53 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
+        // A name the list can't drop — missing, or still referenced — is
+        // reported and the list goes on to the next (probed 2026-10-01 against
+        // SQL Server 2025: `DROP TABLE nope, t` drops t).
+        List<SimulatedSqlException>? refused = null;
         while (true)
         {
             var name = BatchContext.ParseObjectName(context);
-            switch (targetKind)
+            try
             {
-                case DropTargetKind.Function:
-                    DropOneFunction(context, name, ifExists);
-                    break;
-                case DropTargetKind.Aggregate:
-                    DropOneFunction(context, name, ifExists, aggregate: true);
-                    break;
-                case DropTargetKind.View:
-                    DropOneView(context, name, ifExists);
-                    break;
-                case DropTargetKind.Procedure:
-                    DropOneProcedure(context, name, ifExists);
-                    break;
-                case DropTargetKind.Type:
-                    DropOneType(context, name, ifExists);
-                    break;
-                case DropTargetKind.Sequence:
-                    DropOneSequence(context, name, ifExists);
-                    break;
-                case DropTargetKind.Trigger:
-                    DropOneTrigger(context, name, ifExists);
-                    break;
-                case DropTargetKind.Schema:
-                    DropOneSchema(context, name, ifExists);
-                    break;
-                case DropTargetKind.Default:
-                case DropTargetKind.Rule:
-                    DropOneBindable(context, name, ifExists, isRule: targetKind == DropTargetKind.Rule);
-                    break;
-                default:
-                    DropOneTable(context, name, ifExists);
-                    break;
+                switch (targetKind)
+                {
+                    case DropTargetKind.Function:
+                        DropOneFunction(context, name, ifExists);
+                        break;
+                    case DropTargetKind.Aggregate:
+                        DropOneFunction(context, name, ifExists, aggregate: true);
+                        break;
+                    case DropTargetKind.View:
+                        DropOneView(context, name, ifExists);
+                        break;
+                    case DropTargetKind.Procedure:
+                        DropOneProcedure(context, name, ifExists);
+                        break;
+                    case DropTargetKind.Type:
+                        DropOneType(context, name, ifExists);
+                        break;
+                    case DropTargetKind.Sequence:
+                        DropOneSequence(context, name, ifExists);
+                        break;
+                    case DropTargetKind.Trigger:
+                        DropOneTrigger(context, name, ifExists);
+                        break;
+                    case DropTargetKind.Schema:
+                        DropOneSchema(context, name, ifExists);
+                        break;
+                    case DropTargetKind.Default:
+                    case DropTargetKind.Rule:
+                        DropOneBindable(context, name, ifExists, isRule: targetKind == DropTargetKind.Rule);
+                        break;
+                    default:
+                        DropOneTable(context, name, ifExists);
+                        break;
+                }
+            }
+            catch (SimulatedSqlException error) when (error.Number is 3701 or 3726 or 3729)
+            {
+                (refused ??= []).Add(error);
             }
 
             // ParseObjectName leaves the cursor on the last name segment;
@@ -159,7 +170,7 @@ partial class Simulation
                 break;
             context.MoveNextRequired();
         }
-        return true;
+        return refused is null ? true : throw SimulatedSqlException.Aggregate(refused);
     }
 
     private enum DropTargetKind { None, Table, Function, View, Procedure, Type, Sequence, Trigger, Schema, Default, Rule, Aggregate }
@@ -729,6 +740,8 @@ partial class Simulation
             throw SimulatedSqlException.DropObjectPermissionDenied("function", name.Leaf);
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
         RejectDropOfSchemaBoundReferent(context.CurrentDatabase, existing, "DROP FUNCTION", name);
+        if (existing is UserDefinedFunction function && SchemaBinding.FindReferencingConstraint(context.CurrentDatabase, function) is { } constraint)
+            throw SimulatedSqlException.CannotDropReferencedBySchemaBoundObject("DROP FUNCTION", name.ToString(), constraint);
         if (!schema.Functions.TryRemove(name.Leaf, out var removed) && !ifExists)
             throw SimulatedSqlException.CannotDropFunctionDoesNotExist(name.ToString());
         if (removed is not null)

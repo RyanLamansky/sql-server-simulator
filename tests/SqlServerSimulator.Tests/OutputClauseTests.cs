@@ -644,4 +644,66 @@ public class OutputClauseTests
             _ = simulation.ExecuteNonQuery(statement);
         Assert.AreEqual(landed, simulation.ExecuteScalar("select count(*) from t"));
     }
+
+    /// <summary>
+    /// An OUTPUT column's nullability on the wire follows a SELECT's
+    /// inference: INSERTED / DELETED take the column's declaration, a literal
+    /// and ISNULL are NOT NULL, arithmetic is nullable; a MERGE's image a
+    /// clause can leave absent, and <c>$action</c> never (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert t (a) output inserted.a, inserted.b, inserted.id, inserted.d, inserted.a + 1, 'lit', isnull(inserted.b, 0) values (1)", "False,True,False,False,True,False,False")]
+    [DataRow("update t set b = 1 output inserted.a, deleted.a, deleted.b, inserted.id", "False,False,True,False")]
+    [DataRow("delete t output deleted.a, deleted.b", "False,True")]
+    [DataRow("merge t using (values (1, 5)) s(a, v) on t.a = s.a when matched then update set b = s.v output $action, inserted.a, deleted.a, s.v;", "False,False,False,False")]
+    [DataRow("merge t using (values (1, 5)) s(a, v) on t.a = s.a when matched then update set b = s.v when not matched then insert (a) values (s.a) when not matched by source then delete output $action, inserted.a, deleted.a, s.v;", "False,True,True,True")]
+    public void Output_ColumnNullability(string statement, string expected)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int not null, b int null, id int identity, d as isnull(a, 0)); insert t (a) values (1)");
+        Assert.AreEqual(expected, string.Join(",", simulation.ColumnNullability(statement)));
+    }
+
+    /// <summary>
+    /// OUTPUT … INTO refuses a view (Msg 330) and a table with an enabled
+    /// trigger (331), on either side of a foreign key (332), or with a CHECK
+    /// constraint or a rule (333) — while compiling, so nothing runs (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table o (x int); exec('create view v as select x from o'); create table t (a int); insert t output inserted.a into v values (1)", 330)]
+    [DataRow("create table o (x int); exec('create trigger tr on o after insert as select 1'); create table t (a int); insert t output inserted.a into o values (1)", 331)]
+    [DataRow("create table p (id int primary key); create table o (x int references p(id)); create table t (a int); insert t output inserted.a into o values (1)", 332)]
+    [DataRow("create table p (id int primary key); create table c (pid int references p(id)); create table t (a int); insert t output inserted.a into p values (1)", 332)]
+    [DataRow("create table o (x int check (x > 5)); create table t (a int); insert t output inserted.a into o values (1)", 333)]
+    public void OutputInto_RestrictedTarget(string sql, int number)
+        => _ = new Simulation().AssertSqlError(sql, number);
+
+    [TestMethod]
+    public void OutputInto_DisabledCheckTarget_IsAccepted()
+        => Assert.AreEqual(1, new Simulation().ExecuteScalar<int>("""
+            create table o (x int constraint ck check (x > 5)); alter table o nocheck constraint ck;
+            create table t (a int); insert t output inserted.a into o values (1); select count(*) from o
+            """));
+
+    /// <summary>A computed target column takes no value: the positional list skips it, a named one is Msg 271 (probed 2026-10-01).</summary>
+    [TestMethod]
+    public void OutputInto_ComputedTargetColumn()
+    {
+        var simulation = new Simulation();
+        Assert.AreEqual(2, simulation.ExecuteScalar<int>("create table o (x int, c as x + 1); create table t (a int); insert t output inserted.a into o values (1); select c from o"));
+        _ = simulation.AssertSqlError("insert t output inserted.a, 1 into o (x, c) values (1)", 271);
+    }
+
+    [TestMethod]
+    public void OutputInto_UnassignableType_RaisesMsg206()
+        => new Simulation().AssertSqlError("create table o (x date); create table t (a int); insert t output inserted.a into o values (5)", 206, "Operand type clash: int is incompatible with date");
+
+    [TestMethod]
+    [DataRow("insert t output (select 1) values (1)", 10705)]
+    [DataRow("insert t output count(*) values (1)", 158)]
+    [DataRow("update t set a = 1 output max(inserted.a)", 158)]
+    public void Output_SubqueryOrAggregate_IsRefused(string statement, int number)
+        => _ = new Simulation().AssertSqlError($"create table t (a int); {statement}", number);
 }

@@ -288,8 +288,16 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// <c>ALTER TABLE … ALTER COLUMN c { ADD | DROP } PERSISTED</c> swaps in, a
     /// fresh instance so a rolled-back transaction's snapshot keeps the old one.
     /// </summary>
-    internal HeapColumn WithPersisted(bool persisted) =>
-        new(this.Name, this.Type, this.MaxLength, this.Nullable, this.Identity, this.Default, this.Computed, persisted,
+    internal HeapColumn WithPersisted(bool persisted) => this.With(persisted, this.Nullable);
+
+    /// <summary>
+    /// This column with <see cref="Nullable"/> replaced by
+    /// <paramref name="nullable"/>, every other attribute carried over.
+    /// </summary>
+    internal HeapColumn WithNullable(bool nullable) => this.With(this.IsPersisted, nullable);
+
+    private HeapColumn With(bool persisted, bool nullable) =>
+        new(this.Name, this.Type, this.MaxLength, nullable, this.Identity, this.Default, this.Computed, persisted,
             this.GeneratedAs, this.IsHidden, this.Collation, this.ComputedDefinition, this.IsRowGuidCol, this.SpelledNumeric)
         {
             ColumnId = this.ColumnId,

@@ -1007,4 +1007,41 @@ public sealed class MergeTests
             merge dv using (values (1)) s(a) on 1 = 0 when not matched then insert default values;
             select concat(id, '|', x) from dv
             """));
+
+    /// <summary>A clause family repeating an action is Msg 10714 (probed 2026-10-01 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("when matched and s.v = 1 then update set v = 1 when matched then update set v = 2", "An action of type 'WHEN MATCHED' cannot appear more than once in a 'UPDATE' clause of a MERGE statement.")]
+    [DataRow("when matched and s.v = 1 then delete when matched then delete", "An action of type 'WHEN MATCHED' cannot appear more than once in a 'DELETE' clause of a MERGE statement.")]
+    [DataRow("when not matched by source and t.v = 1 then update set v = 1 when not matched by source then update set v = 2", "An action of type 'WHEN NOT MATCHED BY SOURCE' cannot appear more than once in a 'UPDATE' clause of a MERGE statement.")]
+    public void Merge_RepeatedAction_RaisesMsg10714(string clauses, string message)
+        => new Simulation().AssertSqlError($"create table t (id int, v int); merge t using (values (1, 0)) s(id, v) on t.id = s.id {clauses};", 10714, message);
+
+    /// <summary>Msg 5324 is the parser's, so nothing after it is reported (probed 2026-10-01).</summary>
+    [TestMethod]
+    public void Merge_ConditionAfterUnconditional_ReportsMsg5324Alone()
+    {
+        var ex = new Simulation().AssertSqlError("create table t (id int, v int); merge t using (values (1, 0)) s(id, v) on t.id = s.id when matched then delete when matched then update set v = 1;", 5324);
+        AreEqual(1, ex.Errors.Count);
+    }
+
+    [TestMethod]
+    public void Merge_UnqualifiedNameBothSidesCarry_RaisesMsg209()
+        => new Simulation().AssertSqlError("create table t (id int, v int); merge t using (values (1)) s(id) on id = s.id when not matched then insert values (1, 1);", 209, "Ambiguous column name 'id'.");
+
+    [TestMethod]
+    public void Merge_AliasHidesTheTargetsName()
+        => new Simulation().AssertSqlError("create table t (id int, v int); merge t as x using (values (1, 9)) s(id, v) on t.id = s.id when matched then update set v = s.v;", 4104);
+
+    /// <summary>
+    /// A MERGE's own constraint refusals name the MERGE statement, and its
+    /// insert's Msg 515 says "UPDATE fails." (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (id int, v int check (v > 0)); merge t using (values (1, -1)) s(id, v) on t.id = s.id when not matched then insert values (s.id, s.v);", "The MERGE statement conflicted with the CHECK constraint")]
+    [DataRow("create table t (id int, v int constraint ck check (v > 0)); insert t values (1, 1); merge t using (values (1, -1)) s(id, v) on t.id = s.id when matched then update set v = s.v;", "The MERGE statement conflicted with the CHECK constraint \"ck\"")]
+    [DataRow("create table p (id int primary key); create table c (pid int references p(id)); insert p values (1); insert c values (1); merge p using (values (2)) s(id) on p.id = s.id when not matched by source then delete;", "The MERGE statement conflicted with the REFERENCE constraint")]
+    [DataRow("create table t (id int, v int not null); merge t using (values (1, null)) s(id, v) on t.id = s.id when not matched then insert values (s.id, s.v);", "column does not allow nulls. UPDATE fails.")]
+    public void Merge_ConstraintRefusal_NamesTheMerge(string sql, string fragment)
+        => Contains(fragment, Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery(sql)).Errors[0].Message);
 }

@@ -27,13 +27,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// (<c>'TF'</c>, …) return NULL pending those features.
 /// </para>
 /// <para>
-/// Divergence from real SQL Server on temp tables: <c>OBJECT_ID('#foo')</c>
-/// resolves the session's <c>#foo</c> directly because
-/// <see cref="BatchContext.TryResolveTable"/> routes <c>#</c>-prefixed leaves
-/// to the connection's temp dict regardless of qualifier. Real SQL Server
-/// requires the explicit <c>tempdb..#foo</c> three-part form because
-/// unqualified resolution targets the current database (typically not
-/// tempdb). Matches the simulator's existing temp-routing simplification.
+/// A temp table resolves through <c>tempdb..#foo</c>, or a one- or two-part
+/// name while <c>tempdb</c> is the current database; elsewhere
+/// <c>OBJECT_ID('#foo')</c> is NULL, as on real.
 /// </para>
 /// </remarks>
 internal sealed class ObjectId : Expression
@@ -117,6 +113,14 @@ internal sealed class ObjectId : Expression
         var nameStr = nameValue.CoerceTo(SqlType.NVarchar).AsString;
         if (!TryParseObjectName(nameStr, out var parsed))
             return SqlValue.Null(SqlType.Int32);
+        // A temp table lives in tempdb, so a name not naming that database
+        // finds it only while tempdb is the current one (probed 2026-10-01
+        // against SQL Server 2025: OBJECT_ID('#t') is NULL elsewhere).
+        if (parsed.Leaf.StartsWith('#') && parsed.Count < 3
+            && !runtime.Batch.CurrentDatabase.Name.Equals(Simulation.TempdbDatabaseName, StringComparison.OrdinalIgnoreCase))
+        {
+            return SqlValue.Null(SqlType.Int32);
+        }
 
         // A restricted principal gets NULL for an object it can't view metadata
         // for (probe-confirmed: OBJECT_ID('dbo.tab_none') = NULL for a user

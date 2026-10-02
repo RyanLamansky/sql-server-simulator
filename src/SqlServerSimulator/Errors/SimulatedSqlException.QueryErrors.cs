@@ -558,6 +558,73 @@ partial class SimulatedSqlException
         new("Subqueries are not allowed in the OUTPUT clause.", 10705, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 158: an aggregate in an <c>OUTPUT</c> clause
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AggregateInOutputClause() =>
+        new("An aggregate may not appear in the OUTPUT clause.", 158, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 5302: an UPDATE's <c>column.WRITE(…)</c> over a
+    /// NULL value (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException WriteMutatorOnNull(string columnName) =>
+        new($"Mutator 'write()' on '{columnName}' cannot be called on a null value.", 5302, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 582: a <c>.WRITE</c> offset past the value's
+    /// end (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException WriteOffsetPastEnd() =>
+        new("Offset is greater than the length of the column to be updated in write.", 582, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 583: a negative <c>.WRITE</c> offset or length
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException WriteNegativeOffsetOrLength() =>
+        new("Negative offset or length in write.", 583, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 175: an aggregate in a computed column's
+    /// expression or a CHECK constraint (probed 2026-10-01 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException AggregateInComputedOrCheck() =>
+        new("An aggregate may not appear in a computed column expression or check constraint.", 175, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 330: an <c>OUTPUT … INTO</c> target that is a
+    /// view or common table expression, named as written (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OutputIntoViewTarget(string writtenName) =>
+        new($"The target '{writtenName}' of the OUTPUT INTO clause cannot be a view or common table expression.", 330, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 331: an <c>OUTPUT … INTO</c> target carrying an
+    /// enabled trigger (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OutputIntoTriggeredTarget(string writtenName) =>
+        new($"The target table '{writtenName}' of the OUTPUT INTO clause cannot have any enabled triggers.", 331, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 332: an <c>OUTPUT … INTO</c> target on either
+    /// side of an enabled foreign key, which the message names (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OutputIntoForeignKeyTarget(string writtenName, string constraintName) =>
+        new($"The target table '{writtenName}' of the OUTPUT INTO clause cannot be on either side of a (primary key, foreign key) relationship. Found reference constraint '{constraintName}'.", 332, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 333: an <c>OUTPUT … INTO</c> target carrying an
+    /// enabled check constraint or a bound rule, which the message names
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OutputIntoCheckedTarget(string writtenName, string constraintName) =>
+        new($"The target table '{writtenName}' of the OUTPUT INTO clause cannot have any enabled check constraints or any enabled rules. Found check constraint or rule '{constraintName}'.", 333, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 1023 — a function's keyword-only argument
     /// written as something else, such as <c>ISJSON(x, 'scalar')</c> (probed
     /// 2026-09-26 against SQL Server 2025).
@@ -1340,12 +1407,10 @@ partial class SimulatedSqlException
     /// SQL Server enforces a "one-column scope" rule on inline CHECKs:
     /// they may only reference the column they're attached to. Probe-confirmed
     /// against SQL Server 2025 (2026-05-11): Class 16, State 0, first-line
-    /// wording verbatim (real SQL Server appends a second "Could not create
-    /// constraint or index. See previous errors." sentence which the simulator
-    /// doesn't model; apps that string-match the error read the first line).
+    /// wording verbatim, followed by Msg 1750 (probed 2026-10-01).
     /// </summary>
     internal static SimulatedSqlException InlineCheckReferencesAnotherColumn(string owningColumn, string tableName) =>
-        new($"Column CHECK constraint for column '{owningColumn}' references another column, table '{tableName}'.", 8141, 16, 0);
+        FollowedByConstraintNotCreated(new($"Column CHECK constraint for column '{owningColumn}' references another column, table '{tableName}'.", 8141, 16, 0), state: 0);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4701 — <c>TRUNCATE TABLE</c> against a name
@@ -1358,6 +1423,20 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotTruncateObjectDoesNotExist(string name) =>
         new($"Cannot find the object \"{name}\" because it does not exist or you do not have permissions.", 4701, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4708 — <c>TRUNCATE TABLE</c> naming a view
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CannotTruncateNonTable(string name) =>
+        new($"Could not truncate object '{name}' because it is not a table.", 4708, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4909 — <c>ALTER TABLE</c> naming a view,
+    /// spelled as written (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AlterTableNonTable(string name) =>
+        new($"Cannot alter '{name}' because it is not a table.", 4909, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 214 — <c>sp_executesql</c>'s statement (state 2)
@@ -1480,10 +1559,11 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server error 483: an <c>OUTPUT</c> clause combined with an
     /// <c>INSERT … EXEC</c> source. Wording and State 2 probe-confirmed
-    /// against SQL Server 2025.
+    /// against SQL Server 2025; real raises it compiling, so nothing after it
+    /// in the batch runs.
     /// </summary>
     internal static SimulatedSqlException OutputClauseNotAllowedInInsertExec() =>
-        new("The OUTPUT clause cannot be used in an INSERT...EXEC statement.", 483, 16, 2);
+        new("The OUTPUT clause cannot be used in an INSERT...EXEC statement.", 483, 16, 2) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 9829: a <c>STRING_AGG</c> whose operand is a

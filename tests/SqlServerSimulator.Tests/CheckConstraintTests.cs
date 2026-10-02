@@ -436,4 +436,37 @@ public sealed class CheckConstraintTests
         Assert.AreEqual(2, sim.ExecuteScalar("select count(*) from sys.check_constraints where is_system_named = 0"));
         Assert.AreEqual(0, sim.ExecuteScalar("select count(*) from sys.check_constraints where is_system_named = 1 and name in ('ck_b', 'ck_alter')"));
     }
+
+    /// <summary>
+    /// A CHECK or a computed column admits no subquery (Msg 1046) and no
+    /// aggregate (Msg 175) (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (a int check (a in (select 1)))", 1046)]
+    [DataRow("create table t (a int, b as (select 1))", 1046)]
+    [DataRow("create table t (a int, b as sum(a))", 175)]
+    [DataRow("create table t (a int, check (max(a) > 0))", 175)]
+    public void Check_SubqueryOrAggregate_IsRefused(string sql, int number)
+        => _ = new Simulation().AssertSqlError(sql, number);
+
+    /// <summary>A column CHECK naming another column is Msg 8141 then Msg 1750 (probed 2026-10-01).</summary>
+    [TestMethod]
+    public void Check_ColumnLevelNamingAnother_FollowedByMsg1750()
+    {
+        var ex = new Simulation().AssertSqlError("create table t (a int check (b > 0), b int)", 8141);
+        Assert.AreEqual((1750, 0), (ex.Errors[1].Number, ex.Errors[1].State));
+    }
+
+    /// <summary>A function a CHECK or DEFAULT calls can be neither dropped nor altered (Msg 3729, probed 2026-10-01).</summary>
+    [TestMethod]
+    [DataRow("create table t (a int check (dbo.f(a) = 1))", "drop function dbo.f")]
+    [DataRow("create table t (a int default dbo.f(1))", "drop function dbo.f")]
+    [DataRow("create table t (a int check (dbo.f(a) = 1))", "alter function dbo.f(@x int) returns bit as begin return 0 end")]
+    public void Check_FunctionItCalls_IsPinned(string table, string statement)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create function dbo.f(@x int) returns bit as begin return 1 end", table);
+        var ex = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery(statement));
+        Assert.AreEqual(3729, ex.Number);
+    }
 }

@@ -463,4 +463,57 @@ public sealed class AlterTableConstraintTests
         EndsWith("' references invalid table 'missing'.", ex.Errors[0].Message);
         AreEqual(1750, ex.Errors[1].Number);
     }
+
+    /// <summary>
+    /// CHECK / NOCHECK of a missing constraint is Msg 4917, of a key or default
+    /// Msg 11415, each followed by Msg 4916 (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("nope", 4917)]
+    [DataRow("pk", 11415)]
+    [DataRow("df", 11415)]
+    public void Toggle_UntoggleableConstraint(string name, int number)
+    {
+        var ex = new Simulation().AssertSqlError($"create table t (a int constraint pk primary key, b int constraint df default 1); alter table t nocheck constraint {name}", number);
+        AreEqual(4916, ex.Errors[1].Number);
+    }
+
+    [TestMethod]
+    public void DropConstraint_OfAnotherTable_RaisesMsg3733()
+    {
+        var ex = new Simulation().AssertSqlError("create table t (a int constraint ck check (a > 0)); create table u (a int); alter table u drop constraint ck", 3733);
+        AreEqual(("Constraint 'ck' does not belong to table 'u'.", 3727), (ex.Errors[0].Message, ex.Errors[1].Number));
+    }
+
+    [TestMethod]
+    public void AddList_NamingOneConstraintTwice_RaisesMsg8168()
+        => _ = new Simulation().AssertSqlError("create table t (a int, b int); alter table t add constraint ck check (b > 0), constraint ck check (a > 0)", 8168);
+
+    /// <summary>`WITH VALUES` after `DEFAULT … FOR` parses and leaves the existing rows alone (probed 2026-10-01).</summary>
+    [TestMethod]
+    public void AddDefaultFor_WithValues_LeavesRows()
+        => AreEqual(1, new Simulation().ExecuteScalar<int>("create table t (a int); insert t values (null); alter table t add constraint df default 3 for a with values; select count(*) from t where a is null"));
+
+    [TestMethod]
+    public void DropList_ConstraintThenColumn()
+        => AreEqual(1, new Simulation().ExecuteScalar<int>("create table t (a int, b int constraint df default 1); alter table t drop constraint df, column b; select count(*) from sys.columns where object_id = object_id('t')"));
+
+    [TestMethod]
+    public void AlterTable_OnAView_RaisesMsg4909()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (a int)", "create view v as select a from t");
+        _ = simulation.AssertSqlError("alter table v add b int", 4909);
+    }
+
+    /// <summary>
+    /// An added column's own CHECK and UNIQUE judge the rows the ADD filled
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter table t add b int not null default 0 check (b > 0)", 547)]
+    [DataRow("alter table t add b int unique", 1505)]
+    public void AddColumn_FilledRowsMeetItsConstraints(string statement, int number)
+        => _ = new Simulation().AssertSqlError($"create table t (a int); insert t values (1), (2); {statement}", number);
 }

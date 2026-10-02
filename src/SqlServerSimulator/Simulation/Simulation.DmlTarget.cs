@@ -156,6 +156,10 @@ partial class Simulation
             batch.CurrentStatement.TransactedWrite = false;
         if (table.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(name.Leaf);
+        // A trigger's pseudo-tables take no write (probed 2026-10-01 against
+        // SQL Server 2025).
+        if (batch.TriggerFrame is { } trigger && (ReferenceEquals(table, trigger.Inserted) || ReferenceEquals(table, trigger.Deleted)))
+            throw SimulatedSqlException.PseudoTableWrite();
         FunctionBodyShape.NoteTableWrite(batch, verb, persistent ? null : table);
     }
 

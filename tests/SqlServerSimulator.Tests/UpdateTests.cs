@@ -509,4 +509,62 @@ public sealed class UpdateTests
     [DataRow("declare @x int, @y int; update u set @x = @y = v")]
     public void ChainedForms_RaiseMsg102(string statement)
         => new Simulation().AssertSqlError($"{VariableSeed} {statement}", 102);
+
+    /// <summary>
+    /// <c>SET col.WRITE(expression, @Offset, @Length)</c> over a MAX column
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("varchar(max)", "'hello world'", "'HELLO', 0, 5", "HELLO world")]
+    [DataRow("varchar(max)", "'abc'", "'xyz', null, 0", "abcxyz")]
+    [DataRow("varchar(max)", "'abcdef'", "null, 2, null", "ab")]
+    [DataRow("varchar(max)", "'abcdef'", "'X', 4, 100", "abcdX")]
+    [DataRow("varchar(max)", "''", "'X', 0, 0", "X")]
+    [DataRow("nvarchar(max)", "N'abcdef'", "N'ZZ', 1, 3", "aZZef")]
+    [DataRow("varbinary(max)", "0x01020304", "0xFF, 1, 2", "0x01FF04")]
+    public void Update_WriteMutator(string type, string initial, string arguments, string expected)
+    {
+        var read = type == "varbinary(max)" ? "convert(varchar(20), a, 1)" : "a";
+        AreEqual(expected, (string?)new Simulation().ExecuteScalar($"create table t (a {type}); insert t values ({initial}); update t set a.write({arguments}); select {read} from t"));
+    }
+
+    [TestMethod]
+    [DataRow("varchar(max)", "null", "'x', 0, 0", 5302)]
+    [DataRow("varchar(max)", "'abc'", "'x', 10, 0", 582)]
+    [DataRow("varchar(max)", "'abc'", "'x', -1, 0", 583)]
+    [DataRow("varchar(10)", "'abc'", "'x', 0, 1", 258)]
+    public void Update_WriteMutator_Refusals(string type, string initial, string arguments, int number)
+        => _ = new Simulation().AssertSqlError($"create table t (a {type}); insert t values ({initial}); update t set a.write({arguments})", number);
+
+    [TestMethod]
+    public void Update_TargetTheFromClauseReadsTwice_RaisesMsg8154()
+        => new Simulation().AssertSqlError("create table t (id int, v int); update t set v = 5 from t a join t b on a.id = b.id", 8154, "The table 't' is ambiguous.");
+
+    /// <summary>
+    /// <c>SET @v = col = expr</c>'s variable must hold every column value:
+    /// Msg 426 for a shorter string, Msg 4187 for a narrower decimal (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("varchar(5)", "varchar(2)", "'abcde'", "The length 2 of the receiving variable is less than the length 5 of the column 'a'.")]
+    [DataRow("nvarchar(5)", "nvarchar(2)", "N'abcde'", "The length 4 of the receiving variable is less than the length 10 of the column 'a'.")]
+    [DataRow("varchar(max)", "varchar(2)", "'abcde'", "The length 2 of the receiving variable is less than the length 8100 of the column 'a'.")]
+    [DataRow("decimal(10, 2)", "decimal(5, 2)", "3", "Data type decimal of receiving variable cannot store all values of the data type decimal of column 'a' without data loss.")]
+    public void Update_ReceivingVariableNarrowerThanTheColumn(string column, string variable, string value, string message)
+        => AreEqual(message, Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery($"create table t (a {column}); declare @v {variable}; update t set @v = a = {value}")).Errors[0].Message);
+
+    [TestMethod]
+    public void Update_TableVariableQualifiedSetTarget_IsASyntaxError()
+        => _ = new Simulation().AssertSqlError("declare @t table (a int); update @t set @t.a = 2", 102);
+
+    /// <summary>A target the batch creates defers the SET list's refusals to the run (probed 2026-10-01).</summary>
+    [TestMethod]
+    [DataRow("update t set a = sum(a)", 157)]
+    [DataRow("update t set a = row_number() over (order by a)", 4108)]
+    public void Update_SetRefusalOverATableTheBatchCreates_WaitsForTheRun(string update, int number)
+    {
+        var simulation = new Simulation();
+        _ = simulation.AssertSqlError($"create table t (a int); insert t values (1); {update}", number);
+        AreEqual(1, simulation.ExecuteScalar<int>("select count(*) from t"));
+    }
 }

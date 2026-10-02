@@ -70,8 +70,13 @@ partial class Simulation
 
         // Msg 4701 carries only the leaf name (probe-confirmed against SQL
         // Server 2025), distinct from Msg 208 / 3701 which embed the qualifier.
+        // A view is Msg 4708 (probed 2026-10-01).
         if (destination is null || !destination.TryGetValue(name.Leaf, out var table))
-            throw SimulatedSqlException.CannotTruncateObjectDoesNotExist(name.Leaf);
+        {
+            throw batch.TryResolveView(name, out _)
+                ? SimulatedSqlException.CannotTruncateNonTable(name.Leaf)
+                : SimulatedSqlException.CannotTruncateObjectDoesNotExist(name.Leaf);
+        }
 
         // TRUNCATE deallocates pages, so a read-only database refuses it even
         // when the table already holds no rows (probe-confirmed).

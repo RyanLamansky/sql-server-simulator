@@ -168,7 +168,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         bindErrors?.EnterClause(context.Token, BindClause.MergeSource);
 
-        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, replayableSource) = ParseMergeSource(context);
+        var (materializeSource, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, replayableSource, sourceNullability) = ParseMergeSource(context);
         if (context.Batch.CurrentDatabase.Collation.Equals(sourceAlias, targetAlias))
             throw SimulatedSqlException.MergeSourceAndTargetShareAName();
 
@@ -221,7 +221,7 @@ partial class Simulation
         // read the written table alone (Msg 404 otherwise); under INSTEAD OF
         // triggers it names none.
         var output = TryParseMergeOutputClause(
-            context, destinationTable, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks,
+            context, destinationTable, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, MergeOutputNullability(whenClauses, sourceNullability),
             joinWrite is not null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output }
                 ? new ViewOutputShape(destinationTable.Columns, read: null, insertedRefused: joinWrite.Path.Length == 1 || (joinWrite.Path.Length == 2 && joinWrite.Chain.Nested[joinWrite.Path[0]] is { Sources.Length: 1 })
                     ? ordinal => JoinViewColumnReadsOtherSource(context.Batch, joinWrite.Chain, joinWrite.Chain.Views.Length - 1, ordinal, joinWrite.Path[0])
@@ -615,7 +615,7 @@ partial class Simulation
     /// first column name as the would-be hint name) and the simulator
     /// matches by routing through <see cref="Selection.ParseOptionalTableHints"/>.
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable) ParseMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability) ParseMergeSource(ParserContext context)
     {
         context.MoveNextRequired();
         return context.Token is Operator { Character: '(' }
@@ -635,7 +635,7 @@ partial class Simulation
     /// WITH. The prefix belongs ahead of the MERGE itself
     /// (<c>WITH c AS (…) MERGE … USING c</c>), which ships.
     /// </remarks>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable) ParseParenthesizedMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability) ParseParenthesizedMergeSource(ParserContext context)
     {
         context.MoveNextRequired();
 
@@ -643,12 +643,20 @@ partial class Simulation
         SqlType[] sourceSchema;
         string[] selectionColumnNames;
         DataMask?[]? masks = null;
+        bool[]? nullability;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Values })
         {
             var tuples = ParseValuesTuples(context);
             sourceSchema = new SqlType[tuples[0].Length];
             for (var i = 0; i < tuples[0].Length; i++)
                 sourceSchema[i] = tuples[0][i].GetSqlType(context.Batch, name => throw SimulatedSqlException.UnboundColumnReference(name));
+            nullability = new bool[sourceSchema.Length];
+            var valuesNullability = new NullabilityContext(context.Batch, static _ => true, name => throw SimulatedSqlException.UnboundColumnReference(name));
+            foreach (var tuple in tuples)
+            {
+                for (var i = 0; i < tuple.Length && i < nullability.Length; i++)
+                    nullability[i] |= tuple[i].ResultIsNullable(valuesNullability);
+            }
             selectionColumnNames = new string[tuples[0].Length];
             materialize = batch =>
             {
@@ -680,6 +688,7 @@ partial class Simulation
             sourceSchema = selection.Schema;
             selectionColumnNames = selection.ColumnNames;
             masks = selection.ColumnMasks;
+            nullability = selection.ColumnNullability;
             materialize = batch =>
             {
                 // The USING source is its own query expression, so it owns the
@@ -738,7 +747,7 @@ partial class Simulation
 
         // A query source is a nested query, which no cached plan holds (see
         // NoteDmlPlan); a VALUES list is replayable.
-        return (materialize, alias, columnNames, sourceSchema, masks, Replayable: true);
+        return (materialize, alias, columnNames, sourceSchema, masks, Replayable: true, nullability);
     }
 
     /// <summary>
@@ -754,7 +763,7 @@ partial class Simulation
     /// table / view object. Cursor on exit: the next un-consumed token
     /// (typically <c>ON</c>).
     /// </summary>
-    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable) ParseBareTableMergeSource(ParserContext context)
+    private static (Func<BatchContext, List<SqlValue[]>> Materialize, string Alias, string[] ColumnNames, SqlType[] Schema, DataMask?[]? Masks, bool Replayable, bool[]? Nullability) ParseBareTableMergeSource(ParserContext context)
     {
         var objectName = BatchContext.ParseObjectName(context, acceptTableVariable: true);
 
@@ -762,6 +771,7 @@ partial class Simulation
         SqlType[] sourceSchema;
         string[] columnNames;
         DataMask?[]? masks = null;
+        bool[]? nullability = null;
 
         // CTE binding shadows table / view resolution: `WITH c AS (…) MERGE …
         // USING c ON …` references the CTE, not any same-named base object.
@@ -784,7 +794,7 @@ partial class Simulation
                     rows.Add(RowDecoder.DecodeRow(sourceSchema.AsSpan(), rowBytes));
                 return rows;
             };
-            return (materialize, cteAlias, columnNames, sourceSchema, ctePlan.ColumnMasks, Replayable: false);
+            return (materialize, cteAlias, columnNames, sourceSchema, ctePlan.ColumnMasks, Replayable: false, ctePlan.ColumnNullability);
         }
 
         // A linked server's table reads through the same remote query a FROM
@@ -826,6 +836,7 @@ partial class Simulation
                 if (viewColumns[i].DerivedMask is { } viewMask)
                     (masks ??= new DataMask?[viewColumns.Length])[i] = viewMask;
             }
+            nullability = Array.ConvertAll(viewColumns, static column => column.Nullable);
             var viewSelection = Selection.ForView(resolvedView, viewColumns);
             materialize = batch =>
             {
@@ -867,7 +878,7 @@ partial class Simulation
             };
             // Another database's table answers permission checks the session's
             // standing here says nothing about.
-            return (materialize, alias, columnNames, sourceSchema, masks, Replayable: ReferenceEquals(context.Batch.DatabaseFor(sourceTable), context.Batch.CurrentDatabase));
+            return (materialize, alias, columnNames, sourceSchema, masks, Replayable: ReferenceEquals(context.Batch.DatabaseFor(sourceTable), context.Batch.CurrentDatabase), Array.ConvertAll(heapTable.Columns, static column => column.Nullable));
         }
         else
         {
@@ -878,7 +889,7 @@ partial class Simulation
 
         var defaultAlias = Selection.ConsumeOptionalAlias(context) ?? objectName.Leaf;
         _ = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: true);
-        return (materialize, defaultAlias, columnNames, sourceSchema, masks, Replayable: false);
+        return (materialize, defaultAlias, columnNames, sourceSchema, masks, Replayable: false, nullability);
     }
 
     /// <summary>
@@ -909,7 +920,9 @@ partial class Simulation
     /// <summary>Whether <paramref name="name"/>'s qualifier is one of the two spellings of a MERGE side.</summary>
     private static bool NamesMergeSide(ParserContext context, MultiPartName name, string alias, string otherSpelling) =>
         context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, alias)
-        || context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, otherSpelling);
+        // An alias hides the target's own name: `MERGE t AS x … ON t.id = …`
+        // is Msg 4104 (probed 2026-10-01 against SQL Server 2025).
+        || (context.Batch.CurrentDatabase.Collation.Equals(alias, otherSpelling) && context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, otherSpelling));
 
     private static SqlType ResolveMergeColumnType(
         ParserContext context,
@@ -933,7 +946,12 @@ partial class Simulation
             foreach (var column in targetColumns)
             {
                 if (collation.Equals(column.Name, name.Leaf))
+                {
+                    // An unqualified name both sides carry is Msg 209.
+                    if (unqualified && scope == MergeNameScope.Both && Array.Exists(sourceColumnNames, source => collation.Equals(source, name.Leaf)))
+                        throw SimulatedSqlException.AmbiguousColumnName(name.Leaf);
                     return column.Type;
+                }
             }
         }
         if (scope != MergeNameScope.Target && (namesSource || unqualified))
@@ -1107,12 +1125,16 @@ partial class Simulation
 
             // An action reads its clause's side too, and misses there with the
             // ordinary binder errors (probed 2026-09-28).
-            clauses.Add(ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, writtenName, targetAlias, kind switch
+            var clause = ParseMergeAction(context, kind, searchCondition, destinationTable, sourceView, writtenName, targetAlias, kind switch
             {
                 WhenClauseKind.Matched => ResolveType,
                 WhenClauseKind.NotMatchedByTarget => ResolveSourceOnly,
                 _ => ResolveTargetOnly,
-            }));
+            });
+            // A family takes each action at most once.
+            if (clauses.Exists(earlier => earlier.Kind == kind && earlier.Action == clause.Action))
+                throw SimulatedSqlException.MergeActionRepeated(kind == WhenClauseKind.Matched ? "WHEN MATCHED" : "WHEN NOT MATCHED BY SOURCE", clause.Action == MergeActionKind.Update ? "UPDATE" : "DELETE");
+            clauses.Add(clause);
         }
 
         return clauses.Count == 0 ? throw SimulatedSqlException.SyntaxErrorNear(context) : clauses;
@@ -1460,6 +1482,7 @@ partial class Simulation
         string[] sourceColumnNames,
         SqlType[] sourceSchema,
         DataMask?[]? sourceMasks,
+        MergeOutputSides sides,
         ViewOutputShape? view,
         OutputProjection? logged = null)
     {
@@ -1577,12 +1600,29 @@ partial class Simulation
             outputTarget = null;
         }
         view?.ThrowRefusals();
+        outputTarget?.RequireAssignable(expressions, schema);
+
+        bool ColumnIsNullable(MultiPartName name)
+        {
+            var collation = context.Batch.CurrentDatabase.Collation;
+            if (BuiltInToken.Equals(name.ImmediateQualifier, "INSERTED"))
+                return sides.InsertedMayBeAbsent || PseudoColumnIsNullable(collation, targetColumns, name);
+            if (BuiltInToken.Equals(name.ImmediateQualifier, "DELETED"))
+                return sides.DeletedMayBeAbsent || PseudoColumnIsNullable(collation, targetColumns, name);
+            if (sides.SourceMayBeAbsent || sides.SourceNullability is not { } sourceNullability)
+                return true;
+            var ordinal = Array.FindIndex(sourceColumnNames, column => collation.Equals(column, name.Leaf));
+            return ordinal < 0 || ordinal >= sourceNullability.Length || sourceNullability[ordinal];
+        }
 
         var projection = NoteClientOutput(context.Batch, new OutputProjection(
             [.. expressions], [.. columnNames], schema, destinationTable,
-            (sourceAlias, sourceColumnNames, sourceSchema), context.Batch, outputTarget, sourceMasks, view, logged));
+            (sourceAlias, sourceColumnNames, sourceSchema), context.Batch, outputTarget, sourceMasks, view, logged)
+        {
+            Nullability = outputTarget is null ? InferOutputNullability(context.Batch, expressions, ColumnIsNullable, ResolveOutputType) : null,
+        });
         return IsClientOutputAfterInto(context, projection)
-            ? TryParseMergeOutputClause(context, destinationTable, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, view, logged: projection)
+            ? TryParseMergeOutputClause(context, destinationTable, sourceAlias, sourceColumnNames, sourceSchema, sourceMasks, sides, view, logged: projection)
             : projection;
     }
 
@@ -2268,7 +2308,7 @@ partial class Simulation
 
         EvaluateComputedColumns(destinationTable, newValues, context.Batch);
         EnforceNotNull(destinationTable, newValues, "UPDATE");
-        EnforceCheckConstraints(destinationTable, newValues, context.Batch, "UPDATE");
+        EnforceCheckConstraints(destinationTable, newValues, context.Batch, "UPDATE", reportedVerb: "MERGE");
 
         // WITH CHECK OPTION: post-update row must still satisfy the view's
         // visibility chain. Raised before commit so a violating row leaves
@@ -2358,6 +2398,12 @@ partial class Simulation
 
             if (ReferenceEquals(targetColumn, identityColumn))
             {
+                if (coerced.IsNull)
+                {
+                    throw IsConstantNull(clause.InsertValues[i], context.Batch)
+                        ? SimulatedSqlException.DefaultOrNullNotAllowedForIdentity()
+                        : SimulatedSqlException.CannotInsertNull(targetColumn.Name, QualifyForNullMessage(destinationTable), "UPDATE");
+                }
                 identityColumn.Identity!.ObserveExplicit(IdentityState.FromSqlValue(coerced));
             }
         }
@@ -2387,8 +2433,10 @@ partial class Simulation
         EvaluateComputedColumns(destinationTable, rowValues, context.Batch);
         if (!insteadOfInsert)
         {
-            EnforceNotNull(destinationTable, rowValues);
-            EnforceCheckConstraints(destinationTable, rowValues, context.Batch);
+            // A MERGE's insert reports Msg 515 as "UPDATE fails." and Msg 547
+            // as the MERGE statement's (probed 2026-10-01 against SQL Server 2025).
+            EnforceNotNull(destinationTable, rowValues, "UPDATE");
+            EnforceCheckConstraints(destinationTable, rowValues, context.Batch, reportedVerb: "MERGE");
             EnforceEdgeConstraints(destinationTable, rowValues, context, "MERGE");
         }
 
@@ -2586,14 +2634,14 @@ partial class Simulation
                 var oldRows = new List<SqlValue[]>(pendingDeletes.Count);
                 foreach (var (_, _, oldValues, _) in pendingDeletes)
                     oldRows.Add(oldValues);
-                EnforceIncomingForeignKeysOnDelete(destinationTable, oldRows, context, "DELETE", depth: 0);
+                EnforceIncomingForeignKeysOnDelete(destinationTable, oldRows, context, "MERGE", depth: 0);
             }
             if (!insteadOfUpdate && pendingUpdates.Count > 0)
             {
                 var pairs = new List<(SqlValue[] OldFull, SqlValue[] NewFull)>(pendingUpdates.Count);
                 foreach (var (_, _, oldValues, newValues, _) in pendingUpdates)
                     pairs.Add((oldValues, newValues));
-                EnforceIncomingFkOnUpdate(destinationTable, pairs, context, depth: 0);
+                EnforceIncomingFkOnUpdate(destinationTable, pairs, context, depth: 0, verb: "MERGE");
             }
         }
 
@@ -2707,7 +2755,7 @@ partial class Simulation
         // An INTO target consumed the rows, so the statement is a non-query —
         // the same suppression INSERT / UPDATE / DELETE apply.
         return output is { HasTarget: false }
-            ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, totalAffected)
+            ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, totalAffected) { ColumnNullability = output.Nullability }
             : new SimulatedNonQuery(totalAffected);
     }
 
@@ -2817,6 +2865,34 @@ partial class Simulation
         Insert,
         Update,
         Delete,
+    }
+
+    /// <summary>
+    /// Which of a MERGE's row images an <c>OUTPUT</c> row can lack, settled by
+    /// its clauses: <c>INSERTED</c> when a clause deletes, <c>DELETED</c> when
+    /// one inserts, the source when one acts <c>BY SOURCE</c> — each such
+    /// image reads nullable on the wire (probed 2026-10-01 against SQL Server
+    /// 2025) — plus the source's own column nullability.
+    /// </summary>
+    private readonly struct MergeOutputSides(bool insertedMayBeAbsent, bool deletedMayBeAbsent, bool sourceMayBeAbsent, bool[]? sourceNullability)
+    {
+        public readonly bool InsertedMayBeAbsent = insertedMayBeAbsent;
+        public readonly bool DeletedMayBeAbsent = deletedMayBeAbsent;
+        public readonly bool SourceMayBeAbsent = sourceMayBeAbsent;
+        public readonly bool[]? SourceNullability = sourceNullability;
+    }
+
+    /// <summary>The <see cref="MergeOutputSides"/> of a MERGE with <paramref name="whenClauses"/>.</summary>
+    private static MergeOutputSides MergeOutputNullability(List<WhenClause> whenClauses, bool[]? sourceNullability)
+    {
+        bool deletes = false, inserts = false, bySource = false;
+        foreach (var clause in whenClauses)
+        {
+            deletes |= clause.Action == MergeActionKind.Delete;
+            inserts |= clause.Action == MergeActionKind.Insert;
+            bySource |= clause.Kind == WhenClauseKind.NotMatchedBySource;
+        }
+        return new(deletes, inserts, bySource, sourceNullability);
     }
 
     private sealed class WhenClause(

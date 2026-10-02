@@ -15,6 +15,22 @@ partial class SimulatedSqlException
         new($"Data type {variableType} of receiving variable is not equal to the data type {columnType} of column '{columnName}'.", 425, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 426: <c>UPDATE … SET @v = col = expr</c> whose
+    /// variable is shorter than the column, both lengths in bytes (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ReceivingVariableTooShort(int variableBytes, int columnBytes, string columnName) =>
+        new($"The length {variableBytes} of the receiving variable is less than the length {columnBytes} of the column '{columnName}'.", 426, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 4187: <c>UPDATE … SET @v = col = expr</c> whose
+    /// <c>decimal</c> variable has fewer digits on either side of the point
+    /// than the column (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ReceivingVariableLosesData(string variableType, string columnType, string columnName) =>
+        new($"Data type {variableType} of receiving variable cannot store all values of the data type {columnType} of column '{columnName}' without data loss.", 4187, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 8115: arithmetic overflow converting an
     /// expression into a narrower numeric data type.
     /// </summary>
@@ -956,8 +972,8 @@ partial class SimulatedSqlException
     /// SQL Server 2025: Class 16 State 1, verbatim wording
     /// <c>"Invalid collation '{name}'."</c>.
     /// </summary>
-    internal static SimulatedSqlException InvalidCollation(string name) =>
-        new($"Invalid collation '{name}'.", 448, 16, 1);
+    internal static SimulatedSqlException InvalidCollation(string name, byte state = 1) =>
+        new($"Invalid collation '{name}'.", 448, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 459: a collation with no ANSI code page — the

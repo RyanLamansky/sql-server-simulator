@@ -1319,4 +1319,62 @@ public sealed class ForeignKeyTests
             "alter table ch add constraint fk_ch foreign key (pid) references par(id) on delete cascade", 1787);
         Assert.Contains("with cascaded DELETE or UPDATE on table 'ch' because the table has an INSTEAD OF DELETE or UPDATE TRIGGER", ex.Message);
     }
+
+    /// <summary>
+    /// A key referencing its own table is checked once the statement's rows
+    /// are in, so a row may reference itself or a later row (probed
+    /// 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert t values (1, 1)")]
+    [DataRow("insert t values (2, 3), (3, null)")]
+    public void SelfReferencingKey_RowsOfTheStatementCount(string insert)
+        => AreEqual(1, new Simulation().ExecuteScalar<int>($"create table t (id int primary key, p int references t(id)); {insert}; select 1"));
+
+    [TestMethod]
+    public void SelfReferencingKey_MissingRowStillRefuses()
+        => _ = new Simulation().AssertSqlError("create table t (id int primary key, p int references t(id)); insert t values (1, 9)", 547);
+
+    /// <summary>A SET DEFAULT whose default names no parent fails the parent's statement (probed 2026-10-01).</summary>
+    [TestMethod]
+    public void SetDefault_DefaultWithoutParent_RaisesMsg547()
+    {
+        var ex = new Simulation().AssertSqlError("""
+            create table p (id int primary key); insert p values (1);
+            create table c (pid int default 0 references p(id) on delete set default); insert c values (1);
+            delete p where id = 1
+            """, 547);
+        StartsWith("The DELETE statement conflicted with the FOREIGN KEY constraint", ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    [DataRow("create table p (id int primary key); create table c (pid int not null references p(id) on delete set null)", 1761)]
+    [DataRow("create table c (x int references master.dbo.spt_values(number))", 1763)]
+    [DataRow("create table #p (id int primary key); create table c (x int references #p(id))", 1766)]
+    [DataRow("create table a (id int primary key); create table b (id int primary key, aid int references a(id) on delete cascade); create table c (bid int references b(id) on delete cascade, aid int references a(id) on delete cascade)", 1785)]
+    public void ForeignKeyDeclaration_FollowedByMsg1750(string sql, int number)
+    {
+        var ex = new Simulation().AssertSqlError($"{sql}; select 1", number);
+        AreEqual(1750, ex.Errors[1].Number);
+    }
+
+    [TestMethod]
+    public void ForeignKey_ColumnCountMismatch_RaisesMsg8139()
+        => new Simulation().AssertSqlError("create table p (a int, b int, primary key (a, b)); create table c (x int, y int, foreign key (x, y) references p(a))", 8139,
+            "Number of referencing columns in foreign key differs from number of referenced columns, table 'c'.");
+
+    /// <summary>
+    /// A DROP TABLE list reports the table a key still references and drops
+    /// the rest; outside a transaction the batch goes on (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DropTableList_ReferencedTableRefused_DropsTheRest()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table p (id int primary key); create table c (x int references p(id))");
+        var ex = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery("drop table p, c; create table later (a int)"));
+        AreEqual(3726, ex.Number);
+        AreEqual("later,p", (string?)simulation.ExecuteScalar("select string_agg(name, ',') within group (order by name) from sys.tables"));
+    }
 }

@@ -479,7 +479,12 @@ partial class SimulatedSqlException
     /// (Msg 10714) and so doesn't share this path.
     /// </summary>
     internal static SimulatedSqlException MergeUnconditionalMustBeLast(string clauseFamily) =>
-        new($"In a MERGE statement, a '{clauseFamily}' clause with a search condition cannot appear after a '{clauseFamily}' clause with no search condition.", 5324, 16, 1);
+        new($"In a MERGE statement, a '{clauseFamily}' clause with a search condition cannot appear after a '{clauseFamily}' clause with no search condition.", 5324, 16, 1)
+        {
+            // Real's parser raises it, so the batch reports it alone (probed
+            // 2026-10-01 against SQL Server 2025).
+            PreemptsBinderErrors = true,
+        };
 
     /// <summary>
     /// Mimics SQL Server error 8672: a <c>MERGE</c> statement's
@@ -525,7 +530,15 @@ partial class SimulatedSqlException
     /// idiosyncratic <c>"a 'INSERT' clause"</c> phrasing.
     /// </summary>
     internal static SimulatedSqlException MergeMultipleNotMatchedClauses() =>
-        new("An action of type 'WHEN NOT MATCHED' cannot appear more than once in a 'INSERT' clause of a MERGE statement.", 10714, 15, 1);
+        MergeActionRepeated("WHEN NOT MATCHED", "INSERT");
+
+    /// <summary>
+    /// Msg 10714 for any clause family repeating an action — two <c>WHEN
+    /// MATCHED … UPDATE</c>, two <c>WHEN NOT MATCHED BY SOURCE … DELETE</c>
+    /// (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException MergeActionRepeated(string clauseFamily, string action) =>
+        new($"An action of type '{clauseFamily}' cannot appear more than once in a '{action}' clause of a MERGE statement.", 10714, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server error 10713: a <c>MERGE</c> statement was not

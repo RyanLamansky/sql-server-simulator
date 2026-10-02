@@ -56,6 +56,9 @@ internal sealed class IdentCurrent : Expression
             : null;
     }
 
+    /// <summary>The result is <c>numeric(38, 0)</c> by name, as <c>SQL_VARIANT_PROPERTY</c> reports it (probed 2026-10-01).</summary>
+    internal override bool ResultReportsNumeric => true;
+
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         _ = this.tableName.GetSqlType(batch, resolveColumnType);

@@ -91,7 +91,21 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException AmbiguousColumnName(string name) =>
         new($"Ambiguous column name '{name}'.", 209, 16, 1);
 
-    internal static SimulatedSqlException InvalidObjectName(MultiPartName name, byte state = 1) => new($"Invalid object name '{name.Written}'.", 208, 16, state);
+    /// <summary>
+    /// Mimics SQL Server's Msg 8154 — an UPDATE or DELETE naming its target
+    /// by a table its FROM clause reads more than once, each time under
+    /// another alias (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AmbiguousTable(string name) =>
+        new($"The table '{name}' is ambiguous.", 8154, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 208, at state 1 — or 0 for a temp table's
+    /// name, which real resolves in tempdb (probed 2026-10-01 against SQL
+    /// Server 2025) — unless <paramref name="state"/> says otherwise.
+    /// </summary>
+    internal static SimulatedSqlException InvalidObjectName(MultiPartName name, byte? state = null) =>
+        new($"Invalid object name '{name.Written}'.", 208, 16, state ?? (byte)(name.Leaf.StartsWith('#') ? 0 : 1));
 
     internal static SimulatedSqlException MustDeclareScalarVariable(string name) => new($"Must declare the scalar variable \"@{name}\".", 137, 15, 2);
 

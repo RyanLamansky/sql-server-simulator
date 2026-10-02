@@ -176,16 +176,16 @@ partial class Simulation
     /// table <c>@r</c> (probed 2026-09-26 against SQL Server 2025), and a
     /// table variable's after its <c>#</c>-and-hex name inside <c>tempdb</c>
     /// (probed 2026-09-28), whose nine characters a CHECK and a DEFAULT keep
-    /// whole (<paramref name="checkTablePartLength"/>).
+    /// whole (<paramref name="tempNamePadding"/>).
     /// </summary>
     private static void RenameAutoNamedConstraints(
         string ownerName, string tableName, HeapColumn[] columns, KeyConstraint[] keyConstraints, CheckConstraint[] checkConstraints,
-        int checkTablePartLength = 8)
+        int tempNamePadding = 16)
     {
         foreach (var column in columns)
         {
             if (column.DefaultConstraint is { IsSystemNamed: true } defaultConstraint)
-                defaultConstraint.Name = AutoDefaultName(ownerName, column.Name, checkTablePartLength);
+                defaultConstraint.Name = AutoDefaultName(ownerName, column.Name, tempNamePadding);
         }
         foreach (var key in keyConstraints)
         {
@@ -195,7 +195,7 @@ partial class Simulation
         for (var i = 0; i < checkConstraints.Length; i++)
         {
             if (checkConstraints[i].IsSystemNamed)
-                checkConstraints[i].Name = AutoCheckName(ownerName, checkConstraints[i].InlineColumn, i, checkTablePartLength);
+                checkConstraints[i].Name = AutoCheckName(ownerName, checkConstraints[i].InlineColumn, i, tempNamePadding);
         }
     }
 

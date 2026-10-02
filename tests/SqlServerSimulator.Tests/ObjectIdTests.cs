@@ -270,19 +270,25 @@ public sealed class ObjectIdTests
         IsTrue(reader.IsDBNull(0));
     }
 
+    /// <summary>
+    /// A temp table lives in tempdb: <c>tempdb..#foo</c> finds it, and a bare
+    /// <c>#foo</c> does only while tempdb is current (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void ObjectId_TempTable_Resolves()
+    public void ObjectId_TempTable_ResolvesThroughTempdb()
     {
-        // Divergence from real SQL Server (documented quirk): the simulator
-        // routes # leaves to the connection's temp dict regardless of the
-        // current db, so OBJECT_ID('#foo') finds the session's temp table
-        // directly rather than requiring tempdb..#foo.
         using var reader = new Simulation().ExecuteReader("""
             create table #foo (id int);
-            select object_id('#foo') as id
+            select case when object_id('#foo') is null then 0 else 1 end,
+                case when object_id('tempdb..#foo') is null then 0 else 1 end;
+            use tempdb;
+            select case when object_id('#foo') is null then 0 else 1 end
             """);
         IsTrue(reader.Read());
-        IsFalse(reader.IsDBNull(0));
+        AreEqual((0, 1), (reader.GetInt32(0), reader.GetInt32(1)));
+        IsTrue(reader.NextResult() && reader.Read());
+        AreEqual(1, reader.GetInt32(0));
     }
 
     [TestMethod]

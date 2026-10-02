@@ -36,7 +36,7 @@ The DEFAULT value's parentheses are optional (probe-confirmed): both `ADD CONSTR
 A name inside one is **Msg 128** (`The name "v" is not permitted in this context. …`) and a subquery is **Msg 1046**, whichever the left-to-right reading meets first — the same `ParserContext.ScalarOnlyOperand` arming `PRINT`'s operand takes (see [`control-flow.md`](control-flow.md#the-operand-admits-only-scalar-expressions)).
 Real settles both while parsing, so they fire whatever the table holds: an empty table, a name that *is* a column of the table, and a name that is nothing at all all report the same Msg 128, at all three declaration sites (`CREATE TABLE`'s inline form, `ALTER TABLE … ADD <column> DEFAULT`, and the named-constraint `DEFAULT (v) FOR w`).
 
-Anonymous ADD (no `CONSTRAINT name`) auto-generates a name with the same FNV-1a-based scheme as CREATE TABLE inline: `PK__<t8>__<hex>` / `UQ__<t8>__<hex>` / `FK__<t8>__<col8>__<hex>` / `CK__<t8>__<hex>` / `DF__<t8>__<col8>__<hex>`.
+Anonymous ADD (no `CONSTRAINT name`) auto-generates a name with the same FNV-1a-based scheme as CREATE TABLE inline: `PK__<t8>__<hex>` / `UQ__<t8>__<hex>`, and `FK__` / `CK__` / `DF__` cut as [`foreign-keys.md`](foreign-keys.md#auto-generated-fk-name) describes.
 `is_system_named` reflects the auto-name path on FK / CHECK / DEFAULT (KeyConstraint infers from the prefix — `PK__` / `UQ__` — since the existing storage doesn't carry an explicit flag).
 
 ## WITH CHECK / WITH NOCHECK
@@ -46,8 +46,7 @@ It bypasses the existing-row validation pass and sets `IsNotTrusted = true` on t
 `WITH CHECK` (the default) runs the validation pass.
 PK / UQ / DEFAULT ignore the modifier — the grammar accepts it but validation is unconditional (PK / UQ always scan for duplicates; DEFAULT has no data to validate against).
 
-`sys.foreign_keys.is_not_trusted` and `sys.check_constraints.is_not_trusted` reflect the flag.
-Re-trusting via `WITH CHECK CHECK CONSTRAINT name` isn't modeled.
+`sys.foreign_keys.is_not_trusted` and `sys.check_constraints.is_not_trusted` reflect the flag; re-trusting is [below](#trust-toggling--bulk-import-recipe).
 
 ## Existing-data validation
 
@@ -102,7 +101,8 @@ Probe-confirmed error paths:
 
 | Condition | Behavior |
 |-----------|----------|
-| Constraint name not found | Msg 4917 (`Constraint 'name' does not exist.`) |
+| Constraint name not found | Msg 4917 (`Constraint 'name' does not exist.`), then Msg 4916 |
+| A key or default constraint named | Msg 11415 (`Object 'name' cannot be disabled or enabled. …`), then Msg 4916 (probed 2026-10-01) |
 | Multi-name with one missing | Atomic — all names resolved first; Msg 4917 prevents all mutations |
 | Trailing comma | Msg 102 |
 | Revalidation failure (WITH CHECK CHECK) | Msg 547 with `"ALTER TABLE statement"` prefix |
@@ -141,13 +141,15 @@ Probe-confirmed shapes:
 | Condition | Behavior |
 |-----------|----------|
 | Name resolves | Remove from the matching container; FK additionally detaches from `parent.IncomingForeignKeys` |
-| Name not found, no `IF EXISTS` | Msg 3728 (`'name' is not a constraint.`) |
+| Name not found, no `IF EXISTS` | Msg 3728 (`'name' is not a constraint.`), or Msg 3733 (`Constraint 'name' does not belong to table 't'.`) when another table of the schema holds it (probed 2026-10-01) |
 | Name not found, `IF EXISTS` | Silent no-op |
 | PK / UQ referenced by an incoming FK | Msg 3725 (`The constraint 'X' is being referenced by table 'Y', foreign key constraint 'Z'.`) |
 | Trailing comma | Msg 102 (probe-confirmed) |
 
 **Multi-drop is atomic** — all names resolve and validate first; any failure (Msg 3728 / 3725) leaves the table's constraint state unchanged.
 Probe-confirmed.
+
+The list may go on to drop columns — `DROP CONSTRAINT df, COLUMN b` — which runs the constraint drop then the column drop (probed 2026-10-01 against SQL Server 2025).
 
 ## Multi-element ADD
 
@@ -158,6 +160,8 @@ Real applies the list as a whole rather than in writing order (probed 2026-09-25
 
 The statement is **atomic**: an element that raises leaves none of the others behind (probe-confirmed for a binder error, a CHECK the existing rows violate, and a foreign key to a missing table).
 `AlterTableAddUndo` captures the three constraint lists' lengths plus each existing column's `Default` / `DefaultConstraint` — a `DEFAULT … FOR` element writes onto the column instance rather than into a list — and `AddedColumnsUndo` the column array, the column-id watermark and the `Heap` the row rewrite replaced.
+
+Two elements naming one constraint alike are Msg 8168 before anything is added (probed 2026-10-01 against SQL Server 2025).
 
 **Divergence**: a list declaring two primary keys reports only the second's problem here, where real leads with Msg 8110 (`Cannot add multiple PRIMARY KEY constraints`) before carrying on to it.
 
@@ -299,9 +303,6 @@ The text scans that read a stored definition — the determinism and precision c
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named.
   Custom names matching the prefix would report `is_system_named = true` incorrectly.
   Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.
-- **Multi-constraint ADD in one statement** — `ALTER TABLE t ADD CONSTRAINT pk1 PRIMARY KEY (id), CONSTRAINT fk1 FOREIGN KEY (p_id) REFERENCES p(id)` raises `NotSupportedException`.
-  Real SQL Server supports it; EF Migrations doesn't emit it.
-- **`ALTER TABLE … DROP CONSTRAINT name1, , name2`** (empty middle element) — accepted by real SQL Server; the simulator's grammar rejects with Msg 102.
 
 ## EF Core integration
 
@@ -328,7 +329,6 @@ ALTER TABLE [schema.]table ADD [COLUMN] col TYPE [(N | MAX [, scale])]
 Inline column-level constraints (CHECK / UNIQUE / PRIMARY KEY / REFERENCES, with or without `CONSTRAINT name`) all parse through the shared `ParseOneColumnIntoLists` helper that backs CREATE TABLE.
 Computed columns via `col AS expr [PERSISTED [NOT NULL]] [inline constraints]` are supported and resolve against the combined (existing + new) column view — which is also the view the added column's inline CHECK is validated against, so a predicate reaching a non-persisted computed column already on the table raises Msg 1764 (see [`constraints.md`](constraints.md#computed-columns-in-a-check-constraint)).
 
-The optional `COLUMN` keyword between `ADD` and the column name is accepted (probe-confirmed real SQL Server accepts both shapes); the simulator's grammar recognizes `COLUMN` as a reserved keyword here.
 
 An inline `UNIQUE` / `PRIMARY KEY` may be the batch's last token — CREATE TABLE always has a closing paren after the clause, this form doesn't, and `ALTER TABLE t ADD c int NULL UNIQUE` is what Django's schema editor emits for a `unique=True` field a migration adds.
 
@@ -348,6 +348,7 @@ Per-column backfill values:
 | Computed (non-persisted) | No backfill — evaluated on read |
 
 `WITH VALUES` belongs to an added column's DEFAULT alone: on a column without one, in CREATE TABLE and in a table variable's declaration real reads `VALUES` as Msg 156 (probed 2026-09-24 against SQL Server 2025).
+After `ADD … DEFAULT … FOR column` it parses and changes nothing, the column's rows keeping their values (probed 2026-10-01).
 
 The DEFAULT-evaluated-once rule is a probe-confirmed SQL Server quirk: `ALTER TABLE t ADD created datetime NOT NULL DEFAULT GETUTCDATE()` produces a single timestamp for every existing row, not a per-row evaluation.
 The simulator matches.
@@ -362,8 +363,9 @@ The simulator matches.
 | **8111** | Existing PrimaryKeyOnNullableColumn for inline `PRIMARY KEY` on an explicit-`NULL` column (inherited from CREATE TABLE shared parser). |
 | **8183** | Inline `CHECK` / `REFERENCES` / `NOT NULL` on a computed column added without `PERSISTED`. |
 | **1764** | An added column's inline `CHECK` reading a non-persisted computed column, its own or one already on the table. |
-| **1505** | Inline `UNIQUE` constraint when existing rows have duplicate values — the resolver runs the existing-data validation on the combined column set. |
-| **547** | Inline FK / CHECK rejecting existing rows during the post-mutation enforcement scan. |
+| **1505** | Inline `UNIQUE` constraint when the filled rows hold duplicate values — NULLs a nullable column filled every row with included (probed 2026-10-01). |
+| **547** | Inline FK / CHECK rejecting the filled rows — a NOT NULL default its own CHECK refuses included (probed 2026-10-01). |
+| **1701** | The columns' smallest row passes 8060 bytes, as at CREATE TABLE. |
 
 ### Grammar — DROP COLUMN
 
@@ -423,7 +425,7 @@ ALTER TABLE [schema.]table
 
 Single-column shape only (real SQL Server's grammar doesn't accept comma-separated multi-column ALTER COLUMN).
 Routed from `TryParseAlterTable` via `Keyword.Alter` into `TryParseAlterTableAlterColumn`.
-The trailing `NULL`/`NOT NULL` keyword is optional — omitting it preserves the column's existing nullability (probe-confirmed).
+The trailing `NULL`/`NOT NULL` keyword is optional — omitting it leaves the column nullable, a NOT NULL one included and under `SET ANSI_NULL_DFLT_ON OFF` too, unless an alias type declares otherwise (probed 2026-10-01 against SQL Server 2025).
 `COLLATE` sets the column's collation, which a CHECK, DEFAULT or index on it refuses as a type change (see [Blockers](#blockers-msg-5074)).
 
 The `ALTER COLUMN col ADD/DROP {ROWGUIDCOL|SPARSE}` sub-clauses are [column attributes](#column-attributes), `MASKED` is [Dynamic Data Masking](data-masking.md#ddl)'s, and `PERSISTED` is [PERSISTED](#persisted)'s.
@@ -444,6 +446,10 @@ Real SQL Server's error codes surface verbatim:
 | `NULL → NOT NULL` with existing NULL | `varchar(10) null → varchar(10) not null` on a row with NULL | Msg 515 (`Cannot insert the value NULL into column 'X', table 'Y'; column does not allow nulls.`) |
 
 Widening within the same family (`varchar(50) → varchar(100)`, `int → bigint`, `tinyint → smallint`) succeeds when nothing below blocks it; bounded-string narrowings succeed when every existing value fits the new length.
+
+Each value then meets the new column as a write does ([`dml.md`](dml.md#writing-a-value-into-a-column), `ConvertForAlteredColumn`, probed 2026-10-01 against SQL Server 2025): only trailing spaces beyond the length are cut silently, a number into a string converts as a `CAST` would (`12345` into `varchar(2)` stores `*`), the Msg 2628 names no value, and under `SET ANSI_WARNINGS OFF` a truncation cuts and an overflow stores NULL without Msg 3606.
+A refused value ends the statement with Msg 3621, the Msg 515 naming the table three-part.
+A change no `CAST` could make — `date → int`, `int → date`, `int → uniqueidentifier` — is **Msg 206** before any row is read (`Cast.IsIllegalExplicitConversion`).
 
 ### Blockers (Msg 5074)
 
@@ -472,6 +478,8 @@ One Msg 5074 per blocker then Msg 4922 naming `ALTER COLUMN`, in DROP COLUMN's o
 | Column doesn't exist on the table | Msg 4924 | Shares the code with DROP COLUMN's missing-column path, distinct wording (`ALTER TABLE ALTER COLUMN failed because column 'X' does not exist…`). |
 | Column is a computed column | Msg 4928 | Phrasing: `Cannot alter column 'X' because it is 'COMPUTED'.` |
 | Column is rowversion / timestamp | Msg 4928 | Phrasing: `Cannot alter column 'X' because it is 'timestamp'.` |
+| New type is rowversion / timestamp | Msg 4927 | `Cannot alter column 'X' to be data type timestamp.` (probed 2026-10-01) |
+| The table is a view | Msg 4909 | `Cannot alter 'v' because it is not a table.`, for every `ALTER TABLE` action (probed 2026-10-01). |
 | Column is `GENERATED ALWAYS AS ROW START/END` — a period column | Msg 13599 | `Period column 'X' in a system-versioned temporal table cannot be altered.` Checked ahead of the type reference, so a period column with an unparseable target type still reports 13599. |
 | ALTER COLUMN of an IDENTITY column to a non-integer type | Msg 2749 state 3 | `Identity column 'X' must be of data type int, bigint, smallint, tinyint, or decimal or numeric with a scale of 0…` Checked after the type resolves, since it reads the new type. The gate is `SqlType.IsIntegerCategory`, so the `decimal` / `numeric` scale-0 half of the message real honours isn't accepted yet — the same narrowing `CREATE TABLE` applies at state 2. |
 

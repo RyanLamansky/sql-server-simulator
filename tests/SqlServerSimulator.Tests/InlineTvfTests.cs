@@ -186,9 +186,11 @@ public sealed class InlineTvfTests
         // The body filters its rows on a parameter-dependent predicate so the
         // TVF returns zero rows for the test input — exercising OUTER APPLY's
         // null-fill path without depending on no-FROM WHERE support.
-        _ = connection.CreateCommand("create table #src(v int)").ExecuteNonQuery();
-        _ = connection.CreateCommand("insert #src values (10), (20)").ExecuteNonQuery();
-        _ = connection.CreateCommand("create function dbo.tvf_empty(@x int) returns table as return (select v from #src where v = @x * 1000)").ExecuteNonQuery();
+        // A function can't read a temp table (Msg 2772), so the source is a
+        // permanent one.
+        _ = connection.CreateCommand("create table src(v int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("insert src values (10), (20)").ExecuteNonQuery();
+        _ = connection.CreateCommand("create function dbo.tvf_empty(@x int) returns table as return (select v from src where v = @x * 1000)").ExecuteNonQuery();
         using var reader = connection.CreateCommand("select n.n, t.v from #nums n outer apply dbo.tvf_empty(n.n) t order by n.n").ExecuteReader();
         var rows = new List<(int n, int? v)>();
         while (reader.Read())

@@ -104,7 +104,7 @@ public class EFCoreStrings
     }
 
     [TestMethod]
-    public void Insert_VarbinaryAvatarOverMax_RaisesTruncationWithHexValue()
+    public void Insert_VarbinaryAvatarOverMax_RaisesTruncation()
     {
         using var context = new TestDbContext(TestDbContext.CreatePeopleSimulation());
 
@@ -118,7 +118,8 @@ public class EFCoreStrings
         Assert.IsNotNull(ex.InnerException);
         Assert.Contains("would be truncated", ex.InnerException.Message);
         Assert.Contains("Avatar", ex.InnerException.Message);
-        Assert.Contains("0x", ex.InnerException.Message);
+        // A binary's truncated value reports empty (probed 2026-10-01).
+        Assert.Contains("Truncated value: ''.", ex.InnerException.Message);
     }
 
     [TestMethod]

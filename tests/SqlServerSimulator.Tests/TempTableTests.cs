@@ -560,4 +560,33 @@ public sealed class TempTableTests
     [TestMethod]
     public void ASystemNamedConstraint_PadsTheTempTableName()
         => StartsWith("PK__#t______", (string)new Simulation().ExecuteScalar("create table #t (id int primary key); select name from tempdb.sys.key_constraints")!);
+
+    /// <summary>A temp table's Msg 208 is at state 0 (probed 2026-10-01 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void MissingTempTable_RaisesMsg208AtState0()
+    {
+        var ex = new Simulation().AssertSqlError("exec ('create table #d (a int)'); select * from #d", 208);
+        AreEqual(0, ex.Errors[0].State);
+    }
+
+    /// <summary>A view's body can't read a temp table (Msg 4508), nor can a function's (Msg 2772) (probed 2026-10-01).</summary>
+    [TestMethod]
+    [DataRow("create view v as select a from #t", 4508)]
+    [DataRow("create function f() returns int as begin return (select count(*) from #t) end", 2772)]
+    [DataRow("create function f() returns table as return (select a from #t)", 2772)]
+    public void ModuleOverTempTable_IsRefused(string module, int number)
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        _ = connection.CreateCommand("create table #t (a int)").ExecuteNonQuery();
+        AreEqual(number, Throws<SimulatedSqlException>(() => connection.CreateCommand(module).ExecuteNonQuery()).Number);
+    }
+
+    [TestMethod]
+    public void TruncateTable_OnAView_RaisesMsg4708()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (a int)", "create view v as select a from t");
+        _ = simulation.AssertSqlError("truncate table v", 4708);
+    }
 }

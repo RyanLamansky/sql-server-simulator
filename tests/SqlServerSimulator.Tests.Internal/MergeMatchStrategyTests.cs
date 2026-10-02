@@ -88,15 +88,15 @@ public sealed class MergeMatchStrategyTests
             """));
 
     /// <summary>
-    /// An unqualified operand both sides answer to reads the <i>target</i> — the
-    /// runtime resolver's own precedence. Resolving it to the source instead
-    /// would put both operands on one side and lose the key.
+    /// An unqualified operand only the target answers to splits the pair across
+    /// the two sides as a qualified one does. (One both sides answer to is
+    /// real's Msg 209.)
     /// </summary>
     [TestMethod]
-    public void UnqualifiedOperand_ShadowedBySource_ReadsTheTarget()
+    public void UnqualifiedTargetOperand_StillHashes()
         => Contains("Merge:HashMatch(keys=1,residual=0)", CaptureStrategies("""
-            merge t using (values (1, 11)) as s (id, v) on id = s.id
-            when matched then update set v = s.v;
+            merge t using (values (1, 11)) as s (sid, sv) on id = s.sid
+            when matched then update set v = s.sv;
             """));
 
     /// <summary>

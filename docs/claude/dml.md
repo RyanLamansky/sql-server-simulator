@@ -23,7 +23,7 @@ What stays per verb is where the verbs differ:
   See [`indexes.md`](indexes.md#update--delete-target-seeking).
   The multi-table (joined) form's **target** isn't seek-narrowed either — its *other* sources are, see [Joined row sources](#joined-row-sources) below; `MERGE` narrows its target via loop inversion (see its section below).
 - Multi-table syntax (`UPDATE alias SET ... FROM <sources> [WHERE]`, `DELETE FROM alias FROM <sources> [WHERE]`) — the EF7+ `ExecuteUpdate`/`ExecuteDelete` shape.
-  Target identified by leading-identifier match against each source's `FromSource.Qualifier`; missing match → Msg 208.
+  Target identified by leading-identifier match against each source's `FromSource.Qualifier`; missing match → Msg 208, and a table the clause reads twice under aliases neither of which the target names → Msg 8154 (probed 2026-10-01 against SQL Server 2025).
 - **Joined UPDATE/DELETE: each unique target row processed exactly once.**
   When the same target matches multiple join tuples, SQL Server uses the *first* matching tuple's RHS for SET.
   The simulator dedupes by `(page, slot)` via a side-channel byte[]→address map.
@@ -44,6 +44,12 @@ What stays per verb is where the verbs differ:
   Scalar subquery RHS sees pre-update state.
 - **Variables in the SET list** (`@x = expr`, `@x += expr`, `@x = col = expr`) are assigned first for each row, in written order and against the pre-update row, and only then are the columns evaluated, reading the variables as just assigned — so `SET v = @x, @x = @x + 1` writes the incremented value, and `SET @x = v = v + @x` is the running total.
   The compound form gives the column the variable's value; the variable must be declared the column's own type (Msg 425 otherwise), and neither `@x += col = …` nor `@x = @y = …` parses (probed 2026-09-24 against SQL Server 2025).
+  It must hold every value the column can, too: a shorter string or binary is Msg 426, naming both lengths in bytes (a MAX column's as 8100), and a `decimal` with fewer digits either side of the point Msg 4187; all three bind as the statement compiles, ending the batch (probed 2026-10-01).
+  A table variable qualifying a target (`SET @t.a = …`) is the syntax error at its dot.
+- **`SET col.WRITE(expression, @Offset, @Length)`** rewrites part of a `varchar(max)` / `nvarchar(max)` / `varbinary(max)` value (`Parser/Expressions/WriteMutator.cs`, probed 2026-10-01 against SQL Server 2025): the zero-based offset and the length count characters or bytes, a NULL offset appends, a NULL length or one past the end replaces to the end, and a NULL expression cuts the value at the offset.
+  A NULL column is Msg 5302, an offset past the end Msg 582, a negative offset or length Msg 583, and a column of any other type Msg 258.
+  Real logs only the bytes it replaces; the simulator writes the whole new value.
+- **A target the batch hasn't created yet defers the statement's bind**, its SET list's Msg 157 / 4108 included, so the statements before it run (probed 2026-10-01).
   A variable-only entry carries no column name, and `ComputeUpdatedRow` runs the two passes.
 - Identity update → Msg 8102.
   Computed update → Msg 271.
@@ -80,6 +86,14 @@ What stays per verb is where the verbs differ:
   The projection's type comes from the source table and need not match the target's — an ORM building a returning buffer with `SELECT TOP 0 CAST(id AS bigint) … INTO #tmp` then `OUTPUT INSERTED.id INTO #tmp` hands an int to a bigint column.
   Storing it raw reached the row encoder's type check as a bare `ArgumentException`; over the TDS wire that aborts the response mid-stream, so the client reports `HY000 "A severe error occurred"` and the connection dies rather than getting any usable error.
   Uncovered columns already coerced their DEFAULT the same way — this closes the covered-column half.
+  Each projected type must also be *assignable* to its target column as the statement compiles — an `int` into a `date` is Msg 206 — and the row then meets the target's length rules, its computed columns, a rowversion it carries and its NOT NULL columns as an INSERT's would.
+- **`OUTPUT … INTO` refuses some targets outright**, as the statement compiles (probed 2026-10-01 against SQL Server 2025): a view or CTE is **Msg 330**, a table with an enabled trigger **331** (a trigger the same batch disables still counts — it was enabled when the batch compiled), one on either side of an enabled foreign key **332**, and one with an enabled CHECK or a bound rule **333**, the last two naming the constraint or rule found (`RejectRestrictedOutputIntoTarget`).
+  A disabled CHECK or foreign key passes.
+  A computed target column takes no value: the positional list skips it, and naming it is Msg 271.
+- **An `OUTPUT` item** admits no subquery (Msg 10705) and no aggregate (Msg 158), in all four verbs.
+- **A client `OUTPUT`'s column nullability** is inferred as a SELECT's is (`InferOutputNullability`, probed 2026-10-01 against SQL Server 2025): `INSERTED.c` / `DELETED.c` take column `c`'s declaration — an identity, a rowversion and an `ISNULL` computed column are NOT NULL — a literal is NOT NULL and arithmetic nullable.
+  A MERGE's `INSERTED` reads nullable when a clause deletes, its `DELETED` when one inserts, its source columns when one acts `BY SOURCE` (else as the source projects them), and `$action` never; a joined write's other sources read nullable.
+  Nothing a trigger produced reaches it: a target with an enabled trigger refuses a client-bound clause (Msg 334).
 
 ### A target the FROM clause never names
 
@@ -208,6 +222,16 @@ Both engines compile a whole batch before running any of it, so a bad-arity stat
 
 **Divergence:** real reports a statement offending several rules at once as a multi-error response (an unknown column name *and* a bad count come back as Msg 207 then Msg 110; a ragged constructor into a rowversion table as Msg 273 then Msg 10709) — the simulator raises the leading error alone.
 
+## Writing a value into a column
+
+Every write — INSERT, UPDATE, MERGE, `OUTPUT … INTO` and the `ALTER COLUMN` rewrite — meets the column through `Simulation.Coerce.EnforceMaxLength` then the type coercion (probed 2026-10-01 against SQL Server 2025):
+
+- A value whose excess beyond the declared length is only **trailing spaces**, or trailing zero bytes of a binary, is cut to fit without an error: `'abc   '` into `varchar(3)` stores `abc`, `0x010000` into `varbinary(2)` stores `0x0100`.
+- A **number, date or `uniqueidentifier`** written to a string column converts as a `CAST` to the column's declared length would: an `int` too wide for a `varchar(2)` stores `*`, a `date` into `varchar(5)` is cut to `2020-`, and a `bigint`, `decimal`, `money`, `float` or `uniqueidentifier` raises the cast's own error (Msg 8115, 234, 232, 8170).
+- Msg 2628 reports a binary's truncated value **empty** (`Truncated value: ''`), a parameter's included, as it does every value an `ALTER COLUMN` cuts.
+- The out-of-range conversions of a written string (Msg 242, 244, 248) and a date overflow (Msg 517) end the statement with Msg 3621 after them.
+- A row whose value fails to convert has **drawn its identity value** already, so the next row's skips it — the same gap a row a constraint refuses leaves.
+
 ## A multi-row `VALUES` list's column types
 
 A multi-row `INSERT … VALUES` list is a table constructor, so each column takes the type its rows unify to — the `UNION ALL` rule — before converting to the target (probed 2026-09-25 against SQL Server 2025).
@@ -221,6 +245,7 @@ Legal only inside `INSERT … VALUES`, so `ParseValuesTuples` takes an `allowDef
 The VALUES source is parsed **before** identity diagnostics run (`Simulation.Insert.cs`), because the per-cell DEFAULT keywords have to be visible to them:
 
 - an **identity** column receiving `DEFAULT` raises **Msg 339** ("DEFAULT or NULL are not allowed as explicit identity values."), and it fires *before* the `IDENTITY_INSERT` gate — probe-confirmed to raise with `IDENTITY_INSERT` both ON and OFF.
+  So does a written constant that folds to NULL — `NULL`, `CAST(NULL AS int)` — in a `VALUES` cell, a `SELECT` source's projection or a MERGE insert, while a NULL only a run produces (a variable) is Msg 515 (probed 2026-10-01 against SQL Server 2025).
 - a **non-identity** DEFAULT cell resolves to the column's default in the shared row-encode loop, taking the same path an omitted column would.
 
 Django's `db_default` field option emits this shape, which is what motivated it.
@@ -236,6 +261,7 @@ Inserts a single row with every column defaulted.
 8-byte big-endian database-scoped monotonic counter; advances on every INSERT into a rowversion-bearing table and every UPDATE affecting one.
 Storage type name surfaces as `timestamp` in `information_schema` regardless of declaration.
 Explicit insert → Msg 273; explicit update → Msg 272; second column on a table → Msg 2738.
+A written constant NULL in a `VALUES` cell reads as `DEFAULT` and draws a value, where a NULL variable is Msg 273 (probed 2026-10-01 against SQL Server 2025).
 A column written as just `timestamp` (bracketed or not) is one, named timestamp — in a table, a table variable, a table type and a function's return table (probed 2026-09-30 against SQL Server 2025).
 A variable takes a value from an integer, an exact number or a binary; a string or `datetime` is Msg 257 and every other class Msg 206 (`SqlType.PairRules.cs`'s assign grid).
 The column keeps its position in an INSERT's positional column list and accepts the `DEFAULT` keyword there (and in a column list naming it) — see [INSERT value counts](#insert-value-counts).
@@ -256,11 +282,12 @@ Per-column identity allocation routes through `HeapTable.IdentityState`.
 A procedure, trigger, function or dynamic-SQL body is a scope of its own (`IdentityScope`): it starts at NULL and its caller reads its own `SCOPE_IDENTITY()` again afterwards, while `@@IDENTITY` reads the body's — save that a trigger producing no identity value leaves its firing statement's in place, and a function's INSERT touches neither (probed 2026-09-28 against SQL Server 2025).
 `IDENT_INCR(name)` / `IDENT_SEED(name)` (`Parser/Expressions/IdentSeedIncrement.cs`) return the declared step / start of the named table's identity column, or NULL when the table lacks one or the name doesn't resolve.
 All three name-arg scalars accept a 1-/2-/3-part dotted runtime string via the same `TryParseObjectName` helper `OBJECT_ID` uses.
-Result type is `numeric(38, 0)` matching real SQL Server's projection (covers tinyint/smallint/int/bigint columns uniformly).
+Result type is `numeric(38, 0)` matching real SQL Server's projection (covers tinyint/smallint/int/bigint columns uniformly), named `numeric` by `SQL_VARIANT_PROPERTY` (probed 2026-10-01).
 The counter is an `Int128`, since a `decimal(38, 0)` identity's seed, increment and values run past `bigint` — real generates, reseeds and reports them across the whole 38-digit range (probed 2026-09-28 against SQL Server 2025).
 
 `SET IDENTITY_INSERT <table> ON | OFF` (`Simulation.Set.cs`) sets / clears `SimulatedDbConnection.IdentityInsertTable`.
-ON validates the target: a table with no identity column raises **Msg 8106** (`TableHasNoIdentityForSet`, "Table 't' does not have the identity property. Cannot perform SET operation."); a second table while one is already held raises **Msg 8107** (`IdentityInsertAlreadyOn`) — both probe-confirmed against SQL Server 2025.
+ON validates the target: a table with no identity column raises **Msg 8106** (`TableHasNoIdentityForSet`, "Table 't' does not have the identity property. Cannot perform SET operation."); a second table while one is already held raises **Msg 8107** (`IdentityInsertAlreadyOn`), naming the held one three-part — both probe-confirmed against SQL Server 2025.
+A view is Msg 8105 and a missing object Msg 1088, each named as written (probed 2026-10-01).
 
 `DBCC CHECKIDENT` (`Simulation.CheckIdent.cs`) reports and reseeds, and a reseed rolls back with its transaction though a generated value never does.
 The one rule that isn't a plain assignment: a table that hasn't generated a value since it was created or truncated takes the reseed value *itself* on its next insert, where one that has takes the value after it; the pending value shows through `IDENT_CURRENT` but not through CHECKIDENT's own report, which still says `NULL` (probed 2026-09-24).
@@ -269,6 +296,7 @@ The one rule that isn't a plain assignment: a table that hasn't generated a valu
 Both expose the row count of the most-recently-completed statement on the session via `SimulatedDbConnection.LastStatementRowCount`.
 `@@ROWCOUNT` projects as `int`; `ROWCOUNT_BIG()` (`Parser/Expressions/TransactionScalarFunctions.cs`) is its `bigint` sibling — same source, wider projection.
 Same set + reset rules: every DML statement updates the count; control-flow statements (IF / WHILE / SET / DECLARE) leave it unchanged on the failure path but set it to the result on success; SELECT inside a `set @v = (select ...)` reports the inner-SELECT's affected row count.
+An `IF`'s condition resets it to 0 for the branch it chooses, whatever the condition queried (probed 2026-10-01 against SQL Server 2025).
 
 ## The parse / execute split
 `INSERT … VALUES` and the single-table `UPDATE` and `DELETE` build a plan (`InsertPlan` / `UpdatePlan` / `DeletePlan`) at the point their last token is consumed, and run it through an execution half (`RunInsertValues` / `RunUpdate` / `RunDelete`) that reads no tokens — on every execution, so the plan cache's replay of one ([`plan-cache.md`](plan-cache.md#dml-statement-plans)) runs the same code a fresh parse does.
@@ -320,8 +348,10 @@ Probe-confirmed semantics (SQL Server 2025):
 - **The executed body runs on past an error that ends only its statement**, as any called batch does ([`control-flow.md`](control-flow.md#procedure-and-dynamic-sql-bodies)): the error and the body's later messages go out ahead of the INSERT's outcome, every later result set — a nested procedure's included — is inserted, and the INSERT succeeds, its count and `@@ROWCOUNT` taking every row and `@@ERROR` reading 0 (probed 2026-10-01).
   An error that ends the executed batch — a missing object it names — still leaves the INSERT writing the rows returned before it, in a transaction too, after which the INSERT's DONE carries no count and `@@ERROR` reads the error.
   An open `TRY` around the statement catches the body's first error instead, and nothing is inserted.
-- **Nested INSERT…EXEC** (the executed proc / dynamic batch itself contains an `INSERT … EXEC`) raises **Msg 8164 St 1** "An INSERT EXEC statement cannot be nested." Guarded by `SimulatedDbConnection.InsertExecActive`, set while the outer drain runs and checked at the inner INSERT…EXEC entry.
-- **OUTPUT clause combined with INSERT…EXEC** raises **Msg 483 St 2** "The OUTPUT clause cannot be used in an INSERT...EXEC statement." — a structural check that fires regardless of skip state, before the source dispatch.
+- **Nested INSERT…EXEC** (the executed proc / dynamic batch itself contains an `INSERT … EXEC`) raises **Msg 8164 St 1** "An INSERT EXEC statement cannot be nested." as the inner statement runs, ending only it: the body goes on and its later result sets are inserted (probed 2026-10-01 against SQL Server 2025).
+  Guarded by `SimulatedDbConnection.InsertExecActive`, set while the outer drain runs, handed back as it was found (so a body's compile walk doesn't clear it) and checked at the inner INSERT…EXEC entry, which reads its EXEC clause through unrun before raising.
+- **OUTPUT clause combined with INSERT…EXEC** raises **Msg 483 St 2** "The OUTPUT clause cannot be used in an INSERT...EXEC statement." — a structural check that fires regardless of skip state, before the source dispatch, and ends the batch.
+- **Not modeled yet**: an error a row raises as the executed body's rows land — a truncation, which real reports as the legacy Msg 8152 at state 14 attributed to the procedure — and a body's `ROLLBACK`, real's Msg 3915, come out here as the INSERT's own Msg 2628 and Msg 266 (probed 2026-10-01 against SQL Server 2025).
 - **`WITH RESULT SETS` on the EXEC source** raises **Msg 102** — real refuses the clause here, and reports the token one late (`'SETS'`, not `'WITH'`), which the simulator mirrors by consuming both words before raising.
   `WITH RECOMPILE` stays accepted.
   The clause elsewhere is in [`programmable.md`](programmable.md#execute--with-result-sets).
@@ -384,13 +414,14 @@ Probe-confirmed schema-inference rules:
 | Probed Msg | When raised |
 |---|---|
 | **5316** | The target has an INSTEAD OF trigger for some of the actions the WHEN clauses perform but not all — see [`triggers.md`](triggers.md#instead-of-on-views). |
-| **5324** | A WHEN MATCHED or WHEN NOT MATCHED BY SOURCE clause with `AND` appeared after the unconditional clause in the same family. |
+| **5324** | A WHEN MATCHED or WHEN NOT MATCHED BY SOURCE clause with `AND` appeared after the unconditional clause in the same family. Real's parser raises it, so it comes back alone and ends the batch (probed 2026-10-01). |
 | **8672** | A target row matched more than one source row, and the WHEN MATCHED clause that fired chose UPDATE. DELETE is forgiving (multiple matches collapse to one delete — probe-confirmed). It ends the batch and rolls the transaction back as under `XACT_ABORT` (probed 2026-09-28). |
 | **10710** | WHEN NOT MATCHED [BY TARGET] clause specified UPDATE or DELETE (only INSERT is legal). |
 | **10711** | WHEN MATCHED or WHEN NOT MATCHED BY SOURCE clause specified INSERT (only UPDATE / DELETE are legal). |
 | **10713** | MERGE statement missing the required trailing `;` — at the end of the batch or before the next statement's keyword; a stray word in its place is Msg 102 at the word (probed 2026-09-30). |
-| **10714** | More than one WHEN NOT MATCHED [BY TARGET] clause (real SQL Server admits at most one INSERT branch — different from MATCHED / NOT MATCHED BY SOURCE which allow multiple AND-conditioned clauses). |
-| **207** / **4104** | A name in the `ON` predicate or a `WHEN … AND` that neither side answers to. Which side failed decides the message, matching real: a name whose qualifier is the target or source alias — or that carries no qualifier at all — is a bad *column* (Msg 207), while a qualifier neither side answers to is an unbindable identifier (Msg 4104). Both bind while compiling, so they fire over an empty rowset and at CREATE of a module carrying the MERGE. |
+| **10714** | More than one WHEN NOT MATCHED [BY TARGET] clause, or a MATCHED / NOT MATCHED BY SOURCE family repeating an action — two UPDATEs or two DELETEs — the message naming the family and the action (probed 2026-10-01). |
+| **209** | An unqualified name in the `ON` predicate or a matched clause that both the target and the source carry (probed 2026-10-01). |
+| **207** / **4104** | A name in the `ON` predicate or a `WHEN … AND` that neither side answers to — an aliased target's own name included (`MERGE t AS x … ON t.id = …`, probed 2026-10-01). Which side failed decides the message, matching real: a name whose qualifier is the target or source alias — or that carries no qualifier at all — is a bad *column* (Msg 207), while a qualifier neither side answers to is an unbindable identifier (Msg 4104). Both bind while compiling, so they fire over an empty rowset and at CREATE of a module carrying the MERGE. |
 | **5333** / **5334** | A `WHEN NOT MATCHED [BY TARGET]` condition naming anything but a source column, or a `WHEN NOT MATCHED BY SOURCE` one naming anything but a target column — a name bound nowhere and one in a subquery included; state 2 for a qualified name, 1 for a bare one, while a miss qualified by the clause's own side stays Msg 207. The clause's action sees only that side too, missing the other with the ordinary Msg 4104 / 207 (probed 2026-09-28). |
 | **1015** / **157** / **5310** / **5319** | An aggregate in the `ON`, an action's `SET` list, an insert action's `VALUES` or a `WHEN … AND`, written there or moved there from a subquery reading only the statement's columns ([`query.md`](query.md#aggregate-ownership-across-scopes)). |
 
@@ -467,6 +498,10 @@ The OUTPUT parser detects it by string compare and synthesizes a private `MergeA
 Surfaces through any wrapping `AS alias` thanks to `IsMergeActionRef` drilling past `NamedExpression`.
 Default column name is `$action`.
 
+### Constraint messages
+
+A MERGE's constraint refusals name the **MERGE** statement — `The MERGE statement conflicted with the CHECK constraint …`, for its inserts, updates and deletes alike, a referencing row its delete strands included — while its insert's NULL into a NOT NULL column says `UPDATE fails.`, as its update's does (probed 2026-10-01 against SQL Server 2025).
+
 ### Triggers + identity
 
 Each MERGE invocation fires its triggers AFTER all queued mutations apply (matching real SQL Server's "statement-after" semantic).
@@ -485,3 +520,4 @@ EF Core's `ExecuteUpdate` / `ExecuteDelete` for batched single-statement DML emi
 - MERGE into a view ships for a single-base updatable view (`MergeViewTests`), its `OUTPUT` reading the view's columns, for any view whose INSTEAD OF triggers take its actions, and for a join view whose actions each land in one base table — see [`programmable.md`](programmable.md#dml-through-a-join-view).
 - Multi-statement WHEN-clause bodies (real SQL Server only allows the one DML action per WHEN — same restriction here).
 - **An `OUTPUT` naming a source column in a MERGE whose only clauses are `WHEN NOT MATCHED BY SOURCE`** is Msg 4104 on real, which binds no source there; here it reads NULL (probed 2026-09-28).
+- **Composable DML** — a nested `INSERT` / `UPDATE` / `DELETE` / `MERGE` with `OUTPUT` as an `INSERT … SELECT`'s source (`INSERT a SELECT … FROM (MERGE … OUTPUT …) x`), with real's Msg 355 for a triggered target and Msg 8156 for a duplicate column name — is Msg 156 here (probed 2026-10-01 against SQL Server 2025).

@@ -12,7 +12,8 @@ partial class Selection
     /// <list type="bullet">
     /// <item>Direct column ref preserves source column's nullability + identity.</item>
     /// <item>Identity propagates only when the FROM clause is a single
-    /// non-joined heap source — JOIN/UNION/derived-table drop identity.</item>
+    /// non-joined source — a table, or a view or derived table over one —
+    /// and the column is named once; JOIN / UNION drop it.</item>
     /// <item>Nullability defers to <see cref="Expression.ResultIsNullable"/>,
     /// whose XML doc carries the whole rule set — the same inference real
     /// applies to result metadata, so a destination column and the wire's
@@ -45,10 +46,21 @@ partial class Selection
     {
         var destColumns = new HeapColumn[projections.Count];
         var seenNames = new HashSet<string>(BuiltInToken.Comparer);
-        // Identity propagation: requires exactly one FromSource that's a real
-        // heap table, no joins. Anything else (joins, derived tables, CTEs
-        // backed by Selection, OPENJSON) drops identity even on direct refs.
-        var identityEligible = sources.Length == 1 && joins.Length == 0 && sources[0].BackingTable is not null;
+        // Identity propagation: requires exactly one FromSource and no joins.
+        // A view or derived table carries its base column's identity through
+        // (probed 2026-10-01 against SQL Server 2025); a source with none —
+        // OPENJSON say — drops it even on direct refs. Naming the identity
+        // column twice drops it from both copies.
+        var identityEligible = sources.Length == 1 && joins.Length == 0;
+        var identityReferences = 0;
+        if (identityEligible)
+        {
+            foreach (var projection in projections)
+            {
+                if (UnwrapDirectRef(projection) is Reference counted && SourceIdentity(sources, counted) is not null)
+                    identityReferences++;
+            }
+        }
 
         // The destination's declaration follows the same inference the wire's
         // COLMETADATA reports, NULL-fill map included: a column read from the
@@ -86,10 +98,9 @@ partial class Selection
             // Direct column ref → maybe propagate identity. NamedExpression
             // wraps the parser's renaming; the underlying Reference is what
             // we care about for identity rules.
-            if (identityEligible && UnwrapDirectRef(projections[i]) is Reference reference)
+            if (identityReferences == 1 && UnwrapDirectRef(projections[i]) is Reference reference)
             {
-                var (s, c) = FindSourceColumn(sources, reference.ReferencedName);
-                if (s == 0 && sources[0].BackingTable is { } sourceTable && sourceTable.Columns[c].Identity is { } sourceIdentity)
+                if (SourceIdentity(sources, reference) is { } sourceIdentity)
                 {
                     // Each dest gets its own IdentityState starting fresh; the
                     // configured seed/increment match the source's.
@@ -121,6 +132,16 @@ partial class Selection
         return identityFunctions > 0 && inheritedIdentity is not null
             ? throw SimulatedSqlException.IdentityFunctionWithInheritedIdentity(targetName.Leaf, inheritedIdentity)
             : destColumns;
+    }
+
+    /// <summary>
+    /// The identity a direct reference to the lone FROM source reads — the
+    /// column's own, or the one a view or derived table carries through.
+    /// </summary>
+    private static IdentityState? SourceIdentity(FromSource[] sources, Reference reference)
+    {
+        var (s, c) = FindSourceColumn(sources, reference.ReferencedName);
+        return s == 0 ? sources[0].Columns[c].Identity ?? sources[0].Columns[c].IdentitySource : null;
     }
 
     /// <summary>

@@ -472,4 +472,12 @@ public sealed class IfBlockTests
     [TestMethod]
     public void ABlock_LeavesTheRowCountItsLastStatementSet()
         => AreEqual(2, new Simulation().ExecuteScalar("create table t (a int); begin insert t values (1), (2) end; select @@rowcount"));
+
+    /// <summary>An IF's condition resets @@ROWCOUNT to 0 for the branch it chooses (probed 2026-10-01 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("if 1 = 1 select @@rowcount")]
+    [DataRow("if exists (select * from t) select @@rowcount")]
+    [DataRow("if (select count(*) from t) > 0 select @@rowcount")]
+    public void If_ConditionResetsRowCount(string statement)
+        => AreEqual(0, new Simulation().ExecuteScalar<int>($"create table t (a int); insert t values (1), (2), (3); {statement}"));
 }

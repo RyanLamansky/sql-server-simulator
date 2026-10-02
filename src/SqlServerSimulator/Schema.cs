@@ -219,29 +219,39 @@ internal sealed class Schema
     /// </summary>
     public bool HasConstraintNamed(string leaf)
     {
-        var collation = this.Database.Collation;
         foreach (var (_, table) in this.HeapTables)
         {
-            foreach (var key in table.KeyConstraints)
-            {
-                if (collation.Equals(key.Name, leaf))
-                    return true;
-            }
-            foreach (var check in table.CheckConstraints)
-            {
-                if (collation.Equals(check.Name, leaf))
-                    return true;
-            }
-            foreach (var foreignKey in table.OutgoingForeignKeys)
-            {
-                if (collation.Equals(foreignKey.Name, leaf))
-                    return true;
-            }
-            foreach (var column in table.Columns)
-            {
-                if (column.DefaultConstraint is { } def && collation.Equals(def.Name, leaf))
-                    return true;
-            }
+            if (TableHasConstraintNamed(table, leaf, this.Database.Collation))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// True when a key, check, foreign-key or default constraint on
+    /// <paramref name="table"/> is named <paramref name="leaf"/>.
+    /// </summary>
+    public static bool TableHasConstraintNamed(HeapTable table, string leaf, Collation collation)
+    {
+        foreach (var key in table.KeyConstraints)
+        {
+            if (collation.Equals(key.Name, leaf))
+                return true;
+        }
+        foreach (var check in table.CheckConstraints)
+        {
+            if (collation.Equals(check.Name, leaf))
+                return true;
+        }
+        foreach (var foreignKey in table.OutgoingForeignKeys)
+        {
+            if (collation.Equals(foreignKey.Name, leaf))
+                return true;
+        }
+        foreach (var column in table.Columns)
+        {
+            if (column.DefaultConstraint is { } def && collation.Equals(def.Name, leaf))
+                return true;
         }
         return false;
     }

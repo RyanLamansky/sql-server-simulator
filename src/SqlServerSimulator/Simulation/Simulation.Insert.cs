@@ -554,7 +554,7 @@ partial class Simulation
             // DEFAULT (per Msg 339's wording, also NULL) as an explicit identity
             // value is rejected before the IDENTITY_INSERT gate — probe-confirmed
             // to fire with IDENTITY_INSERT both ON and OFF.
-            if (identityListed && valueTuples is not null && TupleColumnIsDefault(valueTuples, destinationColumns, identityColumn))
+            if (identityListed && valueTuples is not null && TupleColumnIsDefault(valueTuples, destinationColumns, identityColumn, context.Batch))
                 throw SimulatedSqlException.DefaultOrNullNotAllowedForIdentity();
             // IDENTITY_INSERT is session state the statement reads when it
             // runs, so a statement compiled without running checks neither.
@@ -599,6 +599,9 @@ partial class Simulation
         // rows-affected and @@ROWCOUNT alike (probe-confirmed).
         var insertedCount = 0;
         var keyGuard = insteadOfActive || sourceRows.Count == 0 ? null : BeginUniqueKeyGuard(context.Batch, destinationTable);
+        // A key referencing the table itself is checked once the rows are in.
+        var selfReferencingRows = !insteadOfActive && ReferencesItself(destinationTable) ? new List<SqlValue[]>() : null;
+        var drawsIdentity = identityColumn is not null && !insteadOfActive && Array.IndexOf(destinationColumns, identityColumn) < 0;
         for (var rowIndex = 0; rowIndex < sourceRows.Count; rowIndex++)
         {
             var sourceRow = sourceRows[rowIndex];
@@ -642,6 +645,11 @@ partial class Simulation
                 var defaultValue = column.Default.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch));
                 rowValues[i] = CoerceForInsert(EnforceMaxLength(defaultValue, column, destinationTable, context.Connection), column);
             }
+
+            // The row draws its identity value ahead of converting its values,
+            // so one that fails to convert leaves a gap the next row skips
+            // (probed 2026-10-01 against SQL Server 2025).
+            Int128? drawnIdentity = drawsIdentity ? GenerateIdentity(identityColumn!) : null;
 
             for (var i = 0; i < destinationColumns.Length; i++)
             {
@@ -687,6 +695,8 @@ partial class Simulation
 
                 if (ReferenceEquals(targetColumn, identityColumn))
                 {
+                    if (coerced.IsNull)
+                        throw SimulatedSqlException.CannotInsertNull(targetColumn.Name, QualifyForNullMessage(destinationTable), "INSERT");
                     var explicitValue = IdentityState.FromSqlValue(coerced);
                     identityColumn.Identity!.ObserveExplicit(explicitValue);
                     lastIdentityValue = explicitValue;
@@ -707,7 +717,7 @@ partial class Simulation
                 }
                 else
                 {
-                    var generated = GenerateIdentity(identityColumn);
+                    var generated = drawnIdentity!.Value;
                     rowValues[identityOrdinal] = CoerceForIdentity(generated, identityColumn);
                     lastIdentityValue = generated;
                 }
@@ -785,7 +795,7 @@ partial class Simulation
                         continue;
                     }
 
-                    EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, plan.Verb);
+                    EnforceOutgoingForeignKeys(destinationTable, [rowValues], context, plan.Verb, selfReferencing: selfReferencingRows is null ? null : false);
                     EnforceEdgeConstraints(destinationTable, rowValues, context, plan.Verb);
                     destinationTable.OwningDatabase?.RejectWriteWhenReadOnly();
                     var image = RowEncoder.EncodeRow(destinationTable.StoredColumns, storedValues, destinationTable.Heap);
@@ -798,6 +808,7 @@ partial class Simulation
                         continue;
                     context.Connection.StatementIo?.CountWrite(destinationTable);
                     destinationTable.ChangeTracking?.RecordRow(context.Batch, destinationTable, rowValues, Storage.ChangeTrackingOperation.Insert);
+                    selfReferencingRows?.Add(rowValues);
                 }
 
                 if (output is { } o)
@@ -811,6 +822,9 @@ partial class Simulation
                 insertedCount++;
             }
         }
+
+        if (selfReferencingRows is { Count: > 0 })
+            EnforceOutgoingForeignKeys(destinationTable, selfReferencingRows, context, plan.Verb, selfReferencing: true);
 
         // Indexed-view maintenance: after all base rows are written, re-evaluate
         // any unique-indexed view over this table and enforce its uniqueness
@@ -855,7 +869,7 @@ partial class Simulation
         // surfaces to the client (probe-confirmed). When the OUTPUT clause
         // has no target, the projected rows flow back as a result set.
         return output is { HasTarget: false } o2
-            ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!, insertedCount)
+            ? new SimulatedSqlResultSet(o2.Schema, o2.ColumnNames, outputRows!, insertedCount) { ColumnNullability = o2.Nullability }
             : new SimulatedNonQuery(insertedCount);
     }
 
@@ -1131,7 +1145,10 @@ partial class Simulation
             {
                 foreach (var tuple in valueTuples)
                 {
-                    if (i < tuple.Length && tuple[i] is not Parser.Expressions.DefaultValueExpression)
+                    // A constant NULL into a rowversion reads as DEFAULT, where
+                    // a NULL variable is Msg 273 (probed 2026-10-01).
+                    if (i < tuple.Length && tuple[i] is not Parser.Expressions.DefaultValueExpression
+                        && !(column.Type == SqlType.RowVersion && IsConstantNull(tuple[i], context.Batch)))
                     {
                         supplied = true;
                         break;
@@ -1232,7 +1249,7 @@ partial class Simulation
     /// <paramref name="destinationColumns"/>). Used to raise Msg 339 when an
     /// identity column receives an explicit <c>DEFAULT</c>.
     /// </summary>
-    private static bool TupleColumnIsDefault(List<Expression[]> tuples, HeapColumn[] destinationColumns, HeapColumn column)
+    private static bool TupleColumnIsDefault(List<Expression[]> tuples, HeapColumn[] destinationColumns, HeapColumn column, BatchContext batch)
     {
         var position = -1;
         for (var i = 0; i < destinationColumns.Length; i++)
@@ -1247,10 +1264,36 @@ partial class Simulation
             return false;
         foreach (var tuple in tuples)
         {
-            if (position < tuple.Length && tuple[position] is Parser.Expressions.DefaultValueExpression)
+            if (position < tuple.Length && (tuple[position] is Parser.Expressions.DefaultValueExpression || IsConstantNull(tuple[position], batch)))
                 return true;
         }
         return false;
+    }
+
+    /// <summary>Whether one of <paramref name="table"/>'s foreign keys references the table itself.</summary>
+    private static bool ReferencesItself(HeapTable table)
+    {
+        foreach (var key in table.OutgoingForeignKeys)
+        {
+            if (ReferenceEquals(key.ReferencedTable, table))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="expression"/> is a written constant that folds
+    /// to NULL (<c>NULL</c>, <c>CAST(NULL AS int)</c>) — what Msg 339 refuses
+    /// as an explicit identity value while compiling, where a NULL only a run
+    /// produces is Msg 515 (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    private static bool IsConstantNull(Expression? expression, BatchContext batch)
+    {
+        if (expression is Parser.Expressions.NamedExpression named)
+            expression = named.Inner;
+        return expression is not null
+            && new NullabilityContext(batch, static _ => true, name => throw SimulatedSqlException.InvalidColumnName(name)).TryFold(expression, out var value)
+            && value.IsNull;
     }
 
     /// <summary>
@@ -1343,6 +1386,8 @@ partial class Simulation
         for (var i = 0; i < expectedColumnCount; i++)
         {
             var projected = selection.ProjectionExpressions?[i] is Parser.Expressions.NamedExpression named ? named.Inner : selection.ProjectionExpressions?[i];
+            if (identityColumn is not null && ReferenceEquals(destinationColumns[i], identityColumn) && IsConstantNull(projected, context.Batch))
+                throw SimulatedSqlException.DefaultOrNullNotAllowedForIdentity();
             if (UndeclaredParameterDeduction.NoteExact(projected, destinationColumns[i].Type))
                 continue;
             if (selection.ColumnIsUntypedNull is not { } untyped || !untyped[i])
@@ -1436,11 +1481,33 @@ partial class Simulation
         var expectedColumnCount = destinationColumns.Length;
         var batch = context.Batch;
         var connection = batch.Connection;
-        if (connection.InsertExecActive)
+        // A nested INSERT … EXEC fails as it runs, ending only its own
+        // statement in the executed body (probed 2026-10-01 against SQL Server
+        // 2025), so the body's compile walk passes it.
+        if (connection.InsertExecActive && !batch.IsSkipping)
+        {
+            // The EXEC clause is read through, unrun, so the body resumes
+            // past it rather than at its EXEC.
+            var wasSkipping = batch.SkipModeFlag;
+            batch.SkipModeFlag = true;
+            try
+            {
+                foreach (var _ in connection.Simulation.ParseExec(batch, insertExecSource: true))
+                {
+                }
+            }
+            finally
+            {
+                batch.SkipModeFlag = wasSkipping;
+            }
             throw SimulatedSqlException.InsertExecCannotBeNested();
+        }
 
         endedBody = null;
         var rows = new List<SqlValue[]>();
+        // A body compile walk reaching a nested one hands the flags back as
+        // it found them, so the outer drain keeps refusing the nested run.
+        var (outerActive, outerTargetTypes) = (connection.InsertExecActive, connection.InsertExecTargetTypes);
         connection.InsertExecActive = true;
         connection.InsertExecTargetTypes = Array.ConvertAll(destinationColumns, column => column.Type);
         try
@@ -1492,8 +1559,8 @@ partial class Simulation
         }
         finally
         {
-            connection.InsertExecActive = false;
-            connection.InsertExecTargetTypes = null;
+            connection.InsertExecActive = outerActive;
+            connection.InsertExecTargetTypes = outerTargetTypes;
         }
         return rows;
 

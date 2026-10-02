@@ -7,11 +7,15 @@ Sibling deep-dives: [`foreign-keys.md`](foreign-keys.md) (the FK family in full)
   Inline column-level CHECK may only reference its owning column — peer refs raise **Msg 8141** at CREATE TABLE (probe-confirmed).
   The walker (`Expression.VisitColumnReferences` + `BooleanExpression.VisitOperandExpressions`) reaches every expression kind, so a peer inside `DATEPART` or a nested `CASE` is caught at CREATE as on real.
   Table-level CHECK has no peer restriction.
+  A CHECK or a computed column admits no subquery (**Msg 1046**) and no aggregate (**Msg 175**), and a function its definition calls is pinned as a schema-bound module's referent is: `DROP FUNCTION` and `ALTER FUNCTION` are **Msg 3729** naming the constraint, a DEFAULT's call likewise (probed 2026-10-01 against SQL Server 2025).
+  Every refused constraint declaration — Msg 8141 here, 1711, 2729, 2799, 1781, 1754, the foreign-key family — is followed by **Msg 1750** as its own message and ends the batch (`FollowedByConstraintNotCreated`, probed 2026-10-01).
   A predicate over a computed column has its own persistence rules — [below](#computed-columns-in-a-check-constraint).
 - `PRIMARY KEY` / `UNIQUE` / secondary `CREATE INDEX`: no B-tree; reads, `UPDATE`/`DELETE`/`MERGE` target scans, **and key-uniqueness enforcement itself** go through the **incrementally-maintained** per-`Heap` seek acceleration (equality / IN / leading-column range / equality-prefix+range continuation / ORDER BY elimination / keyset).
   Seek shapes, mutation/MERGE seeking, journal mechanics, decline rules, residual-WHERE invariant in [`indexes.md`](indexes.md); the enforcement seek's own decline rules are [below](#key-uniqueness-enforcement-seeks-rather-than-scans).
   Violations: PK/UNIQUE *constraints* raise Msg 2627; unique *indexes* raise Msg 2601 — the offending key's rendering is [below](#how-the-duplicate-key-value-renders).
   UNIQUE treats NULLs as equal (the signature SQL Server divergence from ANSI).
+  A key or index whose columns can together pass 900 bytes clustered or 1700 nonclustered is built with the class-0 **Msg 1945** warning (`WarnOfWideIndexKey`, probed 2026-10-01).
+  A temp table's explicitly named constraint shares tempdb's namespace with the session's other temp tables and every global one, so a second `#u (… CONSTRAINT pk_tmp …)` is Msg 2714 (probed 2026-10-01); other sessions' temp tables aren't checked here, where real's tempdb sees them too.
 - `FOREIGN KEY`: inline / table-level / named forms; all four referential actions on `ON DELETE`/`ON UPDATE`; enforced at INSERT/UPDATE/DELETE/MERGE; full `sys.foreign_keys` / `sys.foreign_key_columns`.
   Enforcement **seeks the shared `HeapSeekCache`** (live-byte verified, no residual WHERE).
   Referential-action, cascade-cycle, PK/UNIQUE-target, NULL-skip rules + Msg numbers in [`foreign-keys.md`](foreign-keys.md).
@@ -64,7 +68,7 @@ All probe-confirmed against SQL Server 2025.
 ## Constraint naming metadata
 
 `sys.check_constraints.is_system_named` is 1 for every server-generated name and 0 for a `CONSTRAINT name` one, on both declaration paths — CREATE TABLE (inline column tail and table-level list) and `ALTER TABLE … ADD` — matching real (probe-confirmed against SQL Server 2025, which reports the same split for `sys.default_constraints` and `sys.key_constraints`).
-The auto-name shapes themselves are in [`alter-table.md`](alter-table.md); they are deterministic but don't byte-match real's object-id-derived hex.
+The auto-name shapes themselves are in [`foreign-keys.md`](foreign-keys.md#auto-generated-fk-name); they are deterministic but don't byte-match real's object-id-derived hex.
 
 ## `NOT FOR REPLICATION`
 

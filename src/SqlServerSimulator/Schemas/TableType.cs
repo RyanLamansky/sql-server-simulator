@@ -136,7 +136,7 @@ internal sealed class TableType(
             schemaId: Database.DboSchemaId,
             createDate: batch.CurrentStatement.UtcNow,
             keyConstraints: Simulation.ResolveKeyConstraints(internalName, this.Columns, this.PendingKeys, batch.CurrentDatabase, batch.CurrentStatement.UtcNow),
-            checkConstraints: Simulation.ResolveCheckConstraints(internalName, this.PendingChecks, batch.CurrentDatabase, batch.CurrentStatement.UtcNow, checkTablePartLength: internalName.Length),
+            checkConstraints: Simulation.ResolveCheckConstraints(internalName, this.PendingChecks, batch.CurrentDatabase, batch.CurrentStatement.UtcNow, tempNamePadding: internalName.Length),
             isTableVariable: true,
             isTableValuedParameter: isTableValuedParameter)
         {

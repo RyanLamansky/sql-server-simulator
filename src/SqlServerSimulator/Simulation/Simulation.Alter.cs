@@ -1721,6 +1721,10 @@ partial class Simulation
             context.Batch.AcquireTableRedefinitionLock(alterTarget);
             RecordTableDdlUndo(context, alterTarget);
         }
+        else if (!context.Batch.IsSkipping && context.Batch.TryResolveView(tableName, out _))
+        {
+            throw SimulatedSqlException.AlterTableNonTable(tableName.ToString());
+        }
 
         // Cursor is on the last name segment; advance to the post-name token.
         context.MoveNextRequired();

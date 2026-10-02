@@ -464,18 +464,19 @@ public sealed class KeyConstraintTests
     /// </summary>
     [TestMethod]
     public void Unique_OnNonPersistedComputed_NonDeterministic_Raises2729()
-        => new Simulation().AssertSqlError(
-            "create table t (a int not null, c as getdate(), unique (c))",
-            2729,
-            "Column 'c' in table 'dbo.t' cannot be used in an index or statistics or as a partition key because it is non-deterministic. Could not create constraint or index. See previous errors.");
+    {
+        var ex = new Simulation().AssertSqlError("create table t (a int not null, c as getdate(), unique (c))", 2729);
+        AreEqual("Column 'c' in table 't' cannot be used in an index or statistics or as a partition key because it is non-deterministic.", ex.Errors[0].Message);
+        AreEqual((1750, 1), (ex.Errors[1].Number, ex.Errors[1].State));
+    }
 
     [TestMethod]
     public void Unique_OnNonPersistedComputed_Imprecise_Raises2799()
     {
         var ex = new Simulation().AssertSqlError(
             "create table t (a float not null, c as a * 2, constraint uq_t unique (c))", 2799);
-        Assert.Contains("'uq_t' on table 'dbo.t' because the computed column 'c' is imprecise and not persisted", ex.Message);
-        Assert.Contains("Could not create constraint or index. See previous errors.", ex.Message);
+        Assert.Contains("'uq_t' on table 't' because the computed column 'c' is imprecise and not persisted", ex.Errors[0].Message);
+        AreEqual((1750, 1), (ex.Errors[1].Number, ex.Errors[1].State));
     }
 
     [TestMethod]
@@ -773,4 +774,29 @@ public sealed class KeyConstraintTests
         var ex = new Simulation().AssertSqlError(sql, number);
         AreEqual(1750, ex.Errors[1].Number);
     }
+
+    /// <summary>
+    /// An index whose key columns can together pass 900 bytes clustered or
+    /// 1700 nonclustered is built with Msg 1945 (probed 2026-10-01 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (a varchar(1000) primary key)", 1)]
+    [DataRow("create table t (a varchar(1800) primary key nonclustered)", 1)]
+    [DataRow("create table t (a varchar(1000) unique)", 0)]
+    [DataRow("create table t (a varchar(1000), b varchar(1000)); create clustered index ix on t(a, b)", 1)]
+    [DataRow("create table t (a varchar(1000)); create index ix on t(a)", 0)]
+    public void WideIndexKey_SendsMsg1945(string sql, int warnings)
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        var messages = new List<int>();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(error => error.Number));
+        _ = connection.CreateCommand(sql).ExecuteNonQuery();
+        Assert.AreEqual(warnings, messages.Count(number => number == 1945));
+    }
+
+    /// <summary>A temp table's constraint name shares tempdb's namespace with the session's other temp tables (probed 2026-10-01).</summary>
+    [TestMethod]
+    public void TempTableConstraintName_CollidesAcrossTempTables()
+        => _ = new Simulation().AssertSqlError("create table #t (a int constraint pk_tmp primary key); create table #u (a int constraint pk_tmp primary key)", 2714);
 }

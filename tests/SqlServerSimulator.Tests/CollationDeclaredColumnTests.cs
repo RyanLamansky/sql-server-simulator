@@ -415,21 +415,15 @@ public sealed class CollationDeclaredColumnTests
     }
 
     /// <summary>
-    /// Unknown collation name raises a clear NotSupportedException (it's
-    /// not on the simulator's recognized catalog). Probes confirm this
-    /// is the simulator's "honest about what's modeled" stance, distinct
-    /// from real SQL Server's Msg 448. <c>Pashto_CI_AS</c> doesn't ship
-    /// (only the v100 form does): the prefix is known, the suffix
-    /// grammar is valid, but the specific combination is absent from
-    /// the per-prefix tail-set catalog.
+    /// An unknown collation name in a column definition is real's Msg 448 at
+    /// state 2 (probed 2026-10-01 against SQL Server 2025). <c>Pashto_CI_AS</c>
+    /// doesn't ship (only the v100 form does): the prefix is known, the suffix
+    /// grammar is valid, but the specific combination is absent from the
+    /// per-prefix tail-set catalog.
     /// </summary>
     [TestMethod]
-    public void UnknownCollationName_RaisesNotSupported()
-    {
-        var ex = Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery(
-            "create table t (s varchar(20) collate Pashto_CI_AS)"));
-        Contains("Pashto_CI_AS", ex.Message);
-    }
+    public void UnknownCollationName_RaisesMsg448()
+        => new Simulation().AssertSqlError("create table t (s varchar(20) collate Pashto_CI_AS)", 448, "Invalid collation 'Pashto_CI_AS'.");
 
     /// <summary>
     /// Cross-database-default collation: when the active database has a

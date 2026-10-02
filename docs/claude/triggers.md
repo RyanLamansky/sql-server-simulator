@@ -145,6 +145,7 @@ This is the rule behind EF Core's `HasTrigger` annotation: declaring a trigger m
 ## INSTEAD OF on views
 
 INSERTED / DELETED are the view's own columns, derived ones computed as the view computes them (probed 2026-09-27 against SQL Server 2025).
+Over a table or a view alike they read every column but a computed one as **nullable**, the rows never having been written — a NOT NULL column the INSERT left out reads NULL, which on the wire is a nullable column — and a rowversion as **NULL** (`TryFireInsteadOfTrigger`, probed 2026-10-01 against SQL Server 2025).
 
 - **INSERT** hands the trigger the statement's rows shaped to the view, unspecified columns NULL.
 - **UPDATE and DELETE read the view itself** (`Simulation.InsteadOfView.cs`), whatever its shape — an aggregate, `DISTINCT`, a set operation, a join, or an updatable view alike: the `WHERE` picks the view's rows and may name a derived column, those rows are `DELETED`, and for an UPDATE the rows with the `SET` list applied are `INSERTED`.
@@ -235,6 +236,10 @@ So does any error caught after the body's own `SET XACT_ABORT OFF`, which dooms 
 An error the body leaves *un*handled propagates with its own number instead — an outer `CATCH` sees `ERROR_NUMBER()` 51000 for a body-side `THROW 51000`, with `ERROR_PROCEDURE()` naming the trigger — so Msg 3616 fires only for the swallowed case.
 An error caught inside a stored procedure the body called counts too, which is why `SimulatedDbConnection.TriggerBodyErrorRaised` is connection-scoped; it's saved and cleared per body so a handled error in one trigger doesn't condemn the next.
 
+## Writing the pseudo-tables
+
+A body's `INSERT` / `UPDATE` / `DELETE` of `INSERTED` or `DELETED` is **Msg 286** at `CREATE TRIGGER` (probed 2026-10-01 against SQL Server 2025).
+
 ## Errors in a trigger body
 
 A body starts under `SET XACT_ABORT ON` whatever the session says — `@@OPTIONS & 16384` reads 16384 inside it — so its errors follow that option's rules (probed 2026-09-24 against SQL Server 2025; [`transactions.md`](transactions.md#set-xact_abort)):
@@ -247,6 +252,7 @@ A body starts under `SET XACT_ABORT ON` whatever the session says — `@@OPTIONS
 
 ### Not modeled yet
 
+- **Msg 311 for a `text` / `ntext` / `image` column read from INSERTED or DELETED** in an AFTER trigger's body — refused at `CREATE TRIGGER` on real — binds here (probed 2026-10-01 against SQL Server 2025).
 - **Msg 3621 after a non-writing statement's error in a body that turned `XACT_ABORT` off** — real sends it for the firing statement; here only an error escaping the body earns it.
 - **Msg 3621 after an error escaping the body** carries the trigger as its `Procedure` on real (Msg 8134 from `SELECT 1/0`), and isn't sent at all after a Msg 208 a function the body calls raises as it runs; here it follows unattributed in both (probed 2026-10-01 against SQL Server 2025).
 

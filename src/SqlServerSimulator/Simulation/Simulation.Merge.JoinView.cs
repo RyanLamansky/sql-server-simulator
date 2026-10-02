@@ -411,7 +411,7 @@ partial class Simulation
         var totalAffected = baseInserts.Count + baseUpdates.Count + baseDeletes.Count;
         context.Connection.LastStatementRowCount = totalAffected;
         return output is { HasTarget: false }
-            ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, totalAffected)
+            ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, totalAffected) { ColumnNullability = output.Nullability }
             : new SimulatedNonQuery(totalAffected);
     }
 

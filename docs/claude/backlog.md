@@ -245,6 +245,8 @@ The harness is local-only and not checked in; its three connection-killing findi
 
 **Wrong results**:
 
+- An `INSERT` whose source expression fails (`VALUES (CAST('x' AS int))`, `VALUES (1/0)`, `INSERT … SELECT CAST('x' AS int)`) uses up an identity value on real, so the next row is 2, and none here; a value failing its conversion *into* the column uses one up on both, and a failing row of a multi-row `VALUES` uses none on either (probed 2026-10-02 against SQL Server 2025).
+  It follows real's plan — the identity draw sits ahead of the expression in one shape and behind the constant scan in the other — while the simulator materializes the source before any draw.
 - A multi-row write's client `OUTPUT` sends no rows when a later row raises, where real streams the rows produced before it (probed 2026-10-01; [`dml.md`](dml.md#update--delete)).
 - `STRING_AGG(s, CAST(',' AS varchar(2)))` over a table is Msg 8733 on real and aggregates here; over a `VALUES` source real accepts it too (probed 2026-09-24).
   What separates the two is plan-shaped rather than grammatical (probed 2026-09-27): the refusal needs a single table or view source and no `GROUP BY`, `HAVING`, `TOP`, `LIKE` filter or `OPTION (RECOMPILE)` — any of those, a derived table, a `#temp` table or a table variable accepts it — and it follows the value expression too (`UPPER(s)`, `LEFT(s, 10)`, `ISNULL(s, '')` accept; `s + ''`, `(s)`, `CAST(i AS varchar)`, `'x'` refuse), and a `CONVERT`, a `char(1)` or `varchar(max)` target and a `COLLATE` refuse like the `CAST`.
@@ -284,6 +286,18 @@ What it left open:
 - **`$IDENTITY`** — the identity-column pseudo-reference (`SELECT $identity FROM t`, NOT NULL on real) is Msg 156 here.
 - **`TOP … ORDER BY` ahead of a `UNION` in an `IN` subquery.** `WHERE g IN (SELECT TOP 1 k FROM u ORDER BY k UNION SELECT 3)` answers on real and is Msg 156 here.
 - **Rows ahead of a per-row `TOP` error.** An `APPLY` body's `TOP (t.g)` meeting a NULL is Msg 1014 on both, but real streams the outer rows before it when its plan needs no sort for the statement's `ORDER BY`, the plan-shaped sibling of the partial results noted under [streaming accumulation](query.md#streaming-accumulation-and-where-an-error-surfaces).
+
+**DML / DDL sweep** — a fourth corpus of 1,025 small cases over INSERT / UPDATE / DELETE / MERGE / OUTPUT, identity, defaults, rowversion, constraints and foreign keys, CREATE / ALTER TABLE, temp tables and table variables, the catalog after DDL and `@@ROWCOUNT`, each against a fresh database and compared by value, message and the TDS nullability flag (probed 2026-10-01 against SQL Server 2025).
+Of the cases still differing once its fixes shipped, the environmental ones are temp-table and table-variable internal names (their counters' hex), a MERGE's output row order and two cases the harness's own shared database name collided in, and the already-filed ones INSERT … EXEC's error attribution, syntax-error recovery, `$IDENTITY`, `tempdb.sys.columns` for a table variable and a temp table's collation ([`collations.md`](collations.md#database-default-and-temp-inheritance)).
+What it left open:
+
+- **A CHECK calling a function that reads its own table** sees the table without the row being written on real — `CHECK (dbo.cnt() < 3)` over `SELECT COUNT(*) FROM t` refuses the third row — where here the function runs before the row lands and admits it.
+- **A DML `TOP` refusal over a table the batch creates** — a negative count's Msg 127, a percent over 100's Msg 1031, a fractional count's Msg 1060 — is raised as the batch compiles here, where real defers the statement and runs the ones before it; the SET list's Msg 157 / 4108 defer already.
+- **Sparse column sets** (`xml COLUMN_SET FOR ALL_SPARSE_COLUMNS`) raise `NotSupportedException`; real projects the set in `SELECT *` and writes the sparse columns through it.
+- **`SET ANSI_PADDING OFF`** at CREATE is discarded: real records `is_ansi_padded = 0` on every column and stores `varchar` without trailing spaces, `varbinary` without trailing zeros and a nullable `char` as `varchar`.
+- **`sys.identity_columns`** lists only user tables' identity columns here, where real lists eight system tables' too; `sys.partitions.data_compression_desc` reads `NONE` for a table created `WITH (DATA_COMPRESSION = PAGE)`.
+- **`tempdb.sys.objects`** lists no constraint of a `#temp` table, where real lists them under their padded names; a variable in a CREATE TABLE `DEFAULT` is Msg 112 on real and accepted here.
+- **Msg 1708**, the warning a CREATE TABLE whose largest row can pass 8060 bytes sends, isn't sent; its rule isn't settled — two `varchar(8000)` columns draw none while `char(8000), char(50), varchar(10)` does.
 
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 

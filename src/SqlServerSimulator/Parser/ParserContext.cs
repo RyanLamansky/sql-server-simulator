@@ -367,6 +367,13 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool InOutputItem;
 
     /// <summary>
+    /// True while a CHECK constraint's predicate or a computed column's
+    /// expression parses, where a subquery is Msg 1046 (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    public bool InScalarDefinition;
+
+    /// <summary>
     /// The first column reference met while <see cref="ScalarOnlyOperand"/> is
     /// armed. The reference is recorded rather than its name, since the dotted
     /// parts are appended after construction — the whole multi-part name only

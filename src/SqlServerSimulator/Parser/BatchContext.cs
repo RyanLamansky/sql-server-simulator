@@ -3241,6 +3241,16 @@ internal sealed class BatchContext
             }
         }
 
+        // A view's or function's body can't read a temp table (probed
+        // 2026-10-01 against SQL Server 2025).
+        if (IsLocalTempName(name.Leaf) || IsGlobalTempName(name.Leaf))
+        {
+            if (this.Parser.BindingViewDefinition)
+                throw SimulatedSqlException.ViewOnTemporaryTable();
+            if (this.UdfFrame is not null)
+                throw SimulatedSqlException.TemporaryTableInFunction();
+        }
+
         if (IsLocalTempName(name.Leaf))
         {
             // Temp tables are session-local; no other connection can DROP

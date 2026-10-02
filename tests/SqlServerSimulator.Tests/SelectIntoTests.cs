@@ -263,19 +263,19 @@ public sealed class SelectIntoTests
             """, 2705, "Column names in each table must be unique. Column name 'a' in table '#t' is specified more than once.");
 
     /// <summary>
-    /// Real SQL Server propagates identity through a simple CTE; the
-    /// simulator drops both identity and nullability because CTE bindings
-    /// synthesize wrapper columns with nullable=true and no identity.
-    /// Documented divergence; the inserted explicit row succeeds without
-    /// IDENTITY_INSERT because the column lost its identity property.
+    /// A CTE, view or derived table over the source carries its identity
+    /// through, and an identity column named twice keeps it on neither copy
+    /// (probed 2026-10-01 against SQL Server 2025).
     /// </summary>
     [TestMethod]
-    public void CTE_DropsIdentityAndNullabilityInSimulator()
-        => AreEqual(3, new Simulation().ExecuteScalar<int>($"""
+    [DataRow("with cte as (select id, a from src) select id, a into #t from cte", 1)]
+    [DataRow("select * into #t from (select id, a from src) d", 1)]
+    [DataRow("select id, id as id2 into #t from src", 0)]
+    public void Identity_CarriesThroughDerivedSources(string selectInto, int identityColumns)
+        => AreEqual(identityColumns, new Simulation().ExecuteScalar<int>($"""
             {Seed}
-            with cte as (select id, a from src) select id, a into #t from cte;
-            insert #t values (50, 99);
-            select count(*) from #t
+            {selectInto};
+            select count(*) from tempdb.sys.columns where object_id = object_id('tempdb..#t') and is_identity = 1
             """));
 
     [TestMethod]

@@ -52,13 +52,33 @@ public class CreateTableTests
 
     [TestMethod]
     public void CreateTableFixedWidthSumExceedsRowSizeMax()
+        // 8054 bytes of fixed-width data and 7 of row overhead pass the
+        // 8060-byte in-row record size — Msg 1701 (probed 2026-10-01).
+        => new Simulation().AssertSqlError("create table t ( a char(8000), b char(54) )", 1701,
+            "Creating or altering table 't' failed because the minimum row size would be 8061, including 7 bytes of internal overhead. This exceeds the maximum allowable table row size of 8060 bytes.");
+
+    /// <summary>
+    /// The smallest row packs <c>bit</c> columns eight to a byte and counts a
+    /// null-bitmap byte per eight columns, while a variable-length column adds
+    /// nothing (probed 2026-10-01 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("a char(8000), b char(50), c bit, d bit, e bit, f bit, g bit, h bit, i bit, j bit, k bit", -1)]
+    [DataRow("a char(8000), b char(60), v varchar(10), w varchar(10)", 1701)]
+    [DataRow("a char(8000), b char(40), c int, d int, e int, f int, g int, h int, i int", 1701)]
+    [DataRow("a nchar(4000), b char(100) sparse", -1)]
+    public void CreateTableMinimumRowSize(string columns, int expected)
     {
-        // 2016 int columns × 4 bytes = 8064 bytes, beyond 8060-byte in-row record size — Msg 1701.
-        var columns = string.Join(", ", Enumerable.Range(0, 2016).Select(i => $"c{i} int"));
-        var ex = Assert.Throws<SimulatedSqlException>(() => new Simulation().ExecuteNonQuery($"create table t ( {columns} )"));
-        Assert.Contains("row size", ex.Message);
-        Assert.Contains("8060", ex.Message);
+        if (expected < 0)
+            Assert.AreEqual(-1, new Simulation().ExecuteNonQuery($"create table t ( {columns} )"));
+        else
+            _ = new Simulation().AssertSqlError($"create table t ( {columns} )", expected);
     }
+
+    [TestMethod]
+    public void CreateTableMoreThan1024Columns_RaisesMsg1702()
+        => new Simulation().AssertSqlError($"create table t ( {string.Join(", ", Enumerable.Range(1, 1025).Select(i => $"c{i} int"))} )", 1702,
+            "CREATE TABLE failed because column 'c1025' in table 't' exceeds the maximum of 1024 columns.");
 
     [TestMethod]
     [DataRow("varbinary(50)")]
@@ -75,11 +95,8 @@ public class CreateTableTests
 
     [TestMethod]
     public void CreateTableFixedWidthSumAtRowSizeMax()
-    {
-        // 2015 int columns × 4 bytes = 8060 bytes — exactly at the limit.
-        var columns = string.Join(", ", Enumerable.Range(0, 2015).Select(i => $"c{i} int"));
-        Assert.AreEqual(-1, new Simulation().ExecuteNonQuery($"create table t ( {columns} )"));
-    }
+        // 8053 bytes of fixed-width data and 7 of overhead — exactly at the limit.
+        => Assert.AreEqual(-1, new Simulation().ExecuteNonQuery("create table t ( a char(8000), b char(53) )"));
 
     [TestMethod]
     [DataRow("date")]
@@ -202,4 +219,30 @@ public class CreateTableTests
     [TestMethod]
     public void InlineIndex_UnknownColumn_RaisesAndRollsBack()
         => new Simulation().AssertSqlError("create table zz (id int, INDEX ix (nope))", 1911);
+
+    [TestMethod]
+    public void CreateTable_TempNameOver116Characters_RaisesMsg193()
+        => _ = new Simulation().AssertSqlError($"create table #{new string('t', 116)} (a int)", 193);
+
+    [TestMethod]
+    public void CreateTable_CollateOnANonStringColumn_RaisesMsg447()
+        => new Simulation().AssertSqlError("create table t (b int collate Latin1_General_CS_AS)", 447, "Expression type int is invalid for COLLATE clause.");
+
+    /// <summary>
+    /// An unnamed CHECK, DEFAULT or FOREIGN KEY is thirty characters at most:
+    /// with a column the table and column share fourteen, the table keeping at
+    /// least nine; without one the table keeps sixteen (probed 2026-10-01
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table abcdefghijklmnopqrstuvwxyz (abcdefghijklmnopqrstuvwxyz int default 1)", "DF__abcdefghi__abcde__")]
+    [DataRow("create table abcdefghijklmnopqrstuvwxyz (x int check (x > 0))", "CK__abcdefghijklm__x__")]
+    [DataRow("create table t (abcdefghijklmnopqrstuvwxyz int default 1)", "DF__t__abcdefghijklm__")]
+    [DataRow("create table tt123456 (col1234567 int default 1)", "DF__tt123456__col123__")]
+    [DataRow("create table abcdefghijklmnopqrstuvwxyz (a int, b int, check (a < b))", "CK__abcdefghijklmnop__")]
+    public void CreateTable_AutoConstraintNameLengths(string sql, string prefix)
+    {
+        var name = (string?)new Simulation().ExecuteScalar($"{sql}; select name from sys.objects where type in ('C', 'D')");
+        Assert.AreEqual(prefix, name![..^8]);
+    }
 }

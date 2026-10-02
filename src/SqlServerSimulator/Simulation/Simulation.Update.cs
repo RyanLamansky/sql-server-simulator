@@ -89,6 +89,11 @@ partial class Simulation
             ? Selection.PreParseMutationFrom(context)
             : null;
         var joinedView = leadingView is not null && preParsedFrom is not null;
+        // A target the batch creates ahead of the statement defers its whole
+        // bind, its SET list's refusals included (probed 2026-10-01 against
+        // SQL Server 2025: Msg 157 and 4108 come only once it runs).
+        if (context.Batch.IsSkipping && leadingTable is null && leadingView is null && remoteWrite is null && preParsedFrom is null)
+            context.Batch.CurrentStatement.BindsDeferredSource = true;
         // Phase 1a: when the leading identifier resolved to a concrete table
         // (the simple `UPDATE t SET …` case), lock it now. The
         // multi-table-alias form's target is determined later via the FROM
@@ -182,6 +187,17 @@ partial class Simulation
                 && Collation.Baseline.Equals(columnName, "modify") && IsJsonMutatorTarget(context, leadingTable, setTarget[0]))
             {
                 rawAssignments.Add((setTarget[0], JsonModify.ParseMethod(context, new Reference(leadingIdent.WithAddedPart(setTarget[0])), setTarget[0])));
+                if (context.Token is Operator { Character: ',' })
+                    continue;
+                break;
+            }
+
+            // `col.WRITE(expression, offset, length)` rewrites part of a MAX
+            // string or binary column's value.
+            if (setTarget.Count == 2 && context.Token is Operator { Character: '(' } && Collation.Baseline.Equals(columnName, "write")
+                && ClrTypeColumn(context, leadingTable, setTarget[0]) is null)
+            {
+                rawAssignments.Add((setTarget[0], WriteMutator.ParseMethod(context, new Reference(leadingIdent.WithAddedPart(setTarget[0])), setTarget[0])));
                 if (context.Token is Operator { Character: ',' })
                     continue;
                 break;
@@ -329,6 +345,12 @@ partial class Simulation
         AtPrefixedString variable,
         List<(string? ColumnName, Expression Expr)> rawAssignments)
     {
+        // A table variable qualifying a column (`SET @t.a = …`) is the syntax
+        // error at its dot (probed 2026-10-01 against SQL Server 2025).
+        var atVariable = context.SaveCheckpoint();
+        if (context.GetNextOptional() is Operator { Character: '.' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.RestoreCheckpoint(atVariable);
         var slot = context.Batch.GetVariableSlot(variable.Value);
         context.MoveNextRequired();
         if (TryConsumeAssignmentOperator(context) is not char assignOp)
@@ -1228,7 +1250,7 @@ partial class Simulation
                 FireInsteadOfUpdateTrigger(context, table, sourceView, affected);
             else
                 FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);
-            return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, Array.Empty<byte[]>(), 0);
+            return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, Array.Empty<byte[]>(), 0) { ColumnNullability = output.Nullability };
         }
 
         // SNAPSHOT isolation write-conflict: each affected row must have
@@ -1249,7 +1271,7 @@ partial class Simulation
             FireInsteadOfUpdateTrigger(context, table, sourceView, affected);
             return output is null || output.HasTarget
                 ? new SimulatedNonQuery(affected.Count)
-                : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, affected.Count);
+                : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, affected.Count) { ColumnNullability = output.Nullability };
         }
 
         var keyGuard = BeginUniqueKeyGuard(context.Batch, table);
@@ -1354,7 +1376,7 @@ partial class Simulation
             if (!output.HasTarget)
             {
                 FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);
-                return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows, affected.Count);
+                return new SimulatedSqlResultSet(output.Schema, output.ColumnNames, rows, affected.Count) { ColumnNullability = output.Nullability };
             }
         }
         FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);
@@ -1770,11 +1792,49 @@ partial class Simulation
                 assignments.Add((columnOrdinal, ColumnDefaultValue.Bind(table.Columns[columnOrdinal])));
                 continue;
             }
-            if (expr is AssignmentExpression { Slot.DeclaredType: var variableType } && variableType.SqlServerName != table.Columns[columnOrdinal].Type.SqlServerName)
-                throw SimulatedSqlException.ReceivingVariableTypeMismatch(variableType.SqlServerName, table.Columns[columnOrdinal].Type.SqlServerName, colName);
+            if (expr is AssignmentExpression { Slot.DeclaredType: var variableType })
+            {
+                var column = table.Columns[columnOrdinal];
+                if (variableType.SqlServerName != column.Type.SqlServerName)
+                    throw SimulatedSqlException.ReceivingVariableTypeMismatch(variableType.SqlServerName, column.Type.SqlServerName, colName);
+                RejectNarrowerReceivingVariable(variableType, column, colName);
+            }
             assignments.Add((columnOrdinal, expr));
         }
         return assignments;
+    }
+
+    /// <summary>
+    /// <c>SET @v = col = expr</c>'s variable must hold every value the column
+    /// can: a shorter string or binary is Msg 426, naming both lengths in
+    /// bytes (a MAX column's as 8100), and a <c>decimal</c> with fewer integral
+    /// or fractional digits Msg 4187 (probed 2026-10-01 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static void RejectNarrowerReceivingVariable(SqlType variableType, HeapColumn column, string columnName)
+    {
+        if (variableType is DecimalSqlType variableDecimal && column.Type is DecimalSqlType columnDecimal)
+        {
+            if (variableDecimal.scale < columnDecimal.scale || variableDecimal.precision - variableDecimal.scale < columnDecimal.precision - columnDecimal.scale)
+                throw SimulatedSqlException.ReceivingVariableLosesData(variableType.SqlServerName, column.Type.SqlServerName, columnName);
+            return;
+        }
+        var (variableLength, national) = variableType switch
+        {
+            VarcharSqlType v => (v.length, false),
+            CharSqlType c => (c.length, false),
+            VarbinarySqlType b => (b.length, false),
+            BinarySqlType b => (b.length, false),
+            NVarcharSqlType n => (n.length, true),
+            NCharSqlType n => (n.length, true),
+            _ => ((short)0, false),
+        };
+        if (variableLength <= 0 || column.MaxLength is not int columnLength)
+            return;
+        var columnBytes = columnLength == SqlType.MaxLengthSentinel ? 8100 : national ? columnLength * 2 : columnLength;
+        var variableBytes = national ? variableLength * 2 : variableLength;
+        if (variableBytes < columnBytes)
+            throw SimulatedSqlException.ReceivingVariableTooShort(variableBytes, columnBytes, columnName);
     }
 
     /// <summary>
@@ -2136,11 +2196,20 @@ partial class Simulation
         }
         if (leadingTable is not null)
         {
+            // A table the FROM clause reads twice, under aliases neither of
+            // which the target names, is Msg 8154 (probed 2026-10-01 against
+            // SQL Server 2025).
+            var found = -1;
             for (var s = 0; s < sources.Count; s++)
             {
                 if (ReferenceEquals(sources[s].BackingTable, leadingTable))
-                    return s;
+                {
+                    if (found >= 0)
+                        throw SimulatedSqlException.AmbiguousTable(leadingIdent);
+                    found = s;
+                }
             }
+            return found;
         }
         return -1;
     }

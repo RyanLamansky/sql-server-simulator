@@ -55,6 +55,7 @@ partial class Simulation
         AddedColumns? columns = null;
         List<ParserContext.Checkpoint> constraintStarts = [];
         List<string>? primaryKeyColumns = null;
+        List<string>? constraintNames = null;
         while (true)
         {
             if (context.Token is Name or UnquotedString && !IsEdgeConstraintAhead(context))
@@ -65,6 +66,15 @@ partial class Simulation
             {
                 var start = context.SaveCheckpoint();
                 constraintStarts.Add(start);
+                // Two elements naming one constraint alike are Msg 8168 (probed
+                // 2026-10-01 against SQL Server 2025).
+                if (context.Token is ReservedKeyword { Keyword: Keyword.Constraint } && context.GetNextOptional() is Name named)
+                {
+                    if ((constraintNames ??= []).Exists(name => batch.CurrentDatabase.Collation.Equals(name, named.Value)))
+                        throw SimulatedSqlException.DuplicateNameInStatement(named.Value);
+                    constraintNames.Add(named.Value);
+                    context.RestoreCheckpoint(start);
+                }
                 NotePrimaryKeyColumns(context, ref primaryKeyColumns);
                 context.RestoreCheckpoint(start);
                 var wasSkipping = batch.SkipModeFlag;
@@ -279,10 +289,14 @@ partial class Simulation
         context.MoveNextRequired();
         var predicateStart = context.Token.StartIndex;
         BooleanExpression predicate;
+        var checkAggregates = new List<Parser.Expressions.AggregateExpression>();
         using (context.EnterNextValueForScope(NextValueForScope.Nested))
+        using (ParserScope.Enter(ref context.InScalarDefinition, true))
+        using (ParserScope.Enter(ref context.AggregateCollector, checkAggregates))
         {
             predicate = BooleanExpression.Parse(context);
         }
+        Selection.RefuseClauseAggregates(context.Batch, checkAggregates, SimulatedSqlException.AggregateInComputedOrCheck());
 
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -539,6 +553,7 @@ partial class Simulation
             RejectIndexOnEmptyFilegroup(context.Batch, table, filegroup);
         table.KeyConstraints.Add(constraint);
         table.NoteStatisticsCreated(constraint.Name, context.CurrentDatabase.Collation);
+        WarnOfWideIndexKey(context.Batch, table.Columns, fullOrdinals, constraint.Name, isClustered);
         if (isClustered)
         {
             table.Partitioning = placement;
@@ -590,6 +605,17 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var columnName = columnNameToken.Value;
         context.MoveNextOptional();
+        // `WITH VALUES` is accepted after `FOR column` and changes nothing:
+        // the column's existing rows keep their values (probed 2026-10-01
+        // against SQL Server 2025).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        {
+            var beforeWith = context.SaveCheckpoint();
+            if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Values })
+                context.MoveNextOptional();
+            else
+                context.RestoreCheckpoint(beforeWith);
+        }
 
         if (context.Batch.IsSkipping)
             return true;
@@ -613,6 +639,8 @@ partial class Simulation
             throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.DefaultColumnInvalid(targetColumn.Name, table.Name, 1), state: 0);
         if (targetColumn.Default is not null)
             throw SimulatedSqlException.ColumnAlreadyHasDefault();
+        if (targetColumn.Identity is not null)
+            throw SimulatedSqlException.DefaultOnIdentityColumn(table.Name, targetColumn.Name);
 
         var name = explicitName ?? AutoDefaultName(table.Name, targetColumn.Name);
         targetColumn.Default = expression;
@@ -645,12 +673,12 @@ partial class Simulation
         }
     }
 
-    private static string AutoDefaultName(string tableName, string columnName, int tablePartLength = 8)
+    private static string AutoDefaultName(string tableName, string columnName, int tempNamePadding = 16)
     {
         var h = Fnv1a32.Initial;
         h.MixTableSeed(tableName);
         h.Mix(columnName);
-        return FormatAutoConstraintName("DF__", tableName, columnName, h.Value, tablePartLength);
+        return FormatAutoConstraintName("DF__", tableName, columnName, h.Value, tempNamePadding);
     }
 
     /// <summary>
@@ -847,9 +875,17 @@ partial class Simulation
         names.Add(firstName.Value);
 
         context.MoveNextOptional();
+        // The list may go on to drop columns too: `DROP CONSTRAINT df, COLUMN
+        // b` (probed 2026-10-01 against SQL Server 2025).
+        var columnsFollow = false;
         while (context.Token is Operator { Character: ',' })
         {
-            if (context.GetNextRequired() is not Name next)
+            if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Column })
+            {
+                columnsFollow = true;
+                break;
+            }
+            if (context.Token is not Name next)
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             names.Add(next.Value);
             context.MoveNextOptional();
@@ -862,7 +898,7 @@ partial class Simulation
         _ = ParseOptionalIndexWithClause(context);
 
         if (context.Batch.IsSkipping)
-            return true;
+            return !columnsFollow || ParseDropColumns(context, tableName);
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
@@ -878,7 +914,9 @@ partial class Simulation
             {
                 if (ifExists)
                     continue;
-                throw SimulatedSqlException.NotAConstraint(name);
+                throw context.Batch.TryResolveSchema(tableName, out var schema) && schema.HasConstraintNamed(name)
+                    ? SimulatedSqlException.ConstraintNotOfTable(name, table.Name)
+                    : SimulatedSqlException.NotAConstraint(name);
             }
             if (action.Family == DropConstraintFamily.Key && IsKeyReferencedByForeignKey(table, action.Key!, out var refTable, out var refFkName))
                 throw SimulatedSqlException.ConstraintReferencedByForeignKey(action.Key!.Name, refTable, refFkName);
@@ -897,7 +935,7 @@ partial class Simulation
 
         foreach (var a in planned)
             ApplyDropConstraint(table, a);
-        return true;
+        return !columnsFollow || ParseDropColumns(context, tableName);
     }
 
     /// <summary>
@@ -1000,7 +1038,13 @@ partial class Simulation
                 // An edge constraint toggles as the other two do (probed
                 // 2026-09-27 against SQL Server 2025).
                 if (table.EdgeConstraints.Find(edge => context.Batch.CurrentDatabase.Collation.Equals(edge.Name, name)) is not { } matchedEdge)
-                    throw SimulatedSqlException.ConstraintDoesNotExist(name);
+                {
+                    var collation = context.Batch.CurrentDatabase.Collation;
+                    throw table.KeyConstraints.Exists(key => collation.Equals(key.Name, name))
+                        || Array.Exists(table.Columns, column => column.DefaultConstraint is { } defaultConstraint && collation.Equals(defaultConstraint.Name, name))
+                        ? SimulatedSqlException.ConstraintCannotBeToggled(name)
+                        : SimulatedSqlException.ConstraintDoesNotExist(name);
+                }
                 edgeTargets.Add(matchedEdge);
             }
         }

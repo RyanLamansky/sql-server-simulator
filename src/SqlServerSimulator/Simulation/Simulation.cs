@@ -2528,14 +2528,16 @@ public sealed partial class Simulation
     /// does a scalar subquery answering more than one row (Msg 512) inside a
     /// writing statement (probed 2026-09-28), and so does a positioned update
     /// or delete through a read-only cursor (Msg 16929; probed 2026-09-29) or
-    /// naming a table the cursor doesn't update (Msg 16933; probed 2026-10-01).
+    /// naming a table the cursor doesn't update (Msg 16933; probed 2026-10-01),
+    /// and so do the out-of-range conversions of a written value (Msg 242,
+    /// 244, 248) and a date arithmetic overflow (Msg 517; probed 2026-10-01).
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number is 1505 or 4457
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite)
-            && (error.Number is 127 or 220 or 232 or 512 or 513 or 515 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16933 or 16947
+            && (error.Number is 127 or 220 or 232 or 242 or 244 or 248 or 512 or 513 or 515 or 517 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16933 or 16947
                 || (error.Number == 208 && error.RaisedRunningFunctionBody)));
 
     /// <summary>
@@ -2579,7 +2581,7 @@ public sealed partial class Simulation
     /// </summary>
     private static bool DefersWithItsStatement(BatchContext batch, SimulatedSqlException ex)
         => IsDeferrableNameResolutionError(ex)
-            || (batch.CurrentStatement.BindsDeferredSource && (IsBinderError(ex) || ex.Number is 107 or 130 or 145 or 147 or 164 or 4108));
+            || (batch.CurrentStatement.BindsDeferredSource && (IsBinderError(ex) || ex.Number is 107 or 130 or 145 or 147 or 157 or 164 or 4108));
 
     /// <summary>
     /// True when <paramref name="ex"/> is a statement-terminating error that
@@ -2628,10 +2630,12 @@ public sealed partial class Simulation
     {
         // A structure-changing statement's own failure takes the same path,
         // save the two it raises while compiling (Msg 4902 / 2705), which end
-        // the batch alone (probed 2026-09-26 against SQL Server 2025).
-        // ALTER INDEX's missing index (Msg 2727) does too, though its class is
-        // 11.
-        var structuralFailure = changesTableStructure && (ex.Class == 16 || ex.Number == 2727) && ex.Number is not (4902 or 2705);
+        // the batch alone (probed 2026-09-26 against SQL Server 2025), and a
+        // DROP TABLE a foreign key refuses (Msg 3726) outside a transaction,
+        // after which the batch goes on (probed 2026-10-01). ALTER INDEX's
+        // missing index (Msg 2727) does too, though its class is 11.
+        var structuralFailure = changesTableStructure && (ex.Class == 16 || ex.Number == 2727) && ex.Number is not (4902 or 2705)
+            && !(ex.Number == 3726 && connection.CurrentTransaction is null);
         // A divide by zero or an arithmetic overflow under ARITHABORT ON with
         // ANSI_WARNINGS OFF ends the batch and rolls the transaction back as
         // under XACT_ABORT, dooming it when caught, from a procedure body too
@@ -2755,8 +2759,8 @@ public sealed partial class Simulation
     /// </summary>
     internal static bool IsDeferredCompileError(SimulatedSqlException ex)
         => IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex) || ex.Number is 4902 or 2705
-            || ex.Number is 107 or 108 or 130 or 145 or 147 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 447 or 448 or 529
-                or 1011 or 1012 or 1013 or 4108 or 4115 or 5318 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622 or 10709;
+            || ex.Number is 107 or 108 or 130 or 145 or 147 or 157 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 330 or 331 or 332 or 333 or 425 or 426 or 447 or 448 or 529
+                or 1011 or 1012 or 1013 or 4108 or 4115 or 4187 or 5318 or 5324 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622 or 10709;
 
     /// <summary>
     /// Whether a TRY frame catches <paramref name="ex"/> where it is raised:
@@ -3449,7 +3453,7 @@ public sealed partial class Simulation
         // result set (probed 2026-09-28 against SQL Server 2025).
         connection.LastStatementRowCount = 0;
         return suppressed is SimulatedSqlResultSet output
-            ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, new List<byte[]>())
+            ? new SimulatedSqlResultSet(output.Schema, output.ColumnNames, new List<byte[]>()) { ColumnNullability = output.ColumnNullability }
             : new SimulatedNonQuery(0) { CountSuppressed = false };
     }
 
