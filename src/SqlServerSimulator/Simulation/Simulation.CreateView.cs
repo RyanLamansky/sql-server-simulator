@@ -364,7 +364,11 @@ partial class Simulation
             if (!seen.Add(name))
                 throw SimulatedSqlException.DuplicateColumnInViewOrFunction(name, viewName);
             var nullable = nullability is null || i >= nullability.Length || nullability[i];
-            output[i] = new HeapColumn(name, bodySelection.Schema[i], maxLength: null, nullable: nullable, spelledNumeric: bodySelection.ColumnReportsNumeric is { } numeric && numeric[i])
+            // A character column reports the collation its expression carries,
+            // as a SELECT INTO's does — OPENJSON's key column its
+            // Latin1_General_BIN2 (probed 2026-10-02 against SQL Server 2025).
+            var type = bodySelection.Schema[i];
+            output[i] = new HeapColumn(name, type, maxLength: null, nullable: nullable, collation: type is VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType ? type.Collation?.Name : null, spelledNumeric: bodySelection.ColumnReportsNumeric is { } numeric && numeric[i])
             {
                 AliasType = bodySelection.ColumnAliasTypes?[i],
                 IdentitySource = bodySelection.ColumnIdentitySources?[i],

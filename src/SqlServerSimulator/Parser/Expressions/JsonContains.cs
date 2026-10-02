@@ -101,7 +101,7 @@ internal sealed class JsonContains : Expression
             case JsonValueKind.True or JsonValueKind.False when search.Type == SqlType.Bit:
                 return search.AsBoolean == (node.ValueKind == JsonValueKind.True);
             case JsonValueKind.String when search.Type.Category == SqlTypeCategory.String:
-                var candidate = SqlValue.FromNVarchar(SqlType.NVarcharMax, node.GetString()!)
+                var candidate = SqlValue.FromNVarchar(SqlType.NVarcharMax, JsonText.StringValue(node))
                     .CoerceTo(VarcharSqlType.Get(SqlType.MaxLengthSentinel, database.Collation, Coercibility.CoercibleDefault))
                     .AsString;
                 var collation = search.Type.Collation ?? database.Collation;

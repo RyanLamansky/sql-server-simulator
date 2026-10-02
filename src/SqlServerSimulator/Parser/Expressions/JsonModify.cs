@@ -49,10 +49,10 @@ internal sealed class JsonModify : Expression
     private readonly Expression newValueInput;
 
     /// <summary>
-    /// Whether the third argument is itself a JSON producer, whose text
-    /// embeds raw rather than as a quoted string.
+    /// Whether the third argument is JSON text (<see cref="NVarcharSqlType.jsonText"/>),
+    /// which embeds raw rather than as a quoted string; settled while binding.
     /// </summary>
-    private readonly bool newValueIsJson;
+    private bool newValueIsJson;
 
     /// <summary>
     /// The receiver as written when this is the <c>json</c> type's
@@ -102,35 +102,42 @@ internal sealed class JsonModify : Expression
     /// Whether <paramref name="receiver"/> is a <c>json</c> variable, or a
     /// column the query scope binds to a <c>json</c> one.
     /// </summary>
-    public static bool IsJsonReceiver(Expression receiver, ParserContext context)
+    public static bool IsJsonReceiver(Expression receiver, ParserContext context) => ReceiverType(receiver, context) is JsonSqlType;
+
+    /// <summary>
+    /// The declared type of a method call's receiver, read while it parses:
+    /// a variable's, or a column's the query scope (or an UPDATE's target)
+    /// binds it to; null when the receiver is neither or doesn't bind.
+    /// </summary>
+    public static SqlType? ReceiverType(Expression receiver, ParserContext context)
     {
         switch (receiver)
         {
-            case VariableReference { DeclaredType: JsonSqlType }:
-                return true;
+            case VariableReference variable:
+                return variable.DeclaredType;
             case Reference reference when context.ScopeSources is { Length: > 0 } sources && reference.ReferencedName.Count <= 2:
                 try
                 {
                     var (source, column) = Selection.FindSourceColumn(sources, reference.ReferencedName);
-                    return source >= 0 && sources[source].Columns[column].Type is JsonSqlType;
+                    return source >= 0 ? sources[source].Columns[column].Type : null;
                 }
                 catch (SimulatedSqlException)
                 {
-                    return false;
+                    return null;
                 }
             case Reference reference when context.OuterTypeResolver is { } resolveType:
                 // An UPDATE's own clauses see the write target through the
                 // resolver rather than a FROM scope.
                 try
                 {
-                    return resolveType(reference.ReferencedName) is JsonSqlType;
+                    return resolveType(reference.ReferencedName);
                 }
                 catch (SimulatedSqlException)
                 {
-                    return false;
+                    return null;
                 }
             default:
-                return false;
+                return null;
         }
     }
 
@@ -166,9 +173,9 @@ internal sealed class JsonModify : Expression
     {
         var pathValue = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_MODIFY");
         var newSqlValue = this.newValueInput.Run(runtime);
-        this.RequireWritableValueType(newSqlValue.Type);
+        this.RequireWritableValueType(newSqlValue.Type, jsonInputValue.Type);
         if (jsonInputValue.IsNull)
-            return SqlValue.Null(SqlType.NVarcharMax);
+            return SqlValue.Null(SqlType.JsonTextMax);
 
         var path = JsonPath.Parse(pathValue.AsString, acceptAppend: true);
 
@@ -201,7 +208,7 @@ internal sealed class JsonModify : Expression
                 if (path.Walk(settled.RootElement, scan, out _) == JsonWalkResult.Abandoned)
                     return Unchanged(document);
             }
-            throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, 7);
+            throw scan.Error(7);
         }
 
         var site = JsonEdit.Locate(document, path);
@@ -301,8 +308,9 @@ internal sealed class JsonModify : Expression
         // An append onto a key the object lacks creates it holding a
         // one-element array, NULL value included.
         var rendered = this.Render(newValue);
-        var inserted = new StringBuilder(site.ContainerEmpty ? "" : ",");
-        JsonValueRender.AppendJsonString(inserted, leaf.Property!);
+        // The key goes in as the path names it, in JsonPath.NameForm: escapes
+        // written in the path stay escaped, and nothing else is escaped.
+        var inserted = new StringBuilder(site.ContainerEmpty ? "" : ",").Append('"').Append(leaf.Property).Append('"');
         _ = path.Append
             ? inserted.Append(":[").Append(rendered).Append(']')
             : inserted.Append(':').Append(rendered);
@@ -316,10 +324,10 @@ internal sealed class JsonModify : Expression
     /// </summary>
     private static SqlValue Splice(string document, int start, int end, string replacement) =>
         SqlValue.FromNVarchar(
-            SqlType.NVarcharMax,
+            SqlType.JsonTextMax,
             string.Concat(document.AsSpan(0, start), replacement, document.AsSpan(end)));
 
-    private static SqlValue Unchanged(string document) => SqlValue.FromNVarchar(SqlType.NVarcharMax, document);
+    private static SqlValue Unchanged(string document) => SqlValue.FromNVarchar(SqlType.JsonTextMax, document);
 
     /// <summary>
     /// Renders the third argument as the JSON text that goes into the slot.
@@ -329,6 +337,10 @@ internal sealed class JsonModify : Expression
     /// </summary>
     private string Render(SqlValue value)
     {
+        // A real is written as the float it converts to, at float's sixteen
+        // digits (probed 2026-10-02 against SQL Server 2025).
+        if (value.Type == SqlType.Real)
+            value = value.CoerceTo(SqlType.Float);
         var sb = new StringBuilder();
         JsonValueRender.Append(sb, value, this.newValueIsJson);
         return sb.ToString();
@@ -344,10 +356,13 @@ internal sealed class JsonModify : Expression
     /// An untyped <c>NULL</c> literal types as <c>int</c> and so passes,
     /// which is what leaves the delete-a-member form open.
     /// </summary>
-    private void RequireWritableValueType(SqlType type)
+    private void RequireWritableValueType(SqlType type, SqlType documentType)
     {
+        // A json value is written into a json document, the method's receiver
+        // included, and refused over text (probed 2026-10-02 against SQL
+        // Server 2025).
         if (SqlType.IsIntegerCategory(type)
-            || (type is JsonSqlType && this.methodReceiver is not null)
+            || (type is JsonSqlType && (this.methodReceiver is not null || documentType is JsonSqlType))
             || type is DecimalSqlType
             || type == SqlType.Float
             || type == SqlType.Real
@@ -380,8 +395,11 @@ internal sealed class JsonModify : Expression
                 throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, "modify");
             _ = StringScalars.RequireStringArgument(this.pathInput, this.pathInput.GetSqlType(batch, resolveColumnType), "modify", 2, acceptsLegacyLob: false);
         }
-        this.RequireWritableValueType(this.newValueInput.GetSqlType(batch, resolveColumnType));
-        return this.jsonInput.GetSqlType(batch, resolveColumnType) is JsonSqlType ? SqlType.Json : SqlType.NVarcharMax;
+        var newValueType = this.newValueInput.GetSqlType(batch, resolveColumnType);
+        var documentType = this.jsonInput.GetSqlType(batch, resolveColumnType);
+        this.RequireWritableValueType(newValueType, documentType);
+        this.newValueIsJson |= SqlType.IsJsonText(newValueType);
+        return documentType is JsonSqlType ? SqlType.Json : SqlType.JsonTextMax;
     }
 
     internal override string DebugDisplay() => this.methodReceiver is not null

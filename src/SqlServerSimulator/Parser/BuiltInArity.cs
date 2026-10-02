@@ -108,7 +108,7 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
     /// top-level <c>FROM</c>, which <c>TRIM</c> reads as its own grammar and
     /// any other built-in's parser refuses (<c>SUBSTRING(s FROM 1)</c>).
     /// </summary>
-    private static int CountArguments(ParserContext context)
+    internal static int CountArguments(ParserContext context)
     {
         var count = 0;
         var depth = 0;
@@ -132,6 +132,11 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
                     continue;
                 case ReservedKeyword { Keyword: Keyword.All or Keyword.Distinct or Keyword.From } when depth == 0:
                     return -1;
+
+                // JSON_ARRAYAGG's ORDER BY sits inside its parentheses, and its
+                // commas aren't argument separators.
+                case ReservedKeyword { Keyword: Keyword.Order } when depth == 0:
+                    return expectArgument ? -1 : count;
             }
             if (expectArgument)
             {
@@ -400,6 +405,7 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
             "JSON_ARRAYAGG" => new(1, 1, new(174, "json_arrayagg", 1, 0, 1), new(174, "json_arrayagg", 1, 0, 3)),
             "JSON_CONTAINS" => Between("json_contains", 2, 4),
             "JSON_MODIFY" => Exactly("json_modify", 3),
+            "JSON_OBJECTAGG" => Exactly("JSON_OBJECTAGG", 1),
             "JSON_PATH_EXISTS" => Exactly("json_path_exists", 2),
             "JSON_QUERY" => new(1, 2, new(189, "json_query", 1, 2, 2), new(189, "json_query", 1, 2, 3)),
             "JSON_VALUE" => new(2, 2, new(174, "json_value", 2, 0, 2), new(174, "json_value", 2, 0, 3)),

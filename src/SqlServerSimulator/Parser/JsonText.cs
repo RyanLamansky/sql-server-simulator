@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using SqlServerSimulator.Parser.Expressions;
@@ -84,13 +85,13 @@ internal static class JsonText
     {
         var scan = Scan(text);
         if (scan.Text is null)
-            throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition);
+            throw scan.Error();
         var doc = Parse(scan.Text);
         found = path.Select(doc.RootElement, nodes, out partial);
         if (scan.HasError && (!found || nodes.Count == 0))
         {
             doc.Dispose();
-            throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition);
+            throw scan.Error();
         }
         return doc;
     }
@@ -109,6 +110,72 @@ internal static class JsonText
     /// </summary>
     private static readonly JsonDocumentOptions DocumentOptions = new() { MaxDepth = int.MaxValue };
 
+    /// <summary>
+    /// How many containers a JSON function's reader nests before a value
+    /// inside them is Msg 13606: 129 empty arrays read, a 130th or a scalar
+    /// inside the 129th doesn't (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private const int MaxDepth = 129;
+
+    /// <summary>
+    /// A JSON string's value. An escaped surrogate with no partner reads as
+    /// that lone UTF-16 unit, as SQL Server's reader decodes it (probed
+    /// 2026-10-02), where <see cref="JsonElement.GetString"/> refuses the
+    /// whole string.
+    /// </summary>
+    public static string StringValue(JsonElement element)
+    {
+        try
+        {
+            return element.GetString()!;
+        }
+        catch (InvalidOperationException)
+        {
+            return DecodeEscapes(element.GetRawText());
+        }
+    }
+
+    private static string DecodeEscapes(string raw)
+    {
+        var units = new StringBuilder(raw.Length);
+        for (var i = 1; i < raw.Length - 1; i++)
+        {
+            var c = raw[i];
+            if (c != '\\')
+            {
+                _ = units.Append(c);
+                continue;
+            }
+            var escape = raw[++i];
+            if (escape == 'u')
+            {
+                _ = units.Append((char)int.Parse(raw.AsSpan(i + 1, 4), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture));
+                i += 4;
+                continue;
+            }
+            _ = units.Append(escape switch
+            {
+                'b' => '\b',
+                'f' => '\f',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                _ => escape,
+            });
+        }
+        return units.ToString();
+    }
+
+    /// <summary>
+    /// <paramref name="result"/> carrying the collation and coercibility of a
+    /// string document, which a text result read out of it keeps, or the
+    /// database's for a <c>json</c> one or an untyped NULL.
+    /// </summary>
+    public static SqlType ResultIn(SqlType result, SqlType documentType, BatchContext batch) =>
+        documentType.Collation is { } collation
+            ? result.WithCollation(collation, documentType.Coercibility)
+            : result.WithCollation(batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+
     /// <summary>Parses text a <see cref="Scan"/> already validated.</summary>
     public static JsonDocument Parse(string scanned) => JsonDocument.Parse(scanned, DocumentOptions);
 
@@ -123,7 +190,7 @@ internal static class JsonText
     public static void RaiseUnresolved(in JsonScan scan, JsonWalkResult result, JsonPathMode mode, SqlType documentType)
     {
         if (result is not JsonWalkResult.Abandoned && scan.HasError)
-            throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition);
+            throw scan.Error();
         if (mode == JsonPathMode.Strict)
             throw SimulatedSqlException.JsonStrictPathNotFound(documentType is JsonSqlType ? (byte)5 : (byte)1);
     }
@@ -164,7 +231,10 @@ internal static class JsonText
             return '\0';
         var first = text[i];
         if (first is '{' or '[')
-            return Scan(text).HasError ? '\0' : first;
+        {
+            var scan = Scan(text);
+            return !scan.HasError ? first : scan.TooDeep ? throw scan.Error() : '\0';
+        }
         if (!TryReadScalar(text, ref i))
             return '\0';
         SkipWhitespace(text, ref i);
@@ -234,6 +304,11 @@ internal static class JsonText
                 default:
                     if (c == ']' && state == State.ArrayValue)
                         break;
+
+                    // A value inside 129 containers is past SQL Server's
+                    // nesting limit, raised only once a reader gets there.
+                    if (closers.Count >= MaxDepth)
+                        return Truncated(text, start, closers, safeEnd, safeDepth, c, i, tooDeep: true);
                     if (c is '{' or '[')
                     {
                         closers.Add(c == '{' ? '}' : ']');
@@ -289,7 +364,7 @@ internal static class JsonText
     /// read completely still answers; <see cref="JsonScan.OpenDepth"/> tells
     /// the walk which nodes only exist because of that repair.
     /// </summary>
-    private static JsonScan Truncated(string text, int start, List<char> closers, int safeEnd, int safeDepth, char bad, int position)
+    private static JsonScan Truncated(string text, int start, List<char> closers, int safeEnd, int safeDepth, char bad, int position, bool tooDeep = false)
     {
         if (safeDepth == 0)
             return new JsonScan(null, 0, bad, position, cleanCut: true);
@@ -308,7 +383,7 @@ internal static class JsonText
             after++;
             SkipWhitespace(text, ref after);
         }
-        return new JsonScan(repaired.ToString(), safeDepth, bad, position, cleanCut: after >= position);
+        return new JsonScan(repaired.ToString(), safeDepth, bad, position, cleanCut: after >= position, tooDeep);
     }
 
     private static void SkipWhitespace(string text, ref int i)
@@ -461,6 +536,9 @@ internal readonly struct JsonScan
     /// </summary>
     public readonly bool CleanCut;
 
+    /// <summary>Whether the scan stopped at a value nested past the reader's limit rather than at text it couldn't read.</summary>
+    public readonly bool TooDeep;
+
     /// <summary>The clean scan: a complete root value with nothing but whitespace after it.</summary>
     public JsonScan(string text)
     {
@@ -468,7 +546,7 @@ internal readonly struct JsonScan
         this.CleanCut = true;
     }
 
-    public JsonScan(string? text, int openDepth, char badCharacter, int badPosition, bool cleanCut)
+    public JsonScan(string? text, int openDepth, char badCharacter, int badPosition, bool cleanCut, bool tooDeep = false)
     {
         this.Text = text;
         this.OpenDepth = openDepth;
@@ -476,5 +554,16 @@ internal readonly struct JsonScan
         this.BadCharacter = badCharacter;
         this.BadPosition = badPosition;
         this.CleanCut = cleanCut;
+        this.TooDeep = tooDeep;
     }
+
+    /// <summary>
+    /// The pending error: Msg 13609 at <paramref name="state"/>, or — when
+    /// the scan stopped at the nesting limit rather than at bad text —
+    /// Msg 13606, which every reader raises at State 1, the two that report
+    /// a malformed document as 0 included.
+    /// </summary>
+    public SimulatedSqlException Error(byte state = 1) => this.TooDeep
+        ? SimulatedSqlException.JsonTooDeep(1)
+        : SimulatedSqlException.JsonInvalidText(this.BadCharacter, this.BadPosition, state);
 }

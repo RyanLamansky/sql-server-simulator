@@ -79,7 +79,13 @@ internal sealed class JsonQuery : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var jsonValue = this.jsonInput.Run(runtime);
-        var resultType = this.resultType ?? ResultType(jsonValue.Type);
+        var resultType = this.resultType ?? ResultType(jsonValue.Type, runtime.Batch);
+
+        // A bounded document is read as the nvarchar(4000) the function
+        // returns, so text past its 4000th character is gone before the reader
+        // starts (probed 2026-10-02 against SQL Server 2025).
+        if (resultType is NVarcharSqlType { length: BoundedChars } && !jsonValue.IsNull && jsonValue.AsString is { Length: > BoundedChars } text)
+            jsonValue = SqlValue.FromString(resultType, text[..BoundedChars]);
         if (this.pathInput is null)
         {
             return jsonValue.IsNull ? SqlValue.Null(resultType)
@@ -121,7 +127,7 @@ internal sealed class JsonQuery : Expression
             if (i > 0)
                 _ = sb.Append(',');
             if (!isJson && nodes[i].ValueKind == JsonValueKind.String)
-                JsonValueRender.AppendJsonString(sb, nodes[i].GetString()!, escapeSolidus: true);
+                JsonValueRender.AppendJsonString(sb, JsonText.StringValue(nodes[i]), escapeSolidus: true);
             else
                 _ = sb.Append(nodes[i].GetRawText());
         }
@@ -146,7 +152,7 @@ internal sealed class JsonQuery : Expression
             return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(isJson ? (byte)5 : (byte)2) : SqlValue.Null(resultType);
         if (nodes.Count > 1)
             return strict ? throw SimulatedSqlException.JsonObjectOrArrayNotFound(2) : SqlValue.Null(resultType);
-        var subtree = JsonSubtree.Extract(nodes[0], path.Mode, strictScalarState: 2);
+        var subtree = JsonSubtree.Extract(nodes[0], path.Mode, ScalarState(resultType));
         return subtree is null ? SqlValue.Null(resultType)
             : isJson ? SqlValue.FromJson(subtree)
             : SqlValue.FromString(resultType, subtree);
@@ -166,7 +172,7 @@ internal sealed class JsonQuery : Expression
             result = path.Walk(doc.RootElement, scan, out var match);
             if (result == JsonWalkResult.Resolved)
             {
-                var subtree = JsonSubtree.Extract(match, path.Mode, strictScalarState: 2);
+                var subtree = JsonSubtree.Extract(match, path.Mode, ScalarState(resultType));
                 return subtree is null ? SqlValue.Null(resultType)
                     : jsonValue.Type is JsonSqlType ? SqlValue.FromJson(subtree)
                     : SqlValue.FromString(resultType, subtree);
@@ -180,21 +186,32 @@ internal sealed class JsonQuery : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_query");
-        return this.resultType = ResultType(this.jsonInput.GetSqlType(batch, resolveColumnType));
+        return this.resultType = ResultType(this.jsonInput.GetSqlType(batch, resolveColumnType), batch);
     }
 
     /// <summary>
     /// <c>json</c> over a <c>json</c> document — the subtree of a canonical
     /// document is itself canonical — <c>nvarchar(max)</c> over a MAX string,
     /// and <c>nvarchar(4000)</c> over any other text, a literal included
-    /// (probed 2026-09-26 and 2026-09-28 against SQL Server 2025).
+    /// (probed 2026-09-26 and 2026-09-28 against SQL Server 2025); either
+    /// string is JSON text in the document's collation.
     /// </summary>
-    private static SqlType ResultType(SqlType documentType) => documentType switch
+    private static SqlType ResultType(SqlType documentType, BatchContext batch) => documentType switch
     {
         JsonSqlType => SqlType.Json,
-        VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } => SqlType.NVarcharMax,
-        _ => SqlType.NVarchar,
+        VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } => JsonText.ResultIn(SqlType.JsonTextMax, documentType, batch),
+        _ => JsonText.ResultIn(NVarcharSqlType.Get(BoundedChars, Collation.Baseline, Coercibility.CoercibleDefault, jsonText: true), documentType, batch),
     };
+
+    /// <summary>The bounded result's length, <c>nvarchar(4000)</c>.</summary>
+    private const int BoundedChars = 4000;
+
+    /// <summary>
+    /// The State of the strict-mode Msg 13624 for a scalar match: 1 over a
+    /// MAX document, 2 over any other (probed 2026-10-02 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static byte ScalarState(SqlType resultType) => resultType is NVarcharSqlType { length: SqlType.MaxLengthSentinel } ? (byte)1 : (byte)2;
 
     internal override string DebugDisplay() => this.pathInput is null
         ? $"JSON_QUERY({this.jsonInput.DebugDisplay()}{(this.arrayWrapper ? " WITH ARRAY WRAPPER" : "")})"

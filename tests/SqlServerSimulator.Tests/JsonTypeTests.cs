@@ -241,7 +241,6 @@ public sealed class JsonTypeTests
     [DataRow("create table t (j json); select distinct j from t", 421, 1)]
     [DataRow("create table t (j json); select j from t union select j from t", 5335, 1)]
     [DataRow("create table t (j json); select max(j) from t", 8117, 1)]
-    [DataRow("create table t (j json); insert t values ('[1]'); select count(j) from t", 8117, 2)]
     [DataRow("create table t (j json); insert t values ('[1]'); select count(distinct j) from t", 8117, 2)]
     [DataRow("create table t (j json primary key)", 1919, 1)]
     [DataRow("create table t (j json); create index ix on t (j)", 1978, 3)]
@@ -267,6 +266,8 @@ public sealed class JsonTypeTests
             insert t values (1, '{"a":1}'), (2, '{ "a" : 2 }');
             """);
         AreEqual(2, sim.ExecuteScalar("select count(*) from t where j is not null"));
+        AreEqual(2, sim.ExecuteScalar("select count(j) from t"));
+        AreEqual(2L, sim.ExecuteScalar("select count_big(j) from t"));
         _ = sim.AssertSqlError("insert t values (3, '{\"b\":1}')", 547);
         _ = sim.ExecuteNonQuery("create table c (j json); create clustered columnstore index cci on c");
     }

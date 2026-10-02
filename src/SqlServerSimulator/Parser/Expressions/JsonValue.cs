@@ -115,7 +115,7 @@ internal sealed class JsonValue : Expression
         var jsonValue = this.jsonInput.Run(runtime);
         var pathValue = JsonText.RequirePathValue(this.pathInput.Run(runtime), "JSON_VALUE");
         if (jsonValue.IsNull)
-            return this.NullResult(runtime.Batch);
+            return this.NullResult(jsonValue.Type, runtime.Batch);
 
         var path = JsonPath.Parse(pathValue.AsString);
         if (path.IsAdvanced)
@@ -132,7 +132,7 @@ internal sealed class JsonValue : Expression
         }
 
         JsonText.RaiseUnresolved(scan, result, path.Mode, jsonValue.Type);
-        return this.NullResult(runtime.Batch);
+        return this.NullResult(jsonValue.Type, runtime.Batch);
     }
 
     /// <summary>
@@ -150,18 +150,26 @@ internal sealed class JsonValue : Expression
         using var doc = JsonText.SelectAdvanced(jsonValue.AsString, path, nodes, out var found, out var partial);
         var strict = path.Mode == JsonPathMode.Strict;
         if (!found || nodes.Count == 0 || (strict && partial))
-            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(isJson ? (byte)5 : (byte)2) : this.NullResult(batch);
+            return strict ? throw SimulatedSqlException.JsonStrictPathNotFound(isJson ? (byte)5 : (byte)2) : this.NullResult(jsonValue.Type, batch);
         if (nodes.Count > 1)
         {
-            return !strict ? this.NullResult(batch)
+            return !strict ? this.NullResult(jsonValue.Type, batch)
                 : isJson ? throw SimulatedSqlException.JsonScalarNotFound()
                 : throw SimulatedSqlException.JsonStrictPathNotFound(2);
         }
         return this.Answer(nodes[0], path.Mode, jsonValue.Type, batch);
     }
 
-    private SqlValue NullResult(BatchContext batch) =>
-        SqlValue.Null(this.returningType is null ? SqlType.NVarchar : this.ResultType(batch));
+    private SqlValue NullResult(SqlType documentType, BatchContext batch) =>
+        SqlValue.Null(this.returningType is null ? TextResult(documentType, batch) : this.ResultType(batch));
+
+    /// <summary>
+    /// <c>nvarchar(4000)</c> in the document's own collation and
+    /// coercibility, the database's for a <c>json</c> document (probed
+    /// 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static SqlType TextResult(SqlType documentType, BatchContext batch) =>
+        JsonText.ResultIn(NVarcharSqlType.Get(MaxScalarChars, Collation.Baseline, Coercibility.CoercibleDefault), documentType, batch);
 
     /// <summary>The <c>RETURNING</c> type, a character type carrying the database's collation.</summary>
     private SqlType ResultType(BatchContext batch) =>
@@ -175,29 +183,32 @@ internal sealed class JsonValue : Expression
         {
             // There is no scalar to hand back, which lax mode answers as NULL
             // and strict raises Msg 13623 for.
-            return mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonScalarNotFound() : this.NullResult(batch);
+            return mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonScalarNotFound() : this.NullResult(documentType, batch);
         }
         if (this.returningType is not null)
             return this.Convert(element, mode == JsonPathMode.Strict, batch);
 
+        var type = TextResult(documentType, batch);
         return element.ValueKind switch
         {
             // JSON_VALUE returns nvarchar(4000). A longer scalar string splits
             // by the input's type (probe-confirmed against SQL Server 2025):
             // over a MAX document it is NULL in the default lax mode (4000 →
-            // value, 4001 → NULL), over a bounded one it is cut to its first
-            // 4000 characters (2026-09-23). Either way the result stays within
-            // the bounded wire prefix.
-            JsonValueKind.String => element.GetString() switch
+            // value, 4001 → NULL) and Msg 13625 under strict, over a bounded
+            // one it is cut to its first 4000 characters in either mode
+            // (2026-09-23, 2026-10-02). Either way the result stays within the
+            // bounded wire prefix.
+            JsonValueKind.String => JsonText.StringValue(element) switch
             {
-                { Length: <= MaxScalarChars } s => SqlValue.FromNVarchar(s),
-                { } s when !IsMaxForm(documentType) => SqlValue.FromNVarchar(s[..MaxScalarChars]),
-                _ => SqlValue.Null(SqlType.NVarchar),
+                { Length: <= MaxScalarChars } s => SqlValue.FromString(type, s),
+                { } s when !IsMaxForm(documentType) => SqlValue.FromString(type, s[..MaxScalarChars]),
+                _ when mode == JsonPathMode.Strict => throw SimulatedSqlException.JsonValueTruncated(),
+                _ => SqlValue.Null(type),
             },
-            JsonValueKind.Number => SqlValue.FromNVarchar(element.GetRawText()),
-            JsonValueKind.True => SqlValue.FromNVarchar("true"),
-            JsonValueKind.False => SqlValue.FromNVarchar("false"),
-            _ => SqlValue.Null(SqlType.NVarchar),
+            JsonValueKind.Number => SqlValue.FromString(type, element.GetRawText()),
+            JsonValueKind.True => SqlValue.FromString(type, "true"),
+            JsonValueKind.False => SqlValue.FromString(type, "false"),
+            _ => SqlValue.Null(type),
         };
     }
 
@@ -223,7 +234,7 @@ internal sealed class JsonValue : Expression
             case JsonValueKind.Null:
                 return SqlValue.Null(target);
             case JsonValueKind.String:
-                source = SqlValue.FromNVarchar(SqlType.NVarcharMax, element.GetString()!)
+                source = SqlValue.FromNVarchar(SqlType.NVarcharMax, JsonText.StringValue(element))
                     .CoerceTo(VarcharSqlType.Get(SqlType.MaxLengthSentinel, collation, Coercibility.CoercibleDefault));
                 break;
             case JsonValueKind.True or JsonValueKind.False when stringTarget:
@@ -274,7 +285,7 @@ internal sealed class JsonValue : Expression
     {
         JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_value");
         if (this.returningType is null)
-            return SqlType.NVarchar;
+            return TextResult(this.jsonInput.GetSqlType(batch, resolveColumnType), batch);
 
         // RETURNING is json-only: over a text document real reports the
         // clause itself as a syntax error.

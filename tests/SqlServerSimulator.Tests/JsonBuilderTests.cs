@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -242,4 +243,72 @@ public class JsonBuilderTests
     [DataRow("(select cast('2020-01-02 03:04:05' as datetimeoffset(0)) a for json path)", "[{\"a\":\"2020-01-02T03:04:05Z\"}]")]
     public void DateTimes_RenderAsForJsonDoes(string expression, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
+    // ---- JSON text and value rendering (probed 2026-10-02 against SQL Server 2025) ----
+
+    [TestMethod]
+    [DataRow("select json_object('a':isnull(json_query('[1]'), '[]'))", "{\"a\":[1]}")]
+    [DataRow("select json_object('a':coalesce(null, json_query('[1]')))", "{\"a\":[1]}")]
+    [DataRow("select json_object('a':nullif(json_query('[1]'), N'x'))", "{\"a\":[1]}")]
+    [DataRow("select json_object('a':v) from (select json_array(1) as v) d", "{\"a\":[1]}")]
+    [DataRow("with c as (select json_array(1) as v) select json_object('a':v) from c", "{\"a\":[1]}")]
+    [DataRow("select json_object('a':(select json_query('[1]')))", "{\"a\":[1]}")]
+    [DataRow("select json_object('a':(select 1 as q for json path))", "{\"a\":[{\"q\":1}]}")]
+    [DataRow("select json_object('a':(select 1 as q for json path, root('r')))", "{\"a\":{\"r\":[{\"q\":1}]}}")]
+    [DataRow("select json_object('a':(select 1 as q for json path, without_array_wrapper))", "{\"a\":\"{\\\"q\\\":1}\"}")]
+    [DataRow("select json_object('a':cast(json_query('[1]') as nvarchar(max)))", "{\"a\":\"[1]\"}")]
+    [DataRow("select json_object('a':json_query('[1]') + N'')", "{\"a\":\"[1]\"}")]
+    [DataRow("select json_object('a':isnull(N'[0]', json_query('[1]')))", "{\"a\":\"[0]\"}")]
+    [DataRow("select json_object('a':(select json_arrayagg(n) from (values (1), (2)) v(n)))", "{\"a\":[1,2]}")]
+    public void JsonText_EmbedsAsJsonWhereverItsTypeTravels(string sql, string expected)
+        => AreEqual(expected, ExecuteScalar(sql));
+
+    [TestMethod]
+    public void JsonText_ThroughUnionAll_KeepsTheMarkOnlyWhileBounded()
+    {
+        var sim = new Simulation();
+        AreEqual("{\"k\":[1]}|{\"k\":p}", sim.ExecuteScalar("select string_agg(r, '|') from (select json_object('k':u) as r from (select json_query(N'[1]') as u union all select N'p') d) q"));
+        AreEqual("{\"k\":\"[1]\"}|{\"k\":\"[2]\"}", sim.ExecuteScalar("select string_agg(r, '|') from (select json_object('k':u) as r from (select json_array(1) as u union all select json_array(2)) d) q"));
+    }
+
+    [TestMethod]
+    public void JsonText_StoredBySelectInto_IsPlainText()
+        => AreEqual("{\"k\":\"{\\\"d\\\":1}\"}", new Simulation().ExecuteScalar("select json_query('{\"d\":1}') as c into #q; select json_object('k':c) from #q"));
+
+    [TestMethod]
+    [DataRow("cast(1 as sql_variant)", "[1]")]
+    [DataRow("cast(cast('2024-01-01' as date) as sql_variant)", "[\"2024-01-01\"]")]
+    [DataRow("cast(cast(1 as bit) as sql_variant)", "[true]")]
+    [DataRow("cast(0x01 as image)", "[\"AQ==\"]")]
+    [DataRow("cast(1 as rowversion)", "[\"AAAAAAAAAAE=\"]")]
+    [DataRow("cast('9999-12-31 23:59:59.997' as datetime)", "[\"9999-12-31T23:59:59.997\"]")]
+    public void JsonArray_RendersEachTypeAsRealDoes(string value, string expected)
+        => AreEqual(expected, ExecuteScalar($"select json_array({value})"));
+
+    [TestMethod]
+    [DataRow("cast(1.5 as float)", "{\"1.500000000000000e+000\":1}")]
+    [DataRow("0x41", "{\"QQ==\":1}")]
+    [DataRow("cast(1 as bit)", "{\"true\":1}")]
+    [DataRow("cast('2024-01-02 03:04:05' as datetime)", "{\"2024-01-02T03:04:05\":1}")]
+    [DataRow("cast(1.5 as money)", "{\"1.5000\":1}")]
+    [DataRow("cast(1 as sql_variant)", "{\"1\":1}")]
+    public void JsonObject_Key_IsWrittenAsItsValueWouldBe(string key, string expected)
+        => AreEqual(expected, ExecuteScalar($"select json_object({key}:1)"));
+
+    [TestMethod]
+    [DataRow("select json_object('k':cast('/1/' as hierarchyid))", "json_object and json_objectagg does not support CLR type as parameters", 2)]
+    [DataRow("select json_object(geometry::Point(1, 2, 0):1)", "json_object and json_objectagg does not support CLR type as parameters", 2)]
+    [DataRow("select json_array(geography::Point(1, 2, 4326))", "json_array does not support CLR type as parameters", 3)]
+    [DataRow("select json_arrayagg(cast('/1/' as hierarchyid)) from (values (1)) v(a)", "json_arrayagg does not support CLR type as parameters", 1)]
+    [DataRow("select json_objectagg('k':cast('/1/' as hierarchyid)) from (values (1)) v(a)", "json_object and json_objectagg does not support CLR type as parameters", 2)]
+    public void Builders_RefuseClrTypes(string sql, string message, int state)
+    {
+        var error = new Simulation().AssertSqlError(sql, 13666);
+        AreEqual(message, error.Errors[0].Message);
+        AreEqual((byte)state, error.Errors[0].State);
+    }
+
+    [TestMethod]
+    public void JsonObject_EqualsInPlaceOfColon_ReportsTheTokenAfterTheValue()
+        => new Simulation().ValidateSyntaxError("select json_object('a'=1)", ")");
 }

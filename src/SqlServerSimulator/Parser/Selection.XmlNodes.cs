@@ -98,17 +98,20 @@ internal sealed partial class Selection
     /// </summary>
     private static (string Alias, string ColumnName) ConsumeNodesAlias(ParserContext context)
     {
+        // Without its column list the rowset is Msg 318, and with more than
+        // one column Msg 8159 (probed 2026-10-02 against SQL Server 2025).
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })
             context.MoveNextRequired();
         if (context.Token is not Name aliasName)
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
-        if (context.Token is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+            throw SimulatedSqlException.TableValuedMethodNeedsAlias();
+        if (context.GetNextOptional() is not Operator { Character: '(' })
+            throw SimulatedSqlException.TableValuedMethodNeedsAlias();
         context.MoveNextRequired();
         if (context.Token is not Name columnName)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+        if (context.Token is Operator { Character: ',' })
+            throw SimulatedSqlException.HasFewerColumnsThanColumnList(aliasName.Value);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();

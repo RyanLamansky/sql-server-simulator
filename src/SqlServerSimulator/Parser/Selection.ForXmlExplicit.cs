@@ -207,17 +207,104 @@ partial class Selection
                 case ForXmlExplicitContent.Xml:
                     // The xml directive is a passthrough: no escaping, no
                     // well-formedness check (probe-confirmed).
-                    _ = sb.Append(ScalarForXmlText(value));
+                    _ = innerSchema[column.Column] is XmlSqlType
+                        ? AppendUndeclaringDefaultNamespace(sb, ScalarForXmlText(value))
+                        : sb.Append(ScalarForXmlText(value));
                     break;
                 default:
                     if (innerSchema[column.Column] is XmlSqlType)
-                        _ = sb.Append(ScalarForXmlText(value));
+                        _ = AppendUndeclaringDefaultNamespace(sb, ScalarForXmlText(value));
                     else
                         AppendForXmlText(sb, ForXmlColumnText(value, column.Column, rowBytes, innerSchema, options), isAttribute: false);
                     break;
             }
             if (named)
                 _ = sb.Append("</").Append(column.Name).Append('>');
+        }
+    }
+
+    /// <summary>
+    /// Appends an <c>xml</c> value's markup with <c>xmlns=""</c> on each
+    /// unprefixed top-level element that declares no default namespace, as
+    /// EXPLICIT writes an xml-typed column, after the element's own
+    /// attributes (probed 2026-10-02 against SQL Server 2025: <c>&lt;i v="9"/&gt;</c>
+    /// comes out <c>&lt;i v="9" xmlns=""/&gt;</c>).
+    /// </summary>
+    private static StringBuilder AppendUndeclaringDefaultNamespace(StringBuilder sb, string markup)
+    {
+        var depth = 0;
+        var i = 0;
+        while (i < markup.Length)
+        {
+            if (markup[i] != '<')
+            {
+                _ = sb.Append(markup[i++]);
+                continue;
+            }
+
+            // Comments, processing instructions and CDATA sections pass whole.
+            var skipTo = markup.AsSpan(i).StartsWith("<!--") ? markup.IndexOf("-->", i, StringComparison.Ordinal) + 3
+                : markup.AsSpan(i).StartsWith("<![CDATA[") ? markup.IndexOf("]]>", i, StringComparison.Ordinal) + 3
+                : markup.AsSpan(i).StartsWith("<?") ? markup.IndexOf("?>", i, StringComparison.Ordinal) + 2
+                : -1;
+            if (skipTo > 1)
+            {
+                _ = sb.Append(markup, i, skipTo - i);
+                i = skipTo;
+                continue;
+            }
+
+            var close = TagEnd(markup, i);
+            var tag = markup.AsSpan(i, close - i + 1);
+            if (tag.StartsWith("</"))
+            {
+                depth--;
+            }
+            else
+            {
+                var nameEnd = i + 1;
+                while (nameEnd < close && !char.IsWhiteSpace(markup[nameEnd]) && markup[nameEnd] is not ('/' or '>'))
+                    nameEnd++;
+                if (depth == 0 && !tag.Contains(" xmlns=", StringComparison.Ordinal) && markup.AsSpan(i, nameEnd - i).IndexOf(':') < 0)
+                {
+                    // The declaration goes after the element's own attributes.
+                    var insertAt = tag.EndsWith("/>") ? close - 1 : close;
+                    _ = sb.Append(markup, i, insertAt - i).Append(" xmlns=\"\"").Append(markup, insertAt, close - insertAt + 1);
+                    i = close + 1;
+                    if (!tag.EndsWith("/>"))
+                        depth++;
+                    continue;
+                }
+                if (!tag.EndsWith("/>"))
+                    depth++;
+            }
+            _ = sb.Append(tag);
+            i = close + 1;
+        }
+        return sb;
+
+        // The tag's closing '>', past any quoted attribute values.
+        static int TagEnd(string markup, int start)
+        {
+            var quote = '\0';
+            for (var j = start + 1; j < markup.Length; j++)
+            {
+                var c = markup[j];
+                if (quote != '\0')
+                {
+                    if (c == quote)
+                        quote = '\0';
+                }
+                else if (c is '"' or '\'')
+                {
+                    quote = c;
+                }
+                else if (c == '>')
+                {
+                    return j;
+                }
+            }
+            return markup.Length - 1;
         }
     }
 

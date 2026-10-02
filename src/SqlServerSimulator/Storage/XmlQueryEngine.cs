@@ -46,9 +46,18 @@ internal static class XmlQueryEngine
         string method,
         XmlStaticTyping? typing = null,
         string? displayMethod = null,
-        XmlSqlAccessorScope? sqlAccessors = null)
+        XmlSqlAccessorScope? sqlAccessors = null,
+        Parser.ForXmlNamespaces? statementNamespaces = null)
     {
         var (defaultNamespace, prefixes, body) = ParsePrologAndBody(xquery, displayMethod ?? method);
+
+        // The statement's WITH XMLNAMESPACES binds what the prolog didn't.
+        if (statementNamespaces is not null)
+        {
+            defaultNamespace ??= statementNamespaces.DefaultUri;
+            foreach (var (prefix, uri) in statementNamespaces.Bindings)
+                _ = prefixes.TryAdd(prefix, uri);
+        }
         if (body.Length == 0)
             throw SimulatedSqlException.XQueryExpressionMissing();
 
@@ -70,6 +79,12 @@ internal static class XmlQueryEngine
             if (method.Equals("nodes", StringComparison.Ordinal))
                 throw SimulatedSqlException.XQueryConstructedXmlNotSupported(display, "'nodes()'");
         }
+
+        // nodes() addresses what it returns, so an expression real types as
+        // atomic values is refused while it compiles (probed 2026-10-02
+        // against SQL Server 2025: `nodes('1')`, `nodes('(1, 2)')`).
+        if (method.Equals("nodes", StringComparison.Ordinal) && compiled.Kind != XmlStaticKind.Node)
+            throw SimulatedSqlException.XQueryNodeRequired(display, "'nodes()'");
 
         // query() serializes its result, and an attribute has no serialization
         // of its own outside an element.

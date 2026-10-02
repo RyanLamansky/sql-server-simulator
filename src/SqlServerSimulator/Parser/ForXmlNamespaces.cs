@@ -35,10 +35,22 @@ internal sealed class ForXmlNamespaces
     /// </summary>
     public readonly string DeclarationText;
 
-    private ForXmlNamespaces(HashSet<string> prefixes, string declarationText)
+    /// <summary>
+    /// Each declared prefix's URI, and the DEFAULT binding's (null when there
+    /// is none), which the statement's xml methods read as if their own
+    /// prologs declared them (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    public readonly Dictionary<string, string> Bindings;
+
+    /// <inheritdoc cref="Bindings"/>
+    public readonly string? DefaultUri;
+
+    private ForXmlNamespaces(HashSet<string> prefixes, string declarationText, Dictionary<string, string> bindings, string? defaultUri)
     {
         this.prefixes = prefixes;
         this.DeclarationText = declarationText;
+        this.Bindings = bindings;
+        this.DefaultUri = defaultUri;
     }
 
     /// <summary>Whether <paramref name="prefix"/> was declared (ordinal match).</summary>
@@ -60,6 +72,8 @@ internal sealed class ForXmlNamespaces
 
         var prefixes = new HashSet<string>(StringComparer.Ordinal);
         var declared = new List<string>();
+        var bindings = new Dictionary<string, string>(StringComparer.Ordinal);
+        string? defaultUri = null;
         var sawDefault = false;
 
         while (true)
@@ -97,12 +111,14 @@ internal sealed class ForXmlNamespaces
                 if (sawDefault)
                     throw SimulatedSqlException.XmlNamespaceRedefined("default");
                 sawDefault = true;
+                defaultUri = uri;
                 declared.Add(Declaration("xmlns", uri));
             }
             else if (!isXmlPrefix)
             {
                 if (!prefixes.Add(prefix))
                     throw SimulatedSqlException.XmlNamespaceRedefined(prefix);
+                bindings[prefix] = uri;
                 declared.Add(Declaration("xmlns:" + prefix, uri));
             }
 
@@ -117,7 +133,7 @@ internal sealed class ForXmlNamespaces
         var text = new StringBuilder();
         for (var i = declared.Count - 1; i >= 0; i--)
             _ = text.Append(declared[i]);
-        return new ForXmlNamespaces(prefixes, text.ToString());
+        return new ForXmlNamespaces(prefixes, text.ToString(), bindings, defaultUri);
     }
 
     /// <summary>One <c>xmlns</c> attribute, its URI attribute-value escaped.</summary>

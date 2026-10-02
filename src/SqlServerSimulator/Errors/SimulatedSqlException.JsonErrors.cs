@@ -84,6 +84,54 @@ partial class SimulatedSqlException
         new("Value referenced by JSON path is not an array or object and cannot be opened with OPENJSON.", 13611, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
+    /// Msg 13666: a JSON builder or aggregate given a CLR-typed value
+    /// (<c>hierarchyid</c>, the spatial types, a CLR user-defined type).
+    /// <paramref name="functions"/> is real's own lower-case naming —
+    /// <c>json_object and json_objectagg</c> share State 2, <c>json_array</c>
+    /// is State 3 and <c>json_arrayagg</c> State 1 (probed 2026-10-02 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException JsonBuilderClrType(string functions, byte state) =>
+        new($"{functions} does not support CLR type as parameters", 13666, 16, state);
+
+    /// <summary>
+    /// Msg 13612: an <c>OPENJSON … WITH</c> binary column met a scalar that
+    /// isn't base64.
+    /// </summary>
+    internal static SimulatedSqlException OpenJsonNotBase64() =>
+        new("Cannot convert a string value found in the JSON text to binary value because it is not Base64 encoded.", 13612, 16, 5);
+
+    /// <summary>
+    /// Msg 13613: an <c>OPENJSON … WITH</c> binary column's base64 decodes to
+    /// more bytes than the column holds — state 1, or 2 for a
+    /// <c>rowversion</c> column.
+    /// </summary>
+    internal static SimulatedSqlException OpenJsonBase64Truncated(byte state) =>
+        new("Base64 encoded string cannot be converted to binary value. Binary data would be truncated.", 13613, 16, state);
+
+    /// <summary>Msg 13614: an <c>OPENJSON … WITH</c> column of a legacy LOB type or <c>sql_variant</c>.</summary>
+    internal static SimulatedSqlException OpenJsonUnsupportedLobType() =>
+        new("TEXT, NTEXT, SQL_VARIANT and IMAGE types cannot be used as column types in OPENJSON function with explicit schema. These types are not supported in WITH clause.", 13614, 16, 1);
+
+    /// <summary>Msg 13616: an <c>OPENJSON … WITH</c> column of a CLR type.</summary>
+    internal static SimulatedSqlException OpenJsonUnsupportedClrType() =>
+        new("CLR types cannot be used as column types in OPENJSON function with explicit schema. CLR types are not supported in WITH clause.", 13616, 16, 1);
+
+    /// <summary>
+    /// Msg 13625: a strict <c>JSON_VALUE</c> over a MAX document matched a
+    /// string longer than its <c>nvarchar(4000)</c> result.
+    /// </summary>
+    internal static SimulatedSqlException JsonValueTruncated() =>
+        new("String value in the specified JSON path would be truncated.", 13625, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 13606: a JSON function met a value nested inside 129 containers
+    /// (State 1), or a path of more than 128 steps (State 4).
+    /// </summary>
+    internal static SimulatedSqlException JsonTooDeep(byte state) =>
+        new("JSON text/path that has more than 128 nesting levels cannot be parsed.", 13606, 16, state);
+
+    /// <summary>
     /// Msg 13609: the document argument of JSON_VALUE / JSON_QUERY /
     /// JSON_MODIFY / OPENJSON isn't JSON text, whatever the path's lax or
     /// strict prefix says. <paramref name="character"/> is the character the
@@ -107,6 +155,17 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException JsonObjectNullKey() =>
         new("User error : Name parameter value in 'json_object' cannot be null", 13638, 16, 1);
+
+    /// <summary>Msg 13604: a <c>FOR JSON</c> column of a spatial or CLR user-defined type.</summary>
+    internal static SimulatedSqlException ForJsonClrType() =>
+        new("FOR JSON cannot serialize CLR objects. Cast CLR types explicitly into one of the supported types in FOR JSON queries.", 13604, 16, 1);
+
+    /// <summary>
+    /// Msg 13603: a <c>FOR JSON PATH</c> column alias with an empty step — one
+    /// that starts or ends with <c>.</c> or holds <c>..</c>.
+    /// </summary>
+    internal static SimulatedSqlException ForJsonInvalidPropertyName(string property) =>
+        new($"Property '{property}' cannot be generated in JSON output due to invalid character in the column name or alias. Column name or alias that contains '..', starts or ends with '.' is not allowed in query that has FOR JSON clause.", 13603, 16, 1);
 
     /// <summary>
     /// Msg 13601: two columns in a <c>FOR JSON PATH</c> projection resolve to

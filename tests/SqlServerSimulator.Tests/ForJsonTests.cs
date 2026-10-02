@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -356,4 +357,56 @@ public class ForJsonTests
     public void Path_PropertyNames_AreNotXmlEncoded()
         => AreEqual("""[{"a b":1,"1a":2,"a_x0020_b":3}]""",
             Json("select 1 as [a b], 2 as [1a], 3 as [a_x0020_b] for json path"));
+
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    [TestMethod]
+    [DataRow(".a")]
+    [DataRow("a.")]
+    [DataRow("a..b")]
+    [DataRow("a.b.")]
+    public void Path_AliasWithAnEmptyStep_IsMsg13603(string alias)
+        => new Simulation().AssertSqlError($"select 1 as [{alias}] for json path", 13603, $"Property '{alias}' cannot be generated in JSON output due to invalid character in the column name or alias. Column name or alias that contains '..', starts or ends with '.' is not allowed in query that has FOR JSON clause.");
+
+    [TestMethod]
+    [DataRow("select 1 as a for json path, root('a'), root('b')")]
+    [DataRow("select 1 as a for json path, include_null_values, include_null_values")]
+    [DataRow("select 1 as a for json path, without_array_wrapper, without_array_wrapper")]
+    [DataRow("select 1 as a for json raw")]
+    [DataRow("select 1 as a for json path, elements")]
+    [DataRow("select 1 as a for json path('x')")]
+    public void ClauseItCantTake_IsMsg102NearJson(string sql)
+        => new Simulation().ValidateSyntaxError(sql, "json");
+
+    [TestMethod]
+    public void Auto_RootWithoutAName_IsTheFirstLevelsName()
+    {
+        var sim = new Simulation();
+        AreEqual("{\"v\":[{\"a\":1}]}", sim.ExecuteScalar("select (select a from (values (1)) v(a) for json auto, root)"));
+        AreEqual("{\"root\":[{\"a\":1}]}", sim.ExecuteScalar("select (select 1 as a for json path, root)"));
+    }
+
+    [TestMethod]
+    [DataRow("select * from (select 1 as a for json path) d")]
+    [DataRow("select * from (select 1 as a for xml raw) d")]
+    public void DerivedTableOverADocument_IsMsg8155(string sql)
+        => new Simulation().AssertSqlError(sql, 8155, "No column name was specified for column 1 of 'd'.");
+
+    [TestMethod]
+    public void WithoutArrayWrapperSubquery_EmbedsAsAString()
+        => AreEqual("[{\"s\":\"{\\\"x\\\":1}\"}]", ExecuteScalar("select (select (select 1 as x for json path, without_array_wrapper) as s for json path)"));
+
+    [TestMethod]
+    [DataRow("cast(1 as rowversion)", "[{\"a\":\"AAAAAAAAAAE=\"}]")]
+    [DataRow("cast(0x01 as image)", "[{\"a\":\"AQ==\"}]")]
+    [DataRow("cast('9999-12-31 23:59:59.997' as datetime)", "[{\"a\":\"9999-12-31T23:59:59.997\"}]")]
+    [DataRow("cast('/1/2/' as hierarchyid)", "[{\"a\":\"\\/1\\/2\\/\"}]")]
+    public void Value_RendersAsRealDoes(string value, string expected)
+        => AreEqual(expected, ExecuteScalar($"select (select {value} as a for json path)"));
+
+    [TestMethod]
+    [DataRow("geometry::Point(1, 2, 0)")]
+    [DataRow("geography::Point(1, 2, 4326)")]
+    public void SpatialColumn_IsMsg13604(string value)
+        => new Simulation().AssertSqlError($"select {value} as a for json path", 13604, "FOR JSON cannot serialize CLR objects. Cast CLR types explicitly into one of the supported types in FOR JSON queries.");
 }

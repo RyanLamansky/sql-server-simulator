@@ -3,18 +3,19 @@
 Unlocks EF's owned-types-as-JSON (`OwnsOne(...).ToJson()`) and primitive-collection emissions.
 Every function here reads text documents; SQL Server 2025's native `json` type, what it changes about these functions' result types and states, and the functions that take only it (`JSON_CONTAINS`, `JSON_VALUE … RETURNING`, the `modify` method) are in [`json-type.md`](json-type.md).
 
-`JSON_VALUE(json, path)` returns `nvarchar(4000)`.
+`JSON_VALUE(json, path)` returns `nvarchar(4000)` in the document's collation and coercibility, the database's over `json` (probed 2026-10-02 against SQL Server 2025).
 Lax mode (default and EF's only emitted form): missing path / non-scalar match → SQL NULL.
 `strict $.foo` raises Msg 13608 on miss.
 NULL `json` → NULL; a NULL path is refused — see [Argument types](#argument-types).
 A document that isn't JSON text raises Msg 13609 under either mode — see [Msg 13609](#msg-13609--the-document-isnt-json-text).
 JSON booleans render as lowercase `'true'`/`'false'`; numbers as raw text via `JsonElement.GetRawText`.
 Object/array matches → NULL in lax, **Msg 13623** State 2 in strict.
-**A scalar string longer than 4000 chars** is SQL NULL in lax mode over a MAX document (probe-confirmed against SQL Server 2025: 4000 → value, 4001 → NULL) and is cut to its first 4000 characters over a bounded one (2026-09-23); either way the result stays within the bounded TDS length prefix, so a multi-KB extracted value can't overflow it.
+**A scalar string longer than 4000 chars** is SQL NULL in lax mode over a MAX document (probe-confirmed against SQL Server 2025: 4000 → value, 4001 → NULL) and Msg 13625 under `strict`, and is cut to its first 4000 characters over a bounded one in either mode (2026-09-23, 2026-10-02); either way the result stays within the bounded TDS length prefix, so a multi-KB extracted value can't overflow it.
 
-`JSON_QUERY(json, path)` returns `nvarchar(max)` over a MAX string document and `nvarchar(4000)` over any other text, a literal included (probed 2026-09-28 against SQL Server 2025) — complement of `JSON_VALUE`; the bound type is what its rows carry (`JsonQuery.resultType`).
+`JSON_QUERY(json, path)` returns `nvarchar(max)` over a MAX string document and `nvarchar(4000)` over any other text, a literal included, either in the document's collation (probed 2026-09-28 and 2026-10-02 against SQL Server 2025) — complement of `JSON_VALUE`; the bound type is what its rows carry (`JsonQuery.resultType`).
+A bounded document is read as that `nvarchar(4000)`, so text past its 4000th character is gone before the reader starts: a 3,999-character string value already runs off the end (Msg 13609 at its opening quote), while a path settled ahead of the cut still answers.
 Object/array match → raw JSON text via `JsonElement.GetRawText` (preserves the input's whitespace shape).
-Scalar match → NULL in lax, Msg 13624 State 2 in strict.
+Scalar match → NULL in lax, Msg 13624 in strict — State 1 over a MAX document, 2 over any other.
 Missing path → NULL in lax, Msg 13608 in strict.
 SQL Server 2025's trailing `WITH ARRAY WRAPPER` (any case; `CONDITIONAL`, `UNCONDITIONAL`, `WITHOUT` and a bare `WITH WRAPPER` are Msg 102) gathers every value the path selects, scalars included, into one array — see [Advanced array accessors](#advanced-array-accessors).
 NULL `json` → NULL.
@@ -26,7 +27,7 @@ Pipes cleanly into `OPENJSON` for round-trip on extracted arrays.
 `JSON_MODIFY(json, path, newValue)` returns `nvarchar(max)`, and the result is **the input's own text with one span spliced** — see [Editing the source text](#json_modify-edits-the-source-text).
 EF emits `'strict $.City'`-shape paths from owned-as-JSON partial updates (missing leaf → Msg 13608, State 2).
 Lax existing-key + NULL value removes the key; lax missing key + non-NULL value adds it.
-Numeric/boolean `newValue` stays JSON-typed (`{"n":42}` not `{"n":"42"}`).
+Numeric/boolean `newValue` stays JSON-typed (`{"n":42}` not `{"n":"42"}`), and a `real` is written as the `float` it converts to, at float's sixteen digits (probed 2026-10-02).
 Bare `'$'` — with or without a mode keyword — names the whole document, which leaves no slot to write into: **Msg 13619**, `Unsupported JSON path found in argument 2 of JSON_MODIFY.`
 The `append` prefix (`'append $.arr'`, ahead of any `lax` / `strict` keyword, and the one segment-less form the function takes) adds an element to the array the path names; every other function reports Msg 13607 for it.
 
@@ -37,18 +38,22 @@ Microsoft documents the `JSON_OBJECT` default verbatim ("The default setting for
 The trailing keyword pair (`NULL ON NULL` / `ABSENT ON NULL`) is matched as `ReservedKeyword`s (`Null` + `On` + `Null` / `Absent` falls through `UnquotedString` since `ABSENT` isn't reserved).
 Empty argument list yields `{}` / `[]`.
 Duplicate keys preserved (no dedup, matching real SQL Server).
-NULL key raises **Msg 13638** at runtime; missing `:` separator, `=` instead of `:`, trailing comma, partial null-clause all raise Msg 102 at parse.
+NULL key raises **Msg 13638** at runtime; missing `:` separator, trailing comma, partial null-clause all raise Msg 102 at parse, and `'a' = 1` in place of a pair names the token after the value.
+A key is written the way its value would be, quoted when that isn't a string already — a `float` key is its scientific form, a `bit` `"true"`, a binary its base64 (probed 2026-10-02).
+A CLR-typed key or value (`hierarchyid`, the spatial types, a CLR user-defined type) is **Msg 13666** while binding, `json_object and json_objectagg does not support …` at State 2 for both object builders, `json_array` State 3 and `json_arrayagg` State 1.
 
 `JSON_ARRAYAGG(value [ORDER BY ...] [null_clause])` / `JSON_OBJECTAGG(key : value [null_clause])` are the aggregate forms, both returning `nvarchar(max)`.
-They reuse `JsonValueRender` for element/value formatting (including raw embedding of nested `JSON_OBJECT` / `JSON_ARRAY` / `JSON_QUERY`) and follow the scalar builders' null-clause defaults (`JSON_ARRAYAGG` → ABSENT ON NULL, `JSON_OBJECTAGG` → NULL ON NULL).
+They reuse `JsonValueRender` for element/value formatting (including raw embedding of JSON text) and follow the scalar builders' null-clause defaults (`JSON_ARRAYAGG` → ABSENT ON NULL, `JSON_OBJECTAGG` → NULL ON NULL).
 **Empty input (zero rows) → SQL NULL; a group with rows whose values are all absent → `[]` / `{}`** (the aggregators track row count independently of emitted fragments).
-Grammar specifics, probe-confirmed: `JSON_ARRAYAGG`'s `ORDER BY` sits *inside* the parentheses (not `WITHIN GROUP`) and is mutually exclusive with `OVER` (the combination raises Msg 156); `JSON_OBJECTAGG` accepts neither an `ORDER BY` (Msg 156) nor the SQL-standard `key VALUE value` form (Msg 102), and raises **Msg 13638** on a NULL key.
+Grammar specifics, probe-confirmed: `JSON_ARRAYAGG`'s `ORDER BY` sits *inside* the parentheses and is mutually exclusive with `OVER` (the combination raises Msg 156); its commas don't count as arguments.
+A `WITHIN GROUP (ORDER BY …)` after `JSON_ARRAYAGG` is accepted and orders nothing — the rows keep their arrival order — while after an in-parentheses `ORDER BY`, or after `JSON_OBJECTAGG`, the word is Msg 102 (probed 2026-10-02).
+`JSON_OBJECTAGG` accepts neither an `ORDER BY` (Msg 156) nor the SQL-standard `key VALUE value` form (Msg 102), refuses a comma list with Msg 174 naming itself in capitals, and raises **Msg 13638** on a NULL key.
 Both support `OVER (...)` windows — `PARTITION BY`, running `ORDER BY`, and explicit `ROWS` frames all ride the standard aggregate-window path.
 `JSON_OBJECTAGG`'s per-row key (which the generic value-only aggregator contract can't carry) is set via a `SetKey` side-channel before each `Add`, mirroring `STRING_AGG`'s separator handling; in the window executor it gets a dedicated walk (`ComputeJsonObjectAggWindow`) since the key isn't part of the pre-evaluated operand stream.
 The aggregators build the closing `]` / `}` onto a snapshot rather than mutating the running buffer, so repeated `Result()` calls across sliding-window frames stay correct.
 `DISTINCT` is not accepted by either.
 
-All the `nvarchar(max)` JSON producers (`JSON_QUERY` over a MAX document, `JSON_MODIFY`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_ARRAYAGG`, `JSON_OBJECTAGG`) are typed `SqlType.NVarcharMax` at both `GetSqlType` and `Run` — not the length-0 `SqlType.NVarchar` "size from value" form — except where a `json` input or `RETURNING json` makes them `json` (see [`json-type.md`](json-type.md#the-json-functions-over-a-json-document)).
+All the `nvarchar(max)` JSON producers (`JSON_QUERY` over a MAX document, `JSON_MODIFY`, `JSON_OBJECT`, `JSON_ARRAY`, `JSON_ARRAYAGG`, `JSON_OBJECTAGG`) are typed `SqlType.JsonTextMax` — `nvarchar(max)` carrying the JSON text mark — at both `GetSqlType` and `Run`, not the length-0 `SqlType.NVarchar` "size from value" form, except where a `json` input or `RETURNING json` makes them `json` (see [`json-type.md`](json-type.md#the-json-functions-over-a-json-document)).
 This is load-bearing over the TDS wire: a length-0 result over 32,767 chars overflows the codec's bounded 2-byte length prefix, whereas a MAX result streams as PLP.
 `JSON_VALUE` stays bounded (`nvarchar(4000)`) and is safe by its 4000-char cap.
 See [`tds-endpoint.md`](tds-endpoint.md) for the wire mechanism.
@@ -62,17 +67,21 @@ Specific mappings:
 - `bit` → unquoted `true` / `false`
 - integer / decimal / money — unquoted number, written as the SQL value carries it rather than formatted from the declared type, so an exact numeric's trailing zeros are whatever its type declares: `JSON_ARRAY(CAST(1 AS numeric(10, 2)))` is `[1.00]`, `JSON_OBJECT('a': CAST(1.5 AS numeric(10, 4)))` is `{"a":1.5000}`, `JSON_MODIFY('{"a":0}', '$.a', CAST(1 AS numeric(10, 2)))` is `{"a":1.00}`, and every `money` / `smallmoney` value shows its fixed scale of 4.
   That falls out of the [declared-scale stamp](arithmetic.md#the-value-carries-the-declared-scale) rather than living here, so a conversion, arithmetic, an aggregate and a column read all agree.
-- `varbinary` / `binary` → base64-quoted (`"QUI="` for `0x4142`)
+- `varbinary` / `binary` / `image` / `rowversion` → base64-quoted (`"QUI="` for `0x4142`)
+- `sql_variant` → the value it holds, written as that type is (`1`, `"2024-01-01"`)
 - `datetime` / `datetime2` / `smalldatetime` → quoted ISO with **T** separator (`"2025-01-15T12:34:56"`)
 - `date` / `time` / `uniqueidentifier` → quoted default ISO / uppercase-hex
 - other strings → JSON-escaped (`\"` `\\` `\b` `\f` `\n` `\r` `\t` `\uHHHH` for control chars, and **`/` → `\/`**; non-ASCII / `<` / `>` left literal).
   The solidus escape reaches the keys too (`JSON_OBJECT('k/1': 'v')` is `{"k\/1":"v"}`), and every JSON producer writes it — the two builders, both aggregates, `JSON_MODIFY`'s substituted value and `FOR JSON`.
   The exceptions are the two strings that aren't a rendered *value*: `REGEXP_MATCHES`' `substring_matches` column and the property name `JSON_MODIFY` takes from its path's own text, both of which leave `/` literal (all probe-confirmed).
-- nested `JSON_OBJECT` / `JSON_ARRAY` / `JSON_QUERY` / `JSON_MODIFY` results — embedded **raw** (not re-quoted), via compile-time `JsonValueRender.ProducesJson(Expression)` detection that unwraps `Parenthesized`.
-  Other strings — including `'{"x":1}'` literals — go through the quote-and-escape path, matching SQL Server's JSON-typed-input detection without needing an `SqlValue`-level marker bit.
+- **JSON text** — embedded **raw** (not re-quoted).
+  Over text, `JSON_QUERY`, `JSON_MODIFY`, the builders, their aggregates and a `FOR JSON` with its array wrapper return `nvarchar` carrying a mark (`NVarcharSqlType.jsonText`), and the mark travels with the type: through a derived table, a view, a CTE, a scalar subquery, `ISNULL` / `NULLIF` (the check's type), `COALESCE` and `CASE` (the unified type), and a set operation's bounded column — so `COALESCE(<nvarchar column>, JSON_QUERY(…))` embeds the column's value raw too, as real does (probed 2026-10-02 against SQL Server 2025).
+  It is lost by `CAST` / `CONVERT`, an operator, a MAX set-operation column (two `JSON_ARRAY` arms `UNION ALL`ed embed quoted), a stored column (`SELECT INTO`), a variable, and `FOR JSON … WITHOUT_ARRAY_WRAPPER`, whose document is a plain string.
+  Other strings — including `'{"x":1}'` literals — go through the quote-and-escape path.
 
 `OPENJSON(json [, doc_path]) [WITH (col TYPE [path] [AS JSON], …)]` — rowset-returning, structurally a new FromSource kind.
-The default schema is `key nvarchar(4000)` NOT NULL in `Latin1_General_BIN2` — so it compares and sorts binary — `value nvarchar(max)` and `type tinyint` NOT NULL, and no OPENJSON column is updatable (probed 2026-09-28 against SQL Server 2025).
+The default schema is `key nvarchar(4000)` NOT NULL in `Latin1_General_BIN2` — so it compares and sorts binary, and a longer name is cut to 4000 characters — `value nvarchar(max)` in the document's collation and `type tinyint` NOT NULL, and no OPENJSON column is updatable (probed 2026-09-28 and 2026-10-02 against SQL Server 2025).
+A document of any other type is read as the `nvarchar` it converts to (`OPENJSON(1)` is Msg 13609 at `'1'`, a binary its bytes as UTF-16), and a NULL document path — a literal while binding, a variable when it runs — is Msg 8116 State 9 naming `OPENJSON`.
 Without WITH: default schema `(key nvarchar, value nvarchar, type int)` — type codes 0=null/1=string/2=number/3=bool/4=array/5=object, unfolding the root one row per array element / object property.
 With WITH: column paths are root-relative — an **array root yields one row per element** (paths relative to the element), an **object root yields a single row** (paths relative to the root).
 Each column extracts via `$.<col-name>` (default) or explicit `'$path'`; primitive collections use `'$'`.
@@ -82,10 +91,14 @@ A document path that misses, or lands on a value that isn't an object or array (
 `AS JSON` column modifier — accepted only on `nvarchar(max)` (any other declared type raises **Msg 13618** at parse).
 Extracts the matched subtree via the shared `JsonSubtree.Extract` (the same rule backing `JSON_QUERY`): object/array → verbatim source text (whitespace and key order preserved, via `JsonElement.GetRawText`); JSON `null` → SQL NULL in both modes; any other (non-null) scalar → SQL NULL in lax, **Msg 13624** in strict; a missing path → SQL NULL in lax, **Msg 13608 State 6** in strict (the OPENJSON-context state, threaded through `JsonPath.Walk`'s `strictNotFoundState`; JSON_VALUE / JSON_QUERY report State 1 and JSON_MODIFY State 2).
 
-OPENJSON WITH-clause types: `int`/`bigint`/`decimal(p,s)`/`float`/`bit`/`nvarchar(N|max)`/`varchar(N)`/`date`/`datetime2(N)`/`datetimeoffset(N)`/`uniqueidentifier`.
-Coercion via `SqlValue.CoerceTo`.
-Backed by `System.Text.Json`.
-JSON-path quoted-property escape `""` → literal `"`.
+A `WITH` column reads its scalar's text — `true` / `false` as the words — and converts it as a string would, with real's twists (probed 2026-10-02 against SQL Server 2025):
+
+- A character column takes the text cut to its length, never an error, `strict` included; a character type written without a length is one character long, and takes the document's collation unless the column has a `COLLATE` of its own (a non-string type with one is Msg 447).
+- A binary column reads base64: text that isn't is Msg 13612, more bytes than a bounded column holds Msg 13613 (State 1, or 2 for `rowversion`, which reports even what isn't base64 that way), and `binary(n)` pads.
+- An object or array is no scalar: NULL, or Msg 13624 State 1 under `strict`.
+- A `decimal` column's conversion failure names `decimal` where `CAST`'s says `numeric`.
+- `text` / `ntext` / `image` / `sql_variant` are Msg 13614 and the CLR types Msg 13616, while the clause parses.
+- A column without a path reads its own name as a quoted member, escaped as a JSON string would be, so `[a b]` and `[c"d]` both resolve.
 
 `JSON_PATH_EXISTS(json, path)` returns `int` (1 / 0 / NULL).
 Routes through the same `JsonPath.Walk` infrastructure as `JSON_VALUE` / `JSON_QUERY`: parses the path, walks the parsed `JsonDocument`, returns 1 if the path resolves to a node and 0 otherwise.
@@ -112,7 +125,13 @@ Only `JSON_MODIFY` reads the `append` prefix; elsewhere it is Msg 13607 State 14
 **Whitespace** separates the grammar's tokens and may sit between any two of them — around a keyword, either side of the `$`, either side of a `.`, inside an index's brackets, and trailing the path — so `'  lax  $ . a [ 0 ] '` resolves.
 It is space, tab, line feed, form feed and carriage return; vertical tab and the non-breaking space are not whitespace here.
 A keyword needs no whitespace behind it (`lax$.a` parses) but does need the word to end there, so `laxx$.a` is malformed.
-A name is unquoted only when it starts with a letter or `_`; the quoted form takes anything, with `""` for a literal `"`.
+An unquoted name is ASCII letters, digits and `_`, starting with a letter or `_` — `$.é` is State 22 at the `é` — and the keywords `append`, `lax` and `strict` are lower case only (`LAX $.a` is State 22 at the `L`; `strict append` State 14 at the `a`).
+A quoted name is a JSON string literal: `\"`, `\\`, `\/`, `\b \f \n \r \t` and `\uXXXX` escape, any other escape is State 17 at the character behind the backslash, a `\u` short of four hex digits State 17 at the fourth digit's position, and a doubled `""` closes the name and leaves a stray quote (State 14).
+More than 128 steps is Msg 13606 State 4, raised as the 129th is read (all probed 2026-10-02 against SQL Server 2025).
+
+Names compare in one form on the path and the document alike (`JsonPath.NameForm`): a `\uXXXX` escape decoded, every other escape kept as the two characters written.
+So `$."a\u0041"` finds `{"aA":1}` and `{"a\u0041":1}`, `$."a\/b"` finds `{"a\/b":1}` but not `{"a/b":1}`, and `$."a\nb"` doesn't find `{"a\u000ab":1}`.
+`JSON_MODIFY` writes an inserted key in that form, verbatim: `$."a\/b"` inserts `"a\/b"`, `$."a/b"` inserts `"a/b"`.
 An index reads up to eleven digits and tops out at `uint`'s ceiling.
 
 **Msg 13607** — `JSON path is not properly formatted. Unexpected character '<c>' is found at position <n>.` — names the character the parser stopped on and its zero-based index, with `.` at the path's length standing in for running off the end (the same placeholder [Msg 13609](#msg-13609--the-document-isnt-json-text) uses).
@@ -171,8 +190,8 @@ Under `strict` each of those is Msg 13608 State 2 instead — except the `append
 
 The inserted text is canonical whatever spacing the document itself uses — SQL Server writes `,"b":2` into `{ "a" : 1 }`.
 Values render through the shared `JsonValueRender`, so a substituted string carries the same escaping the JSON_* builders write, `/` → `\/` included.
-A JSON-producing third argument (`JSON_QUERY` / `JSON_OBJECT` / `JSON_ARRAY` / a nested `JSON_MODIFY`, detected by the builders' compile-time `JsonValueRender.ProducesJson`) embeds **raw**, keeping its own spacing; every other string is quoted and escaped.
-An inserted key comes from the path's own text, escaped the same way minus the solidus rule (`'$."café"'` → `"café"`, `'$."a/b"'` → `"a/b"`).
+A third argument of JSON text (the JSON text mark under value formatting above) embeds **raw**, keeping its own spacing; every other string is quoted and escaped.
+An inserted key is the path's name as written (see [the path grammar](#the-path-grammar)), so `'$."café"'` → `"café"` and `'$."a/b"'` → `"a/b"`.
 
 The written value's **type** is gated, and real binds the rule while compiling (a refused type reports over an empty rowset).
 Accepted: the string family bar `text` / `ntext` / `xml` / the spatial types, the integer family, `decimal` / `numeric`, `float`, `real` and `bit` — plus an untyped `NULL` literal, which types as `int` and so leaves the delete-a-member form open.
@@ -195,6 +214,8 @@ A JSON function's document argument is read the way SQL Server's own reader read
 Two rules fall out of that, neither of which `JsonDocument.Parse` applies on its own — **only an object or an array is JSON text** (a root-level scalar such as `1` or `"abc"` is malformed input), and text the reader never had to look at can't be a problem.
 When the reader does meet something it can't read, that's **Msg 13609**: `JSON text is not properly formatted. Unexpected character '<c>' is found at position <n>.`
 The position is a zero-based UTF-16 character index; running off the end of the text names the character `.` at the text's length.
+A value nested inside 129 containers — a 130th container, or a scalar inside the 129th — is **Msg 13606** State 1 instead, raised as lazily as Msg 13609 is, by `ISJSON` and `JSON_PATH_EXISTS` too (probed 2026-10-02 against SQL Server 2025).
+An escaped surrogate with no partner reads as that lone UTF-16 unit.
 A malformed *scalar token* is named at its first character rather than the character that spoiled it — `{"a":1x}` names `'1'` at 5, `{"a":01}` names `'0'`, and an unterminated string names its opening quote — because the reader takes the whole token before judging it.
 The path's `lax` / `strict` prefix has no bearing on any of this: Msg 13609 comes before Msg 13608.
 A NULL document is NULL, never an error.
@@ -244,7 +265,8 @@ The wrapper replaces the result schema with a single `nvarchar(max)` column name
 A SELECT statement's *own* FOR JSON or untyped FOR XML instead **streams** the document to the client, as real does (probed 2026-09-26 against SQL Server 2025): rows of exactly 2033 UTF-16 units, split with no regard for a surrogate pair, and a row count — the DONE token's and `@@ROWCOUNT` — of the rows the clause *serialized*, not the rows it sent.
 `Selection.AsStatementResult` wraps the parsed statement for that, applied by the SELECT dispatch and the FMTONLY path (so `sp_describe_first_result_set` too); the serializers record their input count in `StatementContext.ForClauseSourceRows` as they finish.
 An **empty input rowset yields zero output rows**, so a scalar subquery `(SELECT … FOR JSON …)` returns SQL NULL (probe-confirmed, matching real).
-A `FOR JSON` Selection is marked (`Selection.ForJson`) so an enclosing `FOR JSON` serializer embeds its result as **raw JSON**, not a re-escaped string — the same role `JSON_QUERY` plays for the JSON_* builders.
+A `FOR JSON` document is JSON text, which an enclosing `FOR JSON` or JSON builder embeds as **raw JSON** — except under `WITHOUT_ARRAY_WRAPPER`, whose document is a plain string that embeds quoted (probed 2026-10-02 against SQL Server 2025).
+Read as a derived table without a column list, the document's column is unnamed — Msg 8155, as for `FOR XML`.
 The serializer is deterministic from the query, so it rides the plan cache.
 
 ### PATH mode (fully modeled)
@@ -252,7 +274,7 @@ The serializer is deterministic from the query, so it rides the plan cache.
 Each row is a JSON object; each column is a key (its alias / name) in select order.
 Dotted aliases nest to arbitrary depth (`x.id` / `x.a` → `{"x":{"id":…,"a":…}}`).
 The nesting tree enforces SQL Server's contiguity rule: an object's properties must be consecutive in the select list — a duplicate leaf, a leaf name reused as an object prefix, or an object reopened after another object intervened all raise **Msg 13601** naming the offending column alias.
-A column with no name / alias raises **Msg 13605**.
+A column with no name / alias raises **Msg 13605**, and one whose alias has an empty step — starting or ending with `.`, or holding `..` — **Msg 13603**.
 Rows are wrapped in `[ … ]` unless `WITHOUT_ARRAY_WRAPPER`.
 A nested object whose leaves are all omitted (NULL under omit-NULL) is dropped entirely; the top-level per-row object always emits (an all-NULL row is `{}`).
 
@@ -271,7 +293,8 @@ A set-operation result flattens to a single level named after the first branch's
 
 ### Options
 
-`ROOT('name')` wraps the output in `{"name": <output>}`; `ROOT` with no parens uses `"root"`; `ROOT('')` is a valid empty key.
+`ROOT('name')` wraps the output in `{"name": <output>}`; `ROOT` with no parens uses `"root"` in PATH mode and the first level's name in AUTO (`{"t":[…]}`, probed 2026-10-02); `ROOT('')` is a valid empty key.
+Each option is written at most once; a repeat, a mode other than PATH / AUTO, `ELEMENTS` or a parenthesis after the mode is Msg 102 near the `JSON` keyword itself.
 `INCLUDE_NULL_VALUES` emits `"key":null` for NULL columns (the default omits them — the opposite of `JSON_OBJECT`'s `NULL ON NULL`).
 `WITHOUT_ARRAY_WRAPPER` drops the `[ ]`; multiple rows become comma-separated objects with no wrapper (`{"id":1},{"id":2}` — intentionally not valid JSON, mirroring real).
 `ROOT` combined with `WITHOUT_ARRAY_WRAPPER` raises **Msg 13620**.
@@ -299,10 +322,13 @@ FOR JSON's formatter (`AppendForJsonValue`); the JSON_* builders' `JsonValueRend
 | datetime / smalldatetime | `"yyyy-MM-ddTHH:mm:ss[.fff]"` |
 | datetime2 / time / datetimeoffset | ISO at declared precision, `datetimeoffset` keeps `+HH:mm`, or `Z` for a zero offset |
 | uniqueidentifier | uppercase, quoted |
-| binary / varbinary | base64, quoted (`0x0102FF` → `"AQL/"`) |
+| binary / varbinary / image / rowversion | base64, quoted (`0x0102FF` → `"AQL/"`) |
+| hierarchyid | its string, quoted |
+| geometry / geography / CLR user-defined type | refused while binding, **Msg 13604** |
 | sql_variant | formats its inner value |
 | char / nchar / varchar / nvarchar / text / xml / other | quoted, JSON-escaped |
 
+A `datetime` writes its milliseconds rounded from the three-hundredths it stores (`.997`, not `.996`).
 The date/time types **drop an all-zero fractional second** (`…T00:00:00`, not `…T00:00:00.000`) while keeping the interior/trailing zeros of a non-zero fraction (`.100`, not `.1`), in FOR JSON and the builders alike (probed 2026-09-26 against SQL Server 2025).
 FOR JSON and the JSON_* builders share one renderer and match real's scientific notation exactly.
 

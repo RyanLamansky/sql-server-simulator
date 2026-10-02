@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -815,4 +816,139 @@ public sealed class XmlTests
             "select b.d.value('(', 'int') from dbo.xr as a join sx.xr2 as b on a.id = b.id",
             "sx.xr2.d.value()");
     }
+
+    // ---- method binding (probed 2026-10-02 against SQL Server 2025) ----
+
+    [TestMethod]
+    [DataRow("xml")]
+    [DataRow("text")]
+    [DataRow("ntext")]
+    [DataRow("image")]
+    [DataRow("sql_variant")]
+    [DataRow("hierarchyid")]
+    [DataRow("geometry")]
+    [DataRow("nosuchtype")]
+    [DataRow("int, 1")]
+    public void Value_TargetTypeItCantProduce_IsMsg9500(string type)
+        => new Simulation().AssertSqlError($"declare @x xml = '<a>1</a>'; select @x.value('(/a)[1]', '{type}')", 9500, $"The data type '{type}' used in the VALUE method is invalid.");
+
+    [TestMethod]
+    public void Value_CharacterTypeWithoutLength_IsOneCharacter()
+        => AreEqual("h", ExecuteScalar("declare @x xml = '<a>hello</a>'; select @x.value('(/a)[1]', 'nvarchar')"));
+
+    [TestMethod]
+    public void Value_BinaryTarget_ReadsBase64()
+    {
+        var sim = new Simulation();
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, (byte[])sim.ExecuteScalar("declare @x xml = '<a>AQID</a>'; select @x.value('(/a)[1]', 'varbinary(10)')")!);
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3, 0, 0, 0, 0, 0 }, (byte[])sim.ExecuteScalar("declare @x xml = '<a>AQID</a>'; select @x.value('(/a)[1]', 'timestamp')")!);
+        _ = IsInstanceOfType<DBNull>(sim.ExecuteScalar("declare @x xml = '<a>Widget</a>'; select @x.value('(/a)[1]', 'varbinary(10)')"));
+    }
+
+    [TestMethod]
+    [DataRow("select x.value('(/a)[1]') from t", "The value function requires 2 argument(s).")]
+    [DataRow("select x.query('/a', 1) from t", "The query function requires 1 argument(s).")]
+    [DataRow("select x.exist() from t", "The exist function requires 1 argument(s).")]
+    public void Method_WrongArgumentCount_IsMsg174(string sql, string message)
+        => new Simulation().AssertSqlError("create table t (x xml); " + sql, 174, message);
+
+    [TestMethod]
+    [DataRow("declare @x xml = '<a/>'; select @x.Query('/a')", "Query")]
+    [DataRow("declare @x xml = '<a/>'; select @x.foo('/a')", "foo")]
+    [DataRow("create table t (x xml); select x.Value('(/a)[1]', 'int') from t", "Value")]
+    [DataRow("declare @x xml = '<a/>'; select @x.nodes('/a')", "nodes")]
+    public void Method_XmlHasNoSuchScalarMethod_IsMsg227(string sql, string name)
+        => new Simulation().AssertSqlError(sql, 227, $"\"{name}\" is not a valid function, property, or field.");
+
+    [TestMethod]
+    public void Method_OnAThreePartReceiver_IsMsg344()
+        => new Simulation().AssertSqlError("create table t (x xml); select dbo.t.x.value('count(/a)', 'int') from dbo.t", 344, "Remote function reference 'dbo.t.x.value' is not allowed, and the column name 'dbo' could not be found or is ambiguous.");
+
+    [TestMethod]
+    public void Nodes_WithoutColumnAlias_IsMsg318_AndWithTwoMsg8159()
+    {
+        var sim = new Simulation();
+        var error = sim.AssertSqlError("declare @x xml = '<a/>'; select 1 from @x.nodes('/a') t", 318);
+        AreEqual((byte)15, error.Errors[0].Class);
+        sim.AssertSqlError("declare @x xml = '<a/>'; select 1 from @x.nodes('/a') t(c, d)", 8159, "'t' has fewer columns than were specified in the column list.");
+    }
+
+    [TestMethod]
+    [DataRow("1")]
+    [DataRow("(1, 2)")]
+    [DataRow("data(/a)")]
+    public void Nodes_OverAtomicValues_IsMsg2374(string xquery)
+        => new Simulation().AssertSqlError($"declare @x xml = '<a/>'; select c.query('.') from @x.nodes('{xquery}') t(c)", 2374, "XQuery [nodes()]: A node or set of nodes is required for 'nodes()'");
+
+    [TestMethod]
+    public void Nodes_InAPlainFromOfASubquery_ShredsTheOuterColumn()
+        => AreEqual("<row id=\"1\"><item v=\"1\"/><item v=\"2\"/></row>", new Simulation().ExecuteScalar("""
+            create table t (id int, x xml); insert t values (1, '<r><i v="1"/><i v="2"/></r>');
+            select (select id as [@id], (select i.c.value('@v', 'int') as [@v] from t.x.nodes('/r/i') i(c) for xml path('item'), type) from t for xml path('row'))
+            """));
+
+    [TestMethod]
+    public void WithXmlNamespaces_BindsTheStatementsXmlMethods()
+    {
+        var sim = new Simulation();
+        AreEqual(1, sim.ExecuteScalar("declare @x xml = '<r xmlns=\"urn:a\"><v>1</v></r>'; with xmlnamespaces ('urn:a' as p) select @x.value('(/p:r/p:v)[1]', 'int')"));
+        AreEqual(1, sim.ExecuteScalar("declare @x xml = '<r xmlns=\"urn:a\"><v>1</v></r>'; with xmlnamespaces (default 'urn:a') select @x.value('(/r/v)[1]', 'int')"));
+    }
+
+    [TestMethod]
+    public void NameTest_AnyNamespaceAndAnyLocalName()
+    {
+        var sim = new Simulation();
+        AreEqual(1, sim.ExecuteScalar("declare @x xml = '<r xmlns=\"urn:a\"><v>1</v></r>'; select @x.value('(/*:r/*:v)[1]', 'int')"));
+        AreEqual(2, sim.ExecuteScalar("declare @x xml = '<r xmlns:p=\"urn:p\"><p:a/><p:b/><c/></r>'; select @x.value('declare namespace q=\"urn:p\"; count(/r/q:*)', 'int')"));
+    }
+
+    [TestMethod]
+    [DataRow("xs:double(\"1e400\")", "1e400")]
+    [DataRow("xs:double(\"NaN\")", "NaN")]
+    [DataRow("xs:float(\"1e40\")", "1e40")]
+    public void ApproximateConstructor_OutOfRangeOrNaN_IsMsg9319(string expression, string value)
+        => new Simulation().AssertSqlError($"declare @x xml = '<a/>'; select @x.value('{expression}', 'nvarchar(30)')", 9319, $"XQuery [value()]: Static simple type validation: Invalid simple type value '{value}'.");
+
+    [TestMethod]
+    public void ApproximateConstructor_Infinity_IsAccepted()
+        => AreEqual("-INF", ExecuteScalar("declare @x xml = '<a/>'; select @x.value('xs:double(\"-INF\")', 'nvarchar(30)')"));
+
+    [TestMethod]
+    [DataRow("concat(\"a\", 1)", "xs:integer", "xs:string")]
+    [DataRow("concat(\"a\", true())", "xs:boolean", "xs:string")]
+    [DataRow("upper-case(1)", "xs:integer", "xs:string")]
+    [DataRow("contains(\"1\", 1)", "xs:integer", "xs:string")]
+    [DataRow("string-length(12)", "xs:integer", "xs:string")]
+    [DataRow("substring(\"123\", \"1\")", "xs:string", "xs:decimal")]
+    public void StringFunction_TypedArgumentOfTheWrongKind_IsMsg2364(string expression, string source, string target)
+        => new Simulation().AssertSqlError($"declare @x xml = '<a/>'; select @x.value('{expression}', 'nvarchar(20)')", 2364, $"XQuery [value()]: Cannot implicitly convert from '{source}' to '{target}'");
+
+    [TestMethod]
+    public void StringFunction_UntypedArgument_Converts()
+        => AreEqual("a1", ExecuteScalar("declare @x xml = '<a x=\"1\"/>'; select @x.value('concat(\"a\", (/a/@x)[1])', 'nvarchar(20)')"));
+
+    [TestMethod]
+    [DataRow("a&b<", 2283, "XQuery [query()]: The character '<' may not be part of an entity reference")]
+    [DataRow("a&b c", 2283, "XQuery [query()]: The character ' ' may not be part of an entity reference")]
+    [DataRow("a&b;", 2282, "XQuery [query()]: Invalid entity reference")]
+    [DataRow("a&1;", 2282, "XQuery [query()]: Invalid entity reference")]
+    [DataRow("a&#zz;", 2285, "XQuery [query()]: Invalid numeric entity reference")]
+    public void StringLiteral_MalformedEntityReference(string literal, int number, string message)
+        => new Simulation().AssertSqlError($"declare @x xml = '<a/>'; select @x.query('\"{literal}\"')", number, message);
+
+    [TestMethod]
+    public void Modify_OnNull_EndsTheBatchAndRollsBack()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateOpenConnection();
+        var error = Throws<SimulatedSqlException>(() => connection.CreateCommand("begin tran; declare @y xml; set @y.modify('delete /a'); select 1").ExecuteScalar());
+        AreEqual(5302, error.Number);
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+        AreEqual((short)-1, connection.CreateCommand("declare @y xml; begin tran; begin try set @y.modify('delete /a'); end try begin catch select xact_state() end catch; rollback").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void IsNullOverXml_IsNullable()
+        => IsTrue(new Simulation().ColumnNullability("declare @x xml; select isnull(@x, '<b/>')")[0]);
 }

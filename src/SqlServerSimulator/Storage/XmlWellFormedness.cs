@@ -190,6 +190,8 @@ internal static class XmlWellFormedness
             var preserve = this.preserveWhitespace || (this.preserveFrames.Count > 0 && this.preserveFrames[^1]);
             if (!this.textAllWhitespace || this.textFromMarkup || preserve)
             {
+                if (this.openElements.Count >= MaxDepth)
+                    throw SimulatedSqlException.XmlTooDeep(101);
                 this.CloseStartTag();
                 var referenceLast = this.textAllWhitespace && !this.textHasCarriageReturn;
                 for (var i = 0; i < this.text.Length; i++)
@@ -382,6 +384,15 @@ internal static class XmlWellFormedness
                 }
                 seen.Add((uri, local));
             }
+
+            // An instance holds at most 128 levels: an element below them is
+            // state 102, and an attribute of an element at the 128th level
+            // state 101, as its text is (probed 2026-10-02 against SQL Server
+            // 2025).
+            if (this.openElements.Count >= MaxDepth)
+                throw SimulatedSqlException.XmlTooDeep(102);
+            if (this.openElements.Count == MaxDepth - 1 && seen is not null)
+                throw SimulatedSqlException.XmlTooDeep(101);
 
             this.prologOnly = false;
             this.WriteStartTag(name, empty);
@@ -977,6 +988,9 @@ internal static class XmlWellFormedness
             >= 'A' and <= 'F' when hex => c - 'A' + 10,
             _ => -1,
         };
+
+        /// <summary>The most levels of nested elements an xml instance holds.</summary>
+        private const int MaxDepth = 128;
 
         /// <summary>
         /// The error at <paramref name="index"/>, positioned as real positions

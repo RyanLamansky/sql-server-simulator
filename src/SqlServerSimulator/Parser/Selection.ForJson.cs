@@ -60,11 +60,16 @@ partial class Selection
             return inner;
         }
 
+        // Real reads the clause's options as one unit and reports anything it
+        // can't take — a mode it lacks, an option it lacks or one written
+        // twice, a parenthesis after the mode — near the JSON keyword (probed
+        // 2026-10-02 against SQL Server 2025).
+        var clauseError = SimulatedSqlException.SyntaxErrorNearText(jsonKeyword.Value);
         var mode = context.GetNextRequired() is Name modeName && Collation.Baseline.Equals(modeName.Value, "AUTO")
             ? ForJsonMode.Auto
             : context.Token is Name pathName && Collation.Baseline.Equals(pathName.Value, "PATH")
                 ? ForJsonMode.Path
-                : throw SimulatedSqlException.SyntaxErrorNear(context);
+                : throw clauseError;
 
         var includeNulls = false;
         var withoutArrayWrapper = false;
@@ -72,15 +77,16 @@ partial class Selection
         string? rootName = null;
 
         context.MoveNextOptional();
+        if (context.Token is Operator { Character: '(' })
+            throw clauseError;
         while (context.Token is Operator { Character: ',' })
         {
             if (context.GetNextRequired() is not Name optionName)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
+                throw clauseError;
 
-            if (Collation.Baseline.Equals(optionName.Value, "ROOT"))
+            if (Collation.Baseline.Equals(optionName.Value, "ROOT") && !rootSpecified)
             {
                 rootSpecified = true;
-                rootName = "root";
                 context.MoveNextOptional();
                 if (context.Token is Operator { Character: '(' })
                 {
@@ -92,19 +98,19 @@ partial class Selection
                     context.MoveNextOptional();
                 }
             }
-            else if (Collation.Baseline.Equals(optionName.Value, "INCLUDE_NULL_VALUES"))
+            else if (Collation.Baseline.Equals(optionName.Value, "INCLUDE_NULL_VALUES") && !includeNulls)
             {
                 includeNulls = true;
                 context.MoveNextOptional();
             }
-            else if (Collation.Baseline.Equals(optionName.Value, "WITHOUT_ARRAY_WRAPPER"))
+            else if (Collation.Baseline.Equals(optionName.Value, "WITHOUT_ARRAY_WRAPPER") && !withoutArrayWrapper)
             {
                 withoutArrayWrapper = true;
                 context.MoveNextOptional();
             }
             else
             {
-                throw SimulatedSqlException.SyntaxErrorNear(context);
+                throw clauseError;
             }
         }
 
@@ -112,14 +118,28 @@ partial class Selection
 
         if (rootSpecified && withoutArrayWrapper)
             throw SimulatedSqlException.ForJsonRootWithoutWrapperConflict();
-        var wrapped = WrapForJson(inner, new ForJsonOptions(mode, includeNulls, withoutArrayWrapper, rootSpecified ? rootName : null));
-        wrapped.streamedDocumentType = SqlType.NVarcharMax;
+
+        // A ROOT written without a name is "root" in PATH mode and the first
+        // level's name in AUTO (probed 2026-10-02 against SQL Server 2025).
+        if (rootSpecified && rootName is null)
+            rootName = mode == ForJsonMode.Path ? "root" : BuildAutoLevels(inner, forJson: true)[0].Name;
+        var options = new ForJsonOptions(mode, includeNulls, withoutArrayWrapper, rootSpecified ? rootName : null);
+        var wrapped = WrapForJson(inner, options);
+        wrapped.streamedDocumentType = options.DocumentType;
         wrapped.ColumnMasks = ForClauseDocumentMasks(inner);
         return wrapped;
     }
 
     private static Selection WrapForJson(Selection inner, ForJsonOptions options)
     {
+        // The spatial and CLR user-defined types have no JSON form; hierarchyid
+        // writes its string (probed 2026-10-02 against SQL Server 2025).
+        foreach (var type in inner.Schema)
+        {
+            if (type is SpatialSqlType or ClrUdtSqlType)
+                throw SimulatedSqlException.ForJsonClrType();
+        }
+
         // Every column needs a name (Msg 13605), checked once at parse.
         for (var i = 0; i < inner.ColumnNames.Length; i++)
         {
@@ -130,13 +150,15 @@ partial class Selection
         // Compile-time raw-embed detection per column (nested FOR JSON /
         // JSON_QUERY / JSON_OBJECT / JSON_ARRAY embed as raw JSON).
         var rawColumns = new bool[inner.ColumnNames.Length];
+        for (var i = 0; i < rawColumns.Length; i++)
+            rawColumns[i] = SqlType.IsJsonText(inner.Schema[i]);
         if (inner.ProjectionExpressions is { } projection)
         {
             for (var i = 0; i < projection.Length && i < rawColumns.Length; i++)
-                rawColumns[i] = ColumnProducesRawJson(projection[i]);
+                rawColumns[i] |= ColumnProducesRawJson(projection[i]);
         }
 
-        var schema = new SqlType[] { SqlType.NVarcharMax };
+        var schema = new SqlType[] { options.DocumentType };
         var columnNames = new[] { ForJsonColumnName };
         var innerSchema = inner.Schema;
 
@@ -163,11 +185,14 @@ partial class Selection
             };
         }
 
-        // PATH splits dotted aliases into a contiguity-checked nesting tree.
+        // PATH splits dotted aliases into a contiguity-checked nesting tree;
+        // a name with an empty step is no path (Msg 13603).
         var root = new List<ForJsonNode>();
         for (var i = 0; i < inner.ColumnNames.Length; i++)
         {
             var name = inner.ColumnNames[i];
+            if (name.StartsWith('.') || name.EndsWith('.') || name.Contains("..", StringComparison.Ordinal))
+                throw SimulatedSqlException.ForJsonInvalidPropertyName(name);
             InsertForJsonPath(root, name.Split('.'), 0, i, name);
         }
 
@@ -225,8 +250,8 @@ partial class Selection
         }
 
         return RowEncoder.EncodeRow(
-            [SqlType.NVarcharMax],
-            [SqlValue.FromNVarchar(SqlType.NVarcharMax, document.ToString())]);
+            [options.DocumentType],
+            [SqlValue.FromNVarchar(options.DocumentType, document.ToString())]);
     }
 
     /// <summary>
@@ -404,7 +429,7 @@ partial class Selection
     {
         NamedExpression named => ColumnProducesRawJson(named.Inner),
         Parenthesized parenthesized => ColumnProducesRawJson(parenthesized.Wrapped),
-        ScalarSubqueryExpression subquery => subquery.Inner.ForJson is not null,
+        ScalarSubqueryExpression subquery => subquery.Inner.ForJson is { DocumentType.jsonText: true },
         _ => JsonValueRender.ProducesJson(expression),
     };
 
@@ -463,7 +488,10 @@ partial class Selection
                 AppendForJsonDateTime(sb, value.AsDateTime2, dt2.precision);
                 return;
             case var _ when type == SqlType.DateTime:
-                AppendForJsonDateTime(sb, value.AsDateTime, 3);
+                AppendForJsonDateTime(sb, RoundDateTimeToMilliseconds(value.AsDateTime), 3);
+                return;
+            case ImageSqlType or RowVersionSqlType:
+                _ = sb.Append('"').Append(Convert.ToBase64String(value.CoerceTo(SqlType.VarbinaryMax).AsBytes)).Append('"');
                 return;
             case var _ when type == SqlType.SmallDateTime:
                 AppendForJsonDateTime(sb, value.AsSmallDateTime, 0);
@@ -494,6 +522,14 @@ partial class Selection
     /// </summary>
     internal static void AppendJsonDateTime(StringBuilder sb, DateTime value, int precision) =>
         AppendForJsonDateTime(sb, value, precision);
+
+    /// <summary>
+    /// A <c>datetime</c> counts in three-hundredths of a second, so its
+    /// millisecond digits are a rounding: <c>.997</c> is stored as
+    /// 0.99666…, which every text form writes back as <c>.997</c>.
+    /// </summary>
+    internal static DateTime RoundDateTimeToMilliseconds(DateTime value) =>
+        new((value.Ticks + (TimeSpan.TicksPerMillisecond / 2)) / TimeSpan.TicksPerMillisecond * TimeSpan.TicksPerMillisecond, value.Kind);
 
     /// <summary>A <c>time</c>, quoted, in the form <see cref="AppendJsonDateTime"/> describes.</summary>
     internal static void AppendJsonTime(StringBuilder sb, TimeSpan value, int precision)
@@ -594,6 +630,13 @@ internal sealed class ForJsonOptions(ForJsonMode mode, bool includeNulls, bool w
 
     /// <summary>The ROOT wrapper name, or null when no ROOT option was given (empty string is a valid name).</summary>
     public readonly string? RootName = rootName;
+
+    /// <summary>
+    /// The document's type: JSON text, which a JSON producer reading it
+    /// embeds as JSON, unless <c>WITHOUT_ARRAY_WRAPPER</c> leaves it a plain
+    /// string that embeds quoted (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    public readonly NVarcharSqlType DocumentType = withoutArrayWrapper ? SqlType.NVarcharMax : SqlType.JsonTextMax;
 }
 
 /// <summary>

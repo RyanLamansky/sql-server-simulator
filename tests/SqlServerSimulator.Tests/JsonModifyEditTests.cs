@@ -292,4 +292,22 @@ public sealed class JsonModifyEditTests
     [TestMethod]
     public void SubstitutedValue_UntypedNull_Deletes()
         => AreEqual("{}", ExecuteScalar("select json_modify('{\"a\":1}', '$.a', null)"));
+
+    // ---- written values (probed 2026-10-02 against SQL Server 2025) ----
+
+    [TestMethod]
+    public void Real_IsWrittenAsTheFloatItConvertsTo()
+        => AreEqual("{\"a\":1.500000000000000e+000}", ExecuteScalar("select json_modify('{\"a\":1}', '$.a', cast(1.5 as real))"));
+
+    [TestMethod]
+    public void ForJsonSubquery_EmbedsAsJson()
+        => AreEqual("{\"a\":[{\"x\":1}]}", ExecuteScalar("select json_modify('{\"a\":1}', '$.a', (select 1 as x for json path))"));
+
+    [TestMethod]
+    public void JsonValue_IsWrittenIntoAJsonDocumentAndRefusedOverText()
+    {
+        var sim = new Simulation();
+        AreEqual("{\"a\":1,\"b\":[1,2]}", sim.ExecuteScalar("declare @j json = '{\"a\":1}'; select cast(json_modify(@j, '$.b', cast('[1, 2]' as json)) as nvarchar(max))"));
+        sim.AssertSqlError("select json_modify('{\"a\":1}', '$.b', cast('[1]' as json))", 8116, "Argument data type json is invalid for argument 3 of json_modify function.");
+    }
 }

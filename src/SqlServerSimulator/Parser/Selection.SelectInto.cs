@@ -109,9 +109,14 @@ partial class Selection
                 }
             }
 
+            // A stored column is plain text, whatever JSON producer filled it
+            // (probed 2026-10-02 against SQL Server 2025).
+            var columnType = outputSchema[i] is NVarcharSqlType { jsonText: true } jsonText
+                ? NVarcharSqlType.Get(jsonText.length, jsonText.Collation, jsonText.Coercibility)
+                : outputSchema[i];
             destColumns[i] = new HeapColumn(
                 colName,
-                outputSchema[i],
+                columnType,
                 maxLength: null,
                 nullable: nullable,
                 identity: identity,

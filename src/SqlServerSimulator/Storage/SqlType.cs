@@ -373,6 +373,12 @@ internal abstract partial class SqlType
     /// </remarks>
     public static readonly NVarcharSqlType NVarcharMax = NVarcharSqlType.Get(MaxLengthSentinel, Collation.Baseline, Coercibility.CoercibleDefault);
 
+    /// <summary><see cref="NVarcharMax"/> marked as JSON text — see <see cref="NVarcharSqlType.jsonText"/>.</summary>
+    public static readonly NVarcharSqlType JsonTextMax = NVarcharMax.AsJsonText();
+
+    /// <summary>Whether <paramref name="type"/> is JSON text — see <see cref="NVarcharSqlType.jsonText"/>.</summary>
+    public static bool IsJsonText(SqlType type) => type is NVarcharSqlType { jsonText: true };
+
     /// <remarks>
     /// <c>varchar(max)</c> — the single-byte-charset counterpart of
     /// <see cref="NVarcharMax"/>. Distinct from <see cref="Varchar"/> (length

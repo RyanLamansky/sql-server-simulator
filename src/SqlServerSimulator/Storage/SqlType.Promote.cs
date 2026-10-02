@@ -292,10 +292,12 @@ internal abstract partial class SqlType
             : b.PairClass == TypePairClass.Binary ? (a.Collation ?? Collation.Baseline, a.Coercibility)
             : Collation.Resolve(a, b) ?? (a.Collation ?? b.Collation ?? Collation.Baseline, Coercibility.CoercibleDefault);
 
+        // JSON text stays JSON text when it meets another string.
+        var jsonText = IsJsonText(a) || IsJsonText(b);
         if (aLen == MaxLengthSentinel || bLen == MaxLengthSentinel)
         {
             return national
-                ? NVarcharSqlType.Get(MaxLengthSentinel, collation, coercibility)
+                ? NVarcharSqlType.Get(MaxLengthSentinel, collation, coercibility, jsonText)
                 : VarcharSqlType.Get(MaxLengthSentinel, collation, coercibility);
         }
 
@@ -311,7 +313,7 @@ internal abstract partial class SqlType
         return (national, fixedLength) switch
         {
             (true, true) => NCharSqlType.Get(capped, collation, coercibility),
-            (true, false) => NVarcharSqlType.Get(capped, collation, coercibility),
+            (true, false) => NVarcharSqlType.Get(capped, collation, coercibility, jsonText),
             (false, true) => CharSqlType.Get(capped, collation, coercibility),
             (false, false) => VarcharSqlType.Get(capped, collation, coercibility),
         };

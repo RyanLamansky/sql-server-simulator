@@ -864,6 +864,15 @@ partial class Simulation
         // against SQL Server 2025).
         if (context.Batch.IsSkipping && assignOp == '=' && slot.DeclaredType is VectorSqlType && rhs is VariableReference)
             AssignmentRules.RequireAssignable(rhs, rhs.GetSqlType(context.Batch, NoColumnTypeResolver), slot.DeclaredType);
+
+        // Any other value whose type the batch can settle while compiling is
+        // judged then too, so a refused one stops the whole batch before it
+        // runs: `SET @nv = (SELECT … FOR XML …, TYPE)` is Msg 257 with nothing
+        // run (probed 2026-10-02 against SQL Server 2025). A value naming what
+        // the batch has yet to create defers to its run, as real's statement
+        // does.
+        else if (context.Batch.IsSkipping && assignOp == '=' && StaticTypeOrNull(rhs, context.Batch) is { } staticType)
+            AssignmentRules.RequireAssignable(rhs, staticType, slot.DeclaredType);
         if (context.Batch.IsSkipping)
             return true;
         var assignedExpr = assignOp == '='
@@ -878,6 +887,18 @@ partial class Simulation
         Cast.RejectRoundingUnderRoundAbort(rhsValue, slot.DeclaredType, context.Batch);
         slot.Assign(DataMasking.ForAssignment(context.Batch, assignedExpr, rhsValue, SqlValue.NameVariantBase(rhsValue, Cast.ApplyCoercion(rhsValue, slot.DeclaredType, slot.DeclaredMaxLength), assignedExpr.ResultReportsNumeric), slot.DeclaredType));
         return true;
+    }
+
+    private static SqlType? StaticTypeOrNull(Expression expression, BatchContext batch)
+    {
+        try
+        {
+            return expression.GetSqlType(batch, NoColumnTypeResolver);
+        }
+        catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

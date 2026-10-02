@@ -38,7 +38,7 @@ A bounded string target too short for the canonical text is Msg 13639, never a t
 The json row and column of the pair grids (`SqlType.PairRules.cs`) were probed against one member of each class in both orders, adding a `J` cell for Msg 13636.
 Comparing two json values, `IN`, and comparing json with a bare `NULL` are Msg 13636 state 1; a sort or grouping slot (ORDER BY, GROUP BY, a window's PARTITION BY or ORDER BY) is state 2; `IS NULL` is the one comparison that works.
 Against a string the comparison is Msg 402, the ordinary incompatible-operator error.
-`DISTINCT` is Msg 421, a deduping set operator Msg 5335, `MIN` / `MAX` Msg 8117 state 1, and — unlike `xml` — `COUNT(j)` is Msg 8117 state 2 even without `DISTINCT`.
+`DISTINCT` is Msg 421, a deduping set operator Msg 5335, `MIN` / `MAX` Msg 8117 state 1, and `COUNT(DISTINCT j)` Msg 8117 state 2, while `COUNT(j)` counts (probed 2026-10-02 against SQL Server 2025).
 The string built-ins refuse it with Msg 8116 (state 1, `CHECKSUM` and `GREATEST` state 4), `CONCAT` with Msg 257 naming the string family it would convert to, and `SQL_VARIANT_PROPERTY` with Msg 206.
 DDL refuses it as a key (Msg 1919 then 1750 for a constraint, Msg 1978 state 3 for an index or statistics), with a `COLLATE` (Msg 447 state 1) and as an alias type's base (Msg 13657); an included column, a clustered columnstore index, a `CHECK` over it and a `DEFAULT` for it are all accepted.
 `ALTER COLUMN` from a string to `json` converts every row through the canonicalizer, and the other directions are refused by the assignment grid before any row is read.
@@ -49,7 +49,7 @@ Each function reads the canonical text as it reads any document, so what differs
 
 - `JSON_QUERY` and `JSON_MODIFY` return `json` over a `json` document, `JSON_MODIFY` canonicalizing its edit (a `float` written as `1.5e0` lands as `1.5000000000`); `JSON_VALUE` returns the canonical number text.
 - A strict-mode miss is Msg 13608 at state 5 from `JSON_VALUE` / `JSON_QUERY` / `JSON_MODIFY`, 7 from `OPENJSON`'s document path and 8 from an `OPENJSON … WITH` column path.
-- `JSON_MODIFY`'s written value may not be `json` (Msg 8116, argument 3).
+- `JSON_MODIFY` writes a `json` value into a `json` document as the document it is, and refuses one over text (Msg 8116, argument 3; probed 2026-10-02 against SQL Server 2025).
 - `JSON_OBJECT`, `JSON_ARRAY`, `JSON_ARRAYAGG` and `JSON_OBJECTAGG` return `json` when a value they embed is `json` or a trailing `RETURNING json` asks for it, and canonicalize the result; any other `RETURNING` target is Msg 102 state 19 (`JsonNullClauseParser.ParseReturning`).
   A `json` value embeds as the document it is, in the builders and in `FOR JSON`; `FOR XML` writes its text.
 - `OPENJSON … WITH` accepts `AS JSON` on a `json` column; a `json` column without it reads NULL from a `json` document and converts the scalar's text from any other.
@@ -76,7 +76,7 @@ Under lax a failed conversion, an overflow or a string longer than a bounded cha
 ## The `modify` method
 
 `UPDATE … SET col.modify(path, value)`, the same clause in a `MERGE`'s `UPDATE`, and `SET @var.modify(path, value)` rewrite the column or variable through `JSON_MODIFY`'s edit (`JsonModify.ParseMethod`), so every path rule, `append` and the advanced-accessor refusals carry over.
-What differs: the method name matches without case and takes a `json` value (embedded as the document it is), a NULL receiver is Msg 5302 — which, unlike xml's, ends the batch and rolls the transaction back as under `SET XACT_ABORT ON` — and its refusals name `modify` (Msg 313 / 8144 State 101 for the argument count, 8116 for a type).
+What differs: the method name matches without case and takes a `json` value (embedded as the document it is), a NULL receiver is Msg 5302 — which, as xml's does, ends the batch and rolls the transaction back as under `SET XACT_ABORT ON` — and its refusals name `modify` (Msg 313 / 8144 State 101 for the argument count, 8116 for a type).
 It is the whole assignment: a second assignment to the column is Msg 264, a qualified `t.col.modify` or an operator after it Msg 102, and outside an assignment a json variable's method call is Msg 258 and a json column's Msg 4121.
 A method call on a column of any other type but `xml` is Msg 258 naming the type.
 

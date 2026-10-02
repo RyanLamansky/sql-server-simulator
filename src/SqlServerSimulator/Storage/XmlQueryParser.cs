@@ -818,10 +818,29 @@ internal sealed class XmlQueryParser(
         if (this.Current == '*')
         {
             this.index++;
+
+            // `*:local` names the local part in any namespace (probed
+            // 2026-10-02 against SQL Server 2025).
+            if (this.index + 1 < this.text.Length && this.text[this.index] == ':' && IsNameStart(this.text[this.index + 1]))
+            {
+                this.index++;
+                var anyNamespaceLocal = this.ReadWord();
+                return new XmlStep(axis, XmlNodeTestKind.AnyNamespace, anyNamespaceLocal, string.Empty, this.ParsePredicates());
+            }
             return new XmlStep(axis, XmlNodeTestKind.Wildcard, string.Empty, string.Empty, this.ParsePredicates());
         }
 
         var name = this.ReadWord();
+
+        // `prefix:*` is every local name in the prefix's namespace.
+        if (name.EndsWith(':') && this.Current == '*')
+        {
+            this.index++;
+            var prefix = name[..^1];
+            return this.prefixes.TryGetValue(prefix, out var prefixUri)
+                ? new XmlStep(axis, XmlNodeTestKind.AnyLocalName, string.Empty, prefixUri, this.ParsePredicates())
+                : throw SimulatedSqlException.XQueryUndeclaredNamespace(this.method, prefix);
+        }
         if (NodeTestKind(name) is { } nodeTest && this.PeekIsOpenParen())
         {
             this.ConsumeEmptyArgumentList();
@@ -1194,24 +1213,42 @@ internal sealed class XmlQueryParser(
 
     /// <summary>
     /// An entity or character reference inside a string literal — XQuery
-    /// reads <c>&amp;lt;</c> there as <c>&lt;</c> — or Msg 2282 for an
-    /// <c>&amp;</c> that opens neither (probe-confirmed).
+    /// reads <c>&amp;lt;</c> there as <c>&lt;</c>. A name that stops on a
+    /// character other than <c>;</c> is Msg 2283 naming it, an <c>&amp;</c>
+    /// opening no name or a name XML doesn't predefine Msg 2282, and a
+    /// numeric reference that isn't a number Msg 2285 (probed 2026-10-02
+    /// against SQL Server 2025).
     /// </summary>
     private string ReadEntityReference()
     {
-        var end = this.text.IndexOf(';', this.index);
-        var name = end < 0 ? string.Empty : this.text[(this.index + 1)..end];
-        var replacement = name switch
+        var start = this.index + 1;
+        if (start < this.text.Length && this.text[start] == '#')
+        {
+            var close = this.text.IndexOf(';', start);
+            var digits = close < 0 ? string.Empty : this.text[(start + 1)..close];
+            var number = digits.StartsWith('x')
+                ? int.TryParse(digits.AsSpan(1), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var hex) ? hex : -1
+                : int.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out var code) ? code : -1;
+            if (number is < 0 or > 0x10FFFF)
+                throw SimulatedSqlException.XQueryInvalidNumericEntityReference(this.method);
+            this.index = close + 1;
+            return char.ConvertFromUtf32(number);
+        }
+
+        if (start >= this.text.Length || !IsNameStart(this.text[start]))
+            throw SimulatedSqlException.XQueryInvalidEntityReference(this.method);
+        var end = start;
+        while (end < this.text.Length && IsNameChar(this.text[end]))
+            end++;
+        if (end >= this.text.Length || this.text[end] != ';')
+            throw SimulatedSqlException.XQueryEntityReferenceCharacter(this.method, end < this.text.Length ? this.text[end] : ' ');
+        var replacement = this.text[start..end] switch
         {
             "amp" => "&",
             "apos" => "'",
             "gt" => ">",
             "lt" => "<",
             "quot" => "\"",
-            _ when name.StartsWith("#x", StringComparison.Ordinal)
-                && int.TryParse(name.AsSpan(2), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var hex) => char.ConvertFromUtf32(hex),
-            _ when name.StartsWith('#')
-                && int.TryParse(name.AsSpan(1), NumberStyles.None, CultureInfo.InvariantCulture, out var code) => char.ConvertFromUtf32(code),
             _ => throw SimulatedSqlException.XQueryInvalidEntityReference(this.method),
         };
         this.index = end + 1;
@@ -1435,12 +1472,38 @@ internal sealed class XmlQueryParser(
                     break;
             }
         }
+        RequireParameterTypes(id, arguments, this.method);
         return new XmlFunctionCallExpr(
             id,
             arguments,
             kind,
             occurrenceFromArgument ? arguments[0].Occurrence : occurrence,
             typeName);
+    }
+
+    /// <summary>
+    /// Msg 2364: a typed argument the parameter's type takes no implicit
+    /// conversion from — a number or boolean for a string parameter, a string
+    /// for a number. Untyped values and nodes convert (probed 2026-10-02
+    /// against SQL Server 2025, which names the number parameter
+    /// <c>xs:decimal</c>).
+    /// </summary>
+    private static void RequireParameterTypes(XmlFunctionId id, XmlQueryExpr[] arguments, string method)
+    {
+        for (var i = 0; i < arguments.Length; i++)
+        {
+            var expectsString = id switch
+            {
+                XmlFunctionId.Concat or XmlFunctionId.Contains or XmlFunctionId.UpperCase or XmlFunctionId.LowerCase or XmlFunctionId.StringLength => true,
+                XmlFunctionId.Substring => i == 0,
+                _ => (bool?)null,
+            };
+            if (expectsString is not { } stringParameter)
+                return;
+            var kind = arguments[i].AtomizedKind();
+            if (stringParameter ? kind is XmlStaticKind.Number or XmlStaticKind.Boolean : kind == XmlStaticKind.String)
+                throw SimulatedSqlException.XQueryCannotImplicitlyConvert(method, arguments[i].AtomizedTypeName(), stringParameter ? "xs:string" : "xs:decimal");
+        }
     }
 
     /// <summary>

@@ -78,10 +78,12 @@ internal sealed class IsNullExpression : Expression
     internal override void Describe(NodeShape shape) => shape.Child(this.check).Child(this.replacement);
 
     // ISNULL(x, y) is non-null iff EITHER operand is non-null: a non-null x
-    // short-circuits, otherwise the result is the (possibly-non-null) y.
+    // short-circuits, otherwise the result is the (possibly-non-null) y. Over
+    // an xml or json check real reports the result nullable whatever the
+    // replacement (probed 2026-10-02 against SQL Server 2025).
     internal override bool ResultIsNullable(NullabilityContext context) =>
         this.check.ResultIsNullable(context)
-        && this.replacement.ResultIsNullable(context);
+        && (this.replacement.ResultIsNullable(context) || context.TypeOf(this.check) is XmlSqlType or JsonSqlType);
 
     private Expression? namingArm;
 

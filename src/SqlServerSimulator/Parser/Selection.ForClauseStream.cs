@@ -20,6 +20,12 @@ internal sealed partial class Selection
     private SqlType? streamedDocumentType;
 
     /// <summary>
+    /// Whether this is a FOR JSON or untyped FOR XML wrapper, whose single
+    /// column's name only the client result carries.
+    /// </summary>
+    public bool IsForClauseDocument => this.streamedDocumentType is not null;
+
+    /// <summary>
     /// Whether this is a SELECT statement's streamed FOR JSON / FOR XML result,
     /// whose row count is <see cref="StatementContext.ForClauseSourceRows"/>
     /// rather than the rows it returns.

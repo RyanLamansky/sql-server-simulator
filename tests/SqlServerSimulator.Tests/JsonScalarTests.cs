@@ -441,4 +441,110 @@ public sealed class JsonScalarTests
         else
             AreEqual(DBNull.Value, result);
     }
+
+    // ---- path grammar and name matching (probed 2026-10-02 against SQL Server 2025) ----
+
+    [TestMethod]
+    [DataRow("'LAX $.a'", 'L', 0, 22)]
+    [DataRow("'Strict $.a'", 'S', 0, 22)]
+    [DataRow("'$.é'", 'é', 2, 22)]
+    [DataRow("'$.aé'", 'é', 3, 22)]
+    [DataRow("'$.\"a\"\"b\"'", '"', 5, 14)]
+    [DataRow("'$.\"a\\q\"'", 'q', 5, 17)]
+    [DataRow("'$.\"a\\u00zz\"'", 'z', 9, 17)]
+    [DataRow("'$.\"a\\u00\"'", '.', 9, 17)]
+    public void PathGrammar_Refusals(string path, char character, int position, int state)
+    {
+        var error = new Simulation().AssertSqlError($"select json_value(N'{{\"a\":1}}', {path})", 13607);
+        AreEqual($"JSON path is not properly formatted. Unexpected character '{character}' is found at position {position}.", error.Errors[0].Message);
+        AreEqual((byte)state, error.Errors[0].State);
+    }
+
+    [TestMethod]
+    public void PathGrammar_AppendAfterModeKeyword_IsState14()
+        => AreEqual((byte)14, new Simulation().AssertSqlError("select json_modify('{\"a\":1}', 'strict append $.a', 3)", 13607).Errors[0].State);
+
+    [TestMethod]
+    [DataRow("{\"aA\":3}", "$.\"a\\u0041\"", "3")]
+    [DataRow("{\"a\\u0041\":3}", "$.\"aA\"", "3")]
+    [DataRow("{\"a\\\"b\":3}", "$.\"a\\\"b\"", "3")]
+    [DataRow("{\"a\\/b\":3}", "$.\"a\\/b\"", "3")]
+    [DataRow("{\"a\\/b\":3}", "$.\"a/b\"", null)]
+    [DataRow("{\"a/b\":3}", "$.\"a\\/b\"", null)]
+    [DataRow("{\"a\\u000ab\":3}", "$.\"a\\nb\"", null)]
+    public void QuotedNames_CompareWithUnicodeEscapesDecodedAndShortEscapesAsWritten(string document, string path, string? expected)
+    {
+        var value = ExecuteScalar($"select json_value(N'{document}', N'{path}')");
+        AreEqual(expected, value is DBNull ? null : value);
+    }
+
+    [TestMethod]
+    public void JsonModify_InsertedKey_IsWrittenAsThePathNamesIt()
+        => AreEqual("{\"a/b\":1,\"a\\/b\":2,\"aA\":3}", ExecuteScalar("select json_modify(json_modify(json_modify('{}', '$.\"a/b\"', 1), '$.\"a\\/b\"', 2), '$.\"a\\u0041\"', 3)"));
+
+    [TestMethod]
+    public void Nesting_PastTheLimit_RaisesMsg13606WhenTheReaderGetsThere()
+    {
+        var sim = new Simulation();
+        const string deep = "replicate(cast('[' as varchar(max)), 130) + replicate(cast(']' as varchar(max)), 130)";
+        AreEqual(1, sim.ExecuteScalar("select isjson(replicate(cast('[' as varchar(max)), 129) + replicate(cast(']' as varchar(max)), 129))"));
+        AreEqual("1", sim.ExecuteScalar($"select json_value('{{\"a\":1,\"b\":' + {deep} + '}}', '$.a')"));
+        AreEqual((byte)1, sim.AssertSqlError($"select json_value('{{\"b\":' + {deep} + ',\"a\":1}}', '$.a')", 13606).Errors[0].State);
+        _ = sim.AssertSqlError($"select isjson({deep})", 13606);
+        _ = sim.AssertSqlError($"select json_path_exists({deep}, '$')", 13606);
+        _ = sim.AssertSqlError($"select * from openjson({deep})", 13606);
+        _ = sim.AssertSqlError("select isjson(replicate(cast('[' as varchar(max)), 129) + '1' + replicate(cast(']' as varchar(max)), 129))", 13606);
+    }
+
+    [TestMethod]
+    public void Path_PastOneHundredTwentyEightSteps_RaisesMsg13606State4()
+    {
+        var sim = new Simulation();
+        _ = IsInstanceOfType<DBNull>(sim.ExecuteScalar("select json_value('{\"a\":1}', '$' + replicate(cast('.a' as varchar(max)), 128))"));
+        var error = sim.AssertSqlError("select json_value('{\"a\":1}', '$' + replicate(cast('.a' as varchar(max)), 129) + 'x')", 13606);
+        AreEqual("JSON text/path that has more than 128 nesting levels cannot be parsed.", error.Errors[0].Message);
+        AreEqual((byte)4, error.Errors[0].State);
+    }
+
+    [TestMethod]
+    public void LoneSurrogateEscape_ReadsAsTheLoneUnit()
+    {
+        var sim = new Simulation();
+        AreEqual(55357, sim.ExecuteScalar("select unicode(json_value('{\"a\":\"\\ud83d\"}', '$.a'))"));
+        AreEqual(56832, sim.ExecuteScalar("select unicode([value]) from openjson('[\"\\ude00x\"]')"));
+        AreEqual(2, sim.ExecuteScalar("select len(json_value('{\"a\":\"\\ud83dx\"}', '$.a'))"));
+    }
+
+    [TestMethod]
+    public void JsonValue_Result_IsNVarchar4000InTheDocumentsCollation()
+    {
+        var sim = new Simulation();
+        AreEqual(8000, sim.ExecuteScalar("select sql_variant_property(json_value('{\"a\":1}', '$.a'), 'MaxLength')"));
+        AreEqual("Latin1_General_BIN", sim.ExecuteScalar("select sql_variant_property(json_value('{\"a\":1}' collate Latin1_General_BIN, '$.a'), 'Collation')"));
+        AreEqual("Latin1_General_BIN", sim.ExecuteScalar("select sql_variant_property(cast(json_query('{\"a\":[1]}' collate Latin1_General_BIN, '$.a') as nvarchar(100)), 'Collation')"));
+    }
+
+    [TestMethod]
+    public void JsonValue_StrictLongStringOverMaxDocument_RaisesMsg13625()
+    {
+        var sim = new Simulation();
+        sim.AssertSqlError("select json_value('{\"a\":\"' + replicate(cast('x' as varchar(max)), 4001) + '\"}', 'strict $.a')", 13625, "String value in the specified JSON path would be truncated.");
+        AreEqual(4000, sim.ExecuteScalar("select len(json_value(cast('{\"a\":\"' + replicate('x', 4100) + '\"}' as varchar(8000)), 'strict $.a'))"));
+    }
+
+    [TestMethod]
+    public void JsonQuery_BoundedDocument_IsReadAsItsFirst4000Characters()
+    {
+        var sim = new Simulation();
+        var error = sim.AssertSqlError("select json_query('{\"a\":\"' + replicate('x', 3999) + '\"}', '$.a')", 13609);
+        AreEqual("JSON text is not properly formatted. Unexpected character '\"' is found at position 5.", error.Errors[0].Message);
+        _ = IsInstanceOfType<DBNull>(sim.ExecuteScalar("select json_query('{\"b\":1,\"a\":\"' + replicate('x', 4000) + '\"}', '$.b')"));
+        _ = IsInstanceOfType<DBNull>(sim.ExecuteScalar("select json_query('{\"a\":\"' + replicate(cast('x' as varchar(max)), 4001) + '\"}', '$.a')"));
+    }
+
+    [TestMethod]
+    [DataRow("select json_query('{\"a\":1}', 'strict $.a')", 2)]
+    [DataRow("select json_query(cast('{\"a\":1}' as nvarchar(max)), 'strict $.a')", 1)]
+    public void JsonQuery_StrictScalar_StateFollowsTheDocumentsWidth(string sql, int state)
+        => AreEqual((byte)state, new Simulation().AssertSqlError(sql, 13624).Errors[0].State);
 }

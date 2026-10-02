@@ -400,6 +400,12 @@ internal enum XmlNodeTestKind
     /// <summary><c>*</c> — any node of the axis's principal kind.</summary>
     Wildcard,
 
+    /// <summary><c>*:local</c> — the local name in any namespace.</summary>
+    AnyNamespace,
+
+    /// <summary><c>prefix:*</c> — any local name in the prefix's namespace.</summary>
+    AnyLocalName,
+
     /// <summary><c>text()</c>.</summary>
     Text,
 
@@ -484,7 +490,7 @@ internal sealed class XmlStep(
         XmlNodeTestKind.Node => "node()",
         XmlNodeTestKind.ProcessingInstruction => "processing-instruction",
         XmlNodeTestKind.Text => "text",
-        XmlNodeTestKind.Wildcard => this.Axis == XmlAxis.Attribute
+        XmlNodeTestKind.Wildcard or XmlNodeTestKind.AnyNamespace or XmlNodeTestKind.AnyLocalName => this.Axis == XmlAxis.Attribute
             ? "attribute(*,xdt:untypedAtomic)"
             : "element(*,xdt:untyped)",
         _ => this.Axis == XmlAxis.Attribute
@@ -664,6 +670,10 @@ internal sealed class XmlStep(
         XmlNodeTestKind.ProcessingInstruction => node.NodeType == XPathNodeType.ProcessingInstruction,
         XmlNodeTestKind.Text => node.NodeType is XPathNodeType.Text or XPathNodeType.SignificantWhitespace or XPathNodeType.Whitespace,
         XmlNodeTestKind.Wildcard => node.NodeType is XPathNodeType.Element or XPathNodeType.Attribute,
+        XmlNodeTestKind.AnyNamespace => node.NodeType is XPathNodeType.Element or XPathNodeType.Attribute
+            && string.Equals(node.LocalName, this.LocalName, StringComparison.Ordinal),
+        XmlNodeTestKind.AnyLocalName => node.NodeType is XPathNodeType.Element or XPathNodeType.Attribute
+            && string.Equals(node.NamespaceURI, this.namespaceUri, StringComparison.Ordinal),
         _ => node.NodeType is XPathNodeType.Element or XPathNodeType.Attribute
             && string.Equals(node.LocalName, this.LocalName, StringComparison.Ordinal)
             && string.Equals(node.NamespaceURI, this.namespaceUri, StringComparison.Ordinal),

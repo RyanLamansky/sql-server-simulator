@@ -693,6 +693,9 @@ internal sealed class Cast : Expression
             return RightJustifiedMoney(ApplyCoercion(value, varTarget, length, budgetCollation), value, length).CoerceTo(targetType);
         }
 
+        if (!value.IsNull && value.Type is XmlSqlType && CoerceXmlToSizedTarget(value.AsString, targetType, targetMaxLength) is { } sized)
+            return sized;
+
         var sourceType = value.Type;
         SqlValue coerced;
         try
@@ -711,6 +714,51 @@ internal sealed class Cast : Expression
 
         coerced = NarrowToCodePage(coerced, sourceType, budgetCollation);
         return EnforceTargetMaxLength(coerced, targetType, targetMaxLength, value, budgetCollation);
+    }
+
+    /// <summary>
+    /// An xml instance converted to a string or binary type is refused rather
+    /// than cut when it doesn't fit (Msg 6354), counting UTF-16 units into a
+    /// string and the byte-order mark plus UTF-16 bytes into a binary, which
+    /// is what a binary target holds; a character the target's code page has
+    /// no best fit for is Msg 6355 (probed 2026-10-02 against SQL Server
+    /// 2025). Returns the converted binary, or null to let the ordinary
+    /// coercion convert a string that fits.
+    /// </summary>
+    private static SqlValue? CoerceXmlToSizedTarget(string text, SqlType targetType, int? targetMaxLength)
+    {
+        var length = targetType switch
+        {
+            CharSqlType c => c.length,
+            NCharSqlType nc => nc.length,
+            BinarySqlType b => b.length,
+            _ => targetMaxLength ?? 0,
+        };
+        if (targetType is VarbinarySqlType or BinarySqlType)
+        {
+            var bytes = new byte[2 + (text.Length * 2)];
+            bytes[0] = 0xFF;
+            bytes[1] = 0xFE;
+            _ = System.Text.Encoding.Unicode.GetBytes(text, 0, text.Length, bytes, 2);
+            return length > 0 && bytes.Length > length ? throw SimulatedSqlException.XmlTooLongForTarget()
+                : targetType is BinarySqlType fixedBinary ? SqlValue.FromBinary(fixedBinary, bytes)
+                : SqlValue.FromVarbinary(bytes);
+        }
+        if (targetType is not (VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType))
+            return null;
+        if (length > 0 && text.Length > length)
+            throw SimulatedSqlException.XmlTooLongForTarget();
+        if (targetType is VarcharSqlType or CharSqlType && !System.Text.Ascii.IsValid(text))
+        {
+            var encoding = (targetType.Collation ?? Collation.Baseline).StorageEncoding;
+            var narrowed = encoding.GetString(encoding.GetBytes(text));
+            for (var i = 0; i < narrowed.Length && i < text.Length; i++)
+            {
+                if (narrowed[i] == '?' && text[i] != '?')
+                    throw SimulatedSqlException.XmlCharacterNotInTargetCodePage();
+            }
+        }
+        return null;
     }
 
     /// <summary>
@@ -889,6 +937,8 @@ internal sealed class Cast : Expression
         or 8152 // a scale-prefixed date type's layout into too narrow a binary
         or 8169 // ConversionFailedFromStringToUniqueIdentifier
         or 8170 // InsufficientResultSpaceForUniqueIdentifier
+        or 6354 // XmlTooLongForTarget
+        or 6355 // XmlCharacterNotInTargetCodePage
         or (>= 9400 and <= 9465) // XmlParsingFailed
         or 9807; // InputCharacterStringStyleMismatch
 }

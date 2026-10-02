@@ -245,6 +245,16 @@ internal static class XmlAtomicTypes
             return null;
         }
 
+        // Real's xs:double and xs:float take INF and -INF as written but
+        // refuse NaN and a number past their range (probed 2026-10-02 against
+        // SQL Server 2025), where .NET's reader would round to infinity.
+        if (datatype.TypeCode is XmlTypeCode.Double or XmlTypeCode.Float
+            && Convert.ToDouble(parsed, CultureInfo.InvariantCulture) is var approximate
+            && (double.IsNaN(approximate) || (double.IsInfinity(approximate) && normalized is not ("INF" or "-INF"))))
+        {
+            return null;
+        }
+
         var canonical = XsdCanonical.Render(target, normalized);
         return KindOf(target) switch
         {

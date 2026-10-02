@@ -1,5 +1,3 @@
-using System.Globalization;
-
 namespace SqlServerSimulator.Parser;
 
 /// <summary>
@@ -127,50 +125,10 @@ internal static class JsonEdit
     /// <summary>
     /// Compares a source property name — the quoted token spanning
     /// <paramref name="start"/> to <paramref name="end"/>, escapes and all —
-    /// against a path segment's decoded name.
+    /// against a path segment's name, both in <see cref="JsonPath.NameForm"/>.
     /// </summary>
-    private static bool KeyEquals(string text, int start, int end, string name)
-    {
-        var i = start + 1;
-        var closingQuote = end - 1;
-        var n = 0;
-        while (i < closingQuote)
-        {
-            char c;
-            if (text[i] == '\\')
-            {
-                var escape = text[i + 1];
-                if (escape == 'u')
-                {
-                    c = (char)int.Parse(text.AsSpan(i + 2, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
-                    i += 6;
-                }
-                else
-                {
-                    c = escape switch
-                    {
-                        'b' => '\b',
-                        'f' => '\f',
-                        'n' => '\n',
-                        'r' => '\r',
-                        't' => '\t',
-                        _ => escape,
-                    };
-                    i += 2;
-                }
-            }
-            else
-            {
-                c = text[i];
-                i++;
-            }
-
-            if (n >= name.Length || name[n] != c)
-                return false;
-            n++;
-        }
-        return n == name.Length;
-    }
+    private static bool KeyEquals(string text, int start, int end, string name) =>
+        JsonPath.NameForm(text.AsSpan(start + 1, end - start - 2)) == name;
 
     /// <summary>Advances past the value starting at <paramref name="i"/>.</summary>
     private static void SkipValue(string text, ref int i)

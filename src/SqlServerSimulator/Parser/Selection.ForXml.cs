@@ -149,6 +149,13 @@ partial class Selection
                     throw SimulatedSqlException.ForXmlExplicitInlineSchemaNotImplemented();
                 throw new NotSupportedException("FOR XML XMLSCHEMA (inline XSD emission) isn't modeled.");
             }
+            else if (Collation.Baseline.Equals(optionName.Value, "RAW") || Collation.Baseline.Equals(optionName.Value, "AUTO")
+                || Collation.Baseline.Equals(optionName.Value, "PATH") || Collation.Baseline.Equals(optionName.Value, "EXPLICIT"))
+            {
+                // A second mode reads as an option written twice (probed
+                // 2026-10-02 against SQL Server 2025).
+                throw SimulatedSqlException.ForXmlDuplicateOption();
+            }
             else
             {
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -261,6 +268,14 @@ partial class Selection
     private static Selection WrapForXml(Selection inner, ForXmlOptions options, ForXmlExplicitPlan? explicitPlan = null)
     {
         var innerSchema = inner.Schema;
+
+        // The spatial and CLR user-defined types have no XML form; hierarchyid
+        // writes its string (probed 2026-10-02 against SQL Server 2025).
+        foreach (var type in innerSchema)
+        {
+            if (type is SpatialSqlType or ClrUdtSqlType)
+                throw SimulatedSqlException.ForXmlClrType();
+        }
         // The TYPE option makes the result a typed xml value instead of the
         // string form: one unnamed xml column (probe-confirmed on the wire),
         // which an enclosing FOR XML then embeds as nodes rather than escaped
@@ -356,8 +371,22 @@ partial class Selection
         foreach (var i in columns)
         {
             var columnName = inner.ColumnNames[i];
+
+            // An unnamed column has no attribute to be, but element content
+            // can carry it bare — under ELEMENTS, or an xml value in any shape
+            // (probed 2026-10-02 against SQL Server 2025).
             if (columnName.Length == 0)
-                throw SimulatedSqlException.ForXmlUnnamedColumn();
+            {
+                if (!options.Elements && inner.Schema[i] is not XmlSqlType)
+                    throw SimulatedSqlException.ForXmlUnnamedColumn();
+                wrapper.Content.Add(new ForXmlLeaf(i, ForXmlName.ForXmlPathLeaf.Node, null));
+                continue;
+            }
+
+            // A vector is binary to RAW, which needs BINARY BASE64 to write
+            // one at all (its text form then); AUTO and PATH write the text.
+            if (!options.BinaryBase64 && binaryUrls is null && inner.Schema[i] is VectorSqlType)
+                throw SimulatedSqlException.ForXmlBinaryRaw(columnName);
             if (!options.BinaryBase64 && inner.Schema[i] is BinarySqlType or VarbinarySqlType or ImageSqlType)
             {
                 if (binaryUrls is null)
@@ -377,6 +406,10 @@ partial class Selection
             }
             else
             {
+                // One tag carries an attribute once (Msg 6810, names compared
+                // as written).
+                if (wrapper.Attributes.Exists(attribute => attribute.Name.Equals(xmlName, StringComparison.Ordinal)))
+                    throw SimulatedSqlException.ForXmlRepeatedAttribute(columnName);
                 wrapper.Attributes.Add(new ForXmlAttribute(xmlName, i));
             }
         }
@@ -523,7 +556,9 @@ partial class Selection
         if (attributeName is not null)
         {
             if (node.HasContent)
-                throw SimulatedSqlException.ForXmlAttributeAfterNonAttribute("@" + attributeName);
+                throw SimulatedSqlException.ForXmlAttributeAfterNonAttribute(alias);
+            if (node.Attributes.Exists(attribute => attribute.Name.Equals(attributeName, StringComparison.Ordinal)))
+                throw SimulatedSqlException.ForXmlRepeatedAttribute(alias);
             node.Attributes.Add(new ForXmlAttribute(attributeName, column));
         }
         else
@@ -692,7 +727,7 @@ partial class Selection
             if (value.IsNull)
                 continue;
             _ = sb.Append(' ').Append(attribute.Name).Append("=\"");
-            AppendForXmlText(sb, ForXmlColumnText(value, attribute.Column, rowBytes, innerSchema, options), isAttribute: true);
+            AppendForXmlValueText(sb, ForXmlColumnText(value, attribute.Column, rowBytes, innerSchema, options), innerSchema[attribute.Column], isAttribute: true);
             _ = sb.Append('"');
         }
     }
@@ -725,22 +760,64 @@ partial class Selection
         {
             // A NULL under a comment / processing-instruction step writes
             // nothing at all, XSINIL included — the nil marker is for an
-            // element that would have held a value (probe-confirmed).
-            if (!options.Xsinil || onlyLeaf.Kind is ForXmlName.ForXmlPathLeaf.Comment or ForXmlName.ForXmlPathLeaf.ProcessingInstruction)
+            // element that would have held a value (probe-confirmed). The
+            // element's own attributes still stand, the nil marker after them
+            // (probed 2026-10-02 against SQL Server 2025).
+            var hasAttributes = AnyAttributeValue(element, rowBytes, innerSchema);
+            var nil = options.Xsinil && onlyLeaf.Kind is not (ForXmlName.ForXmlPathLeaf.Comment or ForXmlName.ForXmlPathLeaf.ProcessingInstruction);
+            if (!hasAttributes && !nil)
                 return;
-            _ = sb.Append('<').Append(element.Name).Append(declarations).Append(" xsi:nil=\"true\"/>");
+            _ = sb.Append('<').Append(element.Name).Append(declarations);
+            AppendForXmlAttributes(sb, element, rowBytes, innerSchema, options);
+            _ = sb.Append(nil ? " xsi:nil=\"true\"/>" : "/>");
             return;
         }
+
+        var body = new StringBuilder();
+        _ = SerializeForXmlContent(body, element.Content, rowBytes, innerSchema, options, declarationsOnElements: "", prevAtomic: false);
+
+        // A nested element holding nothing but NULLs isn't written at all
+        // (probed 2026-10-02 against SQL Server 2025).
+        if (!isRowElement && body.Length == 0 && !AnyValue(element, rowBytes, innerSchema))
+            return;
 
         _ = sb.Append('<').Append(element.Name).Append(declarations);
         AppendForXmlAttributes(sb, element, rowBytes, innerSchema, options);
 
-        var body = new StringBuilder();
-        _ = SerializeForXmlContent(body, element.Content, rowBytes, innerSchema, options, declarationsOnElements: "", prevAtomic: false);
-        if (body.Length == 0)
+        // An element closes itself only when nothing was written into it: an
+        // empty string or an empty xml instance still opens and closes it
+        // (probed 2026-10-02 against SQL Server 2025: `'' AS a` is
+        // <a></a>).
+        if (body.Length == 0 && !AnyLeafValue(element, rowBytes, innerSchema))
             _ = sb.Append("/>");
         else
             _ = sb.Append('>').Append(body).Append("</").Append(element.Name).Append('>');
+    }
+
+    private static bool AnyLeafValue(ForXmlElement element, byte[] rowBytes, SqlType[] innerSchema)
+    {
+        foreach (var item in element.Content)
+        {
+            if (item is ForXmlLeaf leaf && !RowDecoder.DecodeColumn(innerSchema, rowBytes, leaf.Column).IsNull)
+                return true;
+        }
+        return false;
+    }
+
+    private static bool AnyAttributeValue(ForXmlElement element, byte[] rowBytes, SqlType[] innerSchema) =>
+        element.Attributes.Exists(attribute => !RowDecoder.DecodeColumn(innerSchema, rowBytes, attribute.Column).IsNull);
+
+    /// <summary>Whether any attribute or leaf at or under <paramref name="element"/> is non-NULL in this row.</summary>
+    private static bool AnyValue(ForXmlElement element, byte[] rowBytes, SqlType[] innerSchema)
+    {
+        if (AnyAttributeValue(element, rowBytes, innerSchema))
+            return true;
+        foreach (var item in element.Content)
+        {
+            if (item is ForXmlElement child ? AnyValue(child, rowBytes, innerSchema) : !RowDecoder.DecodeColumn(innerSchema, rowBytes, ((ForXmlLeaf)item).Column).IsNull)
+                return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -793,7 +870,7 @@ partial class Selection
                             if (innerSchema[leaf.Column] is XmlSqlType)
                                 _ = sb.Append(ScalarForXmlText(value));
                             else
-                                AppendForXmlText(sb, ForXmlColumnText(value, leaf.Column, rowBytes, innerSchema, options), isAttribute: false);
+                                AppendForXmlValueText(sb, ForXmlColumnText(value, leaf.Column, rowBytes, innerSchema, options), innerSchema[leaf.Column], isAttribute: false);
                             break;
                     }
                     // A comment or processing instruction breaks a run of
@@ -807,6 +884,19 @@ partial class Selection
     }
 
     /// <summary>
+    /// A column's text in element or attribute position: escaped, except
+    /// that a <c>json</c> value's text goes in exactly as it is, quotes and
+    /// markup characters included (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static void AppendForXmlValueText(StringBuilder sb, string text, SqlType columnType, bool isAttribute)
+    {
+        if (columnType is JsonSqlType)
+            _ = sb.Append(text);
+        else
+            AppendForXmlText(sb, text, isAttribute);
+    }
+
+    /// <summary>
     /// Appends <paramref name="text"/> with position-dependent XML escaping.
     /// Element content escapes <c>&amp;</c> / <c>&lt;</c> / <c>&gt;</c> and the
     /// carriage return (preserved through parsing); an attribute value also
@@ -817,8 +907,14 @@ partial class Selection
     /// </summary>
     internal static void AppendForXmlText(StringBuilder sb, string text, bool isAttribute)
     {
-        foreach (var c in text)
+        for (var i = 0; i < text.Length; i++)
         {
+            var c = text[i];
+            if (char.IsHighSurrogate(c) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
+            {
+                _ = sb.Append(c).Append(text[++i]);
+                continue;
+            }
             _ = c switch
             {
                 '&' => sb.Append("&amp;"),
@@ -828,6 +924,13 @@ partial class Selection
                 '\t' when isAttribute => sb.Append("&#x09;"),
                 '\n' when isAttribute => sb.Append("&#x0A;"),
                 '\r' => sb.Append("&#x0D;"),
+
+                // What XML can't carry as a character — the other controls,
+                // an unpaired surrogate, U+FFFE / U+FFFF — goes in as a
+                // character reference (probed 2026-10-02 against SQL Server
+                // 2025).
+                (< ' ' and not ('\t' or '\n')) or '\uFFFE' or '\uFFFF' => sb.Append("&#x").Append(((int)c).ToString("X2", CultureInfo.InvariantCulture)).Append(';'),
+                _ when char.IsSurrogate(c) => sb.Append("&#x").Append(((int)c).ToString("X2", CultureInfo.InvariantCulture)).Append(';'),
                 _ => sb.Append(c),
             };
         }
@@ -856,10 +959,12 @@ partial class Selection
                 return value.AsMoneyDecimal38.ToString();
             case BinarySqlType or VarbinarySqlType or ImageSqlType:
                 return Convert.ToBase64String(value.AsBytes);
+            case RowVersionSqlType:
+                return Convert.ToBase64String(value.CoerceTo(SqlType.VarbinaryMax).AsBytes);
             case DateTime2SqlType dt2:
                 return ForXmlDateTime(value.AsDateTime2, dt2.precision);
             case var _ when type == SqlType.DateTime:
-                return ForXmlDateTime(value.AsDateTime, 3);
+                return ForXmlDateTime(RoundDateTimeToMilliseconds(value.AsDateTime), 3);
             case var _ when type == SqlType.SmallDateTime:
                 return ForXmlDateTime(value.AsSmallDateTime, 0);
             case TimeSqlType time:

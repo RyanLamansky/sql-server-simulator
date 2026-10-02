@@ -165,6 +165,16 @@ internal sealed class XmlMethodCall : Expression
 
         var isValue = method == XmlMethod.Value;
 
+        // `value` takes two arguments and the other three one; any other
+        // count is Msg 174 before either is read (probed 2026-10-02 against
+        // SQL Server 2025).
+        var arity = isValue ? 2 : 1;
+        var checkpoint = context.SaveCheckpoint();
+        context.MoveNextRequired();
+        if (BuiltInArity.CountArguments(context) is >= 0 and var count && count != arity)
+            throw SimulatedSqlException.FunctionRequiresNArguments(methodName, arity);
+        context.RestoreCheckpoint(checkpoint);
+
         context.MoveNextRequired();
         string? xqueryText = null;
         SqlType valueType = SqlType.Xml;
@@ -199,7 +209,7 @@ internal sealed class XmlMethodCall : Expression
         var accessorScope = new XmlSqlAccessorScope((isColumn, name) => ResolveAccessorType(isColumn, name, context, display));
         var xquery = xqueryText is null
             ? null
-            : XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetStaticTyping(), display, accessorScope);
+            : XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetStaticTyping(), display, accessorScope, context.XmlNamespaces);
         return new XmlMethodCall(target, methodName, method, xqueryText, xquery, valueType, valueMaxLength, collection, receiverName, [.. accessorScope.Accessors]);
     }
 
@@ -347,8 +357,8 @@ internal sealed class XmlMethodCall : Expression
                 if (input.IsNull)
                     return SqlValue.Null(this.valueType);
                 var selected = XmlQueryEngine.EvaluateScalar(input.AsString, this.xquery!, this.BuildAccessorScope(runtime), runtime.Batch.XmlNodeDocuments);
-                return selected is null
-                    ? SqlValue.Null(this.valueType)
+                return selected is null ? SqlValue.Null(this.valueType)
+                    : this.valueType is VarbinarySqlType or BinarySqlType or RowVersionSqlType ? Base64Value(selected, this.valueType)
                     : Cast.ApplyCoercion(SqlValue.FromString(SqlType.NVarchar, selected), this.valueType, this.valueMaxLength);
         }
     }
@@ -358,11 +368,28 @@ internal sealed class XmlMethodCall : Expression
     /// returns its requested target type; <c>exist</c> returns <c>bit</c>;
     /// <c>nodes</c> / <c>query</c> surface as <c>xml</c>.
     /// </summary>
+    /// <summary>
+    /// A binary target reads the value as base64, as <c>xs:base64Binary</c>
+    /// does, and text that isn't base64 as NULL; a fixed-length target pads
+    /// (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static SqlValue Base64Value(string text, SqlType target)
+    {
+        var bytes = new byte[(text.Length * 3 / 4) + 3];
+        if (!Convert.TryFromBase64String(text, bytes, out var written))
+            return SqlValue.Null(target);
+        var value = SqlValue.FromVarbinary(bytes[..written]);
+        return target is RowVersionSqlType ? value.CoerceTo(SqlType.GetBinary(8)).CoerceTo(target) : value.CoerceTo(target);
+    }
+
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
         this.method switch
         {
             XmlMethod.Value => this.valueType,
             XmlMethod.Exist => SqlType.Bit,
+            // A rowset method read as a scalar is no method at all to real
+            // (probed 2026-10-02 against SQL Server 2025).
+            XmlMethod.Nodes => throw SimulatedSqlException.NotAValidFunctionPropertyOrField(this.methodName),
             _ => SqlType.Xml,
         };
 
@@ -413,30 +440,62 @@ internal sealed class XmlMethodCall : Expression
             return token;
         }
 
+        // What real can't read as one scalar type — a word it doesn't know, a
+        // list, the legacy LOBs, xml, sql_variant, the CLR types — is Msg 9500
+        // naming the text as written (probed 2026-10-02 against SQL Server
+        // 2025).
+        var invalid = SimulatedSqlException.XmlValueTypeInvalid(spec);
         if (NextToken() is not Name typeName)
-            throw new NotSupportedException($"Unrecognized XML value() target type '{spec}'.");
+            throw invalid;
         if (typeName.Span.Equals("integer", StringComparison.OrdinalIgnoreCase))
-            return (SqlType.Int32, null);
+            return NextToken() is null ? (SqlType.Int32, null) : throw invalid;
 
         int? declaredMaxLength = null;
         int? declaredScale = null;
-        if (NextToken() is Operator { Character: '(' })
+        var next = NextToken();
+        if (next is Operator { Character: '(' })
         {
             declaredMaxLength = NextToken() switch
             {
                 Numeric { Value: { IsNull: false } length } => length.AsInt32,
                 UnquotedString { ContextualKeyword: ContextualKeyword.Max } => SqlType.MaxLengthSentinel,
-                _ => throw new NotSupportedException($"Unrecognized XML value() target type '{spec}'."),
+                _ => throw invalid,
             };
-            if (NextToken() is Operator { Character: ',' })
+            next = NextToken();
+            if (next is Operator { Character: ',' })
             {
                 if (NextToken() is not Numeric { Value: { IsNull: false } scale })
-                    throw new NotSupportedException($"Unrecognized XML value() target type '{spec}'.");
+                    throw invalid;
                 declaredScale = scale.AsInt32;
-                _ = NextToken();
+                next = NextToken();
             }
+            if (next is not Operator { Character: ')' })
+                throw invalid;
+            next = NextToken();
         }
-        return SqlType.GetByName(typeName, declaredMaxLength, declaredScale, 1, TypeSpecSite.Cast, columnName: null);
+        if (next is not null)
+            throw invalid;
+
+        (SqlType Type, int? MaxLength) resolved;
+        try
+        {
+            resolved = SqlType.GetByName(typeName, declaredMaxLength, declaredScale, 1, TypeSpecSite.Cast, columnName: null);
+        }
+        catch (SimulatedSqlException ex) when (ex.Number == 243)
+        {
+            throw invalid;
+        }
+        if (resolved.Type is XmlSqlType or TextSqlType or NTextSqlType or ImageSqlType or SqlVariantSqlType or HierarchyIdSqlType or SpatialSqlType or ClrUdtSqlType)
+            throw invalid;
+
+        // A character type written without a length is one character long, as
+        // in a declaration.
+        return declaredMaxLength is not null ? resolved : resolved.Type switch
+        {
+            VarcharSqlType v => (VarcharSqlType.Get(1, v.Collation, v.Coercibility), 1),
+            NVarcharSqlType nv => (NVarcharSqlType.Get(1, nv.Collation, nv.Coercibility), 1),
+            _ => resolved,
+        };
     }
 }
 

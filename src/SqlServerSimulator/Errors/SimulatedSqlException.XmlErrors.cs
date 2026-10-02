@@ -86,6 +86,17 @@ partial class SimulatedSqlException
             AbortsAsUnderXactAbort = true,
         };
 
+    /// <summary>Msg 6865: a <c>FOR XML</c> column of a spatial or CLR user-defined type.</summary>
+    internal static SimulatedSqlException ForXmlClrType() =>
+        new("FOR XML does not support CLR types - cast CLR types explicitly into one of the supported types in FOR XML queries.", 6865, 16, 1);
+
+    /// <summary>
+    /// Msg 6810: two columns would write the same attribute on one tag,
+    /// named by the second column's alias as written.
+    /// </summary>
+    internal static SimulatedSqlException ForXmlRepeatedAttribute(string column) =>
+        new($"Column name '{column}' is repeated. The same attribute cannot be generated more than once on the same XML tag.", 6810, 16, 1);
+
     /// <summary>
     /// Msg 6809: a <c>FOR XML RAW</c> / <c>AUTO</c> projection contains a
     /// column with no name or alias (attribute-centric and element-centric
@@ -568,12 +579,64 @@ partial class SimulatedSqlException
         new($"Cannot call methods on {typeName}.", 258, 15, 1);
 
     /// <summary>
+    /// Msg 344: a method called on a receiver named in three or more parts,
+    /// which real reads as a remote function.
+    /// </summary>
+    internal static SimulatedSqlException RemoteFunctionReference(string written, string firstPart) =>
+        new($"Remote function reference '{written}' is not allowed, and the column name '{firstPart}' could not be found or is ambiguous.", 344, 16, 1);
+
+    /// <summary>
+    /// Msg 227: a method an <c>xml</c> receiver doesn't have — the five names
+    /// match case-sensitively — or <c>.nodes()</c> read as a scalar.
+    /// </summary>
+    internal static SimulatedSqlException NotAValidFunctionPropertyOrField(string name) =>
+        new($"\"{name}\" is not a valid function, property, or field.", 227, 15, 1);
+
+    /// <summary>
+    /// Msg 9500: an <c>xml</c> <c>.value()</c> target type the method can't
+    /// produce, named as written.
+    /// </summary>
+    internal static SimulatedSqlException XmlValueTypeInvalid(string written) =>
+        new($"The data type '{written}' used in the VALUE method is invalid.", 9500, 16, 1);
+
+    /// <summary>
+    /// Msg 6335: a converted xml instance nests past 128 levels — state 102
+    /// for an element there, 101 for an attribute or text node.
+    /// </summary>
+    internal static SimulatedSqlException XmlTooDeep(byte state) =>
+        new("XML datatype instance has too many levels of nested nodes. Maximum allowed depth is 128 levels.", 6335, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 6354: an xml instance converted to a string or binary type too short for it.</summary>
+    internal static SimulatedSqlException XmlTooLongForTarget() =>
+        new("Target string size is too small to represent the XML instance", 6354, 16, 10);
+
+    /// <summary>Msg 6355: an xml instance converted to an ANSI type holds a character its code page can't map.</summary>
+    internal static SimulatedSqlException XmlCharacterNotInTargetCodePage() =>
+        new("Conversion of one or more characters from XML to target collation impossible", 6355, 16, 1);
+
+    /// <summary>
+    /// Msg 6358: a <c>CONVERT</c> to <c>xml</c> with a style other than 0
+    /// to 3, checked once the value converting is non-NULL.
+    /// </summary>
+    internal static SimulatedSqlException XmlStyleInvalid(int style) =>
+        new($"{style.ToString(CultureInfo.InvariantCulture)} is not a valid style number when converting to XML.", 6358, 16, 1);
+
+    /// <summary>
+    /// Msg 318: a <c>.nodes()</c> rowset without its <c>alias(column)</c>.
+    /// </summary>
+    internal static SimulatedSqlException TableValuedMethodNeedsAlias() =>
+        new("The table (and its columns) returned by a table-valued method need to be aliased.", 318, 15, 0);
+
+    /// <summary>
     /// Msg 5302: <c>.modify()</c> is called on a NULL <c>xml</c> instance.
     /// <paramref name="name"/> is the variable (with its <c>@</c>) or column
-    /// as written. Probe-confirmed wording against SQL Server 2025.
+    /// as written. Probe-confirmed wording against SQL Server 2025. Like the
+    /// json type's, it ends the batch and rolls the transaction back as under
+    /// <c>SET XACT_ABORT ON</c>, and dooms it inside <c>TRY</c> (probed
+    /// 2026-10-02).
     /// </summary>
     internal static SimulatedSqlException XmlMutatorOnNullValue(string name) =>
-        new($"Mutator 'modify()' on '{name}' cannot be called on a null value.", 5302, 16, 1);
+        new($"Mutator 'modify()' on '{name}' cannot be called on a null value.", 5302, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 6305: the <c>.modify()</c> argument parses as an XQuery expression
@@ -1042,11 +1105,26 @@ partial class SimulatedSqlException
         new($"XQuery [{method}()]: Invalid entity reference", 2282, 16, 1);
 
     /// <summary>
+    /// Msg 2283: an entity reference's name ran into a character a name
+    /// can't hold before its <c>;</c>.
+    /// </summary>
+    internal static SimulatedSqlException XQueryEntityReferenceCharacter(string method, char character) =>
+        new($"XQuery [{method}()]: The character '{character}' may not be part of an entity reference", 2283, 16, 1);
+
+    /// <summary>Msg 2285: a numeric character reference that names no character.</summary>
+    internal static SimulatedSqlException XQueryInvalidNumericEntityReference(string method) =>
+        new($"XQuery [{method}()]: Invalid numeric entity reference", 2285, 16, 1);
+
+    /// <summary>
     /// Msg 9301: <c>cast as</c> without the <c>?</c> occurrence indicator, the
     /// only form real accepts.
     /// </summary>
     internal static SimulatedSqlException XQueryCastRequiresOptional(string method) =>
         new($"XQuery [{method}()]: In this version of the server, 'cast as <type>' is not available. Please use the 'cast as <type> ?' syntax.", 9301, 16, 1);
+
+    /// <summary>Msg 2364: a function argument whose static type the parameter takes no implicit conversion from.</summary>
+    internal static SimulatedSqlException XQueryCannotImplicitlyConvert(string method, string sourceType, string targetType) =>
+        new($"XQuery [{method}()]: Cannot implicitly convert from '{sourceType}' to '{targetType}'", 2364, 16, 1);
 
     /// <summary>
     /// Msg 2365: a <c>cast as</c> or constructor function whose operand real

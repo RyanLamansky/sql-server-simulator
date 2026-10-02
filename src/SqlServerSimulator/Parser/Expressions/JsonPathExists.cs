@@ -43,7 +43,7 @@ internal sealed class JsonPathExists : Expression
         // the path itself would have resolved.
         var scan = JsonText.Scan(jv.AsString);
         if (scan.HasError)
-            return SqlValue.FromInt32(0);
+            return scan.TooDeep ? throw scan.Error() : SqlValue.FromInt32(0);
 
         using var doc = JsonText.Parse(scan.Text!);
         if (!path.IsAdvanced)

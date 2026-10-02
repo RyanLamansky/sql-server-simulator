@@ -1700,19 +1700,18 @@ public sealed class ForXmlTests
 
     /// <summary>
     /// An <c>xml</c>-typed column becomes a child element holding its nodes,
-    /// the rule RAW and AUTO also take (an attribute can't hold nodes). Real
-    /// re-serializes the embedded fragment and stamps <c>xmlns=""</c> on its
-    /// unprefixed top-level elements in EXPLICIT alone; the simulator embeds
-    /// the stored text as the other modes do.
+    /// the rule RAW and AUTO also take (an attribute can't hold nodes). In
+    /// EXPLICIT alone real stamps <c>xmlns=""</c> on the fragment's
+    /// unprefixed top-level elements, after their own attributes.
     /// </summary>
     [TestMethod]
     public void Explicit_XmlTypedColumnEmbedsAsNodes()
-        => AreEqual("<e><a><b>x</b></a></e>",
+        => AreEqual("""<e><a><b xmlns="">x</b></a></e>""",
             ExplicitXml("select 1 as Tag, null as Parent, cast('<b>x</b>' as xml) as [e!1!a] for xml explicit"));
 
     [TestMethod]
     public void Explicit_NestedTypeSubqueryEmbedsAsNodes()
-        => AreEqual("""<e><a><i v="9"/></a></e>""",
+        => AreEqual("""<e><a><i v="9" xmlns=""/></a></e>""",
             ExplicitXml("select 1 as Tag, null as Parent, (select 1 as Tag, null as Parent, 9 as [i!1!v] for xml explicit, type) as [e!1!a] for xml explicit"));
 
     // ---- EXPLICIT: compile-time rejections ----
@@ -1938,4 +1937,73 @@ public sealed class ForXmlTests
         var malformed = new Simulation().AssertSqlError("select 1 as Tag, null as Parent, '<a>' as [e!1!!xmltext] for xml explicit", 6834);
         AreEqual(2, malformed.State);
     }
+
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    private static string ForXml(string sql) => (string)new Simulation().ExecuteScalar($"select ({sql})")!;
+
+    [TestMethod]
+    [DataRow("select null as [a/b], null as [a/c] for xml path('r')", "<r/>")]
+    [DataRow("select 1 as [a/@x], null as [a] for xml path('r')", "<r><a x=\"1\"/></r>")]
+    [DataRow("select 1 as [a/@x], null as [a/b] for xml path('r')", "<r><a x=\"1\"/></r>")]
+    [DataRow("select 1 as [a/b/@c], null as [a/b] for xml path('r'), elements xsinil", "<r xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><a><b c=\"1\" xsi:nil=\"true\"/></a></r>")]
+    [DataRow("select '' as a for xml path", "<row><a></a></row>")]
+    [DataRow("select '' as a for xml raw, elements", "<row><a></a></row>")]
+    [DataRow("select cast('' as xml) as [a/b] for xml path", "<row><a><b></b></a></row>")]
+    [DataRow("select cast('' as xml) as [*] for xml path", "<row></row>")]
+    public void Path_ElementsHoldingNothing(string sql, string expected)
+        => AreEqual(expected, ForXml(sql));
+
+    [TestMethod]
+    [DataRow("select 1 as a, 'txt' for xml raw, elements", "<row><a>1</a>txt</row>")]
+    [DataRow("select (select 1 as a for xml path('i'), type), 2 as b for xml raw", "<row b=\"2\"><i><a>1</a></i></row>")]
+    public void Raw_UnnamedColumn_IsBareContent(string sql, string expected)
+        => AreEqual(expected, ForXml(sql));
+
+    [TestMethod]
+    [DataRow("select 1 as [@a], 2 as [@a] for xml path", "@a")]
+    [DataRow("select 1 as [@a], 2 as [b/@a], 3 as [b/@a] for xml path('r')", "b/@a")]
+    [DataRow("select 1 as a, 2 as a for xml raw", "a")]
+    public void RepeatedAttribute_IsMsg6810(string sql, string column)
+        => new Simulation().AssertSqlError(sql, 6810, $"Column name '{column}' is repeated. The same attribute cannot be generated more than once on the same XML tag.");
+
+    [TestMethod]
+    public void Path_AttributeAfterItsElement_NamesTheWholeAlias()
+        => new Simulation().AssertSqlError("select 'x' as [a], 1 as [a/@b] for xml path", 6852, "Attribute-centric column 'a/@b' must not come after a non-attribute-centric sibling in XML hierarchy in FOR XML PATH.");
+
+    [TestMethod]
+    [DataRow("geometry::Point(1, 2, 0)")]
+    [DataRow("geography::Point(1, 2, 4326)")]
+    public void SpatialColumn_IsMsg6865(string value)
+        => new Simulation().AssertSqlError($"select {value} as a for xml raw", 6865, "FOR XML does not support CLR types - cast CLR types explicitly into one of the supported types in FOR XML queries.");
+
+    [TestMethod]
+    public void VectorColumn_IsBinaryToRaw()
+    {
+        var sim = new Simulation();
+        _ = sim.AssertSqlError("select cast('[1,2]' as vector(2)) as a for xml raw", 6829);
+        AreEqual("<row a=\"[1.0000000e+000,2.0000000e+000]\"/>", sim.ExecuteScalar("select (select cast('[1,2]' as vector(2)) as a for xml raw, binary base64)"));
+        AreEqual("<row><a>[1.0000000e+000,2.0000000e+000]</a></row>", sim.ExecuteScalar("select (select cast('[1,2]' as vector(2)) as a for xml path)"));
+    }
+
+    [TestMethod]
+    [DataRow("select cast(1 as rowversion) as a for xml raw", "<row a=\"AAAAAAAAAAE=\"/>")]
+    [DataRow("select cast('9999-12-31 23:59:59.997' as datetime) as a for xml raw", "<row a=\"9999-12-31T23:59:59.997\"/>")]
+    [DataRow("select cast('{\"a\":\"<&>\"}' as json) as a for xml raw", "<row a=\"{\"a\":\"<&>\"}\"/>")]
+    [DataRow("select cast('{\"a\":\"<&>\"}' as json) as a for xml path", "<row><a>{\"a\":\"<&>\"}</a></row>")]
+    [DataRow("select 'a' + char(1) + 'b' as a for xml raw", "<row a=\"a&#x01;b\"/>")]
+    [DataRow("select nchar(55357) as a for xml path", "<row><a>&#xD83D;</a></row>")]
+    [DataRow("select nchar(65534) + nchar(65535) as a for xml path", "<row><a>&#xFFFE;&#xFFFF;</a></row>")]
+    public void Value_RendersAsRealDoes(string sql, string expected)
+        => AreEqual(expected, ForXml(sql));
+
+    [TestMethod]
+    [DataRow("select 1 as a for xml path, auto")]
+    [DataRow("select 1 as a for xml raw, path")]
+    public void SecondMode_IsMsg102NearXml(string sql)
+        => new Simulation().ValidateSyntaxError(sql, "XML");
+
+    [TestMethod]
+    public void Explicit_XmlTypedValueWithItsOwnDefaultNamespace_KeepsIt()
+        => AreEqual("<r id=\"1\"><z xmlns=\"q\"/><y xmlns=\"\"/>text</r>", ForXml("select 1 as Tag, null as Parent, 1 as [r!1!id], cast('<z xmlns=\"q\"/><y/>text' as xml) as [r!1!!xml] for xml explicit"));
 }

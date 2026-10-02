@@ -43,13 +43,18 @@ internal sealed partial class Selection
     /// <param name="jsonInput">The first argument — the JSON text expression. May correlate to outer columns.</param>
     /// <param name="docPath">The optional second argument — a path expression locating a sub-document; null when omitted.</param>
     /// <param name="withColumns">When non-null, the parsed WITH-clause columns; null selects the default <c>(key, value, type)</c> schema.</param>
-    public static Selection FromOpenJson(Expression jsonInput, Expression? docPath, OpenJsonColumn[]? withColumns)
+    /// <param name="documentCollation">A string document's collation, which the default schema's <c>value</c> column carries; null for the default.</param>
+    public static Selection FromOpenJson(Expression jsonInput, Expression? docPath, OpenJsonColumn[]? withColumns, Collation? documentCollation = null)
     {
         SqlType[] schema;
         string[] columnNames;
         if (withColumns is null)
         {
-            schema = OpenJsonDefaultSchema;
+            // The value column reads in the document's collation (probed
+            // 2026-10-02 against SQL Server 2025); the key keeps its binary one.
+            schema = documentCollation is null
+                ? OpenJsonDefaultSchema
+                : [OpenJsonKeyType, SqlType.NVarcharMax.WithCollation(documentCollation, Coercibility.Implicit), SqlType.TinyInt];
             columnNames = OpenJsonDefaultColumnNames;
         }
         else
@@ -87,6 +92,12 @@ internal sealed partial class Selection
         if (jsonValue.IsNull)
             yield break;
 
+        // Any other type is read as the nvarchar it converts to, so a number
+        // is Msg 13609 at its first digit and a binary its bytes as UTF-16
+        // (probed 2026-10-02 against SQL Server 2025).
+        if (!SqlType.IsStringCategory(jsonValue.Type) && jsonValue.Type is not JsonSqlType)
+            jsonValue = jsonValue.CoerceTo(SqlType.NVarcharMax);
+
         // OPENJSON's own Msg 13609 State byte: 4 when the reader was inside the
         // value it was after, 3 when it was still looking for it. Without a
         // document path the value is the root, so it is always 4; with one, a
@@ -94,7 +105,7 @@ internal sealed partial class Selection
         var scan = JsonText.Scan(jsonValue.AsString);
         var searchState = (byte)(docPath is null || !scan.CleanCut ? 4 : 3);
         if (scan.Text is null)
-            throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, searchState);
+            throw scan.Error(searchState);
 
         using var doc = JsonText.Parse(scan.Text);
         var root = doc.RootElement;
@@ -107,7 +118,7 @@ internal sealed partial class Selection
         {
             var pathValue = docPath.Run(runtime);
             if (pathValue.IsNull)
-                yield break;
+                throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, "OPENJSON", state: 9);
             var path = JsonPath.Parse(pathValue.AsString);
             JsonElement match;
             JsonWalkResult result;
@@ -120,7 +131,7 @@ internal sealed partial class Selection
                 result = path.Walk(root, scan, out match);
             }
             if (result is JsonWalkResult.Exhausted && scan.HasError)
-                throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, searchState);
+                throw scan.Error(searchState);
             // Lax mode opens nothing where a strict path raises: a miss is
             // Msg 13608 state 3 (7 over a json document, probed 2026-09-26),
             // and a value that isn't an object or array — JSON null included
@@ -167,7 +178,7 @@ internal sealed partial class Selection
         // carry — real streams them, then raises. Text past a complete target
         // is invisible: OPENJSON stops at its closing bracket.
         if (targetTruncated)
-            throw SimulatedSqlException.JsonInvalidText(scan.BadCharacter, scan.BadPosition, 4);
+            throw scan.Error(4);
     }
 
     /// <summary>
@@ -234,14 +245,15 @@ internal sealed partial class Selection
                 JsonValueKind.Object => 5,
                 _ => 0,
             };
-            var keyValue = SqlValue.FromNVarchar(OpenJsonKeyType, key);
+            var keyValue = SqlValue.FromNVarchar(OpenJsonKeyType, key.Length > OpenJsonKeyType.length ? key[..OpenJsonKeyType.length] : key);
+            var valueType = schema[1];
             var valueText = element.ValueKind switch
             {
-                JsonValueKind.Null => SqlValue.Null(SqlType.NVarcharMax),
-                JsonValueKind.String => SqlValue.FromNVarchar(SqlType.NVarcharMax, element.GetString()!),
-                JsonValueKind.True => SqlValue.FromNVarchar(SqlType.NVarcharMax, "true"),
-                JsonValueKind.False => SqlValue.FromNVarchar(SqlType.NVarcharMax, "false"),
-                _ => SqlValue.FromNVarchar(SqlType.NVarcharMax, element.GetRawText()),
+                JsonValueKind.Null => SqlValue.Null(valueType),
+                JsonValueKind.String => SqlValue.FromString(valueType, JsonText.StringValue(element)),
+                JsonValueKind.True => SqlValue.FromString(valueType, "true"),
+                JsonValueKind.False => SqlValue.FromString(valueType, "false"),
+                _ => SqlValue.FromString(valueType, element.GetRawText()),
             };
             return RowEncoder.EncodeRow(schema, [keyValue, valueText, SqlValue.FromByte((byte)typeCode)]);
         }
@@ -290,17 +302,75 @@ internal sealed partial class Selection
         if (element.ValueKind == JsonValueKind.Null)
             return SqlValue.Null(column.Type);
 
-        // Stringify the JSON scalar then route through the existing string→type CAST.
-        var asText = element.ValueKind switch
-        {
-            JsonValueKind.String => element.GetString()!,
-            JsonValueKind.True => "1",
-            JsonValueKind.False => "0",
-            _ => element.GetRawText(),
-        };
+        // An object or an array is no scalar for the column to read: NULL, or
+        // Msg 13624 under strict (probed 2026-10-02 against SQL Server 2025).
+        if (element.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+            return column.Path.Mode == JsonPathMode.Strict ? throw SimulatedSqlException.JsonObjectOrArrayNotFound(1) : SqlValue.Null(column.Type);
 
-        var sourceValue = SqlValue.FromNVarchar(asText);
-        return sourceValue.CoerceTo(column.Type);
+        // The scalar's text converts as a string would — `true` / `false` as
+        // the words — except that a character target cuts it to length rather
+        // than refusing it, and a binary one decodes it as base64.
+        var asText = element.ValueKind == JsonValueKind.String ? JsonText.StringValue(element) : element.GetRawText();
+        return column.Type switch
+        {
+            VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType => SqlValue.FromNVarchar(Truncate(asText, column.Type)).CoerceTo(column.Type),
+            VarbinarySqlType or BinarySqlType or RowVersionSqlType => DecodeBase64(asText, column.Type),
+            _ => CoerceNamingDecimal(SqlValue.FromNVarchar(asText), column),
+        };
+    }
+
+    /// <summary>
+    /// A conversion failure names the column's type as written: a column
+    /// declared <c>decimal</c> reports <c>decimal</c> where a CAST reports
+    /// <c>numeric</c> for either spelling (probed 2026-10-02 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static SqlValue CoerceNamingDecimal(SqlValue text, OpenJsonColumn column)
+    {
+        try
+        {
+            return text.CoerceTo(column.Type);
+        }
+        catch (SimulatedSqlException ex) when (ex.Number == 8114 && column.WrittenDecimal)
+        {
+            throw SimulatedSqlException.ConvertingDataTypeError(text.Type, "decimal");
+        }
+    }
+
+    private static string Truncate(string text, SqlType target)
+    {
+        var length = target switch
+        {
+            VarcharSqlType v => v.length,
+            NVarcharSqlType nv => nv.length,
+            CharSqlType c => c.length,
+            NCharSqlType nc => nc.length,
+            _ => 0,
+        };
+        return length > 0 && text.Length > length ? text[..length] : text;
+    }
+
+    /// <summary>
+    /// A binary column reads its scalar as base64: Msg 13612 for text that
+    /// isn't, Msg 13613 for bytes past a bounded column's length — state 2 for
+    /// <c>rowversion</c>, which refuses even what isn't base64 that way — and
+    /// a <c>binary(n)</c> pads (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static SqlValue DecodeBase64(string text, SqlType target)
+    {
+        var length = target switch
+        {
+            VarbinarySqlType v => v.length,
+            BinarySqlType b => b.length,
+            _ => 8,
+        };
+        var rowVersion = target is RowVersionSqlType;
+        var bytes = new byte[(text.Length * 3 / 4) + 3];
+        if (!Convert.TryFromBase64String(text, bytes, out var written))
+            throw rowVersion ? SimulatedSqlException.OpenJsonBase64Truncated(2) : SimulatedSqlException.OpenJsonNotBase64();
+        if (length > 0 && written > length)
+            throw SimulatedSqlException.OpenJsonBase64Truncated(rowVersion ? (byte)2 : (byte)1);
+        return SqlValue.FromVarbinary(bytes[..written]).CoerceTo(target);
     }
 
     /// <summary>
@@ -326,6 +396,8 @@ internal sealed partial class Selection
         {
             context.MoveNextRequired();
             docPath = Expression.Parse(context);
+            if (Expression.IsUntypedNullLiteral(docPath))
+                throw SimulatedSqlException.InvalidArgumentDataType("NULL", 2, "OPENJSON", state: 9);
         }
 
         if (context.Token is not Operator { Character: ')' })
@@ -333,15 +405,29 @@ internal sealed partial class Selection
         // Advance past the OPENJSON `)`.
         context.MoveNextOptional();
 
+        // A string document's collation is the one its text columns read in.
+        Collation? documentCollation;
+        try
+        {
+            var documentType = jsonInput.GetSqlType(context.Batch, outerTypeResolver ?? (static name => throw SimulatedSqlException.InvalidColumnName(name)));
+            documentCollation = documentType is VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType or TextSqlType or NTextSqlType
+                ? documentType.Collation
+                : null;
+        }
+        catch (SimulatedSqlException)
+        {
+            documentCollation = null;
+        }
+
         OpenJsonColumn[]? withColumns = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
-            withColumns = ParseOpenJsonWithColumns(context, outerTypeResolver);
+            withColumns = ParseOpenJsonWithColumns(context, outerTypeResolver, documentCollation);
             // ParseOpenJsonWithColumns leaves Token on the WITH `)`; advance past.
             context.MoveNextOptional();
         }
 
-        return Selection.FromOpenJson(jsonInput, docPath, withColumns);
+        return Selection.FromOpenJson(jsonInput, docPath, withColumns, documentCollation);
     }
 
     /// <summary>
@@ -351,7 +437,7 @@ internal sealed partial class Selection
     /// <c>AS JSON</c> is accepted only on <c>nvarchar(max)</c> columns
     /// (Msg 13618 otherwise) and flags the column for subtree extraction.
     /// </summary>
-    private static OpenJsonColumn[] ParseOpenJsonWithColumns(ParserContext context, Func<MultiPartName, SqlType>? outerTypeResolver)
+    private static OpenJsonColumn[] ParseOpenJsonWithColumns(ParserContext context, Func<MultiPartName, SqlType>? outerTypeResolver, Collation? documentCollation)
     {
         _ = outerTypeResolver;
         if (context.GetNextRequired() is not Operator { Character: '(' })
@@ -399,7 +485,46 @@ internal sealed partial class Selection
                 context.Batch, qualifiedTypeName, typeNameToken, declaredMaxLength, declaredScale,
                 index: columns.Count + 1, TypeSpecSite.Column, columnName: columnName);
 
-            // Optional per-column path literal; defaults to `$.<column-name>`.
+            // A character type written without a length is one character
+            // long, as in a declaration (probed 2026-10-02 against SQL Server
+            // 2025).
+            if (declaredMaxLength is null)
+            {
+                resolvedType = resolvedType switch
+                {
+                    VarcharSqlType { length: 0 } v => VarcharSqlType.Get(1, v.Collation, v.Coercibility),
+                    NVarcharSqlType { length: 0 } nv => NVarcharSqlType.Get(1, nv.Collation, nv.Coercibility),
+                    _ => resolvedType,
+                };
+            }
+
+            // Real refuses a type the reader has no conversion for while it
+            // parses (probed 2026-10-02 against SQL Server 2025).
+            if (resolvedType is TextSqlType or NTextSqlType or SqlVariantSqlType or ImageSqlType)
+                throw SimulatedSqlException.OpenJsonUnsupportedLobType();
+            if (resolvedType is HierarchyIdSqlType or SpatialSqlType or ClrUdtSqlType)
+                throw SimulatedSqlException.OpenJsonUnsupportedClrType();
+
+            if (documentCollation is not null && resolvedType is VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType)
+                resolvedType = resolvedType.WithCollation(documentCollation, Coercibility.Implicit);
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Collate })
+            {
+                var collationName = Expressions.CollateExpression.ResolvePseudoCollationName(context.GetNextRequired() switch
+                {
+                    UnquotedString us => us.Value,
+                    Name n => n.Value,
+                    _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                }, context.Batch);
+                if (!SqlType.IsStringCategory(resolvedType) || resolvedType is XmlSqlType)
+                    throw SimulatedSqlException.CollateClauseRequiresString(resolvedType.SqlServerName, state: 1);
+                if (!Collation.IsRecognized(collationName))
+                    throw SimulatedSqlException.InvalidCollation(collationName, state: 2);
+                resolvedType = resolvedType.WithCollation(Collation.Get(collationName), Coercibility.Implicit);
+                context.MoveNextRequired();
+            }
+
+            // Optional per-column path literal; defaults to the column's own
+            // name as a quoted member, escaped as a JSON string would be.
             JsonPath path;
             if (context.Token is Literal literal && SqlType.IsStringCategory(literal.Value.Type))
             {
@@ -408,7 +533,9 @@ internal sealed partial class Selection
             }
             else
             {
-                path = JsonPath.Parse("$." + columnName);
+                var quoted = new System.Text.StringBuilder();
+                Expressions.JsonValueRender.AppendJsonString(quoted, columnName);
+                path = JsonPath.Parse("$." + quoted);
             }
 
             // AS JSON modifier — real SQL Server accepts it only on
@@ -429,7 +556,10 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
             }
 
-            columns.Add(new OpenJsonColumn(columnName, resolvedType, path, asJson));
+            columns.Add(new OpenJsonColumn(columnName, resolvedType, path, asJson)
+            {
+                WrittenDecimal = resolvedType is DecimalSqlType && typeNameToken.Value.Equals("decimal", StringComparison.OrdinalIgnoreCase),
+            });
 
             if (context.Token is Operator { Character: ')' })
                 break;
@@ -456,4 +586,7 @@ internal sealed class OpenJsonColumn(string name, SqlType type, JsonPath path, b
     /// the matched object/array subtree as verbatim JSON text rather than
     /// coercing a scalar leaf to <see cref="Type"/>.</summary>
     public readonly bool AsJson = asJson;
+
+    /// <summary>Whether the column's type was written <c>decimal</c>, the name its conversion errors carry.</summary>
+    public bool WrittenDecimal;
 }

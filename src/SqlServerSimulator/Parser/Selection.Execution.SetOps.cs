@@ -247,6 +247,12 @@ internal sealed partial class Selection
             combinedSchema[i] = SqlType.PromoteOperands(
                 new(effectiveLeft, BranchColumnSource(left, i), reportsNumeric: leftReportsNumeric is not null && leftReportsNumeric[i]),
                 new(effectiveRight, BranchColumnSource(right, i), reportsNumeric: rightReportsNumeric is not null && rightReportsNumeric[i]));
+
+            // A MAX column a set operation produces is plain text even where
+            // both branches are JSON text; a bounded one keeps the mark
+            // (probed 2026-10-02 against SQL Server 2025).
+            if (combinedSchema[i] is NVarcharSqlType { jsonText: true, length: SqlType.MaxLengthSentinel } jsonTextMax)
+                combinedSchema[i] = NVarcharSqlType.Get(SqlType.MaxLengthSentinel, jsonTextMax.Collation, jsonTextMax.Coercibility);
             // A deduping operator has to compare the values it folds, so a type
             // that can't be compared at all is refused outright — the legacy
             // LOB trio, xml and the spatial pair alike, all naming the type in

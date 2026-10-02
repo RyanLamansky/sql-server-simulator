@@ -74,6 +74,7 @@ CREATE XML INDEX name ON table(col)
 
 - **`.value(xquery, sqltype)`** — evaluates `xquery` against the target xml via `XmlQueryEngine.EvaluateScalar`, then casts the selected node's string value to `sqltype` through `Cast.ApplyCoercion`.
   The type literal (e.g. `'nvarchar(30)'`, `'money'`, `'decimal(9, 4)'`, `'integer'`) is resolved at parse time via `SqlType.GetByName`; `integer` maps to `int`.
+  A type the method can't produce — `xml`, `text` / `ntext` / `image`, `sql_variant`, the CLR types, an unknown name, anything after the type (`'int, 1'`) — is **Msg 9500** naming the literal as written; a character type without a length is one character long; a binary target reads the value as base64, NULL when it isn't, padding a `binary(n)` or `timestamp` (all probed 2026-10-02 against SQL Server 2025).
   Empty selection → typed NULL, and an expression real doesn't type as at most one item is [Msg 2389](#static-cardinality-and-the-msg-2389-family) at parse.
   `GetSqlType` returns the resolved target type, so projection / view-output schemas are exact (not the old nvarchar(MAX) stub).
 - **`.nodes(xquery)`** — rowset-producing, valid only in a FROM / APPLY source position.
@@ -81,14 +82,18 @@ CREATE XML INDEX name ON table(col)
   A variable or parameter target — `FROM @x.nodes(…)`, `CROSS APPLY @x.nodes(…)` — takes the same plan through a `.nodes(` lookahead on the `@` token.
   The row column is a node reference only the four methods and `IS [NOT] NULL` may read: anything else is **Msg 493**, and a `CAST` / `CONVERT` of it **Msg 525** naming the target's base type — inside an `IS NULL` test too — both ahead of the type rules its `xml` type would otherwise break, in the select list, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY` and `ON` alike (probed 2026-09-25 and 2026-09-28).
   Each row references its node in place — see [the value model](#the-value-model-documents-and-fragments).
-  Reaching `XmlMethodCall.Run` for `.nodes()` means it appeared in scalar position — unsupported.
+  In scalar position it is no method at all to real: **Msg 227** (`"nodes" is not a valid function, property, or field.`).
+  Without its `alias(column)` the rowset is **Msg 318** (class 15, state 0), with two columns **Msg 8159**, and an expression real types as atomic values (`nodes('1')`, `nodes('data(/a)')`) **Msg 2374** while it compiles.
+  A three-part `t.x.nodes(…)` in a subquery's plain `FROM` shreds the enclosing query's column, as an APPLY does its left side's (probed 2026-10-02).
 - **`.exist(xquery)`** — returns `bit`: 1 when the expression's **result sequence is non-empty**, 0 otherwise, NULL when the instance is NULL (`XmlQueryEngine.EvaluateExists`).
   That is emptiness, not an effective boolean value: `exist('false()')`, `exist('0')` and `exist('1=2')` all answer 1 because each yields one item, while `exist('()')` and `exist('/r/nope')` answer 0 (probe-confirmed).
 - **`.query(xquery)`** — returns `xml`: the serialized concatenation of the matched nodes in document order (atomic items separated by a single space), empty string when nothing matches, NULL when the instance is NULL (`XmlQueryEngine.EvaluateQuery`).
   Serialization is `Storage/XmlResultSerializer.cs`, not `XPathNavigator.OuterXml` — the navigator's writer indents and writes ` />`, where real writes neither — and it re-binds the namespaces a node out of its document needs; see [Serializing a node out of its document](#serializing-a-node-out-of-its-document).
 - **`.modify()`** — the mutator, a separate sublanguage; see [`.modify()` — XML-DML](#modify--xml-dml) below.
   Reaching `XmlMethodCall` for it means it was written in a value position, which is **Msg 8137**.
-- `GetSqlType`: `.value()`→resolved target type, `.exist()`→bit, `.nodes()` / `.query()`→xml.
+- `GetSqlType`: `.value()`→resolved target type, `.exist()`→bit, `.query()`→xml.
+- **The call's own shape**, settled while compiling (probed 2026-10-02 against SQL Server 2025): `value` takes two arguments and the other three one, else **Msg 174**; the five names match case-sensitively, so an `xml` receiver's `.Value(…)` or `.foo(…)` is **Msg 227**; a receiver named in three or more parts (`dbo.t.x.value(…)`) is **Msg 344**, read as a remote function.
+- **`WITH XMLNAMESPACES`** binds the statement's xml methods as if their prologs declared the prefixes and the default element namespace; a prolog's own declaration wins.
 - **Where a method may not appear**, each settled while compiling so nothing earlier in the batch runs (probed 2026-09-28 against SQL Server 2025): a `PRINT` operand is **Msg 2722**, a `CHECK` constraint **Msg 423** + 1750, a computed column **Msg 435** — **Msg 424** on a table variable or a multi-statement function's return table.
   Each wants a scalar UDF wrapping the call, which is accepted everywhere.
   `SET`, `DECLARE`'s initializer, `IF` / `WHILE`, `RETURN`, `TOP`, `OFFSET` and a `DEFAULT` all take one; `RAISERROR` / `THROW` / `EXEC` arguments, `EXEC (…)` and `WAITFOR` refuse the dotted call as Msg 102 on both engines.
@@ -110,7 +115,7 @@ An empty or whitespace-only argument is **Msg 6306** (`Invalid XQuery expression
   An undeclared prefix — on a name test or a function name — is **Msg 2229**.
   `declare function` and `declare variable` are **Msg 9335**, and any other declaration (`declare boundary-space …`) Msg 2209 near `declare` (probed 2026-09-28).
 - **Location steps**: child (the default axis), attribute (`@x`), parent (`..`), self (`.`) and the descendant-or-self expansion of `//`.
-  Name tests may be prefixed (`act:number`) or not and may contain `.`; `*`, `text()`, `node()`, `comment()` and `processing-instruction()` are the node tests.
+  Name tests may be prefixed (`act:number`) or not and may contain `.`; `*`, `*:local` (the local name in any namespace), `prefix:*` (any name in the prefix's namespace), `text()`, `node()`, `comment()` and `processing-instruction()` are the node tests (the two wildcards probed 2026-10-02).
   The named forms of the same six axes — `child::`, `attribute::`, `self::`, `parent::`, `descendant::`, `descendant-or-self::` — evaluate; real parses the reverse and sibling axes (`ancestor`, `following-sibling`, …) only to refuse them with **Msg 9335**, reports any other word before `::` (`namespace::` included) as **Msg 2392**, and reads `child :: x` as Msg 2209 near the word.
   A `self::x` after a step real types as an element of another name is **Msg 2261** (`There is no element named 'x' in the type 'element(r,xdt:untyped) *'.`), all probed 2026-09-28.
   A step runs once per context node — which is what scopes a predicate, so `a[1]` is the first `a` under *each* parent — and `XmlStep.SortIntoDocumentOrder` then folds the per-context-node sequences into one **document-ordered, duplicate-free** sequence, as `/` requires.
@@ -157,6 +162,7 @@ An empty or whitespace-only argument is **Msg 6306** (`Invalid XQuery expression
 - `typeswitch`, `validate`, `ordered` and `unordered` are real's **Msg 9335**, as are `treat as`, `castable as`, `to`, `union` / `|`, `intersect` and `except`.
 - **Functions**: `avg` `ceiling` `concat` `contains` `count` `data` `distinct-values` `empty` `false` `floor` `last` `local-name` `lower-case` `max` `min` `namespace-uri` `not` `number` `position` `round` `string` `string-length` `substring` `sum` `true` `upper-case`, reachable bare or through the predeclared `fn:` prefix.
   `number()` takes nodes only — `number("12")` is **Msg 2374** — and `round()` takes a half toward positive infinity (`round(-2.5)` is `-2`).
+  A string parameter (`concat`, `contains`, `upper-case`, `lower-case`, `string-length`, `substring`'s first) refuses a number or boolean argument, and `substring`'s positions a string, with **Msg 2364** naming the argument's type and `xs:string` / `xs:decimal`; an untyped value or a node converts (probed 2026-10-02 against SQL Server 2025).
   Anything else in the function namespace is **Msg 2395**, `There is no function '{http://www.w3.org/2004/07/xpath-functions}:starts-with()'` — which is what real answers for `starts-with` / `ends-with` / `normalize-space` / `translate` / `boolean` / `exists` / `abs` / `zero-or-one` too, since its library doesn't carry them either.
   Arity is part of the signature: too few arguments is **Msg 2236** (`There are not enough actual arguments in the call to function "contains()".`) and too many **Msg 2238** (`Too many arguments in call to function 'count()'` — real punctuates the two differently).
 
@@ -175,7 +181,7 @@ The computed comment and processing-instruction forms are **Msg 9326** and **Msg
 A constructor resolves its name through the [prolog](#the-xquery-subset) exactly as a path step does, so `declare default element namespace "urn:d"; <b/>` builds `<b xmlns="urn:d"/>`; a declared prefix the markup never writes isn't declared on the result, as real omits it.
 
 Inside a direct element, **boundary whitespace** — content that is only whitespace, between tags and enclosed expressions — is dropped (`<a>  {1}  </a>` is `<a>1</a>` while `<a>  x  {1}</a>` keeps its spaces), an attribute value is either literal text or exactly one enclosed expression (**Msg 9313** otherwise), and a CDATA section is text (a top-level one is Msg 2209 near `<!`).
-A string literal reads the five predefined entity references and character references; any other `&` is **Msg 2282**.
+A string literal reads the five predefined entity references and character references: an `&` opening no name, or a name XML doesn't predefine, is **Msg 2282**, a name that runs into another character before its `;` **Msg 2283** naming that character, and a numeric reference that isn't a number **Msg 2285** (probed 2026-10-02 against SQL Server 2025).
 
 An **attribute item in element content** — a computed attribute, or an attribute a path selected (`<e>{/r/@a}</e>`) — is hoisted onto the enclosing element in order, after its literal attributes; one already there is **Msg 6308**, and one that follows an element, comment or processing-instruction child is **Msg 6307**, while text or an atomic value ahead of it is fine.
 The splice-and-parse model carries it as a marker processing instruction the constructor replaces after parsing (`XmlAttributeHoisting`).
@@ -192,7 +198,7 @@ Validation and the result's canonical text ride .NET's built-in datatypes and `X
 
 | shape | answer |
 |---|---|
-| a literal the type doesn't admit (`xs:integer("abc")`, `"300" cast as xs:byte?`) | **Msg 9319** while compiling |
+| a literal the type doesn't admit (`xs:integer("abc")`, `"300" cast as xs:byte?`, and `NaN` or a number past `xs:double` / `xs:float`'s range — `INF` and `-INF` are admitted) | **Msg 9319** while compiling |
 | a value read from the instance that doesn't convert | the empty sequence |
 | a plural or empty operand | **Msg 2365** (`Cannot explicitly convert from 'xdt:untypedAtomic *' to 'xs:integer'`, `'empty'` for `()`) |
 | `cast as xs:type` without the `?` | **Msg 9301** |
@@ -508,7 +514,7 @@ Everywhere else:
 | the target isn't `xml` (`SET @s.modify(…)` on `nvarchar`, `SET n.modify(…)` on `int`) | **Msg 258** sev **15** — `Cannot call methods on nvarchar.` |
 | the target column doesn't exist | **Msg 207** |
 | a qualified column (`SET t.col.modify(…)`) or a chained call (`SET @x.query('/r').modify(…)`) | **Msg 102** |
-| the instance is NULL — an unassigned variable or a NULL cell in an updated row | **Msg 5302** — `Mutator 'modify()' on '@x' cannot be called on a null value.` (the name as written, `@` included for a variable) |
+| the instance is NULL — an unassigned variable or a NULL cell in an updated row | **Msg 5302** — `Mutator 'modify()' on '@x' cannot be called on a null value.` (the name as written, `@` included for a variable); it ends the batch and rolls the transaction back as under `SET XACT_ABORT ON`, and dooms it inside `TRY` (probed 2026-10-02) |
 
 Real reaches Msg 8137 before the SET-option gate, so `.modify()` in a select list reports it even from a session holding `QUOTED_IDENTIFIER` the wrong way; the mutator positions take the gate (**Msg 1934**) like every other XML method, naming the statement's own verb — `SELECT` for `SET @x.modify(…)`, `UPDATE` for the UPDATE form.
 
@@ -680,7 +686,7 @@ flags 3         → 1,    x,       bb
 
 A colpattern is XPath 1.0 evaluated **relative to the row node**, and every form the engine accepts works — an attribute step (`@id`), a child path (`c/d`), `text()`, a parent step (`../@p`), a descendant step (`.//d`), and the context node itself (`.`, whose value is the concatenated descendant text).
 A pattern matching several nodes takes the first; one matching nothing is NULL, not an error.
-The selected text then routes through the ordinary string→type coercion, so a non-numeric attribute read as `int` is Msg 245.
+The selected text then routes through the ordinary string→type coercion, so a non-numeric attribute read as `int` is Msg 245; an `xml` column reads a matched element's markup instead (probed 2026-10-02 against SQL Server 2025).
 
 A colpattern beginning `@mp:` reads a metaproperty of the row node instead: `id`, `localname`, `prefix`, `namespaceuri`, `prev`, `parentid`, `parentlocalname`, `parentprefix`, `parentnamespaceuri`, and `xmltext`.
 Anything else after the prefix raises `NotSupportedException` naming it.
@@ -695,6 +701,7 @@ A pattern the engine refuses is **Msg 6603** state 2, whose text is the parser's
 
 With no `WITH` clause the rowset is real's nine-column edge table (types probe-confirmed): `id` / `parentid` / `prev` `bigint`, `nodetype` `int`, `localname` / `prefix` / `namespaceuri` / `datatype` `nvarchar(4000)`, `text` `ntext`.
 It carries the matched nodes' **whole subtrees** — not the whole document — in document order: the node, then each attribute followed by its value text node, then each child's subtree.
+A node is listed once however many matched subtrees hold it, so `//*` is the document's nodes rather than each element's subtree in turn (probed 2026-10-02 against SQL Server 2025).
 `nodetype` is the DOM's own code (1 element, 2 attribute, 3 text, 7 processing instruction, 8 comment), `datatype` is always NULL for an untyped document, and only character data carries `text` (an element's content and an attribute's value both live on their own text child).
 A namespace declaration surfaces as an attribute with prefix `xmlns` and no namespace URI, whichever half of `xmlns:p` / `xmlns` it is.
 A rowpattern of `/` matches the document node, which contributes no row of its own — the edge table starts at the document element, and a `WITH` schema over it gets one all-NULL row.
@@ -710,7 +717,8 @@ Node ids follow real's numbering, which is not plain document order (probe-confi
 ### Divergences
 
 - **Real's numbering of attribute value text nodes is lazy**, assigned when a query first materializes the node and stable thereafter, so two `OPENXML` reads of one handle in different orders give the same node different ids.
-  The simulator numbers them eagerly in document order at prepare, which matches real for the first read of any handle and stays stable after.
+  The simulator numbers them eagerly in document order at prepare, which matches real for the first read of most handles and stays stable after.
+  Real can also hold an element's own text back past them: in `<root><c id="1" nm="a"><o n="10">x</o><o n="11"/></c><c id="2" nm="b &amp; c"><nm>inner</nm></c></root>` the first read numbers `x` 7 but `inner` 20, after the six attribute texts, where the simulator gives `inner` 14 (probed 2026-10-02 against SQL Server 2025).
 - **The XML declaration and the DTD are not edge-table nodes.**
   Real reports a declaration as a nodetype-7 node named `xml` holding its pseudo-attributes as attribute children (numbering from 1, ahead of the document element's descendants); the simulator drops both, so a document with a prolog numbers as if it had none.
 - **Msg 6602's and Msg 6603's detail sentences come from .NET's XML reader and XPath engine**, not MSXML, so the quoted complaint differs from real's while the message shape, number, severity, state and procedure attribution match.
@@ -790,7 +798,7 @@ Real's untyped result column reports `ntext` (max length 1073741823) in its wire
 
 - **RAW** — one `<row …/>` per row, attribute-centric by default; `RAW('elem')` renames the row element.
   `RAW, ELEMENTS` switches to element-centric (`<row><col>v</col></row>`).
-  An unnamed column raises **Msg 6809**; a binary column without [`BINARY BASE64`](#binary-base64-and-autos-dbobject-references) raises **Msg 6829**.
+  An unnamed column raises **Msg 6809** — unless `ELEMENTS` is in force or it is `xml`, when it is the row element's bare content; a binary or `vector` column without [`BINARY BASE64`](#binary-base64-and-autos-dbobject-references) raises **Msg 6829**; two columns writing one attribute raise **Msg 6810** (all probed 2026-10-02).
 - **AUTO** — one element per FROM source, nested (see below); the row element is named after the table/alias (`<t id="1"/>`), attribute-centric or `ELEMENTS`; unnamed column → Msg 6809, no FROM clause at all → **Msg 6800**, and a binary column without `BINARY BASE64` becomes a [`dbobject` reference](#binary-base64-and-autos-dbobject-references).
 - **PATH** — always element-centric; the column alias drives node placement (compiled once into a shared per-row element template, `ForXmlElement`):
   - `[@x]` → attribute `x` on the row element; `[name]` → child element; `[parent/child]` → nested elements at arbitrary depth (contiguous same-prefix steps share the parent).
@@ -798,8 +806,10 @@ Real's untyped result column reports `ntext` (max length 1073741823) in its wire
   - The rest of the [node functions](#paths-node-functions) — `[comment()]`, `[processing-instruction(target)]`, `[node()]` and `[*]` — place their own node kinds.
   - Consecutive same-name element columns concatenate their text into one element (`[x],[x]` → `<x>1020</x>`).
   - `PATH('')` suppresses the row wrapper (bare elements at document level); an attribute column under `PATH('')` raises **Msg 6864**.
-  - An attribute column after a non-attribute sibling at the same level raises **Msg 6852** — a comment or processing instruction counts as a non-attribute sibling for it.
-  - A NULL drops the child element it would have filled, but the **row** element always stands: a row whose whole content is NULL is `<row/>`, not a missing row (RAW's included).
+  - An attribute column after a non-attribute sibling at the same level raises **Msg 6852** naming the whole alias (`a/@b`) — a comment or processing instruction counts as a non-attribute sibling for it — and one written twice on an element **Msg 6810**.
+  - A NULL drops the child element it would have filled, and a nested element whose every attribute and leaf is NULL goes too (`[d/@x]`, `[d/f]` both NULL leave no `<d/>`), but the **row** element always stands: a row whose whole content is NULL is `<row/>`, not a missing row (RAW's included).
+    An element with an attribute keeps it where its own leaf is NULL (`<a x="1"/>`), the nil marker behind the attributes under `XSINIL`.
+  - An element closes itself only when nothing was written into it: an empty string or an empty `xml` value still opens and closes it (`<a></a>`), RAW's `ELEMENTS` included (probed 2026-10-02).
 - **EXPLICIT** — the universal table, built from the projection's own column names; see [below](#explicit--the-universal-table).
 
 ### PATH's node functions
@@ -920,10 +930,10 @@ A materialized overflow keeps its element open even when it contributed nothing,
 Value formatting, escaping, `TYPE`, `ROOT`, `BINARY BASE64` and the empty-rowset asymmetry are the shared ones.
 `ELEMENTS` is **Msg 6825** (placement comes from the column names), a binary column without `BINARY BASE64` is **Msg 6829** — the same message RAW gets, raised from a scan that precedes every other check, so it beats even Msg 6801 — and `XMLSCHEMA` is real's own **Msg 3625** state 17, `'Inline XSD for FOR XML EXPLICIT' is not yet implemented.`
 
+An `xml`-typed value, in EXPLICIT alone, gets `xmlns=""` on each unprefixed top-level element that declares no default namespace of its own, after the element's attributes (`<a><i v="9" xmlns=""/></a>`; probed 2026-10-02 against SQL Server 2025).
+
 Divergences:
 
-- **An embedded `xml` value carries no `xmlns=""`.**
-  Real re-serializes an `xml`-typed column's fragment in EXPLICIT alone and stamps `xmlns=""` on its unprefixed top-level elements (`<a><b xmlns="">x</b></a>`); the simulator embeds the stored text the way RAW and AUTO do.
 - **`idrefs` / `nmtokens` always raise Msg 6826.**
   Real admits one where the column's expression is statically nullable — the shape that feeds one value per row in and merges them into a space-joined attribute — and reports 6826 otherwise; the simulator has no expression-nullability model, so it reports what real gives the non-nullable shape.
 
@@ -991,13 +1001,14 @@ Real reaches its verdict before resolving the target table (`INSERT INTO nosucht
 - `ROOT` → wrap in `<root>…</root>` (default name `root`); `ROOT('rows')` renames; `ROOT('')` raises **Msg 6861**.
 - `BINARY BASE64` → see [below](#binary-base64-and-autos-dbobject-references).
 
-Each option may be written once — a repeat is **Msg 102** near `'XML'`, as noted at the top of this section.
+Each option may be written once — a repeat, or a second mode word (`FOR XML PATH, AUTO`), is **Msg 102** near `'XML'`, as noted at the top of this section.
 
 ### `WITH XMLNAMESPACES`
 
 `Parser/ForXmlNamespaces.cs` — the `WITH XMLNAMESPACES ('uri' AS prefix | DEFAULT 'uri', …)` prefix.
 It parses through the same seam the CTE list does (`Simulation.ParseCteBindings`, so `Simulation.ParseBodyQuery` picks it up too) and registers on `ParserContext.XmlNamespaces`, which the statement loop clears alongside `CteBindings`.
 Real accepts it only in **first** position: `WITH XMLNAMESPACES (…), c AS (…) SELECT …` works, `WITH c AS (…), XMLNAMESPACES (…)` is Msg 102 near `'xmlnamespaces'`.
+The bindings also reach the statement's [xml methods](#xml-method-execution).
 The word is a keyword there — `WITH XMLNAMESPACES AS (…)` is a syntax error while the delimited `WITH [XMLNAMESPACES] AS (…)` is an ordinary CTE — so only the unquoted spelling enters the clause.
 A URI must be written out (a variable is Msg 102).
 
@@ -1080,13 +1091,15 @@ The base-column half of the addressing is why `Selection` records `AutoColumnOrd
 
 ### Value formatting + escaping (probe-confirmed, SQL Server 2025)
 
-Numeric/date formatting matches FOR JSON (scientific `float`/`real`, the all-zero-fraction drop) **except** `bit` → `1`/`0` (not `true`/`false`), `uniqueidentifier` uppercases, `binary` / `varbinary` / `image` base64-encodes (always in PATH, under [`BINARY BASE64`](#binary-base64-and-autos-dbobject-references) in RAW / AUTO), and values are XML-escaped rather than JSON-escaped.
+Numeric/date formatting matches FOR JSON (scientific `float`/`real`, the all-zero-fraction drop, a `datetime`'s rounded milliseconds) **except** `bit` → `1`/`0` (not `true`/`false`), `uniqueidentifier` uppercases, `binary` / `varbinary` / `image` base64-encodes (always in PATH, under [`BINARY BASE64`](#binary-base64-and-autos-dbobject-references) in RAW / AUTO) as `rowversion` always does, and values are XML-escaped rather than JSON-escaped.
+A `json` value goes in as its text with nothing escaped, quotes and `<` included, and a spatial or CLR user-defined column is **Msg 6865** while binding (probed 2026-10-02 against SQL Server 2025).
 Escaping is position-dependent:
 
 | position | escaped |
 |---|---|
 | element text | `&`→`&amp;`, `<`→`&lt;`, `>`→`&gt;`, CR→`&#x0D;` (`"` and `'` stay literal) |
 | attribute value | the above plus `"`→`&quot;`, tab→`&#x09;`, LF→`&#x0A;` (`'` stays literal) |
+| either | any other control character, an unpaired surrogate and U+FFFE / U+FFFF as a character reference (`&#x01;`, `&#xD83D;`) |
 
 ### Not modeled yet
 
@@ -1109,7 +1122,12 @@ Real raises its XML parsing family, Msg 9400–9465, as `XML parsing: line L, ch
 The family behaves as any error does under `SET XACT_ABORT ON`, whatever the option says: uncaught it ends the batch and rolls the transaction back, caught it dooms the transaction — see [`transactions.md`](transactions.md#set-xact_abort).
 `TRY_CAST` / `TRY_CONVERT` answer NULL for it, and an argument bound to a parameter reports it at line 0, as real does.
 
-A `CONVERT` style against an `xml` target is whitespace and DTD handling, not a text layout, so a binary source is parsed rather than rendered as hex.
+An instance holds at most 128 levels of elements: an element below them is **Msg 6335** state 102, and an attribute or text node of an element at the 128th state 101 (probed 2026-10-02 against SQL Server 2025).
+
+A `CONVERT` style against an `xml` target is whitespace and DTD handling, not a text layout, so a binary source is parsed rather than rendered as hex; a style other than 0 to 3 is **Msg 6358**, raised once the value is non-NULL and absorbed by `TRY_CONVERT` (probed 2026-10-02).
+
+The other direction is refused rather than cut: an instance longer than a sized string target is **Msg 6354** state 10, counting UTF-16 units, and a character an ANSI target's code page has no best fit for **Msg 6355** (`Ā` best-fits to `A`, `日` refuses), both absorbed by `TRY_CAST`.
+A binary target holds the byte-order mark and the UTF-16 bytes (`0xFFFE3C00…`), counted against its length the same way (probed 2026-10-02).
 A binary source is decoded in the encoding its bytes announce — a byte-order mark, an unmarked UTF-16 `<`, or the declaration — and as UTF-8 otherwise, so a stray Latin-1 byte is Msg 9420 there (probed 2026-09-23; `SqlValue.DecodeXmlBytes`).
 
 The same pass answers the **canonical form** real serializes the stored value as, and that text is what the column or variable holds — so `CAST('<a b=''x''></a>' AS xml)` reads back as `<a b="x"/>` through a text cast, and SqlClient's own re-rendering of the value on the wire (`<a b="x" />`) matches what it renders for real (probed 2026-09-23; the rules are in the class's remarks).

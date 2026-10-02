@@ -644,4 +644,22 @@ public sealed class OpenXmlTests
             from openxml(@h, '/root/a') with (id int) o1
             cross join openxml(@h, '/root/a') with (id int) o2
             """));
+
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    [TestMethod]
+    public void EdgeTable_ListsANodeOnceHoweverManyMatchedSubtreesHoldIt()
+        => AreEqual(20, new Simulation().ExecuteScalar("""
+            declare @h int;
+            exec sp_xml_preparedocument @h output, N'<root><c id="1" nm="a"><o n="10">x</o><o n="11"/></c><c id="2" nm="b &amp; c"><nm>inner</nm></c></root>';
+            select count(*) from openxml(@h, '//*')
+            """));
+
+    [TestMethod]
+    public void WithClause_XmlColumn_IsTheElementsMarkup()
+        => AreEqual("<c id=\"1\"><o>x</o></c>", new Simulation().ExecuteScalar("""
+            declare @h int;
+            exec sp_xml_preparedocument @h output, N'<root><c id="1"><o>x</o></c></root>';
+            select cast(x as nvarchar(max)) from openxml(@h, '/root/c') with (x xml '.')
+            """));
 }

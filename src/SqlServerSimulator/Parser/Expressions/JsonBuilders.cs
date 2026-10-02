@@ -81,13 +81,26 @@ internal static class JsonValueRender
             _ = sb.Append('"').Append(Convert.ToBase64String(value.AsBytes)).Append('"');
             return;
         }
+
+        // image and rowversion are binaries too (probed 2026-10-02 against SQL
+        // Server 2025), and a sql_variant writes the value it holds.
+        if (type is ImageSqlType or RowVersionSqlType)
+        {
+            _ = sb.Append('"').Append(Convert.ToBase64String(value.CoerceTo(SqlType.VarbinaryMax).AsBytes)).Append('"');
+            return;
+        }
+        if (type is SqlVariantSqlType)
+        {
+            Append(sb, value.AsVariantInner, embedRaw: false);
+            return;
+        }
         switch (type)
         {
             case DateTime2SqlType dt2:
                 Selection.AppendJsonDateTime(sb, value.AsDateTime2, dt2.precision);
                 return;
             case var _ when type == SqlType.DateTime:
-                Selection.AppendJsonDateTime(sb, value.AsDateTime, 3);
+                Selection.AppendJsonDateTime(sb, Selection.RoundDateTimeToMilliseconds(value.AsDateTime), 3);
                 return;
             case var _ when type == SqlType.SmallDateTime:
                 Selection.AppendJsonDateTime(sb, value.AsSmallDateTime, 0);
@@ -117,8 +130,21 @@ internal static class JsonValueRender
     {
         if (keyValue.IsNull)
             throw SimulatedSqlException.JsonObjectNullKey();
-        AppendJsonString(sb, keyValue.CoerceTo(SqlType.NVarchar).AsString, escapeSolidus: true);
+
+        // A key is written as its value would be, quoted when that isn't a
+        // string already: a float key is its scientific form, a bit `true`, a
+        // binary its base64 (probed 2026-10-02 against SQL Server 2025).
+        var start = sb.Length;
+        Append(sb, keyValue, embedRaw: false);
+        if (sb[start] != '"')
+            _ = sb.Insert(start, '"').Append('"');
     }
+
+    /// <summary>
+    /// Whether <paramref name="type"/> is one of the CLR types, which the JSON
+    /// builders refuse (Msg 13666).
+    /// </summary>
+    public static bool IsClrType(SqlType type) => type is HierarchyIdSqlType or SpatialSqlType or ClrUdtSqlType;
 
     private static string IntegerAsString(SqlType type, SqlValue value)
     {
@@ -164,13 +190,13 @@ internal static class JsonValueRender
     }
 
     /// <summary>
-    /// Returns true when an Expression produces a JSON document whose
-    /// string form should be embedded verbatim (not re-escaped) when used
-    /// as a value inside <c>JSON_OBJECT</c> / <c>JSON_ARRAY</c> or as
-    /// <c>JSON_MODIFY</c>'s substituted value.
-    /// Compile-time check on the Expression's runtime shape — matches SQL
-    /// Server's "input is JSON-typed" detection without needing an
-    /// SqlValue-level marker bit. Parenthesized wrappers unwrap so
+    /// Returns true when an Expression is itself a JSON producer, whose text
+    /// embeds verbatim (not re-escaped) as a value inside <c>JSON_OBJECT</c> /
+    /// <c>JSON_ARRAY</c> or as <c>JSON_MODIFY</c>'s substituted value. The
+    /// rule proper is the type's JSON text mark
+    /// (<see cref="NVarcharSqlType.jsonText"/>), which callers read while
+    /// binding; this syntactic check covers a call reached before its
+    /// operands bind. Parenthesized wrappers unwrap so
     /// <c>(json_query(...))</c> still flags as raw.
     /// </summary>
     public static bool ProducesJson(Expression expression) => expression switch
@@ -260,7 +286,7 @@ internal static class JsonNullClauseParser
     /// </summary>
     public static SqlValue Result(StringBuilder text, bool returnsJson) => returnsJson
         ? SqlValue.FromJson(JsonDocumentText.Canonicalize(text.ToString()))
-        : SqlValue.FromNVarchar(SqlType.NVarcharMax, text.ToString());
+        : SqlValue.FromNVarchar(SqlType.JsonTextMax, text.ToString());
 
     private static void ExpectOnNull(ParserContext context)
     {
@@ -281,7 +307,7 @@ internal static class JsonNullClauseParser
 /// <c>null</c> (Microsoft documents this default verbatim; note it is the
 /// opposite of both <c>JSON_ARRAY</c> and the <c>FOR JSON</c> clause, which
 /// omit NULLs by default). Duplicate keys are preserved verbatim (matching
-/// real SQL Server — no dedup). Result type is <see cref="SqlType.NVarcharMax"/> (<c>nvarchar(max)</c>).
+/// real SQL Server — no dedup). Result type is <see cref="SqlType.JsonTextMax"/> (<c>nvarchar(max)</c>).
 /// </summary>
 /// <remarks>
 /// Probe-confirmed against SQL Server 2025 (2026-05-23): empty argument
@@ -319,6 +345,11 @@ internal sealed class JsonObject : Expression
             {
                 key = Parse(context);
             }
+
+            // Real reads `'a' = 1` whole before missing the colon, so the
+            // syntax error names the token after it.
+            if (context.Token is Operator { Character: '=' })
+                _ = Parse(context.MoveNextRequiredReturnSelf());
             if (context.Token is not Operator { Character: ':' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
@@ -364,9 +395,17 @@ internal sealed class JsonObject : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         this.returnsJson = this.returningJson;
-        foreach (var (_, value, _) in this.entries)
-            this.returnsJson |= value.GetSqlType(batch, resolveColumnType) is JsonSqlType;
-        return this.returnsJson ? SqlType.Json : SqlType.NVarcharMax;
+        for (var i = 0; i < this.entries.Length; i++)
+        {
+            var (key, value, _) = this.entries[i];
+            var keyType = key.GetSqlType(batch, resolveColumnType);
+            var valueType = value.GetSqlType(batch, resolveColumnType);
+            if (JsonValueRender.IsClrType(keyType) || JsonValueRender.IsClrType(valueType))
+                throw SimulatedSqlException.JsonBuilderClrType("json_object and json_objectagg", 2);
+            this.returnsJson |= valueType is JsonSqlType;
+            this.entries[i].EmbedRaw |= SqlType.IsJsonText(valueType);
+        }
+        return this.returnsJson ? SqlType.Json : SqlType.JsonTextMax;
     }
 
     internal override string DebugDisplay() =>
@@ -384,7 +423,7 @@ internal sealed class JsonObject : Expression
 /// SQL <c>JSON_ARRAY([value1 [, ... valueN]] [null_clause])</c>: builds a
 /// JSON array string from a positional value list. Default null clause is
 /// <see cref="JsonNullClause.AbsentOnNull"/> (NULL values are omitted).
-/// Result type is <see cref="SqlType.NVarcharMax"/> (<c>nvarchar(max)</c>).
+/// Result type is <see cref="SqlType.JsonTextMax"/> (<c>nvarchar(max)</c>).
 /// </summary>
 /// <remarks>
 /// Probe-confirmed against SQL Server 2025 (2026-05-23): empty argument
@@ -451,9 +490,15 @@ internal sealed class JsonArray : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         this.returnsJson = this.returningJson;
-        foreach (var (value, _) in this.items)
-            this.returnsJson |= value.GetSqlType(batch, resolveColumnType) is JsonSqlType;
-        return this.returnsJson ? SqlType.Json : SqlType.NVarcharMax;
+        for (var i = 0; i < this.items.Length; i++)
+        {
+            var valueType = this.items[i].Value.GetSqlType(batch, resolveColumnType);
+            if (JsonValueRender.IsClrType(valueType))
+                throw SimulatedSqlException.JsonBuilderClrType("json_array", 3);
+            this.returnsJson |= valueType is JsonSqlType;
+            this.items[i].EmbedRaw |= SqlType.IsJsonText(valueType);
+        }
+        return this.returnsJson ? SqlType.Json : SqlType.JsonTextMax;
     }
 
     internal override string DebugDisplay() =>

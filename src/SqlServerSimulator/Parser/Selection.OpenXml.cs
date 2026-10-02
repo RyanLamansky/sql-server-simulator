@@ -79,15 +79,20 @@ internal sealed partial class Selection
         }
 
         var rows = document.SelectRows(pattern);
+
+        // The edge table lists a node once however many matched subtrees hold
+        // it: `//*` is the document's nodes, not each element's subtree in
+        // turn (probed 2026-10-02 against SQL Server 2025).
+        var listed = columns is null ? new HashSet<XmlNode>() : null;
         foreach (XmlNode rowNode in rows)
         {
-            if (columns is null)
+            if (listed is not null)
             {
-                foreach (var edgeRow in EnumerateOpenXmlEdgeRows(document, rowNode, schema))
+                foreach (var edgeRow in EnumerateOpenXmlEdgeRows(document, rowNode, schema, listed))
                     yield return edgeRow;
                 continue;
             }
-            yield return BuildOpenXmlRow(document, rowNode, columns, schema, flagBits);
+            yield return BuildOpenXmlRow(document, rowNode, columns!, schema, flagBits);
         }
     }
 
@@ -99,12 +104,15 @@ internal sealed partial class Selection
     /// an attribute doesn't have — while one reached as a descendant carries
     /// its owner element's id.
     /// </summary>
-    private static IEnumerable<byte[]> EnumerateOpenXmlEdgeRows(PreparedXmlDocument document, XmlNode rowNode, SqlType[] schema)
+    private static IEnumerable<byte[]> EnumerateOpenXmlEdgeRows(PreparedXmlDocument document, XmlNode rowNode, SqlType[] schema, HashSet<XmlNode> listed)
     {
         return Walk(rowNode, document.IdOf(rowNode.ParentNode));
 
         IEnumerable<byte[]> Walk(XmlNode node, long? parentId)
         {
+            if (!listed.Add(node))
+                yield break;
+
             // The document node carries no edge row of its own — a rowpattern
             // of `/` reports the document element's subtree, not a wrapper.
             if (node.NodeType != XmlNodeType.Document)
@@ -216,7 +224,7 @@ internal sealed partial class Selection
             values[i] = column.MetaProperty is { } meta
                 ? MetaPropertyValue(document, rowNode, meta, consumed, column.Type)
                 : matches[i] is { } match
-                    ? SqlValue.FromNVarchar(NodeText(match)).CoerceTo(column.Type)
+                    ? SqlValue.FromNVarchar(column.Type is XmlSqlType && match.NodeType == XmlNodeType.Element ? match.OuterXml : NodeText(match)).CoerceTo(column.Type)
                     : SqlValue.Null(column.Type);
         }
         return RowEncoder.EncodeRow(schema, values);

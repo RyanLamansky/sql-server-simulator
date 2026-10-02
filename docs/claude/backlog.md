@@ -320,6 +320,15 @@ What it left open:
 - **A filtered index whose predicate is a bare parenthesized column** (`WHERE (a)`) is Msg 102 near the statement's end on real and Msg 4145 here.
 - **`DATABASEPROPERTYEX(…, 'LastGoodCheckDbTime')`** reads the epoch here whatever `DBCC CHECKDB` has run, where real records the last clean check.
 
+**JSON / XML sweep** — a seventh corpus of 2,129 small cases over the JSON functions, `OPENJSON`, `FOR JSON`, the `json` type, EF Core 10's JSON-column SQL (captured from EF against the simulator and replayed on both sides — no divergence), the `xml` methods and namespaces, `FOR XML` in every mode, `OPENXML` and xml conversions, compared by value, result-column type and the TDS nullability flag (probed 2026-10-02 against SQL Server 2025).
+Of the cases still differing once its fixes shipped, the environmental ones are a `JSON_ARRAYAGG` without `ORDER BY` under `ROLLUP` and an EXPLICIT universal table whose `ORDER BY` ties, and the already-filed ones the native `json` and `vector` TDS types a json-aware client reads, the rows a failing `OPENJSON` streams first, Msg 2209's quoted token and `OPENXML`'s .NET-worded Msg 6602 / 6603 ([`xml.md`](xml.md)).
+What it left open:
+
+- **`OPENJSON … WITH` naming a column twice** (`WITH (id int, id int)`) returns both under `SELECT *` on real; here the star expands by name and the second is Msg 209.
+- **A `COLLATE` on a non-string `OPENJSON … WITH` column** is Msg 447 on both, which real follows with the informational Msg 2724 state 14 (`Parameter or variable 'int' has an invalid data type.`), not sent here.
+- **A constant-folded `COALESCE` / `CASE` / `IIF` over JSON text**: `COALESCE(N'[0]', JSON_QUERY(…))`, `CASE WHEN 1 = 1 THEN N'[9]' ELSE JSON_QUERY(…) END` and `IIF(1 = 1, N'x', JSON_QUERY(…))` embed quoted in a JSON builder on real, which types the arm it takes, and raw here, where the unified type keeps the JSON text mark — the JSON face of the written-constant CASE entry under the scalar-function sweep above.
+- **`OPENXML`'s edge-table numbering** holds an element's own text back past the attribute texts in a shape the eager numbering doesn't predict — see [`xml.md`](xml.md#openxml).
+
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 
 Both clauses ship (see [`xml.md`](xml.md#for-xml-result-serialization), [`json.md`](json.md#for-json-result-serialization)); these are the parts that don't:

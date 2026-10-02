@@ -233,13 +233,18 @@ internal sealed class AggregateExpression : Expression
     };
 
     /// <summary>
-    /// The <c>nvarchar(max)</c> store type both JSON aggregates project (the
-    /// scalar <c>JSON_OBJECT</c> / <c>JSON_ARRAY</c> builders return plain
-    /// <c>nvarchar</c>, but the aggregate forms widen to MAX — probe-confirmed
-    /// against SQL Server 2025).
+    /// A JSON aggregate's result: <c>json</c> for <c>RETURNING json</c> or a
+    /// <c>json</c> operand, else JSON text. A CLR-typed key or value is
+    /// Msg 13666 (probed 2026-10-02 against SQL Server 2025).
     /// </summary>
-    internal static readonly NVarcharSqlType NVarcharMax =
-        NVarcharSqlType.Get(SqlType.MaxLengthSentinel, Collation.Baseline, Coercibility.CoercibleDefault);
+    private SqlType BindJsonAggregate(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var operandType = this.Operand!.GetSqlType(batch, resolveColumnType);
+        var isObject = this.Kind == AggregateKind.JsonObjectAgg;
+        if (JsonValueRender.IsClrType(operandType) || (isObject && JsonValueRender.IsClrType(this.KeyExpression!.GetSqlType(batch, resolveColumnType))))
+            throw isObject ? SimulatedSqlException.JsonBuilderClrType("json_object and json_objectagg", 2) : SimulatedSqlException.JsonBuilderClrType("json_arrayagg", 1);
+        return this.ReturningJson || operandType is JsonSqlType ? SqlType.Json : SqlType.JsonTextMax;
+    }
 
     /// <summary>
     /// Builds a single-operand aggregate programmatically (used by PIVOT
@@ -392,8 +397,7 @@ internal sealed class AggregateExpression : Expression
         // STRING_AGG refuses a legacy LOB in either slot, and real binds that
         // while compiling — so the gate runs here as well as per value.
         AggregateKind.StringAgg => BindStringAggArguments(batch, resolveColumnType),
-        AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg =>
-            this.ReturningJson || this.Operand!.GetSqlType(batch, resolveColumnType) is JsonSqlType ? SqlType.Json : NVarcharMax,
+        AggregateKind.JsonArrayAgg or AggregateKind.JsonObjectAgg => this.BindJsonAggregate(batch, resolveColumnType),
         AggregateKind.Sum => DeriveSumResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
         AggregateKind.Avg => DeriveAvgResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),
         AggregateKind.Product => DeriveProductResultType(this.RejectDistinctLob(this.Operand!.GetSqlType(batch, resolveColumnType))),

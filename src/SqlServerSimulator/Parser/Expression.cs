@@ -451,10 +451,25 @@ internal abstract class Expression : ExpressionNode
                                 var probe = context.GetNextOptional();
                                 if (probe is Operator { Character: '(' })
                                 {
+                                    // A receiver named in three or more parts
+                                    // reads as a remote function call (probed
+                                    // 2026-10-02 against SQL Server 2025).
+                                    if (expression is Reference { ReferencedName.Count: >= 3 } longReceiver)
+                                        throw SimulatedSqlException.RemoteFunctionReference($"{longReceiver.ReferencedName}.{name.Value}", longReceiver.ReferencedName[0]);
                                     context.Batch.CurrentStatement.MarkOpensTransaction();
                                     expression = XmlMethodCall.Parse(expression, name.Value, context);
                                     continue;
                                 }
+                                context.RestoreCheckpoint(checkpoint);
+                            }
+                            else if (JsonModify.ReceiverType(expression, context) is XmlSqlType)
+                            {
+                                // An xml receiver has the five methods,
+                                // spelled in lower case, and nothing else
+                                // (probed 2026-10-02 against SQL Server 2025).
+                                var checkpoint = context.SaveCheckpoint();
+                                if (context.GetNextOptional() is Operator { Character: '(' })
+                                    throw SimulatedSqlException.NotAValidFunctionPropertyOrField(name.Value);
                                 context.RestoreCheckpoint(checkpoint);
                             }
                             // Spatial instance-method shape: <expr>.STDistance(args) /
@@ -814,7 +829,15 @@ internal abstract class Expression : ExpressionNode
     /// </summary>
     private static void ParseWithinGroupOrderBy(AggregateExpression aggregate, ParserContext context)
     {
-        if (aggregate.Kind != AggregateKind.StringAgg)
+        // JSON_ARRAYAGG takes the clause and leaves its rows in the order they
+        // arrive — `WITHIN GROUP (ORDER BY n DESC)` over 1, 2 is [1,2] — unless
+        // its own ORDER BY was written, when the word is a syntax error, as it
+        // always is after JSON_OBJECTAGG (probed 2026-10-02 against SQL Server
+        // 2025).
+        var ignored = aggregate.Kind == AggregateKind.JsonArrayAgg;
+        if (aggregate.Kind == AggregateKind.JsonObjectAgg || (ignored && aggregate.OrderBy is not null))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        if (aggregate.Kind != AggregateKind.StringAgg && !ignored)
             throw SimulatedSqlException.FunctionMayNotHaveWithinGroup(aggregate.LowerName);
 
         context.MoveNextRequired();
@@ -837,7 +860,8 @@ internal abstract class Expression : ExpressionNode
             var expr = Expression.Parse(context);
             // The key orders the aggregated values, so real evaluates it and
             // it keeps its own term.
-            _ = ConstantFolding.RejectConstantWindowOrderByTerm(expr, context);
+            if (!ignored)
+                _ = ConstantFolding.RejectConstantWindowOrderByTerm(expr, context);
 
             var descending = false;
             switch (context.Token)
@@ -857,7 +881,8 @@ internal abstract class Expression : ExpressionNode
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        aggregate.OrderBy = items;
+        if (!ignored)
+            aggregate.OrderBy = items;
     }
 
     /// <summary>

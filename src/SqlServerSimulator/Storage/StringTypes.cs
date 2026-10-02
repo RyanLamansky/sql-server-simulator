@@ -81,16 +81,30 @@ internal sealed class NVarcharSqlType : SqlType
 
     public readonly short length;
 
+    /// <summary>
+    /// Whether the type is JSON text: what <c>JSON_QUERY</c>,
+    /// <c>JSON_MODIFY</c>, the JSON builders and their aggregates and a
+    /// wrapped <c>FOR JSON</c> return over text. A JSON producer embeds such a
+    /// value as the JSON it is rather than as a quoted string, and the mark
+    /// travels with the type — through a derived table, a view, a
+    /// <c>UNION</c>, <c>ISNULL</c> or a <c>CASE</c> arm — until a conversion
+    /// or an operator makes a new string (probed 2026-10-02 against SQL
+    /// Server 2025). It has no other effect: the type is <c>nvarchar</c>
+    /// everywhere else.
+    /// </summary>
+    public readonly bool jsonText;
+
     private readonly Collation collation;
 
     private readonly Coercibility coercibility;
 
-    private NVarcharSqlType(short length, Collation collation, Coercibility coercibility)
+    private NVarcharSqlType(short length, Collation collation, Coercibility coercibility, bool jsonText)
         : base(SqlTypeCategory.String, TypePairClass.UnicodeString)
     {
         this.length = length;
         this.collation = collation;
         this.coercibility = coercibility;
+        this.jsonText = jsonText;
     }
 
     public override Type ClrType => typeof(string);
@@ -103,7 +117,7 @@ internal sealed class NVarcharSqlType : SqlType
 
     public override Coercibility Coercibility => this.coercibility;
 
-    public override SqlType WithCollation(Collation collation, Coercibility coercibility) => Get(this.length, collation, coercibility);
+    public override SqlType WithCollation(Collation collation, Coercibility coercibility) => Get(this.length, collation, coercibility, this.jsonText);
 
     public override int GetVariableByteCount(SqlValue value) => value.AsString.Length * 2;
 
@@ -120,12 +134,15 @@ internal sealed class NVarcharSqlType : SqlType
         _ => $"nvarchar({this.length})",
     };
 
-    private static readonly ConcurrentDictionary<(short Length, Collation Collation, Coercibility Coercibility), NVarcharSqlType> cache = new();
+    private static readonly ConcurrentDictionary<(short Length, Collation Collation, Coercibility Coercibility, bool JsonText), NVarcharSqlType> cache = new();
 
-    public static NVarcharSqlType Get(int length, Collation collation, Coercibility coercibility) =>
+    public static NVarcharSqlType Get(int length, Collation collation, Coercibility coercibility, bool jsonText = false) =>
         length is not (0 or SqlType.MaxLengthSentinel) and (< 1 or > 4000)
             ? throw new ArgumentOutOfRangeException(nameof(length), $"nvarchar length must be 1-4000, 0 (unspecified), or -1 (MAX); got {length}.")
-            : cache.GetOrAdd(((short)length, collation, coercibility), static key => new NVarcharSqlType(key.Length, key.Collation, key.Coercibility));
+            : cache.GetOrAdd(((short)length, collation, coercibility, jsonText), static key => new NVarcharSqlType(key.Length, key.Collation, key.Coercibility, key.JsonText));
+
+    /// <summary>This type with the <see cref="jsonText"/> mark.</summary>
+    public NVarcharSqlType AsJsonText() => Get(this.length, this.collation, this.coercibility, jsonText: true);
 }
 
 /// <summary>

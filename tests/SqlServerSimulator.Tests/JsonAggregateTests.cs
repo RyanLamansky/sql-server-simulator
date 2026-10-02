@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -140,4 +141,24 @@ public class JsonAggregateTests
     public void Aggregates_EscapeSolidus(string aggregate, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar(
             $"create table #s (id int, s nvarchar(20)); insert into #s values (1,'a/b'),(2,'c/d');\nselect {aggregate} from #s"));
+
+    // ---- argument grammar (probed 2026-10-02 against SQL Server 2025) ----
+
+    [TestMethod]
+    public void JsonArrayAgg_OrderByOverSeveralKeys_IsNoArgumentList()
+        => AreEqual("[{\"k\":\"a\"},{\"k\":\"b\"},{}]", ExecuteScalar("select json_arrayagg(json_object('k':k absent on null) order by g, k) from (values (1, 'b'), (1, 'a'), (2, null)) v(g, k)"));
+
+    [TestMethod]
+    public void JsonArrayAgg_WithinGroup_IsAcceptedAndLeavesTheRowsInArrivalOrder()
+        => AreEqual("[1,2]", ExecuteScalar("select json_arrayagg(n) within group (order by n desc) from (values (1), (2)) v(n)"));
+
+    [TestMethod]
+    [DataRow("select json_arrayagg(n order by n desc) within group (order by n) from (values (1), (2)) v(n)")]
+    [DataRow("select json_objectagg('k':n) within group (order by n) from (values (1), (2)) v(n)")]
+    public void WithinGroup_AfterAnOrderOrOnObjectAgg_IsMsg102(string sql)
+        => new Simulation().ValidateSyntaxError(sql, "within");
+
+    [TestMethod]
+    public void JsonObjectAgg_CommaForm_IsMsg174()
+        => new Simulation().AssertSqlError("select json_objectagg(k, n) from (values ('a', 1)) v(k, n)", 174, "The JSON_OBJECTAGG function requires 1 argument(s).");
 }

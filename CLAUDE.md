@@ -294,7 +294,8 @@ Where an entry carries a second clause it is because that fact changes what you'
   Several ordinary shapes silently **convert** a cursor's sensitivity, and a keyless table converts it to read-only → [`cursors.md`](docs/claude/cursors.md).
 - **CTEs** — the shapes, the recursive member's restrictions, the declared column list's scoping, and where a `WITH` prefix may appear → [`ctes.md`](docs/claude/ctes.md).
 - **JSON** — the JSON_\* scalars, ISJSON, OPENJSON, `FOR JSON`, and one shared path parser, SQL Server 2025's advanced array accessors (`[*]`, ranges, lists, `last`, `.*`) and `JSON_QUERY … WITH ARRAY WRAPPER` included.
-  Every one of them reads the document left to right and stops as soon as the path is settled, so the same document can raise for one path and answer for another → [`json.md`](docs/claude/json.md).
+  Every one of them reads the document left to right and stops as soon as the path is settled, so the same document can raise for one path and answer for another.
+  Whether a value embeds in a JSON producer as JSON or as a quoted string is a mark on its `nvarchar` type (`NVarcharSqlType.jsonText`), so a new JSON-producing function returns `SqlType.JsonTextMax` → [`json.md`](docs/claude/json.md).
 - **Name resolution, schemas, CREATE / DROP DATABASE, the `OBJECT_*` / `SCHEMA_*` / `DB_*` scalars, cross-database reads and writes, synonyms** — with the reserved-schema pin.
   An unresolved column splits by *what* failed: a bad qualifier is Msg 4104 on the whole name, everything else Msg 207 on the leaf.
   A module body runs in the database that owns it, entered through `ModuleDatabaseScope`, which a new module-invocation path must enter too → [`schemas.md`](docs/claude/schemas.md).

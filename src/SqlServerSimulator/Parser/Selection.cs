@@ -3609,7 +3609,23 @@ internal sealed partial class Selection
                 // for a single-segment leaf (CTE names can't be schema-
                 // qualified — they're aliases, not real tables).
             AfterBuiltInRowsetDispatch:
+                var beforeObjectName = context.SaveCheckpoint();
                 var objectName = BatchContext.ParseObjectName(context);
+
+                // `FROM t.x.nodes('…') n(c)` in a subquery shreds a column of
+                // an enclosing query, as an APPLY's right side shreds one of
+                // its left side (probed 2026-10-02 against SQL Server 2025).
+                if (objectName.Count > 1 && objectName.Leaf.Equals("nodes", StringComparison.Ordinal))
+                {
+                    var afterNodesLeaf = context.SaveCheckpoint();
+                    var followedByParen = context.MoveNext() && context.Token is Operator { Character: '(' };
+                    context.RestoreCheckpoint(afterNodesLeaf);
+                    if (followedByParen)
+                    {
+                        context.RestoreCheckpoint(beforeObjectName);
+                        return ParseXmlNodesSource(context, []);
+                    }
+                }
 
                 // fn_virtualfilestats: a 2-arg system TVF invoked bare or
                 // `sys.`-qualified. Handled after ParseObjectName (unlike the
@@ -4193,7 +4209,10 @@ internal sealed partial class Selection
                 // 2026-09-26: `FROM (SELECT 1 a);` is near ';').
                 var derivedQualifier = ConsumeOptionalAlias(context)
                     ?? throw SimulatedSqlException.SyntaxErrorNear(context);
-                var derivedNames = ResolveDerivedTableColumnNames(context, derivedSelection.ColumnNames, derivedQualifier);
+                // A FOR JSON / FOR XML document's column name belongs to the
+                // client result; read as a derived table it is unnamed
+                // (Msg 8155, probed 2026-10-02 against SQL Server 2025).
+                var derivedNames = ResolveDerivedTableColumnNames(context, derivedSelection.IsForClauseDocument ? [""] : derivedSelection.ColumnNames, derivedQualifier);
                 // A derived table takes no TABLESAMPLE; real stops at the
                 // keyword itself (Msg 156, probed 2026-09-24).
                 if (context.Token is ReservedKeyword { Keyword: Keyword.TableSample } tableSample)

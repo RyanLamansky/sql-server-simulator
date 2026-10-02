@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
@@ -23,9 +25,15 @@ namespace SqlServerSimulator.Parser;
 /// needing no whitespace behind it at all: <c>lax$.a</c>).
 /// </para>
 /// <para>
-/// Quoted-property escape: a doubled <c>""</c> inside the quoted form is
-/// one literal <c>"</c>, matching SQL Server. Other JSON Pointer-style
-/// escapes aren't modeled — EF Core 10 doesn't depend on them.
+/// A quoted property name is a JSON string literal, escapes and all; a
+/// doubled <c>""</c> closes the name and leaves a stray quote. An unquoted
+/// one is ASCII letters, digits and <c>_</c>, starting with a letter or
+/// <c>_</c>, and the <c>append</c> / <c>lax</c> / <c>strict</c> keywords
+/// are lower case only (probed 2026-10-02 against SQL Server 2025).
+/// </para>
+/// <para>
+/// Names compare in the form <see cref="NameForm"/> describes, on the path
+/// and on the document alike.
 /// </para>
 /// </remarks>
 internal readonly struct JsonPath
@@ -62,6 +70,12 @@ internal readonly struct JsonPath
 
     /// <summary>Msg 13607's State for a quoted property name the path never closed.</summary>
     private const byte StateInQuotedName = 20;
+
+    /// <summary>Msg 13607's State for an escape inside a quoted property name that JSON doesn't define.</summary>
+    private const byte StateInEscape = 17;
+
+    /// <summary>The most steps a path may take; one more is Msg 13606 State 4 (probed 2026-10-02 against SQL Server 2025).</summary>
+    private const int MaxSegments = 128;
 
     /// <summary>
     /// How many digits an index reads before real stops taking them, which
@@ -176,6 +190,11 @@ internal readonly struct JsonPath
             SkipWhitespace(text, ref i);
         }
 
+        // `append` behind the mode keyword is a known word out of place.
+        var misplaced = i;
+        if (TryKeyword(text, ref misplaced, "append"))
+            throw SimulatedSqlException.JsonInvalidPath(text[i], i, StateAtEndOfPath);
+
         if (i >= text.Length || text[i] != '$')
             throw Malformed(text, i, StateAtSegmentStart);
         i++;
@@ -209,10 +228,10 @@ internal readonly struct JsonPath
                 {
                     // A name starts with a letter or an underscore; a digit
                     // there is one of the characters that reports state 14.
-                    if (i >= text.Length || !(char.IsLetter(text[i]) || text[i] == '_'))
+                    if (i >= text.Length || !(char.IsAsciiLetter(text[i]) || text[i] == '_'))
                         throw Malformed(text, i, StateAtSegmentStart);
                     var start = i;
-                    while (i < text.Length && (char.IsLetterOrDigit(text[i]) || text[i] == '_'))
+                    while (i < text.Length && (char.IsAsciiLetterOrDigit(text[i]) || text[i] == '_'))
                         i++;
                     segments.Add(Segment.ForProperty(text[start..i]));
                     segmentState = StateAtSegmentStart;
@@ -229,6 +248,10 @@ internal readonly struct JsonPath
                 throw Malformed(text, i, segmentState);
             }
 
+            // A path of more than 128 steps is refused as the step that
+            // passes the limit is read, whatever follows it.
+            if (segments.Count > MaxSegments)
+                throw SimulatedSqlException.JsonTooDeep(4);
             SkipWhitespace(text, ref i);
         }
 
@@ -244,7 +267,7 @@ internal readonly struct JsonPath
     /// </summary>
     private static bool TryKeyword(string text, ref int i, string keyword)
     {
-        if (i + keyword.Length > text.Length || !text.AsSpan(i, keyword.Length).Equals(keyword, StringComparison.OrdinalIgnoreCase))
+        if (i + keyword.Length > text.Length || !text.AsSpan(i, keyword.Length).SequenceEqual(keyword))
             return false;
         var after = i + keyword.Length;
         if (after < text.Length && (char.IsLetterOrDigit(text[after]) || text[after] == '_'))
@@ -254,9 +277,12 @@ internal readonly struct JsonPath
     }
 
     /// <summary>
-    /// Reads a <c>"…"</c> property name from the opening quote, resolving the
-    /// doubled <c>""</c> escape. Running off the end inside one is the single
-    /// malformed-path case with a state of its own.
+    /// Reads a <c>"…"</c> property name from the opening quote as a JSON
+    /// string literal, returning it in <see cref="NameForm"/>. An escape
+    /// JSON doesn't define is State 17 at the character behind the
+    /// backslash, and a <c>\u</c> short of four hex digits State 17 at the
+    /// fourth digit's position; running off the end inside the name is the
+    /// one malformed-path case with a state of its own.
     /// </summary>
     private static string ReadQuotedName(string text, ref int i)
     {
@@ -264,21 +290,70 @@ internal readonly struct JsonPath
         var sb = new StringBuilder();
         while (i < text.Length)
         {
-            if (text[i] == '"')
+            var c = text[i];
+            if (c == '"')
             {
-                if (i + 1 < text.Length && text[i + 1] == '"')
-                {
-                    _ = sb.Append('"');
-                    i += 2;
-                    continue;
-                }
                 i++;
                 return sb.ToString();
             }
-            _ = sb.Append(text[i]);
+            if (c == '\\' && i + 1 < text.Length)
+            {
+                var escape = text[i + 1];
+                if (escape == 'u')
+                {
+                    var last = i + 5;
+                    if (last >= text.Length)
+                        throw SimulatedSqlException.JsonInvalidPath(EndOfPathCharacter, last, StateInEscape);
+                    var hex = text.AsSpan(i + 2, 4);
+                    if (!int.TryParse(hex, NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var code))
+                        throw SimulatedSqlException.JsonInvalidPath(text[last], last, StateInEscape);
+                    _ = sb.Append((char)code);
+                    i += 6;
+                    continue;
+                }
+                if (escape is not ('"' or '\\' or '/' or 'b' or 'f' or 'n' or 'r' or 't'))
+                    throw SimulatedSqlException.JsonInvalidPath(escape, i + 1, StateInEscape);
+                _ = sb.Append(c).Append(escape);
+                i += 2;
+                continue;
+            }
+            _ = sb.Append(c);
             i++;
         }
         throw SimulatedSqlException.JsonInvalidPath(EndOfPathCharacter, text.Length, StateInQuotedName);
+    }
+
+    /// <summary>
+    /// A property name as SQL Server's JSON reader compares it, path and
+    /// document alike: a <c>\uXXXX</c> escape decoded to its character, and
+    /// every other escape kept as the two characters written. So
+    /// <c>$."a\u0041"</c> finds <c>{"aA":1}</c> and <c>$."a\/b"</c> finds
+    /// <c>{"a\/b":1}</c> but not <c>{"a/b":1}</c> (probed 2026-10-02 against
+    /// SQL Server 2025). <paramref name="raw"/> is the text between a
+    /// document key's quotes, already known to be well-formed.
+    /// </summary>
+    internal static string NameForm(ReadOnlySpan<char> raw)
+    {
+        if (!raw.Contains("\\u", StringComparison.Ordinal))
+            return raw.ToString();
+        var sb = new StringBuilder(raw.Length);
+        for (var i = 0; i < raw.Length; i++)
+        {
+            if (raw[i] == '\\' && i + 1 < raw.Length)
+            {
+                if (raw[i + 1] == 'u' && i + 5 < raw.Length)
+                {
+                    _ = sb.Append((char)int.Parse(raw.Slice(i + 2, 4), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture));
+                    i += 5;
+                    continue;
+                }
+                _ = sb.Append(raw[i]).Append(raw[i + 1]);
+                i++;
+                continue;
+            }
+            _ = sb.Append(raw[i]);
+        }
+        return sb.ToString();
     }
 
     /// <summary>
@@ -385,7 +460,7 @@ internal readonly struct JsonPath
     /// <summary>
     /// Whether the lower-case <paramref name="keyword"/> stands at
     /// <paramref name="i"/> as a whole word. The array accessor's keywords
-    /// match case-sensitively, unlike <c>lax</c> / <c>strict</c>.
+    /// match case-sensitively, as <c>lax</c> / <c>strict</c> do.
     /// </summary>
     private static bool IsLowerKeywordAt(string text, int i, string keyword)
     {
@@ -552,12 +627,51 @@ internal readonly struct JsonPath
     /// </summary>
     private static JsonElement? FirstProperty(JsonElement current, string name)
     {
+        // A decoded document name can only differ from its NameForm by a
+        // short escape, which always decodes to one of these characters; a
+        // name holding none of them compares decoded.
+        if (name.AsSpan().IndexOfAny(ShortEscapeTargets) < 0)
+        {
+            foreach (var property in current.EnumerateObject())
+            {
+                if (string.Equals(property.Name, name, StringComparison.Ordinal))
+                    return property.Value;
+            }
+            return null;
+        }
+
+        var index = RawPropertyIndex(current, name);
+        if (index < 0)
+            return null;
         foreach (var property in current.EnumerateObject())
         {
-            if (string.Equals(property.Name, name, StringComparison.Ordinal))
+            if (index-- == 0)
                 return property.Value;
         }
         return null;
+    }
+
+    /// <summary>What a JSON short escape decodes to, the backslash included.</summary>
+    private static readonly SearchValues<char> ShortEscapeTargets = SearchValues.Create("\"\\/\b\f\n\r\t");
+
+    /// <summary>
+    /// The position among <paramref name="current"/>'s members of the first
+    /// whose key, read raw, has <paramref name="name"/> as its
+    /// <see cref="NameForm"/>; -1 when none does.
+    /// </summary>
+    private static int RawPropertyIndex(JsonElement current, string name)
+    {
+        var reader = new Utf8JsonReader(Encoding.UTF8.GetBytes(current.GetRawText()));
+        _ = reader.Read();
+        var index = 0;
+        while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
+        {
+            if (NameForm(Encoding.UTF8.GetString(reader.ValueSpan)) == name)
+                return index;
+            index++;
+            reader.Skip();
+        }
+        return -1;
     }
 
     /// <summary>

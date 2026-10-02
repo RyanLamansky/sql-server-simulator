@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -304,4 +305,100 @@ public sealed class OpenJsonTests
         using var reader = new Simulation().ExecuteReader(query.Replace("strict", "lax", StringComparison.Ordinal));
         IsFalse(reader.Read());
     }
+
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    [TestMethod]
+    public void DefaultSchema_KeyPast4000Characters_IsCut()
+        => AreEqual(4000, ExecuteScalar("select len([key]) from openjson('{\"' + replicate('k', 4001) + '\":1}')"));
+
+    [TestMethod]
+    [DataRow("select * from openjson('{\"a\":[1]}', null)")]
+    [DataRow("declare @p nvarchar(20); select * from openjson('{\"a\":[1]}', @p)")]
+    public void NullDocumentPath_IsMsg8116State9(string sql)
+    {
+        var error = new Simulation().AssertSqlError(sql, 8116);
+        AreEqual("Argument data type NULL is invalid for argument 2 of OPENJSON function.", error.Errors[0].Message);
+        AreEqual((byte)9, error.Errors[0].State);
+    }
+
+    [TestMethod]
+    public void NonStringDocument_IsReadAsTheNVarcharItConvertsTo()
+    {
+        var sim = new Simulation();
+        AreEqual("JSON text is not properly formatted. Unexpected character '1' is found at position 0.", sim.AssertSqlError("select * from openjson(1)", 13609).Errors[0].Message);
+        AreEqual("2", sim.ExecuteScalar("select [value] from openjson(cast(N'[2]' as varbinary(20)))"));
+    }
+
+    [TestMethod]
+    [DataRow("[{\"v\":true}]", "v nvarchar(10)", "true")]
+    [DataRow("[{\"v\":\"abcdef\"}]", "v nvarchar(3)", "abc")]
+    [DataRow("[{\"v\":\"abcdef\"}]", "v varchar(3) 'strict $.v'", "abc")]
+    [DataRow("[{\"v\":\"abcdef\"}]", "v nvarchar", "a")]
+    [DataRow("[{\"v\":12345}]", "v varchar(3)", "123")]
+    [DataRow("[{\"v\":\"ab\"}]", "v char(4)", "ab  ")]
+    public void WithColumn_CharacterTarget_TakesTheTextCutToLength(string document, string column, string expected)
+        => AreEqual(expected, ExecuteScalar($"select v from openjson('{document}') with ({column})"));
+
+    [TestMethod]
+    public void WithColumn_TrueIntoInt_IsAConversionFailureNamingTheWord()
+        => new Simulation().AssertSqlError("select * from openjson('[{\"v\":true}]') with (v int)", 245, "Conversion failed when converting the nvarchar value 'true' to data type int.");
+
+    [TestMethod]
+    public void WithColumn_Binary_ReadsBase64()
+    {
+        var sim = new Simulation();
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, (byte[])sim.ExecuteScalar("select v from openjson('[{\"v\":\"AQID\"}]') with (v varbinary(10))")!);
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3, 0, 0 }, (byte[])sim.ExecuteScalar("select v from openjson('[{\"v\":\"AQID\"}]') with (v binary(5))")!);
+        _ = sim.AssertSqlError("select * from openjson('[{\"v\":\"x\"}]') with (v varbinary(10))", 13612);
+        AreEqual((byte)1, sim.AssertSqlError("select * from openjson('[{\"v\":\"AQIDBA==\"}]') with (v varbinary(2))", 13613).Errors[0].State);
+        AreEqual((byte)2, sim.AssertSqlError("select * from openjson('[{\"v\":\"x\"}]') with (v rowversion)", 13613).Errors[0].State);
+    }
+
+    [TestMethod]
+    [DataRow("text", 13614)]
+    [DataRow("ntext", 13614)]
+    [DataRow("image", 13614)]
+    [DataRow("sql_variant", 13614)]
+    [DataRow("hierarchyid", 13616)]
+    [DataRow("geometry", 13616)]
+    public void WithColumn_TypesTheReaderCantProduce_AreRefused(string type, int number)
+        => new Simulation().AssertSqlError($"select * from openjson('[{{\"v\":1}}]') with (v {type})", number);
+
+    [TestMethod]
+    public void WithColumn_ScalarOverAContainer_IsNullOrStrictMsg13624()
+    {
+        var sim = new Simulation();
+        _ = IsInstanceOfType<DBNull>(sim.ExecuteScalar("select v from openjson('[{\"v\":[1,2]}]') with (v nvarchar(20))"));
+        _ = IsInstanceOfType<DBNull>(sim.ExecuteScalar("select v from openjson('[{\"v\":{\"a\":1}}]') with (v int)"));
+        _ = sim.AssertSqlError("select * from openjson('[{\"v\":[1]}]') with (v int 'strict $.v')", 13624);
+    }
+
+    [TestMethod]
+    public void WithColumn_DefaultPath_QuotesTheColumnName()
+        => AreEqual("5|6", ExecuteScalar("select concat([a b], '|', [c\"d]) from openjson('[{\"a b\":5,\"c\\\"d\":6}]') with ([a b] int, [c\"d] int)"));
+
+    [TestMethod]
+    public void WithColumn_Collation_IsTheClausesOrTheDocuments()
+    {
+        var sim = new Simulation();
+        AreEqual(0, sim.ExecuteScalar("select count(*) from openjson('[{\"v\":\"a\"}]') with (v nvarchar(10) collate Latin1_General_CS_AS) where v = 'A'"));
+        AreEqual("Latin1_General_CS_AS", sim.ExecuteScalar("select sql_variant_property(v, 'Collation') from openjson('[{\"v\":\"x\"}]' collate Latin1_General_CS_AS) with (v nvarchar(10))"));
+        AreEqual("Latin1_General_CS_AS", sim.ExecuteScalar("select sql_variant_property(cast([value] as nvarchar(10)), 'Collation') from openjson('[1]' collate Latin1_General_CS_AS)"));
+        _ = sim.AssertSqlError("select * from openjson('[{\"v\":1}]') with (v int collate Latin1_General_BIN)", 447);
+    }
+
+    [TestMethod]
+    public void WithColumn_DecimalConversionFailure_NamesTheTypeAsWritten()
+    {
+        var sim = new Simulation();
+        sim.AssertSqlError("select * from openjson('[{\"v\":1e3}]') with (v decimal(10,2))", 8114, "Error converting data type nvarchar to decimal.");
+        sim.AssertSqlError("select * from openjson('[{\"v\":\"x\"}]') with (v numeric(5,1))", 8114, "Error converting data type nvarchar to numeric.");
+    }
+
+    [TestMethod]
+    public void View_KeyColumn_ReportsItsBinaryCollation()
+        => AreEqual("Latin1_General_BIN2", new Simulation().ExecuteBatchesScalar(
+            "create view v as select [key], [value] from openjson('[1,2]')",
+            "select collation_name from sys.columns where object_id = object_id('v') and name = 'key'"));
 }

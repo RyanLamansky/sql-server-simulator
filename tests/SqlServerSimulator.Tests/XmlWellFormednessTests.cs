@@ -157,4 +157,77 @@ public sealed class XmlWellFormednessTests
         AreEqual(1, reader.GetInt32(1));
         AreEqual(9400, reader.GetInt32(2));
     }
+
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    [TestMethod]
+    public void Nesting_PastOneHundredTwentyEightLevels_IsMsg6335()
+    {
+        var sim = new Simulation();
+        static string Nested(int depth, string inner) => $"replicate(cast(N'<a>' as nvarchar(max)), {depth}) + N'{inner}' + replicate(cast(N'</a>' as nvarchar(max)), {depth})";
+        AreEqual(397L, Convert.ToInt64(sim.ExecuteScalar($"select datalength(cast({Nested(128, "")} as xml))")));
+        AreEqual((byte)102, sim.AssertSqlError($"select cast({Nested(128, "<b/>")} as xml)", 6335).Errors[0].State);
+        AreEqual((byte)101, sim.AssertSqlError($"select cast({Nested(128, "text")} as xml)", 6335).Errors[0].State);
+        var error = sim.AssertSqlError($"select cast({Nested(127, "<b x=\"1\"/>")} as xml)", 6335);
+        AreEqual("XML datatype instance has too many levels of nested nodes. Maximum allowed depth is 128 levels.", error.Errors[0].Message);
+        AreEqual((byte)101, error.Errors[0].State);
+    }
+
+    [TestMethod]
+    [DataRow(4)]
+    [DataRow(8)]
+    [DataRow(-1)]
+    public void Convert_StyleOtherThanZeroToThree_IsMsg6358(int style)
+        => new Simulation().AssertSqlError($"select convert(xml, '<a/>', {style})", 6358, $"{style} is not a valid style number when converting to XML.");
+
+    [TestMethod]
+    public void Convert_StyleRefusal_WaitsForANonNullValue_AndTryConvertAbsorbsIt()
+    {
+        var sim = new Simulation();
+        _ = IsInstanceOfType<DBNull>(sim.ExecuteScalar("select convert(xml, null, 5)"));
+        _ = IsInstanceOfType<DBNull>(sim.ExecuteScalar("select try_convert(xml, '<a/>', 4)"));
+    }
+
+    [TestMethod]
+    [DataRow("nvarchar(11)")]
+    [DataRow("varchar(5)")]
+    [DataRow("char(5)")]
+    [DataRow("nchar(5)")]
+    [DataRow("varbinary(3)")]
+    public void ToSizedTarget_TooShort_IsMsg6354(string type)
+    {
+        var error = new Simulation().AssertSqlError($"select cast(cast('<a>hello</a>' as xml) as {type})", 6354);
+        AreEqual("Target string size is too small to represent the XML instance", error.Errors[0].Message);
+        AreEqual((byte)10, error.Errors[0].State);
+    }
+
+    [TestMethod]
+    public void ToSizedTarget_ThatFits_Converts()
+    {
+        var sim = new Simulation();
+        AreEqual("<a>hello</a>", sim.ExecuteScalar("select cast(cast('<a>hello</a>' as xml) as nvarchar(12))"));
+        AreEqual("<a>A</a>", sim.ExecuteScalar("select cast(cast(N'<a>Ā</a>' as xml) as varchar(20))"));
+        _ = IsInstanceOfType<DBNull>(sim.ExecuteScalar("select try_cast(cast('<a>hello</a>' as xml) as varchar(5))"));
+    }
+
+    [TestMethod]
+    public void ToAnsiTarget_CharacterWithNoBestFit_IsMsg6355()
+        => new Simulation().AssertSqlError("select convert(varchar(20), cast(N'<a>日</a>' as xml), 1)", 6355, "Conversion of one or more characters from XML to target collation impossible");
+
+    [TestMethod]
+    public void ToBinary_IsTheByteOrderMarkAndUtf16()
+    {
+        var sim = new Simulation();
+        CollectionAssert.AreEqual(new byte[] { 0xFF, 0xFE, 0x3C, 0, 0x61, 0, 0x2F, 0, 0x3E, 0 }, (byte[])sim.ExecuteScalar("select cast(cast('<a/>' as xml) as varbinary(max))")!);
+        CollectionAssert.AreEqual(new byte[] { 0xFF, 0xFE, 0x3C, 0, 0x61, 0, 0x2F, 0, 0x3E, 0, 0, 0 }, (byte[])sim.ExecuteScalar("select cast(cast('<a/>' as xml) as binary(12))")!);
+    }
+
+    [TestMethod]
+    public void SetFromAValueOfAnUnassignableType_StopsTheBatchBeforeItRuns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table r (n int)");
+        _ = sim.AssertSqlError("insert r values (1); declare @x nvarchar(max); set @x = (select cast('<a/>' as xml)); insert r values (2)", 257);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from r"));
+    }
 }
