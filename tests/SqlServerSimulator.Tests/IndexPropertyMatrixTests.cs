@@ -71,4 +71,19 @@ public sealed class IndexPropertyMatrixTests
     [TestMethod]
     public void SysIndexColumns_ListsTheSpatialIndexColumn()
         => Assert.AreEqual(6, Objects.ExecuteScalar("select column_id from sys.index_columns where object_id = object_id('t') and index_id = 384000"));
+
+    [TestMethod]
+    public void IndexDepth_IsZeroOverAnEmptyTable_OneOverAOnePageOne_AndNullOnAPartitionScheme()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int not null primary key, b int); create index ix on t (b)",
+            "create partition function pf (int) as range right for values (10)",
+            "create partition scheme ps as partition pf all to ([PRIMARY])",
+            "create table p (id int not null) on ps (id); create clustered index cix on p (id) on ps (id)");
+        Assert.AreEqual("0", sim.ExecuteScalar("select cast(indexproperty(object_id('t'), 'ix', 'IndexDepth') as varchar)"));
+        _ = sim.ExecuteNonQuery("insert t values (1, 1), (2, 2)");
+        Assert.AreEqual("1", sim.ExecuteScalar("select cast(indexproperty(object_id('t'), 'ix', 'IndexDepth') as varchar)"));
+        Assert.AreEqual(DBNull.Value, sim.ExecuteScalar("select indexproperty(object_id('p'), 'cix', 'IndexDepth')"));
+    }
 }

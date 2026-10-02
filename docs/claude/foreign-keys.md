@@ -54,8 +54,9 @@ Self-referencing FKs are supported (the parent table is already in its schema di
 
 1. **Referenced table must exist** — `MultiPartName` lookup against the live schema dict; missing → Msg 1767 naming the constraint and the table as written, then Msg 1750 (probed 2026-09-25).
 2. **Referenced columns must exist** — an unknown one → Msg 1770 naming the column and the referenced table, then Msg 1750.
-3. **Referenced column set must form a PRIMARY KEY or UNIQUE** — multiset compare against `referencedTable.KeyConstraints`.
+3. **Referenced column set must form a PRIMARY KEY or UNIQUE** — matched in declared order against `referencedTable.KeyConstraints`, then against its unique indexes: an enabled, unfiltered one stands in for a constraint, `DESC` keys and `INCLUDE` columns allowed (probed 2026-10-02 against SQL Server 2025).
    Mismatch → Msg 1776; an omitted list over a table without a primary key → Msg 1773.
+   A key resting on a unique index pins it: `DROP INDEX` on it is Msg 3723 at state 6 (state 4 names a constraint's own index), and `ALTER INDEX … DISABLE` disables and distrusts every key resting on it with a Msg 1992 warning apiece, which a later rebuild doesn't undo.
 4. **Each column pair must agree** — another type → Msg 1778 (`numeric` and `decimal` are two types, an alias type is its base), the same type at another length, precision or scale → Msg 1753, another collation → Msg 1757, each then Msg 1750.
 5. **Cascade-cycle / multiple-path check** — see below. → Msg 1785, then Msg 1750.
 6. **The referencing columns can take the action** — `SET NULL` over a NOT NULL one is Msg 1761 then Msg 1750 (probed 2026-10-01); `SET DEFAULT`'s Msg 1762 is below.

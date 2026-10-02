@@ -50,14 +50,15 @@ internal sealed class NestLevelExpression : Expression
 
 /// <summary>
 /// Backs <c>@@DBTS</c>: returns the current database's last-assigned
-/// rowversion as <c>binary(8)</c>. The 8-byte representation matches the
+/// rowversion as <c>varbinary(8)</c>, the type real describes it with (probed
+/// 2026-10-02 against SQL Server 2025). The 8-byte representation matches the
 /// rowversion encoding used by <see cref="RowVersionSqlType"/> — big-endian
 /// 64-bit. Reads <see cref="Database.LastRowVersion"/>, so a read doesn't
 /// advance the counter.
 /// </summary>
 internal sealed class DbTsExpression : Expression
 {
-    private static readonly SqlType Binary8 = SqlType.GetBinary(8);
+    private static readonly VarbinarySqlType Varbinary8 = VarbinarySqlType.Get(8);
 
     public override SqlValue Run(RuntimeContext runtime)
     {
@@ -68,10 +69,10 @@ internal sealed class DbTsExpression : Expression
             bytes[i] = (byte)(current & 0xff);
             current >>= 8;
         }
-        return SqlValue.FromBinary(Binary8, bytes);
+        return SqlValue.FromVarbinary(Varbinary8, bytes);
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => Binary8;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => Varbinary8;
 
     internal override bool ResultIsNullable(NullabilityContext context) => false;
 

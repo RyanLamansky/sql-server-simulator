@@ -295,7 +295,7 @@ What it left open:
 - **A DML `TOP` refusal over a table the batch creates** — a negative count's Msg 127, a percent over 100's Msg 1031, a fractional count's Msg 1060 — is raised as the batch compiles here, where real defers the statement and runs the ones before it; the SET list's Msg 157 / 4108 defer already.
 - **Sparse column sets** (`xml COLUMN_SET FOR ALL_SPARSE_COLUMNS`) raise `NotSupportedException`; real projects the set in `SELECT *` and writes the sparse columns through it.
 - **`SET ANSI_PADDING OFF`** at CREATE is discarded: real records `is_ansi_padded = 0` on every column and stores `varchar` without trailing spaces, `varbinary` without trailing zeros and a nullable `char` as `varchar`.
-- **`sys.identity_columns`** lists only user tables' identity columns here, where real lists eight system tables' too; `sys.partitions.data_compression_desc` reads `NONE` for a table created `WITH (DATA_COMPRESSION = PAGE)`.
+- **`sys.identity_columns`** lists only user tables' identity columns here, where real lists eight system tables' too; `sys.partitions.data_compression_desc` reads `NONE` for a table created `WITH (DATA_COMPRESSION = PAGE)`, and for the history table `SYSTEM_VERSIONING = ON` creates, which real makes PAGE-compressed (probed 2026-10-02).
 - **`tempdb.sys.objects`** lists no constraint of a `#temp` table, where real lists them under their padded names; a variable in a CREATE TABLE `DEFAULT` is Msg 112 on real and accepted here.
 - **Msg 1708**, the warning a CREATE TABLE whose largest row can pass 8060 bytes sends, isn't sent; its rule isn't settled — two `varchar(8000)` columns draw none while `char(8000), char(50), varchar(10)` does.
 
@@ -310,6 +310,15 @@ What it left open:
 - **`@@PROCID` in an ad hoc batch** reads a nonzero id that changes per batch on real, and 0 here.
 - **`sp_executesql` with a table-type parameter** (`N'@p tt READONLY'`, a table variable bound to it) runs on real, and is Msg 2715 here; without `READONLY` real raises Msg 352.
 - **An `sp_executesql` declaration missing its `@`** (`N'a int'`) leaves the statement's `@a` undeclared on real (Msg 137) and binds it here.
+
+**Metadata sweep** — a sixth corpus of 2,665 small cases over the `sys.*` and `INFORMATION_SCHEMA` views, the property and name scalars, the `sp_help` family and the ODBC catalog procedures, the definition text of defaults, checks and computed columns, and EF Core 10's 14 scaffolding queries, over 46 schema shapes and compared by value, result-column type and the TDS nullability flag (probed 2026-10-02 against SQL Server 2025).
+Of the cases still differing once its fixes shipped, the environmental ones are `sp_help`'s `Created_datetime`, the text of `@@VERSION` and `@@SERVERNAME`, `SERVERPROPERTY('IsAdvancedAnalyticsInstalled')`, a table type's backing-table hex and one corpus query whose ordering tied; `IndexDepth` past one page is an estimate ([`catalog-views.md`](catalog-views.md#metadata-scalars)), and the history table's compression is the `DATA_COMPRESSION` entry above.
+What it left open:
+
+- **`sys.column_store_segments`** is Msg 208 here; real lists a columnstore index's segments, and the view is empty over a database without one.
+- **`sp_statistics`' `PAGES`** over a partitioned table counts a page per non-empty partition on real (3 for three) and the heap's single page here — the storage-accounting residue under the SMO sweep.
+- **A filtered index whose predicate is a bare parenthesized column** (`WHERE (a)`) is Msg 102 near the statement's end on real and Msg 4145 here.
+- **`DATABASEPROPERTYEX(…, 'LastGoodCheckDbTime')`** reads the epoch here whatever `DBCC CHECKDB` has run, where real records the last clean check.
 
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 

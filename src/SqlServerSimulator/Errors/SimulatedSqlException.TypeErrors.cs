@@ -1040,15 +1040,18 @@ partial class SimulatedSqlException
     /// and the 1-based ordinal of the slot being settled —
     /// <c>SELECT</c> / <c>ORDER BY</c> / <c>GROUP BY</c>, each spelled
     /// "&lt;clause&gt; statement". Note the wording carries no leading
-    /// <i>the</i> where Msg 468's does.
+    /// <i>the</i> where Msg 468's does. A computed column's expression in
+    /// <c>CREATE TABLE</c> raises it at state 16, naming the column's position
+    /// (probed 2026-10-02 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException UnresolvedCollationInOutputColumn(
         string rightCollation,
         string leftCollation,
         string operatorName,
         string clause,
-        int ordinal) =>
-        new($"Cannot resolve collation conflict between \"{rightCollation}\" and \"{leftCollation}\" in {operatorName} operator occurring in {clause} statement column {ordinal}.", 451, 16, 1);
+        int ordinal,
+        byte state = 1) =>
+        new($"Cannot resolve collation conflict between \"{rightCollation}\" and \"{leftCollation}\" in {operatorName} operator occurring in {clause} statement column {ordinal}.", 451, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 456: an <em>already unresolved</em> collation

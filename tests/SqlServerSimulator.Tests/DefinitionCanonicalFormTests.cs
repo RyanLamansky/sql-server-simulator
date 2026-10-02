@@ -143,4 +143,34 @@ public sealed class DefinitionCanonicalFormTests
             $"create table t ({Columns}, k as {expression})");
         return simulation.ExecuteScalar("select definition from sys.computed_columns where name = 'k'");
     }
+
+    [TestMethod]
+    [DataRow("int", "-0", "((0))")]
+    [DataRow("decimal(5,2)", "-0.00", "((0.00))")]
+    [DataRow("money", "-$0", "(($0.0000))")]
+    [DataRow("float", "-0e0", "((-0.0000000000000000e+000))")]
+    [DataRow("float", "1.5E-2", "((1.4999999999999999e-002))")]
+    [DataRow("float", "0.1e0", "((1.0000000000000001e-001))")]
+    [DataRow("float", "1e308", "((1.0000000000000000e+308))")]
+    public void DefaultDefinition_NumericLiteralForms(string type, string literal, string expected)
+    {
+        // A zero takes no sign but a float's, and a float literal renders the
+        // stored double to seventeen significant digits (probed 2026-10-02
+        // against SQL Server 2025).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t (c {type} default {literal})");
+        Assert.AreEqual(expected, sim.ExecuteScalar("select definition from sys.default_constraints"));
+    }
+
+    [TestMethod]
+    [DataRow("next value for sq", "(NEXT VALUE FOR [sq])")]
+    [DataRow("((next value for [dbo].sq))", "(NEXT VALUE FOR [dbo].[sq])")]
+    [DataRow("next value for s.[q x]", "(NEXT VALUE FOR [s].[q x])")]
+    [DataRow("next value for sq + 1", "(NEXT VALUE FOR [sq]+(1))")]
+    public void DefaultDefinition_NextValueFor_BracketsTheNameAsWritten(string expression, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create schema s", "create sequence dbo.sq; create sequence s.[q x]", $"create table t (c int default {expression})");
+        Assert.AreEqual(expected, sim.ExecuteScalar("select definition from sys.default_constraints"));
+    }
 }

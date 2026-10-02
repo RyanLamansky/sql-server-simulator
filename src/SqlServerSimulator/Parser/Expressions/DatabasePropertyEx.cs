@@ -67,6 +67,10 @@ internal sealed class DatabasePropertyEx : Expression
         return SqlType.SqlVariant;
     }
 
+    // A string property's base type is nvarchar(128), whatever the value's
+    // length (probed 2026-10-02 against SQL Server 2025: MaxLength 256).
+    private static readonly NVarcharSqlType Name128 = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.CoercibleDefault);
+
     private static SqlValue Produce(string property, Database db)
     {
         // Longer than any recognized property name; also bounds the stackalloc
@@ -80,7 +84,7 @@ internal sealed class DatabasePropertyEx : Expression
         var hasMetrics = Collation.TryGetMetrics(db.CollationName, out var metrics);
         return upper switch
         {
-            "COLLATION" => SqlValue.FromNVarchar(db.CollationName),
+            "COLLATION" => SqlValue.FromNVarchar(Name128, db.CollationName),
             "COMPARISONSTYLE" => hasMetrics ? SqlValue.FromInt32(metrics.ComparisonStyle) : SqlValue.Null(SqlType.SqlVariant),
             "ISANSINULLDEFAULT" => Switch(DatabaseSwitches.AnsiNullDefault),
             "ISANSINULLSENABLED" => Switch(DatabaseSwitches.AnsiNulls),
@@ -110,14 +114,12 @@ internal sealed class DatabasePropertyEx : Expression
             "ISRECURSIVETRIGGERSENABLED" => SqlValue.FromInt32(db.RecursiveTriggers ? 1 : 0),
             "ISTORNPAGEDETECTIONENABLED" => SqlValue.FromInt32(db.PageVerify == 1 ? 1 : 0),
             "ISXTPSUPPORTED" => SqlValue.FromByte(1),
-            // DBCC CHECKDB isn't modeled, so the last-good-checkdb time is a
-            // NULL sql_variant. SMO's CAST(ISNULL(..., 0) AS datetime) resolves
-            // to 1900-01-01: ISNULL over the NULL variant fixes to sql_variant
-            // wrapping the int 0, which CASTs to the datetime epoch (matching
-            // real, probe-confirmed 2026-07-19).
-            "LASTGOODCHECKDBTIME" => SqlValue.Null(SqlType.DateTime),
+            // A database no CHECKDB has passed over reads the datetime epoch
+            // (probed 2026-10-02 against SQL Server 2025), and the simulator
+            // records no CHECKDB run.
+            "LASTGOODCHECKDBTIME" => SqlValue.FromDateTime(new DateTime(1900, 1, 1)),
             "LCID" => SqlValue.FromInt32(hasMetrics ? metrics.Lcid : 1033),
-            "RECOVERY" => SqlValue.FromNVarchar(db.RecoveryModel switch
+            "RECOVERY" => SqlValue.FromNVarchar(Name128, db.RecoveryModel switch
             {
                 RecoveryModel.Simple => "SIMPLE",
                 RecoveryModel.BulkLogged => "BULK_LOGGED",
@@ -125,12 +127,12 @@ internal sealed class DatabasePropertyEx : Expression
             }),
             "SNAPSHOTISOLATIONSTATE" => SqlValue.FromInt32(db.AllowSnapshotIsolation ? 1 : 0),
             "SQLSORTORDER" => SqlValue.FromByte(SortIdFor(db.CollationName)),
-            "STATUS" => SqlValue.FromNVarchar("ONLINE"),
+            "STATUS" => SqlValue.FromNVarchar(Name128, "ONLINE"),
             // The database's access mode, moved by ALTER DATABASE … SET
             // { READ_ONLY | READ_WRITE }. SMO's database-properties preamble
             // reads it as [IsUpdateable].
-            "UPDATEABILITY" => SqlValue.FromNVarchar(db.IsReadOnly ? "READ_ONLY" : "READ_WRITE"),
-            "USERACCESS" => SqlValue.FromNVarchar(db.UserAccess switch
+            "UPDATEABILITY" => SqlValue.FromNVarchar(Name128, db.IsReadOnly ? "READ_ONLY" : "READ_WRITE"),
+            "USERACCESS" => SqlValue.FromNVarchar(Name128, db.UserAccess switch
             {
                 1 => "SINGLE_USER",
                 2 => "RESTRICTED_USER",

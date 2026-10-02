@@ -72,8 +72,15 @@ public sealed class SchemaNameTests
     }
 
     [TestMethod]
-    public void ObjectName_TableType_ResolvableViaTypeTableObjectId()
-        => AreEqual("MyType", new Simulation().ExecuteScalar("create type MyType as table (id int); select object_name(type_table_object_id) from sys.table_types where name = 'MyType'"));
+    public void ObjectName_TableType_NamesTheBackingTypeTable()
+    {
+        // The id is the backing type table's, which answers under the name
+        // sys.objects lists it by (probed 2026-10-02 against SQL Server 2025).
+        var simulation = new Simulation();
+        var name = (string)simulation.ExecuteScalar("create type MyType as table (id int); select object_name(type_table_object_id) from sys.table_types where name = 'MyType'")!;
+        IsTrue(name.StartsWith("TT_MyType_", StringComparison.Ordinal), name);
+        AreEqual(name, simulation.ExecuteScalar("select o.name from sys.table_types t join sys.objects o on o.object_id = t.type_table_object_id"));
+    }
 
     [TestMethod]
     public void ObjectSchemaName_DefaultSchemaTable_ReturnsDbo()

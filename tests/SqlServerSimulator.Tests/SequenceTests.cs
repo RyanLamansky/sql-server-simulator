@@ -652,4 +652,20 @@ public sealed class SequenceTests
             """);
         _ = sim.ExecuteNonQuery(sql);
     }
+
+    [TestMethod]
+    public void NextValueFor_InADefault_RefusesADatabaseQualifiedName()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create sequence dbo.sq");
+        sim.AssertSqlError("create table t (c int default next value for simulated.dbo.sq)", 11730, "Database name cannot be specified for the sequence object in default constraints.");
+    }
+
+    [TestMethod]
+    public void NextValueFor_IsDescribedNotNull()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create sequence dbo.s1; create sequence dbo.s2 as smallint");
+        CollectionAssert.AreEqual(new[] { false, false }, sim.ColumnNullability("select next value for dbo.s1, next value for dbo.s2"));
+    }
 }

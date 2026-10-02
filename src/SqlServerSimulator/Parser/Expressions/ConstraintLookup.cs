@@ -25,15 +25,18 @@ internal static class ConstraintLookup
     /// trimmed <c>sys.objects</c> type code (<c>C</c> / <c>D</c> / <c>PK</c> /
     /// <c>UQ</c> / <c>F</c>), plus the table it hangs off and that table's
     /// schema — the table is the metadata-visibility governor, since a
-    /// constraint has no permissions of its own.
+    /// constraint has no permissions of its own. <see cref="Definition"/> is the
+    /// stored expression text a CHECK or DEFAULT carries, and null for the key
+    /// and reference families, which have none.
     /// </summary>
-    internal readonly struct ConstraintReference(int objectId, string name, string typeCode, HeapTable table, Schema schema)
+    internal readonly struct ConstraintReference(int objectId, string name, string typeCode, HeapTable table, Schema schema, string? definition = null)
     {
         public readonly int ObjectId = objectId;
         public readonly string Name = name;
         public readonly string TypeCode = typeCode;
         public readonly HeapTable Table = table;
         public readonly Schema Schema = schema;
+        public readonly string? Definition = definition;
     }
 
     /// <summary>
@@ -47,9 +50,9 @@ internal static class ConstraintLookup
         if (!batch.TryResolveSchema(name, out var schema))
             return false;
         var collation = schema.Database.Collation;
-        foreach (var (_, table) in schema.HeapTables)
+        foreach (var (table, owner) in ConstraintOwners(schema, includeTableTypes: false))
         {
-            foreach (var reference in Constraints(table, schema))
+            foreach (var reference in Constraints(table, owner))
             {
                 if (collation.Equals(reference.Name, name.Leaf))
                 {
@@ -70,9 +73,9 @@ internal static class ConstraintLookup
     {
         foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var (_, table) in schema.HeapTables)
+            foreach (var (table, owner) in ConstraintOwners(schema, includeTableTypes: true))
             {
-                foreach (var reference in Constraints(table, schema))
+                foreach (var reference in Constraints(table, owner))
                 {
                     if (reference.ObjectId == objectId)
                     {
@@ -87,6 +90,31 @@ internal static class ConstraintLookup
     }
 
     /// <summary>
+    /// Every table shape declared in <paramref name="schema"/> whose
+    /// constraints are catalog objects, with the schema those constraints
+    /// live in: the tables, a multi-statement function's return table, and a
+    /// table type's backing table, whose constraints sit in <c>sys</c> — real
+    /// resolves the last two's constraint ids through the object scalars as it
+    /// does a table's (probed 2026-10-02 against SQL Server 2025). A table
+    /// type's constraint names don't resolve through the type's own schema,
+    /// so the by-name walk leaves them out.
+    /// </summary>
+    private static IEnumerable<(HeapTable Table, Schema Owner)> ConstraintOwners(Schema schema, bool includeTableTypes)
+    {
+        foreach (var (_, table) in schema.HeapTables)
+            yield return (table, schema);
+        foreach (var (_, function) in schema.Functions)
+        {
+            if (function is Schemas.MultiStatementTableValuedFunction multiStatement)
+                yield return (multiStatement.CatalogShape(), schema);
+        }
+        if (!includeTableTypes)
+            yield break;
+        foreach (var (_, tableType) in schema.TableTypes)
+            yield return (tableType.CatalogShape, schema.Database.Schemas["sys"]);
+    }
+
+    /// <summary>
     /// Every constraint <paramref name="table"/> owns, in the order
     /// <c>sys.objects</c> emits them.
     /// </summary>
@@ -97,10 +125,10 @@ internal static class ConstraintLookup
         foreach (var column in table.Columns)
         {
             if (column.DefaultConstraint is { } df)
-                yield return new(df.ObjectId, df.Name, "D", table, schema);
+                yield return new(df.ObjectId, df.Name, "D", table, schema, df.Definition);
         }
         foreach (var check in table.CheckConstraints)
-            yield return new(check.ObjectId, check.Name, "C", table, schema);
+            yield return new(check.ObjectId, check.Name, "C", table, schema, check.Definition);
         foreach (var foreignKey in table.OutgoingForeignKeys)
             yield return new(foreignKey.ObjectId, foreignKey.Name, "F", table, schema);
         foreach (var edge in table.EdgeConstraints)

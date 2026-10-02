@@ -56,7 +56,8 @@ internal sealed class ColName : Expression
 
 /// <summary>
 /// SQL <c>COL_LENGTH(table, col)</c>: returns the declared
-/// storage length (in bytes) of the named column. Routes through
+/// storage length (in bytes) of the named column — the
+/// <c>sys.columns.max_length</c> value. Routes through
 /// <see cref="ObjectId"/>-style name resolution (1- or 2-part dotted
 /// form). NULL on either argument or unknown column returns NULL.
 /// Result type is <see cref="SqlType.SmallInt"/>.
@@ -89,47 +90,25 @@ internal sealed class ColLength : Expression
         for (var i = 1; i < parts.Length; i++)
             multiPart = multiPart.WithAddedPart(parts[i]);
         // A catalog view answers too — `COL_LENGTH('sys.objects', 'name')` is
-        // 256 (probe-confirmed 2026-09-23).
-        HeapColumn[] columns;
+        // 256 (probe-confirmed 2026-09-23) — and so does any other object with
+        // columns, a view or a table-valued function (probed 2026-10-02).
+        HeapColumn[]? columns;
         if (runtime.Batch.TryResolveTable(multiPart, out var table))
             columns = table.Columns;
         else if (runtime.Batch.TryResolveCatalogView(multiPart, out var view, out _))
             columns = view.Columns;
+        else if (runtime.Batch.TryResolveSchema(multiPart, out var schema) && schema.TryFindInSharedNamespace(multiPart.Leaf, out var other))
+            columns = ColumnProperty.ColumnsOf(schema.Database, other.ObjectId);
         else
             return SqlValue.Null(SqlType.SmallInt);
-        foreach (var col in columns)
+        foreach (var col in columns ?? [])
         {
+            // The width sys.columns.max_length reports.
             if (BuiltInToken.Comparer.Equals(col.Name, colNameStr))
-                return SqlValue.FromInt16((short)EstimateColumnLength(col));
+                return SqlValue.FromInt16(BuiltInResources.GetSysColumnMetadata(col).MaxLength);
         }
         return SqlValue.Null(SqlType.SmallInt);
     }
-
-    private static int EstimateColumnLength(HeapColumn col) => col.Type switch
-    {
-        // sys.columns.max_length conventions: fixed-length types report their
-        // byte width; variable-length types report the declared max; MAX
-        // types report -1. Mirrors the catalog-view computation.
-        var t when t == SqlType.TinyInt || t == SqlType.Bit => 1,
-        var t when t == SqlType.SmallInt => 2,
-        var t when t == SqlType.Int32 || t == SqlType.Real || t == SqlType.SmallMoney
-                || t == SqlType.SmallDateTime || t == SqlType.Date => 4,
-        var t when t == SqlType.BigInt || t == SqlType.Float || t == SqlType.Money
-                || t == SqlType.DateTime || t == SqlType.RowVersion => 8,
-        var t when t == SqlType.UniqueIdentifier => 16,
-        var t when t == SqlType.Bit || t == SqlType.TinyInt => 1,
-        var t when t == SqlType.SmallInt => 2,
-        SystemNameSqlType => 256,
-        CharSqlType c => c.length,
-        NCharSqlType nc => nc.length * 2,
-        BinarySqlType bn => bn.length,
-        VarcharSqlType vc => vc.length == 0 ? (col.MaxLength ?? 1) : (vc.length == -1 ? -1 : vc.length),
-        NVarcharSqlType nv => nv.length == 0 ? (col.MaxLength ?? 1) * 2 : (nv.length == -1 ? -1 : nv.length * 2),
-        VarbinarySqlType vb => vb.length == 0 ? (col.MaxLength ?? 1) : (vb.length == -1 ? -1 : vb.length),
-        DecimalSqlType d => d.precision <= 9 ? 5 : d.precision <= 19 ? 9 : d.precision <= 28 ? 13 : 17,
-        VectorSqlType vector => vector.ByteLength,
-        _ => -1,
-    };
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {

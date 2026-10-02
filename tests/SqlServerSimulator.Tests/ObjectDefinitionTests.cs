@@ -167,4 +167,18 @@ public sealed class ObjectDefinitionTests
         AreEqual("create procedure dbo.p1 @x int as select @x",
             sim.ExecuteScalar("select routine_definition from information_schema.routines where routine_name = 'p1'"));
     }
+
+    [TestMethod]
+    public void ObjectDefinition_CheckAndDefaultConstraints_ReturnTheirNormalizedText()
+    {
+        // A CHECK or DEFAULT answers with the text sys.check_constraints /
+        // sys.default_constraints project; a key constraint has none (probed
+        // 2026-10-02 against SQL Server 2025).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int constraint ck check (a > 0) constraint df default 5 constraint pk primary key, b int constraint fk references t (a))");
+        Assert.AreEqual("([a]>(0))", sim.ExecuteScalar("select object_definition(object_id('ck'))"));
+        Assert.AreEqual("((5))", sim.ExecuteScalar("select object_definition(object_id('df'))"));
+        Assert.AreEqual(DBNull.Value, sim.ExecuteScalar("select object_definition(object_id('pk'))"));
+        Assert.AreEqual(DBNull.Value, sim.ExecuteScalar("select object_definition(object_id('fk'))"));
+    }
 }

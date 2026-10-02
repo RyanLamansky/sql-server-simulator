@@ -355,6 +355,7 @@ partial class Simulation
         {
             case AlterIndexForm.Disable:
                 constraint.IsDisabled = true;
+                DisableForeignKeysOn(batch, table, constraint.IndexId, constraint.Name);
                 break;
             case AlterIndexForm.Rebuild:
                 if (constraint.IsDisabled)
@@ -385,6 +386,26 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// Takes every FOREIGN KEY resting on index <paramref name="indexId"/> of
+    /// <paramref name="table"/> out of service, as disabling the index does on
+    /// real, with a Msg 1992 warning apiece. The key stays disabled and
+    /// untrusted until re-enabled with <c>CHECK CONSTRAINT</c>, whatever later
+    /// rebuilds the index (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static void DisableForeignKeysOn(BatchContext batch, HeapTable table, int indexId, string indexName)
+    {
+        foreach (var fk in table.IncomingForeignKeys)
+        {
+            if (fk.IsDisabled || BuiltInResources.ResolveForeignKeyIndexId(fk) != indexId)
+                continue;
+            fk.IsDisabled = true;
+            fk.IsNotTrusted = true;
+            if (!batch.IsSkipping)
+                batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.ForeignKeyDisabledWithIndexMessage(batch, fk.Name, fk.ChildTable.Name, table.Name, indexName));
+        }
+    }
+
     private static void ApplyToIndex(
         ParserContext context, HeapTable table, Storage.Index index, AlterIndexForm form, bool? ignoreDupKey, int? compressionDelay, IndexOptions rebuildOptions, string writtenTableName)
     {
@@ -392,6 +413,8 @@ partial class Simulation
         {
             case AlterIndexForm.Disable:
                 index.IsDisabled = true;
+                table.SettleIndexIds();
+                DisableForeignKeysOn(context.Batch, table, index.IndexId, index.Name);
                 break;
             case AlterIndexForm.Rebuild:
                 // Rows that accumulated while the index was out of service are

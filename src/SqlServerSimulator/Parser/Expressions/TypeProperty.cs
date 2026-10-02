@@ -134,6 +134,8 @@ internal sealed class TypeProperty : Expression
             {
                 "CHAR" => new(8000, null, 1, 1),
                 "DATE" => new(10, 0, 1, null),
+                // json answers as xml does (probed 2026-10-02 against SQL Server 2025).
+                "JSON" => new(-1, null, 1, null),
                 "REAL" => new(24, null, 1, null),
                 "TEXT" => new(2147483647, null, 1, null),
                 "TIME" => new(16, 7, 1, null),

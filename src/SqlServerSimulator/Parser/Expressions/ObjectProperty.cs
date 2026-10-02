@@ -294,6 +294,15 @@ internal sealed class ObjectProperty : Expression
                 _ => null,
             },
             "ISINLINEFUNCTION" => Flag(obj is InlineTableValuedFunction),
+            // A view's or SQL function's precision and data access: a module
+            // real can't verify — any not schema-bound — reports imprecise and
+            // reading both kinds of data; a schema-bound one reads no system
+            // data, user data when it reaches a table, and is precise unless a
+            // scalar function returns float or real (probed 2026-10-02 against
+            // SQL Server 2025).
+            "ISPRECISE" => DataAccessModuleBound(obj) is not { } preciseBound ? null
+                : !preciseBound ? 0
+                : Flag(obj is not ScalarFunction { ReturnType: FloatSqlType or RealSqlType }),
             "ISPROCEDURE" => Flag(obj is Procedure),
             // The creation-time QUOTED_IDENTIFIER capture, under the spelling
             // that also answers for a table. Real reports 1 for any table
@@ -316,17 +325,32 @@ internal sealed class ObjectProperty : Expression
             "ISVIEW" => Flag(obj is View),
             "OWNERID" => FindOwningSchema(database, obj) is null ? null : Ownership.EffectiveOwnerId(database, obj),
             "SCHEMAID" => FindOwningSchema(database, obj)?.SchemaId,
+            "SYSTEMDATAACCESS" => DataAccessModuleBound(obj) is not { } systemBound ? null : Flag(!systemBound),
             "TABLEDELETETRIGGER" => FirstTriggerFor(database, obj, TriggerActions.Delete),
             "TABLEDELETETRIGGERCOUNT" => TableTriggerCount(database, obj, TriggerActions.Delete),
             "TABLEINSERTTRIGGER" => FirstTriggerFor(database, obj, TriggerActions.Insert),
             "TABLEINSERTTRIGGERCOUNT" => TableTriggerCount(database, obj, TriggerActions.Insert),
             "TABLEUPDATETRIGGER" => FirstTriggerFor(database, obj, TriggerActions.Update),
             "TABLEUPDATETRIGGERCOUNT" => TableTriggerCount(database, obj, TriggerActions.Update),
+            "USERDATAACCESS" => DataAccessModuleBound(obj) is not { } userBound ? null
+                : Flag(!userBound || SchemaBinding.ReadsUserData(database, obj)),
             _ => TableFlag(database, obj, name),
         };
     }
 
     private static int Flag(bool value) => value ? 1 : 0;
+
+    /// <summary>
+    /// For a view or a SQL function — the modules the data-access and
+    /// precision properties answer for — whether it is schema-bound; null for
+    /// every other object.
+    /// </summary>
+    private static bool? DataAccessModuleBound(SchemaObject obj) => obj switch
+    {
+        View view => view.IsSchemaBound,
+        ScalarFunction or InlineTableValuedFunction or MultiStatementTableValuedFunction => ((UserDefinedFunction)obj).IsSchemaBound,
+        _ => null,
+    };
 
     /// <summary>
     /// <c>Has*Trigger</c>: whether a trigger with one of
@@ -439,8 +463,11 @@ internal sealed class ObjectProperty : Expression
     /// </summary>
     private static int? TableFlag(Database database, SchemaObject obj, ReadOnlySpan<char> upperName)
     {
-        var table = obj as HeapTable;
-        var fullText = table?.FullTextIndex;
+        // A multi-statement function's return table answers the key and index
+        // members from its declared constraints (probed 2026-10-02 against SQL
+        // Server 2025).
+        var table = obj as HeapTable ?? (obj as MultiStatementTableValuedFunction)?.CatalogShape();
+        var fullText = (obj as HeapTable)?.FullTextIndex;
         if (table is null && obj is not (InlineTableValuedFunction or MultiStatementTableValuedFunction or ClrTableValuedFunction))
         {
             // An indexed view answers the full-text members, all off.
@@ -454,6 +481,9 @@ internal sealed class ObjectProperty : Expression
             "TABLEFULLTEXTBACKGROUNDUPDATEINDEXON" or "TABLEFULLTEXTCHANGETRACKINGON" => Flag(fullText is { ChangeTracking: FullTextChangeTracking.Auto }),
             "TABLEFULLTEXTCATALOGID" => fullText?.CatalogId ?? 0,
             "TABLEFULLTEXTKEYCOLUMN" => FullTextKeyColumnId(table, fullText),
+            // Off without a running merge, which is every table here; a
+            // table-valued function answers it too (probed 2026-10-02).
+            "TABLEFULLTEXTMERGESTATUS" => 0,
             // Real answers 1 while a population runs; the simulator's full-text
             // searches read live rows, so none ever does.
             "TABLEFULLTEXTPOPULATESTATUS" => 0,

@@ -930,4 +930,71 @@ public sealed class InformationSchemaTests
             from information_schema.columns c join sys.columns s on s.object_id = object_id('t') and s.name = c.column_name
             where c.table_name = 't'
             """));
+
+    [TestMethod]
+    public void ConstraintColumnUsage_TableCheck_NamesOnlyTheColumnsItReads()
+    {
+        // `a` is a fragment of AND, but not a column the CHECK reads (probed
+        // 2026-10-02 against SQL Server 2025).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int, b varchar(10), c int, constraint ck check (b <> 'x' and c between 1 and 10))");
+        Assert.AreEqual("b,c", sim.ExecuteScalar(
+            "select string_agg(column_name, ',') within group (order by column_name) from information_schema.constraint_column_usage where constraint_name = 'ck'"));
+    }
+
+    [TestMethod]
+    public void Columns_CharacterSetName_FollowsTheCollationsCodePage()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a varchar(5), b varchar(5) collate Latin1_General_100_CI_AS_SC_UTF8, c varchar(5) collate Japanese_CI_AS, d char(5) collate Greek_CI_AS, e nvarchar(5) collate Japanese_CI_AS)");
+        Assert.AreEqual("a:iso_1,b:utf8,c:cp932,d:cp1253,e:UNICODE", sim.ExecuteScalar(
+            "select string_agg(concat(column_name, ':', character_set_name), ',') within group (order by ordinal_position) from information_schema.columns where table_name = 't'"));
+    }
+
+    [TestMethod]
+    public void TableAndColumnPrivileges_ListTheExplicitGrantsOnTablesAndViews()
+    {
+        // A DENY, a schema-level grant and a non-ISO permission are left out,
+        // and a column grant appears only among the column privileges (probed
+        // 2026-10-02 against SQL Server 2025).
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create user u1 without login; create role r1; create table dbo.t (a int, b int)",
+            "create view dbo.v as select a from dbo.t",
+            "create schema s",
+            """
+            create table s.x (k int);
+            grant select on dbo.t to u1;
+            grant update (b) on dbo.t to u1 with grant option;
+            grant select (a) on dbo.t to r1;
+            grant insert, delete, references, alter on dbo.v to r1;
+            deny select on s.x to u1;
+            grant select on schema::s to r1;
+            """);
+        Assert.AreEqual("dbo>u1:t.SELECT/NO,dbo>r1:v.DELETE/NO,dbo>r1:v.INSERT/NO,dbo>r1:v.REFERENCES/NO", sim.ExecuteScalar(
+            "select string_agg(concat(grantor, '>', grantee, ':', table_name, '.', privilege_type, '/', is_grantable), ',') within group (order by table_name, privilege_type) from information_schema.table_privileges"));
+        Assert.AreEqual("r1:a.SELECT/NO,u1:b.UPDATE/YES", sim.ExecuteScalar(
+            "select string_agg(concat(grantee, ':', column_name, '.', privilege_type, '/', is_grantable), ',') within group (order by column_name) from information_schema.column_privileges"));
+    }
+
+    [TestMethod]
+    public void DomainConstraints_NameTheRuleBoundToAnAliasType()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create type dbo.d1 from int; create type dbo.d2 from int", "create rule dbo.rl as @v > 0", "exec sp_bindrule 'dbo.rl', 'dbo.d1'");
+        Assert.AreEqual("dbo.rl:dbo.d1:NO/NO", sim.ExecuteScalar(
+            "select string_agg(concat(constraint_schema, '.', constraint_name, ':', domain_schema, '.', domain_name, ':', is_deferrable, '/', initially_deferred), ',') from information_schema.domain_constraints"));
+    }
+
+    [TestMethod]
+    public void ParametersAndRoutines_AVectorReadsVarbinary()
+    {
+        // A table column reads vector; a routine's parameter or return value
+        // reads the varbinary it is stored as (probed 2026-10-02 against SQL
+        // Server 2025).
+        var sim = new Simulation();
+        sim.ExecuteBatches("create function dbo.f (@v vector(3)) returns vector(3) as begin return @v; end");
+        Assert.AreEqual("varbinary", sim.ExecuteScalar("select data_type from information_schema.parameters where parameter_name = '@v'"));
+        Assert.AreEqual("varbinary", sim.ExecuteScalar("select data_type from information_schema.routines where routine_name = 'f'"));
+    }
 }

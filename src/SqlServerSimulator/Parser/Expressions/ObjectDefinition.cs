@@ -6,8 +6,11 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// SQL <c>OBJECT_DEFINITION(object_id)</c>: returns the source-text definition
 /// of the programmable module (stored procedure, view, DML / DDL trigger,
 /// scalar / inline / multi-statement function) with the given
-/// <c>object_id</c>, scoped to the connection's current database. Returns NULL
-/// for a NULL / missing / non-module id, and for modules created
+/// <c>object_id</c>, scoped to the connection's current database, or the
+/// normalized expression text of a CHECK or DEFAULT constraint — the same text
+/// <c>sys.check_constraints</c> / <c>sys.default_constraints</c> project, while
+/// a key or foreign-key constraint answers NULL (probed 2026-10-02 against SQL
+/// Server 2025). Returns NULL for a NULL / missing / non-module id, and for modules created
 /// <c>WITH ENCRYPTION</c> (whose <see cref="Schemas.SchemaObject.DefinitionText"/>
 /// is null). The stored text is the original <c>CREATE</c> statement verbatim,
 /// with the leading verb normalized to <c>CREATE</c> for <c>ALTER</c> /
@@ -60,7 +63,9 @@ internal sealed class ObjectDefinition : Expression
             if (ddlTrigger.ObjectId == id)
                 return Definition(ddlTrigger.DefinitionText);
         }
-        return SqlValue.Null(SqlType.NVarcharMax);
+        return ConstraintLookup.TryResolveById(database, id, out var constraint)
+            ? Definition(constraint.Definition)
+            : SqlValue.Null(SqlType.NVarcharMax);
     }
 
     private static SqlValue Definition(string? text) =>

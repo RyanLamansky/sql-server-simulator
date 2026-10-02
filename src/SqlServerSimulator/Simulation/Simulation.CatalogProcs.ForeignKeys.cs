@@ -23,6 +23,10 @@ partial class Simulation
         "KEY_SEQ", "UPDATE_RULE", "DELETE_RULE", "FK_NAME", "PK_NAME", "DEFERRABILITY",
     ];
 
+    // KEY_SEQ alone is described NOT NULL (probed 2026-10-02 against SQL Server 2025).
+    private static readonly bool[] SpFkeysNullability =
+        [true, true, true, true, true, true, true, true, false, true, true, true, true, true];
+
     /// <summary>
     /// Handles <c>EXEC sp_fkeys [@pktable_name] [, @pktable_owner]
     /// [, @pktable_qualifier] [, @fktable_name] [, @fktable_owner]
@@ -119,7 +123,7 @@ partial class Simulation
             return bySequence != 0 ? bySequence : collation.Compare(a[ownerSlot + 2].AsString, b[ownerSlot + 2].AsString);
         });
 
-        yield return new SimulatedSqlResultSet(SpFkeysSchema, SpFkeysColumnNames, rows);
+        yield return new SimulatedSqlResultSet(SpFkeysSchema, SpFkeysColumnNames, rows) { ColumnNullability = SpFkeysNullability };
     }
 
     private static short SpFkeysRule(ReferentialAction action, bool byPrimaryKey) => action switch

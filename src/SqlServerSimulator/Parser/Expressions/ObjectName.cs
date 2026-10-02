@@ -85,8 +85,10 @@ internal sealed class ObjectName : Expression
             }
             foreach (var (_, tableType) in schema.TableTypes)
             {
+                // The id is the backing type table's, which answers under
+                // the name sys.objects lists it by.
                 if (tableType.ObjectId == id)
-                    return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), tableType.Name);
+                    return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), tableType.BackingTableName);
             }
         }
         // A temp table lives in tempdb's catalog, so an id there names it.

@@ -15,7 +15,8 @@ internal sealed class DateFirstExpression : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.TinyInt;
 
-    internal override bool ResultIsNullable(NullabilityContext context) => false;
+    // Described nullable, unlike @@LANGID (probed 2026-10-02 against SQL Server 2025).
+    internal override bool ResultIsNullable(NullabilityContext context) => true;
 
     internal override string DebugDisplay() => "@@DATEFIRST";
 
@@ -35,7 +36,8 @@ internal sealed class LanguageExpression : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
 
-    internal override bool ResultIsNullable(NullabilityContext context) => false;
+    // Described nullable (probed 2026-10-02 against SQL Server 2025).
+    internal override bool ResultIsNullable(NullabilityContext context) => true;
 
     internal override string DebugDisplay() => "@@LANGUAGE";
 

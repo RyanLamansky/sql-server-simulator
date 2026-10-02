@@ -101,23 +101,30 @@ partial class Simulation
                             for (var i = 0; i < procedure.Parameters.Length; i++)
                             {
                                 var parameter = procedure.Parameters[i];
+                                // As sp_columns lists no vector or json column,
+                                // this lists no such parameter (probed
+                                // 2026-10-02 against SQL Server 2025).
+                                if (parameter.Type is VectorSqlType or JsonSqlType)
+                                    continue;
                                 var parameterName = "@" + parameter.Name;
                                 var columnType = parameter.IsOutput ? SqlParamInputOutput : SqlParamInput;
                                 Add(parameterName, columnType, parameter.TableType is { } tableType
                                     ? TableTypeRow(parameterName, tableType, i + 1)
-                                    : TypedRow(new HeapColumn(parameterName, parameter.Type, parameter.DeclaredMaxLength, nullable: true) { AliasType = parameter.AliasType }, i + 1, columnType));
+                                    : TypedRow(new HeapColumn(parameterName, parameter.Type, parameter.DeclaredMaxLength, nullable: true, spelledNumeric: parameter.SpelledNumeric) { AliasType = parameter.AliasType }, i + 1, columnType));
                             }
                             break;
                         case UserDefinedFunction function:
-                            if (function is ScalarFunction scalar)
-                                Add("@RETURN_VALUE", SqlReturnValue, TypedRow(new HeapColumn("@RETURN_VALUE", scalar.ReturnType, null, nullable: true) { AliasType = scalar.ReturnAliasType }, 0, SqlReturnValue));
-                            else
+                            if (function is ScalarFunction { ReturnType: not (VectorSqlType or JsonSqlType) } scalar)
+                                Add("@RETURN_VALUE", SqlReturnValue, TypedRow(new HeapColumn("@RETURN_VALUE", scalar.ReturnType, null, nullable: true, spelledNumeric: scalar.ReturnSpelledNumeric) { AliasType = scalar.ReturnAliasType }, 0, SqlReturnValue));
+                            else if (function is not ScalarFunction)
                                 Add("@TABLE_RETURN_VALUE", SqlResultColumn, TableReturnRow());
                             for (var i = 0; i < function.Parameters.Length; i++)
                             {
                                 var parameter = function.Parameters[i];
+                                if (parameter.Type is VectorSqlType or JsonSqlType)
+                                    continue;
                                 var parameterName = "@" + parameter.Name;
-                                Add(parameterName, SqlParamInput, TypedRow(new HeapColumn(parameterName, parameter.Type, null, nullable: true) { AliasType = parameter.AliasType }, i + 1, SqlParamInput));
+                                Add(parameterName, SqlParamInput, TypedRow(new HeapColumn(parameterName, parameter.Type, null, nullable: true, spelledNumeric: parameter.SpelledNumeric) { AliasType = parameter.AliasType }, i + 1, SqlParamInput));
                             }
                             break;
                     }

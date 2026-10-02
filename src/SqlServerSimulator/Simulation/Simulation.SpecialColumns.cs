@@ -12,6 +12,12 @@ partial class Simulation
     private static readonly string[] SpSpecialColumnsColumnNames =
         ["SCOPE", "COLUMN_NAME", "DATA_TYPE", "TYPE_NAME", "PRECISION", "LENGTH", "SCALE", "PSEUDO_COLUMN"];
 
+    // The @col_type = 'V' form over a table or view that resolves describes
+    // TYPE_NAME alone NOT NULL, where the 'R' form's columns, and the 'V'
+    // form's over a missing object, are all nullable (probed 2026-10-02
+    // against SQL Server 2025).
+    private static readonly bool[] SpSpecialColumnsRowVersionNullability = [true, true, true, false, true, true, true, true];
+
     /// <summary>
     /// Handles <c>EXEC sp_special_columns[_100] @table_name [, @table_owner]
     /// [, @table_qualifier] [, @col_type] [, @scope] [, @nullable]
@@ -80,6 +86,7 @@ partial class Simulation
             throw RaisedAt(SimulatedSqlException.HelpObjectNotInCurrentDatabase(), procedureName, 45);
 
         var rows = new List<SqlValue[]>();
+        var resolved = false;
         // An empty owner quotes to [] alone, which names nothing.
         if (name is not null && owner is not "" && database.Schemas.TryGetValue(owner ?? Database.DefaultSchemaName, out var schema))
         {
@@ -87,6 +94,7 @@ partial class Simulation
             var rowVersionOnly = collation.Equals(colType, "V");
             if (schema.HeapTables.TryGetValue(name, out var table) && !table.IsTableVariable)
             {
+                resolved = true;
                 if (rowVersionOnly)
                 {
                     AppendRowVersionRows(rows, table.Columns);
@@ -114,11 +122,14 @@ partial class Simulation
             }
             else if (rowVersionOnly && schema.Views.TryGetValue(name, out var view))
             {
+                resolved = true;
                 AppendRowVersionRows(rows, view.OutputColumns);
             }
         }
 
-        yield return new SimulatedSqlResultSet(SpSpecialColumnsSchema, SpSpecialColumnsColumnNames, rows);
+        yield return resolved && collation.Equals(colType, "V")
+            ? new SimulatedSqlResultSet(SpSpecialColumnsSchema, SpSpecialColumnsColumnNames, rows) { ColumnNullability = SpSpecialColumnsRowVersionNullability }
+            : new SimulatedSqlResultSet(SpSpecialColumnsSchema, SpSpecialColumnsColumnNames, rows);
     }
 
     // Real's procedure raises these itself, so they carry its name and the
@@ -147,7 +158,8 @@ partial class Simulation
     }
 
     // The unique index real's procedure settles on, as the columns it lists:
-    // key columns in key order, then (classic only) the included ones.
+    // key columns in key order (column order for a clustered one), then
+    // (classic only) the included ones.
     private static List<HeapColumn>? BestUniqueIndexColumns(HeapTable table, bool nonNullableOnly, bool classic)
     {
         List<HeapColumn>? best = null;
@@ -176,6 +188,11 @@ partial class Simulation
 
             if (nonNullableOnly && keys.Exists(column => column.Nullable))
                 continue;
+            // A clustered index's keys come back in column order rather than
+            // key order (probed 2026-10-02 against SQL Server 2025: a table
+            // (z, x, y) keyed PRIMARY KEY (y, z) lists z, then y).
+            if (identity.Type == 1)
+                keys.Sort(static (a, b) => a.ColumnId.CompareTo(b.ColumnId));
             if (classic)
                 keys.AddRange(included);
             best = keys;

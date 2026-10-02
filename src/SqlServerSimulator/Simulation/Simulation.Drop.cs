@@ -998,7 +998,7 @@ partial class Simulation
         foreach (var kc in table.KeyConstraints)
         {
             if (context.Batch.CurrentDatabase.Collation.Equals(kc.Name, indexName))
-                throw SimulatedSqlException.ExplicitDropIndexNotAllowed(tableName.ToString(), indexName, kc.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE");
+                throw SimulatedSqlException.ExplicitDropIndexNotAllowed(tableName.ToString(), indexName, kc.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE", state: 4);
         }
 
         for (var i = 0; i < table.Indexes.Count; i++)
@@ -1012,6 +1012,9 @@ partial class Simulation
                 if (table.Indexes[i].IsClustered && RetentionCleanupDependsOn(context, table))
                     throw SimulatedSqlException.CannotDropRetentionCleanupIndex(qualifiedTableName, indexName);
                 table.SettleIndexIds();
+                var indexId = table.Indexes[i].IndexId;
+                if (table.IncomingForeignKeys.Exists(fk => BuiltInResources.ResolveForeignKeyIndexId(fk) == indexId))
+                    throw SimulatedSqlException.ExplicitDropIndexNotAllowed(tableName.ToString(), indexName, "FOREIGN KEY", state: 6);
                 table.Indexes.RemoveAt(i);
                 RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
                 return;

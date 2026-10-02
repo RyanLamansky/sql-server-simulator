@@ -86,8 +86,12 @@ internal sealed class Value : Expression
         this.IsLiteral = true;
     }
 
+    /// <summary>True when the constant stands in for a constant-valued <c>@@</c> keyword.</summary>
+    private readonly bool isAtAtKeyword;
+
     public Value(DoubleAtPrefixedString doubleAtPrefixedString)
     {
+        this.isAtAtKeyword = true;
         // Constant-valued @@ keywords land here. Session-state-dependent
         // ones (@@TRANCOUNT, @@ROWCOUNT, @@LOCK_TIMEOUT, @@SPID, @@DBTS,
         // @@NESTLEVEL, @@PROCID) route to dedicated expression classes
@@ -163,7 +167,11 @@ internal sealed class Value : Expression
 
     private protected override bool IsStructuralConstant => this.IsLiteral;
 
-    internal override bool ResultIsNullable(NullabilityContext context) => this.Constant.IsNull;
+    // A string-valued @@ keyword — @@VERSION, @@SERVERNAME, @@SERVICENAME — is
+    // described nullable though it never is; the numeric ones aren't (probed
+    // 2026-10-02 against SQL Server 2025).
+    internal override bool ResultIsNullable(NullabilityContext context) =>
+        this.Constant.IsNull || (this.isAtAtKeyword && this.Constant.Type is NVarcharSqlType);
 
     internal override bool IsNonNullConstantComputation => this.IsLiteral && !this.Constant.IsNull;
 

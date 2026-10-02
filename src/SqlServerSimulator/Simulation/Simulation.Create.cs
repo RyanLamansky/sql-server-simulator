@@ -230,7 +230,14 @@ partial class Simulation
         {
             if (Parser.Expressions.XmlMethodCall.AppearsIn(pending.Expression))
                 throw SimulatedSqlException.XmlMethodInComputedColumn(pending.Name, tableName.Leaf, "CREATE TABLE", tableVariable: false);
+            // A bare NULL gives the column no type to take: real reads it as a
+            // type name it can't find (probed 2026-10-02 against SQL Server 2025).
+            if (Expression.IsUntypedNullLiteral(pending.Expression))
+                throw SimulatedSqlException.CannotFindDataType("NULL", pending.Index + 1);
             var resolvedType = pending.Expression.GetSqlType(context.Batch, ResolveComputedReference);
+            // The column has to settle on one collation, as a projection does.
+            if (UnresolvedCollation.On(resolvedType) is { } conflict)
+                throw SimulatedSqlException.UnresolvedCollationInOutputColumn(conflict.RightName, conflict.LeftName, conflict.OperatorName, "CREATE TABLE", pending.Index + 1, state: 16);
             var inferredNullable = pending.Expression.ResultIsNullable(
                 new NullabilityContext(context.Batch, ResolveComputedReferenceNullable, ResolveComputedReference));
             // Pull the declared length off the resolved type for the var-length
@@ -3650,9 +3657,9 @@ partial class Simulation
                         pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)));
             }
 
-            // Referenced columns must form a PRIMARY KEY or UNIQUE constraint
-            // (Msg 1776), matched in declared order — see
-            // ReferencedColumnsFormKey.
+            // Referenced columns must form a PRIMARY KEY or UNIQUE constraint,
+            // or an enabled unfiltered unique index (Msg 1776), matched in
+            // declared order — see ReferencedColumnsFormKey.
             if (!ReferencedColumnsFormKey(referencedTable, refOrdinals))
             {
                 throw SimulatedSqlException.ForeignKeyNoMatchingKey(
@@ -3787,6 +3794,20 @@ partial class Simulation
             var keyFull = StorageOrdinalsToFullOrdinals(referencedTable, key.StorageOrdinals);
             if (SameSequence(keyFull, refFullOrdinals))
                 return true;
+        }
+
+        // A unique index stands in for a constraint when it is enabled and
+        // unfiltered, its keys matched in the same declared order; DESC keys
+        // and INCLUDE columns don't matter (probed 2026-10-02 against SQL
+        // Server 2025).
+        foreach (var index in referencedTable.Indexes)
+        {
+            if (index is { IsUnique: true, Filter: null, IsDisabled: false }
+                && index.KeyFullOrdinals.Length == refFullOrdinals.Length
+                && SameSequence(index.KeyFullOrdinals, refFullOrdinals))
+            {
+                return true;
+            }
         }
         return false;
 

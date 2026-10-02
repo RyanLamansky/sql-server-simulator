@@ -75,6 +75,8 @@ While an index is disabled:
   DDL is deliberately **not** gated — `ALTER INDEX … REBUILD` and `DROP INDEX` keep working on a locked table, which is how real recovers it, so the gate sits at those entry points rather than at table resolution.
   Since a `PRIMARY KEY` defaults clustered, `ALTER INDEX ALL … DISABLE` is the usual way a table ends up locked, and `ALL … REBUILD` is the way back.
 - **`SET (…)` against it raises Msg 1973**.
+- **A nonclustered one holds no storage**: it keeps its `sys.indexes` and `sys.stats` rows but has no `sys.partitions`, `sys.allocation_units` or `sys.dm_db_partition_stats` row (probed 2026-10-02).
+- **A FOREIGN KEY resting on it is disabled with it** — see [`foreign-keys.md`](foreign-keys.md#validation-at-create).
 - It can still be dropped.
 
 `REBUILD` re-validates the rows that accumulated while the index was out, exactly as a fresh `CREATE UNIQUE INDEX` would: **Msg 1505** if any duplicate got in, naming the index (or constraint) whose key collided.

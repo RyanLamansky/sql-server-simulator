@@ -110,6 +110,13 @@ partial class SimulatedSqlException
         batch.InfoMessage(@class: 0, state: 1, number: 8153, "Warning: Null value is eliminated by an aggregate or other SET operation.");
 
     /// <summary>
+    /// Msg 1992, once per FOREIGN KEY that disabling the unique index it rests
+    /// on took out of service (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedError ForeignKeyDisabledWithIndexMessage(BatchContext batch, string foreignKey, string childTable, string referencedTable, string index) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 1992, $"Warning: Foreign key '{foreignKey}' on table '{childTable}' referencing table '{referencedTable}' was disabled as a result of disabling the index '{index}'.");
+
+    /// <summary>
     /// Msg 11729, when a sequence's first cache block is longer than the values
     /// it has left; names the sequence without its schema.
     /// </summary>

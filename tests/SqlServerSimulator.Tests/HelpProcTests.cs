@@ -644,4 +644,59 @@ public sealed class HelpProcTests
     [DataRow("integer")]
     public void SpHelp_NotASystemType_IsMsg15009(string name)
         => _ = new Simulation().AssertSqlError($"exec sp_help '{name}'", 15009);
+
+    private static string ResultSetNullability(Simulation sim, string commandText)
+    {
+        using var reader = sim.ExecuteReader(commandText);
+        var sets = new List<string>();
+        do
+        {
+            if (reader.FieldCount > 0)
+                sets.Add(string.Join(",", reader.GetSchemaTable()!.Rows.Cast<System.Data.DataRow>().Select(static row => $"{row["ColumnName"]}{((bool)row["AllowDBNull"] ? "?" : "!")}")));
+        }
+        while (reader.NextResult());
+        return string.Join(" | ", sets);
+    }
+
+    [TestMethod]
+    public void SpHelp_DescribesRealsNotNullColumns()
+    {
+        // Probed 2026-10-02 against SQL Server 2025, set by set.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.t (a int not null constraint pk primary key, b int constraint ck check (b > 0))");
+        var sets = ResultSetNullability(sim, "exec sp_help 'dbo.t'").Split(" | ");
+        Assert.AreEqual("Name!,Owner?,Type?,Created_datetime!", sets[0]);
+        Assert.AreEqual("Identity!,Seed?,Increment?,Not For Replication?", sets[2]);
+        Assert.AreEqual("RowGuidCol!", sets[3]);
+        Assert.AreEqual("Data_located_on_filegroup!", sets[4]);
+        Assert.AreEqual("index_name!,index_description?,index_keys?", sets[5]);
+        Assert.AreEqual("constraint_type!,constraint_name!,delete_action!,update_action!,status_enabled!,status_for_replication!,constraint_keys?", sets[6]);
+    }
+
+    [TestMethod]
+    public void SpHelp_ParameterLengthAndOrderAreNotNull_AndAMaxParameterReadsPrecZero()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create procedure dbo.p @a varchar(max), @b nvarchar(max), @c varbinary(max), @d xml, @e varchar(10) as select 1");
+        Assert.AreEqual("Parameter_name?,Type?,Length!,Prec?,Scale?,Param_order!,Collation?", ResultSetNullability(sim, "exec sp_help 'dbo.p'").Split(" | ")[1]);
+        using var reader = sim.ExecuteReader("exec sp_help 'dbo.p'");
+        _ = reader.NextResult();
+        var cells = new List<string>();
+        while (reader.Read())
+            cells.Add($"{reader["Parameter_name"]}:{reader["Length"]}:{reader["Prec"]}");
+        Assert.AreEqual("@a:-1:0,@b:-1:0,@c:-1:0,@d:-1:0,@e:10:10", string.Join(",", cells));
+    }
+
+    [TestMethod]
+    public void SpHelp_XmlAndSpatialColumnsCarryNoCollation_AndClrTypesReportFixedLenNullInSource()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.t (x xml, g geography not null, m geometry, h hierarchyid not null, h2 hierarchyid)");
+        using var reader = sim.ExecuteReader("exec sp_help 'dbo.t'");
+        _ = reader.NextResult();
+        var cells = new List<string>();
+        while (reader.Read())
+            cells.Add($"{reader["Column_name"]}:{reader["FixedLenNullInSource"]}:{(reader["Collation"] is DBNull ? "NULL" : reader["Collation"])}");
+        Assert.AreEqual("x:(n/a):NULL,g:no:NULL,m:yes:NULL,h:no:NULL,h2:yes:NULL", string.Join(",", cells));
+    }
 }

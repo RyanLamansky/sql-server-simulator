@@ -1377,4 +1377,53 @@ public sealed class ForeignKeyTests
         AreEqual(3726, ex.Number);
         AreEqual("later,p", (string?)simulation.ExecuteScalar("select string_agg(name, ',') within group (order by name) from sys.tables"));
     }
+
+    [TestMethod]
+    public void ForeignKey_RestsOnAnEnabledUnfilteredUniqueIndex_KeysMatchedInOrder()
+    {
+        // A unique index stands in for a key constraint, DESC keys and
+        // INCLUDE columns allowed; a filtered or disabled one doesn't, and the
+        // keys must match in declared order (probed 2026-10-02 against SQL
+        // Server 2025).
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            """
+            create table p (a int not null, b int not null, c int null, d int not null);
+            create unique index ux_ab on p (a, b);
+            create unique index ux_c on p (c) where c is not null;
+            create unique index ux_d on p (d desc) include (a);
+            create unique index ux_bd on p (b, d);
+            alter index ux_bd on p disable;
+            """,
+            "create table c2 (a int, b int, constraint f2 foreign key (a, b) references p (a, b))",
+            "create table c4 (d int constraint f4 references p (d))");
+        _ = sim.AssertSqlError("create table c1 (a int, b int, constraint f1 foreign key (b, a) references p (b, a))", 1776);
+        _ = sim.AssertSqlError("create table c3 (c int constraint f3 references p (c))", 1776);
+        _ = sim.AssertSqlError("create table c5 (b int, d int, constraint f5 foreign key (b, d) references p (b, d))", 1776);
+        Assert.AreEqual("f2:ux_ab,f4:ux_d", sim.ExecuteScalar(
+            "select string_agg(concat(constraint_name, ':', unique_constraint_name), ',') within group (order by constraint_name) from information_schema.referential_constraints"));
+        Assert.AreEqual("f2:2,f4:4", sim.ExecuteScalar(
+            "select string_agg(concat(name, ':', key_index_id), ',') within group (order by name) from sys.foreign_keys"));
+
+        // The key is enforced, and the index can't be dropped from under it.
+        _ = sim.ExecuteNonQuery("insert p values (1, 2, null, 3); insert c2 values (1, 2)");
+        _ = sim.AssertSqlError("insert c2 values (1, 3)", 547);
+        var drop = sim.AssertSqlError("drop index ux_ab on p", 3723);
+        Assert.AreEqual(6, drop.State);
+    }
+
+    [TestMethod]
+    public void ForeignKey_DisablingTheUniqueIndexItRestsOn_DisablesIt()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table p (d int not null); create unique index ux_d on p (d)",
+            "create table c (d int constraint f references p (d))");
+        using var connection = sim.CreateOpenConnection();
+        var messages = new List<string>();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.Add(e.Message);
+        _ = connection.CreateCommand("alter index ux_d on p disable").ExecuteNonQuery();
+        Assert.AreEqual("Warning: Foreign key 'f' on table 'c' referencing table 'p' was disabled as a result of disabling the index 'ux_d'.", string.Join("|", messages));
+        Assert.AreEqual("1:1", connection.CreateCommand("select concat(is_disabled, ':', is_not_trusted) from sys.foreign_keys").ExecuteScalar());
+    }
 }

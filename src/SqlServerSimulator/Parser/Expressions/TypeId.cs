@@ -53,13 +53,19 @@ internal sealed class TypeId : Expression
             leafPart = StripBrackets(nameStr);
         }
 
-        // System types resolve by name, user-defined ones through the schema —
-        // except that vector resolves only qualified by sys (probed 2026-09-26
-        // against SQL Server 2025).
-        foreach (var row in BuiltInResources.SystypesRowData)
+        // System types resolve unqualified or qualified by sys, user-defined
+        // ones through the schema — except that vector resolves only qualified
+        // by sys (probed 2026-09-26 against SQL Server 2025), and another
+        // schema never finds a system type (TYPE_ID('dbo.int') is NULL, probed
+        // 2026-10-02).
+        var qualified = dotIndex >= 0;
+        if (!qualified || BuiltInToken.Equals(schemaPart, "sys"))
         {
-            if (BuiltInToken.Equals((string)row[0]!, leafPart) && (dotIndex >= 0 || (string)row[0]! != "vector"))
-                return SqlValue.FromInt32(Convert.ToInt32(row[3]!, System.Globalization.CultureInfo.InvariantCulture));
+            foreach (var row in BuiltInResources.SystypesRowData)
+            {
+                if (BuiltInToken.Equals((string)row[0]!, leafPart) && (qualified || (string)row[0]! != "vector"))
+                    return SqlValue.FromInt32(Convert.ToInt32(row[3]!, System.Globalization.CultureInfo.InvariantCulture));
+            }
         }
 
         if (!runtime.Batch.CurrentDatabase.Schemas.TryGetValue(schemaPart, out var schema))

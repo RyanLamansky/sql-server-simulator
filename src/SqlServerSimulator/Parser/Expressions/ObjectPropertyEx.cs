@@ -215,15 +215,15 @@ internal sealed class ObjectPropertyEx : Expression
 
     internal static bool HasClusteredIndex(HeapTable table)
     {
-        // Real SQL Server returns 1 when a clustered index exists. The
-        // simulator's PK constraint creates a clustered index by default
-        // (matching real SQL Server's PRIMARY KEY shipping clustered).
+        // A clustered index or a clustered key constraint; a NONCLUSTERED
+        // primary key leaves the table a heap (probed 2026-10-02 against SQL
+        // Server 2025).
         foreach (var idx in table.Indexes)
         {
             if (idx.IsClustered)
                 return true;
         }
-        return HasPrimaryKey(table);
+        return table.KeyConstraints.Exists(key => key.IsClustered);
     }
 
     /// <summary>

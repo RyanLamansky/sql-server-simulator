@@ -859,14 +859,27 @@ internal static partial class BuiltInResources
         }
     }
 
-    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index, PartitionPlacement? Placement)> EnumerateTableIndexIdentities(Database database, Parser.BatchContext? batch)
+    /// <summary>
+    /// False for a disabled nonclustered index, whose storage real deallocates:
+    /// it keeps its <c>sys.indexes</c> row but has no partition or allocation
+    /// unit (probed 2026-10-02 against SQL Server 2025). A disabled clustered
+    /// index keeps the table's data, so it still holds storage.
+    /// </summary>
+    private static bool HoldsStorage(IndexIdentity identity) =>
+        identity.Type is 0 or 1 or 5 || !(identity.Index?.IsDisabled ?? identity.Constraint?.IsDisabled ?? false);
+
+    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index, PartitionPlacement? Placement)> EnumerateTableIndexIdentities(Database database, Parser.BatchContext? batch, bool storageOnly = true)
     {
         foreach (var (_, schema) in database.Schemas)
         {
             foreach (var table in CatalogTables(schema, batch))
             {
                 foreach (var identity in table.IndexIdentities())
+                {
+                    if (storageOnly && !HoldsStorage(identity))
+                        continue;
                     yield return (table, identity.IndexId, identity.Name, identity.IsHeap, identity.Index, Simulation.PlacementOf(table, identity));
+                }
             }
         }
     }
@@ -977,6 +990,8 @@ internal static partial class BuiltInResources
                 var isBase = true;
                 foreach (var identity in table.IndexIdentities())
                 {
+                    if (!HoldsStorage(identity))
+                        continue;
                     var placement = Simulation.PlacementOf(table, identity);
                     foreach (var unit in census.Units(table, identity.IndexId, placement))
                     {
@@ -1234,7 +1249,7 @@ internal static partial class BuiltInResources
         var primaryRoleDesc = SqlValue.FromString(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit), "PRIMARY");
         var nullName = SqlValue.Null(SqlType.SystemName);
         var trueBit = SqlValue.FromBoolean(true);
-        foreach (var (table, indexId, name, isHeap, index, _) in EnumerateTableIndexIdentities(database, batch).Concat(TypeTableIndexIdentities(database)))
+        foreach (var (table, indexId, name, isHeap, index, _) in EnumerateTableIndexIdentities(database, batch, storageOnly: false).Concat(TypeTableIndexIdentities(database)))
         {
             if (isHeap)
                 continue;

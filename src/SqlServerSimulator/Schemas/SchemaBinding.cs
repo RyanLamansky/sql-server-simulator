@@ -406,6 +406,39 @@ internal static class SchemaBinding
         return matches;
     }
 
+    /// <summary>
+    /// Whether schema-bound <paramref name="module"/> reads user data — what
+    /// <c>OBJECTPROPERTYEX(id, 'UserDataAccess')</c> reports for it: its body
+    /// names a table, or a view or function that does, transitively (probed
+    /// 2026-10-02 against SQL Server 2025: a function calling one that counts
+    /// rows answers 1, one returning a constant 0).
+    /// </summary>
+    internal static bool ReadsUserData(Database database, SchemaObject module) =>
+        ReadsUserData(database, module, []);
+
+    private static bool ReadsUserData(Database database, SchemaObject module, HashSet<SchemaObject> visited)
+    {
+        if (!visited.Add(module))
+            return false;
+        var bodyText = module switch
+        {
+            View view => view.BodyText,
+            UserDefinedFunction function => function.BodyText,
+            _ => null,
+        };
+        if (bodyText is null)
+            return false;
+        foreach (var name in ScanNames(Tokenize(bodyText)))
+        {
+            if (name.SegmentCount == 2 && Resolve(database, name.Qualifier!, name.Leaf) is { } resolved
+                && (resolved is HeapTable || ReadsUserData(database, resolved, visited)))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static void AddWhenReferencing(
         Database database, SchemaObject module, string bodyText,
         SchemaObject target, string? columnName, List<SchemaObject> matches)

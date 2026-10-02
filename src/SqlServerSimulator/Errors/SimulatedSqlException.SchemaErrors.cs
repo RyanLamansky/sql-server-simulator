@@ -815,6 +815,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException NextValueForNotAllowedInConditional() =>
         new("NEXT VALUE FOR function cannot be used within CASE, CHOOSE, COALESCE, IIF, ISNULL and NULLIF.", 11741, 15, 1);
 
+    /// <summary>
+    /// Mimics SQL Server error 11730: a DEFAULT constraint's <c>NEXT VALUE
+    /// FOR</c> named the sequence with a database part (probed 2026-10-02
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SequenceDatabaseNameInDefault() =>
+        new("Database name cannot be specified for the sequence object in default constraints.", 11730, 15, 1);
+
     /// <summary>Mimics SQL Server error 11725: <c>NEXT VALUE FOR</c> passed to an aggregate. Probe-confirmed.</summary>
     internal static SimulatedSqlException NextValueForNotAllowedInAggregate() =>
         new("An expression that contains a NEXT VALUE FOR function cannot be passed as an argument to an aggregate.", 11725, 15, 1);
@@ -2931,13 +2939,14 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 3723: <c>DROP INDEX</c> targeted a system
-    /// index that backs a PRIMARY KEY or UNIQUE constraint. Real SQL
-    /// Server forbids dropping the index directly; the caller must
-    /// <c>ALTER TABLE … DROP CONSTRAINT</c> instead. Probe-confirmed
-    /// wording.
+    /// index that backs a PRIMARY KEY or UNIQUE constraint (state 4), or a
+    /// unique index a FOREIGN KEY rests on (state 6). Real SQL Server forbids
+    /// dropping the index directly; the caller must drop the constraint
+    /// instead. Probe-confirmed wording and states (the FOREIGN KEY form
+    /// probed 2026-10-02 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException ExplicitDropIndexNotAllowed(string qualifiedTableName, string indexName, string constraintKindWord) =>
-        new($"An explicit DROP INDEX is not allowed on index '{qualifiedTableName}.{indexName}'. It is being used for {constraintKindWord} constraint enforcement.", 3723, 16, 4);
+    internal static SimulatedSqlException ExplicitDropIndexNotAllowed(string qualifiedTableName, string indexName, string constraintKindWord, byte state) =>
+        new($"An explicit DROP INDEX is not allowed on index '{qualifiedTableName}.{indexName}'. It is being used for {constraintKindWord} constraint enforcement.", 3723, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 4901: <c>ALTER TABLE ADD col TYPE NOT NULL</c>

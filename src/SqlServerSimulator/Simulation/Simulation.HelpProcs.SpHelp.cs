@@ -34,9 +34,18 @@ partial class Simulation
     private static readonly string[] SpHelpObjectColumnNames =
         ["Name", "Owner", "Type", "Created_datetime"];
 
-    // Created_datetime is NOT NULL, and Seed / Increment are numeric, as real
-    // describes them on the wire (probed 2026-09-28 against SQL Server 2025).
-    private static readonly bool[] SpHelpObjectNullability = [true, true, true, false];
+    // Name and Created_datetime are NOT NULL, and Seed / Increment are numeric,
+    // as real describes them on the wire (probed 2026-09-28 and 2026-10-02
+    // against SQL Server 2025); so are the Identity name, the single-column
+    // RowGuidCol / filegroup / referencing-view sets, and a parameter's Length
+    // and Param_order.
+    private static readonly bool[] SpHelpObjectNullability = [false, true, true, false];
+
+    private static readonly bool[] SpHelpIdentityNullability = [false, true, true, true];
+
+    private static readonly bool[] SingleNotNullColumn = [false];
+
+    private static readonly bool[] SpHelpParameterNullability = [true, true, false, true, true, false, true];
 
     private static readonly bool[] SpHelpIdentityReportsNumeric = [false, true, true, false];
 
@@ -195,15 +204,14 @@ partial class Simulation
         if (HelpParameterRows(batch, target) is { Count: > 0 } parameters)
         {
             yield return HelpBlankLine(batch, procedureName, 184);
-            yield return new SimulatedSqlResultSet(SpHelpParameterSchema, SpHelpParameterColumnNames, parameters);
+            yield return new SimulatedSqlResultSet(SpHelpParameterSchema, SpHelpParameterColumnNames, parameters) { ColumnNullability = SpHelpParameterNullability };
         }
 
         if (target.Object is HeapTable helpTable)
         {
             List<SqlValue[]> filegroup = [[SqlValue.FromSystemName(helpTable.Partitioning?.Scheme.Name ?? FilegroupName(DatabaseOf(batch, helpTable), helpTable.FilegroupId))]];
             yield return HelpBlankLine(batch, procedureName, 202);
-            yield return new SimulatedSqlResultSet(
-                SingleSystemNameColumn, SpHelpFilegroupColumnNames, filegroup);
+            yield return new SimulatedSqlResultSet(SingleSystemNameColumn, SpHelpFilegroupColumnNames, filegroup) { ColumnNullability = SingleNotNullColumn };
             yield return HelpBlankLine(batch, procedureName, 204);
             foreach (var outcome in HelpIndexResultSets(batch, target, objectName, "sys.sp_helpindex"))
                 yield return outcome;
@@ -339,8 +347,10 @@ partial class Simulation
             // A vector answers as the varbinary it shares a system type id with.
             var padded = type is CharSqlType or VarcharSqlType or BinarySqlType
                 or VarbinarySqlType or SqlVariantSqlType or VectorSqlType;
+            // The CLR types answer it, the built-in three included (probed
+            // 2026-10-02 against SQL Server 2025).
             var fixedLenNullInSource = type is CharSqlType or VarcharSqlType
-                or BinarySqlType or VarbinarySqlType or VectorSqlType or ClrUdtSqlType;
+                or BinarySqlType or VarbinarySqlType or VectorSqlType or ClrUdtSqlType or HierarchyIdSqlType or SpatialSqlType;
             rows.Add([
                 SqlValue.FromSystemName(column.Name),
                 SqlValue.FromSystemName(column.AliasType?.Name ?? (column.SpelledNumeric ? column.TypeName : HelpTypeName(type))),
@@ -377,14 +387,14 @@ partial class Simulation
                     : SqlValue.FromInt32(identity.NotForReplication ? 1 : 0),
             ],
         ];
-        return new SimulatedSqlResultSet(SpHelpIdentitySchema, SpHelpIdentityColumnNames, rows) { ColumnReportsNumeric = SpHelpIdentityReportsNumeric };
+        return new SimulatedSqlResultSet(SpHelpIdentitySchema, SpHelpIdentityColumnNames, rows) { ColumnReportsNumeric = SpHelpIdentityReportsNumeric, ColumnNullability = SpHelpIdentityNullability };
     }
 
     private static SimulatedSqlResultSet HelpRowGuidColResultSet(HeapColumn[] columns)
     {
         var name = Array.Find(columns, c => c.IsRowGuidCol)?.Name ?? "No rowguidcol column defined.";
         List<SqlValue[]> rows = [[SqlValue.FromSystemName(name)]];
-        return new SimulatedSqlResultSet(SingleSystemNameColumn, SpHelpRowGuidColColumnNames, rows);
+        return new SimulatedSqlResultSet(SingleSystemNameColumn, SpHelpRowGuidColColumnNames, rows) { ColumnNullability = SingleNotNullColumn };
     }
 
     // Procedure / function parameters in declaration order.
@@ -396,6 +406,11 @@ partial class Simulation
         void Add(string name, SqlType type, int? declaredMaxLength, int order, AliasType? alias)
         {
             var (maxLength, precision, scale) = HelpTypeGeometry(type, declaredMaxLength);
+            // A MAX or xml parameter or return value reads Prec 0 where a
+            // column reads its LOB width (probed 2026-10-02 against SQL Server
+            // 2025).
+            if (maxLength == -1 && type is VarcharSqlType or NVarcharSqlType or VarbinarySqlType or XmlSqlType)
+                precision = 0;
             rows.Add([
                 SqlValue.FromSystemName(name),
                 SqlValue.FromSystemName(alias?.Name ?? HelpTypeName(type)),
@@ -450,8 +465,7 @@ partial class Simulation
         }
 
         rows.Sort(ByFirstCell);
-        yield return new SimulatedSqlResultSet(
-            SingleSystemNameColumn, SpHelpReferencingViewColumnNames, rows);
+        yield return new SimulatedSqlResultSet(SingleSystemNameColumn, SpHelpReferencingViewColumnNames, rows) { ColumnNullability = SingleNotNullColumn };
     }
 
     // Every user-defined type in the database, alias types and table types
@@ -599,8 +613,10 @@ partial class Simulation
         ? SqlValue.FromString(HelpPrecScaleType, v.ToString(CultureInfo.InvariantCulture).PadRight(5))
         : SqlValue.Null(HelpPrecScaleType);
 
+    // xml and the spatial pair carry no collation here (probed 2026-10-02
+    // against SQL Server 2025).
     private static SqlValue HelpColumnCollation(Database database, HeapColumn column) =>
-        column.Type.Category != SqlTypeCategory.String ? SqlValue.Null(SqlType.SystemName)
+        column.Type.Category != SqlTypeCategory.String || column.Type is XmlSqlType or SpatialSqlType ? SqlValue.Null(SqlType.SystemName)
         : SqlValue.FromSystemName(column.Collation
             ?? (column.Type is SystemNameSqlType ? null : column.Type.Collation?.Name)
             ?? database.CollationName);

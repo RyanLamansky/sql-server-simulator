@@ -140,6 +140,10 @@ partial class Simulation
         "PAGES", "FILTER_CONDITION",
     ];
 
+    // TABLE_NAME and TYPE are described NOT NULL (probed 2026-10-02 against SQL Server 2025).
+    private static readonly bool[] SpStatisticsNullability =
+        [true, true, false, true, true, true, false, true, true, true, true, true, true];
+
     // sp_stored_procedures: the 8-column ODBC SQLProcedures result set.
     // Probe-confirmed types — sysname for the two name columns, nvarchar(134)
     // for PROCEDURE_NAME, int for the three param/result counts, varchar(254)
@@ -438,7 +442,10 @@ partial class Simulation
         SqlValue qualifier, SqlValue owner, SqlValue tableName,
         HeapColumn col, int ordinal, FrozenDictionary<string, object?[]> byName)
     {
-        var baseName = SpColumnsTypeName(col.Type);
+        // numeric keeps its own spelling, with its own ODBC code (probed
+        // 2026-10-02 against SQL Server 2025).
+        var spelledNumeric = col.SpelledNumeric && col.Type is DecimalSqlType;
+        var baseName = spelledNumeric ? "numeric" : SpColumnsTypeName(col.Type);
         // A CLR type has no sp_datatype_info row: real reports it as
         // SQL_SS_UDT (-151) with no radix or datetime subcode.
         var clrAssemblyName = SpColumnsClrAssemblyName(col.Type);
@@ -450,10 +457,11 @@ partial class Simulation
         var precision = typePrecision ?? (int)row[2]!;
         // A view's column passing an identity through reads as one too, and an
         // alias-typed column names its alias (probed 2026-09-26 against SQL
-        // Server 2025).
+        // Server 2025). An exact-numeric identity spells its type with empty
+        // parentheses, `decimal() identity` (probed 2026-10-02).
         var isIdentity = (col.Identity ?? col.IdentitySource) is not null;
         var isComputed = col.Computed is not null;
-        var shownName = col.AliasType?.Name ?? baseName;
+        var shownName = col.AliasType?.Name ?? (isIdentity && col.Type is DecimalSqlType ? baseName + "()" : baseName);
 
         SqlValue Smallint(object? cell) =>
             cell is null ? SqlValue.Null(SqlType.SmallInt) : SqlValue.FromInt16((short)(int)cell);
@@ -493,7 +501,7 @@ partial class Simulation
             SqlValue.Null(SqlType.SystemName),                                   // SS_XML_SCHEMACOLLECTION_CATALOG_NAME
             SqlValue.Null(SqlType.SystemName),                                   // SS_XML_SCHEMACOLLECTION_SCHEMA_NAME
             SqlValue.Null(SqlType.SystemName),                                   // SS_XML_SCHEMACOLLECTION_NAME
-            SqlValue.FromByte(SpColumnsSsDataType(col.Type, col.Nullable)),      // SS_DATA_TYPE
+            SqlValue.FromByte(spelledNumeric ? (byte)(col.Nullable ? 108 : 63) : SpColumnsSsDataType(col.Type, col.Nullable)), // SS_DATA_TYPE
         ];
     }
 
@@ -503,8 +511,9 @@ partial class Simulation
             : SqlValue.Null(CatalogNVarchar4000);
 
     // The ODBC/legacy base type name — the key into the sp_datatype_info raw
-    // tables. numeric collapses onto decimal (the simulator's DecimalSqlType
-    // does not distinguish the two spellings); sysname reports as nvarchar.
+    // tables. A DecimalSqlType reads as decimal here; the numeric spelling is
+    // the column's own SpelledNumeric, which the caller checks first.
+    // sysname reports as nvarchar.
     private static string SpColumnsTypeName(SqlType type) => type switch
     {
         _ when type == SqlType.Bit => "bit",
@@ -860,7 +869,7 @@ partial class Simulation
             }
         }
 
-        yield return new SimulatedSqlResultSet(SpStatisticsSchema, SpStatisticsColumnNames, rows);
+        yield return new SimulatedSqlResultSet(SpStatisticsSchema, SpStatisticsColumnNames, rows) { ColumnNullability = SpStatisticsNullability };
     }
 
     private static void AppendStatisticsRows(
@@ -876,6 +885,8 @@ partial class Simulation
         var nullName = SqlValue.Null(SqlType.SystemName);
         var nullChar = SqlValue.Null(CatalogChar1);
         var nullInt = SqlValue.Null(SqlType.Int32);
+        // FILTER_CONDITION is NULL even for a filtered index (probed
+        // 2026-10-02 against SQL Server 2025).
         var nullFilter = SqlValue.Null(CatalogVarchar128);
 
         // Table-cardinality summary row (SQL_TABLE_STAT): TYPE 0, every index
@@ -908,9 +919,6 @@ partial class Simulation
             var indexNameValue = SqlValue.FromSystemName(identity.Name!);
             var rowCardinality = isClustered ? cardinality : nullInt;
             var rowPages = isClustered ? pages : nullInt;
-            var filter = identity.Index?.FilterDefinition is { } fd
-                ? SqlValue.FromString(CatalogVarchar128, fd)
-                : nullFilter;
 
             for (var i = 0; i < keyColumns.Length; i++)
             {
@@ -920,7 +928,7 @@ partial class Simulation
                     indexNameValue, type, SqlValue.FromInt16((short)(i + 1)),
                     SqlValue.FromSystemName(columnName),
                     SqlValue.FromString(CatalogChar1, descending ? "D" : "A"),
-                    rowCardinality, rowPages, filter,
+                    rowCardinality, rowPages, nullFilter,
                 ]);
             }
         }
@@ -931,9 +939,9 @@ partial class Simulation
         rows.AddRange(indexRows);
     }
 
-    // A constraint-backed index (PRIMARY KEY / UNIQUE) is always unique with
-    // ascending key columns; a CREATE INDEX-backed one carries its own UNIQUE
-    // flag and per-column ASC / DESC direction.
+    // A constraint-backed index (PRIMARY KEY / UNIQUE) is always unique; a
+    // CREATE INDEX-backed one carries its own UNIQUE flag. Either carries its
+    // per-column ASC / DESC direction.
     private static (int NonUnique, (string Name, bool Descending)[] KeyColumns) StatisticsKeyColumns(
         HeapTable table, IndexIdentity identity)
     {
@@ -941,7 +949,7 @@ partial class Simulation
         {
             var columns = new (string, bool)[constraint.StorageOrdinals.Length];
             for (var i = 0; i < columns.Length; i++)
-                columns[i] = (table.StoredColumns[constraint.StorageOrdinals[i]].Name, false);
+                columns[i] = (table.StoredColumns[constraint.StorageOrdinals[i]].Name, constraint.IsDescending(i));
             return (0, columns);
         }
 

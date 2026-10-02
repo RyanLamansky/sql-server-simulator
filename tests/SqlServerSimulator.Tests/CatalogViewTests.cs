@@ -1620,4 +1620,66 @@ public sealed class CatalogViewTests
         simulation.ExecuteBatches("create type tt as table (k int primary key, u int unique, v nvarchar(10) default N'x', check (k > 0), index ix (v))");
         AreEqual(expected, simulation.ExecuteScalar($"declare @id int = (select type_table_object_id from sys.table_types where name = 'tt'); {query}"));
     }
+
+    [TestMethod]
+    public void SysTypes_SysnameAndTimestampAreTheNotNullBuiltIns()
+        => Assert.AreEqual("sysname,timestamp", new Simulation().ExecuteScalar(
+            "select string_agg(name, ',') within group (order by name) from sys.types where is_user_defined = 0 and is_nullable = 0"));
+
+    [TestMethod]
+    public void SysPartitions_ADisabledNonclusteredIndexHoldsNoPartition()
+    {
+        // It keeps its sys.indexes and sys.stats rows (probed 2026-10-02
+        // against SQL Server 2025).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int not null primary key, b int); create index ix on t (b); alter index ix on t disable");
+        Assert.AreEqual("1", sim.ExecuteScalar("select string_agg(index_id, ',') from sys.partitions where object_id = object_id('t')"));
+        Assert.AreEqual(2, sim.ExecuteScalar("select count(*) from sys.stats where object_id = object_id('t')"));
+    }
+
+    [TestMethod]
+    public void SysSqlModules_IsRecompiledAndUsesDatabaseCollation()
+    {
+        // A multi-statement function whose return table declares a string
+        // column without COLLATE depends on the database collation (probed
+        // 2026-10-02 against SQL Server 2025).
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create procedure p1 as select 1",
+            "create procedure p2 with recompile as select 1",
+            "create function m_int () returns @r table (a int) as begin return; end",
+            "create function m_str () returns @r table (a varchar(5)) as begin return; end",
+            "create function m_coll () returns @r table (a varchar(5) collate Latin1_General_BIN) as begin return; end");
+        Assert.AreEqual("m_coll:0/0,m_int:0/0,m_str:1/0,p1:0/0,p2:0/1", sim.ExecuteScalar(
+            "select string_agg(concat(object_name(object_id), ':', cast(uses_database_collation as int), '/', cast(is_recompiled as int)), ',') within group (order by object_name(object_id)) from sys.sql_modules"));
+    }
+
+    [TestMethod]
+    public void SysSequences_ListInObjectIdOrderAcrossSchemas()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create schema z", "create sequence dbo.b; create sequence z.a; create sequence dbo.c");
+        using var reader = sim.ExecuteReader("select name from sys.sequences");
+        Assert.AreEqual("b,a,c", string.Join(",", reader.EnumerateRecords().Select(static r => r.GetString(0))));
+    }
+
+    [TestMethod]
+    public void SysParameters_VectorBaseTypeIsTheElementTypeId()
+        => Assert.AreEqual("0", new Simulation().ExecuteBatchesScalar(
+            "create procedure p @v vector(3) as select 1",
+            "select cast(vector_base_type as varchar) from sys.parameters where object_id = object_id('p')"));
+
+    [TestMethod]
+    public void ObjectName_TableTypeConstraints_ResolveButNotByNameUnderTheTypesSchema()
+    {
+        // A table type's constraints live in sys under its backing table, so
+        // OBJECT_ID through the type's own schema finds none (probed
+        // 2026-10-02 against SQL Server 2025).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create type dbo.tt as table (id int not null primary key, check (id > 0))");
+        Assert.AreEqual("C :1:sys:NULL,PK:1:sys:NULL", sim.ExecuteScalar("""
+            select string_agg(concat(type, ':', objectproperty(object_id, 'IsConstraint'), ':', object_schema_name(object_id), ':', isnull(cast(object_id('dbo.' + name) as varchar), 'NULL')), ',') within group (order by type)
+            from sys.objects where parent_object_id in (select type_table_object_id from sys.table_types) and object_name(object_id) = name
+            """));
+    }
 }

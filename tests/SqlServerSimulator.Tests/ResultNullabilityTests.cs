@@ -457,4 +457,21 @@ public sealed class ResultNullabilityTests
     [DataRow("-cast(1 as int)", true)]
     public void Negation_NullableUnlessOverALiteral(string projection, bool expected)
         => AreEqual(expected, new Simulation().ColumnNullability($"select {projection}")[0]);
+
+    [TestMethod]
+    public void AtAtKeywords_StringOnesAndDateFirstAreDescribedNullable()
+    {
+        // Probed 2026-10-02 against SQL Server 2025.
+        CollectionAssert.AreEqual(
+            new[] { true, true, true, false, true, false, true, false, false },
+            new Simulation().ColumnNullability("select @@VERSION, @@SERVERNAME, @@SERVICENAME, @@MAX_PRECISION, @@LANGUAGE, @@LANGID, @@DATEFIRST, @@DBTS, @@SPID"));
+    }
+
+    [TestMethod]
+    public void AtAtDbts_IsVarbinary()
+        => AreEqual("varbinary", new Simulation().ExecuteScalar("select sql_variant_property(@@DBTS, 'BaseType')"));
+
+    [TestMethod]
+    public void HostNameAndAppName_AreNvarchar128()
+        => AreEqual("256,256", new Simulation().ExecuteScalar("select concat(cast(sql_variant_property(host_name(), 'MaxLength') as int), ',', cast(sql_variant_property(app_name(), 'MaxLength') as int))"));
 }

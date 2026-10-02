@@ -311,11 +311,16 @@ internal sealed class CanonicalDefinition
         return this.Postfix();
     }
 
-    // The literal renders as `(<value>)`; a money one as `($<value>)`.
+    // The literal renders as `(<value>)`; a money one as `($<value>)`. A zero
+    // other than a float's takes no sign — `-0.00` reads `(0.00)` while
+    // `-0e0` keeps `(-0.0000000000000000e+000)` (probed 2026-10-02 against
+    // SQL Server 2025).
     private static string NegateLiteral(string literal)
     {
         var money = literal[1] == '$';
         var body = literal[(money ? 2 : 1)..^1];
+        if (!body.Contains('e', StringComparison.Ordinal) && body.AsSpan().TrimStart('-').IndexOfAnyExcept('0', '.') < 0)
+            return literal;
         body = body.StartsWith('-') ? body[1..] : $"-{body}";
         // Only int's own minimum reads as an integer once negated.
         if (body == "-2147483648.")
@@ -372,6 +377,8 @@ internal sealed class CanonicalDefinition
             case ReservedKeyword { Keyword: Keyword.Case }:
                 this.position++;
                 return this.Case();
+            case UnquotedString when this.AtWord("NEXT") && IsWord(this.Next, "VALUE"):
+                return this.NextValueFor();
             case ReservedKeyword or UnquotedString when this.Next is Operator { Character: '(' }:
                 return this.BuiltIn();
             case ReservedKeyword or UnquotedString when Niladic(token.Source) is { } niladic:
@@ -420,8 +427,12 @@ internal sealed class CanonicalDefinition
         var value = numeric.Value;
         if (value.Type == SqlType.Int32)
             return value.AsInt32.ToString(CultureInfo.InvariantCulture);
+        // Seventeen significant digits of the stored double, not of the
+        // written text: 1.5E-2 reads 1.4999999999999999e-002 (probed
+        // 2026-10-02 against SQL Server 2025). A custom format string rounds
+        // to fifteen first, so the standard one carries the digits.
         if (value.Type == SqlType.Float)
-            return value.AsDouble.ToString("0.0000000000000000e+000", CultureInfo.InvariantCulture);
+            return value.AsDouble.ToString("E16", CultureInfo.InvariantCulture).Replace('E', 'e');
         var text = value.AsDecimal38.ToString();
         return text.Contains('.', StringComparison.Ordinal) ? text : $"{text}.";
     }
@@ -434,6 +445,19 @@ internal sealed class CanonicalDefinition
         VarcharSqlType or CharSqlType => new($"'{value.AsString.Replace("'", "''", StringComparison.Ordinal)}'", Shape.Atom),
         _ => null,
     };
+
+    /// <summary>
+    /// <c>NEXT VALUE FOR</c> keeps the sequence name as written, one part or
+    /// two, each bracketed: <c>NEXT VALUE FOR [sq]</c>, <c>NEXT VALUE FOR
+    /// [dbo].[sq]</c> (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private Piece? NextValueFor()
+    {
+        this.position += 2;
+        return this.TakeWord("FOR") && this.NameOrCall() is { Shape: Shape.Atom } name && !name.Text.EndsWith(')')
+            ? new($"NEXT VALUE FOR {name.Text}", Shape.Atom)
+            : null;
+    }
 
     private Piece? NameOrCall()
     {

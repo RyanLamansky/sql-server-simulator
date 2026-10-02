@@ -728,4 +728,69 @@ public sealed class CatalogProcTests
             "a:INSERT:dbo,a:REFERENCES:dbo,a:SELECT:dbo,a:SELECT:u,a:UPDATE:dbo,b:INSERT:dbo,b:REFERENCES:dbo,b:SELECT:dbo,b:SELECT:u,b:UPDATE:dbo,b:UPDATE:u",
             string.Join(",", Run(sim, "exec sp_column_privileges 't'").Select(r => $"{r["COLUMN_NAME"]}:{r["PRIVILEGE"]}:{r["GRANTEE"]}")));
     }
+
+    [TestMethod]
+    public void SpColumns_NumericKeepsItsSpelling_AndAnExactNumericIdentityReadsEmptyParentheses()
+    {
+        // Probed 2026-10-02 against SQL Server 2025.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a numeric(10,0) identity, b decimal(5,2) not null, c numeric(5,2) not null, d numeric(9,1))");
+        Assert.AreEqual("a:2:numeric() identity:63,b:3:decimal:55,c:2:numeric:63,d:2:numeric:108",
+            string.Join(",", Run(sim, "exec sp_columns 't'").Select(r => $"{r["COLUMN_NAME"]}:{r["DATA_TYPE"]}:{r["TYPE_NAME"]}:{r["SS_DATA_TYPE"]}")));
+        var decimalIdentity = new Simulation();
+        _ = decimalIdentity.ExecuteNonQuery("create table t (a decimal(10,0) identity not null)");
+        Assert.AreEqual("decimal() identity", Run(decimalIdentity, "exec sp_columns 't'")[0]["TYPE_NAME"]);
+    }
+
+    [TestMethod]
+    public void SpSprocColumns_NumericKeepsItsSpelling_AndJsonOrVectorParametersAreOmitted()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create procedure p @a numeric(5,1), @b decimal(5,1), @j json, @v vector(3) as select 1",
+            "create function f (@a int, @j json) returns json as begin return @j; end");
+        Assert.AreEqual("@RETURN_VALUE:int,@a:numeric,@b:decimal",
+            string.Join(",", Run(sim, "exec sp_sproc_columns 'p'").Select(r => $"{r["COLUMN_NAME"]}:{r["TYPE_NAME"]}")));
+        Assert.AreEqual("@a:int", string.Join(",", Run(sim, "exec sp_sproc_columns 'f'").Select(r => $"{r["COLUMN_NAME"]}:{r["TYPE_NAME"]}")));
+    }
+
+    [TestMethod]
+    public void SpStatistics_ReadsAConstraintKeysDirection_AndNoFilterCondition()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int not null, b int not null, c int, constraint pk primary key (b desc, a))",
+            "create unique index ux on t (c) where c is not null");
+        Assert.AreEqual("pk:b:D:,pk:a:A:,ux:c:A:",
+            string.Join(",", Run(sim, "exec sp_statistics 't'").Skip(1).Select(r => $"{r["INDEX_NAME"]}:{r["COLUMN_NAME"]}:{r["COLLATION"]}:{r["FILTER_CONDITION"] as string}")));
+    }
+
+    [TestMethod]
+    public void SpSpecialColumns_AClusteredKeyListsInColumnOrder_ANonclusteredOneInKeyOrder()
+    {
+        // A table (z, x, y) keyed (y, z) lists z first when the key is
+        // clustered (probed 2026-10-02 against SQL Server 2025).
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table c (z int not null, x int not null, y int not null, constraint pkc primary key (y, z));
+            create table n (z int not null, x int not null, y int not null, constraint pkn primary key nonclustered (y, z))
+            """);
+        Assert.AreEqual("z,y", string.Join(",", Run(sim, "exec sp_special_columns 'c'").Select(r => r["COLUMN_NAME"])));
+        Assert.AreEqual("y,z", string.Join(",", Run(sim, "exec sp_special_columns 'n'").Select(r => r["COLUMN_NAME"])));
+    }
+
+    [TestMethod]
+    public void CatalogProcs_DescribeRealsNotNullColumns()
+    {
+        // Probed 2026-10-02 against SQL Server 2025.
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table p (id int primary key, rv rowversion); create table c (pid int references p (id))");
+        static string NotNull(bool[] nullability) =>
+            string.Join(",", nullability.Select((nullable, i) => (nullable, i)).Where(static c => !c.nullable).Select(static c => c.i));
+        Assert.AreEqual("8", NotNull(sim.ColumnNullability("exec sp_fkeys @pktable_name = 'p'")));
+        Assert.AreEqual("2,6", NotNull(sim.ColumnNullability("exec sp_statistics 'p'")));
+        Assert.AreEqual("", NotNull(sim.ColumnNullability("exec sp_special_columns 'p'")));
+        Assert.AreEqual("3", NotNull(sim.ColumnNullability("exec sp_special_columns 'p', @col_type = 'V'")));
+        Assert.AreEqual("", NotNull(sim.ColumnNullability("exec sp_special_columns 'missing', @col_type = 'V'")));
+    }
 }

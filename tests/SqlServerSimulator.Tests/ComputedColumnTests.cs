@@ -552,4 +552,21 @@ public sealed class ComputedColumnTests
             create table t (a nvarchar(10), c as json_value(a, '$.x'), d as json_query(a), f as format(1, 'N'), u as upper(a));
             select string_agg(concat(name, ':', max_length), ',') within group (order by column_id) from sys.columns where object_id = object_id('t') and is_computed = 1
             """));
+
+    [TestMethod]
+    [DataRow("c as null")]
+    [DataRow("c as (null)")]
+    public void BareNull_IsACannotFindDataTypeRefusal(string column)
+        => new Simulation().AssertSqlError($"create table t (k int, {column})", 2715, "Column, parameter, or variable #2: Cannot find data type NULL.");
+
+    [TestMethod]
+    public void UnresolvedCollation_RefusesTheColumn()
+    {
+        // The column has to settle on one collation, as a projection does
+        // (probed 2026-10-02 against SQL Server 2025).
+        var error = new Simulation().AssertSqlError(
+            "create table t (a nvarchar(10), b varchar(10) collate Latin1_General_CS_AS, c as (a + N'!' + b))", 451);
+        Assert.AreEqual("Cannot resolve collation conflict between \"Latin1_General_CS_AS\" and \"SQL_Latin1_General_CP1_CI_AS\" in add operator occurring in CREATE TABLE statement column 3.", error.Message);
+        Assert.AreEqual(16, error.State);
+    }
 }

@@ -83,4 +83,24 @@ public sealed class ColumnPropertyMatrixTests
     public void AProperty_AnswersForTheSitesItConcerns(string objectName, string column, string property, string expected)
         => Assert.AreEqual(expected, Objects.ExecuteScalar(
             $"select isnull(cast(columnproperty(object_id('{objectName}'), '{column}', '{property}') as varchar), 'NULL')"));
+
+    [TestMethod]
+    public void SchemaBoundViewColumns_AreVerifiedAndReadNoData()
+    {
+        // A plain float column passes through as indexable, a float expression
+        // doesn't, and neither is precise (probed 2026-10-02 against SQL
+        // Server 2025).
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table dbo.t (a int, f float)", "create view dbo.v with schemabinding as select a, f, f * 2 as f2 from dbo.t");
+        Assert.AreEqual("a:1/1/1/0/0/1,f:1/0/1/0/0/1,f2:1/0/1/0/0/0", sim.ExecuteScalar("""
+            select string_agg(concat(name, ':', columnproperty(object_id, name, 'IsDeterministic'), '/', columnproperty(object_id, name, 'IsPrecise'), '/',
+                columnproperty(object_id, name, 'IsSystemVerified'), '/', columnproperty(object_id, name, 'SystemDataAccess'), '/',
+                columnproperty(object_id, name, 'UserDataAccess'), '/', columnproperty(object_id, name, 'IsIndexable')), ',') within group (order by column_id)
+            from sys.columns where object_id = object_id('dbo.v')
+            """));
+    }
+
+    [TestMethod]
+    public void CharMaxLen_AVectorReadsItsStorageLength()
+        => Assert.AreEqual(20, new Simulation().ExecuteScalar("create table t (v vector(3)); select columnproperty(object_id('t'), 'v', 'Charmaxlen')"));
 }

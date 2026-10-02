@@ -37,7 +37,6 @@ internal static partial class BuiltInResources
         // walks); COLUMN_DEFAULT carries the captured DEFAULT text for a table
         // column and stays NULL for a view's.
         var unicodeCs = SqlValue.FromSystemName("UNICODE");
-        var isoCs = SqlValue.FromSystemName("iso_1");
         var radix10 = SqlValue.FromInt16(10);
         var radix2 = SqlValue.FromInt16(2);
         // INFORMATION_SCHEMA.ROUTINE_COLUMNS takes the same 23 columns over
@@ -70,9 +69,9 @@ internal static partial class BuiltInResources
                 new("DOMAIN_NAME", SqlType.SystemName, 128, true),
             ];
         Iso("COLUMNS", ColumnsShape(ordinalNullable: true), (batch, database) =>
-            EnumerateInformationSchemaColumns(batch, database, defaultCollation, unicodeCs, isoCs, radix10, radix2, routineColumns: false));
+            EnumerateInformationSchemaColumns(batch, database, defaultCollation, unicodeCs, radix10, radix2, routineColumns: false));
         Iso("ROUTINE_COLUMNS", ColumnsShape(ordinalNullable: false), (batch, database) =>
-            EnumerateInformationSchemaColumns(batch, database, defaultCollation, unicodeCs, isoCs, radix10, radix2, routineColumns: true));
+            EnumerateInformationSchemaColumns(batch, database, defaultCollation, unicodeCs, radix10, radix2, routineColumns: true));
 
         // INFORMATION_SCHEMA.SCHEMATA: ISO-standard 6-column shape. Rows cover
         // the materialized schemas plus the catalog-only fixed ones (guest and
@@ -126,6 +125,9 @@ internal static partial class BuiltInResources
             // parameter reverse-engineering reads both.
             new("vector_dimensions", SqlType.Int32, null, true),
             new("vector_base_type_desc", NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), 10, true),
+            // The element type's id, as sys.columns carries it: 0 for float32,
+            // 1 for float16 (probed 2026-10-02 against SQL Server 2025).
+            new("vector_base_type", SqlType.TinyInt, null, true),
         ];
         SysP("parameters", parameterColumns, ["object_id"], EnumerateParameters);
 
@@ -369,7 +371,7 @@ internal static partial class BuiltInResources
             new("SCOPE_SCHEMA", SqlType.SystemName, 128, true),
             new("SCOPE_NAME", SqlType.SystemName, 128, true),
         ], (batch, database) =>
-            EnumerateInformationSchemaParameters(batch, database, modeIn, modeInOut, modeOut, unicodeCs, isoCs, radix10, radix2));
+            EnumerateInformationSchemaParameters(batch, database, modeIn, modeInOut, modeOut, unicodeCs, radix10, radix2));
 
         // INFORMATION_SCHEMA.VIEWS: ISO-standard 6-column shape. IS_UPDATABLE is
         // probe-confirmed to always report 'NO' in real SQL Server even for
@@ -802,7 +804,9 @@ internal static partial class BuiltInResources
                 sysSchemaId,
                 falseBit,
                 falseBit,
-                trueBit,
+                // sysname and timestamp are the two built-ins whose columns
+                // default to NOT NULL (probed 2026-10-02 against SQL Server 2025).
+                name is "sysname" or "timestamp" ? falseBit : trueBit,
                 name is "hierarchyid" or "geometry" or "geography" ? trueBit : falseBit,
                 SqlValue.FromInt16(Convert.ToInt16(row[4]!, CultureInfo.InvariantCulture)),
                 SqlValue.FromByte(Convert.ToByte(row[5]!, CultureInfo.InvariantCulture)),
@@ -913,7 +917,7 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.sequences</c>: one per registered sequence object,
-    /// schema-ordered. <c>is_cached</c> is 0 only under <c>NO CACHE</c>, and
+    /// in object-id order. <c>is_cached</c> is 0 only under <c>NO CACHE</c>, and
     /// <c>cache_size</c> is the explicit <c>CACHE n</c>, else NULL (probed
     /// 2026-09-26 against SQL Server 2025). Type-id
     /// columns derive from the declared type via <see cref="SystypesRowData"/>.
@@ -924,36 +928,39 @@ internal static partial class BuiltInResources
         var nullPrincipal = SqlValue.Null(SqlType.Int32);
         var trueBit = SqlValue.FromBoolean(true);
         var falseBit = SqlValue.FromBoolean(false);
-        foreach (var (_, schema) in database.Schemas)
+        // Object-id order across schemas, as real lists them (probed 2026-10-02
+        // against SQL Server 2025: EF Core's scaffolding query reads them
+        // unordered).
+        var sequences = database.Schemas.EnumerateValues()
+            .SelectMany(schema => schema.Sequences.EnumerateValues().Select(seq => (Schema: schema, Sequence: seq)))
+            .OrderBy(pair => pair.Sequence.ObjectId);
+        foreach (var (schema, seq) in sequences)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            foreach (var seq in schema.Sequences.EnumerateValues().OrderBy(s => s.ObjectId))
-            {
-                var (systemTypeId, userTypeId) = SequenceTypeIds(seq.DeclaredType);
-                var (precision, scale) = SequencePrecisionScale(seq.DeclaredType);
-                yield return [
-                    SqlValue.FromSystemName(seq.Name),
-                    SqlValue.FromInt32(seq.ObjectId),
-                    schemaId,
-                    Ownership.PrincipalIdValue(seq.OwnerPrincipalId),
-                    SqlValue.FromDateTime(seq.CreateDate),
-                    SqlValue.FromDateTime(seq.ModifyDate),
-                    seq.AsDeclaredVariant(seq.StartValue),
-                    seq.AsDeclaredVariant(seq.Increment),
-                    seq.AsDeclaredVariant(seq.MinValue),
-                    seq.AsDeclaredVariant(seq.MaxValue),
-                    seq.Cycle ? trueBit : falseBit,
-                    seq.CacheSize == 0 ? falseBit : trueBit,
-                    seq.CacheSize is > 0 and var size ? SqlValue.FromInt32((int)size) : nullCache,
-                    seq.CurrentValueAsVariant,
-                    seq.LastUsedValueAsVariant,
-                    SqlValue.FromByte(systemTypeId),
-                    SqlValue.FromInt32(userTypeId),
-                    seq.IsExhausted ? trueBit : falseBit,
-                    SqlValue.FromByte(precision),
-                    SqlValue.FromByte(scale),
-                ];
-            }
+            var (systemTypeId, userTypeId) = SequenceTypeIds(seq.DeclaredType);
+            var (precision, scale) = SequencePrecisionScale(seq.DeclaredType);
+            yield return [
+                SqlValue.FromSystemName(seq.Name),
+                SqlValue.FromInt32(seq.ObjectId),
+                schemaId,
+                Ownership.PrincipalIdValue(seq.OwnerPrincipalId),
+                SqlValue.FromDateTime(seq.CreateDate),
+                SqlValue.FromDateTime(seq.ModifyDate),
+                seq.AsDeclaredVariant(seq.StartValue),
+                seq.AsDeclaredVariant(seq.Increment),
+                seq.AsDeclaredVariant(seq.MinValue),
+                seq.AsDeclaredVariant(seq.MaxValue),
+                seq.Cycle ? trueBit : falseBit,
+                seq.CacheSize == 0 ? falseBit : trueBit,
+                seq.CacheSize is > 0 and var size ? SqlValue.FromInt32((int)size) : nullCache,
+                seq.CurrentValueAsVariant,
+                seq.LastUsedValueAsVariant,
+                SqlValue.FromByte(systemTypeId),
+                SqlValue.FromInt32(userTypeId),
+                seq.IsExhausted ? trueBit : falseBit,
+                SqlValue.FromByte(precision),
+                SqlValue.FromByte(scale),
+            ];
         }
     }
 
@@ -1185,6 +1192,8 @@ internal static partial class BuiltInResources
         SqlValue VectorDims(SqlType type) => type is VectorSqlType vector ? SqlValue.FromInt32(vector.dimensions) : nullVectorDims;
         var float16Desc = SqlValue.FromString(NVarcharSqlType.Get(10, Collation.Catalog, Coercibility.Implicit), "float16");
         SqlValue VectorDesc(SqlType type) => type is VectorSqlType vector ? vector.IsFloat16 ? float16Desc : float32Desc : nullVectorDesc;
+        var nullVectorTypeId = SqlValue.Null(SqlType.TinyInt);
+        SqlValue VectorTypeId(SqlType type) => type is VectorSqlType vector ? SqlValue.FromByte(vector.IsFloat16 ? (byte)1 : (byte)0) : nullVectorTypeId;
         foreach (var (_, schema) in database.Schemas)
         {
             foreach (var proc in schema.Procedures.EnumerateValues().OrderBy(p => p.ObjectId))
@@ -1224,6 +1233,7 @@ internal static partial class BuiltInResources
                         trueBit,
                         VectorDims(param.Type),
                         VectorDesc(param.Type),
+                        VectorTypeId(param.Type),
                     ];
                 }
             }
@@ -1266,6 +1276,7 @@ internal static partial class BuiltInResources
                         trueBit,
                         VectorDims(returnType),
                         VectorDesc(returnType),
+                        VectorTypeId(returnType),
                     ];
                 }
                 for (var i = 0; i < fn.Parameters.Length; i++)
@@ -1292,6 +1303,7 @@ internal static partial class BuiltInResources
                         trueBit,
                         VectorDims(p.Type),
                         VectorDesc(p.Type),
+                        VectorTypeId(p.Type),
                     ];
                 }
             }
@@ -1307,6 +1319,20 @@ internal static partial class BuiltInResources
         var value = defaultExpression.Run(new Parser.RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), batch));
         return value.IsNull ? SqlValue.Null(SqlType.SqlVariant) : SqlValue.FromVariant(value);
     }
+
+    /// <summary>
+    /// The <c>CHARACTER_SET_NAME</c> the ISO views report for a single-byte
+    /// string under <paramref name="collation"/>: its code page's
+    /// <c>sys.syscharsets</c> name — <c>iso_1</c> for 1252, <c>utf8</c> for a
+    /// <c>_UTF8</c> collation, <c>cp&lt;page&gt;</c> for the rest (probed
+    /// 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal static string CharacterSetName(Collation collation) => collation.AnsiCodePage switch
+    {
+        1252 => "iso_1",
+        65001 => "utf8",
+        var codePage => $"cp{codePage}",
+    };
 
     /// <summary>
     /// Rows for <c>INFORMATION_SCHEMA.SCHEMATA</c>, ordered by schema_id over
@@ -1376,7 +1402,6 @@ internal static partial class BuiltInResources
         Database database,
         SqlValue defaultCollation,
         SqlValue unicodeCs,
-        SqlValue isoCs,
         SqlValue radix10,
         SqlValue radix2,
         bool routineColumns)
@@ -1398,13 +1423,14 @@ internal static partial class BuiltInResources
         SqlValue[] Row(SqlValue schemaName, SqlValue tableName, HeapColumn col, int position)
         {
             var (charLength, octetLength, numericPrecision, numericRadix, numericScale, dateTimePrecision) = GetInformationSchemaColumnMetadata(col);
-            var cs = !SqlType.IsCollatedString(col.Type) ? nullSysName
-                : SqlType.IsNationalStringCategory(col.Type) ? unicodeCs
-                : isoCs;
             // A view's column carries its collation in its type rather than as
             // a declared override.
+            var collationName = col.Collation ?? col.Type.Collation?.Name;
+            var cs = !SqlType.IsCollatedString(col.Type) ? nullSysName
+                : SqlType.IsNationalStringCategory(col.Type) ? unicodeCs
+                : SqlValue.FromSystemName(CharacterSetName(collationName is null ? database.Collation : Collation.Get(collationName)));
             var collation = !SqlType.IsCollatedString(col.Type) ? nullSysName
-                : (col.Collation ?? col.Type.Collation?.Name) is { } collationName ? SqlValue.FromSystemName(collationName)
+                : collationName is not null ? SqlValue.FromSystemName(collationName)
                 : dbDefaultCollation;
             return
             [
@@ -1592,13 +1618,13 @@ internal static partial class BuiltInResources
                 catalog, schemaName, name, catalog, schemaName, name,
                 SqlValue.FromNVarchar(isProcedure ? "PROCEDURE" : "FUNCTION"),
                 nullSysName, nullSysName, nullSysName, nullSysName, nullSysName, nullSysName,
-                isProcedure ? nullSysName : returnType is null ? SqlValue.FromSystemName("TABLE") : IsoDataTypeName(returnType, spelledNumeric),
+                isProcedure ? nullSysName : returnType is null ? SqlValue.FromSystemName("TABLE") : IsoRoutineDataTypeName(returnType, spelledNumeric),
                 charLength is int cl ? SqlValue.FromInt32(cl) : nullInt32,
                 octetLength is int ol ? SqlValue.FromInt32(ol) : nullInt32,
                 nullSysName, nullSysName,
                 isString ? databaseCollation : nullSysName,
                 nullSysName, nullSysName,
-                !isString ? nullSysName : SqlValue.FromSystemName(SqlType.IsNationalStringCategory(returnType!) ? "UNICODE" : "iso_1"),
+                !isString ? nullSysName : SqlValue.FromSystemName(SqlType.IsNationalStringCategory(returnType!) ? "UNICODE" : CharacterSetName(database.Collation)),
                 numericPrecision is byte np ? SqlValue.FromByte(np) : nullByte,
                 numericRadix is int radix ? SqlValue.FromInt16((short)radix) : nullInt16,
                 numericScale is int ns ? SqlValue.FromInt32(ns) : nullInt32,
@@ -1677,7 +1703,6 @@ internal static partial class BuiltInResources
         SqlValue modeInOut,
         SqlValue modeOut,
         SqlValue unicodeCs,
-        SqlValue isoCs,
         SqlValue radix10,
         SqlValue radix2)
     {
@@ -1712,7 +1737,7 @@ internal static partial class BuiltInResources
                 ordinal == 0 ? yes : no,
                 no,
                 SqlValue.FromSystemName(name),
-                tableType is null ? IsoDataTypeName(type, spelledNumeric) : tableTypeName,
+                tableType is null ? IsoRoutineDataTypeName(type, spelledNumeric) : tableTypeName,
                 charLength is int cl ? SqlValue.FromInt32(cl) : nullInt32,
                 octetLength is int ol ? SqlValue.FromInt32(ol) : nullInt32,
                 nullSysName,
@@ -1720,7 +1745,7 @@ internal static partial class BuiltInResources
                 isString ? databaseCollation : nullSysName,
                 nullSysName,
                 nullSysName,
-                !isString ? nullSysName : SqlType.IsNationalStringCategory(type) ? unicodeCs : isoCs,
+                !isString ? nullSysName : SqlType.IsNationalStringCategory(type) ? unicodeCs : SqlValue.FromSystemName(CharacterSetName(database.Collation)),
                 numericPrecision is byte np ? SqlValue.FromByte(np) : nullByte,
                 numericRadix switch { 2 => radix2, 10 => radix10, _ => nullInt16 },
                 numericScale is int ns ? SqlValue.FromInt32(ns) : nullInt32,
@@ -1780,6 +1805,12 @@ internal static partial class BuiltInResources
 
     private static SqlValue IsoDataTypeName(SqlType type) =>
         SqlValue.FromSystemName(type == SqlType.SystemName ? "nvarchar" : type.SqlServerName);
+
+    // A routine's parameter or return value of type vector reads as the
+    // varbinary it is stored as, where a table column reads vector (probed
+    // 2026-10-02 against SQL Server 2025).
+    private static SqlValue IsoRoutineDataTypeName(SqlType type, bool spelledNumeric) =>
+        type is VectorSqlType ? SqlValue.FromSystemName("varbinary") : IsoDataTypeName(type, spelledNumeric);
 
     /// <summary>
     /// Rows for <c>INFORMATION_SCHEMA.VIEWS</c>: per-view ISO-shape entries.

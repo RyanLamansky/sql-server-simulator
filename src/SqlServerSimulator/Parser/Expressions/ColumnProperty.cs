@@ -70,13 +70,19 @@ internal sealed class ColumnProperty : Expression
         Parameter,
     }
 
-    private readonly struct FoundColumn(HeapColumn column, int columnId, ColumnSite site, HeapColumn[] scope, HeapTable? table, bool isOutput = false, bool isCursor = false)
+    private readonly struct FoundColumn(HeapColumn column, int columnId, ColumnSite site, HeapColumn[] scope, HeapTable? table, bool isOutput = false, bool isCursor = false, View? view = null, int position = -1)
     {
         public readonly HeapColumn Column = column;
         public readonly int ColumnId = columnId;
         public readonly ColumnSite Site = site;
         public readonly HeapColumn[] Scope = scope;
         public readonly HeapTable? Table = table;
+
+        /// <summary>The view a view-site column belongs to, null for a catalog view's or any other site's.</summary>
+        public readonly View? View = view;
+
+        /// <summary>The column's position among its object's columns.</summary>
+        public readonly int Position = position;
         public readonly bool IsOutput = isOutput;
         public readonly bool IsCursor = isCursor;
     }
@@ -142,7 +148,7 @@ internal sealed class ColumnProperty : Expression
                 // A table type's columns answer as a table's; a catalog view's
                 // as a view's.
                 var resolvedSite = owner is null && !Simulation.CatalogViews.Values.Any(view => view.ObjectId == id) ? ColumnSite.Table : site;
-                return new(column, column.ColumnId == 0 ? i + 1 : column.ColumnId, resolvedSite, columns, owner as HeapTable);
+                return new(column, column.ColumnId == 0 ? i + 1 : column.ColumnId, resolvedSite, columns, owner as HeapTable, view: owner as View, position: i);
             }
         }
         return null;
@@ -226,7 +232,7 @@ internal sealed class ColumnProperty : Expression
             "ISINDEXABLE" => found.Site switch
             {
                 ColumnSite.Table => IsIndexable(database, found),
-                ColumnSite.View => 0,
+                ColumnSite.View => IsViewColumnIndexable(database, found),
                 _ => null,
             },
             "ISMASKED" => isColumn ? Flag(column.MaskingFunction is not null) : null,
@@ -256,12 +262,25 @@ internal sealed class ColumnProperty : Expression
     /// The properties reading a column's expression: a computed table column's
     /// own answers, and for a view's column the constants real gives a view
     /// that isn't schema-bound — neither deterministic, precise nor verified,
-    /// and reading both user and system data.
+    /// and reading both user and system data. A schema-bound view's column is
+    /// verified, reads no data of either kind, is deterministic as its view is,
+    /// and precise unless it is float or real (probed 2026-10-02 against SQL
+    /// Server 2025).
     /// </summary>
     private static int? ExpressionProperty(Database database, FoundColumn found, ReadOnlySpan<char> name)
     {
         if (found.Site == ColumnSite.View)
-            return name is "SYSTEMDATAACCESS" or "USERDATAACCESS" ? 1 : 0;
+        {
+            if (found.View is not { IsSchemaBound: true } view)
+                return name is "SYSTEMDATAACCESS" or "USERDATAACCESS" ? 1 : 0;
+            return name switch
+            {
+                "ISDETERMINISTIC" => Schemas.ModuleDeterminism.Evaluate(database, view),
+                "ISPRECISE" => Flag(found.Column.Type is not (FloatSqlType or RealSqlType)),
+                "ISSYSTEMVERIFIED" => 1,
+                _ => 0,
+            };
+        }
         if (found.Site != ColumnSite.Table || found.Column.Computed is null || found.Column.ComputedDefinition is not { } definition)
             return null;
         return name switch
@@ -280,14 +299,34 @@ internal sealed class ColumnProperty : Expression
     /// SQL Server 2025 under the default SET options, which that answer also
     /// weighs on real).
     /// </summary>
+    /// <summary>
+    /// A view column's <c>IsIndexable</c>: 0 unless the view is schema-bound,
+    /// then — as a table's column — 0 for a MAX, LOB, xml, spatial or vector
+    /// type, and otherwise 1 for a deterministic column that is precise or
+    /// passes a base column through unchanged (probed 2026-10-02 against SQL
+    /// Server 2025: a float column read straight answers 1, a float expression
+    /// 0).
+    /// </summary>
+    private static int IsViewColumnIndexable(Database database, FoundColumn found)
+    {
+        if (found.View is not { IsSchemaBound: true } view || IsUnindexableType(found.Column))
+            return 0;
+        var passesThrough = found.Position >= 0
+            && (view.BaseColumnOrdinals.Length > found.Position ? view.BaseColumnOrdinals[found.Position] >= 0
+                : view.DerivedOutputColumns is { } derived && derived.Length > found.Position && !derived[found.Position]);
+        return Flag(Schemas.ModuleDeterminism.Evaluate(database, view) == 1
+            && (passesThrough || found.Column.Type is not (FloatSqlType or RealSqlType)));
+    }
+
+    private static bool IsUnindexableType(HeapColumn column) =>
+        column.IsLob || column.Type is XmlSqlType or GeographySqlType or GeometrySqlType or VectorSqlType
+            or VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel };
+
     private static int IsIndexable(Database database, FoundColumn found)
     {
         var column = found.Column;
-        if (column.IsLob || column.Type is XmlSqlType or GeographySqlType or GeometrySqlType or VectorSqlType
-            || column.Type is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel })
-        {
+        if (IsUnindexableType(column))
             return 0;
-        }
         if (column.Computed is null || column.ComputedDefinition is not { } definition)
             return 1;
         return Flag(Schemas.ModuleDeterminism.IsComputedColumnDeterministic(database, found.Scope, definition)
@@ -354,6 +393,8 @@ internal sealed class ColumnProperty : Expression
         ClrUdtSqlType udt => udt.Udt.MaxByteSize,
         SqlVariantSqlType => 0,
         SystemNameSqlType => 128,
+        // A vector's storage length, as its Precision (probed 2026-10-02 against SQL Server 2025).
+        VectorSqlType vector => vector.ByteLength,
         CharSqlType or VarcharSqlType or NCharSqlType or NVarcharSqlType or BinarySqlType or VarbinarySqlType =>
             column.MaxLength is int n ? (n == SqlType.MaxLengthSentinel ? -1 : n) : DeclaredLength(column.Type),
         _ => null,

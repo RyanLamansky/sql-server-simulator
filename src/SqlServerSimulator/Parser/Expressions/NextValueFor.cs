@@ -59,6 +59,8 @@ internal sealed class NextValueFor : Expression
         {
             ThrowIfRejectedHere(scope);
         }
+        if (context.InDefaultClause && sequenceName.Count >= 3 && sequenceName[sequenceName.Count - 3] is { Length: > 0 })
+            throw SimulatedSqlException.SequenceDatabaseNameInDefault();
         if (!context.Batch.TryResolveSequence(sequenceName, out var resolved))
         {
             // Real SQL Server distinguishes "object name doesn't resolve" (Msg 208)
@@ -125,6 +127,10 @@ internal sealed class NextValueFor : Expression
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Sequence.DeclaredType;
+
+    // A sequence always yields a value, and real describes the column NOT NULL
+    // (probed 2026-10-02 against SQL Server 2025).
+    internal override bool ResultIsNullable(NullabilityContext context) => false;
 
     internal override string DebugDisplay() => $"NEXT VALUE FOR {this.Sequence.FullName}";
 

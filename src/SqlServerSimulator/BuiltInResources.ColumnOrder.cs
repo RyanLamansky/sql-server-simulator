@@ -310,7 +310,6 @@ internal static partial class BuiltInResources
             (new("encryption_algorithm_name", nvarchar128Catalog, 128, true), SqlValue.Null(SqlType.NVarchar)),
             (new("column_encryption_key_id", SqlType.Int32, null, true), SqlValue.Null(SqlType.Int32)),
             (new("column_encryption_key_database_name", SqlType.SystemName, 128, true), SqlValue.Null(SqlType.SystemName)),
-            (new("vector_base_type", SqlType.TinyInt, null, true), SqlValue.Null(SqlType.TinyInt)),
         ],
         // A live file's LSN history reads NULL on a database no backup or
         // restore has touched (probed 2026-09-26 against SQL Server 2025).
@@ -343,7 +342,6 @@ internal static partial class BuiltInResources
             (new("encryption_algorithm_name", nvarchar128Catalog, 128, true), SqlValue.Null(SqlType.NVarchar)),
             (new("column_encryption_key_id", SqlType.Int32, null, true), SqlValue.Null(SqlType.Int32)),
             (new("column_encryption_key_database_name", SqlType.SystemName, 128, true), SqlValue.Null(SqlType.SystemName)),
-            (new("vector_base_type", SqlType.TinyInt, null, true), SqlValue.Null(SqlType.TinyInt)),
         ],
     };
 

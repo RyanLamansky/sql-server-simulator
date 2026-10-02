@@ -59,7 +59,7 @@ Default (`WITH CHECK`) scans the live heap before mutating:
 | `PRIMARY KEY` / `UNIQUE` | column exists | Msg 1911 |
 | `PRIMARY KEY` / `UNIQUE` | no duplicate key tuples in existing rows | Msg 1505 (`CREATE UNIQUE INDEX statement terminated …`) |
 | `FOREIGN KEY` | child column exists | Msg 1769 |
-| `FOREIGN KEY` | referenced columns form PK / UQ on parent | Msg 1776 |
+| `FOREIGN KEY` | referenced columns form PK / UQ, or an enabled unfiltered unique index, on parent | Msg 1776 |
 | `FOREIGN KEY` | a computed child column is PERSISTED, and its referential actions never write it | Msg 1764 / 1765 / 1715 — see [`foreign-keys.md`](foreign-keys.md#computed-columns-in-a-foreign-key) |
 | `FOREIGN KEY` | cascade graph doesn't form a cycle / multiple paths | Msg 1785 |
 | `FOREIGN KEY` | every non-NULL existing FK tuple matches a parent row | Msg 547 with `"ALTER TABLE statement"` prefix |
@@ -285,21 +285,22 @@ The same text reaches every surface that reads it — `INFORMATION_SCHEMA.CHECK_
 The rules the renderer reproduces:
 
 - names bracketed as written (`A` → `[A]`, `dbo.f` → `[dbo].[f]`); built-in names lowercased, except the few real keeps in a case of its own (`Trim`, `Compress`, `Decompress`, `Date_Bucket`, `Crypt_Gen_Random`) and `CONVERT` / `TRY_CAST` / `TRY_CONVERT`;
-- numeric literals parenthesized — an integer by value (`0002` → `(2)`), a decimal with its written scale and a scale-0 one with a trailing point (`1.` → `(1.)`, `2147483648` → `(2147483648.)`), a float as `%.16e` with a three-digit exponent, money as `$` plus four places; string, binary and `NULL` bare;
-- a minus takes a whole multiplicative term (`-a*b` is `-(a*b)`) and folds into a numeric literal, rendering ` -x` otherwise; `+` vanishes; `~` binds tightest;
+- numeric literals parenthesized — an integer by value (`0002` → `(2)`), a decimal with its written scale and a scale-0 one with a trailing point (`1.` → `(1.)`, `2147483648` → `(2147483648.)`), a float as `%.16e` of the **stored double** with a three-digit exponent (`1.5E-2` → `(1.4999999999999999e-002)`, probed 2026-10-02), money as `$` plus four places; string, binary and `NULL` bare;
+- a minus takes a whole multiplicative term (`-a*b` is `-(a*b)`) and folds into a numeric literal, rendering ` -x` otherwise — a zero literal takes no sign but a float's (`-0.00` → `(0.00)`, `-0e0` → `(-0.0000000000000000e+000)`); `+` vanishes; `~` binds tightest;
+- `NEXT VALUE FOR` keeps the sequence name as written, one part or two, each bracketed (`NEXT VALUE FOR [sq]`, `NEXT VALUE FOR [dbo].[sq]`), without the parentheses the source wrapped it in — and a database part is refused in a DEFAULT, Msg 11730 (probed 2026-10-02);
 - written parentheses dropped, and put back by precedence: an arithmetic operand binding no tighter than its operator is parenthesized on either side (`a+b-c` → `([a]+[b])-[c]`), a comparison binds at the additive level, a negation is always parenthesized as an operand;
 - `AND` / `OR` flatten a left operand of their own kind and parenthesize a right one; an `OR` under an `AND` is parenthesized;
 - `IN` becomes an OR chain over its list **reversed**, `BETWEEN` a `>=` / `<=` pair, `NOT` over either parenthesizing the chain; `!=` / `!<` / `!>` become `<>` / `>=` / `<=`; `LIKE` stays lowercase and an `ESCAPE` leaves a trailing space;
 - `CAST` → `CONVERT([type],x)`, `TRY_CONVERT` without a style → `TRY_CAST(x AS [type])`, the type name folded to its system name (`integer` → `int`, `rowversion` → `timestamp`, `national char varying` → `nvarchar`); `IIF` → `CASE`; a `CASE` with no `ELSE` leaves two spaces before `end`; `YEAR` / `MONTH` / `DAY` → `datepart`, and a date part's alias its full name; `CURRENT_TIMESTAMP` → `getdate()`, `CURRENT_USER` / `SESSION_USER` / `USER` → `user_name()`, `SYSTEM_USER` → `suser_sname()`; `<<` / `>>` → `left_shift` / `right_shift`;
 - `COLLATE` parenthesizes its operand, `AT TIME ZONE` its whole expression.
 
-A shape outside that grammar — an ODBC `{fn …}` escape, `NEXT VALUE FOR`, an xml or spatial method call — keeps its **source text**, wrapped in one paren pair (a computed column's body once, not twice), so the column is never empty.
+A shape outside that grammar — an ODBC `{fn …}` escape, an xml or spatial method call — keeps its **source text**, wrapped in one paren pair (a computed column's body once, not twice), so the column is never empty.
 The filtered-index `sys.indexes.filter_definition` has its own, narrower renderer (see [`indexes.md`](indexes.md#filtered-index-filter_definition)).
 The text scans that read a stored definition — the determinism and precision checks behind persisted and indexed computed columns — accept both forms.
 
 ## Fidelity gaps
 
-- **An ODBC escape, `NEXT VALUE FOR` or a method call in a definition keeps its source text** rather than real's canonical rendering — see [Definition columns](#definition-columns).
+- **An ODBC escape or a method call in a definition keeps its source text** rather than real's canonical rendering — see [Definition columns](#definition-columns).
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named.
   Custom names matching the prefix would report `is_system_named = true` incorrectly.
   Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.

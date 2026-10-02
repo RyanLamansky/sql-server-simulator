@@ -37,4 +37,12 @@ public sealed class TypePropertyTests
     [DataRow("sys.al", "Precision", "NULL")]
     public void TypeProperty_AnswersForEveryKindOfType(string type, string property, string expected)
         => Assert.AreEqual(expected, Types.ExecuteScalar($"select isnull(cast(typeproperty('{type}', '{property}') as varchar), 'NULL')"));
+
+    [TestMethod]
+    public void TypeProperty_JsonAnswersAsXmlDoes()
+        => Assert.AreEqual("1/4/-1", new Simulation().ExecuteScalar("select concat(typeproperty('json', 'AllowsNull'), '/', typeproperty('json', 'OwnerId'), '/', typeproperty('json', 'Precision'))"));
+
+    [TestMethod]
+    public void TypeId_ASystemTypeResolvesUnqualifiedOrUnderSysOnly()
+        => Assert.AreEqual("56/56/NULL", new Simulation().ExecuteScalar("select concat(type_id('int'), '/', type_id('sys.int'), '/', isnull(cast(type_id('dbo.int') as varchar), 'NULL'))"));
 }

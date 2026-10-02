@@ -128,4 +128,18 @@ public sealed class MetadataAndStringScalarTests
     [DataRow("' a . b '", 1, " b ")]
     public void ParseName_ReadsIdentifierSyntax(string name, int part, string? expected)
         => AreEqual(expected is null ? DBNull.Value : expected, new Simulation().ExecuteScalar($"select parsename({name}, {part})"));
+
+    [TestMethod]
+    public void ColLength_ReadsSysColumnsMaxLength_ForTablesViewsAndFunctions()
+    {
+        // Probed 2026-10-02 against SQL Server 2025.
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a date, b datetime2(4), c time(0), d datetimeoffset, e sql_variant, f hierarchyid, g text, h ntext, i image)",
+            "create view v as select a, b from t",
+            "create function f () returns table as return select cast('x' as nchar(3)) as n");
+        Assert.AreEqual("3,7,3,10,8016,892,16,16,16", sim.ExecuteScalar(
+            "select string_agg(col_length('t', name), ',') within group (order by column_id) from sys.columns where object_id = object_id('t')"));
+        Assert.AreEqual("3,7,6", sim.ExecuteScalar("select concat_ws(',', col_length('v', 'a'), col_length('v', 'b'), col_length('f', 'n'))"));
+    }
 }

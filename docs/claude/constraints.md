@@ -87,6 +87,8 @@ That is what makes `CONVERT(varchar(20), <datetime col>, 112)` persistable while
 A **`type::Method(…)` static call is not the built-in of the same name** — real persists a computed `geography::Parse('POINT(0 0)')` while refusing the scalar `PARSE(s AS int)`, so the walk skips a name whose preceding token is `::`.
 A *non-persisted* computed column takes no gate at all: it is evaluated per read, so nondeterminism is exactly what it is for.
 
+Two refusals settle the column's type in `CREATE TABLE` whether persisted or not (probed 2026-10-02 against SQL Server 2025): a bare `NULL` body gives it none, which real words as a type it can't find — **Msg 2715** state 6, `Column, parameter, or variable #<position>: Cannot find data type NULL.` — and a body whose collation stays unresolved (`a + b` over two implicit collations) is **Msg 451** state 16, naming `CREATE TABLE statement column <position>`, as a projection's unresolved output column is.
+
 ## Computed columns in a CHECK constraint
 
 A **PERSISTED** computed column carries a CHECK in every form: the inline column tail (`cc AS a + 1 PERSISTED [CONSTRAINT n] CHECK (cc > 0)`), the table-level list, `ALTER TABLE … ADD CONSTRAINT … CHECK`, and the inline tail of an `ALTER TABLE … ADD` of the computed column itself.

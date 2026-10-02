@@ -59,7 +59,7 @@ internal sealed class IndexProperty : Expression
     /// <summary>What an index name resolved to, with the answers every property reads.</summary>
     private readonly struct FoundIndex(
         int indexId, bool isUnique, bool isClustered, bool isColumnstore, bool isDisabled, byte fillFactor, bool isPadded,
-        bool allowRowLocks, bool allowPageLocks, bool optimizeForSequentialKey, bool isFullTextKey, bool isStatistics, bool hasDepth)
+        bool allowRowLocks, bool allowPageLocks, bool optimizeForSequentialKey, bool isFullTextKey, bool isStatistics, int? depth)
     {
         public readonly int IndexId = indexId;
         public readonly bool IsUnique = isUnique;
@@ -73,7 +73,8 @@ internal sealed class IndexProperty : Expression
         public readonly bool OptimizeForSequentialKey = optimizeForSequentialKey;
         public readonly bool IsFullTextKey = isFullTextKey;
         public readonly bool IsStatistics = isStatistics;
-        public readonly bool HasDepth = hasDepth;
+        /// <summary>The <c>IndexDepth</c> answer, null where the index has none.</summary>
+        public readonly int? Depth = depth;
     }
 
     private static FoundIndex? Resolve(Schemas.SchemaObject? owner, string name)
@@ -93,13 +94,13 @@ internal sealed class IndexProperty : Expression
             {
                 return new(identity.IndexId, true, key.IsClustered, false, key.IsDisabled, key.FillFactor, key.IsPadded,
                     key.AllowRowLocks, key.AllowPageLocks, key.OptimizeForSequentialKey,
-                    fullTextKey is not null && Collation.Baseline.Equals(fullTextKey, key.Name), false, true);
+                    fullTextKey is not null && Collation.Baseline.Equals(fullTextKey, key.Name), false, Depth(table, identity));
             }
             if (identity.Index is { } index && Collation.Baseline.Equals(index.Name, name))
             {
                 return new(identity.IndexId, index.IsUnique, index.IsClustered, index.IsColumnstore, index.IsDisabled, index.FillFactor, index.IsPadded,
                     index.AllowRowLocks && !index.IsColumnstore, index.AllowPageLocks && !index.IsColumnstore, index.OptimizeForSequentialKey,
-                    fullTextKey is not null && Collation.Baseline.Equals(fullTextKey, index.Name), false, true);
+                    fullTextKey is not null && Collation.Baseline.Equals(fullTextKey, index.Name), false, Depth(table, identity));
             }
         }
         if (table is null)
@@ -127,11 +128,33 @@ internal sealed class IndexProperty : Expression
         foreach (var statistic in table.UserStatistics)
         {
             if (Collation.Baseline.Equals(statistic.Name, name))
-                return new(0, false, false, false, false, 0, false, true, true, false, false, true, true);
+                return new(0, false, false, false, false, 0, false, true, true, false, false, true, 0);
         }
         return null;
 
-        static FoundIndex Auxiliary(int indexId) => new(indexId, false, false, false, false, 0, false, true, true, false, false, false, false);
+        static FoundIndex Auxiliary(int indexId) => new(indexId, false, false, false, false, 0, false, true, true, false, false, false, null);
+    }
+
+    /// <summary>
+    /// <c>IndexDepth</c>: 0 over an empty table, otherwise one leaf level plus
+    /// the levels above it — real reads 1 for a table whose rows fit one page
+    /// — and NULL for an index on a partition scheme, whose depth is
+    /// per-partition (probed 2026-10-02 against SQL Server 2025). The simulator
+    /// keeps no B-tree, so a larger index's upper levels are estimated from the
+    /// table's page count at a fan-out of 500 keys a page.
+    /// </summary>
+    private static int? Depth(HeapTable? table, IndexIdentity identity)
+    {
+        if (table is null)
+            return 0;
+        if (Simulation.PlacementOf(table, identity) is not null)
+            return null;
+        if (table.Heap.RowCount == 0)
+            return 0;
+        var depth = 1;
+        for (var pages = (long)table.Heap.Pages.Count; pages > 1; pages = (pages + 499) / 500)
+            depth++;
+        return depth;
     }
 
     private static int? Evaluate(FoundIndex found, string property)
@@ -139,7 +162,7 @@ internal sealed class IndexProperty : Expression
         Span<char> upper = stackalloc char[property.Length];
         return upper[..property.AsSpan().ToUpperInvariant(upper)] switch
         {
-            "INDEXDEPTH" => found.HasDepth ? 0 : null,
+            "INDEXDEPTH" => found.Depth,
             "INDEXFILLFACTOR" => found.FillFactor,
             "INDEXID" => found.IndexId,
             "ISAUTOSTATISTICS" or "ISHYPOTHETICAL" => 0,

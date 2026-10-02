@@ -300,7 +300,8 @@ internal sealed class OriginalLogin : Expression
 /// client — the connection string's <c>Workstation ID</c> keyword in-process,
 /// LOGIN7's <c>HostName</c> field over the TDS endpoint, and the empty string
 /// when neither supplied one (the common pool-default observed on real SQL
-/// Server). Result type is <see cref="SqlType.NVarchar"/>.
+/// Server). Result type is <c>nvarchar(128)</c> (probed 2026-10-02 against SQL
+/// Server 2025, through a computed column's <c>max_length</c>).
 /// </summary>
 internal sealed class HostName : Expression
 {
@@ -311,9 +312,9 @@ internal sealed class HostName : Expression
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromNVarchar(runtime.Batch.Connection.ClientHostName);
+        SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), runtime.Batch.Connection.ClientHostName);
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => MetadataNameType(batch);
 
     internal override string DebugDisplay() => "HOST_NAME()";
 
@@ -324,7 +325,8 @@ internal sealed class HostName : Expression
 /// SQL <c>APP_NAME()</c>: returns the application name the client reported —
 /// the connection string's <c>Application Name</c> keyword in-process,
 /// LOGIN7's <c>AppName</c> field over the TDS endpoint, and the empty string
-/// when neither supplied one. Result type is <see cref="SqlType.NVarchar"/>.
+/// when neither supplied one. Result type is <c>nvarchar(128)</c>, as
+/// <see cref="HostName"/>'s.
 /// </summary>
 internal sealed class AppName : Expression
 {
@@ -335,9 +337,9 @@ internal sealed class AppName : Expression
     }
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromNVarchar(runtime.Batch.Connection.ClientApplicationName);
+        SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), runtime.Batch.Connection.ClientApplicationName);
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => MetadataNameType(batch);
 
     internal override string DebugDisplay() => "APP_NAME()";
 

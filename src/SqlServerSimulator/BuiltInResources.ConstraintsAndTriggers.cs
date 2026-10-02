@@ -211,6 +211,38 @@ internal static partial class BuiltInResources
             new("DOMAIN_DEFAULT", SqlType.NVarchar, 4000, true),
         ], EnumerateInformationSchemaDomains);
 
+        // INFORMATION_SCHEMA.DOMAIN_CONSTRAINTS: one row per alias type a
+        // CREATE RULE object is bound to, naming the rule (probed 2026-10-02
+        // against SQL Server 2025).
+        Iso("DOMAIN_CONSTRAINTS",
+        [
+            new("CONSTRAINT_CATALOG", nvarchar128Baseline, 128, true),
+            new("CONSTRAINT_SCHEMA", nvarchar128Baseline, 128, true),
+            new("CONSTRAINT_NAME", SqlType.SystemName, 128, false),
+            new("DOMAIN_CATALOG", nvarchar128Baseline, 128, true),
+            new("DOMAIN_SCHEMA", nvarchar128Baseline, 128, true),
+            new("DOMAIN_NAME", SqlType.SystemName, 128, false),
+            new("IS_DEFERRABLE", VarcharSqlType.Get(2, Collation.Baseline, Coercibility.Implicit), 2, false),
+            new("INITIALLY_DEFERRED", VarcharSqlType.Get(2, Collation.Baseline, Coercibility.Implicit), 2, false),
+        ], EnumerateInformationSchemaDomainConstraints);
+
+        // INFORMATION_SCHEMA.TABLE_PRIVILEGES / COLUMN_PRIVILEGES: the
+        // explicit GRANTs on a table or view, object-level and column-level
+        // respectively (see EnumerateInformationSchemaPrivileges).
+        HeapColumn[] PrivilegeShape(bool column) =>
+        [
+            new("GRANTOR", nvarchar128Baseline, 128, true),
+            new("GRANTEE", nvarchar128Baseline, 128, true),
+            new("TABLE_CATALOG", nvarchar128Baseline, 128, true),
+            new("TABLE_SCHEMA", nvarchar128Baseline, 128, true),
+            new("TABLE_NAME", SqlType.SystemName, 128, false),
+            .. column ? (HeapColumn[])[new("COLUMN_NAME", nvarchar128Baseline, 128, true)] : [],
+            new("PRIVILEGE_TYPE", VarcharSqlType.Get(10, Collation.Baseline, Coercibility.Implicit), 10, true),
+            new("IS_GRANTABLE", VarcharSqlType.Get(3, Collation.Baseline, Coercibility.Implicit), 3, true),
+        ];
+        Iso("TABLE_PRIVILEGES", PrivilegeShape(column: false), (batch, database) => EnumerateInformationSchemaPrivileges(batch, database, columnLevel: false));
+        Iso("COLUMN_PRIVILEGES", PrivilegeShape(column: true), (batch, database) => EnumerateInformationSchemaPrivileges(batch, database, columnLevel: true));
+
         // INFORMATION_SCHEMA.TABLE_CONSTRAINTS: one row per PRIMARY KEY /
         // UNIQUE / FOREIGN KEY / CHECK constraint in the current database.
         // Probe-confirmed 9-column shape (SQL Server 2025): CONSTRAINT_TYPE is
@@ -1077,6 +1109,89 @@ internal static partial class BuiltInResources
     /// 2026-09-26 against SQL Server 2025). DOMAIN_DEFAULT is the whole
     /// definition of the <c>CREATE DEFAULT</c> object bound to an alias type.
     /// </summary>
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.DOMAIN_CONSTRAINTS</c>: each alias type
+    /// carrying a bound rule, in alias order, the rule named in its own schema.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaDomainConstraints(Parser.BatchContext batch, Database database)
+    {
+        _ = batch;
+        var catalog = SqlValue.FromSystemName(database.Name);
+        var no = SqlValue.FromVarchar(VarcharSqlType.Get(2, Collation.Baseline, Coercibility.Implicit), "NO");
+        var aliases = database.Schemas.EnumerateValues()
+            .SelectMany(schema => schema.AliasTypes.EnumerateValues().Select(alias => (schema, alias)))
+            .OrderBy(pair => pair.alias.UserTypeId);
+        foreach (var (schema, alias) in aliases)
+        {
+            if (alias.BoundRule is not { } rule)
+                continue;
+            yield return
+            [
+                catalog, SqlValue.FromSystemName(rule.Schema.Name), SqlValue.FromSystemName(rule.Name),
+                catalog, SqlValue.FromSystemName(schema.Name), SqlValue.FromSystemName(alias.Name),
+                no, no,
+            ];
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.TABLE_PRIVILEGES</c> (object-level) or
+    /// <c>COLUMN_PRIVILEGES</c> (<paramref name="columnLevel"/>): every GRANT
+    /// of SELECT, INSERT, UPDATE, DELETE or REFERENCES on a table or view,
+    /// <c>IS_GRANTABLE</c> YES for one made WITH GRANT OPTION. A DENY, a
+    /// schema-level grant and the implicit owner rights don't appear, and a
+    /// column grant appears only in the column view (probed 2026-10-02 against
+    /// SQL Server 2025).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateInformationSchemaPrivileges(Parser.BatchContext batch, Database database, bool columnLevel)
+    {
+        var catalog = SqlValue.FromSystemName(database.Name);
+        var privilegeType = VarcharSqlType.Get(10, Collation.Baseline, Coercibility.Implicit);
+        var grantableType = VarcharSqlType.Get(3, Collation.Baseline, Coercibility.Implicit);
+        var names = new Dictionary<int, string>();
+        foreach (var (_, principal) in database.Principals)
+            names[principal.PrincipalId] = principal.Name;
+        var tables = new Dictionary<int, (Schema Schema, string Name, HeapColumn[] Columns)>();
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var table in CatalogTables(schema, batch))
+                tables[table.ObjectId] = (schema, table.Name, table.Columns);
+            foreach (var (_, view) in schema.Views)
+                tables[view.ObjectId] = (schema, view.Name, view.OutputColumns);
+        }
+        foreach (var permission in database.Permissions)
+        {
+            var isColumnGrant = permission.MinorId != 0;
+            if (permission.Class != 1 || isColumnGrant != columnLevel
+                || permission.State is not (PermissionState.Grant or PermissionState.GrantWithGrantOption)
+                || permission.DisplayName is not ("SELECT" or "INSERT" or "UPDATE" or "DELETE" or "REFERENCES")
+                || !tables.TryGetValue(permission.MajorId, out var target))
+            {
+                continue;
+            }
+            string? columnName = null;
+            if (columnLevel)
+            {
+                columnName = Array.Find(target.Columns, column => column.ColumnId == permission.MinorId)?.Name;
+                if (columnName is null)
+                    continue;
+            }
+            SqlValue Name(int principalId) =>
+                names.TryGetValue(principalId, out var name) ? SqlValue.FromSystemName(name) : SqlValue.Null(SqlType.SystemName);
+            yield return
+            [
+                Name(permission.GrantorPrincipalId),
+                Name(permission.GranteePrincipalId),
+                catalog,
+                SqlValue.FromSystemName(target.Schema.Name),
+                SqlValue.FromSystemName(target.Name),
+                .. columnLevel ? (SqlValue[])[SqlValue.FromSystemName(columnName!)] : [],
+                SqlValue.FromVarchar(privilegeType, permission.DisplayName),
+                SqlValue.FromVarchar(grantableType, permission.State == PermissionState.GrantWithGrantOption ? "YES" : "NO"),
+            ];
+        }
+    }
+
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaDomains(Parser.BatchContext batch, Database database)
     {
         _ = batch;
@@ -1115,7 +1230,7 @@ internal static partial class BuiltInResources
                 nullSysName, nullSysName,
                 isString ? databaseCollation : nullSysName,
                 nullSysName, nullSysName,
-                !isString ? nullSysName : SqlValue.FromSystemName(SqlType.IsNationalStringCategory(type) ? "UNICODE" : "iso_1"),
+                !isString ? nullSysName : SqlValue.FromSystemName(SqlType.IsNationalStringCategory(type) ? "UNICODE" : CharacterSetName(database.Collation)),
                 numericPrecision is byte np ? SqlValue.FromByte(np) : nullByte,
                 numericRadix is int radix ? SqlValue.FromInt16((short)radix) : nullInt16,
                 numericScale is int ns ? SqlValue.FromInt32(ns) : nullInt32,
@@ -1249,9 +1364,9 @@ internal static partial class BuiltInResources
     /// <para>
     /// A CHECK's columns come from the declaring column for the inline form and
     /// otherwise from matching the stored definition text against the parent
-    /// table's column names — an approximation of real's expression walk, which
-    /// over-reports a column whose name also appears as a string literal inside
-    /// the predicate.
+    /// table's bracketed column names — an approximation of real's expression
+    /// walk, which over-reports a column whose bracketed name also appears
+    /// inside a string literal of the predicate.
     /// </para>
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaConstraintColumnUsage(Parser.BatchContext batch, Database database)
@@ -1319,8 +1434,8 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// The column names a CHECK constraint reads: the declaring column for the
-    /// inline form, else every column of <paramref name="table"/> whose name
-    /// appears in the constraint's stored definition text.
+    /// inline form, else every column of <paramref name="table"/> whose
+    /// bracketed name appears in the constraint's stored definition text.
     /// </summary>
     private static IEnumerable<string> CheckConstraintColumns(Database database, HeapTable table, CheckConstraint check)
     {
@@ -1334,10 +1449,13 @@ internal static partial class BuiltInResources
         if (definition is null)
             yield break;
 
+        // The stored text brackets every column reference (`[b]<>'x'`), so a
+        // bare-name match would also hit a column whose name is a fragment of
+        // a keyword or of another name (`a` inside `AND`).
         var comparison = database.Collation.CaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
         foreach (var column in table.Columns)
         {
-            if (definition.Contains(column.Name, comparison))
+            if (definition.Contains($"[{column.Name.Replace("]", "]]", StringComparison.Ordinal)}]", comparison))
                 yield return column.Name;
         }
     }
@@ -1419,9 +1537,10 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// The name of the PRIMARY KEY / UNIQUE constraint on <paramref name="fk"/>'s
-    /// referenced table whose column set equals the FK's referenced columns, or
-    /// <c>null</c> when none matches (a referenced UNIQUE index the simulator
-    /// doesn't surface as a constraint).
+    /// referenced table whose column set equals the FK's referenced columns,
+    /// else the unique index the FK rests on — real names that index here too
+    /// (probed 2026-10-02 against SQL Server 2025) — or <c>null</c> when
+    /// neither matches.
     /// </summary>
     private static string? ResolveReferencedKeyName(ForeignKey fk)
     {
@@ -1438,6 +1557,11 @@ internal static partial class BuiltInResources
             var keyFull = key.StorageOrdinals.Select(o => StorageOrdinalToFullOrdinal(referenced, o)).OrderBy(o => o);
             if (keyFull.SequenceEqual(wanted))
                 return key.Name;
+        }
+        foreach (var index in referenced.Indexes)
+        {
+            if (index.IsUnique && index.KeyFullOrdinals.Order().SequenceEqual(wanted))
+                return index.Name;
         }
         return null;
     }

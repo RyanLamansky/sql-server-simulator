@@ -250,8 +250,9 @@ internal static partial class BuiltInResources
         // function's RETURNS NULL ON NULL INPUT declaration,
         // execute_as_principal_id the resolved WITH EXECUTE AS principal, and
         // the inline_type / is_inlineable pair the scalar-UDF-inlining
-        // analysis; uses_database_collation / is_recompiled /
-        // uses_native_compilation are probe-confirmed placeholder constants.
+        // analysis, is_recompiled a procedure's WITH RECOMPILE, and
+        // uses_database_collation the probed rule in EnumerateSqlModules;
+        // uses_native_compilation is a probe-confirmed placeholder constant.
         Sys("sql_modules",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -332,7 +333,8 @@ internal static partial class BuiltInResources
     /// declaration, <c>execute_as_principal_id</c> the resolved WITH EXECUTE AS
     /// principal (<see cref="SchemaObject.ExecuteAsPrincipalId"/>), and the
     /// <c>inline_type</c> / <c>is_inlineable</c> pair
-    /// <see cref="ModuleInlining"/>; the rest are probe-confirmed placeholder
+    /// <see cref="ModuleInlining"/>, <c>is_recompiled</c> a procedure's
+    /// <c>WITH RECOMPILE</c>; the rest are probe-confirmed placeholder
     /// constants.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSqlModules(Parser.BatchContext batch, Database database)
@@ -353,9 +355,13 @@ internal static partial class BuiltInResources
                 obj.UsesQuotedIdentifier ? on : off, // uses_quoted_identifier
                 obj is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true } ? on : off, // is_schema_bound
                 // Real reports every schema-bound module as depending on the
-                // database collation, whatever it reads (probed 2026-09-26).
-                obj is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true } ? on : off, // uses_database_collation
-                off, // is_recompiled
+                // database collation, whatever it reads (probed 2026-09-26),
+                // and a multi-statement function whose return table declares a
+                // string column without a COLLATE (probed 2026-10-02).
+                obj is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true }
+                    || (obj is MultiStatementTableValuedFunction multiStatement
+                        && Array.Exists(multiStatement.OutputColumns, column => column.Collation is null && SqlType.IsCollatedString(column.Type))) ? on : off, // uses_database_collation
+                obj is Procedure { RecompilesEveryCall: true } ? on : off, // is_recompiled
                 obj is ScalarFunction { ReturnsNullOnNullInput: true } ? on : off, // null_on_null_input
                 obj.ExecuteAsPrincipalId is { } principalId ? SqlValue.FromInt32(principalId) : nullPrincipal,
                 off, // uses_native_compilation

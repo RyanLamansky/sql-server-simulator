@@ -64,6 +64,12 @@ partial class Simulation
     private static readonly string[] SpHelpIndexColumnNames =
         ["index_name", "index_description", "index_keys"];
 
+    // Real describes index_name, and every constraint column but
+    // constraint_keys, as NOT NULL (probed 2026-10-02 against SQL Server 2025).
+    private static readonly bool[] SpHelpIndexNullability = [false, true, true];
+
+    private static readonly bool[] SpHelpConstraintNullability = [false, false, false, false, false, false, true];
+
     private static readonly SqlType[] SpHelpConstraintNameSchema = [HelpObjectNameType];
 
     private static readonly string[] SpHelpConstraintNameColumnNames = ["Object Name"];
@@ -291,7 +297,7 @@ partial class Simulation
         }
 
         rows.Sort(ByFirstCell);
-        yield return new SimulatedSqlResultSet(SpHelpIndexSchema, SpHelpIndexColumnNames, rows);
+        yield return new SimulatedSqlResultSet(SpHelpIndexSchema, SpHelpIndexColumnNames, rows) { ColumnNullability = SpHelpIndexNullability };
     }
 
     // The attribute phrase, in real's fixed clause order: clustered-ness,
@@ -470,7 +476,7 @@ partial class Simulation
         var rows = target.Table is { } table ? BuildHelpConstraintRows(database, table) : [];
         yield return rows.Count == 0
             ? HelpNoConstraints(batch, procedureName, 340, objectName)
-            : new SimulatedSqlResultSet(SpHelpConstraintSchema, SpHelpConstraintColumnNames, rows);
+            : new SimulatedSqlResultSet(SpHelpConstraintSchema, SpHelpConstraintColumnNames, rows) { ColumnNullability = SpHelpConstraintNullability };
         yield return HelpBlankLine(batch, procedureName, 342);
 
         var referencing = new List<SqlValue[]>();

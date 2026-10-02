@@ -856,4 +856,16 @@ public sealed class PropertyFunctionsTests
         AreEqual(0, sim.ExecuteScalar<int>("select filegroupproperty('FG_Indexes', 'IsDefault')"));
         AreEqual(0, sim.ExecuteScalar<int>("select filegroupproperty('FG_Indexes', 'IsReadOnly')"));
     }
+
+    [TestMethod]
+    public void DatabasePropertyEx_StringPropertiesAreNvarchar128_AndNoCheckDbReadsTheEpoch()
+    {
+        var sim = new Simulation();
+        Assert.AreEqual("256,256,256,256,256", sim.ExecuteScalar("""
+            select concat_ws(',', cast(sql_variant_property(databasepropertyex(db_name(), 'Collation'), 'MaxLength') as int), cast(sql_variant_property(databasepropertyex(db_name(), 'Recovery'), 'MaxLength') as int),
+                cast(sql_variant_property(databasepropertyex(db_name(), 'Status'), 'MaxLength') as int), cast(sql_variant_property(databasepropertyex(db_name(), 'Updateability'), 'MaxLength') as int),
+                cast(sql_variant_property(databasepropertyex(db_name(), 'UserAccess'), 'MaxLength') as int))
+            """));
+        Assert.AreEqual(new DateTime(1900, 1, 1), sim.ExecuteScalar("select databasepropertyex(db_name(), 'LastGoodCheckDbTime')"));
+    }
 }

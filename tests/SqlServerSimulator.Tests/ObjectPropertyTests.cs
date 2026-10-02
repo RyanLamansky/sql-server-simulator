@@ -268,4 +268,55 @@ public sealed class ObjectPropertyTests
     public void ObjectPropertyEx_OnCheckConstraint_MatchesThePlainForm()
         => AreEqual(0, Constrained().ExecuteScalar(
             "select objectpropertyex((select object_id from sys.objects where name = 'ck_t'), 'IsQuotedIdentOn')"));
+
+    [TestMethod]
+    public void TableHasClustIndex_ANonclusteredPrimaryKeyLeavesAHeap()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table h (id int not null primary key nonclustered); create table k (id int not null primary key)");
+        Assert.AreEqual("0,1", sim.ExecuteScalar("select concat(objectproperty(object_id('h'), 'TableHasClustIndex'), ',', objectproperty(object_id('k'), 'TableHasClustIndex'))"));
+    }
+
+    [TestMethod]
+    public void TableFullTextMergeStatus_IsOffForATableAndATableValuedFunction()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int)", "create function f () returns @r table (a int) as begin return; end");
+        Assert.AreEqual("0,0", sim.ExecuteScalar("select concat(objectproperty(object_id('t'), 'TableFullTextMergeStatus'), ',', objectproperty(object_id('f'), 'TableFullTextMergeStatus'))"));
+    }
+
+    [TestMethod]
+    public void MultiStatementFunction_ReturnTableKeysAnswerTheTableMembers_AndItsConstraintsResolve()
+    {
+        // Probed 2026-10-02 against SQL Server 2025.
+        var sim = new Simulation();
+        sim.ExecuteBatches("create function dbo.fm (@k int) returns @r table (id int not null primary key, v int check (v > 0)) as begin return; end");
+        Assert.AreEqual("1,1,1", sim.ExecuteScalar("select concat(objectproperty(object_id('fm'), 'TableHasClustIndex'), ',', objectproperty(object_id('fm'), 'TableHasIndex'), ',', objectproperty(object_id('fm'), 'TableHasPrimaryKey'))"));
+        Assert.AreEqual("C :1:dbo:fm,PK:1:dbo:fm", sim.ExecuteScalar("""
+            select string_agg(concat(type, ':', objectproperty(object_id, 'IsConstraint'), ':', object_schema_name(object_id), ':', object_name(parent_object_id)), ',') within group (order by type)
+            from sys.objects where parent_object_id = object_id('fm') and object_name(object_id) = name
+            """));
+    }
+
+    [TestMethod]
+    public void DataAccessAndPrecision_AnswerForViewsAndFunctions()
+    {
+        // A module real can't verify reads both kinds of data and is
+        // imprecise; a schema-bound one reads no system data, user data when it
+        // reaches a table, and is precise unless a scalar function returns
+        // float (probed 2026-10-02 against SQL Server 2025).
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (a int, f float)",
+            "create view dbo.v as select a from dbo.t",
+            "create view dbo.v_sb with schemabinding as select a, f from dbo.t",
+            "create function dbo.f_read() returns int with schemabinding as begin return (select count(*) from dbo.t); end",
+            "create function dbo.f_call() returns int with schemabinding as begin return dbo.f_read(); end",
+            "create function dbo.f_float() returns float with schemabinding as begin return 1.5; end",
+            "create procedure dbo.p as select 1");
+        Assert.AreEqual("f_call:0/1/1,f_float:0/0/0,f_read:0/1/1,p://,t://,v:1/1/0,v_sb:0/1/1", sim.ExecuteScalar("""
+            select string_agg(concat(name, ':', cast(objectpropertyex(object_id, 'SystemDataAccess') as int), '/', cast(objectpropertyex(object_id, 'UserDataAccess') as int), '/', objectproperty(object_id, 'IsPrecise')), ',') within group (order by name)
+            from sys.objects where is_ms_shipped = 0
+            """));
+    }
 }
