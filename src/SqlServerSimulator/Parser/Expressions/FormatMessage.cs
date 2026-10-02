@@ -99,7 +99,7 @@ internal sealed class FormatMessage : Expression
     {
         var formatValue = this.formatArg.Run(runtime);
         if (formatValue.IsNull)
-            return SqlValue.Null(SqlType.NVarchar);
+            return SqlValue.Null(ErrorFunctionCtor.MessageType);
 
         // Numeric first argument → the msg_id overload, read from the user
         // messages sp_addmessage registered (a system message id, which isn't
@@ -116,10 +116,10 @@ internal sealed class FormatMessage : Expression
             }
             var batch = runtime.Batch;
             if (formatValue.Type == SqlType.BigInt && formatValue.AsInt64 is < int.MinValue or > int.MaxValue)
-                return SqlValue.Null(SqlType.NVarchar);
+                return SqlValue.Null(ErrorFunctionCtor.MessageType);
             var registered = RegisteredMessage.Find(batch.Connection.Simulation, formatValue.CoerceTo(SqlType.Int32).AsInt32, batch.Connection.Language.MsgLangId);
             if (registered is null)
-                return SqlValue.Null(SqlType.NVarchar);
+                return SqlValue.Null(ErrorFunctionCtor.MessageType);
             var messageText = registered.Text;
             var arguments = supplied;
             var ok = messageText.Length != 0;
@@ -129,7 +129,7 @@ internal sealed class FormatMessage : Expression
                     && registered.TryLocalize(arguments, out messageText, out arguments);
             }
             var message = ok && TryRender(messageText, arguments, out var body) ? body : TerseFormattingError(registered.MessageId, registered.Severity);
-            return SqlValue.FromNVarchar(message.Length > MaxResultChars ? message[..MaxResultChars] : message);
+            return SqlValue.FromNVarchar(ErrorFunctionCtor.MessageType, message.Length > MaxResultChars ? message[..MaxResultChars] : message);
         }
 
         var format = formatValue.CoerceTo(SqlType.NVarchar).AsString;
@@ -141,7 +141,7 @@ internal sealed class FormatMessage : Expression
         var rendered = TryRender(format, args, out var text) ? text : TerseFormattingError(50000, -1);
         if (rendered.Length > MaxResultChars)
             rendered = rendered[..MaxResultChars];
-        return SqlValue.FromNVarchar(rendered);
+        return SqlValue.FromNVarchar(ErrorFunctionCtor.MessageType, rendered);
     }
 
     /// <summary>
@@ -466,7 +466,7 @@ internal sealed class FormatMessage : Expression
         {
             throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(formatType, this.formatArg), 1, "formatmessage");
         }
-        return SqlType.NVarchar;
+        return ErrorFunctionCtor.MessageType;
     }
 
     internal override string DebugDisplay() => $"FORMATMESSAGE({this.formatArg.DebugDisplay()}, ...)";

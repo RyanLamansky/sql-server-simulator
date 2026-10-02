@@ -299,4 +299,19 @@ public sealed class PrintStatementTests
     [TestMethod]
     public void Print_ColumnName_InSkippedBranch_StillRaises() =>
         _ = new Simulation().AssertSqlError("if 1 = 0 print zzz", 128);
+    /// <summary>
+    /// The operand converts implicitly to <c>nvarchar</c>, which the xml,
+    /// sql_variant and CLR types refuse with Msg 257 and image and rowversion
+    /// with Msg 206, as the batch compiles (probed 2026-10-02 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("cast('<a>1</a>' as xml)", 257, "Implicit conversion from data type xml to nvarchar is not allowed. Use the CONVERT function to run this query.")]
+    [DataRow("cast(5 as sql_variant)", 257, "Implicit conversion from data type sql_variant to nvarchar is not allowed. Use the CONVERT function to run this query.")]
+    [DataRow("hierarchyid::Parse('/1/2/')", 257, "Implicit conversion from data type hierarchyid to nvarchar is not allowed. Use the CONVERT function to run this query.")]
+    [DataRow("geometry::Point(1, 2, 0)", 257, "Implicit conversion from data type geometry to nvarchar is not allowed. Use the CONVERT function to run this query.")]
+    [DataRow("cast(0x41 as image)", 206, "Operand type clash: image is incompatible with nvarchar")]
+    [DataRow("cast(0x01 as rowversion)", 206, "Operand type clash: timestamp is incompatible with nvarchar")]
+    public void Print_OperandWithNoImplicitStringConversion_IsRefused(string operand, int number, string message)
+        => new Simulation().AssertSqlError($"print {operand}", number, message);
 }

@@ -22,8 +22,11 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException DbccSnapshotInaccessible(string principalName, string databaseName) =>
         new($"The server principal \"{principalName}\" is not able to access the database \"{databaseName}\" under the current security context.", 916, 14, 2) { TerminatesBatch = true };
 
-    /// <summary>Msg 195 state 4: a <c>DBCC … WITH</c> list naming a word that is no DBCC option at all.</summary>
-    internal static SimulatedSqlException DbccOptionNotRecognized(string option) =>
+    /// <summary>
+    /// Msg 195 state 4: a <c>DBCC … WITH</c> or <c>RAISERROR … WITH</c> list
+    /// naming a word that is no option of the statement at all.
+    /// </summary>
+    internal static SimulatedSqlException WithOptionNotRecognized(string option) =>
         new($"'{option}' is not a recognized option.", 195, 15, 4);
 
     /// <summary>Msg 7983: a database-scope <c>DBCC</c> check run by a principal that isn't <c>db_owner</c>.</summary>

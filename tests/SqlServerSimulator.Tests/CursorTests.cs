@@ -754,4 +754,82 @@ public sealed class CursorTests
         AreEqual(1, ex.Errors[0].LineNumber);
         AreEqual(5, ex.Errors[1].LineNumber);
     }
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    private static Simulation FourRows()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v varchar(10)); insert t values (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')");
+        return sim;
+    }
+
+    [TestMethod]
+    public void RefusedFetch_ReadsFetchStatusMinusOne()
+    {
+        var sim = FourRows();
+        _ = sim.ExecuteNonQuery("create table r (s int)");
+        _ = sim.AssertSqlError("declare c cursor for select id from t; open c; fetch next from c; fetch prior from c; insert r select @@fetch_status", 16911);
+        AreEqual(-1, sim.ExecuteScalar("select s from r"));
+    }
+
+    [TestMethod]
+    public void CursorRows_ReadsZeroOnceClosedOrDeallocated()
+        => AreEqual("4|0|0", FourRows().ExecuteScalar("""
+            declare @a int, @b int;
+            declare c cursor static for select id from t;
+            open c; set @a = @@cursor_rows;
+            close c; set @b = @@cursor_rows;
+            deallocate c;
+            select concat(@a, '|', @b, '|', @@cursor_rows)
+            """));
+
+    [TestMethod]
+    public void CursorVariableAssignedAsAScalar_Msg16949()
+        => new Simulation().AssertSqlError("declare @c cursor; select @c = 1", 16949,
+            "The variable '@c' is a cursor variable, but it is used in a place where a cursor variable is not valid.");
+
+    [TestMethod]
+    public void CursorDefaultLocalOption_MakesAnUnscopedCursorLocal()
+    {
+        var sim = FourRows();
+        _ = sim.ExecuteNonQuery("alter database current set cursor_default local");
+        using var connection = sim.CreateOpenConnection();
+        _ = connection.CreateCommand("declare c cursor for select id from t; open c").ExecuteNonQuery();
+        AreEqual((short)-3, connection.CreateCommand("select cursor_status('global', 'c')").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void IntoInTheCursorsQuery_Msg154()
+        => new Simulation().AssertSqlError("declare c cursor for select 1 a into #z", 154,
+            "an INTO clause is not allowed in a cursor declaration.");
+
+    [TestMethod]
+    public void FetchDirectionWithoutFrom_Msg102()
+        => new Simulation().ValidateSyntaxError("declare c cursor for select 1 a; open c; fetch next c", "next");
+
+    [TestMethod]
+    [DataRow("")]
+    [DataRow("static")]
+    [DataRow("keyset")]
+    [DataRow("dynamic")]
+    [DataRow("fast_forward")]
+    public void QueryVariables_ReadTheirValueAtDeclare(string options)
+        => AreEqual(3, FourRows().ExecuteScalar($"""
+            declare @m int = 2;
+            declare c cursor {options} for select id from t where id > @m order by id;
+            set @m = 0;
+            open c;
+            declare @id int;
+            fetch next from c into @id;
+            select @id
+            """));
+
+    [TestMethod]
+    [DataRow("declare c cursor for select id, v from t; open c; update t set v = 'x' where current of c", 16931)]
+    [DataRow("declare c cursor for select id, v from t for update of v; open c; fetch next from c; update t set id = 9 where current of c", 16932)]
+    public void FailedPositionedWrite_IsFollowedByMsg3621(string commandText, int number)
+    {
+        var ex = FourRows().AssertSqlError(commandText, number);
+        AreEqual(3621, ex.Errors[1].Number);
+    }
 }

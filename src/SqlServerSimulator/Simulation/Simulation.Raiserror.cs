@@ -24,7 +24,7 @@ partial class Simulation
     /// Severity routing (probe-confirmed against SQL Server 2025 (2026-05-12)):
     /// </para>
     /// <list type="bullet">
-    /// <item>NULL / negative severity → treated as 0 (informational, no
+    /// <item>A NULL variable or negative severity → treated as 0 (informational, no
     /// error path, message discarded — same as PRINT).</item>
     /// <item>Severity 0-10 → informational. Doesn't throw; doesn't enter
     /// <c>TRY/CATCH</c>; doesn't update <c>@@ERROR</c> unless
@@ -75,17 +75,17 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
-        var msgValue = ParseRaiserrorArgument(batch);
+        var msgValue = ParseRaiserrorArgument(batch, RaiserrorArgument.Message);
         ExpectComma(context);
-        var severityValue = ParseRaiserrorArgument(batch);
+        var severityValue = ParseRaiserrorArgument(batch, RaiserrorArgument.Number);
         ExpectComma(context);
-        var stateValue = ParseRaiserrorArgument(batch);
+        var stateValue = ParseRaiserrorArgument(batch, RaiserrorArgument.Number);
 
         var substitutions = new List<SqlValue>();
         while (context.Token is Operator { Character: ',' })
         {
             context.MoveNextRequired();
-            substitutions.Add(ParseRaiserrorArgument(batch));
+            substitutions.Add(ParseRaiserrorArgument(batch, RaiserrorArgument.Substitution));
         }
         if (substitutions.Count > 20)
             throw SimulatedSqlException.RaiserrorTooManySubstitutionParameters();
@@ -127,6 +127,8 @@ partial class Simulation
                     case UnquotedString { ContextualKeyword: ContextualKeyword.SetError }:
                         withSetError = true;
                         break;
+                    case UnquotedString option:
+                        throw SimulatedSqlException.WithOptionNotRecognized(option.Value);
                     default:
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                 }
@@ -158,7 +160,7 @@ partial class Simulation
         var messageNumber = 50000;
         var isInlineForm = msgValue.Type.Category == SqlTypeCategory.String;
         var registered = !isInlineForm && rawSeverity is < 0
-            ? LookUpRegisteredMessage(batch, msgValue, rawSeverity.Value, NormalizeRaiserrorState(stateValue))
+            ? LookUpRegisteredMessage(batch, msgValue, rawSeverity.Value, NormalizeRaiserrorState(stateValue), withSetError)
             : null;
 
         // Severity: NULL → 0 (informational, no error).
@@ -185,7 +187,7 @@ partial class Simulation
         }
         else
         {
-            registered ??= LookUpRegisteredMessage(batch, msgValue, severity, state);
+            registered ??= LookUpRegisteredMessage(batch, msgValue, severity, state, withSetError || severity >= 11);
             messageNumber = registered.MessageId;
             formatString = string.Empty;
             formatted = registered.Format(substitutions);
@@ -193,6 +195,7 @@ partial class Simulation
 
         if (registered is null)
             formatted = MessageFormatter.Format(formatString, substitutions);
+        formatted = CapRaisedMessage(formatted);
 
         // Severity 20 and up ends the session.
         if (severity >= 20)
@@ -225,13 +228,21 @@ partial class Simulation
     /// Parses one RAISERROR argument value at the current cursor. Accepted
     /// forms (matching real SQL Server's grammar, probe-confirmed via
     /// Msg 102 on <c>CAST</c> in arg position): a string / numeric
-    /// <see cref="Literal"/>, a signed <see cref="Numeric"/> literal (one past
-    /// <c>int</c> or with a fraction read as <c>bigint</c>), an
-    /// <c>@variable</c> reference (read as its current value), or the
-    /// <c>NULL</c> keyword. Leaves the cursor on the first un-consumed
-    /// token (the trailing <c>,</c> or <c>)</c>).
+    /// <see cref="Literal"/>, a signed <see cref="Numeric"/> literal, an
+    /// <c>@variable</c> reference (read as its current value), or — as a
+    /// substitution — the <c>NULL</c> keyword. Leaves the cursor on the first
+    /// un-consumed token (the trailing <c>,</c> or <c>)</c>).
     /// </summary>
-    private static SqlValue ParseRaiserrorArgument(BatchContext batch)
+    /// <remarks>
+    /// The message, severity and state take no <c>NULL</c> keyword (Msg 156)
+    /// and a numeric literal there must be an <c>int</c> (Msg 1080, the
+    /// value echoed unsigned); the severity and state take no string literal
+    /// (Msg 102). A substitution literal past <c>int</c> or with a fraction
+    /// arrives as <c>bigint</c>, truncated, so <c>%I64d</c> prints 5.5 as 5 and
+    /// <c>%d</c> refuses 5.0, while a negated one inside <c>int</c>'s range is
+    /// an <c>int</c> (all probed 2026-10-02 against SQL Server 2025).
+    /// </remarks>
+    private static SqlValue ParseRaiserrorArgument(BatchContext batch, RaiserrorArgument position)
     {
         var context = batch.Parser;
         var negate = false;
@@ -250,21 +261,22 @@ partial class Simulation
         switch (context.Token)
         {
             case Literal lit:
-                if (negate) throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (negate || position == RaiserrorArgument.Number)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
                 value = lit.Value;
                 break;
             case Numeric num:
-                // A fractional literal arrives as bigint, truncated: `%I64d`
-                // prints 5.5 as 5 and `%d` refuses 5.0 (probed 2026-09-24
-                // against SQL Server 2025).
+                if (position != RaiserrorArgument.Substitution && num.Value.Type is DecimalSqlType or BigIntSqlType)
+                    throw SimulatedSqlException.IntegerValueOutOfRange(num.Value.Type is DecimalSqlType ? num.Value.AsDecimal38.ToString() : num.Value.AsInt64.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 value = num.Value.Type is DecimalSqlType ? num.Value.CoerceTo(SqlType.BigInt) : num.Value;
                 if (negate)
                     value = NegateNumeric(value);
                 break;
-            case ReservedKeyword { Keyword: Keyword.Null }:
-                if (negate) throw SimulatedSqlException.SyntaxErrorNear(context);
-                // A NULL literal as the message is the empty one (a space),
-                // where an int-typed NULL variable there is message id 0.
+            case ReservedKeyword { Keyword: Keyword.Null } keyword:
+                if (negate)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (position != RaiserrorArgument.Substitution)
+                    throw SimulatedSqlException.SyntaxErrorNearKeyword(keyword);
                 value = SqlValue.Null(SqlType.NVarchar);
                 break;
             case AtPrefixedString varRef:
@@ -278,6 +290,23 @@ partial class Simulation
         return value;
     }
 
+    /// <summary>Which of <c>RAISERROR</c>'s argument slots a value fills.</summary>
+    private enum RaiserrorArgument
+    {
+        Message,
+        Number,
+        Substitution,
+    }
+
+    /// <summary>
+    /// A raised message — <c>RAISERROR</c>'s at any severity, <c>THROW</c>'s —
+    /// past 2,047 characters is cut to its first 2,044 and <c>...</c>, whatever
+    /// a substitution's width asked for (probed 2026-10-02 against SQL Server
+    /// 2025: <c>ERROR_MESSAGE()</c> then reads 2,047 characters).
+    /// </summary>
+    internal static string CapRaisedMessage(string message) =>
+        message.Length <= 2047 ? message : string.Concat(message.AsSpan(0, 2044), "...");
+
     private static byte NormalizeRaiserrorState(SqlValue stateValue) => CoerceToInt32OrNull(stateValue) switch
     {
         null => 0,
@@ -288,21 +317,22 @@ partial class Simulation
     /// <summary>
     /// The registered message a numeric <c>RAISERROR</c> id names, in the
     /// session's language: Msg 2732 for an id below 13000 or 50000, Msg 18054
-    /// for one <c>sys.messages</c> doesn't carry.
+    /// for one <c>sys.messages</c> doesn't carry, after which <c>@@ERROR</c>
+    /// reads the id when <paramref name="setsAtAtError"/>.
     /// </summary>
-    private static RegisteredMessage LookUpRegisteredMessage(BatchContext batch, SqlValue msgValue, int severity, byte state)
+    private static RegisteredMessage LookUpRegisteredMessage(BatchContext batch, SqlValue msgValue, int severity, byte state, bool setsAtAtError)
     {
         var messageId = CoerceToInt32OrNull(msgValue) ?? 0;
         if (messageId is 50000 or < 13000)
             throw SimulatedSqlException.RaiserrorMsgIdInvalid(messageId);
         return RegisteredMessage.Find(batch.Connection.Simulation, messageId, batch.Connection.Language.MsgLangId)
-            ?? throw SimulatedSqlException.RaiserrorMsgIdNotFound(messageId, severity, state);
+            ?? throw SimulatedSqlException.RaiserrorMsgIdNotFound(messageId, severity, state, setsAtAtError);
     }
 
     private static SqlValue NegateNumeric(SqlValue v) =>
         v.IsNull ? v
         : v.Type == SqlType.Int32 ? SqlValue.FromInt32(-v.AsInt32)
-        : v.Type == SqlType.BigInt ? SqlValue.FromInt64(-v.AsInt64)
+        : v.Type == SqlType.BigInt ? (v.AsInt64 == -(long)int.MinValue ? SqlValue.FromInt32(int.MinValue) : SqlValue.FromInt64(-v.AsInt64))
         : v.Type == SqlType.SmallInt ? SqlValue.FromInt16((short)-v.AsInt32)
         : v;
 

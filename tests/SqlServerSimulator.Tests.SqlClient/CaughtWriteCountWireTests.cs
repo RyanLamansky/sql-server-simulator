@@ -8,7 +8,9 @@ namespace SqlServerSimulator;
 /// counting 0 ahead of the CATCH block's output — one per failing write on the
 /// way out — while <c>NOCOUNT</c> suppresses it and an uncaught error leaves
 /// none; a client-bound <c>OUTPUT</c> clause reports it as an empty result set
-/// (probed 2026-09-28 against SQL Server 2025).
+/// (probed 2026-09-28 against SQL Server 2025). A write failing inside a
+/// procedure's block, IF or WHILE reports its count once, the enclosing
+/// statements adding none (probed 2026-10-02).
 /// </summary>
 [TestClass]
 public sealed class CaughtWriteCountWireTests
@@ -46,6 +48,9 @@ public sealed class CaughtWriteCountWireTests
     [DataRow("begin try insert t values (2); insert t values (1); end try begin catch select 'c' c; end catch", "1,0,1")]
     [DataRow("begin try insert t values ('x'); end try begin catch select 'c' c; end catch", "0,1")]
     [DataRow("begin try exec p; end try begin catch select 'c' c; end catch", "0,1")]
+    [DataRow("begin try exec pb; end try begin catch select 'c' c; end catch", "0,1")]
+    [DataRow("begin try exec pi; end try begin catch select 'c' c; end catch", "0,1")]
+    [DataRow("begin try exec pw; end try begin catch select 'c' c; end catch", "0,1")]
     [DataRow("begin try insert u values (1); end try begin catch select 'c' c; end catch", "0,0,1")]
     [DataRow("set nocount on; begin try insert t values (1); end try begin catch select 'c' c; end catch", "")]
     [DataRow("insert t values (1); select 'c' c", "1")]
@@ -58,6 +63,9 @@ public sealed class CaughtWriteCountWireTests
             create table u (id int);
             exec('create trigger tr on u after insert as update n set id = null');
             exec('create proc p as insert t values (1)');
+            exec('create proc pb as begin insert t values (1); end');
+            exec('create proc pi as if 1 = 1 insert t values (1)');
+            exec('create proc pw as while 1 = 1 begin insert t values (1); end');
             """,
             sql);
         AreEqual(completed, counts);

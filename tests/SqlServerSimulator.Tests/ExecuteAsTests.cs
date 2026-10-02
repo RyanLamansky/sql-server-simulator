@@ -381,12 +381,10 @@ public sealed class ExecuteAsTests
     }
 
     [TestMethod]
-    public void Procedure_ExecuteAsMissingUser_Raises15517AtExec()
-    {
-        var sim = new Simulation();
-        sim.ExecuteBatches("create procedure dbo.p_ghost with execute as 'ghost' as select 1");
-        _ = sim.AssertSqlError("exec dbo.p_ghost", 15517);
-    }
+    public void Procedure_ExecuteAsMissingUser_Raises15151AtCreate()
+        => new Simulation().AssertSqlError(
+            "create procedure dbo.p_ghost with execute as 'ghost' as select 1", 15151,
+            "Cannot execute as the user 'ghost', because it does not exist or you do not have permission.");
 
     // ----- sys.sql_modules.execute_as_principal_id -----
     //

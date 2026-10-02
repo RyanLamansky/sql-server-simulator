@@ -57,12 +57,14 @@ partial class SimulatedSqlException
     /// opened on, even when its body runs across several lines to end of input
     /// (SQL Server 2025, 2026-07-19). Real follows it with a Msg 102 near the
     /// same body, for <c>'</c>, <c>N'</c>, <c>"</c> and <c>[</c> alike
-    /// (probe-confirmed 2026-09-24).
+    /// (probe-confirmed 2026-09-24). A long body is cut, the Msg 105 to the
+    /// 2,047 characters any raised message keeps and the Msg 102's to 129, as
+    /// every literal named there is (probed 2026-10-02).
     /// </summary>
     internal static SimulatedSqlException UnclosedStringLiteral(string body, int lineNumber) =>
         Aggregate([
-            WithLine(new($"Unclosed quotation mark after the character string '{body}'.", 105, 15, 1), lineNumber),
-            WithLine(new($"Incorrect syntax near '{body}'.", 102, 15, 1), lineNumber),
+            WithLine(new(Simulation.CapRaisedMessage($"Unclosed quotation mark after the character string '{body}'."), 105, 15, 1), lineNumber),
+            WithLine(new($"Incorrect syntax near '{(body.Length > 129 ? body[..129] : body)}'.", 102, 15, 1), lineNumber),
         ]);
 
     /// <summary>
@@ -161,7 +163,7 @@ partial class SimulatedSqlException
     /// <c>near 'q'</c>, not <c>near ''q''</c>. A null token — end of input —
     /// leaves the slot empty, matching real's <c>near ''.</c>
     /// </summary>
-    internal static SimulatedSqlException SyntaxErrorNear(Token? token) => new($"Incorrect syntax near '{token?.ErrorText}'.", 102, 15, 1);
+    internal static SimulatedSqlException SyntaxErrorNear(Token? token, byte state = 1) => new($"Incorrect syntax near '{token?.ErrorText}'.", 102, 15, state);
 
     internal static SimulatedSqlException SyntaxErrorNear(char c) => new($"Incorrect syntax near '{c}'.", 102, 15, 1);
 
@@ -438,7 +440,7 @@ partial class SimulatedSqlException
     /// is legal (probe-confirmed); only entry is refused.
     /// </summary>
     internal static SimulatedSqlException GotoCannotJumpIntoTryOrCatch() =>
-        new("GOTO cannot be used to jump into a TRY or CATCH scope.", 1026, 15, 1);
+        new("GOTO cannot be used to jump into a TRY or CATCH scope.", 1026, 15, 0);
 
     internal static SimulatedSqlException LanguageNotFound(string name) =>
         new($"SET LANGUAGE failed because '{name}' is not an official language name or a language alias on this SQL Server.", 2740, 16, 1);
@@ -754,10 +756,12 @@ partial class SimulatedSqlException
     /// 2 still reports line 2, not the <c>THROW</c> statement's line), so this
     /// pre-stamps them and marks the exception resolved to keep the enclosing
     /// dispatch frame from overwriting with the <c>THROW</c> statement's line.
+    /// The original severity is kept too — a re-raised severity-14 primary key
+    /// violation is class 14 again (probed 2026-10-02 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException ThrowReRaised(CaughtError caught)
     {
-        var last = new SimulatedSqlException(caught.Message, caught.Number, 16, caught.State) { TerminatesBatch = true };
+        var last = new SimulatedSqlException(caught.Message, caught.Number, caught.Severity, caught.State) { TerminatesBatch = true };
         last.PreserveDiagnostics(caught.Line, caught.Procedure);
         if (caught.Preceding is not { Length: > 0 } preceding)
             return last;
@@ -859,8 +863,11 @@ partial class SimulatedSqlException
     /// is larger than 50000, make sure the user-defined message is added using
     /// sp_addmessage."</c>). Class 16 State 1.
     /// </summary>
-    internal static SimulatedSqlException RaiserrorMsgIdNotFound(int msgId, int severity, byte state) =>
-        new($"Error {msgId}, severity {severity}, state {state} was raised, but no message with that error number was found in sys.messages. If error is larger than 50000, make sure the user-defined message is added using sp_addmessage.", 18054, 16, 1);
+    internal static SimulatedSqlException RaiserrorMsgIdNotFound(int msgId, int severity, byte state, bool setsAtAtError) =>
+        new($"Error {msgId}, severity {severity}, state {state} was raised, but no message with that error number was found in sys.messages. If error is larger than 50000, make sure the user-defined message is added using sp_addmessage.", 18054, 16, 1)
+        {
+            atAtErrorOverride = setsAtAtError ? msgId : null,
+        };
 
     /// <summary>
     /// Mimics SQL Server error 2754: a <c>RAISERROR</c> call specified

@@ -21,6 +21,17 @@ partial class SimulatedSqlException
     internal static SimulatedError FloatLiteralTooSmallMessage(BatchContext batch, string literal) =>
         batch.InfoMessage(@class: 0, state: 1, number: 337, $"Warning: the floating point value '{literal}' is too small. It will be interpreted as 0.");
 
+    /// <summary>
+    /// Msg 2007, class 0: a module created over a call of a procedure that
+    /// doesn't exist, attributed to the module.
+    /// </summary>
+    internal static SimulatedError ModuleDependsOnMissingObjectMessage(BatchContext batch, string moduleName, string missingName)
+    {
+        var note = batch.InfoMessage(0, 1, 2007, $"The module '{moduleName}' depends on the missing object '{missingName}'. The module will still be created; however, it cannot run successfully until the object exists.");
+        note.Procedure = moduleName;
+        return note;
+    }
+
     internal static SimulatedError NullReturnStatusMessage(BatchContext batch, string procedureName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 282, $"The '{procedureName}' procedure attempted to return a status of NULL, which is not allowed. A status of 0 will be returned instead.");
 

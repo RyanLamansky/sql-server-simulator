@@ -178,10 +178,10 @@ public sealed class WaitForDelayTests
         => new Simulation().AssertSqlError("waitfor delay '99:00:00:00'", 148);
 
     [TestMethod]
-    public void Delay_BadVariableValue_Msg148()
+    public void Delay_BadVariableValue_Msg241()
         => new Simulation().AssertSqlError(
-            "declare @t varchar(20) = 'bogus'; waitfor delay @t", 148,
-            "Incorrect time syntax in time string 'bogus' used with WAITFOR.");
+            "declare @t varchar(20) = 'bogus'; waitfor delay @t", 241,
+            "Conversion failed when converting date and/or time from character string.");
 
     [TestMethod]
     public void Delay_TimeTypedVariable_Msg9815()
@@ -433,4 +433,67 @@ public sealed class WaitForDelayTests
     public void Delay_OneDigitFields_Accepted(string delay)
         // Probed 2026-09-28 against SQL Server 2025.
         => AreEqual(1, new Simulation().ExecuteScalar($"waitfor delay '{delay}'; select 1"));
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    [TestMethod]
+    [DataRow("'00:00:00:010'")]
+    [DataRow("'  00:00:00.01  '")]
+    [DataRow("'00:00:00 AM'")]
+    [DataRow("'12:00AM'")]
+    [DataRow("'12 AM'")]
+    [DataRow("'0:0:0.5'")]
+    [DataRow("'000:00:00'")]
+    [DataRow("' '")]
+    public void Delay_ReadsTheDateTimeTimeOfDayGrammar(string operand)
+        => AreEqual(1, new Simulation().ExecuteScalar($"waitfor delay {operand}; select 1"));
+
+    [TestMethod]
+    [DataRow("'00:00:00.0001'")]
+    [DataRow("'00:00:00.'")]
+    [DataRow("'0'")]
+    [DataRow("'00:00:60'")]
+    [DataRow("'13:00 AM'")]
+    [DataRow("'00:00:00 PM'")]
+    [DataRow("'1900-01-01 00:00:00.010'")]
+    public void Delay_OutsideTheGrammar_Msg148(string operand)
+        => _ = new Simulation().AssertSqlError($"waitfor delay {operand}", 148);
+
+    [TestMethod]
+    public void Delay_MalformedLiteral_RefusesTheBatchUntakenBranchIncluded()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int)");
+        _ = simulation.AssertSqlError("insert t values (1); if 1 = 0 waitfor delay 'x'", 148);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    [DataRow("declare @d int = 1")]
+    [DataRow("declare @d smallint = 0")]
+    [DataRow("declare @d datetime = '1900-01-02 00:00:00.010'")]
+    [DataRow("declare @d nvarchar(20) = N'00:00:00.01'")]
+    [DataRow("declare @d char(20) = '00:00:00.01'")]
+    public void Delay_VariableOfATimeBearingType_Waits(string declaration)
+        => AreEqual(1, new Simulation().ExecuteScalar($"{declaration}; waitfor delay @d; select 1"));
+
+    [TestMethod]
+    [DataRow("declare @d varchar(max) = '00:00:00'", 241)]
+    [DataRow("declare @d varchar(20) = '2020-01-01'", 241)]
+    [DataRow("declare @d float = 0", 9815)]
+    [DataRow("declare @d tinyint = 0", 9815)]
+    [DataRow("declare @d datetime2 = '1900-01-01'", 9815)]
+    public void Delay_VariableOutsideTheTypes_Refused(string declaration, int number)
+        => _ = new Simulation().AssertSqlError($"{declaration}; waitfor delay @d", number);
+
+    [TestMethod]
+    public void Delay_RefusedVariableType_EndsOnlyItsStatement()
+    {
+        var ex = new Simulation().AssertSqlError("declare @d float = 0; waitfor delay @d; select 1 / 0", 9815);
+        AreEqual("Waitfor delay and waitfor time cannot be of type float.", ex.Errors[0].Message);
+        AreEqual(8134, ex.Errors[1].Number);
+    }
+
+    [TestMethod]
+    public void UnknownWaitForWord_Msg155()
+        => new Simulation().AssertSqlError("waitfor nothing '00:00:00'", 155, "'nothing' is not a recognized WAITFOR option.");
 }

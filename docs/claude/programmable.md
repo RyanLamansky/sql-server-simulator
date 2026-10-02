@@ -196,6 +196,8 @@ A CLR module resolves its assembly first (a missing one is Msg 6528 over a `READ
 
 A procedure default that converts at the call but fails to (`@p int = 'abc'`) is the call's binding error, at line 0 under the procedure, as an argument's is.
 
+A default is a constant and nothing more, for a procedure and a function alike (`ParseParameterDefault`, probed 2026-10-02 against SQL Server 2025): a literal, a number with an optional `-` (a `+` is Msg 102), `NULL` or `DEFAULT`, an `@@` function, or a bare or bracketed name, which is the `nvarchar` string of its text (`@a varchar(10) = abc`); `= 1 + 1` and `= GETDATE()` are Msg 102 at the `+` and the `(`.
+
 **Divergences.**
 - Real reports a return-table `timestamp` column's Msg 443 *ahead* of the Msg 207 raised inside an `INSERT` into that table, which the simulator reports behind it, as it does every other binder error.
 
@@ -678,7 +680,7 @@ Probed against SQL Server 2025.
 - **Body capture**: from the first token after `AS` to end-of-batch, with empty bodies legal (`CREATE PROC p AS` with nothing after `AS` succeeds — probe-confirmed; the per-call invocation short-circuits when `BodyText` is empty so the parser doesn't reject empty `CommandText`).
   Separately, the handlers also capture the *full* original statement text into `SchemaObject.DefinitionText` (verb normalized to `CREATE`) for `OBJECT_DEFINITION` / `sys.sql_modules` / `INFORMATION_SCHEMA.ROUTINES.ROUTINE_DEFINITION` — see [`catalog-views.md`](catalog-views.md).
 - **Parens around parameter list optional**: `CREATE PROC p (@x int)` and `CREATE PROC p @x int` are equivalent.
-- **WITH options**: `EXECUTE AS CALLER|SELF|OWNER|'name'` is applied as an impersonation frame at invocation; `RECOMPILE` and `FOR REPLICATION` parse and are ignored — see [The `WITH` option clause](#the-with-option-clause) for what the clause refuses.
+- **WITH options**: `EXECUTE AS CALLER|SELF|OWNER|'name'` is applied as an impersonation frame at invocation, a `'name'` no user of the database carries being Msg 15151 at `CREATE` (probed 2026-10-02); `RECOMPILE` and `FOR REPLICATION` parse and are ignored — see [The `WITH` option clause](#the-with-option-clause) for what the clause refuses.
 - **`NATIVE_COMPILATION`** admits a `BEGIN ATOMIC [WITH (…)]` body, which runs as a plain `BEGIN … END` block; real's in-memory OLTP prerequisites (Msg 41337 without a `MEMORY_OPTIMIZED_DATA` filegroup) aren't modeled.
   Anywhere else the block is refused as real refuses it (probed 2026-09-25): a procedure, function or trigger body without it is Msg 10782 as the module binds at `CREATE`, and a batch or dynamic-SQL string is Msg 102 at `ATOMIC`.
 - **`CREATE OR ALTER`** is an upsert: creates when missing, replaces when present — see [Replacing a module](#replacing-a-module--alter--create-or-alter) for what the replacement preserves.
@@ -695,6 +697,7 @@ Probed against SQL Server 2025.
   Each argument value must be a literal (numeric / string / NULL), a **bare identifier** (unquoted or bracketed — a legacy T-SQL form SQL Server treats as a string constant of the identifier's verbatim, case-preserved text; how Alembic / SSMS pass `sp_rename`'s new-name argument, `EXEC sp_rename 'books.title', headline, 'COLUMN'`), an `@variable` (with optional `OUTPUT`/`OUT` suffix), or the `DEFAULT` keyword — probe-confirmed: arithmetic expressions like `EXEC p @x - 1` raise Msg 102 at parse.
 - **Unqualified names work**: `EXEC p1` resolves to `dbo.p1` (probe-confirmed; matches view-routing relaxation).
 - **EXEC missing proc** → **Msg 2812** (`"Could not find stored procedure 'X'."`) — distinct error from Msg 208 / 3701; State 62 verbatim.
+  A module body calling one is still created, and its `CREATE` sends an informational **Msg 2007** per call (`The module 'p' depends on the missing object 'x'. …`) at the `CREATE`'s line, untaken branches included — not for a `#` procedure, a synonym or the module itself (`BatchContext.MissingProcedureReferences`, probed 2026-10-02 against SQL Server 2025).
 - **EXEC in expression position** (`SELECT EXEC p`) → Msg 156 via the standard non-statement-start path.
 
 **Error matrix at EXEC**:
@@ -702,6 +705,7 @@ Probed against SQL Server 2025.
 - **Msg 201** (`"Procedure or function 'X' expects parameter '@Y', which was not supplied."`) for a missing required parameter (no default), state 4, and only then **Msg 8145** for a named argument matching no parameter.
 - **Msg 8143** (`"Parameter '@X' was supplied multiple times."`) for duplicate named args.
 - **Msg 119** (mixing named-then-positional) — verbatim wording probe-confirmed.
+- **Msg 8162** state 2, at line 0 under the procedure, for a variable passed `OUTPUT` to a parameter not declared `OUTPUT`, and the procedure doesn't run; **Msg 179** for a constant passed `OUTPUT`, as the batch compiles — for `sp_executesql`'s arguments too (probed 2026-10-02).
 
 **OUTPUT parameters**:
 - Procedure parameters declared with `OUTPUT` / `OUT` get `ProcedureParameter.IsOutput = true`; the EXEC argument's optional `OUTPUT` keyword binds the caller's `@variable` slot (captured live, not by value) into `ProcArgument.OutputSlot`.
@@ -709,6 +713,7 @@ Probed against SQL Server 2025.
   **Probe-confirmed quirks**:
   - Caller that omits `OUTPUT` on an OUTPUT-declared parameter: writeback is suppressed (caller's variable retains its pre-EXEC value).
   - A body that runs on past a statement error writes back as usual; one an error ends — into the caller's `CATCH`, or by `THROW` — writes nothing back, and the caller's variable keeps its pre-`EXEC` value (probed 2026-09-24).
+  - A value the caller's variable can't hold is **Msg 8114** state 2 at line 0 under the procedure, and ends the batch (probed 2026-10-02).
 - For `CommandType.StoredProcedure` callers (`SimulatedDbCommand.CommandType = StoredProcedure`), parameters with `ParameterDirection.Output` / `InputOutput` writeback to `DbParameter.Value` at end-of-call; `ParameterDirection.ReturnValue` captures the proc's return code (default 0).
 
 **RETURN semantics**:
@@ -716,8 +721,10 @@ Probed against SQL Server 2025.
 - `RETURN <expr>` evaluates the expression, coerces to `int`, lands in `ProcFrame.ReturnCode`.
   **Probe-confirmed: `RETURN NULL` yields 0 in the caller's `@rc`**, and sends Msg 282 saying so — NULL coerces to 0 in this slot specifically (NOT propagated as `DBNull`), distinct from how NULL flows through other expression contexts.
 - `RETURN 'abc'` (non-coercible string) raises **Msg 245** at the proc body's RETURN statement.
+  A value that fails with an error ending only its statement — `RETURN 1 / 0`, a value past `int` — returns NULL, so Msg 282 follows the error and the status is 0 (`SimulatedSqlException.FollowingMessage`, probed 2026-10-02).
+- A status the caller's `@rc` can't hold (`tinyint` for `RETURN 500`) is **Msg 8114** state 3 at line 0 under the procedure, the variable kept, and the batch runs on (probed 2026-10-02).
 - A body that ends without a `RETURN` value, a bare `RETURN` included, returns 0 — or, when its own statements raised an error, `10 - severity` for the most severe of them: −6 after a severity-16 error, −1 after severity 11 (`ProcFrame.StatusWithoutReturnValue`, probed 2026-09-24 against SQL Server 2025).
-  An error counts even when the body's own `TRY` caught it, and doesn't when a procedure or dynamic SQL the body called raised it; a `RETURN` value set after the error wins.
+  An error counts even when the body's own `TRY` caught it, and doesn't when a procedure or dynamic SQL the body called raised it — nor does the Msg 2812 of a call to a procedure that doesn't exist (probed 2026-10-02); a `RETURN` value set after the error wins.
   A body an error ends assigns the caller's `@rc` nothing.
 - Value-form RETURN is also legal inside scalar UDF bodies (existing); the parse-time check accepts either `BatchContext.UdfFrame` or `BatchContext.ProcFrame` being non-null.
 
@@ -731,8 +738,8 @@ Every error a `CREATE PROCEDURE` raises names the procedure, and a repeated para
 Unlike UDF bodies, the proc invocation iterates `DispatchStatementsUntil` and yields each outcome.
 Output parameter values populate AFTER reader close — probe-confirmed: real SQL Server holds OUTPUT param values until the response stream's done message, which `SimulatedDbDataReader` mirrors via the standard ADO.NET timing.
 
-**Recursion**: each proc call increments `SimulatedDbConnection.NestingLevel`; entering a body at the cap raises Msg 217 (verbatim same wording as scalar UDFs / views).
-`@@NESTLEVEL` reads the counter as int.
+**Recursion**: each proc call increments `SimulatedDbConnection.NestingLevel`; entering a body at the cap raises Msg 217 (verbatim same wording as scalar UDFs / views), which acts as under `XACT_ABORT`: uncaught it ends the batch and rolls the transaction back, caught it dooms it (probed 2026-10-02).
+`@@NESTLEVEL` reads the counter as int; an `EXEC ('…')` batch is one level below its caller and an `sp_executesql` one two, the procedure counting as one (probed 2026-10-02).
 
 **`@@PROCID`**: the `object_id` of the procedure, scalar or multi-statement function, or trigger whose body is running (`BatchContext.ModuleObjectId`), else `0` — so `OBJECT_NAME(@@PROCID)` names each of the four and reads NULL in an inline function, whose body runs inside its caller's statement (probed 2026-09-28 against SQL Server 2025).
 Used by tooling that introspects the calling proc from inside its own body (e.g. logging procs that record their own `OBJECT_NAME(@@procid)`).
@@ -804,7 +811,7 @@ Values convert through the CAST value path, so the `varchar` asterisk fallback, 
   Both type names render bare, so a `decimal(5,2)` declaration reports `'decimal'`.
   The gate is a family matrix (`IsImplicitlyConvertible` / `ConversionFamilyOf`), differentially checked cell-by-cell against real over a 25 × 25 type grid: 601 of 625 cells agree, and the 24 left over are all `hierarchyid`-as-source, whose probe values couldn't be built while `SqlValue.CoerceTo` had no string → `hierarchyid` conversion — those cells are unchecked rather than known to differ.
 - **Msg 11553** — a `NOT NULL` column received a NULL. Raised per row as the set streams, so preceding rows reach the client.
-- **Msg 8114** — a value-level conversion failure, with both type names *decorated* (`Error converting data type varchar(5) to numeric(5,2).`).
+- **Msg 8114** state 2 — a value-level conversion failure, with both type names *decorated* (`Error converting data type varchar(5) to numeric(5,2).`; state probed 2026-10-02).
   Real routes every conversion rule through this one number here, so the simulator remaps the CAST path's own failures (Msg 245 / 8115 / 8170 / …) onto it.
 
 **Error attribution**: Msg 11535 / 11537 / 11538 / 11553 and the Msg 8114 failure name the module's producing statement, not the `EXECUTE` — `ERROR_PROCEDURE()` reads the innermost producing procedure and `ERROR_LINE()` its statement's line.
@@ -879,6 +886,8 @@ That scoping is what lets `sp_MSforeachdb`'s `'USE [?]; …'` idiom run each com
 **`EXEC (<string-expr>)`**:
 - Operand evaluates in the outer batch's context (so `EXEC ('SELECT ' + @col + ' FROM t')` works), then the resulting string is dispatched as a fresh batch.
 - The operand is string literals and variables joined by `+` and nothing else — a function call, a parenthesis or a binary literal is Msg 102 at that token, `NULL` or `COLLATE` Msg 156, and an `xml` variable Msg 257 as it runs (probed 2026-09-26).
+  EXEC joins the parts itself rather than through `+`: a non-string variable converts on its own (`'SELECT ' + @int` runs), a `datetime` at style 0 and a binary as its bytes, and a NULL one adds nothing (probed 2026-10-02).
+- `AS USER = 'name'` / `AS LOGIN = 'name'` after the parenthesis runs the batch in that context, reverting when it returns (probed 2026-10-02).
 - NULL string operand → silent no-op (matches real SQL Server's permissive handling).
 - The form takes no return-code variable: `EXEC @rc = ('...')` is Msg 102 near the `(`.
 - **Not modeled yet**: `EXEC ('…', args) AT linked_server` — a comma after the string is Msg 102 at the comma here, where real, reading it as that form's argument list, reports the closing parenthesis (state 3).
@@ -887,7 +896,9 @@ That scoping is what lets `sp_MSforeachdb`'s `'USE [?]; …'` idiom run each com
 - First argument is the SQL text; second (optional) is a parameter-declaration string parsed by `ParseSpExecuteSqlParamDefinitions` (mini-parser: `@name type [OUTPUT]` entries, comma-separated).
 - Remaining arguments bind values to declared params (positional or named); `OUTPUT` keyword on an `@variable`-valued arg writes the dynamic batch's final variable value back to the caller's slot at exit.
 - The pre-declared `@`-variables exist as the dynamic batch's own `Variables` dict — they don't leak into the outer scope.
-- Probe-confirmed: `sp_executesql` works with no parameters (`EXEC sp_executesql N'SELECT 42'`).
+- Probe-confirmed: `sp_executesql` works with no parameters (`EXEC sp_executesql N'SELECT 42'`); with no statement at all it is its own Msg 201 state 10, naming `@statement` (probed 2026-10-02).
+- Called through a database — `EXEC other.sys.sp_executesql N'…'`, the idiom for running dynamic SQL elsewhere — its batch runs in that database (probed 2026-10-02).
+- A dynamic batch's `USE` sends no Msg 5701 (probed 2026-10-02).
 - Its return status is `@@ERROR` as the dynamic batch left it — 0 after a clean last statement, the error's number after an error that compiling or name resolution ended the batch with (probed 2026-09-24).
 - **The first two arguments bind by position and their names are not checked.**
   A `@name =` prefix is accepted and discarded, so `@stmt =`, `@statement =`, `@sql =` and even `@nonsense =` all run the same statement — probe-confirmed.

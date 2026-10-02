@@ -106,7 +106,7 @@ partial class Simulation
         if (stateInt < 0)
             throw SimulatedSqlException.ThrowStateNegative(stateInt);
 
-        throw SimulatedSqlException.ThrowRaised(numberInt, messageValue.IsNull ? "" : FormatThrowMessage(messageValue.AsString), (byte)stateInt);
+        throw SimulatedSqlException.ThrowRaised(numberInt, messageValue.IsNull ? "" : CapRaisedMessage(FormatThrowMessage(messageValue.AsString)), (byte)stateInt);
     }
 
     /// <summary>

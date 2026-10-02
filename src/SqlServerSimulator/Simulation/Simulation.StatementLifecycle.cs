@@ -95,6 +95,12 @@ partial class Simulation
         public readonly bool IsCall;
 
         /// <summary>
+        /// Whether the statement is a block, an <c>IF</c> or a <c>WHILE</c>,
+        /// whose parts own what a failing write reports.
+        /// </summary>
+        private readonly bool compound;
+
+        /// <summary>
         /// Whether the statement reports its own statistics, which a function
         /// or view body's inline into its caller's.
         /// </summary>
@@ -182,6 +188,8 @@ partial class Simulation
             this.FramesStatement = batch.Connection.FramesEveryStatement && !batch.IsSkipping;
             this.StartDoneKind = this.FramesStatement ? StatementDoneKindOf(batch.Parser) : null;
             this.IsCall = this.FramesStatement && IsProcedureCall(batch.Parser, atBatchStart);
+            this.compound = batch.Parser.Token is ReservedKeyword { Keyword: Keyword.If or Keyword.While }
+                || (batch.Parser.Token is ReservedKeyword { Keyword: Keyword.Begin } && StatementDoneKindOf(batch.Parser) is null);
             // SET STATISTICS TIME reports each statement that closes with a DONE,
             // and a procedure call after its body (probed 2026-09-28 against SQL
             // Server 2025); a function or view body inlines into its caller's.
@@ -440,14 +448,18 @@ partial class Simulation
                 ex.RaisedRunningFunctionBody = true;
             if (!batch.SuppressDiagnosticsResolution)
             {
-                var diagnosticLine = ex.Class == 15
+                var diagnosticLine = ex.Class == 15 && !ex.RaisedByRaiserror
                     ? batch.Parser.Token?.LineNumber ?? batch.CurrentStatement.StartLine
                     : batch.CurrentStatement.StartLine;
                 ex.ResolveDiagnostics(diagnosticLine, batch.LineOffset, batch.ErrorProcedureName);
                 if (!ex.RaisingScopeRecorded)
                 {
                     ex.RaisingScopeRecorded = true;
-                    if (!batch.IsSkipping && batch.ProcFrame is { } procFrame && ex.Class > procFrame.MaxErrorSeverity)
+                    // A call of a procedure that doesn't exist (Msg 2812) is
+                    // a called procedure's error as far as the status goes,
+                    // and counts for nothing (probed 2026-10-02 against SQL
+                    // Server 2025).
+                    if (!batch.IsSkipping && batch.ProcFrame is { } procFrame && ex.Class > procFrame.MaxErrorSeverity && ex.Number != 2812)
                         procFrame.MaxErrorSeverity = ex.Class;
                 }
             }
@@ -489,7 +501,7 @@ partial class Simulation
             // the doomed state rather than a rollback. Applied at the
             // innermost frame and marked, so an outer frame re-raising the
             // same exception doesn't ask twice.
-            ApplyXactAbortPromotion(connection, ex, batch.CurrentStatement.ChangesTableStructure);
+            ApplyXactAbortPromotion(connection, ex, batch.CurrentStatement.ChangesTableStructure, IsDeferredCompileError(ex) && !ex.EndedCalledBatch ? batch.TryFrameDepth : 0);
             return ex;
         }
 
@@ -564,6 +576,14 @@ partial class Simulation
                 // A failed statement leaves @@ROWCOUNT at 0, whatever ran
                 // before it (probed 2026-09-27 against SQL Server 2025).
                 connection.LastStatementRowCount = 0;
+                // Under XACT_ABORT a caught error dooms the transaction, a
+                // called batch's syntax error included, and a caught Msg 266
+                // — a procedure's or dynamic batch's transaction count left
+                // changed — does whatever the option says, where uncaught
+                // both leave it committable (probed 2026-10-02 against SQL
+                // Server 2025).
+                if ((ex.Number == 266 || connection.XactAbort) && connection.CurrentTransaction is { } changed)
+                    changed.Doomed = true;
             }
             else if (batch.ContinueOnError && batch.ProcFrame is null && batch.TriggerFrame is null && EndsBatch(ex))
             {
@@ -590,7 +610,11 @@ partial class Simulation
                 // one that ends the batch propagates below instead, so it
                 // unwinds every caller it reaches.
                 this.Ending = StatementEnding.Continued;
-                connection.LastStatementRowCount = 0;
+                // A called batch a compile or name-resolution error ended
+                // leaves @@ROWCOUNT where its last statement put it (probed
+                // 2026-10-02 against SQL Server 2025).
+                if (!ex.EndedCalledBatch)
+                    connection.LastStatementRowCount = 0;
             }
             else
             {
@@ -622,7 +646,7 @@ partial class Simulation
             // statement does (probed 2026-09-28 against SQL Server 2025).
             var caughtFurtherOut = !batch.IsSkipping && !batch.CreateTimeBinding && connection.OpenTryFrames > 0
                 && !propagated.AbortsTransaction && !propagated.IsAttention;
-            var count = caughtFurtherOut ? CaughtWriteCount(batch) : null;
+            var count = caughtFurtherOut && !this.compound ? CaughtWriteCount(batch) : null;
             if (this.StartDoneKind is not null)
                 _ = FrameStatement(batch, outcomes, standInForNone: this.FramesStatement && caughtFurtherOut && count is null && !this.IsCall);
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
@@ -686,7 +710,7 @@ partial class Simulation
             // it (the wire writes error token(s); the in-process reader
             // converts it to a throw); the outer dispatch loop resumes at the
             // next statement.
-            connection.LastErrorNumber = continuedError.Number;
+            connection.LastErrorNumber = continuedError.AtAtErrorNumber;
             // A batch-aborting error skips the cursor-recovery scan: the outer
             // dispatch loop breaks on BatchAborted, so the cursor position no
             // longer matters and scanning could only mis-stop on a keyword-like
@@ -735,6 +759,8 @@ partial class Simulation
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
             yield return errorOutcome;
+            if (continuedError.FollowingMessage is { } following)
+                yield return new SimulatedInfoOutcome(following, followsRows: true);
             // A statement its error ended still reports its time, after the
             // error and ahead of Msg 3621; one that ended the batch doesn't
             // (probed 2026-09-28 against SQL Server 2025).
@@ -802,7 +828,7 @@ partial class Simulation
                     caught.CatchReadsFirstEntry || caught.Errors.Count < 2 ? null : [.. caught.Errors.SkipLast(1)]);
                 batch.ErrorSignaled = true;
             }
-            connection.LastErrorNumber = caught.Number;
+            connection.LastErrorNumber = caught.AtAtErrorNumber;
             // Any error of severity >= 11 raised while a trigger body runs
             // aborts the firing statement at trigger exit (Msg 3616) even
             // though this CATCH swallowed it — real doesn't let a body's own

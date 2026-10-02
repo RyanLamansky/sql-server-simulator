@@ -14,12 +14,12 @@ namespace SqlServerSimulator;
 /// included) enclose it — which is the <see cref="BatchContext.BlockDepth"/> a
 /// dispatch loop over it runs at.
 /// </param>
-/// <param name="tryDepth">How many of those are <c>TRY</c> / <c>CATCH</c> scopes.</param>
-internal sealed class LabelTarget(ParserContext.Checkpoint checkpoint, int blockDepth, int tryDepth)
+/// <param name="tryScopes">The <c>TRY</c> / <c>CATCH</c> scopes enclosing it, outermost first, each by the order it opened in.</param>
+internal sealed class LabelTarget(ParserContext.Checkpoint checkpoint, int blockDepth, int[] tryScopes)
 {
     public readonly ParserContext.Checkpoint Checkpoint = checkpoint;
     public readonly int BlockDepth = blockDepth;
-    public readonly int TryDepth = tryDepth;
+    public readonly int[] TryScopes = tryScopes;
 }
 
 public sealed partial class Simulation
@@ -48,7 +48,8 @@ public sealed partial class Simulation
     /// <para>TRY / CATCH scopes are tracked as a stack of ids so the
     /// jump-into-a-scope refusal (Msg 1026) can be settled here too: a label
     /// whose scope stack is not a prefix of the <c>GOTO</c>'s sits inside a
-    /// scope the jump would enter.</para>
+    /// scope the jump would enter — a <c>CATCH</c> from its own <c>TRY</c> body
+    /// included (probed 2026-10-02 against SQL Server 2025).</para>
     /// </remarks>
     internal static void ScanBatchLabels(BatchContext batch)
     {
@@ -56,17 +57,24 @@ public sealed partial class Simulation
         batch.Labels = BatchContext.NoLabels;
         if (!context.MightCarryLabelsOrGoto)
             return;
+        // A batch defining a procedure, function or trigger is that module's
+        // body, whose own bind scans it and attributes what it finds to the
+        // module (probed 2026-10-02 against SQL Server 2025).
+        if (batch.ProcFrame is null && batch.UdfFrame is null && batch.TriggerFrame is null && OpensWithModuleDefinition(context))
+            return;
 
         var entry = context.SaveCheckpoint();
         try
         {
             Dictionary<string, LabelTarget>? labels = null;
-            List<(string Name, int TryDepth, int Line)>? gotos = null;
+            List<(string Name, int[] TryScopes, int Line)>? gotos = null;
             // One stack for both nesting questions: a 'c' entry is a CASE
             // (whose END is not a block's), 'b' a BEGIN…END block, 't' a
-            // BEGIN TRY / BEGIN CATCH. 'b' and 't' are exactly the constructs
-            // that open a nested dispatch loop.
-            var open = new List<char>();
+            // BEGIN TRY / BEGIN CATCH, numbered so a TRY and its CATCH are
+            // different scopes. 'b' and 't' are exactly the constructs that
+            // open a nested dispatch loop.
+            var open = new List<(char Kind, int Scope)>();
+            var scopesOpened = 0;
             var parenDepth = 0;
 
             while (context.Token is not null)
@@ -81,11 +89,11 @@ public sealed partial class Simulation
                             parenDepth--;
                         break;
                     case ReservedKeyword { Keyword: Keyword.Case }:
-                        open.Add('c');
+                        open.Add(('c', 0));
                         break;
                     case ReservedKeyword { Keyword: Keyword.Begin }:
                         if (PeekAfterBeginOrEnd(context) is var after && after != BeginKind.Transaction)
-                            open.Add(after == BeginKind.TryOrCatch ? 't' : 'b');
+                            open.Add(after == BeginKind.TryOrCatch ? ('t', ++scopesOpened) : ('b', 0));
                         break;
                     case ReservedKeyword { Keyword: Keyword.End }:
                         if (open.Count > 0)
@@ -95,7 +103,7 @@ public sealed partial class Simulation
                         if (context.GetNextOptional() is UnquotedString target)
                         {
                             gotos ??= [];
-                            gotos.Add((target.Value, Count(open, 't'), gotoKeyword.LineNumber));
+                            gotos.Add((target.Value, TryScopes(open), gotoKeyword.LineNumber));
                         }
                         break;
                     case UnquotedString candidate when parenDepth == 0:
@@ -109,7 +117,7 @@ public sealed partial class Simulation
                                 var declared = new LabelTarget(
                                     context.SaveCheckpoint(),
                                     Count(open, 'b') + Count(open, 't'),
-                                    Count(open, 't'));
+                                    TryScopes(open));
                                 if (!labels.TryAdd(candidate.Value, declared))
                                     throw AtLine(SimulatedSqlException.DuplicateLabel(candidate.Value), candidate.LineNumber);
                                 continue;
@@ -123,13 +131,14 @@ public sealed partial class Simulation
 
             if (gotos is not null)
             {
-                foreach (var (name, tryDepth, line) in gotos)
+                foreach (var (name, tryScopes, line) in gotos)
                 {
                     if (labels is null || !labels.TryGetValue(name, out var declared))
-                        throw AtLine(SimulatedSqlException.UndeclaredLabel(name), line);
-                    // A label enclosed in more TRY / CATCH scopes than the jump
-                    // is sits inside one the jump would enter.
-                    if (declared.TryDepth > tryDepth)
+                        throw AtLine(SimulatedSqlException.UndeclaredLabel(name), context.LastLine);
+                    // A label whose TRY / CATCH scopes aren't all the jump's
+                    // own sits inside one the jump would enter — a TRY's
+                    // CATCH from its TRY body included.
+                    if (declared.TryScopes.Length > tryScopes.Length || !tryScopes.AsSpan(0, declared.TryScopes.Length).SequenceEqual(declared.TryScopes))
                         throw AtLine(SimulatedSqlException.GotoCannotJumpIntoTryOrCatch(), line);
                 }
             }
@@ -143,13 +152,32 @@ public sealed partial class Simulation
         }
 
         // The scan runs ahead of any statement's dispatch, so it stamps the
-        // line itself: the duplicate label's, or the offending GOTO's
-        // (probed 2026-09-23).
+        // line itself: the duplicate label's, the offending GOTO's for Msg
+        // 1026, and the batch's last for a missing label, which real meets
+        // once it has read to the end (probed 2026-10-02 against SQL Server
+        // 2025).
         SimulatedSqlException AtLine(SimulatedSqlException error, int line)
         {
             error.ResolveDiagnostics(line, batch.LineOffset, batch.ErrorProcedureName);
             return error;
         }
+    }
+
+    /// <summary>
+    /// Whether the cursor opens <c>CREATE</c>, <c>ALTER</c> or <c>CREATE OR
+    /// ALTER</c> of a procedure, function or trigger. Leaves the cursor where
+    /// it found it.
+    /// </summary>
+    private static bool OpensWithModuleDefinition(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Create or Keyword.Alter })
+            return false;
+        var checkpoint = context.SaveCheckpoint();
+        var next = context.GetNextOptional();
+        if (next is ReservedKeyword { Keyword: Keyword.Or } && context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Alter })
+            next = context.GetNextOptional();
+        context.RestoreCheckpoint(checkpoint);
+        return next is ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc or Keyword.Function or Keyword.Trigger };
     }
 
     /// <summary>What a <c>BEGIN</c> opens.</summary>
@@ -182,15 +210,27 @@ public sealed partial class Simulation
         return kind;
     }
 
-    private static int Count(List<char> open, char kind)
+    private static int Count(List<(char Kind, int Scope)> open, char kind)
     {
         var total = 0;
-        foreach (var entry in open)
+        foreach (var (entryKind, _) in open)
         {
-            if (entry == kind)
+            if (entryKind == kind)
                 total++;
         }
         return total;
+    }
+
+    private static int[] TryScopes(List<(char Kind, int Scope)> open)
+    {
+        var scopes = new int[Count(open, 't')];
+        var next = 0;
+        foreach (var (kind, scope) in open)
+        {
+            if (kind == 't')
+                scopes[next++] = scope;
+        }
+        return scopes;
     }
 
     /// <summary>

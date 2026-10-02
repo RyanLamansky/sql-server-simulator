@@ -63,7 +63,7 @@ partial class Simulation
                 if (parsed == DbccOptions.MaxDop)
                 {
                     if (context.Token is not Operator { Character: '=' })
-                        throw SimulatedSqlException.DbccOptionNotRecognized(option.Value);
+                        throw SimulatedSqlException.WithOptionNotRecognized(option.Value);
                     if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } degree })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     maxDop = degree.CoerceTo(SqlType.Int32).AsInt32;
@@ -160,7 +160,7 @@ partial class Simulation
             "PHYSICAL_ONLY" => DbccOptions.PhysicalOnly,
             "TABLERESULTS" => DbccOptions.TableResults,
             "TABLOCK" => DbccOptions.TabLock,
-            _ => throw SimulatedSqlException.DbccOptionNotRecognized(option),
+            _ => throw SimulatedSqlException.WithOptionNotRecognized(option),
         };
     }
 

@@ -251,10 +251,13 @@ partial class SimulatedSqlException
     /// Mimics SQL Server's Msg 217 — fired when scalar UDF / proc / trigger /
     /// view recursion exceeds the 32-level cap (probe-confirmed verbatim).
     /// Backed by <see cref="SimulatedDbConnection.NestingLevel"/>; the call
-    /// site checks the depth before incrementing.
+    /// site checks the depth before incrementing. It acts as under
+    /// <c>XACT_ABORT</c> whatever the option says: uncaught it ends the batch
+    /// and rolls the transaction back, caught it dooms it (probed 2026-10-02
+    /// against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException MaximumNestingLevelExceeded() =>
-        new("Maximum stored procedure, function, trigger, or view nesting level exceeded (limit 32).", 217, 16, 1);
+        new("Maximum stored procedure, function, trigger, or view nesting level exceeded (limit 32).", 217, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Mimics SQL Server's Msg 1005 — a numbered procedure's <c>;N</c> outside
@@ -312,6 +315,23 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException ParameterSuppliedMultipleTimes(string parameterName) =>
         new($"Parameter '@{parameterName}' was supplied multiple times.", 8143, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 8162 — a variable passed <c>OUTPUT</c> to a
+    /// procedure or <c>sp_executesql</c> parameter not declared
+    /// <c>OUTPUT</c>. The call doesn't run (probed 2026-10-02 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ParameterNotDeclaredOutput(string parameterName) =>
+        new($"The formal parameter \"@{parameterName}\" was not declared as an OUTPUT parameter, but the actual parameter passed in requested output.", 8162, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 179 — an <c>EXEC</c> or <c>sp_executesql</c>
+    /// argument that is a constant marked <c>OUTPUT</c> (probed 2026-10-02
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ConstantPassedAsOutput() =>
+        new("Cannot use the OUTPUT option when passing a constant to a stored procedure.", 179, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 119 — an EXEC mixed positional and named

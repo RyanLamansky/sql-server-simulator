@@ -22,6 +22,10 @@ That holds for `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `ARITHIGNORE`, `CO
 `ANSI_NULLS` and `QUOTED_IDENTIFIER` are the exceptions: a procedure or trigger body ignores its own `SET` of them, running under the setting captured when the module was created, while dynamic SQL applies them to its own batch.
 `PARSEONLY` in a procedure, trigger or function body refuses the `CREATE` with Msg 1059, at line 0 wherever the `SET` sits (probed 2026-09-28).
 
+## Refused forms
+
+An on/off option given any other value is Msg 102 state 4 naming the option (`SET NOCOUNT maybe` is near `'nocount'`), `SET @@x = …` is Msg 137 state 1 naming `@@x`, and an isolation level outside the five is Msg 102 at it (probed 2026-10-02 against SQL Server 2025).
+
 ## `@@OPTIONS`, `SESSIONPROPERTY` and `sys.dm_exec_sessions`
 
 `@@OPTIONS` (`OptionsExpression`) carries `IMPLICIT_TRANSACTIONS` 2, `CURSOR_CLOSE_ON_COMMIT` 4, `ANSI_WARNINGS` 8, `ANSI_PADDING` 16, `ANSI_NULLS` 32, `ARITHABORT` 64, `ARITHIGNORE` 128, `QUOTED_IDENTIFIER` 256, `NOCOUNT` 512, `ANSI_NULL_DFLT_ON` 1024, `ANSI_NULL_DFLT_OFF` 2048, `CONCAT_NULL_YIELDS_NULL` 4096, `NUMERIC_ROUNDABORT` 8192 and `XACT_ABORT` 16384; a fresh SqlClient session reads 5432.
@@ -39,7 +43,7 @@ Probed 2026-09-28 against SQL Server 2025, a divide by zero or an arithmetic ove
 | off | off | NULL, then Msg 3606 / 3607 after the statement's rows ([`errors.md`](errors.md#the-message-stream)); under `ARITHIGNORE ON` the NULL alone |
 | off | on | the error ends the batch and rolls the transaction back as under `XACT_ABORT` — a procedure's error ends its caller's batch, and a `TRY` that catches it is left with a doomed transaction (`Simulation.ApplyXactAbortPromotion`) |
 
-So `ARITHIGNORE` only reaches the NULL-answering pairing (`BatchContext.AbsorbsArithmeticFault`), a write storing the NULL included.
+So `ARITHIGNORE` only reaches the NULL-answering pairing (`BatchContext.AbsorbsArithmeticFault`), a write storing the NULL included, as does negating a type's minimum (`-CAST(-2147483648 AS int)`, probed 2026-10-02).
 `SESSIONPROPERTY('ARITHIGNORE')` is NULL, as for the other options outside its documented seven.
 
 ## `ANSI_DEFAULTS`

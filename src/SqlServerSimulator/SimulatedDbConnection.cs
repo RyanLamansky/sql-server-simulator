@@ -542,6 +542,15 @@ public sealed class SimulatedDbConnection : DbConnection
     internal int OpenTryFrames;
 
     /// <summary>
+    /// The error the innermost running <c>CATCH</c> on the session's call
+    /// stack handles, which the <c>ERROR_*()</c> functions read in a body
+    /// that has no <c>CATCH</c> of its own running — a procedure, dynamic
+    /// batch, function or trigger the <c>CATCH</c> called (probed 2026-10-02
+    /// against SQL Server 2025). Saved and restored around each <c>CATCH</c>.
+    /// </summary>
+    internal Parser.CaughtError? EnclosingCatchError;
+
+    /// <summary>
     /// The cancellation source for the command currently executing on this
     /// connection, replaced at the start of each top-level command execution
     /// (<see cref="Simulation.CreateResultSetsForCommand"/>). The engine polls

@@ -51,6 +51,17 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CursorFetchVariableCountMismatch() =>
         new("Cursorfetch: The number of variables declared in the INTO list must match that of selected columns.", 16924, 16, 1);
 
+    /// <summary>Msg 154 state 3: a cursor's query carrying <c>SELECT … INTO</c>.</summary>
+    internal static SimulatedSqlException IntoNotAllowedInCursorDeclaration() =>
+        new("an INTO clause is not allowed in a cursor declaration.", 154, 15, 3);
+
+    /// <summary>
+    /// Msg 16949: a cursor variable read or assigned as a scalar —
+    /// <c>SELECT @c = 1</c> (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CursorVariableUsedAsScalar(string name) =>
+        new($"The variable '@{name}' is a cursor variable, but it is used in a place where a cursor variable is not valid.", 16949, 16, 1);
+
     /// <summary>
     /// Msg 16925: <c>FETCH ABSOLUTE</c> against a dynamic-sensitivity cursor,
     /// which can't position by ordinal. Probe-confirmed verbatim:

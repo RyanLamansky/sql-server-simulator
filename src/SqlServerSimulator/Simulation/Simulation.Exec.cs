@@ -296,7 +296,7 @@ partial class Simulation
             "sp_helprolemember" => InvokeSpHelpRoleMember(batch, calledAs),
             "sp_droptype" => this.InvokeSpDropType(batch, calledAs),
             "sp_dropserver" => InvokeSpDropServer(batch),
-            "sp_executesql" => ParseSpExecuteSql(batch, returnCodeVar, insertExecSource),
+            "sp_executesql" => ParseSpExecuteSql(batch, returnCodeVar, insertExecSource, procName.Count >= 3 ? procName[procName.Count - 3] : null),
             "sp_fkeys" => Uncounted(InvokeSpFkeys(batch)),
             "sp_getapplock" => InvokeSpGetAppLock(batch, returnCodeVar),
             "sp_help" => Uncounted(InvokeSpHelp(batch, CalledName(procName))),
@@ -403,7 +403,11 @@ partial class Simulation
         var resultSets = ParseExecuteOptions(batch, insertExecSource, out var recompile);
 
         if (batch.IsSkipping)
+        {
+            if (batch.MissingProcedureReferences is { } missing && !BatchContext.IsLocalTempName(procName.Leaf) && !ResolvesProcedure(batch, procName))
+                missing.Add(procName.WithoutOmittedLeading().Written);
             yield break;
+        }
 
         // A synonym target expands to its base before resolution, so a synonym
         // over a missing procedure reports Msg 2812 naming the base — real's
@@ -442,6 +446,25 @@ partial class Simulation
         foreach (var outcome in resultSets is null ? invocation : ApplyResultSetsContract(invocation, resultSets))
             yield return outcome;
         batch.CurrentStatement.SuppressErrorReset = true;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="name"/> names a procedure, a synonym or the
+    /// module being created — where a name in a database that doesn't exist
+    /// names none.
+    /// </summary>
+    private static bool ResolvesProcedure(BatchContext batch, MultiPartName name)
+    {
+        try
+        {
+            return batch.TryResolveSynonym(name, out _)
+                || batch.TryResolveProcedure(name, out _)
+                || (name.Count == 1 && batch.CurrentDatabase.Collation.Equals(name.Leaf, batch.ErrorProcedureName));
+        }
+        catch (SimulatedSqlException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -629,6 +652,8 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
         context.MoveNextOptional();
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
+            throw SimulatedSqlException.ConstantPassedAsOutput();
         return new ProcArgument(name, isDefault: false, value: literalValue, outputSlot: null, isUntypedNull: untypedNull);
     }
 

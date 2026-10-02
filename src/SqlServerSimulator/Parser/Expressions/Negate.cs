@@ -75,7 +75,18 @@ internal sealed class Negate(Expression operand) : Expression
         }
 
         var resultType = PreservedResultType(value.Type);
-        var raw = Subtract.NegateViaZero(value);
+        SqlValue raw;
+        try
+        {
+            raw = Subtract.NegateViaZero(value);
+        }
+        catch (SimulatedSqlException error) when (runtime.Batch.AbsorbsArithmeticFault(error))
+        {
+            // Negating the type's minimum overflows as any arithmetic does,
+            // answering NULL where the session says so (probed 2026-10-02
+            // against SQL Server 2025).
+            raw = SqlValue.Null(resultType ?? value.Type);
+        }
         return resultType is null ? raw
             : raw.IsNull ? SqlValue.Null(resultType)
             : raw.CoerceTo(resultType);

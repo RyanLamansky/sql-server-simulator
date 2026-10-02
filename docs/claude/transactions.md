@@ -15,6 +15,7 @@ A fourth arrives over the network: TDS Transaction Manager requests map onto the
   A doomed transaction refuses a rollback to a savepoint with Msg 3931, which ends the batch and rolls back as Msg 3930 does.
   A rollback to a savepoint also discards the version-store entries written after it.
   A name held in a variable is cut to 32 characters; a written one past 32 is Msg 103 while compiling, on every statement that takes one.
+  `BEGIN`, `SAVE`, `COMMIT` and `ROLLBACK TRAN` all take a variable, which must be a string (Msg 3914 otherwise), and `COMMIT … WITH (DELAYED_DURABILITY = ON | OFF)` is accepted and discarded (probed 2026-10-02).
   How `BeginTransaction` meets a transaction SQL text opened is [its own section](#begintransaction-and-sql-text-transactions).
   `COMMIT`/`ROLLBACK` with no active tx → Msg 3902/3903.
 - `@@TRANCOUNT` reads connection depth as int.
@@ -151,17 +152,21 @@ An error raised inside a procedure body ends the **calling** batch, not just the
 The other DDL — roles, synonyms, schema transfers, `GRANT` — doesn't.
 
 **`RAISERROR` is the exemption**, at every severity and with or without `WITH LOG`: uncaught under the option it reports, the batch runs on, and the transaction stays committable at `XACT_STATE()` 1.
+So is any severity-11 error but a structural one — a `DROP` of a missing object's Msg 3701 — and a syntax error that ended a called dynamic batch (probed 2026-10-02 against SQL Server 2025).
 `THROW` is promoted like everything else, which is the observable split between the two.
 `SimulatedSqlException.RaisedByRaiserror` marks the factory.
 
 **Caught by a `TRY` frame**, every error including `RAISERROR` behaves the same way instead: the `CATCH` runs, the batch carries on past `END CATCH`, `@@TRANCOUNT` is untouched — and the transaction is doomed, `XACT_STATE()` reading `-1` (`SimulatedDbTransaction.Doomed`).
+Caught, the two exemptions above doom it too.
 Whether an error rolls back or dooms is a question about the **whole session stack**, not one batch frame: a procedure with no `TRY` of its own, called from inside the caller's, dooms.
-`SimulatedDbConnection.OpenTryFrames` is the session-wide counter that answers it.
+`SimulatedDbConnection.OpenTryFrames` is the session-wide counter that answers it, less the frames of the scope a compile error deferred to run time is raised in — they can't catch it, so it rolls back (probed 2026-10-02).
+A caught Msg 266, a procedure or dynamic batch returning with its transaction count changed, dooms the transaction whatever the option says, where uncaught it leaves it committable.
 
 A doomed transaction then:
 
 - refuses any statement that writes to the log with **Msg 3930** class 16 state 1 (*"The current transaction cannot be committed and cannot support operations that write to the log file. Roll back the transaction."*) — DML, object DDL, `SAVE TRANSACTION` and `COMMIT` alike, plus the catalog writers whose leading token is neither (the `GRANT` / `REVOKE` / `DENY` family, `sp_rename`, the extended-property procedures), while a `SELECT`, a `DECLARE` and a `SET` complete normally.
   Msg 3930 is itself batch-aborting and rolls the transaction back, and a nested `TRY` can catch it.
+  A `BEGIN TRANSACTION` is refused the same way, while a write to a table variable, which stands outside the transaction, goes through (probed 2026-10-02).
   The refusal precedes the statement's own name resolution — a `GRANT` on a missing object, an `sp_rename` of a missing one and an `sp_addextendedproperty` naming a missing table all report Msg 3930 rather than their own not-found error, which is the opposite of where the read-only gate sits for the latter two — and it precedes that gate as well: a doomed transaction writing to a read-only database reports Msg 3930, not Msg 3906 (probe-confirmed against SQL Server 2025, 2026-08-08).
 - is rolled back at end of batch with **Msg 3998** class 16 state 1 (*"Uncommittable transaction is detected at the end of the batch. The transaction is rolled back."*), emitted after the batch's own results.
 - is cleared only by `ROLLBACK`, after which the batch runs on normally.
@@ -175,7 +180,7 @@ The option also decides whether a client attention rolls an open transaction bac
 A few errors take this shape with the option **off** too, marked by `SimulatedSqlException.AbortsAsUnderXactAbort` — probed 2026-09-23: uncaught they end the batch and leave `@@TRANCOUNT` 0 with the transaction's writes undone, and caught they read `XACT_STATE() = -1`.
 They are the string-conversion failures — Msg 245, 241, 295, 8169, 8170, 235, and Msg 8114 when a `CAST` of a string to a number raises it — and the XML parsing family (Msg 9400–9465 and Msg 6359, see [`xml.md`](xml.md#well-formedness)).
 Probed 2026-09-24 and flagged alongside them: the `*FROMPARTS` builders' Msg 289, the JSON path and document errors (Msg 13607, 13608, 13609, 13621, 13623, 13624), and the run-time name collisions — Msg 2714 for a table, view, procedure, sequence, constraint or `SELECT … INTO` target, Msg 219 for a type, and Msg 1505 for a unique index over duplicate keys.
-So does an identity value past its column's type (Msg 8115's IDENTITY wording, probed 2026-09-28), from a procedure or dynamic batch as well.
+So does an identity value past its column's type (Msg 8115's IDENTITY wording, probed 2026-09-28), from a procedure or dynamic batch as well, the nesting limit's Msg 217, and a dynamic batch's `USE` of a missing database, Msg 911 (both probed 2026-10-02).
 Their overflow neighbours (Msg 220, 232, 242, 248, and 8115 for an expression) and Msg 9807 end only their statement, as do Msg 8114 raised binding a procedure or `sp_executesql` argument and Msg 2714 for a synonym.
 
 A trigger body runs under the option whatever the session says — see [`triggers.md`](triggers.md#errors-in-a-trigger-body).

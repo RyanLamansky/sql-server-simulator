@@ -140,4 +140,34 @@ public sealed class SetOptionTests
             + " SET ANSI_PADDING ON SET ANSI_WARNINGS ON SET CURSOR_CLOSE_ON_COMMIT OFF SET IMPLICIT_TRANSACTIONS OFF"
             + " SET QUOTED_IDENTIFIER ON SELECT 1"));
     }
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    [TestMethod]
+    public void SetOfAnAtAtName_Msg137()
+    {
+        var ex = new Simulation().AssertSqlError("set @@x = 1", 137);
+        AreEqual("Must declare the scalar variable \"@@x\".", ex.Errors[0].Message);
+        AreEqual((byte)1, ex.Errors[0].State);
+    }
+
+    [TestMethod]
+    [DataRow("set nocount maybe", "nocount")]
+    [DataRow("set ansi_nulls 5", "ansi_nulls")]
+    [DataRow("set xact_abort 'on'", "xact_abort")]
+    public void OnOffOptionGivenAnotherValue_Msg102State4(string commandText, string option)
+    {
+        var ex = new Simulation().AssertSqlError(commandText, 102);
+        AreEqual($"Incorrect syntax near '{option}'.", ex.Errors[0].Message);
+        AreEqual((byte)4, ex.Errors[0].State);
+    }
+
+    [TestMethod]
+    public void NegatingTheIntMinimum_UnderAnsiWarningsOff_AnswersNullWithMsg3606()
+    {
+        using var connection = (SimulatedDbConnection)new Simulation().CreateOpenConnection();
+        var messages = new List<int>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Cast<SimulatedError>().Select(error => error.Number));
+        AreEqual(DBNull.Value, connection.CreateCommand("set ansi_warnings off; set arithabort off; select -cast(-2147483648 as int)").ExecuteScalar());
+        CollectionAssert.AreEqual(new[] { 3606 }, messages);
+    }
 }

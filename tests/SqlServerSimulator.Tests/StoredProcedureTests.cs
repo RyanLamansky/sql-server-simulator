@@ -972,10 +972,23 @@ public sealed class StoredProcedureTests
     {
         var sim = new Simulation();
         sim.ExecuteBatches("create procedure p as begin tran");
-        AreEqual("266:p:0", sim.ExecuteScalar("""
+        AreEqual("266:p:0:-1", sim.ExecuteScalar("""
             begin try exec p end try
-            begin catch select concat(error_number(), ':', error_procedure(), ':', error_line()) end catch
+            begin catch select concat(error_number(), ':', error_procedure(), ':', error_line(), ':', xact_state()) end catch
+            rollback
             """));
+    }
+
+    /// <summary>
+    /// A caught Msg 266 dooms the transaction, which the end of the batch
+    /// then rolls back with Msg 3998 (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Msg266_Caught_DoomsTheTransaction()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure p as begin tran");
+        _ = sim.AssertSqlError("begin try exec p end try begin catch end catch", 3998);
     }
 
     /// <summary>
@@ -1000,4 +1013,132 @@ public sealed class StoredProcedureTests
     [DataRow("select 1; alter procedure p3 as select 1", "p3")]
     public void AMisplacedProcedure_IsTheMessagesProcedure(string batch, string procedure)
         => AreEqual(procedure, new Simulation().AssertSqlError(batch, 111).Errors[0].Procedure);
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    private static List<SimulatedError> InfoMessages(Simulation simulation, string commandText)
+    {
+        using var connection = (SimulatedDbConnection)simulation.CreateOpenConnection();
+        var messages = new List<SimulatedError>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Cast<SimulatedError>());
+        _ = connection.CreateCommand(commandText).ExecuteNonQuery();
+        return messages;
+    }
+
+    [TestMethod]
+    [DataRow("1 / 0", 8134)]
+    [DataRow("2147483648", 8115)]
+    [DataRow("cast(3000000000 as bigint)", 8115)]
+    public void FailedReturnValue_ReturnsZeroWithMsg282(string value, int number)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches($"create proc pr as return {value}", "create table t (rc int, e int)");
+        var ex = sim.AssertSqlError("declare @rc int = -9; exec @rc = pr; insert t select @rc, @@error", number);
+        AreEqual(282, ex.Errors[1].Number);
+        AreEqual("pr", ex.Errors[1].Procedure);
+        AreEqual($"0|{number}", sim.ExecuteScalar("select concat(rc, '|', e) from t"));
+    }
+
+    [TestMethod]
+    public void ReturnStatusTheVariableCantHold_Msg8114State3()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create proc pr as return 500");
+        var ex = sim.AssertSqlError("declare @rc tinyint = 7; exec @rc = pr; select 1 / 0", 8114);
+        AreEqual("Error converting data type int to tinyint.", ex.Errors[0].Message);
+        AreEqual((byte)3, ex.Errors[0].State);
+        AreEqual(0, ex.Errors[0].LineNumber);
+        AreEqual("pr", ex.Errors[0].Procedure);
+        AreEqual(8134, ex.Errors[1].Number);
+    }
+
+    [TestMethod]
+    public void OutputValueTheVariableCantHold_EndsTheBatch()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create proc p @a int output as set @a = 300");
+        var ex = sim.AssertSqlError("declare @x tinyint = 1; exec p @x output; select 1 / 0", 8114);
+        AreEqual((byte)2, ex.Errors[0].State);
+        AreEqual(1, ex.Errors.Count);
+    }
+
+    [TestMethod]
+    public void OutputOnAParameterNotDeclaredOutput_Msg8162_TheProcedureDoesNotRun()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int)", "create proc p @a int as insert t values (@a)");
+        var ex = sim.AssertSqlError("declare @x int = 1; exec p @x output", 8162);
+        AreEqual("The formal parameter \"@a\" was not declared as an OUTPUT parameter, but the actual parameter passed in requested output.", ex.Errors[0].Message);
+        AreEqual("p", ex.Errors[0].Procedure);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void OutputOnAConstant_Msg179()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create proc p @a int output as set @a = 1");
+        _ = sim.AssertSqlError("exec p 5 output", 179);
+        _ = sim.AssertSqlError("declare @r int; exec sp_executesql N'set @o = 1', N'@o int output', @o = 5 output", 179);
+    }
+
+    [TestMethod]
+    public void ParameterDefault_IsAConstantOrABareName()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create proc p @a varchar(10) = abc, @b int = -5, @c int = default, @d smallint = @@spid as select concat(@a, '|', @b, '|', isnull(@c, 0), '|', sign(@d))");
+        AreEqual("abc|-5|0|1", sim.ExecuteScalar("exec p"));
+        _ = sim.AssertSqlError("create proc q @a int = 1 + 1 as select @a", 102);
+        _ = sim.AssertSqlError("create proc q @a datetime = getdate() as select @a", 102);
+        _ = sim.AssertSqlError("create function f(@a int = 1 + 1) returns int as begin return @a end", 102);
+    }
+
+    [TestMethod]
+    public void CallingAMissingProcedure_NotesMsg2007_AndCountsForNothingInTheStatus()
+    {
+        var sim = new Simulation();
+        var notes = InfoMessages(sim, "create proc p as\nselect 1\nexec nosuch1\nexec dbo.nosuch2\nif 1 = 0 exec deadone\nexec p\nexec #tmp");
+        AreEqual(
+            "2007 p 1 The module 'p' depends on the missing object 'nosuch1'. The module will still be created; however, it cannot run successfully until the object exists.|2007 p 1 The module 'p' depends on the missing object 'dbo.nosuch2'. The module will still be created; however, it cannot run successfully until the object exists.|2007 p 1 The module 'p' depends on the missing object 'deadone'. The module will still be created; however, it cannot run successfully until the object exists.",
+            string.Join("|", notes.Select(note => $"{note.Number} {note.Procedure} {note.LineNumber} {note.Message}")));
+        sim.ExecuteBatches("create proc p2 as exec nosuch3", "create table t (rc int)");
+        _ = sim.AssertSqlError("declare @rc int = -1; exec @rc = p2; insert t values (@rc)", 2812);
+        AreEqual(0, sim.ExecuteScalar("select rc from t"));
+    }
+
+    [TestMethod]
+    public void NestingLimit_EndsTheBatchAndRollsBack()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int)", "create proc p as exec p");
+        _ = sim.AssertSqlError("begin tran; insert t values (1); exec p; select 'not reached'", 217);
+        AreEqual(0, sim.ExecuteScalar("select @@trancount + (select count(*) from t)"));
+        AreEqual((short)-1, sim.ExecuteScalar("begin tran; begin try exec p end try begin catch select xact_state() end catch rollback"));
+    }
+
+    [TestMethod]
+    public void NestLevel_CountsSpExecuteSqlAsAProcedure()
+        => AreEqual("1|2|3", new Simulation().ExecuteBatchesScalar(
+            "create table t (s varchar(20))",
+            "create proc p as begin insert t select @@nestlevel; exec ('insert t select @@nestlevel'); exec sp_executesql N'insert t select @@nestlevel'; end",
+            "exec p; select string_agg(s, '|') within group (order by s) from t"));
+
+    [TestMethod]
+    public void ExecuteAsMissingUser_Msg15151AtCreate()
+    {
+        var ex = new Simulation().AssertSqlError("create proc p with execute as 'nosuchuser' as select 1", 15151);
+        AreEqual("Cannot execute as the user 'nosuchuser', because it does not exist or you do not have permission.", ex.Errors[0].Message);
+    }
+
+    [TestMethod]
+    public void WithResultSetsConversionFailure_IsState2()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create proc p as select 'abc' a");
+        var ex = sim.AssertSqlError("exec p with result sets ((x int))", 8114);
+        AreEqual((byte)2, ex.Errors[0].State);
+    }
+
+    [TestMethod]
+    public void AlterOfAMissingProcedure_Msg208State6()
+        => AreEqual((byte)6, new Simulation().AssertSqlError("alter proc nosuch as select 1", 208).Errors[0].State);
 }

@@ -511,4 +511,70 @@ public sealed class TryCatchTests
     [TestMethod]
     public void SyntaxErrorInDynamicSql_IsCaughtByTheCallersTry()
         => AreEqual(156, new Simulation().ExecuteScalar("begin try exec('selec from t') end try begin catch select error_number() end catch"));
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    [TestMethod]
+    public void ErrorFunctions_ReadTheCallersCatch_FromACalledModule()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create procedure pe as select concat('p:', error_number(), ':', error_message())",
+            "create function fe() returns int as begin return error_number() end",
+            "create table t (a int)",
+            "create trigger tr on t after insert as select concat('t:', error_number())");
+        using var reader = sim.ExecuteReader("""
+            begin try select 1 / 0 end try
+            begin catch
+              exec pe;
+              exec ('select concat(''d:'', error_number(), '':'', error_line())');
+              exec sp_executesql N'select concat(''s:'', error_number())';
+              select concat('f:', dbo.fe());
+              insert t values (1);
+            end catch
+            select concat('after:', error_number())
+            """);
+        var seen = new List<string>();
+        do
+        {
+            while (reader.Read())
+                seen.Add(reader.GetString(0));
+        } while (reader.NextResult());
+        AreEqual("p:8134:Divide by zero error encountered.|d:8134:1|s:8134|f:8134|t:8134|after:", string.Join("|", seen));
+    }
+
+    [TestMethod]
+    public void ReturnInsideTryOrCatch_EndsTheBatch()
+    {
+        AreEqual("a", new Simulation().ExecuteScalar("begin try select 'a'; return; select 'b'; end try begin catch select 'c'; end catch select 'd';"));
+        using var reader = new Simulation().ExecuteReader("begin try declare @x int = 1 / 0; end try begin catch select 'c'; return; end catch select 'd';");
+        IsTrue(reader.Read());
+        AreEqual("c", reader.GetString(0));
+        IsFalse(reader.NextResult());
+    }
+
+    [TestMethod]
+    public void ReturnInsideTry_InAProcedure_ReturnsItsStatus()
+        => AreEqual(7, new Simulation().ExecuteBatchesScalar(
+            "create procedure p as begin try return 7; end try begin catch end catch",
+            "declare @rc int; exec @rc = p; select @rc"));
+
+    [TestMethod]
+    public void GotoOutOfCatch_Jumps()
+        => AreEqual("l", new Simulation().ExecuteBatchesScalar(
+            "create table t (a int)",
+            "begin try insert t values (1 / 0) end try begin catch goto l; end catch select 'skipped'; l: select 'l'"));
+
+    [TestMethod]
+    public void RethrowKeepsTheOriginalSeverity()
+    {
+        var ex = new Simulation().AssertSqlError("begin try raiserror('r', 14, 5) end try begin catch throw; end catch", 50000);
+        AreEqual((byte)14, ex.Errors[0].Class);
+        AreEqual((byte)5, ex.Errors[0].State);
+    }
+
+    [TestMethod]
+    public void ErrorProcedure_IsNvarchar128()
+        => AreEqual(256, new Simulation().ExecuteBatchesScalar(
+            "create procedure px as declare @x int = 1 / 0",
+            "begin try exec px end try begin catch select sql_variant_property(error_procedure(), 'MaxLength') end catch"));
 }

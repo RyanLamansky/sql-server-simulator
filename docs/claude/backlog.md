@@ -299,6 +299,18 @@ What it left open:
 - **`tempdb.sys.objects`** lists no constraint of a `#temp` table, where real lists them under their padded names; a variable in a CREATE TABLE `DEFAULT` is Msg 112 on real and accepted here.
 - **Msg 1708**, the warning a CREATE TABLE whose largest row can pass 8060 bytes sends, isn't sent; its rule isn't settled — two `varchar(8000)` columns draw none while `char(8000), char(50), varchar(10)` does.
 
+**Control-flow sweep** — a fifth corpus of 1,462 small cases over TRY / CATCH, THROW and RAISERROR, PRINT, RETURN, GOTO, WHILE, WAITFOR, transactions and `XACT_ABORT`, procedures, dynamic SQL, cursors and the error-shaping `SET` options, compared by value, message stream and DONE counts (probed 2026-10-02 against SQL Server 2025).
+Of the cases still differing once its fixes shipped, the environmental ones are a `WAITFOR TIME` real waits out, `@@SPID`, a global temp table's object id and a case the harness's own `GO` split broke; the already-filed ones are a 3,000-term expression real refuses with its stack limit (Msg 8631, the nesting-cap gap under the over-permissive register), syntax-error recovery (a `BEGIN TRY` with no `CATCH`, a stray `BEGIN CATCH`, `END TRY;` before `BEGIN CATCH`, the Msg 137 real reports after a default's `+`), the system message texts, `ANSI_PADDING OFF`, `SHOWPLAN_TEXT`, Msg 5703's wording, an `OPTIMISTIC` cursor's second positioned write and its per-fetch projection errors ([`cursors.md`](cursors.md#not-modeled-yet)), and two `GOTO` shapes ([`control-flow.md`](control-flow.md#goto-and-labels)).
+What it left open:
+
+- **`SELECT 1 / 0 AS a INTO #t` in a `TRY`** sends a DONE counting 0 on real, as a failed write does; here the FROM-less projection fails while it parses, before the write begins, so no count goes out.
+- **A repeated named argument** to a one-parameter procedure (`EXEC p @a = 1, @a = 2`) is Msg 8144 on real, which counts the arguments first, and Msg 8143 here, raised as the list parses.
+- **A `decimal` argument past its parameter's precision** is Msg 8114 state 1 naming `numeric to decimal` on real, and state 5 naming `decimal to decimal` here.
+- **`@a int VARYING OUTPUT`** on a scalar parameter is Msg 102 near `varying` on real and Msg 156 near the keyword here.
+- **`@@PROCID` in an ad hoc batch** reads a nonzero id that changes per batch on real, and 0 here.
+- **`sp_executesql` with a table-type parameter** (`N'@p tt READONLY'`, a table variable bound to it) runs on real, and is Msg 2715 here; without `READONLY` real raises Msg 352.
+- **An `sp_executesql` declaration missing its `@`** (`N'a int'`) leaves the statement's `@a` undeclared on real (Msg 137) and binds it here.
+
 ### Result-set serialization: `FOR XML` / `FOR JSON`
 
 Both clauses ship (see [`xml.md`](xml.md#for-xml-result-serialization), [`json.md`](json.md#for-json-result-serialization)); these are the parts that don't:

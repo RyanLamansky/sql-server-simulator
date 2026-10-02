@@ -263,6 +263,22 @@ partial class Simulation
         : null;
 
     /// <summary>
+    /// Refuses a module's <c>EXECUTE AS 'user'</c> naming no user of the
+    /// database with Msg 15151, as the module is created (probed 2026-10-02
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static void RequireExecuteAsUser(ParserContext context, string? clause)
+    {
+        if (clause is null || clause.Equals("CALLER", StringComparison.OrdinalIgnoreCase)
+            || clause.Equals("OWNER", StringComparison.OrdinalIgnoreCase) || clause.Equals("SELF", StringComparison.OrdinalIgnoreCase)
+            || context.CurrentDatabase.Principals.ContainsKey(clause))
+        {
+            return;
+        }
+        throw SimulatedSqlException.CannotExecuteAsUser(clause);
+    }
+
+    /// <summary>
     /// Real SQL Server's sentinel for <c>WITH EXECUTE AS OWNER</c> in
     /// <c>sys.sql_modules.execute_as_principal_id</c> — the owner is resolved
     /// per execution rather than pinned at CREATE, so the catalog records

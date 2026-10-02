@@ -564,6 +564,11 @@ internal abstract class Expression : ExpressionNode
                         if (expression is not Reference colonRef || colonRef.ReferencedName.Count is not (1 or 2))
                             throw SimulatedSqlException.SyntaxErrorNear(context);
                         var typeName = colonRef.ReferencedName.Leaf;
+                        // The type name was counted as a column reference on
+                        // the way in; it names a type, so PRINT takes it.
+                        context.ColumnReferencesParsed--;
+                        if (ReferenceEquals(context.ScalarOnlyColumnReference, colonRef))
+                            context.ScalarOnlyColumnReference = null;
                         context.MoveNextRequired();
                         // A CLR type's static member opens the statement's
                         // transaction, as its instance members do.

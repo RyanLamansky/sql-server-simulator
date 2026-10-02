@@ -237,10 +237,14 @@ partial class SimulatedSqlException
     /// that doesn't exist in this <see cref="Simulation"/>. Wording
     /// probe-confirmed against SQL Server 2025: literal database name in
     /// single quotes, full sentence with the "Make sure that the name is
-    /// entered correctly." suffix. Class 16 State 1.
+    /// entered correctly." suffix. Class 16 State 1. A <c>USE</c>'s
+    /// (<paramref name="fromUse"/>) met running a dynamic batch acts as under
+    /// <c>XACT_ABORT</c>: the caller's batch ends and its transaction rolls
+    /// back unless a <c>TRY</c> around the call catches it (probed 2026-10-02
+    /// against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException DatabaseDoesNotExist(string databaseName) =>
-        new($"Database '{databaseName}' does not exist. Make sure that the name is entered correctly.", 911, 16, 1);
+    internal static SimulatedSqlException DatabaseDoesNotExist(string databaseName, bool fromUse = false) =>
+        new($"Database '{databaseName}' does not exist. Make sure that the name is entered correctly.", 911, 16, 1) { AbortsAsUnderXactAbort = fromUse };
 
     /// <summary>
     /// Mimics SQL Server error 5011: <c>ALTER DATABASE &lt;name&gt;</c> names a

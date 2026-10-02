@@ -290,4 +290,15 @@ public sealed class WhileLoopTests
         _ = sim.AssertSqlError("declare @i int = 0; while 1/@i = 1 begin insert t values ('body'); break; end; insert t values ('after')", 8134);
         AreEqual("after", sim.ExecuteScalar("select string_agg(s, ',') from t"));
     }
+    /// <summary>
+    /// An error ending the batch from a loop body — an uncaught THROW, a
+    /// string conversion failure — ends the loop with it, where the loop used
+    /// to run on forever (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @i int = 0; while @i < 3 begin set @i += 1; if @i = 2 throw 50001, 'x', 1; end select 'no'", 50001)]
+    [DataRow("while 1 = 1 throw 50001, 'x', 1;", 50001)]
+    [DataRow("while 1 = 1 select cast('x' as int);", 245)]
+    public void BatchEndingErrorInTheBody_EndsTheLoop(string commandText, int number)
+        => _ = new Simulation().AssertSqlError(commandText, number);
 }

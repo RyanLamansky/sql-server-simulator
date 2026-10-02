@@ -13,7 +13,7 @@ partial class Simulation
     /// expressions raise Msg 102 via <see cref="ParserContext.GetNextRequired{T}"/>'s
     /// type-mismatch check (matches probe-confirmed real-server behavior).
     /// Missing database raises Msg 911 via
-    /// <see cref="SimulatedSqlException.DatabaseDoesNotExist(string)"/>;
+    /// <see cref="SimulatedSqlException.DatabaseDoesNotExist(string, bool)"/>;
     /// the dispatch loop's mid-batch error handling aborts subsequent
     /// statements, also matching the real server.
     /// </summary>
@@ -37,20 +37,23 @@ partial class Simulation
             // (probed 2026-09-28 against SQL Server 2025: `USE a; INSERT t …`
             // sent from database b binds a's t); CompileBatch puts the session
             // back afterwards. A database that doesn't exist while the batch
-            // compiles ends the walk, leaving the rest to bind as it runs.
+            // compiles — even one the batch creates first, and from an untaken
+            // branch — refuses the batch with Msg 911 (probed 2026-10-02
+            // against SQL Server 2025).
             if (batch.CompilingForRun)
             {
-                if (context.Connection.Simulation.Databases.TryGetValue(nameToken.Value, out var compileTarget))
-                    context.Connection.CurrentDatabase = compileTarget;
-                else
-                    batch.BatchAborted = true;
+                context.Connection.CurrentDatabase = context.Connection.Simulation.Databases.TryGetValue(nameToken.Value, out var compileTarget)
+                    ? compileTarget
+                    : throw SimulatedSqlException.DatabaseDoesNotExist(nameToken.Value, fromUse: true);
             }
             return;
         }
 
-        SwitchDatabase(context.Connection, nameToken.Value);
-        // Sent even when the database doesn't change (probed 2026-09-23).
-        context.Connection.PendingMessages.Enqueue(SimulatedSqlException.DatabaseContextChangedMessage(batch, context.Connection.CurrentDatabase.Name));
+        SwitchDatabase(context.Connection, nameToken.Value, fromUse: true);
+        // Sent even when the database doesn't change (probed 2026-09-23), but
+        // not from a dynamic batch (probed 2026-10-02 against SQL Server 2025).
+        if (batch.ProcFrame is not { IsDynamicSql: true })
+            context.Connection.PendingMessages.Enqueue(SimulatedSqlException.DatabaseContextChangedMessage(batch, context.Connection.CurrentDatabase.Name));
     }
 
     /// <summary>
@@ -66,13 +69,13 @@ partial class Simulation
     /// <c>CURRENT_USER</c> follows the switch), and a login with no user there
     /// gets Msg 916 with the session left put.
     /// </summary>
-    internal static void SwitchDatabase(SimulatedDbConnection connection, string databaseName)
+    internal static void SwitchDatabase(SimulatedDbConnection connection, string databaseName, bool fromUse = false)
     {
         var security = connection.Security;
         if (security.HasApplicationRole)
             throw SimulatedSqlException.CannotChangeDatabaseUnderApplicationRole();
         if (!connection.Simulation.Databases.TryGetValue(databaseName, out var target))
-            throw SimulatedSqlException.DatabaseDoesNotExist(databaseName);
+            throw SimulatedSqlException.DatabaseDoesNotExist(databaseName, fromUse);
         if (!PermissionEnforcement.Bypasses(connection, target))
         {
             var principal = PermissionEnforcement.ResolveCrossDatabasePrincipal(connection, target);

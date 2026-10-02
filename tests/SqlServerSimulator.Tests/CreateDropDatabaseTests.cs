@@ -7,13 +7,25 @@ public sealed class CreateDropDatabaseTests
 {
     [TestMethod]
     public void CreateDatabase_Use_RoundTrips()
-        => AreEqual(1, new Simulation().ExecuteScalar("""
-            create database foo;
+        => AreEqual(1, new Simulation().ExecuteBatchesScalar("create database foo", """
             use foo;
             create table t (id int);
             insert t values (1);
             select count(*) from t
             """));
+
+    /// <summary>
+    /// A <c>USE</c> naming a database the batch only creates is refused as the
+    /// batch compiles, so nothing in it runs (probed 2026-10-02 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CreateDatabase_UseInTheSameBatch_Raises911()
+    {
+        var simulation = new Simulation();
+        _ = simulation.AssertSqlError("create database foo; use foo", 911);
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("select db_id('foo')"));
+    }
 
     [TestMethod]
     public void CreateDatabase_AllocatesNextFreeId()
@@ -57,10 +69,14 @@ public sealed class CreateDropDatabaseTests
 
     [TestMethod]
     public void DropDatabase_InUse_Raises3702()
-        => new Simulation().AssertSqlError(
-            "create database foo; use foo; drop database foo",
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create database foo");
+        simulation.AssertSqlError(
+            "use foo; drop database foo",
             3702,
             "Cannot drop database \"foo\" because it is currently in use.");
+    }
 
     [TestMethod]
     public void DropDatabase_FreesIdForReuse()
@@ -83,8 +99,7 @@ public sealed class CreateDropDatabaseTests
 
     [TestMethod]
     public void CreateDatabase_FileAndOptionClauses_Discarded()
-        => AreEqual(1, new Simulation().ExecuteScalar("""
-            create database foo on (name = 'x', filename = 'y') log on (name = 'xl', filename = 'yl');
+        => AreEqual(1, new Simulation().ExecuteBatchesScalar("create database foo on (name = 'x', filename = 'y') log on (name = 'xl', filename = 'yl')", """
             use foo;
             create table t (id int);
             insert t values (1);
@@ -111,7 +126,9 @@ public sealed class CreateDropDatabaseTests
         var log = new List<string>();
         connection.InfoMessage += (_, e) => log.Add($"{e.Errors[0].Number}: {e.Message}");
         using var command = connection.CreateCommand();
-        command.CommandText = "create database foo; use foo; alter database foo modify name = Foo2; select db_name()";
+        command.CommandText = "create database foo";
+        _ = command.ExecuteNonQuery();
+        command.CommandText = "use foo; alter database foo modify name = Foo2; select db_name()";
         AreEqual("Foo2", command.ExecuteScalar());
         CollectionAssert.AreEqual(
             new[] { "5701: Changed database context to 'foo'.", "5021: The database name 'Foo2' has been set.", "5701: Changed database context to 'Foo2'." },

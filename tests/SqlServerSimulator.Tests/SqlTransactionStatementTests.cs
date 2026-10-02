@@ -404,4 +404,30 @@ public sealed class SqlTransactionStatementTests
     [TestMethod]
     public void SaveTransactionWithoutOne_IsMsg628()
         => new Simulation().AssertSqlError("save tran x", 628, "Cannot issue SAVE TRANSACTION when there is no active transaction.");
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    [TestMethod]
+    public void SavepointAndCommitNames_TakeAVariable()
+        => AreEqual("1|0", new Simulation().ExecuteScalar("""
+            declare @s varchar(40) = 'sv', @n varchar(10) = 'x';
+            begin tran @n; save tran @s; rollback tran @s;
+            declare @after int = @@trancount;
+            commit tran @n;
+            select concat(@after, '|', @@trancount)
+            """));
+
+    [TestMethod]
+    public void TransactionNameOfANonStringVariable_Msg3914()
+        => new Simulation().AssertSqlError("declare @n int = 5; begin tran @n", 3914,
+            "The data type \"int\" is invalid for transaction names or savepoint names. Allowed data types are char, varchar, nchar, varchar(max), nvarchar, and nvarchar(max).");
+
+    [TestMethod]
+    [DataRow("begin tran; commit with (delayed_durability = on); select @@trancount")]
+    [DataRow("begin tran; commit tran with (delayed_durability = off); select @@trancount")]
+    public void CommitWithDelayedDurability_Commits(string commandText)
+        => AreEqual(0, new Simulation().ExecuteScalar(commandText));
+
+    [TestMethod]
+    public void UnknownIsolationLevel_Msg102()
+        => new Simulation().ValidateSyntaxError("set transaction isolation level bogus", "bogus");
 }

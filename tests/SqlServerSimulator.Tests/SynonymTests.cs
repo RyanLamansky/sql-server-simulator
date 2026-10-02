@@ -330,8 +330,7 @@ public sealed class SynonymTests
     public void CrossDatabaseBase_ReadsThroughTheThreePartPath()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("""
-            create database other;
+        sim.ExecuteBatches("create database other", """
             use other;
             create table rt (id int);
             insert rt values (1), (2);
@@ -349,8 +348,7 @@ public sealed class SynonymTests
     public void CrossDatabaseBase_WritesThroughTheThreePartPath()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("""
-            create database other;
+        sim.ExecuteBatches("create database other", """
             use other;
             create table rt (id int);
             use simulated;

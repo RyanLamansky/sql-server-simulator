@@ -14,14 +14,15 @@ namespace SqlServerSimulator.Parser;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Specifier grammar: <c>%[-][0][width][.precision][length]type</c>.
+/// Specifier grammar: <c>%[flags][width][.precision][length]type</c>.
 /// </para>
 /// <list type="bullet">
 /// <item><c>type</c>: one of <c>s d i u o x X</c>. <c>%c</c> and <c>%p</c> (and
 /// any other type letter) raise Msg 2787, whose text runs from the <c>%</c>
 /// to the end of the format string. <c>%%</c> emits a literal <c>%</c>.</item>
-/// <item><c>length</c>: <c>l</c> (long; same as bare on 32-bit-int SQL
-/// platforms) or <c>I64</c> (int64 — takes a bigint argument and nothing
+/// <item><c>length</c>: <c>l</c> or <c>L</c> (long; same as bare on 32-bit-int SQL
+/// platforms), <c>h</c> (short — a smallint or tinyint argument, refused for
+/// <c>%s</c>) or <c>I64</c> (int64 — takes a bigint argument and nothing
 /// else; bare <c>%d</c> with a bigint arg raises Msg 2786).</item>
 /// <item><c>width</c>: minimum field width (pad with spaces, or zeros when
 /// the <c>0</c> flag is present).</item>
@@ -32,7 +33,11 @@ namespace SqlServerSimulator.Parser;
 /// <item><c>*</c> in place of the width or precision digits takes it from the
 /// next argument, which must be a tinyint / smallint / int (else Msg 2786,
 /// NULL included). A negative one is ignored.</item>
-/// <item><c>-</c> flag: left-align (default is right-align).</item>
+/// <item>flags, each at most once (a repeat is Msg 2787): <c>-</c> left-aligns
+/// (default is right-align), <c>0</c> zero-pads, <c>+</c> and a space sign a
+/// non-negative <c>%d</c> / <c>%i</c>, and <c>#</c> prefixes a nonzero
+/// <c>%o</c> with 0 and a nonzero <c>%x</c> / <c>%X</c> with <c>0x</c> /
+/// <c>0X</c>.</item>
 /// </list>
 /// <para>
 /// The <c>*</c>, precision and 2787-text rules were probed 2026-09-24
@@ -41,7 +46,7 @@ namespace SqlServerSimulator.Parser;
 /// <para>
 /// Argument-type matching: <c>%s</c> requires a string-category SqlValue;
 /// <c>%d / %i / %ld / %li / %u / %o / %x / %X</c> require tinyint / smallint /
-/// int (bigint specifically requires the <c>%I64d</c>/<c>%I64i</c> length
+/// int, or a binary value read as an integer (bigint specifically requires the <c>%I64d</c>/<c>%I64i</c> length
 /// modifier — probe-confirmed: bare <c>%d</c> with a bigint arg raises Msg
 /// 2786). Mismatches raise Msg 2786 with the 1-based parameter index.
 /// </para>
@@ -89,16 +94,20 @@ internal static class MessageFormatter
                 continue;
             }
 
-            // Flags: `-` (left-align), `0` (zero-pad). SQL Server accepts only
-            // these two; other printf flags (` `, `+`, `#`) are not recognized.
-            var leftAlign = false;
-            var zeroPad = false;
-            while (i < format.Length && (format[i] == '-' || format[i] == '0'))
+            // Flags, each at most once — a repeated one is Msg 2787: `-`
+            // left-aligns, `0` zero-pads, `+` signs a non-negative signed
+            // value, a space prefixes one, and `#` prefixes octal with 0 and
+            // hex with 0x (probed 2026-10-02 against SQL Server 2025).
+            var flags = FormatFlags.None;
+            while (i < format.Length && FlagOf(format[i]) is var flag and not FormatFlags.None)
             {
-                if (format[i] == '-') leftAlign = true;
-                else zeroPad = true;
+                if ((flags & flag) != 0)
+                    throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..]);
+                flags |= flag;
                 i++;
             }
+            var leftAlign = (flags & FormatFlags.Left) != 0;
+            var zeroPad = (flags & FormatFlags.Zero) != 0;
             if (i >= format.Length)
                 throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..]);
 
@@ -148,23 +157,24 @@ internal static class MessageFormatter
                     throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..]);
             }
 
-            // Length modifier: `l` (long) or `I64` (int64).
-            var isInt64 = false;
-            if (format[i] == 'l')
+            // Length modifier: `l` / `L` (long, the same as none), `h` (short —
+            // a smallint or tinyint argument, and not for `%s`) or `I64` (int64).
+            var length = IntegerLength.Int;
+            if (format[i] is 'l' or 'L' or 'h')
             {
-                // %l<type> — same as bare for 32-bit-int SQL Server semantics.
+                if (format[i] == 'h')
+                    length = IntegerLength.Short;
                 i++;
                 if (i >= format.Length)
                     throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..]);
             }
             else if (format[i] == 'I' && i + 2 < format.Length && format[i + 1] == '6' && format[i + 2] == '4')
             {
-                isInt64 = true;
+                length = IntegerLength.Int64;
                 i += 3;
                 if (i >= format.Length)
                     throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..]);
             }
-
             // Type letter. Bounds already validated above for each path.
             var typeChar = format[i];
             var oneBasedArgIndex = argIndex + 1;
@@ -173,7 +183,7 @@ internal static class MessageFormatter
             {
                 case 's':
                     {
-                        if (isInt64)
+                        if (length != IntegerLength.Int)
                             throw SimulatedSqlException.RaiserrorInvalidFormatSpec(format[specStart..]);
                         var (text, isNullArg) = TakeStringArg(arguments, ref argIndex, oneBasedArgIndex);
                         if (!isNullArg && precision >= 0 && text.Length > precision)
@@ -184,59 +194,56 @@ internal static class MessageFormatter
                 case 'd':
                 case 'i':
                     {
-                        var (n, isNullArg) = TakeIntArg(arguments, ref argIndex, oneBasedArgIndex, isInt64);
+                        var (n, isNullArg) = TakeIntArg(arguments, ref argIndex, oneBasedArgIndex, length);
                         if (isNullArg)
                         {
                             rendered = PadString("(null)", width, leftAlign);
                             break;
                         }
                         var s = n.ToString(CultureInfo.InvariantCulture);
-                        rendered = PadNumber(s, width, precision, leftAlign, zeroPad);
+                        var sign = n < 0 ? "-" : (flags & FormatFlags.Plus) != 0 ? "+" : (flags & FormatFlags.Space) != 0 ? " " : "";
+                        rendered = PadNumber(sign, n < 0 ? s[1..] : s, width, precision, leftAlign, zeroPad);
                         break;
                     }
                 case 'u':
                     {
-                        var (n, isNullArg) = TakeIntArg(arguments, ref argIndex, oneBasedArgIndex, isInt64);
+                        var (n, isNullArg) = TakeIntArg(arguments, ref argIndex, oneBasedArgIndex, length);
                         if (isNullArg)
                         {
                             rendered = PadString("(null)", width, leftAlign);
                             break;
                         }
-                        var s = isInt64
-                            ? ((ulong)n).ToString(CultureInfo.InvariantCulture)
-                            : ((uint)n).ToString(CultureInfo.InvariantCulture);
-                        rendered = PadNumber(s, width, precision, leftAlign, zeroPad);
+                        var s = Unsigned(n, length).ToString(CultureInfo.InvariantCulture);
+                        rendered = PadNumber("", s, width, precision, leftAlign, zeroPad);
                         break;
                     }
                 case 'o':
                     {
-                        var (n, isNullArg) = TakeIntArg(arguments, ref argIndex, oneBasedArgIndex, isInt64);
+                        var (n, isNullArg) = TakeIntArg(arguments, ref argIndex, oneBasedArgIndex, length);
                         if (isNullArg)
                         {
                             rendered = PadString("(null)", width, leftAlign);
                             break;
                         }
-                        var s = isInt64
-                            ? Convert.ToString(n, 8)
-                            : Convert.ToString((int)n, 8);
-                        rendered = PadNumber(s, width, precision, leftAlign, zeroPad);
+                        var s = Convert.ToString((long)Unsigned(n, length), 8);
+                        // `#` makes the first digit a 0, which a 0 value already is.
+                        if ((flags & FormatFlags.Alternate) != 0 && n != 0 && s.Length >= precision)
+                            precision = s.Length + 1;
+                        rendered = PadNumber("", s, width, precision, leftAlign, zeroPad);
                         break;
                     }
                 case 'x':
                 case 'X':
                     {
-                        var (n, isNullArg) = TakeIntArg(arguments, ref argIndex, oneBasedArgIndex, isInt64);
+                        var (n, isNullArg) = TakeIntArg(arguments, ref argIndex, oneBasedArgIndex, length);
                         if (isNullArg)
                         {
                             rendered = PadString("(null)", width, leftAlign);
                             break;
                         }
-                        var hex = isInt64
-                            ? ((ulong)n).ToString("x", CultureInfo.InvariantCulture)
-                            : ((uint)n).ToString("x", CultureInfo.InvariantCulture);
-                        if (typeChar == 'X')
-                            hex = hex.ToUpperInvariant();
-                        rendered = PadNumber(hex, width, precision, leftAlign, zeroPad);
+                        var hex = Unsigned(n, length).ToString(typeChar == 'X' ? "X" : "x", CultureInfo.InvariantCulture);
+                        var prefix = (flags & FormatFlags.Alternate) != 0 && n != 0 ? (typeChar == 'X' ? "0X" : "0x") : "";
+                        rendered = PadNumber(prefix, hex, width, precision, leftAlign, zeroPad);
                         break;
                     }
                 default:
@@ -267,7 +274,7 @@ internal static class MessageFormatter
                 break;
             if (format[i] == '%')
                 continue;
-            while (i < format.Length && format[i] is '-' or '0')
+            while (i < format.Length && format[i] is '-' or '0' or '+' or ' ' or '#')
                 i++;
             while (i < format.Length && (format[i] is (>= '0' and <= '9') or '*'))
                 i++;
@@ -277,7 +284,7 @@ internal static class MessageFormatter
                 while (i < format.Length && (format[i] is (>= '0' and <= '9') or '*'))
                     i++;
             }
-            if (i < format.Length && format[i] == 'l')
+            if (i < format.Length && format[i] is 'l' or 'L' or 'h')
                 i++;
             else if (i + 2 < format.Length && format[i] == 'I' && format[i + 1] == '6' && format[i + 2] == '4')
                 i += 3;
@@ -364,15 +371,16 @@ internal static class MessageFormatter
     }
 
     /// <summary>
-    /// Reads the next substitution argument as an integer. <paramref name="isInt64"/>
-    /// is the bigint specifier (<c>%I64d</c>), which takes a bigint and
-    /// nothing else; without it a tinyint / smallint / int is required. Either
-    /// mismatch raises Msg 2786 (probe-confirmed against SQL Server 2025,
-    /// 2026-09-24: <c>%I64d</c> refuses an int, <c>%d</c> a bigint). Returns
-    /// <c>(0, isNullArg: true)</c> on NULL/missing so the caller renders
-    /// <c>(null)</c>.
+    /// Reads the next substitution argument as an integer of the specifier's
+    /// <paramref name="length"/>. <c>%I64d</c> takes a bigint and nothing else;
+    /// <c>%hd</c> a smallint or tinyint; the plain and <c>l</c> forms a tinyint,
+    /// smallint or int, or a binary value read as the big-endian integer its
+    /// last four bytes spell (probed 2026-10-02 against SQL Server 2025:
+    /// <c>%x</c> of <c>0x0102030405</c> prints <c>2030405</c>). Any other
+    /// type raises Msg 2786. Returns <c>(0, isNullArg: true)</c> on
+    /// NULL/missing so the caller renders <c>(null)</c>.
     /// </summary>
-    private static (long value, bool isNullArg) TakeIntArg(List<SqlValue> arguments, ref int argIndex, int oneBasedIndex, bool isInt64)
+    private static (long value, bool isNullArg) TakeIntArg(List<SqlValue> arguments, ref int argIndex, int oneBasedIndex, IntegerLength length)
     {
         if (argIndex >= arguments.Count)
         {
@@ -382,11 +390,60 @@ internal static class MessageFormatter
         var arg = RejectDecimal(arguments[argIndex++], oneBasedIndex);
         if (arg.IsNull)
             return (0, true);
-        return isInt64 ? (arg.Type == SqlType.BigInt ? (arg.AsInt64, false) : throw SimulatedSqlException.RaiserrorTypeMismatch(oneBasedIndex))
-            : arg.Type == SqlType.Int32 ? (arg.AsInt32, false)
-            : arg.Type == SqlType.SmallInt ? (arg.AsInt16, false)
-            : arg.Type == SqlType.TinyInt ? (arg.AsByte, false)
-            : throw SimulatedSqlException.RaiserrorTypeMismatch(oneBasedIndex);
+        return length switch
+        {
+            IntegerLength.Int64 when arg.Type == SqlType.BigInt => (arg.AsInt64, false),
+            IntegerLength.Short when arg.Type == SqlType.SmallInt => (arg.AsInt16, false),
+            IntegerLength.Short or IntegerLength.Int when arg.Type == SqlType.TinyInt => (arg.AsByte, false),
+            IntegerLength.Int when arg.Type == SqlType.SmallInt => (arg.AsInt16, false),
+            IntegerLength.Int when arg.Type == SqlType.Int32 => (arg.AsInt32, false),
+            IntegerLength.Int when arg.Type is VarbinarySqlType or BinarySqlType => (BinaryAsInt32(arg.AsBytes), false),
+            _ => throw SimulatedSqlException.RaiserrorTypeMismatch(oneBasedIndex),
+        };
+    }
+
+    private static int BinaryAsInt32(ReadOnlySpan<byte> bytes)
+    {
+        var value = 0;
+        foreach (var b in bytes.Length > 4 ? bytes[^4..] : bytes)
+            value = (value << 8) | b;
+        return value;
+    }
+
+    /// <summary>The unsigned reading of <paramref name="n"/> at the specifier's width.</summary>
+    private static ulong Unsigned(long n, IntegerLength length) => length switch
+    {
+        IntegerLength.Int64 => (ulong)n,
+        IntegerLength.Short => (ushort)n,
+        _ => (uint)n,
+    };
+
+    private static FormatFlags FlagOf(char c) => c switch
+    {
+        ' ' => FormatFlags.Space,
+        '#' => FormatFlags.Alternate,
+        '+' => FormatFlags.Plus,
+        '-' => FormatFlags.Left,
+        '0' => FormatFlags.Zero,
+        _ => FormatFlags.None,
+    };
+
+    [Flags]
+    private enum FormatFlags
+    {
+        None = 0,
+        Left = 1,
+        Zero = 2,
+        Plus = 4,
+        Space = 8,
+        Alternate = 16,
+    }
+
+    private enum IntegerLength
+    {
+        Int,
+        Short,
+        Int64,
     }
 
     /// <summary>
@@ -408,7 +465,7 @@ internal static class MessageFormatter
         var oneBasedIndex = argIndex + 1;
         if (argIndex >= arguments.Count || arguments[argIndex].IsNull)
             throw SimulatedSqlException.RaiserrorTypeMismatch(oneBasedIndex);
-        return (int)TakeIntArg(arguments, ref argIndex, oneBasedIndex, isInt64: false).value;
+        return (int)TakeIntArg(arguments, ref argIndex, oneBasedIndex, IntegerLength.Int).value;
     }
 
     private static string PadString(string s, int width, bool leftAlign) =>
@@ -416,27 +473,24 @@ internal static class MessageFormatter
             ? s
             : leftAlign ? s.PadRight(width) : s.PadLeft(width);
 
-    private static string PadNumber(string s, int width, int precision, bool leftAlign, bool zeroPad)
+    /// <summary>
+    /// Lays out a number: <paramref name="prefix"/> (its sign or <c>0x</c>),
+    /// then <paramref name="digits"/> filled to the precision — which turns the
+    /// 0 flag off — then padded to the width, zeros going between the prefix
+    /// and the digits.
+    /// </summary>
+    private static string PadNumber(string prefix, string digits, int width, int precision, bool leftAlign, bool zeroPad)
     {
-        // A precision is the minimum digit count, and it turns the 0 flag off.
         if (precision >= 0)
         {
-            var negative = s.Length > 0 && s[0] == '-';
-            var digits = negative ? s[1..] : s;
             digits = precision == 0 && digits == "0" ? "" : digits.PadLeft(precision, '0');
-            s = negative ? "-" + digits : digits;
             zeroPad = false;
         }
-        if (width <= 0 || s.Length >= width)
-            return s;
-        if (leftAlign)
-            return s.PadRight(width);
-        if (!zeroPad)
-            return s.PadLeft(width);
-        // Zero-pad goes between sign and digits; bare PadLeft over "-42"
-        // would produce "00-42" instead of "-0042". Handle the negative case.
-        return s.Length > 0 && s[0] == '-'
-            ? "-" + s[1..].PadLeft(width - 1, '0')
-            : s.PadLeft(width, '0');
+        var length = prefix.Length + digits.Length;
+        if (width <= length)
+            return prefix + digits;
+        return leftAlign ? (prefix + digits).PadRight(width)
+            : zeroPad ? prefix + digits.PadLeft(width - prefix.Length, '0')
+            : (prefix + digits).PadLeft(width);
     }
 }

@@ -57,7 +57,7 @@ The same helper drives `UPDATE t SET col op= expr` (both bare and `t.col` qualif
 ## T-SQL control flow: `IF` / `BEGIN…END` / `WHILE` / `BREAK` / `CONTINUE` / `RETURN` / `GOTO`
 `IF <boolean-expr> <stmt> [ELSE <stmt>]`, `BEGIN <stmt>+ END` compound blocks, `WHILE <boolean-expr> <stmt>` loops with `BREAK` / `CONTINUE`, bare `RETURN` for batch-level early-exit, and `GOTO <label>` (its own section below).
 TRY/CATCH + THROW + ERROR_*() functions ship as a separate section below.
-Value-form `RETURN N` ships inside scalar-UDF bodies (see [`programmable.md`](programmable.md)) and raises Msg 178 in batch / proc scope; a stored procedure's return value isn't modeled.
+Value-form `RETURN N` ships inside scalar-UDF and procedure bodies (see [`programmable.md`](programmable.md)) and raises Msg 178 in a batch or dynamic SQL.
 Probed against SQL Server 2025.
 
 - **Body grammar**: exactly one statement.
@@ -103,6 +103,7 @@ The check on `BatchContext.LoopDepth == 0` fires *unconditionally* — real SQL 
 Inside a real WHILE, `LoopDepth > 0` lets BREAK in an un-taken IF body just no-op (because the `!IsSkipping` gate on the flag *write* prevents the actual control transfer).
 
 **No iteration limit** — as on real, a runaway `WHILE` ends only at the command timeout or a cancel, which the loop's between-statement check observes (probed 2026-09-30 against SQL Server 2025).
+An error that ends the batch from the body — an uncaught `THROW`, a string conversion failure — ends the loop with it (probed 2026-10-02).
 
 **`LoopDepth` is bumped unconditionally** (even when the WHILE itself is in skip mode) so BREAK / CONTINUE inside the body — including inside un-taken IF branches — never see Msg 135 / 136 fire incorrectly.
 The flag-write gate (`!IsSkipping`) handles the runtime "BREAK in skipped-IF inside WHILE" case.
@@ -113,8 +114,7 @@ The WHILE iteration loop checks after every body dispatch (RETURN propagates *th
 `ParseBeginBlock` short-circuits its "expect END" check when the flag is set, since RETURN may fire mid-block before the cursor reaches END.
 End result: bare RETURN exits the entire batch — through any nesting of IF / BEGIN…END / WHILE — and any code after it (including `SELECT 'after'` follow-ups or unreached `END` terminators) never executes.
 
-**`RETURN <value>` raises Msg 178** verbatim (`"A RETURN statement with a return value cannot be used in this context."`) at parse time, regardless of skip mode — outside a scalar-UDF body (gated on `BatchContext.UdfFrame != null`; see [`programmable.md`](programmable.md)).
-Stored-proc scope, where the value form would also be legal, isn't modeled.
+**`RETURN <value>` raises Msg 178** verbatim (`"A RETURN statement with a return value cannot be used in this context."`) at parse time, regardless of skip mode — outside a scalar-UDF or procedure body (see [`programmable.md`](programmable.md)).
 Compile-time check (same pattern as BREAK Msg 135): `IF 1=0 RETURN 5` raises Msg 178 even though the branch is un-taken.
 The simulator detects "value follows" via `IsStatementBoundary(context.Token)` — any non-boundary token after RETURN (operators, variables, literals, parens, non-statement-start keywords) triggers Msg 178; boundary tokens (`;`, EOB, statement-start keywords like SELECT/INSERT/IF/etc.) leave RETURN bare.
 
@@ -180,12 +180,6 @@ The shared column-list parser signals skip mode to its CREATE FUNCTION caller so
 Only name resolution defers — syntax / structural errors carry other numbers (Msg 102, etc.) and still propagate from skipped branches, matching real SQL Server.
 BREAK / CONTINUE / RETURN / THROW scope checks (Msg 135 / 136 / 178 / 10704) also still fire in skip mode — those are compile-time *structural* checks, not name resolution, so they don't defer.
 
-**Fidelity gap — `IF` cond divide-by-zero**: real SQL Server surfaces `IF 1/0 = 0 …` as Msg 8134; the simulator surfaces the raw `DivideByZeroException` from .NET decimal arithmetic (same gap as `TRY_CAST(1/0 AS INT)`).
-
-**Fidelity gap — `IF (value-expr) …` positional**: `IF (1) select` raises Msg 4145 near `')'`; real SQL Server reports the post-paren token (`'select'`).
-Wording is correct (Msg 4145, non-boolean type); only the "near 'X'" suffix differs.
-Applies to any paren-wrapped non-boolean `IF` cond.
-
 **Fidelity gap — CREATE/ALTER inside a control-flow body raises Msg 111, not Msg 156**: the must-be-first-statement check for `CREATE/ALTER PROCEDURE / FUNCTION / VIEW / TRIGGER / SCHEMA` is enforced at parse time.
 Inside `IF` / `WHILE` / `BEGIN…END`, `BatchContext.BlockDepth > 0` triggers Msg 111; real SQL Server's parser surfaces Msg 156 ("Incorrect syntax near 'procedure'") at the same position.
 Same end state (statement rejected), different code.
@@ -200,10 +194,11 @@ A label is an **unquoted** identifier followed directly by a single `:` — real
 
 - **Msg 133** — `A GOTO statement references the label '<n>' but the label has not been declared.`
   Fires even for a `GOTO` under an untaken branch, and a `PRINT` written before it produces no output.
+  It reports the batch's last line, which real reaches before it knows the label is missing (probed 2026-10-02).
 - **Msg 132** — `The label '<n>' has already been declared. Label names must be unique within a query batch or stored procedure.`
   Fires with no `GOTO` referencing the label at all.
-- **Msg 1026** — `GOTO cannot be used to jump into a TRY or CATCH scope.`
-  Only *entry* is refused; jumping out of a TRY block is legal.
+- **Msg 1026** — `GOTO cannot be used to jump into a TRY or CATCH scope.`, state 0.
+  Only *entry* is refused, a TRY body's jump into its own CATCH included; jumping out of a TRY or CATCH block is legal (probed 2026-10-02).
 
 `Simulation.ScanBatchLabels` is that pass.
 It walks the token stream once, tracking parenthesis depth and a stack of open `CASE` / `BEGIN…END` / `BEGIN TRY` / `BEGIN CATCH` constructs, and records each label's position plus the two nesting counts the jump needs.
@@ -217,6 +212,9 @@ A `GOTO` that is the batch's last statement still jumps, and a label begins the 
 Jumping *into* a block — legal on real, which simply runs on from the label — leaves that block's opening `BEGIN` unexecuted, so `BatchContext.PendingBlockEnds` counts the `END`s the loop then steps over.
 
 Labels are scoped to their batch or module body: a procedure carries its own set, and reusing the caller's name is not a collision.
+A batch defining a procedure, function or trigger leaves the scan to the body's bind, so its label errors name the module (probed 2026-10-02).
+
+**Not modeled yet**: a `GOTO` into a `WHILE` body whose `BREAK` then runs is Msg 135 here, where real leaves the loop and runs on; and a label past 128 characters reports its Msg 103 once at line 0, where real reports it for the `GOTO` and the label, at their line (probed 2026-10-02 against SQL Server 2025).
 
 ### Separators between the THEN branch and `ELSE`
 
@@ -241,7 +239,8 @@ Only its binding waits: real parses the whole batch first, so its syntax errors,
 Skip mode's placeholder source is that deferral, and a binder error in a statement over one defers with it (`StatementContext.BindsDeferredSource`), as do the few severity-15 errors real's binder raises (`DefersWithItsStatement`).
 A write to a missing table reads the rest of its statement over placeholder columns too ([`grammar.md`](grammar.md#trailing-token-tightening)), and the walk goes on past it; what in such a write reads no column of the target binds as the batch compiles — an `INSERT`'s `VALUES` tuples and source query, where `INSERT t VALUES (nosuch)` is Msg 207 before anything runs.
 Everything else binds against the schema as the batch found it, which is where real's familiar same-batch traps come from: `ALTER TABLE t ADD b …; SELECT b FROM t` is Msg 207 with the column never added, a type created and used in one batch is Msg 2715, and a table dropped and re-created with other columns binds its old definition.
-A `USE` does move the walk: what follows it binds in the database it names, which `CompileBatch` puts back once the walk ends, and a `USE` naming a database that doesn't exist when the batch compiles ends the walk there (probed 2026-09-28 against SQL Server 2025).
+A `USE` does move the walk: what follows it binds in the database it names, which `CompileBatch` puts back once the walk ends (probed 2026-09-28 against SQL Server 2025).
+A `USE` naming a database that doesn't exist when the batch compiles — one the batch itself creates first included, and from an untaken branch — refuses the batch with Msg 911; met running a dynamic batch, the Msg 911 acts as under `XACT_ABORT`, ending the caller's batch and rolling its transaction back unless a `TRY` around the call catches it (probed 2026-10-02).
 A variable whose `DECLARE` names a missing type is declared anyway, so later references bind rather than raising Msg 137.
 Two statements creating one `#` / `##` table — `CREATE TABLE` or `SELECT … INTO`, even from opposite IF branches or with a `DROP` between — are Msg 2714 state 1 while compiling (`BatchContext.NoteTempTableCreation`), so nothing runs and a module body doing it is refused at `CREATE` (probed 2026-09-24 and 2026-09-26).
 
@@ -254,6 +253,7 @@ The three per-simulation caches keep their own entry counts: `ConcurrentDictiona
 A `TRY` frame the walk parses catches nothing: a syntax error inside a `TRY` body is the batch's compile error, as it is on real, rather than something its `CATCH` handles (probed 2026-09-25); only a batch that runs raises into a frame.
 
 An error that ends a procedure's or dynamic SQL's batch — a compile error, or a missing object at run time — reaches no further: in the caller the `EXEC` fails like any statement, the caller's batch goes on, and a `TRY` around the `EXEC` catches it (`SimulatedSqlException.EndedCalledBatch`, probed 2026-09-24).
+Such an error leaves `@@ROWCOUNT` where the called batch's last statement put it (probed 2026-10-02).
 
 A procedure or DML trigger body compiles again as a whole when a call first runs it (`CompileModuleBody`), so a statement over a table created after the module binds then, untaken branches included, and every binder error it holds is reported before the body's first statement runs (probed 2026-10-01 against SQL Server 2025).
 A procedure's is the `EXEC`'s own error, as dynamic SQL's is: the caller goes on, a `TRY` around the call catches it with the procedure as `ERROR_PROCEDURE()`, and neither a return status nor an `OUTPUT` value comes back.
@@ -345,7 +345,9 @@ Successful statements clear `LastErrorNumber` back to 0.
 `BatchContext.InFlightError` is set on catch and read by the error-functions; nested TRY/CATCH saves+restores it around inner CATCH dispatch — if the inner CATCH re-throws (`THROW;`), the throw propagates through the outer TRY's still-active wrap which captures the re-thrown error into `InFlightError`, so the restore is gated on "is the post-CATCH state still signaled" (don't restore if so — the outer wrap already updated to the re-thrown values).
 
 **ERROR_*() scalars** (`Parser/Expressions/ErrorFunctions.cs`): zero-arg `ERROR_NUMBER` / `ERROR_MESSAGE` / `ERROR_SEVERITY` / `ERROR_STATE` / `ERROR_LINE` / `ERROR_PROCEDURE`.
-All return typed NULL when `BatchContext.InFlightError` is null (outside CATCH); inside CATCH they project the captured fields.
+All return typed NULL outside a CATCH; inside one they project the captured fields — `ERROR_MESSAGE()` as `nvarchar(4000)`, `ERROR_PROCEDURE()` as `nvarchar(128)`.
+A procedure, dynamic batch, function or trigger a CATCH calls reads the caller's error too, unless a CATCH of its own is running (`SimulatedDbConnection.EnclosingCatchError`, probed 2026-10-02 against SQL Server 2025).
+A `RETURN`, or a `GOTO` out of the block, ends a TRY or CATCH body like any other block.
 The `CaughtError` captures the caught exception's *resolved* `LineNumber` / `Procedure`, so `ERROR_LINE()` and `ERROR_PROCEDURE()` report exactly what the exception carries — the procedure's name as its invocation spelled it inside a stored-procedure body (see [`errors.md`](errors.md)), NULL for top-level / dynamic-SQL scopes.
 Line-number semantics (statement-start for runtime/bind, token line for syntax, CREATE-relative for proc bodies) live in [`errors.md`](errors.md).
 
@@ -354,7 +356,7 @@ THROW is a **contextual** keyword in SQL Server's grammar (not in the reserved l
 The dispatch case-matches `UnquotedString u when u.Span.Equals("THROW", ...)` rather than going through `ReservedKeyword`; `IsStatementBoundary` has a parallel UnquotedString branch so the post-dispatch cursor-normalization recognizes it.
 Statement adjacency requires `;` before THROW (probe-confirmed: `select 1 throw 50000, 'msg', 1` is parsed as `SELECT 1 AS throw` then Msg 102 on the trailing `50000`, while `select 1; throw 50000, 'msg', 1` works).
 - **`THROW;`** (no args) — re-raise current error from enclosing CATCH.
-  Reconstructs the exception from `InFlightError` (number / message / state).
+  Reconstructs the exception from `InFlightError` (number / message / severity / state) — a re-raised severity-14 error is class 14 again (probed 2026-10-02).
   Outside CATCH → **Msg 10704** verbatim.
   Compile-time check: fires even from un-taken IF branches (same pattern as Msg 178 / Msg 135) — but the check is **lexical**: a bare `THROW` inside a CATCH whose TRY body succeeded (the CATCH skip-parses) is legal, so the skip-dispatch branch bumps `CatchDepth` too (SSMS's Select-Top-1000 server-properties batch has exactly that shape).
 - **`THROW <number>, <message>, <state>;`** — raise new error.
@@ -377,12 +379,6 @@ Statement adjacency requires `;` before THROW (probe-confirmed: `select 1 throw 
   Under `SET XACT_ABORT ON` the same caught error leaves the transaction **doomed** — `@@TRANCOUNT` unchanged, `XACT_STATE()` reading `-1`, and the next statement that writes refused with Msg 3930; see [`transactions.md`](transactions.md#set-xact_abort).
 
 **Fidelity gaps.**
-- **Parse-time name-resolution errors ARE caught** by TRY/CATCH in the simulator — `BEGIN TRY SELECT * FROM nonexistent END TRY BEGIN CATCH ... END CATCH` runs the CATCH.
-  Real SQL Server reports Msg 208 outside TRY/CATCH because name resolution fires during compile, before TRY's runtime activates; the simulator has no compile/runtime split, so an *active* TRY body's name-resolution error is caught rather than surfacing at compile time.
-  (A *skipped* TRY body is handled separately — see the deferred-name-resolution note above — its missing-name error is swallowed and never reaches CATCH.)
-  Apps that depend on the catch-or-not distinction here will diverge.
-- **Divide-by-zero raises raw `DivideByZeroException`** (not `SimulatedSqlException` Msg 8134), so TRY/CATCH doesn't catch it.
-  Gap independent of TRY/CATCH; will close when the arithmetic error path is converted to factory-emitted Msg 8134.
 - **ERROR_LINE() / ERROR_PROCEDURE()** report the exception's resolved line / procedure (see [`errors.md`](errors.md)); residuals there (tokenizer-thrown multi-line literals; UDF/TVF/trigger/view bodies) are narrow.
 
 ## `RAISERROR`
@@ -395,17 +391,24 @@ Statement adjacency requires `;` before THROW (probe-confirmed: `select 1 throw 
   NULL / negative severity treated as 0.
 - Severity 11-18 → catchable error.
   Throws `SimulatedSqlException` with `Number=50000`, `Class=severity`, `State=state`.
-  Caught by enclosing TRY/CATCH; outside TRY/CATCH, propagates out of the batch.
+  Caught by enclosing TRY/CATCH; outside TRY/CATCH it ends its statement and the batch runs on — severity 15 included, though every other severity-15 error is real's parse phase (probed 2026-10-02).
 - Severity 19 and up → Msg 2754 ("Error severity levels greater than 18 can only be specified by members of the sysadmin role, using the WITH LOG option") unless a sysadmin — or the in-process default session, which passes every server-scope gate — writes `WITH LOG`.
   Severity 19 then raises like 11-18; 20 and up ends the connection on real, which isn't built yet (`NotSupportedException`).
 
-**State**: NULL is 0, a negative state reports 1, and anything past 255 wraps modulo 256 — 300 reports 44 (probed 2026-09-24 against SQL Server 2025; real doesn't raise).
+**State**: a NULL variable is 0, a negative state reports 1, and anything past 255 wraps modulo 256 — 300 reports 44 (probed 2026-09-24 against SQL Server 2025; real doesn't raise).
 
-**Format-specifier coverage** (`%[-][0][width][.precision][length]type`):
+**The control arguments** — message, severity and state — take no `NULL` keyword (Msg 156) and a numeric literal there must be an `int` (Msg 1080, echoing `16.5` or `2147483648`); the severity and state take no string literal (Msg 102) (probed 2026-10-02 against SQL Server 2025).
+
+**The message** — inline, registered or `THROW`'s — keeps at most 2,047 characters, the first 2,044 and `...`, whatever a substitution's width asked for; `ERROR_MESSAGE()` then reads 2,047 (`Simulation.CapRaisedMessage`, probed 2026-10-02).
+Msg 105's echo of an unclosed literal is cut the same way.
+
+**Format-specifier coverage** (`%[flags][width][.precision][length]type`):
 - Types: `%s` (string), `%d` / `%i` (signed int), `%u` (unsigned int — negative int32 renders as uint32), `%o` (octal), `%x` / `%X` (hex lower/upper), `%%` (literal `%`).
-- Length modifiers: `l` (no-op — SQL Server's long is 32-bit), `I64` (bigint and nothing else: an int argument is Msg 2786, as a bigint is for bare `%d`).
-  A numeric literal argument past `int` or with a fraction arrives as `bigint`, truncated.
-- Width / precision / flags: right-align (default), `-` left-align, `0` zero-pad, `.N` for string precision (max chars from source) and for an integer's minimum digit count (which turns `0` off), `*` for either taken from the next argument — all probe-confirmed.
+- Length modifiers: `l` or `L` (no-op — SQL Server's long is 32-bit), `h` (a smallint or tinyint and nothing else, read unsigned by `%hu` / `%hx`; refused for `%s` with Msg 2787), `I64` (bigint and nothing else: an int argument is Msg 2786, as a bigint is for bare `%d`).
+  A numeric literal argument past `int` or with a fraction arrives as `bigint`, truncated, and a negated one inside `int`'s range (`-2147483648`) is an `int`.
+- A binary argument to an integer specifier reads as the big-endian integer its last four bytes spell — `%x` of `0x0102030405` is `2030405` — and is refused by `%I64` and `%h` (probed 2026-10-02).
+- Width / precision / flags: right-align (default), `-` left-align, `0` zero-pad, `+` and a space sign a non-negative `%d` / `%i`, `#` prefixes a nonzero `%o` with `0` and a nonzero `%x` / `%X` with `0x` / `0X` (zero padding going after the prefix), `.N` for string precision (max chars from source) and for an integer's minimum digit count (which turns `0` off), `*` for either taken from the next argument.
+  Each flag is written at most once; a repeat is Msg 2787 (flags probed 2026-10-02 against SQL Server 2025).
 - NULL substitution: renders the literal text `(null)` regardless of specifier; same for missing args (more specifiers than supplied args).
   Extra args beyond the specifier count are silently ignored.
 - Unsupported specifier letters (`%c`, `%p`, `%f`, trailing lone `%`), and a `.` with neither digits nor `*`, raise Msg 2787 echoing the format string from the `%` to its end.
@@ -418,6 +421,7 @@ Statement adjacency requires `;` before THROW (probe-confirmed: `select 1 throw 
 - `msg_id = 50000` (the synthesized id for the inline-string form) or `msg_id < 13000` → Msg 2732 ("Error number N is invalid. The number must be from 13000 through 2147483647 and it cannot be 50000"), including a NULL id typed as an integer, which reads as 0.
 - A registered id formats the message's text for the language of the session and takes the message's own severity for a negative literal severity; a `NULL` literal message is the empty message.
 - Any other numeric id → Msg 18054 ("Error N, severity S, state T was raised, but no message with that error number was found in sys.messages. If error is larger than 50000, make sure the user-defined message is added using sp_addmessage").
+  `ERROR_NUMBER()` reads 18054, but `@@ERROR` reads the id asked for at severity 11 and up or `WITH SETERROR` (`SimulatedSqlException.AtAtErrorNumber`, probed 2026-10-02).
   Real's own system rows (about 16,750 per language) are not carried, so a system id such as 13001 lands here.
 - Inline-string form (`RAISERROR('text', …)`) always uses msg id 50000.
 - `FORMATMESSAGE(msg_number, …)` formats a registered message, or for an unregistered number returns the terse text `Error: {id}, Severity: {severity}, State: 1. (Params:)…` (probed 2026-09-30 against SQL Server 2025).
@@ -425,12 +429,12 @@ Statement adjacency requires `;` before THROW (probe-confirmed: `select 1 throw 
   An empty message goes out on the wire as one space, which a `CATCH` never sees (`ERROR_MESSAGE()` is empty).
   A bare `THROW` sends every entry of an error real raised as several — `3728` then `3727` for a constraint drop, `5011` then `5069` for `ALTER DATABASE` — each as it was, the caught one last.
 
-**WITH options**: comma-separated list after the closing `)`.
+**WITH options**: comma-separated list after the closing `)`; any other word is Msg 195 state 4 (`'bogus' is not a recognized option.`, probed 2026-10-02).
 `LOG` raises Msg 2778 ("Only System Administrator can specify WITH LOG option for RAISERROR command") for a session that isn't a sysadmin, and is otherwise accepted with nothing logged.
 `NOWAIT` is accepted and ignored (no streaming model).
 `SETERROR` is the load-bearing option for severity ≤ 10: it forces `@@ERROR` to 50000 for the next statement to read; without it, sev ≤ 10 leaves `@@ERROR` untouched.
 
-**Grammar restriction**: `msg` / severity / state / sub args accept only literals, signed numeric literals, `@variable` references, and `NULL` — arbitrary expressions (`CAST(...)`, function calls, arithmetic) raise Msg 102 at parse time.
+**Grammar restriction**: `msg` / severity / state / sub args accept only literals, signed numeric literals, `@variable` references, and — as a substitution — `NULL` — arbitrary expressions (`CAST(...)`, function calls, arithmetic) raise Msg 102 at parse time.
 Matches real SQL Server's grammar (probe-confirmed).
 
 **Severity 19 and up** takes `WITH LOG` (Msg 2754 without it), and `WITH LOG` takes a sysadmin — which the in-process default is, as it passes every server-scope gate.
@@ -453,6 +457,7 @@ The evaluation isn't a no-op: operand-side errors still surface — `PRINT 'val=
 Probe-confirmed semantics:
 - `PRINT NULL` and `PRINT ''` deliver a message whose whole body is a single U+0020 space — real emits exactly one character rather than an empty message.
 - `PRINT` resets `@@ROWCOUNT` to 0 — applied by the dispatcher after the parser returns.
+- The operand converts implicitly to `nvarchar`, so `xml`, `sql_variant` and the CLR types (`hierarchyid`, the spatial pair, a user type) are Msg 257 and `image` / `rowversion` Msg 206 as the batch compiles (probed 2026-10-02 against SQL Server 2025).
 - Skip-mode (un-taken IF, after BREAK / CONTINUE / RETURN) suppresses operand evaluation entirely, so an error-bearing operand in a skipped branch doesn't fire.
   Standard pattern: parse the expression unconditionally to advance the cursor, then gate `expression.Run` on `!batch.IsSkipping`.
 - Rollback doesn't undo a PRINT (real SQL Server's InfoMessage stream is non-transactional too), and the simulator's delivery is likewise outside the undo log.
@@ -486,10 +491,11 @@ The rendering is the implicit conversion to a character string real applies, not
 
 ## `WAITFOR DELAY`
 `WAITFOR DELAY '<time>'` and `WAITFOR DELAY @variable` block the calling thread via `Thread.Sleep(TimeSpan)`, matching real SQL Server's "blocks the connection" semantics.
-Operand grammar is strict (matches probe of SQL Server 2025): only a varchar/nvarchar string literal or an `@-variable` reference.
-`cast(...)`, integer literal, bare `NULL` literal all fail at parse (Msg 102/156); `time`-typed variable raises **Msg 9815** (`"Waitfor delay and waitfor time cannot be of type time."` — note SQL Server reserves the operand slot for *string-typed* values, not its own `time` type).
+Operand grammar is strict (matches probe of SQL Server 2025): only a varchar/nvarchar string literal or an `@-variable` reference; `cast(...)`, an integer literal and a bare `NULL` literal fail at parse (Msg 102/156), and any word but `DELAY` / `TIME` after `WAITFOR` is Msg 155 (probed 2026-10-02).
+The operand is a time of day as real's `datetime` conversion reads one (`TryParseWaitForTime`, probed 2026-09-28 and 2026-10-02 against SQL Server 2025): surrounding blanks ignored, `h:m[:s[.fff | :fff]]` with any number of digits per field, minutes and seconds under 60, at most three fraction digits, and an optional `AM` / `PM` (`12 AM`, `00:00:00.01AM`); a date part, a bare number or `'00:00:00.0001'` is out.
+- A literal is read while the batch compiles, so a malformed one is **Msg 148** with nothing in the batch run, from an untaken branch too.
+- A variable is read as it runs: a non-MAX string one failing the same grammar is the conversion's **Msg 241**, which ends the batch, and a MAX one is Msg 241 whatever it holds; an `int` / `smallint` one counts days and waits nothing; a `datetime` one waits its time of day; any other type — `time`, `datetime2`, `float`, `tinyint`, … — is **Msg 9815** (`"Waitfor delay and waitfor time cannot be of type time."`), which ends only its statement.
 Empty string and NULL-valued variable both silently succeed as zero delay.
-Bad-format string raises **Msg 148** with the offending value embedded; each field takes one digit or two, so `'0:0:0'` and `'0:00:00.001'` are accepted (probed 2026-09-28 against SQL Server 2025).
 `@@ROWCOUNT` resets to 0.
 Skip-mode suppresses the sleep entirely (an `IF 1=0 WAITFOR DELAY '00:00:10'` returns instantly).
 **`WAITFOR TIME`** (absolute-time wait) raises `NotSupportedException` — scheduling-style primitive not yet needed.

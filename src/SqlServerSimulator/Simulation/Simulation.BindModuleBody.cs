@@ -128,6 +128,7 @@ partial class Simulation
         if (rejectsNextValueFor)
             bindBatch.Parser.RaiseNextValueForFloor(NextValueForScope.Nested);
         bindBatch.Parser.SchemaBoundBody = outerContext.SchemaBoundBody;
+        bindBatch.MissingProcedureReferences = [];
 
         bool walkedToEnd;
         try
@@ -184,6 +185,15 @@ partial class Simulation
             report.BindReportSettled = true;
             report.CatchReadsFirstEntry = true;
             throw report;
+        }
+
+        // A body calling a procedure that doesn't exist is still created, with
+        // a Msg 2007 note per call, at the CREATE's line (probed 2026-10-02
+        // against SQL Server 2025).
+        if (!outerContext.Batch.IsSkipping)
+        {
+            foreach (var missing in bindBatch.MissingProcedureReferences)
+                connection.PendingMessages.Enqueue(SimulatedSqlException.ModuleDependsOnMissingObjectMessage(outerContext.Batch, moduleName, missing));
         }
     }
 

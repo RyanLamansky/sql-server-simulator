@@ -222,7 +222,7 @@ An API server cursor's FORWARD_ONLY READ_ONLY request keeps its own negotiation 
 
 ## FETCH
 
-`FETCH [NEXT|PRIOR|FIRST|LAST|ABSOLUTE n|RELATIVE n] [FROM] <cursor> [INTO @v,…]`.
+`FETCH [NEXT|PRIOR|FIRST|LAST|ABSOLUTE n|RELATIVE n] [FROM] <cursor> [INTO @v,…]` — a direction takes the `FROM`, `FETCH NEXT c` being Msg 102 near the direction (probed 2026-10-02).
 
 - **Scrollability**: naming a sensitivity implies `SCROLL` — `STATIC`, `KEYSET` *and* `DYNAMIC` all scroll unless `FORWARD_ONLY` / `FAST_FORWARD` says otherwise (probe-confirmed).
   A cursor that names none is forward-only and allows only `NEXT`.
@@ -238,13 +238,15 @@ An API server cursor's FORWARD_ONLY READ_ONLY request keeps its own negotiation 
   ROWSTAT is 1 for a fetched row and 2 for a deleted keyset member.
 - **A deleted keyset member (`-2`) still lands on a row**, which reads as NULL in each column the projection reports nullable and as the type's zero in the rest — 0, the empty GUID, 1900-01-01 for `datetime`, 0001-01-01 for the newer dates, a bounded string or binary filled to its declared length with spaces or zero bytes, an empty `max` value.
   That row goes into INTO variables as well as into the result set (probed 2026-09-25).
-- `@@FETCH_STATUS`: `0` success, `-1` past end / no row, `-2` keyset member deleted.
+- `@@FETCH_STATUS`: `0` success, `-1` past end / no row, `-2` keyset member deleted; a fetch that fails — a direction refused, a row whose projection raises — reads `-1` (probed 2026-10-02).
+- `@@CURSOR_ROWS` reads 0 once a `CLOSE` or `DEALLOCATE` ran (probed 2026-10-02).
 
 ## WHERE CURRENT OF
 
 `UPDATE t SET … WHERE CURRENT OF c` / `DELETE FROM t WHERE CURRENT OF c` target exactly the row the cursor is positioned on, found by matching the address the cursor recorded for the identity slot the target resolved to (`PositionedCursorTarget` + `CursorRowMatches`).
 The UPDATE / DELETE parsers branch in their WHERE clause: `Keyword.Current` → `ParseWhereCurrentOf`, otherwise a normal boolean WHERE.
 The SI tombstone pre-flight is skipped for positioned DML (the cursor already fixed a single live row).
+A positioned write that fails on the cursor — no row fetched (Msg 16931), a column outside `FOR UPDATE OF` (Msg 16932) — is followed by Msg 3621, as an ordinary write's error is (probed 2026-10-02).
 
 **The target names a table, not a cursor alias**: `UPDATE a SET …` where `a` is only the cursor's alias is Msg 208 (`Invalid object name 'a'`) from ordinary name resolution, matching real.
 
@@ -290,7 +292,7 @@ Two independent cursor namespaces, both probe-confirmed against SQL Server 2025:
 - **GLOBAL** cursors live on `SimulatedDbConnection.Cursors` and persist for the connection (visible across GO-separated batches).
 - **LOCAL** cursors live on `BatchContext.LocalCursors` and are implicitly deallocated when the frame (batch / procedure / trigger body) exits — `DeclareCursorInScope` picks the map, `TeardownFrameCursors` (called in the batch `finally` and after proc invocation) releases them.
 
-Default scope is **GLOBAL** — the simulator's fixed model of the `CURSOR_DEFAULT` database option (real SQL Server's install default `is_local_cursor_default = 0` for every system and freshly-created database; the per-database option isn't separately modeled).
+Default scope is the database's `CURSOR_DEFAULT` option — **GLOBAL** as installed (`is_local_cursor_default = 0` for every system and freshly-created database), LOCAL once `ALTER DATABASE … SET CURSOR_DEFAULT LOCAL` sets it (probed 2026-10-02 against SQL Server 2025).
 A name may exist in **both** scopes at once.
 Resolution at a use site (`OPEN` / `CLOSE` / `DEALLOCATE` / `FETCH … FROM` / `WHERE CURRENT OF`):
 
@@ -333,6 +335,11 @@ Real reports the error at the token after the declaration, or at its last line w
 Writing the same option twice is legal.
 `READ_ONLY` beside `FOR READ ONLY` is **Msg 1058**; `INSENSITIVE` after `CURSOR` is **Msg 153** (the word belongs to the SQL-92 prefix, and is named lower-cased, for a `SET @c = CURSOR` too); and a SQL-92 prefix (`INSENSITIVE` / `SCROLL` before `CURSOR`) followed by any T-SQL option is **Msg 1049**.
 The SQL-92 `INSENSITIVE` cursor is a forward-only snapshot unless `SCROLL` is written too.
+A query carrying `SELECT … INTO` is **Msg 154** state 3 (probed 2026-10-02).
+
+**Variables read at `DECLARE`.**
+Every cursor type reads the variables its query names as the `DECLARE` found them, whatever they hold at `OPEN` or a later `FETCH` (`BatchContext.CursorDeclarationSnapshot`, which the query's variable references copy; probed 2026-10-02 against SQL Server 2025).
+A cursor variable read or assigned as a scalar — `SELECT @c = 1` — is **Msg 16949**.
 
 ## FOR UPDATE OF
 
@@ -436,3 +443,4 @@ A session without `VIEW SERVER STATE` sees only its own, and the wrong argument 
 
 - **Asynchronous keyset population** under a non-default `cursor threshold` server option, where real reports a negative `@@CURSOR_ROWS` while it populates; the default (-1) populates synchronously, which is what the simulator always does.
 - **`sys.dm_exec_cursors` rows for API server cursors** — an `sp_cursoropen` cursor lives on the TDS session rather than the connection, so the DMV doesn't list it, where real does as `API | <type> | …`.
+- **A projection error per fetch.** Real evaluates a dynamic or keyset cursor's select list row by row as it fetches, so `SELECT 1 / (id - 2)` fetches row 1 and raises on row 2; here the plan projects every row at the first fetch (`Selection.EnumerateForCursor`), which raises before row 1 arrives (probed 2026-10-02 against SQL Server 2025).

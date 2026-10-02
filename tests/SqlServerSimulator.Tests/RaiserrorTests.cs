@@ -508,4 +508,103 @@ public sealed class RaiserrorTests
         var ex = new Simulation().AssertSqlError("raiserror('x', 19, 1) with log; select 1 / 0", 50000);
         AreEqual(8134, ex.Errors[1].Number);
     }
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    private static string InfoText(string commandText)
+    {
+        using var connection = (SimulatedDbConnection)new Simulation().CreateOpenConnection();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.Add(e.Message);
+        _ = connection.CreateCommand(commandText).ExecuteNonQuery();
+        return string.Join("|", messages);
+    }
+
+    [TestMethod]
+    [DataRow("[%+5d]", "3", "[   +3]")]
+    [DataRow("[%+d]", "-3", "[-3]")]
+    [DataRow("[% d]", "3", "[ 3]")]
+    [DataRow("[%+u]", "3", "[3]")]
+    [DataRow("[%#x]", "255", "[0xff]")]
+    [DataRow("[%#X]", "255", "[0XFF]")]
+    [DataRow("[%#x]", "0", "[0]")]
+    [DataRow("[%#o]", "8", "[010]")]
+    [DataRow("[%#08x]", "255", "[0x0000ff]")]
+    [DataRow("[%#.4x]", "255", "[0x00ff]")]
+    [DataRow("[%-+05d]", "3", "[+3   ]")]
+    [DataRow("[% 05d]", "3", "[ 0003]")]
+    [DataRow("[%Ld]", "5", "[5]")]
+    [DataRow("[%ls]", "'a'", "[a]")]
+    [DataRow("[%x]", "0x0102030405", "[2030405]")]
+    [DataRow("[%d]", "0x41", "[65]")]
+    [DataRow("[%d]", "-2147483648", "[-2147483648]")]
+    public void PrintfFlagsLengthsAndBinaryArguments(string format, string argument, string expected)
+        => AreEqual(expected, InfoText($"raiserror('{format}', 10, 1, {argument})"));
+
+    [TestMethod]
+    public void ShortLength_TakesSmallintAndTinyintOnly()
+    {
+        AreEqual("65535|5", InfoText("declare @s smallint = -1, @t tinyint = 5; raiserror('%hu', 10, 1, @s); raiserror('%hd', 10, 1, @t)"));
+        _ = new Simulation().AssertSqlError("raiserror('%hd', 10, 1, 5)", 2786);
+        _ = new Simulation().AssertSqlError("raiserror('%hs', 10, 1, 'a')", 2787);
+    }
+
+    [TestMethod]
+    [DataRow("raiserror('|%--5d|', 10, 1, 3)")]
+    [DataRow("raiserror('|%++d|', 10, 1, 3)")]
+    [DataRow("raiserror('|%  d|', 10, 1, 3)")]
+    public void RepeatedFlag_IsInvalidSpecification(string commandText)
+        => _ = new Simulation().AssertSqlError(commandText, 2787);
+
+    [TestMethod]
+    public void HugeWidth_IsCutLikeAnyLongMessage()
+    {
+        var text = InfoText("raiserror('[%99999d]', 10, 1, 5)");
+        AreEqual(2047, text.Length);
+        IsTrue(text.EndsWith("...", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void LongMessages_AreCutTo2047Characters()
+    {
+        var simulation = new Simulation();
+        AreEqual("2047|bb...", simulation.ExecuteScalar(
+            "declare @m varchar(max) = replicate('b', 2100); begin try raiserror('%s', 16, 1, @m); end try begin catch select concat(len(error_message()), '|', right(error_message(), 5)); end catch"));
+        AreEqual(2047, simulation.ExecuteScalar(
+            "declare @m nvarchar(max) = replicate(N'x', 3000); begin try throw 50001, @m, 1; end try begin catch select len(error_message()); end catch"));
+    }
+
+    [TestMethod]
+    public void Severity15_EndsOnlyItsStatement()
+    {
+        var ex = new Simulation().AssertSqlError("raiserror('sev 15', 15, 2); select 1 / 0", 50000);
+        AreEqual((byte)15, ex.Errors[0].Class);
+        AreEqual(8134, ex.Errors[1].Number);
+    }
+
+    [TestMethod]
+    [DataRow("raiserror(null, 16, 1)", 156)]
+    [DataRow("raiserror('n', null, 1)", 156)]
+    [DataRow("raiserror('n', 16, null)", 156)]
+    [DataRow("raiserror('n', '16', 1)", 102)]
+    [DataRow("raiserror('n', 16.5, 1)", 1080)]
+    [DataRow("raiserror(2147483648, 16, 1)", 1080)]
+    public void ControlArguments_TakeIntegersAndNoNullKeyword(string commandText, int number)
+        => _ = new Simulation().AssertSqlError(commandText, number);
+
+    [TestMethod]
+    public void UnknownWithOption_Raises195()
+        => new Simulation().AssertSqlError("raiserror('w', 16, 1) with bogus", 195, "'bogus' is not a recognized option.");
+
+    [TestMethod]
+    public void UnregisteredMessageId_LeavesTheIdInAtAtError()
+    {
+        // ERROR_NUMBER() reads 18054 while @@ERROR reads the id asked for, at
+        // severity 11 and up or WITH SETERROR; below that @@ERROR reads 18054.
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (id int identity, e int)");
+        _ = simulation.AssertSqlError("raiserror(60000, 11, 3); insert t (e) select @@error; raiserror(60000, 5, 3); insert t (e) select @@error; raiserror(60000, 5, 3) with seterror; insert t (e) select @@error", 18054);
+        AreEqual("60000,18054,60000", simulation.ExecuteScalar("select string_agg(cast(e as varchar), ',') within group (order by id) from t"));
+        AreEqual("18054|60000", simulation.ExecuteScalar(
+            "begin try raiserror(60000, 16, 1) end try begin catch select concat(error_number(), '|', @@error) end catch"));
+    }
 }

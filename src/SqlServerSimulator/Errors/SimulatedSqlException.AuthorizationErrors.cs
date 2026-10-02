@@ -9,6 +9,10 @@ namespace SqlServerSimulator;
 // reads in IntelliSense.
 partial class SimulatedSqlException
 {
+    /// <summary>Msg 15151 for a module's <c>EXECUTE AS</c> naming no user.</summary>
+    internal static SimulatedSqlException CannotExecuteAsUser(string name) =>
+        new($"Cannot execute as the user '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
+
     /// <summary>
     /// Mimics SQL Server error 15151 in the "Cannot find the &lt;kind&gt;"
     /// wording <c>ALTER AUTHORIZATION</c> uses for every class it resolves —

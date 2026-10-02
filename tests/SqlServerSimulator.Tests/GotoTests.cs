@@ -84,15 +84,29 @@ public sealed class GotoTests
         => _ = new Simulation().AssertSqlError("if 1 = 0 goto nosuchlabel; print 'b';", 133);
 
     /// <summary>
-    /// The label pass reports the offending line: the GOTO's own for an
-    /// undeclared target, the second declaration's for a duplicate
-    /// (probed 2026-09-23).
+    /// The label pass reports the offending line: the batch's last for an
+    /// undeclared target, which real meets reading to the end (probed
+    /// 2026-10-02), the second declaration's for a duplicate (probed
+    /// 2026-09-23).
     /// </summary>
     [TestMethod]
     public void LabelErrors_ReportTheOffendingLine()
     {
         AreEqual(2, new Simulation().AssertSqlError("select 1\ngoto nowhere", 133).LineNumber);
+        AreEqual(4, new Simulation().AssertSqlError("goto nowhere\nselect 1\n\nselect 2", 133).LineNumber);
         AreEqual(3, new Simulation().AssertSqlError("select 1\nl: select 1\nl: select 2", 132).LineNumber);
+    }
+
+    /// <summary>
+    /// A procedure body's undeclared label is reported as the procedure is
+    /// created, attributed to it (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void UndeclaredLabelInAProcedure_NamesTheProcedure()
+    {
+        var ex = new Simulation().AssertSqlError("create proc pr as\nselect 1\ngoto x", 133);
+        AreEqual("pr", ex.Errors[0].Procedure);
+        AreEqual(3, ex.LineNumber);
     }
 
     /// <summary>
@@ -114,11 +128,13 @@ public sealed class GotoTests
     [TestMethod]
     [DataRow("goto l; begin try l: print 'in'; end try begin catch print 'c'; end catch")]
     [DataRow("goto l; begin try print 'in'; end try begin catch l: print 'c'; end catch")]
+    [DataRow("begin try goto l; end try begin catch l: print 'c'; end catch")]
     public void JumpIntoATryOrCatchScope_RaisesMsg1026(string commandText)
     {
         var ex = new Simulation().AssertSqlError(commandText, 1026);
         AreEqual("GOTO cannot be used to jump into a TRY or CATCH scope.", ex.Message);
         AreEqual(15, ex.Class);
+        AreEqual(0, ex.State);
     }
 
     /// <summary>

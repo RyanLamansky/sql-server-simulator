@@ -21,7 +21,7 @@ All semantics below are probe-confirmed against SQL Server 2025.
 | Procedure / `sp_executesql` argument that fails to convert | **0** | + `Procedure` for a procedure (Msg 8114, or an xml parse error) |
 | `sp_executesql` arguments that don't bind (Msg 8144 / 8146 / 8178) | **0** — but the statement's line for a declared parameter missing from a call that supplied no arguments at all | Msg 214 (a non-Unicode statement or declaration) keeps the statement's line and names `sp_executesql` as `Procedure` (probed 2026-09-26) |
 | Procedure call whose arguments don't bind (Msg 201 / 8144 / 8145) | **0** | + `Procedure` = the name as the `EXEC` spelled it (probed 2026-09-23) |
-| `GOTO` to an undeclared label (Msg 133) / a duplicate label (Msg 132) | the `GOTO`'s line / the second label's line | raised while the batch compiles, ahead of anything running (probed 2026-09-23) |
+| `GOTO` to an undeclared label (Msg 133) / a duplicate label (Msg 132) | the batch's last line / the second label's line | raised while the batch compiles, ahead of anything running (probed 2026-09-23 and 2026-10-02); in a module's `CREATE` they name the module |
 | Trigger body error | creating-batch-relative line | + `Procedure = "<name>"` (**unqualified**) |
 | **CREATE-time bind error** (the body error that aborts the CREATE) | batch line | + `Procedure = "<name>"` — **unqualified for every module kind**, procedures included; a `CREATE TRIGGER` naming a missing parent (Msg 8197) is attributed the same way |
 | Scalar-UDF / inline-TVF / multi-statement-TVF / view body error | the **outer invoking** statement's line | no `Procedure` — real inlines these for attribution (even the multi-statement TVF) |

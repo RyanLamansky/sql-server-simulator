@@ -367,10 +367,11 @@ partial class Simulation
                     foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
                         yield return o;
 
-                    // RETURN and GOTO propagate through WHILE (unlike BREAK /
-                    // CONTINUE which we catch). Exit the loop without clearing
-                    // — the outer DispatchStatementsUntil also stops on both.
-                    if (batch.ReturnSignaled || batch.PendingGotoLabel is not null)
+                    // RETURN, GOTO and a batch-ending error propagate through
+                    // WHILE (unlike BREAK / CONTINUE which we catch). Exit the
+                    // loop without clearing — the outer DispatchStatementsUntil
+                    // also stops on all three.
+                    if (batch.ReturnSignaled || batch.BatchAborted || batch.PendingGotoLabel is not null)
                         goto ExitLoop;
 
                     switch (batch.LoopControl)
@@ -507,11 +508,11 @@ partial class Simulation
             }
             if (!batch.IsSkipping)
             {
-                var raw = valueExpr.Run(new RuntimeContext(
-                    name => throw SimulatedSqlException.MustDeclareScalarVariable(name.Leaf),
-                    batch));
                 if (batch.UdfFrame is { } udfFrame)
                 {
+                    var raw = valueExpr.Run(new RuntimeContext(
+                        name => throw SimulatedSqlException.MustDeclareScalarVariable(name.Leaf),
+                        batch));
                     udfFrame.ReturnedValue = raw.CoerceTo(udfFrame.ReturnType);
                 }
                 else
@@ -519,9 +520,26 @@ partial class Simulation
                     // Procedure RETURN: coerce to int, a NULL landing 0 in the
                     // caller's @rc with Msg 282 saying so (probe-confirmed
                     // against SQL Server 2025). Msg 245 surfaces here for
-                    // non-coercible types like `RETURN 'abc'`.
-                    var coerced = raw.CoerceTo(SqlType.Int32);
+                    // non-coercible types like `RETURN 'abc'`, and ends the
+                    // batch; an error that ends only its statement — a divide
+                    // by zero, a value past int — returns NULL instead, Msg
+                    // 282 following the error (probed 2026-10-02).
                     var procFrame = batch.ProcFrame!;
+                    SqlValue coerced;
+                    try
+                    {
+                        coerced = valueExpr.Run(new RuntimeContext(
+                            name => throw SimulatedSqlException.MustDeclareScalarVariable(name.Leaf),
+                            batch)).CoerceTo(SqlType.Int32);
+                    }
+                    catch (Exception failure) when (failure is OverflowException || (failure is SimulatedSqlException { AbortsAsUnderXactAbort: false, TerminatesBatch: false } sql && sql.Class == 16))
+                    {
+                        var error = failure as SimulatedSqlException ?? SimulatedSqlException.ArithmeticOverflow("int");
+                        error.FollowingMessage = SimulatedSqlException.NullReturnStatusMessage(batch, procFrame.ProcedureName);
+                        procFrame.ReturnCode = 0;
+                        batch.ReturnSignaled = true;
+                        throw error;
+                    }
                     if (coerced.IsNull)
                         batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.NullReturnStatusMessage(batch, procFrame.ProcedureName));
                     procFrame.ReturnCode = coerced.IsNull ? 0 : coerced.AsInt32;

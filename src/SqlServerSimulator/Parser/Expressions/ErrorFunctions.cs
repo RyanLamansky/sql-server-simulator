@@ -28,7 +28,7 @@ internal sealed class ErrorNumberFunction : Expression
     public ErrorNumberFunction(ParserContext context) => ErrorFunctionCtor.EnsureNoArgs(context, "error_number");
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        runtime.Batch.InFlightError is CaughtError err
+        ErrorFunctionCtor.Handled(runtime) is CaughtError err
             ? SqlValue.FromInt32(err.Number)
             : SqlValue.Null(SqlType.Int32);
 
@@ -44,11 +44,11 @@ internal sealed class ErrorMessageFunction : Expression
     public ErrorMessageFunction(ParserContext context) => ErrorFunctionCtor.EnsureNoArgs(context, "error_message");
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        runtime.Batch.InFlightError is CaughtError err
-            ? SqlValue.FromNVarchar(err.Message)
-            : SqlValue.Null(SqlType.NVarchar);
+        ErrorFunctionCtor.Handled(runtime) is CaughtError err
+            ? SqlValue.FromNVarchar(ErrorFunctionCtor.MessageType, err.Message)
+            : SqlValue.Null(ErrorFunctionCtor.MessageType);
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ErrorFunctionCtor.MessageType;
 
     internal override string DebugDisplay() => "ERROR_MESSAGE()";
 
@@ -60,7 +60,7 @@ internal sealed class ErrorSeverityFunction : Expression
     public ErrorSeverityFunction(ParserContext context) => ErrorFunctionCtor.EnsureNoArgs(context, "error_severity");
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        runtime.Batch.InFlightError is CaughtError err
+        ErrorFunctionCtor.Handled(runtime) is CaughtError err
             ? SqlValue.FromInt32(err.Severity)
             : SqlValue.Null(SqlType.Int32);
 
@@ -76,7 +76,7 @@ internal sealed class ErrorStateFunction : Expression
     public ErrorStateFunction(ParserContext context) => ErrorFunctionCtor.EnsureNoArgs(context, "error_state");
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        runtime.Batch.InFlightError is CaughtError err
+        ErrorFunctionCtor.Handled(runtime) is CaughtError err
             ? SqlValue.FromInt32(err.State)
             : SqlValue.Null(SqlType.Int32);
 
@@ -92,7 +92,7 @@ internal sealed class ErrorLineFunction : Expression
     public ErrorLineFunction(ParserContext context) => ErrorFunctionCtor.EnsureNoArgs(context, "error_line");
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        runtime.Batch.InFlightError is CaughtError err
+        ErrorFunctionCtor.Handled(runtime) is CaughtError err
             ? SqlValue.FromInt32(err.Line)
             : SqlValue.Null(SqlType.Int32);
 
@@ -108,11 +108,11 @@ internal sealed class ErrorProcedureFunction : Expression
     public ErrorProcedureFunction(ParserContext context) => ErrorFunctionCtor.EnsureNoArgs(context, "error_procedure");
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        runtime.Batch.InFlightError is CaughtError err && err.Procedure is not null
-            ? SqlValue.FromNVarchar(err.Procedure)
-            : SqlValue.Null(SqlType.NVarchar);
+        ErrorFunctionCtor.Handled(runtime) is CaughtError err && err.Procedure is not null
+            ? SqlValue.FromNVarchar(ErrorFunctionCtor.ProcedureType, err.Procedure)
+            : SqlValue.Null(ErrorFunctionCtor.ProcedureType);
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.NVarchar;
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => ErrorFunctionCtor.ProcedureType;
 
     internal override string DebugDisplay() => "ERROR_PROCEDURE()";
 
@@ -130,6 +130,19 @@ internal sealed class ErrorProcedureFunction : Expression
 /// </summary>
 internal static class ErrorFunctionCtor
 {
+    /// <summary><c>ERROR_MESSAGE()</c>'s type, and <c>FORMATMESSAGE</c>'s: <c>nvarchar(4000)</c>.</summary>
+    public static readonly NVarcharSqlType MessageType = NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.CoercibleDefault);
+
+    /// <summary><c>ERROR_PROCEDURE()</c>'s type: <c>nvarchar(128)</c> (probed 2026-10-02 against SQL Server 2025).</summary>
+    public static readonly NVarcharSqlType ProcedureType = NVarcharSqlType.Get(128, Collation.Baseline, Coercibility.CoercibleDefault);
+
+    /// <summary>
+    /// The error a running <c>CATCH</c> handles: the batch's own, else the one
+    /// a caller's <c>CATCH</c> handles around the body this batch runs.
+    /// </summary>
+    public static CaughtError? Handled(RuntimeContext runtime) =>
+        runtime.Batch.InFlightError ?? runtime.Batch.Connection.EnclosingCatchError;
+
     public static void EnsureNoArgs(ParserContext context, string name)
     {
         if (context.Token is not Operator { Character: ')' })

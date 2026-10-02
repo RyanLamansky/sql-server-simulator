@@ -122,7 +122,10 @@ partial class Simulation
         var reqFastForward = (options & CursorOptions.FastForward) != 0;
         var forwardOnly = (options & CursorOptions.ForwardOnly) != 0;
         var reqKeyset = (options & CursorOptions.Keyset) != 0;
-        var localScope = (options & CursorOptions.Local) != 0;
+        // Naming neither scope takes the database's CURSOR_DEFAULT (probed
+        // 2026-10-02 against SQL Server 2025).
+        var localScope = (options & CursorOptions.Local) != 0
+            || ((options & CursorOptions.Global) == 0 && (context.CurrentDatabase.Switches & DatabaseSwitches.LocalCursorDefault) != 0);
         var optimistic = (options & CursorOptions.Optimistic) != 0;
         var readOnlyOption = (options & CursorOptions.ReadOnly) != 0;
         var scrollLocks = (options & CursorOptions.ScrollLocks) != 0;
@@ -136,8 +139,20 @@ partial class Simulation
         using (ParserScope.Enter(ref context.CursorStatement, true))
         using (ParserScope.Enter(ref context.PartitionedWriteReads, reads))
         {
-            selection = ParseBodyQuery(context);
+            batch.CursorDeclarationSnapshot = new(BatchContext.VariableNameComparer);
+            try
+            {
+                selection = ParseBodyQuery(context);
+            }
+            finally
+            {
+                batch.CursorDeclarationSnapshot = null;
+            }
         }
+        // A cursor's query can't create a table (probed 2026-10-02 against
+        // SQL Server 2025).
+        if (selection.IntoTarget is not null)
+            throw SimulatedSqlException.IntoNotAllowedInCursorDeclaration();
 
         // Trailing SQL-92 updatability clause: FOR READ ONLY | FOR UPDATE [OF cols].
         List<string>? forUpdateColumns = null;
@@ -326,10 +341,8 @@ partial class Simulation
         };
         cursor.StatementIdentity = QueryStoreStatementIdentity(batch, cursor.DeclaringText[cursor.DeclaringStart..(cursor.DeclaringEnd + 1)]);
 
-        // Scope: explicit LOCAL wins; otherwise the database's CURSOR_DEFAULT,
-        // which the simulator models as GLOBAL (real SQL Server's install
-        // default — is_local_cursor_default = 0 — for every system and freshly-
-        // created database; the per-database option isn't separately modeled).
+        // Scope: an explicit LOCAL or GLOBAL wins; otherwise the database's
+        // CURSOR_DEFAULT, GLOBAL unless ALTER DATABASE set it LOCAL.
         return (cursor, localScope);
     }
 
@@ -458,6 +471,9 @@ partial class Simulation
         if (batch.IsSkipping)
             return;
         ResolveCursor(batch, reference).Close(batch.Connection);
+        // @@CURSOR_ROWS reads 0 once the cursor is closed, and after a
+        // DEALLOCATE (probed 2026-10-02 against SQL Server 2025).
+        batch.Connection.LastCursorRows = 0;
     }
 
     /// <summary>
@@ -502,6 +518,7 @@ partial class Simulation
         // holds it (refcount keeps a variable-referenced cursor alive).
         if (removed.VariableRefCount == 0)
             DestroyCursor(batch, removed);
+        batch.Connection.LastCursorRows = 0;
     }
 
     /// <summary>
@@ -519,8 +536,10 @@ partial class Simulation
 
         var direction = FetchDirection.Next;
         long offset = 0;
+        UnquotedString? directionToken = null;
         if (context.Token is UnquotedString dirToken && TryParseFetchDirection(dirToken.Span, out direction))
         {
+            directionToken = dirToken;
             context.MoveNextRequired();
             if (direction is FetchDirection.Absolute or FetchDirection.Relative)
             {
@@ -542,6 +561,8 @@ partial class Simulation
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.From })
             context.MoveNextRequired();
+        else if (directionToken is not null)
+            throw SimulatedSqlException.SyntaxErrorNear(directionToken); // a direction takes FROM (probed 2026-10-02)
 
         var reference = ReadCursorReference(context);
 
@@ -569,7 +590,20 @@ partial class Simulation
         if (intoVariables is not null && intoVariables.Count != cursor.Selection.Schema.Length)
             throw SimulatedSqlException.CursorFetchVariableCountMismatch();
 
-        var (status, values) = cursor.Fetch(batch, direction, offset);
+        // A fetch that fails — a direction the cursor refuses, a row whose
+        // projection raises — reads -1 afterwards (probed 2026-10-02 against
+        // SQL Server 2025).
+        int status;
+        SqlValue[]? values;
+        try
+        {
+            (status, values) = cursor.Fetch(batch, direction, offset);
+        }
+        catch (SimulatedSqlException)
+        {
+            connection.LastFetchStatus = -1;
+            throw;
+        }
         // A principal without UNMASK fetches masked values, as its SELECT
         // would read them (probed 2026-09-27 against SQL Server 2025).
         if (values is not null && status == 0 && DataMasking.Applying(batch, cursor.Selection.ColumnMasks) is { } masking)

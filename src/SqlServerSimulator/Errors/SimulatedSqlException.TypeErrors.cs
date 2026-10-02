@@ -306,6 +306,15 @@ partial class SimulatedSqlException
         new($"Error converting data type {FamilyRootName(source)} to {targetWord}.", 8114, 16, state);
 
     /// <summary>
+    /// Msg 8114 state 2: a procedure's <c>OUTPUT</c> parameter whose final
+    /// value the caller's variable can't hold. Unlike an argument's
+    /// conversion failure it ends the batch (probed 2026-10-02 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OutputParameterConversionFailed(SqlType source, SqlType target) =>
+        new($"Error converting data type {FamilyRootName(source)} to {FamilyRootName(target)}.", 8114, 16, 2) { TerminatesBatch = true };
+
+    /// <summary>
     /// Msg 8114 state 31: a <c>datetimeoffset</c> string whose offset moves its
     /// UTC instant outside years 1–9999 (<c>'9999-12-31 23:59:59 -05:00'</c>),
     /// naming the string's own type (probed 2026-09-24 against SQL Server 2025).

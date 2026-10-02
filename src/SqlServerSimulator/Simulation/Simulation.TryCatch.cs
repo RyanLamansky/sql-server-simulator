@@ -116,12 +116,10 @@ partial class Simulation
 
         // A GOTO out of the TRY body leaves the cursor mid-block with a jump
         // pending; the batch root does the jump, so abandon the rest of the
-        // construct rather than demanding its END TRY. Jumping *into* a TRY or
-        // CATCH is refused while the batch compiles (Msg 1026), so the CATCH
-        // half never needs the same escape. An error that ended the batch in
-        // the TRY body — one no TRY in its scope catches — leaves the cursor
-        // inside it too.
-        if (batch.PendingGotoLabel is not null || batch.BatchAborted)
+        // construct rather than demanding its END TRY. A RETURN leaves it there
+        // too, as does an error that ended the batch in the TRY body — one no
+        // TRY in its scope catches.
+        if (batch.PendingGotoLabel is not null || batch.BatchAborted || batch.ReturnSignaled)
             yield break;
 
         // Consume END TRY.
@@ -155,6 +153,8 @@ partial class Simulation
             if (StructuralExecutionTimes(batch, catchBegin.LineNumber) is { } catchTimes)
                 yield return catchTimes;
             batch.CatchDepth++;
+            var enclosingCatchError = batch.Connection.EnclosingCatchError;
+            batch.Connection.EnclosingCatchError = batch.InFlightError;
             try
             {
                 foreach (var o in DispatchStatementsUntil(batch, endKeyword: Keyword.End))
@@ -163,6 +163,7 @@ partial class Simulation
             finally
             {
                 batch.CatchDepth--;
+                batch.Connection.EnclosingCatchError = enclosingCatchError;
             }
         }
         else
@@ -191,9 +192,14 @@ partial class Simulation
 
         // An error that ended the batch inside the CATCH body — an uncaught
         // THROW — left the cursor inside it, and the dispatch loop stops on
-        // the flag without reading on to END CATCH.
-        if (batch.BatchAborted)
+        // the flag without reading on to END CATCH; so does a RETURN or a GOTO
+        // out of it, whose dispatch loop stops on the flag too.
+        if (batch.BatchAborted || batch.ReturnSignaled || batch.PendingGotoLabel is not null)
+        {
+            batch.InFlightError = outerInFlight;
+            batch.ErrorSignaled = outerErrorSignaled;
             yield break;
+        }
 
         // Restore outer error state. For nested TRY/CATCH: if we caught and
         // ran the CATCH, the inner is done — outer state takes over. If the
@@ -216,9 +222,9 @@ partial class Simulation
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Catch })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
-        if (frames && !batch.ReturnSignaled && batch.PendingGotoLabel is null)
+        if (frames)
             yield return StatementDone(batch, StatementDoneKind.EndCatch);
-        if (!batch.ReturnSignaled && batch.PendingGotoLabel is null && StructuralExecutionTimes(batch, endCatch.LineNumber) is { } endCatchTimes)
+        if (StructuralExecutionTimes(batch, endCatch.LineNumber) is { } endCatchTimes)
             yield return endCatchTimes;
     }
 

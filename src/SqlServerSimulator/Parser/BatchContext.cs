@@ -270,6 +270,13 @@ internal sealed class BatchContext
     public bool CreateTimeBinding;
 
     /// <summary>
+    /// The procedures a module body binding at <c>CREATE</c> calls that don't
+    /// exist, as each <c>EXEC</c> wrote them, for the Msg 2007 notes the
+    /// <c>CREATE</c> sends; null for every other batch.
+    /// </summary>
+    public List<string>? MissingProcedureReferences;
+
+    /// <summary>
     /// Set on the throwaway batch <c>Simulation.CompileBatch</c> walks ahead of
     /// running a batch, as opposed to a module body binding at <c>CREATE</c>:
     /// real's optimizer meets the first but not the second, so its refusals
@@ -3150,7 +3157,38 @@ internal sealed class BatchContext
         ? slot
         : throw (this.TableVariables.ContainsKey(name)
             ? SimulatedSqlException.TableVariableUsedAsScalar(name)
-            : SimulatedSqlException.MustDeclareScalarVariable(name));
+            : this.CursorVariables.ContainsKey(name)
+                ? SimulatedSqlException.CursorVariableUsedAsScalar(name)
+                : SimulatedSqlException.MustDeclareScalarVariable(name));
+
+    /// <summary>
+    /// While a cursor's query parses, the copies of the variables it reads,
+    /// holding their values at the <c>DECLARE</c>: a cursor reads its
+    /// variables as they were declared, whatever they hold when it opens or
+    /// fetches (probed 2026-10-02 against SQL Server 2025, every cursor type).
+    /// Null otherwise.
+    /// </summary>
+    public Dictionary<string, VariableSlot>? CursorDeclarationSnapshot;
+
+    /// <summary>
+    /// The copy of <paramref name="slot"/> a cursor declaration reads — see
+    /// <see cref="CursorDeclarationSnapshot"/> — or null outside one.
+    /// </summary>
+    public VariableSlot? DeclarationSnapshotOf(string name, VariableSlot slot)
+    {
+        if (this.CursorDeclarationSnapshot is not { } snapshot)
+            return null;
+        if (!snapshot.TryGetValue(name, out var copy))
+        {
+            snapshot[name] = copy = new VariableSlot(slot.DeclaredType, slot.DeclaredMaxLength, slot.Value, parameter: null)
+            {
+                XmlSchemaCollection = slot.XmlSchemaCollection,
+                SpelledNumeric = slot.SpelledNumeric,
+                AliasType = slot.AliasType,
+            };
+        }
+        return copy;
+    }
 
     /// <summary>
     /// Recognizes a local temp-table name (<c>#foo</c>, including bare

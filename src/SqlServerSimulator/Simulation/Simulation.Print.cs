@@ -44,6 +44,21 @@ partial class Simulation
                 throw SimulatedSqlException.XmlMethodNotAllowedInContext();
         }
 
+        // The operand converts implicitly to nvarchar, which xml, sql_variant
+        // and the CLR types refuse with Msg 257 and image and rowversion with
+        // Msg 206, as the batch compiles (probed 2026-10-02 against SQL Server
+        // 2025).
+        var operandType = expression.GetSqlType(batch, NoColumnTypeResolver);
+        switch (operandType)
+        {
+            case XmlSqlType or SqlVariantSqlType or HierarchyIdSqlType or GeographySqlType or GeometrySqlType or ClrUdtSqlType:
+                throw SimulatedSqlException.ImplicitConversionNotAllowed(SimulatedSqlException.FamilyRootName(operandType), "nvarchar");
+            case ImageSqlType:
+                throw SimulatedSqlException.OperandTypeClash("image", "nvarchar");
+            case RowVersionSqlType:
+                throw SimulatedSqlException.OperandTypeClash("timestamp", "nvarchar");
+        }
+
         if (batch.IsSkipping)
             return;
         var value = expression.Run(new RuntimeContext(NoColumnResolver, batch));

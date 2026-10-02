@@ -197,6 +197,11 @@ partial class Simulation
         }
         if (unknownArgument is not null)
             throw BindingError(SimulatedSqlException.NotAParameterForProcedure(unknownArgument, procedure.Name));
+        for (var i = 0; i < procedure.Parameters.Length; i++)
+        {
+            if (boundOutputSlots[i] is not null && !procedure.Parameters[i].IsOutput && !procedure.Parameters[i].IsCursor)
+                throw BindingError(SimulatedSqlException.ParameterNotDeclaredOutput(procedure.Parameters[i].Name));
+        }
 
         // Seed the child batch's variable dictionary with the bound values,
         // coerced to each parameter's declared type. TVP parameters land in
@@ -407,6 +412,7 @@ partial class Simulation
         // An error that ended the body leaves the caller's variables as they
         // were: no OUTPUT writeback and no return status.
         var bodyCompleted = bodyError is null;
+        SimulatedSqlException? writebackError = null;
         for (var i = 0; bodyCompleted && i < procedure.Parameters.Length; i++)
         {
             var param = procedure.Parameters[i];
@@ -431,9 +437,20 @@ partial class Simulation
             {
                 // Written back as SET assigns the caller's variable, so a
                 // string wider than it is cut to its width (probed 2026-09-28
-                // against SQL Server 2025).
+                // against SQL Server 2025), and one that doesn't convert is
+                // Msg 8114 state 2 at line 0, the variable kept, and the
+                // batch ended (probed 2026-10-02).
                 var finalValue = variables[param.Name].Value;
-                callerSlot.Value = Parser.Expressions.Cast.ApplyCoercion(finalValue.CoerceTo(callerSlot.DeclaredType), callerSlot.DeclaredType, callerSlot.DeclaredMaxLength);
+                try
+                {
+                    callerSlot.Value = BindParameterValue(finalValue, callerSlot.DeclaredType, callerSlot.DeclaredMaxLength, attributionName);
+                }
+                catch (SimulatedSqlException failure) when (failure.Number == 8114)
+                {
+                    var refused = SimulatedSqlException.OutputParameterConversionFailed(finalValue.Type, callerSlot.DeclaredType);
+                    refused.PreserveDiagnostics(0, attributionName);
+                    writebackError ??= refused;
+                }
             }
         }
 
@@ -450,7 +467,16 @@ partial class Simulation
         {
             var rcSlot = outerBatch.GetVariableSlot(returnCodeVariableName);
             var rc = procFrame.ReturnCode ?? procFrame.StatusWithoutReturnValue;
-            rcSlot.Value = SqlValue.FromInt32(rc).CoerceTo(rcSlot.DeclaredType);
+            // A status the variable can't hold is Msg 8114 state 3, the
+            // variable kept (probed 2026-10-02 against SQL Server 2025).
+            try
+            {
+                rcSlot.Value = BindParameterValue(SqlValue.FromInt32(rc), rcSlot.DeclaredType, rcSlot.DeclaredMaxLength, attributionName, conversionState: 3);
+            }
+            catch (SimulatedSqlException failure)
+            {
+                writebackError ??= failure;
+            }
         }
 
         // A call its caller frames brackets the body in scope markers, the
@@ -462,6 +488,8 @@ partial class Simulation
             yield return outcome;
         if (bodyError is not null)
             ExceptionDispatchInfo.Throw(bodyError);
+        if (writebackError is not null)
+            throw writebackError;
         if ((connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount && exitTranCount != enteredTranCount && !endedUnderImplicitTransactions)
         {
             if (framesScope)

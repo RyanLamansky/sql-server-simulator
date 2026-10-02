@@ -147,6 +147,7 @@ partial class Simulation
         // regular BEGIN…END flow.
         var options = ParseModuleOptions(context, ModuleOptionHost.Procedure, procName.Leaf);
         var executeAsClause = options.ExecuteAs;
+        RequireExecuteAsUser(context, executeAsClause);
         var nativelyCompiled = options.NativeCompilation;
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.As })
@@ -405,7 +406,7 @@ partial class Simulation
         if (context.Token is Operator { Character: '=' })
         {
             context.MoveNextRequired();
-            defaultExpression = Expression.Parse(context);
+            defaultExpression = ParseParameterDefault(context);
             if (typeResolved)
                 NoteUnassignableDefault(context.Batch, defaultExpression, paramType, declarationErrors);
         }
@@ -423,6 +424,46 @@ partial class Simulation
         }
 
         return new ProcedureParameter(name, paramType, declaredMaxLength, defaultExpression, isOutput) { SpelledNumeric = spelledNumeric, AliasType = aliasType };
+    }
+
+    /// <summary>
+    /// A procedure or function parameter's default, which is a constant and
+    /// nothing more (probed 2026-10-02 against SQL Server 2025): a literal, a
+    /// number with an optional leading <c>-</c> (a <c>+</c> is Msg 102),
+    /// <c>NULL</c> or <c>DEFAULT</c> (both NULL), an <c>@@</c> function, or a
+    /// bare or bracketed name, which is the <c>nvarchar</c> string of its
+    /// text. What follows is the declaration's own business, so <c>1 + 1</c>
+    /// and <c>GETDATE()</c> are Msg 102 at the <c>+</c> and the <c>(</c>.
+    /// </summary>
+    private static Expression ParseParameterDefault(ParserContext context)
+    {
+        Expression value;
+        switch (context.Token)
+        {
+            case DoubleAtPrefixedString:
+                return Expression.Parse(context);
+            case ReservedKeyword { Keyword: Keyword.Null or Keyword.Default }:
+                value = new Parser.Expressions.Value();
+                break;
+            case Literal literal:
+                value = new Parser.Expressions.Value(literal.Value);
+                break;
+            case Numeric number:
+                value = new Parser.Expressions.Value(number.Value);
+                break;
+            case Operator { Character: '-' }:
+                if (context.GetNextRequired() is not Numeric negated)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                value = new Parser.Expressions.Value(NegateLiteral(negated.Value));
+                break;
+            case Name name:
+                value = new Parser.Expressions.Value(SqlValue.FromNVarchar(NVarcharSqlType.Get(Math.Max(name.Value.Length, 1), context.CurrentDatabase.Collation, Coercibility.CoercibleDefault), name.Value));
+                break;
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        context.MoveNextOptional();
+        return value;
     }
 
     /// <summary>

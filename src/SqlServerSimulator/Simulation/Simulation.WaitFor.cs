@@ -1,4 +1,3 @@
-using System.Globalization;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
@@ -9,31 +8,31 @@ partial class Simulation
 {
     /// <summary>
     /// Parses and runs <c>WAITFOR DELAY '&lt;time&gt;'</c> or
-    /// <c>WAITFOR DELAY @variable</c>. Probed against SQL Server 2025
-    /// (2026-05-11): the operand grammar is strict — only a string literal
-    /// or a <c>@variable</c> reference; <c>cast(...)</c>, integer literals,
-    /// the bare <c>NULL</c> literal, and a <c>time</c>-typed variable are
-    /// all rejected by real SQL Server (Msg 102 / Msg 156 / Msg 9815),
-    /// and the simulator inherits that rejection by not parsing those
-    /// shapes. <c>WAITFOR TIME</c> (the absolute-time form) raises
-    /// <see cref="NotSupportedException"/>.
+    /// <c>WAITFOR DELAY @variable</c>. The operand grammar is strict — only a
+    /// string literal or a <c>@variable</c> reference; <c>cast(...)</c>,
+    /// integer literals and the bare <c>NULL</c> literal are syntax errors
+    /// (probed 2026-05-11 against SQL Server 2025). <c>WAITFOR TIME</c> (the
+    /// absolute-time form) raises <see cref="NotSupportedException"/>, and any
+    /// other word there is Msg 155.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Time format: <c>HH:MM:SS[.fff]</c> (or <c>HH:MM</c>) with hours 0-23
-    /// and no sign or day component. Bad format → Msg 148. An empty string
-    /// or a NULL-valued variable is silently accepted as a zero delay
-    /// (probe-confirmed: <c>waitfor delay ''</c> and a NULL-valued varchar
-    /// both succeed without sleeping).
+    /// A literal is read as a time of day (see <see cref="TryParseWaitForTime"/>)
+    /// while the batch compiles, so a malformed one is Msg 148 before anything
+    /// runs, an untaken branch included. A variable is read as it runs, as a
+    /// <c>datetime</c> whose time of day is the delay: a string one (a MAX one
+    /// never converts) failing the same grammar is the conversion's Msg 241,
+    /// an <c>int</c> or <c>smallint</c> one counts days and so waits nothing,
+    /// and any other type is Msg 9815, which ends only its statement (probed
+    /// 2026-10-02 against SQL Server 2025). An empty string or a NULL-valued
+    /// variable is a zero delay.
     /// </para>
     /// <para>
     /// Sleep mechanism: a cancellable wait on the calling thread (see
     /// <see cref="WaitInterruptibly"/>), matching real SQL Server's "blocks
     /// the connection" semantics while staying interruptible by a command
     /// cancel (TDS attention / <c>CommandTimeout</c> / in-process
-    /// <c>Cancel()</c>) — the wait wakes early and the batch aborts. An
-    /// <c>ExecuteReaderAsync</c> caller's own <c>CancellationToken</c> is a
-    /// separate signal and still isn't threaded into the sleep.
+    /// <c>Cancel()</c>) — the wait wakes early and the batch aborts.
     /// <c>@@ROWCOUNT</c> resets to 0
     /// (probe-confirmed; applied by the dispatcher after this parser returns).
     /// Skip-mode (un-taken IF, after BREAK/CONTINUE/RETURN) suppresses the
@@ -47,38 +46,42 @@ partial class Simulation
 
         // DELAY and TIME are contextual keywords (not in the reserved list),
         // tokenized as UnquotedString. WAITFOR TIME isn't modeled — it's an
-        // absolute-time wait whose primary use case is scheduling, which is
-        // out of scope for the simulator.
-        switch ((context.Token as UnquotedString)?.ContextualKeyword)
+        // absolute-time wait whose primary use case is scheduling.
+        switch (context.Token)
         {
-            case ContextualKeyword.Time:
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Time }:
                 throw new NotSupportedException("WAITFOR TIME (absolute-time wait) isn't modeled — WAITFOR DELAY is.");
-            case ContextualKeyword.Delay:
+            case UnquotedString { ContextualKeyword: ContextualKeyword.Delay }:
                 break;
+            case UnquotedString word:
+                throw SimulatedSqlException.WaitForOptionNotRecognized(word.Value);
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 
         context.MoveNextRequired(); // consume DELAY
 
-        // Capture the raw string operand. The grammar is strict: literal or
-        // @-prefixed variable reference only. Anything else (cast, integer
-        // literal, bare NULL, paren-expr) falls through to Msg 102 / Msg 156
-        // from real SQL Server; the simulator routes them all through the
-        // existing SyntaxErrorNear path which produces Msg 102.
-        string? operandText;
+        TimeSpan delay;
         switch (context.Token)
         {
             case Literal lit when lit.Value.Type is VarcharSqlType or NVarcharSqlType:
-                operandText = lit.Value.IsNull ? null : lit.Value.AsString;
-                break;
+                {
+                    var text = lit.Value.IsNull ? string.Empty : lit.Value.AsString;
+                    if (!TryParseWaitForTime(text, out delay))
+                        throw SimulatedSqlException.IncorrectWaitForTimeSyntax(text);
+                    context.MoveNextOptional();
+                    if (batch.IsSkipping)
+                        return;
+                    break;
+                }
 
             case AtPrefixedString variableToken:
                 {
                     var slot = batch.GetVariableSlot(variableToken.Value);
-                    if (slot.DeclaredType is TimeSqlType)
-                        throw SimulatedSqlException.WaitForCannotBeTimeType();
-                    operandText = slot.Value.IsNull ? null : slot.Value.CoerceTo(SqlType.Varchar).AsString;
+                    context.MoveNextOptional();
+                    if (batch.IsSkipping)
+                        return;
+                    delay = WaitForVariableDelay(slot);
                     break;
                 }
 
@@ -86,21 +89,32 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 
-        context.MoveNextOptional(); // consume the operand token
-
-        if (batch.IsSkipping)
-            return;
-
-        // Probe-confirmed: NULL via variable, and empty string, both succeed
-        // silently with zero delay.
-        if (string.IsNullOrEmpty(operandText))
-            return;
-
-        if (!TryParseWaitForTime(operandText, out var delay))
-            throw SimulatedSqlException.IncorrectWaitForTimeSyntax(operandText);
-
         if (delay.Ticks > 0)
             WaitInterruptibly(batch, delay);
+    }
+
+    /// <summary>The delay a <c>WAITFOR DELAY @variable</c> waits; see <see cref="ParseWaitForStatement"/>.</summary>
+    private static TimeSpan WaitForVariableDelay(VariableSlot slot)
+    {
+        var type = slot.DeclaredType;
+        switch (type)
+        {
+            case VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType:
+                if (slot.Value.IsNull)
+                    return TimeSpan.Zero;
+                if (type is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel }
+                    || !TryParseWaitForTime(slot.Value.AsString, out var delay))
+                {
+                    throw SimulatedSqlException.ConversionFailedDateTimeFromString();
+                }
+                return delay;
+            case Int32SqlType or SmallIntSqlType:
+                return TimeSpan.Zero;
+            case DateTimeSqlType:
+                return slot.Value.IsNull ? TimeSpan.Zero : slot.Value.AsDateTime.TimeOfDay;
+            default:
+                throw SimulatedSqlException.WaitForOperandTypeRefused(SimulatedSqlException.FamilyRootName(type));
+        }
     }
 
     /// <summary>
@@ -135,22 +149,94 @@ partial class Simulation
         }
     }
 
-    // Each field takes one digit or two: real reads '0:0:0' and
-    // '0:00:00.001' (probed 2026-09-28 against SQL Server 2025).
-    private static readonly string[] waitForTimeFormats =
-    [
-        @"h\:m\:s",
-        @"h\:m\:s\.f",
-        @"h\:m\:s\.ff",
-        @"h\:m\:s\.fff",
-        @"h\:m\:s\.ffff",
-        @"h\:m\:s\.fffff",
-        @"h\:m\:s\.ffffff",
-        @"h\:m\:s\.fffffff",
-        @"h\:m",
-    ];
+    /// <summary>
+    /// Reads a <c>WAITFOR DELAY</c> time of day the way real's
+    /// <c>datetime</c> conversion reads a time-only string (probed 2026-09-28
+    /// and 2026-10-02 against SQL Server 2025): surrounding blanks ignored,
+    /// <c>h:m</c> with an optional <c>:s</c> and a fraction of at most three
+    /// digits after <c>.</c> or <c>:</c>, any number of digits per field,
+    /// minutes and seconds under 60, and an optional <c>AM</c> / <c>PM</c>
+    /// suffix taking an hour of 12 at most (and at least 1 for <c>PM</c>) —
+    /// which also stands alone with a bare hour (<c>12 AM</c>). The empty string is a zero delay.
+    /// </summary>
+    private static bool TryParseWaitForTime(string value, out TimeSpan result)
+    {
+        result = TimeSpan.Zero;
+        var text = value.AsSpan().Trim();
+        if (text.IsEmpty)
+            return true;
 
-    private static bool TryParseWaitForTime(string value, out TimeSpan result) =>
-        TimeSpan.TryParseExact(value, waitForTimeFormats, CultureInfo.InvariantCulture, out result)
-            && result.Ticks is >= 0 and < TimeSpan.TicksPerDay;
+        var meridiem = 0; // 1 = AM, 2 = PM
+        if (text.Length >= 2 && (text[^1] is 'm' or 'M') && (text[^2] is 'a' or 'A' or 'p' or 'P'))
+        {
+            meridiem = text[^2] is 'a' or 'A' ? 1 : 2;
+            text = text[..^2].TrimEnd();
+        }
+
+        Span<long> fields = stackalloc long[3];
+        var fieldCount = 0;
+        var fraction = 0L;
+        var fractionDigits = -1;
+        var i = 0;
+        while (true)
+        {
+            var start = i;
+            long field = 0;
+            while (i < text.Length && char.IsAsciiDigit(text[i]))
+            {
+                field = Math.Min((field * 10) + (text[i] - '0'), 1_000_000);
+                i++;
+            }
+            if (i == start)
+                return false;
+            fields[fieldCount++] = field;
+            if (i == text.Length)
+                break;
+            // After the seconds a '.' or ':' opens the fraction.
+            if (fieldCount == 3 && text[i] is '.' or ':')
+            {
+                i++;
+                var fractionStart = i;
+                while (i < text.Length && char.IsAsciiDigit(text[i]))
+                {
+                    fraction = (fraction * 10) + (text[i] - '0');
+                    i++;
+                }
+                fractionDigits = i - fractionStart;
+                if (fractionDigits is 0 or > 3 || i != text.Length)
+                    return false;
+                break;
+            }
+            if (text[i] != ':' || fieldCount == 3)
+                return false;
+            i++;
+        }
+
+        // A bare number is an hour only beside AM / PM.
+        if (fieldCount == 1 && meridiem == 0)
+            return false;
+        var hours = fields[0];
+        var minutes = fieldCount > 1 ? fields[1] : 0;
+        var seconds = fieldCount > 2 ? fields[2] : 0;
+        if (minutes > 59 || seconds > 59)
+            return false;
+        if (meridiem != 0)
+        {
+            // AM takes hours 0 to 12, PM 1 to 12.
+            if (hours > 12 || (meridiem == 2 && hours == 0))
+                return false;
+            hours = (hours % 12) + (meridiem == 2 ? 12 : 0);
+        }
+        if (hours > 23)
+            return false;
+        var milliseconds = fractionDigits switch
+        {
+            1 => fraction * 100,
+            2 => fraction * 10,
+            3 => fraction,
+            _ => 0,
+        };
+        result = new TimeSpan(0, (int)hours, (int)minutes, (int)seconds, (int)milliseconds);
+        return true;
+    }
 }

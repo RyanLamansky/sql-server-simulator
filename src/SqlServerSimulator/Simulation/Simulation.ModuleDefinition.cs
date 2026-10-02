@@ -66,7 +66,7 @@ public sealed partial class Simulation
             ? throw (isAlter || createOrAlter
                 ? SimulatedSqlException.CannotAlterIncompatibleObjectType(name)
                 : SimulatedSqlException.ThereIsAlreadyAnObject(name.Leaf, state: 3))
-            : isAlter ? throw SimulatedSqlException.InvalidObjectName(name) : null;
+            : isAlter ? throw SimulatedSqlException.InvalidObjectName(name, state: 6) : null;
     }
 
     /// <summary>
@@ -201,7 +201,7 @@ public sealed partial class Simulation
                 return new Schema(context.CurrentDatabase, qualifier, 0);
             }
             throw isAlter
-                ? SimulatedSqlException.InvalidObjectName(name)
+                ? SimulatedSqlException.InvalidObjectName(name, state: 6)
                 : SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(name.ImmediateQualifier ?? Database.DefaultSchemaName);
         }
 

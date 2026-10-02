@@ -146,6 +146,24 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool TerminatesBatch { get; private init; }
 
     /// <summary>
+    /// What <c>@@ERROR</c> reads after this error, where that isn't its
+    /// number: a <c>RAISERROR</c> of an unregistered id at severity 11 and up,
+    /// or <c>WITH SETERROR</c>, reports Msg 18054 and leaves <c>@@ERROR</c>
+    /// at the id it asked for, while <c>ERROR_NUMBER()</c> reads 18054
+    /// (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal int AtAtErrorNumber => this.atAtErrorOverride ?? this.Number;
+
+    private int? atAtErrorOverride;
+
+    /// <summary>
+    /// An informational message that goes out right after this error when it
+    /// ends only its statement — a procedure's <c>RETURN</c> whose value
+    /// failed sends Msg 282 for the NULL status it returns instead.
+    /// </summary>
+    internal SimulatedError? FollowingMessage { get; set; }
+
+    /// <summary>
     /// When <see langword="true"/>, raising this error rolls the session's
     /// whole transaction stack back and cannot be intercepted by a
     /// <c>BEGIN TRY</c> frame — SQL Server's transaction-aborting error class,

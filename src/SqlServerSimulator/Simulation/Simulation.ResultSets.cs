@@ -432,8 +432,9 @@ partial class Simulation
     /// Streams the source rows through the declared column types. Conversion
     /// reuses the CAST value path (so the varchar asterisk fallback, silent
     /// truncation and rounding all behave as they do in a CAST) but reports
-    /// every failure as Msg 8114 naming both decorated type names, which is
-    /// what real does here regardless of which conversion rule was violated.
+    /// every failure as Msg 8114 state 2 naming both decorated type names,
+    /// which is what real does here regardless of which conversion rule was
+    /// violated (state probed 2026-10-02 against SQL Server 2025).
     /// </summary>
     private static IEnumerable<SqlValue[]> ConvertResultSetRows(SimulatedQueryResult source, ResultSetShape shape, int setNumber)
     {
@@ -458,7 +459,7 @@ partial class Simulation
                 catch (SimulatedSqlException ex) when (Cast.IsConversionFailure(ex.Number))
                 {
                     throw AttributeToOrigin(
-                        SimulatedSqlException.ConvertingDataTypeError(value.Type.ToString()!, shape.TypeNames[i]), source);
+                        SimulatedSqlException.ConvertingDataTypeError(value.Type.ToString()!, shape.TypeNames[i], state: 2), source);
                 }
             }
             yield return row;

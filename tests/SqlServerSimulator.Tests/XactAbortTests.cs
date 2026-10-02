@@ -428,4 +428,54 @@ public sealed class XactAbortTests
         AreEqual((short)0, new Simulation().ExecuteScalar("SELECT XACT_STATE()"));
         AreEqual((short)1, new Simulation().ExecuteScalar("BEGIN TRAN; SELECT XACT_STATE()"));
     }
+    // ---- probed 2026-10-02 against SQL Server 2025 ----
+
+    [TestMethod]
+    public void Severity11Error_Uncaught_LeavesTheBatchAndTransactionStanding()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int)");
+        var ex = sim.AssertSqlError("set xact_abort on; begin tran; insert t values (1); drop table nosuch; insert t values (2); commit", 3701);
+        AreEqual(1, ex.Errors.Count);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    public void Severity11Error_Caught_DoomsTheTransaction()
+        => AreEqual((short)-1, new Simulation().ExecuteScalar(
+            "set xact_abort on; begin tran; begin try drop table nosuch end try begin catch select xact_state() end catch rollback"));
+
+    [TestMethod]
+    public void DeferredNameError_InTheTrysOwnScope_RollsBackWithoutDooming()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int)");
+        var ex = sim.AssertSqlError("set xact_abort on; begin tran; begin try insert t values (1); select * from nosuch; end try begin catch select 'c' end catch", 208);
+        AreEqual(1, ex.Errors.Count);
+        AreEqual(0, sim.ExecuteScalar("select @@trancount + (select count(*) from t)"));
+    }
+
+    [TestMethod]
+    public void CalledBatchSyntaxError_Caught_DoomsTheTransaction()
+        => AreEqual((short)-1, new Simulation().ExecuteScalar(
+            "set xact_abort on; begin tran; begin try exec ('select from') end try begin catch select xact_state() end catch rollback"));
+
+    [TestMethod]
+    public void CalledBatchSyntaxError_Uncaught_LeavesTheTransactionStanding()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int)");
+        _ = sim.AssertSqlError("set xact_abort on; begin tran; exec ('select from'); declare @tc int = @@trancount; insert t values (@tc); commit", 156);
+        AreEqual(1, sim.ExecuteScalar("select a from t"));
+    }
+
+    [TestMethod]
+    public void DoomedTransaction_RefusesToNest_ButTakesTableVariableWrites()
+    {
+        var sim = new Simulation();
+        _ = sim.AssertSqlError("set xact_abort on; begin tran; begin try select 1 / 0 end try begin catch begin tran end catch", 3930);
+        AreEqual(0, sim.ExecuteScalar("select @@trancount"));
+        var ex = sim.AssertSqlError("set xact_abort on; begin tran; begin try select 1 / 0 end try begin catch declare @t table (a int); insert @t values (1); select count(*) from @t end catch", 3998);
+        AreEqual(1, ex.Errors.Count);
+    }
 }

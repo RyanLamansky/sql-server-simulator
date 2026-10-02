@@ -877,6 +877,9 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
         return CanonicalDefinition.Render(tokens, predicate) is { } canonical ? $"({canonical})" : null;
     }
 
+    /// <summary>The line the command's text ends on, its trailing line break included.</summary>
+    public int LastLine => Token.LineAt(this.commandText, this.commandText.Length);
+
     /// <summary>
     /// The command-text character just ahead of <paramref name="token"/>, or
     /// <c>'\0'</c> at the start of the text.

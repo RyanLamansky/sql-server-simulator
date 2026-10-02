@@ -2537,7 +2537,7 @@ public sealed partial class Simulation
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite)
-            && (error.Number is 127 or 220 or 232 or 242 or 244 or 248 or 512 or 513 or 515 or 517 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16933 or 16947
+            && (error.Number is 127 or 220 or 232 or 242 or 244 or 248 or 512 or 513 or 515 or 517 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16931 or 16932 or 16933 or 16947
                 || (error.Number == 208 && error.RaisedRunningFunctionBody)));
 
     /// <summary>
@@ -2626,7 +2626,7 @@ public sealed partial class Simulation
     /// marked <see cref="SimulatedSqlException.AbortsAsUnderXactAbort"/> takes
     /// this path with the option off too.
     /// </summary>
-    private static void ApplyXactAbortPromotion(SimulatedDbConnection connection, SimulatedSqlException ex, bool changesTableStructure = false)
+    private static void ApplyXactAbortPromotion(SimulatedDbConnection connection, SimulatedSqlException ex, bool changesTableStructure = false, int framesThatCannotCatch = 0)
     {
         // A structure-changing statement's own failure takes the same path,
         // save the two it raises while compiling (Msg 4902 / 2705), which end
@@ -2663,14 +2663,21 @@ public sealed partial class Simulation
             return;
         }
 
-        if (connection.OpenTryFrames > 0)
+        // A TRY in the scope a deferred compile error is raised in doesn't
+        // catch it, so it rolls back unless a caller's TRY will (probed
+        // 2026-10-02 against SQL Server 2025).
+        if (connection.OpenTryFrames - framesThatCannotCatch > 0)
         {
             if (connection.CurrentTransaction is { } doomed)
                 doomed.Doomed = true;
             return;
         }
 
-        if (ex.RaisedByRaiserror)
+        // Uncaught, a severity-11 error — a DROP of a missing object's Msg
+        // 3701 — leaves the batch and the transaction standing as RAISERROR
+        // does, unless it is a structural one (probed 2026-10-02 against SQL
+        // Server 2025); caught, it dooms the transaction like any other.
+        if (ex.RaisedByRaiserror || (ex.Class == 11 && !structuralFailure && !ex.AbortsAsUnderXactAbort))
             return;
         ex.XactAbortPromoted = true;
         connection.CurrentTransaction?.EndRollback();
@@ -2886,7 +2893,7 @@ public sealed partial class Simulation
     }
 
     private static bool EndsBatch(SimulatedSqlException ex)
-        => ((IsDeferredCompileError(ex) || ex.Class == 15) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted || ex.IsAttention;
+        => ((IsDeferredCompileError(ex) || (ex.Class == 15 && !ex.RaisedByRaiserror)) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted || ex.IsAttention;
 
     private IEnumerable<SimulatedStatementOutcome> DispatchOneStatementCore(BatchContext batch, bool requireSemicolonBeforeCte, bool atBatchStart)
     {
@@ -3749,13 +3756,41 @@ public sealed partial class Simulation
             : name;
     }
 
+    /// <summary>
+    /// The transaction or savepoint name a variable holds, cut to the 32
+    /// characters a written one is refused past; a variable of a type other
+    /// than a string is Msg 3914 (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static string? TransactionNameFromVariable(BatchContext batch, string variable)
+    {
+        var slot = batch.GetVariableSlot(variable);
+        if (slot.DeclaredType is not (VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType))
+            throw SimulatedSqlException.TransactionNameTypeInvalid(SimulatedSqlException.FamilyRootName(slot.DeclaredType));
+        if (slot.Value.IsNull)
+            return null;
+        var held = slot.Value.AsString;
+        return held.Length > SimulatedDbTransaction.MaxNameLength ? held[..SimulatedDbTransaction.MaxNameLength] : held;
+    }
+
     private static bool TryParseSavepoint(ParserContext context)
     {
         if (!context.MoveNext() || context.Token is not ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
             return false;
-        _ = context.GetNextRequired<Name>();
-        var name = ParseTransactionName(context);
-        context.MoveNextOptional();
+        string name;
+        if (context.GetNextRequired() is AtPrefixedString variable)
+        {
+            context.MoveNextOptional();
+            if (context.Batch.IsSkipping)
+                return true;
+            name = TransactionNameFromVariable(context.Batch, variable.Value) ?? string.Empty;
+        }
+        else
+        {
+            if (context.Token is not Name)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            name = ParseTransactionName(context);
+            context.MoveNextOptional();
+        }
 
         if (context.Batch.IsSkipping)
             return true;
@@ -3840,6 +3875,9 @@ public sealed partial class Simulation
         if (marked && !named)
             throw SimulatedSqlException.TransactionNameRequiredForMark();
 
+        // A doomed transaction refuses to nest (probed 2026-10-02 against SQL
+        // Server 2025).
+        RejectWriteInDoomedTransaction(context.Connection);
         // Under SET IMPLICIT_TRANSACTIONS ON the statement opens the implicit
         // transaction first and then nests in it, @@TRANCOUNT reading 2
         // (probed 2026-09-28 against SQL Server 2025).
@@ -3863,9 +3901,7 @@ public sealed partial class Simulation
         {
             // A name held in a variable is cut to the 32 characters a written
             // one is refused past (probe-confirmed).
-            var name = literalName;
-            if (nameVariable is not null && context.Batch.GetVariableSlot(nameVariable).Value is { IsNull: false } held)
-                name = held.AsString.Length > SimulatedDbTransaction.MaxNameLength ? held.AsString[..SimulatedDbTransaction.MaxNameLength] : held.AsString;
+            var name = nameVariable is null ? literalName : TransactionNameFromVariable(context.Batch, nameVariable);
             context.Connection.CurrentTransaction = new SimulatedDbTransaction(
                 context.Simulation, context.Connection, System.Data.IsolationLevel.Unspecified)
             {
@@ -3899,12 +3935,33 @@ public sealed partial class Simulation
                 _ = ParseTransactionName(context);
                 context.MoveNextOptional();
             }
+            else if (context.Token is AtPrefixedString)
+            {
+                context.MoveNextOptional();
+            }
         }
         // COMMIT WORK is an ANSI-equivalent. WORK isn't reserved in the
         // simulator's keyword list; accept it as an unquoted identifier
         // following COMMIT.
         else if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Work })
         {
+            context.MoveNextOptional();
+        }
+
+        // WITH (DELAYED_DURABILITY = ON | OFF) asks to defer the log flush,
+        // which nothing here has; accepted and discarded (probed 2026-10-02
+        // against SQL Server 2025).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+        {
+            if (context.GetNextRequired() is not Operator { Character: '(' }
+                || context.GetNextRequired() is not UnquotedString durability
+                || !BuiltInToken.Equals(durability.Value, "DELAYED_DURABILITY")
+                || context.GetNextRequired() is not Operator { Character: '=' }
+                || context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off }
+                || context.GetNextRequired() is not Operator { Character: ')' })
+            {
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
             context.MoveNextOptional();
         }
 
@@ -3979,16 +4036,19 @@ public sealed partial class Simulation
         {
             if (context.Token is ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
             {
-                if (context.MoveNext() && context.Token is Name)
+                if (context.MoveNext() && context.Token is Name or AtPrefixedString)
                 {
                     // Savepoint-name path: partial rollback to the saved
                     // position; the outermost BEGIN's own name rolls the whole
-                    // transaction back.
-                    var name = ParseTransactionName(context);
+                    // transaction back. A variable holds the name.
+                    var variable = context.Token as AtPrefixedString;
+                    var name = variable is null ? ParseTransactionName(context) : string.Empty;
                     context.MoveNextOptional();
 
                     if (context.Batch.IsSkipping)
                         return true;
+                    if (variable is not null)
+                        name = TransactionNameFromVariable(context.Batch, variable.Value) ?? string.Empty;
 
                     var tx = context.Connection.CurrentTransaction
                         ?? throw SimulatedSqlException.NoCorrespondingBeginRollback();
@@ -4070,12 +4130,54 @@ public sealed partial class Simulation
         return outcome;
     }
 
+    /// <summary>
+    /// Whether the <c>INSERT</c> / <c>UPDATE</c> / <c>DELETE</c> / <c>MERGE</c>
+    /// at the cursor names a table variable as its target — read past
+    /// <c>TOP (…)</c>, <c>INTO</c> and <c>FROM</c>. Leaves the cursor where it
+    /// found it.
+    /// </summary>
+    private static bool WritesTableVariable(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        try
+        {
+            var depth = 0;
+            for (var read = 0; read < 16 && context.GetNextOptional() is { } token; read++)
+            {
+                switch (token)
+                {
+                    case Operator { Character: '(' }:
+                        depth++;
+                        continue;
+                    case Operator { Character: ')' }:
+                        depth--;
+                        continue;
+                    case ReservedKeyword { Keyword: Keyword.Top or Keyword.Into or Keyword.From or Keyword.Percent }:
+                        continue;
+                    case AtPrefixedString when depth == 0:
+                        return true;
+                    default:
+                        if (depth > 0)
+                            continue;
+                        return false;
+                }
+            }
+            return false;
+        }
+        finally
+        {
+            context.RestoreCheckpoint(checkpoint);
+        }
+    }
+
     private static SimulatedStatementOutcome RunMutation(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
     {
         context.Batch.CurrentStatement.WritesRows = true;
         // A table-variable target takes no transaction; its parser clears this.
         context.Batch.CurrentStatement.TransactedWrite = true;
-        if (!context.Batch.IsSkipping)
+        // A table variable stands outside the transaction, so a doomed one
+        // lets it be written (probed 2026-10-02 against SQL Server 2025).
+        if (!context.Batch.IsSkipping && context.Connection.CurrentTransaction is { Doomed: true } && !WritesTableVariable(context))
             RejectWriteInDoomedTransaction(context.Connection);
         // A write opens an implicit transaction, a table variable's included.
         context.Batch.BeginImplicitTransaction();

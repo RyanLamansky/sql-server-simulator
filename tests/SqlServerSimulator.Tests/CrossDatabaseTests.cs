@@ -203,8 +203,7 @@ public class CrossDatabaseTests
     private static Simulation WriteFixture()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("""
-            create database zdb;
+        sim.ExecuteBatches("create database zdb", """
             use zdb;
             create table dbo.t (id int identity(1, 1) primary key, v nvarchar(20) null);
             insert dbo.t (v) values ('a'), ('b')
@@ -570,13 +569,29 @@ public class CrossDatabaseTests
     [TestMethod]
     public void Use_SkippedBranch_DoesNotSwitchDatabase()
     {
-        // Un-taken branch short-circuits before the database lookup — the
-        // target name doesn't need to exist for skip-mode to be exercised.
-        var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table only_in_simulated (id int); insert only_in_simulated values (42)");
+        var sim = TwoDatabaseFixture();
         using var conn = sim.CreateOpenConnection();
-        _ = conn.CreateCommand("if 1=0 use no_such_database").ExecuteNonQuery();
-        AreEqual(42, conn.CreateCommand("select id from only_in_simulated").ExecuteScalar());
+        var before = conn.CreateCommand("select db_name()").ExecuteScalar();
+        _ = conn.CreateCommand("if 1=0 use sales; if 1=0 use ops").ExecuteNonQuery();
+        AreEqual(before, conn.CreateCommand("select db_name()").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// A missing database is refused as the batch compiles, from an untaken
+    /// branch too, so nothing in the batch runs; met by a dynamic batch, it
+    /// ends the caller's batch and rolls its transaction back (probed
+    /// 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Use_MissingDatabase_RefusesTheBatch()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int)");
+        _ = sim.AssertSqlError("insert t values (1); if 1=0 use no_such_database", 911);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from t"));
+        _ = sim.AssertSqlError("begin tran; insert t values (2); exec('use no_such_database'); insert t values (3)", 911);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from t"));
+        AreEqual("caught 911", sim.ExecuteScalar("begin try exec('use no_such_database') end try begin catch select concat('caught ', error_number()) end catch"));
     }
 
     // Scalar metadata lookups across DBs. Real SQL Server probe (2026-05-23):

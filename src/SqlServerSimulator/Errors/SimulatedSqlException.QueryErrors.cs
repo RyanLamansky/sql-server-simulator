@@ -779,6 +779,13 @@ partial class SimulatedSqlException
         new("The current transaction cannot be committed and cannot be rolled back to a savepoint. Roll back the entire transaction.", 3931, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 3914: a transaction or savepoint name held in a
+    /// variable that isn't a string (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TransactionNameTypeInvalid(string typeName) =>
+        new($"The data type \"{typeName}\" is invalid for transaction names or savepoint names. Allowed data types are char, varchar, nchar, varchar(max), nvarchar, and nvarchar(max).", 3914, 16, 0);
+
+    /// <summary>
     /// Mimics SQL Server error 266: a procedure or dynamic batch returned
     /// with <c>@@TRANCOUNT</c> other than it entered with. Real raises it at
     /// line 0 against the module, where its caller can catch it (probed
@@ -1391,14 +1398,22 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server's Msg 9815 — the operand of <c>WAITFOR DELAY</c>
-    /// (or <c>WAITFOR TIME</c>) is a variable typed as <c>time</c>. Real
-    /// SQL Server reserves the operand for char/varchar/nchar/nvarchar
-    /// values; the <c>time</c> type is paradoxically rejected. Probe-
-    /// confirmed against SQL Server 2025 (2026-05-11): Class 16, State 0,
-    /// verbatim wording.
+    /// (or <c>WAITFOR TIME</c>) is a variable of a type other than a string,
+    /// <c>int</c>, <c>smallint</c> or <c>datetime</c>; the <c>time</c> type is
+    /// paradoxically among them. It ends only its statement. Probe-confirmed
+    /// against SQL Server 2025 (2026-05-11 and 2026-10-02): Class 16, State
+    /// 0, verbatim wording.
     /// </summary>
-    internal static SimulatedSqlException WaitForCannotBeTimeType() =>
-        new("Waitfor delay and waitfor time cannot be of type time.", 9815, 16, 0);
+    internal static SimulatedSqlException WaitForOperandTypeRefused(string typeName) =>
+        new($"Waitfor delay and waitfor time cannot be of type {typeName}.", 9815, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 155 for a word after <c>WAITFOR</c> that is
+    /// neither <c>DELAY</c> nor <c>TIME</c> (probed 2026-10-02 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException WaitForOptionNotRecognized(string word) =>
+        new($"'{word}' is not a recognized WAITFOR option.", 155, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 8141 — an inline column-level CHECK constraint

@@ -36,6 +36,7 @@ internal sealed class VariableReference : Expression
         // Parse-time validation (and capture of the declared type for
         // GetSqlType) — this is what raises Msg 137 if @v was never declared.
         var slot = context.Batch.GetVariableSlot(raw);
+        this.declarationSnapshot = context.Batch.DeclarationSnapshotOf(this.VariableName, slot);
         this.DeclaredType = slot.DeclaredType;
         this.spelledNumeric = slot.SpelledNumeric;
         this.aliasType = slot.AliasType;
@@ -55,6 +56,12 @@ internal sealed class VariableReference : Expression
 
     private readonly bool spelledNumeric;
 
+    /// <summary>
+    /// In a cursor's query, the variable's value as the <c>DECLARE</c> found
+    /// it, which the cursor reads in place of the live one; null elsewhere.
+    /// </summary>
+    private readonly VariableSlot? declarationSnapshot;
+
     internal override bool ResultReportsNumeric => this.spelledNumeric;
 
     private readonly Schemas.AliasType? aliasType;
@@ -63,7 +70,7 @@ internal sealed class VariableReference : Expression
 
     internal override bool ParallelSafe => true;
 
-    public override SqlValue Run(RuntimeContext runtime) => runtime.Batch.Variables[this.VariableName].Value;
+    public override SqlValue Run(RuntimeContext runtime) => (this.declarationSnapshot ?? runtime.Batch.Variables[this.VariableName]).Value;
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.DeclaredType;
 

@@ -576,6 +576,9 @@ partial class Simulation
         // The Query Store procedures report every error at line 1, a missing
         // parameter's included (probed 2026-09-29).
         (var name, _) when name.StartsWith("sp_query_store_", StringComparison.Ordinal) => (1, null),
+        // sp_executesql's own missing statement is at line 1 (probed
+        // 2026-10-02 against SQL Server 2025).
+        ("sp_executesql", 201) => (1, null),
         (_, 201) => (0, null),
         ("sp_addextendedproperty" or "sp_updateextendedproperty", 15600) when exception.Class == 15 => (22, null),
         ("sp_dropextendedproperty", 15600) when exception.Class == 15 => (14, null),

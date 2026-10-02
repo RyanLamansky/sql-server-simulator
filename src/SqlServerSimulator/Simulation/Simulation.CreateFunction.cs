@@ -887,7 +887,7 @@ partial class Simulation
         if (context.Token is Operator { Character: '=' })
         {
             context.MoveNextRequired();
-            defaultExpression = Expression.Parse(context);
+            defaultExpression = ParseParameterDefault(context);
             if (typeResolved)
                 NoteUnassignableDefault(context.Batch, defaultExpression, paramType, declarationErrors);
         }

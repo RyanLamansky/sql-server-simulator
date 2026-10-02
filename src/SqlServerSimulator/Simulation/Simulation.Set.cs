@@ -38,6 +38,9 @@ partial class Simulation
         {
             ReservedKeyword { Keyword: Keyword.Identity_Insert } => TryParseSetIdentityInsert(context),
             AtPrefixedString variableToken => TryParseSetVariable(context, variableToken),
+            // `SET @@x = …` names a variable no DECLARE can make (probed
+            // 2026-10-02 against SQL Server 2025).
+            DoubleAtPrefixedString global => throw SimulatedSqlException.MustDeclareSetTarget(global.ErrorText[1..]),
             _ => TryParseSetSessionOption(context, afterSet),
         };
     }
@@ -78,6 +81,10 @@ partial class Simulation
 
         var firstName = unquoted.Value;
         context.MoveNextRequired();
+        // An on/off option given any other value is Msg 102 state 4 naming
+        // the option (probed 2026-10-02 against SQL Server 2025).
+        if (firstKind == SetOptionKind.OnOff && context.Token is not (ReservedKeyword { Keyword: Keyword.On or Keyword.Off } or Operator { Character: ',' }))
+            throw SimulatedSqlException.SyntaxErrorNear(unquoted, state: 4);
 
         // Multi-option comma form is OnOff-only: SET opt1, opt2, ... ON|OFF.
         if (firstKind == SetOptionKind.OnOff && context.Token is Operator { Character: ',' })
@@ -496,12 +503,13 @@ partial class Simulation
                 (System.Data.IsolationLevel.Snapshot, false),
             UnquotedString { Value: var name } when name.Equals("SERIALIZABLE", StringComparison.OrdinalIgnoreCase) =>
                 (System.Data.IsolationLevel.Serializable, false),
-            _ => (System.Data.IsolationLevel.Unspecified, false),
+            // Any other word is a syntax error at it (probed 2026-10-02
+            // against SQL Server 2025).
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
         if (consumeAnother)
             context.MoveNextRequired();
-        if (newLevel != System.Data.IsolationLevel.Unspecified)
-            context.Batch.Connection.SessionIsolationLevel = newLevel;
+        context.Batch.Connection.SessionIsolationLevel = newLevel;
         FunctionBodyShape.NoteSideEffect(context.Batch, "SET TRANSACTION ISOLATION LEVEL", FunctionBodyShape.StatementOperatorState);
         return true;
     }

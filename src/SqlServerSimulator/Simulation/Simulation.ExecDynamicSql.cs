@@ -56,7 +56,21 @@ partial class Simulation
         context.MoveNextRequired();
 
         RejectNonStringExecOperands(context);
-        var sqlExpression = Expression.Parse(context);
+        // Each operand is a literal or a variable; EXEC joins their texts itself
+        // rather than through `+`, so a non-string variable converts on its own
+        // and a NULL one adds nothing (probed 2026-10-02 against SQL Server
+        // 2025: `EXEC ('SELECT ' + @int)` runs, `'SELECT 1' + @null` too).
+        var operands = new List<(SqlValue Literal, VariableSlot? Slot)>();
+        while (true)
+        {
+            operands.Add(context.Token is AtPrefixedString variable
+                ? (default, batch.GetVariableSlot(variable.Value))
+                : (((Literal)context.Token).Value, null));
+            context.MoveNextRequired();
+            if (context.Token is not Operator { Character: '+' })
+                break;
+            context.MoveNextRequired();
+        }
 
         // The arguments `?` placeholders bind, which only a linked server
         // takes (`EXEC ('…', 1, @v OUTPUT) AT server`).
@@ -72,6 +86,26 @@ partial class Simulation
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+        // AS { LOGIN | USER } = 'name' runs the batch in that security
+        // context, reverting when it returns (probed 2026-10-02 against SQL
+        // Server 2025).
+        (bool IsLogin, string Name)? runAs = null;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.As })
+        {
+            var isLogin = context.GetNextRequired() switch
+            {
+                ReservedKeyword { Keyword: Keyword.User } => false,
+                UnquotedString { ContextualKeyword: ContextualKeyword.Login } => true,
+                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+            };
+            if (context.GetNextRequired() is not Operator { Character: '=' }
+                || context.GetNextRequired() is not Literal { Value: { IsNull: false } principal } || !SqlType.IsStringCategory(principal.Type))
+            {
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            runAs = (isLogin, principal.AsString);
+            context.MoveNextOptional();
+        }
         string? linkedServerName = null;
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.At })
         {
@@ -93,20 +127,35 @@ partial class Simulation
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
             throw SimulatedSqlException.MaximumNestingLevelExceeded();
 
-        var sqlValue = sqlExpression.Run(new RuntimeContext(
-            name => throw SimulatedSqlException.MustDeclareScalarVariable(name.Leaf),
-            batch));
-        if (sqlValue.Type is XmlSqlType)
-            throw SimulatedSqlException.ImplicitConversionNotAllowed("xml", "nvarchar");
-        if (sqlValue.IsNull)
+        var text = new System.Text.StringBuilder();
+        var maxText = VarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault);
+        foreach (var (literal, slot) in operands)
+        {
+            var part = slot?.Value ?? literal;
+            if (part.Type is XmlSqlType)
+                throw SimulatedSqlException.ImplicitConversionNotAllowed("xml", "nvarchar");
+            if (!part.IsNull)
+                _ = text.Append(SqlType.IsStringCategory(part.Type) ? part.AsString : part.CoerceTo(maxText).AsString);
+        }
+        if (text.Length == 0)
             yield break; // dynamic SQL of NULL → no-op (matches real SQL Server's lenient handling)
 
-        var sqlText = sqlValue.CoerceTo(VarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault)).AsString;
-        var dynamicBatch = linkedServerName is null
-            ? ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null)
-            : ExecuteAtLinkedServer(batch, linkedServerName, sqlText, arguments, insertExecSource);
-        foreach (var outcome in resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets))
-            yield return outcome;
+        var sqlText = text.ToString();
+        var impersonationDepth = connection.Security.ImpersonationDepth;
+        if (runAs is var (asLogin, asName))
+            ApplyExecuteAs(connection, connection.CurrentDatabase, asLogin, asName);
+        try
+        {
+            var dynamicBatch = linkedServerName is null
+                ? ExecuteDynamicBatch(batch, sqlText, preDeclaredVariables: null)
+                : ExecuteAtLinkedServer(batch, linkedServerName, sqlText, arguments, insertExecSource);
+            foreach (var outcome in resultSets is null ? dynamicBatch : ApplyResultSetsContract(dynamicBatch, resultSets))
+                yield return outcome;
+        }
+        finally
+        {
+            connection.Security.RevertTo(impersonationDepth);
+        }
         batch.CurrentStatement.SuppressErrorReset = true;
     }
 
@@ -132,9 +181,18 @@ partial class Simulation
     /// at exit. Probe-confirmed against SQL Server 2025.
     /// </para>
     /// </remarks>
-    private IEnumerable<SimulatedStatementOutcome> ParseSpExecuteSql(BatchContext batch, string? returnCodeVar, bool insertExecSource = false)
+    private IEnumerable<SimulatedStatementOutcome> ParseSpExecuteSql(BatchContext batch, string? returnCodeVar, bool insertExecSource = false, string? calledInDatabase = null)
     {
         var context = batch.Parser;
+
+        // A call with no statement is the procedure's own Msg 201, naming it
+        // (probed 2026-10-02 against SQL Server 2025).
+        if (IsStatementBoundary(context.Token))
+        {
+            if (batch.IsSkipping)
+                yield break;
+            throw SimulatedSqlException.ProcedureExpectsParameter("sp_executesql", "statement", state: 10);
+        }
 
         // Argument 1: SQL text (literal or @-variable, coerced to string).
         // A leading `@name =` is accepted and the name discarded: real binds
@@ -287,6 +345,8 @@ partial class Simulation
                     bound[i] = param.Default ?? throw ArgumentBindingError(SimulatedSqlException.ParameterizedQueryExpectsParameter(paramDefsText, sqlText, "@" + param.Name));
                     boundIsUntypedNull[i] = bound[i]!.Value.IsNull;
                 }
+                if (boundOutputSlots[i] is not null && !param.IsOutput)
+                    throw SimulatedSqlException.ParameterNotDeclaredOutput(param.Name).PinLine(0);
                 if (!boundIsUntypedNull[i])
                     AssignmentRules.RequireAssignable(bound[i]!.Value.Type, param.Type);
                 var initialValue = BindParameterValue(bound[i]!.Value, param.Type, param.DeclaredMaxLength, procedure: "");
@@ -308,7 +368,14 @@ partial class Simulation
         // including when an error of the batch's own ended it, so an error is
         // held until the status is written (probed 2026-09-24 against
         // SQL Server 2025), and what the batch sent before it still goes first.
-        var dynamicBatch = ExecuteDynamicBatch(batch, sqlText, preDeclared);
+        // A three-part name calls the procedure in that database, where the
+        // batch runs — `EXEC other.sys.sp_executesql` is the idiom for running
+        // dynamic SQL in another database (probed 2026-10-02 against SQL
+        // Server 2025).
+        var dynamicBatch = ExecuteDynamicBatch(batch, sqlText, preDeclared, viaSystemProcedure: true,
+            runsIn: calledInDatabase is null ? null
+                : this.Databases.TryGetValue(calledInDatabase, out var calledIn) ? calledIn
+                : throw SimulatedSqlException.DatabaseDoesNotExist(calledInDatabase));
         List<SimulatedStatementOutcome> outcomes = [];
         SimulatedSqlException? failure = null;
         try
@@ -323,12 +390,24 @@ partial class Simulation
 
         // Writeback: sp_executesql's OUTPUT params copy the dynamic batch's
         // final variable values back to the caller's slots.
+        // A value is assigned as SET assigns the variable, cut to its width,
+        // and one that doesn't convert is Msg 8114 state 2 at line 0, the
+        // variable kept (probed 2026-10-02 against SQL Server 2025).
+        SimulatedSqlException? writebackError = null;
         if (failure is null)
         {
             foreach (var (param, callerSlot) in outputBindings)
             {
-                if (preDeclared.TryGetValue(param.Name, out var slot))
-                    callerSlot.Value = slot.Value.CoerceTo(callerSlot.DeclaredType);
+                if (!preDeclared.TryGetValue(param.Name, out var slot))
+                    continue;
+                try
+                {
+                    callerSlot.Value = BindParameterValue(slot.Value, callerSlot.DeclaredType, callerSlot.DeclaredMaxLength, procedure: "", conversionState: 2);
+                }
+                catch (SimulatedSqlException refused)
+                {
+                    writebackError ??= refused;
+                }
             }
         }
 
@@ -342,6 +421,8 @@ partial class Simulation
             yield return outcome;
         if (failure is not null)
             ExceptionDispatchInfo.Throw(failure);
+        if (writebackError is not null)
+            throw writebackError;
         batch.CurrentStatement.SuppressErrorReset = true;
     }
 
@@ -387,22 +468,17 @@ partial class Simulation
             }
             return (slot.Value, outputSlot);
         }
-        if (context.Token is Literal lit)
+        var value = context.Token switch
         {
-            context.MoveNextOptional();
-            return (lit.Value, null);
-        }
-        if (context.Token is Numeric num)
-        {
-            context.MoveNextOptional();
-            return (num.Value, null);
-        }
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Null })
-        {
-            context.MoveNextOptional();
-            return (SqlValue.Null(SqlType.Int32), null);
-        }
-        throw SimulatedSqlException.SyntaxErrorNear(context);
+            Literal lit => lit.Value,
+            Numeric num => num.Value,
+            ReservedKeyword { Keyword: Keyword.Null } => SqlValue.Null(SqlType.Int32),
+            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+        };
+        context.MoveNextOptional();
+        return context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out }
+            ? throw SimulatedSqlException.ConstantPassedAsOutput()
+            : (value, null);
     }
 
     /// <summary>
@@ -645,13 +721,21 @@ partial class Simulation
     /// Dispatches a string of SQL as a fresh child batch. The child batch
     /// shares the outer connection (so transaction / temp-table / catalog
     /// state are shared) but has its own variable scope — outer
-    /// <c>@</c>-variables are invisible to the dynamic SQL.
+    /// <c>@</c>-variables are invisible to the dynamic SQL. The batch is one
+    /// nesting level below its caller, and <c>sp_executesql</c>'s two, the
+    /// procedure counting as one (<paramref name="viaSystemProcedure"/>;
+    /// probed 2026-10-02 against SQL Server 2025: <c>@@NESTLEVEL</c> reads 2
+    /// in an <c>EXEC('…')</c> a level-1 procedure runs, 3 in its
+    /// <c>sp_executesql</c>).
     /// </summary>
     private IEnumerable<SimulatedStatementOutcome> ExecuteDynamicBatch(
         BatchContext outerBatch,
         string sqlText,
-        Dictionary<string, VariableSlot>? preDeclaredVariables)
+        Dictionary<string, VariableSlot>? preDeclaredVariables,
+        bool viaSystemProcedure = false,
+        Database? runsIn = null)
     {
+        var nestingLevels = viaSystemProcedure ? 2 : 1;
         var connection = outerBatch.Connection;
         using var dynCommand = new SimulatedDbCommand(this, connection);
 #pragma warning disable CA2100 // dynamic SQL is the application's input; the caller is responsible for sanitization
@@ -670,8 +754,10 @@ partial class Simulation
         var procFrame = new ProcFrame("<dynamic-sql>", isDynamicSql: true);
         var innerBatch = new BatchContext(dynCommand, variables, procFrame) { ContinueOnError = ContinuesCalledBatch(outerBatch) };
 
-        connection.NestingLevel++;
+        connection.NestingLevel += nestingLevels;
         var enteredDatabase = connection.CurrentDatabase;
+        if (runsIn is not null)
+            connection.CurrentDatabase = runsIn;
         // SET NOCOUNT inside the dynamic batch binds for that batch only, the
         // same module scope USE and temp tables get (probe-confirmed for both
         // EXEC('…') and sp_executesql).
@@ -719,7 +805,7 @@ partial class Simulation
         }
         finally
         {
-            connection.NestingLevel--;
+            connection.NestingLevel -= nestingLevels;
             // A USE inside the dynamic batch binds for that batch only — the
             // caller resumes on the database it was on (probe-confirmed for
             // both EXEC('…') and sp_executesql). This is what makes
