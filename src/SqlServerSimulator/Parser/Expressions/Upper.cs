@@ -18,14 +18,14 @@ internal sealed class Upper(ParserContext context) : Expression
         var raw = source.Run(runtime);
         StringScalars.RejectLegacyLob(raw, "upper");
         if (raw.IsNull)
-            return SqlValue.Null(StringScalars.ResolveRewrittenType(raw.Type, runtime.Batch));
+            return SqlValue.Null(StringScalars.CaseMappedType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "upper");
         var uppered = (value.Type.Collation ?? Collation.Baseline).CaseMapping().ToUpper(value.AsString);
-        return SqlValue.FromString(StringScalars.ResolveRewrittenType(value.Type, runtime.Batch), uppered);
+        return SqlValue.FromString(StringScalars.CaseMappedType(value.Type, runtime.Batch), uppered);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        StringScalars.ResolveRewrittenType(StringScalars.BindSource(source, batch, resolveColumnType, "upper", coerced: false), batch);
+        StringScalars.CaseMappedType(StringScalars.BindSource(source, batch, resolveColumnType, "upper", coerced: false), batch);
 
     internal override string DebugDisplay() => $"UPPER({source.DebugDisplay()})";
 

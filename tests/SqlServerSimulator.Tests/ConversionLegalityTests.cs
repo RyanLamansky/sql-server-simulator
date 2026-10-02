@@ -199,4 +199,28 @@ public sealed class ConversionLegalityTests
         AreEqual(207, ex.Errors[0].Number);
         AreEqual(529, ex.Errors[1].Number);
     }
+
+    // --- timestamp converts as the binary(8) it is (probed 2026-10-02) ---
+
+    [TestMethod]
+    [DataRow("float", "timestamp")]
+    [DataRow("timestamp", "real")]
+    [DataRow("date", "timestamp")]
+    [DataRow("timestamp", "datetime2(7)")]
+    [DataRow("uniqueidentifier", "timestamp")]
+    [DataRow("timestamp", "sql_variant")]
+    [DataRow("xml", "timestamp")]
+    [DataRow("timestamp", "nvarchar(10)")]
+    [DataRow("timestamp", "nchar(10)")]
+    public void RowVersionOutsideItsFamilies_Msg529(string source, string target) => Refuses(source, target);
+
+    [TestMethod]
+    [DataRow("nvarchar(10)", "timestamp")]
+    [DataRow("timestamp", "varchar(10)")]
+    [DataRow("image", "timestamp")]
+    [DataRow("timestamp", "image")]
+    [DataRow("datetime", "timestamp")]
+    [DataRow("timestamp", "smalldatetime")]
+    [DataRow("money", "timestamp")]
+    public void RowVersionWithinItsFamilies_Converts(string source, string target) => Converts(source, target);
 }

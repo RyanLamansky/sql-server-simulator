@@ -285,7 +285,17 @@ internal sealed class JsonValue : Expression
     {
         JsonText.RequireDocumentAndPath(this.jsonInput, this.pathInput, batch, resolveColumnType, "json_value");
         if (this.returningType is null)
-            return TextResult(this.jsonInput.GetSqlType(batch, resolveColumnType), batch);
+        {
+            // A path whose collation disagrees with the document's leaves the
+            // result's unresolved (probed 2026-10-02 against SQL Server 2025:
+            // Msg 457 naming json_value for a varchar document).
+            var documentType = this.jsonInput.GetSqlType(batch, resolveColumnType);
+            var text = TextResult(documentType, batch);
+            return this.pathInput.GetSqlType(batch, resolveColumnType) is { Category: SqlTypeCategory.String } pathType && documentType.Category == SqlTypeCategory.String
+                && UnresolvedCollation.On(UnresolvedCollation.Settle(documentType, documentType, pathType, "json_value")) is { } unresolved
+                ? unresolved.Mark(text)
+                : text;
+        }
 
         // RETURNING is json-only: over a text document real reports the
         // clause itself as a syntax error.

@@ -164,7 +164,7 @@ internal sealed class Substring : Expression
 
         var inputWidth = StringScalars.DeclaredWidth(sourceType);
         return inputWidth > 0 && hasConstantLength
-            ? StringScalars.SizedResultType(sourceType, Math.Min(inputWidth, n), batch)
+            ? StringScalars.SizedResultType(sourceType, Math.Min(inputWidth, StringScalars.CharacterSpan(sourceType, n)), batch)
             : sourceType;
     }
 

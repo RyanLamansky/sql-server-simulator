@@ -38,13 +38,15 @@ internal readonly partial struct SqlValue
     /// </remarks>
     internal SqlValue CoerceDateTimeToStringWithStyle(SqlType target, int style)
     {
+        // A style the source can't satisfy names the target's family.
+        var targetWord = target is NVarcharSqlType or NCharSqlType or SystemNameSqlType ? "nvarchar" : "varchar";
         var formatted = this.Type switch
         {
-            _ when this.Type == SqlType.Date => FormatDateSourceWithStyle(this.AsDate, style),
+            _ when this.Type == SqlType.Date => FormatDateSourceWithStyle(this.AsDate, style, targetWord),
             _ when this.Type == SqlType.DateTime => FormatLegacyDateTimeSourceWithStyle(this.AsDateTime, style, "datetime"),
             _ when this.Type == SqlType.SmallDateTime => FormatLegacyDateTimeSourceWithStyle(this.AsSmallDateTime, style, "smalldatetime"),
             DateTime2SqlType dt2 => FormatDateTime2SourceWithStyle(this.AsDateTime2, dt2.precision, style),
-            TimeSqlType t => FormatTimeSourceWithStyle(this.AsTime, t.precision, style),
+            TimeSqlType t => FormatTimeSourceWithStyle(this.AsTime, t.precision, style, targetWord),
             DateTimeOffsetSqlType dto => FormatDateTimeOffsetSourceWithStyle(this.AsDateTimeOffset, dto.precision, style),
             _ => throw new NotSupportedException($"CONVERT style codes aren't implemented for {this.Type}."),
         };
@@ -58,7 +60,7 @@ internal readonly partial struct SqlValue
     /// (the "this style is never valid for date" set 14/114). Probe-
     /// confirmed split against SQL Server 2025.
     /// </summary>
-    private static string FormatDateSourceWithStyle(DateOnly date, int style) => style switch
+    private static string FormatDateSourceWithStyle(DateOnly date, int style, string targetWord) => style switch
     {
         0 or 100 or 9 or 109 => FormatLegacyDate(date),
         13 or 113 => $"{date:dd MMM yyyy}",
@@ -86,7 +88,7 @@ internal readonly partial struct SqlValue
         112 => date.ToString("yyyyMMdd", CultureInfo.InvariantCulture),
         130 => FormatHijriDateOnly(date.ToDateTime(TimeOnly.MinValue), withMonthName: true),
         131 => FormatHijriDateOnly(date.ToDateTime(TimeOnly.MinValue), withMonthName: false),
-        8 or 24 or 108 => throw SimulatedSqlException.ConvertingDataTypeError(SqlType.Date, "varchar"),
+        8 or 24 or 108 => throw SimulatedSqlException.ConvertingDataTypeError(SqlType.Date, targetWord),
         _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "date"),
     };
 
@@ -119,7 +121,7 @@ internal readonly partial struct SqlValue
             14 or 114 => Format24HourTime(time, ':', frac),
             130 => $"{FormatHijriDateOnly(dt, withMonthName: true)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, ':', frac, spaceBeforeAmPm: false)}",
             131 => $"{FormatHijriDateOnly(dt, withMonthName: false)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, ':', frac, spaceBeforeAmPm: false)}",
-            23 or 1 or 2 or 3 or 4 or 5 or 6 or 7 or 10 or 11 or 12 or 101 or 102 or 103 or 104 or 105 or 106 or 107 or 110 or 111 or 112 => FormatDateSourceWithStyle(date, style),
+            23 or 1 or 2 or 3 or 4 or 5 or 6 or 7 or 10 or 11 or 12 or 101 or 102 or 103 or 104 or 105 or 106 or 107 or 110 or 111 or 112 => FormatDateSourceWithStyle(date, style, "varchar"),
             _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, sourceTypeWord),
         };
     }
@@ -147,7 +149,7 @@ internal readonly partial struct SqlValue
             14 or 114 => Format24HourTime(time, '.', frac),
             130 => $"{FormatHijriDateOnly(dt, withMonthName: true)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', frac, spaceBeforeAmPm: false)}",
             131 => $"{FormatHijriDateOnly(dt, withMonthName: false)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', frac, spaceBeforeAmPm: false)}",
-            23 or 1 or 2 or 3 or 4 or 5 or 6 or 7 or 10 or 11 or 12 or 101 or 102 or 103 or 104 or 105 or 106 or 107 or 110 or 111 or 112 => FormatDateSourceWithStyle(date, style),
+            23 or 1 or 2 or 3 or 4 or 5 or 6 or 7 or 10 or 11 or 12 or 101 or 102 or 103 or 104 or 105 or 106 or 107 or 110 or 111 or 112 => FormatDateSourceWithStyle(date, style, "varchar"),
             _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "datetime2"),
         };
     }
@@ -162,7 +164,7 @@ internal readonly partial struct SqlValue
     /// align against); styles 22/130/131 DO pad the hour (probe-confirmed
     /// quirk).
     /// </summary>
-    private static string FormatTimeSourceWithStyle(TimeSpan ts, int precision, int style)
+    private static string FormatTimeSourceWithStyle(TimeSpan ts, int precision, int style, string targetWord)
     {
         var time = TimeOnly.FromTimeSpan(ts);
         var frac = ModernFractional(DateTime.MinValue.Add(ts), precision);
@@ -176,7 +178,7 @@ internal readonly partial struct SqlValue
             13 or 113 or 14 or 114 or 21 or 25 or 121 => Format24HourTime(time, '.', frac),
             126 or 127 => Format24HourTime(time, '.', IsoFraction(frac)),
             // Date-bearing styles fail with Msg 8114 — source can't supply the date portion (probe-confirmed).
-            1 or 2 or 3 or 4 or 5 or 6 or 7 or 10 or 11 or 12 or 23 or 101 or 102 or 103 or 104 or 105 or 106 or 107 or 110 or 111 or 112 => throw SimulatedSqlException.ConvertingDataTypeError("time", "varchar"),
+            1 or 2 or 3 or 4 or 5 or 6 or 7 or 10 or 11 or 12 or 23 or 101 or 102 or 103 or 104 or 105 or 106 or 107 or 110 or 111 or 112 => throw SimulatedSqlException.ConvertingDataTypeError("time", targetWord),
             _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "time"),
         };
     }
@@ -207,7 +209,7 @@ internal readonly partial struct SqlValue
             21 or 25 or 121 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', frac)} {offset}",
             126 => FormatIsoDateTimeOffset(dto, precision, withOffset: true),
             127 => FormatIsoDateTimeOffset(dto.ToUniversalTime(), precision, withOffset: false) + "Z",
-            23 or 1 or 2 or 3 or 4 or 5 or 6 or 7 or 10 or 11 or 12 or 101 or 102 or 103 or 104 or 105 or 106 or 107 or 110 or 111 or 112 => FormatDateSourceWithStyle(date, style),
+            23 or 1 or 2 or 3 or 4 or 5 or 6 or 7 or 10 or 11 or 12 or 101 or 102 or 103 or 104 or 105 or 106 or 107 or 110 or 111 or 112 => FormatDateSourceWithStyle(date, style, "varchar"),
             _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, "datetimeoffset"),
         };
     }
@@ -520,12 +522,13 @@ internal readonly partial struct SqlValue
     {
         var s = this.AsString;
         var sourceIsUnicode = this.Type is NVarcharSqlType or NCharSqlType or SystemNameSqlType;
+        var sourceWord = sourceIsUnicode ? "nvarchar" : "varchar";
         var bytes = style switch
         {
             0 => sourceIsUnicode ? SystemNameSqlType.Utf16LeBytes(s) : (this.Type.Collation ?? Collation.Baseline).StorageEncoding.GetBytes(s),
-            1 => ParseHexWithPrefix(s, requirePrefix: true),
-            2 => ParseHexWithPrefix(s, requirePrefix: false),
-            _ => throw SimulatedSqlException.InvalidStyleForCharacterString(style, sourceIsUnicode ? "nvarchar" : "varchar"),
+            1 => ParseHexWithPrefix(s, requirePrefix: true, sourceWord),
+            2 => ParseHexWithPrefix(s, requirePrefix: false, sourceWord),
+            _ => throw SimulatedSqlException.StyleNotSupported(style, sourceWord, "varbinary"),
         };
         return target is BinarySqlType bin
             ? FromBinaryPadded(bin, bytes)
@@ -536,24 +539,25 @@ internal readonly partial struct SqlValue
     /// Parses a hex string into a byte array for CONVERT styles 1 / 2.
     /// Style 1 requires a leading <c>"0x"</c>; style 2 requires its
     /// absence. Both demand an even number of hex digits and reject any
-    /// non-hex character — both failure paths raise Msg 8114, matching
-    /// real SQL Server.
+    /// non-hex character — both failure paths raise Msg 8114 naming the
+    /// source's family, matching real SQL Server. Trailing spaces, tabs and
+    /// line breaks are read past, leading ones are not (probed 2026-10-02
+    /// against SQL Server 2025).
     /// </summary>
-    private static byte[] ParseHexWithPrefix(string s, bool requirePrefix)
+    private static byte[] ParseHexWithPrefix(string s, bool requirePrefix, string sourceWord)
     {
-        var hasPrefix = s.StartsWith("0x", StringComparison.OrdinalIgnoreCase);
-        if (requirePrefix != hasPrefix)
-            throw SimulatedSqlException.ConvertingDataTypeError(VarcharSqlType.Get(0, Collation.Baseline, Coercibility.CoercibleDefault), "varbinary");
-        var hex = hasPrefix ? s[2..] : s;
-        if (hex.Length % 2 != 0)
-            throw SimulatedSqlException.ConvertingDataTypeError(VarcharSqlType.Get(0, Collation.Baseline, Coercibility.CoercibleDefault), "varbinary");
+        var text = s.AsSpan().TrimEnd(" \t\r\n");
+        var hasPrefix = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase);
+        var hex = hasPrefix ? text[2..] : text;
+        if (requirePrefix != hasPrefix || hex.Length % 2 != 0)
+            throw SimulatedSqlException.ConvertingDataTypeError(sourceWord, "varbinary");
         try
         {
             return Convert.FromHexString(hex);
         }
         catch (FormatException)
         {
-            throw SimulatedSqlException.ConvertingDataTypeError(VarcharSqlType.Get(0, Collation.Baseline, Coercibility.CoercibleDefault), "varbinary");
+            throw SimulatedSqlException.ConvertingDataTypeError(sourceWord, "varbinary");
         }
     }
 

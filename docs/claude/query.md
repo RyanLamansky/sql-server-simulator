@@ -291,7 +291,7 @@ A bare `SELECT COUNT(*), MAX(s)` over the same table is 24 ms here and 14 ms on 
 A deep page's median carries garbage-collection noise its minimum doesn't (`int` at 140k: 86 median, 39 minimum), since every row's tuple and keys survive to the selection.
 
 **The comparer was most of a sort's cost.**
-Profiled, the full sort by `nvarchar` spent 72% of its time inside `SQL_Latin1_General_CP1_CI_AS`'s compare, which read three frozen dictionaries per character; flat tables for U+0000–U+00FF (`Latin1Entry` in `Collation.SqlLatin1Sort.cs`) cut that sort from 650 ms to 355 ms, and every comparison under the default collation gains the same.
+Profiled, the full sort by `nvarchar` spent 72% of its time inside `SQL_Latin1_General_CP1_CI_AS`'s compare, which read three frozen dictionaries per character; flat tables for the low code points (the `WeightTable` array in `Collation.Latin1GeneralSort.cs`, which covers U+0000–U+024F) cut that sort from 650 ms to 355 ms, and every comparison under the default collation gains the same.
 The residual against real is its parallelism: the 150k-row sort is a single thread here against eight there.
 
 ## `SET ROWCOUNT n`

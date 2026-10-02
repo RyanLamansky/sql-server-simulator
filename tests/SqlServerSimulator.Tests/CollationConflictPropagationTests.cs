@@ -493,6 +493,61 @@ public sealed class CollationConflictPropagationTests
         }
     }
 
+    /// <summary>
+    /// A scalar that matches one argument against another refuses two
+    /// arguments whose collations don't resolve while compiling, as the
+    /// comparison operators do — Msg 468 naming itself (probed 2026-10-02
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select replace(a.s, b.s, 'x') from a, b", "replace")]
+    [DataRow("select replace('x', a.s, b.s) from a, b", "replace")]
+    [DataRow("select charindex(a.s, b.s) from a, b", "charindex")]
+    [DataRow("select patindex(a.s, b.s) from a, b", "patindex")]
+    [DataRow("select stuff(a.s, 1, 1, b.s) from a, b", "stuff")]
+    [DataRow("select translate(a.s, b.s, b.s) from a, b", "translate")]
+    [DataRow("select ltrim(a.s, b.s) from a, b", "ltrim")]
+    [DataRow("select rtrim(a.n, b.n) from a, b", "rtrim")]
+    [DataRow("select difference(a.s, b.s) from a, b", "difference")]
+    [DataRow("select greatest(a.s, b.s) from a, b", "GREATEST/LEAST")]
+    [DataRow("select regexp_replace(a.s, b.s, 'x') from a, b", "regexp_replace")]
+    [DataRow("select 1 from a, b where regexp_count(a.s, b.s) > 0", "regexp_count")]
+    public void MatchingScalar_UnresolvedArguments_Msg468(string sql, string operationName) =>
+        SeededCrossCollationTables().AssertSqlError(sql, 468, $"Cannot resolve the collation conflict between {ConflictPair} in the {operationName} operation.");
+
+    /// <summary><c>TRIM</c> reads its character set first, so the string's collation is named first.</summary>
+    [TestMethod]
+    public void Trim_NamesTheStringFirst() =>
+        SeededCrossCollationTables().AssertSqlError(
+            "select trim(b.s from a.s) from a, b",
+            468,
+            "Cannot resolve the collation conflict between \"Latin1_General_CI_AS\" and \"Latin1_General_CS_AS\" in the Trim operation.");
+
+    /// <summary>
+    /// The rows of a table value constructor settle one collation per column
+    /// as a <c>UNION ALL</c> does, an <c>INSERT … VALUES</c> included.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from (values ('a' collate Latin1_General_CS_AS), ('b' collate Latin1_General_CI_AS)) t(c)")]
+    [DataRow("create table v (c varchar(5)); insert v values ('x' collate Latin1_General_CS_AS), ('y' collate Latin1_General_CI_AS)")]
+    public void ValuesRows_TwoCollateClauses_Msg468(string sql) =>
+        new Simulation().AssertSqlError(sql, 468, "Cannot resolve the collation conflict between \"Latin1_General_CI_AS\" and \"Latin1_General_CS_AS\" in the UNION ALL operation.");
+
+    /// <summary>
+    /// The producers that can leave a result unresolved report where real
+    /// does: <c>IS [NOT] NULL</c> as its own operation, <c>CHOOSE</c> naming
+    /// itself, <c>QUOTENAME</c> at the output column and <c>JSON_VALUE</c> over
+    /// a <c>varchar</c> document at the function.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 1 from a, b where concat(a.n, b.n) is null", 4191, "Cannot resolve collation conflict for is operation.")]
+    [DataRow("select 1 from a, b where concat(a.n, b.n) is not null", 4191, "Cannot resolve collation conflict for is not operation.")]
+    [DataRow("select choose(1, a.s, b.s) from a, b", 457, "Implicit conversion of varchar value to varchar cannot be performed because the collation of the value is unresolved due to a collation conflict between \"Latin1_General_CS_AS\" and \"Latin1_General_CI_AS\" in CHOOSE operator.")]
+    [DataRow("select quotename(a.s, b.s) from a, b", 451, "Cannot resolve collation conflict between \"Latin1_General_CS_AS\" and \"Latin1_General_CI_AS\" in quotename operator occurring in SELECT statement column 1.")]
+    [DataRow("select json_value(a.s, b.s) from a, b", 457, "Implicit conversion of varchar value to varchar cannot be performed because the collation of the value is unresolved due to a collation conflict between \"Latin1_General_CS_AS\" and \"Latin1_General_CI_AS\" in json_value operator.")]
+    public void UnresolvingProducers_ReportAsReal(string sql, int number, string message) =>
+        SeededCrossCollationTables().AssertSqlError(sql, number, message);
+
     private static string OutputColumnMessage(string operatorName, string clause, int ordinal) =>
         $"Cannot resolve collation conflict between {ConflictPair} in {operatorName} operator occurring in {clause} statement column {ordinal}.";
 

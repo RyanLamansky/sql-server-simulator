@@ -53,7 +53,7 @@ internal sealed class Choose : Expression
         // numeric(2, 1); probed 2026-10-01), and a bare NULL has no type to
         // contribute (probed 2026-09-25 against SQL Server 2025: CHOOSE(2,
         // NULL, 'x') is 'x').
-        var t = PromoteValueArms(this.values, batch, resolveColumnType);
+        var t = PromoteValueArms(this.values, batch, resolveColumnType, "CHOOSE");
         this.cachedResultType = t;
         this.namingArm = FirstDecimalArm(this.values, batch, resolveColumnType);
         return t;

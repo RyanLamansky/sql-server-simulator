@@ -254,7 +254,8 @@ The table is the probed one — SQL Server 2025, 2026-08-05, every ordered pair 
 | anything but a character string or a binary | `hierarchyid` / `geography` / `geometry` |
 
 The CLR rows were probed 2026-09-25 against SQL Server 2025, and real names a CLR type in the message by its three-part name in the current database (`simulated.sys.hierarchyid`) and a literal decimal `numeric`.
-Types outside that grid (`rowversion`, alias types) are not in the table and keep whatever the value path decides.
+`timestamp` converts as the `binary(8)` it is — to and from the integer, decimal, money, ANSI string, binary (`image` included) and legacy `datetime` families — and refuses the rest, a Unicode string only as a target (probed 2026-10-02 against SQL Server 2025; `Cast.IsRefusedByRowVersion`).
+Alias types are not in the table and keep whatever the value path decides.
 A module body's Msg 529 **ends the bind report where it is**: real gathers name-resolution errors across a whole body but stops at this one, so a body whose first statement carries a conversion error reports it alone even when a later statement names a missing column, while a name error found first reports with the conversion behind it (probed 2026-08-05).
 Oracle: `ConversionLegalityTests`.
 
@@ -278,7 +279,7 @@ Oracle: `LegacyLobCastTests`.
 ## `TRY_CAST` / `TRY_CONVERT`
 Wrap regular CAST/CONVERT in try/catch that swallows documented "conversion failed" error numbers (returning typed NULL) while letting structural errors propagate.
 
-Swallow set (`Cast.IsConversionFailure`): **241** (datetime-from-string parse), **242** (datetime out-of-range), **244** (tinyint/smallint INT1/INT2 overflow), **245** (string→numeric parse), **248** (int overflow), **295** (smalldatetime parse), **8114** (decimal conversion), **8115** (generic arithmetic overflow), **8169** (uniqueidentifier-from-string), **8170** (uniqueidentifier→too-narrow-string), **9807** (CONVERT-style mismatch on string input).
+Swallow set (`Cast.IsConversionFailure`, widened by `Cast.TrySwallows`): **210** (a binary the legacy date-time layout can't read), **241** (datetime-from-string parse), **242** (datetime out-of-range), **244** (tinyint/smallint INT1/INT2 overflow), **245** (string→numeric parse), **248** (int overflow), **294** (character → `smallmoney` overflow), **295** (smalldatetime parse), **8114** (decimal conversion), **8115** (generic arithmetic overflow), **8169** (uniqueidentifier-from-string), **8170** (uniqueidentifier→too-narrow-string), **9807** (CONVERT-style mismatch on string input).
 
 NOT swallowed: Msg 529 (explicit-cast disallowed pair like `int → date`), Msg 243 (unknown target type), and any source-evaluation error that fires before the cast itself runs.
 `TRY_CAST(1/0 AS INT)` raises Msg 8134 on both — the divide-by-zero fires during operand evaluation, before the cast runs, and 8134 isn't in the swallow set either way.

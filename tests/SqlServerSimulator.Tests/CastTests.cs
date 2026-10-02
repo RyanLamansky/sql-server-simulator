@@ -1150,4 +1150,110 @@ public sealed class CastTests
         AreEqual($"Arithmetic overflow error converting {source} to data type numeric.", ex.Message);
         AreEqual(state, ex.State);
     }
+
+    /// <summary>
+    /// A conversion real refuses, with its number, state and wording (probed
+    /// 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select cast(cast(1.5 as money) as decimal(38, 38))", 234, 1, "There is insufficient result space to convert a money value to numeric.")]
+    [DataRow("select cast(cast(1.5 as smallmoney) as decimal(38, 38))", 292, 1, "There is insufficient result space to convert a smallmoney value to numeric.")]
+    [DataRow("select cast(cast(12345.6789 as money) as decimal(5, 2))", 8115, 8, "Arithmetic overflow error converting money to data type numeric.")]
+    [DataRow("select cast(cast('123' as char(5)) as decimal(38, 38))", 8115, 8, "Arithmetic overflow error converting varchar to data type numeric.")]
+    [DataRow("select cast(cast(N'7' as nvarchar(max)) as decimal(38, 38))", 8115, 8, "Arithmetic overflow error converting nvarchar to data type numeric.")]
+    [DataRow("select cast(cast('1753-01-01' as datetime) as decimal(38, 38))", 8115, 6, "Arithmetic overflow error converting datetime to data type numeric.")]
+    [DataRow("select cast(cast('2079-06-06' as smalldatetime) as decimal(38, 38))", 8115, 6, "Arithmetic overflow error converting smalldatetime to data type numeric.")]
+    [DataRow("select cast(cast(1 as bit) as decimal(38, 38))", 8115, 6, "Arithmetic overflow error converting tinyint to data type numeric.")]
+    [DataRow("select cast('1.79E+309' as real)", 8115, 2, "Arithmetic overflow error converting expression to data type real.")]
+    [DataRow("select cast('1' + char(0) as int)", 245, 1, "Conversion failed when converting the varchar value '1.' to data type int.")]
+    [DataRow("select cast('1' + char(0) as bigint)", 8114, 5, "Error converting data type varchar to bigint.")]
+    [DataRow("select cast('1' + char(0) as money)", 235, 0, "Cannot convert a char value to money. The char value has incorrect syntax.")]
+    [DataRow("select cast('+-1' as money)", 235, 0, "Cannot convert a char value to money. The char value has incorrect syntax.")]
+    [DataRow("select cast('99999999999' as smallmoney)", 294, 0, "The conversion from char data type to smallmoney data type resulted in a smallmoney overflow error.")]
+    [DataRow("select cast(N'99999999999' as smallmoney)", 8115, 2, "Arithmetic overflow error converting expression to data type smallmoney.")]
+    [DataRow("select cast(0x01 as xml)", 9403, 1, "XML parsing: line 0, character 0, unrecognized input signature")]
+    [DataRow("select cast(0xE9 as xml)", 9403, 1, "XML parsing: line 0, character 0, unrecognized input signature")]
+    [DataRow("select cast(cast('/1/2/' as hierarchyid) as binary(10))", 6207, 1, "Error converting sys.hierarchyid to fixed length binary type. The result would be padded and cannot be converted back.")]
+    [DataRow("select cast(cast('/1/2/' as hierarchyid) as varbinary(1))", 9801, 1, "Error converting sys.hierarchyid to binary. The result would be truncated.")]
+    [DataRow("declare @a numeric(18, 0) = 7, @b datetime = '2024-01-03'; select isnull(@a, @b)", 257, 3, "Implicit conversion from data type datetime to numeric is not allowed. Use the CONVERT function to run this query.")]
+    public void Cast_RefusesAsRealDoes(string sql, int number, int state, string message)
+    {
+        var ex = new Simulation().AssertSqlError(sql, number);
+        AreEqual(message, ex.Errors[0].Message);
+        AreEqual(state, ex.State);
+    }
+
+    /// <summary>
+    /// Values real's conversions produce where the simulator once differed
+    /// (probed 2026-10-02 against SQL Server 2025), rendered as text so a
+    /// binary result compares too.
+    /// </summary>
+    [TestMethod]
+    [DataRow("convert(varchar(20), cast(cast('-1e-400' as float) as varbinary(8)), 1)", "0x0000000000000000")]
+    [DataRow("convert(varchar(20), cast(cast('2.2250738585072009E-308' as float) as varbinary(8)), 1)", "0x0000000000000000")]
+    [DataRow("convert(varchar(20), cast(cast('-0' as float) as varbinary(8)), 1)", "0x8000000000000000")]
+    [DataRow("convert(varchar(20), cast(cast('1e-40' as real) as varbinary(4)), 1)", "0x000116C2")]
+    [DataRow("cast(cast('{6F9619FF-8B86-D011-B42D-00C04FD430C8}x' as uniqueidentifier) as varchar(36))", "6F9619FF-8B86-D011-B42D-00C04FD430C8")]
+    [DataRow("convert(varchar(20), cast(cast(N'7' as nvarchar(max)) as binary(5)), 1)", "0x3700200020")]
+    [DataRow("convert(varchar(20), cast(cast(N'7' as nvarchar(40)) as binary(5)), 1)", "0x3700000000")]
+    [DataRow("convert(varchar(20), cast(cast(cast(N'7' as nvarchar(max)) as timestamp) as varbinary(8)), 1)", "0x3700000000000000")]
+    [DataRow("convert(varchar(20), convert(varbinary(10), '41 ' + char(9) + char(13) + char(10), 2), 1)", "0x41")]
+    [DataRow("convert(varchar(20), convert(varbinary(10), '0x41 ', 1), 1)", "0x41")]
+    [DataRow("isnull(convert(varchar(20), try_cast(cast(0xFFFFFFFF as binary(4)) as datetime)), 'NULL')", "NULL")]
+    [DataRow("isnull(convert(varchar(20), try_cast(cast('2024-01-01' as date) as binary(2)), 1), 'NULL')", "NULL")]
+    [DataRow("convert(varchar(20), cast(cast('2024-01-01' as date) as binary(2)), 1)", "0x4546")]
+    [DataRow("case when try_cast(cast('/1/2/' as hierarchyid) as nvarchar(1)) is null then 'NULL' end", "NULL")]
+    [DataRow("isnull(convert(varchar(20), try_cast(cast('/1/2/' as hierarchyid) as binary(10)), 1), 'NULL')", "NULL")]
+    [DataRow("cast(cast(0.1 as decimal(5, 1)) - cast(0.1 as real) as varchar(20))", "0")]
+    public void Cast_ValueAsRealGives(string expression, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
+    /// <summary>
+    /// A hierarchyid too long for a string target is real's CLR truncation
+    /// failure, which <c>TRY_CAST</c> into a <c>varchar</c> still raises.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select cast(cast('/1/2/' as hierarchyid) as varchar(3))", "smaller size limit of 6 bytes")]
+    [DataRow("select try_cast(cast('/1/2/' as hierarchyid) as char(3))", "smaller size limit of 6 bytes")]
+    [DataRow("select cast(cast('/1/2/' as hierarchyid) as nvarchar(1))", "smaller size limit of 2 bytes")]
+    public void Cast_HierarchyIdTooLongForString_RaisesTruncation(string sql, string limit)
+    {
+        var ex = new Simulation().AssertSqlError(sql, 6522);
+        Contains("System.Data.SqlServer.TruncationException: Trying to convert return value or output parameter of size 10 bytes", ex.Errors[0].Message);
+        Contains(limit, ex.Errors[0].Message);
+    }
+
+    /// <summary>A MAX string that doesn't parse as a hierarchyid fails at state 1, a bounded one at 2.</summary>
+    [TestMethod]
+    [DataRow("varchar(max)", 1)]
+    [DataRow("nvarchar(max)", 1)]
+    [DataRow("varchar(10)", 2)]
+    public void Cast_UnreadableHierarchyIdText_StateByWidth(string type, int state) =>
+        AreEqual(state, new Simulation().AssertSqlError($"select cast(cast('abc' as {type}) as hierarchyid)", 6522).State);
+
+    /// <summary>
+    /// A <c>datetime</c> compares with a <c>datetime2</c> or
+    /// <c>datetimeoffset</c> at its exact 1/300-second value (probed 2026-10-02
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("@d = cast('2024-01-01 00:00:00.0033333' as datetime2)", 0)]
+    [DataRow("@d > cast('2024-01-01 00:00:00.0033333' as datetime2)", 1)]
+    [DataRow("@d < cast('2024-01-01 00:00:00.0033334' as datetime2)", 1)]
+    [DataRow("@d > cast('2024-01-01 00:00:00.003' as datetime2(3))", 1)]
+    [DataRow("cast('2024-01-01 00:00:00.0033333' as datetime2) in (@d)", 0)]
+    [DataRow("@d = cast('2024-01-01 00:00:00.0033333 +00:00' as datetimeoffset)", 0)]
+    [DataRow("cast('2024-01-01 00:00:00.010' as datetime) = cast('2024-01-01 00:00:00.01' as datetime2)", 1)]
+    public void DateTimeAgainstDateTime2_ComparesExactly(string predicate, int expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"declare @d datetime = '2024-01-01 00:00:00.003'; select case when {predicate} then 1 else 0 end"));
+
+    /// <summary>A CONVERT style the conversion can't take names the target's own family.</summary>
+    [TestMethod]
+    [DataRow("select convert(nvarchar(30), cast('2024-03-05' as date), 8)", 8114, "Error converting data type date to nvarchar.")]
+    [DataRow("select convert(nvarchar(30), cast('07:08' as time), 101)", 8114, "Error converting data type time to nvarchar.")]
+    [DataRow("select convert(varbinary(10), '0x41FF', 3)", 9809, "The style 3 is not supported for conversions from varchar to varbinary.")]
+    [DataRow("select convert(varbinary(10), N'0x41FF', 9)", 9809, "The style 9 is not supported for conversions from nvarchar to varbinary.")]
+    [DataRow("select convert(varbinary(10), N'0x41FF', 2)", 8114, "Error converting data type nvarchar to varbinary.")]
+    public void Convert_UnsupportedStyle_NamesTheFamilies(string sql, int number, string message) =>
+        new Simulation().AssertSqlError(sql, number, message);
 }

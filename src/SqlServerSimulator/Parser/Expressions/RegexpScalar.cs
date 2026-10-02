@@ -312,8 +312,12 @@ internal sealed class RegexpScalar : Expression
         }
     }
 
-    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        this.ResolveResultType(this.arguments[0].GetSqlType(batch, resolveColumnType), batch);
+    public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        var inputType = this.arguments[0].GetSqlType(batch, resolveColumnType);
+        StringScalars.RequireResolvableCollations(LowerNameFor(this.kind), inputType, this.arguments[1].GetSqlType(batch, resolveColumnType));
+        return this.ResolveResultType(inputType, batch);
+    }
 
     /// <summary>
     /// COUNT / INSTR project <c>int</c>. REPLACE can grow, so it projects the

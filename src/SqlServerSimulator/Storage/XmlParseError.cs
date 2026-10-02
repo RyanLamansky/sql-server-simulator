@@ -11,6 +11,7 @@ internal enum XmlParseError : byte
     UnexpectedEndOfInput,
     UnrecognizedEncoding,
     UnableToSwitchEncoding,
+    UnrecognizedInputSignature,
     WhitespaceExpected,
     SemicolonExpected,
     GreaterThanExpected,

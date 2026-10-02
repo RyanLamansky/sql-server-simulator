@@ -184,7 +184,7 @@ internal static class StringScalars
     {
         var type = BindSource(source, batch, resolveColumnType, functionLowerName, coerced: false);
         if (trimChars is not null)
-            _ = BindArgument(trimChars, batch, resolveColumnType, functionLowerName, argumentIndex: 2);
+            RequireResolvableCollations(functionLowerName, type, BindArgument(trimChars, batch, resolveColumnType, functionLowerName, argumentIndex: 2));
         return type;
     }
 
@@ -490,9 +490,9 @@ internal static class StringScalars
         {
             if (Collation.Resolve(resolved ?? Collation.Baseline, coercibility, operands[i]) is not { } step)
             {
-                // Unresolvable peer collations are Msg 468 territory at a
-                // comparison site; this scalar keeps the database default
-                // rather than raising from a code path that never has.
+                // Unresolvable peers are refused while compiling
+                // (RequireResolvableCollations); a value whose type only the
+                // runtime knows keeps the database default.
                 resolved = null;
                 break;
             }
@@ -501,6 +501,70 @@ internal static class StringScalars
         }
 
         return resolved ?? batch.CurrentDatabase.Collation;
+    }
+
+    /// <summary>
+    /// Raises <b>Msg 468</b> naming <paramref name="operationName"/> when the
+    /// string operands of a scalar that matches one argument against another
+    /// carry collations that don't resolve to one — two columns of different
+    /// implicit collations, or two disagreeing <c>COLLATE</c> clauses — the
+    /// later operand's collation named first, as real names them while
+    /// compiling (probed 2026-10-02 against SQL Server 2025 over <c>REPLACE</c>,
+    /// <c>CHARINDEX</c>, <c>PATINDEX</c>, <c>STUFF</c>, <c>TRANSLATE</c>, the
+    /// <c>TRIM</c> family, <c>DIFFERENCE</c>, <c>GREATEST</c> / <c>LEAST</c>
+    /// and the <c>REGEXP_*</c> scalars). A non-string operand, and one already
+    /// carrying an unresolved collation, which its own gate reports, are
+    /// passed over.
+    /// </summary>
+    public static void RequireResolvableCollations(string operationName, params ReadOnlySpan<SqlType> operands)
+    {
+        Collation? settled = null;
+        var rank = Coercibility.CoercibleDefault;
+        foreach (var operand in operands)
+        {
+            if (operand.Category != SqlTypeCategory.String || operand.Collation is null || operand.Coercibility == Coercibility.NoCollation)
+                continue;
+            if (settled is null)
+            {
+                (settled, rank) = (operand.Collation, operand.Coercibility);
+                continue;
+            }
+            (settled, rank) = Collation.Resolve(settled, rank, operand) is { } step
+                ? (step.Collation, step.Coercibility)
+                : throw SimulatedSqlException.CollationConflict(operand.Collation.Name, settled.Name, operationName);
+        }
+    }
+
+    /// <summary>
+    /// The width <paramref name="characters"/> characters can take in
+    /// <paramref name="type"/>'s storage: two UTF-16 units each under a
+    /// supplementary-character collation, four bytes each in a UTF-8
+    /// <c>varchar</c>, one otherwise — what <c>LEFT</c>, <c>RIGHT</c> and
+    /// <c>SUBSTRING</c> with a constant count size their result by (probed
+    /// 2026-10-02 against SQL Server 2025: <c>LEFT(&lt;nvarchar(5)&gt;, 2)</c>
+    /// is <c>nvarchar(4)</c> under <c>Latin1_General_100_CI_AS_SC</c>).
+    /// </summary>
+    public static int CharacterSpan(SqlType type, int characters)
+    {
+        var bounded = Math.Min(characters, 8000);
+        return type is NVarcharSqlType or NCharSqlType && type.Collation?.IsSupplementaryCharacterAware == true ? bounded * 2
+            : type is VarcharSqlType or CharSqlType && type.Collation?.AnsiCodePage == 65001 ? bounded * 4
+            : bounded;
+    }
+
+    /// <summary>
+    /// <c>UPPER</c> / <c>LOWER</c>'s result: the rewritten type, widened
+    /// eightfold for a bounded UTF-8 <c>varchar</c>, as real sizes it for a case
+    /// mapping that may lengthen the bytes (probed 2026-10-02 against SQL
+    /// Server 2025: <c>UPPER(&lt;varchar(5)&gt;)</c> under a <c>_UTF8</c>
+    /// collation is <c>varchar(40)</c>).
+    /// </summary>
+    public static SqlType CaseMappedType(SqlType sourceType, BatchContext batch)
+    {
+        var rewritten = ResolveRewrittenType(sourceType, batch);
+        return rewritten is VarcharSqlType { length: > 0 } bounded && bounded.Collation?.AnsiCodePage == 65001
+            ? VarcharSqlType.Get(Math.Min(8000, bounded.length * 8), bounded.Collation, bounded.Coercibility)
+            : rewritten;
     }
 
     /// <summary>

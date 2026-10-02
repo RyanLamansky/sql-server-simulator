@@ -123,14 +123,13 @@ internal static partial class BuiltInResources
         ], EnumerateSysDatabases);
 
         // sys.fn_helpcollations() — table-valued metadata function listing the
-        // collations the simulator recognizes. Real SQL Server emits ~5540
-        // rows; the simulator emits the whitelist defined in Collation.Recognized
-        // (currently 2). Each row carries the canonical name + a human
-        // description, matching real SQL Server's column shape.
+        // collations the simulator recognizes, each row the canonical name and
+        // a human description, both NOT NULL as real reports them (probed
+        // 2026-10-02 against SQL Server 2025).
         Sys("fn_helpcollations",
         [
-            new("name", SqlType.SystemName, 128, true),
-            new("description", SqlType.NVarchar, 1000, true),
+            new("name", SqlType.SystemName, 128, false),
+            new("description", SqlType.NVarchar, 1000, false),
         ], EnumerateFnHelpCollations);
 
         // sys.servers: the local instance projects as row 0 (is_linked = 0);

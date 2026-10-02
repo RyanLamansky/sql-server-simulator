@@ -99,8 +99,13 @@ internal sealed class QuoteName : Expression
         var type = this.name.GetSqlType(batch, resolveColumnType);
         // The name converts to nvarchar, which an xml or sql_variant can't do
         // implicitly (Msg 257, probed 2026-09-25 against SQL Server 2025).
-        return type is XmlSqlType or SqlVariantSqlType
-            ? throw SimulatedSqlException.ImplicitConversionNotAllowed(type.SqlServerName, "nvarchar")
+        if (type is XmlSqlType or SqlVariantSqlType)
+            throw SimulatedSqlException.ImplicitConversionNotAllowed(type.SqlServerName, "nvarchar");
+        // A delimiter whose collation disagrees with the name's leaves the
+        // result's unresolved, which its consumer reports (probed 2026-10-02
+        // against SQL Server 2025: Msg 451 naming quotename in a select list).
+        return this.delimiter?.GetSqlType(batch, resolveColumnType) is { Category: SqlTypeCategory.String } delimiterType && type.Category == SqlTypeCategory.String
+            ? UnresolvedCollation.Settle(ResultType(type), type, delimiterType, "quotename")
             : ResultType(type);
     }
 

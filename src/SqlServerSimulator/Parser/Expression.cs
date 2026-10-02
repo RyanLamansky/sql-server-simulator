@@ -1293,9 +1293,10 @@ internal abstract class Expression : ExpressionNode
     /// the unification failure there for <c>COALESCE</c> too (probe-confirmed:
     /// <c>COALESCE</c> desugars to <c>CASE</c>, so its message says
     /// <c>CASE</c>), while <c>ISNULL</c>, which takes the first argument's
-    /// collation outright rather than unifying, never conflicts.</para>
+    /// collation outright rather than unifying, never conflicts. <c>CHOOSE</c>
+    /// names itself (probed 2026-10-02 against SQL Server 2025).</para>
     /// </summary>
-    internal static SqlType PromoteValueArms(ReadOnlySpan<Expression> arms, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    internal static SqlType PromoteValueArms(ReadOnlySpan<Expression> arms, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType, string operatorName = "CASE")
     {
         var branches = new (SqlType, int, Expression)[arms.Length];
         var count = 0;
@@ -1311,7 +1312,7 @@ internal abstract class Expression : ExpressionNode
                 {
                     // Right-then-left naming, matching every other collation
                     // conflict message: the arm being folded in is named first.
-                    stringSoFar = UnresolvedCollation.Settle(SqlType.Promote(accumulated, armType), accumulated, armType, "CASE");
+                    stringSoFar = UnresolvedCollation.Settle(SqlType.Promote(accumulated, armType), accumulated, armType, operatorName);
                 }
                 else
                 {

@@ -38,10 +38,14 @@ internal sealed partial class Selection
         SqlType[] schema = emitOrdinal ? [valueColumnType, SqlType.BigInt] : [valueColumnType];
         string[] columnNames = emitOrdinal ? ["value", "ordinal"] : ["value"];
 
+        // Both columns are NOT NULL (probed 2026-10-02 against SQL Server 2025).
         return new Selection(schema, columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            (batch, outerResolver) => EnumerateStringSplitRows(input, separator, schema, emitOrdinal, valueColumnType, batch, outerResolver));
+            (batch, outerResolver) => EnumerateStringSplitRows(input, separator, schema, emitOrdinal, valueColumnType, batch, outerResolver))
+        {
+            ColumnNullability = emitOrdinal ? [false, false] : [false],
+        };
     }
 
     private static IEnumerable<byte[]> EnumerateStringSplitRows(

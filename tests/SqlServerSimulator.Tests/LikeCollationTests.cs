@@ -348,4 +348,20 @@ public sealed class LikeCollationTests
 
     private static int Rows(string condition) =>
         new Simulation().ExecuteReader($"select 1 where {condition}").EnumerateRecords().Count();
+
+    /// <summary>
+    /// Under the Latin1-General tables a ligature matches its letters whole and
+    /// half of one matches nothing, while sort order 52's varchar data keeps
+    /// the ligature a letter of its own (probed 2026-10-02 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("iif(N'ß' collate Latin1_General_CI_AS like N'ss', 1, 0)", 1)]
+    [DataRow("iif(N'ß' collate Latin1_General_CI_AS like N's%', 1, 0)", 0)]
+    [DataRow("iif(N'straße' collate Latin1_General_100_CI_AS like N'%ss%', 1, 0)", 1)]
+    [DataRow("charindex(N'ss', N'aßb' collate Latin1_General_CI_AS)", 2)]
+    [DataRow("charindex(N'ae', N'xÆy' collate SQL_Latin1_General_CP1_CI_AS)", 2)]
+    [DataRow("iif('ß' collate SQL_Latin1_General_CP1_CI_AS like 'ss', 1, 0)", 0)]
+    public void Ligature_MatchesItsLettersWhole(string expression, int expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
 }

@@ -106,6 +106,10 @@ internal readonly partial struct SqlValue
             // raises here rather than surviving to its first read.
             return target is XmlSqlType && this.Type is not XmlSqlType
                 ? this.CoerceToXml(preserveWhitespace: false)
+                : this.Type is VarcharSqlType or CharSqlType or TextSqlType && target is VarcharSqlType or CharSqlType
+                    && this.Type.Collation is { } sourceCollation && target.Collation is { } targetCollation
+                    && sourceCollation.StorageEncoding != targetCollation.StorageEncoding
+                    ? MoveToCodePage(this.AsString, this.Type is VarcharSqlType { length: > 0 } source ? source.length : null, target, targetCollation)
                 : FromString(target, this.AsString);
         }
 
@@ -195,7 +199,10 @@ internal readonly partial struct SqlValue
         if (SqlType.IsStringCategory(this.Type) && target is VarbinarySqlType)
             return FromVarbinary(EncodeStringForBinary(this.AsString, this.Type));
         if (SqlType.IsStringCategory(this.Type) && target is BinarySqlType targetStringToBinary)
-            return FromBinary(targetStringToBinary, EncodeStringForBinary(this.AsString, this.Type));
+        {
+            var encoded = EncodeStringForBinary(this.AsString, this.Type);
+            return FromBinary(targetStringToBinary, this.Type is NVarcharSqlType { length: SqlType.MaxLengthSentinel } ? PadWithUnicodeSpaces(encoded, targetStringToBinary.length) : encoded);
+        }
 
         // Integer family → binary / varbinary: big-endian native-width two's-
         // complement bytes (bit/tinyint → 1, smallint → 2, int → 4, bigint →
@@ -248,7 +255,12 @@ internal readonly partial struct SqlValue
         }
         if (target is RowVersionSqlType)
         {
-            return FromRowVersion(System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(this.CoerceTo(SqlType.GetBinary(8)).AsBytes));
+            // A string pads with zeros here whatever its type, an
+            // nvarchar(max) included (probed 2026-10-02 against SQL Server 2025).
+            var asBinary = SqlType.IsStringCategory(this.Type)
+                ? FromBinary(SqlType.GetBinary(8), EncodeStringForBinary(this.AsString, this.Type))
+                : this.CoerceTo(SqlType.GetBinary(8));
+            return FromRowVersion(System.Buffers.Binary.BinaryPrimitives.ReadInt64BigEndian(asBinary.AsBytes));
         }
 
         // decimal → binary: the numeric byte form DecodeNumericFromBytes reads
@@ -295,9 +307,31 @@ internal readonly partial struct SqlValue
         // hierarchyid ↔ string: the canonical /1/2/ path text both ways, the
         // conversion a CASE or a comparison against a string literal needs.
         if (this.Type is HierarchyIdSqlType && SqlType.IsStringCategory(target))
-            return FromString(target, HierarchyIdSqlType.PathToString(this.AsHierarchyId));
+        {
+            var path = HierarchyIdSqlType.PathToString(this.AsHierarchyId);
+            var limit = target switch
+            {
+                VarcharSqlType { length: > 0 } v => v.length,
+                NVarcharSqlType { length: > 0 } n => n.length,
+                CharSqlType c => c.length,
+                NCharSqlType nc => nc.length,
+                _ => int.MaxValue,
+            };
+            return path.Length > limit
+                ? throw SimulatedSqlException.HierarchyIdStringTruncated(path.Length, limit)
+                : FromString(target, path);
+        }
         if (target is HierarchyIdSqlType && SqlType.IsStringCategory(this.Type))
-            return FromHierarchyId(HierarchyIdSqlType.ParsePath(this.AsString));
+        {
+            try
+            {
+                return FromHierarchyId(HierarchyIdSqlType.ParsePath(this.AsString));
+            }
+            catch (SimulatedSqlException) when (this.Type is VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel })
+            {
+                throw SimulatedSqlException.HierarchyIdParseFailed(this.AsString, state: 1);
+            }
+        }
 
         // An ANSI string reaches image as its code-page bytes; a Unicode one is
         // real's Msg 529 (the explicit-conversion table's image row).
@@ -311,10 +345,20 @@ internal readonly partial struct SqlValue
         // and hands back a non-canonical string without complaint and raises
         // only when a method decodes it (probed 2026-09-25 against SQL Server
         // 2025), which AsHierarchyId's canonical decode reproduces.
-        if (this.Type is HierarchyIdSqlType && target is VarbinarySqlType)
-            return FromVarbinary(this.AsHierarchyIdBytes);
+        // A binary target too short is refused rather than cut, and a
+        // binary(N) longer than the bytes rather than padded.
+        if (this.Type is HierarchyIdSqlType && target is VarbinarySqlType hierarchyToVarbinary)
+        {
+            return hierarchyToVarbinary.length > 0 && this.AsHierarchyIdBytes.Length > hierarchyToVarbinary.length
+                ? throw SimulatedSqlException.HierarchyIdBinaryMismatch(truncated: true)
+                : FromVarbinary(this.AsHierarchyIdBytes);
+        }
         if (this.Type is HierarchyIdSqlType && target is BinarySqlType hierarchyToBinary)
-            return FromBinary(hierarchyToBinary, this.AsHierarchyIdBytes);
+        {
+            return this.AsHierarchyIdBytes.Length == hierarchyToBinary.length
+                ? FromBinary(hierarchyToBinary, this.AsHierarchyIdBytes)
+                : throw SimulatedSqlException.HierarchyIdBinaryMismatch(truncated: this.AsHierarchyIdBytes.Length > hierarchyToBinary.length);
+        }
         if (this.Type is VarbinarySqlType or BinarySqlType && target is HierarchyIdSqlType)
             return FromHierarchyIdBytes(this.AsBytes);
 
@@ -1076,12 +1120,15 @@ internal readonly partial struct SqlValue
                 trimmed = string.Concat(trimmed.AsSpan(0, 1), digits);
         }
 
-        if (!long.TryParse(trimmed, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var parsed))
+        // .NET's parsers let trailing NULs through; real reads one as any
+        // other stray character.
+        var hasNul = trimmed.Contains('\0', StringComparison.Ordinal);
+        if (hasNul || !long.TryParse(trimmed, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var parsed))
         {
             // long.TryParse fails for both bad format and out-of-long-range.
             // BigInteger disambiguates: if it parses as BigInteger, it's
             // valid digits — overflow rather than format error.
-            if (System.Numerics.BigInteger.TryParse(trimmed, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out _))
+            if (!hasNul && System.Numerics.BigInteger.TryParse(trimmed, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out _))
                 throw OverflowOnConvert(sourceType, source, target);
             // A bigint target reports the 8114 form where the narrower integers
             // report Msg 245 (probed 2026-09-25 against SQL Server 2025).
@@ -1191,6 +1238,8 @@ internal readonly partial struct SqlValue
                 target.SqlServerName, this.CoerceTo(SqlType.BigInt).AsInt64.ToString(CultureInfo.InvariantCulture), state: 3)
             : SqlType.IsMoneyCategory(this.Type)
                 ? SimulatedSqlException.InsufficientResultSpaceForMoneyToSmallMoney()
+            : target == SqlType.SmallMoney && this.Type is CharSqlType or VarcharSqlType
+                ? SimulatedSqlException.CharToSmallMoneyOverflow()
                 : SimulatedSqlException.ArithmeticOverflow(target.SqlServerName);
     }
 
@@ -1293,12 +1342,13 @@ internal readonly partial struct SqlValue
             span = span[1..];
         }
         // Optional currency symbol — drop one if present, else carry on.
-        if (span.Length > 0 && IsCurrencySymbol(span[0]))
+        var hadSymbol = span.Length > 0 && IsCurrencySymbol(span[0]);
+        if (hadSymbol)
             span = span[1..];
-        // A second sign is allowed when the first slot held the symbol
-        // (e.g. <c>'$-5.95'</c>); otherwise a duplicate sign here would
-        // be a parse error.
-        if (span.Length > 0 && (span[0] == '+' || span[0] == '-'))
+        // A second sign is allowed only after the symbol (e.g.
+        // <c>'$-5.95'</c>); a doubled sign without one is unreadable
+        // ('+-1' is Msg 235, probed 2026-10-02 against SQL Server 2025).
+        if (hadSymbol && span.Length > 0 && (span[0] == '+' || span[0] == '-'))
         {
             negative ^= span[0] == '-';
             span = span[1..];
@@ -1317,7 +1367,7 @@ internal readonly partial struct SqlValue
         // decimal point alone is 0 too ('.' and '-.', probed 2026-09-25).
         if (body.Length == 0 || body is ".")
             return 0;
-        return body.IndexOfAny(['e', 'E']) >= 0
+        return body.IndexOfAny(['e', 'E', '\0']) >= 0
             || !decimal.TryParse(
                 body,
                 System.Globalization.NumberStyles.AllowDecimalPoint,
@@ -1444,8 +1494,79 @@ internal readonly partial struct SqlValue
         {
             throw SimulatedSqlException.StringConversionToNumberFailed(sourceType, target == SqlType.Real ? "real" : "float");
         }
-        // A number past float's range is an overflow rather than unreadable.
-        return double.IsInfinity(d) ? throw SimulatedSqlException.ArithmeticOverflow("float") : d;
+        // A number past float's range is an overflow rather than unreadable,
+        // named for the target; one below the smallest normal double reads as
+        // a positive zero, while a written zero keeps its sign (probed
+        // 2026-10-02 against SQL Server 2025: '2.2250738585072009E-308' and
+        // '-1e-400' are 0, '-0' is -0).
+        return double.IsInfinity(d) ? throw SimulatedSqlException.ArithmeticOverflow(target == SqlType.Real ? "real" : "float")
+            : !double.IsNormal(d) && (d != 0 || !IsZeroMantissa(trimmed)) ? 0.0
+            : d;
+    }
+
+    /// <summary>
+    /// ANSI text taken into another code page's collation is converted there —
+    /// best fit or '?' — within its own declared byte budget, whole characters
+    /// only: compared with <c>'ss' COLLATE &lt;a _UTF8 name&gt;</c>, a
+    /// <c>varchar(1)</c> <c>'ß'</c> reads empty, and against a code page 850
+    /// name <c>'Ÿ'</c> reads <c>'Y'</c> (probed 2026-10-02 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static SqlValue MoveToCodePage(string text, int? sourceLength, SqlType target, Collation targetCollation)
+    {
+        if (Ascii.IsValid(text))
+            return FromString(target, text);
+        var stored = RowEncoder.StorageForm(FromString(target, text), target);
+        var budget = sourceLength ?? (target is VarcharSqlType { length: > 0 } bounded ? bounded.length : (int?)null);
+        return target is VarcharSqlType && budget is int bytes
+            && Collation.ClipToByteBudget(stored.AsString, bytes, targetCollation.StorageEncoding) is var clipped
+            && clipped.Length != stored.AsString.Length
+                ? FromString(target, clipped)
+                : stored;
+    }
+
+    /// <summary>
+    /// An <c>nvarchar(max)</c> value fills the rest of a <c>binary(N)</c> with
+    /// UTF-16 spaces rather than zeros — <c>CAST(CAST(N'7' AS nvarchar(max)) AS
+    /// binary(5))</c> is <c>0x3700200020</c>, where a bounded <c>nvarchar</c> or
+    /// a <c>varchar(max)</c> pads with zeros (probed 2026-10-02 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static byte[] PadWithUnicodeSpaces(byte[] bytes, int length)
+    {
+        if (bytes.Length >= length)
+            return bytes;
+        var padded = new byte[length];
+        bytes.CopyTo(padded, 0);
+        for (var i = bytes.Length; i < length; i += 2)
+            padded[i] = 0x20;
+        return padded;
+    }
+
+    /// <summary>Whether the digits ahead of a numeric text's exponent are all zero.</summary>
+    private static bool IsZeroMantissa(ReadOnlySpan<char> text)
+    {
+        var exponent = text.IndexOfAny('e', 'E');
+        return !(exponent < 0 ? text : text[..exponent]).ContainsAnyInRange('1', '9');
+    }
+
+    /// <summary>
+    /// Whether these bytes can't open a UTF-8 document — a control character
+    /// other than tab, line feed or carriage return, or a lead byte starting no
+    /// valid sequence — which real refuses before any parse, at line 0 (probed
+    /// 2026-10-02 against SQL Server 2025: 0x01, 0x80, 0xE9, 0xFFFF and 0xEFBB
+    /// are Msg 9403; 0x09, 0x7F and 0xC3A9 read).
+    /// </summary>
+    private static bool OpensNoUtf8Document(byte[] bytes)
+    {
+        if (bytes.Length == 0)
+            return false;
+        if (bytes[0] < 0x20)
+            return bytes[0] is not (0x09 or 0x0A or 0x0D);
+        if (bytes[0] < 0x80)
+            return false;
+        _ = System.Text.Unicode.Utf8.ToUtf16(bytes.AsSpan(0, Math.Min(bytes.Length, 4)), stackalloc char[4], out var read, out _, replaceInvalidSequences: false, isFinalBlock: false);
+        return read == 0;
     }
 
     /// <summary>
@@ -1495,6 +1616,9 @@ internal readonly partial struct SqlValue
             case [0x00, 0x3C, ..]:
                 return (StrictXmlEncoding(Encoding.BigEndianUnicode).GetString(bytes), true);
         }
+
+        if (OpensNoUtf8Document(bytes))
+            throw SimulatedSqlException.XmlParsingFailed(XmlParseError.UnrecognizedInputSignature, 0, 0);
 
         var encoding = Encoding.UTF8;
         if (DeclaredXmlEncoding().Match(Encoding.Latin1.GetString(bytes, 0, Math.Min(bytes.Length, 200))) is { Success: true } declared)
@@ -1557,7 +1681,7 @@ internal readonly partial struct SqlValue
         if (remainder * 2 >= unitsPerDay)
             quotient++;
         return quotient >= System.Numerics.BigInteger.Pow(10, Decimal38.MaxPrecision)
-            ? throw SimulatedSqlException.ArithmeticOverflow("numeric")
+            ? throw SimulatedSqlException.ArithmeticOverflowConverting(this.Type, "numeric", state: 6)
             : Decimal38.FromParts((UInt128)quotient, scaled.Sign < 0, scale);
     }
 
@@ -1682,9 +1806,10 @@ internal readonly partial struct SqlValue
     private static SimulatedSqlException DecimalConversionOverflow(in Decimal38 value, DecimalSqlType target, SqlType source)
     {
         var state = Decimal38.TryRescale(value, Decimal38.MaxPrecision, target.scale, out _) ? (byte)8 : (byte)6;
-        return source is DecimalSqlType
-            ? SimulatedSqlException.ArithmeticOverflowToTarget("numeric", state)
-            : SimulatedSqlException.ArithmeticOverflowConverting(source, "numeric", SqlType.IsIntegerCategory(source) && source != SqlType.Bit ? state : (byte)8);
+        return source is DecimalSqlType ? SimulatedSqlException.ArithmeticOverflowToTarget("numeric", state)
+            : SqlType.IsMoneyCategory(source) && state == 6 ? SimulatedSqlException.InsufficientResultSpaceForMoney(source, "numeric", state: 1)
+            : source == SqlType.Bit ? SimulatedSqlException.ArithmeticOverflowConverting(SqlType.TinyInt, "numeric", state)
+            : SimulatedSqlException.ArithmeticOverflowConverting(source, "numeric", SqlType.IsIntegerCategory(source) || source is DateTimeSqlType or SmallDateTimeSqlType ? state : (byte)8);
     }
 
     /// <summary>
@@ -1782,6 +1907,11 @@ internal readonly partial struct SqlValue
         return Guid.TryParseExact(trimmed, "D", out var g) || Guid.TryParseExact(trimmed, "B", out g)
             ? g
             : source.Length >= 36 && Guid.TryParseExact(source.AsSpan(0, 36), "D", out g)
+                ? g
+            // A braced form ignores what follows its closing brace as the bare
+            // form ignores what follows its 36th character (probed 2026-10-02
+            // against SQL Server 2025).
+            : source.Length >= 38 && Guid.TryParseExact(source.AsSpan(0, 38), "B", out g)
                 ? g
                 : throw SimulatedSqlException.ConversionFailedFromStringToUniqueIdentifier();
     }

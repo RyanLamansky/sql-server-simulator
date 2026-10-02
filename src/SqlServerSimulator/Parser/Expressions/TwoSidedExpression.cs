@@ -694,8 +694,11 @@ internal abstract class TwoSidedExpression : Expression
         if (left.IsNull || right.IsNull)
             return SqlValue.Null(resultType);
 
-        var l = ToDouble(left);
-        var r = ToDouble(right);
+        // A partner converts to the result type before the operator runs, so a
+        // decimal meeting a real is read as a real: 0.1 - CAST(0.1 AS real) is
+        // 0 (probed 2026-10-02 against SQL Server 2025).
+        var l = resultIsReal ? (float)ToDouble(left) : ToDouble(left);
+        var r = resultIsReal ? (float)ToDouble(right) : ToDouble(right);
         var raw = op switch
         {
             '+' => l + r,

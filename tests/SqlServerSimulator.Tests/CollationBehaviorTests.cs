@@ -130,7 +130,7 @@ public sealed class CollationBehaviorTests
     }
 
     /// <summary>
-    /// Thai (out-of-CP1252) data sorts through the unified SqlLatin1 weight
+    /// Thai (out-of-CP1252) data sorts through the Latin1-General weight
     /// table baked from SQL Server's NLS Unicode weights, not .NET's code-point
     /// order: every Thai letter ranks above all Latin, and the leading vowel
     /// เ (U+0E40) sorts low — so เบญจศร &lt; คณาพล &lt; บางสุขศรี. This is the
@@ -371,4 +371,35 @@ public sealed class CollationBehaviorTests
         AreEqual(1, sim.ExecuteScalar("select count(*) from (select top (1) with ties v from t order by v) d"));
         AreEqual(1, sim.ExecuteScalar("select count(*) from (select distinct v from t where id <= 2) d"));
     }
+
+    /// <summary>
+    /// The Latin1-General weight tables under the names they serve: ligatures
+    /// equal to their letters, the minimal-weight hyphen against sort order
+    /// 52's per-character one, sort order 51's uppercase-first case level, the
+    /// code page 850 and 437 orders, the version split over U+202F, the binary
+    /// names' space padding and a Thai tone mark as an accent (probed
+    /// 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("N'æ'", "N'ae'", "Latin1_General_CI_AS", "=")]
+    [DataRow("N'ß'", "N'ss'", "Latin1_General_100_CS_AS", "=")]
+    [DataRow("N'ǅ'", "N'Dž'", "Latin1_General_CS_AS", "=")]
+    [DataRow("N'coop'", "N'co-op'", "Latin1_General_CI_AS", "<")]
+    [DataRow("'coop'", "'co-op'", "SQL_Latin1_General_CP1_CI_AS", ">")]
+    [DataRow("'ss'", "'ß'", "SQL_Latin1_General_CP1_CI_AS", "<")]
+    [DataRow("'a'", "'A'", "SQL_Latin1_General_CP1_CS_AS", ">")]
+    [DataRow("N'a'", "N'A'", "Latin1_General_CS_AS", "<")]
+    [DataRow("'à'", "'Ao'", "SQL_Latin1_General_CP850_CI_AS", "<")]
+    [DataRow("'Çm'", "'cn'", "SQL_Latin1_General_CP437_CI_AS", "<")]
+    [DataRow("'é'", "'f'", "SQL_Latin1_General_CP850_CI_AI", "<")]
+    [DataRow("N'x' + NCHAR(8239)", "N'x'", "Latin1_General_100_CI_AS", ">")]
+    [DataRow("N'x' + NCHAR(8239)", "N'x'", "Latin1_General_CI_AS", "=")]
+    [DataRow("'a' + CHAR(9)", "'a'", "Latin1_General_BIN2", "<")]
+    [DataRow("N'a' + NCHAR(9)", "N'a'", "Latin1_General_BIN", ">")]
+    [DataRow("N'a' + NCHAR(256)", "N'a' + NCHAR(511)", "Latin1_General_BIN", "<")]
+    [DataRow("N'cafe'", "N'café'", "Latin1_General_CI_AS", "<")]
+    [DataRow("N'ร่'", "N'ร'", "Latin1_General_CI_AS", ">")]
+    public void Latin1GeneralTables_CompareAsRealDoes(string left, string right, string collation, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar(
+            $"select case when {left} collate {collation} < {right} then '<' when {left} collate {collation} = {right} then '=' else '>' end"));
 }

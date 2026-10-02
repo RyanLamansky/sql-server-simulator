@@ -95,6 +95,7 @@ internal sealed class Stuff : Expression
             replacementType = VarcharSqlType.Get(1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
         ScalarArguments.RequireNumericSlot(this.start, batch, resolveColumnType, "stuff", 2, NumericSlot.IntegerOrDecimal);
         ScalarArguments.RequireNumericSlot(this.length, batch, resolveColumnType, "stuff", 3, NumericSlot.IntegerOrDecimal);
+        StringScalars.RequireResolvableCollations("stuff", inputType, replacementType);
         return ResolveResultType(inputType, replacementType, batch);
     }
 
@@ -131,7 +132,13 @@ internal sealed class Stuff : Expression
         // A start at or below zero still sizes (the call answers NULL), and a
         // negative length widens the result by its magnitude: STUFF('abc', 2,
         // -1, 'x') is varchar(5) (probed 2026-10-01 against SQL Server 2025).
-        var clampedDelete = Math.Min(deleteLength, inputWidth - start + 1);
+        // A UTF-8 varchar can't tell how many bytes the deleted characters
+        // held, so nothing is taken off for them: STUFF(<varchar(5)>, 1, 3,
+        // 'qq') is varchar(7) under a _UTF8 collation and varchar(4) otherwise
+        // (probed 2026-10-02 against SQL Server 2025).
+        var clampedDelete = promoted is VarcharSqlType && promoted.Collation?.AnsiCodePage == 65001 && deleteLength >= 0
+            ? 0
+            : Math.Min(deleteLength, inputWidth - start + 1);
         var width = inputWidth - clampedDelete + replacementWidth;
         return StringScalars.SizedResultType(promoted, width, batch);
     }

@@ -18,14 +18,14 @@ internal sealed class Lower(ParserContext context) : Expression
         var raw = source.Run(runtime);
         StringScalars.RejectLegacyLob(raw, "lower");
         if (raw.IsNull)
-            return SqlValue.Null(StringScalars.ResolveRewrittenType(raw.Type, runtime.Batch));
+            return SqlValue.Null(StringScalars.CaseMappedType(raw.Type, runtime.Batch));
         var value = StringScalars.CoerceToVarchar(raw, runtime.Batch, "lower");
         var lowered = (value.Type.Collation ?? Collation.Baseline).CaseMapping().ToLower(value.AsString);
-        return SqlValue.FromString(StringScalars.ResolveRewrittenType(value.Type, runtime.Batch), lowered);
+        return SqlValue.FromString(StringScalars.CaseMappedType(value.Type, runtime.Batch), lowered);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
-        StringScalars.ResolveRewrittenType(StringScalars.BindSource(source, batch, resolveColumnType, "lower", coerced: false), batch);
+        StringScalars.CaseMappedType(StringScalars.BindSource(source, batch, resolveColumnType, "lower", coerced: false), batch);
 
     internal override string DebugDisplay() => $"LOWER({source.DebugDisplay()})";
 

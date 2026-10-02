@@ -149,8 +149,10 @@ internal sealed class Difference : Expression
         // DIFFERENCE is the one member that takes a `text` argument — it
         // converts implicitly and evaluates — so both slots carry the
         // ANSI-text carve-out its Run does.
-        _ = StringScalars.BindArgument(this.left, batch, resolveColumnType, "difference", allowAnsiText: true);
-        _ = StringScalars.BindArgument(this.right, batch, resolveColumnType, "difference", argumentIndex: 2, allowAnsiText: true);
+        StringScalars.RequireResolvableCollations(
+            "difference",
+            StringScalars.BindArgument(this.left, batch, resolveColumnType, "difference", allowAnsiText: true),
+            StringScalars.BindArgument(this.right, batch, resolveColumnType, "difference", argumentIndex: 2, allowAnsiText: true));
         return SqlType.Int32;
     }
 

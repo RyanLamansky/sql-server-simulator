@@ -314,15 +314,15 @@ Three files carry the work:
 ### Bespoke per-name body
 
 `CreateInstance` (in `Collation.Parser.cs`) special-cases a name when the generic `CultureCollation` / `BinaryCollationBody` construction doesn't capture its real behavior: it builds the generic body, then wraps or replaces it.
-One name is special-cased today — the default `SQL_Latin1_General_CP1_CI_AS`, where the freshly-built `CultureCollation` is handed to `new SqlLatin1Cp1CiAsCollation(cultureBody)` (see [byte-exact sort](#sql_latin1_general_cp1_ci_as--byte-exact-sort)); that wrapper keeps the culture body for metadata + the non-CP1252 fallback and overrides `Compare` / `Equals` / `GetHashCode`.
+The Latin1-General names are special-cased — `SortsByLatin1GeneralTable` picks the unversioned and `_100_` `Latin1_General` names and the `SQL_Latin1_General` names over code pages 1, 850 and 437, `_KS` / `_WS` excepted — and the freshly-built `CultureCollation` is handed to `new Latin1GeneralTableCollation(cultureBody, version)` (see [byte-exact sort](#the-latin1-general-names--byte-exact-sort)); that wrapper keeps the culture body for metadata and the fallback past its tables, and overrides `Compare` / `Equals` / `GetHashCode` and the matching seam.
 The wrapped instance is interned like any other, so `TryGet` and `Baseline` return it.
 Every other modeled name routes through `CultureCollation` or `BinaryCollationBody` with the appropriate flag-driven options.
 
 ### Behavioral notes by family
 
-- **SQL_\* family**: the default `SQL_Latin1_General_CP1_CI_AS` is the bespoke byte-exact override (see [byte-exact sort](#sql_latin1_general_cp1_ci_as--byte-exact-sort)); the rest route through invariant `CompareInfo` (unless the human-prefix description maps to a locale-specific culture, e.g., `SQL_Croatian_CP1250_CI_AS` → `hr-HR`) with the [two-pass minimal-punctuation treatment](#symbol-sort-weighting-other-sql_--windows--locale-families).
+- **SQL_\* family**: the `SQL_Latin1_General` names over code pages 1, 850 and 437 take the [byte-exact tables](#the-latin1-general-names--byte-exact-sort); the rest route through invariant `CompareInfo` (unless the human-prefix description maps to a locale-specific culture, e.g., `SQL_Croatian_CP1250_CI_AS` → `hr-HR`) with the [two-pass minimal-punctuation treatment](#symbol-sort-weighting-other-sql_--windows--locale-families).
   Description carries the per-name SQL Server Sort Order number + Code Page (extracted from the `CP*` token).
-- **Windows-style Latin1_General**: invariant `CompareInfo`; two-pass minimal-punctuation sort.
+- **Windows-style Latin1_General**: the unversioned and `_100_` names take the byte-exact tables; `_90` and `_140` keep invariant `CompareInfo` with the two-pass minimal-punctuation sort.
   `_BIN` engages the pre-2005 position-0-codeunit / position-1+-codepoint quirk; `_BIN2` is pure UTF-16 code-unit ordinal.
 - **`_UTF8` collations**: storage encoding flips from CP1252 to UTF-8 for varchar/char columns.
   `_BIN2_UTF8` substitutes `Utf8CodepointBinaryCollation` (codepoint-order = UTF-8 byte order) on varchar storage.
@@ -334,70 +334,76 @@ Every other modeled name routes through `CultureCollation` or `BinaryCollationBo
 - **Locale prefixes** (Japanese, Chinese, Turkish, Korean, etc.): map to the closest .NET culture via `KnownPrefixes`; fall back to invariant when no clean .NET equivalent exists (Tamazight, Traditional_Spanish, Indic_General).
   Sort-parity caveat in [Locale-comparer sort-parity gap](#locale-comparer-sort-parity-gap) applies — equality / CI/CS / KS / WS folding align, secondary sort tiebreakers within equivalence classes may diverge.
 
-## `SQL_Latin1_General_CP1_CI_AS` — byte-exact sort
+## The Latin1-General names — byte-exact sort
 
-The default collation routes through a dedicated body (`SqlLatin1Cp1CiAsCollation` in `Collation.SqlLatin1Sort.cs`, [special-cased in the parser](#bespoke-per-name-body)) that reproduces SQL Server's ordering **byte-for-byte over the entire CP1252 repertoire**, for both `varchar`/`char` and `nvarchar`/`nchar`.
-Validated by a fuzz harness diffing 138k+ random CP1252 string-pair comparisons against the live server (both storage types, zero divergence); the lone real-world divergence that motivated it — base64 `MIN(PasswordHash)` on AdventureWorks `Person.Password` (`varchar`, `+`/`/` order) — is closed.
+`Latin1GeneralTableCollation` (`Collation.Latin1GeneralSort.cs`, its Unicode records in `Collation.Latin1GeneralWeights.cs`) reproduces real's ordering, equality and matching from probe-extracted weight tables, because neither table real uses matches .NET's `CompareInfo`.
+Each Unicode table was read as dense ranks of `NCHAR(n) + N'a'` under a name's `_CI_AI`, `_CI_AS` and `_CS_AI` forms over U+0000–U+024F, the code page 1252 repertoire, Thai, Latin Extended Additional and General Punctuation; each `varchar` sort order as the same ranks of every byte (probed 2026-10-02 against SQL Server 2025).
+Validated by a fuzz harness diffing random string pairs over those repertoires against the live server under every routed name, in both storage types, at zero divergence apart from the characters listed under [Known gaps](#known-gaps); the real-world divergence that first motivated the default collation's tables — base64 `MIN(PasswordHash)` on AdventureWorks `Person.Password` (`varchar`, `+`/`/` order) — stays closed.
 
-Why a bespoke body instead of `CompareInfo`: real SQL Server sorts this collation's non-Unicode and Unicode data through **two different multi-level weight tables**, and neither matches .NET's `CompareInfo`.
-The override bakes four probe-extracted rank tables (DENSE_RANK over `CHAR(n)` / the decoded char, under both the CI_AS and accent-insensitive CI_AI forms) and runs a multi-level comparison:
+**Which table.**
+The unversioned Windows names and every `SQL_Latin1_General` name share one Unicode table; the `_100_` names have their own, which adds characters the older one weighs nothing (the `ȸ` / `ȹ` digraphs expand, U+202F weighs as a space) and drops `¼ ½ ¾` from its repertoire.
+A Windows name's `varchar` data compares as its Unicode data does.
+A `SQL_` name's `varchar` data takes its SQL sort order instead, in `varcharBody`: 52 for `CP1_CI_AS`, 51 for `CP1_CS_AS`, 54 for `CP1_CI_AI`, 53 for `Pref_CP1_CI_AS`, and the code page 850 and 437 orders for those names.
 
-- **Primary** = the accent-folded (CI_AI) rank, so `'à' < 'Ao'` (base letter `a` before `Ao`).
-  **Secondary** = the accent-sensitive (CI_AS) rank, breaking primary ties so `'cafe' < 'café'`, `'az' < 'àz'`.
-  Case folds at both levels.
-- **varchar** (SQL sort order 52, CP1252): pure per-character; **no** ignorable characters.
-  Expands `æ Æ ß` to their base letters at the primary level, with a **tertiary** so the ligature sorts just after its expansion (`'ae' < 'æ'`, `'ss' < 'ß'`).
-  `œ Œ þ Þ` are single-weight letters here (no expansion).
-  `CHAR(0)` is a character like any other, weighted below everything, and the controls weigh below the space; a shorter string compares as if space-padded, so a control sorts a string *before* its own prefix: `'a' + CHAR(0) + 'b' < 'ab'`, `'a' + CHAR(9) < 'a'`, `CHAR(0) <> ''` (probed 2026-09-26).
-  Every other non-binary `SQL_` collation's `varchar` data weights `CHAR(0)` the same way, and so does the matching seam under all of them, the default included — `LIKE 'ab'` doesn't match `'a' + CHAR(0) + 'b'`, `CHARINDEX` / `REPLACE` find the NUL (probed 2026-09-28).
-  Those collations compare through `CompareInfo`, which ignores it, so their `varchar` sibling (`ForVarcharStorage`, `Collation.WeightsNul`) compares the text between NULs piece by piece, and the matcher searches a NUL-bearing needle by code units and refuses a hit that crosses a NUL the needle lacks.
+**The Unicode tables** compare in Windows' own level order, each level over the whole string before the next:
+
+- **Letters** — the accent-folded rank, so `'à' < 'Ao'`.
+- **Accents** — `'cafe' < 'café'`, `'az' < 'àz'`; skipped under `_AI`.
+  A Thai tone mark is an accent on the letter before it.
+- **Case** — lowercase first, a superscript after its digit; skipped under `_CI`.
+- **Minimal-weight characters** — apostrophe, hyphen, the dashes, soft hyphen and the controls weigh only at this last level: `'coop' < 'co-op'`, `'cant' < "can't"`, `'A' < "'A"`.
+- Characters the version doesn't know weigh nothing at all (see [Characters real gives no weight](#characters-real-gives-no-weight-by-collation-version)).
+- The Latin ligatures expand to their letters at every level, so they are **equal** to their expansion: `'æ' = 'ae'`, `'ß' = 'ss'`, `'ǅ' = 'Dž'`, `'ﬁ' = 'fi'`; one carrying a mark (`ǽ`, `ǣ`) weighs it on its last letter.
+- A shorter string compares as if space-padded.
+
+**The SQL sort orders** are per character, with no minimal-weight characters (`'coop' > 'co-op'`) and `CHAR(0)` weighted below everything:
+
+- They share sort order 52's letters (the accent-folded rank, with the cedilla folded onto `c`, probe-confirmed `'Çm' < 'cn'`) and differ in what follows: 52 weighs the accents; 51 the accents and then the case, **uppercase first** (`ORDER BY` over `a, A, b, B` is `A a B b`, so `MIN` / `MAX` over a pair report `A` / `a`); 54 only the cedilla.
+  The code page 850 and 437 names follow the same three shapes over their own byte ranks.
+- Only `æ Æ ß` expand (plus the 437 page's own ligature bytes), and a ligature's last letter weighs above every accent, so `'ae' < 'æ'` and `'ss' < 'ß'`; `œ Œ þ Þ` are single letters.
+- `CHAR(0)` and the controls weigh below the space, and a shorter string compares as if space-padded, so a control sorts a string *before* its own prefix: `'a' + CHAR(0) + 'b' < 'ab'`, `'a' + CHAR(9) < 'a'`, `CHAR(0) <> ''` (probed 2026-09-26).
+  Every other non-binary `SQL_` collation's `varchar` data weights `CHAR(0)` the same way, and so does the matching seam under all of them — `LIKE 'ab'` doesn't match `'a' + CHAR(0) + 'b'`, `CHARINDEX` / `REPLACE` find the NUL (probed 2026-09-28).
+  The names outside the tables compare through `CompareInfo`, which ignores it, so their `varchar` sibling (`ForVarcharStorage`, `Collation.WeightsNul`) compares the text between NULs piece by piece, and the matcher searches a NUL-bearing needle by code units and refuses a hit that crosses a NUL the needle lacks.
   A `LIKE` pattern's literal run that ends in NULs takes exactly that many of the subject's, whatever wildcard follows: `'a' + CHAR(0) + 'b' LIKE 'a' + CHAR(0) + '_'` and `CHAR(0) LIKE CHAR(0) + '%'` are true, and a lone `CHAR(0)` is a character (`LIKE '_'` true, `LIKE ''` false; probed 2026-09-30).
   Unicode data and the Windows collations ignore `CHAR(0)` on real as well.
-  The same `varchar` sibling orders a case pair **uppercase first** under `SQL_Latin1_General_CP1_CS_AS` (sort order 51) and `SQL_Latin1_General_CP850_CS_AS` (41): `ORDER BY` over `a, A, b, B` is `A a B b`, so `MIN` / `MAX` over a pair report `A` / `a` (probed 2026-09-29).
-  Only a pair that differs in case alone flips — the sibling negates `CompareInfo`'s answer when an ignore-case comparison ties — because how an accent and a case difference rank against each other in those legacy orders wasn't probed; the `nvarchar` data of the same names and the CP1250 names sort lowercase first, as `CompareInfo` does.
-  The nine `Pref` names (`SQL_Latin1_General_Pref_CP1` / `CP437` / `CP850`, `Danish`, `Icelandic`, `Scandinavian`, `SwedishPhone`, `SwedishStd`, `AltDiction`) compare equal across a case pair in every operator, yet their `varchar` data sorts the pair uppercase first, at the first character the spellings differ in (`AB`, `Ab`, `aB`, `ab`), while their `nvarchar` data doesn't (probed 2026-09-29 against SQL Server 2025 across all nine).
+- The nine `Pref` names (`SQL_Latin1_General_Pref_CP1` / `CP437` / `CP850`, `Danish`, `Icelandic`, `Scandinavian`, `SwedishPhone`, `SwedishStd`, `AltDiction`) compare equal across a case pair in every operator, yet their `varchar` data sorts the pair uppercase first, at the first character the spellings differ in (`AB`, `Ab`, `aB`, `ab`), while their `nvarchar` data doesn't (probed 2026-09-29 against SQL Server 2025 across all nine).
   The preference is only a **final tiebreak**: it applies once every `ORDER BY` key ties, so a later key outranks it (`ORDER BY v, id` keeps `id` order across a pair), it reverses under `DESC`, and it decides a `TOP … WITH TIES` boundary, where `RANK` / `DENSE_RANK` peers and equality still see one value.
   `Collation.PreferenceCompare` carries it, and `SortOrderKeys` (the sort-site sibling of `CompareOrderKeys`), `STRING_AGG` / `JSON_ARRAYAGG`'s `WITHIN GROUP` sort and the top-N heaps apply it; `MIN` / `MAX` keep the first-seen spelling, as real does.
   Not modeled yet: the spelling a `GROUP BY` / `DISTINCT` / `UNION` / `INTERSECT` reports is real's uppercase-preferred one however the rows arrive (`DISTINCT` over `a, A` is `A`), where the simulator reports the first-seen spelling — the dedup sites are many (`GroupState`, `RowEqualityComparer` sets, the parallel merge), and a hash aggregate over a larger input may not sort at all, so the probed shape is a small-table plan.
-  The other case-sensitive legacy orders (`CP437`, the Scandinavian, EBCDIC and alternate-dictionary families) are not modeled yet.
-- **nvarchar** (Unicode weights): control characters plus apostrophe, hyphen, en/em dash, and soft-hyphen are minimal-weight — ignored at the primary/secondary levels, consulted only to break a remaining tie (`'coop' < 'co-op'`, `'cant' < "can't"`, `'A' < "'A"`).
-  Expands the full Latin ligature set `æ Æ œ Œ ß þ Þ` and treats a ligature as **equal** to its expansion (`'æ' = 'ae'`, `'ß' = 'ss'` — no tertiary).
-- **nvarchar — Thai block** (U+0E00–U+0E7F): extended onto the *same unified rank scale* as CP1252, from one combined `DENSE_RANK` over CP1252 ∪ Thai.
-  SQL Server's SqlLatin1 Unicode sort places Thai by its own NLS weights — **not** code-point order and **not** matched by .NET/ICU (even ICU's `th-TH` orders them differently).
-  Thai letters rank above all Latin; the leading vowels `เ แ โ ใ ไ` rank just above `'z'`; Thai digits between `'0'` and `'a'`.
-  So `เบญจศร < คณาพล < บางสุขศรี` (the AdventureWorks `vJobCandidate.[Name.Last]` order).
-  Thai tone-mark combining characters carry the lowest primary weight rather than SQL Server's secondary-diacritic treatment — a documented edge that doesn't affect tone-free data.
-- `Equals` is `Compare == 0` for in-repertoire pairs; a pair with any out-of-repertoire character uses the inner `CultureCollation`'s **plain** equality rather than its two-pass ordering (see [Equality and hash across the repertoire boundary](#equality-and-hash-across-the-repertoire-boundary)).
-  `GetHashCode` hashes the primary+secondary weight runs after a hash canonicalization pass, so DISTINCT / GROUP BY stay consistent with equality.
-  Equality keeps every symbol significant (only trailing spaces fold, at the `SqlValue` layer), so `'co-op' = 'coop'` is false, and apostrophe ≠ hyphen even off-repertoire (probe-confirmed: `N'ab''cＸ' = N'ab-cＸ'` is false and the two group separately).
+  The other case-sensitive legacy orders (the Scandinavian, EBCDIC and alternate-dictionary families) are not modeled yet.
 
-One hand-adjustment in the data: the legacy varchar CI_AI form classifies cedilla (`Ç`/`ç`) as a distinct primary letter, but its CI_AS *sort* folds it onto `c` (probe-confirmed `'Çm' < 'cn'`), so those two primary entries are pinned to `c`'s rank.
-Strings with a character outside the active repertoire (CP1252, plus Thai for nvarchar) fall back to the inner `CultureCollation`'s `CompareInfo` two-pass (below) — close for arbitrary Unicode, exact for CP1252 and the Thai block.
-Adding the Thai block re-baked the nvarchar tables on the unified scale (`ushort` — the union pushes the max rank past 255); the CP1252-only relative order is unchanged (`DENSE_RANK` is monotonic) and the 138k-pair fuzz stays at zero divergence.
+**Matching.**
+`LIKE` literal runs, `PATINDEX` and the [character-matching scalars](#the-character-matching-string-scalars-search-under-the-collation-too) match through the same table (`MatchesByTable` / `TableMatch`): a run matches where its collation elements equal the subject's at the name's strengths and end on a character boundary, so a ligature matches its letters and half of one matches nothing — `N'ß' LIKE N'ss'` and `CHARINDEX(N'ss', N'aßb')` find it, `N'ß' LIKE N's%'` and `N'ß' LIKE N'[s]'` don't (probed 2026-10-02).
+
+**Past the repertoire.**
+A string with a character outside the table — after composing a decomposed accent, since real weighs `'s'` + U+0307 as `'ṡ'` — falls back to the inner `CultureCollation`'s `CompareInfo` path for the whole pair, which is close for arbitrary Unicode but not exact (see [Known gaps](#known-gaps)).
+`Equals` is `Compare == 0` for in-repertoire pairs; a pair with any out-of-repertoire character uses the inner `CultureCollation`'s **plain** equality rather than its two-pass ordering (see [Equality and hash across the repertoire boundary](#equality-and-hash-across-the-repertoire-boundary)).
+`GetHashCode` hashes the primary run and, under an `_AS` name, the accent run, leaving out a trailing run of elements weighing as a space, after a hash canonicalization pass, so DISTINCT / GROUP BY stay consistent with equality.
+Equality keeps every symbol significant (only trailing spaces fold), so `'co-op' = 'coop'` is false, and apostrophe ≠ hyphen even off-repertoire (probe-confirmed: `N'ab''cＸ' = N'ab-cＸ'` is false and the two group separately).
 
 **Which spelling `MIN` / `MAX` / a group key reports.**
 Among values the collation calls equal — trailing spaces, case under `_CI_`, `'ก'` beside `'ก '` — real reports the **first one its operator reads**, for `MIN`, `MAX`, a `GROUP BY` key, `DISTINCT` and a window's `MAX … OVER`, serial stream or hash aggregate alike; the simulator's aggregators keep the first too (probed 2026-09-29 against SQL Server 2025 over heaps, clustered and indexed tables in four collations and four string types).
 So the spelling is decided by the order rows reach the operator, and wherever real's plan sorts first, by its **Sort operator's order among ties**, which isn't stable: `ORDER BY g` over a heap whose `g` values run `1, 0, 1, 0, 0, 1, 1, 1, 1` returns the first `1` row last.
 That tie order isn't modeled yet (see [`query.md`](query.md#row-order-without-order-by)), so a grouped `MAX` over tied spellings can report another one than real's; a parallel plan's choice is nondeterministic on real itself.
 
-Implementation: this is the engine's hottest string path (it backs `Baseline`), so `Compare` / `GetHashCode` stream each operand's weights through a `WeightCursor` `ref struct` — one element per `MoveNext`, ignorables skipped and ligatures expanded inline — rather than materializing weight lists.
-A comparison walks the cursors at the primary level, dropping to a second walk only on a primary tie and a third only on a secondary tie; the common case resolves in one pass with **zero allocation**.
-Keep the storage-aware `InRepertoire` gate ahead of the streaming path: the "any out-of-repertoire char ⇒ `CompareInfo` fallback for the whole pair" contract requires scanning both operands before choosing the repertoire path, which a bail-mid-walk detector would break.
+Implementation: this is the engine's hottest string path (it backs `Baseline`), so `Compare` / `GetHashCode` stream each operand's weights through a `WeightCursor` `ref struct` — one element per `MoveNext`, weightless characters skipped and ligatures expanded inline — rather than materializing weight lists, and each table holds U+0000–U+024F in a flat array ahead of a frozen dictionary for the rest.
+A comparison walks the cursors at the primary level, dropping to a further walk only on a tie; the common case resolves in one pass with **zero allocation**.
+Keep the `Covers` repertoire gate ahead of the streaming path: the "any out-of-repertoire char ⇒ `CompareInfo` fallback for the whole pair" contract requires scanning both operands before choosing the table path, which a bail-mid-walk detector would break.
 
 ## Equality and hash across the repertoire boundary
 
 The hybrid body's `IEqualityComparer<string>` contract (`Equals(x, y)` ⇒ equal hashes) has to hold across two different equality sources: weight comparison for in-repertoire pairs and the inner `CultureCollation` for pairs with any out-of-repertoire character.
-Three pieces make it hold (`Collation.SqlLatin1Sort.cs`):
+Three pieces make it hold (`Collation.Latin1GeneralSort.cs`):
 
 - **Cross-boundary `Equals` is the inner's *plain* equality**, not `inner.Compare == 0`.
   The inner's two-pass minimal-punctuation logic is an *ordering* device whose tie-break checks only minimal-vs-real per position and would equate apostrophe with hyphen; plain `CompareInfo` equality keeps them distinct marks — matching the live server (probed) and matching `CultureCollation`'s own `Equals`/`Compare` split.
   Consequence: cross-boundary sort-equal-but-not-equal pairs exist, as they do on `CultureCollation` itself.
 - **`GetHashCode` has a fast path and a canonicalized path.**
-  A string whose every character is in the per-body *hash-clean* set (repertoire minus `hashFolds` keys — the overwhelmingly common case) hashes straight off its weight runs, unchanged from before.
+  A string whose every character is in the per-body *hash-clean* set (repertoire minus `hashFolds` keys — the overwhelmingly common case) hashes straight off its weight runs.
   Anything else is canonicalized — NFC (composes `e`+U+0301 → `é`), then per-rune folds — and the canonical form takes the weight-run hash if it lands in-repertoire, else the inner hash (consistent with the inner equality that governs such pairs by construction).
 - **Every fold substitutes inner-equal content**, so canonicalization preserves the inner equality relation; that plus "weight-equal in-repertoire pairs already hash equal" is the whole consistency argument.
   In-repertoire folds live in the hard-coded `hashFolds` table: ICU-ignorable controls + soft hyphen → empty, NBSP → space, `ª º ¹ ² ³` → base, Thai digits → ASCII digits, vulgar fractions → their FRACTION SLASH decompositions (deliberately out-of-repertoire targets: both spellings then take the inner hash together), the CP1252 case pairs whose legacy *varchar* weights are asymmetric (`Œ Š Ÿ Ž` → lowercase), and Thai SARA AM → NIKHAHIT + SARA AA.
-  Out-of-repertoire runes resolve lazily (`ComputeRuneFold`, cached process-wide): NFKC+lowercase candidate accepted only when the inner collation confirms equality (so `ſ` → `s`, which ICU rejects, never lands), with a one-time repertoire scan fallback for wrong-direction decompositions (Greek `μ` → CP1252 `µ`, other scripts' decimal digits).
+  Out-of-repertoire runes resolve lazily (`ComputeRuneFold`, cached per body): NFKC+lowercase candidate accepted only when the inner collation confirms equality (so `ſ` → `s`, which ICU rejects, never lands), with a one-time repertoire scan fallback for wrong-direction decompositions (Greek `μ` → CP1252 `µ`, other scripts' decimal digits).
 
 Why folds of *in-repertoire* characters exist at all: an out-of-repertoire spelling can be `Equals`-equal to two in-repertoire strings that are unequal to each other (fullwidth `２` equals both `2` and `²` through the inner collation), so those in-repertoire strings must share a hash — a legal collision of unequal strings.
 `CollationHashConsistencyTests` (Tests.Internal) guards the contract: repertoire-wide ICU-class sweep, Unicode-block normalization-variant sweep, seeded substitution fuzz, and the named triangles.
@@ -469,7 +475,7 @@ Measured by the probe itself: the simulator's ignorable set disagreed with real'
 - **Hyphen and apostrophe drop out of the primary key** but carry a secondary weight, so the copy bearing the mark sorts *after*: `'coop' < 'co-op'`, `'cant' < "can't"`, `'A' < "'A"`.
 
 Implementation: a fast path (`compareInfo.Compare(x, y, equalityOptions)`) when neither operand contains a minimal mark; otherwise a primary pass over hyphen/apostrophe-stripped copies, then `MinimalPunctuationTiebreak` (a two-pointer scan where a minimal mark sorts after a real character).
-This is structurally faithful but not byte-exact for symbol-internal order or accent multi-level — only the default collation gets the bespoke exact tables.
+This is structurally faithful but not byte-exact for symbol-internal order or accent multi-level — only the [Latin1-General names](#the-latin1-general-names--byte-exact-sort) get exact tables.
 The same approach could extend to other heavily-used names if a divergence surfaces.
 
 ## Locale-comparer sort-parity gap
@@ -737,17 +743,18 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
 
 ## Known gaps
 
-- **A ligature doesn't expand.**
-  Real treats a ligature as equal to its expansion at the primary level and the simulator doesn't, because every linguistic path runs through `CompareInfo`, which holds the two apart.
-  The probed set is the same under `Latin1_General_CI_AS` / `_CS_AS` / `_CI_AI`, the default `SQL_Latin1_General_CP1_CI_AS`, `Latin1_General_100_CI_AS` and `Japanese_CI_AS`, and empty under every binary collation:
-  `Æ`→`AE`, `æ`→`ae`, `Þ`→`TH`, `þ`→`th`, `ß`→`ss`, `Ĳ`→`IJ`, `ĳ`→`ij`, `Œ`→`OE`, `œ`→`oe`, `Ǉ`→`LJ`, `ǈ`→`Lj`, `Ǌ`→`NJ`, `ǋ`→`Nj`, `Ǳ`→`DZ`, `ǲ`→`Dz`, `ﬀ`→`ff`, `ﬁ`→`fi`, `ﬂ`→`fl`, `ﬃ`→`ffi`, `ﬄ`→`ffl`, `ﬆ`→`st`.
-  Nearby characters that look like members and are **not**: `ẞ` (U+1E9E) doesn't fold to `SS`, `ﬅ` (U+FB05) doesn't fold to `st`, and `№` / `™` / `½` / `ﬓ` don't fold at all; `ŀ` / `ŉ` / `Ǆ` / `ǅ` fold only under `_AI`, since their expansion carries a mark, and `Ȱ`→`db` only from `Latin1_General_100_*` on.
-  The expansion reaches every consumer real drives through the collation — `=`, `<`, `BETWEEN`, `IN`, `DISTINCT`, `GROUP BY`, `ORDER BY` (where the ligature ties with its expansion), `LIKE` and `PATINDEX` literal runs, and the [character-matching scalars](#the-character-matching-string-scalars-search-under-the-collation-too) — but **not** `LIKE`'s `_` or a character class, where a ligature is one character and half of it matches nothing (`N'ß' LIKE N'[s]'` is 0 on real).
-  Storage family decides for the default collation: `SQL_Latin1_General_CP1_CI_AS` expands for `nvarchar` everywhere and for `varchar` **nowhere** (its varchar sort order 52 gives the ligature a tertiary instead, so `'ss' < 'ß'`), and the simulator's [byte-exact body](#sql_latin1_general_cp1_ci_as--byte-exact-sort) already reproduces that for `=` / sort / hash — which is why the default collation's `=` and its `LIKE` disagree on `N'ß'` today while `Latin1_General_CI_AS` has them agreeing with each other and both wrong.
-  Closing it wants an expansion pre-pass under `Collation.Compare` / `Equals` / `GetHashCode` **and** under the matching seam, with the search's endpoints required to land on source-character boundaries so half a ligature still matches nothing; the hash has to move with the equality or the seek caches break.
+- **A ligature doesn't expand outside the Latin1-General tables.**
+  Real treats a ligature as equal to its expansion at the primary level under every non-binary collation probed, `Japanese_CI_AS` and `French_CI_AS` included (`N'æ' = N'ae'` and `N'ß' LIKE N'ss'` are true; probed 2026-10-02), and the [byte-exact tables](#the-latin1-general-names--byte-exact-sort) expand it; every other name runs through `CompareInfo`, which holds the two apart.
+  The probed set: `Æ`→`AE`, `æ`→`ae`, `Þ`→`TH`, `þ`→`th`, `ß`→`ss`, `Ĳ`→`IJ`, `ĳ`→`ij`, `Œ`→`OE`, `œ`→`oe`, `Ǉ`→`LJ`, `ǈ`→`Lj`, `Ǌ`→`NJ`, `ǋ`→`Nj`, `Ǳ`→`DZ`, `ǲ`→`Dz`, `ﬀ`→`ff`, `ﬁ`→`fi`, `ﬂ`→`fl`, `ﬃ`→`ffi`, `ﬄ`→`ffl`, `ﬆ`→`st`.
+  Nearby characters that look like members and are **not**: `ẞ` (U+1E9E) doesn't fold to `SS`, `ﬅ` (U+FB05) doesn't fold to `st`, and `№` / `™` / `½` / `ﬓ` don't fold at all.
+  Closing it for another family wants that family's own table, since the Latin1-General one's letter order isn't a locale's tailoring.
+- **Characters outside the Latin1-General tables compare through `CompareInfo`.**
+  A pair holding one falls back for the whole comparison, so its order against the in-table characters is ICU's: `N'µ' = N'μ'` (micro sign against Greek mu) is true here and false on real, and `ŉ` (U+0149), `ẚ` (U+1E9A), `⁄` (U+2044) and, under the `_100_` names, `¼ ½ ¾` sort elsewhere than real puts them — each expands to a sequence holding a character the probe's ranks couldn't place (probed 2026-10-02 against SQL Server 2025).
+  A Thai tone mark leading a string, with no letter to ride on, is the one in-table shape that diverges.
 - **A space variant is a space to the culture comparers' `=`, and the weightless-mark order is approximate.**
-  A search holds the no-break space and the U+2000..U+200A spaces apart from U+0020 as real does — only U+0020 and the ideographic space U+3000 match a space in `CHARINDEX`, `REPLACE`, `PATINDEX`, `TRANSLATE`, `TRIM`, `STRING_SPLIT` and `LIKE` (probed 2026-09-29 against SQL Server 2025 over every BMP code unit; `WeightlessCharacters.ForSearch` gives each a private-use stand-in) — but `N'x' + NCHAR(160) = N'x ' COLLATE Latin1_General_CI_AS` is still true here and false on real, since `=` under the culture comparers reads them through `CompareInfo` (the default collation's own tables get it right).
-  The characters `CompareInfo` ignores and real weighs all take a final-level weight, where real gives U+200B and U+200C a low primary one and the Hebrew accents a diacritic one: under `Latin1_General_CI_AS` real orders `U+3000 < space < U+00A0 < tab < U+200A < U+200B < U+200C < U+2028 < !`, where the simulator orders tab and U+2028 first and puts U+200B and U+200C after the Hebrew accents, so their order against other characters differs while equality matches.
+  A search holds the no-break space and the U+2000..U+200A spaces apart from U+0020 as real does — only U+0020 and the ideographic space U+3000 match a space in `CHARINDEX`, `REPLACE`, `PATINDEX`, `TRANSLATE`, `TRIM`, `STRING_SPLIT` and `LIKE` (probed 2026-09-29 against SQL Server 2025 over every BMP code unit; `WeightlessCharacters.ForSearch` gives each a private-use stand-in) — but `N'x' + NCHAR(160) = N'x ' COLLATE French_CI_AS` is still true here and false on real, since `=` under the culture comparers reads them through `CompareInfo` (the Latin1-General tables get it right).
+  The characters `CompareInfo` ignores and real weighs all take a final-level weight, where real gives U+200B and U+200C a low primary one and the Hebrew accents a diacritic one: under `French_CI_AS` real orders each followed by `a` as `space < U+3000 < U+00A0 < tab < U+200A < U+200B < U+200C < U+2028 < !`, where the simulator orders tab and U+2028 first and puts U+200B and U+200C after the Hebrew accents, so their order against other characters differs while equality matches (probed 2026-10-02 against SQL Server 2025).
+  The Latin1-General tables place all but U+3000, which lies outside them.
   Two further classes surfaced by the same sweep and aren't modeled yet: `CompareInfo` equates `ª`, `ℬ` and the circled letters `Ⓐ` `Ⓑ` `ⓐ` `ⓑ` with the Latin letter they decorate where real's search does not, and real equates `ʙ` (U+0299) with `b` where `CompareInfo` does not.
 - **A standalone combining mark matches any other standalone mark on real.**
   `TRANSLATE(NCHAR(0x0308) + …, NCHAR(0x0301), N'd')` substitutes on real and doesn't here, and the same equivalence shows up in `TRIM`'s character set, in `REPLACE`'s pattern and in a `STRING_SPLIT` separator — real appears to compare the marks at a weight level `CompareInfo` doesn't expose, since a mark attached to a base letter stays distinct in both engines.
@@ -768,19 +775,9 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
   The clause is still *validated* — a Unicode-only collation on `text` raises Msg 459 from the column-declaration site (see [Unicode-only collations](#unicode-only-collations--msg-459)) — it just isn't pinned.
   Low impact (text/ntext deprecated since SQL Server 2005).
 - **Sysname's collation is always `Collation.Baseline`** at `Implicit` rank — real SQL Server's sysname inherits the server's catalog collation which can differ from the user database's collation; the simulator's single-instance modeling collapses them.
-- **`CAST(expr AS varchar(N)) COLLATE …UTF8` doesn't re-truncate under the postfix collation.**
-  The CAST runs against the local default (CP1252, single-byte), so a 3-char input into `varchar(2)` truncates to 2 chars; the postfix COLLATE then rewraps as `varchar(2)` UTF-8 with that 2-char .NET string, which under UTF-8 may be more than 2 bytes.
-  Probe-confirmed against SQL Server 2025: real SQL Server effectively applies the postfix collation's byte budget at CAST time — `CAST(N'AéB' AS varchar(2)) COLLATE Latin1_General_100_CI_AS_SC_UTF8` returns `'A'` (1 byte), the simulator returns `'Aé'` (3 bytes).
-  The fixed-length sibling `CAST(... AS char(N))` doesn't have this gap because `CollateExpression.Run` re-normalizes char(N) values through `FromString` when the storage encoding changes (the char(N) destination buffer is fixed at N bytes, so the regression would manifest as an encoder overflow; varchar sizes dynamically and only the truncation cutoff disagrees).
-  Workaround: pin the UTF-8 collation directly on the CAST target via the column's declared collation, rather than as a postfix on a CAST output.
-  The postfix alone shows the same budget: a `varchar(1)` holding `€` moved to a UTF-8 collation, or holding `…` moved to `Japanese_XJIS_140_CI_AS` (code page 932), reads empty on real, where the character needs more bytes than the declaration has, and keeps the character here (probed 2026-09-28).
-- **Code page 874's best fit misses two characters.**
-  `CAST(CHAR(130) AS varchar(1)) COLLATE Thai_CI_AS` (`‚`, U+201A) best-fits to `,` on real and to `?` here, and `CHAR(132)` (`„`) to `"` (probed 2026-09-28 against SQL Server 2025).
-- **Pre-v100 collation sort divergence on supplementary chars at position 1+.**
-  Probe-confirmed against SQL Server 2025: `SQL_Latin1_General_CP1_CI_AS` (the default) and `Latin1_General_CI_AS` (pre-v100) sort `Z+emoji` BEFORE `Z+U+E000` — code-unit order (high surrogate D83D < E000).
-  The v100 family (`Latin1_General_100_CI_AS` and its SC sibling) sort the other way (codepoint U+1F600 > U+E000 → `Z+E000` first).
-  The simulator routes both pre-v100 and v100 through `CompareInfo`, which always does codepoint compare — so both ranges of collations behave like v100 in the simulator.
-  Narrow gap (only supplementary chars at non-position-0); fixing requires per-collation Compare bodies that drop to code-unit ordinal at supplementary positions.
+- **Pre-v100 collation sort divergence on supplementary chars at position 1+, outside the Latin1-General tables.**
+  Probe-confirmed against SQL Server 2025: the pre-v100 names sort `Z+emoji` BEFORE `Z+U+E000`, while the v100 family sorts the other way.
+  The Latin1-General tables reproduce both (the unversioned table weighs no surrogate); every other pre-v100 name routes through `CompareInfo`, which compares by code point and so behaves like v100.
 
 ## Cross-references
 

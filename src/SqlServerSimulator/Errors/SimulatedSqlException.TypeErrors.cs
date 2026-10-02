@@ -383,7 +383,7 @@ partial class SimulatedSqlException
     /// the declared target's.
     /// </summary>
     internal static SimulatedSqlException ArithmeticOverflowConverting(SqlType source, string targetWord, byte state) =>
-        new($"Arithmetic overflow error converting {FamilyRootName(source)} to data type {targetWord}.", 8115, 16, state);
+        new($"Arithmetic overflow error converting {ConversionSourceName(source)} to data type {targetWord}.", 8115, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 8115 out of an exact-numeric source, whose
@@ -415,6 +415,14 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotConvertCharToSmallMoney() =>
         new("Cannot convert char value to smallmoney. The char value has incorrect syntax.", 293, 16, 0) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 294: an ANSI string read as a number past
+    /// <c>smallmoney</c>'s range — a Unicode one reports the generic Msg 8115
+    /// (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CharToSmallMoneyOverflow() =>
+        new("The conversion from char data type to smallmoney data type resulted in a smallmoney overflow error.", 294, 16, 0);
 
     /// <summary>
     /// Mimics SQL Server error 8134: division by zero in integer, decimal,
@@ -592,18 +600,26 @@ partial class SimulatedSqlException
     /// number, Msg 292, naming itself (probed 2026-09-25 against SQL Server
     /// 2025).
     /// </summary>
-    internal static SimulatedSqlException InsufficientResultSpaceForMoney(SqlType sourceType, string targetType) =>
+    internal static SimulatedSqlException InsufficientResultSpaceForMoney(SqlType sourceType, string targetType, byte state = 2) =>
         sourceType == SqlType.SmallMoney
-            ? new($"There is insufficient result space to convert a smallmoney value to {targetType}.", 292, 16, 2)
-            : new($"There is insufficient result space to convert a money value to {targetType}.", 234, 16, 2);
+            ? new($"There is insufficient result space to convert a smallmoney value to {targetType}.", 292, 16, state)
+            : new($"There is insufficient result space to convert a money value to {targetType}.", 234, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 9809: <c>CONVERT</c> of a binary to a string
     /// under a style other than 0 / 1 / 2, naming the target's family
     /// (probed 2026-09-25 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException StyleNotSupportedFromBinary(int style, string targetTypeWord) =>
-        new($"The style {style.ToString(CultureInfo.InvariantCulture)} is not supported for conversions from varbinary to {targetTypeWord}.", 9809, 16, 1);
+    internal static SimulatedSqlException StyleNotSupportedFromBinary(int style, string targetTypeWord) => StyleNotSupported(style, "varbinary", targetTypeWord);
+
+    /// <summary>
+    /// Mimics SQL Server error 9809 in either direction between a string and
+    /// a binary — a string read under a style other than 0 / 1 / 2 names its
+    /// own family and <c>varbinary</c> (probed 2026-10-02 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException StyleNotSupported(int style, string sourceTypeWord, string targetTypeWord) =>
+        new($"The style {style.ToString(CultureInfo.InvariantCulture)} is not supported for conversions from {sourceTypeWord} to {targetTypeWord}.", 9809, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 281: a non-zero, non-120/121 style number
@@ -728,10 +744,11 @@ partial class SimulatedSqlException
     /// type couldn't parse the string into the target type's value space
     /// (e.g. <c>cast('abc' as int)</c>, <c>cast('42.5' as int)</c>). The
     /// source-type word in the message reflects the actual source
-    /// (<c>varchar</c>, <c>nvarchar</c>, etc.).
+    /// (<c>varchar</c>, <c>nvarchar</c>, etc.). A NUL in the value is quoted
+    /// as a period (probed 2026-10-02 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException ConversionFailedFromString(SqlType sourceType, string sourceValue, SqlType targetType) =>
-        new($"Conversion failed when converting the {ConversionSourceName(sourceType)} value '{sourceValue}' to data type {targetType.SqlServerName}.", 245, 16, 1) { AbortsAsUnderXactAbort = true };
+        new($"Conversion failed when converting the {ConversionSourceName(sourceType)} value '{sourceValue.Replace('\0', '.')}' to data type {targetType.SqlServerName}.", 245, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// This conversion error's text as real sends it when the value came from
@@ -924,12 +941,35 @@ partial class SimulatedSqlException
     /// (all probed 2026-09-25 against SQL Server 2025), stopping before the
     /// stack frames real appends as the spatial family does.
     /// </summary>
-    private static SimulatedSqlException HierarchyIdFailure(string message, string exceptionType = "Microsoft.SqlServer.Types.HierarchyIdException", string? parameterName = null) =>
-        ClrTypeFailure("hierarchyid", exceptionType, message, parameterName, state: 2);
+    private static SimulatedSqlException HierarchyIdFailure(string message, string exceptionType = "Microsoft.SqlServer.Types.HierarchyIdException", string? parameterName = null, byte state = 2) =>
+        ClrTypeFailure("hierarchyid", exceptionType, message, parameterName, state);
 
-    /// <summary>A string <c>hierarchyid::Parse</c> or a conversion can't read.</summary>
-    internal static SimulatedSqlException HierarchyIdParseFailed(string input) =>
-        HierarchyIdFailure($"24001: SqlHierarchyId.Parse failed because the input string '{input}' is not a valid string representation of a SqlHierarchyId node.");
+    /// <summary>
+    /// A string <c>hierarchyid::Parse</c> or a conversion can't read — at
+    /// state 1 when a <c>varchar(max)</c> / <c>nvarchar(max)</c> is converted
+    /// (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException HierarchyIdParseFailed(string input, byte state = 2) =>
+        HierarchyIdFailure($"24001: SqlHierarchyId.Parse failed because the input string '{input}' is not a valid string representation of a SqlHierarchyId node.", state: state);
+
+    /// <summary>
+    /// A hierarchyid converted to a string too short for its path, which real's
+    /// CLR conversion refuses rather than cuts, counting both sides in UTF-16
+    /// bytes (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException HierarchyIdStringTruncated(int pathLength, int targetLength) =>
+        HierarchyIdFailure(
+            $"Trying to convert return value or output parameter of size {(2 * pathLength).ToString(CultureInfo.InvariantCulture)} bytes to a T-SQL type with a smaller size limit of {(2 * targetLength).ToString(CultureInfo.InvariantCulture)} bytes.",
+            "System.Data.SqlServer.TruncationException");
+
+    /// <summary>
+    /// Mimics SQL Server error 9801 (a hierarchyid too long for its binary
+    /// target) and 6207 (a <c>binary(N)</c> it would have to pad), probed
+    /// 2026-10-02 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException HierarchyIdBinaryMismatch(bool truncated) => truncated
+        ? new("Error converting sys.hierarchyid to binary. The result would be truncated.", 9801, 16, 1)
+        : new("Error converting sys.hierarchyid to fixed length binary type. The result would be padded and cannot be converted back.", 6207, 16, 1);
 
     /// <summary>
     /// Bytes that aren't a canonical OrdPath encoding, reported when a method

@@ -159,9 +159,11 @@ internal sealed class Cast : Expression
         try
         {
             RejectRoundingUnderRoundAbort(sourceValue, this.targetType, runtime.Batch);
-            coerced = ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength, ResultCollation(this.targetType, sourceValue.Type, dbCollation));
+            coerced = this.tryMode && TryTruncationFails(sourceValue, this.targetType)
+                ? SqlValue.Null(this.targetType)
+                : ApplyCoercion(sourceValue, this.targetType, this.targetMaxLength, ResultCollation(this.targetType, sourceValue.Type, dbCollation));
         }
-        catch (SimulatedSqlException ex) when (this.tryMode && (IsConversionFailure(ex.Number) || IsVectorConversionFailure(ex.Number) || (ex.Number == 6522 && this.targetType is ClrUdtSqlType)))
+        catch (SimulatedSqlException ex) when (this.tryMode && TrySwallows(ex, sourceValue, this.targetType))
         {
             coerced = SqlValue.Null(this.targetType);
         }
@@ -463,7 +465,7 @@ internal sealed class Cast : Expression
     /// <c>bit</c>, <c>date</c>, <c>datetime</c>, <c>uniqueidentifier</c>,
     /// <c>varbinary</c> and <c>sql_variant</c> all raise 529.</item>
     /// <item><c>image</c> converts only within the binary family —
-    /// <c>varbinary</c> / <c>binary</c> / <c>image</c>. Notably <c>xml</c> and
+    /// <c>varbinary</c> / <c>binary</c> / <c>image</c> / <c>timestamp</c>. Notably <c>xml</c> and
     /// <c>sql_variant</c> raise 529 from <c>image</c> even though <c>xml</c> is
     /// reachable from <c>text</c>.</item>
     /// </list>
@@ -481,7 +483,7 @@ internal sealed class Cast : Expression
     private static bool IsRejectedLegacyLobConversion(SqlType source, SqlType target) =>
         source == SqlType.Text || source == SqlType.NText
             ? !SqlType.IsStringCategory(target)
-            : source == SqlType.Image && target is not (VarbinarySqlType or BinarySqlType or ImageSqlType);
+            : source == SqlType.Image && target is not (VarbinarySqlType or BinarySqlType or ImageSqlType or RowVersionSqlType);
 
     /// <summary>
     /// Whether real refuses this explicit conversion outright — Msg 529, which
@@ -525,6 +527,16 @@ internal sealed class Cast : Expression
     {
         if (source == target)
             return false;
+
+        // timestamp converts as the binary(8) it is to the integer, decimal,
+        // money, ANSI string, binary and legacy datetime families, image
+        // included, and refuses everything else — a Unicode string only as a
+        // target (probed 2026-10-02 against SQL Server 2025).
+        if (source is RowVersionSqlType)
+            return IsRefusedByRowVersion(target) || target is NCharSqlType or NVarcharSqlType or SystemNameSqlType;
+        if (target is RowVersionSqlType)
+            return IsRefusedByRowVersion(source);
+
         if (source == SqlType.Text || source == SqlType.NText || source == SqlType.Image)
             return IsRejectedLegacyLobConversion(source, target);
 
@@ -592,6 +604,11 @@ internal sealed class Cast : Expression
             return target is XmlSqlType;
         return source is BinarySqlType or VarbinarySqlType && (target == SqlType.Float || target == SqlType.Real);
     }
+
+    private static bool IsRefusedByRowVersion(SqlType other) =>
+        other == SqlType.Float || other == SqlType.Real || other == SqlType.Text || other == SqlType.NText
+        || other == SqlType.UniqueIdentifier || IsDateOnlyOrTimeFamily(other)
+        || other is SqlVariantSqlType or XmlSqlType or HierarchyIdSqlType or SpatialSqlType or ClrUdtSqlType or JsonSqlType or VectorSqlType;
 
     private static bool IsCharacterString(SqlType type) =>
         type is VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType or SystemNameSqlType;
@@ -700,7 +717,11 @@ internal sealed class Cast : Expression
         SqlValue coerced;
         try
         {
-            coerced = value.CoerceTo(targetType);
+            // A string's conversion keeps its own collation, so it moves into
+            // no other code page here; the result takes it afterwards.
+            coerced = value.CoerceTo(budgetCollation is not null && SqlType.IsStringCategory(sourceType) && targetType is VarcharSqlType or CharSqlType
+                ? targetType.WithCollation(budgetCollation, targetType.Coercibility)
+                : targetType);
         }
         catch (OverflowException)
         {
@@ -918,8 +939,30 @@ internal sealed class Cast : Expression
     /// explicit-cast rejection, Msg 243 unknown type, etc.) propagates so
     /// the caller still sees genuine programming errors.
     /// </summary>
+    /// <summary>
+    /// Whether <c>TRY_CAST</c> / <c>TRY_CONVERT</c> answer NULL for this
+    /// failure: every <see cref="IsConversionFailure"/> number, a vector's, a
+    /// CLR type's library failure into that type, and a hierarchyid's into a
+    /// binary or a Unicode string it doesn't fit — while one into a
+    /// <c>char</c> / <c>varchar</c> still raises (probed 2026-10-02 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static bool TrySwallows(SimulatedSqlException ex, SqlValue source, SqlType target) =>
+        IsConversionFailure(ex.Number) || IsVectorConversionFailure(ex.Number)
+        || ex.Number is 6207 or 9801
+        || (ex.Number == 6522 && (target is ClrUdtSqlType || (source.Type is HierarchyIdSqlType && target is NCharSqlType or NVarcharSqlType)));
+
+    /// <summary>
+    /// A <c>date</c> into a binary narrower than its three bytes, which
+    /// <c>CAST</c> cuts but <c>TRY_CAST</c> / <c>TRY_CONVERT</c> answer NULL for
+    /// (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    internal static bool TryTruncationFails(SqlValue source, SqlType target) =>
+        !source.IsNull && source.Type == SqlType.Date && target is BinarySqlType { length: < 3 } or VarbinarySqlType { length: > 0 and < 3 };
+
     internal static bool IsConversionFailure(int number) => number is
-        220    // ArithmeticOverflowForDataType (integer → tinyint/smallint)
+        210    // a binary the legacy date-time layout can't read
+        or 220 // ArithmeticOverflowForDataType (integer → tinyint/smallint)
         or 232 // ArithmeticOverflowForType (float/real/money → integer)
         or 234 // InsufficientResultSpaceForMoney
         or 235 // money string syntax
@@ -931,6 +974,7 @@ internal sealed class Cast : Expression
         or 248 // OverflowConvertingToInt
         or 292 // InsufficientResultSpaceForMoney (smallmoney)
         or 293 // smallmoney string syntax
+        or 294 // CharToSmallMoneyOverflow
         or 295 // ConversionFailedSmallDateTimeFromString
         or 8114 // ConvertingDataTypeError
         or 8115 // ArithmeticOverflow

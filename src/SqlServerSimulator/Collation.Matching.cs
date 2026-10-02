@@ -41,6 +41,20 @@ namespace SqlServerSimulator;
 internal abstract partial class Collation
 {
     /// <summary>
+    /// Whether this collation matches <paramref name="text"/> through its own
+    /// weight table rather than <see cref="CompareInfo"/> — true only for a
+    /// table-driven body over text inside the table's repertoire.
+    /// </summary>
+    internal virtual bool MatchesByTable(ReadOnlySpan<char> text) => false;
+
+    /// <summary>
+    /// How many code units of <paramref name="subject"/> the run matches from
+    /// its start under the weight table, or <c>-1</c>; consulted only where
+    /// <see cref="MatchesByTable"/> holds for both.
+    /// </summary>
+    internal virtual int TableMatch(ReadOnlySpan<char> subject, ReadOnlySpan<char> run) => -1;
+
+    /// <summary>
     /// The index in <paramref name="subject"/> at or after
     /// <paramref name="start"/> where <paramref name="needle"/> first matches
     /// under this collation, or <c>-1</c> when it doesn't;
@@ -149,6 +163,12 @@ internal abstract partial class Collation
     internal bool IsPrefix(ReadOnlySpan<char> subject, ReadOnlySpan<char> run, out int matchLength)
     {
         matchLength = 0;
+        if (this.MatchesByTable(subject) && this.MatchesByTable(run))
+        {
+            var consumed = this.TableMatch(subject, run);
+            matchLength = Math.Max(consumed, 0);
+            return consumed >= 0;
+        }
         if (this.LinguisticMatching is not { } linguistic)
             return false;
         // A character real gives no weight stands aside as one CompareInfo
@@ -239,6 +259,22 @@ internal abstract partial class Collation
                 return -1;
             matchLength = needle.Length;
             return fast;
+        }
+
+        if (this.MatchesByTable(window) && this.MatchesByTable(needle))
+        {
+            for (var start = 0; start < window.Length; start++)
+            {
+                if (char.IsLowSurrogate(window[start]) && start > 0 && char.IsHighSurrogate(window[start - 1]))
+                    continue;
+                var consumed = this.TableMatch(window[start..], needle);
+                if (consumed >= 0)
+                {
+                    matchLength = consumed;
+                    return start;
+                }
+            }
+            return -1;
         }
 
         if (this.Weightless is { } weightless)

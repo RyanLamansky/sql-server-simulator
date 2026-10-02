@@ -399,6 +399,7 @@ partial class Simulation
             }
 
             RejectTooManyValueRows(valueTuples);
+            RejectConflictingExplicitCollations(valueTuples);
             RejectSequenceDefaultOutsideColumnList(valueTuples, tupleSequences, destinationTable, destinationColumns);
             ReportingArity(context, () => RejectValuesArityMismatch(valueTuples, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable));
         }
@@ -1101,6 +1102,32 @@ partial class Simulation
         throw arity > destinationColumns.Length && identityColumn is not null && destinationTable is not null
             ? SimulatedSqlException.ExplicitIdentityNeedsColumnList(destinationTable.Name)
             : SimulatedSqlException.ColumnCountDoesNotMatchTableDefinition();
+    }
+
+    /// <summary>
+    /// The rows of an <c>INSERT … VALUES</c> unify per column as a
+    /// <c>UNION ALL</c>'s branches do before anything is written, so two
+    /// <c>COLLATE</c> clauses that disagree in one column are <b>Msg 468</b>
+    /// naming that operation, the later row's collation first (probed
+    /// 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    private static void RejectConflictingExplicitCollations(List<Expression[]> valueTuples)
+    {
+        if (valueTuples.Count < 2)
+            return;
+        for (var c = 0; c < valueTuples[0].Length; c++)
+        {
+            string? first = null;
+            foreach (var tuple in valueTuples)
+            {
+                var name = c < tuple.Length && tuple[c] is Parser.Expressions.CollateExpression collate ? collate.ResolvedCollation.Name : null;
+                if (name is null)
+                    continue;
+                first ??= name;
+                if (!string.Equals(first, name, StringComparison.OrdinalIgnoreCase))
+                    throw SimulatedSqlException.CollationConflict(name, first, "UNION ALL");
+            }
+        }
     }
 
     /// <summary>

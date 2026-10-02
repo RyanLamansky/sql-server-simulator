@@ -1921,10 +1921,13 @@ internal abstract class BooleanExpression : ExpressionNode
 
         // sp_describe_undeclared_parameters falls back to int for a parameter
         // only tested for NULL (probed 2026-09-26 against SQL Server 2025).
+        // An operand whose collation never resolved is refused as the test's
+        // own Msg 4191 (probed 2026-10-02 against SQL Server 2025:
+        // `CONCAT(a, b) IS NULL` over two columns of different collations).
         internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
         {
             if (!UndeclaredParameterDeduction.NoteExact(source, SqlType.Int32))
-                base.Bind(batch, resolveColumnType);
+                UnresolvedCollation.Require(source.GetSqlType(batch, resolveColumnType), negated ? "is not" : "is");
         }
 
         internal override void Describe(NodeShape shape) => shape.Local(negated).Child(source);
@@ -2958,11 +2961,35 @@ internal abstract class BooleanExpression : ExpressionNode
         // why a missing memo just means the old behavior.
         if (SqlType.PairError(TypePairOperation.Compare, l.Type, r.Type, operatorName) is { } error)
             throw error;
+        if (ExactDateTimeOrder(l, r) is { } order)
+            return compare(SqlValue.FromInt32(order), SqlValue.FromInt32(0));
         var common = ComparisonType(l.Type, r.Type, leftIsConstant, rightIsConstant);
         return compare(
             leftMemo is null ? l.CoerceTo(common) : leftMemo.Coerce(l, common),
             rightMemo is null ? r.CoerceTo(common) : rightMemo.Coerce(r, common));
     }
+
+    /// <summary>
+    /// A <c>datetime</c> compared with a <c>datetime2</c> or
+    /// <c>datetimeoffset</c> compares at its exact 1/300-second value rather
+    /// than the 100-nanosecond one it converts to, so <c>.003</c> is above
+    /// <c>datetime2</c> <c>.0033333</c> and equal to nothing it can name
+    /// (probed 2026-10-02 against SQL Server 2025). Answers the operands'
+    /// order in units of a third of a tick, or null for any other pair.
+    /// </summary>
+    private static int? ExactDateTimeOrder(SqlValue l, SqlValue r) => (l.Type, r.Type) switch
+    {
+        (DateTimeSqlType, DateTime2SqlType or DateTimeOffsetSqlType) or (DateTime2SqlType or DateTimeOffsetSqlType, DateTimeSqlType)
+            => ThirdTicks(l).CompareTo(ThirdTicks(r)),
+        _ => null,
+    };
+
+    private static Int128 ThirdTicks(SqlValue value) => value.Type switch
+    {
+        DateTimeSqlType => ((Int128)value.AsDateTime.Date.Ticks * 3) + (DateTimeSqlType.UnitsFromTicks(value.AsDateTime.TimeOfDay.Ticks) * 100_000),
+        DateTimeOffsetSqlType => (Int128)value.AsDateTimeOffset.UtcTicks * 3,
+        _ => (Int128)value.AsDateTime2.Ticks * 3,
+    };
 
     /// <summary>
     /// The type two differently-typed operands compare in: the unification's,

@@ -139,6 +139,8 @@ internal sealed class ConvertExpression : Expression
         try
         {
             Cast.RejectRoundingUnderRoundAbort(sourceValue, this.targetType, runtime.Batch);
+            if (this.tryMode && Cast.TryTruncationFails(sourceValue, this.targetType))
+                return SqlValue.Null(this.targetType);
             // Style is meaningful only for the six (source-family, target-
             // family) pairs listed below; the default arm and the no-style
             // branch both fall through to the styleless coercion, matching
@@ -191,7 +193,7 @@ internal sealed class ConvertExpression : Expression
         }
         // A style the source type doesn't take is NULL too (Msg 281 / 6358 / 9809;
         // probed 2026-09-26 against SQL Server 2025).
-        catch (SimulatedSqlException ex) when (this.tryMode && (Cast.IsConversionFailure(ex.Number) || Cast.IsVectorConversionFailure(ex.Number) || ex.Number is 281 or 6358 or 9809 || (ex.Number == 6522 && this.targetType is ClrUdtSqlType)))
+        catch (SimulatedSqlException ex) when (this.tryMode && (Cast.TrySwallows(ex, sourceValue, this.targetType) || ex.Number is 281 or 6358 or 9809))
         {
             coerced = SqlValue.Null(this.targetType);
         }

@@ -351,4 +351,63 @@ public sealed class CollationCodePageTests
         => AreEqual(expected, new Simulation().ExecuteBatchesScalar(
             $"create database d collate {collation}",
             "use d; select concat_ws('|', unicode('水'), unicode('Ā'), datalength('水'))"));
+
+    /// <summary>
+    /// A varchar moved to a collation of another code page keeps its declared
+    /// byte budget there, losing whole characters past it (probed 2026-10-02
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("'é' collate Latin1_General_100_CI_AS_SC_UTF8", "")]
+    [DataRow("'aéb' collate Latin1_General_100_CI_AS_SC_UTF8", "aé")]
+    [DataRow("cast(N'aéb' as varchar(3)) collate Latin1_General_100_CI_AS_SC_UTF8", "aé")]
+    [DataRow("cast('aéb' as varchar(max)) collate Latin1_General_100_CI_AS_SC_UTF8", "aéb")]
+    public void Collate_ToUtf8_KeepsTheByteBudget(string expression, string expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
+
+    /// <summary>
+    /// What real sizes a character count by under a supplementary-character
+    /// or UTF-8 collation, read back as each result column's declared length
+    /// (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("nvarchar(5) collate Latin1_General_100_CI_AS_SC", "left(c, 2)", 8)]
+    [DataRow("nvarchar(5) collate Latin1_General_100_CI_AS_SC", "substring(c, 1, 2)", 8)]
+    [DataRow("nvarchar(5) collate Latin1_General_100_CI_AS", "left(c, 2)", 4)]
+    [DataRow("varchar(5) collate Latin1_General_100_CI_AS_SC_UTF8", "left(c, 2)", 5)]
+    [DataRow("varchar(5) collate Latin1_General_100_CI_AS_SC_UTF8", "upper(c)", 40)]
+    [DataRow("char(5) collate Latin1_General_100_CI_AS_SC_UTF8", "lower(c)", 40)]
+    [DataRow("varchar(5) collate Latin1_General_100_CI_AS_SC_UTF8", "stuff(c, 1, 3, 'qq')", 7)]
+    [DataRow("varchar(5)", "stuff(c, 1, 3, 'qq')", 4)]
+    public void ResultWidth_FollowsTheCharacterSpan(string columnType, string expression, int maxLength) =>
+        AreEqual((short)maxLength, new Simulation().ExecuteScalar($"""
+            create table t (c {columnType});
+            select {expression} as r into t2 from t;
+            select max_length from sys.columns where object_id = object_id('t2')
+            """));
+
+    /// <summary>
+    /// The characters real best-fits that .NET's code-page tables leave to
+    /// '?', alike under code pages 1252, 850 and 437, and the further ones
+    /// code page 874's table lacks (probed 2026-10-02 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow(8199, "Latin1_General_CI_AS", 160)]
+    [DataRow(8239, "Latin1_General_CI_AS", 160)]
+    [DataRow(8201, "Latin1_General_CI_AS", 32)]
+    [DataRow(8210, "Latin1_General_CI_AS", 45)]
+    [DataRow(8213, "SQL_Latin1_General_CP850_CI_AS", 45)]
+    [DataRow(8219, "SQL_Latin1_General_CP437_CI_AS", 39)]
+    [DataRow(8223, "Latin1_General_CI_AS", 34)]
+    [DataRow(8243, "Latin1_General_CI_AS", 34)]
+    [DataRow(8199, "SQL_Latin1_General_CP850_CI_AS", 255)]
+    [DataRow(8240, "Latin1_General_CI_AS", 137)]
+    [DataRow(8364, "SQL_Latin1_General_CP850_CI_AS", 63)]
+    [DataRow(8218, "Thai_CI_AS", 44)]
+    [DataRow(8222, "Thai_CI_AS", 34)]
+    [DataRow(8192, "Thai_CI_AS", 32)]
+    [DataRow(8758, "Thai_CI_AS", 58)]
+    [DataRow(8218, "SQL_Latin1_General_CP850_CI_AS", 39)]
+    public void NarrowingToACodePage_TakesWindowsBestFit(int codePoint, string collation, int expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"select ascii(cast(nchar({codePoint}) collate {collation} as varchar(1)))"));
 }

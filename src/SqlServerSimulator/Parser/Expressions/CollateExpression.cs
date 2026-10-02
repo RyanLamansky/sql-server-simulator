@@ -91,8 +91,18 @@ internal sealed class CollateExpression(Expression inner, Collation collation, s
         // (probed 2026-09-28 against SQL Server 2025). A fixed-length char(N)
         // goes through FromString first so the new storage encoding re-pads /
         // re-truncates it to its N bytes.
+        // A bounded varchar keeps its declared byte budget under the new code
+        // page, so text growing there loses the characters past it — whole
+        // characters only: 'aéb' COLLATE a UTF-8 collation is 'aé' in a
+        // varchar(3), and 'é' alone is empty in a varchar(1) (probed 2026-10-02
+        // against SQL Server 2025).
         var moved = rewrapped is CharSqlType ? SqlValue.FromString(rewrapped, value.AsString) : value.WithType(rewrapped);
-        return RowEncoder.StorageForm(moved, rewrapped);
+        var stored = RowEncoder.StorageForm(moved, rewrapped);
+        return rewrapped is VarcharSqlType { length: > 0 } bounded
+            && Collation.ClipToByteBudget(stored.AsString, bounded.length, rewrapped.Collation.StorageEncoding) is var clipped
+            && clipped.Length != stored.AsString.Length
+                ? SqlValue.FromString(rewrapped, clipped)
+                : stored;
     }
 
     internal override string DebugDisplay() => $"{this.Inner.DebugDisplay()} COLLATE {this.ResolvedCollation.Name}";
@@ -121,7 +131,11 @@ internal sealed class CollateExpression(Expression inner, Collation collation, s
     public static CollateExpression ParsePostfix(Expression source, ParserContext context)
     {
         if (source is CollateExpression)
-            throw SimulatedSqlException.SyntaxErrorNearKeyword("collate");
+        {
+            throw context.Token is ReservedKeyword written
+                ? SimulatedSqlException.SyntaxErrorNearKeyword(written)
+                : SimulatedSqlException.SyntaxErrorNearKeyword("collate");
+        }
         context.MoveNextRequired();
         var collationName = context.Token switch
         {

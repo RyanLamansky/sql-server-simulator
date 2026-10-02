@@ -19,13 +19,15 @@ internal static class AssignmentRules
     /// Raises real's error when <paramref name="source"/>, of
     /// <paramref name="sourceType"/>, can't be assigned to
     /// <paramref name="target"/>. A bare <c>NULL</c> has no type to judge and
-    /// is always assignable.
+    /// is always assignable. <paramref name="targetSource"/> is the expression
+    /// the target's type comes from, where there is one, so a <c>decimal</c>
+    /// it spells <c>numeric</c> is named that way.
     /// </summary>
-    public static void RequireAssignable(Expression source, SqlType sourceType, SqlType target)
+    public static void RequireAssignable(Expression source, SqlType sourceType, SqlType target, Expression? targetSource = null)
     {
         if (source is Value { IsUntypedNull: true })
             return;
-        if (SqlType.OperandPairError(TypePairOperation.Assign, new TypePairOperand(sourceType, source), new TypePairOperand(target), "assign") is { } error)
+        if (SqlType.OperandPairError(TypePairOperation.Assign, new TypePairOperand(sourceType, source), new TypePairOperand(target, targetSource), "assign") is { } error)
             throw error;
     }
 

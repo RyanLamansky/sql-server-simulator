@@ -40,6 +40,7 @@ partial class SimulatedSqlException
             XmlParseError.UnexpectedEndOfInput => (9400, "unexpected end of input"),
             XmlParseError.UnrecognizedEncoding => (9401, "unrecognized encoding"),
             XmlParseError.UnableToSwitchEncoding => (9402, "unable to switch the encoding"),
+            XmlParseError.UnrecognizedInputSignature => (9403, "unrecognized input signature"),
             XmlParseError.WhitespaceExpected => (9410, "whitespace expected"),
             XmlParseError.SemicolonExpected => (9411, "semicolon expected"),
             XmlParseError.GreaterThanExpected => (9412, "'>' expected"),

@@ -63,6 +63,13 @@ internal sealed class GreatestLeast : Expression
             branches[count++] = (type, IntegerLiteralDigits(this.arguments[i]), this.arguments[i]);
         }
         this.cachedResultType = SqlType.PromoteBranches(branches.AsSpan(0, count));
+        if (this.cachedResultType.Category == SqlTypeCategory.String)
+        {
+            var types = new SqlType[count];
+            for (var i = 0; i < count; i++)
+                types[i] = branches[i].Item1;
+            StringScalars.RequireResolvableCollations("GREATEST/LEAST", types);
+        }
         this.namingArm = FirstDecimalArm(this.arguments, batch, resolveColumnType);
         return this.cachedResultType;
     }

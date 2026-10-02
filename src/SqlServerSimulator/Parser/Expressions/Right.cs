@@ -74,7 +74,7 @@ internal sealed class Right : Expression
             return stringType;
         var inputWidth = StringScalars.DeclaredWidth(stringType);
         return inputWidth > 0 && this.constantCount is int n
-            ? StringScalars.SizedResultType(stringType, Math.Min(inputWidth, Math.Max(0, n)), batch)
+            ? StringScalars.SizedResultType(stringType, Math.Min(inputWidth, StringScalars.CharacterSpan(stringType, Math.Max(0, n))), batch)
             : stringType;
     }
 

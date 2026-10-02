@@ -251,7 +251,7 @@ internal sealed class Checksum : Expression
         var collation = value.Type.Collation ?? Collation.Baseline;
         var national = SqlType.IsNationalStringCategory(value.Type);
         var hash = 0u;
-        if (!national && (isBinary || collation is Collation.SqlLatin1Cp1CiAsCollation))
+        if (!national && (isBinary || collation is Collation.Latin1GeneralTableCollation { UsesSortOrder52: true }))
         {
             foreach (var b in collation.StorageEncoding.GetBytes(text))
                 hash = BitOperations.RotateLeft(hash, 4) ^ (isBinary ? (uint)(sbyte)b : Cp1252CiAsChecksumWeight[b]);

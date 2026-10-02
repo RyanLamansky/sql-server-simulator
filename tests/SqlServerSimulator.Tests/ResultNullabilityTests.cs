@@ -474,4 +474,12 @@ public sealed class ResultNullabilityTests
     [TestMethod]
     public void HostNameAndAppName_AreNvarchar128()
         => AreEqual("256,256", new Simulation().ExecuteScalar("select concat(cast(sql_variant_property(host_name(), 'MaxLength') as int), ',', cast(sql_variant_property(app_name(), 'MaxLength') as int))"));
+
+    /// <summary>Rowset columns real reports NOT NULL (probed 2026-10-02 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("select value from string_split('a,b', ',')", 1)]
+    [DataRow("select value, ordinal from string_split('a,b', ',', 1)", 2)]
+    [DataRow("select name, description from sys.fn_helpcollations()", 2)]
+    public void RowsetColumns_NotNull(string sql, int columns)
+        => CollectionAssert.AreEqual(Enumerable.Repeat(false, columns).ToArray(), new Simulation().ColumnNullability(sql));
 }

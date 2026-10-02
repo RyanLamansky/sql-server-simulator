@@ -113,6 +113,7 @@ internal sealed class Replace : Expression
         var inputType = StringScalars.BindArgument(input, batch, resolveColumnType, "replace");
         var oldType = StringScalars.BindArgument(oldValue, batch, resolveColumnType, "replace", argumentIndex: 2);
         var newType = StringScalars.BindArgument(newValue, batch, resolveColumnType, "replace", argumentIndex: 3);
+        StringScalars.RequireResolvableCollations("replace", inputType, oldType, newType);
         return ResultType(inputType, oldType, newType, batch);
     }
 

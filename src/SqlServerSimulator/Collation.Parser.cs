@@ -55,9 +55,9 @@ internal abstract partial class Collation
     /// Returns the recognized <see cref="Collation"/> for <paramref name="name"/>,
     /// or <see langword="null"/> if the name isn't grammatically valid +
     /// doesn't carry a known prefix. Subsequent calls with the same name
-    /// return the same reference (interned). The default collation name is
-    /// special-cased inside <see cref="CreateInstance"/> to wrap its comparer
-    /// in the byte-exact <see cref="SqlLatin1Cp1CiAsCollation"/>.
+    /// return the same reference (interned). The Latin1-General names are
+    /// special-cased inside <see cref="CreateInstance"/> to wrap their
+    /// comparers in the byte-exact <see cref="Latin1GeneralTableCollation"/>.
     /// </summary>
     internal static Collation? TryGet(string name) =>
         string.IsNullOrEmpty(name)
@@ -410,13 +410,26 @@ internal abstract partial class Collation
             : SurrogateMatching.Unmatchable;
         var cultureBody = new CultureCollation(name, description, prefixInfo.CultureName, caseSensitive, accentInsensitive, kanaSensitive, widthSensitive, storageEncoding, ansiCodePage, scAware, surrogateMatching, version ?? 80, primaryFamily: prefix.StartsWith("Chinese", StringComparison.Ordinal) || prefix.StartsWith("Japanese", StringComparison.Ordinal) || prefix.StartsWith("Korean", StringComparison.Ordinal) ? prefix : null, primaryVersion: version);
 
-        // The default collation gets a byte-exact sort body wrapping the
-        // generic culture comparer (which still supplies metadata + the
-        // non-CP1252 fallback). See Collation.SqlLatin1Sort.cs.
-        return name.Equals(SqlLatin1Cp1CiAsCollation.CollationName, StringComparison.OrdinalIgnoreCase)
-            ? new SqlLatin1Cp1CiAsCollation(cultureBody)
+        // The names sorting their Unicode data by a Latin1-General table get
+        // its byte-exact body wrapping the generic culture comparer (which
+        // still supplies metadata + the fallback past the table's repertoire):
+        // the Windows Latin1_General names, unversioned and _100_, and the SQL
+        // ones over code pages 1, 850 and 437, which order nvarchar as the
+        // unversioned Windows names do (probed 2026-10-02 against SQL Server
+        // 2025) — save a _KS / _WS name, whose width-sensitivity splits the
+        // table's case level (a superscript '3' differs from '3' there). See
+        // Collation.Latin1GeneralSort.cs.
+        return SortsByLatin1GeneralTable(prefix, version, codePage) && !kanaSensitive && !widthSensitive
+            ? new Latin1GeneralTableCollation(cultureBody, version)
             : cultureBody;
     }
+
+    private static bool SortsByLatin1GeneralTable(string prefix, int? version, int? codePage) =>
+        prefix.Equals("Latin1_General", StringComparison.OrdinalIgnoreCase)
+            ? version is null or 100
+            : version is null
+                && (prefix.Equals("SQL_Latin1_General", StringComparison.OrdinalIgnoreCase) || prefix.Equals("SQL_Latin1_General_Pref", StringComparison.OrdinalIgnoreCase))
+                && codePage is 1252 or 850 or 437;
 
     /// <summary>
     /// Generates the human-readable description that

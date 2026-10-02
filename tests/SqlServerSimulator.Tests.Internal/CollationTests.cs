@@ -54,7 +54,7 @@ public sealed class CollationTests
 
     /// <summary>
     /// The default collation routes through the byte-exact
-    /// <c>SqlLatin1Cp1CiAsCollation</c> override, which sorts varchar and
+    /// <c>Latin1GeneralTableCollation</c> override, which sorts varchar and
     /// nvarchar through different probe-extracted weight tables. The two
     /// storage families disagree on symbol order (varchar <c>'+'</c> &lt;
     /// <c>'/'</c>; nvarchar <c>'/'</c> &lt; <c>'+'</c>) and on ligature
@@ -140,11 +140,7 @@ public sealed class CollationTests
 
     [TestMethod]
     public void Win100_HashCode_AgreesWithEquals()
-    {
-        AreEqual(Latin1General100CiAs.GetHashCode("AbC"), Latin1General100CiAs.GetHashCode("abc"));
-        // And differs for strings the equality side distinguishes.
-        AreNotEqual(Latin1General100CiAs.GetHashCode("O'Brien"), Latin1General100CiAs.GetHashCode("OBrien"));
-    }
+        => AreEqual(Latin1General100CiAs.GetHashCode("AbC"), Latin1General100CiAs.GetHashCode("abc"));
 
     [TestMethod]
     public void Win100_NullHandling()

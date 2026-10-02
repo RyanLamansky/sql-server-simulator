@@ -4438,6 +4438,22 @@ internal sealed partial class Selection
                     cells[count++] = (cell.GetSqlType(context.Batch, TypeResolver), Expression.IntegerLiteralDigits(cell), cell);
             }
             schema[c] = SqlType.PromoteBranches(cells.AsSpan(0, count));
+            // The rows settle one collation per column as a UNION ALL's
+            // branches do, so two that disagree refuse or leave it unresolved
+            // (probed 2026-10-02 against SQL Server 2025: two explicit
+            // COLLATE cells are Msg 468 naming UNION ALL).
+            if (schema[c].Category == SqlTypeCategory.String)
+            {
+                SqlType? settled = null;
+                for (var i = 0; i < count; i++)
+                {
+                    var cellType = cells[i].Item1;
+                    if (cellType.Category == SqlTypeCategory.String)
+                        settled = settled is null ? cellType : UnresolvedCollation.Settle(schema[c], settled, cellType, "UNION ALL");
+                }
+                if (settled is not null && UnresolvedCollation.On(settled) is { } unresolved)
+                    schema[c] = unresolved.Mark(schema[c]);
+            }
             untypedNull[c] = count == 0;
         }
 

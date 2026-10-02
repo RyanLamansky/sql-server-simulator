@@ -217,6 +217,7 @@ internal sealed class Translate : Expression
         var inputType = StringScalars.BindArgument(this.inputArg, batch, resolveColumnType, "translate");
         var charsType = StringScalars.RequireStringArgument(this.charsArg, StringScalars.BindArgument(this.charsArg, batch, resolveColumnType, "translate", argumentIndex: 2), "translate", 2);
         var translationsType = StringScalars.RequireStringArgument(this.translationsArg, StringScalars.BindArgument(this.translationsArg, batch, resolveColumnType, "translate", argumentIndex: 3), "translate", 3);
+        StringScalars.RequireResolvableCollations("translate", inputType, charsType, translationsType);
         return this.boundResultType = ResolveResultType(inputType, charsType, translationsType, batch);
     }
 

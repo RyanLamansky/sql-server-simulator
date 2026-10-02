@@ -86,6 +86,7 @@ internal sealed class CharIndex : Expression
             throw SimulatedSqlException.ImplicitConversionNotAllowed(SimulatedSqlException.FamilyRootName(haystackType), "varbinary");
         StringScalars.RejectLegacyLobInCoercion(haystackType, "charindex", argumentIndex: 2, allowLegacyLob: true);
         StringScalars.RequireSettledCollation(haystackType, "charindex");
+        StringScalars.RequireResolvableCollations("charindex", needleType, haystackType);
         if (start is not null)
             ScalarArguments.RequireNumericSlot(start, batch, resolveColumnType, "charindex", 3, NumericSlot.IntegerOrDecimal);
         return ResultType(haystackType);

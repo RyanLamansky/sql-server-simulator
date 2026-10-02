@@ -68,7 +68,7 @@ internal sealed class IsNullExpression : Expression
         // ISNULL(<decimal>, <datetime>) is Msg 257 where COALESCE answers).
         var replacementType = this.replacement.GetSqlType(batch, resolveColumnType);
         _ = UndeclaredParameterDeduction.NoteExact(this.check, replacementType);
-        AssignmentRules.RequireAssignable(this.replacement, replacementType, t);
+        AssignmentRules.RequireAssignable(this.replacement, replacementType, t, this.check);
         this.namingArm = FirstDecimalArm([this.check, this.replacement], batch, resolveColumnType);
         return this.cachedResultType = t;
     }

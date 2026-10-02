@@ -7,7 +7,7 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// Guards the <c>IEqualityComparer&lt;string&gt;</c> hash contract on
-/// <see cref="Collation.SqlLatin1Cp1CiAsCollation"/>: whenever
+/// <see cref="Collation.Latin1GeneralTableCollation"/>: whenever
 /// <c>Equals(x, y)</c> is true — including across the repertoire boundary,
 /// where equality routes through the inner <see cref="CompareInfo"/> —
 /// <c>GetHashCode</c> must agree. The hybrid hashes in-repertoire strings
@@ -18,14 +18,14 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class CollationHashConsistencyTests
 {
-    private static readonly Collation Nvarchar = Collation.Get(Collation.SqlLatin1Cp1CiAsCollation.CollationName);
+    private static readonly Collation Nvarchar = Collation.Get(Collation.Latin1GeneralTableCollation.DefaultName);
 
     private static readonly Collation Varchar = Nvarchar.ForVarcharStorage();
 
     private static void CollectHashMismatch(Collation collation, string x, string y, List<string> mismatches)
     {
         if (collation.Equals(x, y) && collation.GetHashCode(x) != collation.GetHashCode(y))
-            mismatches.Add($"{Escape(x)} vs {Escape(y)} ({(ReferenceEquals(collation, Varchar) ? "varchar" : "nvarchar")})");
+            mismatches.Add($"{Escape(x)} vs {Escape(y)} ({(ReferenceEquals(collation, Varchar) ? "varchar" : collation.Name)})");
     }
 
     private static string Escape(string s) =>
@@ -155,6 +155,37 @@ public sealed class CollationHashConsistencyTests
     [TestMethod]
     public void SubstitutionFuzz_EqualsImpliesHashEqual()
     {
+        var mismatches = new List<string>();
+        Fuzz(Nvarchar, mismatches);
+        Fuzz(Varchar, mismatches);
+        IsEmpty(mismatches, string.Join("; ", mismatches));
+    }
+
+    /// <summary>
+    /// The same contract over the other names the Latin1-General tables serve,
+    /// each strength and both versions.
+    /// </summary>
+    [TestMethod]
+    [DataRow("Latin1_General_CI_AS")]
+    [DataRow("Latin1_General_CS_AS")]
+    [DataRow("Latin1_General_CI_AI")]
+    [DataRow("Latin1_General_CS_AI")]
+    [DataRow("SQL_Latin1_General_CP1_CS_AS")]
+    [DataRow("Latin1_General_100_CI_AS")]
+    [DataRow("Latin1_General_100_CS_AS")]
+    [DataRow("Latin1_General_100_CI_AI")]
+    [DataRow("Latin1_General_100_CI_AS_SC_UTF8")]
+    public void OtherTableBodies_EqualsImpliesHashEqual(string name)
+    {
+        var collation = Collation.Get(name);
+        var mismatches = new List<string>();
+        Fuzz(collation, mismatches);
+        Sweep(collation, mismatches);
+        IsEmpty(mismatches, string.Join("; ", mismatches));
+    }
+
+    private static void Fuzz(Collation collation, List<string> mismatches)
+    {
         string[][] pools =
         [
             ["s", "S", "ｓ", "Ｓ"],
@@ -167,9 +198,10 @@ public sealed class CollationHashConsistencyTests
             ["ำ", "ํา"],
             ["-", "'", "_", "9", "ก", "z"],
             ["µ", "μ"],
+            ["Ł", "ł", "ő", "Ő", "ǆ", "Ǆ", "ǅ", "dž", "ȸ", "ɓ", "Ɓ"],
+            ["\u2010", "\u202F", "\u200D", "\u0E49"],
         ];
 
-        var mismatches = new List<string>();
         var random = new Random(20260713);
         for (var iteration = 0; iteration < 500; iteration++)
         {
@@ -183,13 +215,8 @@ public sealed class CollationHashConsistencyTests
                 _ = builderY.Append(pool[random.Next(pool.Length)]);
             }
 
-            var x = builderX.ToString();
-            var y = builderY.ToString();
-            CollectHashMismatch(Nvarchar, x, y, mismatches);
-            CollectHashMismatch(Varchar, x, y, mismatches);
+            CollectHashMismatch(collation, builderX.ToString(), builderY.ToString(), mismatches);
         }
-
-        IsEmpty(mismatches, string.Join("; ", mismatches));
     }
 
     /// <summary>
@@ -201,12 +228,19 @@ public sealed class CollationHashConsistencyTests
     [TestMethod]
     public void NormalizationVariantSweep_EqualsImpliesHashEqual()
     {
+        var mismatches = new List<string>();
+        Sweep(Nvarchar, mismatches);
+        Sweep(Varchar, mismatches);
+        IsEmpty(mismatches, string.Join("; ", mismatches));
+    }
+
+    private static void Sweep(Collation collation, List<string> mismatches)
+    {
         (int Start, int End)[] blocks =
         [
             (0x0020, 0x02FF), (0x0E00, 0x0E7F), (0x1E00, 0x1EFF),
             (0x2000, 0x20AF), (0x2100, 0x214F), (0xFB00, 0xFB06), (0xFF00, 0xFFEF),
         ];
-        var mismatches = new List<string>();
         foreach (var (start, end) in blocks)
         {
             for (var cp = start; cp <= end; cp++)
@@ -214,15 +248,11 @@ public sealed class CollationHashConsistencyTests
                 var carrier = $"x{(char)cp}z";
                 foreach (var variant in Variants(carrier))
                 {
-                    if (variant == carrier)
-                        continue;
-                    CollectHashMismatch(Nvarchar, carrier, variant, mismatches);
-                    CollectHashMismatch(Varchar, carrier, variant, mismatches);
+                    if (variant != carrier)
+                        CollectHashMismatch(collation, carrier, variant, mismatches);
                 }
             }
         }
-
-        IsEmpty(mismatches, string.Join("; ", mismatches));
     }
 
     private static IEnumerable<string> Variants(string s)
