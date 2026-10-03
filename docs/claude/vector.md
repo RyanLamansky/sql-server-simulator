@@ -146,6 +146,10 @@ Duplicated vectors are the other gap: of several identical vectors real can leav
 - **A second float16 refusal in one batch** — `VECTOR_NORM` and `VECTOR_NORMALIZE` both over float16 vectors — reports both where real stops at the first.
 - **A bare `NULL` normalizes to `vector(1)`**: `VECTOR_NORMALIZE(NULL, …)` has no dimension count to take, and the simulator needs one.
 - **`sys.parameters.vector_base_type`** stays NULL for a vector parameter (its sibling columns are filled).
+- **Real's kernel depends on the CPU, the simulator's doesn't.**
+  The bit-exact kernels above are the ones real runs on a CPU with FMA (probed on a Ryzen 7800X3D); on an Ivy Bridge 3770K without FMA, real's `VECTOR_DISTANCE` and `VECTOR_NORM` answer differently in the last bits (probed 2026-10-03 against SQL Server 2025 RTM-GDR 17.0.1135.8, a different build from the reference's CU7, so a version change isn't fully ruled out).
+  Its dot kernel there fits 33 of 36 probed dimension counts as four SSE lanes with the multiply and the add rounded separately, two accumulator sets combined lane-wise, a leftover block of four into the combined lanes, the last one to three elements in sequence into lane 0, and lanes halved into each other; the three misses (15, 63 and 999 dimensions) are each one ulp off, all with three leftover elements after a main-loop pass.
+  The simulator computes the FMA kernels on every CPU — its fused multiply-add is exact in software where the instruction is missing — so it answers as real does on current hardware wherever it runs.
 
 ## Not modeled yet
 

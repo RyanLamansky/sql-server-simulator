@@ -115,9 +115,43 @@ internal static class VectorArguments
     private static float Term(float x, float y, float accumulated, bool difference)
     {
         if (!difference)
-            return MathF.FusedMultiplyAdd(x, y, accumulated);
+            return FusedMultiplyAdd(x, y, accumulated);
         var d = x - y;
-        return MathF.FusedMultiplyAdd(d, d, accumulated);
+        return FusedMultiplyAdd(d, d, accumulated);
+    }
+
+    /// <summary>
+    /// <c>x·y + z</c> rounded once, on any CPU. The hardware instruction is
+    /// used where there is one; elsewhere <see cref="MathF.FusedMultiplyAdd"/>
+    /// falls back to the C runtime's <c>fmaf</c>, which missed the kernels'
+    /// last-bit match on a pre-Haswell Windows x64 (an Ivy Bridge without
+    /// FMA, observed 2026-10-03), so the fallback is
+    /// <see cref="SoftwareFusedMultiplyAdd"/>.
+    /// </summary>
+    internal static float FusedMultiplyAdd(float x, float y, float z) =>
+        System.Runtime.Intrinsics.X86.Fma.IsSupported || System.Runtime.Intrinsics.Arm.AdvSimd.IsSupported
+            ? MathF.FusedMultiplyAdd(x, y, z)
+            : SoftwareFusedMultiplyAdd(x, y, z);
+
+    /// <summary>
+    /// A correctly rounded single-precision fused multiply-add without the
+    /// instruction: the float product is exact in double, the sum is rounded
+    /// to odd (its last bit set whenever the TwoSum error is nonzero), and
+    /// odd rounding to 53 bits followed by rounding to 24 is one correct
+    /// rounding.
+    /// </summary>
+    internal static float SoftwareFusedMultiplyAdd(float x, float y, float z)
+    {
+        var product = (double)x * y;
+        var sum = product + z;
+        if (!double.IsFinite(sum))
+            return (float)sum;
+        var addend = sum - product;
+        var error = product - (sum - addend) + (z - addend);
+        var bits = BitConverter.DoubleToInt64Bits(sum);
+        if (error != 0 && (bits & 1) == 0)
+            sum = BitConverter.Int64BitsToDouble(bits + ((error > 0) == (sum > 0) ? 1 : -1));
+        return (float)sum;
     }
 
     /// <summary>
