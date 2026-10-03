@@ -83,10 +83,16 @@ internal sealed class DmlPlanEntry(DmlPlanRecording recording, long schemaVersio
     /// it reaches anything that sets a flag — a lock wait that ends the
     /// statement ends it with the frame the parse had at that point.
     /// </summary>
-    public SimulatedStatementOutcome Replay(ParserContext context)
+    /// <remarks>
+    /// Null, nothing run, when a definition change the locks waited out made
+    /// the plan stale: the caller parses the statement instead.
+    /// </remarks>
+    public SimulatedStatementOutcome? Replay(ParserContext context)
     {
         var batch = context.Batch;
         batch.TakeReplayedLocks(this.Locks);
+        if (Volatile.Read(ref context.Connection.Simulation.SchemaVersion) != this.SchemaVersion)
+            return null;
         var statement = batch.CurrentStatement;
         if (this.opensTransaction)
             statement.MarkOpensTransaction();

@@ -44,6 +44,15 @@ partial class SimulatedSqlException
         new("Cursor is not open.", 16917, 16, state);
 
     /// <summary>
+    /// Msg 16943: a FETCH from a KEYSET, DYNAMIC or FAST_FORWARD cursor whose
+    /// table a definition change — an <c>ALTER TABLE</c>, an index created —
+    /// reached since the cursor opened (probed 2026-10-03 against SQL Server
+    /// 2025, state 4; a STATIC cursor reads on).
+    /// </summary>
+    internal static SimulatedSqlException CursorTableSchemaChanged() =>
+        new("Could not complete cursor operation because the table schema changed after the cursor was declared.", 16943, 16, 4);
+
+    /// <summary>
     /// Msg 16924: a <c>FETCH … INTO</c> list has a different cardinality than
     /// the cursor's projected columns. Probe-confirmed verbatim against SQL
     /// Server 2025 (note the <c>"Cursorfetch:"</c> prefix, no space).

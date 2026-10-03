@@ -144,6 +144,7 @@ partial class Simulation
             // so force any live seek cache to rebuild against the now-empty heap.
             table.Heap.InvalidateSeekJournal();
         }
+        VersionStore.SetAsideVersions(batch, table);
         for (var i = 0; i < identitySnapshots.Count; i++)
             identitySnapshots[i].State.Restore(null);
 

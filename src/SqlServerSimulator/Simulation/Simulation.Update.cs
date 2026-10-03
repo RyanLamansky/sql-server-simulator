@@ -658,10 +658,23 @@ partial class Simulation
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;
 
+        // The walk reads the rows as it goes and never meets a row another
+        // session deleted meanwhile; real's read meets the deleted key and
+        // waits on it. Those still in flight are waited out once the walk is
+        // done, before the statement holds anything, and a key one of them —
+        // or any delete since the seek below chose the rows — put back sends
+        // the statement to run again (BatchContext.TargetKeyReinserted).
+        // Noted before the seek: a delete and reinsert settling between the
+        // seek and the note left the key in neither.
+        var keysPutBack = Volatile.Read(ref table.KeysPutBack);
+
         // Seek the target when WHERE carries an indexable equality / range
         // (positioned UPDATE leaves where null, so it keeps the full scan). The
         // loop re-runs WHERE below, so the seek only narrows the rows considered.
-        var rowSource = MutationRowSource(table, where, context.Batch);
+        // The compile walk holds no schema lock, so it doesn't read the
+        // target's rows or seek cache at all: another session redefining the
+        // table meanwhile left them in a layout the walk decoded wrongly.
+        var rowSource = context.Batch.IsSkipping ? [] : MutationRowSource(table, where, context.Batch);
         // Skip mode commits nothing (CommitUpdate returns early), so the walk
         // is pure cost — and running WHERE / SET against live rows can raise a
         // runtime error (a division by zero, a conversion failure) on behalf of
@@ -706,6 +719,13 @@ partial class Simulation
             judgedRows.Add((pageIndex, slotIndex, rowBytes));
         }
 
+        if (positionedCursor is null && !readsNoRow)
+        {
+            if (!table.SupersededKeyImages.IsEmptyLockFree())
+                _ = AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, predicateOnly: true) is not null);
+            if (Volatile.Read(ref table.KeysPutBack) != keysPutBack)
+                context.Batch.TargetKeyReinserted = true;
+        }
         ApplyDmlTopCap(top, affected, context.Batch);
         HoldQualifyingRows(context.Batch, table, affected, judgedRows, walkGeneration, RowLockPurpose.UpdatePreImage, (i, rowBytes) =>
         {
@@ -858,7 +878,7 @@ partial class Simulation
         var batch = context.Batch;
         if (Storage.VersionStore.WriterSnapshotXid(batch, table) is not { } sx)
             return;
-        foreach (var kv in table.RowVersions)
+        foreach (var kv in table.Heap.RowVersions)
         {
             // A live row another transaction changed since the snapshot is
             // judged by the version the snapshot sees too, so an UPDATE whose
@@ -965,6 +985,8 @@ partial class Simulation
             RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), assignments);
 
         Selection.SettleSerializableWriteFence(table, where, serializableHint: false, context.Batch, sources[targetIndex].Qualifier);
+        // Noted before the target is read, as the plain walk notes it.
+        var keysPutBack = Volatile.Read(ref table.KeysPutBack);
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
 
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
@@ -1019,6 +1041,14 @@ partial class Simulation
             judgedRows.Add((addr.Page, addr.Slot, rowBytes));
             partners?.Note(addr, currentTuple);
         }
+
+        // A target row whose key another session deleted and put back
+        // elsewhere during the walk was never paired: the statement runs
+        // again, as the plain walk's does.
+        if (!table.SupersededKeyImages.IsEmptyLockFree())
+            _ = AwaitSupersededTargetRows(context.Batch, table, (_, prior) => QualifyingTuple(prior) is not null);
+        if (Volatile.Read(ref table.KeysPutBack) != keysPutBack)
+            context.Batch.TargetKeyReinserted = true;
 
         ApplyDmlTopCap(top, affected, context.Batch);
         HoldQualifyingRows(context.Batch, table, affected, judgedRows, walkGeneration, RowLockPurpose.UpdatePreImage, (i, rowBytes) =>
@@ -1102,6 +1132,16 @@ partial class Simulation
             unaliasedName: original.UnaliasedName);
 
     /// <summary>
+    /// How many times a statement writing a table runs its target read again
+    /// when rows it waited on came back deleted with their keys reinserted
+    /// (<see cref="BatchContext.TargetKeyReinserted"/>); the last read's rows
+    /// stand whatever it met. Each run again answers a delete and reinsert
+    /// another session committed meanwhile, so the cap only bounds a session
+    /// starved by others rewriting one key without pause.
+    /// </summary>
+    internal const int MaxTargetWalks = 64;
+
+    /// <summary>
     /// Readies a writer's target read for the rows it can't reach. The walk
     /// reaches a target row through the image it carries — a seek by its key,
     /// a join pairing it, a scan, which never meets a deleted slot — and waits
@@ -1117,7 +1157,8 @@ partial class Simulation
     /// image <paramref name="priorQualifies"/> is waited out in U here, before
     /// the walk, which then judges the row as that session left it — the same
     /// outcome as real's wait at the row's turn, moved earlier within the
-    /// statement. True when it waited. Callers test
+    /// statement. True when some such row was in flight, waited out or
+    /// settling as it was met, the walk's seek then to be read again. Callers test
     /// <see cref="HeapTable.SupersededKeyImages"/> for emptiness first, a
     /// lock-free read, so a statement with no such write in flight on
     /// <paramref name="table"/> doesn't build <paramref name="priorQualifies"/>.
@@ -1126,7 +1167,7 @@ partial class Simulation
     {
         if (batch.IsSkipping || batch.SupersededTargetRows(table) is not { } superseded)
             return false;
-        var waited = false;
+        var matched = false;
         foreach (var (address, priorImage, resource) in superseded)
         {
             bool qualifies;
@@ -1141,9 +1182,12 @@ partial class Simulation
                 qualifies = true;
             }
             if (qualifies)
-                waited |= batch.AwaitSupersededTargetRow(table, resource);
+            {
+                _ = batch.AwaitSupersededTargetRow(table, resource);
+                matched = true;
+            }
         }
-        return waited;
+        return matched;
     }
 
     /// <summary>
@@ -1383,8 +1427,8 @@ partial class Simulation
     /// <summary>
     /// Writes a history row for each row affected by a system-versioned
     /// UPDATE. Each history row preserves the pre-update full column set,
-    /// with ROW END overwritten to the statement's frozen UtcNow. The
-    /// resulting period is <c>[original ROW START, UtcNow)</c> — the
+    /// with ROW END overwritten to the write's system time. The
+    /// resulting period is <c>[original ROW START, system time)</c> — the
     /// half-open interval during which that row was current.
     /// </summary>
     private static void WriteHistoryRowsForUpdate(
@@ -1405,14 +1449,21 @@ partial class Simulation
     /// <summary>
     /// Writes <paramref name="oldFull"/>, a row of system-versioned
     /// <paramref name="parent"/> a statement is about to rewrite or delete, to
-    /// its history sibling, its ROW END the statement's frozen UtcNow — the
-    /// end of the half-open interval during which it was current.
+    /// its history sibling, its ROW END the write's system time
+    /// (<see cref="BatchContext.SystemTimeUtc"/>) — the end of the half-open
+    /// interval during which it was current. A row another transaction
+    /// rewrote after this one began would end before it started, which real
+    /// refuses with Msg 13535, ending the statement (probed 2026-10-03
+    /// against SQL Server 2025, for an UPDATE, a DELETE and a MERGE).
     /// </summary>
     internal static void WriteHistoryRow(
         HeapTable parent, HeapTable historyTable, (int StartOrdinal, int EndOrdinal) period, SqlValue[] oldFull, ParserContext context, UndoLog? undoLog)
     {
         var historyRow = (SqlValue[])oldFull.Clone();
-        historyRow[period.EndOrdinal] = SqlValue.FromDateTime2(parent.Columns[period.EndOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
+        var end = SqlValue.FromDateTime2(parent.Columns[period.EndOrdinal].Type, context.Batch.SystemTimeUtc);
+        if (oldFull[period.StartOrdinal] is { IsNull: false } start && start.AsDateTime2 > end.AsDateTime2)
+            throw SimulatedSqlException.SystemTimeBeforePeriodStart(QualifyTableName(parent, context.Batch.DatabaseFor(parent)));
+        historyRow[period.EndOrdinal] = end;
         _ = InsertRow(context.Batch, historyTable, RowEncoder.EncodeRow(historyTable.StoredColumns, ProjectStoredValues(historyTable, historyRow), historyTable.Heap), undoLog);
     }
 
@@ -1445,7 +1496,7 @@ partial class Simulation
         if (!IsLockableTable(table))
             return table.Heap.Insert(image, undoLog);
         batch.ProbeKeyLocksForInsert(table, image);
-        return table.Heap.Insert(
+        var address = table.Heap.Insert(
             image,
             undoLog,
             (batch, table, captureVersion),
@@ -1457,6 +1508,9 @@ partial class Simulation
             },
             guard,
             storedValues);
+        if (address.PageIndex >= 0)
+            batch.NoteKeyPutBack(table, image);
+        return address;
     }
 
     /// <summary>

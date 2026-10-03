@@ -86,7 +86,9 @@ partial class Simulation
             if (targetPlacement.Census(target).Rows[targetNumber - 1] != 0)
                 throw SimulatedSqlException.SwitchTargetPartitionNotEmpty(targetNumber, targetText);
         }
-        else if (target.Heap.RowCount != 0)
+        // The slot count keeps a deleted row's tombstone, so only a live row
+        // makes the target non-empty.
+        else if (target.Heap.RowCount != 0 && target.Heap.EnumerateRows().Any())
         {
             throw SimulatedSqlException.SwitchTargetNotEmpty(targetText);
         }
@@ -96,6 +98,8 @@ partial class Simulation
 
         VersionStore.NoteDefinitionChange(batch, source);
         VersionStore.NoteDefinitionChange(batch, target);
+        VersionStore.SetAsideVersions(batch, source);
+        VersionStore.SetAsideVersions(batch, target);
 
         // Move the rows.
         var undoLog = context.Connection.CurrentTransaction?.UndoLog;

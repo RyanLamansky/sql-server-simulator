@@ -4,6 +4,8 @@
 Per-batch scalar variables.
 `DECLARE @v TYPE [= expr] [, @w TYPE [= expr] ...]` registers slots; `SET @v = expr` and `SELECT @v = expr [, @w = expr2 ...]` mutate them.
 SqlClient parameters seed the same store as if pre-DECLAREd, so a parameter and a DECLARE can't share a name (Msg 134).
+An initializer that fails — its expression raising, or its subquery timing out or deadlocking on a lock it takes as it parses, running or while the batch compiles — still declares the variable, NULL, for the statements after the error, as real's compile-time declaration does (probed 2026-10-03 against SQL Server 2025); only a syntax error leaves it undeclared, each later reference then Msg 137.
+The subquery's case once left it undeclared, so a batch compiled while another session redefined the table failed with Msg 137 alone.
 
 Variable references resolve at runtime via a captured `VariableSlot` — required because mutations between statements have to be visible to subsequent reads.
 Assignment coercion routes through `Cast.ApplyCoercion` so the slot's declared type is honored: `SET @v(varchar(3)) = 'hello'` truncates to `'hel'`; `SET @v(int) = 'abc'` raises Msg 245.

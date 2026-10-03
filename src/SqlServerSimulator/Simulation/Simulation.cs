@@ -888,6 +888,9 @@ public sealed partial class Simulation
     internal void EnqueueAbandonedSession(SimulatedDbConnection connection) =>
         this.abandonedSessions.Enqueue(connection);
 
+    /// <summary>Whether a finalized session waits in the abandoned-session queue, read lock-free.</summary>
+    internal bool HasAbandonedSessions => !this.abandonedSessions.IsEmpty;
+
     /// <summary>
     /// Test-observable: how many sessions this simulation has reclaimed.
     /// </summary>
@@ -1383,9 +1386,11 @@ public sealed partial class Simulation
             && entry.SchemaVersionAtParse == schemaVersionAtStart)
         {
             _ = Interlocked.Increment(ref this.PlanCacheHits);
-            foreach (var outcome in ReplayCachedSelections(command, entry))
+            var stale = new System.Runtime.CompilerServices.StrongBox<bool>();
+            foreach (var outcome in ReplayCachedSelections(command, entry, stale))
                 yield return outcome;
-            yield break;
+            if (!stale.Value)
+                yield break;
         }
         if (cacheKey is not null)
             _ = Interlocked.Increment(ref this.PlanCacheMisses);
@@ -1769,7 +1774,13 @@ public sealed partial class Simulation
     /// <see cref="SimulatedDbConnection.LastStatementRowCount"/>
     /// maintenance. Bypasses tokenization and parsing entirely.
     /// </summary>
-    private static IEnumerable<SimulatedStatementOutcome> ReplayCachedSelections(SimulatedDbCommand command, PlanCacheEntry entry)
+    /// <remarks>
+    /// The first statement's schema locks can wait out a definition change
+    /// that leaves the plans stale; the replay then stops having run nothing
+    /// and says so through <paramref name="stale"/>, for the caller to parse
+    /// the batch instead.
+    /// </remarks>
+    private static IEnumerable<SimulatedStatementOutcome> ReplayCachedSelections(SimulatedDbCommand command, PlanCacheEntry entry, System.Runtime.CompilerServices.StrongBox<bool> stale)
     {
         var batch = new BatchContext(command);
         try
@@ -1808,6 +1819,12 @@ public sealed partial class Simulation
                 // consumer moves past it, as in the dispatch loop, or in the
                 // finally below.
                 batch.TakeReplayedLocks(entry.Locks[statement]);
+                if (statement == 0 && Volatile.Read(ref connection.Simulation.SchemaVersion) != entry.SchemaVersionAtParse)
+                {
+                    batch.ReleaseStatementSchemaLocks();
+                    stale.Value = true;
+                    yield break;
+                }
                 // The cached plan is shared across principals; re-run the
                 // SELECT permission check against the replaying session's
                 // current principal.
@@ -1856,7 +1873,10 @@ public sealed partial class Simulation
                     if (queryStoreIo is not null)
                         connection.StatementIo = null;
                     if (announcedReader)
+                    {
                         LobReclamation.Leave(connection.Session);
+                        Volatile.Write(ref connection.Session.StatementSnapshotXid, long.MaxValue);
+                    }
                 }
                 connection.LastStatementRowCount = rowCount;
                 var replayed = selection.IsAssignmentOnly
@@ -2530,14 +2550,16 @@ public sealed partial class Simulation
     /// or delete through a read-only cursor (Msg 16929; probed 2026-09-29) or
     /// naming a table the cursor doesn't update (Msg 16933; probed 2026-10-01),
     /// and so do the out-of-range conversions of a written value (Msg 242,
-    /// 244, 248) and a date arithmetic overflow (Msg 517; probed 2026-10-01).
+    /// 244, 248) and a date arithmetic overflow (Msg 517; probed 2026-10-01),
+    /// and a lock timeout on a row or key (Msg 1222 at any state but the object
+    /// lock's 56; probed 2026-10-03).
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number is 1505 or 4457
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite)
-            && (error.Number is 127 or 220 or 232 or 242 or 244 or 248 or 512 or 513 or 515 or 517 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16931 or 16932 or 16933 or 16947
+            && ((error.Number == 1222 && error.State != 56) || error.Number is 127 or 220 or 232 or 242 or 244 or 248 or 512 or 513 or 515 or 517 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16931 or 16932 or 16933 or 16947
                 || (error.Number == 208 && error.RaisedRunningFunctionBody)));
 
     /// <summary>
@@ -4237,7 +4259,7 @@ public sealed partial class Simulation
             : context.Connection.TriggerStatementVersionEntries;
         try
         {
-            var outcome = RunMutationBody(context, body);
+            var outcome = RunMutationBodyUntilSettled();
             if (statementVersionEntries is { } autoCommitEntries)
             {
                 // FinalizePendingEntries clears the list, so capture whether
@@ -4269,6 +4291,18 @@ public sealed partial class Simulation
         }
         catch
         {
+            RewindStatement();
+            throw;
+        }
+        finally
+        {
+            context.Batch.CurrentUndoLog = savedLog;
+            context.Batch.CurrentTableVarUndoLog = savedTableVarLog;
+            context.Batch.CurrentStatementVersionEntries = savedStatementVersionEntries;
+        }
+
+        void RewindStatement()
+        {
             // The heap rewinds before the pending versions go, as a
             // transaction's rollback does.
             log.RollbackTo(marker);
@@ -4280,16 +4314,40 @@ public sealed partial class Simulation
             {
                 var added = tx.PendingVersionEntries.GetRange(versionEntriesMarker, tx.PendingVersionEntries.Count - versionEntriesMarker);
                 tx.PendingVersionEntries.RemoveRange(versionEntriesMarker, tx.PendingVersionEntries.Count - versionEntriesMarker);
-                Storage.VersionStore.DiscardPendingEntries(added);
+                Storage.VersionStore.DiscardPendingEntries(added, kept: tx.PendingVersionEntries);
             }
             tableVarLog.Rollback();
-            throw;
         }
-        finally
+
+        // A target row the statement waited on came back deleted while its
+        // key stands again (BatchContext.TargetKeyReinserted): real's read
+        // meets the key and reads the row it holds, where the walk here met
+        // the old address, judged from a stale image or missed it. The
+        // statement's writes are rewound and it runs again, its read now
+        // finding the key settled. Not inside a trigger's statement, whose
+        // versions the firing statement keeps.
+        SimulatedStatementOutcome RunMutationBodyUntilSettled()
         {
-            context.Batch.CurrentUndoLog = savedLog;
-            context.Batch.CurrentTableVarUndoLog = savedTableVarLog;
-            context.Batch.CurrentStatementVersionEntries = savedStatementVersionEntries;
+            var start = context.SaveCheckpoint();
+            for (var attempt = 1; ; attempt++)
+            {
+                context.Batch.TargetKeyReinserted = false;
+                var mayRunAgain = context.Batch.TargetWalkMayRunAgain;
+                context.Batch.TargetWalkMayRunAgain = attempt < MaxTargetWalks && enclosingTriggerLog is null && !context.Batch.IsSkipping;
+                SimulatedStatementOutcome outcome;
+                try
+                {
+                    outcome = RunMutationBody(context, body);
+                }
+                finally
+                {
+                    context.Batch.TargetWalkMayRunAgain = mayRunAgain;
+                }
+                if (!context.Batch.TargetKeyReinserted || attempt == MaxTargetWalks || enclosingTriggerLog is not null || context.Batch.IsSkipping)
+                    return outcome;
+                RewindStatement();
+                context.RestoreCheckpoint(start);
+            }
         }
     }
 }

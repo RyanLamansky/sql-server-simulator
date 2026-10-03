@@ -19,7 +19,10 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
   A name collision — reachable by turning versioning off, leaving the old sibling behind, and turning it back on — appends an 8-hex suffix (`MSSQL_TemporalHistoryFor_1221579390_F058EC24`).
   Real's suffix is random per attempt; the simulator's is a deterministic 32-bit FNV-1a of the colliding name plus the attempt number, so the shape matches and the value doesn't.
   EF Core 10 always emits the explicit form, so nothing in the EF path depends on this.
-- **INSERT** on a system-versioned parent auto-populates the period columns: ROW START = the statement's frozen `BatchContext.CurrentStatement.UtcNow`, ROW END = `DateTime.MaxValue` (datetime2(7) precision = `9999-12-31 23:59:59.9999999`).
+- **The time a write stamps** is its transaction's begin time inside a transaction (`BatchContext.SystemTimeUtc`), the statement's frozen `BatchContext.CurrentStatement.UtcNow` outside one — every row a transaction writes starts its period, and closes its history row, at the moment the transaction began (probed 2026-10-03 against SQL Server 2025).
+  A row another transaction wrote after this one began carries a period start later than this transaction's time, so this one updating or deleting it is **Msg 13535** (`Data modification failed on system-versioned table '<db>.<schema>.<table>' because transaction time was earlier than period start time for affected records.`), the statement ended.
+  Stamping each statement's own time, as it once did, let a transaction's rows start at different moments and a history row end before it began.
+- **INSERT** on a system-versioned parent auto-populates the period columns: ROW START = the write's time (above), ROW END = `DateTime.MaxValue` (datetime2(7) precision = `9999-12-31 23:59:59.9999999`).
   Explicit values for a GENERATED ALWAYS column raise Msg 13536.
   Implicit insert column lists exclude GENERATED columns (so `INSERT INTO Customers (Id, Name) VALUES (...)` works without listing period columns).
 - **UPDATE** on a system-versioned parent: pre-update full row is captured (`oldSnapshotNeeded` forced true), the post-SET row's ROW START is bumped to UtcNow, then `WriteHistoryRowsForUpdate` writes the captured pre-update row to the history sibling with ROW END overwritten to UtcNow (the period during which the row was current).
@@ -46,7 +49,7 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
   A NULL bound likewise returns no rows.
 - **Zero-duration versions are invisible to every form**, `ALL` included: a row updated more than once inside one transaction leaves a history row whose ROW START equals its ROW END, and real hides it from `FOR SYSTEM_TIME` while a direct `SELECT` against the history table still returns it.
   Probe-confirmed on both an engine-produced row (two UPDATEs in one transaction) and a hand-written one.
-  The simulator freezes ROW START per statement rather than per transaction, so it reaches the same state when two mutations land on the same clock tick — which is why the tests separate mutations by a `WAITFOR` / sleep.
+  Inside one transaction the simulator reaches the same state, every write stamping the transaction's begin time; two autocommit statements reach it only when they land on the same clock tick — which is why the tests separate them by a `WAITFOR` / sleep.
 - **Time arguments are a literal or a variable**, which is all real's grammar admits: a function call (`AS OF SYSUTCDATETIME()`), a parenthesized subquery, or a column reference is **Msg 102** (or **Msg 156** when the offending token is a reserved keyword, e.g. `BETWEEN 't' TO 't'`).
   They're evaluated once on iteration start — no per-row re-evaluation, matching SQL Server's "constant per query" contract.
   ISO 8601 string literals with a trailing `Z` (UTC marker — EF Core 10 emits this) are accepted by datetime2 coercion; an unparseable string raises **Msg 241**.

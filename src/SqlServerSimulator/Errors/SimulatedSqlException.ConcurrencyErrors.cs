@@ -131,8 +131,11 @@ partial class SimulatedSqlException
     /// </summary>
     /// <param name="victimSpid">The chosen victim's session id; threaded
     /// into the message wording at the <c>Process ID &lt;N&gt;</c> slot.</param>
-    internal static SimulatedSqlException TransactionDeadlocked(int victimSpid) =>
-        new($"Transaction (Process ID {victimSpid}) was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction.", 1205, 13, 45);
+    /// <param name="state">The kind of lock the victim waited on, as Msg 1222
+    /// names it: 51 for a key, 45 for a heap's row (probed 2026-10-03 against
+    /// SQL Server 2025).</param>
+    internal static SimulatedSqlException TransactionDeadlocked(int victimSpid, byte state) =>
+        new($"Transaction (Process ID {victimSpid}) was deadlocked on lock resources with another process and has been chosen as the deadlock victim. Rerun the transaction.", 1205, 13, state);
 
     /// <summary>
     /// Msg 1047 — raised when an unsupported combination of locking hints

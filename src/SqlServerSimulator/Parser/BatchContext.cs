@@ -88,6 +88,15 @@ internal sealed class BatchContext
     public readonly StatementContext CurrentStatement = new();
 
     /// <summary>
+    /// The time a system-versioned table's period columns record a write at:
+    /// the open transaction's begin time, as real stamps every write a
+    /// transaction makes with the moment its <c>BEGIN TRANSACTION</c> ran,
+    /// else the statement's frozen <see cref="StatementContext.UtcNow"/>
+    /// (probed 2026-10-03 against SQL Server 2025).
+    /// </summary>
+    public DateTime SystemTimeUtc => this.Connection.CurrentTransaction?.BeginTimeUtc ?? this.CurrentStatement.UtcNow;
+
+    /// <summary>
     /// The line of the last top-level statement this batch's dispatch loop
     /// reached, -1 for a <c>BEGIN TRY</c>: where <c>STATISTICS TIME</c>
     /// reports the batch's compile (probed 2026-09-28 against SQL Server 2025).
@@ -521,7 +530,14 @@ internal sealed class BatchContext
         if (!connection.ExecutionCancellationRequested)
             return false;
         if (!this.RunsInsideCallerStatement)
+        {
+            // Ends the batch: every block the statement sits in stops where it
+            // is, as for a batch-aborting error, rather than demanding the END
+            // the abandoned statements never reached — a cancel landing inside
+            // BEGIN…END or TRY otherwise surfaced as a Msg 102 near it.
+            this.BatchAborted = true;
             return true;
+        }
         var attention = SimulatedSqlException.Attention(connection.ExecutionTimedOut);
         attention.AttentionSettled = !this.SuppressDiagnosticsResolution;
         throw attention;
@@ -625,8 +641,9 @@ internal sealed class BatchContext
     /// wire path emits the single error outcome and the dispatch loop breaks
     /// on this flag rather than resuming at the next statement, so the
     /// abandoned-mid-parse cascade of bogus Msg 319 / 102 syntax errors never
-    /// happens. The in-process path aborts by throwing instead, so it never
-    /// sets this.
+    /// happens. The in-process path aborts by throwing instead, so an error
+    /// never sets it there; a cancellation seen between two top-level
+    /// statements sets it on both paths (<see cref="CancelledAtStatementBoundary"/>).
     /// </summary>
     public bool BatchAborted;
 
@@ -1342,6 +1359,14 @@ internal sealed class BatchContext
     /// </remarks>
     public DataLockPlan AcquireDataLockIfApplicable(HeapTable table, Selection.TableHintInfo hints, bool isWrite, bool readsRows = true)
     {
+        var plan = this.AcquireDataLockCore(table, hints, isWrite, readsRows);
+        return isWrite || plan.NoLockReader || !hints.LocksRead
+            ? plan
+            : plan.WithVersioningRule(lockingRead: true, snapshotConflictCheck: hints.UpdLock || hints.XLock || hints.TabLockX);
+    }
+
+    private DataLockPlan AcquireDataLockCore(HeapTable table, Selection.TableHintInfo hints, bool isWrite, bool readsRows)
+    {
         // A vector index makes its table read-only, which real settles
         // optimizing the writing statement — an un-taken branch included
         // when the batch compiles before it runs — and which ends the batch.
@@ -1362,10 +1387,12 @@ internal sealed class BatchContext
             this.CheckMemoryOptimizedIsolation(table, hints, readsRows);
             // No table lock and no reader lock: every read is a snapshot read
             // (ResolveSnapshotXidForRead), and a write's row lock only detects
-            // a conflict, which AcquireOnTable turns into Msg 41302.
+            // a conflict, which AcquireOnTable turns into Msg 41302. The read's
+            // plan isn't NOLOCK's, whose scan reads the heap's live rows — the
+            // in-flight writes of other transactions among them.
             return isWrite
                 ? new DataLockPlan(rowMode: LockMode.Exclusive, rowTxScoped: true, skipBlockedRows: false, noLockReader: false)
-                : DataLockPlan.NoLock;
+                : new DataLockPlan(rowMode: null, rowTxScoped: false, skipBlockedRows: false, noLockReader: false);
         }
         if (hints.Snapshot && !table.IsTableVariable)
             throw SimulatedSqlException.SnapshotHintOnDiskTable();
@@ -1402,9 +1429,23 @@ internal sealed class BatchContext
         if (isolation == System.Data.IsolationLevel.Snapshot && this.DatabaseFor(table) is { AllowSnapshotIsolation: false } snapshotDisabled)
             throw SimulatedSqlException.SnapshotIsolationNotAllowed(snapshotDisabled.Name);
 
-        // Read uncommitted / NOLOCK: skip everything. Dirty-read semantics.
-        if (!isWrite && (hints.NoLock || isolation == System.Data.IsolationLevel.ReadUncommitted))
+        // Read uncommitted / NOLOCK: skip everything. Dirty-read semantics —
+        // save for a READ UNCOMMITTED session's read carrying a hint that
+        // names a locking level of its own, which real takes as written
+        // (probed 2026-10-03 against SQL Server 2025).
+        if (!isWrite && (hints.NoLock || (isolation == System.Data.IsolationLevel.ReadUncommitted && !hints.LocksRead && !hints.ReadCommitted)))
             return DataLockPlan.NoLock;
+
+        // A row-versioned read — READ_COMMITTED_SNAPSHOT's or a SNAPSHOT
+        // transaction's — carrying TABLOCK and no locking hint reads its
+        // versions as any other does, without the table S (probed 2026-10-03
+        // against SQL Server 2025: it reads past an open writer's IX).
+        if (!isWrite && hints.TabLock && !hints.LocksRead
+            && (isolation == System.Data.IsolationLevel.Snapshot
+                || (isolation == System.Data.IsolationLevel.ReadCommitted && this.DatabaseFor(table).ReadCommittedSnapshot)))
+        {
+            hints.TabLock = false;
+        }
 
         // A snapshot older than the table's definition can't reach it, since
         // metadata isn't versioned (see VersionStore.NoteDefinitionChange); a
@@ -1524,15 +1565,55 @@ internal sealed class BatchContext
         // moving into a fenced gap is a phantom the old image can't reveal —
         // and an INSERT tests its image before the heap write and takes its
         // X through AcquireInsertedRowLock.
-        if (Volatile.Read(ref table.ActiveKeyRangeLocks) != 0
-            && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } liveImage)
+        for (var attempt = 1; ; attempt++)
         {
-            if (purpose == RowLockPurpose.Read)
-                _ = this.TestRowKeyLock(table, liveImage, mode, skipIfBlocked: false);
-            else
-                this.TestKeyLocksForWrite(table, liveImage, purpose);
+            if (Volatile.Read(ref table.ActiveKeyRangeLocks) != 0
+                && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } liveImage)
+            {
+                if (purpose == RowLockPurpose.Read)
+                    _ = this.TestRowKeyLock(table, liveImage, mode, skipIfBlocked: false);
+                else
+                    this.TestKeyLocksForWrite(table, liveImage, purpose);
+            }
+            this.AcquireRowLock(table, pageIndex, slotIndex, mode, conflictIsDelete: purpose == RowLockPurpose.Delete);
+            // The key test and the row lock are two acquisitions where real's
+            // key lock is one: a SERIALIZABLE reader can lock the key between
+            // them, find the row unlocked and read it, and the write then
+            // changes the row under the reader's lock. A key lock taken in
+            // that gap gives the row back — unless the session held it
+            // already, when the reader waited on it — and waits for the key.
+            if (purpose == RowLockPurpose.Read || attempt == Simulation.MaxTargetWalks
+                || Volatile.Read(ref table.ActiveKeyRangeLocks) == 0
+                || this.EscalatedModeOf(table) is not null
+                || table.Heap.ReadSlotBytes(pageIndex, slotIndex) is not { } lockedImage
+                || !this.KeyLockRefusesWrite(table, lockedImage, purpose)
+                || !table.RowLocks.TryGetValue((pageIndex, slotIndex), out var held)
+                || this.Connection.Simulation.LockManager.HoldCount(held, mode, this.Connection.Session) > 1)
+            {
+                return;
+            }
+            this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, mode);
         }
-        this.AcquireRowLock(table, pageIndex, slotIndex, mode, conflictIsDelete: purpose == RowLockPurpose.Delete);
+    }
+
+    // Whether another session holds a key lock a write of `image` for
+    // `purpose` would have to wait out (TestKeyLocksForWrite), without waiting.
+    private bool KeyLockRefusesWrite(HeapTable table, byte[] image, RowLockPurpose purpose)
+    {
+        var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
+        foreach (var (_, group) in table.KeyLockGroups)
+        {
+            if (Volatile.Read(ref group.Holds) != 0
+                && (purpose != RowLockPurpose.UpdatePreImage || group.IsRowGroup)
+                && group.TryReadKey(image, out var key)
+                && group.Find(key) is { } resource
+                && manager.HasIncompatibleHolderOtherThan(resource, LockMode.Exclusive, connection.Session))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>
@@ -1542,11 +1623,18 @@ internal sealed class BatchContext
     /// before taking the latch. No session can hold a lock on an address
     /// that didn't exist, so the acquisition never waits.
     /// </summary>
+    /// <remarks>
+    /// The inserter is recorded before the acquisition, whose escalation count
+    /// can release this very lock with the rest of the statement's — the
+    /// release clears it with the X — and not at all under a table X already
+    /// covering the row, when no row lock is taken for it to describe.
+    /// </remarks>
     public void AcquireInsertedRowLock(HeapTable table, int pageIndex, int slotIndex)
     {
+        if (this.EscalatedModeOf(table) == LockMode.Exclusive)
+            return;
+        table.GetOrCreateRowLock(pageIndex, slotIndex).InsertedBy = this.Connection.Session;
         this.AcquireRowLock(table, pageIndex, slotIndex, LockMode.Exclusive, underLatch: true);
-        if (table.RowLocks.TryGetValue((pageIndex, slotIndex), out var resource))
-            resource.InsertedBy = this.Connection.Session;
     }
 
     private void AcquireRowLock(HeapTable table, int pageIndex, int slotIndex, LockMode mode, bool underLatch = false, bool countForEscalation = true, bool conflictIsDelete = false)
@@ -1564,6 +1652,64 @@ internal sealed class BatchContext
         // so they never escalate.
         if (countForEscalation && !table.IsMemoryOptimized)
             this.CountLocksForEscalation(table, 1, exclusive: mode != LockMode.Shared, rowLock: true);
+    }
+
+    /// <summary>
+    /// Set when a target row a writer's walk waited on came back deleted while
+    /// a row carrying its key (<see cref="RowIdentityKey"/>) stands again — a DELETE and INSERT of
+    /// the key in the transaction the walk waited out. Real's read of the key
+    /// reads the row the key holds once its writer settles, so the walk reads
+    /// its rows again (<c>Simulation.MaxTargetWalks</c>): the reinserted row is
+    /// at an address it never read. Cleared by each walk as it starts.
+    /// </summary>
+    public bool TargetKeyReinserted;
+
+    /// <summary>
+    /// Whether the statement running would run again on
+    /// <see cref="TargetKeyReinserted"/> — false on its last attempt and in a
+    /// trigger's statement — so a walk can stop short of work the run again
+    /// replaces, such as a MERGE inserting a source row whose target it missed.
+    /// </summary>
+    public bool TargetWalkMayRunAgain;
+
+    /// <summary>Notes, for <see cref="TargetKeyReinserted"/>, whether a target row the walk read as <paramref name="priorImage"/> and found deleted has its key (<see cref="RowIdentityKey"/>) back.</summary>
+    private void NoteVanishedTargetRow(HeapTable table, byte[] priorImage)
+    {
+        if (this.TargetKeyReinserted || RowIdentityKey(table) is not var (ordinals, commons))
+            return;
+        var schema = table.StoredColumns;
+        if (!HeapSeekCache.TryComputeKey(priorImage, ordinals, commons, schema, table.Heap, out var key))
+            return;
+        // Another session may hold the key deleted again by now; its write
+        // is waited out, as for a reader (see RowsOfDeletedKey).
+        if (this.RowsCarryingKey(table, ordinals, commons, key).Count != 0)
+            this.TargetKeyReinserted = true;
+    }
+
+    /// <summary>
+    /// The addresses of the rows carrying <paramref name="key"/> in
+    /// <see cref="RowIdentityKey"/>'s columns, waiting out another session's
+    /// delete of the key in flight, as real waits on the key's lock whoever
+    /// holds it. Empty only when the rows and the deletes in flight, read one
+    /// after the other, both saw the key gone with nothing put back between
+    /// the reads (<see cref="HeapTable.KeysPutBack"/>): a delete settling
+    /// between them otherwise reads as the key never having come back.
+    /// </summary>
+    private List<(int Page, int Slot)> RowsCarryingKey(HeapTable table, int[] ordinals, SqlType[] commons, SqlValueKey key)
+    {
+        var rows = new List<(int Page, int Slot)>();
+        var schema = table.StoredColumns;
+        for (var attempt = 1; ; attempt++)
+        {
+            var putBack = Volatile.Read(ref table.KeysPutBack);
+            foreach (var (page, slot, _) in HeapSeekCache.For(table.Heap).MatchingRows(table.Heap, schema, ordinals, commons, key))
+                rows.Add((page, slot));
+            if (rows.Count != 0 || attempt == Simulation.MaxTargetWalks
+                || (!this.AwaitKeyDeleters(table, ordinals, commons, key) && Volatile.Read(ref table.KeysPutBack) == putBack))
+            {
+                return rows;
+            }
+        }
     }
 
     /// <summary>
@@ -1594,6 +1740,7 @@ internal sealed class BatchContext
         if (table.Heap.ReadLiveRow(pageIndex, slotIndex) is not { } current)
         {
             this.ReleaseRowLockAcquisition(table, pageIndex, slotIndex, LockMode.Update);
+            this.NoteVanishedTargetRow(table, rowBytes);
             return TargetRowHold.Gone;
         }
         rowBytes = current;
@@ -1744,6 +1891,7 @@ internal sealed class BatchContext
         if (current is null)
         {
             this.ReleaseTargetRow(table, pageIndex, slotIndex, hold);
+            this.NoteVanishedTargetRow(table, rowBytes);
             hold = TargetRowHold.Gone;
             return false;
         }
@@ -1835,6 +1983,214 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// The key that names a row whatever its address — the clustered key, else
+    /// a stored PRIMARY KEY or UNIQUE constraint — which a read that finds its
+    /// row deleted reads again by, as real's read meets the key under its
+    /// writer's lock rather than the address; null when the table has none.
+    /// </summary>
+    internal static (int[] Ordinals, SqlType[] Commons)? RowIdentityKey(HeapTable table)
+    {
+        var ordinals = ClusteredScan.KeyOrdinals(table);
+        if (ordinals is null)
+        {
+            foreach (var key in table.KeyConstraints)
+            {
+                if (!key.IsDisabled && key.KeysAreStored)
+                {
+                    ordinals = key.StorageOrdinals;
+                    break;
+                }
+            }
+        }
+        if (ordinals is null)
+            return null;
+        var schema = table.StoredColumns;
+        var commons = new SqlType[ordinals.Length];
+        for (var i = 0; i < ordinals.Length; i++)
+            commons[i] = schema[ordinals[i]].Type;
+        return (ordinals, commons);
+    }
+
+    /// <summary>
+    /// The order a locking scan reads <paramref name="table"/> in
+    /// (<see cref="ClusteredScan.Order"/>), with <paramref name="keys"/>
+    /// receiving each address's key. With <paramref name="follow"/>, keys
+    /// another session's delete has taken out of the order but not yet
+    /// settled stand in it as their deleted rows, as real's index keeps a
+    /// deleted key as a ghost under its writer's X until the delete commits:
+    /// the scan meets them in key order and waits. The order and the deletes
+    /// are two reads, and a delete that settled between them with its key put
+    /// back elsewhere left the key in neither, so a key put back meanwhile
+    /// (<see cref="HeapTable.KeysPutBack"/>) reads both again.
+    /// </summary>
+    public List<(int Page, int Slot)>? LockingScanOrder(HeapTable table, List<SqlValueKey> keys, bool follow)
+    {
+        for (var reads = 1; ; reads++)
+        {
+            var putBack = Volatile.Read(ref table.KeysPutBack);
+            keys.Clear();
+            var order = ClusteredScan.Order(table, keys, follow);
+            if (order is null || !follow || keys.Count != order.Count)
+                return order;
+            // An empty order may be the sorted-order cache's own list, shared
+            // with every scan of this generation: placing into it would change
+            // what they enumerate.
+            if (order.Count == 0)
+                order = [];
+            this.PlaceInFlightDeletes(table, order, keys);
+            if (Volatile.Read(ref table.KeysPutBack) == putBack || reads == Simulation.MaxTargetWalks)
+                return order;
+        }
+    }
+
+    /// <summary>
+    /// Places in <paramref name="order"/>, a key-order scan's addresses with
+    /// their <paramref name="keys"/> at the same indexes, each row another
+    /// session has deleted and not yet settled, at its key's position — the
+    /// ghost real's index keeps for it — so the scan meets it and waits
+    /// (<see cref="RowsOfDeletedKey"/>) rather than passing a key that comes
+    /// back elsewhere.
+    /// </summary>
+    public void PlaceInFlightDeletes(HeapTable table, List<(int Page, int Slot)> order, List<SqlValueKey> keys)
+    {
+        if (table.SupersededKeyImages.IsEmptyLockFree() || ClusteredScan.KeyOrdinals(table) is not { } ordinals)
+            return;
+        var schema = table.StoredColumns;
+        var commons = new SqlType[ordinals.Length];
+        for (var i = 0; i < ordinals.Length; i++)
+            commons[i] = schema[ordinals[i]].Type;
+        var session = this.Connection.Session;
+        foreach (var (owner, images) in table.SupersededKeyImages)
+        {
+            if (ReferenceEquals(owner, session))
+                continue;
+            foreach (var (address, (image, _)) in images)
+            {
+                if (!HeapSeekCache.TryComputeKey(image, ordinals, commons, schema, table.Heap, out var key))
+                    continue;
+                // A delete whose transaction rolled back has restored its row
+                // here, perhaps since the order was read without it: placed
+                // too, unless the order has it — or the row is an update's
+                // that moved it to another key, where the order finds it.
+                if (!table.Heap.IsSlotTombstoned(address.PageIndex, address.SlotIndex)
+                    && (table.Heap.ReadSlotBytes(address.PageIndex, address.SlotIndex) is not { } live
+                        || !HeapSeekCache.TryComputeKey(live, ordinals, commons, schema, table.Heap, out var liveKey)
+                        || !liveKey.Equals(key)))
+                {
+                    continue;
+                }
+                var at = 0;
+                var placed = false;
+                for (int compared; at < keys.Count && (compared = HeapSeekCache.CompareKeys(keys[at], key)) <= 0; at++)
+                    placed |= compared == 0 && order[at] == (address.PageIndex, address.SlotIndex);
+                if (placed)
+                    continue;
+                order.Insert(at, (address.PageIndex, address.SlotIndex));
+                keys.Insert(at, key);
+            }
+        }
+    }
+
+    /// <summary>
+    /// For a read reaching an address it was about to read that has since been
+    /// deleted, or whose row a wait on it saw deleted: waits out the delete
+    /// when another session still has it in flight, as real's read waits on
+    /// the deleted key's X, and returns the addresses of the rows carrying the
+    /// row's key (<see cref="RowIdentityKey"/>) now — the row a DELETE and
+    /// INSERT of the key in one transaction left, or none. The key is
+    /// <paramref name="knownKey"/> when the caller's order carried it, else
+    /// <paramref name="priorImage"/>'s or the in-flight delete's pre-image's.
+    /// Null when nothing names it, or the read doesn't wait (<c>NOLOCK</c>,
+    /// <c>READPAST</c>). <paramref name="resolvedKey"/> is the key, which names
+    /// the rows returned should they be deleted in turn before they are read.
+    /// </summary>
+    public List<(int Page, int Slot)>? RowsOfDeletedKey(
+        HeapTable table, int pageIndex, int slotIndex, in DataLockPlan plan, SqlValueKey? knownKey, byte[]? priorImage, out SqlValueKey? resolvedKey)
+    {
+        resolvedKey = null;
+        if (plan.NoLockReader || plan.SkipBlockedRows || RowIdentityKey(table) is not var (ordinals, commons))
+            return null;
+        var schema = table.StoredColumns;
+        var key = knownKey;
+        if (key is null && priorImage is not null && HeapSeekCache.TryComputeKey(priorImage, ordinals, commons, schema, table.Heap, out var priorKey))
+            key = priorKey;
+        if (!table.SupersededKeyImages.IsEmptyLockFree())
+        {
+            var session = this.Connection.Session;
+            foreach (var (owner, images) in table.SupersededKeyImages)
+            {
+                if (ReferenceEquals(owner, session) || !images.TryGetValue((pageIndex, slotIndex), out var superseded))
+                    continue;
+                _ = this.AwaitRowWriters(table, superseded.Lock);
+                if (key is null && HeapSeekCache.TryComputeKey(superseded.Image, ordinals, commons, schema, table.Heap, out var imageKey))
+                    key = imageKey;
+                break;
+            }
+        }
+        resolvedKey = key;
+        // The key may be gone again by now, deleted by a session that met it
+        // after this one's wait began: that delete is waited out too.
+        return key is { } known ? this.RowsCarryingKey(table, ordinals, commons, known) : null;
+    }
+
+    /// <summary>
+    /// Counts in <see cref="HeapTable.KeysPutBack"/> an insert of
+    /// <paramref name="image"/> carrying the key (<see cref="RowIdentityKey"/>)
+    /// of a row this session deleted and still holds — a DELETE and INSERT of
+    /// one key in a transaction. Costs one lock-free read while the session
+    /// has no delete in flight on the table.
+    /// </summary>
+    public void NoteKeyPutBack(HeapTable table, ReadOnlySpan<byte> image)
+    {
+        if (table.SupersededKeyImages.IsEmptyLockFree()
+            || !table.SupersededKeyImages.TryGetValue(this.Connection.Session, out var own)
+            || RowIdentityKey(table) is not var (ordinals, commons))
+        {
+            return;
+        }
+        var schema = table.StoredColumns;
+        if (!HeapSeekCache.TryComputeKey(image, ordinals, commons, schema, table.Heap, out var key))
+            return;
+        foreach (var (address, (prior, _)) in own)
+        {
+            if (table.Heap.IsSlotTombstoned(address.PageIndex, address.SlotIndex)
+                && HeapSeekCache.TryComputeKey(prior, ordinals, commons, schema, table.Heap, out var deleted)
+                && deleted.Equals(key))
+            {
+                _ = Interlocked.Increment(ref table.KeysPutBack);
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Waits out, in S, every other session's uncommitted delete or rewrite of
+    /// a row whose <paramref name="ordinals"/> tuple was <paramref name="key"/>;
+    /// true when there was one.
+    /// </summary>
+    private bool AwaitKeyDeleters(HeapTable table, int[] ordinals, SqlType[] commons, SqlValueKey key)
+    {
+        if (table.SupersededKeyImages.IsEmptyLockFree())
+            return false;
+        var session = this.Connection.Session;
+        List<LockResource>? holders = null;
+        foreach (var (owner, images) in table.SupersededKeyImages)
+        {
+            if (ReferenceEquals(owner, session))
+                continue;
+            foreach (var (_, (image, resource)) in images)
+            {
+                if (HeapSeekCache.TryComputeKey(image, ordinals, commons, table.StoredColumns, table.Heap, out var imageKey) && imageKey.Equals(key))
+                    (holders ??= []).Add(resource);
+            }
+        }
+        var waited = false;
+        foreach (var resource in holders ?? [])
+            waited |= this.AwaitRowWriters(table, resource);
+        return waited;
+    }
+
+    /// <summary>
     /// Waits out every other session's uncommitted delete or rewrite of a row
     /// whose <paramref name="storageOrdinals"/> tuple was
     /// <paramref name="probe"/> (see <see cref="HeapTable.SupersededKeyImages"/>),
@@ -1906,7 +2262,7 @@ internal sealed class BatchContext
     /// <paramref name="resource"/> incompatibly with S — the transient
     /// acquire-and-release real's "wait for the committed row" amounts to.
     /// </summary>
-    public void AwaitRowWritersOf(HeapTable table, LockResource resource) => _ = this.AwaitRowWriters(table, resource);
+    public bool AwaitRowWritersOf(HeapTable table, LockResource resource) => this.AwaitRowWriters(table, resource);
 
     // True when there was someone to wait for. A wait for a key some row
     // carries names the key, for the lock DMVs.
@@ -2073,9 +2429,15 @@ internal sealed class BatchContext
         if (!this.serializableTableFallbacks.Add(table))
             return;
         if (KeyLockGroup.RowGroupOf(table) is { } group)
-            this.AcquireKeyFence(table, group, group.Commons, [KeyFenceInterval.Everything], mode, KeyFenceKind.Read, lookupRows: false);
+        {
+            List<KeyFenceInterval> everything = [KeyFenceInterval.Everything];
+            fence.NoteKeysFenced(table, group, everything, lookupRows: false);
+            this.AcquireKeyFence(table, group, group.Commons, everything, mode, KeyFenceKind.Read, lookupRows: false);
+        }
         else
+        {
             this.AcquireSerializableTableS(table);
+        }
     }
 
     /// <summary>
@@ -2373,26 +2735,67 @@ internal sealed class BatchContext
         // iterator body: the seek decision is made after the FROM source is
         // built, and a seeked source is a different enumerable that never runs
         // this one.
+        // A key another session's uncommitted delete took away is waited out
+        // first, as a seek waits before fencing: fencing first held the next
+        // key's range through the wait, which that session's reinsert of the
+        // key then waited on — a deadlock real never meets.
+        var snapshotXid = batch.ResolveSnapshotXidForRead(table, plan);
+        if (snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows)
+            batch.AwaitUncommittedDeletes(table);
         batch.EnsureSerializableTableLock(table, plan);
         var io = batch.Connection.StatementIo?.Touch(table);
         _ = io?.ScanCount += 1;
         var lastPage = -1;
-        var snapshotXid = batch.ResolveSnapshotXidForRead(table);
-        if (snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows)
-            batch.AwaitUncommittedDeletes(table);
         // Null unless the statement reads a row locator (see RowLocator).
         var addresses = batch.CurrentStatement.RowAddresses;
         // A clustered table scans in its key's order (see ClusteredScan); a
         // snapshot read sweeps the heap and its version chains as before.
-        if (snapshotXid is null && ClusteredScan.Order(table) is { } clusteredOrder)
+        var orderKeys = snapshotXid is null ? new List<SqlValueKey>() : null;
+        // A write in flight may delete and reinsert a key the scan has yet to
+        // reach, the row landing at an address the heap's walk already passed:
+        // the scan follows the key order then, keys in hand, even over a heap
+        // whose own order is the key's.
+        var followKeys = !plan.NoLockReader && !plan.SkipBlockedRows
+            && (Volatile.Read(ref table.ActiveDataWriters) != 0 || Volatile.Read(ref table.ActiveUpdateLocks) != 0 || !table.SupersededKeyImages.IsEmptyLockFree());
+        if (snapshotXid is null && batch.LockingScanOrder(table, orderKeys!, followKeys) is { } clusteredOrder)
         {
             var seen = new HashSet<(int, int)>();
-            foreach (var (pageIndex, slotIndex) in clusteredOrder)
+            // Rows read in the key's place when the key's row was deleted
+            // under the scan, read before the scan moves on.
+            var followed = new Stack<((int Page, int Slot) Address, SqlValueKey? Key)>();
+            for (var position = 0; position < clusteredOrder.Count; position++)
             {
-                if (!seen.Add((pageIndex, slotIndex)) || table.Heap.IsSlotTombstoned(pageIndex, slotIndex))
-                    continue;
-                if (batch.TouchRowForRead(table, pageIndex, slotIndex, plan) && table.Heap.ReadLiveRow(pageIndex, slotIndex) is { } bytes)
+                followed.Push((clusteredOrder[position], orderKeys!.Count == clusteredOrder.Count ? orderKeys[position] : null));
+                while (followed.TryPop(out var next))
                 {
+                    var ((pageIndex, slotIndex), key) = next;
+                    if (!seen.Add((pageIndex, slotIndex)))
+                        continue;
+                    // Deleted since the order was taken, or by the writer the
+                    // row's lock waited out — a write that may put the key back
+                    // at another address, as a DELETE and INSERT of one key in a
+                    // transaction does, or here again, as its rollback does.
+                    // Real's scan meets the key under its writer's X, waits,
+                    // and reads what the key holds then.
+                    byte[]? bytes = null;
+                    if (!table.Heap.IsSlotTombstoned(pageIndex, slotIndex))
+                    {
+                        var sequence = table.Heap.WriteSequence;
+                        if (!batch.TouchRowForRead(table, pageIndex, slotIndex, plan))
+                            continue;
+                        if (table.Heap.ReadLiveRow(pageIndex, slotIndex) is { } read)
+                            bytes = batch.SettleReadCommitted(table, pageIndex, slotIndex, plan, read, sequence);
+                    }
+                    if (bytes is null)
+                    {
+                        if (batch.RowsOfDeletedKey(table, pageIndex, slotIndex, plan, key, null, out var movedKey) is { } moved)
+                        {
+                            _ = seen.Remove((pageIndex, slotIndex));
+                            for (var m = moved.Count - 1; m >= 0; m--)
+                                followed.Push((moved[m], movedKey));
+                        }
+                        continue;
+                    }
                     io?.Enter(pageIndex, ref lastPage);
                     addresses?.Record(bytes, pageIndex, slotIndex);
                     yield return bytes;
@@ -2419,7 +2822,7 @@ internal sealed class BatchContext
             // A chain whose address the heap no longer has — its page trimmed
             // or truncated away — may still hold a version the snapshot
             // predates.
-            foreach (var (address, chain) in table.RowVersions)
+            foreach (var (address, chain) in table.Heap.RowVersions)
             {
                 if (heap.TryReadSlot(address.PageIndex, address.SlotIndex, out _, out _))
                     continue;
@@ -2433,6 +2836,9 @@ internal sealed class BatchContext
         else
         {
             using var rows = heap.EnumerateRowsWithAddress().GetEnumerator();
+            // Rows read early by key after the row the scan waited on was
+            // deleted under it, which the walk then passes over.
+            HashSet<(int, int)>? followed = null;
             while (true)
             {
                 // Read just ahead of the row, so a write since — one a wait in
@@ -2441,17 +2847,47 @@ internal sealed class BatchContext
                 if (!rows.MoveNext())
                     break;
                 var (pageIndex, slotIndex, bytes) = rows.Current;
+                if (followed is not null && followed.Contains((pageIndex, slotIndex)))
+                    continue;
                 io?.Enter(pageIndex, ref lastPage);
                 if (!batch.TouchRowForRead(table, pageIndex, slotIndex, plan))
                     continue;
                 // A wait on the row's writer can outlast the image read before
                 // it: when anything wrote the heap since, read the row as it
-                // stands — gone if the write deleted it — as real's read after
-                // the wait does.
+                // stands — gone if the write deleted it, when the rows now
+                // carrying its key are read in its place — as real's read
+                // after the wait does.
                 if (heap.WriteSequence != sequence)
                 {
-                    if (heap.ReadLiveRow(pageIndex, slotIndex) is not { } current)
+                    if (heap.ReadLiveRow(pageIndex, slotIndex) is not { } read
+                        || batch.SettleReadCommitted(table, pageIndex, slotIndex, plan, read, sequence) is not { } current)
+                    {
+                        if (batch.RowsOfDeletedKey(table, pageIndex, slotIndex, plan, null, bytes, out var movedKey) is { } moved)
+                        {
+                            // A row read in the key's place can be deleted in
+                            // turn before its lock is had: the key is followed
+                            // on from it.
+                            var pending = new Stack<(int Page, int Slot)>(moved.AsEnumerable().Reverse());
+                            for (var hops = 0; pending.TryPop(out var at);)
+                            {
+                                if (!(followed ??= []).Add(at) || !batch.TouchRowForRead(table, at.Page, at.Slot, plan))
+                                    continue;
+                                if (heap.ReadLiveRow(at.Page, at.Slot) is { } followedRow)
+                                {
+                                    addresses?.Record(followedRow, at.Page, at.Slot);
+                                    yield return followedRow;
+                                }
+                                else if (++hops < Simulation.MaxTargetWalks
+                                    && batch.RowsOfDeletedKey(table, at.Page, at.Slot, plan, movedKey, null, out _) is { } next)
+                                {
+                                    _ = followed.Remove(at);
+                                    for (var m = next.Count - 1; m >= 0; m--)
+                                        pending.Push(next[m]);
+                                }
+                            }
+                        }
                         continue;
+                    }
                     bytes = current;
                 }
                 addresses?.Record(bytes, pageIndex, slotIndex);
@@ -2461,13 +2897,49 @@ internal sealed class BatchContext
     }
 
     /// <summary>
+    /// A READ COMMITTED read's image of a row it probed (<see cref="TouchRowForRead"/>),
+    /// <paramref name="bytes"/> as read after the probe, with the heap's
+    /// <see cref="Heap.WriteSequence"/> at <paramref name="sequence"/> before it. The probe holds nothing once it
+    /// returns, so a write that took the row between the probe and the read
+    /// — and possibly rolled back since — may be what was read: when the heap
+    /// moved meanwhile, the row is probed and read again until two reads
+    /// agree. A locking read holds its row lock across the read and is
+    /// returned as read; null when the row is gone, or a READPAST read skips
+    /// it.
+    /// </summary>
+    internal byte[]? SettleReadCommitted(HeapTable table, int pageIndex, int slotIndex, in DataLockPlan plan, byte[] bytes, int sequence)
+    {
+        if (plan.RowMode is not null || plan.NoLockReader || table.Heap.WriteSequence == sequence)
+            return bytes;
+        for (var attempt = 1; attempt < Simulation.MaxTargetWalks; attempt++)
+        {
+            if (!this.TouchRowForRead(table, pageIndex, slotIndex, plan) || table.Heap.ReadLiveRow(pageIndex, slotIndex) is not { } again)
+                return null;
+            if (again.AsSpan().SequenceEqual(bytes))
+                return again;
+            bytes = again;
+        }
+        return bytes;
+    }
+
+    /// <summary>
     /// Returns the snapshot Xid governing this read, or <c>null</c> when
     /// the read should use the standard lock-based path (default RC without
     /// RCSI, RR, SERIALIZABLE, etc). Allocates the per-transaction SI Xid
     /// lazily on first call; allocates the per-statement RCSI Xid lazily
     /// on first user-table read inside the statement.
     /// </summary>
-    internal long? ResolveSnapshotXidForRead(HeapTable table)
+    internal long? ResolveSnapshotXidForRead(HeapTable table, in DataLockPlan plan)
+    {
+        var snapshotXid = this.ResolveTableSnapshotXid(table);
+        // A locking read reads the latest committed row under its locks. A
+        // SNAPSHOT transaction's snapshot is still fixed by it, as its first
+        // data access, which is what a later Msg 3960 judges by.
+        return plan.LockingRead && !table.IsMemoryOptimized ? null : snapshotXid;
+    }
+
+    /// <summary>The snapshot an unhinted read of <paramref name="table"/> reads at, by the session's level and the table's database.</summary>
+    private long? ResolveTableSnapshotXid(HeapTable table)
     {
         if (table.IsTableVariable || IsLocalTempName(table.Name))
             return null;
@@ -2482,10 +2954,7 @@ internal sealed class BatchContext
         // transaction's, taken at its first such read, or the statement's
         // outside one.
         if (table.IsMemoryOptimized && connection.CurrentTransaction is null)
-        {
-            this.RcsiStatementSnapshotXid ??= simulation.CurrentTransactionCommitId;
-            return this.RcsiStatementSnapshotXid;
-        }
+            return this.StatementSnapshotXid(simulation);
         if (isolation == System.Data.IsolationLevel.Snapshot || table.IsMemoryOptimized)
         {
             if (connection.CurrentTransaction is { } tx)
@@ -2504,22 +2973,41 @@ internal sealed class BatchContext
                 }
                 return tx.SnapshotXid;
             }
-            // Auto-commit SI session — each read gets the latest commit
-            // stamp (effectively current state). Rare path, mostly a
-            // grammar-level use.
-            return simulation.CurrentTransactionCommitId;
+            // An autocommit statement under SNAPSHOT is a transaction of its
+            // own, its snapshot the statement's.
+            return this.StatementSnapshotXid(simulation);
         }
 
         // RCSI is the *table's* database's flag, not the session's — a session
         // in a non-RCSI database reading a three-part name into an RCSI one
         // reads versioned, and the reverse blocks (probe-confirmed).
         if (isolation == System.Data.IsolationLevel.ReadCommitted && this.DatabaseFor(table).ReadCommittedSnapshot)
-        {
-            this.RcsiStatementSnapshotXid ??= simulation.CurrentTransactionCommitId;
-            return this.RcsiStatementSnapshotXid;
-        }
+            return this.StatementSnapshotXid(simulation);
 
         return null;
+    }
+
+    /// <summary>
+    /// The statement's snapshot (<see cref="RcsiStatementSnapshotXid"/>),
+    /// taken at its first read that needs one. The session registers it
+    /// first (<see cref="SessionToken.StatementSnapshotXid"/>), under a stamp
+    /// no later than the one it reads, as a SNAPSHOT transaction registers
+    /// its own: the version sweep a concurrent commit runs either sees the
+    /// registration or read its cutoff before this stamp existed, so it can't
+    /// drop a version the statement reads. Without it a commit landing
+    /// mid-read collected the versions of the rows it wrote, and the read saw
+    /// their new images beside the old images of rows it had already passed.
+    /// </summary>
+    private long StatementSnapshotXid(Simulation simulation)
+    {
+        if (this.RcsiStatementSnapshotXid is { } taken)
+            return taken;
+        var session = this.Connection.Session;
+        if (Volatile.Read(ref session.StatementSnapshotXid) == long.MaxValue)
+            _ = Interlocked.Exchange(ref session.StatementSnapshotXid, simulation.CurrentTransactionCommitId);
+        var stamp = simulation.CurrentTransactionCommitId;
+        this.RcsiStatementSnapshotXid = stamp;
+        return stamp;
     }
 
     /// <summary>
@@ -2536,7 +3024,9 @@ internal sealed class BatchContext
     /// connection. If found and <see cref="DataLockPlan.SkipBlockedRows"/>
     /// is true, return false so the caller skips this row (READPAST).
     /// Otherwise wait for the row by transiently acquiring + releasing
-    /// row-S (matches real SQL Server's "wait for committed row" semantic).</item>
+    /// row-S (matches real SQL Server's "wait for committed row" semantic).
+    /// A SERIALIZABLE read whose fence may have missed the row's key locks
+    /// it first (<see cref="PhantomFenceState.FencedGroup"/>).</item>
     /// </list>
     /// Returns true when the row should be yielded; false on READPAST skip.
     /// </summary>
@@ -2561,10 +3051,64 @@ internal sealed class BatchContext
                 return false;
             }
             this.AcquireRowLockTxScoped(table, pageIndex, slotIndex, mode);
+            if (plan.SnapshotConflictCheck)
+                Storage.VersionStore.CheckSnapshotUpdateConflict(this, table, (pageIndex, slotIndex));
             return true;
         }
-        // RC probe path: only act if a conflict exists.
+        // The key lock comes first: it fences the writers yet to reach the row,
+        // and the probe then waits out one that reached it before.
+        if (plan.Fence is { FencedGroup: { } fenced } fence && Volatile.Read(ref table.Heap.MutationGeneration) != fence.FencedGeneration)
+        {
+            if (fence.LocksRows)
+            {
+                this.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Shared);
+                return true;
+            }
+            this.HoldFencedRowKey(table, fenced, pageIndex, slotIndex, plan.SerializableRangeMode!.Value);
+        }
+        return this.ProbeRowForRead(table, pageIndex, slotIndex, plan);
+    }
+
+    /// <summary>
+    /// Takes <paramref name="mode"/> on the clustered key the row at
+    /// <paramref name="pageIndex"/> / <paramref name="slotIndex"/> carries,
+    /// unless the session holds it already — the key of a row a SERIALIZABLE
+    /// scan reads that its fence, taken over the keys the table held before,
+    /// may have missed (<see cref="PhantomFenceState.FencedGroup"/>).
+    /// </summary>
+    private void HoldFencedRowKey(HeapTable table, KeyLockGroup group, int pageIndex, int slotIndex, LockMode mode)
+    {
+        if (this.EscalatedModeOf(table) is not null)
+            return;
         var connection = this.Connection;
+        var manager = connection.Simulation.LockManager;
+        var session = connection.Session;
+        var heap = table.Heap;
+        // A key the row is rewritten off while the lock is waited for leaves
+        // the lock on a key it no longer carries: lock the one it carries then.
+        for (var attempt = 0; attempt < Simulation.MaxTargetWalks; attempt++)
+        {
+            if (heap.ReadSlotBytes(pageIndex, slotIndex) is not { } image || !group.TryReadKey(image, out var key))
+                return;
+            var resource = group.GetOrCreate(key);
+            if (manager.IsHeldBy(resource, mode, session))
+                return;
+            this.AcquireTransactionLock(resource, mode, this.noWaitTables.Count != 0 && this.noWaitTables.Contains(table));
+            this.CountLocksForEscalation(table, 1, exclusive: false, rowsKeyLocked: true);
+            if (heap.ReadSlotBytes(pageIndex, slotIndex) is not { } locked || !group.TryReadKey(locked, out var lockedKey) || lockedKey.Equals(key))
+                return;
+        }
+    }
+
+    // The READ COMMITTED probe: waits out a writer holding the row, or reports
+    // false for a READPAST reader to skip it.
+    [MethodImpl(Tiering.OptimizeFirstCall)]
+    private bool ProbeRowForRead(HeapTable table, int pageIndex, int slotIndex, in DataLockPlan plan)
+    {
+        var connection = this.Connection;
+        // TABLOCKX's table X has waited every writer out already.
+        if (plan.SnapshotConflictCheck)
+            Storage.VersionStore.CheckSnapshotUpdateConflict(this, table, (pageIndex, slotIndex));
         if (connection.CurrentTransaction is { } tx && tx.EscalatedTables.Contains(table))
             return true;
         // Lock-free table-level gate: with no data-X held anywhere on the
@@ -2606,6 +3150,19 @@ internal sealed class BatchContext
         this.AcquireOnTable(table, resource, LockMode.Shared, connection.Session);
         manager.Release(resource, LockMode.Shared, connection.Session);
         return true;
+    }
+
+    /// <summary>
+    /// Takes over the statement-scoped locks <paramref name="child"/> holds, so
+    /// they release with this batch's statement: a child batch that binds a
+    /// body for this statement to run is never dispatched, and the locks would
+    /// otherwise outlive the session (held by a SPID nobody can find, blocking
+    /// every later Sch-M on the objects the body names).
+    /// </summary>
+    public void AdoptStatementLocks(BatchContext child)
+    {
+        this.StatementSchemaLocks.AddRange(child.StatementSchemaLocks);
+        child.StatementSchemaLocks.Clear();
     }
 
     /// <summary>

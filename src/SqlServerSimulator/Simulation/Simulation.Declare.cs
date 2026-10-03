@@ -160,7 +160,22 @@ partial class Simulation
                 if (!context.Batch.IsSkipping)
                     context.Batch.CountedStatementLine = context.Batch.CurrentStatement.StartLine;
                 context.MoveNextRequired();
-                var initExpression = Expression.Parse(context);
+                Expression initExpression;
+                try
+                {
+                    initExpression = Expression.Parse(context);
+                }
+                catch (SimulatedSqlException failure) when (!reExecution && (!context.Batch.IsSkipping || failure.Class != 15))
+                {
+                    // A subquery takes its locks as it parses, so a lock timeout
+                    // or deadlock in the initializer is raised here, running;
+                    // and binding, the statements after it bind against the
+                    // variable whatever its initializer met — short of a
+                    // syntax error, which leaves the statement uncompiled and
+                    // the variable undeclared (Msg 137 at each later use).
+                    DeclareNull();
+                    throw;
+                }
                 initExpressionForMask = initExpression;
                 if (!context.Batch.IsSkipping && legacyLobRefusal is null)
                 {
@@ -175,19 +190,22 @@ partial class Simulation
                     }
                     catch (SimulatedSqlException) when (!reExecution)
                     {
-                        // An initializer that fails still declares the variable,
-                        // NULL, for whatever runs after the error (probed
-                        // 2026-09-25 against SQL Server 2025).
-                        context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, SqlValue.Null(declaredType), parameter: null)
-                        {
-                            XmlSchemaCollection = xmlSchemaCollection,
-                            AliasType = aliasType,
-                            SpelledNumeric = spelledNumeric,
-                        };
+                        DeclareNull();
                         throw;
                     }
                     rowsAffected = 1; // initializer counts as one row for @@ROWCOUNT (probe-confirmed)
                 }
+
+                // An initializer that fails still declares the variable, NULL,
+                // for whatever runs after the error (probed 2026-09-25 against
+                // SQL Server 2025, and 2026-10-03 for a subquery's lock timeout).
+                void DeclareNull() =>
+                    context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, SqlValue.Null(declaredType), parameter: null)
+                    {
+                        XmlSchemaCollection = xmlSchemaCollection,
+                        AliasType = aliasType,
+                        SpelledNumeric = spelledNumeric,
+                    };
             }
 
             if (reExecution)

@@ -7,7 +7,7 @@ namespace SqlServerSimulator.Storage;
 /// <c>sys.dm_tran_version_store</c>, <c>sys.dm_tran_version_store_space_usage</c>,
 /// and <c>sys.dm_tran_active_snapshot_database_transactions</c>. All three
 /// project from live per-database state (the per-table
-/// <see cref="HeapTable.RowVersions"/> dicts and
+/// <see cref="Heap.RowVersions"/> dicts and
 /// <see cref="Simulation.ActiveSnapshotTxs"/>) at iteration time — no
 /// caching. The version-store DMV walks every committed
 /// <see cref="HistoricalVersion"/>; pending HVs (those marked with
@@ -38,10 +38,10 @@ internal static class VersionStoreDmvs
         {
             foreach (var (_, table) in schema.HeapTables)
             {
-                if (table.RowVersions.IsEmptyLockFree())
+                if (table.Heap.RowVersions.IsEmptyLockFree())
                     continue;
                 var rowsetId = SqlValue.FromInt64(table.ObjectId);
-                foreach (var kv in table.RowVersions)
+                foreach (var kv in table.Heap.RowVersions)
                 {
                     for (var hv = kv.Value.Head; hv is not null; hv = hv.Next)
                     {
@@ -89,9 +89,9 @@ internal static class VersionStoreDmvs
         {
             foreach (var (_, table) in schema.HeapTables)
             {
-                if (table.RowVersions.IsEmptyLockFree())
+                if (table.Heap.RowVersions.IsEmptyLockFree())
                     continue;
-                foreach (var kv in table.RowVersions)
+                foreach (var kv in table.Heap.RowVersions)
                 {
                     for (var hv = kv.Value.Head; hv is not null; hv = hv.Next)
                     {

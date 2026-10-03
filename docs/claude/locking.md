@@ -196,6 +196,8 @@ The victim, by what it is doing:
 - **Running** (a `WAITFOR`, a lock wait, a long statement): the command is cancelled at its next safe point, ends with Msg 596 at severity 21 and then SqlClient's severity-20 Msg 0, which no `CATCH` intercepts, and the connection closes with its transaction rolled back.
   Over TDS the two errors and a DONE carrying the server-error bit stand where an attention's acknowledgment would.
 
+Whether the victim is idle or running is decided under the session's own gate, which its command start, `Close` and `Dispose` take too, so a kill landing as a command starts rolls the transaction back once: a kill reading the session idle while its command was starting once rolled back beside the command's own unwind, releasing locks twice.
+
 **Divergences.**
 Over TDS, an idle victim's next command is SqlClient's `A transport-level error has occurred` (error 2) where real's is the `connection is broken` error for a session holding a transaction and a transparent reconnect for one that holds none: SqlClient's idle-connection resiliency needs the server's session-recovery feature acknowledgment in the LOGINACK, which the endpoint doesn't send.
 Sessions 1 to 50 are all system sessions here (Msg 6107); only session 7 was probed, and real answers Msg 6106 for one of them that doesn't exist.
@@ -204,7 +206,7 @@ Sessions 1 to 50 are all system sessions here (Msg 6107); only session 7 was pro
 ## Row-lock storage
 
 Per-row `LockResource`s live in `HeapTable.RowLocks`, a `ConcurrentDictionary<(int pageIndex, int slotIndex), LockResource>` keyed by RID.
-Entries are lazily-interned via `GetOrCreateRowLock`; they leak across DELETE (matches the heap's existing slot / payload leak pattern, intentional).
+Entries are lazily-interned via `GetOrCreateRowLock` and retired with the final release of the X that deleted their row (`HeapTable.RetireRowLock`); every other entry leaks as the heap's slots do.
 The dict-lookup itself is thread-safe without taking the lock manager's gate; only mutations to a `LockResource`'s `Holders` list go through the gate.
 
 `HeapTable.TableDataLock` is the table-level `LockResource` for IS / IX / SIX / S / U / X.
@@ -365,6 +367,7 @@ The zero read is sound because a writer's row X is granted before its write is v
 **A reader that waited reads the row again.**
 A scan reads the row's bytes, then probes its lock; when the probe waited out a writer, the image it read may be the writer's, which a rollback then took back.
 The heap scan notes the heap's write sequence (`Heap.WriteSequence`) before each row and re-reads the slot after the probe when it moved — skipping the row if the write deleted it — so a scan waiting out a rolled-back UPDATE returns the restored row rather than the never-committed one; the clustered-order and seek paths read the row after the probe already.
+The probe holds nothing once it returns, so a write can take the row between the probe and the read, and roll back after it: when the heap moved over that span the row is probed and read again until two reads agree (`BatchContext.SettleReadCommitted`), where the stress harness once saw a READ COMMITTED scan return a balance its writer then rolled back.
 Snapshot / RCSI reads never reach this path (they resolve through the version store), so the fast path is a pure READ COMMITTED non-snapshot win.
 The `ActiveDataWriters` invariant (0 at rest, follows the X through commit / rollback / escalation) is guarded by `LockResourceTests.ActiveDataWriters_*`.
 
@@ -399,22 +402,31 @@ Iterators that need addresses go through `Heap.EnumerateRowsWithAddress` instead
 
 Table variables / local temp tables / system tables bypass all data-lock acquisition (and row-lock acquisition).
 
+## Request queue
+
+Requests for one resource are granted in arrival order (`LockResource.Queue`): a request compatible with every holder still waits behind an earlier queued request it conflicts with, unless it converts a lock its own session already holds, so a stream of shared readers can't starve a writer (probed 2026-10-03 against SQL Server 2025: a `TABLOCK` read behind a waiting `TABLOCKX` waits for it, as does a plain read behind a waiting Sch-M).
+Granting whatever was compatible with the holders, as it once did, starved an X or Sch-M waiter for as long as readers kept arriving.
+A waiter blocked on a session that was abandoned rather than closed sweeps the abandoned sessions between its wait slices (see [the sweep](#the-sweep)), so the abandoned transaction's locks don't hold it for the life of the process.
+
 ## Cycle detection
 
 When a conflict-driven wait would block, `LockManager.Acquire`:
 
 1. **Same-thread short-circuit**: if any conflicting holder's `CurrentExecutingThreadId` equals the caller's managed thread id, raise Msg 1205 immediately.
 2. **Cross-thread cycle walk**: `FindDeadlockVictim` walks the wait-for graph starting at each conflicting holder.
+   A waiter's edges are the ones its grant waits on (`LockManager.Blockers`): the holders it conflicts with and the requests queued ahead of it; a compatible holder is no edge, which once reported cycles that weren't there.
    Each connection's `WaitingOnResource` is read consistently under the manager's gate.
    If any walk reaches the caller's connection, a cycle exists, and its victim is the session in it with the lowest `SET DEADLOCK_PRIORITY`, the caller on a tie (probed 2026-09-28 against SQL Server 2025, whose tie picks the requester in the two-session shape).
    A victim other than the caller is blocked in its own wait: it is flagged (`SessionToken.ChosenAsDeadlockVictim`) and woken, its wait ends with Msg 1205, and the caller waits on until the victim's rollback releases what it held.
-3. **Auto-rollback on Msg 1205**: `DispatchOneStatement` catches the exception (`StatementLifecycle.SettleError`), rolls back the connection's current transaction (releasing every held lock and waking the survivor), and propagates.
-   Done BEFORE the TRY/CATCH frame check so both the propagating and TRY-captured paths observe the auto-rollback (probe-confirmed: `@@TRANCOUNT` reads 0 in the catch handler).
+3. **The victim's rollback on Msg 1205**: `StatementLifecycle.SettleError` undoes the victim's work and releases every lock it held — waking the survivor — before the error reaches anyone.
+   Uncaught, the transaction ends with it; caught by a `TRY`, the transaction stays open and doomed (`@@TRANCOUNT` unchanged, `XACT_STATE()` -1) until a `ROLLBACK`, or the batch's end with Msg 3998 (`SimulatedDbTransaction.UndoAsDeadlockVictim`; probed 2026-10-03 against SQL Server 2025).
+   Ending it outright, as it once did, let the `CATCH` read `@@TRANCOUNT` 0.
+   The error's state names the kind of lock the victim waited on, as Msg 1222's does.
 
 ## Lock-timeout semantics
 
 `SET LOCK_TIMEOUT N` → `connection.LockTimeoutMillis`.
-Negative = wait forever (default), `0` = fail-fast on first conflict, positive `N` = wait up to `N` ms before raising Msg 1222, whose state names the kind of lock (`LockManager.TimeoutState`).
+Negative = wait forever (default), `0` = fail-fast on first conflict, positive `N` = wait up to `N` ms before raising Msg 1222, whose state names the kind of lock (`LockManager.TimeoutState`); a write it ends on a row or key lock is followed by Msg 3621, one it ends on the object lock isn't (probed 2026-10-03 against SQL Server 2025).
 Applies uniformly to schema locks, data locks, and row locks.
 
 **A blocked wait also observes the command's own cancellation** — its `CommandTimeout`, a TDS attention, or an in-process `Cancel()`.
@@ -435,17 +447,22 @@ The two deadlines keep their own errors: `SET LOCK_TIMEOUT` elapsing is Msg 1222
 | `READPAST`                        | Skip rows another connection holds incompatibly instead of waiting — the row-X a writer holds, and the row-U / row-X the `UPDLOCK` / `XLOCK` pairing meets. |
 | `TABLOCK`                         | Reader: table-S; Writer: table-X. Skip row-level. |
 | `TABLOCKX`                        | Take table-X regardless of direction.          |
-| `READCOMMITTED` / `READCOMMITTEDLOCK` | Parse-and-discard (equivalent to default). |
+| `READCOMMITTED`                   | The default READ COMMITTED read — versioned under `READ_COMMITTED_SNAPSHOT`. |
+| `READCOMMITTEDLOCK`               | A locking READ COMMITTED read, under `READ_COMMITTED_SNAPSHOT` too. |
 | `ROWLOCK` / `PAGLOCK`             | Parse-and-discard (row-level is default; page granularity not modeled). |
 | `NOWAIT`                          | Zero the lock timeout for the hinted table, so a conflicting acquisition raises Msg 1222 at once rather than waiting. |
 | `KEEPIDENTITY`, etc.              | Parse-and-discard.                             |
+
+A hint that locks the read — `UPDLOCK`, `XLOCK`, `TABLOCKX`, `HOLDLOCK` / `SERIALIZABLE`, `REPEATABLEREAD`, `READCOMMITTEDLOCK` (`TableHintInfo.LocksRead`) — makes it a locking read whatever the level: under READ UNCOMMITTED it waits out the writer instead of reading dirty, and under `READ_COMMITTED_SNAPSHOT` or SNAPSHOT it waits and reads the latest committed row instead of a version; under SNAPSHOT, `UPDLOCK`, `XLOCK` and `TABLOCKX` meet a row changed since the snapshot as an update would, with Msg 3960, while `HOLDLOCK` / `SERIALIZABLE` just read it (`DataLockPlan.LockingRead` / `SnapshotConflictCheck`; probed 2026-10-03 against SQL Server 2025).
+`TABLOCK`, `ROWLOCK`, `PAGLOCK`, `READPAST` and `NOWAIT` leave a versioned read versioned.
+The reads once kept their level's behavior under every hint, so an `UPDLOCK` read-modify-write under READ UNCOMMITTED or `READ_COMMITTED_SNAPSHOT` read a value another transaction then overwrote — a lost update.
 
 The closed `TableHintNames` accept-list still raises Msg 321 on unknown names.
 Conflict-detection (`Msg 1047` on `NOLOCK + XLOCK`, `Msg 1065` on NOLOCK against a DML target) is unmodeled.
 
 ## Isolation-level semantics
 
-`SET TRANSACTION ISOLATION LEVEL` mutates `SimulatedDbConnection.SessionIsolationLevel`.
+`SET TRANSACTION ISOLATION LEVEL` mutates `SimulatedDbConnection.SessionIsolationLevel` when it runs — in a branch an `IF` doesn't take it changes nothing, though the batch's compile walks it (probed 2026-10-03 against SQL Server 2025); it once took effect there, putting a session under SNAPSHOT that never asked for it.
 The session value persists across statements until the next SET.
 Per-isolation reader behavior:
 
@@ -455,7 +472,7 @@ Per-isolation reader behavior:
 | `READ COMMITTED` (default) | Table-IS + per-row probe (wait on row-X holders, no row-S acquire). |
 | `REPEATABLE READ`  | Table-IS tx-scoped + row-S tx-scoped per row returned.         |
 | `SERIALIZABLE`     | Table-IS tx-scoped + key-range locks on the keys the predicate reaches, every key otherwise, table-S over a heap. `UPDLOCK` / `XLOCK` shift the table lock to IX and the range mode to `RangeS-U` / `RangeX-X`. |
-| `SNAPSHOT`         | Parses-and-discards; behaves as READ COMMITTED. |
+| `SNAPSHOT`         | Reads at the transaction's snapshot (see [Snapshot isolation + MVCC](#snapshot-isolation--mvcc)). |
 
 ## Diagnostic DMVs
 
@@ -470,8 +487,8 @@ Per-isolation reader behavior:
   Row generator at `LockDmvs.EnumerateDmOsWaitingTasks`.
   Waiter / mode state lives in `SimulatedDbConnection.WaitingOnResource` / `WaitingForMode`, written when the wait begins and cleared once the acquisition leaves.
 
-Neither DMV takes the manager's gate during enumeration — concurrent acquires / releases may shift the result between rows, but per-resource snapshots stay consistent (Holders list is read field-by-field; the struct copy can't tear).
-That gate-free read is why the waiter registration spans the **whole** wait rather than each `Monitor.Wait` slice: a waiter that cleared and re-set it around every slice reads as idle for the length of its own between-slice re-check, and the re-checking thread can be descheduled there while holding the gate.
+Neither DMV holds the manager's gate across the enumeration — concurrent acquires / releases may shift the result between rows — but each resource's holders are copied under it (`LockManager.HoldersOf`): copying the list another session was appending to threw, or handed back a half-written hold whose owner was null.
+That gate-free walk is why the waiter registration spans the **whole** wait rather than each `Monitor.Wait` slice: a waiter that cleared and re-set it around every slice reads as idle for the length of its own between-slice re-check, and the re-checking thread can be descheduled there while holding the gate.
 Measured over a tight poll of a session blocked on a row-U conflict, that window swallowed 0.01% of observations on an idle 16-core box and 0.19–0.81% with the participants pinned to one core — enough to fail the `sys.dm_os_waiting_tasks` / `sys.dm_tran_locks` / `sp_who` blocked-session tests on a loaded CI runner, and zero once the registration is held across slices.
 
 ## Hint-conflict detection
@@ -493,9 +510,8 @@ Measured over a tight poll of a session blocked on a row-U conflict, that window
 - **History-table writes for system-versioned UPDATE / DELETE** — per-row history-table inserts acquire row-X tx-scoped.
 - **Cascade-FK SET NULL / SET DEFAULT / CASCADE writes on child tables, and an edge constraint's cascade** — each deletes or rewrites through the path a DELETE or UPDATE of the row takes (`Simulation.DeleteRowAt` / `RewriteRowAt`): row-X, the noted pre-image, the version capture.
 - **OUTPUT INTO target / SELECT INTO destination** — per-row row-X on the destination table.
-- **Row-lock cleanup on DELETE** — per-row `DeleteAt` is followed by `table.RowLocks.TryRemove((page, slot), out _)` for every successfully tombstoned slot (guard: `IsLockableTable(table)` so table-vars / temp-tables / system tables skip the path that never populated the dict).
-  Safe because slot directory entries never reuse (the heap's slot-leak quirk doubles as a guarantee here) and nothing looks a tombstoned slot's lock up by address — heap iteration skips the slot, SI / RCSI tombstoned-slot resolution walks via the separate `RowVersions` dict, and the readers and uniqueness checks that wait on an uncommitted delete reach its lock through `HeapTable.SupersededKeyImages` (see [uncommitted keys and deletes](#uncommitted-keys-and-deletes-make-their-readers-wait)).
-  The row-X acquired during the DELETE remains held in `tx.HeldLocks` / `StatementSchemaLocks` until commit / statement end; the LockResource reference there keeps the resource alive even after the dict entry is dropped.
+- **A deleted row's lock entry** outlives the DELETE until the X that deleted it goes (`HeapTable.RetireRowLock`, from `LockManager.Release`): a rollback restores the row at that address, and a session queued on the lock then holds the row it waited for.
+  Removing the entry as the delete ran let a rollback restore the row under no entry, so the next locker interned a second lock for it beside the one a waiting session had just been granted — two sessions each holding the row's U, both writing it, a lost update.
 
 ## Uncommitted keys and deletes make their readers wait
 
@@ -551,6 +567,33 @@ Divergences in what the lock DMVs show:
 - **The second writer holds nothing on its own row while it waits.**
   Real's has entered its base row — and any index before the one it waits on — so it shows `KEY X` or `RID X` on its own new row; the simulator checks before it writes.
 - **A MERGE inserting into an `IGNORE_DUP_KEY` index** waits on real in `RangeI-N`, its insert's range test against the first writer's `RangeX-X`; here the uniqueness wait's X.
+
+### A key deleted and put back in one transaction
+
+Real's index keeps a deleted key in place as a ghost under its writer's X, and an insert of the key in the same transaction fills that ghost, so a reader or writer meeting the key waits once and then reads the row the key holds.
+Here the reinserted row lands at a new address, and every path that meets the key has to follow it there (probed 2026-10-03 against SQL Server 2025: a locking seek or scan, a joined UPDATE and a MERGE each wait on the key and then read or write the reinserted row; `KeyReinsertConcurrencyTests`).
+The pieces, each closing a race the randomized stress harness found as a lost update, a missed row or a row read unlocked:
+
+- **Following the key.**
+  A read or a target walk whose row was deleted under it looks the row's key up again (`BatchContext.RowsOfDeletedKey`, keyed by `RowIdentityKey` — the clustered key, else the first unique key), waiting out whichever session holds the key deleted by then.
+  The rows it finds carry the key on, so a row deleted again before it is read is followed in turn.
+  It concludes the key is gone only when a read of the rows and a read of the deletes in flight saw it gone with nothing put back in between (`BatchContext.RowsCarryingKey`, `HeapTable.KeysPutBack`): the two reads are taken at different moments, and a delete settling between them read as a key that never came back.
+- **Keys a scan's order lacks.**
+  A key-order scan places each in-flight delete's row at its key's position (`BatchContext.LockingScanOrder` / `PlaceInFlightDeletes`), the ghost real keeps, and reads the order and the deletes again when a key was put back meanwhile; a delete its transaction rolled back is placed too when the order was read before the row came back.
+- **Counting before retiring.**
+  A rolled-back delete counts in `KeysPutBack` before its registry entry retires, and a writer notes the count before its seek chooses rows: in the other order a key settled in the gap was in neither read.
+- **Running the statement again.**
+  A writer whose walk met a key put back elsewhere — waited on a row that came back deleted, or saw the count move — rewinds and runs again (`BatchContext.TargetKeyReinserted`, up to `Simulation.MaxTargetWalks`), the plain UPDATE and DELETE, the joined forms, MERGE and a write through a partitioned view alike, each waiting out the deletes still in flight once its walk is done; a MERGE stops before its NOT MATCHED inserts when it will run again (`BatchContext.TargetWalkMayRunAgain`), so a source row whose target it missed doesn't insert a key that stands.
+- **A SERIALIZABLE fence over moving keys.**
+  The fence locks the keys the table holds as it is taken, and a key deleted in flight is missing from them; a row the read then reaches after the table changed has its key locked as it is read (`PhantomFenceState.FencedGroup`, `BatchContext.HoldFencedRowKey`), or its row S for a fence of unique points or one a heap's unique index takes through lookups, before the row's writers are waited out, so the read can't be changed under the reader.
+  A scan waits out in-flight deletes before taking the fence, as a seek does: fencing first held the next key's range while the deleting transaction's reinsert waited on it.
+- **The key test and the row X.**
+  A write tests key locks and then takes the row's X, two acquisitions where real's key lock is one; a SERIALIZABLE reader locking the key between them found the row unlocked and read it, and the write then changed it under the reader's lock.
+  A write that finds a key lock appeared once it holds the X gives the row back and waits for the key (`BatchContext.AcquireRowLockTxScoped`).
+- **The seek cache across a rollback.**
+  A rollback rewinds pages without journaling, so it invalidates the heap's seek journal under the latch hold of each entry it undoes (`UndoLog.RollbackTo`); invalidating once the whole log was undone let a scan read the cache at its old generation while the heap already held a restored row the cache lacked.
+
+A heap (no clustered index) follows a key through its first unique key, but its scan reads in allocation order, places no ghosts, and passes a row whose key was deleted and inserted again at an address it already passed; what real's heap scan does with that shape is unprobed (see [Concurrency stress findings](#concurrency-stress-findings)).
 
 ## A writer's target read
 
@@ -614,7 +657,8 @@ Divergences:
 ## Snapshot isolation + MVCC
 
 `ALLOW_SNAPSHOT_ISOLATION` and `READ_COMMITTED_SNAPSHOT` are per-database flags on `Database` (both default `false`, flipped via `ALTER DATABASE … SET (ALLOW_SNAPSHOT_ISOLATION | READ_COMMITTED_SNAPSHOT) { ON | OFF }`).
-When either flag is on, every INSERT / UPDATE / DELETE / MERGE captures a row-version entry in the per-table `HeapTable.RowVersions` dict; readers under SNAPSHOT or RCSI consult the chain to substitute pre-write payloads.
+When either flag is on, every INSERT / UPDATE / DELETE / MERGE captures a row-version entry in the heap's `Heap.RowVersions` dict; readers under SNAPSHOT or RCSI consult the chain to substitute pre-write payloads.
+A memory-optimized table is read at a snapshot whatever the level — the transaction's, taken at its first read of one, or the statement's outside one; its reads once walked the live rows unlocked, so one transaction's two reads disagreed.
 
 ### Database flags
 Both flags are read off the **table's own database**, not the session's (probe-confirmed in all four combinations): a session in a non-RCSI database reading a three-part name into an RCSI one reads versioned, the reverse blocks on the writer's X lock, and a SNAPSHOT session's Msg 3952 names the target database it reached rather than the one it sits in.
@@ -639,7 +683,9 @@ Probed: a SNAPSHOT transaction fixes **one** stamp at its first data-access stat
 `Simulation.ActiveSnapshotTxs` is instance-wide for the same reason: an open snapshot anywhere pins history everywhere, so the GC cutoff reads the simulation's oldest active Xid.
 
 ### Version-store data structures
-Per-`HeapTable`: `ConcurrentDictionary<(int Page, int Slot), RowVersionChain> RowVersions`, written only under the table's `RowVersionsGate` — a writer's capture, a commit's stamps, a rollback's discard and the sweep — and read lock-free.
+Per-`Heap`: `ConcurrentDictionary<(int Page, int Slot), RowVersionChain> RowVersions`, written only under the table's `RowVersionsGate` — a writer's capture, a commit's stamps, a rollback's discard and the sweep — and read lock-free.
+The chains belong to the heap whose addresses key them: an `ALTER TABLE` rewriting the rows into a new heap leaves them with the old one, and a rollback restoring that heap brings them back, while a `TRUNCATE` or either side of a `SWITCH`, which keep the heap, set them aside with an undo (`VersionStore.SetAsideVersions`).
+On the table, they once outlived the rows they described, and a versioned read after the rewrite resolved them against the new rows at the same addresses — hiding some and resurrecting others, a table of 39 rows reading as 37 under `READ_COMMITTED_SNAPSHOT` (`VersionChainRewriteTests`).
 
 `RowVersionChain`:
 - `LiveXmin: long` — commit Xid of the live row.
@@ -670,7 +716,7 @@ Each `SimulatedDbTransaction.PendingVersionEntries` accumulates captures across 
 A rollback rewinds the heap **before** it discards the entries, a statement's as well as a transaction's: while the entries stand, a snapshot reads past the rolled-back rows to the versions they superseded, and discarding first exposed the rolled-back image as committed for the moment between.
 
 For auto-commit DML (no active tx), `RunMutation` allocates a fresh list on `BatchContext.CurrentStatementVersionEntries`, drains on success / discards on failure — same surface as the existing per-statement undo log.
-A rollback to a savepoint discards the entries written after it, as it undoes their heap writes.
+A rollback to a savepoint discards the entries written after it, as it undoes their heap writes, and leaves the in-flight marks of the rows the transaction's earlier entries still name; clearing them with the rolled-back entries showed a snapshot reader the transaction's uncommitted earlier write as committed.
 
 ### Reader-side visibility
 `BatchContext.ResolveSnapshotXidForRead(table)` returns:
@@ -719,7 +765,8 @@ The sweep runs per table under `RowVersionsGate` and frees the dropped versions'
 
 The oldest active Xid comes from `Simulation.ActiveSnapshotTxs`, populated at `BatchContext.ResolveSnapshotXidForRead` (first user-table read of an SI tx) and drained at tx finalization.
 A transaction registers before it reads its stamp, and the sweep reads the counter before the registrations, so a sweep that misses a registration read a counter no later than that snapshot's stamp — reading the stamp first let a concurrent sweep drop the history-less chains of rows committed in between, which the snapshot then saw.
-RCSI per-statement snapshots don't register here — their sub-statement lifetime means the once-per-tx GC cadence won't observe them as load-bearing, and the short window of risk is bounded by statement execution time; the off-row chains such a statement reads are held for it anyway, by the statement-scoped LOB reclamation in [`heap-storage.md`](heap-storage.md#a-freed-lob-chain-waits-for-the-statements-that-could-read-it).
+A statement's own snapshot — `READ_COMMITTED_SNAPSHOT`'s, an autocommit SNAPSHOT statement's, a memory-optimized read outside a transaction — registers the same way, on its session (`SessionToken.StatementSnapshotXid`), cleared as the statement ends; unregistered, a commit landing mid-read collected the versions the read still needed, and the read saw the new images of rows beside the old images of rows it had passed.
+The off-row chains such a statement reads are held for it besides, by the statement-scoped LOB reclamation in [`heap-storage.md`](heap-storage.md#a-freed-lob-chain-waits-for-the-statements-that-could-read-it).
 
 ### Definition changes (Msg 3961)
 Metadata isn't versioned, so a SNAPSHOT transaction whose snapshot predates a committed change to a table's definition can't reach the table: reading it, writing it or reading it through a view raises **Msg 3961**, which rolls the transaction back, or dooms it inside `TRY` (probed 2026-10-01 against SQL Server 2025; `VersionStore.NoteDefinitionChange` lists what counts and what doesn't).
@@ -732,12 +779,29 @@ So `TRUNCATE`, `SWITCH` and the `ALTER TABLE` rebuilds need no versioning of the
 - **Msg 3960's state 4**: real reports a conflict it meets scanning a table with a clustered index at state 4 and one it meets seeking at state 2, where the simulator, knowing no access path there, reports 2 for every table with a clustered index (probed 2026-09-28 against SQL Server 2025).
 - **`sys.dm_tran_version_store` timing**: real lists a version while its writer is still in flight and keeps it until its cleanup task runs, where the simulator lists only finalized versions and collects them at commit once no snapshot needs them.
 
+## Concurrency stress findings
+
+A randomized harness, run outside the repo, drives 2 to 16 sessions through a seeded mix of transfers between accounts (two UPDATEs, CASE, MERGE, joined, through a view, a CTE and a partitioned view, `UPDLOCK` and isolation-level read-modify-writes, DELETE and INSERT of a key, `OUTPUT … INTO`, savepoints, cursors), readers at every level and hint, uniqueness races, identity inserts, foreign-key cascades, triggers, temporal and change-tracked tables, memory-optimized tables under SNAPSHOT, application locks, DDL (`ALTER TABLE`, index DDL, `TRUNCATE`, `SWITCH`), lock timeouts, deadlock priorities, cancels, `KILL` and abandoned connections.
+It checks that the accounts' total and count are conserved and agree with a ledger written in the same transactions, every read at REPEATABLE READ or above or under a snapshot sees a consistent and repeatable total, no read but a dirty one sees an uncommitted balance, identities are issued once, unique keys and foreign keys hold, no session hangs, every deadlock rolls back exactly one victim, no error escapes as other than `SimulatedSqlException`, and no lock, waiter or version-store pin outlives its session.
+A deadlock ring of 2 to 8 sessions checks that the victim is the lowest `DEADLOCK_PRIORITY` and the rest commit.
+What it found is recorded where each fix lives — the key-move races under [Uncommitted keys](#a-key-deleted-and-put-back-in-one-transaction), the request queue, the lock DMVs, `KILL`, the hints under versioned and dirty reads, the version chains and statement snapshots under MVCC, and, outside this file, the temporal transaction time ([`temporal-tables.md`](temporal-tables.md)) and the cursors' committed reads, optimistic compare and schema check ([`cursors.md`](cursors.md)).
+
+### Not modeled yet
+
+- **A heap scan over a key deleted and inserted again** passes the reinserted row when it lands at an address the scan already passed, so a REPEATABLE READ or locking read of a heap can count one row short; real's heap scan wasn't probed for the shape, where a scan that starts after the reinsert meets the new row and waits, as here (probed 2026-10-03 against SQL Server 2025).
+  Every residual stress finding is this one.
+- **A compile-time schema-lock wait**: real takes a batch's schema locks as it compiles, so a referenced table under another session's Sch-M times out the whole batch before any statement runs (Msg 1222 state 56, no `CATCH`); the simulator takes them statement by statement, so the statements ahead run and a `TRY` catches the timeout (probed 2026-10-03 against SQL Server 2025).
+- **A redefinition behind an open writer** deadlocks the writer's next statement (see [Table-level and schema-lock behaviors](#table-level-and-schema-lock-behaviors)).
+- **A joined UPDATE waiting on a key another transaction deleted and reinserted** reports `LCK_M_U` on the row where real reports `LCK_M_X` on the key (probed 2026-10-03 against SQL Server 2025).
+- **A stress finding seen once and not reproduced**: an `UPDATE … WHERE id = (SELECT TOP (1) … ORDER BY …)` over a table with a nonclustered index, beside concurrent writers, failed with `InvalidOperationException` ("Collection was modified").
+
 ## Table-level and schema-lock behaviors
 
 Retained at table / schema granularity:
 
 - A statement that redefines a table or swaps its rows out — `ALTER TABLE`, `TRUNCATE`, `SWITCH` on both its tables — takes Sch-M on the table's data lock to the transaction's end beside the statement's Sch-M on its schema lock (`BatchContext.AcquireTableRedefinitionLock`), so it waits out every transaction still holding the table's intent lock, and new readers and writers wait for it, as real's one object Sch-M does (probed 2026-10-01 against SQL Server 2025: `LCK_M_SCH_M` on the object behind an open insert, for all three).
   Taking only the schema lock, as it did, let a `TRUNCATE` swap the pages out from under an open insert, whose rollback then failed on pages that were gone.
+  **Divergence**: the statement holds its schema lock's Sch-M while it waits for the data lock, so the open transaction it waits on deadlocks (Msg 1205) as soon as its next statement asks for its Sch-S, where real's single object lock lets that transaction carry on and the redefinition waits for it to end (probed 2026-10-03 against SQL Server 2025).
 
 - `LockResource` data carrier + `LockManager` (gate, Acquire / Release, re-entrance counting, cycle detection).
 - `SchemaObject.SchemaLock` field.

@@ -162,21 +162,28 @@ internal sealed class HeapSeekCache
     /// (null) when the entry serving the key has widened past it onto a
     /// nullable column, whose NULL-keyed rows no bucket holds.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="keys"/>, when given, receives each address's key at the
+    /// same index: a scan reaching an address deleted since the order was taken
+    /// finds by it the row a reinsert of the key put elsewhere. With
+    /// <paramref name="keyed"/> the order comes back even when the heap's own
+    /// order is the key's, for a scan that needs those keys.
+    /// </remarks>
     public List<(int Page, int Slot)>? KeyOrderUnlessHeapOrdered(
-        Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons)
+        Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, List<SqlValueKey>? keys = null, bool keyed = false)
     {
         lock (this.gate)
         {
             var entry = this.ResolveEntry(heap, schema, lobStore, ordinals, commons, traced: false);
-            if (entry.HeapOrdered)
+            if (entry.HeapOrdered && !keyed)
                 return null;
             foreach (var ordinal in entry.Ordinals)
             {
                 if (schema[ordinal].Nullable)
                     return null;
             }
-            var ordered = entry.OrderedCandidates(null, false, null, false);
-            return entry.NoteKeyOrderWalk(ordered) ? null : ordered;
+            var ordered = entry.CappedCandidates(null, false, null, false, int.MaxValue, keys)!;
+            return entry.NoteKeyOrderWalk(ordered) && !keyed ? null : ordered;
         }
     }
 
@@ -391,6 +398,9 @@ internal sealed class HeapSeekCache
     // type, so over the set's own elements this is a total order — exactly
     // what SortedSet needs; the ragged-arity case only ever arises for the
     // synthetic bound keys passed to GetViewBetween, never set members.
+    /// <summary>Orders two key tuples as the ordered view orders them.</summary>
+    internal static int CompareKeys(SqlValueKey x, SqlValueKey y) => KeyTupleComparer.Instance.Compare(x, y);
+
     private sealed class KeyTupleComparer : IComparer<SqlValueKey>
     {
         public static readonly KeyTupleComparer Instance = new();
@@ -766,8 +776,8 @@ internal sealed class HeapSeekCache
         // range stops paying for itself past some share of the table passes that
         // share here, so a whole-table range stops after a quarter of the walk
         // instead of building a list it discards. int.MaxValue is uncapped.
-        private List<(int Page, int Slot)>? CappedCandidates(
-            SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, int candidateCap)
+        public List<(int Page, int Slot)>? CappedCandidates(
+            SqlValueKey? lower, bool lowerInclusive, SqlValueKey? upper, bool upperInclusive, int candidateCap, List<SqlValueKey>? keys = null)
         {
             var sorted = this.EnsureSorted();
             var result = new List<(int Page, int Slot)>();
@@ -790,6 +800,8 @@ internal sealed class HeapSeekCache
                     if (result.Count + bucket.Count > candidateCap)
                         return null;
                     result.AddRange(bucket);
+                    for (var i = 0; keys is not null && i < bucket.Count; i++)
+                        keys.Add(key);
                 }
             }
 

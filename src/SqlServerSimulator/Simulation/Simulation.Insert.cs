@@ -858,7 +858,8 @@ partial class Simulation
 
     /// <summary>
     /// Fills the period columns of a row an INSERT or a MERGE's insert lands:
-    /// ROW START the statement's frozen UtcNow, ROW END max <c>datetime2</c>.
+    /// ROW START the write's system time (<see cref="BatchContext.SystemTimeUtc"/>),
+    /// ROW END max <c>datetime2</c>.
     /// Gated on the columns' GENERATED ALWAYS markers rather than the
     /// SYSTEM_VERSIONING link, because those markers outlive
     /// <c>SET (SYSTEM_VERSIONING = OFF)</c> and real keeps populating through
@@ -869,14 +870,14 @@ partial class Simulation
     {
         if (table.PeriodColumns is { } pc && table.Columns[pc.StartOrdinal].GeneratedAs != GeneratedAlwaysAsRow.None)
         {
-            rowValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, batch.CurrentStatement.UtcNow);
+            rowValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, batch.SystemTimeUtc);
             rowValues[pc.EndOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.EndOrdinal].Type, DateTime.MaxValue);
         }
     }
 
     /// <summary>
     /// Advances the ROW START of a row an UPDATE or a MERGE's update rewrites
-    /// to the statement's frozen UtcNow; ROW END stays at max, the row being
+    /// to the write's system time; ROW END stays at max, the row being
     /// still current.
     /// Gated like <see cref="StampInsertedPeriod"/> on the GENERATED ALWAYS
     /// markers, so a table with versioning switched OFF still advances (probed
@@ -885,7 +886,7 @@ partial class Simulation
     private static void AdvanceUpdatedPeriodStart(HeapTable table, SqlValue[] newValues, BatchContext batch)
     {
         if (table.PeriodColumns is { } pc && table.Columns[pc.StartOrdinal].GeneratedAs != GeneratedAlwaysAsRow.None)
-            newValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, batch.CurrentStatement.UtcNow);
+            newValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, batch.SystemTimeUtc);
     }
 
     /// <summary>

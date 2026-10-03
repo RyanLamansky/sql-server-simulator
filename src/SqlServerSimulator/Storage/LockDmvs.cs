@@ -9,10 +9,11 @@ namespace SqlServerSimulator.Storage;
 /// project from live <see cref="LockManager"/> state at iteration time:
 /// every successful Acquire appends a hold; every wait sets
 /// <see cref="SimulatedDbConnection.WaitingOnResource"/> + <c>WaitingForMode</c>.
-/// Neither DMV takes the manager's gate during enumeration — concurrent
-/// acquires / releases may shift the result between rows, but the
-/// per-resource snapshot stays consistent because <see cref="LockResource.Holders"/>
-/// is read field-by-field and a torn row is not possible. That a blocked
+/// Neither DMV holds the manager's gate across the enumeration — concurrent
+/// acquires / releases may shift the result between rows — but each
+/// resource's holders are copied under it (<see cref="LockManager.HoldersOf"/>),
+/// since a list another session appends to mid-copy can throw or hand back a
+/// half-written hold. That a blocked
 /// session appears at all rests on the acquirer keeping its registration set
 /// for the whole wait rather than per wait slice, so a waiter re-checking its
 /// conflict can't read as idle here.
@@ -71,6 +72,7 @@ internal static class LockDmvs
     internal static IEnumerable<SqlValue[]> EnumerateDmTranLocks(BatchContext batch, Database database)
     {
         var sim = batch.Connection.Simulation;
+        var locks = sim.LockManager;
         var dbId = SqlValue.FromInt32(database.Id);
         // Real describes an OBJECT resource by 256 spaces, not by name — the
         // object is resource_associated_entity_id (probed 2026-09-30 against
@@ -92,52 +94,52 @@ internal static class LockDmvs
         {
             foreach (var (_, t) in schema.HeapTables)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, t.ObjectId, t.SchemaLock, waitsByResource, grantStatus, waitStatus, SchemaLocksBesideDataLock(t)))
+                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, t.ObjectId, t.SchemaLock, waitsByResource, grantStatus, waitStatus, SchemaLocksBesideDataLock(locks, t)))
                     yield return row;
-                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, t.ObjectId, t.TableDataLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, t.ObjectId, t.TableDataLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
-                var folded = FoldRowLocksIntoKeyLocks(t);
+                var folded = FoldRowLocksIntoKeyLocks(locks, t);
                 foreach (var row in EmitRowLocks(batch, t, ridType, keyType, dbId, waitsByResource, keyWaits, grantStatus, waitStatus, folded))
                     yield return row;
                 foreach (var (_, group) in t.KeyLockGroups)
                 {
-                    foreach (var row in EmitRowsForResource(keyType, dbId, KeyLockGroup.Describe(null), t.ObjectId, group.Infinity, waitsByResource, grantStatus, waitStatus, folded))
+                    foreach (var row in EmitRowsForResource(locks, keyType, dbId, KeyLockGroup.Describe(null), t.ObjectId, group.Infinity, waitsByResource, grantStatus, waitStatus, folded))
                         yield return row;
                     foreach (var kv in group.Anchors)
                     {
-                        foreach (var row in EmitRowsForResource(keyType, dbId, KeyLockGroup.Describe(kv.Key), t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus, folded))
+                        foreach (var row in EmitRowsForResource(locks, keyType, dbId, KeyLockGroup.Describe(kv.Key), t.ObjectId, kv.Value, waitsByResource, grantStatus, waitStatus, folded))
                             yield return row;
                     }
                 }
             }
             foreach (var (_, v) in schema.Views)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, v.ObjectId, v.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, v.ObjectId, v.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
             foreach (var (_, f) in schema.Functions)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, f.ObjectId, f.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, f.ObjectId, f.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
             foreach (var (_, p) in schema.Procedures)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, p.ObjectId, p.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, p.ObjectId, p.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
             foreach (var (_, s) in schema.Sequences)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, s.ObjectId, s.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, s.ObjectId, s.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
             foreach (var (_, tt) in schema.TableTypes)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, tt.ObjectId, tt.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, tt.ObjectId, tt.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
             foreach (var (_, tr) in schema.Triggers)
             {
-                foreach (var row in EmitRowsForResource(objectType, dbId, objectDescription, tr.ObjectId, tr.SchemaLock, waitsByResource, grantStatus, waitStatus))
+                foreach (var row in EmitRowsForResource(locks, objectType, dbId, objectDescription, tr.ObjectId, tr.SchemaLock, waitsByResource, grantStatus, waitStatus))
                     yield return row;
             }
         }
@@ -158,7 +160,7 @@ internal static class LockDmvs
         foreach (var (key, resource) in appLocks)
         {
             var description = $"{key.PrincipalId}:[{key.Resource}]:({Fnv1a32(key.Resource):x8})";
-            foreach (var row in EmitRowsForResource(applicationType, dbId, description, entityId: 0, resource, waitsByResource, grantStatus, waitStatus))
+            foreach (var row in EmitRowsForResource(locks, applicationType, dbId, description, entityId: 0, resource, waitsByResource, grantStatus, waitStatus))
                 yield return row;
         }
     }
@@ -265,6 +267,7 @@ internal static class LockDmvs
     {
         // A row of a clustered table is its clustered key, which is what real
         // locks and reports as KEY; only a heap's row is a RID.
+        var locks = batch.Connection.Simulation.LockManager;
         var rowGroup = KeyLockGroup.RowGroupOf(table);
         var rowType = rowGroup is null ? ridType : keyType;
         var rows = new List<((int PageIndex, int SlotIndex) Address, LockResource Lock)>();
@@ -288,14 +291,14 @@ internal static class LockDmvs
 
         foreach (var (address, resource) in rows)
         {
-            var holders = resource.Holders.ToArray();
+            var holders = locks.HoldersOf(resource);
             if (holders.Length == 0 && !waitersByResource.ContainsKey(resource))
                 continue;
             var live = table.Heap.ReadLiveRow(address.PageIndex, address.SlotIndex);
             var description = rowGroup is not null && (live ?? PreImageOf(table, address, holders)) is { } image
                 ? DescribeImageKey(table, rowGroup, image)
                 : $"{address.PageIndex}:{address.SlotIndex}";
-            foreach (var row in EmitRowsForResource(rowType, dbIdVal, description, table.ObjectId, resource, waitersByResource, grantStatus, waitStatus, folded))
+            foreach (var row in EmitRowsForResource(locks, rowType, dbIdVal, description, table.ObjectId, resource, waitersByResource, grantStatus, waitStatus, folded))
                 yield return row;
             foreach (var hold in holders)
             {
@@ -360,6 +363,7 @@ internal static class LockDmvs
         BatchContext batch, HeapTable table, KeyLockGroup? rowGroup, (int PageIndex, int SlotIndex) address, LockResource resource, SessionToken owner, byte[]? live)
     {
         var keys = new List<string>();
+        var locks = batch.Connection.Simulation.LockManager;
         var pre = table.SupersededKeyImages.TryGetValue(owner, out var images) && images.TryGetValue(address, out var entry) ? entry.Image : null;
         var inserted = ReferenceEquals(resource.InsertedBy, owner);
         if (pre is null && !inserted)
@@ -402,7 +406,7 @@ internal static class LockDmvs
                 return;
             if (group.TryReadKey(image, out var anchorKey) && group.Find(anchorKey) is { } anchor)
             {
-                foreach (var hold in anchor.Holders.ToArray())
+                foreach (var hold in locks.HoldersOf(anchor))
                 {
                     if (ReferenceEquals(hold.Owner, owner))
                         return;
@@ -424,6 +428,7 @@ internal static class LockDmvs
     }
 
     private static IEnumerable<SqlValue[]> EmitRowsForResource(
+        LockManager locks,
         SqlValue typeVal,
         SqlValue dbIdVal,
         string description,
@@ -441,10 +446,10 @@ internal static class LockDmvs
         var entityVal = SqlValue.FromInt64(entityId);
         // GRANT rows from current holders. A U its holder has since taken X
         // over is real's lock converted, reported as the X alone.
-        foreach (var hold in resource.Holders.ToArray())
+        foreach (var hold in locks.HoldersOf(resource))
         {
             var mode = hold.Mode;
-            if (mode == LockMode.Update && HoldsExclusive(resource, hold.Owner))
+            if (mode == LockMode.Update && HoldsExclusive(locks, resource, hold.Owner))
                 continue;
             if (folded is not null && folded.TryGetValue((resource, hold.Owner, mode), out var reported))
             {
@@ -487,10 +492,10 @@ internal static class LockDmvs
     // Real's object lock is one resource; the simulator's two meet in a
     // statement redefining the table (BatchContext.AcquireTableRedefinitionLock),
     // whose Sch-M then shows once, on the data lock that outlives the statement.
-    private static Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? SchemaLocksBesideDataLock(HeapTable table)
+    private static Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? SchemaLocksBesideDataLock(LockManager locks, HeapTable table)
     {
         Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? folded = null;
-        foreach (var hold in table.TableDataLock.Holders.ToArray())
+        foreach (var hold in locks.HoldersOf(table.TableDataLock))
         {
             if (hold.Mode == LockMode.SchemaModification)
                 (folded ??= [])[(table.SchemaLock, hold.Owner, LockMode.SchemaModification)] = null;
@@ -498,9 +503,9 @@ internal static class LockDmvs
         return folded;
     }
 
-    private static bool HoldsExclusive(LockResource resource, SessionToken owner)
+    private static bool HoldsExclusive(LockManager locks, LockResource resource, SessionToken owner)
     {
-        foreach (var hold in resource.Holders.ToArray())
+        foreach (var hold in locks.HoldersOf(resource))
         {
             if (hold.Mode == LockMode.Exclusive && ReferenceEquals(hold.Owner, owner))
                 return true;
@@ -520,7 +525,7 @@ internal static class LockDmvs
     {
         if (waiter.WaitingForMode is not { } mode)
             return null;
-        foreach (var hold in resource.Holders.ToArray())
+        foreach (var hold in waiter.Simulation.LockManager.HoldersOf(resource))
         {
             if (ReferenceEquals(hold.Owner, waiter.Session))
                 continue;
@@ -540,7 +545,7 @@ internal static class LockDmvs
     /// mode) hold, null to leave the row lock out and a mode to report the key
     /// lock in instead. Null when nothing folds.
     /// </summary>
-    private static Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? FoldRowLocksIntoKeyLocks(HeapTable table)
+    private static Dictionary<(LockResource, SessionToken, LockMode), LockMode?>? FoldRowLocksIntoKeyLocks(LockManager locks, HeapTable table)
     {
         if (KeyLockGroup.ClusteredOwner(table) is not { } owner
             || !table.KeyLockGroups.TryGetValue(owner, out var group)
@@ -558,7 +563,7 @@ internal static class LockDmvs
             {
                 if (!table.Heap.IsSlotTombstoned(address.PageIndex, address.SlotIndex) || !group.TryReadKey(image, out var key) || group.Find(key) is not { } anchor)
                     continue;
-                foreach (var keyHold in anchor.Holders.ToArray())
+                foreach (var keyHold in locks.HoldersOf(anchor))
                 {
                     if (ReferenceEquals(keyHold.Owner, deleter) && keyHold.Mode is LockMode.RangeSharedShared or LockMode.RangeSharedUpdate)
                         (folded ??= [])[(anchor, deleter, keyHold.Mode)] = LockMode.RangeExclusiveExclusive;
@@ -567,14 +572,14 @@ internal static class LockDmvs
         }
         foreach (var (address, rowLock) in table.RowLocks)
         {
-            foreach (var rowHold in rowLock.Holders.ToArray())
+            foreach (var rowHold in locks.HoldersOf(rowLock))
             {
                 var image = table.Heap.ReadSlotBytes(address.PageIndex, address.SlotIndex);
                 if (image is null && table.SupersededKeyImages.TryGetValue(rowHold.Owner, out var superseded) && superseded.TryGetValue(address, out var entry))
                     image = entry.Image;
                 if (image is null || !group.TryReadKey(image, out var key) || group.Find(key) is not { } anchor)
                     continue;
-                foreach (var keyHold in anchor.Holders.ToArray())
+                foreach (var keyHold in locks.HoldersOf(anchor))
                 {
                     if (!ReferenceEquals(keyHold.Owner, rowHold.Owner) || keyHold.Mode is not (LockMode.RangeSharedShared or LockMode.RangeSharedUpdate or LockMode.RangeExclusiveExclusive))
                         continue;

@@ -216,20 +216,29 @@ internal sealed class UndoLog(LobReclamation? reclamation)
         if (position >= this.entries.Count)
             return;
 
-        for (var i = this.entries.Count - 1; i >= position; i--)
-            this.entries[i].Undo(reclamation);
-
         // Undo rewinds heap state by mutating pages directly — it produces no
         // reversing seek-journal events and doesn't advance MutationGeneration,
         // so a seek cache built mid-transaction would otherwise carry the
-        // rolled-back rows. Invalidate each touched heap's journal once so the
-        // next seek rebuilds from the rewound state (the agreed rollback safety
-        // valve for the incrementally-maintained equality-seek cache).
-        HashSet<Heap>? touched = null;
-        for (var i = position; i < this.entries.Count; i++)
+        // rolled-back rows. Each entry's heap journal is invalidated under the
+        // same latch hold as its rewind, so the next seek rebuilds from the
+        // rewound state (the rollback safety valve for the incrementally-
+        // maintained equality-seek cache). Invalidating once the whole log was
+        // unwound instead left a window in which a seek read the cache at the
+        // generation it was built for while the heap already held a restored
+        // row the cache lacked: a concurrent scan's key order missed the row.
+        for (var i = this.entries.Count - 1; i >= position; i--)
         {
-            if (this.entries[i].AffectedHeap is { } heap && (touched ??= []).Add(heap))
+            var entry = this.entries[i];
+            if (entry.AffectedHeap is { } heap)
+            {
+                using var latch = heap.EnterLatch();
+                entry.Undo(reclamation);
                 heap.InvalidateSeekJournal();
+            }
+            else
+            {
+                entry.Undo(reclamation);
+            }
         }
 
         this.entries.RemoveRange(position, this.entries.Count - position);
@@ -344,8 +353,8 @@ internal sealed class UndoLog(LobReclamation? reclamation)
 
         /// <summary>
         /// The heap this entry mutates, or null for entries that touch no heap
-        /// (temp-table DDL). <see cref="RollbackTo"/> uses it to invalidate each
-        /// affected heap's seek journal exactly once after a rollback.
+        /// (temp-table DDL). <see cref="RollbackTo"/> uses it to invalidate the
+        /// heap's seek journal under the latch hold its undo runs in.
         /// </summary>
         public virtual Heap? AffectedHeap => null;
 

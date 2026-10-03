@@ -223,6 +223,31 @@ internal sealed class Heap
     }
 
     /// <summary>
+    /// Per-row version chains used by SNAPSHOT and READ_COMMITTED_SNAPSHOT
+    /// readers. Each entry maps a slot's <c>(PageIndex, SlotIndex)</c> tuple
+    /// to a <see cref="RowVersionChain"/> that records the slot's commit
+    /// timeline (live-row Xmin + history of superseded payloads, oldest
+    /// first walked newest-first by visibility logic). Populated lazily on
+    /// the first INSERT / UPDATE / DELETE the slot participates in; pre-
+    /// existing rows that have never been touched have no entry and are
+    /// implicitly committed at Xmin = 0 (visible to every snapshot). Skipped
+    /// for table variables / local temp tables / system tables — same set
+    /// that bypasses <see cref="HeapTable.RowLocks"/>. Concurrent dict for
+    /// the same reason: visibility lookups must run without the lock-manager
+    /// gate so SNAPSHOT readers don't serialize behind writers.
+    /// <para>
+    /// Held by the heap whose addresses key it, not by the table: a
+    /// statement rewriting the table into a new heap (an <c>ALTER TABLE</c>
+    /// adding or dropping a column) leaves them behind with the old heap, and
+    /// a rollback restoring that heap brings them back. On the table, a
+    /// snapshot read after the rewrite resolved the old heap's chains against
+    /// the new heap's rows at the same addresses, hiding some and showing
+    /// others twice.
+    /// </para>
+    /// </summary>
+    public readonly ConcurrentDictionary<(int PageIndex, int SlotIndex), RowVersionChain> RowVersions = new();
+
+    /// <summary>
     /// Monotonic counter bumped by every <see cref="Insert"/>,
     /// <see cref="DeleteAt"/>, and <see cref="UpdateAt"/>; the forwarding
     /// UPDATE path may bump multiple times (its internal Insert + Delete each

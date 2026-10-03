@@ -301,4 +301,25 @@ public sealed class WhileLoopTests
     [DataRow("while 1 = 1 select cast('x' as int);", 245)]
     public void BatchEndingErrorInTheBody_EndsTheLoop(string commandText, int number)
         => _ = new Simulation().AssertSqlError(commandText, number);
+
+    /// <summary>
+    /// An error inside a loop inside a <c>TRY</c> leaves the loop for the
+    /// <c>CATCH</c>, where the loop once ran on with the error signalled and
+    /// never ended.
+    /// </summary>
+    [TestMethod]
+    public void ACaughtErrorInTheBody_LeavesTheLoopForTheCatch()
+        => AreEqual(3, new Simulation().ExecuteScalar("""
+            declare @n int = 0;
+            begin try
+                while 1 = 1
+                begin
+                    set @n += 1;
+                    if @n = 3 set @n = @n / 0;
+                end
+            end try
+            begin catch
+                select @n
+            end catch
+            """));
 }

@@ -717,6 +717,22 @@ internal sealed class HeapTable : SchemaObject
     /// </summary>
     public readonly ConcurrentDictionary<SessionToken, ConcurrentDictionary<(int PageIndex, int SlotIndex), (byte[] Image, LockResource Lock)>> SupersededKeyImages = new();
 
+    /// <summary>
+    /// Drops <paramref name="resource"/>, the lock of the row at
+    /// <paramref name="address"/>, from <see cref="RowLocks"/> once its last X
+    /// is released over a deleted row: the delete has settled, the slot is
+    /// never used again, and nothing looks a dead row's lock up by address.
+    /// Removing it as the delete ran, as was once done, let a rollback restore
+    /// the row under no entry, so the next locker interned a second lock for
+    /// it beside the one a waiting session had just been granted — two
+    /// sessions each holding the row's U, both writing it.
+    /// </summary>
+    internal void RetireRowLock((int PageIndex, int SlotIndex) address, LockResource resource)
+    {
+        if (this.Heap.IsSlotTombstoned(address.PageIndex, address.SlotIndex))
+            _ = this.RowLocks.TryRemove(KeyValuePair.Create(address, resource));
+    }
+
     /// <summary>Retires <paramref name="owner"/>'s superseded image of <paramref name="address"/>, if any.</summary>
     [MethodImpl(Tiering.OptimizeFirstCall)]
     internal void RetireSupersededKeyImage(SessionToken owner, (int PageIndex, int SlotIndex) address)
@@ -724,6 +740,20 @@ internal sealed class HeapTable : SchemaObject
         if (this.SupersededKeyImages.TryGetValue(owner, out var images) && images.TryRemove(address, out _) && images.IsEmptyLockFree())
             _ = this.SupersededKeyImages.TryRemove(owner, out _);
     }
+
+    /// <summary>
+    /// How many times a key a session deleted came back while another read
+    /// might have looked for it: the deleting transaction inserted a row
+    /// carrying it again (<see cref="Parser.BatchContext.NoteKeyPutBack"/>),
+    /// or rolled the delete back (counted as the delete's row X goes,
+    /// <see cref="LockResource.DeletedBy"/>). A read that looked the key up
+    /// while the delete was in flight found it missing, and finds no
+    /// <see cref="SupersededKeyImages"/> entry to wait on once that delete has
+    /// settled, so it notes this count before reading and reads again when
+    /// it moved. Counting every settled delete instead sent a statement
+    /// draining a queue beside others to read again after each of theirs.
+    /// </summary>
+    public long KeysPutBack;
 
     /// <summary>
     /// The key locks of each key and index that ever took one, keyed by the
@@ -759,23 +789,7 @@ internal sealed class HeapTable : SchemaObject
     public IEnumerable<byte[]> Rows => this.Heap.EnumerateRows();
 
     /// <summary>
-    /// Per-row version chains used by SNAPSHOT and READ_COMMITTED_SNAPSHOT
-    /// readers. Each entry maps a slot's <c>(PageIndex, SlotIndex)</c> tuple
-    /// to a <see cref="RowVersionChain"/> that records the slot's commit
-    /// timeline (live-row Xmin + history of superseded payloads, oldest
-    /// first walked newest-first by visibility logic). Populated lazily on
-    /// the first INSERT / UPDATE / DELETE the slot participates in; pre-
-    /// existing rows that have never been touched have no entry and are
-    /// implicitly committed at Xmin = 0 (visible to every snapshot). Skipped
-    /// for table variables / local temp tables / system tables — same set
-    /// that bypasses <see cref="RowLocks"/>. Concurrent dict for the same
-    /// reason: visibility lookups must run without the lock-manager gate so
-    /// SNAPSHOT readers don't serialize behind writers.
-    /// </summary>
-    public readonly ConcurrentDictionary<(int PageIndex, int SlotIndex), RowVersionChain> RowVersions = new();
-
-    /// <summary>
-    /// Serializes the writes to <see cref="RowVersions"/> and its chains — a
+    /// Serializes the writes to <see cref="Heap.RowVersions"/> and its chains — a
     /// writer's capture, a commit's stamps, a rollback's discard and the
     /// version sweep — so a sweep can't drop a chain a writer just took, nor
     /// two sweeps free one version's off-row chains twice. Readers take no
@@ -795,6 +809,14 @@ internal sealed class HeapTable : SchemaObject
     /// <see cref="VersionStore.NoteDefinitionChange"/>).
     /// </summary>
     public long DefinitionXid;
+
+    /// <summary>
+    /// How many definition changes the table has seen — each statement that
+    /// <c>VersionStore.NoteDefinitionChange</c> records. A cursor reading the
+    /// table notes it at OPEN and refuses to FETCH once it moved (Msg 16943),
+    /// since its rows no longer decode against the plan it compiled.
+    /// </summary>
+    public long DefinitionVersion;
 
     internal string DebugDisplay() => $"{this.Name} ({string.Join(", ", this.Columns.Select(c => c.Name))})";
 
@@ -1044,4 +1066,12 @@ internal sealed class HistoricalVersion
     internal long Xmin;
     internal long Xmax;
     internal HistoricalVersion? Next;
+
+    /// <summary>
+    /// The heap's <see cref="Heap.ReclaimColumns"/> when the payload was
+    /// captured: the layout its off-row chains are found by when the version
+    /// is collected. An <c>ALTER TABLE</c> since gives the table another, and
+    /// a payload read through that one doesn't decode.
+    /// </summary>
+    internal HeapColumn[]? ReclaimColumns;
 }

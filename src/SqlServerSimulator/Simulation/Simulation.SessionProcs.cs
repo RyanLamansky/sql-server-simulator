@@ -300,7 +300,7 @@ partial class Simulation
     {
         if (connection.WaitingOnResource is not { } resource || connection.WaitingForMode is not { } mode)
             return 0;
-        foreach (var hold in resource.Holders)
+        foreach (var hold in connection.Simulation.LockManager.HoldersOf(resource))
         {
             if (!ReferenceEquals(hold.Owner, connection.Session) && !LockManager.IsCompatible(hold.Mode, mode))
                 return hold.Owner.Spid;

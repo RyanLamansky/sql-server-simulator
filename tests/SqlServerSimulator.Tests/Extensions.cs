@@ -38,6 +38,44 @@ static class Extensions
         return connection;
     }
 
+    /// <summary>
+    /// Starts <paramref name="sql"/> on <paramref name="connection"/> from a
+    /// threadpool thread and returns once that session waits on a lock, read
+    /// off <c>sys.dm_os_waiting_tasks</c> rather than assumed from elapsed
+    /// time; the returned task carries the first column of every row the
+    /// batch returns. Fails when the batch finishes, or ten seconds pass,
+    /// without the session waiting.
+    /// </summary>
+    public static async Task<Task<List<object?>>> StartBlocked(this Simulation simulation, DbConnection connection, string sql, CancellationToken cancellationToken)
+    {
+        var spid = (short)connection.CreateCommand("select @@spid").ExecuteScalar()!;
+        var running = Task.Run(() => FirstColumn(connection, sql), cancellationToken);
+        using var observer = simulation.CreateOpenConnection();
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while ((int)observer.CreateCommand($"select count(*) from sys.dm_os_waiting_tasks where session_id = {spid}").ExecuteScalar()! == 0)
+        {
+            if (running.IsCompleted)
+                Assert.Fail($"expected `{sql}` to wait; it finished: {(running.IsFaulted ? running.Exception!.InnerException!.Message : "ok")}");
+            Assert.IsLessThan(10_000, waited.ElapsedMilliseconds, $"`{sql}` never waited");
+            await Task.Delay(5, cancellationToken);
+        }
+        return running;
+    }
+
+    /// <summary>The first column of every row of every result set <paramref name="sql"/> returns.</summary>
+    public static List<object?> FirstColumn(DbConnection connection, string sql)
+    {
+        var values = new List<object?>();
+        using var reader = connection.CreateCommand(sql).ExecuteReader();
+        do
+        {
+            while (reader.Read())
+                values.Add(reader.GetValue(0));
+        }
+        while (reader.NextResult());
+        return values;
+    }
+
     public static int ExecuteNonQuery(this Simulation simulation, string commandText)
     {
         using var connection = simulation.CreateOpenConnection();

@@ -509,7 +509,10 @@ partial class Simulation
         };
         if (consumeAnother)
             context.MoveNextRequired();
-        context.Batch.Connection.SessionIsolationLevel = newLevel;
+        // An un-taken branch's SET leaves the level alone (probed 2026-10-03
+        // against SQL Server 2025).
+        if (!context.Batch.IsSkipping)
+            context.Batch.Connection.SessionIsolationLevel = newLevel;
         FunctionBodyShape.NoteSideEffect(context.Batch, "SET TRANSACTION ISOLATION LEVEL", FunctionBodyShape.StatementOperatorState);
         return true;
     }

@@ -51,7 +51,12 @@ partial class Simulation
             return RunMutation(context, replaying =>
             {
                 replaying.JumpTo(entry.End);
-                return entry.Replay(replaying);
+                if (entry.Replay(replaying) is { } replayed)
+                    return replayed;
+                // The schema locks the replay took waited out a definition
+                // change, so the statement parses as it would have.
+                replaying.RestoreCheckpoint(start);
+                return parse(replaying);
             });
         }
 

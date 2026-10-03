@@ -147,9 +147,10 @@ partial class Simulation
     /// The propagating form of <see cref="TryParseViewBodyPlan"/>, used by
     /// DML through a view: the statement is about to write through the body,
     /// so a body that won't parse or bind is the statement's own error rather
-    /// than something to fall back from. Statement schema locks stay held for
-    /// the rest of the statement. A CTE's unstored view answers the body the
-    /// statement parsed.
+    /// than something to fall back from. The statement-scoped locks the body's
+    /// binding took pass to <paramref name="outerBatch"/>, held for the rest
+    /// of its statement. A CTE's unstored view answers the body the statement
+    /// parsed.
     /// </summary>
     internal Selection ParseViewBodyPlan(BatchContext outerBatch, View view) =>
         view.UnstoredBody ?? ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: false);
@@ -187,8 +188,13 @@ partial class Simulation
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.AnsiNulls = savedAnsiNulls;
+            // The body's batch is never dispatched, so nothing else releases
+            // what it took: either now, or — for a write about to run through
+            // the body — with the outer statement, which owns them from here.
             if (releaseStatementSchemaLocks)
                 innerBatch.ReleaseStatementSchemaLocks();
+            else
+                outerBatch.AdoptStatementLocks(innerBatch);
             moduleScope.Exit();
         }
     }

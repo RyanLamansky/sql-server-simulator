@@ -205,7 +205,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         {
             var undone = this.PendingVersionEntries.GetRange(savepoint.VersionEntryCount, this.PendingVersionEntries.Count - savepoint.VersionEntryCount);
             this.PendingVersionEntries.RemoveRange(savepoint.VersionEntryCount, undone.Count);
-            VersionStore.DiscardPendingEntries(undone);
+            VersionStore.DiscardPendingEntries(undone, kept: this.PendingVersionEntries);
         }
         return true;
     }
@@ -281,7 +281,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// during this transaction. <see cref="Commit"/> hands the list to
     /// <see cref="VersionStore.FinalizePendingEntries"/> which
     /// stamps each entry with the commit Xid and propagates payloads into
-    /// the per-table <see cref="HeapTable.RowVersions"/>;
+    /// the per-table <see cref="Heap.RowVersions"/>;
     /// <see cref="Rollback()"/> hands the list to
     /// <see cref="VersionStore.DiscardPendingEntries"/> which clears
     /// the in-flight writer marks without touching the heap (the undo log
@@ -517,6 +517,28 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.Owner.CurrentTransaction = null;
         this.Ended = true;
         this.Owner.RecordTransactionEvent(cause, this);
+    }
+
+    /// <summary>
+    /// A deadlock victim's rollback when a <c>TRY</c> will catch its Msg
+    /// 1205: the work undone and every lock released, so the deadlock the
+    /// victim was chosen to break breaks, while the transaction stays open
+    /// and doomed — <c>@@TRANCOUNT</c> unchanged, <c>XACT_STATE()</c> -1 —
+    /// until a <c>ROLLBACK</c> ends it, or the batch's end with Msg 3998
+    /// (probed 2026-10-03 against SQL Server 2025). Ended outright, as it
+    /// once was, the <c>CATCH</c> read <c>@@TRANCOUNT</c> 0.
+    /// </summary>
+    internal void UndoAsDeadlockVictim()
+    {
+        var db = this.Owner.CurrentDatabase;
+        this.UndoLog.Rollback();
+        Storage.VersionStore.DiscardPendingEntries(this.PendingVersionEntries);
+        this.DefinitionChanges = null;
+        ReleaseAllLocks();
+        UnregisterActiveSnapshot();
+        this.SnapshotXid = null;
+        Storage.VersionStore.RunGarbageCollection(this.simulation, db);
+        this.Doomed = true;
     }
 
     /// <summary>

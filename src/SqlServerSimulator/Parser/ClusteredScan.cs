@@ -42,7 +42,15 @@ internal static class ClusteredScan
     /// repeated address, which the caller skips as
     /// <c>MaterializeWithLockChecks</c> does.
     /// </summary>
-    public static List<(int Page, int Slot)>? Order(HeapTable table)
+    /// <remarks>
+    /// <paramref name="keys"/>, when given, receives the key of each address at
+    /// the same index where the seek cache's ordered view serves the order, and
+    /// stays empty where the order is sorted here. With <paramref name="keyed"/>
+    /// the order comes back from the ordered view even for a heap already in
+    /// key order, for a locking scan that has to follow a key another session
+    /// deletes and reinserts beside it.
+    /// </remarks>
+    public static List<(int Page, int Slot)>? Order(HeapTable table, List<SqlValueKey>? keys = null, bool keyed = false)
     {
         if (ClusteredKey(table) is not var (ordinals, descending))
             return null;
@@ -54,7 +62,7 @@ internal static class ClusteredScan
                 return SortedKeyOrder(table, ordinals, descending);
             commons[i] = schema[ordinals[i]].Type;
         }
-        return HeapSeekCache.For(table.Heap).KeyOrderUnlessHeapOrdered(table.Heap, schema, table.Heap, ordinals, commons);
+        return HeapSeekCache.For(table.Heap).KeyOrderUnlessHeapOrdered(table.Heap, schema, table.Heap, ordinals, commons, keys, keyed);
     }
 
     private static List<(int Page, int Slot)>? SortedKeyOrder(HeapTable table, int[] ordinals, bool[] descending)
@@ -236,6 +244,9 @@ internal static class ClusteredScan
 
     // The clustered key's storage ordinals and column directions, or null for
     // a heap (or a disabled / filtered clustered index, which leaves one).
+    /// <summary>The storage ordinals of <paramref name="table"/>'s clustered key, or null for a scan that keeps the heap's order.</summary>
+    public static int[]? KeyOrdinals(HeapTable table) => ClusteredKey(table)?.Ordinals;
+
     private static (int[] Ordinals, bool[] Descending)? ClusteredKey(HeapTable table)
     {
         foreach (var key in table.KeyConstraints)

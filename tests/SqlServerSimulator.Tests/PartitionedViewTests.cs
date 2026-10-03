@@ -347,4 +347,24 @@ public sealed class PartitionedViewTests
         _ = simulation.AssertSqlError("update pck set v = 1", 4444);
         _ = simulation.AssertSqlError("insert pcb values (4, 4)", 271);
     }
+
+    /// <summary>
+    /// A write through a partitioned view lets go of the locks binding the
+    /// view took on its members once the statement ends, where they once
+    /// stayed with the session and blocked every later schema change.
+    /// </summary>
+    [TestMethod]
+    [DataRow("update pv set v = v + 1 where k in (2, 150)")]
+    [DataRow("delete pv where k = 1")]
+    [DataRow("insert pv values (5, 50)")]
+    public void WriteThroughTheView_LeavesNoLockBehind(string write)
+    {
+        var sim = Setup();
+        using var writer = sim.CreateOpenConnection();
+        var spid = writer.CreateCommand("select @@spid").ExecuteScalar();
+        _ = writer.CreateCommand(write).ExecuteNonQuery();
+
+        AreEqual(0, sim.ExecuteScalar($"select count(*) from sys.dm_tran_locks where request_session_id = {spid} and resource_type <> 'DATABASE'"));
+        _ = sim.ExecuteNonQuery("alter table m1 add c int null");
+    }
 }

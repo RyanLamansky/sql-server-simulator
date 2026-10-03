@@ -1402,5 +1402,41 @@ public sealed class TemporalTableTests
         _ = sim.ExecuteNonQuery("create table q (Id int not null, Vf datetime2 not null, Vt datetime2 not null)");
         AreEqual((byte)state, sim.AssertSqlError($"alter table q add period for system_time ({periodColumns})", 4924).State);
     }
-}
 
+    /// <summary>
+    /// A transaction stamps the period start of every row it writes with the
+    /// time it began, not the time of the write (probed 2026-10-03 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void PeriodStart_IsTheTransactionsBeginTime()
+        => AreEqual(1, new Simulation().ExecuteScalar($"""
+            {CreateTemporalCustomers};
+            insert Customers (Id, Name) values (1, 'a');
+            declare @began datetime2 = sysutcdatetime();
+            begin tran;
+            waitfor delay '00:00:00.200';
+            update Customers set Name = 'b' where Id = 1;
+            select case when datediff(ms, @began, Vf) < 150 then 1 else 0 end from Customers where Id = 1;
+            commit
+            """));
+
+    /// <summary>
+    /// A row another transaction wrote after this one began carries a period
+    /// start later than this transaction's time, so this one writing it would
+    /// close its history before it opened: Msg 13535, the statement ended
+    /// (probed 2026-10-03 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void WritingARowAnotherTransactionWroteSinceThisOneBegan_IsMsg13535()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"{CreateTemporalCustomers}; insert Customers (Id, Name) values (1, 'a'), (2, 'b')");
+        using var early = sim.CreateOpenConnection();
+        _ = early.CreateCommand("begin tran; update Customers set Name = 'x' where Id = 2; waitfor delay '00:00:00.020'").ExecuteNonQuery();
+        _ = sim.ExecuteNonQuery("update Customers set Name = 'y' where Id = 1");
+
+        AreEqual(13535, Throws<SimulatedSqlException>(() => early.CreateCommand("update Customers set Name = 'z' where Id = 1").ExecuteNonQuery()).Number);
+        _ = early.CreateCommand("if @@trancount > 0 rollback").ExecuteNonQuery();
+    }
+}

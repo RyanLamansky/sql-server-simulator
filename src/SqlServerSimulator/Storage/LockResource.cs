@@ -91,6 +91,18 @@ internal sealed class LockResource
     public readonly List<Hold> Holders = [];
 
     /// <summary>
+    /// The requests waiting on this resource, oldest first, each named by
+    /// its session and mode; null until someone waits. A new request waits
+    /// behind any it conflicts with, so a waiting X or Sch-M isn't starved by
+    /// the S, IS or Sch-S requests that keep arriving compatible with the
+    /// holders, as real grants in arrival order (probed 2026-10-03 against
+    /// SQL Server 2025: a TABLOCK read queues behind a TABLOCKX request that
+    /// waits on another reader's S). Mutated only under
+    /// <see cref="LockManager"/>'s gate.
+    /// </summary>
+    public List<(SessionToken Owner, LockMode Mode)>? Queue;
+
+    /// <summary>
     /// The table this resource locks (a row lock or the
     /// <see cref="HeapTable.TableDataLock"/>), or <c>null</c> for resources
     /// not tied to a heap table (e.g. <see cref="SchemaObject.SchemaLock"/>).
@@ -115,6 +127,13 @@ internal sealed class LockResource
     /// (<see cref="LockDmvs"/>). Cleared with that X's final release.
     /// </summary>
     public SessionToken? InsertedBy;
+
+    /// <summary>
+    /// The session that deleted the row this row lock locks, while its X on
+    /// the row is held; the final release of that X clears it, counting a
+    /// delete a rollback undid in <see cref="HeapTable.KeysPutBack"/>.
+    /// </summary>
+    public SessionToken? DeletedBy;
 
     /// <summary>
     /// The key or index this resource is a key lock of, for a
@@ -289,9 +308,9 @@ internal sealed class LockManager
         switch (this.TryAcquire(resource, mode, owner, timeoutMillis, sweepAbandoned))
         {
             case LockAcquireOutcome.TimedOut:
-                throw SimulatedSqlException.LockRequestTimeOutExceeded(TimeoutState(resource));
+                throw SimulatedSqlException.LockRequestTimeOutExceeded(TimeoutState(resource, mode));
             case LockAcquireOutcome.Deadlocked:
-                throw SimulatedSqlException.TransactionDeadlocked(owner.Spid);
+                throw SimulatedSqlException.TransactionDeadlocked(owner.Spid, TimeoutState(resource, mode));
             case LockAcquireOutcome.Cancelled:
                 // The same -2 / 0 split the command surface makes: a
                 // CommandTimeout is Msg -2, a caller's Cancel() is Msg 0.
@@ -305,10 +324,13 @@ internal sealed class LockManager
     /// Msg 1222's state, which names the kind of lock that timed out: 51 for
     /// a key lock — a row of a table with a clustered index is one — 45 for a
     /// heap's row, 56 for a table or schema lock (probed 2026-09-28 against
-    /// SQL Server 2025).
+    /// SQL Server 2025), and 48 for an insert's test of a fenced gap
+    /// (probed 2026-10-03). A uniqueness check's wait reports 47
+    /// (<c>Simulation.AwaitUncommittedKeyWriters</c>).
     /// </summary>
-    private static byte TimeoutState(LockResource resource) => resource switch
+    private static byte TimeoutState(LockResource resource, LockMode mode) => resource switch
     {
+        _ when mode == LockMode.RangeInsertNull => 48,
         { KeyGroup: not null } => 51,
         { RowAddress: not null, OwningTable: { } table } => table.HasClusteredIndex() ? (byte)51 : (byte)45,
         _ => 56,
@@ -365,7 +387,7 @@ internal sealed class LockManager
                     if (owner.ChosenAsDeadlockVictim)
                         return LockAcquireOutcome.Deadlocked;
 
-                    if (TryGrant(resource, mode, owner))
+                    if (TryGrant(resource, mode, owner, queued: waited))
                         return waited ? LockAcquireOutcome.GrantedAfterWait : LockAcquireOutcome.Granted;
 
                     // Same-thread conflict → immediate Msg 1205. This thread
@@ -409,7 +431,10 @@ internal sealed class LockManager
                     // an exception path (Msg 1222 / 1205) leaves no stale
                     // wait state either.
                     if (!waited)
+                    {
                         owner.WaitStartedTicks = Environment.TickCount64;
+                        (resource.Queue ??= []).Add((owner, mode));
+                    }
                     owner.WaitingOnResource = resource;
                     owner.WaitingForMode = mode;
                     waited = true;
@@ -429,6 +454,25 @@ internal sealed class LockManager
                             return LockAcquireOutcome.Cancelled;
                         if (timeoutMillis > 0 && Environment.TickCount64 >= deadline)
                             return LockAcquireOutcome.TimedOut;
+                        // A session abandoned since the wait began may hold
+                        // what it waits for: real's server resets a session
+                        // once its client's finalizer closes the connection,
+                        // and the waiter there goes on. The sweep runs outside
+                        // the gate, since a teardown releases locks through it;
+                        // the wait stays registered across it, as across a
+                        // slice.
+                        if (sweepAbandoned && this.OwningSimulation is { HasAbandonedSessions: true })
+                        {
+                            Monitor.Exit(this.gate);
+                            try
+                            {
+                                this.SweepAbandonedSessions();
+                            }
+                            finally
+                            {
+                                Monitor.Enter(this.gate);
+                            }
+                        }
                     }
                 }
             }
@@ -442,9 +486,23 @@ internal sealed class LockManager
                     owner.WaitingOnResource = null;
                     owner.WaitingForMode = null;
                     owner.ChosenAsDeadlockVictim = false;
+                    var queue = resource.Queue!;
+                    _ = queue.Remove((owner, mode));
+                    // Those queued behind this request may go now.
+                    Monitor.PulseAll(this.gate);
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// A copy of <paramref name="resource"/>'s holders, taken under the gate,
+    /// for a reader outside it — the lock DMVs and <c>sp_who</c>.
+    /// </summary>
+    public LockResource.Hold[] HoldersOf(LockResource resource)
+    {
+        lock (this.gate)
+            return [.. resource.Holders];
     }
 
     /// <summary>
@@ -500,10 +558,23 @@ internal sealed class LockManager
                             if (mode is LockMode.Exclusive or LockMode.RangeExclusiveExclusive)
                             {
                                 _ = Interlocked.Decrement(ref table.ActiveDataWriters);
-                                if (resource.RowAddress is { } address)
-                                    table.RetireSupersededKeyImage(owner, address);
                                 if (ReferenceEquals(resource.InsertedBy, owner))
                                     resource.InsertedBy = null;
+                                // Counted before the delete's entry retires: a
+                                // scan finding no entry for the key then finds
+                                // the count moved (BatchContext.LockingScanOrder).
+                                if (ReferenceEquals(resource.DeletedBy, owner))
+                                {
+                                    resource.DeletedBy = null;
+                                    if (resource.RowAddress is { } restored && !table.Heap.IsSlotTombstoned(restored.PageIndex, restored.SlotIndex))
+                                        _ = Interlocked.Increment(ref table.KeysPutBack);
+                                }
+                                if (resource.RowAddress is { } address)
+                                {
+                                    table.RetireSupersededKeyImage(owner, address);
+                                    if (mode == LockMode.Exclusive && resource.Holders.Count == 0)
+                                        table.RetireRowLock(address, resource);
+                                }
                             }
                             else if (mode == LockMode.Update)
                             {
@@ -535,15 +606,39 @@ internal sealed class LockManager
     /// re-entrance is handled in <see cref="Acquire"/>). Appends a new
     /// hold on success.
     /// </summary>
+    /// <remarks>
+    /// Past the holders, a request also waits behind an earlier waiter it
+    /// conflicts with (<see cref="LockResource.Queue"/>) — every waiter, for a
+    /// request not yet queued — unless its session already holds the
+    /// resource, a conversion, which real grants ahead of the queue.
+    /// </remarks>
     [MethodImpl(Tiering.OptimizeFirstCall)]
-    private static bool TryGrant(LockResource resource, LockMode mode, SessionToken owner)
+    private static bool TryGrant(LockResource resource, LockMode mode, SessionToken owner, bool queued)
     {
+        var converts = false;
         foreach (var hold in resource.Holders)
         {
             if (ReferenceEquals(hold.Owner, owner))
+            {
+                converts = true;
                 continue;
+            }
             if (!IsCompatible(hold.Mode, mode))
                 return false;
+        }
+        if (!converts && resource.Queue is { Count: > 0 } queue)
+        {
+            foreach (var (waiter, waiting) in queue)
+            {
+                if (ReferenceEquals(waiter, owner))
+                {
+                    if (queued)
+                        break;
+                    continue;
+                }
+                if (!IsCompatible(waiting, mode))
+                    return false;
+            }
         }
         resource.Holders.Add(new LockResource.Hold(owner, mode, 1));
         if (resource.OwningTable is { } table)
@@ -567,6 +662,20 @@ internal sealed class LockManager
     /// keys once per outer row skip the re-entrant acquisition, which would
     /// otherwise pile up one held-lock entry per pass.
     /// </summary>
+    /// <summary>How many acquisitions of <paramref name="mode"/> by <paramref name="owner"/> on <paramref name="resource"/> are outstanding.</summary>
+    public int HoldCount(LockResource resource, LockMode mode, SessionToken owner)
+    {
+        lock (this.gate)
+        {
+            foreach (var hold in resource.Holders)
+            {
+                if (ReferenceEquals(hold.Owner, owner) && hold.Mode == mode)
+                    return hold.Count;
+            }
+            return 0;
+        }
+    }
+
     public bool IsHeldBy(LockResource resource, LockMode mode, SessionToken owner)
     {
         lock (this.gate)
@@ -645,13 +754,9 @@ internal sealed class LockManager
     {
         var visited = new HashSet<SessionToken>(ReferenceEqualityComparer.Instance);
         var path = new List<SessionToken>();
-        foreach (var hold in resource.Holders)
+        foreach (var blocker in Blockers(resource, mode, caller))
         {
-            if (ReferenceEquals(hold.Owner, caller))
-                continue;
-            if (IsCompatible(hold.Mode, mode))
-                continue;
-            if (!WalkBack(hold.Owner, caller, visited, path))
+            if (!WalkBack(blocker, caller, visited, path))
                 continue;
             var victim = caller;
             var lowest = PriorityOf(caller);
@@ -681,21 +786,51 @@ internal sealed class LockManager
     {
         if (!visited.Add(blocker))
             return false;
-        var waitsOn = blocker.WaitingOnResource;
-        if (waitsOn is null)
+        if (blocker.WaitingOnResource is not { } waitsOn || blocker.WaitingForMode is not { } waitsFor)
             return false;
         path.Add(blocker);
-        foreach (var hold in waitsOn.Holders)
+        foreach (var next in Blockers(waitsOn, waitsFor, blocker))
         {
-            if (ReferenceEquals(hold.Owner, blocker))
-                continue;
-            if (ReferenceEquals(hold.Owner, target))
+            if (ReferenceEquals(next, target))
                 return true;
-            if (WalkBack(hold.Owner, target, visited, path))
+            if (WalkBack(next, target, visited, path))
                 return true;
         }
         path.RemoveAt(path.Count - 1);
         return false;
+    }
+
+    /// <summary>
+    /// The sessions a request of <paramref name="mode"/> by
+    /// <paramref name="requester"/> on <paramref name="resource"/> waits for:
+    /// the holders whose modes it conflicts with, and — unless it converts a
+    /// hold of its own — the waiters queued ahead of it it conflicts with
+    /// (<see cref="TryGrant"/>). A holder whose mode the request is compatible
+    /// with isn't one: counting every holder once reported a cycle through a
+    /// session sharing the resource compatibly.
+    /// </summary>
+    private static List<SessionToken> Blockers(LockResource resource, LockMode mode, SessionToken requester)
+    {
+        var blockers = new List<SessionToken>();
+        var converts = false;
+        foreach (var hold in resource.Holders)
+        {
+            if (ReferenceEquals(hold.Owner, requester))
+                converts = true;
+            else if (!IsCompatible(hold.Mode, mode))
+                blockers.Add(hold.Owner);
+        }
+        if (!converts && resource.Queue is { Count: > 0 } queue)
+        {
+            foreach (var (waiter, waiting) in queue)
+            {
+                if (ReferenceEquals(waiter, requester))
+                    break;
+                if (!IsCompatible(waiting, mode))
+                    blockers.Add(waiter);
+            }
+        }
+        return blockers;
     }
 
     /// <summary>

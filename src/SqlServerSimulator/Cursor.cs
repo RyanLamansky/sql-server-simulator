@@ -328,12 +328,19 @@ internal sealed class Cursor(
     private bool dynamicBeforeFirst;
     private bool dynamicAfterLast;
 
+    /// <summary>
+    /// Each <see cref="BaseTables"/> entry's <see cref="HeapTable.DefinitionVersion"/>
+    /// as the cursor opened, which a FETCH checks (Msg 16943).
+    /// </summary>
+    private long[] openedDefinitions = [];
+
     /// <summary>OPEN the cursor: materialize per sensitivity and seed
     /// <c>@@CURSOR_ROWS</c>. Raises Msg 16905 if already open.</summary>
     public void Open(BatchContext batch)
     {
         if (this.IsOpen)
             throw SimulatedSqlException.CursorAlreadyOpen();
+        this.openedDefinitions = Array.ConvertAll(this.BaseTables, static table => Volatile.Read(ref table.DefinitionVersion));
 
         switch (this.Sensitivity)
         {
@@ -345,7 +352,7 @@ internal sealed class Cursor(
             case CursorSensitivity.Keyset:
                 // OPEN is where a TOP / OFFSET / FETCH limit picks membership;
                 // later FETCHes re-read the frozen key set without it.
-                this.keysetIdentities = Selection.EnumerateForCursor(this.Plan!, batch, applyRowLimit: true);
+                this.keysetIdentities = this.ReadKeyset(batch);
                 this.position = -1;
                 batch.Connection.LastCursorRows = this.keysetIdentities.Count;
                 break;
@@ -460,15 +467,24 @@ internal sealed class Cursor(
     /// a rowversion bump, or the row's deletion out-of-band. No-op for other
     /// concurrency modes. Called at positioned UPDATE / DELETE time.
     /// </summary>
-    internal void CheckOptimisticConflict()
+    internal void CheckOptimisticConflict(BatchContext batch)
     {
         if (this.Concurrency != CursorConcurrency.Optimistic)
             return;
         if (this.CurrentRids is not { } rids || this.optimisticSnapshot is not { } snapshot)
             throw SimulatedSqlException.CursorOptimisticConflict();
+        // The rows are compared once the sessions writing them have settled,
+        // under the U real's positioned write takes before it compares: a
+        // row deleted and put back elsewhere meanwhile is a conflict, where
+        // comparing first let the write find its row gone and change nothing.
         for (var i = 0; i < rids.Length; i++)
         {
-            var live = rids[i] is { } rid ? this.BaseTables[i].Heap.ReadSlotBytes(rid.Page, rid.Slot) : null;
+            if (rids[i] is { } rid)
+                _ = batch.TouchRowForRead(this.BaseTables[i], rid.Page, rid.Slot, PositionedWriteLock);
+        }
+        for (var i = 0; i < rids.Length; i++)
+        {
+            var live = rids[i] is { } rid ? this.BaseTables[i].Heap.ReadLiveRow(rid.Page, rid.Slot) : null;
             if (live is null
                 ? snapshot[i] is not null
                 : snapshot[i] is null || !live.AsSpan().SequenceEqual(snapshot[i]))
@@ -653,12 +669,23 @@ internal sealed class Cursor(
         if (!this.IsOpen)
             throw SimulatedSqlException.CursorNotOpen(state: 2);
         this.EnsureDirectionAllowed(direction);
+        if (this.Sensitivity != CursorSensitivity.Static)
+        {
+            for (var i = 0; i < this.openedDefinitions.Length && i < this.BaseTables.Length; i++)
+            {
+                if (Volatile.Read(ref this.BaseTables[i].DefinitionVersion) != this.openedDefinitions[i])
+                    throw SimulatedSqlException.CursorTableSchemaChanged();
+            }
+        }
+        var generations = this.Sensitivity == CursorSensitivity.Keyset ? this.BaseGenerations() : null;
         var (status, values) = this.Sensitivity switch
         {
             CursorSensitivity.Static => this.FetchStatic(direction, offset),
             CursorSensitivity.Keyset => this.FetchKeyset(batch, direction, offset),
             _ => this.FetchDynamic(batch, direction, offset),
         };
+        if (generations is not null && status != -1)
+            (status, values) = this.SettleKeysetFetch(batch, status, values, generations);
         this.OnKeysetHole = status == -2;
         this.FetchStatus = status;
         this.fetchedSinceOpen = true;
@@ -679,10 +706,98 @@ internal sealed class Cursor(
                 snapshot[i] = fetched[i] is { } orid ? this.BaseTables[i].Heap.ReadSlotBytes(orid.Page, orid.Slot) : null;
             this.optimisticSnapshot = snapshot;
         }
-        if (this.Concurrency == CursorConcurrency.ScrollLocks)
+        if (this.Concurrency == CursorConcurrency.ScrollLocks && generations is null)
             this.MoveScrollLock(batch);
 
         return (status, values);
+    }
+
+    /// <summary>
+    /// The keyset OPEN freezes, read as a READ COMMITTED read reads: the
+    /// deletes in flight on its tables waited out first and the writers of
+    /// every member row after, the rows read again while a wait let a write
+    /// land. Read off the heap as it stood, a member another transaction was
+    /// deleting and putting back was missing from the keyset altogether.
+    /// </summary>
+    private List<Selection.CursorRow> ReadKeyset(BatchContext batch)
+    {
+        var waits = batch.Connection.SessionIsolationLevel != System.Data.IsolationLevel.ReadUncommitted;
+        for (var attempt = 1; ; attempt++)
+        {
+            // Noted before the wait: a delete starting after it moves the
+            // generation, and the keyset is read again.
+            var generations = this.BaseGenerations();
+            if (waits)
+            {
+                foreach (var table in this.BaseTables)
+                    batch.AwaitUncommittedDeletes(table);
+            }
+            var rows = Selection.EnumerateForCursor(this.Plan!, batch, applyRowLimit: true);
+            if (!waits)
+                return rows;
+            foreach (var row in rows)
+            {
+                for (var i = 0; i < row.Rids.Length; i++)
+                {
+                    if (row.Rids[i] is { } rid)
+                        _ = batch.TouchRowForRead(this.BaseTables[i], rid.Page, rid.Slot, ReadCommittedProbe);
+                }
+            }
+            if (attempt == Simulation.MaxTargetWalks || this.BaseGenerations().AsSpan().SequenceEqual(generations))
+                return rows;
+        }
+    }
+
+    // The U a positioned write reads its row under before it compares it.
+    private static readonly DataLockPlan PositionedWriteLock = new(rowMode: LockMode.Update, rowTxScoped: false, skipBlockedRows: false, noLockReader: false);
+
+    // A READ COMMITTED reader's wait on a row's writers (BatchContext.TouchRowForRead).
+    private static readonly DataLockPlan ReadCommittedProbe = new(rowMode: null, rowTxScoped: false, skipBlockedRows: false, noLockReader: false);
+
+    private long[] BaseGenerations() => Array.ConvertAll(this.BaseTables, static table => Volatile.Read(ref table.Heap.MutationGeneration));
+
+    /// <summary>
+    /// Settles the keyset member a fetch landed on: waits out the sessions
+    /// writing its rows — in U, taking the cursor's scroll locks, under
+    /// <c>SCROLL_LOCKS</c>, else as a READ COMMITTED read waits — and, when
+    /// the member was missing, the deletes in flight on its tables, then reads
+    /// the member again in place while a wait let a write land, as real's
+    /// fetch waits on the member's key and reads what it holds then (probed
+    /// 2026-10-03 against SQL Server 2025: <c>LCK_M_S</c> on a key another
+    /// transaction deleted and inserted again, then the reinserted row). The
+    /// fetch once read the rows as the heap held them, so a member another
+    /// transaction was deleting and putting back read as deleted (-2) and a
+    /// row that transaction then rolled back read dirty.
+    /// </summary>
+    private (int, SqlValue[]?) SettleKeysetFetch(BatchContext batch, int status, SqlValue[]? values, long[] generations)
+    {
+        if (batch.Connection.SessionIsolationLevel == System.Data.IsolationLevel.ReadUncommitted && this.Concurrency != CursorConcurrency.ScrollLocks)
+            return (status, values);
+        for (var attempt = 1; ; attempt++)
+        {
+            if (this.Concurrency == CursorConcurrency.ScrollLocks)
+            {
+                this.MoveScrollLock(batch);
+            }
+            else if (this.CurrentRids is { } rids)
+            {
+                for (var i = 0; i < rids.Length; i++)
+                {
+                    if (rids[i] is { } rid)
+                        _ = batch.TouchRowForRead(this.BaseTables[i], rid.Page, rid.Slot, ReadCommittedProbe);
+                }
+            }
+            if (status == -2)
+            {
+                foreach (var table in this.BaseTables)
+                    batch.AwaitUncommittedDeletes(table);
+            }
+            var settled = this.BaseGenerations();
+            if (attempt == Simulation.MaxTargetWalks || settled.AsSpan().SequenceEqual(generations))
+                return (status, values);
+            generations = settled;
+            (status, values) = this.FetchKeyset(batch, FetchDirection.Relative, 0);
+        }
     }
 
     /// <summary>

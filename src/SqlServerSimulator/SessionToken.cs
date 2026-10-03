@@ -75,6 +75,15 @@ internal sealed class SessionToken(int spid)
     public long StatementEpoch = long.MaxValue;
 
     /// <summary>
+    /// The oldest snapshot a statement of the session's running outermost
+    /// statement reads at — <c>READ_COMMITTED_SNAPSHOT</c>'s, an autocommit
+    /// SNAPSHOT statement's, a memory-optimized table's outside a transaction
+    /// — or <see cref="long.MaxValue"/> while none does. The version sweep
+    /// keeps every version it may read.
+    /// </summary>
+    public long StatementSnapshotXid = long.MaxValue;
+
+    /// <summary>
     /// The <see cref="LockResource"/> this session is currently blocked on, or
     /// <c>null</c> when it isn't waiting. Set and cleared inside
     /// <c>LockManager</c>'s gate so the cycle detector reads a consistent

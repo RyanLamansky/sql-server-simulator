@@ -16,6 +16,8 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class SnapshotIsolationTests
 {
+    public TestContext TestContext { get; set; } = null!;
+
     [TestMethod]
     public void AlterDatabase_SetAllowSnapshotIsolationOn_AcceptsBareName()
         => AreEqual(1, new Simulation().ExecuteScalar("""
@@ -511,5 +513,130 @@ public sealed class SnapshotIsolationTests
             _ = rcConn.CreateCommand("update h set v = 5 where id = 1").ExecuteNonQuery();
         var ex = Throws<SimulatedSqlException>(() => siConn.CreateCommand("update h set v = 3 where id = 1").ExecuteNonQuery());
         AreEqual((3960, (byte)6), (ex.Number, ex.State));
+    }
+
+    private static Simulation TwoAccounts(string options = "")
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"alter database simulated set allow_snapshot_isolation on; {options} create table acc (id int primary key, bal int not null); insert acc values (1, 100), (2, 100);");
+        return sim;
+    }
+
+    /// <summary>
+    /// A locking hint makes a READ_COMMITTED_SNAPSHOT read a locking one: it
+    /// waits out the writer and reads the row it committed, where the other
+    /// hints leave it reading the version (probed 2026-10-03 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("updlock")]
+    [DataRow("holdlock")]
+    [DataRow("repeatableread")]
+    [DataRow("readcommittedlock")]
+    [DataRow("xlock")]
+    public async Task Rcsi_LockingHintRead_WaitsForTheWriter(string hint)
+    {
+        var sim = TwoAccounts("alter database simulated set read_committed_snapshot on;");
+        using var writer = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = writer.CreateCommand("begin tran; update acc set bal = bal + 1 where id = 1").ExecuteNonQuery();
+        var read = await sim.StartBlocked(reader, $"select bal from acc with ({hint}) where id = 1", TestContext.CancellationToken);
+        _ = writer.CreateCommand("commit").ExecuteNonQuery();
+
+        AreEqual(101, (await read).Single());
+    }
+
+    [TestMethod]
+    [DataRow("tablock")]
+    [DataRow("readcommitted")]
+    [DataRow("rowlock")]
+    [DataRow("paglock")]
+    [DataRow("readpast")]
+    [DataRow("nowait")]
+    public void Rcsi_NonLockingHintRead_ReadsTheVersion(string hint)
+    {
+        var sim = TwoAccounts("alter database simulated set read_committed_snapshot on;");
+        using var writer = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = writer.CreateCommand("begin tran; update acc set bal = bal + 1 where id = 1").ExecuteNonQuery();
+
+        AreEqual(100, reader.CreateCommand($"select bal from acc with ({hint}) where id = 1").ExecuteScalar());
+        _ = writer.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// <c>READ UNCOMMITTED</c> reads dirty only where it takes no lock: an
+    /// <c>UPDLOCK</c> read under it waits for the writer (probed 2026-10-03
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("updlock")]
+    [DataRow("xlock")]
+    public async Task ReadUncommitted_LockingHintRead_WaitsForTheWriter(string hint)
+    {
+        var sim = TwoAccounts();
+        using var writer = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = writer.CreateCommand("begin tran; update acc set bal = bal + 1 where id = 1").ExecuteNonQuery();
+        var read = await sim.StartBlocked(reader, $"set transaction isolation level read uncommitted; select bal from acc with ({hint}) where id = 1", TestContext.CancellationToken);
+        _ = writer.CreateCommand("commit").ExecuteNonQuery();
+
+        AreEqual(101, (await read).Single());
+    }
+
+    /// <summary>
+    /// Under SNAPSHOT, a read announcing an update — <c>UPDLOCK</c>,
+    /// <c>XLOCK</c>, <c>TABLOCKX</c> — of a row another transaction changed
+    /// since the snapshot meets the update conflict an update would (Msg
+    /// 3960, ending the transaction), while a <c>SERIALIZABLE</c> one reads
+    /// the latest committed row (probed 2026-10-03 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("updlock")]
+    [DataRow("xlock")]
+    [DataRow("tablockx")]
+    public void Snapshot_UpdatingHintRead_OfARowChangedSinceTheSnapshot_IsAnUpdateConflict(string hint)
+    {
+        var sim = TwoAccounts();
+        using var reader = sim.CreateOpenConnection();
+        _ = reader.CreateCommand("set transaction isolation level snapshot; begin tran; select count(*) from acc where id = 2").ExecuteScalar();
+        _ = sim.ExecuteNonQuery("update acc set bal = bal + 1 where id = 1");
+
+        AreEqual(3960, Throws<SimulatedSqlException>(() => reader.CreateCommand($"select bal from acc with ({hint}) where id = 1").ExecuteScalar()).Number);
+        AreEqual(0, reader.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    public void Snapshot_SerializableHintRead_ReadsTheLatestCommittedRow()
+    {
+        var sim = TwoAccounts();
+        using var reader = sim.CreateOpenConnection();
+        _ = reader.CreateCommand("set transaction isolation level snapshot; begin tran; select count(*) from acc where id = 2").ExecuteScalar();
+        _ = sim.ExecuteNonQuery("update acc set bal = bal + 1 where id = 1");
+
+        AreEqual(101, reader.CreateCommand("select bal from acc with (serializable) where id = 1").ExecuteScalar());
+        _ = reader.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// A rollback to a savepoint keeps the transaction's earlier writes in
+    /// flight: a snapshot reader still reads past them to the committed rows,
+    /// where the rollback once cleared their marks with the savepoint's own.
+    /// </summary>
+    [TestMethod]
+    [DataRow("update acc set bal = bal - 10 where id = 1; save tran s; update acc set bal = bal + 1000 where id = 1; rollback tran s")]
+    [DataRow("update acc set bal = bal - 10 where id = 1; save tran s; delete acc where id = 1; rollback tran s")]
+    [DataRow("insert acc values (3, 100); save tran s; update acc set bal = bal + 1000 where id = 3; rollback tran s")]
+    public void SnapshotRead_AfterARollbackToASavepoint_StillReadsTheCommittedRows(string writes)
+    {
+        var sim = TwoAccounts();
+        using var writer = sim.CreateOpenConnection();
+        _ = writer.CreateCommand("begin tran; " + writes).ExecuteNonQuery();
+
+        AreEqual("1:100,2:100", sim.ExecuteScalar("set transaction isolation level snapshot; begin tran; select string_agg(concat(id, ':', bal), ',') within group (order by id) from acc; commit"));
+        _ = writer.CreateCommand("rollback").ExecuteNonQuery();
     }
 }

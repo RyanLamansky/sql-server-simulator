@@ -592,6 +592,10 @@ public sealed class SimulatedDbConnection : DbConnection
         this.CursorsDeclaredInExecution = null;
         var previous = Interlocked.Exchange(ref this.executionCancellation, fresh);
         previous.Dispose();
+        // A KILL landing after the command was counted in but before this
+        // scope existed cancelled the previous source; it ends this one.
+        if (this.Killed)
+            this.CancelExecution();
     }
 
     /// <summary>
@@ -738,7 +742,30 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <summary>How many commands are executing on this connection right now, which is how <see cref="Kill"/> tells a running session from an idle one.</summary>
     private int commandsInFlight;
 
-    internal void BeginCommand() => _ = Interlocked.Increment(ref this.commandsInFlight);
+    /// <summary>
+    /// Orders another session's <see cref="Kill"/> against this session's own
+    /// thread: whether a command is in flight, the start of the next one, and
+    /// the teardown <see cref="Close"/> and <see cref="Dispose(bool)"/> run.
+    /// Without it a kill could find the session idle, roll its transaction
+    /// back from the killer's thread while the session's thread began a
+    /// command or closed itself, and the two rollbacks released the same
+    /// locks twice.
+    /// </summary>
+    private readonly Lock sessionGate = new();
+
+    /// <summary>Counts a command in; one starting after a <see cref="Kill"/> finds the connection broken.</summary>
+    internal void BeginCommand()
+    {
+        lock (this.sessionGate)
+        {
+            if (this.Killed)
+            {
+                this.Close();
+                throw SimulatedSqlException.ConnectionBroken();
+            }
+            _ = Interlocked.Increment(ref this.commandsInFlight);
+        }
+    }
 
     internal void EndCommand() => _ = Interlocked.Decrement(ref this.commandsInFlight);
 
@@ -754,16 +781,19 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     internal void Kill()
     {
-        this.Killed = true;
-        this.Simulation.UnregisterConnection(this);
-        if (Volatile.Read(ref this.commandsInFlight) > 0)
+        lock (this.sessionGate)
         {
-            this.SessionEnding = true;
-            this.CancelExecution();
-            return;
+            this.Killed = true;
+            this.Simulation.UnregisterConnection(this);
+            if (Volatile.Read(ref this.commandsInFlight) > 0)
+            {
+                this.SessionEnding = true;
+                this.CancelExecution();
+                return;
+            }
+            this.CurrentTransaction?.EndRollback();
+            this.ReleaseSessionAppLocks();
         }
-        this.CurrentTransaction?.EndRollback();
-        this.ReleaseSessionAppLocks();
         this.AbortTransport?.Invoke();
     }
 
@@ -1546,9 +1576,12 @@ public sealed class SimulatedDbConnection : DbConnection
         // connection closes. The transaction's own dispose handles the
         // explicit using-pattern; this branch covers raw Close() without
         // disposing the transaction first.
-        this.CurrentTransaction?.EndRollback();
-        this.ReleaseSessionAppLocks();
-        this.state = ConnectionState.Closed;
+        lock (this.sessionGate)
+        {
+            this.CurrentTransaction?.EndRollback();
+            this.ReleaseSessionAppLocks();
+            this.state = ConnectionState.Closed;
+        }
     }
 
     /// <inheritdoc/>
@@ -1575,9 +1608,12 @@ public sealed class SimulatedDbConnection : DbConnection
         else
         {
             this.Session.Reclaimed = true;
-            this.CurrentTransaction?.EndRollback();
+            lock (this.sessionGate)
+            {
+                this.CurrentTransaction?.EndRollback();
+                this.ReleaseSessionAppLocks();
+            }
             this.executionCancellation.Dispose();
-            this.ReleaseSessionAppLocks();
             // Local temp tables auto-drop at session close. Clearing the dict
             // releases each table's Heap and LOB pages for GC; nothing else
             // holds long-lived references to them after the connection ends.

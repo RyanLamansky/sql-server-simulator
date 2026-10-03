@@ -480,4 +480,16 @@ public sealed class IfBlockTests
     [DataRow("if (select count(*) from t) > 0 select @@rowcount")]
     public void If_ConditionResetsRowCount(string statement)
         => AreEqual(0, new Simulation().ExecuteScalar<int>($"create table t (a int); insert t values (1), (2), (3); {statement}"));
+
+    /// <summary>
+    /// A <c>SET TRANSACTION ISOLATION LEVEL</c> in a branch the IF doesn't
+    /// take leaves the session's level alone, as every other session option
+    /// in one does (probed 2026-10-03 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("if 1 = 0 begin set transaction isolation level snapshot; end")]
+    [DataRow("if 1 = 0 set transaction isolation level serializable")]
+    [DataRow("if 1 = 1 set nocount on else set transaction isolation level repeatable read")]
+    public void SetTransactionIsolationLevel_InAnUntakenBranch_LeavesTheLevel(string statement)
+        => AreEqual(2, new Simulation().ExecuteScalar<int>($"{statement}; select cast(transaction_isolation_level as int) from sys.dm_exec_sessions where session_id = @@spid"));
 }

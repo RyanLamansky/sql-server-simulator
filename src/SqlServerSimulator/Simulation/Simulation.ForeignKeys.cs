@@ -514,7 +514,7 @@ partial class Simulation
             // and keeps the old one in its history, as an UPDATE of it does.
             if (childTable.SystemVersioning is { } history && childTable.PeriodColumns is { } period)
             {
-                newRow[period.StartOrdinal] = SqlValue.FromDateTime2(childTable.Columns[period.StartOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
+                newRow[period.StartOrdinal] = SqlValue.FromDateTime2(childTable.Columns[period.StartOrdinal].Type, context.Batch.SystemTimeUtc);
                 WriteHistoryRow(childTable, history, period, oldClone, context, undoLog);
             }
             EvaluateComputedColumns(childTable, newRow, context.Batch);
@@ -591,7 +591,7 @@ partial class Simulation
             // and keeps the old one in its history, as an UPDATE of it does.
             if (childTable.SystemVersioning is { } history && childTable.PeriodColumns is { } period)
             {
-                newRow[period.StartOrdinal] = SqlValue.FromDateTime2(childTable.Columns[period.StartOrdinal].Type, context.Batch.CurrentStatement.UtcNow);
+                newRow[period.StartOrdinal] = SqlValue.FromDateTime2(childTable.Columns[period.StartOrdinal].Type, context.Batch.SystemTimeUtc);
                 WriteHistoryRow(childTable, history, period, oldClone, context, undoLog);
             }
             EvaluateComputedColumns(childTable, newRow, context.Batch);

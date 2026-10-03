@@ -1030,8 +1030,17 @@ partial class Simulation
         // Real waits on the key's lock in the unique index that holds it,
         // which is where the lock DMVs report the wait.
         var reportedKey = IsUniqueKeyTuple(table, storageOrdinals);
-        batch.AwaitSupersededKeyHolders(table, storageOrdinals, commons, probe, mode, reportedKey);
-        _ = batch.AwaitLiveKeyHolders(table, storageOrdinals, commons, probe, mode, reportedKey);
+        try
+        {
+            batch.AwaitSupersededKeyHolders(table, storageOrdinals, commons, probe, mode, reportedKey);
+            _ = batch.AwaitLiveKeyHolders(table, storageOrdinals, commons, probe, mode, reportedKey);
+        }
+        catch (SimulatedSqlException timeout) when (timeout.Number == 1222 && mode == LockMode.Exclusive)
+        {
+            // Real's uniqueness check reports its timeout at state 47
+            // (probed 2026-10-03 against SQL Server 2025).
+            throw SimulatedSqlException.LockRequestTimeOutExceeded(47);
+        }
     }
 
     // Whether storageOrdinals are exactly the key of one of the table's

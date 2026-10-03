@@ -975,6 +975,7 @@ partial class Simulation
         var images = new Dictionary<(int Member, int Page, int Slot), byte[]>();
         var rows = new List<byte[]>();
         var generations = new long[members.Length];
+        var keysPutBack = new long[members.Length];
 
         // A level that limits its rows, projects a window or derives a column
         // shows each member's rows as its body yields them for that member
@@ -988,6 +989,8 @@ partial class Simulation
         for (var m = 0; m < members.Length; m++)
         {
             var table = members[m].Table;
+            // Noted ahead of the wait, as the table walk notes it ahead of its seek.
+            keysPutBack[m] = Volatile.Read(ref table.KeysPutBack);
             if (!table.SupersededKeyImages.IsEmptyLockFree())
                 _ = AwaitSupersededTargetRows(batch, table, (_, prior) => ShownRow(m, prior) is not null);
             generations[m] = Volatile.Read(ref table.Heap.MutationGeneration);
@@ -1043,6 +1046,16 @@ partial class Simulation
             judged[m].Add((page, slot, rowBytes));
         }
 
+        // A row another session deleted ahead of the scan, and puts back
+        // behind it, was never met: its delete is waited out before anything
+        // is held, and the count below sends the statement to run again.
+        for (var m = 0; m < members.Length; m++)
+        {
+            var table = members[m].Table;
+            if (!table.SupersededKeyImages.IsEmptyLockFree())
+                _ = AwaitSupersededTargetRows(batch, table, (_, prior) => ShownRow(m, prior) is not null);
+        }
+
         for (var m = 0; m < members.Length; m++)
         {
             var member = m;
@@ -1054,6 +1067,11 @@ partial class Simulation
                 memberRows[i] = Judge(member, memberRows[i].PageIndex, memberRows[i].SlotIndex, rowBytes);
                 return true;
             });
+            // A delete that settled while the member was scanned may have put
+            // its key back where the scan had already passed: the statement
+            // runs again (BatchContext.TargetKeyReinserted).
+            if (Volatile.Read(ref members[member].Table.KeysPutBack) != keysPutBack[member])
+                batch.TargetKeyReinserted = true;
         }
         return walked;
 

@@ -540,4 +540,27 @@ public sealed class MemoryOptimizedTableTests
             end
             """,
             "select dbo.f(21)"));
+
+    /// <summary>
+    /// A transaction reads a memory-optimized table at the snapshot its first
+    /// read of one took, so a write committed later stays out of every read
+    /// after it, where the reads once walked the live rows.
+    /// </summary>
+    [TestMethod]
+    public void TransactionReads_KeepTheirSnapshot()
+    {
+        var sim = WithContainer();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int not null primary key nonclustered, v int not null) with (memory_optimized = on);
+            insert t values (1, 1), (2, 2)
+            """);
+        using var reader = sim.CreateOpenConnection();
+        AreEqual(3, reader.CreateCommand("begin tran; select sum(v) from t with (snapshot)").ExecuteScalar());
+        _ = sim.ExecuteNonQuery("update t set v = 10 where id = 1; insert t values (3, 3)");
+
+        AreEqual(3, reader.CreateCommand("select sum(v) from t with (snapshot)").ExecuteScalar());
+        AreEqual(1, reader.CreateCommand("select v from t with (snapshot) where id = 1").ExecuteScalar());
+        _ = reader.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual(15, reader.CreateCommand("select sum(v) from t").ExecuteScalar());
+    }
 }

@@ -1892,6 +1892,8 @@ partial class Simulation
         // The heap's generation before the match reads any target row: a row
         // held with the heap unwritten since is the row as it was read.
         var walkGeneration = Volatile.Read(ref destinationTable.Heap.MutationGeneration);
+        // Noted before the target is read, as an UPDATE's walk notes it.
+        var keysPutBack = Volatile.Read(ref destinationTable.KeysPutBack);
         var targetSeek = readsTarget && sourceView is null
             ? Selection.TryPrepareMergeTargetSeek(destinationTable, targetAlias, onPredicate, context.Batch)
             : null;
@@ -2125,6 +2127,22 @@ partial class Simulation
                     ? new MergeStep(matchedSources[0], pageIndex, slotIndex, targetValues, matchedSources)
                     : new MergeStep(sourceRows.Count, pageIndex, slotIndex, targetValues, null));
                 return true;
+            }
+        }
+
+        // A target row whose key another session deleted and put back
+        // elsewhere during the match was never matched: the statement runs
+        // again (BatchContext.TargetKeyReinserted) before a source row it
+        // missed falls to NOT MATCHED and inserts a key that stands.
+        if (readsTarget)
+        {
+            if (!destinationTable.SupersededKeyImages.IsEmptyLockFree())
+                _ = AwaitSupersededTargetRows(context.Batch, destinationTable, (_, prior) => hasNotMatchedBySource || PriorImageMatches(prior));
+            if (Volatile.Read(ref destinationTable.KeysPutBack) != keysPutBack)
+            {
+                context.Batch.TargetKeyReinserted = true;
+                if (context.Batch.TargetWalkMayRunAgain)
+                    return new SimulatedNonQuery(0);
             }
         }
 

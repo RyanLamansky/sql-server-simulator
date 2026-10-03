@@ -1937,6 +1937,16 @@ partial class SimulatedSqlException
         new($"Cannot alter HIDDEN attribute on column '{columnName}' in table '{tableName}' because this column is not a generated always column.", 13735, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 13535: a write to a system-versioned table met
+    /// a row whose period another transaction started after this one began,
+    /// so the version it would retire would end before it started. It ends
+    /// the statement, the transaction staying open (probed 2026-10-03 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SystemTimeBeforePeriodStart(string qualifiedTableName) =>
+        new($"Data modification failed on system-versioned table '{qualifiedTableName}' because transaction time was earlier than period start time for affected records.", 13535, 16, 0);
+
+    /// <summary>
     /// Mimics SQL Server error 13559: a direct <c>INSERT</c> targeted the
     /// history sibling of a system-versioned temporal table. History rows
     /// are populated by the engine via UPDATE / DELETE on the parent.

@@ -97,6 +97,22 @@ internal sealed partial class Selection
         // unseen yet unfenced. Settling it before the seek is even known to
         // apply costs at worst the whole-table fallback the scan path would
         // have taken anyway.
+        // A locking read meets a key another session's uncommitted delete took
+        // away under that session's lock, and waits there before it locks
+        // anything past it (probed 2026-10-03 against SQL Server 2025: a
+        // SERIALIZABLE UPDLOCK seek of a key deleted and then reinserted in
+        // one transaction waits on the key and reads the reinserted row).
+        // Fencing first held the next key's range while waiting, which the
+        // deleting transaction's reinsert of the key then waited on: a
+        // deadlock real never meets.
+        if (!plan.NoLockReader && !plan.SkipBlockedRows && !table.SupersededKeyImages.IsEmptyLockFree()
+            && batch.ResolveSnapshotXidForRead(table, plan) is null)
+        {
+            if (equalities.Count != 0)
+                _ = AwaitUncommittedDeletesMatching(table, batch, outerResolver, equalities);
+            else if (bounds.Count != 0)
+                _ = AwaitUncommittedDeletesInRange(table, batch, outerResolver, bounds);
+        }
         SettleSerializablePhantomFence(source, table, plan, batch, outerResolver, equalities, bounds);
 
         // The seek narrows the row source, then routes each candidate through
@@ -109,7 +125,7 @@ internal sealed partial class Selection
         RowLockQualifier? qualifier = null;
         if (plan.RowTxScoped)
         {
-            if (batch.ResolveSnapshotXidForRead(table) is not null
+            if (batch.ResolveSnapshotXidForRead(table, plan) is not null
                 || (qualifier = RowLockQualifier.For(source, conjuncts, outerResolver)) is null)
             {
                 IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
@@ -127,7 +143,7 @@ internal sealed partial class Selection
         // from their live key, so a live-key-only seek could miss them. With an
         // empty version store the sweep is empty and every candidate resolves to
         // its live bytes. See MaterializeSnapshotCandidates.
-        var snapshotXid = batch.ResolveSnapshotXidForRead(table);
+        var snapshotXid = batch.ResolveSnapshotXidForRead(table, plan);
 
         if (equalities.Count != 0
             && TrySeekByLongestPrefix(source, table, plan, batch, snapshotXid, outerResolver, equalities, bounds, qualifier, out var seekRows, out var width, out var rangeExtended, out var equalityCandidates))
@@ -212,14 +228,16 @@ internal sealed partial class Selection
     {
         if (!plan.SkipBlockedRows)
             batch.AwaitUncommittedDeletes(table);
-        var addresses = ClusteredScan.Order(table);
+        var keys = new List<SqlValueKey>();
+        var addresses = batch.LockingScanOrder(table, keys, follow: !plan.SkipBlockedRows
+            && (Volatile.Read(ref table.ActiveDataWriters) != 0 || Volatile.Read(ref table.ActiveUpdateLocks) != 0 || !table.SupersededKeyImages.IsEmptyLockFree()));
         if (addresses is null)
         {
             addresses = [];
             foreach (var (page, slot, _) in table.Heap.EnumerateRowsWithAddress())
                 addresses.Add((page, slot));
         }
-        foreach (var row in MaterializeWithLockChecks(table, batch, plan, addresses, qualifier))
+        foreach (var row in MaterializeWithLockChecks(table, batch, plan, addresses, qualifier, keys: keys.Count == addresses.Count ? keys : null))
             yield return row;
     }
 
@@ -253,7 +271,10 @@ internal sealed partial class Selection
         }
 
         if (plan.Fence is { } settled)
+        {
             settled.Settled = true;
+            settled.NoteKeysFenced(table, fence.Group, fence.Intervals, lookupRows: mode == LockMode.RangeSharedShared);
+        }
         batch.AcquireKeyFence(table, fence.Group, fence.Commons, fence.Intervals, mode, KeyFenceKind.Read, lookupRows: mode == LockMode.RangeSharedShared);
     }
 
@@ -605,6 +626,7 @@ internal sealed partial class Selection
         out IEnumerable<byte[]> seekRows,
         out int candidateCount)
     {
+        var keysPutBack = Volatile.Read(ref table.KeysPutBack);
         if (!TryComputeRangeCandidates(source, table, batch, outerResolver, bounds, out var candidates))
         {
             seekRows = [];
@@ -612,23 +634,32 @@ internal sealed partial class Selection
             return false;
         }
 
+        for (var reads = 1; reads < MaxKeyRereads && snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows; reads++)
+        {
+            if (!AwaitUncommittedDeletesInRange(table, batch, outerResolver, bounds) && Volatile.Read(ref table.KeysPutBack) == keysPutBack)
+                break;
+            keysPutBack = Volatile.Read(ref table.KeysPutBack);
+            _ = TryComputeRangeCandidates(source, table, batch, outerResolver, bounds, out candidates);
+        }
         candidateCount = candidates.Count;
-        if (snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows)
-            AwaitUncommittedDeletesInRange(table, batch, outerResolver, bounds);
         seekRows = snapshotXid is { } sx
             ? MaterializeSnapshotCandidates(table, batch, sx, candidates)
-            : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier);
+            : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier, recompute: () => SettledCandidates(
+                table,
+                () => AwaitUncommittedDeletesInRange(table, batch, outerResolver, bounds),
+                () => TryComputeRangeCandidates(source, table, batch, outerResolver, bounds, out var current) ? current : []));
         return true;
     }
 
     // The range seek's counterpart of AwaitUncommittedDeletesMatching: waits
     // out another session's uncommitted delete of a row whose pre-image lies
     // inside every bounded column's range.
-    private static void AwaitUncommittedDeletesInRange(
+    private static bool AwaitUncommittedDeletesInRange(
         HeapTable table, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, Dictionary<int, RangeBoundExprs> bounds)
     {
         if (OtherSessionsDeletedRows(table, batch) is not { } deleted)
-            return;
+            return false;
+        var matched = false;
 
         var evaluated = new List<(int Ordinal, bool HasLower, SqlValue Lower, bool LowerInclusive, bool HasUpper, SqlValue Upper, bool UpperInclusive)>();
         foreach (var (ordinal, bound) in bounds)
@@ -655,12 +686,20 @@ internal sealed partial class Selection
                 }
             }
             if (inside)
-                batch.AwaitRowWritersOf(table, resource);
+            {
+                _ = batch.AwaitRowWritersOf(table, resource);
+                matched = true;
+            }
         }
+        return matched;
     }
 
-    // Another session's uncommitted deletes on the table, as (pre-image, row
-    // lock) pairs, or null when there are none.
+    // Another session's uncommitted deletes and rewrites on the table, as
+    // (pre-image, row lock) pairs, or null when there are none. A rewrite
+    // counts too: one moving a row's key away leaves the old key under the
+    // writer's lock as a delete does, and a rolling-back delete has restored
+    // its row before the entry retires — counting only tombstoned slots let a
+    // seek read the key absent between the two and wait for nothing.
     private static List<(byte[] Image, LockResource Lock)>? OtherSessionsDeletedRows(HeapTable table, BatchContext batch)
     {
         if (table.SupersededKeyImages.IsEmptyLockFree())
@@ -671,11 +710,8 @@ internal sealed partial class Selection
         {
             if (ReferenceEquals(owner, session))
                 continue;
-            foreach (var (address, entry) in images)
-            {
-                if (table.Heap.IsSlotTombstoned(address.PageIndex, address.SlotIndex))
-                    (deleted ??= []).Add(entry);
-            }
+            foreach (var (_, entry) in images)
+                (deleted ??= []).Add(entry);
         }
         return deleted;
     }
@@ -1027,7 +1063,7 @@ internal sealed partial class Selection
         // A SNAPSHOT / RCSI read materializes through the version store, whose
         // chain sweep appends rows in arbitrary order — an ordered scan couldn't
         // stay ordered, so sort as before.
-        if (batch.ResolveSnapshotXidForRead(table) is not null)
+        if (batch.ResolveSnapshotXidForRead(table, plan) is not null)
             return false;
 
         // Parse ORDER BY into a column-ordinal list under one shared direction.
@@ -2304,6 +2340,7 @@ internal sealed partial class Selection
         out bool rangeExtended,
         out int candidateCount)
     {
+        var keysPutBack = Volatile.Read(ref table.KeysPutBack);
         if (!TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var candidates, out width, out rangeExtended, out var seeks))
         {
             seekRows = [];
@@ -2311,14 +2348,50 @@ internal sealed partial class Selection
             return false;
         }
 
+        // A delete the wait outlasted may have put its key back elsewhere,
+        // which the candidates read before it don't name — and the key read
+        // again may be another session's to delete by then.
+        for (var reads = 1; reads < MaxKeyRereads && snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows; reads++)
+        {
+            if (!AwaitUncommittedDeletesMatching(table, batch, outerResolver, equalities) && Volatile.Read(ref table.KeysPutBack) == keysPutBack)
+                break;
+            keysPutBack = Volatile.Read(ref table.KeysPutBack);
+            _ = TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out candidates, out width, out rangeExtended, out seeks);
+        }
         candidateCount = candidates.Count;
-        if (snapshotXid is null && !plan.NoLockReader && !plan.SkipBlockedRows)
-            AwaitUncommittedDeletesMatching(table, batch, outerResolver, equalities);
         seekRows = snapshotXid is { } sx
             ? MaterializeSnapshotCandidates(table, batch, sx, candidates, seeks)
-            : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier, seeks);
+            : MaterializeWithLockChecks(table, batch, plan, candidates, qualifier, seeks, recompute: () => SettledCandidates(
+                table,
+                () => AwaitUncommittedDeletesMatching(table, batch, outerResolver, equalities),
+                () => TryComputeEqualityCandidates(source, table, batch, outerResolver, equalities, bounds, out var current, out _, out _, out _) ? current : []));
         return true;
     }
+
+    /// <summary>
+    /// A locking seek's candidates read again, once the in-flight deletes of
+    /// the keys it probes have been waited out (<paramref name="awaitDeletes"/>,
+    /// true when there was one) — and again while a wait, or a key put back
+    /// (<see cref="HeapTable.KeysPutBack"/>), says the read may have been
+    /// taken between a delete and its key's return.
+    /// </summary>
+    private static List<(int Page, int Slot)> SettledCandidates(HeapTable table, Func<bool> awaitDeletes, Func<List<(int Page, int Slot)>> read)
+    {
+        var current = new List<(int Page, int Slot)>();
+        for (var reads = 0; reads < MaxKeyRereads; reads++)
+        {
+            var putBack = Volatile.Read(ref table.KeysPutBack);
+            current = read();
+            if (!awaitDeletes() && Volatile.Read(ref table.KeysPutBack) == putBack)
+                break;
+        }
+        return current;
+    }
+
+    // How many times a locking seek reads its candidates again after waiting
+    // out another session's in-flight delete of a key it probes: the key can
+    // come back elsewhere, and be deleted again, while it waits.
+    private const int MaxKeyRereads = 64;
 
     // The seek's counterpart of BatchContext.AwaitUncommittedDeletes: waits out
     // another session's uncommitted delete of a row the seek's equalities would
@@ -2326,11 +2399,12 @@ internal sealed partial class Selection
     // key's lock and waits (probed 2026-09-26 against SQL Server 2025). A row
     // matches when every equality column's value in its pre-delete image equals
     // one of that column's probes.
-    private static void AwaitUncommittedDeletesMatching(
+    private static bool AwaitUncommittedDeletesMatching(
         HeapTable table, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver, Dictionary<int, Expression[]> equalities)
     {
         if (OtherSessionsDeletedRows(table, batch) is not { } deleted)
-            return;
+            return false;
+        var matched = false;
 
         var runtime = new RuntimeContext(name => outerResolver is not null ? outerResolver(name) : throw SimulatedSqlException.InvalidColumnName(name), batch);
         var probes = new List<(int Ordinal, SqlValue[] Values)>(equalities.Count);
@@ -2350,8 +2424,12 @@ internal sealed partial class Selection
                 }
             }
             if (matches)
-                batch.AwaitRowWritersOf(table, resource);
+            {
+                _ = batch.AwaitRowWritersOf(table, resource);
+                matched = true;
+            }
         }
+        return matched;
     }
 
     private static bool ProbeEquals(SqlValue probe, SqlValue stored) =>
@@ -2807,8 +2885,18 @@ internal sealed partial class Selection
     // — exactly what the full scan applies, but only to the seeked rows). With a
     // qualifier, a tx-scoped row lock taken on a row it rejects is let go and
     // the row skipped (see RowLockQualifier).
+    /// <remarks>
+    /// A candidate deleted since the list was taken, or by the writer its lock
+    /// waited out, is the key's to read, as real's read meets the deleted key
+    /// and waits on it (<see cref="BatchContext.RowsOfDeletedKey"/>):
+    /// <paramref name="keys"/>, when given, names each candidate's key at the
+    /// same index. One no key names sends the read to
+    /// <paramref name="recompute"/>, when given, for the candidates as they
+    /// stand, the rows it hasn't read yet read in turn.
+    /// </remarks>
     private static IEnumerable<byte[]> MaterializeWithLockChecks(
-        HeapTable table, BatchContext batch, DataLockPlan plan, List<(int Page, int Slot)> candidates, RowLockQualifier? qualifier = null, int seeks = 1)
+        HeapTable table, BatchContext batch, DataLockPlan plan, List<(int Page, int Slot)> candidates, RowLockQualifier? qualifier = null, int seeks = 1,
+        List<SqlValueKey>? keys = null, Func<List<(int Page, int Slot)>>? recompute = null)
     {
         var io = batch.Connection.StatementIo?.Touch(table);
         _ = io?.ScanCount += seeks;
@@ -2833,24 +2921,75 @@ internal sealed partial class Selection
         // bucket, and a double-applied Insert can list one twice.
         var seen = new HashSet<(int, int)>();
         var addresses = batch.CurrentStatement.RowAddresses;
-        foreach (var (page, slot) in candidates)
+        var heap = table.Heap;
+        var work = candidates;
+        // The key each row read in a deleted row's place was found by, which
+        // names its rows again should it be deleted in turn.
+        Dictionary<(int, int), SqlValueKey>? followedKeys = null;
+        for (var round = 1; ; round++)
         {
-            if (!seen.Add((page, slot)) || table.Heap.IsSlotTombstoned(page, slot))
-                continue;
-            if (!batch.TouchRowForRead(table, page, slot, plan) || table.Heap.ReadLiveRow(page, slot) is not { } bytes)
-                continue;
-            addresses?.Record(bytes, page, slot);
-            io?.Enter(page, ref lastPage);
-            if (qualifying)
+            var lost = false;
+            for (var position = 0; position < work.Count; position++)
             {
-                tuple[0] = bytes;
-                if (!Qualifies(qualifier!.Conjuncts, runtime))
+                var (page, slot) = work[position];
+                if (!seen.Add((page, slot)))
+                    continue;
+                // The image before the row's lock is taken names its key should
+                // the wait end with the row deleted; the sequence says whether
+                // the image read after the lock still is it.
+                var sequence = heap.WriteSequence;
+                var prior = heap.ReadLiveRow(page, slot);
+                byte[]? bytes = null;
+                if (prior is not null)
                 {
-                    batch.ReleaseRowLockAcquisition(table, page, slot, plan.RowMode!.Value);
+                    if (!batch.TouchRowForRead(table, page, slot, plan))
+                        continue;
+                    bytes = heap.WriteSequence == sequence ? prior
+                        : heap.ReadLiveRow(page, slot) is { } read ? batch.SettleReadCommitted(table, page, slot, plan, read, sequence)
+                        : null;
+                }
+                if (bytes is null)
+                {
+                    SqlValueKey? key = keys is not null && ReferenceEquals(work, candidates) && position < keys.Count ? keys[position]
+                        : followedKeys is not null && followedKeys.TryGetValue((page, slot), out var followedKey) ? followedKey
+                        : null;
+                    if (batch.RowsOfDeletedKey(table, page, slot, plan, key, prior, out var movedKey) is { } moved)
+                    {
+                        if (ReferenceEquals(work, candidates))
+                            work = [.. candidates];
+                        work.AddRange(moved);
+                        if (movedKey is { } named)
+                        {
+                            followedKeys ??= [];
+                            foreach (var address in moved)
+                                followedKeys[address] = named;
+                        }
+                        // A delete the wait saw roll back put the row back at
+                        // this very address.
+                        _ = seen.Remove((page, slot));
+                    }
+                    else
+                    {
+                        lost = !plan.SkipBlockedRows;
+                    }
                     continue;
                 }
+                addresses?.Record(bytes, page, slot);
+                io?.Enter(page, ref lastPage);
+                if (qualifying)
+                {
+                    tuple[0] = bytes;
+                    if (!Qualifies(qualifier!.Conjuncts, runtime))
+                    {
+                        batch.ReleaseRowLockAcquisition(table, page, slot, plan.RowMode!.Value);
+                        continue;
+                    }
+                }
+                yield return bytes;
             }
-            yield return bytes;
+            if (!lost || recompute is null || round == Simulation.MaxTargetWalks)
+                break;
+            work = recompute();
         }
         tuple[0] = null;
     }
@@ -3181,7 +3320,7 @@ internal sealed partial class Selection
             }
         }
 
-        foreach (var (address, _) in table.RowVersions)
+        foreach (var (address, _) in table.Heap.RowVersions)
         {
             var (page, slot) = address;
             if (!seen.Add((page, slot)))

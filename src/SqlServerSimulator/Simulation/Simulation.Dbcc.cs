@@ -418,7 +418,7 @@ partial class Simulation
     /// </summary>
     private static bool PageIsPinned(HeapTable table, int pageIndex)
     {
-        foreach (var ((versionPage, _), _) in table.RowVersions)
+        foreach (var ((versionPage, _), _) in table.Heap.RowVersions)
         {
             if (versionPage == pageIndex)
                 return true;

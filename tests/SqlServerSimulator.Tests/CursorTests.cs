@@ -832,4 +832,30 @@ public sealed class CursorTests
         var ex = FourRows().AssertSqlError(commandText, number);
         AreEqual(3621, ex.Errors[1].Number);
     }
+
+    /// <summary>
+    /// A table redefined while a cursor over it is open — a column added or
+    /// dropped, an index created — fails the cursor's next fetch with Msg
+    /// 16943, unless the cursor is STATIC, whose rows were copied when it
+    /// opened (probed 2026-10-03 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("keyset", "alter table acc add c int null", true)]
+    [DataRow("dynamic", "alter table acc add c int null", true)]
+    [DataRow("fast_forward", "alter table acc add c int null", true)]
+    [DataRow("keyset", "create index ix_bal on acc (bal)", true)]
+    [DataRow("static", "alter table acc add c int null", false)]
+    public void Fetch_AfterTheTableIsRedefined(string kind, string ddl, bool refused)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table acc (id int primary key, bal int not null); insert acc values (1, 100), (2, 100), (3, 100)");
+        using var cursorSession = sim.CreateOpenConnection();
+        _ = cursorSession.CreateCommand($"declare c cursor global {kind} for select id, bal from acc; open c; fetch next from c").ExecuteScalar();
+        _ = sim.ExecuteNonQuery(ddl);
+
+        if (refused)
+            AreEqual(16943, Throws<SimulatedSqlException>(() => cursorSession.CreateCommand("fetch next from c").ExecuteScalar()).Number);
+        else
+            AreEqual(2, cursorSession.CreateCommand("fetch next from c").ExecuteScalar());
+    }
 }

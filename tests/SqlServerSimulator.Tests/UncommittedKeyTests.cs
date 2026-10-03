@@ -188,7 +188,10 @@ public sealed class UncommittedKeyTests
     /// <summary>
     /// Two transactions each inserting the key the other holds deadlock, and
     /// the one closing the cycle is the victim, as on real (probed 2026-10-01
-    /// against SQL Server 2025).
+    /// against SQL Server 2025). Which one closes it is the one that asks
+    /// second, so the first is seen waiting before the second asks: a fixed
+    /// delay let a slow runner start the first's wait only after the second's,
+    /// closing the cycle from the other side.
     /// </summary>
     [TestMethod]
     public async Task CrossedInsertsOfEachOthersKey_Deadlock()
@@ -196,12 +199,19 @@ public sealed class UncommittedKeyTests
         var sim = Keyed();
         using var first = sim.CreateOpenConnection();
         using var second = sim.CreateOpenConnection();
+        using var observer = sim.CreateOpenConnection();
 
         _ = first.CreateCommand("begin tran; insert t values (41, 1)").ExecuteNonQuery();
         _ = second.CreateCommand("begin tran; insert t values (42, 2)").ExecuteNonQuery();
+        var firstSpid = (short)first.CreateCommand("select @@spid").ExecuteScalar()!;
         var blocked = Task.Run(() => first.CreateCommand("insert t values (42, 1)").ExecuteNonQuery(), TestContext.CancellationToken);
-        await Task.Delay(150, TestContext.CancellationToken);
-        IsFalse(blocked.IsCompleted);
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while ((int)observer.CreateCommand($"select count(*) from sys.dm_os_waiting_tasks where session_id = {firstSpid}").ExecuteScalar()! == 0)
+        {
+            IsFalse(blocked.IsCompleted, "the first insert was to wait on the second's key");
+            IsLessThan(ThreadStartTimeoutMs, waited.ElapsedMilliseconds, "the first insert never waited");
+            await Task.Delay(5, TestContext.CancellationToken);
+        }
 
         AreEqual(1205, Throws<SimulatedSqlException>(() => second.CreateCommand("insert t values (41, 2)").ExecuteNonQuery()).Number);
         AreEqual(1, await blocked);

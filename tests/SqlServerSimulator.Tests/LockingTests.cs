@@ -807,12 +807,16 @@ public sealed class LockingTests
         using var sleeper = sim.CreateOpenConnection();
         using var observer = sim.CreateOpenConnection();
         var sleeperSpid = (short)sleeper.CreateCommand("select @@spid").ExecuteScalar()!;
-        var sleepTask = Task.Run(() => sleeper.CreateCommand("waitfor delay '00:00:01'").ExecuteNonQuery(), TestContext.CancellationToken);
+        // A wait far longer than any poll, cancelled once observed: a short
+        // one could end before a loaded runner's first poll reached it.
+        var sleep = sleeper.CreateCommand("waitfor delay '00:01:00'");
+        var sleepTask = Task.Run(() => ThrowsExactly<SimulatedSqlException>(() => sleep.ExecuteNonQuery()), TestContext.CancellationToken);
         var row = await PollUntil(
             () => observer.CreateCommand($"select concat(status, '|', command, '|', wait_type, '|', blocking_session_id) from sys.dm_exec_requests where session_id = {sleeperSpid}").ExecuteScalar() as string,
             // The request is visible from the batch's start, a moment before its WAITFOR begins.
             value => value?.StartsWith("suspended|", StringComparison.Ordinal) == true,
             TestContext.CancellationToken);
+        sleep.Cancel();
         AreEqual("suspended|WAITFOR|WAITFOR|0", row);
         _ = await sleepTask;
     }
@@ -923,5 +927,131 @@ public sealed class LockingTests
             from sys.dm_tran_locks where resource_type = 'OBJECT' and resource_associated_entity_id = object_id('t')
             """).ExecuteScalar());
         _ = conn.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// A write's lock timeout names the lock in its state and, ending the
+    /// write on a row or key lock, is followed by Msg 3621 — on the object
+    /// lock it isn't (probed 2026-10-03 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("update h set v = v where id = 1", "delete h where id = 1", 45, true)]
+    [DataRow("update t set v = v where id = 1", "delete t where id = 1", 51, true)]
+    [DataRow("update t set v = v where id = 1", "insert t select 1, 1", 47, true)]
+    [DataRow("select * from t with (holdlock, tablock)", "insert t values (3, 3)", 56, false)]
+    [DataRow("set transaction isolation level serializable; select * from t where id between 1 and 2", "insert t values (3, 3)", 48, true)]
+    public void LockTimeout_EndingAWrite(string held, string write, int state, bool terminated)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int); insert t values (1, 1), (2, 2); create table h (id int, v int); insert h values (1, 1)");
+        using var holder = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+        _ = holder.CreateCommand("begin tran; " + held).ExecuteNonQuery();
+
+        var error = Throws<SimulatedSqlException>(() => writer.CreateCommand("set lock_timeout 0; " + write).ExecuteNonQuery());
+
+        AreEqual(1222, error.Number);
+        AreEqual(state, error.State);
+        AreEqual(terminated ? 3621 : 1222, error.Errors[^1].Number);
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Lock requests queue in arrival order: a table S asked for behind a
+    /// waiting table X waits for it, though the S held now is compatible,
+    /// so a stream of shared readers can't starve the writer (probed
+    /// 2026-10-03 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task SharedRequest_BehindAWaitingExclusive_WaitsItsTurn()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int); insert t values (1, 1), (2, 2)");
+        using var holder = sim.CreateOpenConnection();
+        using var writer = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+
+        _ = holder.CreateCommand("begin tran; select count(*) from t with (tablock, holdlock)").ExecuteScalar();
+        var exclusive = await sim.StartBlocked(writer, "begin tran; select count(*) from t with (tablockx)", TestContext.CancellationToken);
+        var shared = await sim.StartBlocked(reader, "select count(*) from t with (tablock)", TestContext.CancellationToken);
+
+        _ = holder.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual(2, (await exclusive).Single());
+        IsFalse(shared.IsCompleted);
+        _ = writer.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual(2, (await shared).Single());
+    }
+
+    /// <summary>
+    /// The lock DMVs read every resource's holders as other sessions take and
+    /// give them back; a holder list copied while another session appended to
+    /// it once threw or handed back a half-written hold.
+    /// </summary>
+    [TestMethod]
+    public void LockDmvs_ReadDuringLockChurn_NeverFail()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int); insert t select value, 0 from generate_series(1, 8)");
+        var failures = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        var stop = DateTime.UtcNow.AddMilliseconds(400);
+        var threads = Enumerable.Range(0, 4).Select(index => new Thread(() =>
+        {
+            using var conn = sim.CreateOpenConnection();
+            try
+            {
+                for (var i = 0; DateTime.UtcNow < stop; i++)
+                {
+                    _ = index == 0
+                        ? conn.CreateCommand("select count(*) from sys.dm_tran_locks; select count(*) from sys.dm_os_waiting_tasks").ExecuteScalar()
+                        : conn.CreateCommand($"set lock_timeout 20; begin try begin tran; update t set v += 1 where id = {((i + index) % 8) + 1}; update t set v += 1 where id = {(i * index % 8) + 1}; rollback; end try begin catch if @@trancount > 0 rollback; end catch").ExecuteScalar();
+                }
+            }
+            catch (Exception e)
+            {
+                failures.Enqueue(e);
+            }
+        })).ToArray();
+        foreach (var thread in threads)
+            thread.Start();
+        foreach (var thread in threads)
+            IsTrue(thread.Join(30_000));
+
+        IsEmpty(failures);
+    }
+
+    /// <summary>
+    /// A deadlock victim's Msg 1205 caught by a <c>TRY</c> finds its work
+    /// undone and its locks gone — the survivor goes on — but its transaction
+    /// open and doomed: <c>@@TRANCOUNT</c> 1, <c>XACT_STATE()</c> -1, until a
+    /// <c>ROLLBACK</c> ends it (probed 2026-10-03 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task CaughtDeadlock_LeavesTheVictimsTransactionDoomed()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int); insert t values (1, 1), (2, 2)");
+        using var survivor = sim.CreateOpenConnection();
+        using var victim = sim.CreateOpenConnection();
+        _ = survivor.CreateCommand("set deadlock_priority high; begin tran; update t set v = 20 where id = 2").ExecuteNonQuery();
+
+        var caught = await sim.StartBlocked(victim, """
+            set deadlock_priority low;
+            begin try
+                begin tran;
+                update t set v = 10 where id = 1;
+                update t set v = 21 where id = 2;
+                commit;
+            end try
+            begin catch
+                select @@trancount * 10 + xact_state() where error_number() = 1205;
+                rollback;
+            end catch
+            """, TestContext.CancellationToken);
+        _ = survivor.CreateCommand("update t set v = 11 where id = 1").ExecuteNonQuery();
+
+        CollectionAssert.AreEqual(new object?[] { 9 }, await caught);
+        AreEqual(0, victim.CreateCommand("select @@trancount").ExecuteScalar());
+        _ = survivor.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual("1:11,2:20", sim.ExecuteScalar("select string_agg(concat(id, ':', v), ',') within group (order by id) from t"));
     }
 }

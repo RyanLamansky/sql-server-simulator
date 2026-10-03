@@ -320,4 +320,21 @@ public sealed class StatementCancellationTests
         AreEqual((short)-3, Scalar(connection, "select cursor_status('global', 'later')"));
         AreEqual((short)1, Scalar(connection, "select cursor_status('global', 'earlier')"));
     }
+
+    /// <summary>
+    /// A timeout landing between the statements of a block inside a
+    /// <c>TRY</c> ends the batch like one inside a statement: the dispatch
+    /// once carried on from the block's next token, reporting Msg 102 at its
+    /// <c>END</c>.
+    /// </summary>
+    [TestMethod]
+    public void Timeout_InsideABlockInsideTry_EndsTheBatch()
+    {
+        using var connection = Open();
+
+        var timeout = Throws<SimulatedSqlException>(() => Run(connection, "begin try begin while 1 = 1 begin delete logt; insert logt values (2); end end end try begin catch insert logt values (1) end catch", timeout: 1));
+
+        AreEqual(-2, timeout.Number);
+        AreEqual(0, Scalar(connection, "select count(*) from logt where v = 1"));
+    }
 }

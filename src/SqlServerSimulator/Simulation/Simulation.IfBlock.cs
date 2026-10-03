@@ -367,11 +367,14 @@ partial class Simulation
                     foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
                         yield return o;
 
-                    // RETURN, GOTO and a batch-ending error propagate through
-                    // WHILE (unlike BREAK / CONTINUE which we catch). Exit the
-                    // loop without clearing — the outer DispatchStatementsUntil
-                    // also stops on all three.
-                    if (batch.ReturnSignaled || batch.BatchAborted || batch.PendingGotoLabel is not null)
+                    // RETURN, GOTO, a batch-ending error and an error a TRY
+                    // caught propagate through WHILE (unlike BREAK / CONTINUE
+                    // which we catch). Exit the loop without clearing — the
+                    // outer DispatchStatementsUntil stops on the first three,
+                    // and the TRY skips to its CATCH on the last; iterating on
+                    // would run the condition over a body that only skips, so
+                    // a loop whose body advances its own condition never ends.
+                    if (batch.ReturnSignaled || batch.BatchAborted || batch.PendingGotoLabel is not null || batch.ErrorSignaled)
                         goto ExitLoop;
 
                     switch (batch.LoopControl)

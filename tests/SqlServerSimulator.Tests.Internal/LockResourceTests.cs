@@ -173,7 +173,8 @@ public sealed class LockResourceTests
     {
         // Set up a 2-cycle without real threading: this thread holds X on
         // r1; a second "impersonated" connection holds X on r2 and is
-        // marked as waiting on r1 (WaitingOnResource = r1). When this
+        // marked as waiting on r1 in X (WaitingOnResource = r1; the mode is
+        // what makes r1's holder an edge, as a compatible holder isn't). When this
         // thread asks for X on r2, the detector walks r2's holders → b →
         // b.WaitingOnResource = r1 → r1's holders → us, cycle closed.
         // Caller (us) is the victim, both sessions at the same deadlock priority.
@@ -187,6 +188,7 @@ public sealed class LockResourceTests
         sim.LockManager.Acquire(r1, LockMode.Exclusive, caller.Session, 0);
         sim.LockManager.Acquire(r2, LockMode.Exclusive, b.Session, 0);
         b.WaitingOnResource = r1;
+        b.Session.WaitingForMode = LockMode.Exclusive;
         try
         {
             var ex = Throws<SimulatedSqlException>(() =>
@@ -197,6 +199,7 @@ public sealed class LockResourceTests
         finally
         {
             b.WaitingOnResource = null;
+            b.Session.WaitingForMode = null;
             sim.LockManager.Release(r2, LockMode.Exclusive, b.Session);
             sim.LockManager.Release(r1, LockMode.Exclusive, caller.Session);
         }

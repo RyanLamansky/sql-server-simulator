@@ -301,7 +301,10 @@ partial class Simulation
             batch.ReleaseStatementSchemaLocks();
             connection.CurrentExecutingThreadId = this.savedThreadId;
             if (this.announcedReader)
+            {
                 LobReclamation.Leave(connection.Session);
+                Volatile.Write(ref connection.Session.StatementSnapshotXid, long.MaxValue);
+            }
             if (this.ReportsStatistics)
                 connection.StatementIo = this.enclosingIo;
             if (this.opensConditional)
@@ -473,13 +476,18 @@ partial class Simulation
                 connection.AttentionEndedWrite = batch.CurrentStatement.WritesRows && !batch.IsSkipping
                     && batch.TriggerFrame is null && !connection.XactAbort;
             }
-            // Class 13 = deadlock victim. Real SQL Server auto-rolls
-            // back the active transaction before propagating (probe-
-            // confirmed: @@TRANCOUNT reads 0 in the catch handler).
-            // Done BEFORE the TRY-frame check so both the propagating
-            // path and the TRY-caught path observe the same rollback.
-            if (ex.Class == 13)
-                connection.CurrentTransaction?.EndRollback();
+            // Class 13 = deadlock victim. Real undoes the victim's work and
+            // releases its locks before the error reaches anyone; a TRY that
+            // will catch it finds the transaction open and doomed, while
+            // uncaught it ends the transaction (probed 2026-10-03 against
+            // SQL Server 2025).
+            if (ex.Class == 13 && connection.CurrentTransaction is { } victim)
+            {
+                if (connection.OpenTryFrames > 0 && !victim.Doomed)
+                    victim.UndoAsDeadlockVictim();
+                else
+                    victim.EndRollback();
+            }
             // The transaction-aborting error class does the same, for the
             // same reason and at the same point: real rolls the whole
             // stack back (@@TRANCOUNT 2 reads 0 afterwards, not 1) before
@@ -659,6 +667,87 @@ partial class Simulation
         }
 
         /// <summary>
+        /// Moves <paramref name="parser"/>, left wherever the statement's error
+        /// interrupted it, to the next statement boundary — skipping the
+        /// boundary-like words that are the statement's own: those a
+        /// parenthesized expression or a <c>CASE</c> holds (its <c>ELSE</c> and
+        /// <c>END</c>, a subquery's <c>SELECT</c>), an <c>UPDATE</c>'s
+        /// <c>SET</c>, an <c>INSERT</c>'s source, the statement a common table
+        /// expression introduces, a set operator's next <c>SELECT</c>, a
+        /// cursor's query, and everything up to a <c>MERGE</c>'s closing
+        /// semicolon. The words before the interrupted token are read from the
+        /// statement's start for that: a lock wait timing out at an
+        /// <c>UPDATE</c>'s target left the cursor before its <c>SET</c> list,
+        /// where the scan once stopped, and the rest of the batch parsed from
+        /// there.
+        /// </summary>
+        private readonly void SkipToNextStatement(ParserContext parser)
+        {
+            if (parser.Token is not { } interrupted)
+                return;
+            var resumeAt = interrupted.StartIndex;
+            var parens = 0;
+            var cases = 0;
+            parser.RestoreCheckpoint(this.StatementStart);
+            var kind = parser.Token is ReservedKeyword { Keyword: var first } ? first : (Keyword?)null;
+            var clauseTaken = false;
+            Token? previous = null;
+            while (parser.Token is { } token)
+            {
+                if (previous is not null && parens <= 0 && cases <= 0 && token is ReservedKeyword { Keyword: var word } && IsStatementBoundary(token))
+                {
+                    var owned = kind switch
+                    {
+                        Keyword.Merge => true,
+                        Keyword.With when word is Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge => true,
+                        Keyword.Update => word == Keyword.Set && !clauseTaken,
+                        Keyword.Insert => word is Keyword.Select or Keyword.Exec or Keyword.Execute or Keyword.With && !clauseTaken,
+                        _ => false,
+                    } || (word == Keyword.Select && previous is ReservedKeyword { Keyword: Keyword.Union or Keyword.All or Keyword.Except or Keyword.Intersect or Keyword.For });
+                    if (owned)
+                    {
+                        if (kind == Keyword.With)
+                            kind = word;
+                        else
+                            clauseTaken = true;
+                    }
+                    else if (token.StartIndex >= resumeAt)
+                    {
+                        return;
+                    }
+                }
+                else if (token.StartIndex >= resumeAt && parens <= 0 && cases <= 0 && IsStatementBoundary(token) && (previous is not null || token is not ReservedKeyword))
+                {
+                    return;
+                }
+                switch (token)
+                {
+                    case Operator { Character: '(' }:
+                        parens++;
+                        break;
+                    case Operator { Character: ')' }:
+                        parens--;
+                        break;
+                    case ReservedKeyword { Keyword: Keyword.Case } when parens <= 0:
+                        cases++;
+                        break;
+                    case ReservedKeyword { Keyword: Keyword.End } when parens <= 0 && cases > 0:
+                        cases--;
+                        break;
+                    case ReservedKeyword { Keyword: Keyword.Values } when kind == Keyword.Insert && parens <= 0:
+                        // A VALUES list is the INSERT's source; a SELECT after
+                        // it starts the next statement.
+                        clauseTaken = true;
+                        break;
+                    default:
+                        break;
+                }
+                previous = token;
+                parser.MoveNextOptional();
+            }
+        }
+
+        /// <summary>
         /// Ends a <see cref="StatementEnding.Deferred"/> statement or one whose
         /// error a bind gathered: resumes at the next statement boundary and
         /// sends what the statement produced before it failed.
@@ -676,10 +765,7 @@ partial class Simulation
             // statement, which may open with a `(`.
             var parser = batch.Parser;
             if (!(parser.Token is Operator { Character: '(' } paren && (this.resumedAtStatementEnd || parser.StatementEndedOnParen == paren.StartIndex)))
-            {
-                while (parser.Token is not null && !IsStatementBoundary(parser.Token))
-                    parser.MoveNextOptional();
-            }
+                this.SkipToNextStatement(parser);
             // A scan that stopped on a separator (or ran out of body) resumed
             // where a statement really begins; one that stopped on a keyword
             // guessed, and the bind reads a later severity-15 error from a
@@ -716,11 +802,7 @@ partial class Simulation
             // longer matters and scanning could only mis-stop on a keyword-like
             // token inside the failed statement's own tail.
             if (!batch.BatchAborted)
-            {
-                var parser = batch.Parser;
-                while (parser.Token is not null && !IsStatementBoundary(parser.Token))
-                    parser.MoveNextOptional();
-            }
+                this.SkipToNextStatement(batch.Parser);
             // The error closes with its statement's DONE — or, when it ended
             // the batch, with the batch's closing one, and when it ended a
             // procedure call, with that call's DONEPROC (probed 2026-09-28
@@ -847,9 +929,7 @@ partial class Simulation
             // this scan it'd re-dispatch the same partially-parsed statement
             // and infinite-loop. IsStatementBoundary treats `END` as a stop,
             // so we land at `END TRY` for the typical case.
-            var parser = batch.Parser;
-            while (parser.Token is not null && !IsStatementBoundary(parser.Token))
-                parser.MoveNextOptional();
+            this.SkipToNextStatement(batch.Parser);
             // A caught error's statement still closes with its DONE, the error
             // bit clear — a procedure call with its DONEPROC, no return status
             // (probed 2026-09-28 against SQL Server 2025).

@@ -236,4 +236,26 @@ public sealed class VariableTests
         _ = cmd.ExecuteNonQuery();
         AreEqual(5, p.Value);
     }
+
+    /// <summary>
+    /// An initializer whose subquery times out on a lock still declares the
+    /// variable, NULL, for the statements after it — the subquery takes its
+    /// locks as it parses, which once left the variable undeclared and every
+    /// later reference Msg 137 (probed 2026-10-03 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void InitializerSubqueryLockTimeout_StillDeclaresTheVariable()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (id int primary key, v int); insert t values (1, 1)");
+        using var holder = sim.CreateOpenConnection();
+        using var reader = sim.CreateOpenConnection();
+        _ = holder.CreateCommand("begin tran; update t with (tablockx) set v = v").ExecuteNonQuery();
+
+        var error = Throws<SimulatedSqlException>(() => reader.CreateCommand("set lock_timeout 0; declare @v int = (select v from t with (updlock) where id = 1); select isnull(@v, -1)").ExecuteNonQuery());
+
+        AreEqual(1222, error.Number);
+        AreEqual(1, error.Errors.Count);
+        _ = holder.CreateCommand("rollback").ExecuteNonQuery();
+    }
 }

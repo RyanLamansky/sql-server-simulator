@@ -46,6 +46,12 @@ internal sealed partial class Selection
         TabLockX,
         NoExpand,
 
+        /// <summary><c>READCOMMITTED</c>.</summary>
+        ReadCommitted,
+
+        /// <summary><c>READCOMMITTEDLOCK</c>.</summary>
+        ReadCommittedLock,
+
         /// <summary><c>INDEX</c>, whose argument list is captured for validation against the resolved table.</summary>
         Index,
 
@@ -93,8 +99,8 @@ internal sealed partial class Selection
         ["KEEPDEFAULTS"] = TableHintKind.Discard,
         ["KEEPIDENTITY"] = TableHintKind.Discard,
         ["PAGLOCK"] = TableHintKind.Discard,
-        ["READCOMMITTED"] = TableHintKind.Discard,
-        ["READCOMMITTEDLOCK"] = TableHintKind.Discard,
+        ["READCOMMITTED"] = TableHintKind.ReadCommitted,
+        ["READCOMMITTEDLOCK"] = TableHintKind.ReadCommittedLock,
         ["READONLY"] = TableHintKind.Discard,
         ["REMOTE"] = TableHintKind.Discard,
         ["ROWLOCK"] = TableHintKind.Discard,
@@ -231,6 +237,32 @@ internal sealed partial class Selection
         public bool NoWait;
         /// <summary><c>TABLOCK</c> — escalate to table-S (read) or table-X (write) instead of row-level.</summary>
         public bool TabLock;
+        /// <summary>
+        /// <c>READCOMMITTED</c> — a READ COMMITTED read of this table whatever
+        /// the session's level, so under a READ UNCOMMITTED session it waits
+        /// out writers (probed 2026-10-03 against SQL Server 2025); under
+        /// <c>READ_COMMITTED_SNAPSHOT</c> it still reads row versions.
+        /// </summary>
+        public bool ReadCommitted;
+        /// <summary>
+        /// <c>READCOMMITTEDLOCK</c> — a locking READ COMMITTED read, the hint
+        /// that takes a read off row versioning under
+        /// <c>READ_COMMITTED_SNAPSHOT</c> or <c>SNAPSHOT</c>.
+        /// </summary>
+        public bool ReadCommittedLock;
+
+        /// <summary>
+        /// A hint that makes this table's read a locking read whatever the
+        /// session's level: under READ UNCOMMITTED it waits out writers rather
+        /// than reading dirty, and under <c>READ_COMMITTED_SNAPSHOT</c> or
+        /// <c>SNAPSHOT</c> it reads the latest committed row under its locks
+        /// rather than a row version (probed 2026-10-03 against SQL Server
+        /// 2025). <c>TABLOCK</c>, <c>ROWLOCK</c>, <c>PAGLOCK</c> and
+        /// <c>NOWAIT</c> aren't among them: those read dirty under READ
+        /// UNCOMMITTED and versioned under row versioning, the versioned
+        /// <c>TABLOCK</c> without its table S.
+        /// </summary>
+        public readonly bool LocksRead => this.UpdLock || this.XLock || this.TabLockX || this.Serializable || this.Repeatable || this.ReadCommittedLock;
         /// <summary><c>TABLOCKX</c> — escalate to table-X regardless of read / write direction.</summary>
         public bool TabLockX;
         /// <summary>
@@ -666,6 +698,8 @@ internal sealed partial class Selection
             case TableHintKind.TabLock: info.TabLock = true; break;
             case TableHintKind.TabLockX: info.TabLockX = true; break;
             case TableHintKind.NoExpand: info.NoExpand = true; break;
+            case TableHintKind.ReadCommitted: info.ReadCommitted = true; break;
+            case TableHintKind.ReadCommittedLock: info.ReadCommittedLock = true; break;
 
             case TableHintKind.Index:
                 info.IndexHint = true;

@@ -206,11 +206,24 @@ partial class Simulation
         var needsFullForHistory = table.SystemVersioning is not null;
         var needsFullForFk = table.IncomingForeignKeys.Count > 0 || table.GraphKind == GraphTableKind.Node;
 
+        // The walk reads the rows as it goes and never meets a row another
+        // session deleted meanwhile; real's read meets the deleted key and
+        // waits on it. Those still in flight are waited out once the walk is
+        // done, before the statement holds anything, and a key one of them —
+        // or any delete since the seek below chose the rows — put back sends
+        // the statement to run again (BatchContext.TargetKeyReinserted).
+        // Noted before the seek: a delete and reinsert settling between the
+        // seek and the note left the key in neither.
+        var keysPutBack = Volatile.Read(ref table.KeysPutBack);
+
         // Seek the target when WHERE carries an indexable equality / range
         // (positioned DELETE leaves where null, so it keeps the full scan — the
         // cursor already fixed one row). The loop re-runs WHERE below, so the
         // seek only narrows the rows considered.
-        var rowSource = MutationRowSource(table, where, context.Batch);
+        // The compile walk holds no schema lock, so it doesn't read the
+        // target's rows or seek cache at all: another session redefining the
+        // table meanwhile left them in a layout the walk decoded wrongly.
+        var rowSource = context.Batch.IsSkipping ? [] : MutationRowSource(table, where, context.Batch);
         // Skip mode commits nothing (CommitDelete returns early) — same reason
         // the UPDATE path drops its row source, including the runtime errors a
         // never-run statement's WHERE would otherwise raise while a module body
@@ -256,6 +269,13 @@ partial class Simulation
             judgedRows.Add((pageIndex, slotIndex, rowBytes));
         }
 
+        if (positionedCursor is null && !readsNoRow)
+        {
+            if (!table.SupersededKeyImages.IsEmptyLockFree())
+                _ = AwaitSupersededTargetRows(context.Batch, table, (address, prior) => JudgeRow(address.Page, address.Slot, prior, out _));
+            if (Volatile.Read(ref table.KeysPutBack) != keysPutBack)
+                context.Batch.TargetKeyReinserted = true;
+        }
         ApplyDmlTopCap(top, deleted, context.Batch);
         HoldQualifyingRows(context.Batch, table, deleted, judgedRows, walkGeneration, RowLockPurpose.Delete, (i, rowBytes) =>
         {
@@ -379,6 +399,8 @@ partial class Simulation
             RunUpdateStartupConstants(context, table, JoinedPredicates(joins, where), []);
 
         Selection.SettleSerializableWriteFence(table, where, serializableHint: false, context.Batch, sources[targetIndex].Qualifier);
+        // Noted before the target is read, as the plain walk notes it.
+        var keysPutBack = Volatile.Read(ref table.KeysPutBack);
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
 
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
@@ -440,6 +462,14 @@ partial class Simulation
             judgedRows.Add((addr.Page, addr.Slot, rowBytes));
             partners?.Note(addr, currentTuple);
         }
+
+        // A target row whose key another session deleted and put back
+        // elsewhere during the walk was never paired: the statement runs
+        // again, as the plain walk's does.
+        if (!table.SupersededKeyImages.IsEmptyLockFree())
+            _ = AwaitSupersededTargetRows(context.Batch, table, (_, prior) => Rejudge(prior, out var _));
+        if (Volatile.Read(ref table.KeysPutBack) != keysPutBack)
+            context.Batch.TargetKeyReinserted = true;
 
         ApplyDmlTopCap(top, deleted, context.Batch);
         HoldQualifyingRows(context.Batch, table, deleted, judgedRows, walkGeneration, RowLockPurpose.Delete, (i, rowBytes) =>
@@ -589,17 +619,15 @@ partial class Simulation
             if (!rowLocked)
                 context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.Delete);
             context.Batch.NoteSupersededRow(table, pageIndex, slotIndex);
+            if (table.RowLocks.TryGetValue((pageIndex, slotIndex), out var rowLock))
+                rowLock.DeletedBy = context.Connection.Session;
             if (VersionStore.WillCaptureVersions(context.Batch.DatabaseFor(table), table) && table.Heap.ReadSlotBytes(pageIndex, slotIndex) is { } oldBytes)
                 VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytes, VersionWriteKind.Delete);
         }
+        // The row's lock entry stays until its X goes (HeapTable.RetireRowLock):
+        // a rollback restores the row at this address, and a session already
+        // waiting on the lock then holds the row it waited for.
         table.Heap.DeleteAt(pageIndex, slotIndex, undoLog, ReclaimSuperseded(table, context));
-        // The slot is tombstoned and slot ids are never reused, so the row's
-        // lock entry has no future lookup; the hold in the session's lock list
-        // keeps the resource alive until release, and what still has to find
-        // it — the waits on an uncommitted delete, the lock DMVs — reaches it
-        // through HeapTable.SupersededKeyImages.
-        if (lockable)
-            _ = table.RowLocks.TryRemove((pageIndex, slotIndex), out _);
     }
 
     /// <summary>

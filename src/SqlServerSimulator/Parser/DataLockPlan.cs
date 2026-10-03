@@ -16,7 +16,9 @@ internal readonly struct DataLockPlan(
     bool skipBlockedRows,
     bool noLockReader,
     LockMode? serializableRangeMode = null,
-    PhantomFenceState? fence = null)
+    PhantomFenceState? fence = null,
+    bool lockingRead = false,
+    bool snapshotConflictCheck = false)
 {
     /// <summary>
     /// Lock mode to acquire per touched row, or <c>null</c> when no row-
@@ -74,6 +76,27 @@ internal readonly struct DataLockPlan(
     public readonly PhantomFenceState? Fence = fence;
 
     /// <summary>
+    /// The read carries a hint that makes it a locking read
+    /// (<c>Selection.TableHintInfo.LocksRead</c>), so row versioning —
+    /// <c>READ_COMMITTED_SNAPSHOT</c>'s statement snapshot or a
+    /// <c>SNAPSHOT</c> transaction's — doesn't answer it: it waits out
+    /// writers and reads the latest committed row under the locks it takes.
+    /// </summary>
+    public readonly bool LockingRead = lockingRead;
+
+    /// <summary>
+    /// The read carries <c>UPDLOCK</c>, <c>XLOCK</c> or <c>TABLOCKX</c>, which
+    /// under <c>SNAPSHOT</c> isolation raise Msg 3960 on a row another
+    /// transaction committed a change to after the snapshot, as the update
+    /// they announce would (probed 2026-10-03 against SQL Server 2025).
+    /// </summary>
+    public readonly bool SnapshotConflictCheck = snapshotConflictCheck;
+
+    /// <summary>This plan with <see cref="LockingRead"/> and <see cref="SnapshotConflictCheck"/> set as given.</summary>
+    public DataLockPlan WithVersioningRule(bool lockingRead, bool snapshotConflictCheck) =>
+        new(this.RowMode, this.RowTxScoped, this.SkipBlockedRows, this.NoLockReader, this.SerializableRangeMode, this.Fence, lockingRead, snapshotConflictCheck);
+
+    /// <summary>
     /// Plan for sources where data locks don't apply (table variables,
     /// local temp tables, system tables). Acquires nothing; the reader /
     /// writer iterator's per-row touch is a no-op.
@@ -90,8 +113,8 @@ internal readonly struct DataLockPlan(
 /// <summary>
 /// One SERIALIZABLE / <c>HOLDLOCK</c> heap source's phantom-fence bookkeeping,
 /// allocated with the source's <see cref="DataLockPlan"/> and shared by every
-/// copy of it. One flag: whether the fence this source owes has been taken,
-/// whichever form it took.
+/// copy of it: whether the fence this source owes has been taken, whichever
+/// form it took, and over which keys.
 /// </summary>
 internal sealed class PhantomFenceState
 {
@@ -102,6 +125,43 @@ internal sealed class PhantomFenceState
     /// the index-seek path already fenced with a range.
     /// </summary>
     public bool Settled;
+
+    /// <summary>
+    /// The lock group whose keys the fence locked — the clustered key's, or a
+    /// heap's unique index read through row lookups — else <c>null</c>. The
+    /// fence locks the keys the table held as it was taken, and a key a write
+    /// in flight deleted then is in none of them — though the read, waiting
+    /// that write out, reads the row its transaction put back under the key —
+    /// so a row read after the table changed is locked as it is read
+    /// (<c>BatchContext.TouchRowForRead</c>), as real's read locks each key
+    /// it reaches.
+    /// </summary>
+    public KeyLockGroup? FencedGroup;
+
+    /// <summary>The heap's <see cref="Heap.MutationGeneration"/> just before <see cref="FencedGroup"/>'s keys were read for the fence.</summary>
+    public long FencedGeneration;
+
+    /// <summary>
+    /// Whether the fence locks the rows it finds rather than the keys — one of
+    /// unique points alone, as real takes it, or a heap's index read through
+    /// lookups — so a row read after the table changed takes its row S
+    /// rather than its key's range lock.
+    /// </summary>
+    public bool LocksRows;
+
+    /// <summary>
+    /// Records that the fence about to be taken locks <paramref name="group"/>'s
+    /// keys over <paramref name="intervals"/> as <paramref name="table"/> holds
+    /// them now, looking each key's rows up when <paramref name="lookupRows"/>.
+    /// </summary>
+    public void NoteKeysFenced(HeapTable table, KeyLockGroup group, List<KeyFenceInterval> intervals, bool lookupRows)
+    {
+        if (!group.IsRowGroup && !lookupRows)
+            return;
+        this.FencedGroup = group;
+        this.LocksRows = !group.IsRowGroup || intervals.TrueForAll(interval => interval.UniquePoint);
+        this.FencedGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
+    }
 }
 
 /// <summary>

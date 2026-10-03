@@ -894,7 +894,7 @@ partial class Simulation
         }
 
         // OPTIMISTIC: raise the conflict chain if the row changed since fetch.
-        cursor.CheckOptimisticConflict();
+        cursor.CheckOptimisticConflict(batch);
         cursor.NotePositionedWrite(delete: assignedColumns is null);
         return new PositionedCursorTarget(cursor, slot);
     }

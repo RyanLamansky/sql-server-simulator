@@ -240,6 +240,8 @@ An API server cursor's FORWARD_ONLY READ_ONLY request keeps its own negotiation 
   That row goes into INTO variables as well as into the result set (probed 2026-09-25).
 - `@@FETCH_STATUS`: `0` success, `-1` past end / no row, `-2` keyset member deleted; a fetch that fails — a direction refused, a row whose projection raises — reads `-1` (probed 2026-10-02).
 - `@@CURSOR_ROWS` reads 0 once a `CLOSE` or `DEALLOCATE` ran (probed 2026-10-02).
+- **A table redefined since the cursor opened** — a column added or dropped, an index created — fails a KEYSET, DYNAMIC or FAST_FORWARD cursor's next fetch with **Msg 16943** state 4, while a STATIC cursor reads on from the rows it copied (probed 2026-10-03 against SQL Server 2025).
+  The cursor notes each table's `HeapTable.DefinitionVersion` as it opens; a fetch once decoded rows in the new layout with the old one and failed outside any SQL error.
 
 ## WHERE CURRENT OF
 
@@ -366,6 +368,10 @@ A slot a view stamps is matched against the **view's** output columns rather tha
 - **OPTIMISTIC** holds no lock.
   At each FETCH the row's full stored bytes are snapshotted (`optimisticSnapshot`); a positioned UPDATE / DELETE re-reads the live bytes at the row's address and, if they differ (a value change, a rowversion bump, or the row's deletion), raises the optimistic-conflict chain: **Msg 16947** (`"No rows were updated or deleted."`, class 16 state 1 — the number a SqlClient consumer catches) plus the descriptive class-0 **Msg 16934** (`"Optimistic concurrency check failed. The row was modified outside of this cursor."`) and **Msg 3621**, all reproduced in `SimulatedSqlException.Errors`.
   A full-row byte compare subsumes both of real SQL Server's detection bases — the rowversion column when the table has one (its bytes change on any update), a column checksum otherwise.
+  The compare comes after the write's U has waited out the row's other writers (`Cursor.CheckOptimisticConflict`), as real's does (probed 2026-10-03 against SQL Server 2025: `LCK_M_U`, then the conflict chain for a row deleted and inserted again meanwhile); comparing first let the write find its row gone afterwards and report success having changed nothing.
+- **A KEYSET cursor reads committed rows.**
+  OPEN reads its keyset and each FETCH its member as a READ COMMITTED read would — waiting out the writers of the rows it lands on, and the deletes in flight on its tables when a member is missing, then reading again while a wait let a write land (`Cursor.ReadKeyset`, `Cursor.SettleKeysetFetch`); under `SCROLL_LOCKS` the fetch's U is that wait (probed 2026-10-03 against SQL Server 2025: `LCK_M_S` on a member's key another transaction holds, then the row it committed or restored).
+  Both once read the rows as the heap held them, so a member another transaction was deleting and putting back was missing from the keyset or fetched as deleted (-2), and a row that transaction then rolled back was read dirty.
 
 ## TYPE_WARNING
 
