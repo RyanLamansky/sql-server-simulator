@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 
 namespace SqlServerSimulator;
 
@@ -90,6 +91,7 @@ internal static class BuiltInToken
     /// The compare itself, on the cheaper path when
     /// <see cref="IsOrdinalComparable"/> admits both arguments.
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     private static bool MatchesNonNull(string x, string y) =>
         IsOrdinalComparable(x) && IsOrdinalComparable(y)
             ? x.Equals(y, StringComparison.OrdinalIgnoreCase)

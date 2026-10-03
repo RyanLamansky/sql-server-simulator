@@ -53,191 +53,200 @@ partial class Simulation
         "SQL_DATA_TYPE", "SQL_DATETIME_SUB", "NUM_PREC_RADIX", "INTERVAL_PRECISION", "USERTYPE",
     ];
 
-    // The authoritative datatype-info rows, one raw 20-element array per type,
-    // transcribed verbatim from the probe-captured reference data: JSON null =
-    // SQL NULL, a string cell = a non-NULL varchar/nvarchar (an empty string
-    // stays a non-NULL empty string), a numeric cell = smallint or int per the
-    // schema. Two version-tagged sets: ODBC 2.x (concise temporal codes,
-    // decimal float/real precision) and ODBC 3.x (verbatim 91/93 temporal codes,
-    // binary float/real precision). Both are pre-sorted by the proc's ORDER BY
-    // (DATA_TYPE, AUTO_INCREMENT, MONEY, USERTYPE).
-    private static readonly object?[][] DatatypeInfoV2Raw =
-    [
-        ["datetimeoffset", -155, 34, "'", "'", "scale", 1, 0, 3, null, 0, null, "datetimeoffset", 0, 7, -155, 0, null, null, 0],
-        ["time", -154, 16, "'", "'", "scale", 1, 0, 3, null, 0, null, "time", 0, 7, -154, 0, null, null, 0],
-        ["xml", -152, 0, "N'", "'", null, 1, 1, 0, null, 0, null, "xml", null, null, -152, null, null, null, 0],
-        ["sql_variant", -150, 8000, null, null, null, 1, 0, 2, null, 0, null, "sql_variant", 0, 0, -150, null, 10, null, 0],
-        ["uniqueidentifier", -11, 36, "'", "'", null, 1, 0, 2, null, 0, null, "uniqueidentifier", null, null, -11, null, null, null, 0],
-        ["ntext", -10, 1073741823, "N'", "'", null, 1, 0, 1, null, 0, null, "ntext", null, null, -10, null, null, null, 0],
-        ["nvarchar", -9, 4000, "N'", "'", "max length", 1, 0, 3, null, 0, null, "nvarchar", null, null, -9, null, null, null, 0],
-        ["sysname", -9, 128, "N'", "'", null, 0, 0, 3, null, 0, null, "sysname", null, null, -9, null, null, null, 18],
-        ["nchar", -8, 4000, "N'", "'", "length", 1, 0, 3, null, 0, null, "nchar", null, null, -8, null, null, null, 0],
-        ["bit", -7, 1, null, null, null, 1, 0, 2, null, 0, null, "bit", 0, 0, -7, null, null, null, 16],
-        ["tinyint", -6, 3, null, null, null, 1, 0, 2, 1, 0, 0, "tinyint", 0, 0, -6, null, 10, null, 5],
-        ["tinyint identity", -6, 3, null, null, null, 0, 0, 2, 1, 0, 1, "tinyint identity", 0, 0, -6, null, 10, null, 5],
-        ["bigint", -5, 19, null, null, null, 1, 0, 2, 0, 0, 0, "bigint", 0, 0, -5, null, 10, null, 0],
-        ["bigint identity", -5, 19, null, null, null, 0, 0, 2, 0, 0, 1, "bigint identity", 0, 0, -5, null, 10, null, 0],
-        ["image", -4, 2147483647, "0x", null, null, 1, 0, 0, null, 0, null, "image", null, null, -4, null, null, null, 20],
-        ["varbinary", -3, 8000, "0x", null, "max length", 1, 0, 2, null, 0, null, "varbinary", null, null, -3, null, null, null, 4],
-        ["binary", -2, 8000, "0x", null, "length", 1, 0, 2, null, 0, null, "binary", null, null, -2, null, null, null, 3],
-        ["timestamp", -2, 8, "0x", null, null, 0, 0, 2, null, 0, null, "timestamp", null, null, -2, null, null, null, 80],
-        ["text", -1, 2147483647, "'", "'", null, 1, 0, 1, null, 0, null, "text", null, null, -1, null, null, null, 19],
-        ["char", 1, 8000, "'", "'", "length", 1, 0, 3, null, 0, null, "char", null, null, 1, null, null, null, 1],
-        ["numeric", 2, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "numeric", 0, 38, 2, null, 10, null, 10],
-        ["numeric() identity", 2, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "numeric() identity", 0, 0, 2, null, 10, null, 10],
-        ["decimal", 3, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "decimal", 0, 38, 3, null, 10, null, 24],
-        ["money", 3, 19, "$", null, null, 1, 0, 2, 0, 1, 0, "money", 4, 4, 3, null, 10, null, 11],
-        ["smallmoney", 3, 10, "$", null, null, 1, 0, 2, 0, 1, 0, "smallmoney", 4, 4, 3, null, 10, null, 21],
-        ["decimal() identity", 3, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "decimal() identity", 0, 0, 3, null, 10, null, 24],
-        ["int", 4, 10, null, null, null, 1, 0, 2, 0, 0, 0, "int", 0, 0, 4, null, 10, null, 7],
-        ["int identity", 4, 10, null, null, null, 0, 0, 2, 0, 0, 1, "int identity", 0, 0, 4, null, 10, null, 7],
-        ["smallint", 5, 5, null, null, null, 1, 0, 2, 0, 0, 0, "smallint", 0, 0, 5, null, 10, null, 6],
-        ["smallint identity", 5, 5, null, null, null, 0, 0, 2, 0, 0, 1, "smallint identity", 0, 0, 5, null, 10, null, 6],
-        ["float", 6, 15, null, null, null, 1, 0, 2, 0, 0, 0, "float", null, null, 6, null, 10, null, 8],
-        ["real", 7, 7, null, null, null, 1, 0, 2, 0, 0, 0, "real", null, null, 7, null, 10, null, 23],
-        ["date", 9, 10, "'", "'", null, 1, 0, 3, null, 0, null, "date", null, 0, 9, 1, null, null, 0],
-        ["datetime2", 11, 27, "'", "'", "scale", 1, 0, 3, null, 0, null, "datetime2", 0, 7, 9, 3, null, null, 0],
-        ["datetime", 11, 23, "'", "'", null, 1, 0, 3, null, 0, null, "datetime", 3, 3, 9, 3, null, null, 12],
-        ["smalldatetime", 11, 16, "'", "'", null, 1, 0, 3, null, 0, null, "smalldatetime", 0, 0, 9, 3, null, null, 22],
-        ["varchar", 12, 8000, "'", "'", "max length", 1, 0, 3, null, 0, null, "varchar", null, null, 12, null, null, null, 2],
-    ];
+    /// <summary>
+    /// The datatype-info row tables, held apart from the type's other statics:
+    /// their thousands of boxed cells were a large share of the work every
+    /// process paid initializing <see cref="Simulation"/>, and here they build
+    /// when a procedure first reads them.
+    /// </summary>
+    private static class DatatypeInfoTables
+    {
+        // The authoritative datatype-info rows, one raw 20-element array per type,
+        // transcribed verbatim from the probe-captured reference data: JSON null =
+        // SQL NULL, a string cell = a non-NULL varchar/nvarchar (an empty string
+        // stays a non-NULL empty string), a numeric cell = smallint or int per the
+        // schema. Two version-tagged sets: ODBC 2.x (concise temporal codes,
+        // decimal float/real precision) and ODBC 3.x (verbatim 91/93 temporal codes,
+        // binary float/real precision). Both are pre-sorted by the proc's ORDER BY
+        // (DATA_TYPE, AUTO_INCREMENT, MONEY, USERTYPE).
+        internal static readonly object?[][] DatatypeInfoV2Raw =
+        [
+            ["datetimeoffset", -155, 34, "'", "'", "scale", 1, 0, 3, null, 0, null, "datetimeoffset", 0, 7, -155, 0, null, null, 0],
+            ["time", -154, 16, "'", "'", "scale", 1, 0, 3, null, 0, null, "time", 0, 7, -154, 0, null, null, 0],
+            ["xml", -152, 0, "N'", "'", null, 1, 1, 0, null, 0, null, "xml", null, null, -152, null, null, null, 0],
+            ["sql_variant", -150, 8000, null, null, null, 1, 0, 2, null, 0, null, "sql_variant", 0, 0, -150, null, 10, null, 0],
+            ["uniqueidentifier", -11, 36, "'", "'", null, 1, 0, 2, null, 0, null, "uniqueidentifier", null, null, -11, null, null, null, 0],
+            ["ntext", -10, 1073741823, "N'", "'", null, 1, 0, 1, null, 0, null, "ntext", null, null, -10, null, null, null, 0],
+            ["nvarchar", -9, 4000, "N'", "'", "max length", 1, 0, 3, null, 0, null, "nvarchar", null, null, -9, null, null, null, 0],
+            ["sysname", -9, 128, "N'", "'", null, 0, 0, 3, null, 0, null, "sysname", null, null, -9, null, null, null, 18],
+            ["nchar", -8, 4000, "N'", "'", "length", 1, 0, 3, null, 0, null, "nchar", null, null, -8, null, null, null, 0],
+            ["bit", -7, 1, null, null, null, 1, 0, 2, null, 0, null, "bit", 0, 0, -7, null, null, null, 16],
+            ["tinyint", -6, 3, null, null, null, 1, 0, 2, 1, 0, 0, "tinyint", 0, 0, -6, null, 10, null, 5],
+            ["tinyint identity", -6, 3, null, null, null, 0, 0, 2, 1, 0, 1, "tinyint identity", 0, 0, -6, null, 10, null, 5],
+            ["bigint", -5, 19, null, null, null, 1, 0, 2, 0, 0, 0, "bigint", 0, 0, -5, null, 10, null, 0],
+            ["bigint identity", -5, 19, null, null, null, 0, 0, 2, 0, 0, 1, "bigint identity", 0, 0, -5, null, 10, null, 0],
+            ["image", -4, 2147483647, "0x", null, null, 1, 0, 0, null, 0, null, "image", null, null, -4, null, null, null, 20],
+            ["varbinary", -3, 8000, "0x", null, "max length", 1, 0, 2, null, 0, null, "varbinary", null, null, -3, null, null, null, 4],
+            ["binary", -2, 8000, "0x", null, "length", 1, 0, 2, null, 0, null, "binary", null, null, -2, null, null, null, 3],
+            ["timestamp", -2, 8, "0x", null, null, 0, 0, 2, null, 0, null, "timestamp", null, null, -2, null, null, null, 80],
+            ["text", -1, 2147483647, "'", "'", null, 1, 0, 1, null, 0, null, "text", null, null, -1, null, null, null, 19],
+            ["char", 1, 8000, "'", "'", "length", 1, 0, 3, null, 0, null, "char", null, null, 1, null, null, null, 1],
+            ["numeric", 2, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "numeric", 0, 38, 2, null, 10, null, 10],
+            ["numeric() identity", 2, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "numeric() identity", 0, 0, 2, null, 10, null, 10],
+            ["decimal", 3, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "decimal", 0, 38, 3, null, 10, null, 24],
+            ["money", 3, 19, "$", null, null, 1, 0, 2, 0, 1, 0, "money", 4, 4, 3, null, 10, null, 11],
+            ["smallmoney", 3, 10, "$", null, null, 1, 0, 2, 0, 1, 0, "smallmoney", 4, 4, 3, null, 10, null, 21],
+            ["decimal() identity", 3, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "decimal() identity", 0, 0, 3, null, 10, null, 24],
+            ["int", 4, 10, null, null, null, 1, 0, 2, 0, 0, 0, "int", 0, 0, 4, null, 10, null, 7],
+            ["int identity", 4, 10, null, null, null, 0, 0, 2, 0, 0, 1, "int identity", 0, 0, 4, null, 10, null, 7],
+            ["smallint", 5, 5, null, null, null, 1, 0, 2, 0, 0, 0, "smallint", 0, 0, 5, null, 10, null, 6],
+            ["smallint identity", 5, 5, null, null, null, 0, 0, 2, 0, 0, 1, "smallint identity", 0, 0, 5, null, 10, null, 6],
+            ["float", 6, 15, null, null, null, 1, 0, 2, 0, 0, 0, "float", null, null, 6, null, 10, null, 8],
+            ["real", 7, 7, null, null, null, 1, 0, 2, 0, 0, 0, "real", null, null, 7, null, 10, null, 23],
+            ["date", 9, 10, "'", "'", null, 1, 0, 3, null, 0, null, "date", null, 0, 9, 1, null, null, 0],
+            ["datetime2", 11, 27, "'", "'", "scale", 1, 0, 3, null, 0, null, "datetime2", 0, 7, 9, 3, null, null, 0],
+            ["datetime", 11, 23, "'", "'", null, 1, 0, 3, null, 0, null, "datetime", 3, 3, 9, 3, null, null, 12],
+            ["smalldatetime", 11, 16, "'", "'", null, 1, 0, 3, null, 0, null, "smalldatetime", 0, 0, 9, 3, null, null, 22],
+            ["varchar", 12, 8000, "'", "'", "max length", 1, 0, 3, null, 0, null, "varchar", null, null, 12, null, null, null, 2],
+        ];
 
-    private static readonly object?[][] DatatypeInfoV3Raw =
-    [
-        ["datetimeoffset", -155, 34, "'", "'", "scale", 1, 0, 3, null, 0, null, "datetimeoffset", 0, 7, -155, 0, null, null, 0],
-        ["time", -154, 16, "'", "'", "scale", 1, 0, 3, null, 0, null, "time", 0, 7, -154, 0, null, null, 0],
-        ["xml", -152, 0, "N'", "'", null, 1, 1, 0, null, 0, null, "xml", null, null, -152, null, null, null, 0],
-        ["sql_variant", -150, 8000, null, null, null, 1, 0, 2, null, 0, null, "sql_variant", 0, 0, -150, null, 10, null, 0],
-        ["uniqueidentifier", -11, 36, "'", "'", null, 1, 0, 2, null, 0, null, "uniqueidentifier", null, null, -11, null, null, null, 0],
-        ["ntext", -10, 1073741823, "N'", "'", null, 1, 0, 1, null, 0, null, "ntext", null, null, -10, null, null, null, 0],
-        ["nvarchar", -9, 4000, "N'", "'", "max length", 1, 0, 3, null, 0, null, "nvarchar", null, null, -9, null, null, null, 0],
-        ["sysname", -9, 128, "N'", "'", null, 0, 0, 3, null, 0, null, "sysname", null, null, -9, null, null, null, 18],
-        ["nchar", -8, 4000, "N'", "'", "length", 1, 0, 3, null, 0, null, "nchar", null, null, -8, null, null, null, 0],
-        ["bit", -7, 1, null, null, null, 1, 0, 2, null, 0, null, "bit", 0, 0, -7, null, null, null, 16],
-        ["tinyint", -6, 3, null, null, null, 1, 0, 2, 1, 0, 0, "tinyint", 0, 0, -6, null, 10, null, 5],
-        ["tinyint identity", -6, 3, null, null, null, 0, 0, 2, 1, 0, 1, "tinyint identity", 0, 0, -6, null, 10, null, 5],
-        ["bigint", -5, 19, null, null, null, 1, 0, 2, 0, 0, 0, "bigint", 0, 0, -5, null, 10, null, 0],
-        ["bigint identity", -5, 19, null, null, null, 0, 0, 2, 0, 0, 1, "bigint identity", 0, 0, -5, null, 10, null, 0],
-        ["image", -4, 2147483647, "0x", null, null, 1, 0, 0, null, 0, null, "image", null, null, -4, null, null, null, 20],
-        ["varbinary", -3, 8000, "0x", null, "max length", 1, 0, 2, null, 0, null, "varbinary", null, null, -3, null, null, null, 4],
-        ["binary", -2, 8000, "0x", null, "length", 1, 0, 2, null, 0, null, "binary", null, null, -2, null, null, null, 3],
-        ["timestamp", -2, 8, "0x", null, null, 0, 0, 2, null, 0, null, "timestamp", null, null, -2, null, null, null, 80],
-        ["text", -1, 2147483647, "'", "'", null, 1, 0, 1, null, 0, null, "text", null, null, -1, null, null, null, 19],
-        ["char", 1, 8000, "'", "'", "length", 1, 0, 3, null, 0, null, "char", null, null, 1, null, null, null, 1],
-        ["numeric", 2, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "numeric", 0, 38, 2, null, 10, null, 10],
-        ["numeric() identity", 2, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "numeric() identity", 0, 0, 2, null, 10, null, 10],
-        ["decimal", 3, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "decimal", 0, 38, 3, null, 10, null, 24],
-        ["money", 3, 19, "$", null, null, 1, 0, 2, 0, 1, 0, "money", 4, 4, 3, null, 10, null, 11],
-        ["smallmoney", 3, 10, "$", null, null, 1, 0, 2, 0, 1, 0, "smallmoney", 4, 4, 3, null, 10, null, 21],
-        ["decimal() identity", 3, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "decimal() identity", 0, 0, 3, null, 10, null, 24],
-        ["int", 4, 10, null, null, null, 1, 0, 2, 0, 0, 0, "int", 0, 0, 4, null, 10, null, 7],
-        ["int identity", 4, 10, null, null, null, 0, 0, 2, 0, 0, 1, "int identity", 0, 0, 4, null, 10, null, 7],
-        ["smallint", 5, 5, null, null, null, 1, 0, 2, 0, 0, 0, "smallint", 0, 0, 5, null, 10, null, 6],
-        ["smallint identity", 5, 5, null, null, null, 0, 0, 2, 0, 0, 1, "smallint identity", 0, 0, 5, null, 10, null, 6],
-        ["float", 6, 53, null, null, null, 1, 0, 2, 0, 0, 0, "float", null, null, 6, null, 2, null, 8],
-        ["real", 7, 24, null, null, null, 1, 0, 2, 0, 0, 0, "real", null, null, 7, null, 2, null, 23],
-        ["varchar", 12, 8000, "'", "'", "max length", 1, 0, 3, null, 0, null, "varchar", null, null, 12, null, null, null, 2],
-        ["date", 91, 10, "'", "'", null, 1, 0, 3, null, 0, null, "date", null, 0, 9, 1, null, null, 0],
-        ["datetime2", 93, 27, "'", "'", "scale", 1, 0, 3, null, 0, null, "datetime2", 0, 7, 9, 3, null, null, 0],
-        ["datetime", 93, 23, "'", "'", null, 1, 0, 3, null, 0, null, "datetime", 3, 3, 9, 3, null, null, 12],
-        ["smalldatetime", 93, 16, "'", "'", null, 1, 0, 3, null, 0, null, "smalldatetime", 0, 0, 9, 3, null, null, 22],
-    ];
+        internal static readonly object?[][] DatatypeInfoV3Raw =
+        [
+            ["datetimeoffset", -155, 34, "'", "'", "scale", 1, 0, 3, null, 0, null, "datetimeoffset", 0, 7, -155, 0, null, null, 0],
+            ["time", -154, 16, "'", "'", "scale", 1, 0, 3, null, 0, null, "time", 0, 7, -154, 0, null, null, 0],
+            ["xml", -152, 0, "N'", "'", null, 1, 1, 0, null, 0, null, "xml", null, null, -152, null, null, null, 0],
+            ["sql_variant", -150, 8000, null, null, null, 1, 0, 2, null, 0, null, "sql_variant", 0, 0, -150, null, 10, null, 0],
+            ["uniqueidentifier", -11, 36, "'", "'", null, 1, 0, 2, null, 0, null, "uniqueidentifier", null, null, -11, null, null, null, 0],
+            ["ntext", -10, 1073741823, "N'", "'", null, 1, 0, 1, null, 0, null, "ntext", null, null, -10, null, null, null, 0],
+            ["nvarchar", -9, 4000, "N'", "'", "max length", 1, 0, 3, null, 0, null, "nvarchar", null, null, -9, null, null, null, 0],
+            ["sysname", -9, 128, "N'", "'", null, 0, 0, 3, null, 0, null, "sysname", null, null, -9, null, null, null, 18],
+            ["nchar", -8, 4000, "N'", "'", "length", 1, 0, 3, null, 0, null, "nchar", null, null, -8, null, null, null, 0],
+            ["bit", -7, 1, null, null, null, 1, 0, 2, null, 0, null, "bit", 0, 0, -7, null, null, null, 16],
+            ["tinyint", -6, 3, null, null, null, 1, 0, 2, 1, 0, 0, "tinyint", 0, 0, -6, null, 10, null, 5],
+            ["tinyint identity", -6, 3, null, null, null, 0, 0, 2, 1, 0, 1, "tinyint identity", 0, 0, -6, null, 10, null, 5],
+            ["bigint", -5, 19, null, null, null, 1, 0, 2, 0, 0, 0, "bigint", 0, 0, -5, null, 10, null, 0],
+            ["bigint identity", -5, 19, null, null, null, 0, 0, 2, 0, 0, 1, "bigint identity", 0, 0, -5, null, 10, null, 0],
+            ["image", -4, 2147483647, "0x", null, null, 1, 0, 0, null, 0, null, "image", null, null, -4, null, null, null, 20],
+            ["varbinary", -3, 8000, "0x", null, "max length", 1, 0, 2, null, 0, null, "varbinary", null, null, -3, null, null, null, 4],
+            ["binary", -2, 8000, "0x", null, "length", 1, 0, 2, null, 0, null, "binary", null, null, -2, null, null, null, 3],
+            ["timestamp", -2, 8, "0x", null, null, 0, 0, 2, null, 0, null, "timestamp", null, null, -2, null, null, null, 80],
+            ["text", -1, 2147483647, "'", "'", null, 1, 0, 1, null, 0, null, "text", null, null, -1, null, null, null, 19],
+            ["char", 1, 8000, "'", "'", "length", 1, 0, 3, null, 0, null, "char", null, null, 1, null, null, null, 1],
+            ["numeric", 2, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "numeric", 0, 38, 2, null, 10, null, 10],
+            ["numeric() identity", 2, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "numeric() identity", 0, 0, 2, null, 10, null, 10],
+            ["decimal", 3, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "decimal", 0, 38, 3, null, 10, null, 24],
+            ["money", 3, 19, "$", null, null, 1, 0, 2, 0, 1, 0, "money", 4, 4, 3, null, 10, null, 11],
+            ["smallmoney", 3, 10, "$", null, null, 1, 0, 2, 0, 1, 0, "smallmoney", 4, 4, 3, null, 10, null, 21],
+            ["decimal() identity", 3, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "decimal() identity", 0, 0, 3, null, 10, null, 24],
+            ["int", 4, 10, null, null, null, 1, 0, 2, 0, 0, 0, "int", 0, 0, 4, null, 10, null, 7],
+            ["int identity", 4, 10, null, null, null, 0, 0, 2, 0, 0, 1, "int identity", 0, 0, 4, null, 10, null, 7],
+            ["smallint", 5, 5, null, null, null, 1, 0, 2, 0, 0, 0, "smallint", 0, 0, 5, null, 10, null, 6],
+            ["smallint identity", 5, 5, null, null, null, 0, 0, 2, 0, 0, 1, "smallint identity", 0, 0, 5, null, 10, null, 6],
+            ["float", 6, 53, null, null, null, 1, 0, 2, 0, 0, 0, "float", null, null, 6, null, 2, null, 8],
+            ["real", 7, 24, null, null, null, 1, 0, 2, 0, 0, 0, "real", null, null, 7, null, 2, null, 23],
+            ["varchar", 12, 8000, "'", "'", "max length", 1, 0, 3, null, 0, null, "varchar", null, null, 12, null, null, null, 2],
+            ["date", 91, 10, "'", "'", null, 1, 0, 3, null, 0, null, "date", null, 0, 9, 1, null, null, 0],
+            ["datetime2", 93, 27, "'", "'", "scale", 1, 0, 3, null, 0, null, "datetime2", 0, 7, 9, 3, null, null, 0],
+            ["datetime", 93, 23, "'", "'", null, 1, 0, 3, null, 0, null, "datetime", 3, 3, 9, 3, null, null, 12],
+            ["smalldatetime", 93, 16, "'", "'", null, 1, 0, 3, null, 0, null, "smalldatetime", 0, 0, 9, 3, null, null, 22],
+        ];
 
-    private static readonly SqlValue[][] DatatypeInfoV2Rows = BuildDatatypeInfoRows(DatatypeInfoV2Raw);
+        internal static readonly SqlValue[][] DatatypeInfoV2Rows = BuildDatatypeInfoRows(DatatypeInfoV2Raw);
 
-    private static readonly SqlValue[][] DatatypeInfoV3Rows = BuildDatatypeInfoRows(DatatypeInfoV3Raw);
+        internal static readonly SqlValue[][] DatatypeInfoV3Rows = BuildDatatypeInfoRows(DatatypeInfoV3Raw);
 
-    // The older sp_datatype_info's rows, captured verbatim from SQL Server
-    // 2025 (2026-09-25) in the order it returns them: its backward-compatible
-    // columns report date / time / datetime2 / datetimeoffset as nvarchar (-9)
-    // and xml as ntext (-10), for drivers that predate those types, and its
-    // ORDER BY adds a hidden mapped-type key, so the rows keep this order
-    // rather than being re-sorted.
-    private static readonly object?[][] ClassicDatatypeInfoV2Raw =
-    [
-        ["sql_variant", -150, 8000, null, null, null, 1, 0, 2, null, 0, null, "sql_variant", 0, 0, -150, null, 10, null, 0],
-        ["uniqueidentifier", -11, 36, "'", "'", null, 1, 0, 2, null, 0, null, "uniqueidentifier", null, null, -11, null, null, null, 0],
-        ["ntext", -10, 1073741823, "N'", "'", null, 1, 0, 1, null, 0, null, "ntext", null, null, -10, null, null, null, 0],
-        ["xml", -10, 1073741823, "N'", "'", null, 1, 1, 0, null, 0, null, "xml", null, null, -10, null, null, null, 0],
-        ["nvarchar", -9, 4000, "N'", "'", "max length", 1, 0, 3, null, 0, null, "nvarchar", null, null, -9, null, null, null, 0],
-        ["sysname", -9, 128, "N'", "'", null, 0, 0, 3, null, 0, null, "sysname", null, null, -9, null, null, null, 18],
-        ["date", -9, 10, "'", "'", null, 1, 0, 3, null, 0, null, "date", null, null, -9, null, null, null, 0],
-        ["time", -9, 16, "'", "'", null, 1, 0, 3, null, 0, null, "time", null, null, -9, null, null, null, 0],
-        ["datetime2", -9, 27, "'", "'", null, 1, 0, 3, null, 0, null, "datetime2", null, null, -9, null, null, null, 0],
-        ["datetimeoffset", -9, 34, "'", "'", null, 1, 0, 3, null, 0, null, "datetimeoffset", null, null, -9, null, null, null, 0],
-        ["nchar", -8, 4000, "N'", "'", "length", 1, 0, 3, null, 0, null, "nchar", null, null, -8, null, null, null, 0],
-        ["bit", -7, 1, null, null, null, 1, 0, 2, null, 0, null, "bit", 0, 0, -7, null, null, null, 16],
-        ["tinyint", -6, 3, null, null, null, 1, 0, 2, 1, 0, 0, "tinyint", 0, 0, -6, null, 10, null, 5],
-        ["tinyint identity", -6, 3, null, null, null, 0, 0, 2, 1, 0, 1, "tinyint identity", 0, 0, -6, null, 10, null, 5],
-        ["bigint", -5, 19, null, null, null, 1, 0, 2, 0, 0, 0, "bigint", 0, 0, -5, null, 10, null, 0],
-        ["bigint identity", -5, 19, null, null, null, 0, 0, 2, 0, 0, 1, "bigint identity", 0, 0, -5, null, 10, null, 0],
-        ["image", -4, 2147483647, "0x", null, null, 1, 0, 0, null, 0, null, "image", null, null, -4, null, null, null, 20],
-        ["varbinary", -3, 8000, "0x", null, "max length", 1, 0, 2, null, 0, null, "varbinary", null, null, -3, null, null, null, 4],
-        ["binary", -2, 8000, "0x", null, "length", 1, 0, 2, null, 0, null, "binary", null, null, -2, null, null, null, 3],
-        ["timestamp", -2, 8, "0x", null, null, 0, 0, 2, null, 0, null, "timestamp", null, null, -2, null, null, null, 80],
-        ["text", -1, 2147483647, "'", "'", null, 1, 0, 1, null, 0, null, "text", null, null, -1, null, null, null, 19],
-        ["char", 1, 8000, "'", "'", "length", 1, 0, 3, null, 0, null, "char", null, null, 1, null, null, null, 1],
-        ["numeric", 2, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "numeric", 0, 38, 2, null, 10, null, 10],
-        ["numeric() identity", 2, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "numeric() identity", 0, 0, 2, null, 10, null, 10],
-        ["decimal", 3, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "decimal", 0, 38, 3, null, 10, null, 24],
-        ["money", 3, 19, "$", null, null, 1, 0, 2, 0, 1, 0, "money", 4, 4, 3, null, 10, null, 11],
-        ["smallmoney", 3, 10, "$", null, null, 1, 0, 2, 0, 1, 0, "smallmoney", 4, 4, 3, null, 10, null, 21],
-        ["decimal() identity", 3, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "decimal() identity", 0, 0, 3, null, 10, null, 24],
-        ["int", 4, 10, null, null, null, 1, 0, 2, 0, 0, 0, "int", 0, 0, 4, null, 10, null, 7],
-        ["int identity", 4, 10, null, null, null, 0, 0, 2, 0, 0, 1, "int identity", 0, 0, 4, null, 10, null, 7],
-        ["smallint", 5, 5, null, null, null, 1, 0, 2, 0, 0, 0, "smallint", 0, 0, 5, null, 10, null, 6],
-        ["smallint identity", 5, 5, null, null, null, 0, 0, 2, 0, 0, 1, "smallint identity", 0, 0, 5, null, 10, null, 6],
-        ["float", 6, 15, null, null, null, 1, 0, 2, 0, 0, 0, "float", null, null, 6, null, 10, null, 8],
-        ["real", 7, 7, null, null, null, 1, 0, 2, 0, 0, 0, "real", null, null, 7, null, 10, null, 23],
-        ["datetime", 11, 23, "'", "'", null, 1, 0, 3, null, 0, null, "datetime", 3, 3, 9, 3, null, null, 12],
-        ["smalldatetime", 11, 16, "'", "'", null, 1, 0, 3, null, 0, null, "smalldatetime", 0, 0, 9, 3, null, null, 22],
-        ["varchar", 12, 8000, "'", "'", "max length", 1, 0, 3, null, 0, null, "varchar", null, null, 12, null, null, null, 2],
-    ];
+        // The older sp_datatype_info's rows, captured verbatim from SQL Server
+        // 2025 (2026-09-25) in the order it returns them: its backward-compatible
+        // columns report date / time / datetime2 / datetimeoffset as nvarchar (-9)
+        // and xml as ntext (-10), for drivers that predate those types, and its
+        // ORDER BY adds a hidden mapped-type key, so the rows keep this order
+        // rather than being re-sorted.
+        internal static readonly object?[][] ClassicDatatypeInfoV2Raw =
+        [
+            ["sql_variant", -150, 8000, null, null, null, 1, 0, 2, null, 0, null, "sql_variant", 0, 0, -150, null, 10, null, 0],
+            ["uniqueidentifier", -11, 36, "'", "'", null, 1, 0, 2, null, 0, null, "uniqueidentifier", null, null, -11, null, null, null, 0],
+            ["ntext", -10, 1073741823, "N'", "'", null, 1, 0, 1, null, 0, null, "ntext", null, null, -10, null, null, null, 0],
+            ["xml", -10, 1073741823, "N'", "'", null, 1, 1, 0, null, 0, null, "xml", null, null, -10, null, null, null, 0],
+            ["nvarchar", -9, 4000, "N'", "'", "max length", 1, 0, 3, null, 0, null, "nvarchar", null, null, -9, null, null, null, 0],
+            ["sysname", -9, 128, "N'", "'", null, 0, 0, 3, null, 0, null, "sysname", null, null, -9, null, null, null, 18],
+            ["date", -9, 10, "'", "'", null, 1, 0, 3, null, 0, null, "date", null, null, -9, null, null, null, 0],
+            ["time", -9, 16, "'", "'", null, 1, 0, 3, null, 0, null, "time", null, null, -9, null, null, null, 0],
+            ["datetime2", -9, 27, "'", "'", null, 1, 0, 3, null, 0, null, "datetime2", null, null, -9, null, null, null, 0],
+            ["datetimeoffset", -9, 34, "'", "'", null, 1, 0, 3, null, 0, null, "datetimeoffset", null, null, -9, null, null, null, 0],
+            ["nchar", -8, 4000, "N'", "'", "length", 1, 0, 3, null, 0, null, "nchar", null, null, -8, null, null, null, 0],
+            ["bit", -7, 1, null, null, null, 1, 0, 2, null, 0, null, "bit", 0, 0, -7, null, null, null, 16],
+            ["tinyint", -6, 3, null, null, null, 1, 0, 2, 1, 0, 0, "tinyint", 0, 0, -6, null, 10, null, 5],
+            ["tinyint identity", -6, 3, null, null, null, 0, 0, 2, 1, 0, 1, "tinyint identity", 0, 0, -6, null, 10, null, 5],
+            ["bigint", -5, 19, null, null, null, 1, 0, 2, 0, 0, 0, "bigint", 0, 0, -5, null, 10, null, 0],
+            ["bigint identity", -5, 19, null, null, null, 0, 0, 2, 0, 0, 1, "bigint identity", 0, 0, -5, null, 10, null, 0],
+            ["image", -4, 2147483647, "0x", null, null, 1, 0, 0, null, 0, null, "image", null, null, -4, null, null, null, 20],
+            ["varbinary", -3, 8000, "0x", null, "max length", 1, 0, 2, null, 0, null, "varbinary", null, null, -3, null, null, null, 4],
+            ["binary", -2, 8000, "0x", null, "length", 1, 0, 2, null, 0, null, "binary", null, null, -2, null, null, null, 3],
+            ["timestamp", -2, 8, "0x", null, null, 0, 0, 2, null, 0, null, "timestamp", null, null, -2, null, null, null, 80],
+            ["text", -1, 2147483647, "'", "'", null, 1, 0, 1, null, 0, null, "text", null, null, -1, null, null, null, 19],
+            ["char", 1, 8000, "'", "'", "length", 1, 0, 3, null, 0, null, "char", null, null, 1, null, null, null, 1],
+            ["numeric", 2, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "numeric", 0, 38, 2, null, 10, null, 10],
+            ["numeric() identity", 2, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "numeric() identity", 0, 0, 2, null, 10, null, 10],
+            ["decimal", 3, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "decimal", 0, 38, 3, null, 10, null, 24],
+            ["money", 3, 19, "$", null, null, 1, 0, 2, 0, 1, 0, "money", 4, 4, 3, null, 10, null, 11],
+            ["smallmoney", 3, 10, "$", null, null, 1, 0, 2, 0, 1, 0, "smallmoney", 4, 4, 3, null, 10, null, 21],
+            ["decimal() identity", 3, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "decimal() identity", 0, 0, 3, null, 10, null, 24],
+            ["int", 4, 10, null, null, null, 1, 0, 2, 0, 0, 0, "int", 0, 0, 4, null, 10, null, 7],
+            ["int identity", 4, 10, null, null, null, 0, 0, 2, 0, 0, 1, "int identity", 0, 0, 4, null, 10, null, 7],
+            ["smallint", 5, 5, null, null, null, 1, 0, 2, 0, 0, 0, "smallint", 0, 0, 5, null, 10, null, 6],
+            ["smallint identity", 5, 5, null, null, null, 0, 0, 2, 0, 0, 1, "smallint identity", 0, 0, 5, null, 10, null, 6],
+            ["float", 6, 15, null, null, null, 1, 0, 2, 0, 0, 0, "float", null, null, 6, null, 10, null, 8],
+            ["real", 7, 7, null, null, null, 1, 0, 2, 0, 0, 0, "real", null, null, 7, null, 10, null, 23],
+            ["datetime", 11, 23, "'", "'", null, 1, 0, 3, null, 0, null, "datetime", 3, 3, 9, 3, null, null, 12],
+            ["smalldatetime", 11, 16, "'", "'", null, 1, 0, 3, null, 0, null, "smalldatetime", 0, 0, 9, 3, null, null, 22],
+            ["varchar", 12, 8000, "'", "'", "max length", 1, 0, 3, null, 0, null, "varchar", null, null, 12, null, null, null, 2],
+        ];
 
-    private static readonly object?[][] ClassicDatatypeInfoV3Raw =
-    [
-        ["sql_variant", -150, 8000, null, null, null, 1, 0, 2, null, 0, null, "sql_variant", 0, 0, -150, null, 10, null, 0],
-        ["uniqueidentifier", -11, 36, "'", "'", null, 1, 0, 2, null, 0, null, "uniqueidentifier", null, null, -11, null, null, null, 0],
-        ["ntext", -10, 1073741823, "N'", "'", null, 1, 0, 1, null, 0, null, "ntext", null, null, -10, null, null, null, 0],
-        ["xml", -10, 1073741823, "N'", "'", null, 1, 1, 0, null, 0, null, "xml", null, null, -10, null, null, null, 0],
-        ["nvarchar", -9, 4000, "N'", "'", "max length", 1, 0, 3, null, 0, null, "nvarchar", null, null, -9, null, null, null, 0],
-        ["sysname", -9, 128, "N'", "'", null, 0, 0, 3, null, 0, null, "sysname", null, null, -9, null, null, null, 18],
-        ["date", -9, 10, "'", "'", null, 1, 0, 3, null, 0, null, "date", null, null, -9, null, null, null, 0],
-        ["time", -9, 16, "'", "'", null, 1, 0, 3, null, 0, null, "time", null, null, -9, null, null, null, 0],
-        ["datetime2", -9, 27, "'", "'", null, 1, 0, 3, null, 0, null, "datetime2", null, null, -9, null, null, null, 0],
-        ["datetimeoffset", -9, 34, "'", "'", null, 1, 0, 3, null, 0, null, "datetimeoffset", null, null, -9, null, null, null, 0],
-        ["nchar", -8, 4000, "N'", "'", "length", 1, 0, 3, null, 0, null, "nchar", null, null, -8, null, null, null, 0],
-        ["bit", -7, 1, null, null, null, 1, 0, 2, null, 0, null, "bit", 0, 0, -7, null, null, null, 16],
-        ["tinyint", -6, 3, null, null, null, 1, 0, 2, 1, 0, 0, "tinyint", 0, 0, -6, null, 10, null, 5],
-        ["tinyint identity", -6, 3, null, null, null, 0, 0, 2, 1, 0, 1, "tinyint identity", 0, 0, -6, null, 10, null, 5],
-        ["bigint", -5, 19, null, null, null, 1, 0, 2, 0, 0, 0, "bigint", 0, 0, -5, null, 10, null, 0],
-        ["bigint identity", -5, 19, null, null, null, 0, 0, 2, 0, 0, 1, "bigint identity", 0, 0, -5, null, 10, null, 0],
-        ["image", -4, 2147483647, "0x", null, null, 1, 0, 0, null, 0, null, "image", null, null, -4, null, null, null, 20],
-        ["varbinary", -3, 8000, "0x", null, "max length", 1, 0, 2, null, 0, null, "varbinary", null, null, -3, null, null, null, 4],
-        ["binary", -2, 8000, "0x", null, "length", 1, 0, 2, null, 0, null, "binary", null, null, -2, null, null, null, 3],
-        ["timestamp", -2, 8, "0x", null, null, 0, 0, 2, null, 0, null, "timestamp", null, null, -2, null, null, null, 80],
-        ["text", -1, 2147483647, "'", "'", null, 1, 0, 1, null, 0, null, "text", null, null, -1, null, null, null, 19],
-        ["char", 1, 8000, "'", "'", "length", 1, 0, 3, null, 0, null, "char", null, null, 1, null, null, null, 1],
-        ["numeric", 2, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "numeric", 0, 38, 2, null, 10, null, 10],
-        ["numeric() identity", 2, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "numeric() identity", 0, 0, 2, null, 10, null, 10],
-        ["decimal", 3, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "decimal", 0, 38, 3, null, 10, null, 24],
-        ["money", 3, 19, "$", null, null, 1, 0, 2, 0, 1, 0, "money", 4, 4, 3, null, 10, null, 11],
-        ["smallmoney", 3, 10, "$", null, null, 1, 0, 2, 0, 1, 0, "smallmoney", 4, 4, 3, null, 10, null, 21],
-        ["decimal() identity", 3, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "decimal() identity", 0, 0, 3, null, 10, null, 24],
-        ["int", 4, 10, null, null, null, 1, 0, 2, 0, 0, 0, "int", 0, 0, 4, null, 10, null, 7],
-        ["int identity", 4, 10, null, null, null, 0, 0, 2, 0, 0, 1, "int identity", 0, 0, 4, null, 10, null, 7],
-        ["smallint", 5, 5, null, null, null, 1, 0, 2, 0, 0, 0, "smallint", 0, 0, 5, null, 10, null, 6],
-        ["smallint identity", 5, 5, null, null, null, 0, 0, 2, 0, 0, 1, "smallint identity", 0, 0, 5, null, 10, null, 6],
-        ["float", 6, 53, null, null, null, 1, 0, 2, 0, 0, 0, "float", null, null, 6, null, 2, null, 8],
-        ["real", 7, 24, null, null, null, 1, 0, 2, 0, 0, 0, "real", null, null, 7, null, 2, null, 23],
-        ["varchar", 12, 8000, "'", "'", "max length", 1, 0, 3, null, 0, null, "varchar", null, null, 12, null, null, null, 2],
-        ["datetime", 93, 23, "'", "'", null, 1, 0, 3, null, 0, null, "datetime", 3, 3, 9, 3, null, null, 12],
-        ["smalldatetime", 93, 16, "'", "'", null, 1, 0, 3, null, 0, null, "smalldatetime", 0, 0, 9, 3, null, null, 22],
-    ];
+        internal static readonly object?[][] ClassicDatatypeInfoV3Raw =
+        [
+            ["sql_variant", -150, 8000, null, null, null, 1, 0, 2, null, 0, null, "sql_variant", 0, 0, -150, null, 10, null, 0],
+            ["uniqueidentifier", -11, 36, "'", "'", null, 1, 0, 2, null, 0, null, "uniqueidentifier", null, null, -11, null, null, null, 0],
+            ["ntext", -10, 1073741823, "N'", "'", null, 1, 0, 1, null, 0, null, "ntext", null, null, -10, null, null, null, 0],
+            ["xml", -10, 1073741823, "N'", "'", null, 1, 1, 0, null, 0, null, "xml", null, null, -10, null, null, null, 0],
+            ["nvarchar", -9, 4000, "N'", "'", "max length", 1, 0, 3, null, 0, null, "nvarchar", null, null, -9, null, null, null, 0],
+            ["sysname", -9, 128, "N'", "'", null, 0, 0, 3, null, 0, null, "sysname", null, null, -9, null, null, null, 18],
+            ["date", -9, 10, "'", "'", null, 1, 0, 3, null, 0, null, "date", null, null, -9, null, null, null, 0],
+            ["time", -9, 16, "'", "'", null, 1, 0, 3, null, 0, null, "time", null, null, -9, null, null, null, 0],
+            ["datetime2", -9, 27, "'", "'", null, 1, 0, 3, null, 0, null, "datetime2", null, null, -9, null, null, null, 0],
+            ["datetimeoffset", -9, 34, "'", "'", null, 1, 0, 3, null, 0, null, "datetimeoffset", null, null, -9, null, null, null, 0],
+            ["nchar", -8, 4000, "N'", "'", "length", 1, 0, 3, null, 0, null, "nchar", null, null, -8, null, null, null, 0],
+            ["bit", -7, 1, null, null, null, 1, 0, 2, null, 0, null, "bit", 0, 0, -7, null, null, null, 16],
+            ["tinyint", -6, 3, null, null, null, 1, 0, 2, 1, 0, 0, "tinyint", 0, 0, -6, null, 10, null, 5],
+            ["tinyint identity", -6, 3, null, null, null, 0, 0, 2, 1, 0, 1, "tinyint identity", 0, 0, -6, null, 10, null, 5],
+            ["bigint", -5, 19, null, null, null, 1, 0, 2, 0, 0, 0, "bigint", 0, 0, -5, null, 10, null, 0],
+            ["bigint identity", -5, 19, null, null, null, 0, 0, 2, 0, 0, 1, "bigint identity", 0, 0, -5, null, 10, null, 0],
+            ["image", -4, 2147483647, "0x", null, null, 1, 0, 0, null, 0, null, "image", null, null, -4, null, null, null, 20],
+            ["varbinary", -3, 8000, "0x", null, "max length", 1, 0, 2, null, 0, null, "varbinary", null, null, -3, null, null, null, 4],
+            ["binary", -2, 8000, "0x", null, "length", 1, 0, 2, null, 0, null, "binary", null, null, -2, null, null, null, 3],
+            ["timestamp", -2, 8, "0x", null, null, 0, 0, 2, null, 0, null, "timestamp", null, null, -2, null, null, null, 80],
+            ["text", -1, 2147483647, "'", "'", null, 1, 0, 1, null, 0, null, "text", null, null, -1, null, null, null, 19],
+            ["char", 1, 8000, "'", "'", "length", 1, 0, 3, null, 0, null, "char", null, null, 1, null, null, null, 1],
+            ["numeric", 2, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "numeric", 0, 38, 2, null, 10, null, 10],
+            ["numeric() identity", 2, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "numeric() identity", 0, 0, 2, null, 10, null, 10],
+            ["decimal", 3, 38, null, null, "precision,scale", 1, 0, 2, 0, 0, 0, "decimal", 0, 38, 3, null, 10, null, 24],
+            ["money", 3, 19, "$", null, null, 1, 0, 2, 0, 1, 0, "money", 4, 4, 3, null, 10, null, 11],
+            ["smallmoney", 3, 10, "$", null, null, 1, 0, 2, 0, 1, 0, "smallmoney", 4, 4, 3, null, 10, null, 21],
+            ["decimal() identity", 3, 38, null, null, "precision", 0, 0, 2, 0, 0, 1, "decimal() identity", 0, 0, 3, null, 10, null, 24],
+            ["int", 4, 10, null, null, null, 1, 0, 2, 0, 0, 0, "int", 0, 0, 4, null, 10, null, 7],
+            ["int identity", 4, 10, null, null, null, 0, 0, 2, 0, 0, 1, "int identity", 0, 0, 4, null, 10, null, 7],
+            ["smallint", 5, 5, null, null, null, 1, 0, 2, 0, 0, 0, "smallint", 0, 0, 5, null, 10, null, 6],
+            ["smallint identity", 5, 5, null, null, null, 0, 0, 2, 0, 0, 1, "smallint identity", 0, 0, 5, null, 10, null, 6],
+            ["float", 6, 53, null, null, null, 1, 0, 2, 0, 0, 0, "float", null, null, 6, null, 2, null, 8],
+            ["real", 7, 24, null, null, null, 1, 0, 2, 0, 0, 0, "real", null, null, 7, null, 2, null, 23],
+            ["varchar", 12, 8000, "'", "'", "max length", 1, 0, 3, null, 0, null, "varchar", null, null, 12, null, null, null, 2],
+            ["datetime", 93, 23, "'", "'", null, 1, 0, 3, null, 0, null, "datetime", 3, 3, 9, 3, null, null, 12],
+            ["smalldatetime", 93, 16, "'", "'", null, 1, 0, 3, null, 0, null, "smalldatetime", 0, 0, 9, 3, null, null, 22],
+        ];
 
-    private static readonly SqlValue[][] ClassicDatatypeInfoV2Rows = BuildDatatypeInfoRows(ClassicDatatypeInfoV2Raw);
+        internal static readonly SqlValue[][] ClassicDatatypeInfoV2Rows = BuildDatatypeInfoRows(ClassicDatatypeInfoV2Raw);
 
-    private static readonly SqlValue[][] ClassicDatatypeInfoV3Rows = BuildDatatypeInfoRows(ClassicDatatypeInfoV3Raw);
+        internal static readonly SqlValue[][] ClassicDatatypeInfoV3Rows = BuildDatatypeInfoRows(ClassicDatatypeInfoV3Raw);
+    }
 
     private static SqlValue[][] BuildDatatypeInfoRows(object?[][] raw)
     {
@@ -291,10 +300,10 @@ partial class Simulation
         var (dataType, odbcVer) = ParseDatatypeInfoArgs(arguments, classic ? "sp_datatype_info" : "sp_datatype_info_100");
         var source = (classic, odbcVer >= 3) switch
         {
-            (true, true) => ClassicDatatypeInfoV3Rows,
-            (true, false) => ClassicDatatypeInfoV2Rows,
-            (false, true) => DatatypeInfoV3Rows,
-            (false, false) => DatatypeInfoV2Rows,
+            (true, true) => DatatypeInfoTables.ClassicDatatypeInfoV3Rows,
+            (true, false) => DatatypeInfoTables.ClassicDatatypeInfoV2Rows,
+            (false, true) => DatatypeInfoTables.DatatypeInfoV3Rows,
+            (false, false) => DatatypeInfoTables.DatatypeInfoV2Rows,
         };
 
         // An explicit NULL @data_type matches no type — the proc's range test

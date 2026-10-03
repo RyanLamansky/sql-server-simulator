@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -23,6 +24,7 @@ internal readonly struct SqlValueKey(SqlValue[] values) : IEquatable<SqlValueKey
     internal SqlValue ComponentAt(int index) => this.values[index];
 
     /// <summary>A key over the first <paramref name="arity"/> components — the seek cache's narrow-probe view key.</summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     internal SqlValueKey Prefix(int arity) => new(this.values[..arity]);
 
     public bool Equals(SqlValueKey other)

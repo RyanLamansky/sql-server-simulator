@@ -1,6 +1,12 @@
 namespace SqlServerSimulator;
 
-internal static partial class BuiltInResources
+/// <summary>
+/// The built-in permission rows, a type of their own so the table builds when
+/// a permission function first reads it rather than with the catalog views'
+/// <see cref="BuiltInResources"/>, whose static initialization every process
+/// pays on its first catalog read.
+/// </summary>
+internal static class BuiltinPermissionRows
 {
     /// <summary>
     /// The rows of <c>sys.fn_builtin_permissions(DEFAULT)</c> in real's own
@@ -9,7 +15,7 @@ internal static partial class BuiltInResources
     /// empty (probed 2026-09-29 against SQL Server 2025). The order is also
     /// the one <c>fn_my_permissions</c> lists a class's permissions in.
     /// </summary>
-    internal static readonly (string ClassDescription, string PermissionName, string Type, string Covering, string ParentClass, string ParentCovering)[] BuiltinPermissions =
+    internal static readonly (string ClassDescription, string PermissionName, string Type, string Covering, string ParentClass, string ParentCovering)[] All =
     [
         ("DATABASE", "CREATE TABLE", "CRTB", "ALTER", "SERVER", "CONTROL SERVER"),
         ("DATABASE", "CREATE VIEW", "CRVW", "ALTER", "SERVER", "CONTROL SERVER"),

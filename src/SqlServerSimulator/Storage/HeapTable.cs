@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using SqlServerSimulator.Schemas;
 
 namespace SqlServerSimulator.Storage;
@@ -717,6 +718,7 @@ internal sealed class HeapTable : SchemaObject
     public readonly ConcurrentDictionary<SessionToken, ConcurrentDictionary<(int PageIndex, int SlotIndex), (byte[] Image, LockResource Lock)>> SupersededKeyImages = new();
 
     /// <summary>Retires <paramref name="owner"/>'s superseded image of <paramref name="address"/>, if any.</summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     internal void RetireSupersededKeyImage(SessionToken owner, (int PageIndex, int SlotIndex) address)
     {
         if (this.SupersededKeyImages.TryGetValue(owner, out var images) && images.TryRemove(address, out _) && images.IsEmptyLockFree())

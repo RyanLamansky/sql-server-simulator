@@ -1005,6 +1005,22 @@ public sealed class IndexSeekTests
     }
 
     [TestMethod]
+    public void KeyedBulkInsertPastJournalCap_ReplaysOnlyLaterEvents()
+    {
+        // Key enforcement replays the journal once per inserted row while the
+        // journal trims itself past its cap, so every later replay starts part
+        // way into a journal whose oldest events are gone and must apply exactly
+        // the events past its own generation.
+        var (trace, rows) = WarmMutateProbe(
+            TableT,
+            "select val from t where id = 1",
+            "insert t (id, val) select value, value * 10 from generate_series(10, 1200)",
+            "select val from t where id in (10, 700, 1200) order by val");
+        DoesNotContain("CacheBuild", trace);
+        AreEqual("100,7000,12000", string.Join(",", rows));
+    }
+
+    [TestMethod]
     public void InterleavedInsertSeekLoop_NeverStale()
     {
         // Each insert/seek cycle must see the row just inserted — the regression
@@ -1963,6 +1979,80 @@ public sealed class IndexSeekTests
         DoesNotContain("OrderedScan(t)", trace);
         Contains("Seek(t)", trace);
         AreEqual("1,3", Seq(rows));
+    }
+
+    // ---- ORDER BY elimination over a join whose sort reads only the leftmost
+    // source's unique key: the fold emits each left row's tuples together, so
+    // scanning the leftmost in key order streams the sorted result. ----
+
+    private const string ScrambledJoin = """
+        create table a (id int not null primary key, val int not null);
+        create index ix_val on a (val);
+        create table b (id int not null primary key, aid int not null);
+        insert a values (3, 30), (1, 10), (2, 20);
+        insert b values (12, 2), (11, 1), (13, 3), (14, 1)
+        """;
+
+    [TestMethod]
+    public void OrderByLeftmostKey_OverCrossJoin_StreamsTop()
+    {
+        var (trace, rows) = Run(ScrambledJoin, "select top 2 a.id * 100 + b.id from a cross join b order by a.id");
+        Contains("OrderedScan(a)", trace);
+        AreEqual("111,112", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderByLeftmostKey_OverLeftJoin_KeepsEachLeftRowsMatchesTogether()
+    {
+        var (trace, rows) = Run(ScrambledJoin, "select a.id * 100 + isnull(b.id, 0) from a left join b on b.aid = a.id order by a.id desc");
+        Contains("OrderedScan(a)", trace);
+        AreEqual("313,212,111,114", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderByLeftmostNonUniqueColumn_OverJoin_Sorts()
+    {
+        var (trace, rows) = Run(ScrambledJoin, "select top 2 a.id * 100 + b.id from a cross join b order by a.val");
+        DoesNotContain("OrderedScan(a)", trace);
+        AreEqual("111,112", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderByLeftmostKey_OverJoinWithWhere_Sorts()
+    {
+        var (trace, rows) = Run(ScrambledJoin, "select a.id * 100 + b.id from a join b on b.aid = a.id where b.id > 11 order by a.id");
+        DoesNotContain("OrderedScan(a)", trace);
+        AreEqual("114,212,313", Seq(rows));
+    }
+
+    [TestMethod]
+    public void OrderBySiblingColumn_OverJoin_Sorts()
+    {
+        var (trace, rows) = Run(ScrambledJoin, "select top 1 a.id * 100 + b.id from a cross join b order by b.id, a.id");
+        DoesNotContain("OrderedScan(a)", trace);
+        AreEqual("111", Seq(rows));
+    }
+
+    // ---- an uncorrelated derived table inside a per-row body runs once per
+    // statement: its rows are reused by every later enumeration of the body. ----
+
+    [TestMethod]
+    public void UncorrelatedDerivedTable_InCorrelatedExists_RunsOncePerStatement()
+    {
+        var (trace, rows) = Run(
+            """
+            create table o (id int not null primary key, k int not null);
+            create table d (id int not null primary key, k int not null);
+            insert o values (1, 1), (2, 2), (3, 3), (4, 4);
+            insert d values (1, 1), (2, 2), (3, 3)
+            """,
+            """
+            select o.id from o
+            where exists (select 1 from d as d1 join (select id from d where id >= 1) as dt on dt.id = d1.id where d1.k = o.k)
+            order by o.id
+            """);
+        _ = ContainsSingle(entry => entry == "RangeSeek(d)", trace);
+        AreEqual("1,2,3", Seq(rows));
     }
 
     [TestMethod]

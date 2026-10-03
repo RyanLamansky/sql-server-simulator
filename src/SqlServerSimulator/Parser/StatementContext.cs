@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -38,7 +39,8 @@ internal sealed class StatementContext
     /// their first execution, keyed by the consuming expression instance
     /// (reference identity); see <see cref="UncorrelatedSubqueryCache"/> for the
     /// entry shapes and the sentinel that marks a site as needing per-row
-    /// execution. Cleared by the dispatch loop at the top of each statement
+    /// execution. A deferred FROM source's materialized rows share it, keyed by
+    /// the source's plan (<c>Selection.StatementMaterializedRows</c>). Cleared by the dispatch loop at the top of each statement
     /// iteration alongside the <see cref="UtcNow"/> refresh — the statement is
     /// the scope over which the data a subquery reads is fixed. Lives here —
     /// not on the expression — because a plan-cached <c>Selection</c> shares its
@@ -488,6 +490,7 @@ internal sealed class StatementContext
     /// clears the caches that run fills — once per run, a re-read for the
     /// statement's whole binder report included.
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     public void BeginExecution()
     {
         this.UtcNow = DateTime.UtcNow;

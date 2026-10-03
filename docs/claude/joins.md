@@ -270,6 +270,11 @@ Two kinds of source qualify:
   SQL Server requires `APPLY` for laterality, so none of them can read a sibling FROM source.
   Each *can* read an enclosing statement's row, but that row is fixed for one execution of this `Selection` (the enclosing query re-executes the whole plan per enclosing row), so every re-execution within one enumeration would return identical rows.
 
+**The rows outlive the enumeration when the body reads nothing outside itself.**
+An enumeration nested in an enclosing query re-runs per enclosing row — the body of a correlated `EXISTS`, once per outer row — and would materialize the source again each time.
+So inside such a scope the materializing execution runs under the [uncorrelated-subquery memo](subqueries.md#an-outer-independent-inner-plan-runs-once-per-statement)'s latch, and a body that consulted neither the enclosing row nor a per-call-varying built-in stores its rows on the statement under its plan, which every later enumeration reuses.
+EF Core's `ExecuteDelete` over a navigation (`DELETE … WHERE EXISTS (SELECT 1 FROM Orders JOIN (SELECT … FROM [Order Details] WHERE …) …)`) re-ran the derived table's scan of `Order Details` for each of the first 128 candidate rows, until the [semi-join switch](subqueries.md#an-equi-correlated-body-switches-to-a-hash-semi--anti-join) took over; it now runs it once (91 → 42 ms).
+
 The leftmost source stays deferred — a fold range's leftmost slot already executes its plan once and streams, so materializing it buys nothing and costs the buffer.
 The leftmost slot of a parenthesized join group is skipped for the same reason (`GroupJoin` materializes the whole interior as a unit).
 

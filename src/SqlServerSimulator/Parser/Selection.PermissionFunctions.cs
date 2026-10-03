@@ -8,7 +8,7 @@ partial class Selection
     /// <summary>
     /// Built-in system TVF <c>fn_builtin_permissions(class)</c>, bare or
     /// <c>sys.</c>-qualified: the permission catalog
-    /// (<see cref="BuiltInResources.BuiltinPermissions"/>), every class for
+    /// (<see cref="BuiltinPermissionRows.All"/>), every class for
     /// <c>DEFAULT</c>, NULL or an empty string, one class for its
     /// <c>class_desc</c> in any casing, and nothing for a name no class carries
     /// (probed 2026-09-29 against SQL Server 2025).
@@ -53,7 +53,7 @@ partial class Selection
         }
         var name = (NVarcharSqlType)schema[0];
         var type = (VarcharSqlType)schema[2];
-        foreach (var row in BuiltInResources.BuiltinPermissions)
+        foreach (var row in BuiltinPermissionRows.All)
         {
             if (classFilter is not null && !BuiltInToken.Comparer.Equals(row.ClassDescription, classFilter))
                 continue;
@@ -162,7 +162,7 @@ partial class Selection
         var permissionType = (NVarcharSqlType)schema[2];
         var entityValue = SqlValue.FromNVarchar(nameType, entity);
         var subentity = SqlValue.FromNVarchar(nameType, "");
-        foreach (var row in BuiltInResources.BuiltinPermissions)
+        foreach (var row in BuiltinPermissionRows.All)
         {
             if (BuiltInToken.Comparer.Equals(row.ClassDescription, className) && holds(row.PermissionName))
                 yield return RowEncoder.EncodeRow(schema, [entityValue, subentity, SqlValue.FromNVarchar(permissionType, row.PermissionName)]);

@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace SqlServerSimulator.Storage;
 
@@ -309,7 +310,17 @@ internal sealed class Heap
     /// clustered scan following the cache's key order would lose the row.
     /// </para>
     /// </summary>
-    private Queue<SeekJournalEvent>? seekJournal;
+    private List<SeekJournalEvent>? seekJournal;
+
+    /// <summary>
+    /// Index of the oldest live event in <see cref="seekJournal"/>: trimming
+    /// advances it rather than shifting the list, and the dead prefix is
+    /// dropped once it reaches <see cref="MaxSeekJournalEvents"/>. Events are
+    /// in generation order, so a reader binary-searches its starting point
+    /// (<see cref="FirstSeekJournalEventAfter"/>) instead of walking the whole
+    /// journal for the few events past its generation.
+    /// </summary>
+    private int seekJournalHead;
 
     /// <summary>
     /// Highest <see cref="MutationGeneration"/> whose journal event has been
@@ -343,7 +354,7 @@ internal sealed class Heap
     {
         using (this.EnterLatch())
         {
-            this.seekJournal ??= new Queue<SeekJournalEvent>();
+            this.seekJournal ??= [];
             this.SeekJournalActive = true;
             return this.MutationGeneration;
         }
@@ -362,16 +373,30 @@ internal sealed class Heap
         using (this.EnterLatch())
         {
             currentGen = this.MutationGeneration;
-            if (this.seekJournal is null || sinceGen < this.seekJournalDroppedThroughGen)
+            if (this.seekJournal is not { } journal || sinceGen < this.seekJournalDroppedThroughGen)
                 return null;
-            var result = new List<SeekJournalEvent>();
-            foreach (var e in this.seekJournal)
-            {
-                if (e.Generation > sinceGen)
-                    result.Add(e);
-            }
-            return [.. result];
+            var start = this.FirstSeekJournalEventAfter(sinceGen);
+            return [.. CollectionsMarshal.AsSpan(journal)[start..]];
         }
+    }
+
+    /// <summary>
+    /// The index of the first live journal event past <paramref name="generation"/>,
+    /// or the journal's count when there is none.
+    /// </summary>
+    private int FirstSeekJournalEventAfter(long generation)
+    {
+        var journal = this.seekJournal!;
+        int low = this.seekJournalHead, high = journal.Count;
+        while (low < high)
+        {
+            var mid = low + ((high - low) >> 1);
+            if (journal[mid].Generation > generation)
+                high = mid;
+            else
+                low = mid + 1;
+        }
+        return low;
     }
 
     /// <summary>
@@ -386,9 +411,9 @@ internal sealed class Heap
         Debug.Assert(this.latch.IsHeldByCurrentThread, "The seek journal is read under the latch.");
         if (this.seekJournal is not { } journal || generation < this.seekJournalDroppedThroughGen)
             return false;
-        foreach (var e in journal)
+        for (var i = this.FirstSeekJournalEventAfter(generation); i < journal.Count; i++)
         {
-            if (e.Generation > generation && e.NewImage is { } image)
+            if (journal[i].NewImage is { } image)
                 (images ??= []).Add(image);
         }
         return true;
@@ -410,15 +435,24 @@ internal sealed class Heap
         this.MutationGeneration++;
         this.seekJournalDroppedThroughGen = this.MutationGeneration;
         this.seekJournal?.Clear();
+        this.seekJournalHead = 0;
     }
 
     private void RecordSeekJournalEvent(SeekJournalKind kind, int page, int slot, byte[]? oldImage, byte[]? newImage)
     {
         if (this.seekJournal is not { } journal)
             return;
-        journal.Enqueue(new SeekJournalEvent(this.MutationGeneration, kind, page, slot, oldImage, newImage));
-        while (journal.Count > MaxSeekJournalEvents)
-            this.seekJournalDroppedThroughGen = Math.Max(this.seekJournalDroppedThroughGen, journal.Dequeue().Generation);
+        journal.Add(new SeekJournalEvent(this.MutationGeneration, kind, page, slot, oldImage, newImage));
+        while (journal.Count - this.seekJournalHead > MaxSeekJournalEvents)
+        {
+            this.seekJournalDroppedThroughGen = Math.Max(this.seekJournalDroppedThroughGen, journal[this.seekJournalHead].Generation);
+            journal[this.seekJournalHead++] = default;
+        }
+        if (this.seekJournalHead >= MaxSeekJournalEvents)
+        {
+            journal.RemoveRange(0, this.seekJournalHead);
+            this.seekJournalHead = 0;
+        }
     }
 
     /// <summary>

@@ -2,6 +2,7 @@ using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 using System.Data.Common;
+using System.Runtime.CompilerServices;
 
 namespace SqlServerSimulator.Parser;
 
@@ -735,6 +736,7 @@ internal sealed class BatchContext
     /// Takes <paramref name="locks"/> — a cached statement's parse-time
     /// acquisitions — as this batch's session, in the order the parse took them.
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     public void TakeReplayedLocks(ReplayedLock[] locks)
     {
         foreach (var taken in locks)
@@ -1217,6 +1219,7 @@ internal sealed class BatchContext
     /// fail by throwing — on success the lock IS held, and we always reach
     /// the append. On throw the lock isn't held, no cleanup needed.
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     public void AcquireStatementLock(LockResource resource, LockMode mode, bool noWait = false)
     {
         this.ReplayLockLog?.Add(new ReplayedLock(resource, mode, noWait, transactionScoped: false));
@@ -1781,6 +1784,7 @@ internal sealed class BatchContext
     /// scan on the row a delete hides, until this session's transaction
     /// settles. An escalated table's X covers every row already.
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     public void NoteSupersededRow(HeapTable table, int pageIndex, int slotIndex)
     {
         var connection = this.Connection;
@@ -2536,6 +2540,7 @@ internal sealed class BatchContext
     /// </list>
     /// Returns true when the row should be yielded; false on READPAST skip.
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     public bool TouchRowForRead(HeapTable table, int pageIndex, int slotIndex, in DataLockPlan plan)
     {
         if (plan.NoLockReader)
@@ -2609,6 +2614,7 @@ internal sealed class BatchContext
     /// even when the list is empty; safe to call multiple times (the list
     /// clears between calls so the second is a no-op).
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     public void ReleaseStatementSchemaLocks()
     {
         var connection = this.Connection;

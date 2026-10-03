@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser;
@@ -36,6 +37,7 @@ internal sealed class IoStatistics
     /// <c>inserted</c> / <c>deleted</c> and the system base tables behind the
     /// catalog views.
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     public IoTableCounts? Touch(HeapTable table)
     {
         foreach (var counts in this.tables)
@@ -75,6 +77,7 @@ internal sealed class IoStatistics
             this.TouchWork("Workfile");
     }
 
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     private void TouchWork(string name)
     {
         foreach (var counts in this.tables)

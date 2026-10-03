@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace SqlServerSimulator.Parser;
 
 /// <summary>
@@ -39,6 +41,7 @@ internal sealed class SourceColumnMemo
     /// still raises from the underlying resolution (never cached — it throws
     /// before the append).
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     public (int SourceIndex, int ColumnIndex) Find(FromSource[] sources, MultiPartName name)
     {
         var snapshot = this.entries;

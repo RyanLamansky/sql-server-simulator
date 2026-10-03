@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using SqlServerSimulator.Schemas;
 
 namespace SqlServerSimulator.Storage;
@@ -324,6 +325,7 @@ internal sealed class LockManager
     /// Distinguishes <see cref="LockAcquireOutcome.GrantedAfterWait"/> from
     /// an immediate grant for sp_getapplock's return-code 1.
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     public LockAcquireOutcome TryAcquire(LockResource resource, LockMode mode, SessionToken owner, int timeoutMillis, bool sweepAbandoned = true)
     {
         if (sweepAbandoned)
@@ -456,6 +458,7 @@ internal sealed class LockManager
     /// (<c>READPAST</c>). <paramref name="counts"/>, when given, narrows the
     /// holders considered.
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     public bool HasIncompatibleHolderOtherThan(LockResource resource, LockMode probedMode, SessionToken excludingOwner, Func<SessionToken, bool>? counts = null)
     {
         lock (this.gate)
@@ -478,6 +481,7 @@ internal sealed class LockManager
     /// holder entry and pulses every waiter on this manager's gate so
     /// each waiter re-checks compatibility.
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     public void Release(LockResource resource, LockMode mode, SessionToken owner)
     {
         lock (this.gate)
@@ -531,6 +535,7 @@ internal sealed class LockManager
     /// re-entrance is handled in <see cref="Acquire"/>). Appends a new
     /// hold on success.
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     private static bool TryGrant(LockResource resource, LockMode mode, SessionToken owner)
     {
         foreach (var hold in resource.Holders)

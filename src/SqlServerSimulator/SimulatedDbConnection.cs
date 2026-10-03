@@ -2,6 +2,7 @@
 using System.Data;
 using System.Data.Common;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
@@ -572,6 +573,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// execution — a cancel that fired against a previous command doesn't
     /// bleed into the next one on the same connection.
     /// </summary>
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     internal void BeginExecutionScope(TimeSpan? timeout = null)
     {
         var fresh = new CancellationTokenSource();

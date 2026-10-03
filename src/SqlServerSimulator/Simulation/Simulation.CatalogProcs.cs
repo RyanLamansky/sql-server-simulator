@@ -166,14 +166,13 @@ partial class Simulation
     // duplicate name). sp_columns_100 reads DATA_TYPE, SQL_DATA_TYPE,
     // SQL_DATETIME_SUB, NUM_PREC_RADIX, and the parameterless PRECISION out of
     // these, so the two procs can't drift on the shared type facts.
-    // Lazy so the build defers past static-init time: the source
-    // DatatypeInfo* raw tables live in a sibling partial whose field
-    // initializers have no ordering guarantee relative to this file's.
+    // Lazy so the build, and the raw tables it reads, wait for the first
+    // procedure that needs them.
     private static readonly Lazy<FrozenDictionary<string, object?[]>> SpDatatypeInfoByNameV2 =
-        new(() => BuildDatatypeInfoNameIndex(DatatypeInfoV2Raw!));
+        new(() => BuildDatatypeInfoNameIndex(DatatypeInfoTables.DatatypeInfoV2Raw));
 
     private static readonly Lazy<FrozenDictionary<string, object?[]>> SpDatatypeInfoByNameV3 =
-        new(() => BuildDatatypeInfoNameIndex(DatatypeInfoV3Raw!));
+        new(() => BuildDatatypeInfoNameIndex(DatatypeInfoTables.DatatypeInfoV3Raw));
 
     private static FrozenDictionary<string, object?[]> BuildDatatypeInfoNameIndex(object?[][] raw)
     {

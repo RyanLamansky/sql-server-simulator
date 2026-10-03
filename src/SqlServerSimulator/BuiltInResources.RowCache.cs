@@ -138,10 +138,22 @@ internal static partial class BuiltInResources
                     : name.EndsWith("_id", StringComparison.OrdinalIgnoreCase) || BuiltInToken.Equals(name, "type")
                         ? 2
                         : -1;
-        return [.. view.Columns
-            .Select(column => (column.Name, Rank: Rank(column.Name)))
-            .Where(ranked => ranked.Rank >= 0)
-            .OrderBy(ranked => ranked.Rank)
-            .Select(ranked => ranked.Name)];
+        // Rank by rank, each in column order: the order a stable sort on the
+        // rank gives, without the generic sort machinery a first catalog
+        // read would compile for it.
+        var columns = view.Columns;
+        var ranks = new int[columns.Length];
+        for (var i = 0; i < columns.Length; i++)
+            ranks[i] = Rank(columns[i].Name);
+        var ranked = new List<string>();
+        for (var rank = 0; rank <= 2; rank++)
+        {
+            for (var i = 0; i < columns.Length; i++)
+            {
+                if (ranks[i] == rank)
+                    ranked.Add(columns[i].Name);
+            }
+        }
+        return [.. ranked];
     }
 }

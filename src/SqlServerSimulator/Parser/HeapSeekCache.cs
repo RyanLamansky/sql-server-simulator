@@ -267,6 +267,7 @@ internal sealed class HeapSeekCache
     // widened entry never narrows back and starts thrashing. Caller holds the gate.
     // `traced` is false for the clustered-scan order check, which reads the
     // cache without being a seek, so the seek diagnostics stay the seeks'.
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     private CacheEntry ResolveEntry(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, bool traced = true)
     {
         var lead = ordinals[0];
@@ -293,6 +294,7 @@ internal sealed class HeapSeekCache
         return this.Rebuild(heap, schema, lobStore, ordinals, commons, lead, traced);
     }
 
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     private CacheEntry Rebuild(Heap heap, HeapColumn[] schema, Heap? lobStore, int[] ordinals, SqlType[] commons, int lead, bool traced)
     {
         // Activate journaling and capture the build generation BEFORE scanning,
@@ -373,6 +375,7 @@ internal sealed class HeapSeekCache
         return true;
     }
 
+    [MethodImpl(Tiering.OptimizeFirstCall)]
     private static void AddRid(Dictionary<SqlValueKey, List<(int Page, int Slot)>> buckets, SqlValueKey key, (int Page, int Slot) rid)
     {
         if (!buckets.TryGetValue(key, out var bucket))

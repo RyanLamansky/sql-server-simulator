@@ -475,6 +475,46 @@ Two runtime-level levers were measured and are not the library's to pull: ReadyT
 
 Over TDS a `SELECT 1` round trip is ~180 µs against ~8 µs in process (real SQL Server 2025 on the same machine: ~320 µs), which is the whole difference in the one class it shows in: graph updates runs ~11 s of tests in process and ~17 s over the wire, while the query classes, whose time is EF Core's own, run the same either way.
 
+#### Second pass: the simulator inside the test process
+
+Measured 2026-10-03 over the same four classes plus `ComplexNavigationsQuerySqlServerTest` (622 tests) and `JsonQuerySqlServerTest` (445), with a third measure beside the replay's two: the time a class run spends inside the simulator's own calls (execute, read, next result, close), summed by a timing wrapper around the in-process connection.
+That in-process figure is the one the earlier replays understated.
+
+| Class | In process, before → after | Replay cold | Replay warm |
+|---|---|---|---|
+| Northwind miscellaneous | 3.36 s → 3.00 s | 4.45 s → 3.51 s | 1.08 s → 0.93 s |
+| Northwind bulk updates | 2.90 s → 2.12 s | 2.84 s → 2.32 s | 0.63 s → 0.56 s |
+| Graph updates | 3.49 s → 3.30 s | 2.75 s → 2.67 s | 0.62 s → 0.62 s |
+| Gears of War (less its 3 s `WAITFOR`) | 1.08 s → 1.09 s | 1.24 s → 1.19 s | 0.15 s → 0.15 s |
+| Complex navigations | 0.79 s → 0.76 s | 0.94 s → 0.93 s | 0.29 s → 0.26 s |
+| JSON query | 0.58 s → 0.59 s | 0.74 s → 0.73 s | 0.18 s → 0.17 s |
+
+The replay's cold column now includes constructing the `Simulation`, which the earlier table's didn't; every replayed result hashed identically before and after.
+
+**Inside the test process the simulator runs mostly unoptimized.**
+Graph updates spends 3.5 s in the simulator in process against 2.6 s for a cold replay and 0.6 s warm, and a JIT trace of the class run shows why: of the ~2,900 simulator methods it compiles, 187 reach the optimized tier and 1,730 stop at the instrumented copy the runtime builds on the way there.
+A method only starts counting its calls toward tier-up once no new method has been compiled for 100 ms, and EF Core compiles methods for every query it shapes, so in a test process that pause rarely comes.
+Two process settings confirm it and stay the consumer's to choose: `DOTNET_TC_CallCountingDelayMs=0` cut graph updates from 3.5 s to 1.7 s in the simulator and from 23.5 s to 16.3 s of wall time, and `DOTNET_TieredPGO=0` to 2.3 s and 17.9 s.
+The library's own lever is `[MethodImpl(Tiering.OptimizeFirstCall)]` (`MethodImplOptions.AggressiveOptimization`), now on twenty methods of per-statement and per-row bookkeeping — lock grant and release, the seek cache's entry resolution and rebuild, I/O statistics, the name memo, statement begin — chosen because they make no virtual or delegate call, the only thing the profile-guided recompile they give up would have bought them.
+Measured alone it took 4% off graph updates and 6% off Northwind in process and 13% off the Northwind cold replay, at the price of ~10 ms of optimized compilation per process; the warm replays moved under 1%.
+A wider set taking in the join and seek planners, whose expression trees call virtually, took 6–7% in process but slowed the warm replays 5–11%, so it was dropped.
+
+**Startup** — a bare `new Simulation()`, connection, `SELECT 1`, `sys.databases` probe and a short CREATE / INSERT / SELECT script in a fresh process — went from ~398 ms to ~368 ms, and constructing the `Simulation` from ~131 ms to ~110 ms.
+The constructor's share was mostly the type initializers: `Simulation`'s 43 KB of static-field IL (23 ms to compile before it ran), half of it the datatype-info tables' 3,000-odd boxed cells, a `RegexOptions.Compiled` collation-name pattern (emitted and compiled at startup, which also made `CreateDbConnection` cost 20–60 ms by chance of timing), and `BuiltInResources`' built-in permission table.
+The datatype-info tables and the permission table moved into types of their own, initialized on first read, and both regexes became `[GeneratedRegex]`; a catalog view's seek-column ranking dropped the LINQ sort a first catalog read compiled for it.
+Part of the constructor's gain reappears in later statements, which now compile the BCL code the compiled regex used to compile first, so the whole-script figure is the honest one.
+The first command of every class, the fixture's `sys.databases` probe, still costs ~160 ms cold: building every catalog view (~50 ms, about half of it compiling the `Register*` methods) and compiling the parse and execute path.
+What remains of the cold cost is a long tail — ~5,400 methods at ~0.1 ms each for Gears of War, whose cold replay is 55% compilation.
+
+Kept, each measured by alternating builds one case per process:
+
+- an uncorrelated deferred source inside a per-row body is materialized once per statement rather than once per enclosing row (see [`joins.md`](joins.md#deferred-sources-materialize-once-per-enumeration)) — EF Core's `ExecuteDelete` over a navigation, 91 → 42 ms, and the bulk-updates class 21% warm;
+- ORDER BY elimination over a join sorted by its leftmost source's unique key ([`indexes.md`](indexes.md#order-by-elimination)) — the three-way cross join `TOP (1)` from ~92 ms to ~31 µs, Northwind 16% warm;
+- the seek journal finds its replay start by binary search (`Heap.FirstSeekJournalEventAfter`) instead of walking all 512 events, the third cost the first pass left — the Northwind seed's inserts 170 → 160 ms cold;
+- the tiering attribute and the startup changes above.
+
+Measured flat and dropped: the name memo (`SourceColumnMemo`) starting its scan after its last hit, and again growing by doubling over immutable entries (allocation −4% per statement, time unchanged in replay and in process) — the sampler put an eighth of graph updates' simulator time in it, which was its safe-point bias rather than the memo's work; building the eight non-default Latin1 weight tables lazily (2 ms); and moving `BuiltInResources`' other large tables out of its initializer, worth ~7 ms on the first catalog read, left in the backlog.
+
 ## Not modeled / future
 
 - **DML plans for the declined shapes** — `INSERT … SELECT`, a `MERGE` from a query, the joined `UPDATE` / `DELETE` forms, DML through a view, and a statement holding a subquery.

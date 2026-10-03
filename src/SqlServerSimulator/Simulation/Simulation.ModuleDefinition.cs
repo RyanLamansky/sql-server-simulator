@@ -214,8 +214,8 @@ public sealed partial class Simulation
     // ALTER keyword tokens but keeps the whitespace that surrounded them, so
     // `CREATE OR ALTER PROCEDURE` is stored as `CREATE   PROCEDURE`
     // (probe-confirmed). The two captured whitespace runs reproduce that.
-    private static readonly Regex CreateOrAlterVerb =
-        new(@"^(CREATE\s+)OR(\s+)ALTER", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    [GeneratedRegex(@"^(CREATE\s+)OR(\s+)ALTER", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex CreateOrAlterVerb();
 
     /// <summary>
     /// Builds the module-definition text stored for <c>OBJECT_DEFINITION</c> /
@@ -231,7 +231,7 @@ public sealed partial class Simulation
     private static string BuildModuleDefinition(string commandText, int verbStart, bool isAlter, bool createOrAlter)
     {
         var raw = commandText[verbStart..];
-        var verb = createOrAlter ? CreateOrAlterVerb.Replace(raw, "$1$2")
+        var verb = createOrAlter ? CreateOrAlterVerb().Replace(raw, "$1$2")
             : isAlter ? "CREATE" + raw["ALTER".Length..]
             : raw;
         return commandText[..verbStart] + verb;

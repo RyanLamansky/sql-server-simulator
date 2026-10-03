@@ -213,7 +213,7 @@ internal abstract partial class Collation
     private static bool TryParse(string name, [NotNullWhen(true)] out Collation? collation)
     {
         collation = null;
-        if (name.Length == 0 || !validNameChars.IsMatch(name)) return false;
+        if (name.Length == 0 || !ValidNameChars().IsMatch(name)) return false;
 
         var parts = name.Split('_');
         if (parts.Length < 2) return false;
@@ -264,8 +264,8 @@ internal abstract partial class Collation
         return true;
     }
 
-    private static readonly Regex validNameChars =
-        new("^[A-Za-z0-9_]+$", RegexOptions.Compiled);
+    [GeneratedRegex("^[A-Za-z0-9_]+$")]
+    private static partial Regex ValidNameChars();
 
     /// <summary>
     /// Maps one suffix token to its bit / numeric slot. Returns

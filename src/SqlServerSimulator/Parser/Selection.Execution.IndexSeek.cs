@@ -1231,6 +1231,77 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// The ORDER BY elimination above for a join whose sort reads only its
+    /// leftmost source: <c>TOP (1) … FROM c CROSS JOIN o ORDER BY c.id</c> scans
+    /// <c>c</c> in key order and streams, where a sort would buffer every joined
+    /// tuple to keep one. Returns the sources with the leftmost replaced by its
+    /// ordered scan, or null to sort as before.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The fold drives from the leftmost source and every join kind admitted
+    /// here — INNER, CROSS, LEFT and the two APPLYs — emits a left row's
+    /// tuples together, before the next left row's, so the joined stream is in
+    /// the leftmost source's order. The sort columns must hold a unique key of
+    /// that source: two of its rows then never tie, so the stable sort the
+    /// stream replaces kept each left row's tuples in exactly the order the
+    /// fold emits them, and the streamed rows are the sorted rows, ties and
+    /// all. A WHERE declines, since its narrowing may reorder the chain to
+    /// drive from another source, as does a select list drawing
+    /// <c>NEXT VALUE FOR</c>, which the sort draws for every row it ranks.
+    /// </para>
+    /// </remarks>
+    private static FromSource[]? TryApplyLeftmostOrderedScan(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        List<Expression> expressions,
+        List<OrderBySpec> orderBy,
+        List<BooleanExpression> excluders,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        if (sources.Length < 2 || excluders.Count != 0 || sources[0].BackingTable is not { } table)
+            return null;
+        foreach (var join in joins)
+        {
+            if (join.Kind is not (JoinKind.Inner or JoinKind.Cross or JoinKind.Left or JoinKind.CrossApply or JoinKind.OuterApply))
+                return null;
+        }
+
+        var orderOrdinals = new HashSet<int>();
+        foreach (var spec in orderBy)
+        {
+            if (spec.Expr is not Reference { ReferencedName: { ImmediateQualifier: not null } name } column
+                || FindSourceColumn(sources, name).SourceIndex != 0
+                || !TryIdentifyIndexableColumn(sources[0], column, out var ordinal))
+            {
+                return null;
+            }
+            _ = orderOrdinals.Add(ordinal);
+        }
+        if (!HoldsUniqueKey(table, orderOrdinals))
+            return null;
+
+        foreach (var expression in expressions)
+        {
+            var draws = false;
+            expression.Walk((visited, _) =>
+            {
+                draws |= visited is NextValueFor;
+                return !draws;
+            });
+            if (draws)
+                return null;
+        }
+
+        if (!TryApplyOrderedScan([sources[0]], NoJoins, orderBy, excluders, 0, batch, outerResolver, out var ordered, out _))
+            return null;
+        var rewritten = (FromSource[])sources.Clone();
+        rewritten[0] = ordered[0];
+        return rewritten;
+    }
+
+    /// <summary>
     /// The ordered scan's rows: <paramref name="order"/> read forward, or from
     /// the end for a descending order, with the per-row checks
     /// <see cref="MaterializeWithLockChecks"/> makes. The first

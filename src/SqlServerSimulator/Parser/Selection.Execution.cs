@@ -2798,22 +2798,49 @@ internal sealed partial class Selection
                     continue;
                 }
             }
-            var volatileEvaluationsAtStart = batch.Connection.VolatileEvaluations;
-            var materialized = new List<byte[]>(plan.Execute(batch, outerResolver).RowBytes);
-            // A body that draws its values once, or whose every drawing column
-            // the reader re-draws per output row, reads the same whatever
-            // re-runs it; only an unknown or partly re-drawable body keeps its
-            // per-row execution.
-            if (batch.Connection.VolatileEvaluations != volatileEvaluationsAtStart
-                && plan.VolatileColumns is not ({ FixesValues: true } or { Complete: true }))
+            if (StatementMaterializedRows(batch, plan) is not { } materialized)
             {
-                continue;
+                var volatileEvaluationsAtStart = batch.Connection.VolatileEvaluations;
+                // Inside an enclosing query the execution is watched, as a
+                // subquery's is, for whether its rows can serve the statement.
+                OuterRowProbe? probe = null;
+                var enclosing = default(RuntimeContext);
+                if (outerResolver is not null)
+                {
+                    enclosing = new RuntimeContext(outerResolver, batch);
+                    probe = new OuterRowProbe(enclosing);
+                }
+                materialized = [.. plan.Execute(batch, probe?.Resolver ?? outerResolver).RowBytes];
+                // A body that draws its values once, or whose every drawing column
+                // the reader re-draws per output row, reads the same whatever
+                // re-runs it; only an unknown or partly re-drawable body keeps its
+                // per-row execution.
+                if (batch.Connection.VolatileEvaluations != volatileEvaluationsAtStart
+                    && plan.VolatileColumns is not ({ FixesValues: true } or { Complete: true }))
+                {
+                    continue;
+                }
+                if (probe is not null && probe.CanReplay(enclosing))
+                    (batch.CurrentStatement.SubqueryResults ??= new Dictionary<object, object>(ReferenceEqualityComparer.Instance))[plan] = materialized;
             }
             rewritten ??= (FromSource[])sources.Clone();
             rewritten[i] = sources[i].WithMaterializedRows(materialized);
         }
         return rewritten ?? sources;
     }
+
+    /// <summary>
+    /// The rows an earlier enumeration in this statement materialized for
+    /// <paramref name="plan"/>, or null when it has to run. An enumeration
+    /// that runs inside an enclosing query re-runs per enclosing row — the
+    /// body of a correlated <c>EXISTS</c> once per outer row — so a body that
+    /// read neither that row nor a per-call-varying built-in is stored on the
+    /// statement under its plan, as <see cref="UncorrelatedSubqueryCache"/>
+    /// stores a subquery's result, and every later enumeration reuses its
+    /// rows: the statement is the scope over which the data it read is fixed.
+    /// </summary>
+    private static List<byte[]>? StatementMaterializedRows(BatchContext batch, Selection plan) =>
+        batch.CurrentStatement.SubqueryResults is { } memo && memo.TryGetValue(plan, out var rows) ? (List<byte[]>)rows : null;
 
     /// <summary>
     /// The row-source passes a <b>joined UPDATE / DELETE</b> takes before it
@@ -2915,6 +2942,11 @@ internal sealed partial class Selection
             && TryApplyOrderedScan(sources, joins, orderBy, excluders, offsetCount ?? 0, batch, outerResolver, out var orderedSources, out var skipped))
         {
             return ProjectStreaming(orderedSources, joins, expressions, excluders, top.Count, offsetCount - skipped, fetchCount, batch, outerResolver);
+        }
+        if (!hasJoinGroup && !distinct && !top.RequiresBuffering && orderBy.Count > 0
+            && TryApplyLeftmostOrderedScan(sources, joins, expressions, orderBy, excluders, batch, outerResolver) is { } leftmostOrdered)
+        {
+            return ProjectStreaming(leftmostOrdered, joins, expressions, excluders, top.Count, offsetCount, fetchCount, batch, outerResolver);
         }
 
         if (!hasJoinGroup)
