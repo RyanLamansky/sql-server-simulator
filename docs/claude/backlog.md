@@ -295,6 +295,7 @@ The harness is local-only and not checked in; its three connection-killing findi
 **Batch compilation** ships ([`control-flow.md`](control-flow.md#batch-compilation)); what the sweep found past it:
 
 - The compile walk still stops at a deferral raised mid-statement — an `ALTER TABLE` of a table the batch creates, a binder error in a statement reading one — so an error past it surfaces only when its statement runs ([`control-flow.md`](control-flow.md#not-modeled-yet)).
+  A statement whose `NEXT VALUE FOR` sits in a derived table, over a sequence the same batch creates, raises its Msg 11719 while the batch compiles here, where real defers that statement with the sequence and runs the statements before it first (probed 2026-10-03 against SQL Server 2025).
 - Syntax-error recovery ([`errors.md`](errors.md#syntax-error-recovery)) restarts at statement keywords rather than walking real's grammar, so a restart the simulator's own parser reads differently diverges: `begin try end try begin catch select 1 end catch` on one line adds Msg 102 near the last `catch` on real and nothing here, and a Msg 178 after a misplaced `CREATE PROCEDURE` names the procedure on real and nothing here (probed 2026-09-28).
   A parenthesized set-operation branch carrying `ORDER BY` without `TOP` is Msg 1033 on both, but real follows it with Msg 102 near the `)` closing the enclosing derived table, `IN` list or CTE when the ordered branch is the first one, which the simulator doesn't send (probed 2026-10-01 against SQL Server 2025).
 
