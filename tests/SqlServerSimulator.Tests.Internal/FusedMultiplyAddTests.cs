@@ -42,7 +42,17 @@ public sealed class FusedMultiplyAddTests
     [DataRow(-0f, 1f, 0f)]
     [DataRow(1f, 1f, -1f)]
     public void Software_EdgeValues(float x, float y, float z)
-        => AreEqual(BitConverter.SingleToInt32Bits(MathF.FusedMultiplyAdd(x, y, z)), BitConverter.SingleToInt32Bits(VectorArguments.SoftwareFusedMultiplyAdd(x, y, z)));
+    {
+        var expected = MathF.FusedMultiplyAdd(x, y, z);
+        var actual = VectorArguments.SoftwareFusedMultiplyAdd(x, y, z);
+        // A NaN's sign and payload differ by implementation (x86's default
+        // NaN is negative, the Windows C runtime's fmaf positive) and carry
+        // no meaning, so only NaN-ness is compared.
+        if (float.IsNaN(expected))
+            IsTrue(float.IsNaN(actual));
+        else
+            AreEqual(BitConverter.SingleToInt32Bits(expected), BitConverter.SingleToInt32Bits(actual));
+    }
 
     private static float Next(Random random)
     {
