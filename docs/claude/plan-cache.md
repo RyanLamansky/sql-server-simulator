@@ -290,6 +290,12 @@ Those tests deliberately use plan-cache-declined shapes: a bare repeated SELECT 
 
 ## Performance impact
 
+Three measurement rules every figure below follows, each learned from a number that misled:
+
+- **One case per process.** Measuring several cases in one process made the results order-dependent by up to 2×, since whichever case ran first absorbed the tiered JIT's warm-up ("fixed text" read 28.3 µs first and 14.5 µs last).
+- **Warm by elapsed time, not by an iteration count.** A single-row `UPDATE` batch read ~100 µs after 3,000 iterations and 12 µs after 100,000.
+- **How a benchmark resets its table is part of what it measures.** `DELETE` leaves dead pages an insert's reuse walk visits and `TRUNCATE` doesn't, and a table that only grows makes any target scan grow with it — so measure the shape you mean, and say which.
+
 ### The plan cache
 
 Measured against `.vs/workload/` benches:

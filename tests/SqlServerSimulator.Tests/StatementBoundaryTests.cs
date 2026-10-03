@@ -165,7 +165,7 @@ public sealed class StatementBoundaryTests
     // Wrapped in a transaction so COMMIT succeeds: a statement that raises an
     // error of its own reports that error first, since the simulator executes
     // as it parses where real parses the whole batch first — see the
-    // parse-before-bind entry in backlog.md.
+    // batch-compilation section of control-flow.md.
     [DataRow("begin transaction commit zzz")]
     [DataRow("waitfor delay '00:00:00' zzz")]
     [DataRow("raiserror('m', 0, 1) zzz")]

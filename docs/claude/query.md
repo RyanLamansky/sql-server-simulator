@@ -53,6 +53,8 @@
   Result type from `SqlType.Promote` over the THEN / ELSE branches, **skipping bare untyped `NULL` literals** (`CaseExpression.GetSqlType`, which caches the result on first call): SQL Server treats an untyped NULL as typeless in CASE result resolution — it yields to the typed branches, so `CASE WHEN … THEN 'x' ELSE NULL END` is nvarchar, not int (a bare-NULL placeholder `int` would otherwise promote the whole CASE to int and a string arm then failed to convert — surfaced by SMO's `CASE … THEN (SELECT name … COLLATE catalog_default) … ELSE NULL END`).
   Only when *every* branch is a bare NULL does the placeholder int type stand — and that all-NULL case raises **Msg 8133** anyway.
   A typed NULL (`CAST(NULL AS int)`) is not skipped.
+  **Not modeled yet**: a written-constant condition types a string result as the arm it takes on real — `IIF(1 = 1, CAST('a' AS char(5)), CAST('b' AS varchar(2)))` is `char(5)` there and `varchar(5)` here, `CASE WHEN 1 = 1 THEN 'ab' ELSE 'abcde' END` is `varchar(2)` where both arms unify to `varchar(5)` here, and `COALESCE(CAST('a' AS char(5)), CAST('b' AS varchar(10)))` is `char(5)` against `varchar(10)` (probed 2026-10-01, re-checked 2026-10-03 against SQL Server 2025).
+  The same calls over a variable or a column unify as the simulator does, and a numeric pair keeps the unified type even when folded (`CASE WHEN 1 = 1 THEN 1 ELSE 2.5 END` is `numeric(2, 1)` on both), so the fold changes only a string result's type and width — and, in a JSON builder, whether JSON text embeds raw (see [`json.md`](json.md#divergences)).
   **Msg 8133** fires at parse when every result expression (every THEN body + the explicit ELSE if present; an absent ELSE counts as implicit bare NULL) is a bare `NULL` literal — `Expression.IsBareNullLiteral` unwraps `Parenthesized` so `(NULL)` still trips.
   A single typed branch (e.g. `CAST(NULL AS int)`) satisfies the rule.
   `IIF` enforces the same check on its two value arms (real SQL Server desugars IIF to CASE).
@@ -224,6 +226,7 @@ An **unaliased** derived table is still accepted, where real requires the alias 
 - Fetch ≤ 0 → **Msg 10744** (verbatim typo "greater then zero").
 - TOP + OFFSET → **Msg 10741**.
 - Counts resolve at parse time (constants, parameters, arithmetic).
+- **Not modeled yet**: a derived table's set-operation `ORDER BY … OFFSET / FETCH` limits the combined rows here, where real applies it to the last branch alone — `(SELECT 3 a UNION ALL SELECT 2 UNION ALL SELECT 1 ORDER BY 1 OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY) d` is one row here and three on real (probed 2026-10-03 against SQL Server 2025).
 
 ### The rows an `OFFSET` skips
 
@@ -544,6 +547,12 @@ A `TOP` over a grouped, distinct or set-operation query picks from the sorted ro
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT)` / `COUNT_BIG`, `SUM` / `AVG`, `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`, and SQL Server 2025's `PRODUCT` (SUM's result types, save a fractional decimal multiplying at scale 6; `ProductAggregator`).
 `APPROX_COUNT_DISTINCT` counts exactly and `APPROX_PERCENTILE_CONT` / `APPROX_PERCENTILE_DISC` compute the exact percentile — see [the approximate aggregates](#the-approximate-aggregates) for where real's sketches part from that and why neither is reproduced.
 `AVG(int)` truncates; `AVG(decimal(p,s))` widens to `decimal(38, max(s,6))`.
+
+**Not modeled yet: `STRING_AGG`'s Msg 8733 for a separator real doesn't read as a literal.**
+`STRING_AGG(s, CAST(',' AS varchar(2)))` over a table is Msg 8733 on real and aggregates here; over a `VALUES` source real accepts it too (probed 2026-09-24, re-checked 2026-10-03).
+What separates the two is plan-shaped rather than grammatical (probed 2026-09-27): the refusal needs a single table or view source and no `GROUP BY`, `HAVING`, `TOP`, `LIKE` filter or `OPTION (RECOMPILE)` — any of those, a derived table, a `#temp` table or a table variable accepts it — and it follows the value expression too (`UPPER(s)`, `LEFT(s, 10)`, `ISNULL(s, '')` accept; `s + ''`, `(s)`, `CAST(i AS varchar)`, `'x'` refuse), and a `CONVERT`, a `char(1)` or `varchar(max)` target and a `COLLATE` refuse like the `CAST`.
+The shapes line up with simple parameterization's eligibility — a `CAST`'s literal turned into a parameter is no longer a literal — but `PARAMETERIZATION FORCED` doesn't make the accepted shapes refuse, and none of the refused statements leaves a parameterized plan in `sys.dm_exec_cached_plans` (probed 2026-09-28), so that reading isn't confirmed.
+The refusal survives `WHERE i = 1`, `WITHIN GROUP`, a table alias, `dbo.t`, `WITH (NOLOCK)`, a column alias and another statement in the batch, while `CHAR(13) + CHAR(10)`, `', ' + ' '`, `CONCAT(',', ' ')`, `CHAR(44)` and `SPACE(1)` are accepted over the same table (probed 2026-09-28).
 `SUM` / `AVG` also widen `real` to `float` and `smallmoney` to `money`, where `MIN` / `MAX` keep the operand's type — see [`arithmetic.md`](arithmetic.md#the-approximate-family-float--real).
 
 A filter written **above** a grouped body — and the key set of an equi-join to one — reaches *below* the grouping when it names a grouping column, so the aggregate runs over the groups the statement keeps rather than every group in the table: see [`joins.md`](joins.md#join-key-reduction-of-a-grouped-body).
@@ -609,6 +618,7 @@ Oracle: `GroupedAggregateStreamingTests`.
 
 **Not modeled yet**: real sends the groups (and window rows) that completed before an aggregate operand fails — `SELECT g, SUM(i) … GROUP BY g ORDER BY g` over an overflowing second group streams the first group's row, then the error — and follows the error with the Msg 8153 NULL-elimination warning when a NULL was skipped; here the statement fails before its first row and the warning isn't sent (probed 2026-09-26 against SQL Server 2025).
 Which groups completed first depends on real's plan (a stream aggregate over sorted input finishes them in key order, a hash aggregate at the end).
+The same holds for a per-row `TOP` error: an `APPLY` body's `TOP (t.g)` meeting a NULL is Msg 1014 on both, but real streams the outer rows before it when its plan needs no sort for the statement's `ORDER BY` (probed 2026-10-03 against SQL Server 2025).
 
 ### Parallel grouped accumulation (built, proven, **off by default**)
 
@@ -733,7 +743,7 @@ Probe-confirmed; oracle `AggregateBindingRuleTests`.
 - **Msg 130 Cls 15 St 1** — `"Cannot perform an aggregate function on an expression containing an aggregate or a subquery."`
   Fires when an aggregate's *own argument* contains another aggregate or a subquery at any depth: `SUM(MAX(a))`, `SUM(a + MAX(b))`, `MAX(CASE WHEN EXISTS(…) THEN a END)`, `MAX((SELECT 1))`, and the correlated form.
   A subquery elsewhere — HAVING, projection, WHERE — is untouched.
-  A **windowed** aggregate over an aggregate is legal on real (`SUM(SUM(b)) OVER ()` returns a value); the simulator doesn't parse that shape at all yet, so it can't reach this check — see [`backlog.md`](backlog.md).
+  A **windowed** aggregate over an aggregate is legal (`SUM(SUM(b)) OVER ()` over a grouped query returns a value on both engines).
 - **Msg 8117 Cls 16 St 1** — `"Operand data type NULL is invalid for {aggregate} operator."`
   A bare untyped `NULL` operand, for count / count_big / sum / avg / max / min / stdev / checksum_agg.
   A derived table's or CTE's column its body fills only with bare `NULL`s is untyped too — through `VALUES`, a union and a pass-through level — so an aggregate, an aggregate window or `LAG` / `LEAD` / `FIRST_VALUE` / `LAST_VALUE` over it is refused the same way (`HeapColumn.IsUntypedNull`, probed 2026-09-25).
@@ -746,6 +756,7 @@ Probe-confirmed; oracle `AggregateBindingRuleTests`.
   The rule is purely about column presence, **not determinism** — `GROUP BY a + DATEPART(year, GETDATE())` and even a `NEWID()`-derived expression are legal because they contain `a`, while `GROUP BY 1` / `'x'` / `@v` / `GETDATE()` / `RAND()` are not.
   (`GROUP BY 1` is a constant, not an ordinal; SQL Server has no ordinal GROUP BY.)
   The empty grouping set is exempt — `GROUP BY ()`, `GROUPING SETS (())`, `GROUPING SETS ((a),())` and `GROUP BY (), a` all return rows on real, and contribute no expression for the rule to apply to.
+  **Not modeled yet**: a subquery's item naming only the *enclosing* query's column (`SELECT (SELECT COUNT(*) FROM u GROUP BY t.a) FROM t`) is Msg 164 on real and runs here (probed 2026-10-03 against SQL Server 2025).
 
 Msg 144 and Msg 164 are **held rather than thrown**: real parses a batch before binding any of it, so a stray token after the clause reports Msg 102 instead (`GROUP BY 'a' 'b'` → `near 'b'`, where `GROUP BY 'a'` alone is Msg 164 — probe-confirmed).
 The held message is raised once the statement's outermost query expression has parsed; see the trailing-token section of [`grammar.md`](grammar.md#trailing-token-tightening).
@@ -873,7 +884,7 @@ The representative fallback fires only for non-empty grouping sets, preserving t
 SQL Server is strict — no functional-dependency relaxation, so grouping by a table's PK does *not* license its other columns — and binds the rule before any row is read.
 The check leans on `Expression.VisitColumnReferences` already excluding aggregate-internal columns (an `AggregateExpression` doesn't visit its operand), so it walks each SELECT / HAVING / ORDER BY expression's bare references, resolves each to a source column, and requires it to be a *bare* GROUP BY column; a correlated / outer reference (unresolved against the local sources) is skipped, and an ORDER BY reference matching an unqualified select-list alias is a validated projection, not a source-column violation.
 The one deliberate conservative miss: a column appearing only *inside* a compound grouping expression (`GROUP BY a+1`, then a bare `SELECT a`) is left unflagged — distinguishing it from the valid `SELECT (a+1)*2` shape would need sub-expression structural matching, so it errs toward no false positive on the valid form.
-Oracle: `GroupByContainmentTests`; Msg 130 / 8117 / 164 aggregate-validation rules remain over-permissive (see [`backlog.md`](backlog.md)).
+Oracle: `GroupByContainmentTests`.
 
 **ORDER BY on a grouped query** sorts the full grouped stream (across all grouping sets) before TOP / OFFSET / FETCH, so `SELECT TOP (n) … GROUP BY … ORDER BY SUM(x) DESC` selects the correct rows in order.
 ORDER BY items resolve a select-list **alias** first (`ORDER BY Total`, bare terms only — see [ORDER BY term resolution](#order-by-term-resolution)), then through the grouped-key / representative-row resolver — so an aggregate (`ORDER BY SUM(x)`, whose `AggregateExpression` is collected and bound like any projection aggregate), a grouped column, or a grouping expression all sort correctly.

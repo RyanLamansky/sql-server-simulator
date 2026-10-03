@@ -341,6 +341,9 @@ And the blocking matrix, session A holding a SERIALIZABLE `k BETWEEN 15 AND 25` 
   Taking it always keeps the non-covering case, the common one, from admitting a write real refuses.
 - **The `UPDLOCK` / `XLOCK` row lock stays on top of the key lock**, where real folds the two into one key lock; the readers and writers that take a row lock meet it there.
   `sys.dm_tran_locks` folds them back (`LockDmvs.FoldRowLocksIntoKeyLocks`), reporting the one key lock in the combined mode — `RangeX-X` for a written key — as real does.
+- **No ghost records.**
+  On real a `DELETE` leaves its key behind as a ghost until cleanup runs, and a `ROWLOCK, UPDLOCK` seek for that key locks the ghost, so a concurrent `INSERT` of the key waits; here the seek finds nothing to lock and the insert lands first.
+  Real's outcome turns on whether ghost cleanup has run yet (probed 2026-10-02 against SQL Server 2025 through Django's `get_or_create.UpdateOrCreateTransactionTests.test_creation_in_transaction`, whose predecessor deletes the same key).
 - **`resource_description` prints the anchor key**, e.g. `(20)` or `(1,5)`; real prints a hash of it, so only the infinity anchor's `(ffffffffffff)` byte-matches.
 - **A non-default isolation level disables the plan cache.**
   A cached plan's FROM sources carry the lock acquisitions their parsing session made, so replaying one under a different level would settle the wrong session's protection, or none.

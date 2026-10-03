@@ -254,6 +254,12 @@ The related strict-mode errors carry State bytes of their own: `JSON_VALUE`'s **
 
 A statement that fails partway surfaces as the error alone: real streams the rows a truncated `OPENJSON` got through ahead of the error token, while the simulator's failed statement carries no rows (see [`data-reader.md`](data-reader.md)).
 
+Not modeled yet (probed 2026-10-02, re-checked 2026-10-03 against SQL Server 2025):
+
+- **`OPENJSON … WITH` naming a column twice** (`WITH (id int, id int)`) returns both under `SELECT *` on real; here the star expands by name and the second is Msg 209.
+- **A `COLLATE` on a non-string `OPENJSON … WITH` column** is Msg 447 on both, which real follows with the informational Msg 2724 state 14 (`Parameter or variable 'int' has an invalid data type.`), not sent here.
+- **A constant-folded `COALESCE` / `CASE` / `IIF` over JSON text** — `COALESCE(N'[0]', JSON_QUERY(…))`, `IIF(1 = 1, N'x', JSON_QUERY(…))` — embeds quoted in a JSON builder on real, which types the arm it takes, and raw here, where the unified type keeps the JSON text mark: the JSON face of the written-constant typing note in [`query.md`](query.md#boolean--set-ops--projection--case).
+
 ## `FOR JSON` result serialization
 
 The trailing `FOR JSON { PATH | AUTO } [, ROOT[('name')]] [, INCLUDE_NULL_VALUES] [, WITHOUT_ARRAY_WRAPPER]` clause on a SELECT serializes the whole result set to a single JSON string.

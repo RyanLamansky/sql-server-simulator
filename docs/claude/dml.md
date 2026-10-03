@@ -296,6 +296,12 @@ A view is Msg 8105 and a missing object Msg 1088, each named as written (probed 
 `DBCC CHECKIDENT` (`Simulation.CheckIdent.cs`) reports and reseeds, and a reseed rolls back with its transaction though a generated value never does.
 The one rule that isn't a plain assignment: a table that hasn't generated a value since it was created or truncated takes the reseed value *itself* on its next insert, where one that has takes the value after it; the pending value shows through `IDENT_CURRENT` but not through CHECKIDENT's own report, which still says `NULL` (probed 2026-09-24).
 
+**Not modeled yet**:
+
+- An `INSERT` whose source expression fails (`VALUES (CAST('x' AS int))`, `VALUES (1/0)`, `INSERT … SELECT CAST('x' AS int)`) uses up an identity value on real, so the next row is 2, and none here; a value failing its conversion *into* the column uses one up on both, and a failing row of a multi-row `VALUES` uses none on either (probed 2026-10-02 against SQL Server 2025).
+  It follows real's plan — the identity draw sits ahead of the expression in one shape and behind the constant scan in the other — while the simulator materializes the source before any draw.
+- **`$IDENTITY`**, the identity-column pseudo-reference (`SELECT $identity FROM t`, NOT NULL on real), is Msg 156 here (probed 2026-10-01 against SQL Server 2025).
+
 ## `@@ROWCOUNT` / `ROWCOUNT_BIG()`
 Both expose the row count of the most-recently-completed statement on the session via `SimulatedDbConnection.LastStatementRowCount`.
 `@@ROWCOUNT` projects as `int`; `ROWCOUNT_BIG()` (`Parser/Expressions/TransactionScalarFunctions.cs`) is its `bigint` sibling — same source, wider projection.
@@ -389,6 +395,7 @@ Probe-confirmed schema-inference rules:
   The simulator parses this, propagates `IntoTarget` from the left branch through `CombineSetOps`, and strips identity on the combined dest schema.
   A right branch carrying its own INTO → Msg 156 (`Incorrect syntax near the keyword 'into'.`).
 - **INTO without FROM** works (`SELECT 1 AS x INTO #t`) — synthesized-row path threads `IntoTarget` through.
+  **Not modeled yet**: a projection error there (`SELECT 1 / 0 AS a INTO #t` in a `TRY`) sends a DONE counting 0 on real, as a failed write does; here the FROM-less projection fails while it parses, before the write begins, so no count goes out (probed 2026-10-02 against SQL Server 2025).
 - **The `IDENTITY(type [, seed, increment])` function** makes the destination's identity column (`Parser/Expressions/IdentityFunction.cs`).
   Real takes it only as a whole select-list item of a statement-level query, with an alias (`AS i`, a bare alias or `i = IDENTITY(…)`); anywhere else the keyword is a syntax error, and a query without `INTO` is Msg 177 — an `INSERT … SELECT` source included.
   The projection carries a typed NULL, which the copy replaces with the column's next value in the rows' order, so `ORDER BY` numbers them.

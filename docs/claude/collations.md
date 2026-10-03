@@ -778,6 +778,11 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
 - **Pre-v100 collation sort divergence on supplementary chars at position 1+, outside the Latin1-General tables.**
   Probe-confirmed against SQL Server 2025: the pre-v100 names sort `Z+emoji` BEFORE `Z+U+E000`, while the v100 family sorts the other way.
   The Latin1-General tables reproduce both (the unversioned table weighs no surrogate); every other pre-v100 name routes through `CompareInfo`, which compares by code point and so behaves like v100.
+- **Non-`_SC` `TRANSLATE` over surrogate halves.**
+  Here each half maps by its own position; real reads the halves as weightless riders on one character, by a rule not yet explained: `TRANSLATE(N'x' + <pair>, <pair>, N'ZQ')` is `xZZ`, `TRANSLATE(N'a😀', N'😀', N'xy')` is `axx` (`axy` here), `TRANSLATE(N'😀😁', N'😁', N'xy')` is `xxxx`, a lone low surrogate looked up in a list holding only the high one translates (`TRANSLATE(N'a' + NCHAR(56832), NCHAR(55357), N'x')` is `ax`), yet `TRANSLATE(N'😀', N'x😀', N'abc')` leaves the input unchanged (probed 2026-09-29 and 2026-10-01, re-checked 2026-10-03 against SQL Server 2025).
+- **A string operand moved into a `_UTF8` collation by `LIKE` or `CHARINDEX` keeps its characters**, where real converts it within its declared byte budget as a comparison already does here: `CHARINDEX('ä', CAST('ä' AS varchar(10)) COLLATE Latin1_General_100_CI_AI_SC_UTF8)`, whose `varchar(1)` needle can't hold the two-byte `ä`, is 0 on real and 1 here (probed 2026-10-03 against SQL Server 2025).
+- **`STRING_AGG(a, b)` over two columns of conflicting collations** is Msg 468 on real, which settles the collation before the separator check, and Msg 8733 here (probed 2026-10-03 against SQL Server 2025).
+- **`TERTIARY_WEIGHTS`** is Msg 195 here; real accepts a `varchar` argument under a SQL collation and refuses an `nvarchar` one with Msg 8116 (probed 2026-10-02 against SQL Server 2025).
 
 ## Cross-references
 

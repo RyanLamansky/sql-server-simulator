@@ -117,6 +117,7 @@ First-word accept-list (case-insensitive, in `OptionHintFirstWords`):
 
 Multi-word hints (`LOOP JOIN`, `FORCE ORDER`, `KEEPFIXED PLAN`, `OPTIMIZE FOR UNKNOWN`, `HASH GROUP`, `CONCAT UNION`, etc.) are accepted via first-word match + skip-tokens-to-comma-or-paren.
 The trailing words / numeric arguments / parenthesized payloads aren't validated beyond bracket balancing.
+**Not modeled yet**: `INSERT … VALUES … OPTION (RECOMPILE)` is accepted on real and Msg 156 here (probed 2026-10-03 against SQL Server 2025).
 
 ### `USE HINT('name' [, 'name'] …)` — the one name-validated OPTION hint
 

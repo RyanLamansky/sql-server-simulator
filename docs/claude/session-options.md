@@ -112,6 +112,7 @@ While either option is on the session skips the plan cache and the compiled-batc
 - `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family return plans; they parse and are discarded, so no result set arrives and a `SHOWPLAN` batch runs where real only describes it.
 - `STATISTICS IO` lists nothing for a catalog view, where real lists the system base tables it read (`sysschobjs` …), and a system procedure's statements report nothing, where real's report each of its own (`sp_help`'s compile and a Msg 3612 per statement).
 - `STATISTICS IO` orders a hash join's, an `EXCEPT`'s and a foreign-key check's tables by the simulator's own read order, which is not always real's (a hash join's build side first, a referenced table ahead of the written one), and lists no `Worktable` for an `UPDATE` of a key column, where real's split-sort lists one.
+- `SET ANSI_PADDING OFF` at `CREATE TABLE` is discarded: real records `is_ansi_padded = 0` on every column and stores `varchar` without trailing spaces, `varbinary` without trailing zeros and a nullable `char` as `varchar` (probed 2026-10-01, re-checked 2026-10-03 against SQL Server 2025).
 - `FORCEPLAN`, `QUERY_GOVERNOR_COST_LIMIT`, `REMOTE_PROC_TRANSACTIONS` and `DISABLE_DEF_CNST_CHK` have no effect; `FORCEPLAN`, `REMOTE_PROC_TRANSACTIONS` and the `STATISTICS XML` / `PROFILE` switches are kept only for `DBCC USEROPTIONS` to list ([`dbcc.md`](dbcc.md#useroptions)), and not reverted when a module body that set them returns.
 
 ## Divergences

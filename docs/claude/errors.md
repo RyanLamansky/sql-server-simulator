@@ -70,6 +70,7 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 
 - **Msg 5703 is English whatever the language**; real words it in the language being switched to (`Die Spracheneinstellung wurde in Deutsch geändert.`).
 - **Msg 8153 over a constant `VALUES` source grouped into single-row groups** isn't sent by real (`SELECT x, SUM(y) FROM (VALUES (1, NULL), (2, 3)) v(x, y) GROUP BY x`), which evaluates those groups while compiling; the same data in a table warns on both.
+- **Msg 1708**, the warning a `CREATE TABLE` whose largest row can pass 8060 bytes sends, isn't sent; its rule isn't settled — two `varchar(8000)` columns draw none while `char(8000), char(50), varchar(10)` does (probed 2026-10-01 against SQL Server 2025).
 
 ## A statement's whole binder report
 
@@ -117,7 +118,7 @@ A batch whose parse fails reports the syntax errors real's parser finds past the
 Real recovers the way a yacc parser does: it restarts at the token it failed on, discards tokens that can't begin a statement, and reports a further Msg 102 / 156 only once three tokens have parsed since the last — `select 1 +; select 2 +;` reports both, `select 1 frm t; select * from where;` both, `select (1; select 2;` one.
 An error a grammar action raises rather than the token stream — Msg 319 for a `WITH` after an unterminated statement, Msg 111 for a module `CREATE` not first in its batch, Msg 178 for the valued `RETURN` its body then holds — is reported however soon it comes, so a table hint the grammar refuses (`INSERT t (c) WITH (TABLOCK) …`) is Msg 156 then the Msg 319 its `WITH` raises read as a common table expression.
 `Simulation.WithRecoveredSyntaxErrors` re-reads the batch from each restart point with the text before it blanked out (lines and positions stay as written), restarting only at a keyword, `;`, `THROW` or a `(` that opens a query, since real's grammar gives a bare name nothing to begin.
-It walks the simulator's own statement parser rather than real's grammar, so where that parser reads a restart differently the report diverges; see the backlog.
+It walks the simulator's own statement parser rather than real's grammar, so where that parser reads a restart differently the report diverges; see [Divergences / residuals](#divergences--residuals).
 What it carries past the blanking, each probed 2026-09-30 against SQL Server 2025:
 
 - **A module body recovers too.** A procedure's, trigger's or function's body — bound on its own child batch at `CREATE` — restarts on a child batch with the body's own frame, so a restart reads its `RETURN`, parameters and return table as the body does, and every variable and table variable the failed walk had declared.
@@ -175,6 +176,7 @@ The static exception factories (`SimulatedSqlException.*Errors.cs`) can't reach 
 
 ## Divergences / residuals
 
+- **Syntax-error recovery where the simulator's parser restarts differently from real's grammar** (probed 2026-09-28 against SQL Server 2025): `begin try end try begin catch select 1 end catch` on one line adds a Msg 102 near the last `catch` on real and nothing here, and the Msg 178 a misplaced `CREATE PROCEDURE`'s valued `RETURN` raises names the procedure on real and nothing here.
 - **`THROW; re-raise inside a proc body`** preserves the original line but not a body-relative offset re-application; top-level re-raise is exact.
 
 Database-scope DDL trigger bodies run through the same child-batch dispatch DML trigger bodies do, so the `LineOffset` / `ErrorProcedureName` threading above covers them too — a body-side `THROW` reports its CREATE-relative line and the trigger's unqualified name (see [`triggers.md`](triggers.md)).

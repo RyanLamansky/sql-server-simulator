@@ -69,6 +69,7 @@ Probe-confirmed: at 170, `SELECT 1 AS REGEXP_LIKE`, `CREATE TABLE REGEXP_LIKE (a
 
 That last case is the one applications hit: mssql-django installs its regex support as a **CLR scalar function** named `dbo.REGEXP_LIKE`, and the generated SQL calls it unbracketed — which stops parsing the moment the database moves to 170.
 Bracketing or double-quoting the name (`dbo.[REGEXP_LIKE]`) is the escape hatch, and it works at every level.
+A `dbo.REGEXP_LIKE` faked as a built-in was tried and reverted: on real the name resolves only once mssql-django's regex assembly is installed, and that authentic path works here — `EnableClr` plus mssql-django's own `install_regex_clr` sequence loads `regex_clr.dll`, with `clr_name` and MVID matching the live server's (see [`clr-assemblies.md`](clr-assemblies.md)).
 The reservation covers only `REGEXP_LIKE`; the other six `REGEXP_*` names are ordinary identifiers.
 
 Mechanically, the tokenizer is the gate.

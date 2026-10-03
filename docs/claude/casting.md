@@ -221,6 +221,7 @@ The plan cache keys on the order too, as real's does.
 ### Not modeled yet
 
 - **Month names in other languages** — only the English names are recognized.
+- **`CONVERT(binary(3), '', 2)`** is an empty `0x` on real, unpadded although the type is fixed-length, and `0x000000` here (probed 2026-10-03 against SQL Server 2025).
 
 ## A precision or scale past its type's range
 
@@ -367,9 +368,7 @@ A trailing **`Z`** is universal on the modern targets, and legacy-side belongs t
 The Msg 242 case is narrow: the token count, the year-token width and the two non-year tokens (≤ 2 digits) all have to fit the style, so style 2 reports 242 for `01/02/99` (y-m-d with an impossible day) but 241 for `01/02/1999`, which isn't its layout at all.
 `TRY_CONVERT` swallows all of them.
 
-**Default (no-style) path** (`SqlValue.Parse.cs` — `ParseDateTime2` / `ParseDate` / `TryParseLegacyDateTime`, distinct from the with-style parser above): a `CAST`/`CONVERT` to a date/time target with **no style argument** routes through a deliberately restrictive **language-neutral** exact-format parser, not the flexible culture-based one.
-Accepted: ISO `yyyy-MM-dd` / `yyyyMMdd`, ISO with `T`/space time and 1-7 fractional digits, and — since the Django shakedown — **year-first slash / dot** forms `yyyy/M/d` / `yyyy.M.d` (unambiguous: the 4-digit year leads, so no mdy/dmy assumption; the `.dates()`/`.datetimes()` truncation an ORM emits builds these).
-Locale-ordered numeric forms the with-style *general* parser accepts (`M/d/y` mdy like `'1/2/3'`) are **not** accepted here and raise Msg 241 — the language-neutral stance means the no-style path is stricter than an explicit style-0 CONVERT (a modeled divergence from real, which treats them identically under `us_english`).
+**Default (no-style) path**: a `CAST` / `CONVERT` to a date/time target with no style argument reads through the grammar under [Reading a date-time string](#reading-a-date-time-string), in the session's `SET DATEFORMAT` order, so `CAST('1/2/3' AS date)` is 2003-01-02 under `us_english` as on real.
 
 **Money → string** (`SqlValue.CoerceMoneyToStringWithStyle`):
 

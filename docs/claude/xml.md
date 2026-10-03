@@ -1107,8 +1107,6 @@ The `XMLSCHEMA` directive raises `NotSupportedException` in RAW / AUTO / PATH (u
 `XMLDATA` isn't parsed at all, so it falls to Msg 102 without the prefix.
 EXPLICIT's `idrefs` / `nmtokens` accept path is under [its divergences](#explicit--the-universal-table).
 
-See [`backlog.md`](backlog.md).
-
 ## Leading byte-order mark
 
 A string that becomes `xml` loses a leading U+FEFF, wherever the conversion happens — a literal INSERT, a parameter, an explicit `CAST`, `SqlBulkCopy` and a TVP row all behave the same, probe-confirmed against SQL Server 2025 (2026-07-30).

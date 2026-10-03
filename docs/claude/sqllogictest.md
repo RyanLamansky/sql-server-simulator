@@ -83,4 +83,32 @@ Its first capture had one divergent record, SQLite's `group_concat(DISTINCT x, '
 Fixing that exposed the whole quantified-call family and, beside it, `[abs](1)` running here where real refuses a delimited one-part name as a function — see [`query.md`](query.md#a-quantified-call-is-an-aggregate-call-whatever-the-name) and [`grammar.md`](grammar.md#a-delimited-one-part-name-doesnt-call-anything).
 The slice now agrees record for record, and replays in under a second as part of the routine replay.
 
+The top-level `select1`–`select5` scripts have no captured reference yet, so the routine replay doesn't cover them; a differential run of `lists/pilot-phase1.txt` (those five plus `evidence/`) had every query agree with real (2026-09-27, SQL Server 2025), `select5`'s many-way comma joins included.
+
 Re-run the sweep after any bundle touching the parser, the expression evaluator or the type system.
+
+## Other differential oracles
+
+Four more harnesses run real applications' and tools' SQL against the simulator's TDS endpoint and against SQL Server 2025 side by side: Django 5.1's ORM test suite through mssql-django, EF Core's own SQL Server functional suite, an SMO property-and-script drain, and hand-written edge-case corpora compared case by case.
+Each is local-only under the gitignored `.vs/`, with its own README for running it; their open findings live in the feature docs and the [backlog](backlog.md).
+What carries over from them:
+
+- **The bar is parity with real, not a clean run.**
+  Many Django and EF tests fail on real too, so the target is that the simulator fails exactly the set real fails.
+  Take the delta both ways — `comm -23` of the sorted failing-test names for simulator-only, `comm -13` for real-only — since the real-only set is the over-permissive direction, and a "matches real" claim needs both empty.
+- **Group failures by cause, not by test.**
+  One statement the simulator couldn't run once killed the TDS connection and failed every later test in its class, 27 of 50 failures at the time; a test that leaves state behind fails every later one in its cleanup.
+  Counted by cause, Django's first hundreds of failures were eleven roots, the largest a qualifier-blind name resolver that silently bound to the wrong same-named column.
+- **Re-run the oracle that found a bug rather than reconstructing it from its description.**
+  A hand-built probe that passes is not proof a finding is stale: one was once deleted on the strength of a wide matrix of hand-written `OUTPUT … INTO` shapes that all passed, when the trigger was a destination-column type mismatch none of them had.
+- **Give each probed claim its own batch.**
+  A probe that creates a table and queries it in one batch fails real's compile-time column resolution (Msg 207) for reasons unrelated to the claim, and reads exactly like the divergence being looked for.
+- **An existing test is not evidence of real's behavior.**
+  EF Core's suite corrected two of this repo's tests that had pinned unprobed behavior (a table after `APPLY` refused, `ALTER COLUMN` keeping a declared collation); hand-written tests had agreed with the simulator there.
+- **Two runs sharing one database or one endpoint wedge each other on locks**, which reads exactly like a simulator blocking bug — run the two sides one at a time.
+
+Standing results, each the last full run:
+
+- **Django** (2026-10-02): the 132-app ORM slice (9,295 tests), `schema` and 70 further apps (7,263 tests) — the whole suite but GIS, PostgreSQL and two apps whose migrations fail on both — fail identically on both engines: 0 simulator-only, 0 real-only.
+- **EF Core** `v10.0.2` (2026-10-02): of 51,446 results real fails none and the simulator 2, both asserting the order of rows an `ORDER BY` leaves tied, which is settled as a plan accident (see the backlog's row-order entry).
+- **SMO** (2026-10-02): no simulator bug among the non-matching rows; what is unbuilt is listed in the backlog's TDS section.

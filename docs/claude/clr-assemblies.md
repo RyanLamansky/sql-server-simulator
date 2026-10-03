@@ -287,11 +287,6 @@ The strong-named case is unprobed.
   Authoring an assembly real will accept therefore still means targeting `net4x` — which is why `regex_clr.dll` is a Framework 2.0 binary that has never needed re-targeting.
   The simulator runs on .NET, so all three resolve and the allow-list admits them.
   This is the over-permissive direction, and it is what lets the tests emit a fixture assembly without a .NET Framework toolchain.
-- **`REGEXP_LIKE` is not reserved.**
-  SQL Server 2025 reserves `REGEXP_LIKE` as a native predicate at **compatibility level 170**, so `dbo.REGEXP_LIKE(…)` — the unbracketed form mssql-django emits for Django `__regex` lookups — raises Msg 156 there and needs `dbo.[REGEXP_LIKE](…)`.
-  At compat 160 and below the unbracketed form resolves normally (probe-confirmed both ways on the same server).
-  The simulator defaults to compat 170 but does not reserve the keyword, so it accepts the unbracketed form at every level — over-permissive at 170, matching at ≤160.
-  Closing this belongs with the native `REGEXP_LIKE` predicate, which is tracked separately in [`backlog.md`](backlog.md).
 - **`PERMISSION_SET` is recorded, not enforced at run time.** It selects which static checks run at registration; it cannot confine a loaded assembly (see above).
 - **A reported stack holds only the frames the simulator can see as the author's.**
   Real also shows its own internal frames — `SqlMetaData.Construct`, `System.Data.SqlServer.Internal.ClrLevelContext` — which have no counterpart, and the shim's public frames are named after its own members, which match Framework's only where the member is the one that throws.

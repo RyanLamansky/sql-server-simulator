@@ -100,3 +100,5 @@ Every refusal is **Msg 6522 state 2** in the library's own wording — `hierarch
 The text stops at the repeated exception-type line, before the stack frames real appends, as the spatial family's does ([`spatial.md`](spatial.md)).
 
 `.Read` / `.Write` raise `NotSupportedException` if encountered.
+
+**Not modeled yet**: a `hierarchyid` built from bytes that aren't a valid OrdPath (`CAST(0x0000 AS hierarchyid)`) is Msg 6522 carrying 24000 on real as it reaches the client, and a value here that a client can't read (probed 2026-10-03 against SQL Server 2025).

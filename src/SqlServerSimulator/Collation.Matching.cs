@@ -96,7 +96,7 @@ internal abstract partial class Collation
     /// <c>N'cafe' + NCHAR(0x0301)</c> strips the mark.</para>
     /// <para>Real goes further and equates a standalone mark with <em>any</em>
     /// other standalone mark, which <c>CompareInfo</c> does not — see the
-    /// standalone-combining-mark entry in <c>docs/claude/backlog.md</c>.</para>
+    /// standalone-combining-mark entry in <c>docs/claude/collations.md</c>.</para>
     /// </remarks>
     internal int IndexOfElement(string set, ReadOnlySpan<char> element)
     {

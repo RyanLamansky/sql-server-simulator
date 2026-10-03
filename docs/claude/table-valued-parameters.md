@@ -169,11 +169,8 @@ The common idiom `IF type_id('dbo.MyType') IS NOT NULL DROP TYPE dbo.MyType` wor
 
 ## Fidelity gaps remaining
 
-- **Table-type parameters outside `CREATE PROCEDURE`** — real accepts one in a scalar `CREATE FUNCTION` parameter list and in an `sp_executesql` parameter declaration, raising the same Msg 352 when `READONLY` is missing; the simulator's parameter-type parsers there don't consult `Schema.TableTypes`, so both report **Msg 243** (`Type <name> is not a defined system type.`).
-- **Inline non-unique `INDEX` clause** — Msg 102 in v1; real SQL Server accepts it.
-  Adding it via the shared parser would close the gap for both `DECLARE @t TABLE` and `CREATE TYPE`.
+- **Table-type parameters outside `CREATE PROCEDURE`** — real accepts one in a `CREATE FUNCTION` parameter list, scalar or table-valued, and in an `sp_executesql` parameter declaration, raising the same Msg 352 when `READONLY` is missing; the simulator's parameter-type parsers there don't consult `Schema.TableTypes`, so a scalar function and `sp_executesql` report Msg 2715 (`Cannot find data type tt.`) with Msg 2724 and, under `READONLY`, Msg 346, and an inline function's body reading the parameter is Msg 1087 (probed 2026-10-03 against SQL Server 2025).
 - **`IEnumerable<SqlDataRecord>`** as a TVP value source isn't accepted (SqlClient dependency / reflection path).
-- **`CREATE TYPE … FROM <basetype>`** (scalar UDT form) — not modeled; only the AS TABLE form ships.
 - **Constraint-name hashes** — clones embed the @t name in the hash.
   Real SQL Server's table-type clone names differ in suffix derivation; constraint-violation error wording byte-matches the wider quirks documented in CLAUDE.md (the `PK__#<hex>__<8hex>` shape uses the simulator's FNV-1a convention).
 - **TVP value-source column-name matching** — the simulator follows real SQL Server's positional binding (column names ignored) verbatim.

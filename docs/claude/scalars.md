@@ -502,6 +502,9 @@ Probed 2026-09-26 against SQL Server 2025; none is gated on the compatibility le
   NULL → NULL.
 - **`DIFFERENCE(s1, s2)`** — counts matching positions (0–4) between the two strings' SOUNDEX codes.
   Result `int`; NULL on either side → NULL.
+  **Divergence**: real scores from a code of its own rather than the two `SOUNDEX` results — `'xc'` and `'x'` share `X000` yet score 1 and 0 against `'abcd'` — and asymmetrically (`DIFFERENCE('x', '1')` is 0, `DIFFERENCE('1', 'x')` 3), so the position count matches real on most pairs but not all (re-checked 2026-10-03 against SQL Server 2025).
+  The best rule found (a 6,561-pair grid over first letters A and B, zero to three of the digits 1–3 and the empty string, probed 2026-09-28) fits 6,001 pairs with the *first* code's digits as the needle: equal codes score 4; otherwise a matching first letter scores 1, plus 3 when the first code's three padded digits occur in the second code's, else 2 when its last or first two do, else one per digit found searching left to right from the previous hit's own position (not past it).
+  Most misses have a repeated digit in the first code — `DIFFERENCE('aababab', 'babab')` (`A111`, `B110`) is 3 where the rule gives 2, `A112` against any `A12x` is 4 — and `DIFFERENCE('', x)` is 3 for a code with no digits, 2 for one or two and 0 for three, so padding and repeats are what the rule still gets wrong.
   Unlike SOUNDEX it accepts a `text` argument (implicitly converted to `varchar`) while refusing `ntext` / `image` — see *Legacy LOB arguments* above.
 - **`STR(float [, length [, decimals]])`** — right-aligned fixed-width numeric-to-string.
   Defaults: length 10, decimals 0.
@@ -990,6 +993,9 @@ The keyword reservation that comes with it is covered in [`grammar.md`](grammar.
 3. Numeric **range** — Msg 19301.
 4. **Flags** — Msg 19303.
 5. **Pattern** compilation — Msg 19300 / 19307 / 19308 / 19309.
+
+**Not modeled yet**: real's operand-type check covers the numeric arguments too, where the simulator converts them implicitly.
+`REGEXP_COUNT('abc', 'b', <start>)` is Msg 8116 on real for a `tinyint`, `decimal` / `numeric`, `money`, `float`, `bit`, `datetime` or `date` start position (`date` is Msg 529 here) and answers for an `int`, `smallint`, `bigint` or a string; the same holds for the start and occurrence arguments of `REGEXP_INSTR`, `REGEXP_SUBSTR` and `REGEXP_REPLACE`, each naming its own argument number (probed 2026-10-03 against SQL Server 2025).
 
 **Msg 19301** wording is `'<ARG>' value should be greater than or equal to <min> but '<value>' is provided in '<FUNCTION>' function.`, and real's `<min>` isn't always the bound it enforces:
 

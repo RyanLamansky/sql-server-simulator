@@ -306,6 +306,8 @@ The text scans that read a stored definition — the determinism and precision c
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named.
   Custom names matching the prefix would report `is_system_named = true` incorrectly.
   Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.
+- **A variable in a `CREATE TABLE` column's `DEFAULT`** (`DECLARE @v int = 1; CREATE TABLE t (a int DEFAULT @v)`) is Msg 112 on real (`Variables are not allowed in the CREATE TABLE statement.`) and accepted here (probed 2026-10-03 against SQL Server 2025).
+- **Sparse column sets** (`cs xml COLUMN_SET FOR ALL_SPARSE_COLUMNS`) raise `NotSupportedException` at `CREATE TABLE`; real projects the set in `SELECT *` (`<a>5</a>` for one sparse column holding 5) and writes the sparse columns through it (probed 2026-10-03 against SQL Server 2025).
 
 ## EF Core integration
 

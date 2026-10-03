@@ -56,7 +56,7 @@ The views read them through `BuiltInResources.CatalogTables`, which appends them
 A `#temp` table's messages — Msg 515, Msg 2628 — name it as real does, by its name inside `tempdb`: the written name padded with underscores to 116 characters and twelve hex digits of a server-wide counter each local temp table's creation advances (`HeapTable.InternalName`, probed 2026-09-28), real's counter carrying its instance's history where this one starts at 1; a constraint conflict (Msg 547) names it bare, `table "#t"`.
 A table variable's internal name is `#` and eight hex digits of a negative object id — see [`table-variables.md`](table-variables.md#fidelity-gaps-remaining).
 
-**Divergences**: the catalog views and `OBJECT_NAME` list a `#temp` by its written name, where real lists that padded name; real also lists other sessions' `#temp` tables and every table variable, which don't appear here; and `EXEC tempdb..sp_help '#t'` is Msg 15009 here where real describes the table.
+**Divergences**: the catalog views and `OBJECT_NAME` list a `#temp` by its written name, where real lists that padded name; real also lists other sessions' `#temp` tables, every table variable and a `#temp` table's constraints (under their padded names), which don't appear here; and `EXEC tempdb..sp_help '#t'` is Msg 15009 here where real describes the table.
 
 ## Global temp tables (`##foo`)
 Instance-wide `ConcurrentDictionary<string, HeapTable> GlobalTempTables` on `Simulation`; routed by `BatchContext.TryResolveTable` via `IsGlobalTempName` (leading `##`, length ≥ 2 — bare `##` is a valid name, probe-confirmed).

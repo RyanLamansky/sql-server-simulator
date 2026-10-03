@@ -266,6 +266,8 @@ A body that doesn't compile keeps no plan, so the next call compiles and reports
 - **The walk still stops at a deferral raised mid-statement**, since the recovery scan can't tell where that statement ends: an `ALTER TABLE` of a table the batch creates (Msg 4902), and a binder error in a statement reading one (`CREATE TABLE t …; SELECT a FROM t WHERE a = CAST(1 AS xml)`, whose Msg 529 real defers).
   Real keeps compiling the statements after it, so an error past one surfaces here only when its statement runs — after the statements ahead of it have run (probed 2026-10-01 against SQL Server 2025).
   A syntax error (Msg 102 / 156) surfacing that way at least ends the batch (`EndsBatch`), as real's refusal would have, rather than the dispatch resuming inside the broken statement's tail.
+- **A refusal the walk raises that real defers with the statement's table or sequence.**
+  A DML `TOP` over a table the batch creates — a negative count's Msg 127, a percent over 100's Msg 1031, a fractional count's Msg 1060 — and a `NEXT VALUE FOR` in a derived table over a sequence the batch creates (Msg 11719) end the batch as it compiles here, where real defers the statement and runs the ones before it first (probed 2026-10-01 and 2026-10-03 against SQL Server 2025); the `SET` list's Msg 157 / 4108 defer already.
 
 ## Statement-terminating vs batch-aborting errors (unified continue-on-error)
 

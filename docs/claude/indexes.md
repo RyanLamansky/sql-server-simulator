@@ -617,7 +617,7 @@ Step *placement* still diverges from real's sampled max-diff algorithm; the valu
 An empty table yields a 0-row result set.
 Errors mirror real: unresolvable table → Msg 2501, unknown statistic → Msg 2767, NULL / unparseable argument → Msg 2560 (all probe-confirmed class/state).
 Only `WITH HISTOGRAM` is modeled, Msg 2528 following the rows unless `NO_INFOMSGS` joins it — the no-`WITH` three-result-set form and every other option (`STAT_HEADER` / `DENSITY_VECTOR` / `STATS_STREAM`) raise `NotSupportedException` naming the option.
-`STATS_STREAM` (the serialized histogram blob SMO's `Statistic.Stream` reads) remains a deferred gap — see [`backlog.md`](backlog.md).
+`STATS_STREAM` (the serialized histogram blob SMO's `Statistic.Stream` reads) isn't modeled yet — see [`backlog.md`](backlog.md).
 
 ## EF Migrations integration
 
@@ -706,7 +706,7 @@ The option rules follow the target, so an `ALTER INDEX` resolves its index befor
 
 ## Fidelity gaps
 
-- **Columnstore residue**: the row-group DMVs (`sys.column_store_row_groups`, `sys.dm_db_column_store_row_group_physical_stats` …) aren't modeled (a `vector` or `json` column rides a clustered columnstore index as its other columns do, and is refused as a rowstore or statistics key — see [`vector.md`](vector.md), [`json-type.md`](json-type.md)).
+- **Columnstore residue**: the row-group DMVs (`sys.column_store_row_groups`, `sys.dm_db_column_store_row_group_physical_stats` …) and `sys.column_store_segments` (Msg 208 here; empty on real over a database without a columnstore index) aren't modeled (a `vector` or `json` column rides a clustered columnstore index as its other columns do, and is refused as a rowstore or statistics key — see [`vector.md`](vector.md), [`json-type.md`](json-type.md)).
 
 - **`filter_definition` edge cases**: the column is rendered (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)) and byte-matches SQL Server across the common filtered grammar, but two literal-typing corners diverge: an integer literal larger than `int` range renders `(5000000000)` where SQL Server types it as `numeric` and renders `(5000000000.)` (trailing dot), and a scale-0 decimal literal likewise omits the trailing dot.
   Both are rare in filtered predicates.
@@ -715,6 +715,7 @@ The option rules follow the target, so an `ALTER INDEX` resolves its index befor
   Real may instead scan a narrower nonclustered index that covers the query and so return that index's order (`SELECT a FROM t` over `UNIQUE (a)` on a heap), which isn't modeled.
 - *(the one-clustered-per-table rule now covers every path — see [One clustered index per table](#grammar). The constraint paths raise **Msg 1902 State 3** naming the existing clustered index, except an all-inline CREATE TABLE pair, which real gives its own **Msg 8112** since neither entry exists yet to name; the multiple-PRIMARY-KEY check (Msg 8110) outranks both.)*
 - **Option names in a CREATE TABLE / CREATE TYPE / ALTER TABLE ADD column clause** — standalone `CREATE INDEX`, `ALTER INDEX … REBUILD` and `ALTER TABLE … ADD CONSTRAINT` refuse a name the statement doesn't take as real does (`IndexOptionStatement`), but the column-level parser those three statements share with table variables doesn't know which statement it serves, so a constraint or inline index there accepts any name — real refuses an unknown one naming `CREATE TABLE` / `CREATE TYPE` / `ALTER TABLE`, and `CREATE TABLE` refuses `SORT_IN_TEMPDB` / `ONLINE` / `MAXDOP` / `DROP_EXISTING` too (probed 2026-09-26).
+- **A filtered index whose predicate is a bare parenthesized column** (`WHERE (a)`) is Msg 102 near the statement's end on real and Msg 4145 here (probed 2026-10-03 against SQL Server 2025).
 - **DROP INDEX comma list not atomic**: each entry resolves independently.
   Real SQL Server rolls back all on any failure.
 - **Indexed-view battery gate order**: each rejection below was probed in isolation, so real's precedence when one view violates several at once isn't pinned — a body with both DISTINCT and TOP may name the other one on real.

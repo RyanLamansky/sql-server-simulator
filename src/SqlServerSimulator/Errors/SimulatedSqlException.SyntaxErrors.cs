@@ -314,7 +314,7 @@ partial class SimulatedSqlException
     /// Reached by every client that rolls back to a savepoint it believes it
     /// took — a transaction-aborting error discards the savepoints along with
     /// the transaction, and Django's <c>atomic</c> block hits exactly this on
-    /// the way out (see the Django notes in <c>docs/claude/backlog.md</c>).
+    /// the way out (see the transaction-aborting error class in <c>docs/claude/transactions.md</c>).
     /// </remarks>
     internal static SimulatedSqlException CannotRollBackUnknownSavepoint(string name) =>
         new($"Cannot roll back {name}. No transaction or savepoint of that name was found.", 6401, 16, 1);

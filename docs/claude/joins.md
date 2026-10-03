@@ -101,6 +101,9 @@ With ≥1 equi-key, RIGHT / FULL route straight to `HashEquiJoin` (their unmatch
   LEFT keeps its NULL-extend-on-no-match semantic on both paths.
 - The driving set is shrunk first by the WHERE pushdown below, which is what makes the per-outer inner seek win for the common filter-then-join shape.
 
+**Building the hash over the smaller side was measured and moved nothing** (2026-08-05): an INNER join at fold level 1 over two un-narrowed base tables, building over WWI's 70,510-row `Sales.Invoices` rather than the 228,265-row `Sales.InvoiceLines`, read 102.2 ms min against the control's 97.4, allocation unchanged at 74 MB — both arrangements compute one key per row of *both* sides, which is the cost the build's row-list appends hide behind.
+The `COUNT(DISTINCT …)` per group over that join that prompted it decomposes as 10.6 ms for the bare scan, 49.3 with the join, 81.4 with the `GROUP BY` and 102.5 with the distinct sets, against live's 54 ms at DOP 8, so what is left there is grouping and intra-query parallelism rather than the join strategy.
+
 ### WHERE pushdown into every base-table source
 
 `NarrowJoinSources` (`Selection.Execution.IndexSeek.cs`, run by all three projectors — row, aggregate and window) attempts the single-source equality / range seek against the statement's WHERE excluders for **each** base-table FROM source, not just the leftmost.
