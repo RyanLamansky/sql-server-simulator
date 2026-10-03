@@ -439,6 +439,42 @@ The saving is the statement's parse, a fixed cost per statement plus a share per
 A batch that compiled cleanly is remembered under its key and schema version (`compiledBatches`), and a repeat of it skips the walk outright, so a repeated `MERGE` batch parses its statement once per run, not twice — a thread-time profile of the 10-row identity batch puts `CompileBatch` under 1%.
 The walk still runs where the memo can't help — a first execution, a batch that resolved a `#temp` table, one holding an `OPTION (RECOMPILE)` inlining failure — and there a plan recorded by a run would rarely exist yet; the walk also binds on a throwaway context whose statements record nothing, so it stays a parse.
 
+### EF Core functional workload
+
+Measured 2026-10-02 with four classes of EF Core 10.0.2's own `EFCore.SqlServer.FunctionalTests` — `NorthwindMiscellaneousQuerySqlServerTest` (942 tests), `GearsOfWarQuerySqlServerTest` (1,195), `GraphUpdatesSqlServerIdentityTest` (1,788) and `NorthwindBulkUpdatesSqlServerTest` (180) — one class per process, through the in-process connection (the local `.vs/efcore-shakedown` harness's `EFSIM_INPROC=1` mode) and once over the TDS endpoint.
+The plan cache is not where that workload's time goes; this records where it does, because the answer decided which passes changed.
+
+**The simulator is the minority of a class's wall time.**
+A class run is 14–41 s, of which about 10 s is the test platform discovering the suite's 51k tests, and in the query classes 11–20 s is the JIT compiling the dynamic methods EF Core builds for its shapers and the tests' expected results.
+The simulator's own share was isolated by capturing every ADO.NET call a class made and replaying the stream against a fresh `Simulation` in a process of its own (a scratch harness, not in the repo): cold — one replay, JIT included, which is what a class run pays — and warm, a later pass in the same process.
+
+| Class | Run, before → after | Simulator cold | Simulator warm |
+|---|---|---|---|
+| Northwind miscellaneous | 41.3 s → 38.7 s | 5.60 s → 4.64 s | 2.86 s → 1.06 s |
+| Northwind bulk updates | 14.9 s → 13.6 s | 3.80 s → 3.08 s | 1.45 s → 0.68 s |
+| Graph updates | 23.1 s → 23.1 s | 2.84 s → 2.91 s | 0.67 s → 0.65 s |
+| Gears of War | 28.6 s → 28.8 s | 4.23 s → 4.23 s | 3.13 s → 3.13 s |
+
+Gears of War's 3 s is real time: its seed script waits `WAITFOR DELAY '00:00:03'` for full-text population, which the simulator honors.
+The cold-minus-warm gap, 2.2–2.8 s in every class, is the runtime's tiered JIT over the simulator's code — about 0.6 s compiling some 4,500 methods at tier 0, the rest running them unoptimized — and dominates the graph-updates class, whose 19k commands cost ~30 µs each warm.
+A replayed run checks behavior too: each command's results hash into a digest, and every kept change left all four digests byte-identical.
+
+Four passes were kept, each measured by replay A/B (alternating builds, one case per process), and each documented on its declaration:
+
+- the scan prefilter pushes `[NOT] LIKE` (`IsSourceLocalLike`), so a `LIKE N'A%'` leftmost source of a cross join feeds its 30 rows to the join rather than 689k tuples;
+- a joined `UPDATE` / `DELETE` prefilters its target (`PrefilterMutationTarget`), so EF Core's `ExecuteDelete` over a navigation runs its `APPLY` body only for target rows the WHERE keeps;
+- the semi-join switch keys EF Core's NULL-matching correlation (`TryClassifyNullMatchingCorrelation`);
+- `Token.LineAt` counts with a vectorized scan — every statement asks for its starting line, so a long seed script paid a scan of its prefix per statement.
+
+**The sampling profiler misled repeatedly.**
+EventPipe's sampler stops a thread at a safe point, so a sample lands where the code polls, not where it spends: `Thread.PollGC`, `Monitor.Enter_Slowpath`, `Array.Copy`, `DateTime.UtcNow` and `Stopwatch.GetTimestamp` led the leaf lists while the work sat in their callers.
+Three changes chasing such leaves measured flat and were dropped: `SourceColumnMemo` growing by doubling with a next-slot cursor (allocation −8%, time ±1%), `LockManager` pulsing its gate only when a waiter waits (0%), and settling a sorted projection's `NEXT VALUE FOR` walk once per plan (±1%, where the sampler said 4%).
+What the replay's per-statement timing found instead — a handful of statements carrying most of two classes' warm time — is what the kept passes answer.
+
+Two runtime-level levers were measured and are not the library's to pull: ReadyToRun-compiling the simulator cut the cold replay by ~0.5 s in two classes and nothing in the third, but slowed the warm passes 8–30% and doubles the assembly (7 MB → 14.5 MB); `DOTNET_TieredPGO=0` cut the graph-updates cold replay 28%, a setting of the consumer's process.
+
+Over TDS a `SELECT 1` round trip is ~180 µs against ~8 µs in process (real SQL Server 2025 on the same machine: ~320 µs), which is the whole difference in the one class it shows in: graph updates runs ~11 s of tests in process and ~17 s over the wire, while the query classes, whose time is EF Core's own, run the same either way.
+
 ## Not modeled / future
 
 - **DML plans for the declined shapes** — `INSERT … SELECT`, a `MERGE` from a query, the joined `UPDATE` / `DELETE` forms, DML through a view, and a statement holding a subquery.

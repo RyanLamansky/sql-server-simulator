@@ -49,6 +49,9 @@ The WHERE has to split into *correlation equi-conjuncts* — `<bare column of th
 Everything that reads the row set as a whole declines, because the body's answer would then depend on *which* rows the correlation kept: `DISTINCT`, `TOP` / `OFFSET` / `FETCH`, `GROUP BY` / `HAVING`, an aggregate, a window, an `ORDER BY`.
 So does a correlated reference anywhere but those conjuncts — a residual conjunct, a JOIN `ON`, the projection — and a key pair whose types `TryPromoteComparableKeyTypes` won't settle (the same gate the equi-join hash buckets rest on, so a bucket means what evaluating the `=` meant: collation folding, ANSI trailing-space padding, cross-width promotion).
 
+A correlation conjunct may also be the **NULL-matching** form EF Core writes when it compares two nullable columns, `i = o OR (i IS NULL AND o IS NULL)` (either order within each part), over a bare body column `i` and a bare enclosing column `o`.
+It is TRUE exactly when the two are equal or both NULL — a NULL on one side only leaves UNKNOWN OR FALSE — so the key plan keys it like an equality whose NULL is one more key value (`SemiJoinShape.NullMatches`): the build keeps that component's NULL and a NULL outer probes for it, where a plain `=`'s NULL keys nothing.
+
 **The switch is adaptive**, mirroring `EquiJoinSeekOrHash`'s philosophy.
 Below the threshold nothing changes, so a small outer never pays a build it can't amortize.
 Past it, an inner the per-row path **seeks** (a lone base table with a key / index leading on a correlation column) keeps running per row until the outer reaches a quarter of that table's row count — the build costs one pass over the whole table while the per-row path pays only for the rows each key selects, the same conservative 4:1 crossover the join planner uses.
@@ -59,8 +62,8 @@ An error raised while building declines the same way rather than surfacing, so t
 
 **NULL rules** (probed against SQL Server 2025 as the four forms × NULL outer key × NULL inner key × NULL inner projection matrix, and identical to what the per-row path already answered):
 
-- A row whose **inner** key has a NULL component is dropped while building — `NULL = NULL` is UNKNOWN, so it equi-matches no outer key, a NULL one included.
-- A NULL **outer** key selects no inner row: `EXISTS` false, `NOT EXISTS` true, `IN` false, `NOT IN` true.
+- A row whose **inner** key has a NULL component is dropped while building — `NULL = NULL` is UNKNOWN, so it equi-matches no outer key, a NULL one included — except in a NULL-matching component, where the NULL is a key.
+- A NULL **outer** key selects no inner row: `EXISTS` false, `NOT EXISTS` true, `IN` false, `NOT IN` true — except in a NULL-matching component, where it selects the inner rows whose key is NULL there.
 - `IN` / `NOT IN` carry **`sawNull` per correlation key**, not globally: a NULL projection under key *k* turns a miss into UNKNOWN only for the outer rows whose key is *k*. A key no inner row carries is a definite miss (false / true) however many NULLs the other keys' groups hold.
 
 ### A NULL left side settles on the inner's emptiness

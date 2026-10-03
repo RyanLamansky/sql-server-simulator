@@ -1531,6 +1531,20 @@ internal abstract class BooleanExpression : ExpressionNode
     }
 
     /// <summary>
+    /// Exposes the subject, pattern and optional escape when this predicate is
+    /// a <c>LIKE</c> or <c>NOT LIKE</c>; returns false otherwise. Lets the join
+    /// scan prefilter push a pattern match on one source's column below the
+    /// join.
+    /// </summary>
+    internal virtual bool TryGetLikeOperands([NotNullWhen(true)] out Expression? subject, [NotNullWhen(true)] out Expression? pattern, out Expression? escape)
+    {
+        subject = null;
+        pattern = null;
+        escape = null;
+        return false;
+    }
+
+    /// <summary>
     /// Exposes the value and the inclusive lower / upper bounds when this
     /// predicate is a non-negated <c>value BETWEEN lower AND upper</c>; returns
     /// false otherwise (<c>NOT BETWEEN</c> is the non-contiguous complement, so
@@ -3205,6 +3219,14 @@ internal abstract class BooleanExpression : ExpressionNode
             probe.IsSeekColumn(this.left) && probe.IsValueSide(this.right) && !probe.ConvertsColumn(this.left, this.right)
             && (this.right is not Value { Constant: { IsNull: false, Type.Category: SqlTypeCategory.String } pattern }
                 || pattern.AsString is not ['%' or '_', ..]);
+
+        internal override bool TryGetLikeOperands([NotNullWhen(true)] out Expression? subject, [NotNullWhen(true)] out Expression? pattern, out Expression? escape)
+        {
+            subject = this.left;
+            pattern = this.right;
+            escape = this.escape;
+            return true;
+        }
 
         public override bool? Run(RuntimeContext runtime)
         {

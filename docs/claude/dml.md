@@ -21,7 +21,7 @@ What stays per verb is where the verbs differ:
 - **Target scan is seek-narrowed** when the single-table WHERE carries an indexable equality / IN / cross-column OR / range (`Selection.SeekMutationTarget`), instead of walking the whole heap — the same per-`Heap` seek cache the SELECT path and FK enforcement use.
   The mutation loop re-runs the full WHERE per row (residual filter) and X-locks only the rows it commits, so it's a pure narrowing; positioned (`WHERE CURRENT OF`) mutations keep the scan.
   See [`indexes.md`](indexes.md#update--delete-target-seeking).
-  The multi-table (joined) form's **target** isn't seek-narrowed either — its *other* sources are, see [Joined row sources](#joined-row-sources) below; `MERGE` narrows its target via loop inversion (see its section below).
+  The multi-table (joined) form's **target** isn't seek-narrowed either — its *other* sources are, and the target's row stream is prefiltered, see [Joined row sources](#joined-row-sources) below; `MERGE` narrows its target via loop inversion (see its section below).
 - Multi-table syntax (`UPDATE alias SET ... FROM <sources> [WHERE]`, `DELETE FROM alias FROM <sources> [WHERE]`) — the EF7+ `ExecuteUpdate`/`ExecuteDelete` shape.
   Target identified by leading-identifier match against each source's `FromSource.Qualifier`; missing match → Msg 208, and a table the clause reads twice under aliases neither of which the target names → Msg 8154 (probed 2026-10-01 against SQL Server 2025).
 - **Joined UPDATE/DELETE: each unique target row processed exactly once.**
@@ -123,8 +123,11 @@ A FROM source *aliased* as the target's name still wins the match, so `UPDATE u 
   Every source is gated by the read path's `IsSeekNarrowingTarget` — the leftmost included, unlike the read path's unconditional leftmost attempt, since extending that to a mutation would change which key ranges a SERIALIZABLE reader locks around a write.
 - **No reorder.** The written join order stands; the target is identified by slot index.
 
-**The target source is left exactly as it enumerates.**
-The write pipeline reaches each affected row through an address side-channel keyed by the `byte[]` instances that enumerator yields, and settles its lock / undo bookkeeping per row it touches, so narrowing it would be a change to the write path rather than to a read.
+**The target source enumerates every row, and a prefilter drops the ones the WHERE rejects on the target alone.**
+The write pipeline reaches each affected row through an address side-channel keyed by the `byte[]` instances that enumerator yields, and settles its lock / undo bookkeeping per row it touches, so a seek on the target would be a change to the write path rather than to a read.
+The scan prefilter ([`indexes.md`](indexes.md#the-scan-prefilter-a-join-source-no-key-can-seek)) isn't: `PrefilterMutationTarget` wraps the stream *after* the address wrapper, so it passes on the instances the wrapper recorded, in the order it read them, and the write path's waits, locks, `TOP` cap and rejudging all happen for qualifying rows only, as before.
+What a rejected row stops costing is its drive through the join — an `APPLY` body's execution included — before the residual WHERE turned it away; the measured EF Core shape is on `PrefilterMutationTarget`.
+It also stops raising what only its partners raise, which is real's behavior: an `APPLY` body dividing by a rejected row's zero is no Msg 8134 on SQL Server 2025 (probed 2026-10-02), where the unfiltered walk raised it.
 
 **Halloween** needs no separate protection here: the statement collects its whole affected-row set before it writes anything, so a source reading the target table reads the pre-statement rows however many times it runs — which is what makes running it once identical to running it per target row, and is what real does anyway.
 Probe-confirmed against SQL Server 2025: `UPDATE t SET v = d.m FROM #t t JOIN (SELECT MAX(v) AS m FROM #t) d ON 1 = 1` over `(10, 20, 30)` leaves every row at `30`, the CTE spelling and the grouped per-key spelling agree, `UPDATE t SET v = u.v FROM #t t JOIN #t u ON u.id = t.id + 1` reads the pre-update partner, and a `NEWID()` inside the joined source draws **once per target row** (five distinct values over five rows), which the per-row re-draw of a merged body's drawn columns is what preserves (see [`joins.md`](joins.md#deferred-sources-materialize-once-per-enumeration)).

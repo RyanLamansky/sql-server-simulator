@@ -383,6 +383,7 @@ partial class Simulation
 
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
         sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses, context.Connection.StatementIo);
+        sources = Selection.PrefilterMutationTarget(sources, targetIndex, where, context.Batch);
 
         var seen = new HashSet<(int Page, int Slot)>();
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();

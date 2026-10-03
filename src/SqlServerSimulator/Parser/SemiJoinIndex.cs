@@ -27,7 +27,7 @@ namespace SqlServerSimulator.Parser;
 /// <c>IN</c> compares its left side against. <c>EXISTS</c> ignores it.
 /// </para>
 /// </remarks>
-internal sealed class SemiJoinShape(Selection keyPlan, Expression[] outerKeys, SqlType[] keyTypes, HeapTable? seekableInner)
+internal sealed class SemiJoinShape(Selection keyPlan, Expression[] outerKeys, SqlType[] keyTypes, bool[] nullMatches, HeapTable? seekableInner)
 {
     /// <summary>The inner plan with its correlation equalities stripped, projecting the key columns (and the IN value column when there is one).</summary>
     internal readonly Selection KeyPlan = keyPlan;
@@ -47,6 +47,14 @@ internal sealed class SemiJoinShape(Selection keyPlan, Expression[] outerKeys, S
 
     /// <summary>The type each correlation pair compares under — <c>SqlType.Promote</c>'s target, so a hash bucket means what evaluating the <c>=</c> meant.</summary>
     internal readonly SqlType[] KeyTypes = keyTypes;
+
+    /// <summary>
+    /// Per correlation pair, whether a NULL on both sides matches — the
+    /// <c>i = o OR (i IS NULL AND o IS NULL)</c> form — rather than matching
+    /// nothing as a plain <c>=</c>'s NULL does. Such a component keeps a NULL
+    /// in the key on both the build and the probe side.
+    /// </summary>
+    internal readonly bool[] NullMatches = nullMatches;
 
     /// <summary>Whether <see cref="KeyPlan"/> projects the inner <c>IN</c> column after its key columns; an <c>IN</c> site declines the transform without it.</summary>
     internal bool ProjectsValue => this.KeyPlan.Schema.Length > this.KeyTypes.Length;
@@ -72,9 +80,11 @@ internal sealed class SemiJoinGroup
 /// The hash semi / anti-join structure one execution of a
 /// <see cref="SemiJoinShape.KeyPlan"/> builds: the key tuples the inner
 /// produced, each carrying its own <see cref="SemiJoinGroup"/> when the plan
-/// projects an <c>IN</c> value column. A row whose key has any NULL component
+/// projects an <c>IN</c> value column. A row whose key has a NULL component
 /// is dropped while building — <c>NULL = NULL</c> is UNKNOWN, so such a row can
-/// equi-match no outer key, including a NULL one.
+/// equi-match no outer key, including a NULL one — unless the component
+/// matches NULLs (<see cref="SemiJoinShape.NullMatches"/>), where the NULL is
+/// the key value a NULL outer probes for.
 /// </summary>
 internal sealed class SemiJoinIndex
 {
@@ -134,6 +144,11 @@ internal sealed class SemiJoinIndex
             var value = outerKeys[i].Run(runtime);
             if (value.IsNull)
             {
+                if (shape.NullMatches[i])
+                {
+                    values[i] = value;
+                    continue;
+                }
                 hasNull = true;
                 return true;
             }
@@ -300,6 +315,7 @@ internal static class SemiJoinProbe
         var resultSet = shape.KeyPlan.Execute(batch, resolver);
         var columns = RowDecoder.ColumnsFor(resultSet.Schema);
         var keyTypes = shape.KeyTypes;
+        var nullMatches = shape.NullMatches;
         var projectsValue = shape.ProjectsValue;
         var index = new SemiJoinIndex();
         foreach (var rowBytes in resultSet.RowBytes)
@@ -311,7 +327,13 @@ internal static class SemiJoinProbe
                 var value = RowDecoder.DecodeColumn(columns, rowBytes, i);
                 if (value.IsNull)
                 {
-                    // NULL never equi-matches, so this row belongs to no key.
+                    // A NULL-matching component keys the NULL itself; a plain
+                    // equality's NULL never matches, so the row belongs to no key.
+                    if (nullMatches[i])
+                    {
+                        values[i] = value;
+                        continue;
+                    }
                     nullComponent = true;
                     break;
                 }

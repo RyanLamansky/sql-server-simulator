@@ -278,6 +278,7 @@ A source whose sargable conjunct lands on a column **no key or index leads** can
 It runs only for a multi-source FROM — with one source the residual WHERE already is the scan's filter, so there is nothing to save.
 
 The pushed shapes are the same sargable whitelist the seek's own intake uses: a comparison (`=` / `>` / `>=` / `<` / `<=`, either operand order) or a `BETWEEN` whose column side is a bare reference into this source (`TryIdentifyIndexableColumn`) and whose value side is row-invariant for this execution (`IsStableValueSide` — a literal, a variable, a pure conversion or arithmetic over those, or an enclosing-scope column; a **sibling** of the same FROM declines, since it isn't readable before the join runs).
+`[NOT] LIKE` joins them on the same terms — the subject a bare column of this source, the pattern and any `ESCAPE` stable — although the seek positions on none of it, because it is what EF Core emits for `StartsWith` / `EndsWith` / `Contains`.
 That structural whitelist is what makes the push provably source-local: both operand shapes are enumerated node by node, so unlike an `Expression.VisitColumnReferences` walk it can't miss a reference buried in a container the walk doesn't descend into.
 Every name a pushed conjunct can read is therefore either this source's own column or one the enclosing resolver answers, and the filter resolves through a one-slot tuple over that single source with the enclosing resolver behind it.
 
@@ -295,6 +296,8 @@ What it buys is the join's own strategy switch: a driving table cut to a handful
 
 Measured (WWI, `Sales.Orders JOIN Sales.OrderLines` with a one-week `BETWEEN` on the unindexed `OrderDate` — the shape real also has no index for): **77.3 ms → 26.6 ms** (~2.9×) and 59.2 MB → 8.4 MB allocated, against ~64 ms on live SQL Server.
 A year-wide range on the same shape (38% of the table, so the filter keeps filtering but the join still hashes) went 92.0 → 74.4 ms.
+
+A joined `UPDATE` / `DELETE` prefilters its **target** too (`PrefilterMutationTarget`), after the write pipeline's address wrapper, so the filter passes on the very row instances the write path keys its addresses by — see [`dml.md`](dml.md#joined-row-sources).
 
 ### Catalog views: the row cache's indexes
 

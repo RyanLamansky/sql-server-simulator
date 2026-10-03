@@ -58,17 +58,16 @@ abstract class Token
     /// Msg 113 at end-of-input), whose reported line comes from the tokenizer's
     /// own position rather than the last-consumed token.
     /// </summary>
-    public static int LineAt(string command, int index)
-    {
-        var line = 1;
-        var prefix = command.AsSpan(0, index);
-        foreach (var c in prefix)
-        {
-            if (c == '\n')
-                line++;
-        }
-        return line;
-    }
+    /// <remarks>
+    /// The count is a vectorized <see cref="MemoryExtensions.Count{T}(ReadOnlySpan{T}, T)"/>
+    /// rather than a per-character loop: every statement of a batch asks for
+    /// its starting line, so a long script pays a scan of its whole prefix per
+    /// statement. EF Core's Northwind seed — 830 single-row <c>INSERT</c>s in
+    /// one 300 KB batch — spends a quarter to a third of its first execution in
+    /// a per-character count.
+    /// </remarks>
+    public static int LineAt(string command, int index) =>
+        1 + command.AsSpan(0, index).Count('\n');
 
     // This is used for various error messages even though tokens are not directly accessible to user code.
     public sealed override string ToString() => command.Substring(StartIndex, length);

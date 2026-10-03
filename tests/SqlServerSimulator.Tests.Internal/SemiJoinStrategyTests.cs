@@ -140,6 +140,94 @@ public sealed class SemiJoinStrategyTests
         Contains("SemiJoin:Build(keys=1,groups=5)", trace);
     }
 
+    // ---- the NULL-matching correlation EF Core writes for nullable columns ----
+
+    /// <summary>
+    /// <paramref name="outerRows"/> outer rows and a 40-row inner whose
+    /// correlation key is nullable on both sides: every seventh outer key and
+    /// every ninth inner key is NULL.
+    /// </summary>
+    private static SimulatedDbConnection OpenNullable(int outerRows)
+    {
+        var connection = new Simulation().CreateDbConnection();
+        connection.Open();
+        using var setup = connection.CreateCommand();
+        setup.CommandText = $"""
+            create table outer_rows (id int not null primary key, k int null, v int null);
+            create table inner_rows (k bigint null, v int null, tag int not null);
+            declare @i int = 1;
+            while @i <= {outerRows} begin
+                insert outer_rows values (@i, case when @i % 7 = 0 then null else @i % 50 end, case when @i % 13 = 0 then null else @i % 5 end);
+                set @i += 1;
+            end;
+            set @i = 0;
+            while @i < 40 begin
+                insert inner_rows values (case when @i % 9 = 0 then null else @i end, case when @i % 8 = 0 then null else @i % 4 end, @i);
+                set @i += 1;
+            end
+            """;
+        _ = setup.ExecuteNonQuery();
+        return connection;
+    }
+
+    private static readonly string[] NullMatchingPredicates =
+    [
+        "exists (select 1 from inner_rows i where i.k = o.k or (i.k is null and o.k is null){0})",
+        "exists (select 1 from inner_rows i where (o.k is null and i.k is null) or o.k = i.k{0})",
+        "not exists (select 1 from inner_rows i where i.k = o.k or (i.k is null and o.k is null){0})",
+        "o.v in (select i.v from inner_rows i where (i.k = o.k or (i.k is null and o.k is null)){0})",
+        "o.v not in (select i.v from inner_rows i where (i.k = o.k or (i.k is null and o.k is null)){0})",
+    ];
+
+    [TestMethod]
+    public void NullMatchingCorrelation_Builds()
+    {
+        using var connection = OpenNullable(400);
+        foreach (var predicate in NullMatchingPredicates)
+        {
+            var (trace, executions, _) = Run(connection, $"select id from outer_rows o where {string.Format(System.Globalization.CultureInfo.InvariantCulture, predicate, "")}");
+            IsTrue(trace.Exists(static entry => entry.StartsWith("SemiJoin:Build(keys=1,", StringComparison.Ordinal)), predicate);
+            AreEqual(SemiJoinProbe.PerRowEvaluationsBeforeBuild, executions, predicate);
+        }
+    }
+
+    /// <summary>
+    /// The built key set answers every row as the per-row execution does — a
+    /// NULL outer key matching exactly the NULL inner keys, a NULL on one side
+    /// only matching nothing — checked against the same predicate made to stay
+    /// per row by a residual that reads the outer row.
+    /// </summary>
+    [TestMethod]
+    public void NullMatchingCorrelation_AnswersAsPerRow()
+    {
+        using var connection = OpenNullable(400);
+        foreach (var predicate in NullMatchingPredicates)
+        {
+            var built = Ids(connection, string.Format(System.Globalization.CultureInfo.InvariantCulture, predicate, ""));
+            var perRow = Ids(connection, string.Format(System.Globalization.CultureInfo.InvariantCulture, predicate, " and o.id = o.id"));
+            AreEqual(perRow, built, predicate);
+        }
+
+        static string Ids(SimulatedDbConnection connection, string predicate)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = $"select string_agg(cast(id as varchar(max)), ',') within group (order by id) from outer_rows o where {predicate}";
+            return command.ExecuteScalar() as string ?? "";
+        }
+    }
+
+    [TestMethod]
+    public void NullTestOnAnotherColumn_StaysPerRow()
+    {
+        // `o.id is null` doesn't pair with the equality's `o.k`, so the OR isn't
+        // the NULL-matching form and the conjunct reads the outer row as a residual.
+        using var connection = OpenNullable(400);
+        var (trace, executions, _) = Run(connection,
+            "select id from outer_rows o where exists (select 1 from inner_rows i where i.k = o.k or (i.k is null and o.id is null))");
+        IsEmpty(trace);
+        AreEqual(400L, executions);
+    }
+
     // ---- the switch stays out of the way ----
 
     [TestMethod]

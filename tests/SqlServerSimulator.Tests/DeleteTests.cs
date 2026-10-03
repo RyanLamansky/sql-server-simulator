@@ -252,4 +252,27 @@ public sealed class DeleteTests
         while (reader.Read()) totals.Add(reader.GetDecimal(0));
         CollectionAssert.AreEqual(new[] { 50m }, totals);
     }
+
+    /// <summary>
+    /// A target row the WHERE rejects on its own columns never drives the join,
+    /// so an <c>APPLY</c> body that would raise for it isn't run for it: SQL
+    /// Server 2025 deletes the two qualifying rows without Msg 8134 for the
+    /// third row's zero (probed 2026-10-02), and the joined UPDATE answers the
+    /// same.
+    /// </summary>
+    [TestMethod]
+    public void Delete_JoinedApply_RowTheWhereRejects_NeverRunsTheBody()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table line (id int not null, qty int not null);
+            insert line values (1, 10), (2, 20), (20, 0)
+            """);
+
+        AreEqual(2, simulation.ExecuteNonQuery(
+            "update h set qty = 5 from line h cross apply (select 100 / h.qty as q) a where h.id < 10"));
+        AreEqual(2, simulation.ExecuteNonQuery(
+            "delete l from line l cross apply (select 1 / l.qty as q) a where l.id < 10"));
+        CollectionAssert.AreEqual(new[] { 20 }, ReadInts(simulation.CreateCommand("select id from line")));
+    }
 }

@@ -324,4 +324,84 @@ public sealed class ScanPrefilterTests
             JoinDiagnostics.Sink = null;
         }
     }
+
+    // ---- LIKE pushes like a comparison does ----
+
+    private static SimulatedDbConnection OpenNamed()
+    {
+        var connection = OpenJoined();
+        Exec(connection, """
+            create table who (id int not null primary key, name nvarchar(20) null);
+            insert who values (1, N'Alfred'), (2, N'Ana'), (3, N'Bob'), (4, null);
+            create table pat (p nvarchar(20) not null);
+            insert pat values (N'A%')
+            """);
+        return connection;
+    }
+
+    [TestMethod]
+    public void LikeOnJoinColumn_PrefiltersTheScan()
+    {
+        using var connection = OpenNamed();
+        foreach (var (where, expected) in new[]
+        {
+            ("w.name like N'A%'", 60),
+            ("w.name not like N'A%'", 40),
+            ("w.name like N'A!%' escape N'!'", (object?)null),
+        })
+        {
+            var (trace, rows) = Run(connection, $"select sum(l.qty) from who w join line l on l.id = w.id where {where}");
+            Contains("ScanPrefilter(who,1)", trace, where);
+            AreEqual(expected, rows[0], where);
+        }
+    }
+
+    [TestMethod]
+    public void LikeWithSiblingPattern_Declines()
+    {
+        using var connection = OpenNamed();
+        var (trace, rows) = Run(connection, "select count(*) from who w join pat on w.name like pat.p");
+        DoesNotContain("ScanPrefilter(who,1)", trace);
+        AreEqual(2, rows[0]);
+    }
+
+    // ---- a joined UPDATE / DELETE's target is prefiltered too ----
+
+    [TestMethod]
+    public void JoinedDeleteTarget_Prefiltered()
+    {
+        using var connection = OpenJoined();
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            Exec(connection, "delete l from line l cross apply (select top (1) h.tag from hdr h where h.id <= l.id order by h.id) a where l.qty >= 30");
+            Contains("ScanPrefilter(line,1)", IndexSeekDiagnostics.Sink);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+
+        var (_, rows) = Run(connection, "select sum(qty) from line");
+        AreEqual(30, rows[0]);
+    }
+
+    [TestMethod]
+    public void JoinedUpdateTarget_Prefiltered()
+    {
+        using var connection = OpenJoined();
+        IndexSeekDiagnostics.Sink = [];
+        try
+        {
+            Exec(connection, "update h set tag = l.qty from hdr h join line l on l.id = h.id where h.made > '2020-02-15'");
+            Contains("ScanPrefilter(hdr,1)", IndexSeekDiagnostics.Sink);
+        }
+        finally
+        {
+            IndexSeekDiagnostics.Sink = null;
+        }
+
+        var (_, rows) = Run(connection, "select sum(tag) from hdr");
+        AreEqual(7 + 7 + 40 + 50, rows[0]);
+    }
 }

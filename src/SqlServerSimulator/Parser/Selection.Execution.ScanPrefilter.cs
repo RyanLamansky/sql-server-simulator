@@ -36,15 +36,25 @@ partial class Selection
     /// seek the inner per row instead of hashing all of it.
     /// <para>
     /// Returns <see langword="null"/> when no conjunct qualifies. Only the
-    /// <b>sargable</b> shapes are pushed — a comparison or <c>BETWEEN</c> whose
-    /// column side is a bare reference into this source
-    /// (<see cref="TryIdentifyIndexableColumn"/>) and whose value side is
-    /// row-invariant for this execution (<see cref="IsStableValueSide"/>, which
-    /// admits a literal, a variable and an enclosing-scope column but rejects a
-    /// sibling's). That structural whitelist is what makes the push provably
-    /// source-local: both operand shapes are enumerated node by node, so every
-    /// name the pushed conjunct can read is either this source's own column or
-    /// one the enclosing resolver answers.
+    /// <b>sargable</b> shapes are pushed — a comparison, <c>BETWEEN</c> or
+    /// <c>[NOT] LIKE</c> whose column side is a bare reference into this source
+    /// (<see cref="TryIdentifyIndexableColumn"/>) and whose value side — every
+    /// bound, the pattern and its escape — is row-invariant for this execution
+    /// (<see cref="IsStableValueSide"/>, which admits a literal, a variable and
+    /// an enclosing-scope column but rejects a sibling's). That structural
+    /// whitelist is what makes the push provably source-local: both operand
+    /// shapes are enumerated node by node, so every name the pushed conjunct
+    /// can read is either this source's own column or one the enclosing
+    /// resolver answers.
+    /// </para>
+    /// <para>
+    /// <c>LIKE</c> is pushed because it is what EF Core emits for
+    /// <c>StartsWith</c> / <c>EndsWith</c> / <c>Contains</c>, and the seek
+    /// planner positions on none of it: EF Core's own
+    /// <c>NorthwindMiscellaneousQuerySqlServerTest</c> crosses <c>Orders</c>
+    /// with itself under <c>WHERE o.CustomerID LIKE N'A%'</c>: unpushed, the
+    /// join reads 689k tuples (~315 ms per execution); pushed, <c>o</c> arrives
+    /// as its 30 rows (~20 ms).
     /// </para>
     /// <para>
     /// <b>The pushed conjunct stays in the enclosing WHERE.</b> The prefilter is
@@ -82,6 +92,50 @@ partial class Selection
         return source.WithFilteredRows(PrefilteredRows(source, [.. pushed], batch, outerResolver));
     }
 
+    /// <summary>
+    /// The prefilter above applied to a joined <c>UPDATE</c> / <c>DELETE</c>'s
+    /// <b>target</b>, after the write pipeline has wrapped it with its address
+    /// side-channel: the filter passes on the very <c>byte[]</c> instances the
+    /// wrapper recorded, in the order it read them, so the write path — which
+    /// row addresses it resolves, which qualifying rows it waits on and locks,
+    /// what a <c>TOP</c> keeps — sees exactly the rows it saw before, minus
+    /// rows a WHERE conjunct on the target alone rejects, which it skipped
+    /// anyway. What changes is what those rejected rows cost: unfiltered, each
+    /// one drives the join to its partners, an <c>APPLY</c> body's execution
+    /// included, before the WHERE turns it away.
+    /// <para>
+    /// EF Core's <c>ExecuteDelete</c> / <c>ExecuteUpdate</c> over a navigation
+    /// emits exactly that shape — the filter on the target, a join or
+    /// <c>APPLY</c> to what it navigates — and its
+    /// <c>NorthwindBulkUpdatesSqlServerTest</c> deletes from <c>[Order
+    /// Details]</c> under <c>WHERE o.OrderID &lt; 10276</c> with a
+    /// <c>CROSS APPLY</c> body per row, which runs for all 2,155 target rows
+    /// unfiltered (~120 ms per statement) and for the 74 the filter keeps
+    /// (~1 ms).
+    /// </para>
+    /// <para>
+    /// Like the read path's, the push can only remove rows the WHERE would
+    /// have rejected, and a conjunct that raises keeps its row for the residual
+    /// to decide. A rejected row's partners go unevaluated, so an error only
+    /// they would raise — an <c>APPLY</c> body dividing by the row's zero —
+    /// doesn't surface, which is real's answer: SQL Server 2025
+    /// deletes and updates the qualifying rows of that shape without Msg 8134
+    /// (probed 2026-10-02). Skip mode declines, since nothing enumerates there.
+    /// </para>
+    /// </summary>
+    internal static FromSource[] PrefilterMutationTarget(FromSource[] sources, int targetIndex, BooleanExpression? where, BatchContext batch)
+    {
+        if (where is null || sources.Length < 2 || batch.IsSkipping)
+            return sources;
+        var conjuncts = new List<BooleanExpression>();
+        where.CollectConjuncts(conjuncts);
+        if (TryPrefilterJoinSource(sources[targetIndex], conjuncts, sources, batch, outerResolver: null) is not { } filtered)
+            return sources;
+        var narrowed = (FromSource[])sources.Clone();
+        narrowed[targetIndex] = filtered;
+        return narrowed;
+    }
+
     // Whether a top-level conjunct compares a bare column of THIS source against
     // a value that is fixed for one execution of the plan — the only shapes the
     // prefilter pushes. Every other conjunct (a sibling comparison, a subquery,
@@ -91,7 +145,19 @@ partial class Selection
             ? IsColumnAgainstStableValue(source, equalLeft, equalRight, planSources)
             : conjunct.TryGetRangeOperands(out var rangeLeft, out _, out var rangeRight)
                 ? IsColumnAgainstStableValue(source, rangeLeft, rangeRight, planSources)
-                : IsSourceLocalBetween(source, conjunct, planSources);
+                : conjunct.TryGetLikeOperands(out var subject, out var pattern, out var escape)
+                    ? IsSourceLocalLike(source, subject, pattern, escape, planSources)
+                    : IsSourceLocalBetween(source, conjunct, planSources);
+
+    // The LIKE arm: the subject must be this source's bare column — a pattern
+    // reading the row would be no filter on the source alone — and the pattern
+    // and escape fixed for the execution. Like every pushed shape it is
+    // NULL-rejecting on the column: a NULL subject answers UNKNOWN for LIKE and
+    // NOT LIKE alike.
+    private static bool IsSourceLocalLike(FromSource source, Expression subject, Expression pattern, Expression? escape, FromSource[] planSources)
+        => TryIdentifyIndexableColumn(source, subject, out _)
+        && IsStableValueSide(pattern, source, allowCorrelatedColumnValue: true, planSources)
+        && (escape is null || IsStableValueSide(escape, source, allowCorrelatedColumnValue: true, planSources));
 
     // The BETWEEN arm of the shape test: both bounds have to be stable, since the
     // predicate reads them together.

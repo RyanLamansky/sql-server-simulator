@@ -89,6 +89,7 @@ internal sealed partial class Selection
         var innerKeys = new List<Expression>();
         var outerKeys = new List<Expression>();
         var keyTypes = new List<SqlType>();
+        var nullMatches = new List<bool>();
         var residual = new List<BooleanExpression>();
         foreach (var conjunct in conjuncts)
         {
@@ -97,6 +98,14 @@ internal sealed partial class Selection
                 innerKeys.Add(innerKey);
                 outerKeys.Add(outerKey);
                 keyTypes.Add(keyType);
+                nullMatches.Add(false);
+            }
+            else if (TryClassifyNullMatchingCorrelation(parseBatch, sources, conjunct, ResolveColumnType, out innerKey, out outerKey, out keyType))
+            {
+                innerKeys.Add(innerKey);
+                outerKeys.Add(outerKey);
+                keyTypes.Add(keyType);
+                nullMatches.Add(true);
             }
             else
             {
@@ -168,7 +177,7 @@ internal sealed partial class Selection
                 isAssignmentOnly: false,
                 intoTarget: null,
                 readColumnSink: null);
-            return new SemiJoinShape(keyPlan, [.. outerKeys], [.. keyTypes], SeekableInnerTable(sources, innerKeys));
+            return new SemiJoinShape(keyPlan, [.. outerKeys], [.. keyTypes], [.. nullMatches], SeekableInnerTable(sources, innerKeys));
         }
         catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
         {
@@ -245,6 +254,86 @@ internal sealed partial class Selection
 
         (innerKey, outerKey, keyType) = (column, value, common);
         return true;
+    }
+
+    /// <summary>
+    /// Recognizes the NULL-matching correlation EF Core writes when it compares
+    /// two nullable columns, <c>i = o OR (i IS NULL AND o IS NULL)</c> (either
+    /// operand order in each part), where <c>i</c> is a bare column of this
+    /// body and <c>o</c> a bare enclosing column. Over the two columns' values
+    /// it is TRUE exactly when both are equal or both are NULL, and UNKNOWN or
+    /// FALSE otherwise, so the key plan can key it like an equality whose NULL
+    /// is one more key value — where the plain equality's NULL keys nothing.
+    /// <para>
+    /// EF Core's <c>NorthwindMiscellaneousQuerySqlServerTest</c> correlates an
+    /// <c>EXISTS</c> over a <c>TOP (100) … ORDER BY</c> derived table this way:
+    /// per row, the derived table's sort runs for each of 830 outer rows
+    /// (~255 ms per statement); keyed, one run answers the rest (~40 ms).
+    /// </para>
+    /// </summary>
+    private static bool TryClassifyNullMatchingCorrelation(
+        BatchContext parseBatch,
+        FromSource[] sources,
+        BooleanExpression conjunct,
+        Func<MultiPartName, SqlType> resolveColumnType,
+        out Expression innerKey,
+        out Expression outerKey,
+        out SqlType keyType)
+    {
+        innerKey = null!;
+        outerKey = null!;
+        keyType = null!;
+        var disjuncts = new List<BooleanExpression>();
+        conjunct.CollectDisjuncts(disjuncts);
+        if (disjuncts.Count != 2)
+            return false;
+        var equality = disjuncts[0].TryGetEqualityOperands(out _, out _) ? disjuncts[0] : disjuncts[1];
+        var nullTests = ReferenceEquals(equality, disjuncts[0]) ? disjuncts[1] : disjuncts[0];
+        if (!TryClassifyCorrelationEquality(parseBatch, sources, equality, resolveColumnType, out var inner, out var outer, out var common)
+            || outer is not Reference outerColumn)
+        {
+            return false;
+        }
+
+        var tests = new List<BooleanExpression>();
+        nullTests.CollectConjuncts(tests);
+        if (tests.Count != 2)
+            return false;
+        var sawInner = false;
+        var sawOuter = false;
+        foreach (var test in tests)
+        {
+            if (!test.TryGetNullTest(out var subject, out var isNotNull) || isNotNull || subject is not Reference tested)
+                return false;
+            if (!sawInner && SameLocalColumn(sources, tested, (Reference)inner))
+            {
+                sawInner = true;
+                continue;
+            }
+            if (sawOuter || ResolvesLocally(sources, tested.ReferencedName) != false
+                || !string.Equals(tested.ReferencedName.ToString(), outerColumn.ReferencedName.ToString(), StringComparison.Ordinal))
+            {
+                return false;
+            }
+            sawOuter = true;
+        }
+
+        (innerKey, outerKey, keyType) = (inner, outer, common);
+        return sawInner && sawOuter;
+    }
+
+    // Whether two references bind to the same column of this body's sources.
+    private static bool SameLocalColumn(FromSource[] sources, Reference a, Reference b)
+    {
+        try
+        {
+            var first = FindSourceColumn(sources, a.ReferencedName);
+            return first.SourceIndex >= 0 && first == FindSourceColumn(sources, b.ReferencedName);
+        }
+        catch (SimulatedSqlException)
+        {
+            return false;
+        }
     }
 
     // The column side has to be a bare reference into this body's own sources;
