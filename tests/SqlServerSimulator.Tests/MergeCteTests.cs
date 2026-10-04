@@ -104,7 +104,7 @@ public sealed class MergeCteTests
     {
         // Real table `c` with different shape exists; the CTE binding takes
         // precedence in the MERGE source resolution (same shadowing semantic
-        // SELECT has via Selection.cs's CTE-first lookup).
+        // SELECT has via Selection.FromClause.cs's CTE-first lookup).
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("""
             create table tgt (id int primary key, v int);

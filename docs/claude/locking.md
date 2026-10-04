@@ -396,7 +396,7 @@ Skipped for temp tables / table variables / trigger `INSERTED` / `DELETED` pseud
 
 **Sch-M** — every DDL site: `DROP {TABLE,VIEW,FUNCTION,PROCEDURE,TYPE, SEQUENCE,TRIGGER}` after the lookup; `TRUNCATE TABLE`; `ALTER TABLE`.
 
-**Data locks** — `BatchContext.AcquireDataLockIfApplicable(table, hints, isWrite)` from FROM-source resolution in `Selection.cs` and INSERT / UPDATE / DELETE / MERGE target / MERGE bare-table-source sites.
+**Data locks** — `BatchContext.AcquireDataLockIfApplicable(table, hints, isWrite)` from FROM-source resolution in `Selection.FromClause.cs` and INSERT / UPDATE / DELETE / MERGE target / MERGE bare-table-source sites.
 
 **Row locks (X)** — `BatchContext.AcquireRowLockTxScoped(table, pageIndex, slotIndex, Exclusive)` from each `Heap.Insert` / `Heap.DeleteAt` callsite inside INSERT / UPDATE / DELETE / MERGE (the four user-DML statement kinds).
 Update is a delete+insert pair, so both the old RID and the new RID get row-X.

@@ -18,7 +18,7 @@ The edge-probe harness (`.vs/edge-probe`, `--linked`) maps a loopback `lb` on bo
 
 ## Reads
 
-Four-part-name `srv.db.schema.t` references in FROM (parsed in [`Selection.cs::ParseSingleFromSource`](../../src/SqlServerSimulator/Parser/Selection.cs)), and a MERGE's `USING` source, route through [`BatchContext.TryResolveLinkedServerTable`](../../src/SqlServerSimulator/Parser/BatchContext.Resolution.cs): leading segment → `Simulation.ActiveLinkedServers`, then 2nd/3rd/4th segments → the remote's table or view (direct in-process dict access, matching real SQL Server's "metadata at compile, data at execute" linked-server contract).
+Four-part-name `srv.db.schema.t` references in FROM (parsed in [`Selection.FromClause.cs::ParseSingleFromSource`](../../src/SqlServerSimulator/Parser/Selection.FromClause.cs)), and a MERGE's `USING` source, route through [`BatchContext.TryResolveLinkedServerTable`](../../src/SqlServerSimulator/Parser/BatchContext.Resolution.cs): leading segment → `Simulation.ActiveLinkedServers`, then 2nd/3rd/4th segments → the remote's table or view (direct in-process dict access, matching real SQL Server's "metadata at compile, data at execute" linked-server contract).
 A `sys` or `INFORMATION_SCHEMA` name reads the remote's catalog view, its columns found by running it once as `OPENQUERY` does.
 
 Execution opens a fresh `SimulatedDbConnection` on the remote, in the named database, and issues `SELECT <the columns the query names> FROM [db].[schema].[t]` through the remote's full pipeline: parser, planner, lock manager, exception factories, session state.
@@ -34,7 +34,7 @@ A read inside a local transaction needs no distributed transaction — only a `B
 It's a FROM / JOIN / derived-table source that runs a verbatim query string on a linked server and returns its **first result set** as a rowset, and a write target (see [Writes](#writes)).
 
 Grammar (probed against SQL Server 2025): exactly two arguments — a bare **identifier** (plain or bracketed) naming the linked server, and a bare **string literal** (`'...'` / `N'...'`, doubled-quote `''` escaping handled by the tokenizer) carrying the pass-through query.
-Parsed in [`Selection.LinkedServer.cs::ParseOpenQueryArguments`](../../src/SqlServerSimulator/Parser/Selection.LinkedServer.cs); dispatched from a `ReservedKeyword { Keyword: OpenQuery }` arm in `Selection.cs::ParseSingleFromSourceCore` (OPENQUERY is a reserved keyword, so it never rides the Name-token rowset dispatch used by OPENJSON / STRING_SPLIT), from a keyword check in `ParseLateralFromSource` so it works in the JOIN / APPLY position too, and from the INSERT / UPDATE / DELETE target positions.
+Parsed in [`Selection.LinkedServer.cs::ParseOpenQueryArguments`](../../src/SqlServerSimulator/Parser/Selection.LinkedServer.cs); dispatched from a `ReservedKeyword { Keyword: OpenQuery }` arm in `Selection.FromClause.cs::ParseSingleFromSourceCore` (OPENQUERY is a reserved keyword, so it never rides the Name-token rowset dispatch used by OPENJSON / STRING_SPLIT), from a keyword check in `ParseLateralFromSource` so it works in the JOIN / APPLY position too, and from the INSERT / UPDATE / DELETE target positions.
 Syntax errors fire **before** server resolution:
 
 - Server slot a literal / number / dotted `a.b` → **Msg 102** (the token after the identifier isn't `,`).

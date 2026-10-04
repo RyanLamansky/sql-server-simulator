@@ -32,7 +32,7 @@ A comma list written out of join order (`FROM t51, t29, t31, t55 WHERE a51 = b31
 
 ## Exposed names
 
-Two sources in one FROM clause may not share an exposed name (`AddSource` in `Selection.cs`, probed 2026-09-26 against SQL Server 2025).
+Two sources in one FROM clause may not share an exposed name (`AddSource` in `Selection.FromClause.cs`, probed 2026-09-26 against SQL Server 2025).
 An unaliased table, view or catalog view exposes the last part of its name, so `t`, `dbo.t` and `s.t` all collide; an alias, and a CTE referenced without one, is a correlation name; an unaliased rowset function (`OPENJSON`) exposes nothing.
 Which of the three messages real raises depends on whether each side is a correlation name, and a MERGE whose source shares its target's exposed name raises its own.
 The check runs as each source joins the list, across parenthesized groups and APPLY alike, so the first collision in written order is the one reported.
@@ -49,7 +49,7 @@ The group is a *grammar grouping*, not a derived-table scope: `B` and `C` keep t
 It changes associativity from the default left-deep fold — the interior `ON c1` binds first, then `ON c2` joins the accumulated left spine against the *whole group*, and an outer-join miss NULL-fills **every** group member (both `B` and `C` read as typed NULL).
 Semantics probed against SQL Server 2025.
 
-**Parsing** (`Selection.cs`).
+**Parsing** (`Selection.FromClause.cs`).
 `NextSourceIsJoinGroup` peeks one token past the source's opening `(`: a `SELECT` marks a derived table and `VALUES` a table-value constructor (both keep their existing paths); anything else is a join group.
 `ParseJoinGroup` recurses into `ParseExplicitJoinChain` over the *same* flat `sources[]` / `joins[]` lists, so the group's members occupy their own slots.
 Two positions accept a group:
@@ -238,7 +238,7 @@ See [`dml.md`](dml.md#match-strategies).
 ### A non-APPLY source's arguments can't read a sibling
 
 SQL Server binds a FROM source's own arguments in a scope holding **none** of that FROM's sources — only `CROSS` / `OUTER APPLY` makes a right side lateral.
-So `FROM t JOIN STRING_SPLIT(t.csv, ',') s ON …` is **Msg 4104** ("The multi-part identifier "t.csv" could not be bound"), class 16 state 1, and the simulator raises it from `RejectSiblingReferences` (`Selection.cs`).
+So `FROM t JOIN STRING_SPLIT(t.csv, ',') s ON …` is **Msg 4104** ("The multi-part identifier "t.csv" could not be bound"), class 16 state 1, and the simulator raises it from `RejectSiblingReferences` (`Selection.FromClause.cs`).
 
 Probed against SQL Server 2025 (2026-08-05) across `STRING_SPLIT`, `OPENJSON`, an inline and a multi-statement TVF and a `VALUES` constructor, as a `JOIN` / `CROSS JOIN` / comma / `LEFT JOIN` right side, as the leftmost source naming a *later* sibling, as one generator naming another's output column, as an argument naming the generator's own alias, and inside a joined `UPDATE`'s FROM: every one is Msg 4104 on the written multi-part name.
 Two neighbours settle the shape of the rule:

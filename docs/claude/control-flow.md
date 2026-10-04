@@ -151,7 +151,7 @@ So deferral is scoped to a missing object, and the matrix is:
 The simulator has no compile/run split — it resolves inline with parsing — so it reproduces this two ways:
 
 - **Placeholder parse-continuation (the primary mechanism).**
-  A skip-mode FROM-clause table miss (`Selection.cs`, the `TryResolveTable` fail) substitutes a **`FromSource.DeferredPlaceholder`** (`FromSource.IsPlaceholder`) instead of throwing Msg 208; a skip-mode schema-qualified function miss (`Expression.cs`, `ParseDeferredCallAndDiscard`) parses-and-discards the argument list and yields a placeholder `Value` instead of throwing Msg 4121.
+  A skip-mode FROM-clause table miss (`Selection.FromClause.cs`, the `TryResolveTable` fail) substitutes a **`FromSource.DeferredPlaceholder`** (`FromSource.IsPlaceholder`) instead of throwing Msg 208; a skip-mode schema-qualified function miss (`Expression.cs`, `ParseDeferredCallAndDiscard`) parses-and-discards the argument list and yields a placeholder `Value` instead of throwing Msg 4121.
   The statement then parses to completion and is discarded whole (skip mode gates its execution).
   This is what stops the **orphaned-fragment cascade**: without it, an `EXISTS (SELECT … FROM <missing>)` inside a skipped `IF` condition throws mid-parse and the recovery scan orphans the trailing THEN / `ELSE` / `END` into bare statements (spurious Msg 102 / 156, and over the wire an infinite error stream — an SSMS Query Store probe hits exactly this).
   With the placeholder the inner IF parses its full THEN+ELSE and the whole thing skip-completes.

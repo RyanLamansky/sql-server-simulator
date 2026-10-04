@@ -78,7 +78,7 @@ CREATE XML INDEX name ON table(col)
   Empty selection → typed NULL, and an expression real doesn't type as at most one item is [Msg 2389](#static-cardinality-and-the-msg-2389-family) at parse.
   `GetSqlType` returns the resolved target type, so projection / view-output schemas are exact (not the old nvarchar(MAX) stub).
 - **`.nodes(xquery)`** — rowset-producing, valid only in a FROM / APPLY source position.
-  `Selection.cs::ParseLateralFromSource` detects the `xmlexpr.nodes(...) [AS] alias(column)` shape (the parsed object name's leaf is `nodes` with a following `(`), re-parses the target as an expression, and builds a correlated single-column (`xml`) lateral plan (`Selection.XmlNodes.cs`).
+  `Selection.FromClause.cs::ParseLateralFromSource` detects the `xmlexpr.nodes(...) [AS] alias(column)` shape (the parsed object name's leaf is `nodes` with a following `(`), re-parses the target as an expression, and builds a correlated single-column (`xml`) lateral plan (`Selection.XmlNodes.cs`).
   A variable or parameter target — `FROM @x.nodes(…)`, `CROSS APPLY @x.nodes(…)` — takes the same plan through a `.nodes(` lookahead on the `@` token.
   The row column is a node reference only the four methods and `IS [NOT] NULL` may read: anything else is **Msg 493**, and a `CAST` / `CONVERT` of it **Msg 525** naming the target's base type — inside an `IS NULL` test too — both ahead of the type rules its `xml` type would otherwise break, in the select list, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY` and `ON` alike (probed 2026-09-25 and 2026-09-28).
   Each row references its node in place — see [the value model](#the-value-model-documents-and-fragments).
