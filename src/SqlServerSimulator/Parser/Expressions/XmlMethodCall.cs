@@ -163,6 +163,7 @@ internal sealed class XmlMethodCall : Expression
             throw SimulatedSqlException.IncorrectSetOptions(context.Batch.CurrentStatement.StatementVerb, setOptions);
         }
 
+        _ = context.IndexedViewShapeCollector?.UsesXmlMethod = true;
         var isValue = method == XmlMethod.Value;
 
         // `value` takes two arguments and the other three one; any other

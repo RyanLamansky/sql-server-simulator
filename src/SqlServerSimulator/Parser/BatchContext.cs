@@ -976,6 +976,15 @@ internal sealed partial class BatchContext
     public bool SuppressDiagnosticsResolution;
 
     /// <summary>
+    /// Set on the batch a view's or inline function's body binds in where a
+    /// statement references it: real binds the stored definition there as it
+    /// does at <c>CREATE</c>, so a missing schema-qualified object reports
+    /// line 12 (see <see cref="UnresolvableObjectName"/>; probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    public bool BindsModuleDefinition;
+
+    /// <summary>
     /// Non-null when this batch is executing a trigger body. Holds the
     /// <c>INSERTED</c> / <c>DELETED</c> pseudo-tables (materialized from
     /// the firing DML's affected rows) so the trigger body's bare-name

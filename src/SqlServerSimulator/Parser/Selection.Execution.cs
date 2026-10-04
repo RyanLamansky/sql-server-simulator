@@ -116,12 +116,62 @@ internal sealed partial class Selection
         FromClause fromClause,
         bool distinct,
         Expression? topExpression,
-        List<AggregateExpression> aggregates)
+        List<AggregateExpression> aggregates,
+        List<WindowExpression> windows,
+        List<Expression> expressions)
     {
         if (parseBatch.Parser.IndexedViewShapeCollector is not { } shape)
             return;
 
         shape.HasDistinct |= distinct;
+        shape.HasHaving |= fromClause.Having is not null;
+        shape.HasGroupingSets |= fromClause.GroupingSets.Count > 1 || fromClause.GroupingSetsWritten;
+        shape.HasWindow |= windows.Count > 0;
+        foreach (var source in sources)
+        {
+            if (source.DerivedTable is { Correlated: false } derived)
+                shape.DerivedTableAlias ??= derived.Alias;
+            if (source.BackingView is { } referenced)
+                shape.ReferencedView ??= $"{referenced.Schema.Name}.{referenced.Name}";
+        }
+        var typeOf = ColumnTypeResolverFor(sources);
+        // A float or real column a WHERE or GROUP BY reads is Msg 1962.
+        void NoteImpreciseColumn(Expression expression)
+        {
+            if (shape.ImpreciseFilterColumn is null && expression is Reference reference)
+            {
+                try
+                {
+                    if (typeOf(reference.ReferencedName) is FloatSqlType or RealSqlType)
+                        shape.ImpreciseFilterColumn = reference.ReferencedName.Leaf;
+                }
+                catch (SimulatedSqlException)
+                {
+                }
+            }
+        }
+        foreach (var excluder in fromClause.Excluders)
+            VisitAll(excluder, NoteImpreciseColumn);
+        foreach (var grouping in fromClause.AllGroupingExpressions)
+            VisitAll(grouping, NoteImpreciseColumn);
+        // A grouped view projects each GROUP BY expression (Msg 8660), and a
+        // projection over an aggregate's result is Msg 8668.
+        if (fromClause.AllGroupingExpressions.Count > 0)
+        {
+            foreach (var grouping in fromClause.AllGroupingExpressions)
+            {
+                var display = grouping.DebugDisplay();
+                if (!expressions.Exists(projected => Unaliased(projected).DebugDisplay() == display))
+                    shape.GroupingExpressionNotProjected = true;
+            }
+        }
+        foreach (var projected in expressions)
+        {
+            var inner = Unaliased(projected);
+            if (inner is AggregateExpression)
+                continue;
+            VisitAll(inner, expression => shape.ExpressionOverAggregate |= expression is AggregateExpression);
+        }
         shape.HasTopOrOffset |= topExpression is not null
             || fromClause.OffsetExpression is not null
             || fromClause.FetchExpression is not null;
@@ -129,11 +179,8 @@ internal sealed partial class Selection
 
         foreach (var join in joins)
         {
-            if (join.Kind is JoinKind.Left or JoinKind.Right or JoinKind.Full)
-            {
-                shape.HasOuterJoin = true;
-                break;
-            }
+            shape.HasApply |= join.Kind is JoinKind.CrossApply or JoinKind.OuterApply;
+            shape.HasOuterJoin |= join.Kind is JoinKind.Left or JoinKind.Right or JoinKind.Full;
         }
 
         // Self-join: two FROM sources resolving to the same base table. Real
@@ -164,12 +211,43 @@ internal sealed partial class Selection
             shape.Aggregates.Add(aggregate.Kind);
             if (aggregate.Kind == AggregateKind.Sum
                 && aggregate.Operand is { } operand
-                && operand.ResultIsNullable(operandNullability))
+                && SumOperandIsNullable(operand, operandNullability))
             {
                 shape.SumsNullableExpression = true;
             }
         }
+
+        static Expression Unaliased(Expression expression) => expression is NamedExpression named ? named.Inner : expression;
     }
+
+    /// <summary>
+    /// Whether a <c>SUM</c>'s operand can be NULL for Msg 8662: arithmetic over
+    /// operands none of which can is not, which real accepts (<c>SUM(v * 2)</c>
+    /// over a <c>NOT NULL</c> column, probed 2026-10-04 against SQL Server
+    /// 2025); anything else answers as its result metadata does.
+    /// </summary>
+    private static bool SumOperandIsNullable(Expression operand, NullabilityContext nullability)
+    {
+        if (operand is not TwoSidedExpression)
+            return operand.ResultIsNullable(nullability);
+        var shape = new NodeShape();
+        operand.Describe(shape);
+        foreach (var side in shape.ChildNodes)
+        {
+            if (side is Expression sideExpression && SumOperandIsNullable(sideExpression, nullability))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>Calls <paramref name="visitor"/> on every expression at or under <paramref name="node"/>.</summary>
+    private static void VisitAll(ExpressionNode node, Action<Expression> visitor) =>
+        node.Walk((visited, _) =>
+        {
+            if (visited is Expression expression)
+                visitor(expression);
+            return true;
+        });
 
     /// <summary>
     /// Column-nullability lookup across the FROM sources for
@@ -666,6 +744,8 @@ internal sealed partial class Selection
         var (s, c) = FindSourceColumn(sources, name);
         if (s != -1)
         {
+            if (sources[s].BackingTable is { RefusesLegacyLobReads: true } && sources[s].Columns[c].Type.IsLegacyLob)
+                throw SimulatedSqlException.LegacyLobColumnInPseudoTable();
             // A HeapColumn can carry its MAX-ness in MaxLength while its .Type
             // stays a length-0 "value-width" variant (catalog-view columns
             // like sys.sql_modules.definition are declared this way). Fold that
@@ -1452,7 +1532,7 @@ internal sealed partial class Selection
         MultiPartName? intoTarget,
         Dictionary<int, ColumnReadTarget>? readColumnSink)
     {
-        RecordIndexedViewShape(parseBatch, sources, joins, fromClause, distinct, topExpression, aggregates);
+        RecordIndexedViewShape(parseBatch, sources, joins, fromClause, distinct, topExpression, aggregates, windows, expressions);
 
         RehomeAggregatesOverOuterScope(parseBatch, sources, aggregates, parseBatch.Parser.OuterTypeResolver ?? scope.OuterTypeResolver);
 

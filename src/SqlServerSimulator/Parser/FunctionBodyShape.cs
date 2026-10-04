@@ -101,7 +101,24 @@ internal sealed class FunctionBodyShape
     /// dispatched. No-ops when <paramref name="batch"/> isn't a function-body
     /// bind, which is every call site's fast path.
     /// </summary>
-    public static void NoteSideEffect(BatchContext batch, string operatorName, byte state)
+    public static void NoteSideEffect(BatchContext batch, string operatorName, byte state) =>
+        NoteSideEffect(batch, operatorName, state, batch.FunctionBodyShape is { TokenLines: true } ? batch.Parser.Token?.LineNumber ?? 1 : batch.CurrentStatement.StartLine);
+
+    /// <summary>
+    /// Set for a definition parsed outside the dispatch loop — an inline
+    /// function's query, a return table's column list — whose refusals stand
+    /// at the line of the token that raised them (probed 2026-10-04 against
+    /// SQL Server 2025).
+    /// </summary>
+    public bool TokenLines;
+
+    /// <summary>
+    /// <see cref="NoteSideEffect(BatchContext, string, byte)"/> for an operator
+    /// standing on a line of its own rather than at a statement's start — the
+    /// <c>END TRY</c>, <c>BEGIN CATCH</c> and <c>END CATCH</c> delimiters,
+    /// each refused where it stands (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    public static void NoteSideEffect(BatchContext batch, string operatorName, byte state, int line)
     {
         if (batch.FunctionBodyShape is not { } shape)
             return;
@@ -114,8 +131,15 @@ internal sealed class FunctionBodyShape
             state = ContextConnectionState;
         }
 
-        shape.Violations.Add((batch.CurrentStatement.StartLine, SimulatedSqlException.SideEffectingOperatorInFunction(operatorName, state)));
+        shape.Violations.Add((line, SimulatedSqlException.SideEffectingOperatorInFunction(operatorName, state)));
     }
+
+    /// <summary>
+    /// Records a body-shape refusal other than Msg 443 at
+    /// <paramref name="line"/>, reported among the shape violations.
+    /// </summary>
+    public static void NoteRefusal(BatchContext batch, SimulatedSqlException refusal, int line) =>
+        batch.FunctionBodyShape?.Violations.Add((line, refusal));
 
     /// <summary>
     /// Real's state on Msg 443 for a statement a SQLCLR function runs on its

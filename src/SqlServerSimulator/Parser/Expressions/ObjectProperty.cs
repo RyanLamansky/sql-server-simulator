@@ -37,7 +37,9 @@ internal sealed class ObjectProperty : Expression
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
         var database = runtime.Batch.CurrentDatabase;
         var result = FindObject(database, id) is { } obj
-            ? EvaluateProperty(database, obj, prop)
+            ? obj is View view && prop.Equals("IsIndexable", StringComparison.OrdinalIgnoreCase)
+                ? Flag(runtime.Batch.Connection.Simulation.IsViewIndexable(runtime.Batch, view))
+                : EvaluateProperty(database, obj, prop)
             : TryFindConstraint(database, id, out var constraint)
                 ? EvaluateConstraintProperty(constraint, prop)
                 : BuiltInResources.TryResolveSystemObject(id, out var system)
@@ -281,6 +283,8 @@ internal sealed class ObjectProperty : Expression
             // default-constraint populator filters on `= 0`, so a NULL here
             // silently drops every DEFAULT constraint from a bacpac export.
             "ISEXTENDEDPROC" or "ISMSSHIPPED" or "ISQUEUE" or "ISREPLPROC" or "ISSYSTEMTABLE" => 0,
+            // A view's answer runs the indexed-view battery, which needs a
+            // batch to parse its body in; Run answers it before reaching here.
             "ISINDEXABLE" => obj switch
             {
                 HeapTable => 1,

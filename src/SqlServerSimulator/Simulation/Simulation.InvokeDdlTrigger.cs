@@ -165,7 +165,10 @@ partial class Simulation
                 end = Math.Min(NextStatementStart(batch.Parser), commandText.Length);
                 break;
         }
-        string Shaped(string text) => extent == CommandTextExtent.Statement ? text.TrimEnd().TrimEnd(';').TrimEnd() : text;
+        // A statement's own tokens end at its last one: the whitespace,
+        // comments and separators after it are no part of it (probed
+        // 2026-10-04 against SQL Server 2025 with a trailing comment).
+        string Shaped(string text) => extent == CommandTextExtent.Statement ? text[..EndOfLastToken(text)].TrimEnd(';').TrimEnd() : text;
         var statementText = end > start ? Shaped(commandText[start..end]) : string.Empty;
 
         // Server-scope triggers run ahead of the database's own for the same
@@ -416,12 +419,35 @@ partial class Simulation
             || ((create || alter) && (Is(1, "USER") || Is(1, "SEQUENCE")))
             || ((create || drop) && Is(1, "TYPE"))
             || (create && Is(1, "SYNONYM"))
-            || (drop && Is(1, "SCHEMA"))
+            || (drop && (Is(1, "SCHEMA") || Is(1, "STATISTICS")))
             || (alter && (Is(1, "AUTHORIZATION") || (Is(1, "DATABASE") && Is(2, "SCOPED"))))
             || (Is(1, "PARTITION") && (Is(2, "SCHEME") || (create && Is(2, "FUNCTION"))))
             || Is(1, "FULLTEXT")
             ? CommandTextExtent.ThroughSeparator
             : CommandTextExtent.Statement;
+    }
+
+    /// <summary>
+    /// The end of the last token in <paramref name="text"/> that is neither
+    /// whitespace nor a comment, or its length when it doesn't tokenize.
+    /// </summary>
+    private static int EndOfLastToken(string text)
+    {
+        var end = 0;
+        var index = 0;
+        try
+        {
+            while (Parser.Tokenizer.NextToken(text, ref index, Collation.Baseline) is { } token)
+            {
+                if (token is not (Parser.Tokens.Whitespace or Parser.Tokens.Comment))
+                    end = token.EndIndex;
+            }
+        }
+        catch (SimulatedSqlException)
+        {
+            return text.Length;
+        }
+        return end;
     }
 
     /// <summary>

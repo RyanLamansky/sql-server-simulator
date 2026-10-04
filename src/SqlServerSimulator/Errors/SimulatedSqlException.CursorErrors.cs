@@ -65,6 +65,14 @@ partial class SimulatedSqlException
         new("an INTO clause is not allowed in a cursor declaration.", 154, 15, 3);
 
     /// <summary>
+    /// Mimics SQL Server error 154 for a <c>USE</c> inside a procedure,
+    /// function or trigger body, raised as the body parses (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException UseNotAllowedInModule() =>
+        new("a USE database statement is not allowed in a procedure, function or trigger.", 154, 15, 1);
+
+    /// <summary>
     /// Msg 16949: a cursor variable read or assigned as a scalar —
     /// <c>SELECT @c = 1</c> (probed 2026-10-02 against SQL Server 2025).
     /// </summary>

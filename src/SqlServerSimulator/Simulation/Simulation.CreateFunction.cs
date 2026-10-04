@@ -79,8 +79,8 @@ partial class Simulation
         // Every error from here on names the function as its Procedure, as the
         // statement wrote it (probed 2026-09-25 against SQL Server 2025; see
         // the matching note in TryParseCreateView).
-        context.Batch.ErrorProcedureName = functionName.Leaf;
         RejectQualifiedModuleName(functionName, "FUNCTION");
+        context.Batch.ErrorProcedureName = functionName.Leaf;
         var schema = ResolveModuleSchema(context, functionName, isAlter);
 
         if (context.GetNextRequired() is not Operator { Character: '(' })
@@ -203,6 +203,10 @@ partial class Simulation
     {
         var returnVariableName = ((AtPrefixedString)context.Token!).Value;
         var returnVariableLine = context.Token.LineNumber;
+        // The return variable shares the parameters' namespace (probed
+        // 2026-10-04 against SQL Server 2025).
+        if (parameters.Exists(parameter => BatchContext.VariableNameComparer.Equals(parameter.Name, returnVariableName)))
+            throw SimulatedSqlException.VariableAlreadyDeclared(returnVariableName);
         context.MoveNextRequired(); // consume @r
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Table })
@@ -212,16 +216,35 @@ partial class Simulation
         // cursor advances past the closing `)`. The helper returns false in
         // skip mode AFTER consuming the column list — the body still needs
         // to be captured below.
+        // A side-effecting built-in in a column's default is refused as one
+        // in the body is (probed 2026-10-04 against SQL Server 2025), so the
+        // column list parses under a shape of its own, reported once the body
+        // has bound.
         var returnTableIndexes = new List<PendingInlineIndex>();
-        var hasResolvedColumns = TryParseTableVariableColumnsAndConstraints(
-            context,
-            "@" + returnVariableName,
-            out var outputColumns,
-            out var keyConstraints,
-            out var checkConstraints,
-            returnTableIndexes);
-        if (returnTableIndexes.Count > 0)
-            throw new NotSupportedException("An inline INDEX on a multi-statement function's return table isn't modeled.");
+        var returnTableShape = new FunctionBodyShape { TokenLines = true };
+        var enclosingShape = context.Batch.FunctionBodyShape;
+        context.Batch.FunctionBodyShape = returnTableShape;
+        bool hasResolvedColumns;
+        HeapColumn[] outputColumns;
+        KeyConstraint[] keyConstraints;
+        CheckConstraint[] checkConstraints;
+        try
+        {
+            hasResolvedColumns = TryParseTableVariableColumnsAndConstraints(
+                context,
+                "@" + returnVariableName,
+                out outputColumns,
+                out keyConstraints,
+                out checkConstraints,
+                returnTableIndexes);
+        }
+        finally
+        {
+            context.Batch.FunctionBodyShape = enclosingShape;
+        }
+        // An inline INDEX shapes nothing a read returns, so it is accepted and
+        // kept out of the catalog (real lists it in sys.indexes under the
+        // function).
         RenameAutoNamedConstraints(functionName.Leaf, "@" + returnVariableName, outputColumns, keyConstraints, checkConstraints);
 
         // Optional WITH-clause (SCHEMABINDING is captured for
@@ -287,6 +310,12 @@ partial class Simulation
         // created.
         RejectStatementAfterModuleBody(context, functionName.Leaf);
 
+        // A persisted computed column in the return table is refused whatever
+        // its expression, once the whole statement has been read (probed
+        // 2026-10-04 against SQL Server 2025).
+        if (hasResolvedColumns && Array.Find(outputColumns, static column => column is { Computed: not null, IsPersisted: true }) is { } persisted)
+            throw SimulatedSqlException.ComputedColumnCannotBePersisted(persisted.Name, "@" + returnVariableName);
+
         if (context.Batch.IsSkipping || !hasResolvedColumns)
             return true;
 
@@ -310,6 +339,13 @@ partial class Simulation
             keyConstraints, checkConstraints, bodyText,
             CountNewlines(commandText, 0, bodyStart), timestampColumnLine, commandText[bodyEnd..(bodyEnd + 3)]));
 
+        if (returnTableShape.Violations.Count > 0)
+        {
+            foreach (var (line, violation) in returnTableShape.Violations)
+                violation.ResolveDiagnostics(line, 0, functionName.Leaf);
+            throw SimulatedSqlException.Aggregate([.. returnTableShape.Violations.Select(static violation => violation.Error)]);
+        }
+        RequireExecuteAsUser(context, options.ExecuteAs);
         var replaced = ResolveFunctionAlterTarget<MultiStatementTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
         RejectTimestampParameters(parameters);
 
@@ -470,6 +506,7 @@ partial class Simulation
         // Server 2025).
         if (options.Inline == true && (!ModuleInlining.IsInlineableScalar(bodyText, functionName.Leaf, executeAsClause) || parameters.Exists(static parameter => parameter.TableType is not null)))
             throw SimulatedSqlException.InlineOptionNotValid();
+        RequireExecuteAsUser(context, executeAsClause);
         var replaced = ResolveFunctionAlterTarget<ScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
         RejectTimestampParameters(parameters);
 
@@ -790,6 +827,12 @@ partial class Simulation
         {
             var parser = innerBatch.Parser;
             parser.SchemaBoundBody = outerContext.SchemaBoundBody;
+            parser.DefiningModuleQuery = DefiningModuleQuery.InlineFunction;
+            // A side-effecting built-in is Msg 443 here as in a statement
+            // body, where the token stands (probed 2026-10-04 against SQL
+            // Server 2025).
+            var shape = new FunctionBodyShape { TokenLines = true };
+            innerBatch.FunctionBodyShape = shape;
             parser.MoveNextRequired();
 
             Selection selection;
@@ -821,13 +864,20 @@ partial class Simulation
             if (selection.HasOrderBy && !selection.HasTopOrOffsetOrFetch)
                 throw SimulatedSqlException.OrderByInvalidInCte();
 
+            if (shape.Violations.Count > 0)
+            {
+                foreach (var (line, violation) in shape.Violations)
+                    violation.ResolveDiagnostics(line, bodyLineOffset, functionName);
+                throw SimulatedSqlException.Aggregate([.. shape.Violations.Select(static violation => violation.Error)]);
+            }
+
             var columns = new HeapColumn[selection.Schema.Length];
             var seenNames = new HashSet<string>(outerContext.Batch.CurrentDatabase.Collation);
             var nullability = selection.ColumnNullability;
             for (var i = 0; i < selection.Schema.Length; i++)
             {
                 var name = selection.ColumnNames[i];
-                if (string.IsNullOrEmpty(name))
+                if (string.IsNullOrEmpty(name) || name is Selection.ForXmlColumnName or Selection.ForJsonColumnName)
                     throw SimulatedSqlException.InlineTvfMissingColumnName(i + 1);
                 if (!seenNames.Add(name))
                     throw SimulatedSqlException.DuplicateColumnInViewOrFunction(name, functionName);
@@ -919,6 +969,10 @@ partial class Simulation
             if (typeResolved)
                 NoteUnassignableDefault(context.Batch, defaultExpression, paramType, declarationErrors);
         }
+        // A function's parameters pass nothing back (probed 2026-10-04 against
+        // SQL Server 2025).
+        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
+            throw SimulatedSqlException.OutputOptionNotAllowed();
         _ = NoteReadOnlyScalarParameter(context, variable, declarationErrors);
         return new UdfParameter(name, paramType, defaultExpression) { SpelledNumeric = spelledNumeric, AliasType = aliasType, DeclaredMaxLength = paramMaxLength, LineNumber = variable.LineNumber };
     }
@@ -968,8 +1022,8 @@ partial class Simulation
     /// The errors a module's parameter list and return type raise, which real
     /// reports once the whole statement has parsed — so a syntax error in the
     /// body outranks them — and ahead of anything its body binds (probed
-    /// 2026-09-30 against SQL Server 2025). A <c>timestamp</c> return type is
-    /// Msg 2733 alone, at the line the statement ends on; otherwise every
+    /// 2026-09-30 against SQL Server 2025). A <c>timestamp</c> or legacy LOB
+    /// return type is Msg 2733 alone, at the line the statement ends on; otherwise every
     /// parameter's Msg 346 and Msg 2715 (with its Msg 2724 note), in parameter
     /// order. A parameter default that can't be assigned to its type
     /// (<see cref="NoteUnassignableDefault"/>) is reported alone, the first
@@ -981,9 +1035,9 @@ partial class Simulation
         if (unassignableDefault is not null && !declarationErrors.Exists(static held => held.Number == 2715))
             return unassignableDefault;
         _ = declarationErrors.RemoveAll(static held => held.Number is 206 or 257);
-        if (returnType == SqlType.RowVersion)
+        if (returnType == SqlType.RowVersion || returnType is { IsLegacyLob: true })
         {
-            var refusal = SimulatedSqlException.TimestampReturnTypeInvalid();
+            var refusal = SimulatedSqlException.ReturnTypeInvalid(returnType == SqlType.RowVersion ? "timestamp" : returnType.SqlServerName);
             refusal.Errors[0].LineNumber = endLine;
             return refusal;
         }

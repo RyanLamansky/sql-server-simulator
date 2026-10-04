@@ -137,12 +137,26 @@ partial class Simulation
     /// Real reports the <em>old</em> name as <c>ObjectName</c> (probe-confirmed)
     /// alongside a <c>NewObjectName</c> element the simulator doesn't emit.
     /// </summary>
+    /// <remarks>
+    /// A column or index names its table as <c>TargetObjectName</c> /
+    /// <c>TargetObjectType</c> under the table's schema, and an object's
+    /// rename carries the pair empty (probed 2026-10-04 against SQL Server
+    /// 2025).
+    /// </remarks>
     private static void RecordRenameEvent(BatchContext batch, string objName, string objectType)
     {
-        var dot = objName.LastIndexOf('.');
-        var schemaName = dot < 0 ? Database.DefaultSchemaName : objName[..dot].Trim('[', ']');
-        var leaf = objName[(dot + 1)..].Trim('[', ']');
-        RecordDdlEvent(batch.Parser, "RENAME", schemaName, leaf, objectType);
+        var parts = objName.Split('.');
+        for (var i = 0; i < parts.Length; i++)
+            parts[i] = parts[i].Trim('[', ']');
+        var leaf = parts[^1];
+        if (objectType is "COLUMN" or "INDEX" && parts.Length >= 2)
+        {
+            var columnSchema = parts.Length >= 3 ? parts[^3] : Database.DefaultSchemaName;
+            RecordDdlEvent(batch.Parser, "RENAME", columnSchema, leaf, objectType, parts[^2], "TABLE");
+            return;
+        }
+        var schemaName = parts.Length >= 2 ? parts[^2] : Database.DefaultSchemaName;
+        RecordDdlEvent(batch.Parser, "RENAME", schemaName, leaf, objectType, targetObjectName: "", targetObjectType: "");
     }
 
     private static (string? ObjName, string? NewName, string? ObjType) ParseSpRenameArgs(List<ProcArgument> arguments)

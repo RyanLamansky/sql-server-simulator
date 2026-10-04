@@ -579,6 +579,15 @@ partial class Simulation
             } while (context.Token is Operator { Character: ',' });
         }
 
+        // A function body's FETCH without INTO would send the row to the
+        // client: Msg 444 at state 2, a rowset read (probed 2026-10-04
+        // against SQL Server 2025).
+        if (intoVariables is null && batch.FunctionBodyShape is { } shape)
+        {
+            shape.StatementReadsData = true;
+            FunctionBodyShape.NoteClientSelect(batch);
+        }
+
         if (batch.IsSkipping)
             yield break;
 

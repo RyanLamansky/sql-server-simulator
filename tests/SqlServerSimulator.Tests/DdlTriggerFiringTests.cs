@@ -210,7 +210,9 @@ public sealed class DdlTriggerFiringTests
                 begin try throw 51000, 'caught', 1; end try begin catch insert ddl_log values ('swallowed'); end catch
             end
             """);
-        _ = sim.AssertSqlError("create table t1 (a int)", 3616);
+        // The caught error doomed the unit, so the CATCH's write is Msg 3930
+        // (probed 2026-10-04 against SQL Server 2025).
+        _ = sim.AssertSqlError("create table t1 (a int)", 3930);
         AreEqual(0, sim.ExecuteScalar("select count(*) from ddl_log"));
     }
 
@@ -326,5 +328,38 @@ public sealed class DdlTriggerFiringTests
         _ = sim.ExecuteNonQuery(batch);
         AreEqual(expected, sim.ExecuteScalar(
             "select top (1) cast(doc as xml).value('(/EVENT_INSTANCE/TSQLCommand/CommandText)[1]', 'nvarchar(max)') from ddl_log order by id desc"));
+    }
+
+    [TestMethod]
+    [Description("A database trigger's CREATE / ALTER event carries an empty SchemaName and the database as its target.")]
+    public void CreateTriggerOnDatabase_TargetsTheDatabase()
+    {
+        var sim = NewLoggingSimulation();
+        sim.ExecuteBatches("create trigger t2 on database for create_table as select 1");
+        var document = (string)sim.ExecuteScalar("select doc from ddl_log where ev = 'CREATE_TRIGGER'")!;
+        Assert.Contains("<SchemaName /><ObjectName>t2</ObjectName><ObjectType>TRIGGER</ObjectType><TargetObjectName /><TargetObjectType>Database</TargetObjectType>", document);
+    }
+
+    [TestMethod]
+    [Description("UPDATE STATISTICS fires with the table as its target; a trailing comment stays out of CommandText.")]
+    public void UpdateStatistics_TargetsTheTable()
+    {
+        var sim = NewLoggingSimulation();
+        _ = sim.ExecuteNonQuery("create table dbo.t1 (a int)");
+        _ = sim.ExecuteNonQuery("update statistics dbo.t1 -- trailing");
+        var document = (string)sim.ExecuteScalar("select doc from ddl_log where ev = 'UPDATE_STATISTICS'")!;
+        Assert.Contains("<TargetObjectName>t1</TargetObjectName><TargetObjectType>TABLE</TargetObjectType>", document);
+        Assert.Contains("<CommandText>update statistics dbo.t1</CommandText>", document);
+    }
+
+    [TestMethod]
+    [Description("Renaming a column names its table as the target.")]
+    public void RenameColumn_TargetsTheTable()
+    {
+        var sim = NewLoggingSimulation();
+        _ = sim.ExecuteNonQuery("create table dbo.t1 (a int)");
+        _ = sim.ExecuteNonQuery("exec sp_rename 'dbo.t1.a', 'b', 'COLUMN'");
+        var document = (string)sim.ExecuteScalar("select doc from ddl_log where ev = 'RENAME'")!;
+        Assert.Contains("<TargetObjectName>t1</TargetObjectName><TargetObjectType>TABLE</TargetObjectType>", document);
     }
 }

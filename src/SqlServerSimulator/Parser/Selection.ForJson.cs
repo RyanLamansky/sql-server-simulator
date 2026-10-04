@@ -31,7 +31,7 @@ partial class Selection
     /// The fixed single-column name SQL Server assigns a top-level FOR JSON
     /// result set (a GUID-shaped sentinel; consumers concatenate the chunks).
     /// </summary>
-    private const string ForJsonColumnName = "JSON_F52E2B61-18A1-11d1-B105-00805F49916B";
+    internal const string ForJsonColumnName = "JSON_F52E2B61-18A1-11d1-B105-00805F49916B";
 
     /// <summary>
     /// Parses the trailing <c>FOR JSON { PATH | AUTO } [, ROOT[('name')]]

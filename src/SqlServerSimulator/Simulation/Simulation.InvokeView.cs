@@ -102,7 +102,7 @@ partial class Simulation
         var recorded = view.OutputColumns;
         var bound = plan.Schema;
         if (bound.Length < recorded.Length)
-            throw SimulatedSqlException.ViewHasMoreColumnNamesThanColumns(view.Name);
+            throw SimulatedSqlException.ViewHasMoreColumnNamesThanColumns($"{view.Schema.Name}.{view.Name}");
 
         var nullability = plan.ColumnNullability;
         // A column over a masked one masks as the body projects it, which
@@ -187,7 +187,7 @@ partial class Simulation
         connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
         var savedAnsiNulls = connection.AnsiNulls;
         connection.AnsiNulls = view.UsesAnsiNulls;
-        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32)) { SuppressDiagnosticsResolution = true, InlinedCalls = outerBatch.InlinedCalls, InheritedSystemTime = systemTime };
+        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32)) { SuppressDiagnosticsResolution = true, BindsModuleDefinition = true, InlinedCalls = outerBatch.InlinedCalls, InheritedSystemTime = systemTime };
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
         connection.NestingLevel++;
         try

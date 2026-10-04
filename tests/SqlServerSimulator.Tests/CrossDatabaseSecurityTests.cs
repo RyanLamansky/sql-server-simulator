@@ -292,12 +292,15 @@ public sealed class CrossDatabasePermissionTests
         AreEqual(DBNull.Value, sim.ExecuteScalar("use home; exec dbo.p_oname"));
     }
 
+    /// <summary>
+    /// A module body takes no USE at all — refused as the procedure is created
+    /// (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void ModuleOwnerFrame_Use_Raises916()
+    public void ModuleBody_Use_RaisesMsg154()
     {
         var sim = TwoDatabaseFixture();
-        sim.ExecuteBatches("use home", "create procedure dbo.p_use with execute as owner as use away");
-        _ = sim.AssertSqlError("use home; exec dbo.p_use", 916);
+        _ = sim.AssertSqlError("create procedure dbo.p_use with execute as owner as use away", 154);
     }
 
     // ---- ownership chaining breaks at the database boundary ----

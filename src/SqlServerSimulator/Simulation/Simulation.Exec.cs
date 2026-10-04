@@ -364,6 +364,7 @@ partial class Simulation
         };
         if (systemProc is not null)
         {
+            RefuseProcedureFromFunctionBody(batch, systemProcName!);
             if (OpensImplicitTransaction(systemProcName!))
                 batch.BeginImplicitTransaction();
             // A system procedure is a procedure scope like any other;
@@ -419,6 +420,19 @@ partial class Simulation
         procName = batch.ExpandSynonym(procName);
         if (!batch.TryResolveProcedure(procName, out var procedure))
         {
+            // EXEC runs a scalar function as it runs a procedure, its value
+            // the `@rc =` variable's (probed 2026-10-04 against SQL Server
+            // 2025).
+            if (!insertExecSource && resultSets is null && batch.TryResolveFunction(procName, out var scalarCandidate) && scalarCandidate is Schemas.ScalarFunction scalar)
+            {
+                var result = this.InvokeScalarFunctionByExec(batch, scalar, arguments);
+                if (returnCodeVar is not null)
+                {
+                    var slot = batch.GetVariableSlot(returnCodeVar);
+                    slot.Assign(Parser.Expressions.Cast.ApplyCoercion(result, slot.DeclaredType, slot.DeclaredMaxLength));
+                }
+                yield break;
+            }
             // An aggregate is the one function kind EXEC names by kind
             // (probed 2026-09-28 against SQL Server 2025).
             throw batch.TryResolveFunction(procName, out var function) && function is Schemas.ClrAggregateFunction
@@ -441,12 +455,73 @@ partial class Simulation
                 context.Command.CommandText[batch.CurrentStatement.StartIndex..statementEnd].TrimEnd());
         }
 
+        RefuseProcedureFromFunctionBody(batch, procedure.Name);
         var invocation = this.InvokeProcedure(
             batch, procedure, arguments, returnCodeVar, execSynonym is null ? writtenName : $"{procedure.Schema.Name}.{procedure.Name}", execSynonym,
             framesScope: batch.Connection.FramesEveryStatement && !insertExecSource, recompile: recompile);
         foreach (var outcome in resultSets is null ? invocation : ApplyResultSetsContract(invocation, resultSets))
             yield return outcome;
         batch.CurrentStatement.SuppressErrorReset = true;
+    }
+
+    /// <summary>
+    /// A scalar or multi-statement function's body may <c>EXEC</c> only a
+    /// function or an extended procedure — <c>sp_set_session_context</c>
+    /// among them — and anything else is Msg 557 as the call runs (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static void RefuseProcedureFromFunctionBody(BatchContext batch, string procedureName)
+    {
+        if (!batch.IsSkipping && (batch.UdfFrame is not null || batch.MultiStatementTvfBody)
+            && !procedureName.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
+            && !procedureName.Equals("sp_set_session_context", StringComparison.OrdinalIgnoreCase))
+        {
+            throw SimulatedSqlException.OnlyFunctionsExecutableFromFunction();
+        }
+    }
+
+    /// <summary>
+    /// Runs a scalar function an <c>EXEC</c> names, binding its arguments as a
+    /// procedure's bind — by position, then by name — with an omitted or
+    /// <c>DEFAULT</c> argument taking the parameter's default.
+    /// </summary>
+    private SqlValue InvokeScalarFunctionByExec(BatchContext batch, Schemas.ScalarFunction function, List<ProcArgument> arguments)
+    {
+        var parameters = function.Parameters;
+        var values = new SqlValue[parameters.Length];
+        var isDefault = new bool[parameters.Length];
+        var supplied = new bool[parameters.Length];
+        var declaredName = $"{function.Schema.Name}.{function.Name}";
+        var position = 0;
+        foreach (var argument in arguments)
+        {
+            int index;
+            if (argument.Name is null)
+            {
+                index = position++;
+            }
+            else
+            {
+                index = Array.FindIndex(parameters, parameter => batch.CurrentDatabase.Collation.Equals(parameter.Name, argument.Name));
+                if (index < 0)
+                    throw SimulatedSqlException.TooManyArgumentsToFunction(declaredName);
+            }
+            if (index >= parameters.Length)
+                throw SimulatedSqlException.TooManyArgumentsToFunction(declaredName);
+            supplied[index] = true;
+            isDefault[index] = argument.IsDefault;
+            values[index] = argument.IsDefault ? SqlValue.Null(parameters[index].Type) : argument.Value;
+        }
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            if (supplied[i])
+                continue;
+            if (parameters[i].Default is null)
+                throw SimulatedSqlException.ProcedureExpectsParameter(declaredName, parameters[i].Name.TrimStart('@'));
+            isDefault[i] = true;
+            values[i] = SqlValue.Null(parameters[i].Type);
+        }
+        return this.InvokeScalarFunction(batch, function, values, isDefault);
     }
 
     /// <summary>
@@ -460,7 +535,7 @@ partial class Simulation
         {
             return batch.TryResolveSynonym(name, out _)
                 || batch.TryResolveProcedure(name, out _)
-                || (name.Count == 1 && batch.CurrentDatabase.Collation.Equals(name.Leaf, batch.ErrorProcedureName));
+                || (name.Count <= 2 && batch.CurrentDatabase.Collation.Equals(name.Leaf, batch.ErrorProcedureName));
         }
         catch (SimulatedSqlException)
         {

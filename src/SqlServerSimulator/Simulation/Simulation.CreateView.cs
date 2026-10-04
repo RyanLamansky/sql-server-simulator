@@ -80,9 +80,13 @@ partial class Simulation
         // statement is its batch's only one, so nothing after it inherits this.
         // An element of a CREATE SCHEMA is no module of its own there, and
         // its errors name none (probed 2026-09-30 against SQL Server 2025).
+        RejectQualifiedModuleName(viewName, "VIEW");
+        // A temporary view is refused ahead of the view's own attribution
+        // (probed 2026-10-04 against SQL Server 2025).
+        if (viewName.Leaf.StartsWith('#'))
+            throw SimulatedSqlException.TemporaryViewNotAllowed(viewName.Leaf);
         if (context.Batch.CreateSchemaElementScope is null)
             context.Batch.ErrorProcedureName = viewName.Leaf;
-        RejectQualifiedModuleName(viewName, "VIEW");
         var schema = ResolveModuleSchema(context, viewName, isAlter);
 
         context.MoveNextRequired();
@@ -136,7 +140,9 @@ partial class Simulation
         var bodyStart = context.Token?.StartIndex
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
         context.BindingViewDefinition = true;
-        var bodySelection = ParseBodyQuery(context, rejectsNextValueFor: true, bodyParens > 0 ? QueryPosition.ParenthesizedModuleBody : QueryPosition.Statement);
+        Selection bodySelection;
+        using (ParserScope.Enter(ref context.DefiningModuleQuery, DefiningModuleQuery.View))
+            bodySelection = ParseBodyQuery(context, rejectsNextValueFor: true, bodyParens > 0 ? QueryPosition.ParenthesizedModuleBody : QueryPosition.Statement);
         context.BindingViewDefinition = false;
         // A CREATE SCHEMA's next element is no part of this body. A refusal
         // leaves the rule set for the recovery that follows it.
@@ -235,6 +241,7 @@ partial class Simulation
             isJoinUpdatable: isJoinUpdatable)
         {
             DefinitionText = options.Encryption ? null : BuildModuleDefinition(commandText, context.Batch.CurrentStatement.StartIndex, isAlter, createOrAlter),
+            HasViewMetadata = options.ViewMetadata,
             UsesQuotedIdentifier = context.QuotedIdentifiers,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             DerivedOutputColumns = DerivedOutputColumnsFor(bodySelection, baseTable, rejectionReason, outputColumns.Length),
@@ -252,6 +259,15 @@ partial class Simulation
         var replacedBases = replaced?.ReferencedBaseTables;
         if (replaced is not null)
         {
+            // A replaced view keeps its object-level permissions but loses
+            // every column-level one (probed 2026-10-04 against SQL Server
+            // 2025).
+            var permissions = context.CurrentDatabase.Permissions;
+            if (permissions.Exists(p => p.Class == PermissionChecker.ClassObject && p.MajorId == replaced.ObjectId && p.MinorId != 0))
+            {
+                RecordSecurityUndo(context, context.CurrentDatabase);
+                _ = permissions.RemoveAll(p => p.Class == PermissionChecker.ClassObject && p.MajorId == replaced.ObjectId && p.MinorId != 0);
+            }
             view.ModifyDate = context.Batch.CurrentStatement.UtcNow;
             DetachIndexedViewDependencies(replaced);
             ReseatTriggerParents(context.CurrentDatabase, replaced, view);
@@ -342,10 +358,19 @@ partial class Simulation
         {
             // Msg 8158 / 8159 — the shared column-alias-list mismatch factory
             // (probe-confirmed identical text across CTE / view / VALUES).
+            // Real reports the list's refusals at line 12 whatever the
+            // statement's own (probed 2026-10-04 against SQL Server 2025),
+            // and a name it repeats as Msg 8156.
             if (renames.Count < projectionCount)
-                throw SimulatedSqlException.HasMoreColumnsThanColumnList(viewName);
+                throw SimulatedSqlException.HasMoreColumnsThanColumnList(viewName).PinLine(12);
             if (renames.Count > projectionCount)
-                throw SimulatedSqlException.HasFewerColumnsThanColumnList(viewName);
+                throw SimulatedSqlException.HasFewerColumnsThanColumnList(viewName).PinLine(12);
+            var listed = new HashSet<string>(collation);
+            foreach (var rename in renames)
+            {
+                if (!listed.Add(rename))
+                    throw SimulatedSqlException.ColumnSpecifiedMultipleTimes(rename, viewName).PinLine(12);
+            }
             columnNames = [.. renames];
         }
         else
@@ -353,13 +378,17 @@ partial class Simulation
             columnNames = bodySelection.ColumnNames;
         }
 
+        if (projectionCount > 1024)
+            throw SimulatedSqlException.ViewExceedsMaximumColumns(columnNames[1024], viewName);
         var seen = new HashSet<string>(collation);
         var nullability = bodySelection.ColumnNullability;
         var output = new HeapColumn[projectionCount];
         for (var i = 0; i < projectionCount; i++)
         {
             var name = columnNames[i];
-            if (string.IsNullOrEmpty(name))
+            // A FOR XML / FOR JSON column names nothing a view can carry
+            // (probed 2026-10-04 against SQL Server 2025).
+            if (string.IsNullOrEmpty(name) || (renameList is null && name is Selection.ForXmlColumnName or Selection.ForJsonColumnName))
                 throw SimulatedSqlException.CreateViewMissingColumnName(i + 1);
             if (!seen.Add(name))
                 throw SimulatedSqlException.DuplicateColumnInViewOrFunction(name, viewName);

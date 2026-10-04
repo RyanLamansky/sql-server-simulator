@@ -380,4 +380,46 @@ public sealed class InlineTvfTests
         sim.ExecuteBatches("create function f (@x int) returns table as return select @x * 2 d union all select @x * 3 except select 0");
         AreEqual(10, sim.ExecuteScalar("select sum(d) from dbo.f(2)"));
     }
+
+    // === Writes through an inline TVF, and its binding refusals ===
+
+    [TestMethod]
+    [Description("An inline TVF over one table is updatable, its parameters bound per call.")]
+    public void WritesThroughAnInlineFunction()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int primary key, v int)",
+            "create function dbo.f(@lo int) returns table as return select id, v from dbo.t where id >= @lo");
+        _ = sim.ExecuteNonQuery("insert dbo.f(0) values (1, 10), (2, 20)");
+        _ = sim.ExecuteNonQuery("update dbo.f(2) set v = 0");
+        _ = sim.ExecuteNonQuery("delete dbo.f(2)");
+        AreEqual(10, sim.ExecuteScalar("select sum(v) from dbo.t"));
+    }
+
+    [TestMethod]
+    [DataRow("create function dbo.g() returns table as return select * from dbo.t tablesample (10 percent)", 478)]
+    [DataRow("create function dbo.g() returns table as return select id from dbo.t option (maxdop 1)", 156)]
+    [DataRow("create function dbo.g() returns table as return select id from dbo.s()", 208)]
+    [DataRow("create function dbo.g() returns table as return select dbo.f(1) x", 4121)]
+    [DataRow("create function dbo.g() returns table as return select a from dbo.f() x(a, b)", 317)]
+    [Description("Inline-body refusals at CREATE.")]
+    public void InlineBodyRefusals(string create, int number)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int primary key)",
+            "create function dbo.f() returns table as return select id from dbo.t",
+            "create function dbo.s() returns int as begin return 1 end");
+        _ = sim.AssertSqlError(create, number);
+    }
+
+    [TestMethod]
+    [Description("Too few arguments is Msg 313 state 3.")]
+    public void TooFewArguments_IsMsg313()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create function dbo.f(@a int, @b int) returns table as return select @a a, @b b");
+        AreEqual((byte)3, sim.AssertSqlError("select * from dbo.f(1)", 313).State);
+    }
 }

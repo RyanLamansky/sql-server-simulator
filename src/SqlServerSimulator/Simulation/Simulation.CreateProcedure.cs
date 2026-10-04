@@ -92,8 +92,8 @@ partial class Simulation
         // its parameter list's included (probed 2026-09-26 against SQL Server
         // 2025). The statement is its batch's only one, so nothing after it
         // inherits this.
-        context.Batch.ErrorProcedureName = procName.Leaf;
         RejectQualifiedModuleName(procName, "PROCEDURE");
+        context.Batch.ErrorProcedureName = procName.Leaf;
         var schema = ResolveModuleSchema(context, procName, isAlter);
 
         context.MoveNextRequired();

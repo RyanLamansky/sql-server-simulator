@@ -218,7 +218,9 @@ partial class Simulation
             var fullOrdinal = ResolveColumnOrdinal(context.Batch.CurrentDatabase.Collation, table, keyColumns[i].Name);
             if (table.Columns[fullOrdinal].Type is VectorSqlType or JsonSqlType or ClrUdtSqlType { Udt.IsByteOrdered: false })
                 throw SimulatedSqlException.VectorKeyColumnInvalid(table.Columns[fullOrdinal].Name, targetTableName.ToString(), table.Columns[fullOrdinal].Type switch { JsonSqlType => 3, VectorSqlType => 4, _ => 1 });
-            RejectComputedKeyColumnNotIndexable(context.Batch, table, table.Columns[fullOrdinal], indexName, viaConstraint: false);
+            // The table is named as the statement wrote it (probed 2026-10-01
+            // bare and 2026-10-04 schema-qualified against SQL Server 2025).
+            RejectComputedKeyColumnNotIndexable(context.Batch.CurrentDatabase, table.Columns, targetTableName.ToString(), table.Columns[fullOrdinal], indexName, viaConstraint: false);
             resolvedKeyColumns[i] = new IndexKeyColumn(table.StorageOrdinals[fullOrdinal], fullOrdinal, keyColumns[i].IsDescending);
         }
         var resolvedIncludeColumns = new int[includeColumnNames.Count];

@@ -561,6 +561,12 @@ internal static class ModuleDependencies
     {
         public int Depth;
 
+        /// <summary>
+        /// The <c>CASE</c> expressions open in the frame, whose <c>END</c>
+        /// closes the expression rather than the statement.
+        /// </summary>
+        public int CaseDepth;
+
         /// <summary>Set by an introducer keyword; consumed by the next name.</summary>
         public SourceRole PendingSource;
 
@@ -757,6 +763,12 @@ internal static class ModuleDependencies
                 frame.PendingSource = SourceRole.None;
                 if (keyword is not (Keyword.On or Keyword.Values))
                     frame.CloseFromList();
+                return frame;
+            case Keyword.Case:
+                frame.CaseDepth++;
+                return frame;
+            case Keyword.End when frame.CaseDepth > 0:
+                frame.CaseDepth--;
                 return frame;
             case Keyword.Select or Keyword.Declare or Keyword.If or Keyword.While or Keyword.Return
                 or Keyword.Print or Keyword.Begin or Keyword.End or Keyword.RaisError or Keyword.WaitFor

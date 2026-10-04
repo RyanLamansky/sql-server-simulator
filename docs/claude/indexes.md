@@ -483,10 +483,17 @@ Applied in this exact order:
 3. **Msg 1940** — the view has no unique clustered index yet **and** this index isn't unique-clustered (`Cannot create index on view '<schema.view>'. It does not have a unique clustered index.`) — i.e. the first index on a view must be UNIQUE CLUSTERED.
    A unique *nonclustered* first index also hits 1940.
 
+Past those, probed 2026-10-04 against SQL Server 2025: a view, base table or function the view reaches created under `ANSI_NULLS OFF` is **Msg 1935** naming it; a second clustered index **Msg 1902** state 3 (except a `DROP_EXISTING` of the same name, which replaces it); a filtered clustered index a syntax error near `WHERE` and a filtered nonclustered one **Msg 10610**; and a key column the view computes as `float` / `real` **Msg 1901**.
+`CREATE INDEX`, `DROP INDEX` (a clustered one taking every index and the maintenance with it), `ALTER INDEX … DISABLE` / `REBUILD` and `DROP_EXISTING` all roll back with an enclosing transaction.
+`OBJECTPROPERTY(id, 'IsIndexable')` runs the same qualifying battery.
+
 A key column not in the view's output → **Msg 1911** (shared "table, index or view" wording).
 At CREATE the current view rows are evaluated once and checked for duplicates → **Msg 1505** on a collision (same factory / rendering as the heap-table create-time path).
 
 An indexed view is schema bound by requirement, so its base tables also carry the [schema-binding dependency gate](programmable.md#schema-binding-with-schemabinding) — `DROP TABLE` on a base is **Msg 3729**, independently of the `DependentIndexedViews` wiring below (that one is about DML re-validation, this one about DDL).
+`TRUNCATE TABLE` on a base is Msg 3729 state 2 while the view holds an index (probed 2026-10-04 against SQL Server 2025).
+
+A write to a base table under a session option an indexed view refuses (`ANSI_NULLS` off and its siblings) is **Msg 1934**, which ends the batch (`SimulatedSqlException.IncorrectSetOptionsForWrite`; probed 2026-10-04 against SQL Server 2025).
 
 ### DML enforcement (Msg 2601)
 
@@ -498,13 +505,12 @@ The hook is zero-cost (`DependentIndexedViews.Count == 0` guard) for the overwhe
 `CREATE INDEX` on a view re-parses the body three times — the qualifying-battery shape scan, the create-time duplicate-key materialization, and this dependency collection — each in a child `BatchContext` that executes outside the dispatch loop.
 Each therefore **releases its own statement schema locks** (`ReleaseStatementSchemaLocks` in the `finally`) rather than relying on the loop's release: without that, the Sch-S the body took on each base table outlives the statement and the connection, and the next connection's Sch-M on that table — a `DROP TABLE` / `ALTER TABLE` — waits forever.
 
-The hook is wired on the INSERT and UPDATE paths.
-**MERGE** into an indexed-view base table isn't hooked (a niche shape — AW's indexed-view bases are never MERGE targets); it would need the same post-apply call in `Simulation.Merge.cs`.
+The hook is wired on the INSERT, UPDATE and MERGE paths; a disabled view index enforces nothing.
 
-**DELETE is deliberately not enforced** (verified): a valid indexed view is an inner-join / aggregate projection, so removing base rows can only remove or reduce view rows — never create a new duplicate key.
-(The simulator doesn't enforce real's determinism / `COUNT_BIG(*)` / GROUP BY battery, so a user could in principle build a shape where this reasoning fails; AW needs none of it — see Fidelity gaps.)
+**DELETE is deliberately not enforced** (verified): a view the qualifying battery admits is an inner-join / aggregate projection, so removing base rows can only remove or reduce view rows — never create a new duplicate key.
 
-`FROM <view> WITH (NOEXPAND)` is accepted (it's in the table-hint accept-list — see [`query-hints.md`](query-hints.md)); results are identical since the simulator always expands.
+`FROM <view> WITH (NOEXPAND)` is accepted over a view with an enabled unique clustered index; results are identical since the simulator always expands.
+Over any other view or a table it is **Msg 8171** (state 2, at the line of the object's name in a batch and a module alike), on a write's target state 1; an `INDEX` hint naming no index of the view is Msg 308, and one without `NOEXPAND` sends the warning **Msg 4430** (`Selection.ValidateViewIndexHints`; probed 2026-10-04 against SQL Server 2025).
 
 ### Catalog surface
 
@@ -647,15 +653,33 @@ The simulator matches that placement — `Simulation.IndexedViews.cs`'s `Enforce
 | `SUM` over a nullable expression | 8662 | **0** |
 | Nondeterministic built-in | 1949 | 1 |
 | Self-join | 1947 | 1 |
+| A view (rather than a table) in `FROM` | 1937 | 1 |
+| `PIVOT` / `UNPIVOT` | 10114 | 1 |
+| Derived table | 10109 | 1 |
+| Table-valued function | 10129 | 1 |
+| `OPENJSON` | 10148 | 1 |
+| An `xml` method | 1985 | 1 |
+| A table hint | 10140 | 1 |
+| An implicit string-to-date conversion in a date function | 10139 | 1 |
+| A nondeterministic user function | 1956 | 1 |
+| A nondeterministic `CONVERT` | 1963 | 1 |
+| `HAVING` | 10121 | 1 |
+| `ROLLUP` / `CUBE` / `GROUPING SETS` | 10119 | 1 |
+| A window function | 10143 | 1 |
+| `APPLY` | 10142 | 1 |
+| `*` inside a function (`BINARY_CHECKSUM(*)`) | 10117 | 1 |
+| Grouping by a `float` / `real` column | 1962 | 1 |
+| An expression over an aggregate | 8668 | 0 |
+| A grouping column the select list leaves out | 8660 | 0 |
 
 Wording is verbatim, including real's **inconsistent quoting**: 10116 / 10138 / 1949 single-quote the view name where the rest use double quotes, and 8662 alone names the *index* as well as the view and carries State 0.
 The view is database-qualified (`db.schema.view`) throughout, and Msg 1949 lower-cases the function name regardless of how it was written.
 
-Gate order is the simulator's own except for Msg 10137, whose precedence is probe-confirmed: a CTE-bearing body reports it ahead of the DISTINCT, subquery and nondeterministic-function rejections it also violates, so the check runs first.
+The rows from Msg 1937 down were added from the 2026-10-04 corpus against SQL Server 2025; gate order (`EnforceIndexedViewQualifies`) is the simulator's own except for Msg 10137, whose precedence is probe-confirmed: a CTE-bearing body reports it ahead of the DISTINCT, subquery and nondeterministic-function rejections it also violates, so the check runs first.
 10137 embeds a CTE name, and real names the **first the body declares** — not the one the body's SELECT reads, and even when nothing reads it — so `ParseCteBindings` records the first name it registers into the shape collector.
 CTE-bodied views themselves ship; only indexing one is refused → [`ctes.md`](ctes.md#where-a-prefix-may-appear).
 
-Nondeterminism is a closed set of built-ins (`GETDATE` / `GETUTCDATE` / `SYSDATETIME` / `SYSUTCDATETIME` / `SYSDATETIMEOFFSET` / `NEWID` / `NEWSEQUENTIALID` / `RAND`) recorded at `ResolveBuiltIn`, so a reference at any nesting depth is caught.
+Nondeterminism is `ModuleDeterminism.FindNondeterminism`, the walk behind `OBJECTPROPERTY(id, 'IsDeterministic')`, so the battery and the property agree: a seeded `RAND(n)` is deterministic, and the kind it finds — a built-in, an implicit date conversion, a `CONVERT`, a user function — picks the message.
 Aggregates outside the disallowed set (`STRING_AGG` and friends) are **left alone** rather than guessed at — an unprobed rejection would be the over-restrictive direction.
 `SUM` nullability reuses `Expression.ResultIsNullable`, the same rule that drives result-metadata nullability, with an unresolvable column treated as nullable.
 
@@ -720,6 +744,8 @@ The option rules follow the target, so an `ALTER INDEX` resolves its index befor
   Real SQL Server rolls back all on any failure.
 - **Indexed-view battery gate order**: each rejection below was probed in isolation, so real's precedence when one view violates several at once isn't pinned — a body with both DISTINCT and TOP may name the other one on real.
   The simulator's order is fixed and documented in `Simulation.IndexedViews.cs`.
+- **Columnstore and statistics on an indexed view**: `CREATE COLUMNSTORE INDEX` and `CREATE STATISTICS` on a view raise Msg 1088 here, where real builds them over a view with a unique clustered index and otherwise refuses with Msg 1940 (probed 2026-10-04 against SQL Server 2025).
+- **`IsPrecise` of a view grouping by a `float` expression** reads 1 here and 0 on real (probed 2026-10-04 against SQL Server 2025).
 - **Indexed-view `sys.partitions` row**: real reports a `sys.partitions` / `sys.dm_db_partition_stats` row for a view index carrying the materialized row count; the simulator (which never materializes) omits view indexes from those page-count views.
   `sys.indexes` / `sys.index_columns` / `sys.stats` are populated.
 - **Index hints (`SELECT … WITH (INDEX = name)`)** choose no access path — the read seeks or scans as it would unhinted, and the hint only settles which `FORCESEEK` / `FORCESCAN` plans real would refuse (see [`query-hints.md`](query-hints.md#enforced-rejections)).

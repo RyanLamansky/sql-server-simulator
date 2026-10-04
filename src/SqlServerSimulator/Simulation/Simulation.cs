@@ -2580,7 +2580,8 @@ public sealed partial class Simulation
     /// and so do the out-of-range conversions of a written value (Msg 242,
     /// 244, 248) and a date arithmetic overflow (Msg 517; probed 2026-10-01),
     /// and a lock timeout on a row or key (Msg 1222 at any state but the object
-    /// lock's 56; probed 2026-10-03).
+    /// lock's 56; probed 2026-10-03), and a trigger body's write refused in the
+    /// unit a caught error doomed (Msg 3930; probed 2026-10-04).
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number is 1505 or 4457
@@ -2588,7 +2589,8 @@ public sealed partial class Simulation
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite)
             && ((error.Number == 1222 && error.State != 56) || error.Number is 127 or 220 or 232 or 242 or 244 or 248 or 512 or 513 or 515 or 517 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16931 or 16932 or 16933 or 16947
-                || (error.Number == 208 && error.RaisedRunningFunctionBody)));
+                || (error.Number == 208 && error.RaisedRunningFunctionBody)
+                || (error.Number == 3930 && error.EndedTriggerBody)));
 
     /// <summary>
     /// True for the parse-time error real SQL Server defers to bind time —
@@ -2733,6 +2735,8 @@ public sealed partial class Simulation
         {
             if (connection.CurrentTransaction is { } doomed)
                 doomed.Doomed = true;
+            else if (connection.TriggerStatementUndoLog is not null)
+                connection.TriggerUnitDoomed = true;
             return;
         }
 
@@ -2774,7 +2778,7 @@ public sealed partial class Simulation
     /// </remarks>
     private static void RejectWriteInDoomedTransaction(SimulatedDbConnection connection)
     {
-        if (connection.CurrentTransaction is { Doomed: true })
+        if (connection.CurrentTransaction is { Doomed: true } || (connection.CurrentTransaction is null && connection.TriggerStatementUndoLog is not null && connection.TriggerUnitDoomed))
             throw SimulatedSqlException.UncommittableTransactionCannotWrite();
     }
 
@@ -3603,7 +3607,11 @@ public sealed partial class Simulation
         // would send rows to the client.
         if (batch.FunctionBodyShape is not null)
         {
-            if (selection.IntoTarget is not null)
+            // A temporary destination is Msg 2772 in place of the operator
+            // (probed 2026-10-04 against SQL Server 2025).
+            if (selection.IntoTarget is { } into && (BatchContext.IsLocalTempName(into.Leaf) || BatchContext.IsGlobalTempName(into.Leaf)))
+                FunctionBodyShape.NoteRefusal(batch, SimulatedSqlException.TemporaryTableInFunction(), batch.CurrentStatement.StartLine);
+            else if (selection.IntoTarget is not null)
                 FunctionBodyShape.NoteSideEffect(batch, "SELECT INTO", FunctionBodyShape.StatementOperatorState);
             else if (!selection.IsAssignmentOnly)
                 FunctionBodyShape.NoteClientSelect(batch);
@@ -3857,6 +3865,11 @@ public sealed partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        if (context.Connection.CurrentTransaction is null && context.Connection.TriggerStatementUndoLog is { } unit)
+        {
+            (context.Connection.TriggerUnitSavepoints ??= []).Add((name, unit.Position, context.Connection.TriggerStatementVersionEntries?.Count ?? 0));
+            return true;
+        }
         var tx = context.Connection.CurrentTransaction
             ?? throw SimulatedSqlException.SaveTransactionWithoutTransaction();
         // SAVE TRANSACTION writes a log record, so a doomed transaction
@@ -4112,6 +4125,8 @@ public sealed partial class Simulation
                     if (variable is not null)
                         name = TransactionNameFromVariable(context.Batch, variable.Value) ?? string.Empty;
 
+                    if (context.Connection.CurrentTransaction is null && TryRollbackTriggerUnitToSavepoint(context.Connection, name))
+                        return true;
                     var tx = context.Connection.CurrentTransaction
                         ?? throw SimulatedSqlException.NoCorrespondingBeginRollback();
                     if (tx.TryRollbackToSavepoint(name))
@@ -4167,6 +4182,30 @@ public sealed partial class Simulation
         triggerUnit.Rollback();
         connection.TriggerStatementUndoLog = null;
         connection.TriggerTransactionEnded = true;
+        return true;
+    }
+
+    /// <summary>
+    /// Rolls a trigger body's auto-commit unit back to the newest savepoint
+    /// <paramref name="name"/> names, consuming it and every later one, and
+    /// keeps the unit open; false when the body set none of that name.
+    /// </summary>
+    private static bool TryRollbackTriggerUnitToSavepoint(SimulatedDbConnection connection, string name)
+    {
+        if (connection.TriggerStatementUndoLog is not { } unit || connection.TriggerUnitSavepoints is not { } savepoints)
+            return false;
+        var index = savepoints.FindLastIndex(savepoint => string.Equals(savepoint.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (index < 0)
+            return false;
+        var (_, undoPosition, versionEntryCount) = savepoints[index];
+        savepoints.RemoveRange(index, savepoints.Count - index);
+        unit.RollbackTo(undoPosition);
+        if (connection.TriggerStatementVersionEntries is { } versions && versions.Count > versionEntryCount)
+        {
+            var undone = versions.GetRange(versionEntryCount, versions.Count - versionEntryCount);
+            versions.RemoveRange(versionEntryCount, undone.Count);
+            Storage.VersionStore.DiscardPendingEntries(undone, kept: versions);
+        }
         return true;
     }
 
@@ -4251,8 +4290,12 @@ public sealed partial class Simulation
         context.Batch.CurrentStatement.TransactedWrite = true;
         // A table variable stands outside the transaction, so a doomed one
         // lets it be written (probed 2026-10-02 against SQL Server 2025).
-        if (!context.Batch.IsSkipping && context.Connection.CurrentTransaction is { Doomed: true } && !WritesTableVariable(context))
+        if (!context.Batch.IsSkipping
+            && (context.Connection.CurrentTransaction is { Doomed: true } || context.Connection is { CurrentTransaction: null, TriggerStatementUndoLog: not null, TriggerUnitDoomed: true })
+            && !WritesTableVariable(context))
+        {
             RejectWriteInDoomedTransaction(context.Connection);
+        }
         // A write opens an implicit transaction, a table variable's included.
         context.Batch.BeginImplicitTransaction();
         var tx = context.Connection.CurrentTransaction;

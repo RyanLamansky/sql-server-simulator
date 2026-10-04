@@ -265,7 +265,7 @@ partial class Simulation
             trigger = batch.CurrentDatabase.DdlTriggers.TryGetValue(leaf, out var databaseTrigger) ? databaseTrigger : null;
         }
         if (trigger is null)
-            throw SimulatedSqlException.CouldNotFindObjectOrNoPermission(triggerName);
+            throw SimulatedSqlException.CouldNotFindObjectOrNoPermission(triggerName).AtSystemProcedureLine(142);
 
         // An event group or a name that isn't an event is a bad parameter; an
         // event the trigger doesn't fire on is Msg 15125.

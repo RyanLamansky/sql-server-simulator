@@ -462,9 +462,12 @@ partial class Simulation
                         continue;
                     case ReservedKeyword { Keyword: Keyword.On }:
                         context.MoveNextOptional();
+                        // A DML trigger takes no ON: anything but DATABASE or
+                        // ALL SERVER after it is a syntax error there (probed
+                        // 2026-10-04 against SQL Server 2025).
                         return context.Token is ReservedKeyword { Keyword: Keyword.Database } ? TriggerDropScope.Database
                             : IsAllServer(context) ? TriggerDropScope.Server
-                            : TriggerDropScope.Object;
+                            : throw SimulatedSqlException.SyntaxErrorNear(context);
                     default:
                         return TriggerDropScope.Object;
                 }
@@ -968,6 +971,42 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Drops an indexed view's index: its clustered index takes every other
+    /// index on the view with it, and the view stops being maintained — a
+    /// rollback puts them back (probed 2026-10-04 against SQL Server 2025).
+    /// False when the view has no index of that name.
+    /// </summary>
+    private static bool DropViewIndex(ParserContext context, View view, string indexName, MultiPartName writtenName)
+    {
+        var index = view.Indexes.Find(candidate => context.Batch.CurrentDatabase.Collation.Equals(candidate.Name, indexName));
+        if (index is null)
+            return false;
+        if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(view), view.ObjectId, view.SchemaId))
+            throw SimulatedSqlException.CannotFindObjectForAlterIndex($"{writtenName}.{indexName}");
+        view.Schema.Database.RejectWriteWhenReadOnly();
+        Storage.Index[] before = [.. view.Indexes];
+        var bases = view.ReferencedBaseTables;
+        if (index.IsClustered)
+        {
+            view.Indexes.Clear();
+            DetachIndexedViewDependencies(view);
+        }
+        else
+        {
+            _ = view.Indexes.Remove(index);
+        }
+        RecordDdlUndo(context, () =>
+        {
+            view.Indexes.Clear();
+            view.Indexes.AddRange(before);
+            if (index.IsClustered)
+                ReattachIndexedViewDependencies(view, bases);
+        });
+        RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(writtenName), indexName, "INDEX", view.Name, "VIEW");
+        return true;
+    }
+
+    /// <summary>
     /// Builds the table-name portion of a deprecated <c>DROP INDEX
     /// table.index</c> reference by dropping the rightmost (index-name)
     /// segment.
@@ -1015,6 +1054,8 @@ partial class Simulation
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
         {
+            if (context.Batch.TryResolveView(tableName, out var indexedView) && DropViewIndex(context, indexedView, indexName, tableName))
+                return;
             if (ifExists)
                 return;
             // Msg 3701 names the table as written, missing or not (probed

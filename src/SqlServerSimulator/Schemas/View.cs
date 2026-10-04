@@ -93,6 +93,13 @@ internal sealed class View(
     public readonly bool IsSchemaBound = isSchemaBound;
 
     /// <summary>
+    /// True when the view was declared <c>WITH VIEW_METADATA</c>, surfaced as
+    /// <c>sys.views.has_opaque_metadata</c> (probed 2026-10-04 against SQL
+    /// Server 2025).
+    /// </summary>
+    public bool HasViewMetadata;
+
+    /// <summary>
     /// Unique-clustered (and any secondary) indexes declared on this view via
     /// <c>CREATE INDEX ON &lt;view&gt;</c> — an indexed (materialized) view.
     /// Reuses <see cref="Storage.Index"/>: a view index's key / include

@@ -471,6 +471,14 @@ internal sealed class HeapTable : SchemaObject
     public bool ReadsAsWorktable;
 
     /// <summary>
+    /// For an <c>AFTER</c> trigger's <c>inserted</c> / <c>deleted</c>, which
+    /// take no read of a <c>text</c>, <c>ntext</c> or <c>image</c> column:
+    /// naming one is Msg 311, as the trigger is created (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    public bool RefusesLegacyLobReads;
+
+    /// <summary>
     /// The <see cref="Database"/> this table is registered in, stamped when it
     /// enters a <see cref="Schema.HeapTables"/> dict. Null for the tables that
     /// belong to no database — temp tables, table variables, table-valued

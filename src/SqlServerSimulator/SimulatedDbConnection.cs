@@ -1258,6 +1258,24 @@ public sealed class SimulatedDbConnection : DbConnection
     internal List<Storage.PendingVersionEntry>? TriggerStatementVersionEntries;
 
     /// <summary>
+    /// The savepoints a trigger body's <c>SAVE TRANSACTION</c> set on
+    /// <see cref="TriggerStatementUndoLog"/> — the auto-commit unit a body
+    /// reads as <c>@@TRANCOUNT</c> 1 takes one as a transaction does, and a
+    /// <c>ROLLBACK TRANSACTION</c> naming it undoes back to it (probed
+    /// 2026-10-04 against SQL Server 2025). Each entry is the name, the undo
+    /// log's position and the pending-version count when it was set.
+    /// </summary>
+    internal List<(string Name, int UndoPosition, int VersionEntryCount)>? TriggerUnitSavepoints;
+
+    /// <summary>
+    /// Set when an error a body's <c>TRY</c> caught under <c>XACT_ABORT ON</c>
+    /// doomed <see cref="TriggerStatementUndoLog"/>'s auto-commit unit, as it
+    /// dooms a user transaction: <c>XACT_STATE()</c> reads -1 and a write is
+    /// Msg 3930 (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal bool TriggerUnitDoomed;
+
+    /// <summary>
     /// Set when an error of severity 11 or higher was raised while the
     /// currently running trigger body executed and a <c>TRY</c> / <c>CATCH</c>
     /// swallowed it. The trigger dispatcher reads it when the body returns and

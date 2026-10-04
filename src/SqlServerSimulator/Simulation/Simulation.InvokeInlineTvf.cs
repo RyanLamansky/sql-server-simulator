@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
@@ -145,7 +146,7 @@ partial class Simulation
         connection.AnsiNulls = function.UsesAnsiNulls;
         // Body errors attribute to the outer invoking statement (probe-
         // confirmed: real reports the referencing SELECT's line, no procedure).
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true, BindsModuleDefinition = true };
         SeedTableValuedParameters(innerBatch, outerBatch, function.Parameters, tableArguments);
         // Inlined into the referencing statement — same current-time freeze,
         // so a per-row APPLY reads one constant value (matching real).
@@ -171,6 +172,81 @@ partial class Simulation
             connection.AnsiNulls = savedAnsiNulls;
             // As in the view body: the Sch-S / IS the body took are recorded
             // against this inner batch, which the dispatch loop never sees.
+            innerBatch.ReleaseStatementSchemaLocks();
+        }
+    }
+
+    /// <summary>
+    /// A write naming a table-valued function call as its target: an inline
+    /// function is the unstored view its body is, with this call's arguments,
+    /// so a write passes through it to the table it reads as through a view
+    /// — its filter selecting the rows, a derived column Msg 4406, a join Msg
+    /// 4405 to a <c>DELETE</c> — and a multi-statement one is Msg 270 (probed
+    /// 2026-10-04 against SQL Server 2025). Entered on the name's last token;
+    /// on success left on the argument list's <c>)</c>.
+    /// </summary>
+    private static bool TryResolveFunctionWriteTarget(ParserContext context, MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out View? view)
+    {
+        view = null;
+        if (!context.Batch.TryResolveTableValuedFunction(name, out var function))
+            return false;
+        var checkpoint = context.SaveCheckpoint();
+        if (context.GetNextOptional() is not Operator { Character: '(' })
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return false;
+        }
+        if (function is not InlineTableValuedFunction inline)
+            throw SimulatedSqlException.ObjectCannotBeModified(name.ToString());
+        context.MoveNextRequired();
+        var arguments = Parser.Expressions.UserFunctionCall.ParseFunctionArguments(inline, context);
+        var batch = context.Batch;
+        var (argValues, isDefault, _) = EvaluateFunctionArguments(
+            inline, arguments, new RuntimeContext(written => throw SimulatedSqlException.InvalidColumnName(written), batch));
+
+        var connection = batch.Connection;
+        using var bodyCommand = new SimulatedDbCommand(connection.Simulation, connection);
+#pragma warning disable CA2100 // the function's pre-validated stored body, not external input
+        bodyCommand.CommandText = inline.BodyText;
+#pragma warning restore CA2100
+        var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+        for (var i = 0; i < inline.Parameters.Length; i++)
+        {
+            var param = inline.Parameters[i];
+            if (param.TableType is not null)
+                continue;
+            var value = isDefault[i] && param.Default is { } defaultExpr
+                ? defaultExpr.Run(new RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), batch)).CoerceTo(param.Type)
+                : argValues[i];
+            value = Parser.Expressions.Cast.ApplyCoercion(value, param.Type, param.DeclaredMaxLength);
+            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, value, parameter: null) { SpelledNumeric = param.SpelledNumeric };
+        }
+        var savedQuotedIdentifiers = connection.QuotedIdentifiers;
+        var savedAnsiNulls = connection.AnsiNulls;
+        connection.QuotedIdentifiers = inline.UsesQuotedIdentifier;
+        connection.AnsiNulls = inline.UsesAnsiNulls;
+        // The body's parameter references bind to this call's slots rather
+        // than by name, so the write evaluates them from its own batch — the
+        // binding a cursor's declaration gives the variables it reads.
+        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32))
+        {
+            SuppressDiagnosticsResolution = true,
+            BindsModuleDefinition = true,
+            CursorDeclarationSnapshot = new Dictionary<string, VariableSlot>(variables, BatchContext.VariableNameComparer),
+        };
+        innerBatch.AdoptStatementFreezeFrom(batch);
+        try
+        {
+            var parser = innerBatch.Parser;
+            parser.MoveNextRequired();
+            var body = ParseInlineTvfBody(parser, inline, name);
+            view = UnstoredDmlView(body, inline.Schema.Database, name.ToString(), body.ColumnNames, isDerivedTable: false);
+            return true;
+        }
+        finally
+        {
+            connection.QuotedIdentifiers = savedQuotedIdentifiers;
+            connection.AnsiNulls = savedAnsiNulls;
             innerBatch.ReleaseStatementSchemaLocks();
         }
     }

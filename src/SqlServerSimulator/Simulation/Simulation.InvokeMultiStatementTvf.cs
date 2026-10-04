@@ -89,9 +89,13 @@ partial class Simulation
         // instances are shared across calls (immutable; row-level enforcement
         // reads kind + ordinals only). Each call gets its own object id +
         // create date so a recursive call doesn't collide on identity.
+        // An identity column numbers each call's rows afresh.
+        var returnColumns = function.OutputColumns;
+        if (Array.Exists(returnColumns, static column => column.Identity is not null))
+            returnColumns = Array.ConvertAll(returnColumns, static column => column.WithFreshIdentity());
         var returnTable = new HeapTable(
             "@" + function.ReturnVariableName,
-            function.OutputColumns,
+            returnColumns,
             outerBatch.CurrentDatabase.AllocateObjectId(),
             schemaId: Database.DboSchemaId,
             createDate: outerBatch.CurrentStatement.UtcNow,
@@ -133,6 +137,9 @@ partial class Simulation
         innerBatch.TableVariables[function.ReturnVariableName] = returnTable;
         connection.NestingLevel++;
         var identityScope = IdentityScope.Enter(connection);
+        // WITH EXECUTE AS runs the body as the principal it names, as a
+        // scalar function's does (probed 2026-10-04 against SQL Server 2025).
+        var savedImpersonationDepth = connection.Security.ImpersonationDepth;
         // What the body reads real doesn't report under STATISTICS IO; the
         // caller's statement reports its scan of the return table instead,
         // under a table variable's name (probed 2026-09-28 against SQL Server
@@ -141,6 +148,7 @@ partial class Simulation
         connection.StatementIo = null;
         try
         {
+            PushModuleExecuteAsFrame(connection, function.ExecuteAsClause, function.ExecuteAsPrincipalId, function.Schema.Database, innerBatch.OwnershipChainOwnerId ?? Database.DboPrincipalId);
             var parser = innerBatch.Parser;
             parser.MoveNextOptional();
             foreach (var _ in DispatchStatementsUntil(innerBatch, endKeyword: null))
@@ -153,6 +161,7 @@ partial class Simulation
         }
         finally
         {
+            connection.Security.RevertTo(savedImpersonationDepth);
             connection.StatementIo = callerIo;
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
@@ -161,12 +170,14 @@ partial class Simulation
             moduleScope.Exit();
         }
 
-        // Yield the accumulated @r rows. Iterating the table-variable's Heap
-        // returns row bytes directly — same shape the inline TVF path yields.
+        // Yield the accumulated @r rows, re-encoded in the selection's own
+        // shape: the heap stores no non-persisted computed column, and may
+        // have pushed a long value off-row into a chain only the return
+        // table's heap can resolve.
         if (callerIo is null)
         {
             foreach (var rowBytes in returnTable.Rows)
-                yield return rowBytes;
+                yield return ReturnTableRowAsSelected(returnTable, rowBytes, outerBatch);
             yield break;
         }
         returnTable.InternalName = connection.Simulation.AllocateTableVariableInternalName();
@@ -176,7 +187,27 @@ partial class Simulation
         foreach (var (page, _, rowBytes) in returnTable.Heap.EnumerateRowsWithAddress())
         {
             counts?.Enter(page, ref lastPage);
-            yield return rowBytes;
+            yield return ReturnTableRowAsSelected(returnTable, rowBytes, outerBatch);
         }
+    }
+
+    /// <summary>
+    /// One return-table row as <see cref="Selection.ForMultiStatementTvf"/>
+    /// declares it: every output column, a non-persisted computed one
+    /// evaluated as it is read (so its error reaches the caller, as on real),
+    /// and every value inline.
+    /// </summary>
+    private static byte[] ReturnTableRowAsSelected(HeapTable returnTable, byte[] rowBytes, BatchContext batch)
+    {
+        var values = DecodeFullRow(returnTable, rowBytes);
+        for (var i = 0; i < returnTable.Columns.Length; i++)
+        {
+            if (returnTable.Columns[i] is { Computed: not null, IsPersisted: false })
+                values[i] = EvaluateComputedColumn(returnTable, values, i, batch);
+        }
+        var schema = new SqlType[values.Length];
+        for (var i = 0; i < schema.Length; i++)
+            schema[i] = returnTable.Columns[i].Type;
+        return RowEncoder.EncodeRow(schema, values);
     }
 }

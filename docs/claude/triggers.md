@@ -15,9 +15,11 @@ Server-scope triggers (`CREATE TRIGGER … ON ALL SERVER`) — logon triggers an
 
 - **CREATE / ALTER / CREATE OR ALTER TRIGGER** — same upsert pattern as procedures (ObjectId preserved across ALTER), and the same replacement gates: **Msg 2010** when the name holds another object kind, **Msg 2110** when it holds a trigger on a different parent, **Msg 208** when it holds nothing (bare ALTER), **Msg 2714** on a plain CREATE over a taken name (state 2, or state 5 for a CLR trigger; probed 2026-09-28 against SQL Server 2025), and **Msg 166** for a database-qualified trigger name — see [`programmable.md`](programmable.md#replacing-a-module--alter--create-or-alter).
   A missing `ON` target reports its Msg 8197 ahead of all of them.
+- **CREATE refusals** — a trigger qualified by a schema other than its parent's is **Msg 2103** (an unqualified one takes the parent's schema), an action listed twice **Msg 1034**, `WITH APPEND` after the action list Msg 195, and `INSTEAD OF UPDATE` / `DELETE` on a view declared `WITH CHECK OPTION` **Msg 2112** (probed 2026-10-04 against SQL Server 2025).
 - **DROP TRIGGER [IF EXISTS] name [, ...]** — comma-list form supported via the shared DROP parser.
-- **DISABLE / ENABLE TRIGGER { name | ALL } ON parent** — toggles `Trigger.IsDisabled`.
+- **DISABLE / ENABLE TRIGGER { name [, …] | ALL } ON parent** — toggles `Trigger.IsDisabled`.
   Disabled triggers stay in the schema and surface in `sys.triggers.is_disabled` but don't fire.
+  A name the parent lacks is **Msg 1088** state 119 naming it as written, and toggles none of the list; the toggle rolls back with an enclosing transaction, and an `ALTER TRIGGER` keeps a disabled trigger disabled (probed 2026-10-04 against SQL Server 2025).
   `ALTER TABLE t { DISABLE | ENABLE } TRIGGER { ALL | name [, …] }` is the table-scoped form; a name the table lacks is Msg 4920 and toggles none of the list (probed 2026-09-25).
   Works on both table and view parents.
 - **AFTER INSERT / UPDATE / DELETE** plus the **FOR-synonym-for-AFTER** spelling — table parents only.
@@ -25,6 +27,7 @@ Server-scope triggers (`CREATE TRIGGER … ON ALL SERVER`) — logon triggers an
 - **INSTEAD OF INSERT / UPDATE / DELETE** — replaces the would-be DML with the trigger body.
   The heap-write phase is skipped; identity allocation is skipped (INSERTED's identity column shows the type's typed default — 0 for int — rather than the next sequential value); NOT NULL / CHECK / key constraints are not enforced on the suppressed write; AFTER triggers on the same action don't fire.
   DEFAULT-clause evaluation and computed columns still run so INSERTED carries the would-be values (probe-confirmed).
+  The pseudo-tables keep an identity column `NOT NULL`, null a `rowversion` column only for an `INSERT`, and an `INSTEAD OF UPDATE` on a table reports the SET list through `UPDATE(col)` / `COLUMNS_UPDATED()` as an AFTER trigger does; `INSERT … DEFAULT VALUES` through a view fires its `INSTEAD OF INSERT` over one row (probed 2026-10-04 against SQL Server 2025).
   Parent can be a heap table or a view.
 - **INSTEAD OF on views** — the primary real-world use case: makes a non-updatable view (join / aggregate / etc.) writable → [INSTEAD OF on views](#instead-of-on-views).
 - **At most one INSTEAD OF per action per target** (Msg 2111, probe-confirmed verbatim).
@@ -59,6 +62,7 @@ Server-scope triggers (`CREATE TRIGGER … ON ALL SERVER`) — logon triggers an
 - **`UPDATE(col)` / `COLUMNS_UPDATED()`** — see [Change-detection intrinsics](#change-detection-intrinsics).
 - **AFTER triggers fire on a zero-row DML** — an UPDATE / DELETE matching nothing, an `INSERT … SELECT` producing nothing, and a MERGE with no source rows all still run the body, with empty `INSERTED` / `DELETED` and `@@ROWCOUNT` 0 (probe-confirmed for all four shapes).
   `UPDATE(col)` still reports the SET-clause columns there, because the reading is a property of the statement rather than of the rows.
+  An `UPDATE` whose SET assigns only variables fires the trigger too, over empty pseudo-tables (probed 2026-10-04 against SQL Server 2025).
 - **Nesting and recursion gating** — `RECURSIVE_TRIGGERS` (per database) and the `nested triggers` server option decide whether a trigger fires while other triggers are running; see [Nesting and recursion options](#nesting-and-recursion-options).
 - **CLR triggers** — `AS EXTERNAL NAME assembly.class.method`, DML (AFTER and INSTEAD OF) and DDL, fire where a T-SQL body would, read `SqlContext.TriggerContext`, and read `INSERTED` / `DELETED` and `EVENTDATA()` through the context connection, whose commands carry the trigger's frame → [`clr-assemblies.md`](clr-assemblies.md#triggers).
 - **MERGE routing through INSTEAD OF** — the actions a MERGE's `WHEN` clauses perform must all have an INSTEAD OF trigger on the target, or none: some but not all is **Msg 5316**, raised while compiling, so an un-taken branch's MERGE ends its batch and a `DISABLE TRIGGER` earlier in the same batch hasn't run yet when it's judged (probed 2026-09-27 against SQL Server 2025, table and view).
@@ -225,6 +229,9 @@ Over an auto-commit statement the statement's end then takes one level off the t
 An error after it ends the batch with its own number, and what was committed stays.
 `XACT_STATE()` reads 1 in the unit, as it does in any statement writing a table or table variable.
 
+The unit takes savepoints: `SAVE TRAN` in a body over an auto-commit statement names a point a later `ROLLBACK TRAN <name>` returns to, keeping the firing statement's rows and undoing only the body's writes since (`SimulatedDbConnection.TriggerUnitSavepoints`).
+An error the body catches with its forced `XACT_ABORT` on dooms the unit as it would a user transaction: `XACT_STATE()` reads -1, the next write is **Msg 3930**, and Msg 3621 follows for the firing statement (`SimulatedDbConnection.TriggerUnitDoomed`; probed 2026-10-04 against SQL Server 2025).
+
 ### Msg 3616 — the body's own TRY / CATCH doesn't rescue it
 
 An error of severity **11 or higher** raised while a body runs aborts the batch and rolls the unit back *even when the body's own `TRY` / `CATCH` handled it*, surfacing:
@@ -239,12 +246,13 @@ An error caught inside a stored procedure the body called counts too, which is w
 ## Writing the pseudo-tables
 
 A body's `INSERT` / `UPDATE` / `DELETE` of `INSERTED` or `DELETED` is **Msg 286** at `CREATE TRIGGER` (probed 2026-10-01 against SQL Server 2025).
+An AFTER trigger's body reading a `text` / `ntext` / `image` column of either is **Msg 311** at `CREATE TRIGGER` (`HeapTable.RefusesLegacyLobReads`); an INSTEAD OF trigger's reads them (probed 2026-10-04 against SQL Server 2025).
 
 ## Errors in a trigger body
 
 A body starts under `SET XACT_ABORT ON` whatever the session says — `@@OPTIONS & 16384` reads 16384 inside it — so its errors follow that option's rules (probed 2026-09-24 against SQL Server 2025; [`transactions.md`](transactions.md#set-xact_abort)):
 - An error the body leaves unhandled ends the firing batch and rolls the transaction back, and so does one from a procedure or dynamic SQL the body calls, which inherit the option.
-  The firing statement still sends Msg 3621 after it, which an error ending the batch from the statement itself doesn't (`SimulatedSqlException.EndedTriggerBody`).
+  The firing statement still sends Msg 3621 after it, at line 1 and unattributed, which an error ending the batch from the statement itself doesn't (`SimulatedSqlException.EndedTriggerBody`; probed 2026-10-04 against SQL Server 2025).
 - Caught by a `TRY` in the firing batch, it dooms the transaction.
   A `TRY` catches the body's binder errors too — those of the compile as the trigger first fires and a missing object the body names when it runs — which otherwise end the batch the same way (probed 2026-10-01 against SQL Server 2025).
 - `RAISERROR`, which the option exempts, lets the body run on the way a procedure body does ([`control-flow.md`](control-flow.md#procedure-and-dynamic-sql-bodies)): the error reaches the client among the body's output, and the firing statement keeps its rows.
@@ -252,9 +260,11 @@ A body starts under `SET XACT_ABORT ON` whatever the session says — `@@OPTIONS
 
 ### Not modeled yet
 
-- **Msg 311 for a `text` / `ntext` / `image` column read from INSERTED or DELETED** in an AFTER trigger's body — refused at `CREATE TRIGGER` on real — binds here (probed 2026-10-01 against SQL Server 2025).
 - **Msg 3621 after a non-writing statement's error in a body that turned `XACT_ABORT` off** — real sends it for the firing statement; here only an error escaping the body earns it.
-- **Msg 3621 after an error escaping the body** carries the trigger as its `Procedure` on real (Msg 8134 from `SELECT 1/0`), and isn't sent at all after a Msg 208 a function the body calls raises as it runs; here it follows unattributed in both (probed 2026-10-01 against SQL Server 2025).
+- **Msg 3621 after an error escaping the body** carries the trigger as its `Procedure` and the failing statement's line on real when that statement writes nothing (Msg 8134 from `SELECT 1/0`), and isn't sent at all after a Msg 208 a function the body calls raises as it runs; here it follows at line 1 unattributed in both (probed 2026-10-04 against SQL Server 2025).
+  A nested trigger's error ending a chain of two is the same: real attributes the 3621 to the inner trigger.
+- **A `SELECT` the body began before a caught error** — real sends nothing for it; here its empty result set reaches the client ahead of Msg 3930.
+- **`COLUMNS_UPDATED()` in a function a trigger body calls** reads the trigger's mask on real; here it reads NULL, as outside any trigger (probed 2026-10-04 against SQL Server 2025).
 
 ## Change-detection intrinsics
 
@@ -275,11 +285,9 @@ The mask is keyed on the **stable `column_id`**, so a dropped column keeps its b
 **Where they live.** `COLUMNS_UPDATED()` is a value expression and resolves through `ResolveBuiltIn` ([`ColumnsUpdated.cs`](../../src/SqlServerSimulator/Parser/Expressions/ColumnsUpdated.cs)); `UPDATE(col)` is a **`BooleanExpression`** ([`UpdatePredicate.cs`](../../src/SqlServerSimulator/Parser/Expressions/UpdatePredicate.cs)) dispatched from `BooleanExpression.ParseAtom`, because real raises **Msg 156** for `SELECT UPDATE(c1)` — modeling it as a bit-returning built-in would accept a shape real rejects.
 The per-fire mask rides on `TriggerFrame.ColumnsUpdatedMask`, built by `Simulation.BuildColumnsUpdatedMask` at fire time.
 
-Error paths (probe-confirmed): an unknown column raises **Msg 207**; use outside any trigger raises **Msg 140** (`"Can only use IF UPDATE within a CREATE TRIGGER statement."`); a qualified name (`UPDATE(t.c1)`) raises Msg 102 near `'.'` and the no-arg `UPDATE()` raises Msg 102 near `')'`.
+Error paths (probe-confirmed): an unknown column raises **Msg 207**, a computed column **Msg 2114** and `UPDATE(col)` in a DDL trigger **Msg 1097**, all at `CREATE TRIGGER` (probed 2026-10-04 against SQL Server 2025); use outside any trigger raises **Msg 140** (`"Can only use IF UPDATE within a CREATE TRIGGER statement."`); a qualified name (`UPDATE(t.c1)`) raises Msg 102 near `'.'` and the no-arg `UPDATE()` raises Msg 102 near `')'`.
 `COLUMNS_UPDATED()` is deliberately asymmetric — outside a trigger it returns **NULL** rather than raising.
 
-`UPDATE(col)` resolves its column to a `column_id` when the body parses, which for the simulator is each fire rather than at CREATE TRIGGER; real resolves at CREATE and raises Msg 207 there.
-That's the same deferred module-body validation every other trigger-body name reference has.
 
 ## DDL triggers — `CREATE TRIGGER … ON DATABASE`
 
@@ -345,7 +353,7 @@ The document is built once per fire and carried on the body's `TriggerFrame`, so
 ```
 
 Element order is real's.
-`SchemaName` is **omitted entirely** for `CREATE_USER` / `CREATE_ROLE` and their siblings, an application role's and a full-text catalog's, matching real; `TargetObjectName` / `TargetObjectType` follow `ObjectType` for the index and trigger events (naming the parent table or view), and a synonym event carries `TargetObjectName` alone.
+`SchemaName` is **omitted entirely** for `CREATE_USER` / `CREATE_ROLE` and their siblings, an application role's and a full-text catalog's, matching real; `TargetObjectName` / `TargetObjectType` follow `ObjectType` for the index and trigger events (naming the parent table or view — for a database-scope trigger an empty `SchemaName` and `TargetObjectName` with `TargetObjectType` `Database`), for `UPDATE_STATISTICS` (which carries no `ObjectName`) and for an `sp_rename` of a column or index (naming its table; an object's carries an empty pair), and a synonym event carries `TargetObjectName` alone (probed 2026-10-04 against SQL Server 2025).
 `ObjectType` uses real's spellings — `TABLE`, `VIEW`, `INDEX`, `SCHEMA`, `TRIGGER`, `SEQUENCE`, `SYNONYM`, `TYPE`, `ROLE`, `SQL USER`, `APPLICATION ROLE`, `XML SCHEMA COLLECTION`, `FULLTEXT CATALOG`; a full-text index event names its table.
 
 Three kinds carry elements of their own after the common ones (probed 2026-09-28 against SQL Server 2025):
@@ -356,7 +364,7 @@ Three kinds carry elements of their own after the common ones (probed 2026-09-28
 `QUOTED_IDENTIFIER` reflects the session setting; the other `SetOptions` attributes are fixed.
 
 `CommandText` is the statement's source, over an extent real settles by the statement's kind (probed 2026-09-28 against SQL Server 2025; `Simulation.CommandTextExtentOf` reads it off the leading words):
-- a table, index, statistics, database or XML-schema-collection statement, an `EXEC` of a procedure that raises one, and the `DROP` of a table, view, module, index, sequence, synonym, user, default, rule or partition function, reports its own tokens, without its `;`;
+- a table, index, statistics, database or XML-schema-collection statement (comments after its last token excluded), an `EXEC` of a procedure that raises one, and the `DROP` of a table, view, module, index, sequence, synonym, user, default, rule or partition function, reports its own tokens, without its `;`;
 - a login, user (bar `DROP USER`), role, application-role, `GRANT` / `DENY` / `REVOKE`, `CREATE SYNONYM`, `CREATE` / `ALTER SEQUENCE`, `CREATE` / `DROP TYPE`, `DROP SCHEMA`, `ALTER AUTHORIZATION`, partition-scheme, `CREATE PARTITION FUNCTION`, full-text catalog or index, or `ALTER DATABASE SCOPED CONFIGURATION` statement reports everything up to the next statement's first token — its `;`, the whitespace and comments after it — or to the end of the batch;
 - a statement a batch must hold alone — `CREATE` / `ALTER` of a view, procedure, function or trigger, `CREATE DEFAULT` / `RULE` / `SCHEMA` — reports the whole batch, leading comments and whitespace included.
 
@@ -431,10 +439,9 @@ Unpinned triggers of one scope fire in creation order.
 - **A login's default database** — `ALTER LOGIN … DEFAULT_DATABASE` is discarded, so a login lands where the connection asks or on the simulator's default.
 - **Login-event `CommandText`** — real keeps the statement's `;` and the newline after it; the simulator trims them.
 
-## Not modeled
+## Not modeled yet
 
-- **`@@NESTLEVEL` independence** — the simulator collapses UDF / procedure / trigger depth into a single counter (`SimulatedDbConnection.NestingLevel`).
-  `TRIGGER_NESTLEVEL()` reads its own dedicated `TriggerNestLevel` counter, so it's accurate, but `@@NESTLEVEL` (not modeled at all) wouldn't have the right value if added.
+- **The `nested triggers` option read per batch** — real reads it as a batch compiles, so a `RECONFIGURE` in the same batch takes effect from the next batch; here the firing statement reads the live value (probed 2026-10-04 against SQL Server 2025).
 
 ## EF Core reach
 

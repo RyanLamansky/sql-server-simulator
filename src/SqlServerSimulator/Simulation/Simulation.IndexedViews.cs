@@ -45,31 +45,62 @@ partial class Simulation
         // session's own Msg 1934 (probe-confirmed).
         if (!view.UsesQuotedIdentifier)
             throw SimulatedSqlException.CannotCreateIndexObjectCreatedWithOptionsOff(view.Name, QuotedIdentifierOptionName);
+        if (!view.UsesAnsiNulls)
+            throw SimulatedSqlException.CannotCreateIndexObjectCreatedWithOptionsOff(view.Name, "ANSI_NULLS");
         if (IncorrectSetOptionNames(context) is { } setOptions)
             throw SimulatedSqlException.IncorrectSetOptions("CREATE INDEX", setOptions);
+        // Every table and function the body reaches carries the same
+        // creation-time requirement (probed 2026-10-04 against SQL Server
+        // 2025).
+        var reachedTables = new HashSet<HeapTable>();
+        this.CollectViewBaseTables(context.Batch, view, reachedTables, []);
+        foreach (var table in reachedTables)
+        {
+            if (!table.UsesAnsiNulls)
+                throw SimulatedSqlException.CannotCreateIndexObjectCreatedWithOptionsOff(table.Name, "ANSI_NULLS");
+        }
+        foreach (var function in AnalyzeIndexedViewShape(context.Batch, view).CalledFunctions)
+        {
+            if (!function.UsesAnsiNulls)
+                throw SimulatedSqlException.CannotCreateIndexObjectCreatedWithOptionsOff(function.Name, "ANSI_NULLS");
+        }
 
         if (!view.IsSchemaBound)
             throw SimulatedSqlException.CannotIndexViewNotSchemaBound(view.Name);
         if (isClustered && !isUnique)
             throw SimulatedSqlException.CannotIndexViewNonUniqueClustered(qualifiedViewName);
-        var hasUniqueClustered = false;
+        StoredIndex? uniqueClustered = null;
         foreach (var existing in view.Indexes)
         {
             if (existing.IsUnique && existing.IsClustered)
             {
-                hasUniqueClustered = true;
+                uniqueClustered = existing;
                 break;
             }
         }
-        if (!hasUniqueClustered && !(isUnique && isClustered))
+        if (uniqueClustered is null && !(isUnique && isClustered))
             throw SimulatedSqlException.CannotIndexViewNoUniqueClustered(qualifiedViewName);
+        // A view takes one clustered index, and no filter: a clustered one's
+        // WHERE is a syntax error there, a nonclustered one's Msg 10610
+        // (probed 2026-10-04 against SQL Server 2025).
+        if (isClustered && uniqueClustered is not null && !(options.DropExisting && collation.Equals(uniqueClustered.Name, indexName)))
+            throw SimulatedSqlException.MoreThanOneClusteredIndexOnView(qualifiedViewName, uniqueClustered.Name);
+        if (filter is not null)
+        {
+            throw isClustered
+                ? SimulatedSqlException.SyntaxErrorNearText("WHERE")
+                : SimulatedSqlException.FilteredIndexOnView(indexName, qualifiedViewName);
+        }
 
         EnforceIndexedViewQualifies(context, view, indexName);
 
+        // DROP_EXISTING replaces an index of the same name, keeping the
+        // others (probed 2026-10-04 against SQL Server 2025).
+        StoredIndex? replaced = null;
         foreach (var existing in view.Indexes)
         {
             if (collation.Equals(existing.Name, indexName))
-                throw SimulatedSqlException.IndexAlreadyExists(indexName, qualifiedViewName);
+                replaced = options.DropExisting ? existing : throw SimulatedSqlException.IndexAlreadyExists(indexName, qualifiedViewName);
         }
 
         var resolvedKeyColumns = new IndexKeyColumn[keyColumns.Count];
@@ -79,6 +110,11 @@ partial class Simulation
             // ordinal doubles as both the storage ordinal (decode) and the
             // column ordinal (sys.index_columns.column_id = ordinal + 1).
             var ordinal = ResolveViewOutputOrdinal(collation, view, keyColumns[i].Name);
+            // A float or real key column has to read a column straight;
+            // computed, it is Msg 1901 (probed 2026-10-04 against SQL Server
+            // 2025).
+            if (view.OutputColumns[ordinal].Type is FloatSqlType or RealSqlType && !ViewColumnPassesThrough(view, ordinal))
+                throw SimulatedSqlException.ViewIndexKeyImprecise(indexName, qualifiedViewName, view.OutputColumns[ordinal].Name);
             resolvedKeyColumns[i] = new IndexKeyColumn(ordinal, ordinal, keyColumns[i].IsDescending);
         }
         var resolvedIncludeColumns = new int[includeColumnNames.Count];
@@ -111,9 +147,31 @@ partial class Simulation
                 throw SimulatedSqlException.DuplicateKeyOnCreate(qualifiedViewName, indexName, FormatIndexKeyValues(dupKey));
         }
 
-        view.Indexes.Add(index);
+        StoredIndex[] before = [.. view.Indexes];
+        var bases = view.ReferencedBaseTables;
+        if (replaced is not null)
+            view.Indexes[view.Indexes.IndexOf(replaced)] = index;
+        else
+            view.Indexes.Add(index);
         this.RegisterViewDependencies(context.Batch, view);
+        // An enclosing transaction's rollback takes the index back off, and
+        // with the view's first index, its maintenance (probed 2026-10-04
+        // against SQL Server 2025).
+        RecordDdlUndo(context, () =>
+        {
+            view.Indexes.Clear();
+            view.Indexes.AddRange(before);
+            if (before.Length == 0)
+                DetachIndexedViewDependencies(view);
+            else
+                view.ReferencedBaseTables = bases;
+        });
     }
+
+    /// <summary>Whether a view's output column reads a base column unchanged.</summary>
+    private static bool ViewColumnPassesThrough(View view, int ordinal) =>
+        view.BaseColumnOrdinals.Length > ordinal ? view.BaseColumnOrdinals[ordinal] >= 0
+            : view.DerivedOutputColumns is { } derived && derived.Length > ordinal && !derived[ordinal];
 
     private static int ResolveViewOutputOrdinal(Collation collation, View view, string columnName)
     {
@@ -147,7 +205,7 @@ partial class Simulation
             var hasUnique = false;
             foreach (var index in view.Indexes)
             {
-                if (index.IsUnique)
+                if (index is { IsUnique: true, IsDisabled: false })
                 {
                     hasUnique = true;
                     break;
@@ -160,7 +218,7 @@ partial class Simulation
             var qualifiedViewName = $"{view.Schema.Name}.{view.Name}";
             foreach (var index in view.Indexes)
             {
-                if (!index.IsUnique)
+                if (!index.IsUnique || index.IsDisabled)
                     continue;
                 if (FindFirstDuplicateViewKey(index, schema, rows) is { } dupKey)
                     throw SimulatedSqlException.ViolationOfUniqueIndex(index.Name, qualifiedViewName, FormatIndexKeyValues(dupKey));
@@ -345,8 +403,31 @@ partial class Simulation
         // nondeterministic-function rejections it also violates.
         if (shape.CteName is { } cteName)
             throw SimulatedSqlException.IndexedViewReferencesCte(qualified, cteName);
-        if (shape.NondeterministicFunction is { } nondeterministic)
-            throw SimulatedSqlException.IndexedViewIsNondeterministic(qualified, nondeterministic);
+        if (shape.ReferencedView is { } referencedView)
+            throw SimulatedSqlException.IndexedViewReferencesView(qualified, referencedView);
+        // A PIVOT names itself ahead of the derived table it reads.
+        if (shape.HasPivot)
+            throw SimulatedSqlException.IndexedViewHasPivot(qualified);
+        if (shape.DerivedTableAlias is { } derivedAlias)
+            throw SimulatedSqlException.IndexedViewReferencesDerivedTable(qualified, derivedAlias);
+        if (shape.TableValuedFunction is { } tableValuedFunction)
+            throw SimulatedSqlException.IndexedViewReferencesTableValuedFunction(qualified, tableValuedFunction);
+        if (shape.UsesOpenJson)
+            throw SimulatedSqlException.IndexedViewUsesOpenJson(qualified);
+        if (shape.UsesXmlMethod)
+            throw SimulatedSqlException.IndexedViewUsesXmlMethod(qualified);
+        if (shape.HasTableHint)
+            throw SimulatedSqlException.IndexedViewHasTableHint(qualified);
+        if (ModuleDeterminism.FindNondeterminism(context.Batch.CurrentDatabase, view) is var (kind, name))
+        {
+            throw kind switch
+            {
+                ModuleDeterminism.Nondeterminism.BuiltIn => SimulatedSqlException.IndexedViewIsNondeterministic(qualified, name!),
+                ModuleDeterminism.Nondeterminism.ImplicitDateConversion => SimulatedSqlException.IndexedViewHasImplicitDateConversion(qualified),
+                ModuleDeterminism.Nondeterminism.UserFunction => SimulatedSqlException.IndexedViewUsesNondeterministicFunction(qualified, name!),
+                _ => SimulatedSqlException.IndexedViewHasNondeterministicConvert(qualified),
+            };
+        }
         if (shape.SelfJoinedTable is { } selfJoined)
         {
             throw SimulatedSqlException.IndexedViewHasSelfJoin(
@@ -359,10 +440,22 @@ partial class Simulation
             throw SimulatedSqlException.IndexedViewHasTopOrOffset(qualified);
         if (shape.HasOuterJoin)
             throw SimulatedSqlException.IndexedViewHasOuterJoin(qualified);
+        if (shape.HasApply)
+            throw SimulatedSqlException.IndexedViewHasApply(qualified);
         if (shape.HasSetOperation)
             throw SimulatedSqlException.IndexedViewHasSetOperator(qualified);
         if (shape.HasSubquery)
             throw SimulatedSqlException.IndexedViewHasSubquery(qualified);
+        if (shape.HasWindow)
+            throw SimulatedSqlException.IndexedViewHasWindow(qualified);
+        if (shape.HasHaving)
+            throw SimulatedSqlException.IndexedViewHasHaving(qualified);
+        if (shape.HasGroupingSets)
+            throw SimulatedSqlException.IndexedViewHasGroupingSets(qualified);
+        if (shape.UsesStarOperator)
+            throw SimulatedSqlException.IndexedViewUsesStarOperator(qualified);
+        if (shape.ImpreciseFilterColumn is { } imprecise)
+            throw SimulatedSqlException.IndexedViewFiltersOnImpreciseColumn(qualified, imprecise);
 
         foreach (var aggregate in shape.Aggregates)
         {
@@ -373,14 +466,39 @@ partial class Simulation
             // over-restrictive direction.
             if (aggregate == AggregateKind.Count)
                 throw SimulatedSqlException.IndexedViewUsesCount(qualified);
-            if (DisallowedAggregateName(aggregate) is { } name)
-                throw SimulatedSqlException.IndexedViewHasDisallowedAggregate(qualified, name);
+            if (DisallowedAggregateName(aggregate) is { } aggregateName)
+                throw SimulatedSqlException.IndexedViewHasDisallowedAggregate(qualified, aggregateName);
         }
 
         if (shape.HasGroupBy && !shape.Aggregates.Contains(AggregateKind.CountBig))
             throw SimulatedSqlException.IndexedViewMissingCountBig(qualified);
         if (shape.SumsNullableExpression)
             throw SimulatedSqlException.IndexedViewSumsNullableExpression(indexName, qualified);
+        if (shape.ExpressionOverAggregate)
+            throw SimulatedSqlException.IndexedViewHasExpressionOverAggregate(indexName, qualified);
+        if (shape.GroupingExpressionNotProjected)
+            throw SimulatedSqlException.IndexedViewGroupByNotProjected(indexName, qualified);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="view"/> could carry an index —
+    /// <c>OBJECTPROPERTY(…, 'IsIndexable')</c>: schema-bound, created under
+    /// <c>QUOTED_IDENTIFIER</c> and <c>ANSI_NULLS</c> ON, and clear of the
+    /// whole qualifying battery (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal bool IsViewIndexable(BatchContext batch, View view)
+    {
+        if (!view.IsSchemaBound || !view.UsesQuotedIdentifier || !view.UsesAnsiNulls)
+            return false;
+        try
+        {
+            this.EnforceIndexedViewQualifies(batch.Parser, view, indexName: "");
+            return true;
+        }
+        catch (SimulatedSqlException)
+        {
+            return false;
+        }
     }
 
     /// <summary>

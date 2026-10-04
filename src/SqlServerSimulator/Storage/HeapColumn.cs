@@ -303,8 +303,17 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// </summary>
     internal HeapColumn WithHidden(bool hidden) => this.With(this.IsPersisted, this.Nullable, hidden);
 
-    private HeapColumn With(bool persisted, bool nullable, bool hidden) =>
-        new(this.Name, this.Type, this.MaxLength, nullable, this.Identity, this.Default, this.Computed, persisted,
+    /// <summary>
+    /// This identity column with an identity counter of its own, starting from
+    /// the seed — what each call of a multi-statement function hands its
+    /// return table, whose numbering restarts per call (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    internal HeapColumn WithFreshIdentity() =>
+        this.Identity is { } identity ? this.With(this.IsPersisted, this.Nullable, this.IsHidden, new IdentityState(identity.Seed, identity.Increment, identity.NotForReplication)) : this;
+
+    private HeapColumn With(bool persisted, bool nullable, bool hidden, IdentityState? identity = null) =>
+        new(this.Name, this.Type, this.MaxLength, nullable, identity ?? this.Identity, this.Default, this.Computed, persisted,
             this.GeneratedAs, hidden, this.Collation, this.ComputedDefinition, this.IsRowGuidCol, this.SpelledNumeric)
         {
             ColumnId = this.ColumnId,

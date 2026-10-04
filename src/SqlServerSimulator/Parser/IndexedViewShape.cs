@@ -46,12 +46,56 @@ internal sealed class IndexedViewShape
     /// </summary>
     public Storage.HeapTable? SelfJoinedTable;
 
+    /// <summary>The alias of the first derived table the body reads → Msg 10109, which embeds it.</summary>
+    public string? DerivedTableAlias;
+
+    /// <summary>A <c>HAVING</c> clause → Msg 10121.</summary>
+    public bool HasHaving;
+
+    /// <summary>A <c>ROLLUP</c>, <c>CUBE</c> or <c>GROUPING SETS</c> → Msg 10119.</summary>
+    public bool HasGroupingSets;
+
+    /// <summary>A ranking or aggregate window function → Msg 10143.</summary>
+    public bool HasWindow;
+
+    /// <summary>A <c>CROSS</c> or <c>OUTER APPLY</c> → Msg 10142.</summary>
+    public bool HasApply;
+
+    /// <summary>A <c>PIVOT</c> or <c>UNPIVOT</c> → Msg 10114.</summary>
+    public bool HasPivot;
+
+    /// <summary>A table hint on any source → Msg 10140.</summary>
+    public bool HasTableHint;
+
+    /// <summary>A <c>CHECKSUM(*)</c> / <c>BINARY_CHECKSUM(*)</c> star → Msg 10117.</summary>
+    public bool UsesStarOperator;
+
+    /// <summary>The first view the body reads, as <c>schema.view</c> → Msg 1937, which embeds it.</summary>
+    public string? ReferencedView;
+
     /// <summary>
-    /// The lower-cased name of the first nondeterministic built-in reached →
-    /// Msg 1949, which embeds it (real reports <c>'getdate'</c> lower-cased
-    /// regardless of how the call was written).
+    /// The first float or real column a <c>WHERE</c> or <c>GROUP BY</c> reads →
+    /// Msg 1962, which embeds it.
     /// </summary>
-    public string? NondeterministicFunction;
+    public string? ImpreciseFilterColumn;
+
+    /// <summary>The first table-valued function the body reads, as <c>schema.name</c> → Msg 10129.</summary>
+    public string? TableValuedFunction;
+
+    /// <summary>An <c>OPENJSON</c> rowset → Msg 10148.</summary>
+    public bool UsesOpenJson;
+
+    /// <summary>An xml data type method → Msg 1985.</summary>
+    public bool UsesXmlMethod;
+
+    /// <summary>The user functions the body calls, whose creation-time SET options Msg 1935 judges.</summary>
+    public readonly List<Schemas.UserDefinedFunction> CalledFunctions = [];
+
+    /// <summary>A select-list expression over an aggregate's result → Msg 8668.</summary>
+    public bool ExpressionOverAggregate;
+
+    /// <summary>A <c>GROUP BY</c> expression the select list doesn't carry → Msg 8660.</summary>
+    public bool GroupingExpressionNotProjected;
 
     /// <summary>
     /// The aggregates the body projects, in parse order. Msg 10125 names the

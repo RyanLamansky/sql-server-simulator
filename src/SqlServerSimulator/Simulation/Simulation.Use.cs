@@ -27,6 +27,9 @@ partial class Simulation
     private static void ParseUseStatement(BatchContext batch)
     {
         var context = batch.Parser;
+        // A module body other than dynamic SQL takes no USE.
+        if (batch.UdfFrame is not null || batch.MultiStatementTvfBody || batch.ProcFrame is { IsDynamicSql: false } || batch.TriggerFrame is not null)
+            throw SimulatedSqlException.UseNotAllowedInModule();
         var nameToken = context.GetNextRequired<Name>();
         context.MoveNextOptional();
 

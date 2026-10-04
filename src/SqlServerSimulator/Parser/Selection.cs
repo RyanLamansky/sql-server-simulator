@@ -715,6 +715,14 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Whether the query <paramref name="scope"/> places is a view's or inline
+    /// function's own defining query as its <c>CREATE</c> parses it.
+    /// </summary>
+    private static bool DefinesModuleQuery(ParserContext context, QueryScope scope) =>
+        context.DefiningModuleQuery != DefiningModuleQuery.None
+        && scope.Position is QueryPosition.Statement or QueryPosition.ParenthesizedModuleBody;
+
+    /// <summary>
     /// Parses a full query expression: a chain of set-op-combined SELECT
     /// branches optionally followed by a top-level ORDER BY. Set-op
     /// precedence: <c>INTERSECT</c> binds tighter than <c>UNION</c> /
@@ -819,8 +827,10 @@ internal sealed partial class Selection
         // closed-list per Selection.Hints.cs; MAXRECURSION applies to in-
         // scope recursive CTEs, everything else recognized is discarded
         // (the simulator has nothing to dispatch on a hint against).
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Option })
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Option } optionKeyword)
         {
+            if (DefinesModuleQuery(context, scope))
+                throw SimulatedSqlException.SyntaxErrorNearKeyword(optionKeyword);
             ParseOptionClause(context);
             bareProjectionStatement = false;
             context.SimpleParameterizationBlocked = true;
@@ -2238,7 +2248,7 @@ internal sealed partial class Selection
                 // alongside the schema-inference walk, so we can flag the
                 // offending column with the target table name in the message.
                 case ReservedKeyword { Keyword: Keyword.Into }:
-                    if (intoTarget is not null)
+                    if (intoTarget is not null || DefinesModuleQuery(context, scope))
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     context.MoveNextRequired();
                     intoTarget = BatchContext.ParseObjectName(context);
@@ -3378,6 +3388,10 @@ internal sealed partial class Selection
             // branch naming an unknown function (SSMS's EngineEdition-gated
             // `CROSS APPLY sys.dm_os_volume_stats(...)` VolumeFreeSpace probe)
             // compiles and is discarded.
+            // A scalar function named as a rowset is an object the reference
+            // can't use, state 224 (probed 2026-10-04 against SQL Server 2025).
+            if (isFunctionCallShape && context.Batch.TryResolveFunction(resolvedName, out var applied) && applied is ScalarFunction)
+                throw SimulatedSqlException.InvalidObjectName(resolvedName, state: 224);
             if (isFunctionCallShape && context.Batch.IsSkipping)
             {
                 InlinedScalarCalls.NoteMissingObject(context.Batch, resolvedName, context.Token?.LineNumber ?? 0);
@@ -3645,6 +3659,7 @@ internal sealed partial class Selection
                 // qualified — they're aliases, not real tables).
             AfterBuiltInRowsetDispatch:
                 var beforeObjectName = context.SaveCheckpoint();
+                var objectNameLine = context.Token?.LineNumber ?? 0;
                 var objectName = BatchContext.ParseObjectName(context);
 
                 // `FROM t.x.nodes('…') n(c)` in a subquery shreds a column of
@@ -3957,6 +3972,7 @@ internal sealed partial class Selection
                     {
                         throw SimulatedSqlException.IncorrectSetOptions(context.Batch.CurrentStatement.StatementVerb, noExpandSetOptions);
                     }
+                    ValidateViewIndexHints(context, resolvedView, viewHints, objectName.ToString(), objectNameLine);
                     var viewSynonym = RecordSecurableRead(context, resolvedView, objectName, viewBody);
                     return new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,
@@ -3992,6 +4008,10 @@ internal sealed partial class Selection
                         var tvfArgs = InArgumentScope(context, scope, () => Expressions.UserFunctionCall.ParseFunctionArguments(function, context));
                         // ParseFunctionArguments leaves the cursor on the closing `)`.
                         var tvfAlias = ConsumeOptionalAlias(context);
+                        // A user function's columns take no alias list (probed
+                        // 2026-10-04 against SQL Server 2025).
+                        if (tvfAlias is not null && context.Token is Operator { Character: '(' })
+                            throw SimulatedSqlException.TableValuedFunctionColumnAlias(function.Name);
                         var outputColumns = function switch
                         {
                             InlineTableValuedFunction inline => Simulation.InlineTvfColumnsWithCurrentMasks(context, inline),
@@ -4013,6 +4033,7 @@ internal sealed partial class Selection
                                 outputColumns = [.. outputColumns.Select(column => column.WithDerivedMask(DataMask.Merge(column.DerivedMask, taint)))];
                         }
                         _ = RecordSecurableRead(context, function, objectName);
+                        _ = context.IndexedViewShapeCollector?.TableValuedFunction ??= $"{function.Schema.Name}.{function.Name}";
                         // An inline function's body expands into the query, and
                         // the scalar functions it calls inline with it.
                         if (function is InlineTableValuedFunction expanded)
@@ -4068,6 +4089,11 @@ internal sealed partial class Selection
                         _ = ParseOptionalFromSourceHints(context, placeholderAlias is not null, objectName.ToString());
                         return FromSource.DeferredPlaceholder(placeholderAlias ?? objectName.Leaf);
                     }
+                    // A scalar function named as a rowset is an object the
+                    // reference can't use, state 224 (probed 2026-10-04
+                    // against SQL Server 2025).
+                    if (context.Batch.TryResolveFunction(objectName, out var notRowset) && notRowset is ScalarFunction)
+                        throw SimulatedSqlException.InvalidObjectName(objectName, state: 224);
                     throw context.Batch.UnresolvableObjectName(objectName);
                 }
 
@@ -4114,6 +4140,10 @@ internal sealed partial class Selection
                     : ConsumeOptionalAlias(context);
                 ParseOptionalTableSample(context);
                 var heapHints = ParseOptionalFromSourceHints(context, heapAlias is not null, objectName.ToString());
+                // NOEXPAND names an indexed view, which a table is not
+                // (probed 2026-10-04 against SQL Server 2025).
+                if (heapHints.NoExpand)
+                    throw SimulatedSqlException.NoExpandHintInvalid(objectName.ToString(), state: 2).PinLine(objectNameLine + context.Batch.LineOffset);
                 ValidateIndexHintArguments(context.Batch.CurrentDatabase.Collation, heapHints, heapTable, $"{objectName.ImmediateQualifier ?? Database.DefaultSchemaName}.{heapTable.Name}");
                 ValidateForceSeekColumns(context.Batch.CurrentDatabase.Collation, heapHints, heapTable);
                 // Phase 1b: acquire table-level IS/IX/S/X (based on hints +
@@ -4290,6 +4320,12 @@ internal sealed partial class Selection
                 // the argument list and the optional WITH clause, leaving the
                 // cursor one past the source (BuiltInRowsetSource's contract).
                 return BuiltInRowsetSource(context, ParseOpenXml(context));
+
+            // A schema-bound body may reach none of the three ad hoc rowsets,
+            // refused as the parser meets the keyword (probed 2026-10-04
+            // against SQL Server 2025).
+            case ReservedKeyword { Keyword: Keyword.OpenQuery or Keyword.OpenRowSet or Keyword.OpenDataSource } when context.SchemaBoundBody != SchemaBoundBody.None:
+                throw SimulatedSqlException.SyntaxNotAllowedInSchemaBoundObject("Openrowset/Openquery/Opendatasource", 3);
 
             case ReservedKeyword { Keyword: Keyword.OpenQuery }:
                 // OPENQUERY dispatch: an ad-hoc pass-through rowset over a

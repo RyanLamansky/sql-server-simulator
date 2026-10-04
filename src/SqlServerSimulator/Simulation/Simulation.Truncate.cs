@@ -104,6 +104,19 @@ partial class Simulation
             throw SimulatedSqlException.CannotTruncateTableReferencedByForeignKey(name.Written);
         if (table.GraphKind == GraphTableKind.Node && EdgeConstraintsReferencing(context.Batch.DatabaseFor(table), table).Count > 0)
             throw SimulatedSqlException.CannotTruncateNodeTableReferencedByEdgeConstraint(name.Written);
+        // An indexed view reading the table blocks it too, where a plain
+        // schema-bound one doesn't (probed 2026-10-04 against SQL Server
+        // 2025).
+        if (table.DependentIndexedViews.Count > 0)
+        {
+            var oldest = table.DependentIndexedViews[0];
+            foreach (var view in table.DependentIndexedViews)
+            {
+                if (view.ObjectId < oldest.ObjectId)
+                    oldest = view;
+            }
+            throw SimulatedSqlException.CannotTruncateReferencedByIndexedView(name.Written, oldest.Name);
+        }
 
         // Sch-M on the target — waits for every concurrent reader and open
         // writer to drain before the destructive page-swap and identity

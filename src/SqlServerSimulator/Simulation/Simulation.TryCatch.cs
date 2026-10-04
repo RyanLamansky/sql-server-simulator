@@ -123,16 +123,19 @@ partial class Simulation
             yield break;
 
         // Consume END TRY.
-        if (context.Token is not ReservedKeyword { Keyword: Keyword.End })
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.End } endTry)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Try })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+        // A function body refuses every delimiter, each where it stands.
+        FunctionBodyShape.NoteSideEffect(batch, "END TRY", FunctionBodyShape.ControlOperatorState, endTry.LineNumber);
 
         // Expect BEGIN CATCH.
         if (context.Token is not ReservedKeyword { Keyword: Keyword.Begin } catchBegin)
             throw SimulatedSqlException.SyntaxErrorNear(context);
+        FunctionBodyShape.NoteSideEffect(batch, "BEGIN CATCH", FunctionBodyShape.ControlOperatorState, catchBegin.LineNumber);
         context.MoveNextRequired();
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Catch })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -222,6 +225,7 @@ partial class Simulation
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Catch })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+        FunctionBodyShape.NoteSideEffect(batch, "END CATCH", FunctionBodyShape.ControlOperatorState, endCatch.LineNumber);
         if (frames)
             yield return StatementDone(batch, StatementDoneKind.EndCatch);
         if (StructuralExecutionTimes(batch, endCatch.LineNumber) is { } endCatchTimes)

@@ -143,8 +143,12 @@ public sealed partial class Simulation
     {
         if (name.Count >= 4)
             throw SimulatedSqlException.TooManyNamePrefixes(name, 2);
+        // Real reports the database prefix at line 12 whatever the statement's
+        // own, and neither refusal names the module (probed 2026-10-04 against
+        // SQL Server 2025), so the callers raise them ahead of their own
+        // attribution.
         if (name.Count == 3)
-            throw SimulatedSqlException.ModuleNameMayNotBeDatabaseQualified(moduleKind);
+            throw SimulatedSqlException.ModuleNameMayNotBeDatabaseQualified(moduleKind).PinLine(12);
     }
 
     /// <summary>
@@ -222,6 +226,14 @@ public sealed partial class Simulation
                 : SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(name.ImmediateQualifier ?? Database.DefaultSchemaName);
         }
 
+        // The system schemas take no module, refused as a schema that doesn't
+        // exist (probed 2026-10-04 against SQL Server 2025 for a view, a
+        // procedure and a function).
+        if (!isAlter && name.ImmediateQualifier is { } systemQualifier
+            && (Collation.Baseline.Equals(systemQualifier, "sys") || Collation.Baseline.Equals(systemQualifier, "INFORMATION_SCHEMA")))
+        {
+            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(systemQualifier);
+        }
         schema.Database.RejectWriteWhenReadOnly();
         return schema;
     }

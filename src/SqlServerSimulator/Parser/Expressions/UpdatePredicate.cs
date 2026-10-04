@@ -21,10 +21,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// </para>
 /// <para>
 /// The column resolves to its stable <c>column_id</c> at parse time, which
-/// for a trigger body is each time the body fires (bodies are re-tokenized
-/// per fire). Real resolves at CREATE TRIGGER and raises Msg 207 there;
-/// the simulator's deferred module-body validation moves that to the first
-/// fire — the same asymmetry every other trigger-body name reference has.
+/// the body's bind at CREATE TRIGGER reaches first, so a missing column
+/// (Msg 207) or a computed one (Msg 2114) refuses the trigger there, as on
+/// real.
 /// </para>
 /// </remarks>
 internal sealed class UpdatePredicate : BooleanExpression
@@ -62,9 +61,12 @@ internal sealed class UpdatePredicate : BooleanExpression
 
         // Outside a trigger body the construct has nothing to report on.
         // Real's wording names the IF form even when it appears elsewhere.
-        return context.Batch.TriggerFrame?.Trigger is not { } trigger
-            ? throw SimulatedSqlException.UpdateOnlyWithinCreateTrigger()
-            : new UpdatePredicate(ResolveColumnId(trigger, columnName), columnName);
+        return context.Batch.TriggerFrame switch
+        {
+            { Trigger: { } trigger } => new UpdatePredicate(ResolveColumnId(trigger, columnName), columnName),
+            { DdlTrigger: not null } => throw SimulatedSqlException.UpdateNotWithinThisTrigger(),
+            _ => throw SimulatedSqlException.UpdateOnlyWithinCreateTrigger(),
+        };
     }
 
     /// <summary>
@@ -85,8 +87,11 @@ internal sealed class UpdatePredicate : BooleanExpression
         {
             for (var i = 0; i < columns.Length; i++)
             {
-                if (Collation.Baseline.Equals(columns[i].Name, columnName))
-                    return trigger.Parent is HeapTable ? columns[i].ColumnId : i + 1;
+                if (!Collation.Baseline.Equals(columns[i].Name, columnName))
+                    continue;
+                if (trigger.Parent is HeapTable && columns[i].Computed is not null)
+                    throw SimulatedSqlException.UpdateOfComputedColumn(columns[i].Name);
+                return trigger.Parent is HeapTable ? columns[i].ColumnId : i + 1;
             }
         }
         throw SimulatedSqlException.InvalidColumnName(columnName);

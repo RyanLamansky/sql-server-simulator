@@ -33,6 +33,7 @@ internal sealed class XactState : Expression
     /// </remarks>
     public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromInt16(
         runtime.Batch.Connection.CurrentTransaction is { TranCount: > 0 } transaction ? (transaction.Doomed ? (short)-1 : (short)1)
+            : runtime.Batch.Connection is { TriggerStatementUndoLog: not null, TriggerUnitDoomed: true } ? (short)-1
             : this.statementMark.Opens
                 || runtime.Batch.Connection.TriggerStatementUndoLog is not null
                 || runtime.Batch.CurrentStatement.WritesRows

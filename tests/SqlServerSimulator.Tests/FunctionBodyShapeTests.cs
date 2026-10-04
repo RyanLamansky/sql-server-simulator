@@ -190,7 +190,6 @@ public sealed class FunctionBodyShapeTests
     [DataRow("throw 50000, 'x', 1", "THROW", 14)]
     [DataRow("waitfor delay '00:00:01'", "WAITFOR", 14)]
     [DataRow("exec('select 1')", "EXECUTE STRING", 14)]
-    [DataRow("begin try set @x = 1 end try begin catch set @x = 2 end catch", "BEGIN TRY", 14)]
     public void SideEffectingStatement_IsMsg443(string body, string operatorName, int state)
     {
         var ex = AssertScalarBodyError($"{body} return 1", 443);
@@ -493,4 +492,54 @@ public sealed class FunctionBodyShapeTests
         _ = sim.AssertSqlError("create function dbo.f(@x int) returns int as begin update dbo.missing_table set a = 1 set @x = 2 end", 455);
         AreEqual(0, ObjectCount(sim, "f"));
     }
+
+    // === The remaining side-effecting statements ===
+
+    [TestMethod]
+    [DataRow("create table #t (a int) return 1", 2772)]
+    [DataRow("use master return 1", 154)]
+    [DataRow("declare @v int insert @t exec dbo.callee return 1", 443)]
+    [DataRow("declare c cursor for select 1 open c fetch next from c return 1", 444)]
+    [DataRow("exec dbo.callee return 1", 557)]
+    [DataRow("kill 99 return 1", 443)]
+    [DataRow("dbcc checkident('dbo.t') return 1", 443)]
+    [Description("Each refusal leaves no function behind; EXEC of a procedure is Msg 557, raised as the call runs.")]
+    public void SideEffectingStatement_IsRefused(string body, int number)
+    {
+        if (number == 557)
+        {
+            var sim = WithFixture();
+            sim.ExecuteBatches($"create function dbo.f(@x int) returns int as begin {body} end");
+            sim.AssertSqlError("select dbo.f(1)", 557, "Only functions and some extended stored procedures can be executed from within a function.");
+            return;
+        }
+        _ = AssertScalarBodyError(body.Replace("@t exec", "@tv exec", StringComparison.Ordinal).Replace("declare @v int insert", "declare @tv table (v int) insert", StringComparison.Ordinal), number);
+    }
+
+    [TestMethod]
+    [Description("TRY / CATCH delimiters are Msg 443 at their own lines, each reported.")]
+    public void TryCatchDelimiters_AreMsg443AtTheirLines()
+    {
+        var ex = WithFixture().AssertSqlError("""
+            create function dbo.f(@x int) returns int as
+            begin
+                begin try
+                    set @x = 1
+                end try
+                begin catch
+                    set @x = 2
+                end catch
+                return @x
+            end
+            """, 443);
+        CollectionAssert.AreEqual(new[] { 3, 5, 6, 8 }, ex.Errors.Select(static entry => entry.LineNumber).ToArray());
+    }
+
+    [TestMethod]
+    [DataRow("create function dbo.f() returns table as return select newid() n")]
+    [DataRow("create function dbo.f() returns table as return select rand() r")]
+    [DataRow("create function dbo.f() returns @r table (a int, g uniqueidentifier default newid()) as begin return end")]
+    [Description("A side-effecting built-in in an inline TVF or a return-table default is Msg 443.")]
+    public void SideEffectingBuiltInInATableValuedFunction_IsMsg443(string create)
+        => _ = WithFixture().AssertSqlError(create, 443);
 }

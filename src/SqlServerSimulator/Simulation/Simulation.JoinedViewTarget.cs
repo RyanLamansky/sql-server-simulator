@@ -125,7 +125,7 @@ partial class Simulation
             return ExecuteInsteadOfViewUpdate(context, InsteadOfTargetName(leadingIdent, sources[0], view), view, rawAssignments, top, serializableHint: false, from);
         if (view.PartitionedBase is not null && !HasInsteadOfTrigger(batch, view, TriggerActions.Update))
             return ExecutePartitionedViewUpdate(context, leadingIdent, view, rawAssignments, top, from, targetIndex, partitionedReads ?? []);
-        RefuseJoinedViewWrite(context, view, TriggerActions.Update, written, [.. SetColumnNames(rawAssignments)]);
+        RefuseJoinedViewWrite(context, view, sources[targetIndex].WrittenObjectName ?? view.Name, TriggerActions.Update, written, [.. SetColumnNames(rawAssignments)]);
         if (view.BaseTable is not { } table)
             return ExecuteJoinedJoinViewUpdate(context, written, view, sources, joins, targetIndex, rawAssignments, top, from.After);
 
@@ -284,7 +284,7 @@ partial class Simulation
             return ExecuteInsteadOfViewDelete(context, InsteadOfTargetName(leadingIdent, sources[0], view), view, top, serializableHint: false, from);
         if (view.PartitionedBase is not null && !HasInsteadOfTrigger(batch, view, TriggerActions.Delete))
             return ExecutePartitionedViewDelete(context, leadingIdent, view, top, from, targetIndex);
-        RefuseJoinedViewWrite(context, view, TriggerActions.Delete, written, setColumns: null);
+        RefuseJoinedViewWrite(context, view, sources[targetIndex].WrittenObjectName ?? view.Name, TriggerActions.Delete, written, setColumns: null);
         var table = view.BaseTable!;
         FunctionBodyShape.NoteTableWrite(batch, "DELETE", table);
         LockWriteTable(batch, table, "DELETE", checkFilegroup: true);
@@ -471,17 +471,18 @@ partial class Simulation
     /// <summary>
     /// Real's refusals of a joined write through a view, ahead of anything it
     /// reads: a view carrying an <c>INSTEAD OF</c> trigger for the action
-    /// beside another source is Msg 414 / 415 naming the view — one the
+    /// beside another source is Msg 414 / 415 naming the view as the
+    /// <c>FROM</c> clause wrote it (probed 2026-10-04) — one the
     /// <c>FROM</c> clause names alone takes the trigger instead; a <c>DELETE</c>
     /// through one reading several base tables Msg 4405, and a view no write
     /// passes through its own refusal — an <c>UPDATE</c>'s unknown column Msg
     /// 207 and derived one Msg 4406 first — all naming the target as written
     /// (probed 2026-10-01 against SQL Server 2025).
     /// </summary>
-    private static void RefuseJoinedViewWrite(ParserContext context, View view, TriggerActions action, string written, List<string>? setColumns)
+    private static void RefuseJoinedViewWrite(ParserContext context, View view, string viewWritten, TriggerActions action, string written, List<string>? setColumns)
     {
         if (HasInsteadOfTrigger(context.Batch, view, action))
-            throw SimulatedSqlException.InsteadOfViewInJoin(view.Name, action == TriggerActions.Delete);
+            throw SimulatedSqlException.InsteadOfViewInJoin(viewWritten, action == TriggerActions.Delete);
         if (view.BaseTable is not null || (view.IsJoinUpdatable && action != TriggerActions.Delete))
             return;
         if (action != TriggerActions.Delete && view.DerivedOutputColumns is { } derived)

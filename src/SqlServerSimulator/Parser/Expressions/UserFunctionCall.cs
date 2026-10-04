@@ -143,6 +143,7 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
         // unchecked — a documented gap.
         context.SecurableSink?.Add(new ReferencedSecurable(function.Schema.Database, function.ObjectId, function.SchemaId, function.Name, function.Schema.Name, "EXECUTE"));
         InlinedScalarCalls.Note(context, function);
+        context.IndexedViewShapeCollector?.CalledFunctions.Add(function);
         var simulation = context.Batch.Connection.Simulation;
         return new(function, ParseFunctionArguments(function, context))
         {
@@ -192,7 +193,10 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
                     // (probed 2026-10-04 against SQL Server 2025).
                     if (tableType is not null && function is InlineTableValuedFunction)
                         throw SimulatedSqlException.InvalidDefaultForParameter(slot + 1);
-                    if (tableType is null && function.Parameters[slot].Default is null)
+                    // A scalar function's DEFAULT for a parameter declaring
+                    // none passes NULL (probed 2026-10-04 against SQL Server
+                    // 2025); a table-valued function's is Msg 313.
+                    if (tableType is null && function.Parameters[slot].Default is null && function is not ScalarFunction)
                         throw SimulatedSqlException.InsufficientArgumentsToFunction(declaredName);
                     arguments.Add(null); // DEFAULT marker
                     context.MoveNextRequired();
@@ -213,10 +217,15 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
         // parameters have declared defaults — probe-confirmed `fn_default()`
         // with `@x int = 99` raises Msg 313. The DEFAULT keyword is the only
         // legal omission.
+        // A table-valued function's shortfall is state 3 at line 12, the
+        // line real gives what its function binding raises (probed 2026-10-04
+        // against SQL Server 2025).
         return arguments.Count > function.Parameters.Length
             ? throw SimulatedSqlException.TooManyArgumentsToFunction(declaredName)
             : arguments.Count < function.Parameters.Length
-                ? throw SimulatedSqlException.InsufficientArgumentsToFunction(declaredName)
+                ? throw (function is ScalarFunction
+                    ? SimulatedSqlException.InsufficientArgumentsToFunction(declaredName)
+                    : SimulatedSqlException.InsufficientArgumentsToFunction(declaredName, state: 3).PinLine(12))
                 : [.. arguments];
     }
 }

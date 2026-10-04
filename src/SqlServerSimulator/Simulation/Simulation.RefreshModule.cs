@@ -95,8 +95,11 @@ partial class Simulation
 
         if (module is View { IsSchemaBound: true } or UserDefinedFunction { IsSchemaBound: true })
         {
-            // Named as the argument spelled it (probed 2026-09-25).
-            batch.AppendInfoError(@class: 0, state: 1, number: 2023, message: $"Metadata was not updated for the schema-bound object '{objectName}'.");
+            // Named as the argument spelled it (probed 2026-09-25), from
+            // line 47 of the internal procedure both front doors call (probed
+            // 2026-10-04 against SQL Server 2025).
+            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(
+                batch, "sys.sp_refreshsqlmodule_internal", 47, 2023, $"Metadata was not updated for the schema-bound object '{objectName}'."));
             yield break;
         }
 

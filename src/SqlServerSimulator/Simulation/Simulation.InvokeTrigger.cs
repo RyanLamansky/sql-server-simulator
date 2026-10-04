@@ -89,6 +89,7 @@ partial class Simulation
         // that reads row by row without an ORDER BY.
         var insertedPseudo = MaterializePseudoTable(targetTable.Columns, "inserted", insertedRows ?? [], outerBatch, reversed: true);
         var deletedPseudo = MaterializePseudoTable(targetTable.Columns, "deleted", deletedRows ?? [], outerBatch, reversed: true);
+        insertedPseudo.RefusesLegacyLobReads = deletedPseudo.RefusesLegacyLobReads = true;
         var mask = BuildColumnsUpdatedMask(targetTable, targetTable.Columns.Length, action, updatedColumnOrdinals);
         RunTriggerBodies(outerBatch, targetDatabase, matching, action, insertedPseudo, deletedPseudo, affectedRowCount, mask);
     }
@@ -202,14 +203,15 @@ partial class Simulation
             return false;
 
         // The rows an INSTEAD OF trigger reads were never written, so every
-        // column but a computed one reads as nullable and a rowversion as NULL
-        // (probed 2026-10-01 against SQL Server 2025).
+        // column but a computed or identity one reads as nullable, and an
+        // INSERT's rowversion as NULL, where an UPDATE's keeps the row's
+        // (probed 2026-10-01 and 2026-10-04 against SQL Server 2025).
         var columns = new HeapColumn[pseudoColumns.Length];
         for (var i = 0; i < columns.Length; i++)
         {
             var column = pseudoColumns[i];
-            columns[i] = column.Nullable || column.Computed is not null ? column : column.WithNullable(true);
-            if (column.Type is RowVersionSqlType && insertedRows is { Count: > 0 })
+            columns[i] = column.Nullable || column.Computed is not null || column.Identity is not null ? column : column.WithNullable(true);
+            if (column.Type is RowVersionSqlType && action == TriggerActions.Insert && insertedRows is { Count: > 0 })
             {
                 for (var r = 0; r < insertedRows.Count; r++)
                 {
@@ -259,6 +261,15 @@ partial class Simulation
         // save/restore nests harmlessly.
         var outerTriggerLog = connection.TriggerStatementUndoLog;
         var outerTriggerVersionEntries = connection.TriggerStatementVersionEntries;
+        // Savepoints belong to the unit they were set on: a nested fire over
+        // the same unit keeps them, a fire over a new one starts without.
+        var outerSavepoints = connection.TriggerUnitSavepoints;
+        var outerDoomed = connection.TriggerUnitDoomed;
+        if (!ReferenceEquals(outerTriggerLog, outerBatch.CurrentUndoLog))
+        {
+            connection.TriggerUnitSavepoints = null;
+            connection.TriggerUnitDoomed = false;
+        }
         connection.TriggerStatementUndoLog = outerBatch.CurrentUndoLog;
         connection.TriggerStatementVersionEntries = outerBatch.CurrentStatementVersionEntries;
         // A statement firing in auto-commit whose trigger ended the statement's
@@ -301,6 +312,8 @@ partial class Simulation
             connection.TriggerReplacedTransaction = outerReplaced;
             connection.TriggerStatementUndoLog = outerTriggerLog;
             connection.TriggerStatementVersionEntries = outerTriggerVersionEntries;
+            connection.TriggerUnitSavepoints = outerSavepoints;
+            connection.TriggerUnitDoomed = outerDoomed;
         }
 
         identityScope.Exit(IdentityScopeKind.Trigger);

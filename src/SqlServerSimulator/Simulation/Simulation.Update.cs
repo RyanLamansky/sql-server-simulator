@@ -78,11 +78,17 @@ partial class Simulation
                 context.MoveNextOptional();
                 throw RefuseNonUpdatableViewWrite(context, leadingView, leadingIdent, isUpdate: true);
             }
+            if (viewRoute is DmlViewRoute.BaseTable or DmlViewRoute.JoinView)
+                RejectCheckOptionOverRowLimit(leadingView, leadingIdent.ToString());
         }
 
         context.MoveNextRequired();
         var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
         Selection.ValidateDmlTargetHints(targetHints);
+        // A write's target takes no NOEXPAND, an indexed view's included
+        // (probed 2026-10-04 against SQL Server 2025).
+        if (targetHints.NoExpand)
+            throw SimulatedSqlException.NoExpandHintInvalid(leadingIdent.ToString(), state: 1);
         // A target the FROM clause names — an alias, or a view written through
         // in a join — is read from that clause ahead of the SET list, whose
         // values bind against its sources.
@@ -1298,7 +1304,7 @@ partial class Simulation
             // An INSTEAD OF UPDATE trigger runs over the empty set the same
             // way (probed 2026-09-27 against SQL Server 2025).
             if (insteadOfActive)
-                FireInsteadOfUpdateTrigger(context, table, sourceView, affected);
+                FireInsteadOfUpdateTrigger(context, table, sourceView, affected, updatedColumnOrdinals);
             else
                 FireAfterUpdateTriggers(context, table, affected, updatedColumnOrdinals);
             return output is null ? new SimulatedNonQuery(0) : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, Array.Empty<byte[]>(), 0) { ColumnNullability = output.Nullability };
@@ -1316,7 +1322,7 @@ partial class Simulation
             // OUTPUT INTO's rows land before the body runs (probed 2026-09-27
             // against SQL Server 2025); to the client it is Msg 334.
             var outputRows = output is null ? null : ProjectMutationOutput(affected, output, context.Batch, partners);
-            FireInsteadOfUpdateTrigger(context, table, sourceView, affected);
+            FireInsteadOfUpdateTrigger(context, table, sourceView, affected, updatedColumnOrdinals);
             return output is null || output.HasTarget
                 ? new SimulatedNonQuery(affected.Count)
                 : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, affected.Count) { ColumnNullability = output.Nullability };
@@ -1625,8 +1631,25 @@ partial class Simulation
         ParserContext context,
         HeapTable table,
         View? sourceView,
-        List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected)
+        List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected,
+        IReadOnlyList<int> updatedColumnOrdinals)
     {
+        // UPDATE(col) / COLUMNS_UPDATED() read the SET list here as under an
+        // AFTER trigger — through the view, at the view's own positions.
+        var updatedOrdinals = new List<int>(updatedColumnOrdinals.Count);
+        foreach (var ordinal in updatedColumnOrdinals)
+        {
+            if (sourceView is null)
+            {
+                updatedOrdinals.Add(ordinal);
+                continue;
+            }
+            for (var i = 0; i < sourceView.BaseColumnOrdinals.Length; i++)
+            {
+                if (sourceView.BaseColumnOrdinals[i] == ordinal)
+                    updatedOrdinals.Add(i);
+            }
+        }
         var insertedRows = new List<SqlValue[]>(affected.Count);
         var deletedRows = new List<SqlValue[]>(affected.Count);
         foreach (var (_, _, fullNew, fullOld) in affected)
@@ -1644,7 +1667,7 @@ partial class Simulation
         _ = context.Batch.Connection.Simulation.TryFireInsteadOfTrigger(
             context.Batch, parent, TriggerActions.Update,
             pseudoColumns, insertedRows, deletedRows,
-            affectedRowCount: affected.Count);
+            affectedRowCount: affected.Count, updatedOrdinals);
     }
 
     /// <summary>
@@ -1685,10 +1708,16 @@ partial class Simulation
             return;
         var insertedRows = new List<SqlValue[]>(affected.Count);
         var deletedRows = new List<SqlValue[]>(affected.Count);
-        foreach (var (_, _, fullNew, fullOld) in affected)
+        // A SET list assigning only variables changes no column, and the
+        // trigger reads empty INSERTED / DELETED (probed 2026-10-04 against
+        // SQL Server 2025).
+        if (updatedColumnOrdinals.Count > 0)
         {
-            insertedRows.Add(fullNew);
-            deletedRows.Add(fullOld ?? new SqlValue[table.Columns.Length]);
+            foreach (var (_, _, fullNew, fullOld) in affected)
+            {
+                insertedRows.Add(fullNew);
+                deletedRows.Add(fullOld ?? new SqlValue[table.Columns.Length]);
+            }
         }
         context.Connection.LastStatementRowCount = affected.Count;
         context.Batch.Connection.Simulation.FireTriggers(

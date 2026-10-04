@@ -552,6 +552,15 @@ partial class Simulation
             catch (SimulatedSqlException exception) when (SystemProcedureErrorSite(systemProcName, exception) is { } site)
             {
                 exception.PreserveDiagnostics(site.Line, site.Procedure ?? calledName);
+                // An inner procedure named by the site raises it, whatever
+                // module the error first named — a refreshed view's binding
+                // error comes from sys.sp_refreshsqlmodule_internal (probed
+                // 2026-10-04 against SQL Server 2025).
+                if (site.Procedure is { Length: > 0 } inner)
+                {
+                    foreach (var entry in exception.Errors)
+                        entry.Procedure = inner;
+                }
                 exception.RaisedBySystemProcedure = exception.Number != 201;
                 if (returnCode is not null && exception.RaisedBySystemProcedure)
                     returnCode.Value = SqlValue.FromInt32(exception.SystemProcedureReturnCode).CoerceTo(returnCode.DeclaredType);
@@ -638,6 +647,7 @@ partial class Simulation
         ("sp_helpuser", 15198) => (142, null),
         ("sp_recompile", 15165) => (18, null),
         ("sp_refreshsqlmodule" or "sp_refreshview", 15165) => (62, "sys.sp_refreshsqlmodule_internal"),
+        ("sp_refreshsqlmodule" or "sp_refreshview", 208) => (85, "sys.sp_refreshsqlmodule_internal"),
         ("sp_rename", 297) => (502, null),
         ("sp_rename", 15225) => (637, null),
         ("sp_rename", 15248) => (269, null),
@@ -652,7 +662,7 @@ partial class Simulation
         ("sp_setapprole", 15422) => (38, null),
         ("sp_setapprole", 15431) => (22, null),
         ("sp_setapprole", 15600) => (31, null),
-        ("sp_settriggerorder", 15165) => (142, null),
+        ("sp_settriggerorder", _) when exception.SystemProcedureLine is { } triggerOrderLine => (triggerOrderLine, null),
         ("sp_spaceused", 15009) => (153, null),
         ("sp_unbindefault", 15148) => (149, null),
         ("sp_unbindefault", 15236) => (73, null),

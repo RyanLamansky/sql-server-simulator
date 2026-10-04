@@ -608,7 +608,7 @@ partial class Simulation
         // case — never reaches it.
         if (batch.CreateTimeBinding || IncorrectSetOptionNames(batch.Parser) is not { } options || !RequiresCorrectSetOptions(table))
             return;
-        throw SimulatedSqlException.IncorrectSetOptions(verb, options);
+        throw SimulatedSqlException.IncorrectSetOptionsForWrite(verb, options);
     }
 
     /// <summary>

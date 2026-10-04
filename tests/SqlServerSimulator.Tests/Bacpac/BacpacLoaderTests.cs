@@ -1201,8 +1201,8 @@ public class BacpacLoaderTests
     public void IndexOnView_LoadsAsIndexedView()
     {
         // An indexed (materialized) view: the SqlView is created WITH
-        // SCHEMABINDING, then its unique clustered SqlIndex (phase 8, after
-        // views land in phase 6) dispatches as CREATE UNIQUE CLUSTERED INDEX
+        // SCHEMABINDING, then its unique clustered SqlIndex (at the end of
+        // phase 6, once the views exist) dispatches as CREATE UNIQUE CLUSTERED INDEX
         // ON the view. No Skipped entry; the index surfaces in sys.indexes at
         // index_id 1 / CLUSTERED and enforces uniqueness on base DML.
         using var bacpac = BacpacBuilder.Create()
@@ -1219,6 +1219,24 @@ public class BacpacLoaderTests
         // base rows projecting the same view key raise Msg 2601.
         _ = sim.ExecuteNonQuery("INSERT dbo.Item VALUES (1, 10)");
         _ = sim.AssertSqlError("INSERT dbo.Item VALUES (1, 20)", 2601);
+    }
+
+    [TestMethod]
+    [Description("A procedure reading an indexed view WITH (NOEXPAND) loads: the view's indexes land before the modules, which refuse NOEXPAND on an unindexed view.")]
+    public void IndexOnView_PrecedesAProcedureReadingItWithNoExpand()
+    {
+        using var bacpac = BacpacBuilder.Create()
+            .Table("dbo", "Item", t => t.Column("Id", "int").Column("Grp", "int"))
+            .View("dbo", "ItemView", "CREATE VIEW dbo.ItemView WITH SCHEMABINDING AS SELECT Id, Grp FROM dbo.Item;")
+            .IndexOnView("dbo", "ItemView", "IX_ItemView_Grp", ["Grp"], isUnique: false, isClustered: false)
+            .IndexOnView("dbo", "ItemView", "IX_ItemView_Id", ["Id"])
+            .Procedure("dbo", "ReadItems", "CREATE PROCEDURE dbo.ReadItems AS SELECT Id FROM dbo.ItemView WITH (NOEXPAND);")
+            .Build();
+
+        var sim = new Simulation();
+        sim.ImportBacpac(bacpac, out var diag);
+        IsEmpty(diag.Skipped);
+        AreEqual(2, sim.ExecuteScalar("SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID('dbo.ItemView');"));
     }
 
     [TestMethod]

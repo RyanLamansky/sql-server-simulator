@@ -132,8 +132,11 @@ partial class Simulation
     /// </summary>
     private static DmlTarget ResolveDmlTarget(ParserContext context, MultiPartName name, RemoteWriteKind? remoteKind)
     {
-        if (TryResolveCteTarget(context, name, out var view) || context.Batch.TryResolveView(name, out view))
+        if (TryResolveCteTarget(context, name, out var view) || context.Batch.TryResolveView(name, out view)
+            || TryResolveFunctionWriteTarget(context, name, out view))
+        {
             return DmlTarget.ForView(name, view);
+        }
         _ = context.Batch.TryResolveTable(name, out var table);
         if (table is null && name.Count == 1 && remoteKind is { } aliasKind and (RemoteWriteKind.Update or RemoteWriteKind.Delete))
         {
@@ -213,6 +216,24 @@ partial class Simulation
 
         /// <summary>Real's refusal: Msg 4403 / 4405, or 4406 for a derived column.</summary>
         Refused,
+    }
+
+    /// <summary>
+    /// Msg 4427: an <c>INSERT</c>, <c>UPDATE</c> or <c>MERGE</c> through a view
+    /// whose chain carries <c>WITH CHECK OPTION</c> at or above a level limiting
+    /// its rows with <c>TOP</c> or <c>OFFSET</c> — a <c>DELETE</c> passes —
+    /// naming the target as written, a <c>MERGE</c>'s alias included (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static void RejectCheckOptionOverRowLimit(View view, string written)
+    {
+        var checkOptionSeen = false;
+        for (var level = view; level is not null; level = level.UpstreamView)
+        {
+            checkOptionSeen |= level.WithCheckOption;
+            if (checkOptionSeen && level.IsRowLimited)
+                throw SimulatedSqlException.CheckOptionOverRowLimit(written);
+        }
     }
 
     /// <summary>

@@ -36,9 +36,22 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
+        // The lines each refusal comes from in real's own procedure source
+        // (probed 2026-10-04 against SQL Server 2025) let the errors carry
+        // them, attributed to sp_settriggerorder.
         var (triggerName, order, statementType, triggerNamespace) = ParseSetTriggerOrderArgs(arguments);
-        if (string.IsNullOrEmpty(triggerName) || order is null || statementType is null)
+        if (triggerName is null)
+            throw SimulatedSqlException.CouldNotFindObjectOrNoPermission("(null)").AtSystemProcedureLine(142);
+        if (triggerName.Length == 0 || order is null || statementType is null)
             throw SimulatedSqlException.InvalidTriggerOrderParameter();
+
+        // A database- or server-scope @namespace takes no schema prefix, a
+        // DML action's included.
+        if (triggerNamespace is not null && triggerName.Contains('.', StringComparison.Ordinal)
+            && (BuiltInToken.Equals(triggerNamespace, "DATABASE") || BuiltInToken.Equals(triggerNamespace, "SERVER")))
+        {
+            throw SimulatedSqlException.SchemaPrefixOnScopedTrigger().AtSystemProcedureLine(78);
+        }
 
         // @namespace selects a server- or database-scope trigger; a DML
         // action keeps the table-trigger path whatever it says.
@@ -57,18 +70,18 @@ partial class Simulation
             var s when BuiltInToken.Equals(s, "INSERT") => TriggerActions.Insert,
             var s when BuiltInToken.Equals(s, "UPDATE") => TriggerActions.Update,
             var s when BuiltInToken.Equals(s, "DELETE") => TriggerActions.Delete,
-            _ => throw SimulatedSqlException.InvalidTriggerOrderParameter(),
+            _ => throw SimulatedSqlException.InvalidTriggerOrderParameter().AtSystemProcedureLine(113),
         };
         var isFirst = BuiltInToken.Equals(order, "First");
         var isLast = BuiltInToken.Equals(order, "Last");
         if (!isFirst && !isLast && !BuiltInToken.Equals(order, "None"))
-            throw SimulatedSqlException.InvalidTriggerOrderParameter();
+            throw SimulatedSqlException.InvalidTriggerOrderParameter().AtSystemProcedureLine(56);
 
         var trigger = ResolveTriggerForOrdering(batch, triggerName);
         if (trigger.Timing == TriggerTiming.InsteadOf)
-            throw SimulatedSqlException.InsteadOfTriggerCannotBeOrdered(triggerName);
+            throw SimulatedSqlException.InsteadOfTriggerCannotBeOrdered(triggerName).AtSystemProcedureLine(153);
         if ((trigger.Actions & action) == 0)
-            throw SimulatedSqlException.TriggerIsNotATriggerForAction(triggerName, statementType);
+            throw SimulatedSqlException.TriggerIsNotATriggerForAction(triggerName, statementType).AtSystemProcedureLine(151);
 
         // A slot is only contested when a *different* trigger on the same
         // parent already holds it; re-pinning the incumbent is a no-op move.
@@ -77,7 +90,7 @@ partial class Simulation
             if (ReferenceEquals(peer, trigger))
                 continue;
             if ((isFirst && (peer.FirstForActions & action) != 0) || (isLast && (peer.LastForActions & action) != 0))
-                throw SimulatedSqlException.TriggerOrderAlreadyExists(order, statementType);
+                throw SimulatedSqlException.TriggerOrderAlreadyExists(order, statementType).AtSystemProcedureLine(163);
         }
 
         // Setting one slot vacates the other: a trigger can't be both.
@@ -105,7 +118,7 @@ partial class Simulation
                     return candidate;
             }
         }
-        throw SimulatedSqlException.CouldNotFindObjectOrNoPermission(triggerName);
+        throw SimulatedSqlException.CouldNotFindObjectOrNoPermission(triggerName).AtSystemProcedureLine(142);
     }
 
     /// <summary>Every DML trigger attached to <paramref name="parent"/>.</summary>

@@ -399,4 +399,77 @@ public sealed class ScalarFunctionTests
                 select 1 as v
             end
             """, 156).Message);
+
+    // === RETURN conversion, DEFAULT arguments, RETURNS NULL ON NULL INPUT, EXEC ===
+
+    [TestMethod]
+    [Description("A RETURN value the declared type can't hold is Msg 220, not a crash.")]
+    public void ReturnOverflow_IsMsg220()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create function dbo.f() returns tinyint as begin return 300 end");
+        _ = sim.AssertSqlError("select dbo.f()", 220);
+    }
+
+    [TestMethod]
+    [Description("DEFAULT for a parameter with no default passes NULL; RETURNS NULL ON NULL INPUT short-circuits it.")]
+    public void DefaultArgumentAndReturnsNullOnNullInput()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create function dbo.f(@x int) returns int as begin return isnull(@x, -1) end",
+            "create function dbo.g(@x int = 5) returns int with returns null on null input as begin return 7 end");
+        AreEqual(-1, sim.ExecuteScalar("select dbo.f(default)"));
+        AreEqual(7, sim.ExecuteScalar("select dbo.g(default)"));
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select dbo.g(null)"));
+    }
+
+    [TestMethod]
+    [Description("Both NULL-input options together are Msg 1052.")]
+    public void ConflictingNullInputOptions_IsMsg1052()
+        => _ = new Simulation().AssertSqlError(
+            "create function dbo.f(@x int) returns int with returns null on null input, called on null input as begin return 1 end", 1052);
+
+    [TestMethod]
+    [Description("EXEC runs a scalar function, assigning its value to a return-status variable.")]
+    public void ExecOfAScalarFunction_AssignsTheValue()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create function dbo.f(@x int) returns int as begin return @x * 2 end");
+        AreEqual(42, sim.ExecuteScalar("declare @r int; exec @r = dbo.f 21; select @r"));
+    }
+
+    [TestMethod]
+    [Description("A call leaves the caller's @@ROWCOUNT as it was.")]
+    public void Call_PreservesRowCount()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (a int); insert dbo.t values (1), (2), (3)",
+            "create function dbo.f() returns int as begin declare @t table (a int); insert @t values (1), (2), (3), (4); return 1 end");
+        using var connection = sim.CreateOpenConnection();
+        using var reader = connection.CreateCommand("update dbo.t set a = a; select dbo.f() f, @@rowcount rc").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(3, reader.GetInt32(1));
+    }
+
+    [TestMethod]
+    [DataRow("create function dbo.f(@x int output) returns int as begin return 1 end", 181)]
+    [DataRow("create function dbo.f() returns text as begin return '' end", 2733)]
+    [DataRow("create function dbo.f() returns int with execute as 'nosuch' as begin return 1 end", 15151)]
+    [DataRow("create function sys.f() returns int as begin return 1 end", 2760)]
+    [Description("CREATE FUNCTION header refusals.")]
+    public void HeaderRefusals(string create, int number)
+        => _ = new Simulation().AssertSqlError(create, number);
+
+    [TestMethod]
+    [Description("Dropping a function a computed column calls is Msg 3729 naming the table.")]
+    public void DropOfAFunctionAComputedColumnCalls_IsMsg3729()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create function dbo.f(@x int) returns int with schemabinding as begin return @x end",
+            "create table dbo.t (a int, c as dbo.f(a))");
+        sim.AssertSqlError("drop function dbo.f", 3729, "Cannot DROP FUNCTION 'dbo.f' because it is being referenced by object 't'.");
+    }
 }

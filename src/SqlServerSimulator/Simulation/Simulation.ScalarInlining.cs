@@ -180,14 +180,14 @@ partial class Simulation
     }
 
     /// <summary>The line real reports an inlining failure on when the missing object's name is qualified.</summary>
-    private const int QualifiedInliningFailureLine = 13;
+    private const int QualifiedInliningFailureLine = 12;
 
     /// <summary>
     /// What an attempt to inline <paramref name="function"/> — or to expand an
     /// inline table-valued one — meets: the first
     /// object its body names that doesn't exist, attributed to the function at
     /// the reference's line in the text that created it (a qualified name's on
-    /// line 13); else the failures of
+    /// line 12); else the failures of
     /// the scalar functions the body calls in turn, which real inlines with it
     /// (probed 2026-09-30 against SQL Server 2025). Settled once per
     /// <see cref="SchemaVersion"/> by reading the body as it binds at
@@ -245,10 +245,11 @@ partial class Simulation
             // binding error, which the referencing statement reports itself.
             if (function is ScalarFunction && attempt.MissingObject is var (name, line))
             {
-                // A qualified name reports line 13 wherever it sits — real's own
-                // constant, as Msg 1065's 15 is — and a bare one its own line
-                // (probed 2026-09-30 against SQL Server 2025, two-, three- and
-                // four-part names, bracketed or not).
+                // A qualified name reports line 12 wherever it sits — real's own
+                // constant, the line its module-definition binding reports a
+                // missing qualified name at — and a bare one its own line
+                // (probed 2026-09-30 and again 2026-10-04 against SQL Server
+                // 2025, two-, three- and four-part names, bracketed or not).
                 failures.Add(new InliningFailure(name, name.Count > 1 ? QualifiedInliningFailureLine : line + function.BodyLineOffset, function.Name));
             }
             else

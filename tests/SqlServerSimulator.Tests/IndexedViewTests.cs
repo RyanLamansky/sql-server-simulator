@@ -360,4 +360,150 @@ public sealed class IndexedViewTests
 
         AreEqual(1, sim.ExecuteScalar("select count(*) from sys.indexes where name = 'ix'"));
     }
+
+    // === The rest of the qualifying battery, IsIndexable, and the SET-option gates ===
+
+    private static Simulation BatteryFixture()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int primary key, g int not null, v int not null, s varchar(10) not null, f float not null, d datetime not null)",
+            "create table dbo.u (id int primary key, w int not null)",
+            "create table dbo.xt (id int primary key, x xml)",
+            "create function dbo.fnd(@x int) returns datetime with schemabinding as begin return dateadd(day, @x, getdate()) end",
+            "create function dbo.tf() returns table with schemabinding as return select id from dbo.t",
+            "create view dbo.vin with schemabinding as select id, v from dbo.t");
+        return sim;
+    }
+
+    [TestMethod]
+    [DataRow("select x.id, x.v from (select id, v from dbo.t) x", "id", 10109)]
+    [DataRow("select g, count_big(*) cb from dbo.t group by g having count_big(*) > 0", "g", 10121)]
+    [DataRow("select id, row_number() over (order by id) rn from dbo.t", "id", 10143)]
+    [DataRow("select t.id, x.w from dbo.t t cross apply (select w from dbo.u where u.id = t.id) x", "id", 10142)]
+    [DataRow("select [1] a, [2] b from (select g, v from dbo.t) s pivot (sum(v) for g in ([1], [2])) p", "a", 10114)]
+    [DataRow("select g, count_big(*) cb from dbo.t group by g with rollup", "g", 10119)]
+    [DataRow("select g, count_big(*) cb, sum(v) * 2 sv2 from dbo.t group by g", "g", 8668)]
+    [DataRow("select count_big(*) cb, sum(v) sv from dbo.t group by g", "cb", 8660)]
+    [DataRow("select id, dbo.fnd(v) fv from dbo.t", "id", 1956)]
+    [DataRow("select f, count_big(*) cb from dbo.t group by f", "f", 1962)]
+    [DataRow("select id, convert(datetime, '1/2/2020') cd from dbo.t", "id", 1963)]
+    [DataRow("select id, datediff(day, d, '20210101') dd from dbo.t", "id", 10139)]
+    [DataRow("select id, datename(month, d) dn from dbo.t", "id", 1949)]
+    [DataRow("select id, v from dbo.vin", "id", 1937)]
+    [DataRow("select id, v from dbo.t with (nolock)", "id", 10140)]
+    [DataRow("select id, binary_checksum(*) ck from dbo.t", "id", 10117)]
+    [DataRow("select id from dbo.tf()", "id", 10129)]
+    [DataRow("select [key] k from openjson('[1,2]')", "k", 10148)]
+    [DataRow("select id, x.value('(/a)[1]', 'int') a from dbo.xt", "id", 1985)]
+    [Description("Every shape refuses CREATE INDEX with real's own message and reads IsIndexable 0.")]
+    public void QualifyingBattery_RefusesTheShape(string body, string key, int number)
+    {
+        var sim = BatteryFixture();
+        sim.ExecuteBatches($"create view dbo.iv with schemabinding as {body}");
+        AreEqual(0, sim.ExecuteScalar("select objectproperty(object_id('dbo.iv'), 'IsIndexable')"));
+        _ = sim.AssertSqlError($"create unique clustered index cx on dbo.iv ({key})", number);
+    }
+
+    [TestMethod]
+    [DataRow("select g, count_big(*) cb, sum(v * 2) sv from dbo.t group by g", "g")]
+    [DataRow("select id, rand(1) r from dbo.t", "id")]
+    [DataRow("select id, f from dbo.t", "id")]
+    [Description("A SUM over arithmetic on NOT NULL columns and a seeded RAND both index, reading IsIndexable 1.")]
+    public void QualifyingBattery_AcceptsTheShape(string body, string key)
+    {
+        var sim = BatteryFixture();
+        sim.ExecuteBatches($"create view dbo.iv with schemabinding as {body}");
+        AreEqual(1, sim.ExecuteScalar("select objectproperty(object_id('dbo.iv'), 'IsIndexable')"));
+        _ = sim.ExecuteNonQuery($"create unique clustered index cx on dbo.iv ({key})");
+    }
+
+    [TestMethod]
+    [Description("A computed float key column is Msg 1901, a second clustered index Msg 1902, a filtered nonclustered one Msg 10610.")]
+    public void ViewIndexKeysAndKinds_Refusals()
+    {
+        var sim = BatteryFixture();
+        sim.ExecuteBatches(
+            "create view dbo.iv with schemabinding as select id, v, f * 2 f2 from dbo.t",
+            "create unique clustered index cx on dbo.iv (id)");
+        _ = sim.AssertSqlError("create unique index ux on dbo.iv (f2)", 1901);
+        sim.AssertSqlError("create unique clustered index cx2 on dbo.iv (v)", 1902,
+            "Cannot create more than one clustered index on view 'dbo.iv'. Drop the existing clustered index 'cx' before creating another.");
+        _ = sim.AssertSqlError("create index nx on dbo.iv (v) where v > 0", 10610);
+    }
+
+    [TestMethod]
+    [Description("A view, table or function created under ANSI_NULLS OFF is Msg 1935 at CREATE INDEX.")]
+    public void AnsiNullsOffAtCreation_IsMsg1935()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "set ansi_nulls off",
+            "create table dbo.t (id int primary key, v int not null)");
+        using (var connection = sim.CreateOpenConnection())
+        {
+            _ = connection.CreateCommand("set ansi_nulls on").ExecuteNonQuery();
+            _ = connection.CreateCommand("create view dbo.iv with schemabinding as select id, v from dbo.t").ExecuteNonQuery();
+        }
+        sim.AssertSqlError("create unique clustered index cx on dbo.iv (id)", 1935,
+            "Cannot create index. Object 't' was created with the following SET options off: 'ANSI_NULLS'.");
+    }
+
+    [TestMethod]
+    [Description("A write to an indexed view's base table under a refused SET option is Msg 1934, which ends the batch.")]
+    public void WriteUnderARefusedOption_EndsTheBatch()
+    {
+        var sim = SeedIndexedView();
+        using var connection = sim.CreateOpenConnection();
+        var error = Throws<SimulatedSqlException>(() => connection.CreateCommand("set ansi_nulls off; insert dbo.b values (9, 9, 9); select 1 / 0").ExecuteNonQuery());
+        AreEqual(1934, error.Number);
+        AreEqual(1, error.Errors.Count);
+    }
+
+    [TestMethod]
+    [Description("TRUNCATE of an indexed view's base table is Msg 3729 state 2 naming the view.")]
+    public void TruncateOfABaseTable_IsMsg3729()
+    {
+        var sim = SeedIndexedView();
+        sim.AssertSqlError("truncate table dbo.b", 3729, "Cannot TRUNCATE TABLE 'dbo.b' because it is being referenced by object 'v'.");
+    }
+
+    [TestMethod]
+    [Description("NOEXPAND names an indexed view: on a plain view or a table it is Msg 8171 at the line of the object's name, on a write's target state 1; an index hint without it is the warning Msg 4430.")]
+    public void NoExpandAndIndexHints()
+    {
+        var sim = SeedIndexedView();
+        sim.ExecuteBatches("create view dbo.pv as select id from dbo.b");
+        var error = sim.AssertSqlError("select id from dbo.pv with (noexpand)", 8171);
+        AreEqual(1, error.Errors[0].LineNumber);
+        AreEqual((byte)2, error.State);
+        AreEqual(3, sim.AssertSqlError("select 1\nselect id\nfrom dbo.pv\nwith (noexpand)", 8171).Errors[0].LineNumber);
+        _ = sim.AssertSqlError("select id from dbo.b with (noexpand)", 8171);
+        AreEqual((byte)1, sim.AssertSqlError("update dbo.v with (noexpand) set val = 0", 8171).State);
+        sim.AssertSqlError("select id from dbo.v with (noexpand, index(nosuch))", 308, "Index 'nosuch' on table 'dbo.v' (specified in the FROM clause) does not exist.");
+
+        using var connection = sim.CreateOpenConnection();
+        var messages = new List<int>();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(static entry => entry.Number));
+        AreEqual(3, connection.CreateCommand("select count(*) from dbo.v with (index(ix_v))").ExecuteScalar());
+        CollectionAssert.AreEqual(new[] { 4430 }, messages);
+    }
+
+    [TestMethod]
+    [Description("DROP INDEX of a view's clustered index takes the rest and the maintenance with it; ALTER INDEX DISABLE makes NOEXPAND invalid until a REBUILD; a rollback undoes CREATE INDEX.")]
+    public void ViewIndexLifecycle()
+    {
+        var sim = SeedIndexedView();
+        sim.ExecuteBatches(
+            "create index nx on dbo.v (val)",
+            "alter index ix_v on dbo.v disable");
+        _ = sim.AssertSqlError("select id from dbo.v with (noexpand)", 8171);
+        sim.ExecuteBatches("alter index ix_v on dbo.v rebuild");
+        AreEqual(3, sim.ExecuteScalar("select count(*) from dbo.v with (noexpand)"));
+        sim.ExecuteBatches("drop index ix_v on dbo.v");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('dbo.v')"));
+        _ = sim.ExecuteNonQuery("insert dbo.b values (1, 1, 1)");
+        _ = sim.ExecuteNonQuery("begin tran; create unique clustered index cx on dbo.v (val); rollback");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('dbo.v')"));
+    }
 }

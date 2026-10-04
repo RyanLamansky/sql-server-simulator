@@ -163,9 +163,10 @@ internal static partial class BuiltInResources
             new("with_check_option", SqlType.Bit, null, false),
             new("is_date_correlation_view", SqlType.Bit, null, false),
             new("ledger_view_type", SqlType.TinyInt, null, true),
-            // has_opaque_metadata / is_dropped_ledger_view: both nullable bit
-            // on real, 0 for every ordinary view (probe-confirmed against
-            // SQL Server 2025) — SMO's Script-As view query reads both.
+            // has_opaque_metadata / is_dropped_ledger_view: has_opaque_metadata
+            // is 1 for a view created WITH VIEW_METADATA, both 0 otherwise
+            // (probe-confirmed against SQL Server 2025) — SMO's Script-As
+            // view query reads both.
             new("has_opaque_metadata", SqlType.Bit, null, false),
             new("is_dropped_ledger_view", SqlType.Bit, null, true),
         ], EnumerateViews);
@@ -1155,7 +1156,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromBoolean(view.WithCheckOption),
                     falseBit,
                     ledgerViewTypeNone,
-                    falseBit,
+                    SqlValue.FromBoolean(view.HasViewMetadata),
                     falseBit,
                 ];
             }

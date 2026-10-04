@@ -124,6 +124,9 @@ partial class Simulation
                 index.StatisticsNoRecompute = noRecompute;
         }
         table?.MarkStatisticsFresh(targets, collation);
+        // The event names the table as its target and no statistic of its
+        // own (probed 2026-10-04 against SQL Server 2025).
+        RecordDdlEvent(context, "UPDATE_STATISTICS", EventSchemaName(tableName), null, "STATISTICS", tableName.Leaf, table is null ? "VIEW" : "TABLE");
         return true;
     }
 

@@ -51,18 +51,6 @@ partial class Simulation
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
             throw SimulatedSqlException.MaximumNestingLevelExceeded();
 
-        // RETURNS NULL ON NULL INPUT short-circuit. Slots flagged as DEFAULT
-        // will materialize from the stored default expression in the child
-        // batch — they don't trigger the short-circuit on their own.
-        if (function.ReturnsNullOnNullInput)
-        {
-            for (var i = 0; i < argValues.Length; i++)
-            {
-                if (!isDefault[i] && argValues[i].IsNull && function.Parameters[i].TableType is null)
-                    return SqlValue.Null(function.ReturnType);
-            }
-        }
-
         // Synthesize a command for the body. The connection is the caller's;
         // database / transaction state is shared. CommandText is the function's
         // own stored body (set at CREATE FUNCTION time from the user's own
@@ -79,10 +67,18 @@ partial class Simulation
             var param = function.Parameters[i];
             if (param.TableType is not null)
                 continue;
-            var value = isDefault[i] && param.Default is { } defaultExpr
-                ? defaultExpr.Run(new RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), outerBatch))
-                    .CoerceTo(param.Type)
-                : argValues[i];
+            // A DEFAULT for a parameter declaring none passes NULL (probed
+            // 2026-10-04 against SQL Server 2025).
+            var value = !isDefault[i] ? argValues[i]
+                : param.Default is { } defaultExpr
+                    ? defaultExpr.Run(new RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), outerBatch))
+                        .CoerceTo(param.Type)
+                    : SqlValue.Null(param.Type);
+            // RETURNS NULL ON NULL INPUT answers NULL without running the
+            // body for any NULL argument, a DEFAULT that comes to NULL
+            // included (probed 2026-10-04 against SQL Server 2025).
+            if (function.ReturnsNullOnNullInput && value.IsNull)
+                return SqlValue.Null(function.ReturnType);
             // An argument past the parameter's width is cut to it, as a
             // variable assignment is (probed 2026-09-27 against SQL Server
             // 2025).
@@ -115,6 +111,9 @@ partial class Simulation
         // impersonated principal.
         var savedImpersonationDepth = connection.Security.ImpersonationDepth;
         var identityScope = IdentityScope.Enter(connection);
+        // The caller's @@ROWCOUNT survives the call: the body's statements
+        // count for the body alone (probed 2026-10-04 against SQL Server 2025).
+        var savedRowCount = connection.LastStatementRowCount;
         try
         {
             PushModuleExecuteAsFrame(connection, function.ExecuteAsClause, function.ExecuteAsPrincipalId, function.Schema.Database, functionOwner);
@@ -129,6 +128,7 @@ partial class Simulation
         }
         finally
         {
+            connection.LastStatementRowCount = savedRowCount;
             connection.NestingLevel--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.AnsiNulls = savedAnsiNulls;

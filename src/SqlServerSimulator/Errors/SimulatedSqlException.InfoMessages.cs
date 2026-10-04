@@ -42,6 +42,10 @@ partial class SimulatedSqlException
     internal static SimulatedError WideIndexKeyMessage(BatchContext batch, bool clustered, int limit, string indexName, int length) =>
         batch.InfoMessage(@class: 0, state: 1, number: 1945, $"Warning! The maximum key length for a {(clustered ? "clustered" : "nonclustered")} index is {limit} bytes. The index '{indexName}' has maximum length of {length} bytes. For some combination of large values, the insert/update operation will fail.");
 
+    /// <summary>Msg 4430, an index hint on a view read without <c>NOEXPAND</c>.</summary>
+    internal static SimulatedError ViewIndexHintsIgnoredMessage(BatchContext batch, string viewName) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 4430, $"Warning: Index hints supplied for view '{viewName}' will be ignored.");
+
     /// <summary>Msg 3621, after an execution error ends a statement that writes rows.</summary>
     internal static SimulatedError StatementTerminatedMessage(BatchContext batch, SimulatedSqlException? error = null)
     {
@@ -50,11 +54,11 @@ partial class SimulatedSqlException
         // column rewrite a value it can't convert, the notice reports line 1,
         // whatever line the statement was on (probed 2026-09-26 against SQL
         // Server 2025).
-        // A CLR trigger's throw reports it at the trigger's line 1 as well, as
-        // does its context connection ending the firing statement's
-        // transaction, and a partitioned view's write a row fits no member of
-        // (probed 2026-10-01).
-        if (error is { Number: 1505 or 4457 } or { EndedColumnRewrite: true } or { Number: 3991 or 3992 or 6522 or 6549, EndedTriggerBody: true })
+        // So does any error that ended a trigger body, T-SQL or CLR, and its
+        // context connection ending the firing statement's transaction (probed
+        // 2026-10-01 and 2026-10-04), and a partitioned view's write a row
+        // fits no member of (probed 2026-10-01).
+        if (error is { Number: 1505 or 4457 } or { EndedColumnRewrite: true } or { EndedTriggerBody: true })
             message.LineNumber = 1;
         return message;
     }

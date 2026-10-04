@@ -514,18 +514,19 @@ public sealed class QuotedIdentifierCaptureTests
         => AreEqual(1, IndexedView().ExecuteScalar("set quoted_identifier off; select a from v"));
 
     /// <summary>
-    /// The hint on a view with no index is not gated — there is no
-    /// materialized expression for the setting to disagree with.
+    /// The hint on a view with no index is no SET-option question at all: the
+    /// hint itself is invalid there, Msg 8171 (probed 2026-10-04 against SQL
+    /// Server 2025).
     /// </summary>
     [TestMethod]
-    public void SelectNoExpandFromPlainView_UnderOff_Succeeds()
+    public void SelectNoExpandFromPlainView_UnderOff_IsMsg8171()
     {
         var simulation = new Simulation();
         simulation.ExecuteBatches(
             "create table b (a int not null primary key)",
             "create view v as select a from dbo.b",
             "insert b values (1)");
-        AreEqual(1, simulation.ExecuteScalar("set quoted_identifier off; select a from v with (noexpand)"));
+        _ = simulation.AssertSqlError("set quoted_identifier off; select a from v with (noexpand)", 8171);
     }
 
     // ----- Msg 1934: the non-QUOTED_IDENTIFIER components -----

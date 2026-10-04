@@ -1928,7 +1928,7 @@ partial class Simulation
         if (allTriggers)
         {
             foreach (var trigger in tableTriggers)
-                trigger.IsDisabled = disable;
+                SetTriggerDisabled(context.Batch, trigger, disable);
             return true;
         }
 
@@ -1940,7 +1940,7 @@ partial class Simulation
                 ?? throw SimulatedSqlException.AlterTableTriggerMissing(name, tableName.Leaf));
         }
         foreach (var trigger in named)
-            trigger.IsDisabled = disable;
+            SetTriggerDisabled(context.Batch, trigger, disable);
         return true;
     }
 

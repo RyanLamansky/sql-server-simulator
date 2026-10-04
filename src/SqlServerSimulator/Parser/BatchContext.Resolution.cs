@@ -522,7 +522,7 @@ internal sealed partial class BatchContext
         if (this.TryResolveSynonym(name, out var synonym))
             return SimulatedSqlException.SynonymRefersToInvalidObject(name.ToString(), this.TryResolveSynonymBase(synonym, out _) ? (byte)224 : (byte)1);
         var error = SimulatedSqlException.InvalidObjectName(name);
-        if (!this.CreateTimeBinding && !this.Parser.BindingViewDefinition)
+        if (!this.CreateTimeBinding && !this.Parser.BindingViewDefinition && !this.BindsModuleDefinition)
             return error;
         if (name.Count >= 2)
             return error.PinLine(12);

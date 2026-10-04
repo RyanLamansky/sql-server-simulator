@@ -199,6 +199,14 @@ partial class SimulatedSqlException
         new($"Cannot find either column \"{name.ImmediateQualifier}\" or the user-defined function or aggregate \"{name}\", or the name is ambiguous.", 4121, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 317: a column-alias list after a user
+    /// table-valued function's alias (probed 2026-10-04 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException TableValuedFunctionColumnAlias(string functionName) =>
+        new($"Table-valued function '{functionName}' cannot have a column alias.", 317, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 313 — fired by a function/procedure call that
     /// supplies fewer arguments than the parameter list. Probe-confirmed that
     /// this fires even when omitted parameters have declared defaults — the
@@ -362,6 +370,13 @@ partial class SimulatedSqlException
         new($"'{option}' is not a recognized option.", 195, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 1052 for a function's <c>WITH</c> clause naming
+    /// both NULL-input behaviors (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ConflictingFunctionOptions(string first, string second) =>
+        new($"Conflicting CREATE/ALTER FUNCTION options \"{first}\" and \"{second}\".", 1052, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 10796: <c>SCHEMABINDING</c> on a procedure or
     /// trigger that isn't natively compiled, or <c>NATIVE_COMPILATION</c>
     /// without it — state 1 for those, 2 for a function (probed 2026-09-26
@@ -389,6 +404,37 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException DuplicateColumnInViewOrFunction(string columnName, string objectName) =>
         new($"Column names in each view or function must be unique. Column name '{columnName}' in view or function '{objectName}' is specified more than once.", 4506, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4103: a view named as a temporary object, raised
+    /// before the view's own attribution (probed 2026-10-04 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException TemporaryViewNotAllowed(string viewName) =>
+        new($"\"{viewName}\": Temporary views are not allowed.", 4103, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4505: a view projecting more than 1,024 columns,
+    /// naming the first past the limit (probed 2026-10-04 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException ViewExceedsMaximumColumns(string columnName, string viewName) =>
+        new($"CREATE VIEW failed because column '{columnName}' in view '{viewName}' exceeds the maximum of 1024 columns.", 4505, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 270: a write naming a multi-statement
+    /// table-valued function call as its target (probed 2026-10-04 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ObjectCannotBeModified(string writtenName) =>
+        new($"Object '{writtenName}' cannot be modified.", 270, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 4427 — a write through a view whose
+    /// <c>WITH CHECK OPTION</c> spans a <c>TOP</c> or <c>OFFSET</c>.
+    /// </summary>
+    internal static SimulatedSqlException CheckOptionOverRowLimit(string viewName) =>
+        new($"Cannot update the view \"{viewName}\" because it or a view it references was created with WITH CHECK OPTION and its definition contains a TOP or OFFSET clause.", 4427, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 4511 — fired at <c>CREATE VIEW</c> when the
@@ -443,8 +489,9 @@ partial class SimulatedSqlException
     /// <summary>
     /// Mimics SQL Server's Msg 414 (<paramref name="isDelete"/> false) and Msg
     /// 415 — a joined UPDATE or DELETE whose target is a view carrying an
-    /// <c>INSTEAD OF</c> trigger for the action, the view named bare (probed
-    /// 2026-10-01 against SQL Server 2025).
+    /// <c>INSTEAD OF</c> trigger for the action, the view named as the
+    /// <c>FROM</c> clause wrote it (probed 2026-10-01 and 2026-10-04 against
+    /// SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException InsteadOfViewInJoin(string viewName, bool isDelete) =>
         isDelete

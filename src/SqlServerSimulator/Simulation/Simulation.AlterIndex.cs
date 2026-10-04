@@ -182,7 +182,14 @@ partial class Simulation
             return true;
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
+        {
+            if (context.Batch.TryResolveView(tableName, out var indexedView) && indexedView.Indexes.Count > 0)
+            {
+                AlterViewIndexes(context, indexedView, alterAll ? null : indexName, form, tableName);
+                return true;
+            }
             throw SimulatedSqlException.CannotFindObjectForAlterIndex(tableName.ToString());
+        }
         RejectOnMemoryOptimized(table, "The operation 'ALTER INDEX'", 8);
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         RecordTableDdlUndo(context, table);
@@ -333,6 +340,41 @@ partial class Simulation
         AlterIndexForm.Pause => "PAUSE",
         _ => "RESUME",
     };
+
+    /// <summary>
+    /// <c>ALTER INDEX</c> on an indexed view: <c>DISABLE</c> takes an index
+    /// out of service — the clustered one every index on the view, so
+    /// <c>NOEXPAND</c> no longer reads it and its uniqueness goes unchecked —
+    /// and <c>REBUILD</c> puts it back; the other forms change nothing a read
+    /// shows (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static void AlterViewIndexes(ParserContext context, Schemas.View view, string? indexName, AlterIndexForm form, MultiPartName writtenName)
+    {
+        if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(view), view.ObjectId, view.SchemaId))
+            throw SimulatedSqlException.CannotFindObjectForAlterIndex(writtenName.ToString());
+        var targets = indexName is null
+            ? view.Indexes
+            : view.Indexes.FindAll(index => context.Batch.CurrentDatabase.Collation.Equals(index.Name, indexName));
+        if (targets.Count == 0)
+            throw SimulatedSqlException.CannotFindObjectForAlterIndex(writtenName.ToString());
+        var before = view.Indexes.ConvertAll(static index => (index, index.IsDisabled));
+        if (form == AlterIndexForm.Disable)
+        {
+            foreach (var index in targets.Exists(static index => index.IsClustered) ? view.Indexes : targets)
+                index.IsDisabled = true;
+        }
+        else if (form == AlterIndexForm.Rebuild)
+        {
+            foreach (var index in targets)
+                index.IsDisabled = false;
+        }
+        RecordDdlUndo(context, () =>
+        {
+            foreach (var (index, wasDisabled) in before)
+                index.IsDisabled = wasDisabled;
+        });
+        RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(writtenName), indexName ?? "ALL", "INDEX", view.Name, "VIEW");
+    }
 
     private enum AlterIndexForm
     {

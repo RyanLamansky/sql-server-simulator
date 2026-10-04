@@ -369,8 +369,8 @@ partial class Simulation
     /// session's database principal for <c>SELF</c>, and the named user's
     /// principal id otherwise (probe-confirmed across procedures, functions
     /// and triggers). A named user the database doesn't hold resolves to
-    /// <see langword="null"/>; real refuses the CREATE outright, which the
-    /// simulator defers to invocation time (Msg 15517).
+    /// <see langword="null"/>, which <see cref="RequireExecuteAsUser"/> has
+    /// already refused for a procedure or function.
     /// </summary>
     internal static int? ResolveExecuteAsPrincipalId(ParserContext context, string? clause) =>
         clause is null || clause.Equals("CALLER", StringComparison.OrdinalIgnoreCase) ? null

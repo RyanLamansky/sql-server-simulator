@@ -46,9 +46,11 @@ internal sealed partial class Selection
             switch (context.Token)
             {
                 case ReservedKeyword { Keyword: Keyword.Pivot }:
+                    _ = context.IndexedViewShapeCollector?.HasPivot = true;
                     source = ParsePivot(context, source, outerTypeResolver);
                     break;
                 case ReservedKeyword { Keyword: Keyword.Unpivot }:
+                    _ = context.IndexedViewShapeCollector?.HasPivot = true;
                     source = ParseUnpivot(context, source);
                     break;
                 default:

@@ -755,15 +755,16 @@ internal abstract class Expression : ExpressionNode
                     return systemFunction;
                 if (context.Batch.TryResolveFunction(reference.ReferencedName, out var function))
                 {
-                    switch (function)
+                    return function switch
                     {
-                        case ScalarFunction scalarFn:
-                            return UserFunctionCall.ParseCall(scalarFn, context);
-                        case ClrScalarFunction clrFn:
-                            return ClrFunctionCall.ParseCall(clrFn, context);
-                        case ClrAggregateFunction clrAggregate:
-                            return AggregateExpression.ParseClr(clrAggregate, reference.ReferencedName, context);
-                    }
+                        ScalarFunction scalarFn => UserFunctionCall.ParseCall(scalarFn, context),
+                        ClrScalarFunction clrFn => ClrFunctionCall.ParseCall(clrFn, context),
+                        ClrAggregateFunction clrAggregate => AggregateExpression.ParseClr(clrAggregate, reference.ReferencedName, context),
+                        // A table-valued function in a value's place is a
+                        // missing scalar function, ahead of its arguments
+                        // (probed 2026-10-04 against SQL Server 2025).
+                        _ => throw SimulatedSqlException.CannotFindUserDefinedFunction(reference.ReferencedName),
+                    };
                 }
                 // Skip mode: real SQL Server defers user-function binding, so
                 // an un-taken branch calling a missing schema-qualified
@@ -1786,45 +1787,12 @@ internal abstract class Expression : ExpressionNode
         : name;
 
     /// <summary>
-    /// Notes a nondeterministic built-in for the indexed-view battery
-    /// (Msg 1949, whose text embeds the function name as the catalog spells
-    /// it — lower-case, but <c>'Crypt_Gen_Random'</c>). Only the
-    /// closed set of built-ins whose value can differ between two evaluations
-    /// of the same row matters here — that is exactly what makes a view's
-    /// materialized contents unreproducible.
-    /// </summary>
-    private static void RecordNondeterministicBuiltIn(string name, ParserContext context)
-    {
-        if (context.IndexedViewShapeCollector is not { } shape || shape.NondeterministicFunction is not null)
-            return;
-
-        // The arms yield the spelling real reports, so no
-        // case conversion of the caller's text is needed (and CA1308's
-        // normalization concern doesn't arise).
-        Span<char> upper = stackalloc char[name.Length];
-        var length = name.ToUpperInvariant(upper);
-        shape.NondeterministicFunction = length switch
-        {
-            4 => upper[..length] is "RAND" ? "rand" : null,
-            5 => upper[..length] is "NEWID" ? "newid" : null,
-            7 => upper[..length] is "GETDATE" ? "getdate" : null,
-            10 => upper[..length] is "GETUTCDATE" ? "getutcdate" : null,
-            11 => upper[..length] is "SYSDATETIME" ? "sysdatetime" : null,
-            14 => upper[..length] is "SYSUTCDATETIME" ? "sysutcdatetime" : null,
-            15 => upper[..length] is "NEWSEQUENTIALID" ? "newsequentialid" : null,
-            16 => upper[..length] is "CRYPT_GEN_RANDOM" ? "Crypt_Gen_Random" : null,
-            17 => upper[..length] is "SYSDATETIMEOFFSET" ? "sysdatetimeoffset" : null,
-            _ => null,
-        };
-    }
-
-    /// <summary>
     /// Notes a side-effecting built-in inside a function body being bound at
     /// <c>CREATE</c> — real's Msg 443, which embeds the name the way the
     /// catalog spells it (probe-confirmed: lower-case, but
-    /// <c>'Crypt_Gen_Random'</c>). The date / time built-ins are deterministic
-    /// enough for real to allow them here even though the indexed-view battery
-    /// above rejects them, so the two sets deliberately differ.
+    /// <c>'Crypt_Gen_Random'</c>). The date / time built-ins are allowed here
+    /// although the indexed-view battery rejects them as nondeterministic, so
+    /// this set is side effects, not nondeterminism.
     /// </summary>
     private static void RecordSideEffectingBuiltIn(string name, ParserContext context)
     {
@@ -1933,7 +1901,6 @@ internal abstract class Expression : ExpressionNode
     private static Expression ResolveBuiltIn(string name, ParserContext context)
     {
         Span<char> uppercaseName = stackalloc char[name.Length];
-        RecordNondeterministicBuiltIn(name, context);
         RecordSideEffectingBuiltIn(name, context);
         _ = name.ToUpperInvariant(uppercaseName);
         if (OpensStatementTransaction(uppercaseName))

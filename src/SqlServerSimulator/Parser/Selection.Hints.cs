@@ -420,7 +420,11 @@ internal sealed partial class Selection
     /// </summary>
     internal static TableHintInfo ParseOptionalFromSourceHints(ParserContext context, bool aliasConsumed, string writtenObjectName)
     {
+        var before = context.Token;
         var info = ParseOptionalTableHints(context, allowLegacyParenForm: true, commitOnLegacyParen: aliasConsumed);
+        // Any hint keeps a view from being indexed (Msg 10140).
+        if (!ReferenceEquals(before, context.Token) && context.IndexedViewShapeCollector is { } shape)
+            shape.HasTableHint = true;
         if (context.Token is Operator { Character: '(' })
             RefuseArgumentList(context, writtenObjectName, reportsNames: true);
         return info;
@@ -566,6 +570,31 @@ internal sealed partial class Selection
             throw SimulatedSqlException.NoLockHintNotAllowedOnDmlTarget();
         if (info.IndexHint)
             throw SimulatedSqlException.IndexHintsOnlyInFromOrOption();
+    }
+
+    /// <summary>
+    /// A view's table hints: <c>NOEXPAND</c> needs an enabled unique clustered
+    /// index on it (Msg 8171 at the line after the view's name — real's line,
+    /// in a batch and a module alike), and an index
+    /// hint is then checked against the view's indexes (Msg 308); without
+    /// <c>NOEXPAND</c> an index hint is ignored with the warning Msg 4430
+    /// (all probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static void ValidateViewIndexHints(ParserContext context, Schemas.View view, TableHintInfo info, string writtenName, int nameLine)
+    {
+        if (info.NoExpand)
+        {
+            if (!view.Indexes.Exists(static index => index is { IsUnique: true, IsClustered: true, IsDisabled: false }))
+                throw SimulatedSqlException.NoExpandHintInvalid(writtenName, state: 2).PinLine(nameLine + context.Batch.LineOffset);
+            foreach (var argument in info.IndexArguments ?? [])
+            {
+                if (argument.Name is { } name && !view.Indexes.Exists(index => context.Batch.CurrentDatabase.Collation.Equals(index.Name, name)))
+                    throw SimulatedSqlException.IndexHintNameNotFound(name, writtenName);
+            }
+            return;
+        }
+        if (info.IndexArguments is not null && !context.Batch.IsSkipping)
+            context.Connection.PendingMessages.Enqueue(SimulatedSqlException.ViewIndexHintsIgnoredMessage(context.Batch, writtenName));
     }
 
     /// <summary>
@@ -1074,6 +1103,10 @@ internal sealed partial class Selection
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.TableSample })
             return;
+        // A view's or inline function's definition samples nothing (probed
+        // 2026-10-04 against SQL Server 2025).
+        if (context.DefiningModuleQuery != DefiningModuleQuery.None)
+            throw SimulatedSqlException.TableSampleInModuleDefinition();
         context.SimpleParameterizationBlocked = true;
         var collation = context.Batch.CurrentDatabase.Collation;
         context.MoveNextRequired();

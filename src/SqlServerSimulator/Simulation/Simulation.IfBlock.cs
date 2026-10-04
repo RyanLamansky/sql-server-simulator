@@ -520,7 +520,10 @@ partial class Simulation
                     var raw = valueExpr.Run(new RuntimeContext(
                         name => throw SimulatedSqlException.MustDeclareScalarVariable(name.Leaf),
                         batch));
-                    udfFrame.ReturnedValue = raw.CoerceTo(udfFrame.ReturnType);
+                    // Converted as an assignment converts, so a value past the
+                    // return type is its overflow error (Msg 220 for an int
+                    // into tinyint), never a raw .NET overflow.
+                    udfFrame.ReturnedValue = Parser.Expressions.Cast.ApplyCoercion(raw, udfFrame.ReturnType, targetMaxLength: null);
                 }
                 else
                 {

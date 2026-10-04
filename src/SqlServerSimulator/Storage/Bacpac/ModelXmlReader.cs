@@ -120,10 +120,8 @@ internal static class ModelXmlReader
         connection.SuppressDdlTriggers = true;
         var bracketedDb = BracketName(database.Name);
 
-        // Pre-build a set of view qualified-names so the index emitter can
-        // skip indexes on views (those require views to exist first + indexed-
-        // view machinery the simulator doesn't model). Future phase that adds
-        // view support promotes the skipped-on-view indexes off Skipped.
+        // The view qualified-names: a view's indexes land with the views rather
+        // than in phase 8, and an extended property's host kind reads them.
         var viewNames = elements
             .Where(e => e.Attribute("Type")?.Value == "SqlView")
             .Select(e => e.Attribute("Name")?.Value)
@@ -141,11 +139,11 @@ internal static class ModelXmlReader
         // phase 5 = unused (was indexes; moved to phase 8 so filtered-index
         // predicates referencing computed columns resolve); phase 6 = views
         // (body is deferred-parsed so cross-references inside the same phase
-        // work); phase 7 = functions + procedures + DML triggers (bodies
+        // work), then the views' indexes; phase 7 = functions + procedures + DML triggers (bodies
         // also deferred-parsed); phase 8 = deferred computed columns for the
         // tables phase 2 fell back on (ALTER TABLE ADD col AS expr — depend on
         // functions landing in phase 7; these append at the end rather than
-        // the model ordinal) + indexes (depend on tables AND computed columns;
+        // the model ordinal) + table indexes (depend on tables AND computed columns;
         // within phase 8 document order puts SqlTable's deferred-computed-column
         // ALTERs ahead of SqlIndex emissions); phase 9 = extended properties
         // (depend on every covered host type, including the computed
@@ -185,6 +183,7 @@ internal static class ModelXmlReader
         // the phase, once their siblings exist.
         var deferredInlineTvfs = new List<XElement>();
         var deferredPartitionSchemes = new List<XElement>();
+        var viewIndexes = new List<XElement>();
         foreach (var element in elements)
         {
             var type = element.Attribute("Type")?.Value!;
@@ -234,6 +233,11 @@ internal static class ModelXmlReader
                     // Elements without the relationship are ignored.
                     ("SqlTable", 5) => Run(() => EmitDeferredSystemVersioning(element, name, connection)),
                     ("SqlView", 6) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlView", "QueryScript")),
+                    // A view's indexes follow the views, ahead of the phase-7
+                    // modules: a body reading one WITH (NOEXPAND) is refused
+                    // at CREATE while the view has no index (Msg 8171).
+                    ("SqlIndex", 6) when IndexesAView(element, viewNames) => Run(() => viewIndexes.Add(element)),
+                    ("SqlIndex", 8) when IndexesAView(element, viewNames) => true,
                     ("SqlScalarFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlScalarFunction", "BodyScript")),
                     ("SqlMultiStatementTableValuedFunction", 7) => Run(() => EmitProgrammableObject(element, name, connection, result, "SqlMultiStatementTableValuedFunction", "BodyScript")),
                     // An inline TVF carries BodyScript like the other function
@@ -315,6 +319,18 @@ internal static class ModelXmlReader
         }
 
         DrainDeferredInlineTvfs(deferredInlineTvfs, connection, result);
+        // The clustered index comes first: every other index on a view needs it.
+        foreach (var element in viewIndexes.OrderBy(static element => !ReadBoolProperty(element, "IsClustered", defaultValue: false)))
+        {
+            try
+            {
+                EmitIndex(element, element.Attribute("Name")?.Value, connection, result, memoryOptimizedKeys);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException and not StackOverflowException)
+            {
+                result.AddSkipped(new BacpacSkipped("SqlIndex", element.Attribute("Name")?.Value, $"Load failed: {ex.GetType().Name}: {ex.Message}"));
+            }
+        }
         foreach (var element in deferredPartitionSchemes)
         {
             try
@@ -2141,6 +2157,10 @@ internal static class ModelXmlReader
         }
     }
 
+    /// <summary>Whether a <c>SqlIndex</c> element indexes a view.</summary>
+    private static bool IndexesAView(XElement element, HashSet<string> viewNames)
+        => ReadSingleReference(element, "IndexedObject") is { } indexedObject && viewNames.Contains(indexedObject);
+
     /// <summary>
     /// Emits <c>CREATE [UNIQUE] [CLUSTERED|NONCLUSTERED] INDEX name ON table (cols) [INCLUDE (cols)]</c>.
     /// Index Name attribute is 3-part <c>[schema].[table].[index_name]</c>;
@@ -2148,9 +2168,9 @@ internal static class ModelXmlReader
     /// (= non-unique nonclustered). IncludedColumns relationship carries the
     /// INCLUDE list. An index whose <c>IndexedObject</c> is a view is an
     /// indexed view: the same emission produces <c>CREATE UNIQUE CLUSTERED
-    /// INDEX … ON &lt;view&gt;</c> (views are created in phase 6, before this
-    /// phase-8 emission), which the CREATE INDEX parser routes to the view
-    /// path (see <c>docs/claude/indexes.md</c>).
+    /// INDEX … ON &lt;view&gt;</c>, emitted at the end of phase 6 once the
+    /// views exist, which the CREATE INDEX parser routes to the view path
+    /// (see <c>docs/claude/indexes.md</c>).
     /// </summary>
     private static void EmitIndex(XElement element, string? indexName, DbConnection connection, BacpacImportResult result, Dictionary<string, XElement?> memoryOptimizedKeys)
     {

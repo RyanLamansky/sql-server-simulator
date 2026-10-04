@@ -23,7 +23,9 @@ partial class Simulation
         public bool SchemaBinding;
         public bool NativeCompilation;
         public bool ReturnsNullOnNullInput;
+        public bool CalledOnNullInput;
         public bool Recompile;
+        public bool ViewMetadata;
         public string? ExecuteAs;
 
         /// <summary>The <c>INLINE = ON | OFF</c> setting written; null when absent.</summary>
@@ -98,6 +100,7 @@ partial class Simulation
                     break;
                 case Name { Value: var called } when functionGrammar && BuiltInToken.Equals(called, "CALLED"):
                     ExpectOnNullInput(context);
+                    options.CalledOnNullInput = true;
                     written.Add(("CALLED ON NULL INPUT", true));
                     break;
                 case Name { Value: var inline } when functionGrammar && BuiltInToken.Equals(inline, "INLINE"):
@@ -174,8 +177,15 @@ partial class Simulation
                 case "SCHEMABINDING":
                     options.SchemaBinding = true;
                     break;
+                case "VIEW_METADATA":
+                    options.ViewMetadata = true;
+                    break;
             }
         }
+        // The two NULL-input options contradict each other (probed 2026-10-04
+        // against SQL Server 2025).
+        if (options.ReturnsNullOnNullInput && options.CalledOnNullInput)
+            throw SimulatedSqlException.ConflictingFunctionOptions("RETURNS NULL ON NULL INPUT", "CALLED ON NULL INPUT");
 
         // SCHEMABINDING is required of a natively compiled module and taken by
         // no other procedure or trigger; a function takes it either way.

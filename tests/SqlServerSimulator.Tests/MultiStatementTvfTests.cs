@@ -358,4 +358,38 @@ public sealed class MultiStatementTvfTests
         Assert.Contains(fragment, ex.Errors[0].Message);
         Assert.Contains("The statement has been terminated.", ex.Message);
     }
+
+    // === Return-table shapes ===
+
+    [TestMethod]
+    [Description("A return table with a computed and a LOB column returns both; identity restarts per call.")]
+    public void ComputedLobAndIdentityColumns()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("""
+            create function dbo.f() returns @r table (id int identity, a int, c as a * 2, m varchar(max)) as
+            begin
+                insert @r (a, m) values (1, replicate(cast('x' as varchar(max)), 9000)), (2, 'y')
+                return
+            end
+            """);
+        AreEqual("1:2:9000|2:4:1", sim.ExecuteScalar("select string_agg(concat(id, ':', c, ':', len(m)), '|') within group (order by id) from dbo.f()"));
+        AreEqual(2, sim.ExecuteScalar("select max(id) from dbo.f()"));
+    }
+
+    [TestMethod]
+    [DataRow("create function dbo.f(@r int) returns @r table (a int) as begin return end", 134)]
+    [DataRow("create function dbo.f() returns @r table (a int, c as a persisted) as begin return end", 4936)]
+    [Description("Return-variable refusals.")]
+    public void ReturnTableRefusals(string create, int number)
+        => _ = new Simulation().AssertSqlError(create, number);
+
+    [TestMethod]
+    [Description("A multi-statement TVF can't be a write target (Msg 270).")]
+    public void WriteThroughAMultiStatementFunction_IsMsg270()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create function dbo.f() returns @r table (a int) as begin return end");
+        _ = sim.AssertSqlError("insert dbo.f() values (1)", 270);
+    }
 }

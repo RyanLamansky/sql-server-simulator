@@ -93,6 +93,14 @@ partial class SimulatedSqlException
         new("Too many grouping sets. The maximum number is 4096.", 10703, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 557: a function body's <c>EXEC</c> reaching a
+    /// procedure, raised as the statement runs — the <c>CREATE</c> accepted it
+    /// (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OnlyFunctionsExecutableFromFunction() =>
+        new("Only functions and some extended stored procedures can be executed from within a function.", 557, 16, 2);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 1054: a construct a schema-bound module's body
     /// may not hold, raised by the parser standing on it — <c>GROUP BY ALL</c>'s
     /// <c>ALL</c> is state 8, a select-list <c>*</c> state 6 and a qualified

@@ -155,6 +155,12 @@ partial class Simulation
         };
         if (!context.Batch.CurrentDatabase.Collation.Equals(targetAlias, defaultTargetName))
             context.MoveNextRequired();
+        if ((sourceView ?? viewRowsTarget) is { } checkedView && !HasInsteadOfTrigger(context.Batch, checkedView, TriggerActions.Insert | TriggerActions.Update | TriggerActions.Delete))
+        {
+            RejectCheckOptionOverRowLimit(
+                checkedView,
+                context.Batch.CurrentDatabase.Collation.Equals(targetAlias, defaultTargetName) ? destinationName.ToString() : targetAlias);
+        }
 
         // Target-side parse-time column shape: the view's projection when
         // present (so user-typed names like `vbase.pk` resolve against the
@@ -215,7 +221,11 @@ partial class Simulation
                 return null;
             if (!viewRowsTarget.IsJoinUpdatable)
                 throw RefuseMergeIntoNonUpdatableView(viewRowsTarget, destinationTable, whenClauses, destinationName);
-            joinWrite = PlanJoinViewMerge(context.Batch, viewRowsTarget, destinationTable, whenClauses, destinationName);
+            // The refusals name the target's alias when it has one (probed
+            // 2026-10-04 against SQL Server 2025).
+            joinWrite = PlanJoinViewMerge(
+                context.Batch, viewRowsTarget, destinationTable, whenClauses,
+                context.Batch.CurrentDatabase.Collation.Equals(targetAlias, defaultTargetName) ? destinationName : new MultiPartName(targetAlias));
         }
 
         // OUTPUT. Through a join view INSERTED may name only the columns that

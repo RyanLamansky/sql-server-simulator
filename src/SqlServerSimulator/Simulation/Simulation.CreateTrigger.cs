@@ -71,8 +71,8 @@ partial class Simulation
         if (context.Token is not Name)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var triggerName = BatchContext.ParseObjectName(context);
-        context.Batch.ErrorProcedureName = triggerName.Leaf;
         RejectQualifiedModuleName(triggerName, "TRIGGER");
+        context.Batch.ErrorProcedureName = triggerName.Leaf;
         if (!context.Batch.TryResolveSchema(triggerName, out var triggerSchema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(triggerName.ImmediateQualifier ?? Database.DefaultSchemaName);
         triggerSchema.Database.RejectWriteWhenReadOnly();
@@ -126,11 +126,12 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
 
-        // Actions list: INSERT / UPDATE / DELETE, comma-separated.
+        // Actions list: INSERT / UPDATE / DELETE, comma-separated; one named
+        // twice is Msg 1034.
         var actions = TriggerActions.None;
         while (true)
         {
-            actions |= context.Token switch
+            var action = context.Token switch
             {
                 ReservedKeyword { Keyword: Keyword.Insert } => TriggerActions.Insert,
                 ReservedKeyword { Keyword: Keyword.Update } => TriggerActions.Update,
@@ -141,11 +142,20 @@ partial class Simulation
                 Name { Value: var word } when actions == TriggerActions.None => throw SimulatedSqlException.InvalidEventType(word),
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
+            if ((actions & action) != 0)
+                throw SimulatedSqlException.DuplicateTriggerAction(FirstActionName(action));
+            actions |= action;
             context.MoveNextRequired();
             if (context.Token is not Operator { Character: ',' })
                 break;
             context.MoveNextRequired();
         }
+
+        // The legacy `WITH APPEND` after the actions reads as an option list
+        // no option of which is recognized (probed 2026-10-04 against SQL
+        // Server 2025).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.With } && context.GetNextRequired() is Name { Value: var legacyOption })
+            throw SimulatedSqlException.OptionNotRecognized(legacyOption);
 
         // NOT FOR REPLICATION before AS is also valid, and only recorded.
         var notForReplication = false;
@@ -225,6 +235,25 @@ partial class Simulation
             throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString(), triggerName.Leaf, parentView is null ? (byte)4 : (byte)6);
         }
 
+        // A trigger lives in its parent's schema: an unqualified name lands
+        // there, and one naming another schema is Msg 2103 (probed 2026-10-04
+        // against SQL Server 2025).
+        var parentSchema = triggerSchema;
+        foreach (var (_, candidate) in context.Batch.DatabaseFor(parent).Schemas)
+        {
+            if (candidate.SchemaId == parent.SchemaId)
+                parentSchema = candidate;
+        }
+        if (triggerName.Count == 1)
+            triggerSchema = parentSchema;
+        else if (!ReferenceEquals(triggerSchema, parentSchema))
+            throw SimulatedSqlException.TriggerSchemaDiffersFromParent(triggerName.ToString());
+
+        // An INSTEAD OF trigger can't take over a view's CHECK OPTION
+        // (probed 2026-10-04 against SQL Server 2025).
+        if (timing == TriggerTiming.InsteadOf && parent is View { WithCheckOption: true })
+            throw SimulatedSqlException.InsteadOfTriggerOnCheckOptionView(triggerName.ToString(), parentName.ToString());
+
         // A history table takes no trigger, and a system-versioned table no
         // INSTEAD OF one (probed 2026-10-04 against SQL Server 2025).
         if (parent is HeapTable { IsHistoryTable: true } or HeapTable { SystemVersioning: not null } && (parent is HeapTable { IsHistoryTable: true } || timing == TriggerTiming.InsteadOf))
@@ -266,14 +295,13 @@ partial class Simulation
             var bindTrigger = new Trigger(
                 triggerSchema, triggerName.Leaf, objectId: 0, parent, actions, timing, bodyText,
                 createDate: context.Batch.CurrentStatement.UtcNow);
+            var bindInserted = MaterializePseudoTable(pseudoColumns, "inserted", [], context.Batch);
+            var bindDeleted = MaterializePseudoTable(pseudoColumns, "deleted", [], context.Batch);
+            bindInserted.RefusesLegacyLobReads = bindDeleted.RefusesLegacyLobReads = timing == TriggerTiming.After;
             context.Simulation.BindTriggerBodyAtCreate(
                 context,
                 triggerName.Leaf,
-                new TriggerFrame(
-                    bindTrigger,
-                    MaterializePseudoTable(pseudoColumns, "inserted", [], context.Batch),
-                    MaterializePseudoTable(pseudoColumns, "deleted", [], context.Batch),
-                    columnsUpdatedMask: []),
+                new TriggerFrame(bindTrigger, bindInserted, bindDeleted, columnsUpdatedMask: []),
                 bodyText,
                 bodyLineOffset,
                 options.NativeCompilation);
@@ -332,7 +360,7 @@ partial class Simulation
         if ((isAlter || createOrAlter) && !existed && triggerSchema.HasNameInSharedNamespace(triggerName.Leaf))
             throw SimulatedSqlException.CannotAlterIncompatibleObjectType(triggerName);
         if (isAlter && !existed)
-            throw SimulatedSqlException.InvalidObjectName(triggerName);
+            throw SimulatedSqlException.InvalidObjectName(triggerName, state: 6);
         if (existed && (isAlter || createOrAlter) && !ReferenceEquals(existing!.Parent, parent))
             throw SimulatedSqlException.CannotAlterTriggerOnDifferentObject(triggerName, parentName);
         RejectClrTriggerKindChange(existed ? existing : null, clrEntry, triggerName);
@@ -371,6 +399,9 @@ partial class Simulation
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
             NotForReplication = notForReplication,
             IsNativelyCompiled = options.NativeCompilation,
+            // Replacing a disabled trigger leaves it disabled (probed
+            // 2026-10-04 against SQL Server 2025).
+            IsDisabled = existed && existing!.IsDisabled,
         };
         if (existed)
             trigger.ModifyDate = context.Batch.CurrentStatement.UtcNow;
@@ -398,12 +429,12 @@ partial class Simulation
         : "DELETE";
 
     /// <summary>
-    /// Parses <c>{ DISABLE | ENABLE } TRIGGER name ON parent</c>. Toggles
-    /// <see cref="Trigger.IsDisabled"/>; the matching DML still parses
-    /// and writes normally but the trigger body is skipped while
-    /// disabled. <c>DISABLE TRIGGER ALL</c> / <c>ENABLE TRIGGER ALL</c>
-    /// (toggling every trigger on the parent at once) is supported too.
-    /// The parent may be a heap table or a view.
+    /// Parses <c>{ DISABLE | ENABLE } TRIGGER { name [, …] | ALL } ON parent</c>.
+    /// Toggles <see cref="Trigger.IsDisabled"/>; the matching DML still parses
+    /// and writes normally but the trigger body is skipped while disabled. The
+    /// parent may be a heap table or a view, and a name the parent doesn't
+    /// carry is Msg 1088 state 119 naming it as written, toggling none of the
+    /// list (probed 2026-10-04 against SQL Server 2025).
     /// </summary>
     private static bool TryParseEnableOrDisableTrigger(ParserContext context, bool disable)
     {
@@ -415,10 +446,10 @@ partial class Simulation
 
         context.MoveNextRequired();
 
-        // Two shapes: a trigger name, or the literal keyword ALL. Both
-        // are followed by ON parent.
+        // Two shapes: a comma list of trigger names, or the literal keyword
+        // ALL. Both are followed by ON parent.
         var allTriggers = false;
-        MultiPartName triggerName = default;
+        var triggerNames = new List<MultiPartName>();
         if (context.Token is ReservedKeyword { Keyword: Keyword.All })
         {
             allTriggers = true;
@@ -426,10 +457,16 @@ partial class Simulation
         }
         else
         {
-            if (context.Token is not Name)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            triggerName = BatchContext.ParseObjectName(context);
-            context.MoveNextRequired();
+            while (true)
+            {
+                if (context.Token is not Name)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                triggerNames.Add(BatchContext.ParseObjectName(context));
+                context.MoveNextRequired();
+                if (context.Token is not Operator { Character: ',' })
+                    break;
+                context.MoveNextRequired();
+            }
         }
 
         if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
@@ -443,21 +480,30 @@ partial class Simulation
         var serverScope = IsAllServer(context);
         if (serverScope || context.Token is ReservedKeyword { Keyword: Keyword.Database })
         {
-            if (!allTriggers && triggerName.Count > 1)
-                throw SimulatedSqlException.SchemaPrefixOnScopedTrigger();
+            foreach (var name in triggerNames)
+            {
+                if (name.Count > 1)
+                    throw SimulatedSqlException.SchemaPrefixOnScopedTrigger();
+            }
             if (context.Batch.IsSkipping)
                 return true;
             var scoped = serverScope ? context.Simulation.ServerTriggers.All : context.CurrentDatabase.DdlTriggers.EnumerateValues();
             if (allTriggers)
             {
                 foreach (var ddlTrigger in scoped)
-                    ddlTrigger.IsDisabled = disable;
+                    SetTriggerDisabled(context.Batch, ddlTrigger, disable);
                 return true;
             }
-            var matchedDdlTrigger = serverScope
-                ? context.Simulation.ServerTriggers.TryGetValue(triggerName.Leaf, out var serverTrigger) ? serverTrigger : null
-                : context.CurrentDatabase.DdlTriggers.TryGetValue(triggerName.Leaf, out var databaseTrigger) ? databaseTrigger : null;
-            (matchedDdlTrigger ?? throw SimulatedSqlException.CannotFindScopedTrigger(triggerName.Leaf)).IsDisabled = disable;
+            var matchedDdlTriggers = new List<DdlTrigger>(triggerNames.Count);
+            foreach (var name in triggerNames)
+            {
+                var matchedDdlTrigger = serverScope
+                    ? context.Simulation.ServerTriggers.TryGetValue(name.Leaf, out var serverTrigger) ? serverTrigger : null
+                    : context.CurrentDatabase.DdlTriggers.TryGetValue(name.Leaf, out var databaseTrigger) ? databaseTrigger : null;
+                matchedDdlTriggers.Add(matchedDdlTrigger ?? throw SimulatedSqlException.CannotFindScopedTrigger(name.Leaf));
+            }
+            foreach (var matched in matchedDdlTriggers)
+                SetTriggerDisabled(context.Batch, matched, disable);
             return true;
         }
 
@@ -481,20 +527,49 @@ partial class Simulation
                 foreach (var (_, trigger) in schema.Triggers)
                 {
                     if (ReferenceEquals(trigger.Parent, parent))
-                        trigger.IsDisabled = disable;
+                        SetTriggerDisabled(context.Batch, trigger, disable);
                 }
             }
             return true;
         }
 
-        if (!context.Batch.TryResolveSchema(triggerName, out var triggerSchema)
-            || !triggerSchema.Triggers.TryGetValue(triggerName.Leaf, out var matchedTrigger)
-            || !ReferenceEquals(matchedTrigger.Parent, parent))
+        var matchedTriggers = new List<Trigger>(triggerNames.Count);
+        foreach (var name in triggerNames)
         {
-            throw SimulatedSqlException.InvalidObjectName(triggerName);
+            if (!context.Batch.TryResolveSchema(name, out var triggerSchema)
+                || !triggerSchema.Triggers.TryGetValue(name.Leaf, out var matchedTrigger)
+                || !ReferenceEquals(matchedTrigger.Parent, parent))
+            {
+                throw SimulatedSqlException.CannotFindScopedTrigger(name.ToString());
+            }
+            matchedTriggers.Add(matchedTrigger);
         }
-        matchedTrigger.IsDisabled = disable;
+        foreach (var matched in matchedTriggers)
+            SetTriggerDisabled(context.Batch, matched, disable);
         return true;
+    }
+
+    /// <summary>
+    /// Enables or disables a DML trigger, undone with an enclosing
+    /// transaction's rollback as real undoes it (probed 2026-10-04 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static void SetTriggerDisabled(BatchContext batch, Trigger trigger, bool disable)
+    {
+        var was = trigger.IsDisabled;
+        trigger.IsDisabled = disable;
+        RecordDdlUndo(batch, () => trigger.IsDisabled = was);
+    }
+
+    /// <summary>
+    /// <see cref="SetTriggerDisabled(BatchContext, Trigger, bool)"/> for a
+    /// database- or server-scope trigger.
+    /// </summary>
+    internal static void SetTriggerDisabled(BatchContext batch, DdlTrigger trigger, bool disable)
+    {
+        var was = trigger.IsDisabled;
+        trigger.IsDisabled = disable;
+        RecordDdlUndo(batch, () => trigger.IsDisabled = was);
     }
 
     /// <summary>
@@ -743,12 +818,17 @@ partial class Simulation
         RecordSlotUndo(context, context.CurrentDatabase.DdlTriggers, triggerName.Leaf, existing);
         if (!existed)
             context.Batch.CurrentStatement.DdlTriggerCreatedThisStatement = objectId;
+        // A database-scope trigger belongs to no schema: its event carries
+        // SchemaName empty and the database as its target (probed 2026-10-04
+        // against SQL Server 2025).
         RecordDdlEvent(
             context,
             existed ? "ALTER_TRIGGER" : "CREATE_TRIGGER",
-            triggerSchema.Name,
+            "",
             triggerName.Leaf,
-            "TRIGGER");
+            "TRIGGER",
+            targetObjectName: "",
+            targetObjectType: "Database");
         return true;
     }
     /// <summary>

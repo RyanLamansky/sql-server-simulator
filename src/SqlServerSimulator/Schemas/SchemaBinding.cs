@@ -90,7 +90,8 @@ internal static class SchemaBinding
 
     /// <summary>
     /// The CHECK or DEFAULT constraint whose definition calls
-    /// <paramref name="function"/>, or null. Such a constraint pins the
+    /// <paramref name="function"/>, or the table a computed column of which
+    /// does, or null. Such a constraint pins the
     /// function as a schema-bound module would — dropping or altering it is
     /// Msg 3729 naming the constraint (probed 2026-10-01 against SQL Server
     /// 2025). The stored definition spells a call <c>[schema].[name](</c>.
@@ -111,6 +112,10 @@ internal static class SchemaBinding
                 {
                     if (column.DefaultConstraint is { Definition: { } definition } constraint && definition.Contains(call, StringComparison.OrdinalIgnoreCase))
                         return constraint.Name;
+                    // A computed column calling it pins it too, naming its
+                    // table (probed 2026-10-04 against SQL Server 2025).
+                    if (column.Computed is not null && column.ComputedDefinition?.Contains(call, StringComparison.OrdinalIgnoreCase) == true)
+                        return table.Name;
                 }
             }
         }
@@ -228,6 +233,18 @@ internal static class SchemaBinding
             // whose unbound names otherwise defer, and at line 12 as any
             // module definition's missing qualified name is (probed 2026-09-26
             // against SQL Server 2025).
+            // A system object or a synonym can't be bound to (probed
+            // 2026-10-04 against SQL Server 2025).
+            if (name.InSourcePosition && name.SegmentCount == 2 && resolved is null
+                && (Collation.Baseline.Equals(name.Qualifier!, "sys") || Collation.Baseline.Equals(name.Qualifier!, "INFORMATION_SCHEMA")))
+            {
+                throw SimulatedSqlException.CannotSchemaBindSystemObject(moduleKind, qualifiedModuleName, name.Text);
+            }
+            if (name.InSourcePosition && !name.IsCall && name.SegmentCount == 2 && resolved is null
+                && database.Schemas.TryGetValue(name.Qualifier!, out var synonymSchema) && synonymSchema.Synonyms.ContainsKey(name.Leaf))
+            {
+                throw SimulatedSqlException.SynonymInSchemaBoundObject();
+            }
             if (name.InSourcePosition && !name.IsCall && name.SegmentCount == 2 && resolved is null)
                 throw SimulatedSqlException.InvalidObjectName(new Parser.MultiPartName(name.Qualifier!).WithAddedPart(name.Leaf)).PinLine(12);
             switch (resolved)

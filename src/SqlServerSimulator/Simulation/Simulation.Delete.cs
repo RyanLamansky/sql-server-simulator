@@ -56,6 +56,10 @@ partial class Simulation
         context.MoveNextOptional();
         var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
         Selection.ValidateDmlTargetHints(targetHints);
+        // A write's target takes no NOEXPAND, an indexed view's included
+        // (probed 2026-10-04 against SQL Server 2025).
+        if (targetHints.NoExpand)
+            throw SimulatedSqlException.NoExpandHintInvalid(leadingIdent.ToString(), state: 1);
         // A target the FROM clause names — an alias, or a view written through
         // in a join — is read from that clause ahead of the OUTPUT clause,
         // which binds against the table it reaches.

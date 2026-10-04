@@ -409,6 +409,19 @@ public sealed partial class SimulatedSqlException : DbException
     /// <summary>Set on a refusal binding a system procedure's arguments, which leaves the caller's return code unset.</summary>
     internal bool SystemProcedureBindingError;
 
+    /// <summary>
+    /// The line of a system procedure's own source a refusal is raised at, set
+    /// where one procedure raises the same number from several lines.
+    /// </summary>
+    internal int? SystemProcedureLine;
+
+    /// <summary>Sets <see cref="SystemProcedureLine"/> and returns this exception.</summary>
+    internal SimulatedSqlException AtSystemProcedureLine(int line)
+    {
+        this.SystemProcedureLine = line;
+        return this;
+    }
+
     /// <summary>Set by <see cref="PinLine"/>: the line holds wherever the error is caught.</summary>
     private bool linePinned;
 

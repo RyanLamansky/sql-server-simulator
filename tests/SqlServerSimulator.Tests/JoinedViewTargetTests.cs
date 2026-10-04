@@ -134,6 +134,7 @@ public sealed class JoinedViewTargetTests
             "create trigger tr_vd on vd instead of delete as insert log1 select 'iod'");
         simulation.AssertSqlError("update a set v = 0 from vi a join u on u.k = a.k", 414, "UPDATE is not allowed because the statement updates view \"vi\" which participates in a join and has an INSTEAD OF UPDATE trigger.");
         _ = simulation.AssertSqlError("update vi set v = 0 from u where u.k = vi.k", 414);
+        simulation.AssertSqlError("delete a from dbo.vd a join u on u.k = a.k", 415, "DELETE is not allowed because the statement updates view \"dbo.vd\" which participates in a join and has an INSTEAD OF DELETE trigger.");
         simulation.AssertSqlError("delete a from vd a join u on u.k = a.k", 415, "DELETE is not allowed because the statement updates view \"vd\" which participates in a join and has an INSTEAD OF DELETE trigger.");
         AreEqual(3, simulation.ExecuteNonQuery("delete a from vi a join u on u.k = a.k"));
         AreEqual(1, simulation.ExecuteScalar("select count(*) from t"));

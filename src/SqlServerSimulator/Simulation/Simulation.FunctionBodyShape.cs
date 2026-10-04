@@ -62,11 +62,24 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Save }:
                 FunctionBodyShape.NoteSideEffect(batch, "SAVEPOINT", FunctionBodyShape.StatementOperatorState);
                 break;
-            case ReservedKeyword { Keyword: Keyword.Create } when shape.ContextConnection && NextIsTable(batch):
-                // A SQLCLR function's context connection refuses a table's
-                // creation as the side effect it is (probed 2026-09-28 against
-                // SQL Server 2025).
-                FunctionBodyShape.NoteSideEffect(batch, "CREATE TABLE", FunctionBodyShape.StatementOperatorState);
+            case ReservedKeyword { Keyword: Keyword.Create } when NextIsTable(batch, out var temporary):
+                // A table's creation is the side effect it is, in a body and
+                // on a SQLCLR function's context connection alike, and a
+                // temporary one Msg 2772 (probed 2026-09-28 and 2026-10-04
+                // against SQL Server 2025).
+                if (temporary && !shape.ContextConnection)
+                    FunctionBodyShape.NoteRefusal(batch, SimulatedSqlException.TemporaryTableInFunction(), batch.CurrentStatement.StartLine);
+                else
+                    FunctionBodyShape.NoteSideEffect(batch, "CREATE TABLE", FunctionBodyShape.StatementOperatorState);
+                break;
+            case ReservedKeyword { Keyword: Keyword.Drop }:
+                FunctionBodyShape.NoteSideEffect(batch, "DROP OBJECT", FunctionBodyShape.ControlOperatorState);
+                break;
+            case ReservedKeyword { Keyword: Keyword.Kill }:
+                FunctionBodyShape.NoteSideEffect(batch, "KILL", FunctionBodyShape.ControlOperatorState);
+                break;
+            case ReservedKeyword { Keyword: Keyword.Dbcc }:
+                FunctionBodyShape.NoteSideEffect(batch, "DBCC", FunctionBodyShape.StatementOperatorState);
                 break;
             default:
                 break;
@@ -80,13 +93,17 @@ partial class Simulation
         return opensConditional;
     }
 
-    /// <summary>Whether the statement opening at <c>CREATE</c> creates a table.</summary>
-    private static bool NextIsTable(BatchContext batch)
+    /// <summary>
+    /// Whether the statement opening at <c>CREATE</c> creates a table, and
+    /// whether that table is temporary.
+    /// </summary>
+    private static bool NextIsTable(BatchContext batch, out bool temporary)
     {
         var context = batch.Parser;
         var checkpoint = context.SaveCheckpoint();
         context.MoveNextOptional();
         var isTable = context.Token is ReservedKeyword { Keyword: Keyword.Table };
+        temporary = isTable && context.GetNextOptional() is Name { Value: var tableName } && tableName.StartsWith('#');
         context.RestoreCheckpoint(checkpoint);
         return isTable;
     }

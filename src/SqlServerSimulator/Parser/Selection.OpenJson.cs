@@ -384,6 +384,7 @@ internal sealed partial class Selection
     /// </summary>
     public static Selection ParseOpenJson(ParserContext context, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
+        _ = context.IndexedViewShapeCollector?.UsesOpenJson = true;
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 

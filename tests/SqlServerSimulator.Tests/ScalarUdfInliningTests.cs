@@ -206,12 +206,12 @@ public sealed class ScalarUdfInliningTests
         AreEqual("208 L6 f, 208 L1", ReaderError(connection, "select dbo.g()"));
     }
 
-    /// <summary>A qualified name fails on line 13 wherever it sits, real's own constant.</summary>
+    /// <summary>A qualified name fails on line 12 wherever it sits, real's own constant.</summary>
     [TestMethod]
-    public void AQualifiedName_FailsOnLine13()
+    public void AQualifiedName_FailsOnLine12()
     {
         using var connection = Open("create function dbo.q() returns int as begin return (select count(*) from dbo.nope) end");
-        AreEqual("208 L13 q, 208 L1", ReaderError(connection, "select dbo.q()"));
+        AreEqual("208 L12 q, 208 L1", ReaderError(connection, "select dbo.q()"));
     }
 
     [TestMethod]
@@ -316,7 +316,7 @@ public sealed class ScalarUdfInliningTests
             "create procedure p as select dbo.g() x");
         AreEqual("none", ReaderError(connection, "exec p"));
         _ = connection.CreateCommand("drop table src").ExecuteNonQuery();
-        AreEqual("208 L13 g, 208 L1 p", ReaderError(connection, "exec p"));
+        AreEqual("208 L12 g, 208 L1 p", ReaderError(connection, "exec p"));
         AreEqual("208 L1 p", ReaderError(connection, "exec p"));
     }
 

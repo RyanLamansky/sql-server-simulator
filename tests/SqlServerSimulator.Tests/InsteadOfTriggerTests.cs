@@ -599,9 +599,9 @@ public sealed class InsteadOfTriggerTests
     }
 
     /// <summary>
-    /// An INSTEAD OF trigger's INSERTED reads every column but a computed one
-    /// as nullable, and a rowversion as NULL (probed 2026-10-01 against SQL
-    /// Server 2025).
+    /// An INSTEAD OF trigger's INSERTED reads every column but a computed or
+    /// identity one as nullable, and a rowversion as NULL (probed 2026-10-01
+    /// and 2026-10-04 against SQL Server 2025).
     /// </summary>
     [TestMethod]
     public void InsteadOf_InsertedColumnsAreNullable()
@@ -610,7 +610,7 @@ public sealed class InsteadOfTriggerTests
         simulation.ExecuteBatches(
             "create table t (id int identity, v int not null, rv rowversion, p as isnull(v, 0) persisted)",
             "create trigger tr on t instead of insert as select id, v, rv, p from inserted");
-        AreEqual("True,True,True,False", string.Join(",", simulation.ColumnNullability("insert t (v) values (5)")));
+        AreEqual("False,True,True,False", string.Join(",", simulation.ColumnNullability("insert t (v) values (5)")));
         using var reader = simulation.ExecuteReader("insert t (v) values (5)");
         IsTrue(reader.Read());
         IsTrue(reader.IsDBNull(2));
@@ -623,5 +623,18 @@ public sealed class InsteadOfTriggerTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create table t (v int)");
         _ = simulation.AssertSqlError("create trigger tr on t after insert as update inserted set v = 1", 286);
+    }
+
+    [TestMethod]
+    [Description("INSERT … DEFAULT VALUES through a view fires its INSTEAD OF INSERT trigger over one all-NULL row.")]
+    public void DefaultValuesThroughAView_FiresTheTrigger()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table dbo.t (id int identity primary key, v int); create table dbo.log1 (n int, nv int)",
+            "create view dbo.vw as select id, v from dbo.t",
+            "create trigger tr on dbo.vw instead of insert as insert dbo.log1 select count(*), count(v) from inserted");
+        _ = simulation.ExecuteNonQuery("insert dbo.vw default values");
+        AreEqual("1:0", simulation.ExecuteScalar("select concat(n, ':', nv) from dbo.log1"));
     }
 }

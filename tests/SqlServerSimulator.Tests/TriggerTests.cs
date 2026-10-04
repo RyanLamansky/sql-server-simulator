@@ -1266,4 +1266,201 @@ public sealed class TriggerTests
         _ = simulation.ExecuteNonQuery("insert t values (1)");
         AreEqual("zz,aa,mm", simulation.ExecuteScalar("select string_agg(n, ',') within group (order by id) from note"));
     }
+
+    // === The pseudo-tables, the change-detection intrinsics and the trigger's unit ===
+
+    [TestMethod]
+    [Description("An INSTEAD OF UPDATE trigger on a table reads the SET list through UPDATE(col) / COLUMNS_UPDATED(), and INSERTED keeps the row's rowversion.")]
+    public void InsteadOfUpdate_OnATable_ReadsTheSetListAndTheRowversion()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (id int primary key, a int, b int, rv rowversion); create table note (n varchar(20))",
+            "insert t (id, a, b) values (1, 1, 1)",
+            "create trigger tr on t instead of update as insert note select concat(case when update(b) then 'b' end, case when update(a) then 'a' end, ':', convert(varchar(10), columns_updated(), 1), ':', case when rv is null then 'null' else 'set' end) from inserted");
+        _ = simulation.ExecuteNonQuery("update t set b = 2");
+        AreEqual("b:0x04:set", simulation.ExecuteScalar("select n from note"));
+    }
+
+    [TestMethod]
+    [Description("UPDATE(col) on a computed column is Msg 2114 at CREATE TRIGGER, and in a DDL trigger Msg 1097.")]
+    public void UpdateOfAComputedColumn_IsMsg2114_AndInADdlTrigger_Msg1097()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (a int, c as a + 1 persisted)");
+        simulation.AssertSqlError("create trigger tr on t after update as if update(c) select 1", 2114,
+            "Column 'c' cannot be used in an IF UPDATE clause because it is a computed column.");
+        simulation.AssertSqlError("create trigger trd on database for create_table as if update(a) select 1", 1097,
+            "Cannot use If UPDATE within this CREATE TRIGGER statement.");
+    }
+
+    [TestMethod]
+    [Description("An UPDATE whose SET list assigns only variables changes no column, and its trigger reads empty INSERTED / DELETED.")]
+    public void VariableOnlyUpdate_FiresOverEmptyPseudoTables()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int); create table note (i int, d int)",
+            "insert t values (1), (2)",
+            "create trigger tr on t after update as insert note select (select count(*) from inserted), (select count(*) from deleted)");
+        _ = simulation.ExecuteNonQuery("declare @v int; update t set @v = a");
+        AreEqual("0,0", simulation.ExecuteScalar("select concat(i, ',', d) from note"));
+    }
+
+    [TestMethod]
+    [Description("A body fired by an auto-commit statement sets and rolls back to a savepoint of the statement's own unit.")]
+    public void SavepointInTheAutoCommitUnit_RollsBackToIt()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int); create table note (n int)",
+            "create trigger tr on t after insert as begin save tran s1; insert note values (1); rollback tran s1; insert note values (2); end");
+        _ = simulation.ExecuteNonQuery("insert t values (5)");
+        AreEqual("2", simulation.ExecuteScalar("select string_agg(cast(n as varchar), ',') from note"));
+        AreEqual(1, simulation.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    [Description("An error a body's TRY catches under XACT_ABORT ON dooms the auto-commit unit: XACT_STATE() reads -1 and a write is Msg 3930, followed by Msg 3621 at line 1.")]
+    public void CaughtErrorInTheBody_DoomsTheUnit()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int); create table note (n int)",
+            "create trigger tr on t after insert as begin try select 1 / 0 end try begin catch insert note values (xact_state()) end catch");
+        var error = simulation.AssertSqlError("select 1\ninsert t values (5)", 3930);
+        AreEqual("tr", error.Errors[0].Procedure);
+        AreEqual(3621, error.Errors[^1].Number);
+        AreEqual(1, error.Errors[^1].LineNumber);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from t"));
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from note"));
+    }
+
+    [TestMethod]
+    [Description("An error ending a trigger body is followed by Msg 3621 at line 1, whatever line the firing statement is on.")]
+    public void ErrorEndingTheBody_IsFollowedByMsg3621AtLine1()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int primary key)",
+            "insert t values (1)",
+            "create trigger tr on t after insert as insert t values (1)");
+        var error = simulation.AssertSqlError("select 1\n\ninsert t values (2)", 2627);
+        AreEqual(3621, error.Errors[^1].Number);
+        AreEqual(1, error.Errors[^1].LineNumber);
+    }
+
+    [TestMethod]
+    [Description("An AFTER trigger's body reading a text / ntext / image column of INSERTED or DELETED is Msg 311 at CREATE; an INSTEAD OF trigger's may.")]
+    public void LegacyLobColumnOfThePseudoTables_IsMsg311()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (id int primary key, x text)");
+        simulation.AssertSqlError("create trigger tr on t after insert as select x from inserted", 311,
+            "Cannot use text, ntext, or image columns in the 'inserted' and 'deleted' tables.");
+        _ = simulation.AssertSqlError("create trigger tr on t after delete as select * into dbo.cap from deleted", 311);
+        simulation.ExecuteBatches(
+            "create trigger tr on t after insert as select id from inserted",
+            "create trigger ti on t instead of update as select datalength(x) from inserted");
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from sys.triggers"));
+    }
+
+    // === DISABLE / ENABLE TRIGGER ===
+
+    [TestMethod]
+    [Description("DISABLE TRIGGER takes a list, a name the table doesn't carry is Msg 1088 state 119 toggling none, a rollback undoes it, and ALTER TRIGGER keeps a disabled trigger disabled.")]
+    public void DisableTrigger_ListMissingNameRollbackAndAlter()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int)",
+            "create trigger ta on t after insert as select 1",
+            "create trigger tb on t after insert as select 2",
+            "disable trigger dbo.ta, dbo.tb on dbo.t");
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from sys.triggers where is_disabled = 1"));
+        simulation.AssertSqlError("enable trigger ta, dbo.nosuch on t", 1088,
+            "Cannot find the object \"dbo.nosuch\" because it does not exist or you do not have permissions.");
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from sys.triggers where is_disabled = 1"));
+        _ = simulation.ExecuteNonQuery("begin tran; enable trigger ta on t; rollback");
+        AreEqual(2, simulation.ExecuteScalar("select count(*) from sys.triggers where is_disabled = 1"));
+        simulation.ExecuteBatches("alter trigger ta on t after insert as select 3");
+        IsTrue((bool)simulation.ExecuteScalar("select is_disabled from sys.triggers where name = 'ta'")!);
+    }
+
+    // === CREATE / ALTER / DROP TRIGGER refusals ===
+
+    [TestMethod]
+    [Description("A trigger lives in its parent's schema: an unqualified name lands there, another schema is Msg 2103.")]
+    public void TriggerSchema_FollowsItsParent()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create schema s",
+            "create table s.u (a int); create table dbo.t (a int)",
+            "create trigger tx on s.u after insert as select 1");
+        AreEqual("s", simulation.ExecuteScalar("select schema_name(schema_id) from sys.objects where name = 'tx'"));
+        simulation.AssertSqlError("create trigger s.ty on dbo.t after insert as select 1", 2103,
+            "Cannot create trigger 's.ty' because its schema is different from the schema of the target table or view.");
+    }
+
+    [TestMethod]
+    [DataRow("create trigger tr on t after insert, insert as select 1", 1034)]
+    [DataRow("create trigger tr on t for insert with append as select 1", 195)]
+    [DataRow("alter trigger nosuch on t after insert as select 1", 208)]
+    [DataRow("drop trigger dbo.tr0 on dbo.t", 102)]
+    [DataRow("create trigger tv on vc instead of insert as select 1", 2112)]
+    [Description("The trigger statement refusals: a repeated action, a legacy WITH APPEND, a missing ALTER target (state 6), a table after DROP's ON, and an INSTEAD OF trigger on a CHECK OPTION view.")]
+    public void TriggerStatementRefusals(string sql, int number)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int)",
+            "create trigger tr0 on t after insert as select 1",
+            "create view vc as select a from t where a > 0 with check option");
+        var error = simulation.AssertSqlError(sql, number);
+        if (number == 208)
+            AreEqual((byte)6, error.State);
+    }
+
+    [TestMethod]
+    [Description("A database-qualified module name is Msg 166 at line 12 naming no procedure, and a four-part one Msg 117 naming none.")]
+    public void QualifiedModuleNames_AreAttributedToNoModule()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (a int)");
+        var error = simulation.AssertSqlError("create trigger simulated.dbo.tr on t after insert as select 1", 166);
+        AreEqual(12, error.Errors[0].LineNumber);
+        AreEqual("", error.Errors[0].Procedure);
+        error = simulation.AssertSqlError("create view a.b.c.v as select 1 x", 117);
+        AreEqual("", error.Errors[0].Procedure);
+    }
+
+    [TestMethod]
+    [Description("sp_settriggerorder's refusals come from its own lines, attributed to it; a NULL name is Msg 15165 naming '(null)'.")]
+    public void SetTriggerOrderRefusals_AreAttributedToTheProcedure()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int)",
+            "create trigger ta on t after insert as select 1",
+            "create trigger tb on t after insert as select 2",
+            "exec sp_settriggerorder 'dbo.ta', 'First', 'INSERT'");
+        var error = simulation.AssertSqlError("exec sp_settriggerorder 'dbo.tb', 'First', 'INSERT'", 15130);
+        AreEqual("sp_settriggerorder", error.Errors[0].Procedure);
+        AreEqual(163, error.Errors[0].LineNumber);
+        simulation.AssertSqlError("exec sp_settriggerorder null, 'First', 'INSERT'", 15165, "Could not find object '(null)' or you do not have permission.");
+        _ = simulation.AssertSqlError("exec sp_settriggerorder 'dbo.ta', 'First', 'INSERT', 'DATABASE'", 1094);
+    }
+
+    [TestMethod]
+    [Description("A procedure calling itself by its schema-qualified name earns no Msg 2007 note of a missing object.")]
+    public void SelfCallByQualifiedName_NotesNoMissingObject()
+    {
+        var simulation = new Simulation();
+        using var connection = simulation.CreateOpenConnection();
+        var messages = new List<int>();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(static error => error.Number));
+        _ = connection.CreateCommand("create procedure dbo.p @d int as if @d < 3 exec dbo.p 1").ExecuteNonQuery();
+        IsEmpty(messages);
+    }
 }

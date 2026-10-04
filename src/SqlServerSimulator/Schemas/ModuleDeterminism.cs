@@ -354,8 +354,18 @@ internal static partial class ModuleDeterminism
     /// caller's lookup. The body always tokenizes — the CREATE-time parser
     /// walked the same text to find its end.
     /// </remarks>
-    private static bool Scan(string body, out List<Token> tokens, out List<(string Qualifier, string Leaf)> referencedModules)
+    private static bool Scan(string body, out List<Token> tokens, out List<(string Qualifier, string Leaf)> referencedModules) =>
+        Scan(body, out tokens, out referencedModules, out _);
+
+    /// <summary>
+    /// <see cref="Scan(string, out List{Token}, out List{ValueTuple{string, string}})"/>,
+    /// also naming what made the body nondeterministic when it is: a built-in
+    /// (its name as real's Msg 1949 spells it), or a date function reading a
+    /// character literal, an implicit string-to-date conversion.
+    /// </summary>
+    private static bool Scan(string body, out List<Token> tokens, out List<(string Qualifier, string Leaf)> referencedModules, out (Nondeterminism Kind, string? Name) cause)
     {
+        cause = (Nondeterminism.BuiltIn, null);
         referencedModules = [];
         tokens = [];
         var index = 0;
@@ -416,14 +426,33 @@ internal static partial class ModuleDeterminism
                             if (i > 0 && tokens[i - 1] is Operator { Character: ':' })
                                 break;
                             // An unqualified call is always a built-in: real
-                            // rejects a bare user-function call outright.
-                            if (lookup.Contains(name.Span))
+                            // rejects a bare user-function call outright. A
+                            // seeded RAND repeats its sequence, so it is
+                            // deterministic (probed 2026-10-04 against SQL
+                            // Server 2025).
+                            if (lookup.Contains(name.Span)
+                                && !(name.Span.Equals("RAND", StringComparison.OrdinalIgnoreCase) && leafIndex + 2 < tokens.Count && tokens[leafIndex + 2] is not Operator { Character: ')' }))
+                            {
+#pragma warning disable CA1308 // real's Msg 1949 spells the built-in in lower case
+                                cause = (Nondeterminism.BuiltIn, name.Span.Equals("CRYPT_GEN_RANDOM", StringComparison.OrdinalIgnoreCase) ? "Crypt_Gen_Random" : name.Value.ToLowerInvariant());
+#pragma warning restore CA1308
                                 return false;
+                            }
                             if (name.Span.Equals("DATEPART", StringComparison.OrdinalIgnoreCase)
                                 && leafIndex + 2 < tokens.Count
                                 && tokens[leafIndex + 2] is Name unit
                                 && dateParts.Contains(unit.Span))
                             {
+                                cause = (Nondeterminism.BuiltIn, "datepart");
+                                return false;
+                            }
+                            // A date function reading a character literal
+                            // converts it to a date implicitly, which real
+                            // classifies nondeterministic (probed 2026-10-04
+                            // against SQL Server 2025).
+                            if (ReadsDateArgument(name.Span) && HasCharacterLiteralArgument(tokens, leafIndex + 1))
+                            {
+                                cause = (Nondeterminism.ImplicitDateConversion, null);
                                 return false;
                             }
                         }
@@ -433,5 +462,80 @@ internal static partial class ModuleDeterminism
             }
         }
         return true;
+    }
+
+    /// <summary>The built-ins whose arguments include a date.</summary>
+    private static bool ReadsDateArgument(ReadOnlySpan<char> name) =>
+        name.Equals("DATEPART", StringComparison.OrdinalIgnoreCase) || name.Equals("DATEADD", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("DATEDIFF", StringComparison.OrdinalIgnoreCase) || name.Equals("DATEDIFF_BIG", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("YEAR", StringComparison.OrdinalIgnoreCase) || name.Equals("MONTH", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("DAY", StringComparison.OrdinalIgnoreCase) || name.Equals("EOMONTH", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("DATETRUNC", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether the argument list opening at <paramref name="openParen"/> holds
+    /// a character literal as one of its own arguments, nested calls aside.
+    /// </summary>
+    private static bool HasCharacterLiteralArgument(List<Token> tokens, int openParen)
+    {
+        var depth = 0;
+        for (var i = openParen; i < tokens.Count; i++)
+        {
+            switch (tokens[i])
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' }:
+                    if (--depth == 0)
+                        return false;
+                    break;
+                case Literal { Value.Type: VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType } when depth == 1:
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// What makes a view nondeterministic, in the terms <c>CREATE INDEX</c>
+    /// refuses it in — see <see cref="FindNondeterminism"/>.
+    /// </summary>
+    internal enum Nondeterminism
+    {
+        /// <summary>A nondeterministic built-in (Msg 1949, naming it).</summary>
+        BuiltIn,
+
+        /// <summary>A date function reading a character literal (Msg 10139).</summary>
+        ImplicitDateConversion,
+
+        /// <summary>A conversion between a date and a string without a deterministic style (Msg 1963).</summary>
+        Conversion,
+
+        /// <summary>A nondeterministic user function (Msg 1956, naming it).</summary>
+        UserFunction,
+    }
+
+    /// <summary>
+    /// What makes <paramref name="view"/>'s body nondeterministic — the first
+    /// cause <c>CREATE INDEX</c> refuses it for — or null when nothing does.
+    /// </summary>
+    internal static (Nondeterminism Kind, string? Name)? FindNondeterminism(Database database, View view)
+    {
+        if (!Scan(view.BodyText, out var tokens, out var referencedModules, out var cause))
+            return cause;
+        if (!ConversionsAreDeterministic(tokens, NameFamilies(database, view, tokens, referencedModules)))
+            return (Nondeterminism.Conversion, null);
+        var visited = new HashSet<int> { view.ObjectId };
+        foreach (var (qualifier, leaf) in referencedModules)
+        {
+            if (database.Schemas.TryGetValue(qualifier, out var schema)
+                && schema.Functions.TryGetValue(leaf, out var function)
+                && !IsDeterministic(database, function, visited))
+            {
+                return (Nondeterminism.UserFunction, $"{function.Schema.Name}.{function.Name}");
+            }
+        }
+        return null;
     }
 }

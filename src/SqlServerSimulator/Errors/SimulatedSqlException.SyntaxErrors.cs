@@ -48,6 +48,29 @@ partial class SimulatedSqlException
         new("Can only use IF UPDATE within a CREATE TRIGGER statement.", 140, 15, 1);
 
     /// <summary>
+    /// Msg 181: <c>OUTPUT</c> on a function's parameter (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OutputOptionNotAllowed() =>
+        new("Cannot use the OUTPUT option in a DECLARE, CREATE AGGREGATE or CREATE FUNCTION statement.", 181, 15, 1);
+
+    /// <summary>
+    /// Msg 1097: <c>UPDATE(column)</c> in a DDL trigger's body, which has no
+    /// statement columns to report on (probed 2026-10-04 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException UpdateNotWithinThisTrigger() =>
+        new("Cannot use If UPDATE within this CREATE TRIGGER statement.", 1097, 15, 1);
+
+    /// <summary>
+    /// Msg 2114: <c>UPDATE(column)</c> naming a computed column, persisted or
+    /// not, which no statement assigns (probed 2026-10-04 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException UpdateOfComputedColumn(string columnName) =>
+        new($"Column '{columnName}' cannot be used in an IF UPDATE clause because it is a computed column.", 2114, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 105: a string literal or quote-delimited
     /// identifier opened with <c>'</c> or <c>"</c> was never closed before
     /// end of input. Real SQL Server echoes the scanned body in the message

@@ -166,8 +166,16 @@ partial class SimulatedSqlException
                 entry.Procedure = moduleName;
         }
         var trailer = new SimulatedSqlException($"Could not use view or function '{writtenName.Written}' because of binding errors.", 4413, 16, 1);
-        if (writtenName.Count >= 2)
-            trailer.Errors[0].LineNumber = 12;
+        if (writtenName.Count < 2)
+            return FollowedBy(FromErrors(entries), trailer);
+        // When every body entry already carries the line it bound at — a
+        // missing qualified object's 12 — the whole report is pinned, so a
+        // procedure body adds no offset to it; an entry still waiting for the
+        // statement's line (a missing column's) leaves the trailer's 12 to be
+        // offset as the statement's is.
+        if (entries.TrueForAll(static entry => entry.LineNumber != 0))
+            return FollowedBy(FromErrors(entries), trailer).PinLine(12, keepStamped: true);
+        trailer.Errors[0].LineNumber = 12;
         return FollowedBy(FromErrors(entries), trailer);
     }
 
@@ -1255,11 +1263,11 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 2733: a scalar function declared to return
-    /// <c>timestamp</c> / <c>rowversion</c> (probed 2026-09-30 against SQL
-    /// Server 2025).
+    /// <c>timestamp</c> / <c>rowversion</c> or a legacy LOB type, named in the
+    /// message (probed 2026-09-30 and 2026-10-04 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException TimestampReturnTypeInvalid() =>
-        new("The timestamp data type is invalid for return values.", 2733, 16, 1);
+    internal static SimulatedSqlException ReturnTypeInvalid(string typeName) =>
+        new($"The {typeName} data type is invalid for return values.", 2733, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 346: <c>READONLY</c> on a parameter that isn't
@@ -1864,6 +1872,21 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CannotTransferSchemaBoundObject() =>
         new("Cannot transfer a schemabound object.", 15348, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2720: a schema-bound module's body naming a
+    /// system object, echoed as written (probed 2026-10-04 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException CannotSchemaBindSystemObject(string moduleKind, string qualifiedModuleName, string referencedName) =>
+        new($"Cannot schema bind {moduleKind} '{qualifiedModuleName}' because it references system object '{referencedName}'.", 2720, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2788: a schema-bound module's body naming a
+    /// synonym (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SynonymInSchemaBoundObject() =>
+        new("Synonyms are invalid in a schemabound object or a constraint expression.", 2788, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 4512: a <c>WITH SCHEMABINDING</c> body named a
@@ -3060,6 +3083,128 @@ partial class SimulatedSqlException
         new($"Cannot create index on view \"{qualifiedViewName}\". The view contains a self join on \"{qualifiedTableName}\".", 1947, 16, 1);
 
     /// <summary>
+    /// The rest of the indexed-view battery, verbatim from SQL Server 2025
+    /// (probed 2026-10-04): the view database-qualified throughout, quoted as
+    /// real quotes each, and Msg 8668 / 8660 naming the index too at State 0.
+    /// </summary>
+    internal static SimulatedSqlException IndexedViewReferencesDerivedTable(string qualifiedViewName, string alias) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it references derived table \"{alias}\" (defined by SELECT statement in FROM clause). Consider removing the reference to the derived table or not indexing the view.", 10109, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewReferencesTableValuedFunction(string qualifiedViewName, string functionName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it references the inline or multistatement table-valued function \"{functionName}\". Consider expanding the function definition by hand in the view definition, or not indexing the view.", 10129, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewUsesOpenJson(string qualifiedViewName) =>
+        new($"Cannot create index on the view '{qualifiedViewName}' because it uses OPENJSON.", 10148, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewUsesXmlMethod(string qualifiedViewName) =>
+        new($"Cannot create index on view '{qualifiedViewName}'. It contains one or more XML data type methods.", 1985, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewHasPivot(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it uses the PIVOT operator. Consider not indexing this view.", 10114, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewUsesStarOperator(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because the view uses the \"*\" operator to select columns. Consider referencing columns by name instead.", 10117, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewHasGroupingSets(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it contains a CUBE, ROLLUP, or GROUPING SETS operator. Consider not indexing this view.", 10119, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewHasHaving(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it contains a HAVING clause. Consider removing the HAVING clause.", 10121, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewHasImplicitDateConversion(string qualifiedViewName) =>
+        new($"Cannot create index on view '{qualifiedViewName}' because the view uses an implicit conversion from string to datetime or smalldatetime. Use an explicit CONVERT with a deterministic style value.", 10139, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewHasTableHint(string qualifiedViewName) =>
+        new($"Cannot create index on view '{qualifiedViewName}' because the view contains a table hint. Consider removing the hint.", 10140, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewHasApply(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it contains an APPLY. Consider not indexing the view, or removing APPLY.", 10142, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewHasWindow(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\" because it contains a ranking or aggregate window function. Remove the function from the view definition or, alternatively, do not index the view.", 10143, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewReferencesView(string qualifiedViewName, string referencedView) =>
+        new($"Cannot create index on view '{qualifiedViewName}' because it references another view '{referencedView}'. Consider expanding referenced view's definition by hand in indexed view definition.", 1937, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewUsesNondeterministicFunction(string qualifiedViewName, string functionName) =>
+        new($"Cannot create index on the '{qualifiedViewName}' view because it uses the nondeterministic user-defined function '{functionName}'. Remove the reference to the function, or make it deterministic.", 1956, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewFiltersOnImpreciseColumn(string qualifiedViewName, string columnName) =>
+        new($"Cannot create index on view '{qualifiedViewName}' because column '{columnName}' that is referenced by the view in the WHERE or GROUP BY clause is imprecise. Consider eliminating the column from the view, or altering the column to be precise.", 1962, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewHasNondeterministicConvert(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\". The view contains a convert that is imprecise or non-deterministic.", 1963, 16, 1);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewHasExpressionOverAggregate(string indexName, string qualifiedViewName) =>
+        new($"Cannot create the clustered index '{indexName}' on view '{qualifiedViewName}' because the select list of the view contains an expression on result of aggregate function or grouping column. Consider removing expression on result of aggregate function or grouping column from select list.", 8668, 16, 0);
+
+    /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
+    internal static SimulatedSqlException IndexedViewGroupByNotProjected(string indexName, string qualifiedViewName) =>
+        new($"Cannot create the clustered index \"{indexName}\" on view \"{qualifiedViewName}\" because the select list of the view definition does not include all columns in the GROUP BY clause. Consider adding these columns to the select list.", 8660, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 1901: an index key column of a view whose value
+    /// is imprecise and computed — a float expression — rather than a column
+    /// read straight (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ViewIndexKeyImprecise(string indexName, string viewName, string columnName) =>
+        new($"Cannot create index or statistics '{indexName}' on view '{viewName}' because key column '{columnName}' is imprecise, computed and not persisted. Consider removing reference to column in view index or statistics key or changing column to be precise. If column is computed in base table consider marking it PERSISTED there.", 1901, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 478: <c>TABLESAMPLE</c> in a view's or inline
+    /// function's definition, refused at <c>CREATE</c> (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TableSampleInModuleDefinition() =>
+        new("The TABLESAMPLE clause cannot be used in a view definition or inline table function definition.", 478, 16, 0);
+
+    /// <summary>
+    /// Mimics SQL Server error 1902 for a view: a second clustered index
+    /// (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException MoreThanOneClusteredIndexOnView(string viewName, string existingIndexName) =>
+        new($"Cannot create more than one clustered index on view '{viewName}'. Drop the existing clustered index '{existingIndexName}' before creating another.", 1902, 16, 3);
+
+    /// <summary>
+    /// Mimics SQL Server error 10610: a filtered nonclustered index on a view
+    /// (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FilteredIndexOnView(string indexName, string viewName) =>
+        new($"Filtered index '{indexName}' cannot be created on object '{viewName}' because it is not a user table. Filtered indexes are only supported on tables. If you are trying to create a filtered index on a view, consider creating an indexed view with the filter expression incorporated in the view definition.", 10610, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 3729 state 2: <c>TRUNCATE TABLE</c> of a table
+    /// an indexed view reads (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CannotTruncateReferencedByIndexedView(string writtenTable, string viewName) =>
+        new($"Cannot TRUNCATE TABLE '{writtenTable}' because it is being referenced by object '{viewName}'.", 3729, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 8171: <c>NOEXPAND</c> on an object that is no
+    /// indexed view, state 2 in a read — at the line after the object's name —
+    /// and state 1 on a write's target (probed 2026-10-04 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException NoExpandHintInvalid(string objectName, byte state) =>
+        new($"Hint 'noexpand' on object '{objectName}' is invalid.", 8171, 16, state);
+
+    /// <summary>
     /// Mimics SQL Server error 1939: <c>CREATE INDEX</c> on a view that wasn't
     /// declared <c>WITH SCHEMABINDING</c>. Probe-confirmed wording (SQL Server
     /// 2025, 2026-07-17) uses the view's <b>leaf</b> name (unqualified),
@@ -3427,22 +3572,25 @@ partial class SimulatedSqlException
         new(message, new SimulatedError(@class: 11, lineNumber: 0, message, number, procedure: "sp_rename", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 1));
 
     /// <summary>
-    /// Mimics SQL Server error 1934: the statement touches a feature that
-    /// requires a fixed set of SET options and the session has one of them
-    /// wrong. <paramref name="verb"/> names the statement real echoes —
-    /// <c>INSERT</c> / <c>UPDATE</c> / <c>DELETE</c> / <c>MERGE</c> /
-    /// <c>SELECT</c> / <c>CREATE TABLE</c> / <c>ALTER TABLE</c> /
-    /// <c>CREATE INDEX</c> / <c>CREATE PRIMARY XML INDEX</c> — and
-    /// <paramref name="options"/> the offending option names, quoted and
-    /// comma-separated. Only the <c>QUOTED_IDENTIFIER</c> component is
-    /// enforced; real's full required set is
-    /// <c>ANSI_NULLS</c> / <c>ANSI_PADDING</c> / <c>ANSI_WARNINGS</c> /
-    /// <c>ARITHABORT</c> / <c>CONCAT_NULL_YIELDS_NULL</c> ON and
-    /// <c>NUMERIC_ROUNDABORT</c> OFF.
-    /// Probe-confirmed wording, class 16 state 1 (SQL Server 2025).
+    /// Mimics SQL Server error 1934: a statement under SET options real's
+    /// indexed-view / computed-column / filtered-index gate refuses —
+    /// <c>ANSI_NULLS</c>, <c>ANSI_PADDING</c>, <c>ANSI_WARNINGS</c>,
+    /// <c>CONCAT_NULL_YIELDS_NULL</c> or <c>QUOTED_IDENTIFIER</c> OFF, or
+    /// <c>NUMERIC_ROUNDABORT</c> ON. <paramref name="verb"/> names the
+    /// statement and <paramref name="options"/> the offending option names,
+    /// comma-separated. Probe-confirmed wording, class 16 state 1 (SQL Server
+    /// 2025).
     /// </summary>
     internal static SimulatedSqlException IncorrectSetOptions(string verb, string options) =>
         new($"{verb} failed because the following SET options have incorrect settings: '{options}'. Verify that SET options are correct for use with indexed views and/or indexes on computed columns and/or filtered indexes and/or query notifications and/or XML data type methods and/or spatial index operations.", 1934, 16, 1);
+
+    /// <summary>
+    /// <see cref="IncorrectSetOptions"/> refusing a write: the statement
+    /// compiles again under the changed options, and the failed compile ends
+    /// the batch (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IncorrectSetOptionsForWrite(string verb, string options) =>
+        new($"{verb} failed because the following SET options have incorrect settings: '{options}'. Verify that SET options are correct for use with indexed views and/or indexes on computed columns and/or filtered indexes and/or query notifications and/or XML data type methods and/or spatial index operations.", 1934, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 1934's spatial-only wording: <c>CREATE SPATIAL

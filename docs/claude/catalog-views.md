@@ -1026,7 +1026,7 @@ The canonical `OBJECT_DEFINITION(OBJECT_ID('trg'))` idiom works because `OBJECT_
 The grid's shape is what a property concerns, each answering NULL outside it:
 - the `Is*` kind flags, `IsExecuted`, `OwnerId` and `SchemaId` — every object;
 - the `Exec*` family — whatever executes (a procedure, function, trigger or view), the trigger-specific members 0 for all but a trigger;
-- `Has*Trigger`, `IsIndexable`, `IsIndexed` — a table or view (a view is indexable when schema-bound);
+- `Has*Trigger`, `IsIndexable`, `IsIndexed` — a table or view (a view is indexable when schema-bound and its body passes the [indexed-view qualifying battery](indexes.md#indexed-view-qualifying-battery));
 - the `Table*` family — a table or table-valued function, every flag off for the latter save a multi-statement function's `TableIsFake`, with the full-text members also answering (off) for an indexed view;
 - the `Cnst*` family — a constraint.
 
@@ -1186,6 +1186,8 @@ Two argument-sensitive splits, both probed:
 - `DATEPART` is nondeterministic only for the `SET DATEFIRST`-dependent units — `week` / `wk` / `ww` / `weekday` / `dw` / `w`.
   `DATEPART(year, …)` and even `DATEPART(iso_week, …)` are deterministic.
   `DATENAME` needs no such split: it is language-dependent for every unit.
+- `RAND` is nondeterministic only without a seed: `RAND(1)` is deterministic.
+- A date function (`DATEPART`, `DATEADD`, `DATEDIFF` and their siblings) given a character literal where it takes a date converts it implicitly, which is nondeterministic — the indexed-view battery's Msg 10139 (probed 2026-10-04 against SQL Server 2025).
 - Probed *deterministic* despite looking otherwise, so deliberately absent from the table: `CHECKSUM` / `BINARY_CHECKSUM` / `HASHBYTES`, `QUOTENAME` (while `PARSENAME` is nondeterministic), `MIN_ACTIVE_ROWVERSION`, `DECOMPRESS` (while `COMPRESS` is nondeterministic — probed, not a typo), `APPROX_COUNT_DISTINCT`, `ISNUMERIC`, `TEXTPTR`, `DATEDIFF` / `DATEADD` / `DATETRUNC` / `DATE_BUCKET` / `EOMONTH`, and every window function.
 
 **The `CAST` / `CONVERT` style rule** (`Schemas/ModuleDeterminism.Conversions.cs`).

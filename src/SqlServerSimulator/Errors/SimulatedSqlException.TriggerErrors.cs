@@ -58,6 +58,38 @@ partial class SimulatedSqlException
         new($"Cannot find the object \"{name}\" because it does not exist or you do not have permissions.", 1088, 16, 119);
 
     /// <summary>
+    /// Mimics SQL Server error 311: an <c>AFTER</c> trigger's body reading a
+    /// <c>text</c>, <c>ntext</c> or <c>image</c> column of <c>inserted</c> or
+    /// <c>deleted</c>, refused at <c>CREATE TRIGGER</c> (probed 2026-10-01 and
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException LegacyLobColumnInPseudoTable() =>
+        new("Cannot use text, ntext, or image columns in the 'inserted' and 'deleted' tables.", 311, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2103: a DML trigger named in a schema other than
+    /// its table's or view's, the trigger echoed as written (probed 2026-10-04
+    /// against SQL Server 2025). An unqualified name takes the parent's schema.
+    /// </summary>
+    internal static SimulatedSqlException TriggerSchemaDiffersFromParent(string triggerName) =>
+        new($"Cannot create trigger '{triggerName}' because its schema is different from the schema of the target table or view.", 2103, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1034: a DML trigger's action list naming one
+    /// action twice (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DuplicateTriggerAction(string action) =>
+        new($"Syntax error: Duplicate specification of the action \"{action}\" in the trigger declaration.", 1034, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 2112: an <c>INSTEAD OF</c> trigger on a view
+    /// defined <c>WITH CHECK OPTION</c>, both named as written (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InsteadOfTriggerOnCheckOptionView(string triggerName, string viewName) =>
+        new($"Cannot create trigger '{triggerName}' on view '{viewName}' because the view is defined with CHECK OPTION.", 2112, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 17892 as the client sees it: a logon trigger
     /// failed — rolled back, raised an error, or returned a result set — so the
     /// login is refused. The server logs it at severity 20 but sends it at 14,

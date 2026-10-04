@@ -26,7 +26,10 @@ partial class Simulation
         // (Msg 443). An INSERT / MERGE target is always a written name, never a
         // FROM-clause alias, so the name alone settles it.
         var writesTableVariable = BatchContext.IsTableVariableName(destinationName.Leaf);
-        FunctionBodyShape.NoteWrite(context.Batch, "INSERT", persistent: !writesTableVariable);
+        // A temporary target is the binder's Msg 2772 alone (probed
+        // 2026-10-04 against SQL Server 2025).
+        if (!BatchContext.IsLocalTempName(destinationName.Leaf) && !BatchContext.IsGlobalTempName(destinationName.Leaf))
+            FunctionBodyShape.NoteWrite(context.Batch, "INSERT", persistent: !writesTableVariable);
         if (writesTableVariable)
             context.Batch.CurrentStatement.TransactedWrite = false;
 
@@ -38,6 +41,13 @@ partial class Simulation
         // hints entirely: real SQL Server raises Msg 156 near 'with'; the
         // simulator falls through to Msg 102 at the column-list / VALUES
         // dispatch since we don't call the hint parser for `@t`.
+        // An inline function call writes through its body, read before the
+        // column list (the call's arguments sit where a table's list would).
+        if (TryResolveFunctionWriteTarget(context, destinationName, out var functionView))
+        {
+            context.MoveNextRequired();
+            return ProcessViewInsert(functionView, context, top, destinationName);
+        }
         context.MoveNextRequired();
         Selection.TableHintInfo targetHints = default;
         if (!BatchContext.IsTableVariableName(destinationName.Leaf))
@@ -118,6 +128,8 @@ partial class Simulation
     private static SimulatedStatementOutcome ProcessViewInsert(View destinationView, ParserContext context, Selection.DmlTopLimit? top, MultiPartName destinationName)
     {
         var route = RouteViewWrite(context.Batch, destinationView, TriggerActions.Insert);
+        if (route is DmlViewRoute.BaseTable or DmlViewRoute.JoinView)
+            RejectCheckOptionOverRowLimit(destinationView, destinationName.ToString());
         if (!context.Batch.IsSkipping)
         {
             PermissionEnforcement.CheckReference(context.Batch, "INSERT", destinationName, destinationView);
@@ -198,8 +210,18 @@ partial class Simulation
             RejectClientOutputOnTriggeredTarget(context.Batch, destinationView, TriggerActions.Insert, destinationName.ToString(), output is { HasTarget: false });
         }
 
+        // DEFAULT VALUES hands the trigger one row of NULLs, a derived column
+        // included (probed 2026-10-04 against SQL Server 2025).
+        if (!hasExplicitColumnList && context.Token is ReservedKeyword { Keyword: Keyword.Default })
+        {
+            if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Values })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            destinationColumns = [];
+        }
         var sourceRows = context.Token switch
         {
+            _ when destinationColumns.Length == 0 && !hasExplicitColumnList => [[]],
             // The trigger sees whatever the statement supplied, but the value
             // count still has to match the view's shape first — the arity
             // diagnostics are the view's own, measured against its projection.
@@ -1621,6 +1643,9 @@ partial class Simulation
         var expectedColumnCount = destinationColumns.Length;
         var batch = context.Batch;
         var connection = batch.Connection;
+        // A function body refuses it whatever the target, a table variable's
+        // included (probed 2026-10-04 against SQL Server 2025).
+        FunctionBodyShape.NoteSideEffect(batch, "INSERT EXEC", FunctionBodyShape.ControlOperatorState);
         // A nested INSERT … EXEC fails as it runs, ending only its own
         // statement in the executed body (probed 2026-10-01 against SQL Server
         // 2025), so the body's compile walk passes it.

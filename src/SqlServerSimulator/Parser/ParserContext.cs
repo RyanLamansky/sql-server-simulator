@@ -269,6 +269,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool BindingViewDefinition;
 
     /// <summary>
+    /// The module whose defining query is parsing at <c>CREATE</c> — a view's
+    /// or an inline function's — whose own query takes no <c>INTO</c> or
+    /// <c>OPTION</c> clause, a syntax error at the keyword, and no
+    /// <c>TABLESAMPLE</c> anywhere (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    public DefiningModuleQuery DefiningModuleQuery;
+
+    /// <summary>
     /// Set by a schema-bound view's or function's option clause for the body
     /// that follows, whose refusals are raised as the parser meets them. A
     /// refusal leaves it set, since recovery past one reads the rest of the
@@ -1391,4 +1399,12 @@ internal enum NextValueForScope
 
     /// <summary>A statement real declines to define the reference in at all, such as <c>PRINT</c>. Msg 11738.</summary>
     Unsupported,
+}
+
+/// <summary>The kinds of module whose defining query <see cref="ParserContext.DefiningModuleQuery"/> marks.</summary>
+internal enum DefiningModuleQuery
+{
+    None,
+    View,
+    InlineFunction,
 }

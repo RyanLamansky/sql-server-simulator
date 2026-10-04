@@ -67,6 +67,7 @@ internal sealed class Checksum : Expression
             // `CHECKSUM(*)` hashes every column of the FROM clause, in order,
             // and needs one (probed 2026-09-25 against SQL Server 2025).
             var sources = context.ScopeSources ?? throw SimulatedSqlException.MustSpecifyTableToSelectFrom();
+            _ = context.IndexedViewShapeCollector?.UsesStarOperator = true;
             context.MoveNextRequired();
             if (context.Token is not Tokens.Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);

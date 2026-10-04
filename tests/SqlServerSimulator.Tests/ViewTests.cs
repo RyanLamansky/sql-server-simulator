@@ -589,7 +589,7 @@ public sealed class ViewTests
             "create view v as select * from t",
             "alter table t drop column b");
         simulation.AssertSqlError("select * from v", 4502,
-            "View or function 'v' has more column names specified than columns defined.");
+            "View or function 'dbo.v' has more column names specified than columns defined.");
     }
 
     [TestMethod]
@@ -697,5 +697,55 @@ public sealed class ViewTests
         var qualified = sim.AssertSqlError("select * from dbo.v", 208).Errors[1];
         Assert.AreEqual("Could not use view or function 'dbo.v' because of binding errors.", qualified.Message);
         Assert.AreEqual(12, qualified.LineNumber);
+    }
+
+    // === CREATE VIEW refusals, VIEW_METADATA, row-limited CHECK OPTION ===
+
+    [TestMethod]
+    [DataRow("create view #v as select 1 a", 4103)]
+    [DataRow("create view sys.v as select 1 a", 2760)]
+    [DataRow("create view dbo.v as select id into dbo.x from dbo.t1", 156)]
+    [DataRow("create view dbo.v as select id from dbo.t1 for xml auto", 4511)]
+    [DataRow("create view dbo.v with schemabinding as select name from sys.objects", 2720)]
+    [Description("CREATE VIEW refusals real raises.")]
+    public void CreateViewRefusals(string create, int number)
+        => _ = WithT1().AssertSqlError(create, number);
+
+    [TestMethod]
+    [Description("VIEW_METADATA is recorded in sys.views.has_opaque_metadata.")]
+    public void ViewMetadata_IsRecorded()
+    {
+        var simulation = WithT1();
+        simulation.ExecuteBatches("create view dbo.v with view_metadata as select id from dbo.t1");
+        Assert.IsTrue((bool)simulation.ExecuteScalar("select has_opaque_metadata from sys.views where name = 'v'")!);
+    }
+
+    [TestMethod]
+    [Description("A write through a CHECK OPTION view over a TOP is Msg 4427.")]
+    public void CheckOptionOverTop_RefusesWrites()
+    {
+        var simulation = WithT1();
+        simulation.ExecuteBatches("create view dbo.v as select top 2 id, label from dbo.t1 with check option");
+        _ = simulation.AssertSqlError("update dbo.v set label = 'z'", 4427);
+        _ = simulation.AssertSqlError("insert dbo.v (label) values ('z')", 4427);
+    }
+
+    [TestMethod]
+    [Description("A name a view's body misses is reported at line 12 of the binding, as real's re-bind does.")]
+    public void BindingFailureOfAStoredView_IsAtLine12()
+    {
+        var simulation = WithT1();
+        simulation.ExecuteBatches("create view dbo.v as select id from dbo.t1", "drop table dbo.t1");
+        var ex = simulation.AssertSqlError("select * from dbo.v", 208);
+        Assert.AreEqual(12, ex.Errors[0].LineNumber);
+    }
+
+    [TestMethod]
+    [Description("CASE expressions don't hide a view's column references from INFORMATION_SCHEMA.VIEW_COLUMN_USAGE.")]
+    public void CaseExpression_ColumnsAreDependencies()
+    {
+        var simulation = WithT1();
+        simulation.ExecuteBatches("create view dbo.v as select case when tag = 'x' then label end c from dbo.t1");
+        Assert.AreEqual("label,tag", simulation.ExecuteScalar("select string_agg(column_name, ',') within group (order by column_name) from information_schema.view_column_usage where view_name = 'v'"));
     }
 }
