@@ -43,7 +43,7 @@ partial class Simulation
 
         SimulatedStatementOutcome Execute() => ExecuteMerge(
             context, destinationTable, plan.SourceView, plan.TargetAlias, plan.MaterializeSource, plan.SourceAlias, plan.SourceColumnNames, plan.SourceSchema,
-            plan.OnPredicate, plan.WhenClauses, plan.Output, plan.SerializableHint, viewRowsTarget, joinWrite, plan.Top);
+            plan.OnPredicate, plan.WhenClauses, DataMasking.Applying(context.Batch, plan.WriteMasks), plan.Output, plan.SerializableHint, viewRowsTarget, joinWrite, plan.Top);
     }
 
     /// <summary>
@@ -169,6 +169,7 @@ partial class Simulation
         SqlType[] sourceSchema,
         BooleanExpression onPredicate,
         List<WhenClause> whenClauses,
+        MaskingFunction?[]? writeMasks,
         OutputProjection? output,
         bool serializableHint,
         View? viewRowsTarget,
@@ -324,18 +325,18 @@ partial class Simulation
         {
             if (step.MatchedSources is { } matchedSources)
             {
-                ApplyMergeMatched(context, destinationTable, sourceView, whenClauses, step.Page, step.Slot, step.TargetValues!, sourceRows, matchedSources, ResolveCombined, pendingUpdates, pendingDeletes);
+                ApplyMergeMatched(context, destinationTable, sourceView, whenClauses, writeMasks, step.Page, step.Slot, step.TargetValues!, sourceRows, matchedSources, ResolveCombined, pendingUpdates, pendingDeletes);
             }
             else if (step.TargetValues is { } targetValues)
             {
                 if (PickClause(whenClauses, WhenClauseKind.NotMatchedBySource, targetValues, sourceValues: null, context.Batch, ResolveCombined) is { } chosen)
-                    ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, step.Page, step.Slot, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
+                    ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, writeMasks, step.Page, step.Slot, targetValues, sourceValues: null, ResolveCombined, pendingUpdates, pendingDeletes);
             }
             else if (NotMatchedByTargetApplies(step.Key))
             {
                 // A join view's row is formed only to be carried to its base
                 // table, whose own INSERT path validates it.
-                ApplyInsert(context, destinationTable, sourceView, nmbtClause!, sourceRows[step.Key], ResolveCombined, pendingInserts, insteadOfInsert: joinWrite is not null || HasInsteadOfTrigger(context.Batch, insteadOfInsertTarget, TriggerActions.Insert));
+                ApplyInsert(context, destinationTable, sourceView, nmbtClause!, writeMasks, sourceRows[step.Key], ResolveCombined, pendingInserts, insteadOfInsert: joinWrite is not null || HasInsteadOfTrigger(context.Batch, insteadOfInsertTarget, TriggerActions.Insert));
             }
             Tag(step.Key);
         }
@@ -747,6 +748,7 @@ partial class Simulation
         HeapTable destinationTable,
         View? sourceView,
         List<WhenClause> whenClauses,
+        MaskingFunction?[]? writeMasks,
         int pageIndex,
         int slotIndex,
         SqlValue[] targetValues,
@@ -763,7 +765,7 @@ partial class Simulation
         if (chosen.Action == MergeActionKind.Update && matchedSources.Count > 1)
             throw SimulatedSqlException.MergeMultiMatch();
 
-        ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, pageIndex, slotIndex, targetValues, sourceValues, resolveCombined, pendingUpdates, pendingDeletes);
+        ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, writeMasks, pageIndex, slotIndex, targetValues, sourceValues, resolveCombined, pendingUpdates, pendingDeletes);
     }
 
     private static void ApplyChosenMatchedAction(
@@ -771,6 +773,7 @@ partial class Simulation
         HeapTable destinationTable,
         View? sourceView,
         WhenClause clause,
+        MaskingFunction?[]? writeMasks,
         int pageIndex,
         int slotIndex,
         SqlValue[] targetValues,
@@ -792,7 +795,7 @@ partial class Simulation
         foreach (var (ord, expr) in clause.Assignments!)
         {
             var raw = expr.Run(new RuntimeContext(name => resolveCombined(targetValues, sourceValues, name), context.Batch));
-            if (clause.WriteMasks?[ord] is { } mask)
+            if (writeMasks?[ord] is { } mask)
                 raw = DataMasking.ForStorage(mask.Apply(raw, destinationTable.Columns[ord].Type));
             raw = EnforceMaxLength(raw, destinationTable.Columns[ord], destinationTable, context.Connection);
             newValues[ord] = SqlValue.NameVariantBase(raw, CoerceForWrite(raw, destinationTable.Columns[ord], context.Batch), expr.ResultReportsNumeric);
@@ -817,6 +820,7 @@ partial class Simulation
         HeapTable destinationTable,
         View? sourceView,
         WhenClause clause,
+        MaskingFunction?[]? writeMasks,
         SqlValue[] sourceValues,
         Func<SqlValue[]?, SqlValue[]?, MultiPartName, SqlValue> resolveCombined,
         List<(SqlValue[] NewValues, SqlValue[]? SourceValues)> pendingInserts,
@@ -889,7 +893,7 @@ partial class Simulation
                 }
             }
             var source = clause.InsertValues![i].Run(sourceRuntime);
-            if (clause.WriteMasks?[ordinal] is { } mask)
+            if (writeMasks?[ordinal] is { } mask)
                 source = DataMasking.ForStorage(mask.Apply(source, targetColumn.Type));
             source = EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);
             var coerced = SqlValue.NameVariantBase(source, CoerceForWrite(source, targetColumn, context.Batch), clause.InsertValues[i].ResultReportsNumeric);

@@ -100,8 +100,10 @@ public sealed class DmlPlanReplayTests
         {
             if (run.Before is { } before)
                 Execute(connection, before, [], transcript);
+            // Cleared from a dbo session of its own, since a run may impersonate
+            // a principal FREEPROCCACHE refuses.
             if (freshEachRun)
-                Execute(connection, "dbcc freeproccache with no_infomsgs", [], new StringBuilder());
+                _ = simulation.ExecuteNonQuery("dbcc freeproccache with no_infomsgs");
             _ = transcript.AppendLine("--");
             Execute(connection, text, run.Parameters, transcript);
             Execute(connection, state, [], transcript);
@@ -592,6 +594,54 @@ public sealed class DmlPlanReplayTests
         using (var command = replayer.CreateCommand(text, ("@id", 1)))
             AreEqual(1222, Throws<SimulatedSqlException>(() => command.ExecuteNonQuery()).Number);
     }
+
+    private const string Principals = """
+        create table m (id int primary key, s varchar(20) masked with (function = 'email()'), copy varchar(20) null);
+        insert m (id, s) values (1, 'ann@example.com'), (2, 'bob@example.com'), (3, 'cat@example.com');
+        create table w (id int primary key, v int not null);
+        create user seer without login;
+        create user blind without login;
+        grant select, insert, update, delete on m to seer, blind;
+        grant unmask to seer;
+        grant select, insert, update on w to seer;
+        grant select on w to blind;
+        """;
+
+    private static Run As(string user, params (string Name, object Value)[] parameters) =>
+        new($"revert; execute as user = '{user}'", parameters);
+
+    [TestMethod]
+    public void MaskedUpdate_PrincipalsInAlternation()
+        => AssertReplayMatchesFreshParse(
+            Principals,
+            "SET NOCOUNT ON;\nUPDATE [m] SET [copy] = [s]\nOUTPUT INSERTED.[s], INSERTED.[copy]\nWHERE [id] = @p0;",
+            "select id, copy, user_name() from m order by id",
+            As("blind", ("@p0", 1)),
+            As("seer", ("@p0", 2)),
+            As("blind", ("@p0", 3)),
+            As("seer", ("@p0", 1)));
+
+    [TestMethod]
+    public void MaskedMerge_PrincipalsInAlternation()
+        => AssertReplayMatchesFreshParse(
+            Principals,
+            "merge m as tgt using (values (@id, @s)) as src (id, s) on tgt.id = src.id when matched then update set copy = tgt.s + src.s output inserted.copy;",
+            "select id, copy from m order by id",
+            As("seer", ("@id", 1), ("@s", "!")),
+            As("blind", ("@id", 2), ("@s", "!")),
+            As("seer", ("@id", 3), ("@s", "?")),
+            As("blind", ("@id", 1), ("@s", "?")));
+
+    [TestMethod]
+    public void InsertPermission_PrincipalsInAlternation()
+        => AssertReplayMatchesFreshParse(
+            Principals,
+            "insert w (id, v) values (@id, @v)",
+            "select id, v from w order by id",
+            As("blind", ("@id", 1), ("@v", 1)),
+            As("seer", ("@id", 2), ("@v", 2)),
+            As("blind", ("@id", 3), ("@v", 3)),
+            As("seer", ("@id", 4), ("@v", 4)));
 
     [TestMethod]
     public void ConcurrentReplays_OfOneUpdatePlan_ApplyEveryIncrement()

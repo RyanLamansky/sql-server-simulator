@@ -747,30 +747,58 @@ internal sealed partial class BatchContext
     public DmlPlanRecording? DmlPlanRecording;
 
     /// <summary>
-    /// Records every lock acquisition and <c>NOWAIT</c> table while non-null —
-    /// armed by the SELECT arm around a top-level statement's parse in a batch
-    /// the plan cache may store. Taking schema-stability and table-level data
-    /// locks is part of parsing a SELECT here, so a replay, which parses
-    /// nothing, takes the recorded list again as the replaying session.
+    /// Records every lock acquisition, <c>NOWAIT</c> table and parse-time
+    /// permission check while non-null — armed around a top-level statement's
+    /// parse in a batch the plan cache may store. Taking schema-stability and
+    /// table-level data locks is part of parsing a statement here, and so is
+    /// the odd permission check, so a replay, which parses nothing, takes the
+    /// recorded list again as the replaying session.
     /// </summary>
     public List<ReplayedLock>? ReplayLockLog;
+#if DEBUG
+
+    /// <summary>
+    /// Where a SELECT this batch may cache first read its principal while
+    /// parsing, if one did (see <see cref="PlanCacheCaptureAudit"/>).
+    /// </summary>
+    public string? PrincipalReadWhileParsing;
+#endif
 
     /// <summary>
     /// Takes <paramref name="locks"/> — a cached statement's parse-time
-    /// acquisitions — as this batch's session, in the order the parse took them.
+    /// acquisitions and permission checks — as this batch's session, in the
+    /// order the parse took them. Stops ahead of a permission check, answering
+    /// false, once <see cref="Simulation.SchemaVersion"/> has moved off
+    /// <paramref name="schemaVersion"/> (a lock waited out a definition
+    /// change): the check would judge an object the statement may no longer
+    /// name, and the caller parses the statement instead. A null
+    /// <paramref name="schemaVersion"/> takes every step regardless.
     /// </summary>
     [MethodImpl(Tiering.OptimizeFirstCall)]
-    public void TakeReplayedLocks(ReplayedLock[] locks)
+    public bool TakeReplayedLocks(ReplayedLock[] locks, long? schemaVersion)
     {
         foreach (var taken in locks)
         {
-            if (taken.NoWaitTable is { } table)
+            if (taken.Check is { } check)
+            {
+                if (schemaVersion is { } expected && Volatile.Read(ref this.Connection.Simulation.SchemaVersion) != expected)
+                    return false;
+                check.Run(this);
+            }
+            else if (taken.NoWaitTable is { } table)
+            {
                 _ = this.noWaitTables.Add(table);
+            }
             else if (taken.TransactionScoped)
+            {
                 this.AcquireTransactionLock(taken.Resource!, taken.Mode, taken.NoWait);
+            }
             else
+            {
                 this.AcquireStatementLock(taken.Resource!, taken.Mode, taken.NoWait);
+            }
         }
+        return true;
     }
 
     /// <summary>

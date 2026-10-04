@@ -36,7 +36,7 @@ partial class Simulation
     private SimulatedStatementOutcome RunDmlStatement(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> parse)
     {
         var batch = context.Batch;
-        if (!this.MayCacheDmlPlan(context))
+        if (!MayCacheDmlPlan(context))
             return RunMutation(context, parse);
 
         var start = context.SaveCheckpoint();
@@ -66,6 +66,9 @@ partial class Simulation
         batch.HasSessionScopedReference = false;
         var recording = batch.DmlPlanRecording = new DmlPlanRecording { QueriesParsedAtStart = context.QueriesParsed };
         batch.ReplayLockLog = [];
+#if DEBUG
+        recording.PrincipalWatch = PlanCacheCaptureAudit.WatchPrincipalReads(batch.Connection.Security);
+#endif
         var schemaVersion = Volatile.Read(ref this.SchemaVersion);
         var database = context.CurrentDatabase;
         try
@@ -95,6 +98,11 @@ partial class Simulation
         {
             batch.DmlPlanRecording = null;
             batch.ReplayLockLog = null;
+#if DEBUG
+            EndPrincipalWatch(recording);
+            if (recording.Plan is not null)
+                PlanCacheCaptureAudit.VerifyPrincipalIndependent(recording.PrincipalRead, batch.PlanCacheKey!.Value.CommandText);
+#endif
             batch.HasSessionScopedReference |= enteredSessionScoped;
             // A statement whose execution half failed still parsed completely,
             // so its plan is as good as a successful one's.
@@ -108,10 +116,12 @@ partial class Simulation
     /// plan: a top-level statement of a batch the plan cache keys, under the
     /// settings its key was taken with — a statement earlier in the batch may
     /// have changed one — and none of the settings the cache stays out of.
-    /// Only a principal every permission check waves through qualifies, since a
-    /// parse checks some permissions as it goes and a replay parses nothing.
+    /// Any principal qualifies: a plan holds nothing that depends on who parsed
+    /// it, since the permission checks and the masks run in the execution half
+    /// or replay from the recording as the executing principal (see
+    /// <see cref="PermissionEnforcement.CheckWhileParsing"/>).
     /// </summary>
-    private bool MayCacheDmlPlan(ParserContext context)
+    private static bool MayCacheDmlPlan(ParserContext context)
     {
         var batch = context.Batch;
         if (batch.PlanCacheKey is not { } key
@@ -124,7 +134,6 @@ partial class Simulation
             || batch.UdfFrame is not null
             || batch.ProcFrame is not null
             || batch.TriggerFrame is not null
-            || this.DeclaresDataMasks
             || !context.HoldsTokenSequence)
         {
             return false;
@@ -140,8 +149,7 @@ partial class Simulation
             && key.AnsiNulls == connection.AnsiNulls
             && key.ConcatNullYieldsNull == connection.ConcatNullYieldsNull
             && connection.CurrentDatabase is { } database
-            && string.Equals(key.DatabaseName, database.Name, StringComparison.Ordinal)
-            && PermissionEnforcement.Bypasses(connection, database);
+            && string.Equals(key.DatabaseName, database.Name, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -162,6 +170,9 @@ partial class Simulation
         batch.DmlPlanRecording = null;
         var locks = batch.ReplayLockLog;
         batch.ReplayLockLog = null;
+#if DEBUG
+        EndPrincipalWatch(recording);
+#endif
         var statement = batch.CurrentStatement;
         recording.Declined = true;
         if (!admitted
@@ -188,6 +199,18 @@ partial class Simulation
         recording.ClientOutputShape = statement.ClientOutputShape;
     }
 
+#if DEBUG
+    /// <summary>Ends <paramref name="recording"/>'s principal-read watch, if it still runs.</summary>
+    private static void EndPrincipalWatch(DmlPlanRecording recording)
+    {
+        if (recording.PrincipalWatch is { } principalWatch)
+        {
+            recording.PrincipalRead = PlanCacheCaptureAudit.EndPrincipalWatch(principalWatch);
+            recording.PrincipalWatch = null;
+        }
+    }
+
+#endif
     /// <summary>
     /// Files a recorded statement plan under the batch's key, creating the
     /// text's set on its first plan while the cap allows.
@@ -221,8 +244,8 @@ partial class Simulation
     /// <summary>
     /// Whether a table's write-time behavior can change without a schema
     /// change in a way a cached DML plan wouldn't see: another database's
-    /// table, whose permission checks the session's <c>dbo</c> standing in its
-    /// own database says nothing about; a trigger that could be
+    /// table, whose write resolves the session's identity in that database —
+    /// a path the replay differential doesn't cover; a trigger that could be
     /// enabled or disabled under it while its <c>OUTPUT</c> returns rows to the
     /// client (Msg 334 is settled while parsing), or a column or index that
     /// makes the write check the session's SET options.

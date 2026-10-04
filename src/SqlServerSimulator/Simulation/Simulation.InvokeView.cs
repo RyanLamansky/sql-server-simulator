@@ -85,6 +85,13 @@ partial class Simulation
         var inherited = systemTime is { } clause ? new InheritedSystemTime(clause.Kind, null, null) : outerBatch.InheritedSystemTime;
         try
         {
+#if DEBUG
+            // What the bind reads off the body — its columns' types, masks and
+            // reads — no principal changes, since any error but a missing
+            // name leaves the recorded columns, and execution parses the body
+            // again as the executing principal.
+            using var principalIndependent = PlanCacheCaptureAudit.SuspendPrincipalWatch();
+#endif
             plan = ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: true, inherited);
         }
         catch (SimulatedSqlException error) when (error.Number is 207 or 208 or 4104 or 15281 or 13590)

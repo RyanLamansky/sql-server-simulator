@@ -182,8 +182,8 @@ public sealed class DmlPlanCacheTests
         => AreEqual(0, ReplaysOverThreeRuns("set ansi_nulls off; update t set v = @v where id = 1", parameters: ("@v", 2)));
 
     [TestMethod]
-    public void UnderAnImpersonatedPrincipal_Reparses()
-        => AreEqual(0, ReplaysOverThreeRuns(
+    public void UnderAnImpersonatedPrincipal_Replays()
+        => AreEqual(2, ReplaysOverThreeRuns(
             "update t set v = @v where id = 1",
             "create user u without login; grant update, select on t to u; execute as user = 'u'",
             ("@v", 2)));

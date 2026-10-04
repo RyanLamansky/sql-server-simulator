@@ -15,9 +15,87 @@ namespace SqlServerSimulator;
 /// server objects a plan may legitimately hold (tables, databases, schema
 /// objects, collations, types), and raises naming the path to the first
 /// execution-scoped object it meets.
+/// <para>
+/// The walk sees references, not values, so a second check covers what a parse
+/// <em>copies</em> out of the principal it runs as — a mask settled for it, a
+/// permission check it passed: the parse of a statement the cache may keep is
+/// watched (<see cref="WatchPrincipalReads"/>), and a plan whose parse read the
+/// session's effective principal outside a step its replay repeats
+/// (<see cref="SuspendPrincipalWatch"/>) is refused as it enters the cache
+/// (<see cref="VerifyPrincipalIndependent"/>).
+/// </para>
 /// </summary>
 internal static class PlanCacheCaptureAudit
 {
+    /// <summary>The parse being watched on this thread, innermost first.</summary>
+    [ThreadStatic]
+    private static PrincipalReadWatch? watch;
+
+    /// <summary>
+    /// One parse's watch over <see cref="Security"/>: where it first read the
+    /// effective principal, if it did. Another session's identity — a linked
+    /// server's session opened while parsing — isn't this parse's to watch.
+    /// </summary>
+    internal sealed class PrincipalReadWatch(SessionSecurityContext security, PrincipalReadWatch? outer)
+    {
+        public readonly SessionSecurityContext Security = security;
+        public readonly PrincipalReadWatch? Outer = outer;
+        public int Suspended;
+        public string? FirstRead;
+    }
+
+    /// <summary>Starts watching the parse about to run on this thread; <see cref="EndPrincipalWatch"/> ends it.</summary>
+    public static PrincipalReadWatch WatchPrincipalReads(SessionSecurityContext security) =>
+        watch = new PrincipalReadWatch(security, watch);
+
+    /// <summary>Ends <paramref name="ended"/>, answering where it first read the principal, if it did.</summary>
+    public static string? EndPrincipalWatch(PrincipalReadWatch ended)
+    {
+        if (!ReferenceEquals(watch, ended))
+            throw new InvalidOperationException("A principal-read watch ended out of order.");
+        watch = ended.Outer;
+        return ended.FirstRead;
+    }
+
+    /// <summary>Called on every read of <paramref name="security"/>'s effective principal.</summary>
+    public static void NotePrincipalRead(SessionSecurityContext security)
+    {
+        if (watch is { Suspended: 0, FirstRead: null } current && ReferenceEquals(current.Security, security))
+            current.FirstRead = Environment.StackTrace;
+    }
+
+    /// <summary>
+    /// Excuses the principal reads until disposed: a step the replay repeats as
+    /// its own principal, or a parse whose outcome no principal changes.
+    /// </summary>
+    public static PrincipalWatchSuspension SuspendPrincipalWatch()
+    {
+        if (watch is { } current)
+            current.Suspended++;
+        return new PrincipalWatchSuspension(watch);
+    }
+
+    /// <summary>The scope <see cref="SuspendPrincipalWatch"/> opens.</summary>
+    internal readonly struct PrincipalWatchSuspension(PrincipalReadWatch? suspended) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (suspended is not null)
+                suspended.Suspended--;
+        }
+    }
+
+    /// <summary>
+    /// Raises <see cref="InvalidOperationException"/> when the parse of a plan
+    /// entering the cache read the principal it ran as (<paramref name="firstRead"/>,
+    /// from <see cref="EndPrincipalWatch"/>).
+    /// </summary>
+    public static void VerifyPrincipalIndependent(string? firstRead, string commandText)
+    {
+        if (firstRead is not null)
+            throw new InvalidOperationException($"A cached plan for `{commandText}` was parsed reading the session's principal outside a step its replay repeats, at:{Environment.NewLine}{firstRead}");
+    }
+
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, FieldInfo[]> fieldsByType = new();
 
     /// <summary>

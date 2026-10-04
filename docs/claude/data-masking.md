@@ -91,6 +91,8 @@ The projection's `CAST`, `CONVERT` and operator nodes carry the column's mask (`
 
 A plan compiles its masks once — `Selection.ColumnMasks`, null for any query reading no masked column — and every sink tests that array before anything else, so an unmasked query pays one null test.
 The projection walk that fills it is skipped outright until the simulation's first mask is declared (`Simulation.DeclaresDataMasks`).
+What a plan holds is the masks' definitions, the same for every principal; which of them apply is settled at the sink for the executing principal, `UPDATE`'s and `MERGE`'s write masks (`UpdatePlan.SetMasks`, `MergePlan.WriteMasks`) once per execution by the statement's execution half.
+That is what lets one cached plan serve a principal with `UNMASK` and one without ([`plan-cache.md`](plan-cache.md#principal-independence)): when the write masks were settled while parsing, a masked column anywhere in the simulation kept every DML statement from caching, and an EF Core update or 10-row insert over a masked table ran 9–39% slower for it (measured 2026-10-04, [`plan-cache.md`](plan-cache.md#plans-for-every-principal)).
 
 ## Divergences
 

@@ -389,7 +389,7 @@ partial class Simulation
                 for (var i = 0; i < values.Length; i++)
                     values[i] = new Value(newView[viewOrdinals[i]]);
                 var clause = new WhenClause(WhenClauseKind.NotMatchedByTarget, MergeActionKind.Insert, searchCondition: null, assignments: null, baseColumns, values);
-                ApplyInsert(context, table, sourceView: null, clause, sourceValues ?? [], static (_, _, name) => throw SimulatedSqlException.InvalidColumnName(name), baseInserts, insteadOfInsert);
+                ApplyInsert(context, table, sourceView: null, clause, writeMasks: null, sourceValues ?? [], static (_, _, name) => throw SimulatedSqlException.InvalidColumnName(name), baseInserts, insteadOfInsert);
                 var inserted = baseInserts[^1].NewValues;
                 if (!insteadOfInsert && plan.ChecksOption && !PathRowRemainsVisible(batch, plan.Chain, plan.Path, table, inserted))
                     throw SimulatedSqlException.ViewCheckOptionViolation();

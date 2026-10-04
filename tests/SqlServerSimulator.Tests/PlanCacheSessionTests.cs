@@ -202,6 +202,27 @@ public sealed class PlanCacheSessionTests
     }
 
     [TestMethod]
+    public void Replay_ChecksViewChangeTrackingForTheReplayingPrincipal()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            alter database current set change_tracking = on;
+            create table ct (id int primary key, v int);
+            alter table ct enable change_tracking;
+            insert ct values (1, 1);
+            create user u without login;
+            grant select on ct to u
+            """);
+        const string text = "select count(*) from changetable(changes ct, 0) as c";
+        AreEqual(1, simulation.ExecuteScalar(text));
+        using var restricted = simulation.CreateOpenConnection();
+        Exec(restricted, "execute as user = 'u'");
+        AreEqual(229, SqlErrorNumber(restricted, text));
+        Exec(restricted, "revert; grant view change tracking on ct to u; execute as user = 'u'");
+        AreEqual(1, Scalar(restricted, text));
+    }
+
+    [TestMethod]
     public void Replay_InAnotherDatabase_ReadsThatDatabasesTable()
     {
         var simulation = WithTable();

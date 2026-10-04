@@ -243,8 +243,9 @@ partial class Simulation
                 ? SingleBaseViewOutputShape(context.Batch, sourceView, destinationName, destinationTable)
                 : null);
 
-        if (context.Batch.Connection.Simulation.DeclaresDataMasks && !context.Batch.IsSkipping)
-            SettleMergeWriteMasks(context.Batch, destinationTable, sourceView, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceMasks, whenClauses);
+        var writeMasks = context.Batch.Connection.Simulation.DeclaresDataMasks && !context.Batch.IsSkipping
+            ? MergeWriteMasks(context.Batch, destinationTable, sourceView, targetAlias, defaultTargetName, targetColumns, sourceAlias, sourceColumnNames, sourceMasks, whenClauses)
+            : null;
 
         // Msg 334 applies per action the MERGE actually performs, and the
         // message echoes the target as written — its alias when one was given
@@ -284,7 +285,7 @@ partial class Simulation
 
         var plan = new MergePlan(
             destinationName, triggerTarget, destinationTable, sourceView, targetAlias, materializeSource, sourceAlias, sourceColumnNames, sourceSchema,
-            onPredicate, whenClauses, output, serializableHint, viewRowsTarget, joinWrite, top);
+            onPredicate, whenClauses, writeMasks, output, serializableHint, viewRowsTarget, joinWrite, top);
         // Which INSTEAD OF triggers take the actions is settled above from
         // their enabled state, which no schema change records, so a target
         // carrying any keeps its statements parsing.
@@ -315,6 +316,7 @@ partial class Simulation
         SqlType[] sourceSchema,
         BooleanExpression onPredicate,
         List<WhenClause> whenClauses,
+        DataMask?[]? writeMasks,
         OutputProjection? output,
         bool serializableHint,
         View? viewRowsTarget,
@@ -332,6 +334,9 @@ partial class Simulation
         public readonly SqlType[] SourceSchema = sourceSchema;
         public readonly BooleanExpression OnPredicate = onPredicate;
         public readonly List<WhenClause> WhenClauses = whenClauses;
+
+        /// <summary>See <see cref="MergeWriteMasks"/>.</summary>
+        public readonly DataMask?[]? WriteMasks = writeMasks;
         public readonly OutputProjection? Output = output;
         public readonly bool SerializableHint = serializableHint;
         public readonly View? ViewRowsTarget = viewRowsTarget;
@@ -400,8 +405,10 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Settles, per target column, the mask a principal without <c>UNMASK</c>
-    /// writes it through: every action's value for the column — each
+    /// Per target column (base-table ordinal), the mask a principal without
+    /// <c>UNMASK</c> writes it through, or null when nothing masks; which
+    /// principal that is, the execution half settles. Every action's value for
+    /// the column — each
     /// <c>UPDATE SET</c> and the <c>INSERT</c>'s — meets in one column as a
     /// <c>CASE</c>'s arms do, so a bare masked source column stores its own
     /// function, any other expression over one <c>default()</c>, and an
@@ -409,7 +416,7 @@ partial class Simulation
     /// 2026-09-27 against SQL Server 2025: <c>UPDATE SET s = s + src.x</c>
     /// with <c>INSERT VALUES (src.id, src.x)</c> stores <c>xxxx</c> both ways).
     /// </summary>
-    private static void SettleMergeWriteMasks(
+    private static DataMask?[]? MergeWriteMasks(
         BatchContext batch,
         HeapTable destinationTable,
         View? sourceView,
@@ -463,10 +470,7 @@ partial class Simulation
                     Write(Array.IndexOf(destinationTable.Columns, insertColumns[i]), insertValues[i]);
             }
         }
-        if (DataMasking.Applying(batch, columns) is not { } functions)
-            return;
-        foreach (var clause in whenClauses)
-            clause.WriteMasks = functions;
+        return Array.Exists(columns, mask => mask is not null) ? columns : null;
     }
 
     /// <summary>
@@ -1688,13 +1692,6 @@ partial class Simulation
         /// write to.
         /// </summary>
         public readonly bool InsertColumnsImplied = insertColumnsImplied;
-
-        /// <summary>
-        /// Per target column (base-table ordinal), the function the executing
-        /// principal writes it through; null when nothing masks. Set once per
-        /// statement by <see cref="SettleMergeWriteMasks"/>.
-        /// </summary>
-        public MaskingFunction?[]? WriteMasks;
     }
 
     /// <summary>

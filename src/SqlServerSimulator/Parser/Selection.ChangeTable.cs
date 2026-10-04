@@ -95,8 +95,7 @@ internal sealed partial class Selection
             throw SimulatedSqlException.ChangeTableRequiresAlias();
         // Reading a table's changes takes VIEW CHANGE TRACKING on it beside
         // SELECT (probed 2026-10-04 against SQL Server 2025).
-        if (!context.Batch.IsSkipping && !context.Batch.Connection.Security.EffectiveIsDbo)
-            PermissionEnforcement.CheckSchemaObject(context.Batch, "VIEW CHANGE TRACKING", table);
+        PermissionEnforcement.CheckWhileParsing(context.Batch, "VIEW CHANGE TRACKING", writtenName: null, table);
 
         var plan = versionForm
             ? BindChangeTableVersion(context, table, versionColumns!, versionValues!)

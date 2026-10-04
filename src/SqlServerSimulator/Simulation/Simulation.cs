@@ -3126,6 +3126,9 @@ public sealed partial class Simulation
         // its parse takes, which a replay takes again as its own
         // session.
         batch.ReplayLockLog = batch.PlanCacheCommandText is not null && batch.BlockDepth == 0 && !batch.IsSkipping ? [] : null;
+#if DEBUG
+        var principalWatch = batch.ReplayLockLog is not null ? PlanCacheCaptureAudit.WatchPrincipalReads(connection.Security) : null;
+#endif
         Selection selection;
         try
         {
@@ -3147,6 +3150,10 @@ public sealed partial class Simulation
         {
             replayLocks = batch.ReplayLockLog;
             batch.ReplayLockLog = null;
+#if DEBUG
+            if (principalWatch is not null)
+                batch.PrincipalReadWhileParsing ??= PlanCacheCaptureAudit.EndPrincipalWatch(principalWatch);
+#endif
         }
         // A value literal or a name left dangling after a complete
         // SELECT is always unconsumed trailing input — real SQL

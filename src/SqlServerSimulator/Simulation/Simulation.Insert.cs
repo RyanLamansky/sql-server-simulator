@@ -66,8 +66,7 @@ partial class Simulation
         }
         if (destinationTable.IsTableValuedParameter)
             throw SimulatedSqlException.TableValuedParameterIsReadOnly(destinationName.Leaf);
-        if (!context.Batch.IsSkipping)
-            PermissionEnforcement.CheckReference(context.Batch, "INSERT", destinationName, destinationTable);
+        PermissionEnforcement.CheckWhileParsing(context.Batch, "INSERT", destinationName, destinationTable);
         // Phase 1b: acquire table-IX on the INSERT target (escalates to
         // table-X via TABLOCK*); row-X is taken per inserted row in
         // ProcessHeapInsert.

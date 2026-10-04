@@ -252,10 +252,11 @@ internal readonly struct KeyFenceInterval(SqlValueKey? lower, bool lowerInclusiv
 }
 
 /// <summary>
-/// One step a top-level SELECT's parse took on the lock manager — a lock on
-/// <see cref="Resource"/>, or the <c>NOWAIT</c> hint on
-/// <see cref="NoWaitTable"/> — recorded so a plan-cache replay retakes it as
-/// the replaying session (<c>BatchContext.TakeReplayedLocks</c>).
+/// One step a cached statement's parse took that a replay takes again — a
+/// lock on <see cref="Resource"/>, the <c>NOWAIT</c> hint on
+/// <see cref="NoWaitTable"/>, or the permission check <see cref="Check"/> —
+/// recorded so a plan-cache replay retakes it, in the parse's order, as the
+/// replaying session (<c>BatchContext.TakeReplayedLocks</c>).
 /// </summary>
 internal readonly struct ReplayedLock
 {
@@ -269,7 +270,9 @@ internal readonly struct ReplayedLock
 
     public ReplayedLock(HeapTable noWaitTable) => this.NoWaitTable = noWaitTable;
 
-    /// <summary>The locked resource; null for a <see cref="NoWaitTable"/> step.</summary>
+    public ReplayedLock(CompiledPermissionCheck check) => this.Check = check;
+
+    /// <summary>The locked resource; null for a <see cref="NoWaitTable"/> or <see cref="Check"/> step.</summary>
     public readonly LockResource? Resource;
 
     /// <summary>The mode taken on <see cref="Resource"/>.</summary>
@@ -283,4 +286,7 @@ internal readonly struct ReplayedLock
 
     /// <summary>A table the statement named with a <c>NOWAIT</c> hint.</summary>
     public readonly HeapTable? NoWaitTable;
+
+    /// <summary>A permission check the parse made (<c>PermissionEnforcement.CheckWhileParsing</c>).</summary>
+    public readonly CompiledPermissionCheck? Check;
 }

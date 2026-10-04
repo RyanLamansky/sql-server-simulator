@@ -114,6 +114,31 @@ internal sealed class ColumnReadTarget(Schemas.SchemaObject securable, Storage.H
 }
 
 /// <summary>
+/// A permission check a statement makes while it parses, kept on the batch's
+/// replay log (<see cref="BatchContext.ReplayLockLog"/>) beside the locks the
+/// parse takes, so a plan-cache replay, which parses nothing, makes it again
+/// at the same point as the replaying principal (see
+/// <see cref="PermissionEnforcement.CheckWhileParsing"/>). Holds only the
+/// securable and the name it was written as, if that decides the securable,
+/// so the plan it rides with stays the same for every principal.
+/// </summary>
+internal sealed class CompiledPermissionCheck(string permission, MultiPartName? writtenName, Schemas.SchemaObject resolved)
+{
+    private readonly string permission = permission;
+    private readonly MultiPartName? writtenName = writtenName;
+    private readonly Schemas.SchemaObject resolved = resolved;
+
+    /// <summary>Makes the check as <paramref name="batch"/>'s effective principal.</summary>
+    public void Run(BatchContext batch)
+    {
+        if (this.writtenName is { } name)
+            PermissionEnforcement.CheckReference(batch, this.permission, name, this.resolved);
+        else
+            PermissionEnforcement.CheckSchemaObject(batch, this.permission, this.resolved);
+    }
+}
+
+/// <summary>
 /// Execution-time permission enforcement — the thin layer between the
 /// statement dispatch / row sources and <see cref="PermissionChecker"/>. Every
 /// entry point short-circuits before any allocation when the effective
@@ -981,6 +1006,29 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckReference(BatchContext batch, string permission, MultiPartName writtenName, Schemas.SchemaObject resolved, string procedure = "") =>
         CheckSchemaObject(batch, permission, SecurableFor(batch, writtenName, resolved), procedure);
+
+    /// <summary>
+    /// <see cref="CheckReference"/> — or, with no <paramref name="writtenName"/>,
+    /// <see cref="CheckSchemaObject"/> — for a check a statement makes as it
+    /// parses rather than as it starts executing: the check is made now, unless the
+    /// batch is only compiling, and when the parse is one the plan cache may
+    /// keep it is also recorded among the parse's locks, for a replay to make
+    /// again in the same place as its own principal. Whoever parses, the
+    /// recording is the same — the check is recorded even for a principal it
+    /// waves through — which is what keeps the cached plan principal-independent.
+    /// </summary>
+    internal static void CheckWhileParsing(BatchContext batch, string permission, MultiPartName? writtenName, Schemas.SchemaObject resolved)
+    {
+        if (batch.IsSkipping)
+            return;
+        var check = new CompiledPermissionCheck(permission, writtenName, resolved);
+        batch.ReplayLockLog?.Add(new ReplayedLock(check));
+#if DEBUG
+        // The check reads the principal, which the replay reads again.
+        using var recorded = PlanCacheCaptureAudit.SuspendPrincipalWatch();
+#endif
+        check.Run(batch);
+    }
 
     /// <summary>
     /// The securable a reference written as <paramref name="writtenName"/> is

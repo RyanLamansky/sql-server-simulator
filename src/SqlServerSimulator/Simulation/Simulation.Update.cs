@@ -625,7 +625,7 @@ partial class Simulation
         HeapTable table,
         List<(string? ColumnName, Expression Expr)> rawAssignments,
         List<(int Ordinal, Expression Expr)> assignments,
-        MaskingFunction?[]? setMasks,
+        DataMask?[]? setMasks,
         BooleanExpression? where,
         PositionedCursorTarget? positionedCursor,
         OutputProjection? output,
@@ -637,7 +637,12 @@ partial class Simulation
         public readonly HeapTable Table = table;
         public readonly List<(string? ColumnName, Expression Expr)> RawAssignments = rawAssignments;
         public readonly List<(int Ordinal, Expression Expr)> Assignments = assignments;
-        public readonly MaskingFunction?[]? SetMasks = setMasks;
+        /// <summary>
+        /// Per SET assignment, the mask a principal without <c>UNMASK</c>
+        /// writes its value through — which principal that is, the execution
+        /// half settles.
+        /// </summary>
+        public readonly DataMask?[]? SetMasks = setMasks;
         public readonly BooleanExpression? Where = where;
         public readonly PositionedCursorTarget? PositionedCursor = positionedCursor;
         public readonly OutputProjection? Output = output;
@@ -655,9 +660,10 @@ partial class Simulation
     /// </summary>
     private static SimulatedStatementOutcome RunUpdate(ParserContext context, UpdatePlan plan)
     {
-        var (targetName, table, rawAssignments, assignments, setMasks, where) = (plan.TargetName, plan.Table, plan.RawAssignments, plan.Assignments, plan.SetMasks, plan.Where);
+        var (targetName, table, rawAssignments, assignments, where) = (plan.TargetName, plan.Table, plan.RawAssignments, plan.Assignments, plan.Where);
         var (positionedCursor, output, top, serializableHint, sourceView) = (plan.PositionedCursor, plan.Output, plan.Top, plan.SerializableHint, plan.SourceView);
         CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where);
+        var setMasks = DataMasking.Applying(context.Batch, plan.SetMasks);
         if (positionedCursor is null)
             Selection.SettleSerializableWriteFence(table, where, serializableHint, context.Batch);
 
@@ -960,7 +966,7 @@ partial class Simulation
 
         BindDeferredXmlMutators(context, table, rawAssignments, WrittenNameOf(sources[targetIndex], table));
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, bindErrors: context.Batch.BindErrors);
-        var setMasks = UpdateSetMasks(context.Batch, assignments, name => Selection.SourceColumnMask(sources, name));
+        var setMasks = DataMasking.Applying(context.Batch, UpdateSetMasks(context.Batch, assignments, name => Selection.SourceColumnMask(sources, name)));
 
         // Compile-time bind of the predicate and the SET values — see
         // ExecuteUpdateAgainstTable for why.
@@ -2178,21 +2184,25 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Per SET assignment, the mask its value reads through for the executing
-    /// principal, or null when none applies: a principal without
-    /// <c>UNMASK</c> writes what it would read (probed 2026-09-27 against SQL
-    /// Server 2025 — <c>SET plain = LEFT(masked, 10)</c> stores <c>xxxx</c>,
-    /// and <c>SET s = s + '!'</c> overwrites the column with its own mask).
-    /// Settled once per statement.
+    /// Per SET assignment, the mask its value reads through, or null when no
+    /// assignment reads a masked column: a principal without <c>UNMASK</c>
+    /// writes what it would read (probed 2026-09-27 against SQL Server 2025 —
+    /// <c>SET plain = LEFT(masked, 10)</c> stores <c>xxxx</c>, and
+    /// <c>SET s = s + '!'</c> overwrites the column with its own mask). These
+    /// are the masks' definitions, the same for every principal; which of them
+    /// apply is settled once per execution (<see cref="DataMasking.Applying"/>).
     /// </summary>
-    private static MaskingFunction?[]? UpdateSetMasks(BatchContext batch, List<(int Ordinal, Expression Expr)> assignments, Func<MultiPartName, DataMask?> columnMask)
+    private static DataMask?[]? UpdateSetMasks(BatchContext batch, List<(int Ordinal, Expression Expr)> assignments, Func<MultiPartName, DataMask?> columnMask)
     {
         if (!batch.Connection.Simulation.DeclaresDataMasks)
             return null;
-        var masks = new DataMask?[assignments.Count];
+        DataMask?[]? masks = null;
         for (var i = 0; i < assignments.Count; i++)
-            masks[i] = assignments[i].Expr is AssignmentExpression ? null : DataMask.Of(assignments[i].Expr, columnMask, typeOf: null);
-        return DataMasking.Applying(batch, masks);
+        {
+            if (assignments[i].Expr is not AssignmentExpression && DataMask.Of(assignments[i].Expr, columnMask, typeOf: null) is { } mask)
+                (masks ??= new DataMask?[assignments.Count])[i] = mask;
+        }
+        return masks;
     }
 
     /// <summary>

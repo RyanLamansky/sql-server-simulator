@@ -90,8 +90,16 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
         new(new SecurityPrincipalFrame(Database.DboPrincipalId, "dbo", "sa"), "sa");
 
     /// <summary>The frame every statement runs as: the top impersonation frame, or the base identity.</summary>
-    public SecurityPrincipalFrame Effective =>
-        this.impersonation.Count > 0 ? this.impersonation[^1] : baseFrame;
+    public SecurityPrincipalFrame Effective
+    {
+        get
+        {
+#if DEBUG
+            PlanCacheCaptureAudit.NotePrincipalRead(this);
+#endif
+            return this.impersonation.Count > 0 ? this.impersonation[^1] : baseFrame;
+        }
+    }
 
     /// <summary>True when the effective database principal is <c>dbo</c> — the same-database enforcement bypass. A reference that crosses a database boundary asks the boundary-aware form instead, since a <c>dbo</c> frame can be database-scoped.</summary>
     public bool EffectiveIsDbo => this.Effective.DatabasePrincipalId == Database.DboPrincipalId;

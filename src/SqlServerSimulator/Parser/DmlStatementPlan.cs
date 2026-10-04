@@ -41,7 +41,7 @@ internal sealed class DmlPlanRecording
     /// <summary>Where the parse left the cursor: the token after the statement.</summary>
     public ParserContext.Checkpoint End;
 
-    /// <summary>The locks the parse took, in order.</summary>
+    /// <summary>The locks the parse took and the permission checks it made, in order.</summary>
     public ReplayedLock[] Locks = [];
 
     /// <summary>The statement-frame state the parse settled; see <see cref="DmlPlanEntry"/>.</summary>
@@ -49,6 +49,14 @@ internal sealed class DmlPlanRecording
 
     /// <summary>The client-bound <c>OUTPUT</c> shape the parse noted, if any.</summary>
     public (Storage.SqlType[] Schema, string[] ColumnNames)? ClientOutputShape;
+#if DEBUG
+
+    /// <summary>The watch over the parse's principal reads, until the split point ends it.</summary>
+    public PlanCacheCaptureAudit.PrincipalReadWatch? PrincipalWatch;
+
+    /// <summary>Where the parse first read its principal, if it did (see <see cref="PlanCacheCaptureAudit"/>).</summary>
+    public string? PrincipalRead;
+#endif
 }
 
 /// <summary>
@@ -77,11 +85,12 @@ internal sealed class DmlPlanEntry(DmlPlanRecording recording, long schemaVersio
 
     /// <summary>
     /// Replays the statement against <paramref name="context"/>'s batch, whose
-    /// cursor already sits at <see cref="End"/>: the parse's locks as this
-    /// session, then the flags its parse set on the statement frame, then the
-    /// execution half. The locks come first because a parse takes them before
-    /// it reaches anything that sets a flag — a lock wait that ends the
-    /// statement ends it with the frame the parse had at that point.
+    /// cursor already sits at <see cref="End"/>: the parse's locks and
+    /// permission checks as this session, then the flags its parse set on the
+    /// statement frame, then the execution half. The locks come first because
+    /// a parse takes them before it reaches anything that sets a flag — a lock
+    /// wait that ends the statement ends it with the frame the parse had at
+    /// that point.
     /// </summary>
     /// <remarks>
     /// Null, nothing run, when a definition change the locks waited out made
@@ -90,8 +99,7 @@ internal sealed class DmlPlanEntry(DmlPlanRecording recording, long schemaVersio
     public SimulatedStatementOutcome? Replay(ParserContext context)
     {
         var batch = context.Batch;
-        batch.TakeReplayedLocks(this.Locks);
-        if (Volatile.Read(ref context.Connection.Simulation.SchemaVersion) != this.SchemaVersion)
+        if (!batch.TakeReplayedLocks(this.Locks, this.SchemaVersion) || Volatile.Read(ref context.Connection.Simulation.SchemaVersion) != this.SchemaVersion)
             return null;
         var statement = batch.CurrentStatement;
         if (this.opensTransaction)

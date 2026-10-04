@@ -36,7 +36,7 @@ Bump sites:
 - `Simulation.AddRemoteSimulation` (changes what an active linked-server name will resolve to at the next `sp_addlinkedserver`).
 - `sp_addlinkedserver` / `sp_dropserver` (changes the active linked-server table, which four-part-name FROM clauses resolve against at parse time).
 
-Non-DDL statements that touch principal / permission / extended-property / trigger-enable state don't bump — cached SELECT plans don't depend on those for parse-time validity.
+Non-DDL statements that touch principal / permission / extended-property / trigger-enable state don't bump — cached plans don't depend on those for parse-time validity ([principal independence](#principal-independence)).
 Every bump also invalidates the catalog row cache, which the non-DDL metadata changes invalidate on their own — see [`catalog-views.md`](catalog-views.md#cross-statement-row-cache-and-indexes).
 
 ## Clearing: `DBCC FREEPROCCACHE`
@@ -140,7 +140,8 @@ Locks come before flags because a parse takes its locks before it reaches anythi
 
 **Why the parse half is safe to skip.**
 What a DML parse checks is either decided by the text and the schema — the same key and `SchemaVersion` decide it the same way, and a parse that raised records nothing — or read from the session.
-The session reads are handled one of three ways: moved into the execution half (above), repeated from the recording (locks, flags), or gated so they can't differ (below).
+The session reads are handled one of three ways: moved into the execution half (above), repeated from the recording (locks, flags, and the one permission check a parse makes, `INSERT`'s on its target), or gated so they can't differ (below).
+Nothing a plan holds depends on the principal that parsed it ([below](#principal-independence)).
 `DmlPlanReplayTests` (public API) is the differential: each test runs a text several times against one simulation, the later runs replaying, and against a second whose plan cache is emptied before every run, and compares the transcripts — result sets, row counts, every error's number, class, state, line and message, info messages and the table afterwards — over constraint, conversion, truncation (either message, as `VERBOSE_TRUNCATION_WARNINGS` picks), `NOT NULL`, foreign-key, duplicate-key, divide-by-zero and trigger-rollback errors, `XACT_ABORT`, `IDENTITY_INSERT`, `SET ROWCOUNT` and trigger state flipped between runs, a `TOP (@n)` that trims the parsed tuples, identity, rowversion, sequence-default and computed values, a schema change under `OUTPUT INSERTED.*`, explicit transactions, `TRY` / `CATCH`, error lines deep in a batch, Query Store's record of the runs, another session's lock and 8 concurrent replayers — and for `MERGE`, the EF shapes' errors, a trigger rollback under `OUTPUT … INTO @inserted0`, an upsert from a table under `TOP (@n)` and `SET ROWCOUNT`, an `INSTEAD OF` trigger created and toggled between runs, `OUTPUT … INTO` a table whose schema changes, and 8 sessions replaying one plan into their own table variables.
 
 ### What a DML plan declines
@@ -149,7 +150,7 @@ Checked per statement, since an earlier statement in the batch can change what t
 
 - The batch has a plan-cache key (so the READ COMMITTED and session-option gates [above](#the-entry-is-a-statement-sequence) hold), and the statement is top-level, not skipping, not being read again for a binder report, and not in a module, trigger or procedure body.
 - `QUOTED_IDENTIFIER`, `DATEFORMAT`, `ANSI_NULLS`, `CONCAT_NULL_YIELDS_NULL` and the database still equal the key's; the isolation level and the gated options are read live.
-- The principal is one every permission check waves through (`PermissionEnforcement.Bypasses`, `dbo`), because a parse checks some permissions as it goes (`INSERT`'s target) and a replay parses nothing; and no column in the simulation has ever been masked, since a mask resolves per principal.
+- Any principal: the plans are principal-independent ([below](#principal-independence)), so a restricted principal, an `EXECUTE AS` frame and an application role replay what another principal recorded, and a masked column changes nothing.
 
 And per shape, at the split point (`NoteDmlPlan` plus each parser's `admitted`):
 
@@ -237,6 +238,32 @@ When adding any executor or expression feature that computes per-row / per-group
 `PlanCacheCaptureAudit.Verify` runs at every promotion and walks everything a cached plan reaches — fields, closures' targets, iterator state machines, collections — stopping at the shared server objects a plan may hold (tables, databases, schema objects, collations, types), and throws on reaching a `BatchContext`, `ParserContext`, `StatementContext`, connection, command, transaction, `SessionToken`, security context, `VariableSlot`, undo log, `#temp` table, table variable or SERIALIZABLE fence state.
 Every test that caches a plan therefore checks it, and CI's Debug leg fails on a new capture; the Release build carries no cost.
 It catches a reference, not a value: state a parse *copies* out of the session — a folded constant, a setting read into a field — is what the differential tests in `PlanCacheSessionTests` are for.
+The one copied value it does catch is the principal's: the parse of every statement the cache may keep is watched (`PlanCacheCaptureAudit.WatchPrincipalReads`, over reads of `SessionSecurityContext.Effective`), and a plan whose parse read it outside a step its replay repeats is refused as it enters the cache ([below](#principal-independence)).
+
+## Principal independence
+
+A cached plan is shared by every principal that sends its text, so it carries definitions and lists, never a decision made for the principal that parsed it; each replay makes those decisions again as its own principal.
+The per-principal state a parse meets, and where each piece lives:
+
+| State | On the plan | Decided |
+|---|---|---|
+| A query's read permissions (`SELECT`, a scalar UDF's `EXECUTE`, a view's broken ownership chain) | `Selection.ReferencedSecurables` / `ReadColumnsByObject` and each view's body reads | Per execution (`CheckReadSources`), replay included |
+| `UPDATE` / `DELETE` / `MERGE` target permissions | The target and the written name | In the execution half |
+| `INSERT`'s target permission, `CHANGETABLE`'s `VIEW CHANGE TRACKING` | A `CompiledPermissionCheck` among the recorded locks | While parsing — after the compile walk's binder errors and ahead of any row's, which is where real's Msg 229 falls (probed 2026-10-04 against SQL Server 2025) — and again by the replay at the same step |
+| A query's output masks (`Selection.ColumnMasks`), a cursor's, `OUTPUT`'s, `SELECT … INTO`'s and `INSERT … SELECT`'s | `DataMask` definitions | At the sink, per execution |
+| `UPDATE … SET`'s and `MERGE`'s write masks | `UpdatePlan.SetMasks` / `MergePlan.WriteMasks` as `DataMask` definitions | Once per execution, by the execution half |
+| A conversion error's redaction, a variable assignment's mask, a scalar UDF's return mask | Definitions on the expression or the function | When the value is computed |
+| A `NEXT VALUE FOR`'s `UPDATE`, metadata visibility in the catalog views and `OBJECT_ID`, the identity scalars | Nothing | When the expression runs |
+| `EXECUTE AS` / application-role identity | Nothing — the capture audit refuses a `SessionSecurityContext` | Read from the executing session |
+| Name resolution | Objects resolved through `dbo` for an unqualified name | The same for every principal, since the default schema resolves nothing yet ([`permissions.md`](permissions.md#known-gaps)) |
+
+`MayCacheDmlPlan` once kept DML plans to `dbo` and to simulations with no masked column, because `UPDATE` and `MERGE` settled their write masks for the parsing principal and `INSERT` checked its target as it parsed; with both following the table, every principal caches.
+The `SELECT` cache never had such a gate, and a `CHANGETABLE` reference was the one parse-time check the principal-read watch found it skipping on replay: a plan `dbo` compiled answered a principal without `VIEW CHANGE TRACKING` with rows where a fresh parse refuses it.
+
+A view body bound while the referencing statement parses reads the principal too — a FROM-less body evaluates a scalar UDF there — but nothing it settles changes by principal: any error but a missing name leaves the view's recorded columns, and execution parses the body again as the executing principal, so the watch excuses it.
+The compiled-batch memo and the module plans record only whether a compile walk passed, and that walk runs in skip mode, which no permission check reads.
+
+`PlanCachePrincipalTests` (Tests.Internal) runs two principals — logins on their own connections, `EXECUTE AS` frames on theirs, and one connection switching between them — through one text in alternation, the one able to unmask or write beside the one not, and asserts each gets its own answer from a plan recorded once and replayed by both: a masked `UPDATE`, `MERGE` and `DELETE … OUTPUT`, an `INSERT` and an `UPDATE` one principal may not make, and a `CHANGETABLE` read; `DmlPlanReplayTests` holds the same alternations to a fresh parse's transcript.
 
 ## Co-fix: `VariableReference` resolves at Run time
 
@@ -255,7 +282,7 @@ Parse-time `context.Batch.GetVariableSlot(name)` is still called once (for the M
 A cache hit short-circuits the full dispatch via `ReplayCachedSelection`:
 
 - New `BatchContext` for the incoming command (seeds `Variables` from parameters, allocates the same lock / undo / lifecycle scaffolding the standard path would).
-- Per statement: the recorded parse-time locks are retaken as the replaying session, the read permission check reruns against its principal, and the statement-scoped locks are released when the statement ends.
+- Per statement: the recorded parse-time locks and permission checks are retaken as the replaying session, the read permission check reruns against its principal, and the statement-scoped locks are released when the statement ends.
 - `selection.Execute(batch)` runs the cached Selection.
   `MaterializeRows()` drains them, mirroring the standard path's `LastStatementRowCount` accounting — and, like the standard path, keeping the producer's own row form (see [`data-reader.md`](data-reader.md#the-row-form-the-reader-reads)).
 - Outcome shape: `SimulatedSqlResultSet` (the only shape we cache — assignment-only Selections never cache).
@@ -282,7 +309,7 @@ The shared-plan contract has its own section of tests there: parameterized TOP /
 `PlanCacheSessionTests` (public API) replays one text across connections: a replay meeting another session's lock after its compiler was disposed times out rather than raising `ObjectDisposedException`, it doesn't read past the compiler's own uncommitted write or another session's `TABLOCKX` insert, it waits with its own lock timeout and honors `NOWAIT`, its `UPDLOCK` read holds for its own transaction and releases outside one, an RCSI replay reads its own statement's snapshot, `FOR SYSTEM_TIME AS OF @p` reads each execution's parameter, and the session-setting differential above.
 `PlanCacheRetentionTests` (Tests.Internal) pins that an abandoned connection whose SELECT became a cached plan is still finalized and reclaimed.
 
-`Simulation.DmlPlanHits` and `DmlPlanRecordings` back `DmlPlanCacheTests` (Tests.Internal): EF Core's insert, update-batch, delete, `MERGE` and trigger-table shapes (`OUTPUT … INTO @inserted0` included) and a `MERGE` from a table replay statement by statement; a `MERGE` from a query, through a view, into a table variable or onto a table with an `INSTEAD OF` trigger, a client `OUTPUT` on a triggered table, a subquery, `INSERT … SELECT`, a `#temp` target, a statement inside a block, another isolation level, a key option changed mid-batch and an impersonated principal all re-parse; a schema change re-parses once and then replays again, `FREEPROCCACHE` drops the plans, parameter types keep separate plans, and an abandoned connection that recorded a plan is still reclaimed.
+`Simulation.DmlPlanHits` and `DmlPlanRecordings` back `DmlPlanCacheTests` (Tests.Internal): EF Core's insert, update-batch, delete, `MERGE` and trigger-table shapes (`OUTPUT … INTO @inserted0` included) and a `MERGE` from a table replay statement by statement; a `MERGE` from a query, through a view, into a table variable or onto a table with an `INSTEAD OF` trigger, a client `OUTPUT` on a triggered table, a subquery, `INSERT … SELECT`, a `#temp` target, a statement inside a block, another isolation level and a key option changed mid-batch all re-parse, while an impersonated principal replays; a schema change re-parses once and then replays again, `FREEPROCCACHE` drops the plans, parameter types keep separate plans, and an abandoned connection that recorded a plan is still reclaimed.
 Whether a replay reports what a fresh parse reports is `DmlPlanReplayTests`' ([above](#dml-statement-plans)).
 
 `Simulation.TokenMemo`'s `Hits` / `Misses` / `Count` back `TokenMemoTests`: a repeated DML batch is served on its second execution, a text carrying every token shape replays identically, each `QUOTED_IDENTIFIER` setting gets its own entry while a text that *flips* it mid-batch is never served, a tokenizer error reports the same message on every execution, the back-and-forth-lookahead shape memoizes what it parsed, a procedure body is served across invocations, and 8 workers share one sequence with no divergence.
@@ -445,6 +472,20 @@ The saving is the statement's parse, a fixed cost per statement plus a share per
 A batch that compiled cleanly is remembered under its key and schema version (`compiledBatches`), and a repeat of it skips the walk outright, so a repeated `MERGE` batch parses its statement once per run, not twice — a thread-time profile of the 10-row identity batch puts `CompileBatch` under 1%.
 The walk still runs where the memo can't help — a first execution, a batch that resolved a `#temp` table, one holding an `OPTION (RECOMPILE)` inlining failure — and there a plan recorded by a run would rarely exist yet; the walk also binds on a throwaway context whose statements record nothing, so it stays a parse.
 
+### Plans for every principal
+
+EF Core 10's update and identity-key insert texts with a masked column in the table (`email()` on an `nvarchar(100)`, the values written from parameters), replayed through ADO.NET, one case per process, 4 s warm-up then 4 s timed (median batch), three processes per case alternating the build where `MayCacheDmlPlan` declined both principal kinds below (A) and the principal-independent one (B) (measured 2026-10-04):
+
+| Case | Principal | A | B | Δ |
+|---|---|---|---|---|
+| `UPDATE … OUTPUT 1`, 1 row | a login's non-`dbo` user | 29.8 µs | 27.1 µs | −9% |
+| `MERGE … OUTPUT`, 10 rows (target truncated between batches by a `dbo` session) | a login's non-`dbo` user | 44.3 µs | 27.1 µs | −39% |
+| `UPDATE … OUTPUT 1`, 1 row | `dbo` | 9.2 µs | 6.3 µs | −32% |
+| `MERGE … OUTPUT`, 10 rows | `dbo` | 36.5 µs | 22.1 µs | −39% |
+
+`dbo` gains too, since one masked column anywhere in the simulation had declined every DML plan.
+The non-`dbo` update saves the same ~3 µs of parse as `dbo`'s and still runs about three times as long, a cost of the non-`dbo` execution path that isn't profiled yet; skipping its `UPDATE` permission check outright moved it within run-to-run noise, so the check is not the bulk of it.
+
 ### EF Core functional workload
 
 Measured 2026-10-02 with four classes of EF Core 10.0.2's own `EFCore.SqlServer.FunctionalTests` — `NorthwindMiscellaneousQuerySqlServerTest` (942 tests), `GearsOfWarQuerySqlServerTest` (1,195), `GraphUpdatesSqlServerIdentityTest` (1,788) and `NorthwindBulkUpdatesSqlServerTest` (180) — one class per process, through the in-process connection (the local `.vs/efcore-shakedown` harness's `EFSIM_INPROC=1` mode) and once over the TDS endpoint.
@@ -525,7 +566,6 @@ Measured flat and dropped: the name memo (`SourceColumnMemo`) starting its scan 
 
 - **DML plans for the declined shapes** — `INSERT … SELECT`, a `MERGE` from a query, the joined `UPDATE` / `DELETE` forms, DML through a view, and a statement holding a subquery.
   Each needs its own split point, and a subquery's plan its closures moved off the parse (the `OuterTypeResolver` a nested query captures reaches the `ParserContext`).
-- **A DML plan for a principal permission checks apply to** — the parse checks `INSERT` permission on the target as it goes, so a replay under such a principal would need that check recorded as a replay step between the locks.
 - **`SET` / `DECLARE` as recordable effects**, which is what a batch mixing them with a SELECT would need to cache as a SELECT sequence; the DML statement plans don't need it, since they sit beside statements that still parse.
 - LRU eviction, for both layers (the cap is hard FIFO-ish, and a one-shot migration script run first can fill it ahead of the steady-state working set).
 - Parameter-sniffing-style value-dependent plan selection (the simulator has no cost-based optimizer, so this doesn't apply).

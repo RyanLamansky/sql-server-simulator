@@ -159,6 +159,7 @@ public sealed partial class Simulation
         // re-cached versions of an already-tracked one.
 #if DEBUG
         PlanCacheCaptureAudit.Verify(plans, text);
+        PlanCacheCaptureAudit.VerifyPrincipalIndependent(batch.PrincipalReadWhileParsing, text);
 #endif
         var entry = new PlanCacheEntry([.. plans], [.. batch.PlanCacheSequenceLocks!], [.. batch.PlanCacheSequenceSpans!], batch.PlanCacheSchemaVersion);
         if (this.planCache.ContainsKey(key))
@@ -363,8 +364,8 @@ public sealed partial class Simulation
                 // statement-scoped ones when the statement ends — when the
                 // consumer moves past it, as in the dispatch loop, or in the
                 // finally below.
-                batch.TakeReplayedLocks(entry.Locks[statement]);
-                if (statement == 0 && Volatile.Read(ref connection.Simulation.SchemaVersion) != entry.SchemaVersionAtParse)
+                var current = batch.TakeReplayedLocks(entry.Locks[statement], statement == 0 ? entry.SchemaVersionAtParse : null);
+                if (statement == 0 && (!current || Volatile.Read(ref connection.Simulation.SchemaVersion) != entry.SchemaVersionAtParse))
                 {
                     batch.ReleaseStatementSchemaLocks();
                     stale.Value = true;

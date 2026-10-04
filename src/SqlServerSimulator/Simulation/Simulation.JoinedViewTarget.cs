@@ -131,7 +131,7 @@ partial class Simulation
 
         BindDeferredXmlMutators(context, table, rawAssignments, written);
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, view, batch.BindErrors, derivedLabel: written);
-        var setMasks = UpdateSetMasks(batch, assignments, name => Selection.SourceColumnMask(sources, name));
+        var setMasks = DataMasking.Applying(batch, UpdateSetMasks(batch, assignments, name => Selection.SourceColumnMask(sources, name)));
         FunctionBodyShape.NoteTableWrite(batch, "UPDATE", table);
         LockWriteTable(batch, table, "UPDATE", checkFilegroup: true);
 
