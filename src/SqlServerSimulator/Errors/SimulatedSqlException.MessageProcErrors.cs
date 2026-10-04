@@ -167,6 +167,10 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CannotDropDatabaseOwnerUser(string user) =>
         new($"Cannot drop the user '{user}'.", 15150, 16, 1);
 
+    /// <summary>Msg 15150: <c>ALTER USER dbo WITH DEFAULT_SCHEMA</c>, whose default schema is always <c>dbo</c> (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException CannotAlterDatabaseOwnerUser(string user) =>
+        new($"Cannot alter the user '{user}'.", 15150, 16, 1);
+
     /// <summary>Msg 15150: <c>sp_droprole</c> of <c>public</c> or a fixed role.</summary>
     internal static SimulatedSqlException CannotDropFixedRole(string role) =>
         new($"Cannot drop the role '{role}'.", 15150, 16, 1);

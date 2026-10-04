@@ -129,6 +129,7 @@ partial class Simulation
             SuppressDiagnosticsResolution = true,
             CalledFunctionBody = true,
             ModuleObjectId = function.ObjectId,
+            ModuleSchema = function.Schema,
             CapturesQueryStore = true,
             MultiStatementTvfBody = true,
             OwnershipChainOwnerId = Ownership.EffectiveOwnerId(function.Schema.Database, function),

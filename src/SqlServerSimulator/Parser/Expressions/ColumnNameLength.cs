@@ -110,7 +110,7 @@ internal sealed class ColLength : Expression
         {
             columns = view.Columns;
         }
-        else if (runtime.Batch.TryResolveSchema(multiPart, out var schema) && schema.TryFindInSharedNamespace(multiPart.Leaf, out var other))
+        else if (runtime.Batch.TryResolveCallerSchema(multiPart, out var schema) && schema.TryFindInSharedNamespace(multiPart.Leaf, out var other))
         {
             columns = ColumnProperty.ColumnsOf(schema.Database, other.ObjectId);
         }

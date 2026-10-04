@@ -168,7 +168,8 @@ Field rosters live in the source XML docs; this captures only identity + load-be
 - **`BatchContext`** (internal, `Parser/`) = one command execution.
   Owns the `ParserContext` (parse-time scratch) + batch-lifetime runtime state: `Variables`, `TableVariables` (`@t`), `CurrentUndoLog`, `CurrentTableVarUndoLog` (statement-only, disjoint from the tx-scoped log so `ROLLBACK TRAN` skips `@t`), `UdfFrame` / `ProcFrame` (non-null in a UDF/proc body — gates value-form `RETURN`).
   Exposes the **resolver contract** the parser depends on:
-  - `TryResolveTable` — `#foo` → `Connection.TempTables` (any qualifier); `@t` → `TableVariables` (1-part only); else named schema (`dbo` unqualified); `SystemHeapTables` only as flat 1-part fallback.
+  - `TryResolveTable` — `#foo` → `Connection.TempTables` (any qualifier); `@t` → `TableVariables` (1-part only); else named schema, an unqualified name searching the principal's default schema (a module body's own schema) before `dbo`; `SystemHeapTables` only as flat 1-part fallback.
+    An unqualified `CREATE` target asks `TryResolveCreateSchema` instead.
   - `TryResolveFunction` — 2-/3-part only.
     `TryResolveProcedure` accepts 1-part.
     `TryResolveTableType` accepts 1-part + `dbo` fallback.
@@ -303,7 +304,8 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **JSON** — the JSON_\* scalars, ISJSON, OPENJSON, `FOR JSON`, and one shared path parser, SQL Server 2025's advanced array accessors (`[*]`, ranges, lists, `last`, `.*`) and `JSON_QUERY … WITH ARRAY WRAPPER` included.
   Every one of them reads the document left to right and stops as soon as the path is settled, so the same document can raise for one path and answer for another.
   Whether a value embeds in a JSON producer as JSON or as a quoted string is a mark on its `nvarchar` type (`NVarcharSqlType.jsonText`), so a new JSON-producing function returns `SqlType.JsonTextMax` → [`json.md`](docs/claude/json.md).
-- **Name resolution, schemas, CREATE / DROP DATABASE, the `OBJECT_*` / `SCHEMA_*` / `DB_*` scalars, cross-database reads and writes, synonyms** — with the reserved-schema pin.
+- **Name resolution, per-principal default schemas, schemas, CREATE / DROP DATABASE, the `OBJECT_*` / `SCHEMA_*` / `DB_*` scalars, cross-database reads and writes, synonyms** — with the reserved-schema pin.
+  An unqualified name searches the principal's default schema before `dbo`, but a module body's queries search the module's own schema, so a new module-body batch site sets `BatchContext.ModuleSchema`.
   An unresolved column splits by *what* failed: a bad qualifier is Msg 4104 on the whole name, everything else Msg 207 on the leaf.
   A module body runs in the database that owns it, entered through `ModuleDatabaseScope`, which a new module-invocation path must enter too → [`schemas.md`](docs/claude/schemas.md).
 - **System metadata surfaces** — the `sys.*` / `INFORMATION_SCHEMA.*` views, `OBJECTPROPERTY`, the `sp_help` family, `sp_describe_first_result_set`, `sp_who`, `sp_configure`, and the expression-dependency surfaces.

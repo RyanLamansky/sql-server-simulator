@@ -72,7 +72,21 @@ internal sealed class ObjectId : Expression
         if (freezable && frame.StatementScopedValues is { } scoped && scoped.TryGetValue(this, out var frozen))
             return frozen;
 
-        var value = this.Resolve(runtime);
+        // A name OBJECT_ID reads resolves as its caller would, inside a module
+        // body too, where the body's own references search the module's schema
+        // (probed 2026-10-04 against SQL Server 2025).
+        var batch = runtime.Batch;
+        var suspended = batch.SuspendsModuleSchema;
+        batch.SuspendsModuleSchema = true;
+        SqlValue value;
+        try
+        {
+            value = this.Resolve(runtime);
+        }
+        finally
+        {
+            batch.SuspendsModuleSchema = suspended;
+        }
         if (freezable)
         {
             (frame.StatementScopedValues ??= new Dictionary<Expression, SqlValue>(ReferenceEqualityComparer.Instance))[this] = value;
@@ -164,12 +178,9 @@ internal sealed class ObjectId : Expression
             // TryResolveFunction takes 2-/3-part names only, because a bare
             // f() at a *call* site is Msg 195 on real. OBJECT_ID is a name
             // lookup rather than a call, and real resolves the unqualified
-            // form against the default schema (probe-confirmed: OBJECT_ID('f')
-            // returns the id), so qualify a 1-part name before asking.
-            var functionName = parsed.Count == 1
-                ? new MultiPartName(Database.DefaultSchemaName).WithAddedPart(parsed.Leaf)
-                : parsed;
-            if (runtime.Batch.TryResolveFunction(functionName, out var function))
+            // form as any unqualified name (probe-confirmed: OBJECT_ID('f')
+            // returns the id).
+            if (runtime.Batch.TryResolveFunctionName(parsed, out var function))
             {
                 var kindMatches = filter switch
                 {
@@ -373,6 +384,7 @@ internal sealed class ObjectId : Expression
             return false;
         var segments = new List<string>(4);
         var leadingEmpty = true;
+        var schemaOmitted = false;
         var position = 0;
         while (true)
         {
@@ -425,7 +437,10 @@ internal sealed class ObjectId : Expression
                 if (last)
                     return false;
                 if (!leadingEmpty)
+                {
                     segments.Add(Database.DefaultSchemaName);
+                    schemaOmitted = true;
+                }
             }
             else
             {
@@ -441,6 +456,9 @@ internal sealed class ObjectId : Expression
         result = new MultiPartName(segments[0]);
         for (var i = 1; i < segments.Count; i++)
             result = result.WithAddedPart(segments[i]);
+        // `db..name` searches as an unqualified name does in that database.
+        if (schemaOmitted && segments.Count == 3)
+            result = result.WithOmissions(0, schema: true);
         return true;
     }
 }

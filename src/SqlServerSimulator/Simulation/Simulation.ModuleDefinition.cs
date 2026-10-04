@@ -211,7 +211,7 @@ public sealed partial class Simulation
     /// </remarks>
     private static Schema ResolveModuleSchema(ParserContext context, MultiPartName name, bool isAlter)
     {
-        if (!context.Batch.TryResolveSchema(name, out var schema))
+        if (!(isAlter ? context.Batch.TryResolveSchema(name, out var schema) : context.Batch.TryResolveCreateSchema(name, out schema, statementOnly: true)))
         {
             // A CREATE SCHEMA element names the schema its statement creates,
             // which the compile pass hasn't created; the run settles the name
@@ -235,6 +235,7 @@ public sealed partial class Simulation
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(systemQualifier);
         }
         schema.Database.RejectWriteWhenReadOnly();
+        context.Batch.DefiningModuleSchema = schema;
         return schema;
     }
 

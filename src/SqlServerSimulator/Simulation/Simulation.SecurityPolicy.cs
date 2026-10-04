@@ -63,7 +63,7 @@ partial class Simulation
         // error stops the batch whole; the permission checks, the name's
         // uniqueness and the one-enabled-policy rule wait for the run.
         var batch = context.Batch;
-        if (!batch.TryResolveSchema(policyName, out var schema))
+        if (!batch.TryResolveCreateSchema(policyName, out var schema))
             throw SimulatedSqlException.SecurityPolicySchemaMissing(policyName.ImmediateQualifier ?? Database.DefaultSchemaName);
         var database = schema.Database;
         var isEnabled = state ?? true;
@@ -732,6 +732,7 @@ partial class Simulation
             SuppressDiagnosticsResolution = true,
             BindsModuleDefinition = true,
             SuppressesRowSecurity = true,
+            ModuleSchema = function.Schema,
         };
         inner.AdoptStatementFreezeFrom(batch);
         var savedQuotedIdentifiers = connection.QuotedIdentifiers;

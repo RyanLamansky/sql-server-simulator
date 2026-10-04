@@ -146,7 +146,7 @@ partial class Simulation
         connection.AnsiNulls = function.UsesAnsiNulls;
         // Body errors attribute to the outer invoking statement (probe-
         // confirmed: real reports the referencing SELECT's line, no procedure).
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true, BindsModuleDefinition = true };
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true, BindsModuleDefinition = true, ModuleSchema = function.Schema };
         SeedTableValuedParameters(innerBatch, outerBatch, function.Parameters, tableArguments);
         // Inlined into the referencing statement — same current-time freeze,
         // so a per-row APPLY reads one constant value (matching real).
@@ -233,6 +233,7 @@ partial class Simulation
             SuppressDiagnosticsResolution = true,
             BindsModuleDefinition = true,
             CursorDeclarationSnapshot = new Dictionary<string, VariableSlot>(variables, BatchContext.VariableNameComparer),
+            ModuleSchema = inline.Schema,
         };
         innerBatch.AdoptStatementFreezeFrom(batch);
         try

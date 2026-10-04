@@ -1028,7 +1028,7 @@ partial class Simulation
                 // A built-in type is not a securable: real reads `sys.int` as a missing object.
                 if (BuiltInToken.Equals(name.ImmediateQualifier ?? "", "sys"))
                     throw SimulatedSqlException.CannotFindObject(name.Leaf);
-                if (batch.TryResolveSchema(name, out var typeSchema))
+                if (batch.TryResolveCallerTypeSchema(name, out var typeSchema))
                 {
                     if (typeSchema.AliasTypes.TryGetValue(name.Leaf, out var alias))
                         return alias.UserTypeId;
@@ -1041,7 +1041,7 @@ partial class Simulation
                     ? SimulatedSqlException.CannotFindObject(name.Leaf)
                     : SimulatedSqlException.CannotFindType(name.Leaf);
             case PermissionChecker.ClassXmlSchemaCollection:
-                return batch.TryResolveSchema(name, out var collectionSchema) && collectionSchema.XmlSchemaCollections.TryGetValue(name.Leaf, out var collection)
+                return batch.TryResolveXmlSchemaCollectionSchema(name, out var collectionSchema) && collectionSchema.XmlSchemaCollections.TryGetValue(name.Leaf, out var collection)
                     ? collection.Id
                     : throw SimulatedSqlException.CannotFindXmlSchemaCollection(name.Leaf);
             default:

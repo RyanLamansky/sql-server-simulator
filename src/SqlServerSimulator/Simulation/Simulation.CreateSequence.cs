@@ -159,8 +159,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (!context.Batch.TryResolveSchema(sequenceName, out var schema))
-            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(sequenceName.Count >= 2 ? sequenceName.ImmediateQualifier! : Database.DefaultSchemaName);
+        if (!context.Batch.TryResolveCreateSchema(sequenceName, out var schema))
+            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(sequenceName.ImmediateQualifier ?? Database.DefaultSchemaName);
 
         // CREATE SEQUENCE is a permission of the target schema, which its
         // ALTER covers (sys.fn_builtin_permissions) — Msg 15247 without it.

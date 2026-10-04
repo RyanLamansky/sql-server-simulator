@@ -305,6 +305,7 @@ partial class Simulation
                     ContinueOnError = ContinuesCalledBatch(outerBatch),
                     OwnershipChainOwnerId = Ownership.EffectiveOwnerId(procedure.Schema.Database, procedure),
                     ModuleObjectId = procedure.ObjectId,
+                    ModuleSchema = procedure.Schema,
                 };
                 // Seed cursor parameters as unallocated cursor variables in the
                 // child frame; the body SETs and OPENs a cursor on each.

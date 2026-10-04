@@ -49,7 +49,7 @@ internal sealed class TypeId : Expression
         }
         else
         {
-            schemaPart = Database.DefaultSchemaName;
+            schemaPart = "";
             leafPart = StripBrackets(nameStr);
         }
 
@@ -68,8 +68,14 @@ internal sealed class TypeId : Expression
             }
         }
 
-        if (!runtime.Batch.CurrentDatabase.Schemas.TryGetValue(schemaPart, out var schema))
+        // An unqualified user type searches the type namespace as any
+        // unqualified name does, through the caller's default schema first.
+        if (!(qualified
+            ? runtime.Batch.CurrentDatabase.Schemas.TryGetValue(schemaPart, out var schema)
+            : runtime.Batch.TryResolveCallerTypeSchema(new MultiPartName(leafPart), out schema)))
+        {
             return SqlValue.Null(SqlType.Int32);
+        }
         if (schema.TableTypes.TryGetValue(leafPart, out var tableType))
             return SqlValue.FromInt32(tableType.UserTypeId);
         return schema.AliasTypes.TryGetValue(leafPart, out var aliasType)

@@ -101,7 +101,7 @@ internal sealed class TypeProperty : Expression
             if (name.Count == 2)
                 return null;
         }
-        if (!batch.TryResolveSchema(name, out var schema))
+        if (!batch.TryResolveCallerTypeSchema(name, out var schema))
             return null;
         if (schema.AliasTypes.TryGetValue(name.Leaf, out var alias))
         {

@@ -194,7 +194,7 @@ partial class Simulation
         connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
         var savedAnsiNulls = connection.AnsiNulls;
         connection.AnsiNulls = view.UsesAnsiNulls;
-        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32)) { SuppressDiagnosticsResolution = true, BindsModuleDefinition = true, InlinedCalls = outerBatch.InlinedCalls, InheritedSystemTime = systemTime };
+        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32)) { SuppressDiagnosticsResolution = true, BindsModuleDefinition = true, InlinedCalls = outerBatch.InlinedCalls, InheritedSystemTime = systemTime, ModuleSchema = view.Schema };
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
         connection.NestingLevel++;
         try
@@ -246,7 +246,7 @@ partial class Simulation
         connection.AnsiNulls = view.UsesAnsiNulls;
         // Body errors attribute to the outer statement that referenced the view
         // (probe-confirmed: real reports the outer SELECT's line, no procedure).
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true, InheritedSystemTime = systemTime };
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true, InheritedSystemTime = systemTime, ModuleSchema = view.Schema };
         // The body is part of the referencing statement, not a statement of its
         // own, so its current-time calls read that statement's freeze.
         innerBatch.AdoptStatementFreezeFrom(outerBatch);

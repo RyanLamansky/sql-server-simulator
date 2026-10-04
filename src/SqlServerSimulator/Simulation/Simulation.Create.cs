@@ -359,8 +359,8 @@ partial class Simulation
         }
         else
         {
-            if (!context.Batch.TryResolveSchema(tableName, out schema))
-                throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(tableName.Count >= 2 ? tableName.ImmediateQualifier! : Database.DefaultSchemaName);
+            if (!context.Batch.TryResolveCreateSchema(tableName, out schema))
+                throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(tableName.ImmediateQualifier ?? Database.DefaultSchemaName);
             // This branch is the permanent-table one — a #temp / ##temp target
             // took the branch above and stays legal whatever the session's own
             // database is set to.
@@ -416,8 +416,8 @@ partial class Simulation
                 throw SimulatedSqlException.TemporalTableRequiresPrimaryKey($"{schema!.Database.Name}.{schema.Name}.{tableName.Leaf}");
             if (options.HistoryTable is { } hn)
             {
-                if (!context.Batch.TryResolveSchema(hn, out historySchema))
-                    throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(hn.Count >= 2 ? hn.ImmediateQualifier! : Database.DefaultSchemaName);
+                if (!context.Batch.TryResolveCreateSchema(hn, out historySchema))
+                    throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(hn.ImmediateQualifier ?? Database.DefaultSchemaName);
                 // Naming the table being created reads as a history table with
                 // a period of its own.
                 if (ReferenceEquals(historySchema, schema) && context.Batch.CurrentDatabase.Collation.Equals(hn.Leaf, tableName.Leaf))

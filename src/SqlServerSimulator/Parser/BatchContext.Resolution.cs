@@ -47,9 +47,9 @@ internal sealed partial class BatchContext
     /// <summary>
     /// Resolves <paramref name="name"/> against the right table dictionary —
     /// the connection's <see cref="SimulatedDbConnection.TempTables"/> for
-    /// <c>#foo</c> names, otherwise the named schema (or
-    /// <see cref="Database.DefaultSchemaName"/> for an unqualified reference)
-    /// plus the simulation's flat system-table dict. Centralizes the routing
+    /// <c>#foo</c> names, otherwise the named schema (or the unqualified search,
+    /// <see cref="TryResolveUnqualified"/>) plus the simulation's flat
+    /// system-table dict. Centralizes the routing
     /// rule so callsites (SELECT/INSERT/UPDATE/DELETE/MERGE name lookups,
     /// <c>IDENT_CURRENT</c>, <c>SET IDENTITY_INSERT</c>) stay uniform.
     /// </summary>
@@ -226,8 +226,7 @@ internal sealed partial class BatchContext
     /// <summary>
     /// Schema an unqualified name resolves to while a <c>CREATE SCHEMA
     /// &lt;name&gt; &lt;element&gt; …</c> element list is being bound — the
-    /// schema being created rather than
-    /// <see cref="Database.DefaultSchemaName"/>. Real scopes the elements that
+    /// schema being created rather than the principal's default. Real scopes the elements that
     /// way (probe-confirmed: an element's <c>CREATE TABLE t</c> lands in the new
     /// schema and a sibling <c>GRANT SELECT ON t</c> grants on it), and routing
     /// it through the one place unqualified names bind is what makes creation
@@ -243,22 +242,150 @@ internal sealed partial class BatchContext
     internal string? SchemaCompiledUncreated;
 
     /// <summary>
-    /// Resolves <paramref name="name"/> to the <see cref="Schema"/> a CREATE /
-    /// DROP / TRUNCATE / SELECT-INTO / FROM target lives in. Returns false
-    /// when the schema doesn't exist, when a 3-part name's db segment
-    /// doesn't match any database in <see cref="Simulation.Databases"/>, or
-    /// when the name is 4-part (linked-server names aren't modeled — the
-    /// simulator returns false rather than silently ignoring the server
-    /// segment). 3-part names route to the named database, enabling
-    /// cross-database SELECT / JOIN / catalog-view inspection and DML; the
-    /// returned <see cref="Schema"/> carries its owning <see cref="Database"/>
-    /// via <see cref="Schema.Database"/> so callers (catalog-view enumerators,
-    /// constraint-violation error messages, etc.) can scope correctly.
-    /// A 1-part name resolves to the connection's <see cref="CurrentDatabase"/>
-    /// + <see cref="Database.DefaultSchemaName"/> (always present, so the
-    /// 1-part branch never returns false).
+    /// The schema a module body's unqualified references search before
+    /// <c>dbo</c>: the module's own, whoever calls it — set on the batch a
+    /// procedure, function, trigger or view body binds and runs in. Real binds
+    /// a body's queries and DML (tables, views, functions, sequences, synonyms,
+    /// types) this way, while its DDL, its <c>EXEC</c> of a procedure, the
+    /// catalog functions it calls and the dynamic SQL it runs resolve through
+    /// the caller's default schema, and an unqualified <c>CREATE</c> lands in
+    /// the caller's (probed 2026-10-04 against SQL Server 2025). Null outside
+    /// a module body.
     /// </summary>
-    public bool TryResolveSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
+    public Schema? ModuleSchema;
+
+    /// <summary>
+    /// The schema of the module a <c>CREATE</c> / <c>ALTER</c> statement is
+    /// defining, which the body binds through as <see cref="ModuleSchema"/> when
+    /// the statement checks it. Set as the statement resolves the module's name.
+    /// </summary>
+    public Schema? DefiningModuleSchema;
+
+    /// <summary>
+    /// Set by the dispatch loop for a statement that resolves its names as the
+    /// caller does even inside a module body (see <see cref="ModuleSchema"/>):
+    /// DDL, <c>EXEC</c> and the permission statements.
+    /// </summary>
+    public bool SuspendsModuleSchema;
+
+    /// <summary>
+    /// <see cref="DefaultSchemaName"/> as the batch began, which is what a
+    /// <c>DECLARE</c>'s type binds through: real binds a batch's declarations
+    /// when it compiles, so an <c>EXECUTE AS</c> earlier in the same batch
+    /// doesn't reach them, where a query it recompiles per statement follows
+    /// the switch (probed 2026-10-04 against SQL Server 2025). Taken as the
+    /// batch dispatches its first statement; null before.
+    /// </summary>
+    public string? CompiledDefaultSchemaName;
+
+    /// <summary>
+    /// <see cref="DefaultSchemaName"/> and the identity and database it was
+    /// derived for, null until first asked or seeded.
+    /// </summary>
+    private (string Name, SessionSecurityContext Security, int Generation, Database Database)? defaultSchema;
+
+    /// <summary>
+    /// The effective principal's default schema in <see cref="CurrentDatabase"/>
+    /// (<see cref="SessionSecurityContext.EffectiveDefaultSchemaName"/>) — what an
+    /// unqualified name searches before <c>dbo</c> outside a module body, and
+    /// where an unqualified <c>CREATE</c> lands. Derived once per identity
+    /// (<see cref="SessionSecurityContext.Generation"/>) and database, or seeded
+    /// from the plan-cache key the batch took (<see cref="SeedDefaultSchemaName"/>).
+    /// </summary>
+    public string DefaultSchemaName
+    {
+        get
+        {
+            var security = this.Connection.Security;
+            var database = this.CurrentDatabase;
+            if (this.defaultSchema is { } cached
+                && cached.Generation == security.Generation
+                && ReferenceEquals(cached.Database, database)
+                && ReferenceEquals(cached.Security, security))
+            {
+                return cached.Name;
+            }
+#if DEBUG
+            // A key component (PlanCacheKey.DefaultSchemaName) that
+            // MayCacheDmlPlan re-checks per statement, so a parse reading it
+            // decides nothing a principal with another default schema could
+            // replay.
+            using var excused = PlanCacheCaptureAudit.SuspendPrincipalWatch();
+#endif
+            var name = security.EffectiveDefaultSchemaName(database);
+            this.defaultSchema = (name, security, security.Generation, database);
+            return name;
+        }
+    }
+
+    /// <summary>Takes <paramref name="name"/> as <see cref="DefaultSchemaName"/> for the session's identity and database as they stand.</summary>
+    public void SeedDefaultSchemaName(string name)
+    {
+        var security = this.Connection.Security;
+        this.defaultSchema = (name, security, security.Generation, this.CurrentDatabase);
+    }
+
+    /// <summary>
+    /// The schema of <see cref="CurrentDatabase"/> named <see cref="DefaultSchemaName"/>,
+    /// or null when the principal's <c>DEFAULT_SCHEMA</c> names none —
+    /// <c>SCHEMA_NAME()</c> / <c>SCHEMA_ID()</c> with no argument.
+    /// </summary>
+    public Schema? DefaultSchema =>
+        this.CurrentDatabase.Schemas.TryGetValue(this.DefaultSchemaName, out var schema) ? schema : null;
+
+    /// <summary>
+    /// Resolves <paramref name="name"/> to the <see cref="Schema"/> an object
+    /// reference lives in. Returns false when the schema doesn't exist, when a
+    /// 3-part name's db segment doesn't match any database in
+    /// <see cref="Simulation.Databases"/>, or when the name is 4-part
+    /// (linked-server names aren't modeled — the simulator returns false rather
+    /// than silently ignoring the server segment). 3-part names route to the
+    /// named database, enabling cross-database SELECT / JOIN / catalog-view
+    /// inspection and DML; the returned <see cref="Schema"/> carries its owning
+    /// <see cref="Database"/> via <see cref="Schema.Database"/> so callers
+    /// (catalog-view enumerators, constraint-violation error messages, etc.)
+    /// can scope correctly. A 1-part name — and a <c>db..name</c> one —
+    /// resolves through <see cref="TryResolveUnqualified"/>, to the first of
+    /// the searched schemas holding an object of that name, else <c>dbo</c>.
+    /// A <c>CREATE</c> asks <see cref="TryResolveCreateSchema"/> instead.
+    /// </summary>
+    public bool TryResolveSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema) =>
+        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsObjectNamed(leaf), callerScope: false, types: false, out schema);
+
+    /// <summary>
+    /// <see cref="TryResolveSchema"/> as the caller
+    /// resolves, ignoring <see cref="ModuleSchema"/>: a procedure an
+    /// <c>EXEC</c> names, and the name a catalog function (<c>OBJECT_ID</c>,
+    /// <c>COL_LENGTH</c>, …) reads at run time.
+    /// </summary>
+    public bool TryResolveCallerSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema) =>
+        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsObjectNamed(leaf), callerScope: true, types: false, out schema);
+
+    /// <summary>
+    /// <see cref="TryResolveSchema"/> for a type
+    /// name, searching the type namespace (table and alias types) and binding
+    /// a batch's unqualified type through <see cref="CompiledDefaultSchemaName"/>.
+    /// </summary>
+    public bool TryResolveTypeSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema) =>
+        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsTypeNamed(leaf), callerScope: false, types: true, out schema);
+
+    /// <summary>
+    /// <see cref="TryResolveTypeSchema"/> as the caller resolves a type name
+    /// when the statement runs — <c>DROP TYPE</c>, <c>TYPE_ID</c>,
+    /// <c>TYPEPROPERTY</c> — through the principal's default schema as it
+    /// stands rather than as the batch compiled.
+    /// </summary>
+    public bool TryResolveCallerTypeSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema) =>
+        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.HoldsTypeNamed(leaf), callerScope: true, types: false, out schema);
+
+    /// <summary>
+    /// <see cref="TryResolveTypeSchema"/> for an XML schema collection, whose
+    /// names are a namespace of their own.
+    /// </summary>
+    public bool TryResolveXmlSchemaCollectionSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema) =>
+        this.TryResolveSchemaCore(name, static (candidate, leaf) => candidate.XmlSchemaCollections.ContainsKey(leaf), callerScope: false, types: true, out schema);
+
+    private bool TryResolveSchemaCore(MultiPartName name, Func<Schema, string, bool> holds, bool callerScope, bool types, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
     {
         if (name.Count >= 4)
         {
@@ -278,10 +405,68 @@ internal sealed partial class BatchContext
                 return false;
             }
         }
-        var schemaName = name.Count >= 2
-            ? name.ImmediateQualifier!
-            : this.CreateSchemaElementScope ?? Database.DefaultSchemaName;
-        return database.Schemas.TryGetValue(schemaName, out schema);
+        return name.Count == 1 || name.SchemaOmitted
+            ? this.TryResolveUnqualified(database, name.Leaf, holds, callerScope, types, out schema)
+            : database.Schemas.TryGetValue(name.ImmediateQualifier!, out schema);
+    }
+
+    /// <summary>
+    /// The schema of <paramref name="database"/> an unqualified
+    /// <paramref name="leaf"/> resolves into: the first searched schema
+    /// <paramref name="holds"/> it in, else <c>dbo</c>. Real searches one schema
+    /// before <c>dbo</c> — the module's (<see cref="ModuleSchema"/>) for a
+    /// module body's references, otherwise the principal's default
+    /// (<see cref="DefaultSchemaName"/>) — and an object of any kind there
+    /// shadows <c>dbo</c>'s; a principal's default searches only its own
+    /// database. A <c>CREATE SCHEMA</c> element list searches the new schema
+    /// alone (<see cref="CreateSchemaElementScope"/>).
+    /// </summary>
+    private bool TryResolveUnqualified(Database database, string leaf, Func<Schema, string, bool> holds, bool callerScope, bool types, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema)
+    {
+        if (this.CreateSchemaElementScope is { } elementScope)
+            return database.Schemas.TryGetValue(elementScope, out schema);
+        if (!callerScope && !this.SuspendsModuleSchema && this.ModuleSchema is { } module && ReferenceEquals(module.Database, database))
+        {
+            if (module.SchemaId != Database.DboSchemaId && holds(module, leaf))
+            {
+                schema = module;
+                return true;
+            }
+        }
+        else if (ReferenceEquals(database, this.CurrentDatabase))
+        {
+            // dbo and every principal declaring no default schema share the
+            // interned constant, so they search dbo alone without a lookup.
+            var first = types ? this.CompiledDefaultSchemaName ?? this.DefaultSchemaName : this.DefaultSchemaName;
+            if (!ReferenceEquals(first, Database.DefaultSchemaName) && database.Schemas.TryGetValue(first, out var candidate) && holds(candidate, leaf))
+            {
+                schema = candidate;
+                return true;
+            }
+        }
+        return database.Schemas.TryGetValue(Database.DefaultSchemaName, out schema);
+    }
+
+    /// <summary>
+    /// Resolves the schema a <c>CREATE</c> (or <c>SELECT … INTO</c>) of
+    /// <paramref name="name"/> places its object in: a written schema as
+    /// <see cref="TryResolveSchema"/> finds it, an
+    /// unqualified name the principal's default schema — the caller's even
+    /// inside a module body — or a <c>CREATE SCHEMA</c> element list's new
+    /// schema. A default schema that doesn't exist is Msg 2797 at
+    /// <paramref name="missingDefaultState"/>, ending the batch unless
+    /// <paramref name="statementOnly"/> (probed 2026-10-04 against SQL Server
+    /// 2025).
+    /// </summary>
+    public bool TryResolveCreateSchema(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Schema? schema, byte missingDefaultState = 1, bool statementOnly = false)
+    {
+        if (name.Count != 1 && !name.SchemaOmitted)
+            return this.TryResolveSchema(name, out schema);
+        var database = name.Count == 3 && this.Connection.Simulation.Databases.TryGetValue(name[0], out var named) ? named : this.CurrentDatabase;
+        if (this.CreateSchemaElementScope is { } elementScope)
+            return database.Schemas.TryGetValue(elementScope, out schema);
+        var target = ReferenceEquals(database, this.CurrentDatabase) ? this.DefaultSchemaName : Database.DefaultSchemaName;
+        return database.Schemas.TryGetValue(target, out schema) ? true : throw SimulatedSqlException.DefaultSchemaDoesNotExist(missingDefaultState, terminatesBatch: !statementOnly);
     }
 
     /// <summary>
@@ -297,20 +482,31 @@ internal sealed partial class BatchContext
     public bool TryResolveFunction(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out UserDefinedFunction? function)
     {
         function = null;
-        if (name.Count < 2 || !this.TryResolveSchema(name, out var schema))
+        return name.Count >= 2 && this.TryResolveFunctionCore(name, out function);
+    }
+
+    /// <summary>
+    /// <see cref="TryResolveFunction"/> for a name looked up rather than
+    /// called — <c>OBJECT_ID('f')</c> — which a one-part name reaches through
+    /// the unqualified search.
+    /// </summary>
+    public bool TryResolveFunctionName(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out UserDefinedFunction? function) =>
+        this.TryResolveFunctionCore(name, out function);
+
+    private bool TryResolveFunctionCore(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out UserDefinedFunction? function)
+    {
+        function = null;
+        if (!this.TryResolveSchema(name, out var schema))
             return false;
         if (!schema.Functions.TryGetValue(name.Leaf, out function))
         {
             // Synonym redirect: `SELECT dbo.syn(1)` where `syn FOR f` calls the
             // base scalar function, and `FROM dbo.syn(1)` the base TVF
             // (probe-confirmed both work on real). A base written unqualified
-            // needs the default schema attached, since a 1-part name never
+            // resolves as an unqualified name, since a 1-part name never
             // reaches function resolution at a call site (Msg 195).
-            if (!this.TryRedirectThroughSynonym(schema, name, out var functionBase))
-                return false;
-            if (functionBase.Count == 1)
-                functionBase = new MultiPartName(Database.DefaultSchemaName).WithAddedPart(functionBase.Leaf);
-            return this.TryResolveFunction(functionBase, out function);
+            return this.TryRedirectThroughSynonym(schema, name, out var functionBase)
+                && this.TryResolveFunctionCore(functionBase, out function);
         }
         this.AcquireStatementLock(function.SchemaLock, LockMode.SchemaStability);
         this.CurrentStatement.MarkOpensTransaction();
@@ -325,16 +521,14 @@ internal sealed partial class BatchContext
     /// 2026-09-26 against SQL Server 2025).
     /// </summary>
     public bool TryResolveTableValuedFunction(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out UserDefinedFunction? function) =>
-        (this.TryResolveFunction(name, out function)
-            || (name.Count == 1 && this.TryResolveFunction(new MultiPartName(Database.DefaultSchemaName).WithAddedPart(name.Leaf), out function)))
+        this.TryResolveFunctionCore(name, out function)
         && function is InlineTableValuedFunction or MultiStatementTableValuedFunction or ClrTableValuedFunction;
 
     /// <summary>
     /// Resolves <paramref name="name"/> to a registered <see cref="View"/>.
     /// Unlike scalar UDFs, views accept 1-part names too (probe-confirmed:
-    /// <c>FROM v1</c> works the same as <c>FROM dbo.v1</c>) — the lookup
-    /// falls back to <see cref="Database.DefaultSchemaName"/> for the
-    /// unqualified case. Schema-qualified misses return false; the caller
+    /// <c>FROM v1</c> works the same as <c>FROM dbo.v1</c>) through the
+    /// unqualified search (<see cref="TryResolveUnqualified"/>). Schema-qualified misses return false; the caller
     /// is responsible for routing those to Msg 208.
     /// </summary>
     public bool TryResolveView(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out View? view)
@@ -359,13 +553,16 @@ internal sealed partial class BatchContext
     /// Resolves <paramref name="name"/> to a registered <see cref="Procedure"/>.
     /// Like views (and unlike scalar UDFs), procedures accept 1-part names —
     /// probe-confirmed: <c>EXEC p1</c> finds <c>dbo.p1</c>. The lookup falls
-    /// back to <see cref="Database.DefaultSchemaName"/> for the unqualified
-    /// case; schema-qualified misses return false (caller routes to Msg 2812).
+    /// back to the caller's default schema and then <c>dbo</c> for the
+    /// unqualified case — inside a module body too, where real doesn't search
+    /// the module's schema for a procedure (probed 2026-10-04 against SQL
+    /// Server 2025); schema-qualified misses return false (caller routes to
+    /// Msg 2812).
     /// </summary>
     public bool TryResolveProcedure(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Procedure? procedure)
     {
         procedure = null;
-        if (!this.TryResolveSchema(name, out var schema)
+        if (!this.TryResolveCallerSchema(name, out var schema)
             || !schema.Procedures.TryGetValue(name.Leaf, out procedure))
         {
             return false;
@@ -376,8 +573,8 @@ internal sealed partial class BatchContext
 
     /// <summary>
     /// Resolves <paramref name="name"/> to a registered DML <see cref="Trigger"/>.
-    /// Triggers share the schema's object-name namespace; the lookup falls back
-    /// to <see cref="Database.DefaultSchemaName"/> for the unqualified case.
+    /// Triggers share the schema's object-name namespace; an unqualified name
+    /// searches as the caller does (<see cref="TryResolveCallerSchema"/>).
     /// Used by <c>OBJECT_ID</c> so the canonical
     /// <c>OBJECT_DEFINITION(OBJECT_ID('trg'))</c> idiom resolves. DDL triggers
     /// (database-scoped, not schema-resident) aren't covered here.
@@ -385,7 +582,7 @@ internal sealed partial class BatchContext
     public bool TryResolveTrigger(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Trigger? trigger)
     {
         trigger = null;
-        if (!this.TryResolveSchema(name, out var schema)
+        if (!this.TryResolveCallerSchema(name, out var schema)
             || !schema.Triggers.TryGetValue(name.Leaf, out trigger))
         {
             return false;
@@ -399,13 +596,13 @@ internal sealed partial class BatchContext
     /// <see cref="TableType"/>. Like views / procedures (and unlike scalar
     /// UDFs), table types accept 1-part names: probe-confirmed against SQL
     /// Server 2025 that <c>DECLARE @t MyType</c> finds <c>dbo.MyType</c>.
-    /// The lookup falls back to <see cref="Database.DefaultSchemaName"/> for
-    /// the unqualified case.
+    /// An unqualified name searches the type namespace
+    /// (<see cref="TryResolveTypeSchema"/>).
     /// </summary>
     public bool TryResolveTableType(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TableType? tableType)
     {
         tableType = null;
-        if (!this.TryResolveSchema(name, out var schema)
+        if (!this.TryResolveTypeSchema(name, out var schema)
             || !schema.TableTypes.TryGetValue(name.Leaf, out tableType))
         {
             return false;
@@ -417,9 +614,8 @@ internal sealed partial class BatchContext
     /// <summary>
     /// Resolves <paramref name="name"/> to a registered scalar
     /// <see cref="AliasType"/> (UDDT) in the per-database schema dictionary.
-    /// Like table types, alias types accept 1-part names with fallback to
-    /// <see cref="Database.DefaultSchemaName"/>; 2-part qualified references
-    /// route through <see cref="TryResolveSchema"/>. Used by every type-
+    /// Like table types, alias types accept 1-part names, searching the type
+    /// namespace (<see cref="TryResolveTypeSchema"/>). Used by every type-
     /// reference parser site (CREATE TABLE column, DECLARE @v, procedure /
     /// function / sequence param, ALTER TABLE ALTER COLUMN, OPENJSON, EXEC
     /// dynamic-SQL parameter) to determine whether a parsed type reference
@@ -428,15 +624,16 @@ internal sealed partial class BatchContext
     public bool TryResolveAliasType(MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out AliasType? aliasType)
     {
         aliasType = null;
-        return this.TryResolveSchema(name, out var schema)
+        return this.TryResolveTypeSchema(name, out var schema)
             && schema.AliasTypes.TryGetValue(name.Leaf, out aliasType);
     }
 
     /// <summary>
     /// Resolves <paramref name="name"/> to a registered <see cref="Sequence"/>.
     /// Accepts 1-part names (probe-confirmed: <c>NEXT VALUE FOR seq1</c> finds
-    /// <c>dbo.seq1</c>) with fallback to <see cref="Database.DefaultSchemaName"/>;
-    /// 2-part / 3-part qualified routes through the named schema. Returns false
+    /// <c>dbo.seq1</c>) through the unqualified search
+    /// (<see cref="TryResolveUnqualified"/>); 2-part / 3-part qualified routes
+    /// through the named schema. Returns false
     /// on miss (caller routes to Msg 208 for unknown name or Msg 11726 if the
     /// name resolves to a non-sequence object).
     /// </summary>
@@ -455,7 +652,7 @@ internal sealed partial class BatchContext
     /// <summary>
     /// Resolves <paramref name="name"/> to a <see cref="Synonym"/> — the
     /// synonym object itself, without following it to its base. Accepts 1-part
-    /// names with the usual <see cref="Database.DefaultSchemaName"/> fallback.
+    /// names through the unqualified search (<see cref="TryResolveUnqualified"/>).
     /// Used by <c>OBJECT_ID</c> (which reports a synonym's own id and never
     /// follows it — probe-confirmed <c>OBJECT_ID('syn', 'U')</c> is NULL) and
     /// by the DROP / error paths that need to know a name is a synonym.
@@ -500,7 +697,7 @@ internal sealed partial class BatchContext
     /// naming the base, matching real.
     /// </summary>
     public MultiPartName ExpandSynonym(MultiPartName name) =>
-        this.TryResolveSchema(name, out var schema) && this.TryRedirectThroughSynonym(schema, name, out var baseName)
+        this.TryResolveCallerSchema(name, out var schema) && this.TryRedirectThroughSynonym(schema, name, out var baseName)
             ? baseName
             : name;
 
@@ -720,11 +917,10 @@ internal sealed partial class BatchContext
     /// leaving the cursor on the <em>last</em> consumed name segment (matching
     /// the standard parser-context contract that every parser leaves Token on
     /// its last consumed token). An empty middle segment (<c>db..table</c>,
-    /// <c>tempdb..#foo</c>) substitutes <see cref="Database.DefaultSchemaName"/>
-    /// so <c>db..table</c> resolves identically to <c>db.dbo.table</c> —
-    /// real SQL Server uses the login's default schema (probe-confirmed); the
-    /// simulator has no per-login schema and routes everything through
-    /// <c>dbo</c>, so the substitution is exact for the modeled case.
+    /// <c>tempdb..#foo</c>) substitutes <c>dbo</c> as a placeholder and marks the
+    /// name <see cref="MultiPartName.SchemaOmitted"/>, which the resolvers read
+    /// as an unqualified name in that database — real searches the principal's
+    /// default schema there first (probed 2026-10-04 against SQL Server 2025).
     /// Used everywhere a table-shaped name appears (CREATE / DROP / TRUNCATE
     /// / SELECT-FROM / INSERT / UPDATE / DELETE / MERGE / SET IDENTITY_INSERT)
     /// so the multi-part-name grammar lives in one place. The 5th segment
@@ -797,14 +993,13 @@ internal sealed partial class BatchContext
             }
             if (context.Token is Operator { Character: '.' } && context.MoveNext() && context.Token is Name afterEmpty)
             {
-                // Empty middle segment (`db..table`). Substitute the default
-                // schema name so the resolver sees `db.dbo.table` — real
-                // SQL Server uses the login's default schema; the simulator
-                // has no per-login schema and routes everything through dbo.
-                // The pattern is required for cross-database short-form
-                // queries to land in the correct database (the leading
-                // segment routes to that DB rather than being interpreted
-                // as a schema in the current DB).
+                // Empty middle segment (`db..table`). Substitute dbo and mark
+                // the schema omitted, which the resolvers read as an
+                // unqualified name in that database. The pattern is required
+                // for cross-database short-form queries to land in the
+                // correct database (the leading segment routes to that DB
+                // rather than being interpreted as a schema in the current
+                // DB).
                 name = name.WithAddedPart(Database.DefaultSchemaName).WithAddedPart(afterEmpty.Value);
                 schemaOmitted = true;
                 continue;

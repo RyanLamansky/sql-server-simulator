@@ -219,7 +219,7 @@ partial class Simulation
             foreach (var param in function.Parameters)
                 variables[param.Name] = new VariableSlot(param.Type, param.DeclaredMaxLength, Storage.SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric };
             var attempt = new InlinedScalarCalls(errors: null, body: true);
-            var analysis = new BatchContext(bodyCommand, variables, new UdfFrame(function is ScalarFunction scalar ? scalar.ReturnType : Storage.SqlType.Int32)) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, InlinedCalls = attempt };
+            var analysis = new BatchContext(bodyCommand, variables, new UdfFrame(function is ScalarFunction scalar ? scalar.ReturnType : Storage.SqlType.Int32)) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, InlinedCalls = attempt, ModuleSchema = function.Schema };
             var moduleScope = ModuleDatabaseScope.Enter(connection, function.Schema.Database);
             var savedQuotedIdentifiers = connection.QuotedIdentifiers;
             var savedAnsiNulls = connection.AnsiNulls;

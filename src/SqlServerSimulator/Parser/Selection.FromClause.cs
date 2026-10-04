@@ -926,9 +926,27 @@ internal sealed partial class Selection
         if (context.SecurableSink is { } sink && !name.Leaf.StartsWith('#'))
         {
             var securable = (Schemas.SchemaObject?)synonym ?? obj;
-            sink.Add(new ReferencedSecurable(context.Batch.DatabaseFor(securable), securable.ObjectId, securable.SchemaId, securable.Name, name.ImmediateQualifier ?? Database.DefaultSchemaName, module: moduleBody is null ? null : obj as Schemas.View, moduleBody: moduleBody));
+            var database = context.Batch.DatabaseFor(securable);
+            // An unqualified name reports the schema it resolved into — the
+            // principal's default one, not necessarily dbo.
+            var schemaName = name.Count >= 2 && !name.SchemaOmitted ? name.ImmediateQualifier! : SchemaNameOf(database, securable.SchemaId);
+            sink.Add(new ReferencedSecurable(database, securable.ObjectId, securable.SchemaId, securable.Name, schemaName, module: moduleBody is null ? null : obj as Schemas.View, moduleBody: moduleBody));
         }
         return synonym;
+    }
+
+    /// <summary>The name of <paramref name="database"/>'s schema <paramref name="schemaId"/>.</summary>
+    private static string SchemaNameOf(Database database, int schemaId)
+    {
+        if (schemaId != Database.DboSchemaId)
+        {
+            foreach (var (_, schema) in database.Schemas)
+            {
+                if (schema.SchemaId == schemaId)
+                    return schema.Name;
+            }
+        }
+        return Database.DefaultSchemaName;
     }
 
     /// <summary>

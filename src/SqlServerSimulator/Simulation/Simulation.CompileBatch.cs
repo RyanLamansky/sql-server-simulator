@@ -158,6 +158,7 @@ partial class Simulation
         compile.ForceTempTableScope = executing.ForceTempTableScope;
         // A trigger body binds inserted / deleted against the firing frame.
         compile.TriggerFrame = executing.TriggerFrame;
+        compile.ModuleSchema = executing.ModuleSchema;
         return compile;
     }
 

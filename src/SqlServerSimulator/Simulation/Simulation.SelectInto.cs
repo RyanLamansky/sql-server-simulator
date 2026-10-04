@@ -56,7 +56,7 @@ partial class Simulation
             ? batch.Connection.TempTables
             : isGlobalTemp
                 ? batch.Connection.Simulation.GlobalTempTables
-                : batch.TryResolveSchema(targetName, out schema) ? schema.HeapTables
+                : batch.TryResolveCreateSchema(targetName, out schema) ? schema.HeapTables
                     : throw SimulatedSqlException.InvalidObjectName(targetName);
         // A three-part target lands in the named database, so both the object
         // id and the owning-database stamp come from the resolved schema.
@@ -87,7 +87,7 @@ partial class Simulation
             }
         }
         var destinationDatabase = owningDatabase ?? batch.Connection.Simulation.Databases[TempdbDatabaseName];
-        var destTable = new HeapTable(leaf, destColumns, destinationDatabase.AllocateObjectId())
+        var destTable = new HeapTable(leaf, destColumns, destinationDatabase.AllocateObjectId(), schemaId: schema?.SchemaId ?? Database.DboSchemaId)
         {
             OwningDatabase = owningDatabase,
             UsesAnsiNulls = batch.Connection.AnsiNulls,

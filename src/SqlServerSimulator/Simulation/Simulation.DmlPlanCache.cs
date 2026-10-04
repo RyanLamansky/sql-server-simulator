@@ -119,7 +119,9 @@ partial class Simulation
     /// Any principal qualifies: a plan holds nothing that depends on who parsed
     /// it, since the permission checks and the masks run in the execution half
     /// or replay from the recording as the executing principal (see
-    /// <see cref="PermissionEnforcement.CheckWhileParsing"/>).
+    /// <see cref="PermissionEnforcement.CheckWhileParsing"/>), and the one
+    /// principal-dependent binding — the default schema an unqualified name
+    /// searches — is a key component.
     /// </summary>
     private static bool MayCacheDmlPlan(ParserContext context)
     {
@@ -149,7 +151,10 @@ partial class Simulation
             && key.AnsiNulls == connection.AnsiNulls
             && key.ConcatNullYieldsNull == connection.ConcatNullYieldsNull
             && connection.CurrentDatabase is { } database
-            && string.Equals(key.DatabaseName, database.Name, StringComparison.Ordinal);
+            && string.Equals(key.DatabaseName, database.Name, StringComparison.Ordinal)
+            // An EXECUTE AS earlier in the batch changes the default schema an
+            // unqualified name searches.
+            && string.Equals(key.DefaultSchemaName, batch.DefaultSchemaName, StringComparison.Ordinal);
     }
 
     /// <summary>

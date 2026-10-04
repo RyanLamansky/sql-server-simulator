@@ -817,7 +817,7 @@ partial class Simulation
         // The body binds at CREATE as any module body does — a parameter has
         // no value yet, so `TOP (@n)` is settled from its declared type rather
         // than refused as a NULL count (probed 2026-09-26).
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { CreateTimeBinding = true, LineOffset = bodyLineOffset };
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { CreateTimeBinding = true, LineOffset = bodyLineOffset, ModuleSchema = outerContext.Batch.DefiningModuleSchema };
         SeedTableValuedParameters(innerBatch, outerContext.Batch, parameters);
         // Inspection runs the body's FROM-less projections, so the batch needs
         // the CREATE statement's own current-time freeze to evaluate a
@@ -850,7 +850,7 @@ partial class Simulation
                 innerBatch.ErrorProcedureName = functionName;
                 throw connection.Simulation.WithRecoveredSyntaxErrors(innerBatch, parsePhase, errorToken, command =>
                 {
-                    var recovery = new BatchContext(command, new Dictionary<string, VariableSlot>(variables, BatchContext.VariableNameComparer), new UdfFrame(SqlType.Int32));
+                    var recovery = new BatchContext(command, new Dictionary<string, VariableSlot>(variables, BatchContext.VariableNameComparer), new UdfFrame(SqlType.Int32)) { ModuleSchema = outerContext.Batch.DefiningModuleSchema };
                     SeedTableValuedParameters(recovery, outerContext.Batch, parameters);
                     recovery.AdoptStatementFreezeFrom(outerContext.Batch);
                     return recovery;

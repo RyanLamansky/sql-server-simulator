@@ -68,11 +68,9 @@ partial class Simulation
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        // Resolve via the schema's XmlSchemaCollections dict, falling back
-        // to dbo for an unqualified name (matches the alias-type / table-type
-        // resolution shape).
-        var schemaName = collectionName.ImmediateQualifier ?? Database.DefaultSchemaName;
-        return context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var schema)
+        // Resolve via the schema's XmlSchemaCollections dict, an unqualified
+        // name searching as a type name does.
+        return context.Batch.TryResolveXmlSchemaCollectionSchema(collectionName, out var schema)
             && schema.XmlSchemaCollections.TryGetValue(collectionName.Leaf, out var collection)
             ? collection
             : throw SimulatedSqlException.InvalidObjectName(collectionName);
@@ -115,8 +113,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
-        var schemaName = collectionName.ImmediateQualifier ?? Database.DefaultSchemaName;
-        return context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var schema)
+        return context.Batch.TryResolveXmlSchemaCollectionSchema(collectionName, out var schema)
             && schema.XmlSchemaCollections.TryGetValue(collectionName.Leaf, out var collection)
             ? (collection, document)
             : throw SimulatedSqlException.XmlSchemaCollectionNotInMetadata(collectionName.Leaf);
@@ -205,9 +202,9 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        var schemaName = name.ImmediateQualifier ?? Database.DefaultSchemaName;
-        if (!context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var ownerSchema))
-            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schemaName);
+        if (!context.Batch.TryResolveCreateSchema(name, out var ownerSchema, missingDefaultState: 2))
+            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(name.ImmediateQualifier ?? Database.DefaultSchemaName);
+        var schemaName = ownerSchema.Name;
 
         // Dual DDL gate — and this one runs the two halves in the opposite order
         // from CREATE TABLE / SYNONYM / TYPE: real checks ALTER on the target
@@ -273,8 +270,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        var schemaName = name.ImmediateQualifier ?? Database.DefaultSchemaName;
-        if (!context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var ownerSchema)
+        if (!context.Batch.TryResolveXmlSchemaCollectionSchema(name, out var ownerSchema)
             || !ownerSchema.XmlSchemaCollections.TryGetValue(name.Leaf, out var collection)
             || !PermissionEnforcement.HasSchemaAlter(context.Batch, ownerSchema))
         {
@@ -297,7 +293,7 @@ partial class Simulation
             collection.XsdText = previousText;
             collection.ModifyDate = previousModified;
         });
-        RecordDdlEvent(context, "ALTER_XML_SCHEMA_COLLECTION", schemaName, name.Leaf, "XML SCHEMA COLLECTION");
+        RecordDdlEvent(context, "ALTER_XML_SCHEMA_COLLECTION", ownerSchema.Name, name.Leaf, "XML SCHEMA COLLECTION");
         return true;
     }
 
@@ -447,9 +443,9 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        var schemaName = name.ImmediateQualifier ?? Database.DefaultSchemaName;
-        if (!context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var ownerSchema))
+        if (!context.Batch.TryResolveXmlSchemaCollectionSchema(name, out var ownerSchema))
             throw SimulatedSqlException.InvalidObjectName(name);
+        var schemaName = ownerSchema.Name;
         // Real gates the drop on ALTER of the owning schema or CONTROL on the
         // collection, and reports Msg 15151 naming the collection's leaf.
         if (!ownerSchema.XmlSchemaCollections.TryGetValue(name.Leaf, out var existing))

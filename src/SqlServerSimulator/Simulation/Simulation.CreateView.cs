@@ -141,8 +141,23 @@ partial class Simulation
             ?? throw SimulatedSqlException.SyntaxErrorNear(context);
         context.BindingViewDefinition = true;
         Selection bodySelection;
-        using (ParserScope.Enter(ref context.DefiningModuleQuery, DefiningModuleQuery.View))
-            bodySelection = ParseBodyQuery(context, rejectsNextValueFor: true, bodyParens > 0 ? QueryPosition.ParenthesizedModuleBody : QueryPosition.Statement);
+        // The body binds its unqualified names through the view's schema, as
+        // it will each time it is read.
+        var batch = context.Batch;
+        var enclosingModuleSchema = batch.ModuleSchema;
+        var enclosingSuspension = batch.SuspendsModuleSchema;
+        batch.ModuleSchema = schema;
+        batch.SuspendsModuleSchema = false;
+        try
+        {
+            using (ParserScope.Enter(ref context.DefiningModuleQuery, DefiningModuleQuery.View))
+                bodySelection = ParseBodyQuery(context, rejectsNextValueFor: true, bodyParens > 0 ? QueryPosition.ParenthesizedModuleBody : QueryPosition.Statement);
+        }
+        finally
+        {
+            batch.ModuleSchema = enclosingModuleSchema;
+            batch.SuspendsModuleSchema = enclosingSuspension;
+        }
         context.BindingViewDefinition = false;
         // A CREATE SCHEMA's next element is no part of this body. A refusal
         // leaves the rule set for the recovery that follows it.

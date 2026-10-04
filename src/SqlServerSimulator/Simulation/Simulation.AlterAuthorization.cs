@@ -259,7 +259,7 @@ partial class Simulation
         var database = context.CurrentDatabase;
         if (name.Count == 1 && IsSystemTypeName(name.Leaf))
             throw SimulatedSqlException.UserDoesNotHavePermission();
-        if (name.Count > 2 || !context.Batch.TryResolveSchema(name, out var schema))
+        if (name.Count > 2 || !context.Batch.TryResolveCallerTypeSchema(name, out var schema))
             throw SimulatedSqlException.CannotFindType(name.Leaf);
         _ = schema.TableTypes.TryGetValue(name.Leaf, out var tableType);
         _ = schema.AliasTypes.TryGetValue(name.Leaf, out var aliasType);
@@ -306,7 +306,7 @@ partial class Simulation
     private static void ChangeXmlSchemaCollectionOwner(ParserContext context, MultiPartName name, string? ownerName)
     {
         var database = context.CurrentDatabase;
-        if (name.Count > 2 || !context.Batch.TryResolveSchema(name, out var schema)
+        if (name.Count > 2 || !context.Batch.TryResolveXmlSchemaCollectionSchema(name, out var schema)
             || !schema.XmlSchemaCollections.TryGetValue(name.Leaf, out var collection)
             || !PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassXmlSchemaCollection, collection.Id, schema.SchemaId))
         {

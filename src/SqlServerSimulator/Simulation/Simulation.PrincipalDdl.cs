@@ -193,6 +193,8 @@ partial class Simulation
         {
             throw SimulatedSqlException.CannotAlterUser(userName);
         }
+        if (defaultSchema is not null && user.PrincipalId == Database.DboPrincipalId)
+            throw SimulatedSqlException.CannotAlterDatabaseOwnerUser(user.Name);
         RecordSecurityUndo(context, database);
         if (newName is not null)
             RenamePrincipal(database, user, newName);

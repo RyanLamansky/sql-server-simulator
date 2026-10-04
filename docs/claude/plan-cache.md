@@ -256,7 +256,13 @@ The per-principal state a parse meets, and where each piece lives:
 | A `NEXT VALUE FOR`'s `UPDATE`, metadata visibility in the catalog views and `OBJECT_ID`, the identity scalars | Nothing | When the expression runs |
 | `EXECUTE AS` / application-role identity | Nothing — the capture audit refuses a `SessionSecurityContext` | Read from the executing session |
 | A table's row-level security predicates | Nothing — the table, whose predicates each execution looks up | As the statement reads or writes, its `USER_NAME()` / `SESSION_CONTEXT` read then ([`row-level-security.md`](row-level-security.md#plan-cache-and-cost)) |
-| Name resolution | Objects resolved through `dbo` for an unqualified name | The same for every principal, since the default schema resolves nothing yet ([`permissions.md`](permissions.md#known-gaps)) |
+| Name resolution | Objects an unqualified name resolved to through the principal's default schema | While parsing, through the default schema the key holds (below) |
+
+The default schema an unqualified name searches before `dbo` ([`schemas.md`](schemas.md#default-schemas-and-unqualified-names)) is the one binding a plan takes from its principal, so it is a `PlanCacheKey` component: principals sharing a default schema — `dbo` and every user declaring none, the common case — share plans, and a principal with another parses its own.
+The batch takes it from the key (`BatchContext.SeedDefaultSchemaName`) rather than reading the session as it parses, and `MayCacheDmlPlan` compares it per statement, since an `EXECUTE AS` earlier in the batch changes it; a recomputation while a parse is watched is excused for the same reason.
+The schema name a plan records for a permission message (`ReferencedSecurable`) is the resolved schema's.
+Real keys the same way — the `user_id` plan attribute holds the default schema's id, not the user's, so two users sharing a default schema reuse one plan (probed 2026-10-04 against SQL Server 2025) — but shares a text naming nothing unqualified across every default schema (`user_id` -2), which the simulator doesn't distinguish.
+`PlanCacheDefaultSchemaTests` (Tests.Internal) runs principals with different and with shared default schemas through one text in alternation, and an `EXECUTE AS` mid-batch.
 
 `MayCacheDmlPlan` once kept DML plans to `dbo` and to simulations with no masked column, because `UPDATE` and `MERGE` settled their write masks for the parsing principal and `INSERT` checked its target as it parsed; with both following the table, every principal caches.
 The `SELECT` cache never had such a gate, and a `CHANGETABLE` reference was the one parse-time check the principal-read watch found it skipping on replay: a plan `dbo` compiled answered a principal without `VIEW CHANGE TRACKING` with rows where a fresh parse refuses it.

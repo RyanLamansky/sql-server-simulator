@@ -75,11 +75,26 @@ public sealed partial class Simulation
     /// fence most visibly. Anything but the default READ COMMITTED therefore
     /// skips both the lookup and the promotion and re-parses per execution.
     /// </para></summary>
-    internal readonly struct PlanCacheKey(string commandText, string databaseName, string parameterSignature, bool quotedIdentifiers, DateOrder dateFormat, bool ansiNulls, bool concatNullYieldsNull)
+    internal readonly struct PlanCacheKey(string commandText, string databaseName, string defaultSchemaName, string parameterSignature, bool quotedIdentifiers, DateOrder dateFormat, bool ansiNulls, bool concatNullYieldsNull)
         : IEquatable<PlanCacheKey>
     {
         public readonly string CommandText = commandText;
         public readonly string DatabaseName = databaseName;
+
+        /// <summary>
+        /// The effective principal's default schema
+        /// (<see cref="BatchContext.DefaultSchemaName"/>), which an unqualified
+        /// name searches before <c>dbo</c>: a plan answers only principals
+        /// whose default schema is the one it was parsed under, so principals
+        /// sharing one — <c>dbo</c> the common case — share plans. Real keys
+        /// its plan cache the same way, as the <c>user_id</c> plan attribute,
+        /// which holds the default schema's id rather than the user's (probed
+        /// 2026-10-04 against SQL Server 2025: two users defaulting to one
+        /// schema reuse one plan); real shares a text naming nothing
+        /// unqualified across every schema (<c>user_id</c> -2), which the
+        /// simulator doesn't distinguish.
+        /// </summary>
+        public readonly string DefaultSchemaName = defaultSchemaName;
         public readonly string ParameterSignature = parameterSignature;
         public readonly bool QuotedIdentifiers = quotedIdentifiers;
 
@@ -107,12 +122,13 @@ public sealed partial class Simulation
             && this.ConcatNullYieldsNull == other.ConcatNullYieldsNull
             && string.Equals(this.CommandText, other.CommandText, StringComparison.Ordinal)
             && string.Equals(this.DatabaseName, other.DatabaseName, StringComparison.Ordinal)
+            && string.Equals(this.DefaultSchemaName, other.DefaultSchemaName, StringComparison.Ordinal)
             && string.Equals(this.ParameterSignature, other.ParameterSignature, StringComparison.Ordinal);
 
         public override bool Equals(object? obj) => obj is PlanCacheKey other && this.Equals(other);
 
         public override int GetHashCode() =>
-            HashCode.Combine(this.CommandText, this.DatabaseName, this.ParameterSignature, this.QuotedIdentifiers, this.DateFormat, this.AnsiNulls, this.ConcatNullYieldsNull);
+            HashCode.Combine(this.CommandText, this.DatabaseName, this.DefaultSchemaName, this.ParameterSignature, this.QuotedIdentifiers, this.DateFormat, this.AnsiNulls, this.ConcatNullYieldsNull);
     }
 
     /// <summary>Cache entry: the batch's parsed <see cref="Selection"/>s in
@@ -152,7 +168,7 @@ public sealed partial class Simulation
         if (Volatile.Read(ref this.SchemaVersion) != batch.PlanCacheSchemaVersion) return;
         // A cacheable batch is SELECTs only (no SET can be among them), so the
         // connection's live setting still equals the value at parse.
-        var key = new PlanCacheKey(text, dbName, paramSig, batch.Connection.QuotedIdentifiers, batch.Connection.DateFormat, batch.Connection.AnsiNulls, batch.Connection.ConcatNullYieldsNull);
+        var key = new PlanCacheKey(text, dbName, batch.PlanCacheKey!.Value.DefaultSchemaName, paramSig, batch.Connection.QuotedIdentifiers, batch.Connection.DateFormat, batch.Connection.AnsiNulls, batch.Connection.ConcatNullYieldsNull);
         // Refresh-in-place semantics: when a DDL has invalidated the prior
         // entry under this key, the indexer overwrites without growing the
         // dictionary. The capacity cap therefore only gates fresh keys, not
@@ -274,7 +290,7 @@ public sealed partial class Simulation
                 // reports its time has to run.
                 && !connection.StatisticsIo && !connection.StatisticsTime
                 && BuildPlanCacheParameterSignature(command) is { } sig
-                    ? new PlanCacheKey(command.CommandText, currentDb.Name, sig, connection.QuotedIdentifiers, connection.DateFormat, connection.AnsiNulls, connection.ConcatNullYieldsNull)
+                    ? new PlanCacheKey(command.CommandText, currentDb.Name, connection.Security.EffectiveDefaultSchemaName(currentDb), sig, connection.QuotedIdentifiers, connection.DateFormat, connection.AnsiNulls, connection.ConcatNullYieldsNull)
                     : null;
 
     private static string? BuildPlanCacheParameterSignature(SimulatedDbCommand command)

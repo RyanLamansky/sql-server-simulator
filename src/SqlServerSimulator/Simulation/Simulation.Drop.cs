@@ -562,7 +562,7 @@ partial class Simulation
     {
         if (context.Batch.IsSkipping)
             return;
-        var schema = context.Batch.TryResolveSchema(name, out var resolved) ? resolved : null;
+        var schema = context.Batch.TryResolveCallerTypeSchema(name, out var resolved) ? resolved : null;
         if (schema is not null && schema.AliasTypes.TryGetValue(name.Leaf, out var alias))
         {
             schema.Database.RejectWriteWhenReadOnly();

@@ -439,6 +439,8 @@ partial class Simulation
                     ContinueOnError = ContinuesCalledBatch(outerBatch),
                     OwnershipChainOwnerId = chainOwner,
                     ModuleObjectId = objectId,
+                    // A DDL trigger has no schema of its own.
+                    ModuleSchema = frame.Trigger?.Schema,
                     // The body writes inside the firing statement's
                     // transaction, so a system-versioned table it changes
                     // takes that statement's time (probed 2026-10-04 against

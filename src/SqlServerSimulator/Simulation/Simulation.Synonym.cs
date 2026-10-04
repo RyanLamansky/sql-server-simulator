@@ -31,8 +31,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (!context.Batch.TryResolveSchema(synonymName, out var schema))
-            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(synonymName.Count >= 2 ? synonymName.ImmediateQualifier! : Database.DefaultSchemaName);
+        if (!context.Batch.TryResolveCreateSchema(synonymName, out var schema, statementOnly: true))
+            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(synonymName.ImmediateQualifier ?? Database.DefaultSchemaName);
 
         schema.Database.RejectWriteWhenReadOnly();
 

@@ -698,7 +698,7 @@ partial class Simulation
         {
             // A name only a type answers renames the type (probed 2026-10-04
             // against SQL Server 2025).
-            return ObjectId.TryParseObjectName(objName, out var typeName) && typeName.Count <= 2 && batch.TryResolveSchema(typeName, out var typeSchema)
+            return ObjectId.TryParseObjectName(objName, out var typeName) && typeName.Count <= 2 && batch.TryResolveCallerTypeSchema(typeName, out var typeSchema)
                 && (typeSchema.AliasTypes.ContainsKey(typeName.Leaf) || typeSchema.TableTypes.ContainsKey(typeName.Leaf))
                 ? "userdatatype"
                 : null;

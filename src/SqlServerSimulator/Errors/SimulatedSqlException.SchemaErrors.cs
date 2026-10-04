@@ -525,6 +525,16 @@ partial class SimulatedSqlException
         new($"The specified schema name \"{schemaName}\" either does not exist or you do not have permission to use it.", 2760, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
+    /// Msg 2797: an unqualified <c>CREATE</c> (or <c>SELECT … INTO</c>) by a
+    /// principal whose <c>DEFAULT_SCHEMA</c> names no schema. Ends the batch
+    /// for a table, type, sequence or XML schema collection (state 2), though
+    /// a <c>TRY</c> can still catch it, and only the statement for a module or
+    /// a synonym (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DefaultSchemaDoesNotExist(byte state, bool terminatesBatch) =>
+        new("The default schema does not exist.", 2797, 16, state) { TerminatesBatch = terminatesBatch };
+
+    /// <summary>
     /// Mimics SQL Server error 2705: <c>SELECT … INTO target</c> produced a
     /// projection with two columns of the same name. Wording probe-confirmed
     /// against SQL Server 2025: the table name is the SELECT INTO target

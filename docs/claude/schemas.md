@@ -2,7 +2,7 @@
 
 ## Schemas (`CREATE SCHEMA` + schema-qualified resolution)
 `CREATE SCHEMA <name>` adds an entry to `Database.Schemas`; subsequent two-part references (`SELECT * FROM audit.t`, `INSERT audit.t VALUES (…)`, every DML / DDL targeting a table) route through it.
-Unqualified references fall back to `Database.DefaultSchemaName` (`"dbo"`), which every `Database` ships pre-populated with.
+Unqualified references search the principal's default schema and then `dbo` — see [Default schemas](#default-schemas-and-unqualified-names).
 The 9 table-lookup sites (Selection FROM, Insert/Update/Delete/Merge targets, CREATE / DROP / TRUNCATE, SET IDENTITY_INSERT, IDENT_CURRENT, SELECT INTO) all share one parser (`BatchContext.ParseObjectName`) and one resolver pair (`BatchContext.TryResolveTable` for lookup, `BatchContext.TryResolveSchema` for CREATE-shape callsites that need the dict).
 Every `Database` ships with three pre-populated schemas at conventional ids: `dbo=1`, `INFORMATION_SCHEMA=3`, `sys=4`.
 User schemas allocate ids starting at 5 from `Database.AllocateSchemaId()` (a counter seeded so the next-allocated value is 5).
@@ -14,7 +14,7 @@ Probed against SQL Server 2025.
 - **Three-part `db.schema.t`** routes the db segment through `Simulation.Databases` (case-insensitive).
   Missing database surfaces as Msg 208 / 3701 / 4701 per callsite (same as a missing table); existing-but-other-database resolves cross-DB for reads (SELECT / JOIN / catalog views) and for writes (see [Cross-database writes](#cross-database-writes) below).
   **Four-part `server.db.schema.t`** always returns false (linked-server names aren't modeled — real SQL Server raises Msg 7202 for unknown server; the simulator surfaces Msg 208 instead).
-  Empty middle segment (`db..table`) is substituted with `dbo` at parse time so `db..table` resolves identically to `db.dbo.table` — real SQL Server uses the login's default schema; the simulator has no per-login schema and routes everything through `dbo`.
+  Empty middle segment (`db..table`) parses as `db.dbo.table` marked `SchemaOmitted`, which the resolvers read as an unqualified name in that database, so it searches the principal's default schema first there as real does.
   This makes cross-database short-form queries (`SELECT * FROM sales..Customer`) land in the correct database; temp-table forms (`tempdb..#foo`) still work because `TryResolveTable`'s `IsLocalTempName` check operates on the leaf regardless of qualifier.
 - **`CREATE TABLE schema.t`** where `schema` doesn't exist → **Msg 2760** (target schema for the create must already exist).
   Distinct from FROM / INSERT / UPDATE / DELETE / MERGE / DROP / TRUNCATE access which use 208 / 3701 / 4701 respectively.
@@ -46,6 +46,41 @@ The compile-time walk also **downgrades**: a scope whose own sources expose the 
 `Selection.QualifierIsDmlTarget` is that check, applied ahead of the leaf lookup in `TargetColumnTypeResolver` and in `ResolveUpdateTargetColumnType` (the SET list's parse-time scope).
 
 Not yet: the SET list's own **left-hand side** (`UPDATE t SET zz.id = 5`) drops its qualifier at the parse, and an `INSERT … VALUES (zz.id)` expression reports 207 — both are Msg 4104 on real.
+
+## Default schemas and unqualified names
+
+Probed 2026-10-04 against SQL Server 2025 (677 differential cases, users without logins switched with `EXECUTE AS USER`, one login through `EXECUTE AS LOGIN`, application roles).
+
+**Outside a module**, an unqualified name searches the effective principal's default schema, then `dbo` — for tables, views, table-valued functions, procedures, sequences, synonyms, triggers, table and alias types, XML schema collections, `db..name`, the DDL targets (`DROP`, `ALTER TABLE`, `TRUNCATE`, `CREATE INDEX`, `sp_rename`) and the catalog functions (`OBJECT_ID`, `TYPE_ID`, `TYPEPROPERTY`, `COL_LENGTH`, `HAS_PERMS_BY_NAME`).
+A scalar function still needs two parts at a call site (Msg 195).
+- An object of **any kind** in the default schema shadows `dbo`'s: a procedure `s.x` makes `SELECT * FROM x` Msg 208 though `dbo.x` is a table, and `EXEC x` naming a table `s.x` is real's Msg 2809.
+  Types are a namespace of their own, as are XML schema collections.
+- A **permission** refusal on the default schema's object doesn't fall back to `dbo`'s: `DENY SELECT ON s.t` makes `SELECT * FROM t` Msg 229 naming schema `s`.
+- The default schema is `dbo` for `dbo` (Msg 15150 refuses `ALTER USER dbo WITH DEFAULT_SCHEMA`), `guest` for `guest`, the declared one for a user or application role (stored as written, so `[S]` resolves `s`), and `dbo` when none was declared — a `db_owner` member keeps its own.
+  `SessionSecurityContext.EffectiveDefaultSchemaName` is the one derivation.
+- A default schema that **doesn't exist** (declared so, or dropped since) makes `SCHEMA_NAME()` / `SCHEMA_ID()` NULL and leaves references searching `dbo` alone, while an unqualified `CREATE` or `SELECT … INTO` is Msg 2797 — ending the batch for a table, type, sequence or XML schema collection (state 2 for the last), only the statement for a module or synonym, a module's attributed to the module.
+  A `sys` or `INFORMATION_SCHEMA` default reads back from `SCHEMA_NAME()` and resolves user objects through `dbo`.
+- An unqualified `CREATE` lands in the default schema (`BatchContext.TryResolveCreateSchema`); a trigger lands in its table's schema whatever the default.
+- **When it binds**: a query or DML statement follows an `EXECUTE AS` earlier in its own batch — real recompiles a statement whose plan depends on the default schema — while a `DECLARE`'s type and a `CREATE TABLE` column's alias type bind as the batch compiles, before that `EXECUTE AS` has run (`BatchContext.CompiledDefaultSchemaName`).
+  Dynamic SQL compiles when it runs, so it follows.
+
+**Inside a module** (procedure, function of any kind, trigger, view), the body's queries and DML — tables, views, table-valued functions, sequences, synonyms, declared types, `INSERT` / `UPDATE` / `DELETE` / `MERGE` targets, a cursor's query — search the **module's** schema, then `dbo`, whoever calls it: `s2.p` reads `s2.t2`, and `dbo.p` reads `dbo.t` even for a caller defaulting to a schema that holds a `t`.
+Everything else resolves as the caller does: the procedure an `EXEC` names, the DDL statements (`CREATE` placement included, so `s2.p`'s `CREATE TABLE x` lands in the caller's default schema and is Msg 2797 for a caller whose default doesn't exist), the catalog functions, and dynamic SQL; `SCHEMA_NAME()` reads the caller's default schema, which a module's `WITH EXECUTE AS` changes.
+`BatchContext.ModuleSchema` carries the module's schema on every module body's batch — set at each invocation and `CREATE`-time bind site — and the dispatch loop sets `SuspendsModuleSchema` for the statements that resolve as the caller.
+
+**The plan cache** keys on the default schema ([`plan-cache.md`](plan-cache.md#principal-independence)).
+
+### Divergences
+
+- A query's types follow the batch compile (`OPENJSON … WITH (a al)` after an `EXECUTE AS` binds `al` through the default schema the batch began with), where real recompiles the statement and binds through the switched one.
+- `sp_setapprole` doesn't make real recompile a statement it has a plan for, so an unqualified name real had bound to `dbo` before the role was set stays bound there while the simulator resolves it through the role's default schema.
+- `REVERT` inside dynamic SQL pops an `EXECUTE AS` frame the enclosing batch pushed, where real leaves it.
+
+### Not modeled yet
+
+- The six dependency surfaces resolve a module body's one-part names through `dbo`, not the module's schema.
+- `guest`'s schema isn't materialized (only its `sys.schemas` row is), so a `guest` default reads `SCHEMA_NAME()` NULL and its `CREATE` is Msg 2797; `EXECUTE AS USER = 'guest'` is refused besides.
+- `EXEC` of a non-procedure in the default schema is Msg 2812, where real's is Msg 2809 naming the kind, and a reference meeting an object of the wrong kind there reports Msg 208 at state 1, real's at state 224.
 
 ## `USE <db>`
 `USE <name>` (bare or bracketed) switches the connection's `CurrentDatabase` to the named database.
@@ -255,8 +290,8 @@ A NULL on any argument propagates NULL.
   Resolution is attempted last, after tables, so a name a table also holds still answers the table's id.
 
 - **Runtime-evaluated arguments**: `DECLARE @n nvarchar(100) = 'foo'; SELECT OBJECT_ID(@n)` works — both args are full `Expression`s.
-- **Unqualified function names resolve against the default schema.** `BatchContext.TryResolveFunction` takes 2-/3-part names only, because a bare `f()` at a *call* site is Msg 195 on real; `OBJECT_ID` is a name lookup rather than a call, and real returns the id for `OBJECT_ID('f')`, so the 1-part form is qualified with `dbo` before the resolver is asked.
-  Tables, procedures and views already resolved unqualified — this was specific to the function namespace, and it silently broke the common `OBJECTPROPERTY(OBJECT_ID('f'), …)` idiom, which reported NULL rather than the property.
+- **Unqualified function names resolve as any unqualified name does.** `BatchContext.TryResolveFunction` takes 2-/3-part names only, because a bare `f()` at a *call* site is Msg 195 on real; `OBJECT_ID` is a name lookup rather than a call, and real returns the id for `OBJECT_ID('f')`, so it asks `TryResolveFunctionName`, which takes the 1-part form through the default-schema search.
+  Skipping the function namespace silently broke the common `OBJECTPROPERTY(OBJECT_ID('f'), …)` idiom, which reported NULL rather than the property.
 - **Temp-table divergence**: `OBJECT_ID('#foo')` resolves the session's `#foo` directly because `BatchContext.TryResolveTable` routes `#` leaves to the connection's temp dict regardless of qualifier.
   Real SQL Server requires the explicit `tempdb..#foo` three-part form (since unqualified resolution targets the current DB, not tempdb).
   The simulator's existing temp-routing simplification carries through; `OBJECT_ID('tempdb..#foo')` also works (probe-confirmed real behavior).
@@ -333,7 +368,7 @@ Probe-confirmed against SQL Server 2025:
 
 **`SCHEMA_NAME([id])`** (`Parser/Expressions/SchemaName.cs`): the `int → name` inverse of `SCHEMA_ID`.
 With an int `schema_id` argument, walks `Database.Schemas.Values` for the matching `Schema.SchemaId` and returns its `Name`.
-No-arg returns `Database.DefaultSchemaName` (`"dbo"`) — matches real SQL Server's "default schema for the current user" behavior (single-principal simulator).
+No-arg returns the effective principal's default schema, NULL when its `DEFAULT_SCHEMA` names none (see [Default schemas](#default-schemas-and-unqualified-names)).
 NULL arg / missing id / negative id → NULL.
 Result type: `sysname` (nvarchar(128)).
 

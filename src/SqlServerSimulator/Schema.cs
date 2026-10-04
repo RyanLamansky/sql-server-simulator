@@ -222,6 +222,26 @@ internal sealed class Schema
     public bool HasNameInSharedNamespace(string leaf) => this.TryFindInSharedNamespace(leaf, out _) || this.HasConstraintNamed(leaf);
 
     /// <summary>
+    /// True when an object of the shared namespace is named <paramref name="leaf"/>
+    /// — the dictionary-lookup form of <see cref="TryFindInSharedNamespace"/>,
+    /// asked of a principal's default schema before an unqualified name falls
+    /// back to <c>dbo</c>: an object of any kind there shadows <c>dbo</c>'s, so
+    /// <c>EXEC x</c> naming a table in the default schema is refused rather than
+    /// running <c>dbo.x</c> (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    public bool HoldsObjectNamed(string leaf) =>
+        this.HeapTables.ContainsKey(leaf) || this.Views.ContainsKey(leaf) || this.Functions.ContainsKey(leaf)
+        || this.Procedures.ContainsKey(leaf) || this.Sequences.ContainsKey(leaf) || this.Synonyms.ContainsKey(leaf)
+        || this.Triggers.ContainsKey(leaf) || this.Defaults.ContainsKey(leaf) || this.Rules.ContainsKey(leaf)
+        || this.SecurityPolicies.ContainsKey(leaf);
+
+    /// <summary>
+    /// True when a table type or alias type is named <paramref name="leaf"/> —
+    /// the type namespace's <see cref="HoldsObjectNamed"/>.
+    /// </summary>
+    public bool HoldsTypeNamed(string leaf) => this.TableTypes.ContainsKey(leaf) || this.AliasTypes.ContainsKey(leaf);
+
+    /// <summary>
     /// True when a key, check, foreign-key or default constraint on one of this
     /// schema's tables is named <paramref name="leaf"/>.
     /// </summary>

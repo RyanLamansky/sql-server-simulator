@@ -4,11 +4,11 @@ namespace SqlServerSimulator.Parser.Expressions;
 
 /// <summary>
 /// SQL <c>SCHEMA_NAME([id])</c>: returns the name of the schema with the
-/// given <c>schema_id</c>, or the caller's default schema name (<c>dbo</c>)
-/// when called with no argument. Probe-confirmed against SQL Server 2025
-/// (2026-05-13): no-arg returns <c>dbo</c> for the user the simulator
-/// emulates; a non-existent or negative id returns NULL; a NULL argument
-/// returns NULL. Result type is <see cref="Expression.MetadataNameType"/> (<c>nvarchar(128)</c> /
+/// given <c>schema_id</c>, or with no argument the effective principal's
+/// default schema — the caller's inside a module body too, and NULL when its
+/// <c>DEFAULT_SCHEMA</c> names no schema (probed 2026-10-04 against SQL Server
+/// 2025). A non-existent or negative id returns NULL; a NULL argument returns
+/// NULL. Result type is <see cref="Expression.MetadataNameType"/> (<c>nvarchar(128)</c> /
 /// nvarchar(128)) — mirrors <see cref="SchemaId"/>'s int-result inverse.
 /// </summary>
 internal sealed class SchemaName : Expression
@@ -27,7 +27,11 @@ internal sealed class SchemaName : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         if (this.idArg is null)
-            return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), Database.DefaultSchemaName);
+        {
+            return runtime.Batch.DefaultSchema is { } defaultSchema
+                ? SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), defaultSchema.Name)
+                : SqlValue.Null(MetadataNameType(runtime.Batch));
+        }
         var idValue = this.idArg.Run(runtime);
         if (idValue.IsNull)
             return SqlValue.Null(MetadataNameType(runtime.Batch));

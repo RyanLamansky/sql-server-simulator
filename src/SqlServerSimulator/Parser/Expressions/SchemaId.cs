@@ -5,10 +5,9 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <summary>
 /// SQL <c>SCHEMA_ID([name])</c>: returns the int schema id of the named
 /// schema (matching <c>sys.schemas.schema_id</c>), or the caller's default
-/// schema id when called with no argument. The simulator has no user model,
-/// so the no-arg form always returns <see cref="Database.DboSchemaId"/>
-/// (=1) — matching real SQL Server's <c>dbo</c>-default behavior for the
-/// user we ship with. Probe-confirmed against SQL Server 2025 (2026-05-11)
+/// schema id when called with no argument — the effective principal's, NULL
+/// when its <c>DEFAULT_SCHEMA</c> names no schema (probed 2026-10-04 against
+/// SQL Server 2025). Probe-confirmed against SQL Server 2025 (2026-05-11)
 /// that built-in schemas land at conventional ids: <c>dbo=1</c>,
 /// <c>INFORMATION_SCHEMA=3</c>, <c>sys=4</c>; user schemas start at 5.
 /// NULL name or unknown name → NULL.
@@ -31,7 +30,7 @@ internal sealed class SchemaId : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         if (this.nameArg is null)
-            return SqlValue.FromInt32(Database.DboSchemaId);
+            return runtime.Batch.DefaultSchema is { } defaultSchema ? SqlValue.FromInt32(defaultSchema.SchemaId) : SqlValue.Null(SqlType.Int32);
         var nameValue = this.nameArg.Run(runtime);
         if (nameValue.IsNull)
             return SqlValue.Null(SqlType.Int32);

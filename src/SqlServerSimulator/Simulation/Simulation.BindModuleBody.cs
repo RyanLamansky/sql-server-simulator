@@ -114,6 +114,7 @@ partial class Simulation
 
         var bindErrors = new List<SimulatedSqlException>();
         var bindBatch = buildBindBatch(bodyCommand);
+        bindBatch.ModuleSchema = outerContext.Batch.DefiningModuleSchema;
         bindBatch.FunctionBodyShape = shape;
         bindBatch.LineOffset = bodyLineOffset;
         bindBatch.ErrorProcedureName = moduleName;
@@ -441,7 +442,7 @@ partial class Simulation
                     variables[param.Name] = new VariableSlot(param.Type, param.DeclaredMaxLength, SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric };
             }
             var frame = new UdfFrame(function.ReturnType) { AnalyzesReturnMask = true };
-            var analysis = new BatchContext(bodyCommand, variables, frame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true };
+            var analysis = new BatchContext(bodyCommand, variables, frame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, ModuleSchema = function.Schema };
             SeedTableValuedParameters(analysis, batch, function.Parameters);
             var savedQuotedIdentifiers = connection.QuotedIdentifiers;
             var savedAnsiNulls = connection.AnsiNulls;

@@ -101,6 +101,38 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
         }
     }
 
+    /// <summary>
+    /// Bumped by every change of the effective principal — an impersonation
+    /// frame pushed or popped, an application role set or unset, the base frame
+    /// rebound — so a cached derivation of it (a batch's default schema) can
+    /// tell it is stale without reading <see cref="Effective"/>.
+    /// </summary>
+    public int Generation;
+
+    /// <summary>
+    /// The effective principal's default schema in <paramref name="database"/>:
+    /// the schema an unqualified name searches before <c>dbo</c> and an
+    /// unqualified <c>CREATE</c> lands in. <c>dbo</c>'s is always <c>dbo</c>,
+    /// <c>guest</c>'s <c>guest</c>, and a user's or application role's its
+    /// declared <c>DEFAULT_SCHEMA</c> as written — possibly naming no schema —
+    /// or <c>dbo</c> when it declared none (probed 2026-10-04 against SQL
+    /// Server 2025, a <c>db_owner</c> member keeping its own).
+    /// </summary>
+    public string EffectiveDefaultSchemaName(Database database)
+    {
+        var effective = this.Effective;
+        return effective.DatabasePrincipalId switch
+        {
+            Database.DboPrincipalId => Database.DefaultSchemaName,
+            Database.GuestPrincipalId => "guest",
+            _ => database.Principals.TryGetValue(effective.DatabasePrincipalName, out var principal)
+                && principal.PrincipalId == effective.DatabasePrincipalId
+                && principal.DefaultSchemaName is { } declared
+                    ? declared
+                    : Database.DefaultSchemaName,
+        };
+    }
+
     /// <summary>True when the effective database principal is <c>dbo</c> — the same-database enforcement bypass. A reference that crosses a database boundary asks the boundary-aware form instead, since a <c>dbo</c> frame can be database-scoped.</summary>
     public bool EffectiveIsDbo => this.Effective.DatabasePrincipalId == Database.DboPrincipalId;
 
@@ -135,6 +167,7 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
     {
         this.preApplicationRoleFrame = baseFrame;
         baseFrame = new SecurityPrincipalFrame(rolePrincipalId, roleName, loginName, isDatabaseScoped: true);
+        this.Generation++;
         this.ApplicationRoleName = roleName;
         this.ApplicationRoleCookie = cookie;
     }
@@ -155,6 +188,7 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
             return false;
         }
         baseFrame = this.preApplicationRoleFrame;
+        this.Generation++;
         this.ApplicationRoleName = null;
         this.ApplicationRoleCookie = null;
         return true;
@@ -176,13 +210,19 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
         {
             var top = this.impersonation[^1];
             this.impersonation[^1] = new SecurityPrincipalFrame(principal.PrincipalId, principal.Name, top.LoginName, top.IsDatabaseScoped, top.Guard);
+            this.Generation++;
             return;
         }
         baseFrame = new SecurityPrincipalFrame(principal.PrincipalId, principal.Name, baseFrame.LoginName);
+        this.Generation++;
     }
 
     /// <summary>Pushes one impersonation frame (<c>EXECUTE AS</c> or a module's <c>WITH EXECUTE AS</c>).</summary>
-    public void Push(SecurityPrincipalFrame frame) => this.impersonation.Add(frame);
+    public void Push(SecurityPrincipalFrame frame)
+    {
+        this.impersonation.Add(frame);
+        this.Generation++;
+    }
 
     /// <summary>
     /// Pops one impersonation frame for a <c>REVERT</c> run in
@@ -205,12 +245,16 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
         if (guard.Cookie is { } issued ? cookie is null || !issued.AsSpan().SequenceEqual(cookie) : cookie is not null)
             throw SimulatedSqlException.RevertNeedsMatchingCookie();
         this.impersonation.RemoveAt(this.impersonation.Count - 1);
+        this.Generation++;
     }
 
     /// <summary>Unwinds the stack back to <paramref name="depth"/> frames — the module-exit revert that survives a body that left frames pushed.</summary>
     public void RevertTo(int depth)
     {
         while (this.impersonation.Count > depth)
+        {
             this.impersonation.RemoveAt(this.impersonation.Count - 1);
+            this.Generation++;
+        }
     }
 }

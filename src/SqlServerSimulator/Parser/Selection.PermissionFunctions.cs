@@ -215,7 +215,7 @@ partial class Selection
                 return ("database", className, Granted(PermissionChecker.ClassDatabase, 0, 0), null);
             case "OBJECT":
                 if (name is null || !Expressions.ObjectId.TryParseObjectName(name, out var objectName)
-                    || !batch.TryResolveSchema(objectName, out var objectSchema) || !objectSchema.TryFindInSharedNamespace(objectName.Leaf, out var obj))
+                    || !batch.TryResolveCallerSchema(objectName, out var objectSchema) || !objectSchema.TryFindInSharedNamespace(objectName.Leaf, out var obj))
                 {
                     return null;
                 }

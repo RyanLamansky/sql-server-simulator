@@ -19,7 +19,8 @@ Logins are enforced as connection credentials at both front doors (TDS endpoint 
 - `LoginName` (string?) — the mapped server login from `CREATE USER … FOR LOGIN` (null otherwise); drives login → database-user resolution at connect.
 - `SecurityIdentifierString` (string?) — the deterministic `S-1-9-3-…` SID a `CREATE USER … WITHOUT LOGIN` user reports through `SYSTEM_USER` / Msg 916 (FNV-derived from the name).
 - `EffectiveLoginIdentity` — the `SYSTEM_USER` value while impersonating this user (login ?? SID ?? name).
-- `DefaultSchemaName` (string?) — an **application role's** declared `DEFAULT_SCHEMA` (`dbo` unless it said otherwise); null for every other principal, which the catalog view then fills in per real's own rules (see below).
+- `DefaultSchemaName` (string?) — an application role's declared `DEFAULT_SCHEMA` (`dbo` unless it said otherwise) or a user's (as written); null otherwise, which the catalog view then fills in per real's own rules (see below).
+  It is what an unqualified name searches before `dbo` ([`schemas.md`](schemas.md#default-schemas-and-unqualified-names)).
 - `PasswordHash` (byte[]?) — an application role's password, in the same legacy `0x0200` single-pass format `ServerLogin` uses (never persisted, so PBKDF2 hardening would only bill activation).
 
 **`DatabasePermission`** (`src/SqlServerSimulator/DatabasePermission.cs`) carries class + major_id + minor_id + grantee/grantor ids + a `Permission` enum + a `PermissionState` enum (Grant / GrantWithGrantOption / Deny / Revoke, projecting the `G`/`W`/`D`/`R` state codes).
@@ -414,8 +415,7 @@ The same goes for a database-scoped frame out of a non-`TRUSTWORTHY` database: t
 
 - `CREATE USER name [{FOR | FROM} ...] [WITH option = value, …]` — name + principal_id allocation; `type_code='S'`.
   `FOR / FROM LOGIN` and `WITHOUT LOGIN` are read, a user with no source clause at all maps to the login of its own name, and a login the server doesn't know is **Msg 15007** either way (probed 2026-09-29 and 2026-09-30 against SQL Server 2025); the `WITH` list records `DEFAULT_SCHEMA` (as written, even when no such schema exists) and reads the other options without effect; anything else parses-and-discards through the next statement boundary.
-- `ALTER USER name WITH option = value, …` — `NAME` renames, `DEFAULT_SCHEMA` sets the default schema, the rest are read without effect; a missing user is **Msg 15151** state 1 and a taken name **Msg 15023** state 10.
-  The default schema is catalog-only: an unqualified name still resolves through `dbo` for every user (not built yet).
+- `ALTER USER name WITH option = value, …` — `NAME` renames, `DEFAULT_SCHEMA` sets the default schema, the rest are read without effect; a missing user is **Msg 15151** state 1 and a taken name **Msg 15023** state 10, and `dbo`'s default schema is **Msg 15150** (probed 2026-10-04 against SQL Server 2025).
 - `CREATE ROLE name [AUTHORIZATION owner]` — `type_code='R'`.
   `AUTHORIZATION` sets `owning_principal_id`; an unknown owner is Msg 15151's *user* wording (probed 2026-09-27 against SQL Server 2025).
 - `ALTER ROLE name { ADD MEMBER name | DROP MEMBER name | WITH NAME = newname }` — ADD/DROP MEMBER append/remove `(role_id, member_id)` on `Database.RoleMembers`, refusing `dbo` (**Msg 15405**), the role itself (**Msg 15413**) and `[public]` (**Msg 15081**); a name that isn't a role is `Cannot alter the role` and a missing member `Cannot add` / `Cannot drop the principal` (all Msg 15151 state 1); `WITH NAME` renames, a taken name being **Msg 15023** state 10.
@@ -898,9 +898,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
   `CREATE ASSEMBLY` covers through `CONTROL` rather than real's `ALTER ANY ASSEMBLY`, which isn't in the catalog.
   Real pairs the ALTER DATABASE refusal with a terminating Msg 5069 and the CREATE INDEX / TRUNCATE family with no second record; the simulator raises the single leading error, matching how the DMV 300 / 262 pair is modeled.
 - **`PERMISSIONS()`** answers `dbo`'s full bitmap for every caller rather than real's per-permission bits for a restricted one.
-- **The default schema resolves nothing** — an unqualified name binds through `dbo` whatever the user's `DEFAULT_SCHEMA`, so `SCHEMA_NAME()` and an unqualified `CREATE` / reference read `dbo` where real reads the user's schema (probed 2026-10-04 against SQL Server 2025).
-  The plan cache doesn't stand in its way, since nothing else on a plan depends on the principal ([`plan-cache.md`](plan-cache.md#principal-independence)), but this is the one resolution that must: a plan whose parse resolved an unqualified name through a default schema answers only principals with that default schema, so the cache needs the effective principal's default schema in `PlanCacheKey` (principals sharing one, `dbo` the common case, still share plans), read from the key the batch took rather than from the session while parsing so the principal-read watch stays quiet, and `MayCacheDmlPlan` must compare it per statement as it does the key's settings, since an `EXECUTE AS` earlier in the batch changes it.
-  The names a plan records for its messages (`ReferencedSecurable`'s schema name, defaulted to `dbo`) follow the resolved schema then.
+- **The user option list** takes `NAME` in a `CREATE USER`'s `WITH` list, which real refuses (Msg 102 near `name`), and reports `DEFAULT_SCHEMA = NULL` as Msg 156 near `null` where real's is Msg 102 near `default_schema` (probed 2026-10-04 against SQL Server 2025).
 - **Residue from the differential sweep** (probed 2026-10-04 against SQL Server 2025):
   - a schema `DENY ALTER` doesn't stop `db_ddladmin`'s `CREATE TABLE` there on real, and a database `CONTROL` holder under it gets Msg 3701 for `DROP TABLE`; the simulator refuses the first and admits the second;
   - a `CREATE VIEW … WITH SCHEMABINDING` lacking both `CREATE VIEW` and `REFERENCES` raises real's REFERENCES Msg 229 first, Msg 262 here;

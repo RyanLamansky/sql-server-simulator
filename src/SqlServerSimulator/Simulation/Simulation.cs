@@ -1311,6 +1311,10 @@ public sealed partial class Simulation
             batch.PlanCacheSchemaVersion = schemaVersionAtStart;
             batch.PlanCacheKey = prepared;
             batch.DmlPlans = this.dmlPlanSets.TryGetValue(prepared, out var dmlPlans) ? dmlPlans : null;
+            // The batch resolves unqualified names through the default schema
+            // its key was taken under, rather than reading the principal as it
+            // parses.
+            batch.SeedDefaultSchemaName(prepared.DefaultSchemaName);
         }
 
         // A command carrying parameters is an ad-hoc scope, not a plain batch:
@@ -1805,6 +1809,11 @@ public sealed partial class Simulation
         else
         {
             ScanBatchLabels(batch);
+            // A declaration's type binds as the batch compiles, before any
+            // EXECUTE AS in it has run; a module body binds its types through
+            // the module's schema instead.
+            if (batch.ModuleSchema is null)
+                batch.CompiledDefaultSchemaName ??= batch.DefaultSchemaName;
         }
 
         try
@@ -2565,6 +2574,19 @@ public sealed partial class Simulation
             ParseCteBindings(context);
             batch.BindErrors?.AddCtePrefix(withToken, context.Token);
             context.CtePrefixLeadsSelectStatement = context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' };
+        }
+
+        // Inside a module body a query or DML statement binds its unqualified
+        // names through the module's schema, while DDL, EXEC and the
+        // permission statements resolve as the caller does (probed 2026-10-04
+        // against SQL Server 2025; see BatchContext.ModuleSchema).
+        if (batch.ModuleSchema is not null)
+        {
+            batch.SuspendsModuleSchema = context.Token is ReservedKeyword
+            {
+                Keyword: Keyword.Create or Keyword.Alter or Keyword.Drop or Keyword.Truncate or Keyword.Exec or Keyword.Execute
+                    or Keyword.Grant or Keyword.Deny or Keyword.Revoke or Keyword.Dbcc,
+            } || (context.Token is ReservedKeyword { Keyword: Keyword.Update } && IsUpdateStatistics(context));
         }
 
         // A doomed transaction refuses object DDL with Msg 3930 the way it

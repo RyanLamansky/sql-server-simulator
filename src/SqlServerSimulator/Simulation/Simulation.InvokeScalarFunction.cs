@@ -102,7 +102,7 @@ partial class Simulation
         // statement (probe-confirmed: real reports the SELECT's line, no
         // procedure) — so this frame leaves the exception unresolved.
         var functionOwner = Ownership.EffectiveOwnerId(function.Schema.Database, function);
-        var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, OwnershipChainOwnerId = functionOwner, ModuleObjectId = function.ObjectId, CapturesQueryStore = BodyStatementsCaptured(function) };
+        var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, OwnershipChainOwnerId = functionOwner, ModuleObjectId = function.ObjectId, CapturesQueryStore = BodyStatementsCaptured(function), ModuleSchema = function.Schema };
         SeedTableValuedParameters(innerBatch, outerBatch, function.Parameters, tableArguments);
         connection.NestingLevel++;
         // Module WITH EXECUTE AS: push the impersonation frame around the body

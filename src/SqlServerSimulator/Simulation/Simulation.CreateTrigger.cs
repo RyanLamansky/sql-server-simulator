@@ -248,6 +248,7 @@ partial class Simulation
             triggerSchema = parentSchema;
         else if (!ReferenceEquals(triggerSchema, parentSchema))
             throw SimulatedSqlException.TriggerSchemaDiffersFromParent(triggerName.ToString());
+        context.Batch.DefiningModuleSchema = triggerSchema;
 
         // An INSTEAD OF trigger can't take over a view's CHECK OPTION
         // (probed 2026-10-04 against SQL Server 2025).
