@@ -83,6 +83,8 @@ dotnet test tests/SqlServerSimulator.Tests/bin/Debug/net10.0/SqlServerSimulator.
 
 That's somewhat faster than `dotnet test <csproj> --no-build --filter`, which pays MSBuild's fixed cost on top; either serves a tight loop.
 Rebuild the one project (`dotnet build src/SqlServerSimulator/SqlServerSimulator.csproj`) when the DLL goes stale; full `dotnet build` + `dotnet test` is the pre-commit checkpoint.
+While iterating, add `-p:RunAnalyzers=false` to those rebuilds: the analyzers the build runs (trim analysis, the IDE / CA rules, the SSS rules) roughly double or triple a compile of the library, and almost all of that cost is Microsoft's, not the SSS rules'.
+The plain `dotnet build` stays the gate, since a style or analyzer violation only surfaces there.
 All tests use method-level parallelism.
 
 **No large binary files in the repo** (bacpacs included — the WWI/AW `.bacpac` fixtures live gitignored under `.vs/`, local-only).
