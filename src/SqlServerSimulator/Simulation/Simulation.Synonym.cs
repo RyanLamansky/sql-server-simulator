@@ -136,6 +136,7 @@ partial class Simulation
         Synonym => ("synonym", "SYNONYM"),
         DefaultObject => ("default", "DEFAULT"),
         RuleObject => ("rule", "RULE"),
+        SecurityPolicy => ("security policy", "SECURITY POLICY"),
         _ => throw new InvalidOperationException($"No DROP wording is mapped for schema-object kind {obj.GetType().Name}."),
     };
 }

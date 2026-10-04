@@ -251,6 +251,7 @@ partial class Simulation
             EnforceNotNull(table, rowValues);
             if (plan.CheckConstraints)
                 EnforceCheckConstraints(table, rowValues, batch);
+            RowSecurity.EnforceBlock(batch, table, BlockOperation.AfterInsert, rowValues);
 
             var storedValues = ProjectStoredValues(table, rowValues);
             if (keyGuard?.Restart() == true)

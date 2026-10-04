@@ -1841,10 +1841,11 @@ partial class SimulatedSqlException
     /// object found in the dependency-graph walk (which often happens to be
     /// an auto-named PK / UNIQUE / CHECK constraint rather than the table
     /// itself); the simulator picks a representative name from the same
-    /// dict scan. Probe-confirmed verbatim wording against SQL Server 2025.
+    /// dict scan. Probe-confirmed verbatim wording against SQL Server 2025;
+    /// it ends the batch (probed 2026-10-04).
     /// </summary>
     internal static SimulatedSqlException CannotDropSchemaBecauseNotEmpty(string schemaName, string objectName) =>
-        new($"Cannot drop schema '{schemaName}' because it is being referenced by object '{objectName}'.", 3729, 16, 1);
+        new($"Cannot drop schema '{schemaName}' because it is being referenced by object '{objectName}'.", 3729, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 3729: a <c>DROP</c> targeted an object that a
@@ -1856,8 +1857,8 @@ partial class SimulatedSqlException
     /// Server 2025 — state 1, distinct from the ALTER form's state 3.
     /// </summary>
     internal static SimulatedSqlException CannotDropReferencedBySchemaBoundObject(
-        string statement, string writtenName, string referencingName) =>
-        new($"Cannot {statement} '{writtenName}' because it is being referenced by object '{referencingName}'.", 3729, 16, 1);
+        string statement, string writtenName, string referencingName, byte state = 1) =>
+        new($"Cannot {statement} '{writtenName}' because it is being referenced by object '{referencingName}'.", 3729, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 3729: an <c>ALTER</c> (or <c>CREATE OR

@@ -255,6 +255,7 @@ The per-principal state a parse meets, and where each piece lives:
 | A conversion error's redaction, a variable assignment's mask, a scalar UDF's return mask | Definitions on the expression or the function | When the value is computed |
 | A `NEXT VALUE FOR`'s `UPDATE`, metadata visibility in the catalog views and `OBJECT_ID`, the identity scalars | Nothing | When the expression runs |
 | `EXECUTE AS` / application-role identity | Nothing — the capture audit refuses a `SessionSecurityContext` | Read from the executing session |
+| A table's row-level security predicates | Nothing — the table, whose predicates each execution looks up | As the statement reads or writes, its `USER_NAME()` / `SESSION_CONTEXT` read then ([`row-level-security.md`](row-level-security.md#plan-cache-and-cost)) |
 | Name resolution | Objects resolved through `dbo` for an unqualified name | The same for every principal, since the default schema resolves nothing yet ([`permissions.md`](permissions.md#known-gaps)) |
 
 `MayCacheDmlPlan` once kept DML plans to `dbo` and to simulations with no masked column, because `UPDATE` and `MERGE` settled their write masks for the parsing principal and `INSERT` checked its target as it parsed; with both following the table, every principal caches.

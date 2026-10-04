@@ -995,7 +995,7 @@ partial class Simulation
                 _ = AwaitSupersededTargetRows(batch, table, (_, prior) => ShownRow(m, prior) is not null);
             generations[m] = Volatile.Read(ref table.Heap.MutationGeneration);
             var waits = Volatile.Read(ref table.ActiveDataWriters) != 0 || Volatile.Read(ref table.ActiveUpdateLocks) != 0;
-            foreach (var (page, slot, scanned) in table.Heap.EnumerateRowsWithAddress())
+            foreach (var (page, slot, scanned) in RowSecurity.FilterAddressedRows(table, table.Heap.EnumerateRowsWithAddress(), batch))
             {
                 var bytes = scanned;
                 if (waits && !batch.AwaitTargetRowWriters(table, page, slot, ref bytes))

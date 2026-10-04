@@ -202,8 +202,10 @@ partial class Simulation
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;
 
+        RowSecurity.NoteWrite(context.Batch, table);
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
         var needsFull = DeleteNeedsOldRows(context.Batch, table, (SchemaObject?)sourceView ?? table, output);
+        var filtered = context.Batch.IsSkipping ? null : RowSecurity.For(context.Batch, table)?.Filter;
 
         // The walk reads the rows as it goes and never meets a row another
         // session deleted meanwhile; real's read meets the deleted key and
@@ -303,11 +305,16 @@ partial class Simulation
         {
             fullOld = null;
             SqlValue[]? fullValues = null;
-            if (where is not null || sourceView is not null || needsFull)
+            if (where is not null || sourceView is not null || needsFull || filtered is not null)
             {
                 fullValues = DecodeFullRow(table, rowBytes);
                 EvaluateComputedColumns(table, fullValues, context.Batch);
             }
+
+            // A row the table's filter predicate hides is no candidate, and is
+            // judged before anything the statement itself evaluates.
+            if (filtered is not null && !RowSecurity.Admits(context.Batch, table, fullValues!))
+                return false;
 
             // View visibility filter: rows not visible in the view aren't
             // candidates for DELETE through it. AND-of-WHEREs up the chain.
@@ -403,7 +410,7 @@ partial class Simulation
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
 
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
-        sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses, context.Connection.StatementIo);
+        sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses, context.Batch);
         sources = Selection.PrefilterMutationTarget(sources, targetIndex, where, context.Batch);
 
         var seen = new HashSet<(int Page, int Slot)>();
@@ -515,6 +522,14 @@ partial class Simulation
         || table.IncomingForeignKeys.Count > 0
         || table.GraphKind == GraphTableKind.Node;
 
+    /// <summary>The logical column values of the live row at an address, computed columns included.</summary>
+    private static SqlValue[] FullImageAt(HeapTable table, int pageIndex, int slotIndex, BatchContext batch)
+    {
+        var fullValues = DecodeFullRow(table, table.Heap.ReadSlotBytes(pageIndex, slotIndex)!);
+        EvaluateComputedColumns(table, fullValues, batch);
+        return fullValues;
+    }
+
     /// <summary>
     /// Tombstones the deleted rows and emits OUTPUT.DELETED projection rows
     /// when requested. Shared between the no-FROM and joined-source paths.
@@ -554,6 +569,14 @@ partial class Simulation
             return output is null || output.HasTarget
                 ? new SimulatedNonQuery(deleted.Count)
                 : new SimulatedSqlResultSet(output.Schema, output.ColumnNames, outputRows!, deleted.Count) { ColumnNullability = output.Nullability };
+        }
+
+        // A BEFORE DELETE block predicate judges each row as it stands, ahead
+        // of any change.
+        if (RowSecurity.For(context.Batch, table)?.BlockFor(BlockOperation.BeforeDelete) is not null)
+        {
+            foreach (var (pageIndex, slotIndex, fullOld) in deleted)
+                RowSecurity.EnforceBlock(context.Batch, table, BlockOperation.BeforeDelete, fullOld ?? FullImageAt(table, pageIndex, slotIndex, context.Batch));
         }
 
         var undoLog = table.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;

@@ -301,6 +301,7 @@ partial class Selection
             : schema.Triggers.TryGetValue(leaf, out var trigger) ? trigger.ObjectId
             : schema.Synonyms.TryGetValue(leaf, out var synonym) ? synonym.ObjectId
             : schema.Sequences.TryGetValue(leaf, out var sequence) ? sequence.ObjectId
+            : schema.SecurityPolicies.TryGetValue(leaf, out var policy) ? policy.ObjectId
             : ModuleDependencies.ExpressionConstraintId(database, schema, leaf);
     }
 }

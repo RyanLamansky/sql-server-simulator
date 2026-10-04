@@ -170,7 +170,10 @@ partial class Simulation
             yield break;
         }
 
-        List<SqlValue[]> objectInfo =
+        // Real joins the object to its type's display text, which a security
+        // policy has none of, so its row drops out (probed 2026-10-04 against
+        // SQL Server 2025).
+        List<SqlValue[]> objectInfo = target.TypeCode == "SP" ? [] :
         [
             [
                 SqlValue.FromSystemName(target.Name),

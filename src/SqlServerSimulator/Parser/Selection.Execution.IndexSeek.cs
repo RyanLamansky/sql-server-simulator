@@ -153,7 +153,7 @@ internal sealed partial class Selection
             if (rangeExtended)
                 IndexSeekDiagnostics.Sink?.Add($"PrefixRangeSeek({table.Name})");
             seekedCandidates = equalityCandidates;
-            return SeekedSource(source, seekRows);
+            return SeekedSource(source, RowSecurity.FilterRows(table, seekRows, batch));
         }
 
         // No equality seek on the conjunction — try the union of seeks a
@@ -171,9 +171,9 @@ internal sealed partial class Selection
             IndexSeekDiagnostics.Sink?.Add($"UnionSeek({table.Name},{unionDisjuncts})");
             IndexSeekDiagnostics.Sink?.Add($"UnionSeekCandidates({table.Name},{unionCandidates.Count})");
             seekedCandidates = unionCandidates.Count;
-            return SeekedSource(source, snapshotXid is { } unionSx
+            return SeekedSource(source, RowSecurity.FilterRows(table, snapshotXid is { } unionSx
                 ? MaterializeSnapshotCandidates(table, batch, unionSx, unionCandidates)
-                : MaterializeWithLockChecks(table, batch, plan, unionCandidates, qualifier));
+                : MaterializeWithLockChecks(table, batch, plan, unionCandidates, qualifier), batch));
         }
 
         // No equality seek — try a range seek on a leading key column
@@ -186,11 +186,11 @@ internal sealed partial class Selection
             IndexSeekDiagnostics.Sink?.Add($"RangeSeek({table.Name})");
             IndexSeekDiagnostics.Sink?.Add($"SeekWidth({table.Name},1)");
             seekedCandidates = rangeCandidates;
-            return SeekedSource(source, rangeRows);
+            return SeekedSource(source, RowSecurity.FilterRows(table, rangeRows, batch));
         }
 
         IndexSeekDiagnostics.Sink?.Add($"Scan({table.Name})");
-        return qualifier is null ? sources : SeekedSource(source, QualifiedLockScan(table, batch, plan, qualifier));
+        return qualifier is null ? sources : SeekedSource(source, RowSecurity.FilterRows(table, QualifiedLockScan(table, batch, plan, qualifier), batch));
     }
 
     /// <summary>
@@ -1059,6 +1059,10 @@ internal sealed partial class Selection
         if (source.BackingTable is not { } table || source.LateralPlan is not null)
             return false;
         if (source.HeapPlan is not { } plan || plan.RowTxScoped)
+            return false;
+        // The scan counts the rows an OFFSET skips before any reaches the
+        // filter predicate, which would skip rows it hides.
+        if (RowSecurity.For(batch, table) is { Filter: not null })
             return false;
         // A SNAPSHOT / RCSI read materializes through the version store, whose
         // chain sweep appends rows in arbitrary order — an ordered scan couldn't

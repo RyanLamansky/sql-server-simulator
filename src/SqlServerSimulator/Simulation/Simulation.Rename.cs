@@ -243,6 +243,7 @@ partial class Simulation
                 Trigger trigger => Move(schema.Triggers, trigger, "TRIGGER"),
                 DefaultObject bindableDefault => Move(schema.Defaults, bindableDefault, "DEFAULT"),
                 RuleObject rule => Move(schema.Rules, rule, "RULE"),
+                SecurityPolicy policy => Move(schema.SecurityPolicies, policy, "SECURITY POLICY"),
                 _ => throw NotFound(),
             };
             BumpSchemaVersion();

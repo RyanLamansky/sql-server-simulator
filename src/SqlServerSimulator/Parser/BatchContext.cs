@@ -1004,6 +1004,19 @@ internal sealed partial class BatchContext
     public bool SuppressDiagnosticsResolution;
 
     /// <summary>
+    /// Set on the batch a security predicate's function body runs in, which
+    /// reads its tables without applying row-level security
+    /// (see <see cref="RowSecurity"/>).
+    /// </summary>
+    public bool SuppressesRowSecurity;
+
+    /// <summary>
+    /// The security predicates the batch's statements have applied, each
+    /// compiled once (see <see cref="SecurityPredicateRunner"/>).
+    /// </summary>
+    public Dictionary<Schemas.SecurityPredicate, SecurityPredicateRunner>? RowSecurityRunners;
+
+    /// <summary>
     /// Set on the batch a view's or inline function's body binds in where a
     /// statement references it: real binds the stored definition there as it
     /// does at <c>CREATE</c>, so a missing schema-qualified object reports

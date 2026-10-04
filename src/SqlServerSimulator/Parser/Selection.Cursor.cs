@@ -946,7 +946,7 @@ internal sealed partial class Selection
             _ = counts?.ScanCount += 1;
             var lastPage = -1;
             var addresses = batch.CurrentStatement.RowAddresses;
-            foreach (var (page, slot, bytes) in table.Heap.EnumerateRowsWithAddress())
+            foreach (var (page, slot, bytes) in RowSecurity.FilterAddressedRows(table, table.Heap.EnumerateRowsWithAddress(), batch))
             {
                 counts?.Enter(page, ref lastPage);
                 addresses?.Record(bytes, page, slot);

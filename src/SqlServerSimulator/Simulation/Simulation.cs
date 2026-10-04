@@ -1035,6 +1035,13 @@ public sealed partial class Simulation
     internal volatile bool DeclaresDataMasks;
 
     /// <summary>
+    /// Set once any security policy in the simulation is created, and never
+    /// cleared: until then no read or write asks whether a table carries
+    /// row-level security (<see cref="Parser.RowSecurity.For"/>).
+    /// </summary>
+    internal volatile bool DeclaresSecurityPolicies;
+
+    /// <summary>
     /// The trace flags <c>DBCC TRACEON( …, -1)</c> turned on server-wide, which
     /// every session sees beside its own <see cref="SimulatedDbConnection.TraceFlags"/>.
     /// Guarded by locking the set itself.
@@ -2143,14 +2150,15 @@ public sealed partial class Simulation
     /// 244, 248) and a date arithmetic overflow (Msg 517; probed 2026-10-01),
     /// and a lock timeout on a row or key (Msg 1222 at any state but the object
     /// lock's 56; probed 2026-10-03), and a trigger body's write refused in the
-    /// unit a caught error doomed (Msg 3930; probed 2026-10-04).
+    /// unit a caught error doomed (Msg 3930; probed 2026-10-04), and a block
+    /// predicate refusing a row (Msg 33504; probed 2026-10-04).
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number is 1505 or 4457
         || error.EndedColumnRewrite
         || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
             && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite)
-            && ((error.Number == 1222 && error.State != 56) || error.Number is 127 or 220 or 232 or 242 or 244 or 248 or 512 or 513 or 515 or 517 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16931 or 16932 or 16933 or 16947
+            && ((error.Number == 1222 && error.State != 56) || error.Number is 127 or 220 or 232 or 242 or 244 or 248 or 512 or 513 or 515 or 517 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16931 or 16932 or 16933 or 16947 or 33504
                 || (error.Number == 208 && error.RaisedRunningFunctionBody)
                 || (error.Number == 3930 && error.EndedTriggerBody)));
 
@@ -2247,10 +2255,13 @@ public sealed partial class Simulation
         // save the two it raises while compiling (Msg 4902 / 2705), which end
         // the batch alone (probed 2026-09-26 against SQL Server 2025), and a
         // DROP TABLE a foreign key refuses (Msg 3726) outside a transaction,
-        // after which the batch goes on (probed 2026-10-01). ALTER INDEX's
-        // missing index (Msg 2727) does too, though its class is 11.
+        // after which the batch goes on (probed 2026-10-01), as it does past
+        // one a schema-bound object or a security policy refuses (Msg 3729)
+        // or that names another kind of object (Msg 3705; probed 2026-10-04).
+        // ALTER INDEX's missing index (Msg 2727) does too, though its class
+        // is 11.
         var structuralFailure = changesTableStructure && (ex.Class == 16 || ex.Number == 2727) && ex.Number is not (4902 or 2705)
-            && !(ex.Number == 3726 && connection.CurrentTransaction is null);
+            && !(ex.Number is 3726 or 3729 or 3705 && connection.CurrentTransaction is null);
         // A divide by zero or an arithmetic overflow under ARITHABORT ON with
         // ANSI_WARNINGS OFF ends the batch and rolls the transaction back as
         // under XACT_ABORT, dooming it when caught, from a procedure body too

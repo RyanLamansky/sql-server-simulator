@@ -4121,13 +4121,22 @@ internal sealed class TemporalRowSource(
         var lowerTime = lower ?? default;
         var upperTime = upper ?? default;
 
+        // The current table's filter predicate hides its rows; the history
+        // rows answer only to a predicate on the history table itself (probed
+        // 2026-10-04 against SQL Server 2025).
+        var currentFilter = RowSecurity.For(batch, parent)?.Filter is { } parentPredicate ? SecurityPredicateRunner.For(batch, parentPredicate) : null;
+        var historyFilter = RowSecurity.For(batch, history)?.Filter is { } historyPredicate ? SecurityPredicateRunner.For(batch, historyPredicate) : null;
+
         // The current rows come in their clustered key's order, ahead of the
         // history's, as real's scan of the two reads them (probed 2026-10-04
         // against SQL Server 2025).
         foreach (var bytes in ClusteredScan.Rows(parent))
         {
-            if (this.RowMatches(parent.StoredColumns, bytes, parent.Heap, startStored, endStored, lowerTime, upperTime, DateTime.MinValue))
+            if (this.RowMatches(parent.StoredColumns, bytes, parent.Heap, startStored, endStored, lowerTime, upperTime, DateTime.MinValue)
+                && currentFilter?.AdmitsStored(bytes) != false)
+            {
                 yield return bytes;
+            }
         }
         // A finite HISTORY_RETENTION_PERIOD hides history rows whose validity
         // ended before the window opens. Real applies the same cutoff at query
@@ -4141,8 +4150,11 @@ internal sealed class TemporalRowSource(
         // page indexes would name its unrelated chains.
         foreach (var bytes in ClusteredScan.Rows(history))
         {
-            if (this.RowMatches(history.StoredColumns, bytes, history.Heap, startStored, endStored, lowerTime, upperTime, cutoff))
+            if (this.RowMatches(history.StoredColumns, bytes, history.Heap, startStored, endStored, lowerTime, upperTime, cutoff)
+                && historyFilter?.AdmitsStored(bytes) != false)
+            {
                 yield return RowEncoder.EncodeRow(history.StoredColumns, RowDecoder.DecodeRow(history.StoredColumns, bytes, history.Heap));
+            }
         }
     }
 

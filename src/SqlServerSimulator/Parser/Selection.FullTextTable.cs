@@ -182,6 +182,9 @@ internal sealed partial class Selection
         List<(SqlValue Key, int[] Frequencies, int Length)> matches = [];
         var rowCount = 0;
         var totalLength = 0L;
+        // A key the table's filter predicate hides is no match (probed
+        // 2026-10-04 against SQL Server 2025).
+        var filter = RowSecurity.For(batch, table)?.Filter is { } predicate ? SecurityPredicateRunner.For(batch, predicate) : null;
 
         foreach (var bytes in table.Rows)
         {
@@ -203,7 +206,7 @@ internal sealed partial class Selection
                 if (frequencies[i] > 0)
                     documentFrequencies[i]++;
             }
-            if (compiled.Matches(document))
+            if (compiled.Matches(document) && filter?.AdmitsStored(bytes) != false)
                 matches.Add((RowDecoder.DecodeColumn(storedSchema, bytes, keyStorageOrdinal, table.Heap), frequencies, document.Length));
         }
 

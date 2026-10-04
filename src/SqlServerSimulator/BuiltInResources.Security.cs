@@ -438,7 +438,7 @@ internal static partial class BuiltInResources
             new("is_not_for_replication", SqlType.Bit, null, false),
             new("uses_database_collation", SqlType.Bit, null, true),
             new("is_schema_bound", SqlType.Bit, null, false),
-        ], static (_, _) => EmptyCatalogRows);
+        ], (_, database) => EnumerateSecurityPolicies(database, charTwo));
         Sys("security_predicates",
         [
             new("object_id", SqlType.Int32, null, false),
@@ -449,7 +449,7 @@ internal static partial class BuiltInResources
             new("predicate_type_desc", nvarchar60Catalog, 60, true),
             new("operation", SqlType.Int32, null, true),
             new("operation_desc", nvarchar60Catalog, 60, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], static (_, database) => EnumerateSecurityPredicates(database));
         Sys("server_audits",
         [
             new("audit_id", SqlType.Int32, null, false),
@@ -1054,5 +1054,79 @@ internal static partial class BuiltInResources
                 nullPasswordHash,
             ];
         }
+    }
+
+    /// <summary>
+    /// <c>sys.security_policies</c>: one row per policy, in object-id order.
+    /// <c>uses_database_collation</c> is 1 for a schema-bound policy and 0
+    /// otherwise (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSecurityPolicies(Database database, SqlType charTwo)
+    {
+        var typeCode = SqlValue.FromChar(charTwo, "SP");
+        var typeDesc = SqlValue.FromNVarchar("SECURITY_POLICY");
+        var zero = SqlValue.FromInt32(0);
+        foreach (var policy in SecurityPoliciesOf(database))
+        {
+            var state = policy.State;
+            yield return [
+                SqlValue.FromSystemName(policy.Name),
+                SqlValue.FromInt32(policy.ObjectId),
+                Ownership.PrincipalIdValue(policy.OwnerPrincipalId),
+                SqlValue.FromInt32(policy.SchemaId),
+                zero,
+                typeCode,
+                typeDesc,
+                SqlValue.FromDateTime(policy.CreateDate),
+                SqlValue.FromDateTime(policy.ModifyDate),
+                notMsShipped,
+                SqlValue.FromBoolean(state.IsEnabled),
+                SqlValue.FromBoolean(state.NotForReplication),
+                SqlValue.FromBoolean(state.IsSchemaBound),
+                SqlValue.FromBoolean(state.IsSchemaBound),
+            ];
+        }
+    }
+
+    /// <summary><c>sys.security_predicates</c>: each policy's predicates in id order, the policies in object-id order.</summary>
+    private static IEnumerable<SqlValue[]> EnumerateSecurityPredicates(Database database)
+    {
+        foreach (var policy in SecurityPoliciesOf(database))
+        {
+            var policyId = SqlValue.FromInt32(policy.ObjectId);
+            foreach (var predicate in policy.State.Predicates)
+            {
+                var block = predicate.Kind == SecurityPredicateKind.Block;
+                yield return [
+                    policyId,
+                    SqlValue.FromInt32(predicate.Id),
+                    SqlValue.FromInt32(predicate.Target.ObjectId),
+                    SqlValue.FromNVarchar(predicate.Definition),
+                    SqlValue.FromInt32((int)predicate.Kind),
+                    SqlValue.FromNVarchar(block ? "BLOCK" : "FILTER"),
+                    predicate.Operation is { } operation ? SqlValue.FromInt32((int)operation) : SqlValue.Null(SqlType.Int32),
+                    predicate.Operation switch
+                    {
+                        BlockOperation.AfterInsert => SqlValue.FromNVarchar("AFTER INSERT"),
+                        BlockOperation.AfterUpdate => SqlValue.FromNVarchar("AFTER UPDATE"),
+                        BlockOperation.BeforeUpdate => SqlValue.FromNVarchar("BEFORE UPDATE"),
+                        BlockOperation.BeforeDelete => SqlValue.FromNVarchar("BEFORE DELETE"),
+                        _ => SqlValue.Null(SqlType.NVarchar),
+                    },
+                ];
+            }
+        }
+    }
+
+    private static List<SecurityPolicy> SecurityPoliciesOf(Database database)
+    {
+        var policies = new List<SecurityPolicy>();
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, policy) in schema.SecurityPolicies)
+                policies.Add(policy);
+        }
+        policies.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
+        return policies;
     }
 }

@@ -84,6 +84,13 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     public AttachedTriggerSet? AttachedTriggers;
 
     /// <summary>
+    /// The row-level security this table carries as of one
+    /// <see cref="Simulation.SchemaVersion"/>, kept by
+    /// <see cref="Parser.RowSecurity.For"/>; null until first asked.
+    /// </summary>
+    public Parser.RowSecurity? RowSecurity;
+
+    /// <summary>
     /// UTC creation timestamp — captured at CREATE time from the executing
     /// statement's frozen UtcNow on
     /// <see cref="Parser.StatementContext"/>. Surfaces in

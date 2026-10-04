@@ -16,6 +16,7 @@ partial class Simulation
     private static SimulatedStatementOutcome RunMerge(ParserContext context, MergePlan plan)
     {
         var (destinationTable, viewRowsTarget, joinWrite) = (plan.DestinationTable, plan.ViewRowsTarget, plan.JoinWrite);
+        RowSecurity.NoteWrite(context.Batch, destinationTable);
         if (!context.Batch.IsSkipping)
             CheckMergePermissions(context.Batch, plan.DestinationName, plan.TriggerTarget, plan.WhenClauses, joinWrite, plan.OnPredicate, plan.TargetAlias);
         if (joinWrite is not null && !context.Batch.IsSkipping)
@@ -446,7 +447,8 @@ partial class Simulation
                     {
                         var candidateValues = DecodeFullRow(destinationTable, rowBytes);
                         EvaluateComputedColumns(destinationTable, candidateValues, context.Batch);
-                        if (!OnMatches(new RuntimeContext(name => ResolveCombined(candidateValues, sourceValues, name), context.Batch)))
+                        if (!RowSecurity.Admits(context.Batch, destinationTable, candidateValues)
+                            || !OnMatches(new RuntimeContext(name => ResolveCombined(candidateValues, sourceValues, name), context.Batch)))
                         {
                             context.Batch.ReleaseTargetRow(destinationTable, page, slot, hold);
                             break;
@@ -477,6 +479,9 @@ partial class Simulation
                     // another session changed it first.
                     var rowBytes = scannedBytes;
                     var matched = matchedByTarget.TryGetValue((pageIndex, slotIndex), out var matchedSources);
+                    // A row the filter predicate hides is no target row at all.
+                    if (!matched && !RowSecurity.Admits(context.Batch, destinationTable, FullImage(destinationTable, rowBytes, context.Batch)))
+                        continue;
                     if (!matched)
                     {
                         var hold = context.Batch.AwaitTargetRow(destinationTable, pageIndex, slotIndex, ref rowBytes);
@@ -543,6 +548,13 @@ partial class Simulation
             {
                 var targetValues = DecodeFullRow(destinationTable, rowBytes);
                 EvaluateComputedColumns(destinationTable, targetValues, context.Batch);
+
+                // A row the filter predicate hides is no target row at all.
+                if (!RowSecurity.Admits(context.Batch, destinationTable, targetValues))
+                {
+                    context.Batch.ReleaseTargetRow(destinationTable, pageIndex, slotIndex, hold);
+                    return true;
+                }
 
                 // View visibility filter: a base row not visible through the
                 // view participates in neither the ON-predicate match nor the
@@ -768,6 +780,14 @@ partial class Simulation
         ApplyChosenMatchedAction(context, destinationTable, sourceView, chosen, writeMasks, pageIndex, slotIndex, targetValues, sourceValues, resolveCombined, pendingUpdates, pendingDeletes);
     }
 
+    /// <summary>The logical column values of a stored row of <paramref name="table"/>, computed columns included.</summary>
+    private static SqlValue[] FullImage(HeapTable table, byte[] rowBytes, BatchContext batch)
+    {
+        var fullValues = DecodeFullRow(table, rowBytes);
+        EvaluateComputedColumns(table, fullValues, batch);
+        return fullValues;
+    }
+
     private static void ApplyChosenMatchedAction(
         ParserContext context,
         HeapTable destinationTable,
@@ -784,9 +804,11 @@ partial class Simulation
     {
         if (clause.Action == MergeActionKind.Delete)
         {
+            RowSecurity.EnforceBlock(context.Batch, destinationTable, BlockOperation.BeforeDelete, targetValues);
             pendingDeletes.Add((pageIndex, slotIndex, targetValues, sourceValues));
             return;
         }
+        RowSecurity.EnforceBlock(context.Batch, destinationTable, BlockOperation.BeforeUpdate, targetValues);
         // UPDATE: compute new row using assignments evaluated against the same pre-update snapshot.
         context.Batch.BumpRowStamp();
         var newValues = new SqlValue[destinationTable.Columns.Length];
@@ -805,6 +827,7 @@ partial class Simulation
         StampUpdatedRow(destinationTable, newValues, context.Batch);
         EnforceNotNull(destinationTable, newValues, "UPDATE");
         EnforceCheckConstraints(destinationTable, newValues, context.Batch, "UPDATE", reportedVerb: "MERGE");
+        RowSecurity.EnforceBlock(context.Batch, destinationTable, BlockOperation.AfterUpdate, newValues);
 
         // WITH CHECK OPTION: post-update row must still satisfy the view's
         // visibility chain. Raised before commit so a violating row leaves
@@ -942,6 +965,7 @@ partial class Simulation
             EnforceNotNull(destinationTable, rowValues, "UPDATE");
             EnforceCheckConstraints(destinationTable, rowValues, context.Batch, reportedVerb: "MERGE");
             EnforceEdgeConstraints(destinationTable, rowValues, context, "MERGE");
+            RowSecurity.EnforceBlock(context.Batch, destinationTable, BlockOperation.AfterInsert, rowValues);
         }
 
         // WITH CHECK OPTION on the post-insert row, matching INSERT-through-view.

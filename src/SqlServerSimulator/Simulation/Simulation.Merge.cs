@@ -740,7 +740,7 @@ partial class Simulation
             materialize = batch =>
             {
                 var rows = new List<SqlValue[]>();
-                foreach (var rowBytes in ClusteredScan.Rows(sourceTable, batch.Connection.StatementIo))
+                foreach (var rowBytes in RowSecurity.FilterRows(sourceTable, ClusteredScan.Rows(sourceTable, batch.Connection.StatementIo), batch))
                 {
                     batch.PollCancellation();
                     var fullValues = DecodeFullRow(sourceTable, rowBytes);

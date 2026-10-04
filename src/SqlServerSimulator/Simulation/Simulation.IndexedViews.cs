@@ -93,6 +93,7 @@ partial class Simulation
         }
 
         EnforceIndexedViewQualifies(context, view, indexName);
+        this.RejectIndexOverSecurityPolicyTable(context.Batch, view, qualifiedViewName);
 
         // DROP_EXISTING replaces an index of the same name, keeping the
         // others (probed 2026-10-04 against SQL Server 2025).

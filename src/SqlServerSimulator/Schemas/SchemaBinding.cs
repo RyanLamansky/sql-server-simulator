@@ -427,9 +427,46 @@ internal static class SchemaBinding
                 if (function.IsSchemaBound)
                     AddWhenReferencing(database, function, function.BodyText, target, columnName, matches);
             }
+            foreach (var (_, policy) in schema.SecurityPolicies)
+            {
+                if (policy.State.IsSchemaBound && PolicyReferences(database, policy, target, columnName))
+                    matches.Add(policy);
+            }
         }
         matches.Sort(static (a, b) => a.ObjectId.CompareTo(b.ObjectId));
         return matches;
+    }
+
+    /// <summary>
+    /// Whether a predicate of <paramref name="policy"/> names
+    /// <paramref name="target"/> — as the table it applies to, or as its
+    /// function — and, given <paramref name="columnName"/>, reads that column
+    /// of the table among its arguments.
+    /// </summary>
+    internal static bool PolicyReferences(Database database, SecurityPolicy policy, SchemaObject target, string? columnName)
+    {
+        foreach (var predicate in policy.State.Predicates)
+        {
+            if (ReferenceEquals(predicate.Target, target))
+            {
+                if (columnName is null)
+                    return true;
+                foreach (var argument in predicate.Arguments)
+                {
+                    var reads = false;
+                    argument.VisitColumnReferences(name => reads |= database.Collation.Equals(name.Leaf, columnName));
+                    if (reads)
+                        return true;
+                }
+            }
+            else if (columnName is null && target is UserDefinedFunction function
+                && database.Collation.Equals(function.Schema.Name, predicate.FunctionSchema)
+                && database.Collation.Equals(function.Name, predicate.FunctionName))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>

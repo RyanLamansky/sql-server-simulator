@@ -204,6 +204,7 @@ partial class Simulation
         Sequence => "SEQUENCE",
         Synonym => "SYNONYM",
         RuleObject => "RULE",
+        SecurityPolicy => "SECURITY POLICY",
         _ => "DEFAULT",
     };
 

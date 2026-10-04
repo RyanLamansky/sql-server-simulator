@@ -74,8 +74,8 @@ partial class Selection
             columnNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
-            rowSource: (outerBatch, _) =>
-                outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates, InheritedFor(systemTime, outerBatch)))
+            rowSource: (outerBatch, _) => RowSecurity.FilterViewRows(
+                view, columns, outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates, InheritedFor(systemTime, outerBatch)), outerBatch))
         {
             PredicatePushdown = templates => ForView(
                 view, columns, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates], systemTime),

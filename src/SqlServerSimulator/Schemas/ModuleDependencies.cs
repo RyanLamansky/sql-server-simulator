@@ -213,6 +213,8 @@ internal static class ModuleDependencies
                 if (includeIndexes)
                     AddFilteredIndexes(database, entities, schema, table);
             }
+            foreach (var (_, policy) in schema.SecurityPolicies)
+                AddSecurityPolicy(database, entities, schema, policy);
         }
 
         foreach (var (_, ddlTrigger) in database.DdlTriggers)
@@ -289,6 +291,58 @@ internal static class ModuleDependencies
                 objects.Add(resolved);
         }
         return objects;
+    }
+
+    /// <summary>
+    /// A schema-bound security policy's predicates, one entity each with the
+    /// predicate's id as its minor id: the target, the columns the arguments
+    /// read, and the function. A policy that isn't schema bound records
+    /// nothing (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static void AddSecurityPolicy(Database database, List<Entity> entities, Schema schema, SecurityPolicy policy)
+    {
+        if (!policy.State.IsSchemaBound)
+            return;
+        foreach (var predicate in policy.State.Predicates)
+        {
+            var target = new Reference(null, null, SchemaNameOf(database, predicate.Target), predicate.Target.Name, ObjectOrColumnClass)
+            {
+                IsSchemaBound = true,
+                HasObjectReference = true,
+                IsSelected = true,
+                Resolved = predicate.Target,
+            };
+            if (ColumnsOf(predicate.Target) is { } columns)
+            {
+                foreach (var column in columns)
+                {
+                    var reads = false;
+                    foreach (var argument in predicate.Arguments)
+                        argument.VisitColumnReferences(name => reads |= database.Collation.Equals(name.Leaf, column.Name));
+                    if (reads)
+                        target.Columns.Add(new ColumnUse(column.Name) { Selected = true });
+                }
+            }
+            _ = database.Schemas.TryGetValue(predicate.FunctionSchema, out var functionSchema);
+            var function = new Reference(null, null, predicate.FunctionSchema, predicate.FunctionName, ObjectOrColumnClass)
+            {
+                IsSchemaBound = true,
+                HasObjectReference = true,
+                IsSelected = true,
+                Resolved = functionSchema?.Functions.GetValueOrDefault(predicate.FunctionName),
+            };
+            entities.Add(new Entity(policy.ObjectId, predicate.Id, ObjectOrColumnClass, schema.Name, policy.Name, policy.ObjectTypeCode, [target, function]));
+        }
+
+        static string? SchemaNameOf(Database database, SchemaObject target)
+        {
+            foreach (var (name, candidate) in database.Schemas)
+            {
+                if (candidate.SchemaId == target.SchemaId)
+                    return name;
+            }
+            return null;
+        }
     }
 
     private static void AddModule(

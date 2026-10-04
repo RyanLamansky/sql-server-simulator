@@ -663,6 +663,7 @@ partial class Simulation
         var (targetName, table, rawAssignments, assignments, where) = (plan.TargetName, plan.Table, plan.RawAssignments, plan.Assignments, plan.Where);
         var (positionedCursor, output, top, serializableHint, sourceView) = (plan.PositionedCursor, plan.Output, plan.Top, plan.SerializableHint, plan.SourceView);
         CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where);
+        RowSecurity.NoteWrite(context.Batch, table);
         var setMasks = DataMasking.Applying(context.Batch, plan.SetMasks);
         if (positionedCursor is null)
             Selection.SettleSerializableWriteFence(table, where, serializableHint, context.Batch);
@@ -770,6 +771,11 @@ partial class Simulation
         {
             var fullValues = DecodeFullRow(table, rowBytes);
             EvaluateComputedColumns(table, fullValues, context.Batch);
+
+            // A row the table's filter predicate hides is no candidate, and is
+            // judged before anything the statement itself evaluates.
+            if (!RowSecurity.Admits(context.Batch, table, fullValues))
+                return null;
 
             // View visibility filter: rows not visible in the view aren't
             // candidates for UPDATE through it. AND-of-WHEREs up the chain
@@ -997,7 +1003,7 @@ partial class Simulation
         sources = Selection.PrepareMutationJoinSources(sources, joins, where, targetIndex, context.Batch);
 
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
-        sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses, context.Connection.StatementIo);
+        sources[targetIndex] = WrapSourceWithAddressTracking(sources[targetIndex], table, targetAddresses, context.Batch);
         sources = Selection.PrefilterMutationTarget(sources, targetIndex, where, context.Batch);
 
         var seen = new HashSet<(int Page, int Slot)>();
@@ -2223,6 +2229,8 @@ partial class Simulation
         MaskingFunction?[]? setMasks = null,
         bool enforceConstraints = true)
     {
+        if (enforceConstraints)
+            RowSecurity.EnforceBlock(context.Batch, table, BlockOperation.BeforeUpdate, fullValues);
         var newValues = new SqlValue[table.Columns.Length];
         Array.Copy(fullValues, newValues, fullValues.Length);
 
@@ -2260,6 +2268,7 @@ partial class Simulation
         {
             EnforceNotNull(table, newValues, "UPDATE");
             EnforceCheckConstraints(table, newValues, context.Batch, "UPDATE");
+            RowSecurity.EnforceBlock(context.Batch, table, BlockOperation.AfterUpdate, newValues);
         }
 
         return newValues;
@@ -2383,14 +2392,17 @@ partial class Simulation
         FromSource original,
         HeapTable table,
         Dictionary<byte[], (int Page, int Slot)> addressMap,
-        IoStatistics? io)
+        BatchContext batch)
     {
+        var io = batch.Connection.StatementIo;
         IEnumerable<byte[]> RowsRecording()
         {
             var counts = io?.Touch(table);
             _ = counts?.ScanCount += 1;
             var lastPage = -1;
-            foreach (var (page, slot, bytes) in table.Heap.EnumerateRowsWithAddress())
+            // The target's filter predicate hides its rows from the write as
+            // from any read.
+            foreach (var (page, slot, bytes) in RowSecurity.FilterAddressedRows(table, table.Heap.EnumerateRowsWithAddress(), batch))
             {
                 counts?.Enter(page, ref lastPage);
                 addressMap[bytes] = (page, slot);

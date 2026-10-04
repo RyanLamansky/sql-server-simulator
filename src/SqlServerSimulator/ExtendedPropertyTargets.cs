@@ -163,6 +163,7 @@ internal sealed class ExtendedPropertyTargets
             Synonym => "SYNONYM",
             RuleObject => "RULE",
             DefaultObject => "DEFAULT",
+            SecurityPolicy => "SECURITY POLICY",
             _ => obj.ObjectTypeDescription,
         };
         return [("SCHEMA", this.schemaNames.GetValueOrDefault(obj.SchemaId, "")), (kind, obj.Name)];

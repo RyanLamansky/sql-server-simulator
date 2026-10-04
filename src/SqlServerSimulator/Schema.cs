@@ -68,6 +68,7 @@ internal sealed class Schema
         this.Synonyms = new(collation);
         this.Defaults = new(collation);
         this.Rules = new(collation);
+        this.SecurityPolicies = new(collation);
     }
 
     public readonly ConcurrentDictionary<string, HeapTable> HeapTables;
@@ -179,9 +180,15 @@ internal sealed class Schema
     public readonly ConcurrentDictionary<string, RuleObject> Rules;
 
     /// <summary>
+    /// Row-level security policies hosted by this schema (see
+    /// <see cref="SecurityPolicy"/>), sharing the object-name namespace.
+    /// </summary>
+    public readonly ConcurrentDictionary<string, SecurityPolicy> SecurityPolicies;
+
+    /// <summary>
     /// Yields every <see cref="SchemaObject"/> in this schema's
     /// object-name namespace (heap tables, views, UDFs, procedures,
-    /// sequences, triggers, synonyms, defaults, rules) — the set whose leaf names must be
+    /// sequences, triggers, synonyms, defaults, rules, security policies) — the set whose leaf names must be
     /// unique (Msg 2714 on CREATE collision). <see cref="TableTypes"/> are
     /// deliberately omitted: probe-confirmed that table-type names occupy
     /// a separate namespace from this set. Used by sys.objects projection
@@ -198,6 +205,7 @@ internal sealed class Schema
         foreach (var (_, sn) in this.Synonyms) yield return sn;
         foreach (var (_, d) in this.Defaults) yield return d;
         foreach (var (_, r) in this.Rules) yield return r;
+        foreach (var (_, sp) in this.SecurityPolicies) yield return sp;
     }
 
     /// <summary>

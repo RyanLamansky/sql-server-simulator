@@ -125,6 +125,8 @@ internal sealed class ObjectProperty : Expression
                 if (d.ObjectId == id) return d;
             foreach (var (_, r) in schema.Rules)
                 if (r.ObjectId == id) return r;
+            foreach (var (_, sp) in schema.SecurityPolicies)
+                if (sp.ObjectId == id) return sp;
         }
         return null;
     }

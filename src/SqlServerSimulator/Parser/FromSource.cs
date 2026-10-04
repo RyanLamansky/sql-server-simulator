@@ -582,7 +582,7 @@ internal abstract class PerExecutionRows : IEnumerable<byte[]>
 internal sealed class LockCheckedScanRows(HeapTable table, DataLockPlan plan) : PerExecutionRows
 {
     public override IEnumerable<byte[]> For(BatchContext batch) =>
-        BatchContext.WrapWithRowConflictChecks(table, batch, plan);
+        RowSecurity.FilterLockedRows(table, plan, BatchContext.WrapWithRowConflictChecks(table, batch, plan), batch);
 }
 
 /// <summary>
@@ -592,5 +592,5 @@ internal sealed class LockCheckedScanRows(HeapTable table, DataLockPlan plan) : 
 internal sealed class UnlockedScanRows(HeapTable table) : PerExecutionRows
 {
     public override IEnumerable<byte[]> For(BatchContext batch) =>
-        ClusteredScan.Rows(table, batch.Connection.StatementIo, batch.CurrentStatement.RowAddresses);
+        RowSecurity.FilterRows(table, ClusteredScan.Rows(table, batch.Connection.StatementIo, batch.CurrentStatement.RowAddresses), batch);
 }

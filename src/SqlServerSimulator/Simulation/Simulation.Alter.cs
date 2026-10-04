@@ -52,6 +52,8 @@ partial class Simulation
                 return TryParseAlterServerRole(context);
             case Name appWord when appWord.Value.Equals("APPLICATION", StringComparison.OrdinalIgnoreCase):
                 return TryParseAlterApplicationRole(context);
+            case Name securityWord when securityWord.Value.Equals("SECURITY", StringComparison.OrdinalIgnoreCase):
+                return TryParseAlterSecurityPolicy(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return TryParseAlterFullText(context);
             case ReservedKeyword { Keyword: Keyword.Authorization }:
@@ -61,7 +63,7 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.Database }:
                 break;
             default:
-                return false;
+                return RejectPredicateClauseWord(context);
         }
 
         // Cursor is on DATABASE; advance to the token after it (a db name, the
@@ -1687,6 +1689,8 @@ partial class Simulation
             return sameSchema ? "RULE" : MoveSchemaObject(sourceSchema.Rules, destSchema.Rules, rule, leafName, sourceSchema, destSchema, batch, static (moved, schema) => moved.Schema = schema, "RULE");
         if (sourceSchema.Defaults.TryGetValue(leafName, out var defaultObject))
             return sameSchema ? "DEFAULT" : MoveSchemaObject(sourceSchema.Defaults, destSchema.Defaults, defaultObject, leafName, sourceSchema, destSchema, batch, static (moved, schema) => moved.Schema = schema, "DEFAULT");
+        if (sourceSchema.SecurityPolicies.TryGetValue(leafName, out var policy))
+            return sameSchema ? "SECURITY POLICY" : MoveSchemaObject(sourceSchema.SecurityPolicies, destSchema.SecurityPolicies, policy, leafName, sourceSchema, destSchema, batch, static (moved, schema) => moved.Schema = schema, "SECURITY POLICY");
 
         throw SimulatedSqlException.CannotFindObject(leafName);
     }

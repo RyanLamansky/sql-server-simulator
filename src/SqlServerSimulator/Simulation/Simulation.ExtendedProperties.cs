@@ -325,6 +325,7 @@ partial class Simulation
             "FUNCTION" => schema.Functions.GetValueOrDefault(level1Name),
             "PROCEDURE" => schema.Procedures.GetValueOrDefault(level1Name),
             "RULE" => schema.Rules.GetValueOrDefault(level1Name),
+            "SECURITY POLICY" => schema.SecurityPolicies.GetValueOrDefault(level1Name),
             "SEQUENCE" => schema.Sequences.GetValueOrDefault(level1Name),
             "SYNONYM" => schema.Synonyms.GetValueOrDefault(level1Name),
             "TABLE" => schema.HeapTables.GetValueOrDefault(level1Name),

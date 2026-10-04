@@ -36,6 +36,8 @@ internal static partial class BuiltInResources
         "sys.objects",
         "sys.parameters",
         "sys.procedures",
+        "sys.security_policies",
+        "sys.security_predicates",
         "sys.sequences",
         "sys.sql_modules",
         "sys.synonyms",

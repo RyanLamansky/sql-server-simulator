@@ -157,7 +157,7 @@ partial class Simulation
         // rows, computed here, after the waits above.
         var targetAddresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
         var rowMaps = new Dictionary<byte[], byte[]?[]>[path.Length - 1];
-        sources = SourcesAlongPath(batch, chain, path, 0, original => WrapSourceWithAddressTracking(original, table, targetAddresses, batch.Connection.StatementIo), rowMaps);
+        sources = SourcesAlongPath(batch, chain, path, 0, original => WrapSourceWithAddressTracking(original, table, targetAddresses, batch), rowMaps);
         // A joined statement's OUTPUT may read its own other sources.
         var partners = output is { ReadsPartners: true } ? new OutputPartnerRows(sources) : null;
         foreach (var candidate in Selection.EnumerateJoinedRows(sources, chain.Joins, batch, outerResolver: null))

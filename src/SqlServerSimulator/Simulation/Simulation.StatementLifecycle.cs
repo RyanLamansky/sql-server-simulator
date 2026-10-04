@@ -147,6 +147,13 @@ partial class Simulation
         private bool resumedAtStatementEnd;
 
         /// <summary>
+        /// The session's <see cref="SimulatedDbConnection.RowSecurityMarks"/> as
+        /// the statement began: a count past it when an error settles means the
+        /// statement, or one it ran, applied a security predicate.
+        /// </summary>
+        private readonly int rowSecurityMarks;
+
+        /// <summary>
         /// What the enclosing statement let its scalar function calls inline
         /// into, and how many calls the compile had gathered, when this one
         /// began (see <see cref="InlinedScalarCalls"/>).
@@ -178,6 +185,7 @@ partial class Simulation
                     batch.CountedStatementLine = batch.CurrentStatement.StartLine;
             }
             this.StatementStart = batch.Parser.SaveCheckpoint();
+            this.rowSecurityMarks = batch.Connection.RowSecurityMarks;
             this.gatheredBefore = batch.CreateTimeBindErrors?.Count ?? 0;
             // The string → date-time conversion reads the session's order from
             // here, having no session of its own; an unchanged order republishes
@@ -429,6 +437,12 @@ partial class Simulation
                 inlined.TruncateTo(this.inlinedCallsBefore);
             if (!thrown.BindReportSettled)
                 (ex, this.resumedAtStatementEnd) = simulation.ReportEveryBindError(batch, thrown, this.StatementStart, requireSemicolonBeforeCte, atBatchStart);
+
+            // A statement that applied a security predicate quotes no value,
+            // type or name in a conversion or truncation error, whichever row
+            // raised it (probed 2026-10-04 against SQL Server 2025).
+            if (connection.RowSecurityMarks != this.rowSecurityMarks && ex.RedactedForRowSecurity() is { } redacted)
+                ex = redacted;
 
             // Stamp the batch-relative line / server / procedure the static
             // factories couldn't know at throw time — the ambient-capture

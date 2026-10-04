@@ -116,7 +116,7 @@ Routes through `Simulation.Drop.cs` alongside DROP TABLE / VIEW / FUNCTION / PRO
   Reuses `IsReservedSchemaName` from CreateSchema.
 - **Missing schema, no `IF EXISTS`** → **Msg 15151** (`"Cannot drop the schema '<n>', because it does not exist or you do not have permission."`).
   With `IF EXISTS`, the miss is silent (same shape as the temp-table / function / procedure variants).
-- **Non-empty schema** → **Msg 3729** (`"Cannot drop schema '<n>' because it is being referenced by object '<obj>'."`).
+- **Non-empty schema** → **Msg 3729** (`"Cannot drop schema '<n>' because it is being referenced by object '<obj>'."`), which ends the batch (probed 2026-10-04 against SQL Server 2025).
   Real SQL Server names the first dependent object the engine encounters in its dependency walk — often a PK / UNIQUE / CHECK constraint name rather than the table itself.
   The simulator's `FirstSchemaResident` walks `Schema.SchemaObjects()` first (heap tables / views / functions / procedures / sequences / triggers) and falls through to `Schema.TableTypes` (which occupies the separate type namespace); it names the table (or first-found object) rather than a constraint, since auto-named constraints aren't tracked as standalone `SchemaObject`s.
   Same Msg / wording prefix as the probe; the specific object-name suffix is a minor fidelity gap.

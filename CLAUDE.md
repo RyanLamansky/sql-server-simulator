@@ -357,6 +357,8 @@ Where an entry carries a second clause it is because that fact changes what you'
 - **`hierarchyid`** — OrdPath storage, byte-identical CAST / wire / DATALENGTH, and the full sixteen-tier ordinal domain (wider than `int`, so labels are `long`) → [`hierarchyid.md`](docs/claude/hierarchyid.md).
 - **`GRANT` / `REVOKE` / `DENY`** — securable resolution (objects, schemas, users, roles, and the type / XML schema collection / full-text catalog classes), the covering scope walk, role closure, ownership and `ALTER AUTHORIZATION`, ownership chaining by owner, `EXECUTE AS`, application roles, login and server-scope DDL, a gate on every modeled CREATE / ALTER / DROP, and the server permissions and fixed server roles — the login gate, the server-scope statement gates, and what a server permission implies in every database.
   A cross-database reference resolves the login's user in the **target**, and dbo bypasses every check → [`permissions.md`](docs/claude/permissions.md).
+- **Row-level security** — `CREATE` / `ALTER` / `DROP SECURITY POLICY`, filter and block predicates, their catalog and dependencies, and the conversion errors a statement applying one redacts.
+  Predicates are looked up and run per execution, never settled while a plan parses, and a filter applies to `dbo` too, ahead of anything the statement evaluates over the row; a new path reading a table's rows for a statement filters them through `RowSecurity` → [`row-level-security.md`](docs/claude/row-level-security.md).
 - **Dynamic Data Masking** — `MASKED WITH`, `ALTER COLUMN … ADD | DROP MASKED`, `sys.masked_columns`, `UNMASK` at every scope, and what a principal without it reads and writes.
   Each output column's mask compiles onto the plan and applies only at the statement's output sinks, so predicates, joins and ordering read stored values → [`data-masking.md`](docs/claude/data-masking.md).
 - **Graph tables** — `AS NODE` / `AS EDGE`, the `$node_id` / `$edge_id` / `$from_id` / `$to_id` pseudo-columns and their JSON identifiers, edge constraints, `MATCH`, `SHORTEST_PATH` with its graph path aggregates, and the six identifier functions.
@@ -392,7 +394,6 @@ The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 
 - **A few `SET <option>` toggles still parse and are discarded** — `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family, which return no plans, `ARITHIGNORE`, `FORCEPLAN` → [`session-options.md`](docs/claude/session-options.md#not-modeled-yet).
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
-- **Row-level security** — `CREATE SECURITY POLICY` and its filter / block predicates → [`permissions.md`](docs/claude/permissions.md#known-gaps).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **A binder report's ORDER BY Msg 209** for a name two select items share, and a name only a run reaches → [`errors.md`](docs/claude/errors.md#not-modeled-yet-1).
 

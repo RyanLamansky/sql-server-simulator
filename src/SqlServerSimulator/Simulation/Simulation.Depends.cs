@@ -93,7 +93,11 @@ partial class Simulation
 
         var references = SpDependsReferenceRows(entities, targetId);
         var referencedBy = SpDependsReferencedByRows(entities, targetId);
-        if (references.Count == 0 && referencedBy.Count == 0)
+        // A security policy naming the object counts as a referrer though its
+        // row drops out of the set, which then goes out empty (probed
+        // 2026-10-04 against SQL Server 2025).
+        var policyRefers = entities.Exists(entity => entity.ObjectTypeCode == "SP" && entity.References.Exists(reference => reference.ReferencedId == targetId));
+        if (references.Count == 0 && referencedBy.Count == 0 && !policyRefers)
         {
             batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 83, 15461,
                 "Object does not reference any object, and no objects reference it."));
@@ -107,7 +111,7 @@ partial class Simulation
             yield return new SimulatedSqlResultSet(SpDependsReferencesSchema, SpDependsReferencesColumnNames, references);
         }
 
-        if (referencedBy.Count > 0)
+        if (referencedBy.Count > 0 || policyRefers)
         {
             // Sent as an outcome of its own so it lands between the two result
             // sets rather than ahead of the first.
@@ -130,6 +134,11 @@ partial class Simulation
         {
             if (entity.ReferencingId != targetId || entity.ReferencingClass != ModuleDependencies.ObjectOrColumnClass)
                 continue;
+            if (entity.ObjectTypeCode == "SP")
+            {
+                SpDependsPolicyRows(entity, rows);
+                continue;
+            }
             foreach (var reference in entity.References)
             {
                 if (reference.Resolved is not { } resolved)
@@ -164,6 +173,38 @@ partial class Simulation
     }
 
     /// <summary>
+    /// A security policy's predicate as <c>sp_depends</c> reports it: each
+    /// object the predicate names with a column-less row, then a row per
+    /// column it reads, all selected, the policy's predicates together listed
+    /// once each in name order (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static void SpDependsPolicyRows(ModuleDependencies.Entity entity, List<SqlValue[]> rows)
+    {
+        foreach (var reference in entity.References)
+        {
+            if (reference.Resolved is not { } resolved)
+                continue;
+            var name = $"{reference.SchemaName ?? Database.DefaultSchemaName}.{reference.EntityName}";
+            var type = SpDependsTypeLabel(resolved.ObjectTypeCode);
+            AddRow(name, type, null);
+            foreach (var column in reference.Columns)
+                AddRow(name, type, column.Name);
+        }
+        rows.Sort(static (a, b) =>
+        {
+            var byName = string.CompareOrdinal(a[0].AsString, b[0].AsString);
+            return byName != 0 ? byName : a[4].IsNull ? (b[4].IsNull ? 0 : -1) : b[4].IsNull ? 1 : string.CompareOrdinal(a[4].AsString, b[4].AsString);
+        });
+
+        void AddRow(string name, SqlValue type, string? column)
+        {
+            if (rows.Exists(row => row[0].AsString == name && (column is null ? row[4].IsNull : !row[4].IsNull && row[4].AsString == column)))
+                return;
+            rows.Add([SqlValue.FromSystemName(name), type, SpDependsNo, SpDependsSelected, column is null ? SqlValue.Null(SqlType.SystemName) : SqlValue.FromSystemName(column)]);
+        }
+    }
+
+    /// <summary>
     /// What references the named object, distinct on (name, type), in
     /// schema-then-name order — a table whose computed columns read its own
     /// columns included (probed 2026-09-30 against SQL Server 2025).
@@ -175,8 +216,11 @@ partial class Simulation
         {
             // A module naming itself isn't listed against itself, and a DDL
             // trigger has no schema-qualified name real can report.
+            // A security policy isn't listed against what its predicates name
+            // (probed 2026-10-04 against SQL Server 2025).
             if ((entity.ReferencingId == targetId && entity.ReferencingMinorId == 0)
-                || entity.ReferencingClass != ModuleDependencies.ObjectOrColumnClass)
+                || entity.ReferencingClass != ModuleDependencies.ObjectOrColumnClass
+                || entity.ObjectTypeCode == "SP")
             {
                 continue;
             }

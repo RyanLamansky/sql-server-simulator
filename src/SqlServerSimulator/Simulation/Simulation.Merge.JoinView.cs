@@ -177,7 +177,7 @@ partial class Simulation
         var table = plan.Table;
         var addresses = new Dictionary<byte[], (int Page, int Slot)>(ReferenceEqualityComparer.Instance);
         var rowMaps = new Dictionary<byte[], byte[]?[]>[path.Length - 1];
-        var sources = SourcesAlongPath(batch, chain, path, 0, original => WrapSourceWithAddressTracking(original, table, addresses, batch.Connection.StatementIo), rowMaps);
+        var sources = SourcesAlongPath(batch, chain, path, 0, original => WrapSourceWithAddressTracking(original, table, addresses, batch), rowMaps);
 
         // Hoisted scaffolding: one mutable tuple slot and one resolver per
         // level, reused across the walk and the reads of single rows.

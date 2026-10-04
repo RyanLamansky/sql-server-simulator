@@ -1166,6 +1166,14 @@ public sealed class SimulatedDbConnection : DbConnection
     internal int NestingLevel;
 
     /// <summary>
+    /// Counts each time a statement on this session applies a row-level
+    /// security predicate. A statement compares it with the count it started
+    /// at, nested statements included, to tell whether its conversion errors
+    /// read redacted (see <see cref="Parser.SecurityPredicateRunner.For"/>).
+    /// </summary>
+    internal int RowSecurityMarks;
+
+    /// <summary>
     /// How many natively compiled modules' <c>BEGIN ATOMIC</c> blocks the
     /// session is running inside. A memory-optimized table reached there runs
     /// at the block's own isolation level, so the session-level rules real

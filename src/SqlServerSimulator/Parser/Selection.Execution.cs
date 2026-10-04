@@ -2140,6 +2140,7 @@ internal sealed partial class Selection
                 // probe of an EXISTS reads no projection.
                 if (top.Count != 0)
                 {
+                    RowSecurity.NoteReads(sources, batch);
                     RunStartupConstants(startupConstants, batch);
                     if (!ReferenceEquals(batch.ExistenceProbe, self))
                         RunStartupConstants(projectionStartupConstants, batch);

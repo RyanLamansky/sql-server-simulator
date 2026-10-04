@@ -453,6 +453,7 @@ partial class Simulation
         }
         else
         {
+            RowSecurity.NoteWrite(context.Batch, destinationTable);
             sourceRows = context.Token switch
             {
                 ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable),
@@ -527,6 +528,7 @@ partial class Simulation
         // cell and a NEXT VALUE FOR of the same sequence share one value, row
         // by row (probed 2026-10-04 against SQL Server 2025).
         var batch = context.Batch;
+        RowSecurity.NoteWrite(batch, plan.DestinationTable);
         var retainsDraws = plan.ValueTuples!.Count > 1 && batch.SequenceValuesByRow is null;
         if (retainsDraws)
             batch.SequenceValuesByRow = [];
@@ -830,6 +832,8 @@ partial class Simulation
             {
                 EnforceNotNull(destinationTable, rowValues, plan.Verb);
                 EnforceCheckConstraints(destinationTable, rowValues, context.Batch, plan.Verb);
+                if (!context.Batch.IsSkipping)
+                    RowSecurity.EnforceBlock(context.Batch, destinationTable, BlockOperation.AfterInsert, rowValues);
             }
 
             // WITH CHECK OPTION: the post-row-construction row must satisfy

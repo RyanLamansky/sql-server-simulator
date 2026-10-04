@@ -62,6 +62,8 @@ partial class Simulation
                 return Simulation.TryParseDropXml(context);
             case Name synonymWord when synonymWord.Value.Equals("SYNONYM", StringComparison.OrdinalIgnoreCase):
                 return TryParseDropSynonym(context);
+            case Name securityWord when securityWord.Value.Equals("SECURITY", StringComparison.OrdinalIgnoreCase):
+                return TryParseDropSecurityPolicy(context);
             case Name assemblyWord when assemblyWord.Value.Equals("ASSEMBLY", StringComparison.OrdinalIgnoreCase):
                 return TryParseDropAssembly(context);
             // DROP STATISTICS takes `table.name` entries rather than the plain
@@ -88,7 +90,7 @@ partial class Simulation
             _ => DropTargetKind.None,
         };
         if (targetKind == DropTargetKind.None)
-            return false;
+            return RejectPredicateClauseWord(context);
 
         context.MoveNextRequired();
         var ifExists = false;
@@ -870,7 +872,10 @@ partial class Simulation
         // schema-bound view's base reports Msg 3726). Temp tables are exempt —
         // a schema-bound body can't name one.
         if (!isTempTable && schema is not null)
+        {
             RejectDropOfSchemaBoundReferent(context.CurrentDatabase, removedTable, "DROP TABLE", name);
+            RejectDropOfPolicyTarget(context.CurrentDatabase, removedTable, name);
+        }
         if (isLocalTempTable)
         {
             context.Connection.RemoveTempTable(removedTable);
@@ -1212,6 +1217,24 @@ partial class Simulation
             }
         }
         return false;
+    }
+
+    /// <summary>
+    /// Raises Msg 3729 state 3 when a security policy that isn't schema bound
+    /// has a predicate on the table being dropped: such a policy pins its
+    /// table by id though not its columns or function (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    private static void RejectDropOfPolicyTarget(Database database, HeapTable table, MultiPartName writtenName)
+    {
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, policy) in schema.SecurityPolicies)
+            {
+                if (Array.Exists(policy.State.Predicates, predicate => ReferenceEquals(predicate.Target, table)))
+                    throw SimulatedSqlException.CannotDropReferencedBySchemaBoundObject("DROP TABLE", writtenName.ToString(), policy.Name, state: 3);
+            }
+        }
     }
 
     /// <summary>

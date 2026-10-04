@@ -67,6 +67,8 @@ partial class Simulation
                 return Simulation.TryParseCreateSpatial(context);
             case Name synonymWord when synonymWord.Value.Equals("SYNONYM", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateSynonym(context);
+            case Name securityWord when securityWord.Value.Equals("SECURITY", StringComparison.OrdinalIgnoreCase):
+                return TryParseCreateSecurityPolicy(context);
             case ReservedKeyword { Keyword: Keyword.Statistics }:
                 return Simulation.TryParseCreateStatistics(context);
             case Name assemblyWord when assemblyWord.Value.Equals("ASSEMBLY", StringComparison.OrdinalIgnoreCase):
