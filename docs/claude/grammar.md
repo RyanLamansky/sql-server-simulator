@@ -103,7 +103,7 @@ The message quotes the first 128 characters of that undelimited body.
 Django's schema editor emits exactly-128-character table names for a long model's implicit m2m table, which is what surfaced the delimiter-counting version of the rule.
 
 `@@OPTIONS` returns 5432 on a fresh session, with **bit 256** tracking QI — `@@OPTIONS & 256` is 256 under ON, 0 under OFF — as the batch's last `SET` of it leaves the option, since the whole batch parses before any of it runs (see [`session-options.md`](session-options.md#when-a-set-applies)).
-The **plan cache** key (`PlanCacheKey`, `Simulation/Simulation.cs`) includes the `QuotedIdentifiers` bool, so the identical text `SELECT "abc"` caches separately under ON vs OFF and never replays the wrong reading.
+The **plan cache** key (`PlanCacheKey`, `Simulation/Simulation.PlanCache.cs`) includes the `QuotedIdentifiers` bool, so the identical text `SELECT "abc"` caches separately under ON vs OFF and never replays the wrong reading.
 
 ## Scoping — parse-time, textual order
 
