@@ -468,7 +468,7 @@ partial class Simulation
         // INLINE = ON over a body that can't inline is refused after the body
         // binds and ahead of the name check (probed 2026-10-01 against SQL
         // Server 2025).
-        if (options.Inline == true && !ModuleInlining.IsInlineableScalar(bodyText, functionName.Leaf, executeAsClause))
+        if (options.Inline == true && (!ModuleInlining.IsInlineableScalar(bodyText, functionName.Leaf, executeAsClause) || parameters.Exists(static parameter => parameter.TableType is not null)))
             throw SimulatedSqlException.InlineOptionNotValid();
         var replaced = ResolveFunctionAlterTarget<ScalarFunction>(context, schema, functionName, isAlter, createOrAlter);
         RejectTimestampParameters(parameters);
@@ -770,12 +770,7 @@ partial class Simulation
         bodyCommand.CommandText = bodyText;
 #pragma warning restore CA2100
 
-        var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
-        for (var i = 0; i < parameters.Length; i++)
-        {
-            var p = parameters[i];
-            variables[p.Name] = new VariableSlot(p.Type, declaredMaxLength: null, SqlValue.Null(p.Type), parameter: null) { SpelledNumeric = p.SpelledNumeric };
-        }
+        var variables = SeedFunctionParameters(parameters);
 
         // Use the scalar-UDF body batch constructor — it accepts a synthesized
         // command + a pre-seeded variable dict, which is exactly what we need
@@ -786,6 +781,7 @@ partial class Simulation
         // no value yet, so `TOP (@n)` is settled from its declared type rather
         // than refused as a NULL count (probed 2026-09-26).
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { CreateTimeBinding = true, LineOffset = bodyLineOffset };
+        SeedTableValuedParameters(innerBatch, outerContext.Batch, parameters);
         // Inspection runs the body's FROM-less projections, so the batch needs
         // the CREATE statement's own current-time freeze to evaluate a
         // GETDATE() / SYSDATETIME() column.
@@ -812,6 +808,7 @@ partial class Simulation
                 throw connection.Simulation.WithRecoveredSyntaxErrors(innerBatch, parsePhase, errorToken, command =>
                 {
                     var recovery = new BatchContext(command, new Dictionary<string, VariableSlot>(variables, BatchContext.VariableNameComparer), new UdfFrame(SqlType.Int32));
+                    SeedTableValuedParameters(recovery, outerContext.Batch, parameters);
                     recovery.AdoptStatementFreezeFrom(outerContext.Batch);
                     return recovery;
                 });
@@ -876,6 +873,26 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var name = variable.Value;
         context.MoveNextRequired();
+
+        // A user-defined table type makes a table-valued parameter, which
+        // takes no default (a written one is Msg 206 against the type) and
+        // must be READONLY (Msg 352), as a procedure's (probed 2026-10-04
+        // against SQL Server 2025).
+        if (TryResolveTableTypeParameter(context, out var onePart) is { } tableType)
+        {
+            if (context.Token is Operator { Character: '=' })
+            {
+                context.MoveNextRequired();
+                var written = ParseParameterDefault(context);
+                throw SimulatedSqlException.OperandTypeClash(
+                    Expression.IsUntypedNullLiteral(written) ? "NULL" : SimulatedSqlException.FamilyRootName(written.GetSqlType(context.Batch, NoColumnTypeResolver)),
+                    tableType.Name);
+            }
+            if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.ReadOnly })
+                throw SimulatedSqlException.TableValuedParameterMustBeReadOnly("@" + name);
+            context.MoveNextRequired();
+            return new UdfParameter(name, SqlType.Int32, null) { TableType = tableType, TableTypeNamedOnePart = onePart, LineNumber = variable.LineNumber };
+        }
 
         var spelledNumeric = IsNumericTypeWord(context.Token);
         SqlType paramType;

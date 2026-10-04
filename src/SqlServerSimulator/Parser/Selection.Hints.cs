@@ -702,6 +702,7 @@ internal sealed partial class Selection
             case TableHintKind.ReadCommittedLock: info.ReadCommittedLock = true; break;
 
             case TableHintKind.Index:
+                context.SimpleParameterizationBlocked = true;
                 info.IndexHint = true;
                 info.IndexNamed = true;
                 context.MoveNextRequired();
@@ -709,12 +710,14 @@ internal sealed partial class Selection
                 return;
 
             case TableHintKind.ForceScan:
+                context.SimpleParameterizationBlocked = true;
                 info.IndexHint = true;
                 info.ForceScan = true;
                 context.MoveNextRequired();
                 return;
 
             case TableHintKind.ForceSeek:
+                context.SimpleParameterizationBlocked = true;
                 info.IndexHint = true;
                 info.ForceSeek = true;
                 context.MoveNextRequired();
@@ -1071,6 +1074,7 @@ internal sealed partial class Selection
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.TableSample })
             return;
+        context.SimpleParameterizationBlocked = true;
         var collation = context.Batch.CurrentDatabase.Collation;
         context.MoveNextRequired();
         // Optional SYSTEM sampling-method identifier (contextual).

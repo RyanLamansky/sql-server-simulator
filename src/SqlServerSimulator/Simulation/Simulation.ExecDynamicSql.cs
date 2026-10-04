@@ -217,6 +217,7 @@ partial class Simulation
         // Kept verbatim: Msg 8178 quotes the two argument strings exactly as
         // written, spacing included.
         var paramDefsText = "";
+        var declaresParameters = false;
         SqlType? paramDefsType = null;
         if (hasMoreArgs)
         {
@@ -233,13 +234,13 @@ partial class Simulation
             if (!paramDefs.IsNull && SqlType.IsNationalStringCategory(paramDefsType))
             {
                 paramDefsText = paramDefs.AsString;
-                declaredParams = ParseSpExecuteSqlParamDefinitions(paramDefsText, batch.Connection);
+                declaresParameters = true;
             }
             hasMoreArgs = context.Token is Operator { Character: ',' };
         }
 
         // Remaining args: positional/named values bound to declared params.
-        var argumentValues = new List<(string? Name, SqlValue Value, VariableSlot? OutputSlot, bool IsUntypedNull)>();
+        var argumentValues = new List<(string? Name, SqlValue Value, VariableSlot? OutputSlot, bool IsUntypedNull, HeapTable? Table, bool IsDefault)>();
         while (hasMoreArgs)
         {
             context.MoveNextRequired();
@@ -253,8 +254,8 @@ partial class Simulation
             else if (sawNamedArgument)
                 throw SimulatedSqlException.MustPassParameterAsNamed();
             var isUntypedNull = context.Token is ReservedKeyword { Keyword: Keyword.Null };
-            var (argValue, argOutputSlot) = ParseSpExecuteSqlValueArg(context, batch);
-            argumentValues.Add((argName, argValue, argOutputSlot, isUntypedNull));
+            var (argValue, argOutputSlot) = ParseSpExecuteSqlValueArg(context, batch, out var argTable, out var argIsDefault);
+            argumentValues.Add((argName, argValue, argOutputSlot, isUntypedNull, argTable, argIsDefault));
             hasMoreArgs = context.Token is Operator { Character: ',' };
         }
 
@@ -267,6 +268,22 @@ partial class Simulation
             throw SimulatedSqlException.SpExecuteSqlArgumentNotUnicode("@statement", 2).PinLine(1);
         if (paramDefsType is not null && !SqlType.IsNationalStringCategory(paramDefsType))
             throw SimulatedSqlException.SpExecuteSqlArgumentNotUnicode("@params", 3).PinLine(1);
+
+        // The declarations, and the arguments bound to them below, belong to
+        // the call: an error in either is the call's, and the caller's batch
+        // goes on past it (probed 2026-10-04 against SQL Server 2025).
+        if (declaresParameters)
+        {
+            try
+            {
+                declaredParams = ParseSpExecuteSqlParamDefinitions(paramDefsText, batch.Connection);
+            }
+            catch (SimulatedSqlException declarationError)
+            {
+                declarationError.EndedCalledBatch = true;
+                throw;
+            }
+        }
 
         if (sqlValue.IsNull)
             yield break;
@@ -283,85 +300,124 @@ partial class Simulation
         SimulatedSqlException ArgumentBindingError(SimulatedSqlException error) =>
             error.PinLine(argumentValues.Count > 0 ? 0 : 1);
         var preDeclared = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+        Dictionary<string, HeapTable>? tableArguments = null;
         var outputBindings = new List<(SpExecuteSqlParam Param, VariableSlot CallerSlot)>();
-        if (declaredParams is not null)
+        try
         {
-            var positional = 0;
-            var bound = new SqlValue?[declaredParams.Count];
-            var boundOutputSlots = new VariableSlot?[declaredParams.Count];
-            var boundIsUntypedNull = new bool[declaredParams.Count];
-            // Real checks the declarations for completeness *before* it
-            // complains about a name it doesn't recognize, so an unknown name
-            // alongside a missing declared one reports the missing one
-            // (probe-confirmed) — hence the flag rather than an immediate
-            // throw.
-            var sawUnknownName = false;
-            if (declaredParams.Count == 0 && argumentValues.Count > 0)
-                throw SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine("").PinLine(0);
-            foreach (var (name, value, outputSlot, isUntypedNull) in argumentValues)
+            if (declaredParams is not null)
             {
-                int idx;
-                if (name is null)
+                var positional = 0;
+                var bound = new SqlValue?[declaredParams.Count];
+                var boundOutputSlots = new VariableSlot?[declaredParams.Count];
+                var boundIsUntypedNull = new bool[declaredParams.Count];
+                var boundTables = new HeapTable?[declaredParams.Count];
+                // Real checks the declarations for completeness *before* it
+                // complains about a name it doesn't recognize, so an unknown name
+                // alongside a missing declared one reports the missing one
+                // (probe-confirmed) — hence the flag rather than an immediate
+                // throw.
+                var sawUnknownName = false;
+                if (declaredParams.Count == 0 && argumentValues.Count > 0)
+                    throw SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine("").PinLine(0);
+                foreach (var (name, value, outputSlot, isUntypedNull, table, isDefault) in argumentValues)
                 {
-                    idx = positional++;
-                    if (idx >= declaredParams.Count)
-                        throw SimulatedSqlException.TooManyArgumentsToFunction("").PinLine(0);
-                }
-                else
-                {
-                    idx = -1;
-                    for (var i = 0; i < declaredParams.Count; i++)
+                    int idx;
+                    if (name is null)
                     {
-                        if (context.Batch.CurrentDatabase.Collation.Equals(declaredParams[i].Name, name))
+                        idx = positional++;
+                        if (idx >= declaredParams.Count)
+                            throw SimulatedSqlException.TooManyArgumentsToFunction("").PinLine(0);
+                    }
+                    else
+                    {
+                        idx = -1;
+                        for (var i = 0; i < declaredParams.Count; i++)
                         {
-                            idx = i;
-                            break;
+                            if (context.Batch.CurrentDatabase.Collation.Equals(declaredParams[i].Name, name))
+                            {
+                                idx = i;
+                                break;
+                            }
+                        }
+                        if (idx < 0)
+                        {
+                            sawUnknownName = true;
+                            continue;
                         }
                     }
-                    if (idx < 0)
+                    // A second value for one parameter is a surplus argument.
+                    if (bound[idx] is not null || boundTables[idx] is not null)
+                        throw SimulatedSqlException.TooManyArgumentsToFunction("").PinLine(0);
+                    if (isDefault)
+                        continue;
+                    bound[idx] = table is null ? value : null;
+                    boundTables[idx] = table;
+                    boundOutputSlots[idx] = outputSlot;
+                    boundIsUntypedNull[idx] = isUntypedNull;
+                }
+                for (var i = 0; i < declaredParams.Count; i++)
+                {
+                    var param = declaredParams[i];
+                    // A table-valued parameter takes a table variable of its own
+                    // type, and an unsupplied one is an empty table; anything else
+                    // is Msg 206 against the type as the call binds (probed
+                    // 2026-10-04 against SQL Server 2025).
+                    if (param.TableType is { } tableType)
                     {
-                        sawUnknownName = true;
+                        if (boundTables[i] is { } suppliedTable && !ReferenceEquals(suppliedTable.DeclaredTableType, tableType))
+                            throw SimulatedSqlException.OperandTypeClash(suppliedTable.DeclaredTableType?.Name ?? "table", tableType.Name).PinLine(0);
+                        if (bound[i] is { } scalar)
+                            throw SimulatedSqlException.OperandTypeClash(boundIsUntypedNull[i] ? "NULL" : SimulatedSqlException.FamilyRootName(scalar.Type), tableType.Name).PinLine(0);
+                        (tableArguments ??= new Dictionary<string, HeapTable>(BatchContext.VariableNameComparer))[param.Name] =
+                            CloneTableValuedArgument(tableType, param.Name, batch, boundTables[i]);
                         continue;
                     }
+                    if (boundTables[i] is { } misplacedTable)
+                        throw SimulatedSqlException.OperandTypeClash(misplacedTable.DeclaredTableType?.Name ?? "table", SimulatedSqlException.FamilyRootName(param.Type)).PinLine(0);
+                    // Every declared parameter without a default has to be
+                    // supplied — an explicit NULL counts, an omission does not,
+                    // and OUTPUT parameters are no exception. Where several are missing real names the first
+                    // declared one, which is what this loop's order gives.
+                    // The stored name is unprefixed (it keys a variable slot); the
+                    // message spells it the way the declaration did.
+                    if (bound[i] is null)
+                    {
+                        bound[i] = param.Default ?? throw ArgumentBindingError(SimulatedSqlException.ParameterizedQueryExpectsParameter(paramDefsText, sqlText, "@" + param.Name));
+                        boundIsUntypedNull[i] = bound[i]!.Value.IsNull;
+                    }
+                    if (boundOutputSlots[i] is not null && !param.IsOutput)
+                        throw SimulatedSqlException.ParameterNotDeclaredOutput(param.Name).PinLine(0);
+                    if (!boundIsUntypedNull[i])
+                    {
+                        try
+                        {
+                            AssignmentRules.RequireAssignable(bound[i]!.Value.Type, param.Type);
+                        }
+                        catch (SimulatedSqlException refused)
+                        {
+                            // At line 0, as every other binding error.
+                            throw refused.PinLine(0);
+                        }
+                    }
+                    var initialValue = BindParameterValue(bound[i]!.Value, param.Type, param.DeclaredMaxLength, procedure: "");
+                    var slot = new VariableSlot(param.Type, param.DeclaredMaxLength, initialValue, parameter: null);
+                    preDeclared[param.Name] = slot;
+                    if (param.IsOutput && boundOutputSlots[i] is { } caller)
+                        outputBindings.Add((param, caller));
                 }
-                // A second value for one parameter is a surplus argument.
-                if (bound[idx] is not null)
-                    throw SimulatedSqlException.TooManyArgumentsToFunction("").PinLine(0);
-                bound[idx] = value;
-                boundOutputSlots[idx] = outputSlot;
-                boundIsUntypedNull[idx] = isUntypedNull;
-            }
-            for (var i = 0; i < declaredParams.Count; i++)
-            {
-                var param = declaredParams[i];
-                // Every declared parameter without a default has to be
-                // supplied — an explicit NULL counts, an omission does not,
-                // and OUTPUT parameters are no exception. Where several are missing real names the first
-                // declared one, which is what this loop's order gives.
-                // The stored name is unprefixed (it keys a variable slot); the
-                // message spells it the way the declaration did.
-                if (bound[i] is null)
-                {
-                    bound[i] = param.Default ?? throw ArgumentBindingError(SimulatedSqlException.ParameterizedQueryExpectsParameter(paramDefsText, sqlText, "@" + param.Name));
-                    boundIsUntypedNull[i] = bound[i]!.Value.IsNull;
-                }
-                if (boundOutputSlots[i] is not null && !param.IsOutput)
-                    throw SimulatedSqlException.ParameterNotDeclaredOutput(param.Name).PinLine(0);
-                if (!boundIsUntypedNull[i])
-                    AssignmentRules.RequireAssignable(bound[i]!.Value.Type, param.Type);
-                var initialValue = BindParameterValue(bound[i]!.Value, param.Type, param.DeclaredMaxLength, procedure: "");
-                var slot = new VariableSlot(param.Type, param.DeclaredMaxLength, initialValue, parameter: null);
-                preDeclared[param.Name] = slot;
-                if (param.IsOutput && boundOutputSlots[i] is { } caller)
-                    outputBindings.Add((param, caller));
-            }
 
-            // Only once every declaration is satisfied does an unrecognized
-            // argument name become the complaint — real reports the missing
-            // declaration first when both are wrong. The name is empty, which
-            // is why real's message carries a double space.
-            if (sawUnknownName)
-                throw SimulatedSqlException.TooManyArgumentsToFunction("").PinLine(0);
+                // Only once every declaration is satisfied does an unrecognized
+                // argument name become the complaint — real reports the missing
+                // declaration first when both are wrong. The name is empty, which
+                // is why real's message carries a double space.
+                if (sawUnknownName)
+                    throw SimulatedSqlException.TooManyArgumentsToFunction("").PinLine(0);
+            }
+        }
+        catch (SimulatedSqlException bindingError)
+        {
+            bindingError.EndedCalledBatch = true;
+            throw;
         }
 
         // The status sp_executesql returns is @@ERROR as its batch left it,
@@ -372,7 +428,7 @@ partial class Simulation
         // batch runs — `EXEC other.sys.sp_executesql` is the idiom for running
         // dynamic SQL in another database (probed 2026-10-02 against SQL
         // Server 2025).
-        var dynamicBatch = ExecuteDynamicBatch(batch, sqlText, preDeclared, viaSystemProcedure: true,
+        var dynamicBatch = ExecuteDynamicBatch(batch, sqlText, preDeclared, viaSystemProcedure: true, tableVariables: tableArguments,
             runsIn: calledInDatabase is null ? null
                 : this.Databases.TryGetValue(calledInDatabase, out var calledIn) ? calledIn
                 : throw SimulatedSqlException.DatabaseDoesNotExist(calledInDatabase));
@@ -454,8 +510,33 @@ partial class Simulation
         return null;
     }
 
-    private static (SqlValue Value, VariableSlot? OutputSlot) ParseSpExecuteSqlValueArg(ParserContext context, BatchContext batch)
+    private static (SqlValue Value, VariableSlot? OutputSlot) ParseSpExecuteSqlValueArg(ParserContext context, BatchContext batch) =>
+        ParseSpExecuteSqlValueArg(context, batch, out _, out _);
+
+    /// <summary>
+    /// <see cref="ParseSpExecuteSqlValueArg(ParserContext, BatchContext)"/>
+    /// for a trailing value argument, which may also be a table variable — a
+    /// table-valued parameter's value, reported through
+    /// <paramref name="table"/> — or <c>DEFAULT</c>, which leaves the
+    /// parameter unsupplied (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static (SqlValue Value, VariableSlot? OutputSlot) ParseSpExecuteSqlValueArg(ParserContext context, BatchContext batch, out HeapTable? table, out bool isDefault)
     {
+        table = null;
+        isDefault = false;
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
+        {
+            isDefault = true;
+            context.MoveNextOptional();
+            return (SqlValue.Null(SqlType.Int32), null);
+        }
+        if (context.Token is AtPrefixedString tableRef
+            && batch.TableVariables.TryGetValue(tableRef.Value.TrimStart('@'), out var tableVariable))
+        {
+            table = tableVariable;
+            context.MoveNextOptional();
+            return (SqlValue.Null(SqlType.Int32), null);
+        }
         if (context.Token is AtPrefixedString varRef)
         {
             var slot = batch.GetVariableSlot(varRef.Value);
@@ -479,6 +560,22 @@ partial class Simulation
         return context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out }
             ? throw SimulatedSqlException.ConstantPassedAsOutput()
             : (value, null);
+    }
+
+    /// <summary>
+    /// The declarations' table-valued parameters as empty read-only table
+    /// variables, for the describing procedures that compile a batch without
+    /// arguments; null when there are none.
+    /// </summary>
+    private static Dictionary<string, HeapTable>? EmptyTableValuedParameters(List<SpExecuteSqlParam> parameters, BatchContext batch)
+    {
+        Dictionary<string, HeapTable>? tables = null;
+        foreach (var parameter in parameters)
+        {
+            if (parameter.TableType is { } tableType)
+                (tables ??= new Dictionary<string, HeapTable>(BatchContext.VariableNameComparer))[parameter.Name] = CloneTableValuedArgument(tableType, parameter.Name, batch, supplied: null);
+        }
+        return tables;
     }
 
     /// <summary>
@@ -570,6 +667,32 @@ partial class Simulation
             if (defContext.Token is not AtPrefixedString name)
                 throw SimulatedSqlException.SyntaxErrorNear(defContext);
             defContext.MoveNextRequired();
+
+            // A user-defined table type declares a table-valued parameter,
+            // whose grammar takes READONLY (Msg 352 without it) and nothing
+            // else — a default or OUTPUT is a syntax error at it (probed
+            // 2026-10-04 against SQL Server 2025).
+            if (TryResolveTableTypeParameter(defContext, out _) is { } tableType)
+            {
+                if (defContext.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.ReadOnly })
+                {
+                    throw defContext.Token is Operator { Character: '=' } or UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out }
+                        ? SimulatedSqlException.SyntaxErrorNear(defContext)
+                        : SimulatedSqlException.TableValuedParameterMustBeReadOnly("@" + name.Value);
+                }
+                defContext.MoveNextRequired();
+                parameters.Add(new SpExecuteSqlParam(name.Value, SqlType.Int32, null, isOutput: false, defaultValue: null, tableType));
+                if (defContext.Token is Operator { Character: ',' })
+                {
+                    defContext.MoveNextRequired();
+                    continue;
+                }
+                if (defContext.Token is not Operator { Character: ')' })
+                    throw SimulatedSqlException.SyntaxErrorNear(defContext);
+                if (defContext.GetNextOptional() is not null)
+                    throw SimulatedSqlException.BatchParametersNotValid();
+                return declarationErrors.Count == 0 ? parameters : throw SimulatedSqlException.Aggregate(declarationErrors);
+            }
 
             // Type parsing reuses the procedure-parameter type grammar.
             SqlType type;
@@ -733,7 +856,8 @@ partial class Simulation
         string sqlText,
         Dictionary<string, VariableSlot>? preDeclaredVariables,
         bool viaSystemProcedure = false,
-        Database? runsIn = null)
+        Database? runsIn = null,
+        Dictionary<string, HeapTable>? tableVariables = null)
     {
         var nestingLevels = viaSystemProcedure ? 2 : 1;
         var connection = outerBatch.Connection;
@@ -752,7 +876,7 @@ partial class Simulation
             ? new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer)
             : new Dictionary<string, VariableSlot>(preDeclaredVariables, BatchContext.VariableNameComparer);
         var procFrame = new ProcFrame("<dynamic-sql>", isDynamicSql: true);
-        var innerBatch = new BatchContext(dynCommand, variables, procFrame) { ContinueOnError = ContinuesCalledBatch(outerBatch) };
+        var innerBatch = new BatchContext(dynCommand, variables, procFrame, tableVariables) { ContinueOnError = ContinuesCalledBatch(outerBatch) };
 
         connection.NestingLevel += nestingLevels;
         var enteredDatabase = connection.CurrentDatabase;
@@ -855,10 +979,17 @@ partial class Simulation
     /// sp_executesql params have no defaults — every declared param must be
     /// bound by a positional/named arg.
     /// </summary>
-    private readonly struct SpExecuteSqlParam(string name, SqlType type, int? declaredMaxLength, bool isOutput, SqlValue? defaultValue)
+    private readonly struct SpExecuteSqlParam(string name, SqlType type, int? declaredMaxLength, bool isOutput, SqlValue? defaultValue, TableType? tableType = null)
     {
         public readonly string Name = name;
         public readonly SqlType Type = type;
+
+        /// <summary>
+        /// The table type of a table-valued parameter (declared
+        /// <c>READONLY</c>), which the batch reads as a read-only table
+        /// variable; null for a scalar one.
+        /// </summary>
+        public readonly TableType? TableType = tableType;
 
         /// <summary>The declared width a bound value is cut to, as a procedure parameter's is.</summary>
         public readonly int? DeclaredMaxLength = declaredMaxLength;

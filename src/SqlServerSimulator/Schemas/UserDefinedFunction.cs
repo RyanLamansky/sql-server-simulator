@@ -452,6 +452,20 @@ internal sealed class UdfParameter(string name, SqlType type, Expression? defaul
     public int LineNumber;
 
     /// <summary>
+    /// The user-defined table type of a table-valued parameter (declared
+    /// <c>READONLY</c>, Msg 352 otherwise); null for a scalar one. The body
+    /// reads it as a read-only table variable, and <see cref="Type"/> is a
+    /// placeholder <c>int</c>.
+    /// </summary>
+    public TableType? TableType;
+
+    /// <summary>
+    /// Whether <see cref="TableType"/> was written as a one-part name, which a
+    /// schema-bound function refuses with Msg 2789.
+    /// </summary>
+    public bool TableTypeNamedOnePart;
+
+    /// <summary>
     /// The declared width of a string or binary parameter (1 when written
     /// without one), which an argument is cut to as a variable assignment
     /// would; null for the other types.

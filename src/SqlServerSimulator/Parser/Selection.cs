@@ -556,21 +556,39 @@ internal sealed partial class Selection
             IsSingleConstantRow = tuples.Count == 1,
         };
 
-    private static IEnumerable<byte[]> EnumerateValuesRows(SqlType[] schema, List<Expression[]> tuples, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
+    /// <summary>
+    /// A <c>VALUES</c> list's rows. One row merges into its reader, so its
+    /// values are computed as it is read, past an <c>INSERT</c>'s identity
+    /// draw; a longer list is a constant scan, which computes every row before
+    /// the first goes out — so a later row's error comes ahead of the first row
+    /// (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static byte[][] EnumerateValuesRows(SqlType[] schema, List<Expression[]> tuples, BatchContext batch, Func<MultiPartName, SqlValue>? outerResolver)
     {
         SqlValue Resolve(MultiPartName name) =>
             outerResolver is not null ? outerResolver(name) : throw SimulatedSqlException.InvalidColumnName(name);
         var runtime = new RuntimeContext(Resolve, batch);
-        foreach (var tuple in tuples)
+        var rows = new byte[tuples.Count][];
+        for (var r = 0; r < tuples.Count; r++)
         {
+            var tuple = tuples[r];
             var values = new SqlValue[schema.Length];
-            for (var c = 0; c < schema.Length; c++)
+            try
             {
-                var raw = tuple[c].Run(runtime);
-                values[c] = raw.IsNull || raw.Type == schema[c] ? raw : raw.CoerceTo(schema[c]);
+                for (var c = 0; c < schema.Length; c++)
+                {
+                    var raw = tuple[c].Run(runtime);
+                    values[c] = raw.IsNull || raw.Type == schema[c] ? raw : raw.CoerceTo(schema[c]);
+                }
             }
-            yield return RowEncoder.EncodeRow(schema, values);
+            catch (SimulatedSqlException valueError)
+            {
+                valueError.RaisedInRowProjection = tuples.Count == 1;
+                throw;
+            }
+            rows[r] = RowEncoder.EncodeRow(schema, values);
         }
+        return rows;
     }
 
     /// <summary>
@@ -770,7 +788,11 @@ internal sealed partial class Selection
         // slot; a non-XML FOR clause is left in place for the downstream Msg 102.
         combined = ParseOptionalForXml(context, combined, scope);
         if (!ReferenceEquals(combined, beforeForClauses))
+        {
             bareProjectionStatement = false;
+            // Simple parameterization reads the query under the clause.
+            combined.SimplyParameterizable = beforeForClauses.SimplyParameterizable;
+        }
 
         // FOR BROWSE — the statement's own query in browse mode, which the
         // SELECT dispatch answers by reading the statement again as a browse
@@ -801,6 +823,7 @@ internal sealed partial class Selection
         {
             ParseOptionClause(context);
             bareProjectionStatement = false;
+            context.SimpleParameterizationBlocked = true;
         }
 
         if (ownsSecurableSink)
@@ -5864,23 +5887,44 @@ internal sealed partial class Selection
                     ? outerResolver(name)
                     : throw SimulatedSqlException.InvalidColumnName(name);
 
-            foreach (var excluder in excluders)
+            try
             {
-                if (excluder.Run(new RuntimeContext(Resolve, batch)) != true)
-                    return [];
+                foreach (var excluder in excluders)
+                {
+                    if (excluder.Run(new RuntimeContext(Resolve, batch)) != true)
+                        return [];
+                }
+            }
+            catch (SimulatedSqlException filterError)
+            {
+                filterError.RaisedInRowProjection = false;
+                throw;
             }
 
-            bakeFailure?.Throw();
+            if (bakeFailure is not null)
+            {
+                // The row's value is computed past an INSERT's identity draw.
+                ((SimulatedSqlException)bakeFailure.SourceException).RaisedInRowProjection = true;
+                bakeFailure.Throw();
+            }
             if (scope.ProjectionUnread || !referencesOuterColumns)
                 return [RowEncoder.EncodeRow(schema, values)];
 
             // Deferred projection: evaluate against this invocation's outer row.
             var perCall = new SqlValue[expressions.Count];
             var runtime = new RuntimeContext(Resolve, batch);
-            for (var i = 0; i < expressions.Count; i++)
+            try
             {
-                var raw = expressions[i].Run(runtime);
-                perCall[i] = raw.IsNull || raw.Type == schema[i] ? raw : raw.CoerceTo(schema[i]);
+                for (var i = 0; i < expressions.Count; i++)
+                {
+                    var raw = expressions[i].Run(runtime);
+                    perCall[i] = raw.IsNull || raw.Type == schema[i] ? raw : raw.CoerceTo(schema[i]);
+                }
+            }
+            catch (SimulatedSqlException projectionError)
+            {
+                projectionError.RaisedInRowProjection = true;
+                throw;
             }
 
             return [RowEncoder.EncodeRow(schema, perCall)];

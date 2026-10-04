@@ -151,6 +151,7 @@ internal sealed class TableType(
         {
             InternalName = internalName,
             IsMemoryOptimized = this.IsMemoryOptimized,
+            DeclaredTableType = this,
         };
         Simulation.AddInlineIndexes(batch, table, fullName, this.PendingIndexes);
         return table;

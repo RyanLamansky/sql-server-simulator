@@ -51,29 +51,50 @@ partial class Simulation
         var outerRuntime = new RuntimeContext(
             outerResolver ?? (name => throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString())),
             outerBatch);
+        var (argValues, isDefault, tableArguments) = EvaluateFunctionArguments(function, arguments, outerRuntime);
+
+        // The body binds and runs in the function's own database, one row at a
+        // time, since the referencing statement consumes it lazily.
+        var rows = InvokeInlineTvfCore(outerBatch, function, argValues, isDefault, tableArguments, writtenName);
+        return ReferenceEquals(function.Schema.Database, connection.CurrentDatabase)
+            ? rows
+            : ModuleDatabaseScope.Enumerate(connection, function.Schema.Database, rows);
+    }
+
+    /// <summary>
+    /// Evaluates a table-valued function call's arguments in the caller's
+    /// scope: each scalar argument coerced to its parameter's type, a
+    /// <c>DEFAULT</c> slot flagged for the child batch to fill from the stored
+    /// default, and a table-valued parameter's argument resolved to the table
+    /// it passes (null when there are no table-valued parameters).
+    /// </summary>
+    private static (SqlValue[] Values, bool[] IsDefault, HeapTable?[]? Tables) EvaluateFunctionArguments(
+        UserDefinedFunction function, Expression?[] arguments, RuntimeContext outerRuntime)
+    {
         var argCount = function.Parameters.Length;
         var argValues = new SqlValue[argCount];
         var isDefault = new bool[argCount];
+        HeapTable?[]? tables = null;
         for (var i = 0; i < argCount; i++)
         {
+            var parameter = function.Parameters[i];
             var argExpr = arguments[i];
             if (argExpr is null)
             {
                 isDefault[i] = true;
-                argValues[i] = SqlValue.Null(function.Parameters[i].Type);
+                argValues[i] = SqlValue.Null(parameter.Type);
+            }
+            else if (parameter.TableType is not null)
+            {
+                argValues[i] = SqlValue.Null(parameter.Type);
+                (tables ??= new HeapTable?[argCount])[i] = ((Parser.Expressions.TableValuedArgument)argExpr).Resolve(outerRuntime);
             }
             else
             {
-                argValues[i] = argExpr.Run(outerRuntime).CoerceTo(function.Parameters[i].Type);
+                argValues[i] = argExpr.Run(outerRuntime).CoerceTo(parameter.Type);
             }
         }
-
-        // The body binds and runs in the function's own database, one row at a
-        // time, since the referencing statement consumes it lazily.
-        var rows = InvokeInlineTvfCore(outerBatch, function, argValues, isDefault, writtenName);
-        return ReferenceEquals(function.Schema.Database, connection.CurrentDatabase)
-            ? rows
-            : ModuleDatabaseScope.Enumerate(connection, function.Schema.Database, rows);
+        return (argValues, isDefault, tables);
     }
 
     private IEnumerable<byte[]> InvokeInlineTvfCore(
@@ -81,6 +102,7 @@ partial class Simulation
         InlineTableValuedFunction function,
         SqlValue[] argValues,
         bool[] isDefault,
+        HeapTable?[]? tableArguments,
         MultiPartName writtenName)
     {
         var connection = outerBatch.Connection;
@@ -93,6 +115,8 @@ partial class Simulation
         for (var i = 0; i < function.Parameters.Length; i++)
         {
             var param = function.Parameters[i];
+            if (param.TableType is not null)
+                continue;
             var value = isDefault[i] && param.Default is { } defaultExpr
                 ? defaultExpr.Run(new RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), outerBatch))
                     .CoerceTo(param.Type)
@@ -122,6 +146,7 @@ partial class Simulation
         // Body errors attribute to the outer invoking statement (probe-
         // confirmed: real reports the referencing SELECT's line, no procedure).
         var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
+        SeedTableValuedParameters(innerBatch, outerBatch, function.Parameters, tableArguments);
         // Inlined into the referencing statement — same current-time freeze,
         // so a per-row APPLY reads one constant value (matching real).
         innerBatch.AdoptStatementFreezeFrom(outerBatch);

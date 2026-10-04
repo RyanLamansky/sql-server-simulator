@@ -220,23 +220,7 @@ partial class Simulation
                 // (which we pass through as-is, but flagged read-only) or
                 // omitted the arg entirely (we clone an empty table from
                 // the type template).
-                var clone = tvpType.Clone("@" + param.Name, outerBatch, isTableValuedParameter: true);
-                if (boundTableValues[i] is { } supplied)
-                {
-                    // Row bytes can point into the source heap's off-row
-                    // pages (LOB chains, overflow-pushed var columns), so
-                    // off-row-capable schemas decode and re-encode each row
-                    // against the clone's heap; pointer-free schemas copy
-                    // the bytes as-is.
-                    var reencode = supplied.Heap.ReclaimColumns is not null;
-                    foreach (var row in supplied.Heap.EnumerateRows())
-                    {
-                        _ = clone.Heap.Insert(reencode
-                            ? RowEncoder.EncodeRow(supplied.StoredColumns, RowDecoder.DecodeRow(supplied.StoredColumns, row, supplied.Heap), clone.Heap)
-                            : row);
-                    }
-                }
-                tableVariables[param.Name] = clone;
+                tableVariables[param.Name] = CloneTableValuedArgument(tvpType, param.Name, outerBatch, boundTableValues[i]);
                 continue;
             }
             // A supplied value meets the parameter's one-way assignment rule

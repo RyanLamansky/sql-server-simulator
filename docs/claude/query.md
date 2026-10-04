@@ -39,6 +39,7 @@
 - **Table-value-constructor derived tables** (`Selection.ParseValuesDerivedTable`): `(VALUES (row), (row), …) alias(col, …)` as a FROM source, a JOIN source, or a `CROSS` / `OUTER APPLY` source.
   Rides the same deferred `FromSource.LateralPlan` seam as a derived-table SELECT (`Selection.ForValuesConstructor`), so a VALUES source **under APPLY correlates to the outer row** — the SSMS server-properties shape `… CROSS APPLY (VALUES (1001, 'host_platform', 0, host_platform), …) t(id, [name], internal_value, [value])`, whose rows mix literals with outer-column references.
   Per-column result types unify across every row's cell the way a `UNION ALL` would (`SqlType.PromoteBranches`): an untyped `NULL` cell yields to its typed siblings (an all-`NULL` column is `int`), an integer literal sizes against a decimal one (`(1), (2.5)` → `numeric(2, 1)`), and varchar + N'…' → nvarchar; the unified type coerces each cell at runtime (so `(1),('abc')` promotes to int, then Msg 245 on the `'abc'` row).
+  A list of two or more rows is a constant scan, which computes every row before the first goes out, so a later row's error comes with no row sent — `SELECT TOP 1 v FROM (VALUES (1), (1/0)) d(v)` is Msg 8134 — while a single row merges into its reader (probed 2026-10-04 against SQL Server 2025).
   Both the **alias and its column-alias list are required**: no alias → Msg 102 near `)`; no column list → **Msg 8155**; more row columns than list names → **Msg 8158**, fewer → **Msg 8159** (shared factory with CTE / view rename lists); rows of differing arity → **Msg 10709**; empty row `()` → Msg 102.
 - **FROM-less `SELECT` with a trailing `ORDER BY`**: `SELECT 2 AS X, 1 AS Y ORDER BY X` is legal (the one synthesized row makes the sort a no-op, but the clause must parse rather than raise Msg 156).
   Also legal as the final `ORDER BY` of a set-op chain whose branches are FROM-less (`SELECT 2 AS X UNION ALL SELECT 1 ORDER BY X DESC` → 2, 1), applied by `ApplyTopLevelOrderBy`.
@@ -183,11 +184,13 @@ The folded node keeps its **equality** shape readable to the seek planners, so `
   The same freedom moves the two *operands* of one comparison and the two halves of one range: `WHERE <overflowing expression> <= 18 / CAST(NULL AS int)` raises on real, while `DISTINCT`, a `GROUP BY`, a `TOP 2` or a join on that one statement each flip it to no rows — real's arithmetic-NULL comparison fold reaches a WHERE only under the plan that isn't trivial, which is why the simulator applies it in a HAVING alone (above).
   An **empty constant interval** is the same story: `WHERE <bad> BETWEEN 41 AND 5` raises Msg 8134 on real, `SELECT DISTINCT` of the same statement answers no rows, and `HAVING b BETWEEN 41 AND 5` still reports Msg 8121 for the ungrouped `b`.
   These are cost choices, not semantic ones, and they reverse per plan.
+  **Settled — don't re-pitch:** real doesn't guarantee its own answer here, since a plan or cost-model choice flips it.
 - **`NULL <op> ANY | ALL (SELECT …)`.** Real runs the subquery for row existence but drops its projection, so `NULL <> ALL (SELECT a * 2000000000 FROM t)` answers no rows where the simulator raises Msg 8115.
   Folding it isn't available — the answer over an *empty* subquery is TRUE, not UNKNOWN — so this needs an existence-only execution path.
 - **An un-negated `IN` list carrying its own left operand.** `x IN (…, x, …)` is `x IS NOT NULL` and could be folded, but real doesn't settle it consistently: `WHERE x IN (x / 0, x)` answers rows there while moving the same self element to the front — `WHERE x IN (x, x / 0)` — raises Msg 8134.
   Two written orders of one semantic list, two answers, so folding it would answer where real raises.
   The simulator keeps its own left-to-right evaluation; the negated spelling, whose two orders *do* agree on real, is settled by the never-TRUE rule above.
+  **Settled — don't re-pitch:** real doesn't guarantee which element it reaches first, so there is no rule to match.
 - **An `IN` list evaluates every element on real**, even after an earlier one matched: `WHERE a IN (2, 3, 0, a / 0)` is Msg 8134 there and answers rows here.
   The simulator keeps its left-to-right short-circuit, which costs an error real raises but avoids evaluating a long literal list per row.
   (A list carrying a NULL constant under a negation is settled by the never-TRUE rule above and never reaches this.)
@@ -537,22 +540,25 @@ Over constants alone real proves the rows distinct and concatenates (`SELECT 2 U
 These already follow real: a bare `TOP` reads the scan's order (key order over a clustered table), a derived table's `TOP … ORDER BY` or `OFFSET` leaves its rows in that order, and `TOP 100 PERCENT … ORDER BY` in a derived table is dropped as real drops it.
 A `TOP` over a grouped, distinct or set-operation query picks from the sorted rows, so it keeps the rows real keeps.
 
+**Settled — don't re-pitch:** a join's order follows real's cost-based choice of driving input, which real doesn't guarantee — see [`joins.md`](joins.md#row-order-of-a-join).
+
 **Not modeled yet.**
 - The order among rows a sort ties: real's sort isn't stable, and its tie order matched no textbook quicksort, heapsort or insertion variant tried against it; here ties keep the earlier sorts' order and then arrival, which is what an index already supplying the order gives on real too.
 - `CUBE` and `GROUPING SETS` other than a rollup chain, which real runs as a concatenation of stream aggregates in an order of its choosing.
 - A constant-only set operation real sorts anyway: a chain of three or more `UNION`s over literals is a merge (`SELECT 3 UNION SELECT 1 UNION SELECT 2` is 1, 2, 3), as is one whose constants repeat.
-- Join order — see [`joins.md`](joins.md#row-order-of-a-join).
 
 ## Aggregates
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT)` / `COUNT_BIG`, `SUM` / `AVG`, `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`, and SQL Server 2025's `PRODUCT` (SUM's result types, save a fractional decimal multiplying at scale 6; `ProductAggregator`).
 `APPROX_COUNT_DISTINCT` counts exactly and `APPROX_PERCENTILE_CONT` / `APPROX_PERCENTILE_DISC` compute the exact percentile — see [the approximate aggregates](#the-approximate-aggregates) for where real's sketches part from that and why neither is reproduced.
 `AVG(int)` truncates; `AVG(decimal(p,s))` widens to `decimal(38, max(s,6))`.
 
-**Not modeled yet: `STRING_AGG`'s Msg 8733 for a separator real doesn't read as a literal.**
-`STRING_AGG(s, CAST(',' AS varchar(2)))` over a table is Msg 8733 on real and aggregates here; over a `VALUES` source real accepts it too (probed 2026-09-24, re-checked 2026-10-03).
-What separates the two is plan-shaped rather than grammatical (probed 2026-09-27): the refusal needs a single table or view source and no `GROUP BY`, `HAVING`, `TOP`, `LIKE` filter or `OPTION (RECOMPILE)` — any of those, a derived table, a `#temp` table or a table variable accepts it — and it follows the value expression too (`UPPER(s)`, `LEFT(s, 10)`, `ISNULL(s, '')` accept; `s + ''`, `(s)`, `CAST(i AS varchar)`, `'x'` refuse), and a `CONVERT`, a `char(1)` or `varchar(max)` target and a `COLLATE` refuse like the `CAST`.
-The shapes line up with simple parameterization's eligibility — a `CAST`'s literal turned into a parameter is no longer a literal — but `PARAMETERIZATION FORCED` doesn't make the accepted shapes refuse, and none of the refused statements leaves a parameterized plan in `sys.dm_exec_cached_plans` (probed 2026-09-28), so that reading isn't confirmed.
-The refusal survives `WHERE i = 1`, `WITHIN GROUP`, a table alias, `dbo.t`, `WITH (NOLOCK)`, a column alias and another statement in the batch, while `CHAR(13) + CHAR(10)`, `', ' + ' '`, `CONCAT(',', ' ')`, `CHAR(44)` and `SPACE(1)` are accepted over the same table (probed 2026-09-28).
+**`STRING_AGG`'s separator is a literal or a variable (Msg 8733), as real reads it once simple parameterization has run** (probed 2026-10-04 against SQL Server 2025, 165 shapes, each statement's showplan read for a `ParameterizedText`).
+A constant the binder folds passes — `','`, `',' + ' '`, `CHAR(44)`, `(',')`, `CAST(NULL AS varchar(2))` — and a column, `@s + @s` or `UPPER(',')` doesn't, wherever the statement sits.
+A constant only through a `CAST` or `CONVERT` of a literal (`TRY_` forms, a style, a `COLLATE` over it and an operand around it alike — `',' + CAST(',' AS varchar(2))`) is Msg 8733 exactly where real simple-parameterizes the statement, since the literal becomes a parameter there, and passes everywhere else:
+- The statement is an ad hoc `SELECT` — a client batch or dynamic SQL, never a module body — reading one permanent table, view or catalog view whole, under an alias, a three-part name, `NOLOCK` / `TABLOCK`, a `WHERE` of comparisons, `BETWEEN`, `IS [NOT] NULL` and `AND`, an `ORDER BY`, `WITHIN GROUP` or `FOR JSON` / `FOR XML` (`Selection.SimplyParameterizable`).
+- A join, a derived table, a CTE, a `#temp` table, a table variable, `VALUES`, `GROUP BY`, `HAVING`, `DISTINCT`, `TOP`, `OFFSET`, a set operation, `INTO`, a variable assignment, `OPTION`, `TABLESAMPLE` or an index hint declines it, and so does anywhere in the statement a local variable, an `IN` list, `OR`, `LIKE`, a comparison of two constants (`CASE WHEN 1 = 1`, `IIF(1 = 1, …)`), a subquery, or one of the built-ins `Expression.BlocksSimpleParameterization` lists — most string functions, the date-part family, the JSON functions, `ISNULL`, `CHOOSE`, `CEILING`, `RAND` and a handful of `@@` functions — while `ABS`, `FLOOR`, `ROUND`, `COALESCE`, `NULLIF`, `IIF` over a column, `CAST`, `GETDATE()`, `NEWID()` and the metadata functions outside that list don't (`ParserContext.SimpleParameterizationBlocked`).
+A `CAST` or `CONVERT` of a variable is accepted by a scalar aggregate and refused by a grouped one.
+The rule predicted all 28 shapes of a holdout set probed after it was written.
 `SUM` / `AVG` also widen `real` to `float` and `smallmoney` to `money`, where `MIN` / `MAX` keep the operand's type — see [`arithmetic.md`](arithmetic.md#the-approximate-family-float--real).
 
 A filter written **above** a grouped body — and the key set of an equi-join to one — reaches *below* the grouping when it names a grouping column, so the aggregate runs over the groups the statement keeps rather than every group in the table: see [`joins.md`](joins.md#join-key-reduction-of-a-grouped-body).
@@ -592,6 +598,8 @@ Real's answers are reproducible neither way, for different reasons (probed 2026-
   From 978 on real compacts its sketch, and the answer changes between executions of one statement — the 1.3th percentile of a fixed 978 values was 1,304 on some runs and 1,416 on others — while every group of one execution agrees.
   A randomized compaction is nothing a query output can predict, so the exact percentile stands in as the deterministic answer.
 
+**Settled — don't re-pitch:** `APPROX_COUNT_DISTINCT` stays exact — real's hash isn't identifiable and its answer varies between batch and row mode, so real guarantees no particular estimate.
+
 **Clauses.**
 - `APPROX_COUNT_DISTINCT(x) OVER (…)` is Msg 4113 state 5, naming the function as written.
   It is raised once the window clause has parsed, so a syntax error inside the clause wins, and ahead of binding, so a dead branch raises it and a missing table doesn't preempt it.
@@ -616,9 +624,14 @@ The representative is what a projection reaching the column *underneath* a group
 
 Oracle: `GroupedAggregateStreamingTests`.
 
-**Not modeled yet**: real sends the groups (and window rows) that completed before an aggregate operand fails — `SELECT g, SUM(i) … GROUP BY g ORDER BY g` over an overflowing second group streams the first group's row, then the error — and follows the error with the Msg 8153 NULL-elimination warning when a NULL was skipped; here the statement fails before its first row and the warning isn't sent (probed 2026-09-26 against SQL Server 2025).
-Which groups completed first depends on real's plan (a stream aggregate over sorted input finishes them in key order, a hash aggregate at the end).
-The same holds for a per-row `TOP` error: an `APPLY` body's `TOP (t.g)` meeting a NULL is Msg 1014 on both, but real streams the outer rows before it when its plan needs no sort for the statement's `ORDER BY` (probed 2026-10-03 against SQL Server 2025).
+**A per-row error under an `APPLY` streams the rows ranked ahead of it.**
+An `APPLY` body's `TOP (t.g)` meeting a NULL is Msg 1014, and real sends the rows of every outer row its plan reached first: with no `ORDER BY`, the scan's; with an `ORDER BY` reading only the outer source, real sorts that source *under* the `APPLY` — whether or not an index serves the order — so `ORDER BY h.k` over a heap sends the rows of the outer rows ranked before the NULL, `ORDER BY h.g` (the NULL ranks first) none, and an `ORDER BY` reading a body column sorts above the `APPLY` and sends none (probed 2026-10-04 against SQL Server 2025).
+An index serving the order reads the outer source in key order (`TryApplyLeftmostOrderedScan`); otherwise an `APPLY` chain sorts its leftmost source's rows by the keys and streams the join over them (`TrySortLeftmostSource`), which is the full sort's order, ties included.
+Still plan-dependent and not modeled: an `ORDER BY` pairing a unique outer key with a body column (`ORDER BY c.k, x.v` over a primary key `k`) streams on real, whose optimizer sees the body's own `ORDER BY v` keep each key's rows in order; here it sorts above the join and sends nothing.
+
+**Not modeled yet**: real sends the groups (and window rows) that completed before an aggregate operand fails — `SELECT g, SUM(i) … GROUP BY g ORDER BY g` over an overflowing second group streams the first group's row, then the error, over a heap or a clustered index, with or without the `ORDER BY`, and `ORDER BY g DESC` streams the third group's — and follows the error with the Msg 8153 NULL-elimination warning when a NULL was skipped; here the statement fails before its first row and the warning isn't sent (probed 2026-09-26 and 2026-10-04 against SQL Server 2025).
+Which groups completed first follows real's choice of a stream aggregate over sorted input, which finishes them in output order, over a hash aggregate, which finishes them all at the end; that is a cardinality choice, the one [the implicit group order](#row-order-without-order-by) approximates with its sort cap.
+`SUM(i) OVER (PARTITION BY g)` streams its completed partitions the same way.
 
 ### Parallel grouped accumulation (built, proven, **off by default**)
 

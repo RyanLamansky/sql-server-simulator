@@ -782,4 +782,146 @@ public sealed class TableValuedParameterTests
             join sys.table_types tt on tt.type_table_object_id = kc.parent_object_id
             where tt.name = 'tt'
             """)!);
+    // ---- Table-valued parameters of functions and sp_executesql ----
+
+    /// <summary>
+    /// A function of every kind and an <c>sp_executesql</c> declaration take a
+    /// table-type <c>READONLY</c> parameter, and a call passes a table variable
+    /// of that type (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create function f (@t tt readonly) returns table as return select a from @t where a > 1",
+        "select string_agg(a, ',') within group (order by a) from dbo.f(@x)", "2,4")]
+    [DataRow("create function f (@t tt readonly, @m int) returns table as return select a from @t where a > @m",
+        "select string_agg(concat(v, ':', a), ',') within group (order by v, a) from (values (0), (2)) d(v) cross apply dbo.f(@x, v)", "0:1,0:2,0:4,2:4")]
+    [DataRow("create function f (@t dbo.tt readonly) returns @r table (n int, s int) as begin insert @r select count(*), sum(a) from @t; return; end",
+        "select concat(n, '/', s) from dbo.f(@x)", "3/7")]
+    [DataRow("create function f (@t tt readonly) returns int as begin return (select sum(a) from @t); end",
+        "select dbo.f(@x) + 1", "8")]
+    [DataRow("create function f (@t tt readonly, @m int) returns int as begin return (select count(*) from @t where a > @m); end",
+        "select string_agg(concat(v, ':', dbo.f(@x, v)), ',') within group (order by v) from (values (0), (1), (3)) d(v)", "0:3,1:2,3:1")]
+    [DataRow("create function f (@t tt readonly) returns int as begin return (select count(*) from @t); end",
+        "select dbo.f((@x))", "3")]
+    [DataRow("create function f (@t tt readonly) returns int as begin return (select count(*) from @t); end",
+        "select dbo.f(default)", "0")]
+    [DataRow("create function f (@t tt readonly) returns @r table (n int) as begin insert @r select count(*) from @t; return; end",
+        "select n from dbo.f(default)", "0")]
+    [DataRow("create procedure p as select 1",
+        "exec sp_executesql N'select sum(a) from @p where a > @m', N'@m int, @p tt readonly', @p = @x, @m = 1", "6")]
+    [DataRow("create procedure p as select 1",
+        "exec sp_executesql N'select count(*) from @p', N'@p dbo.tt readonly', default", "0")]
+    public void TableValuedParameter_OutsideProcedures(string module, string call, string expected) =>
+        AreEqual(expected, Convert.ToString(new Simulation().ExecuteBatchesScalar(
+            "create type tt as table (a int)",
+            module,
+            "declare @x tt; insert @x values (1), (2), (4); " + call), System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>A function's body calls another with its own table-valued parameter, as a procedure's does.</summary>
+    [TestMethod]
+    public void TableValuedParameter_PassesThroughNestedModules() =>
+        AreEqual(70, new Simulation().ExecuteBatchesScalar(
+            "create type tt as table (a int)",
+            "create function g (@t tt readonly) returns int as begin return (select sum(a) from @t); end",
+            "create function f (@t tt readonly) returns int as begin return dbo.g(@t) * 10; end",
+            "create procedure p @t tt readonly as exec sp_executesql N'select dbo.f(@p)', N'@p tt readonly', @t",
+            "declare @x tt; insert @x values (3), (4); exec p @x"));
+
+    /// <summary>
+    /// What a call may pass a table-valued parameter: a table variable of the
+    /// parameter's own type and nothing else, each refusal Msg 206 naming the
+    /// type; an inline function's <c>DEFAULT</c> there is Msg 1090.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select dbo.s(null)", 206, "Operand type clash: NULL is incompatible with tt")]
+    [DataRow("select dbo.s(@i)", 206, "Operand type clash: int is incompatible with tt")]
+    [DataRow("select dbo.s(@y)", 206, "Operand type clash: tt2 is incompatible with tt")]
+    [DataRow("select dbo.s(@z)", 206, "Operand type clash: table is incompatible with tt")]
+    [DataRow("select * from dbo.i(null)", 206, "Operand type clash: NULL is incompatible with tt")]
+    [DataRow("select * from dbo.i(@y)", 206, "Operand type clash: tt2 is incompatible with tt")]
+    [DataRow("select * from dbo.i(default)", 1090, "Invalid default for parameter 1.")]
+    [DataRow("exec sp_executesql N'select 1 from @p', N'@p tt readonly', null", 206, "Operand type clash: NULL is incompatible with tt")]
+    [DataRow("exec sp_executesql N'select 1 from @p', N'@p tt readonly', 1", 206, "Operand type clash: int is incompatible with tt")]
+    [DataRow("exec sp_executesql N'select 1 from @p', N'@p tt readonly', @y", 206, "Operand type clash: tt2 is incompatible with tt")]
+    [DataRow("exec sp_executesql N'select 1 from @p', N'@p tt readonly', @z", 206, "Operand type clash: table is incompatible with tt")]
+    [DataRow("exec sp_executesql N'select @p', N'@p int', @x", 206, "Operand type clash: tt is incompatible with int")]
+    [DataRow("exec sp_executesql N'select 1', N'@p tt', @x", 352, "The table-valued parameter \"@p\" must be declared with the READONLY option.")]
+    [DataRow("exec sp_executesql N'delete @p', N'@p tt readonly', @x", 10700, "The table-valued parameter \"@p\" is READONLY and cannot be modified.")]
+    public void TableValuedArgument_Refused(string call, int number, string message)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create type tt as table (a int)",
+            "create type tt2 as table (a int)",
+            "create function s (@t tt readonly) returns int as begin return (select count(*) from @t); end",
+            "create function i (@t tt readonly) returns table as return select a from @t");
+        sim.AssertSqlError("declare @x tt; declare @y tt2; declare @z table (a int); declare @i int = 1; " + call, number, message);
+    }
+
+    /// <summary>
+    /// An <c>sp_executesql</c> declaration or argument error is the call's
+    /// own, so the caller's batch runs on past it.
+    /// </summary>
+    [TestMethod]
+    public void SpExecuteSqlTableValuedParameterError_EndsOnlyTheCall()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create type tt as table (a int); create table log (a int)");
+        _ = sim.AssertSqlError("exec sp_executesql N'select 1', N'@p tt', 1; insert log values (1)", 352);
+        AreEqual(1, sim.ExecuteScalar<int>("select count(*) from log"));
+    }
+
+    /// <summary>
+    /// The declarations a function's CREATE refuses: a missing READONLY, a
+    /// default, a body writing the parameter, a one-part type name under
+    /// SCHEMABINDING, and INLINE = ON.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create function f (@t tt) returns int as begin return 1; end", 352)]
+    [DataRow("create function f (@t tt) returns table as return select 1 x", 352)]
+    [DataRow("create function f (@t tt = null readonly) returns int as begin return 1; end", 206)]
+    [DataRow("create function f (@t tt readonly) returns @r table (a int) as begin delete @t; return; end", 10700)]
+    [DataRow("create function f (@t tt readonly) returns int as begin update @t set a = 1; return 1; end", 10700)]
+    [DataRow("create function f (@t tt readonly) returns int with schemabinding as begin return 1; end", 2789)]
+    [DataRow("create function f (@t tt readonly) returns table with schemabinding as return select 1 x", 2789)]
+    [DataRow("create function f (@t tt readonly) returns int with inline = on as begin return (select count(*) from @t); end", 16203)]
+    public void FunctionTableValuedParameter_RefusedAtCreate(string create, int number)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create type tt as table (a int)");
+        _ = sim.AssertSqlError(create, number);
+        _ = IsInstanceOfType<DBNull>(sim.ExecuteScalar("select object_id('f')"));
+    }
+
+    [TestMethod]
+    public void FunctionTableValuedParameter_SchemaBoundTwoPartName_Runs() =>
+        AreEqual(2, new Simulation().ExecuteBatchesScalar(
+            "create type tt as table (a int)",
+            "create function f (@t dbo.tt readonly) returns int with schemabinding as begin return (select count(*) from @t); end",
+            "declare @x dbo.tt; insert @x values (1), (2); select dbo.f(@x)"));
+
+    /// <summary>
+    /// The catalog lists a function's table-valued parameter as a procedure's:
+    /// type 243 of the table type, read-only, a type dependency, and the
+    /// function no longer inlineable; and the type can't be dropped under it.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select concat(name, '/', system_type_id, '/', type_name(user_type_id), '/', is_readonly, '/', max_length) from sys.parameters where object_id = object_id('f') and parameter_id = 1", "@t/243/tt/1/-1")]
+    [DataRow("select concat(data_type, '/', user_defined_type_name) from information_schema.parameters where specific_name = 'f' and ordinal_position = 1", "table type/tt")]
+    [DataRow("select referenced_class_desc from sys.sql_expression_dependencies where referencing_id = object_id('f') and referenced_entity_name = 'tt'", "TYPE")]
+    [DataRow("select is_inlineable from sys.sql_modules where object_id = object_id('f')", "False")]
+    public void FunctionTableValuedParameter_Catalog(string query, string expected) =>
+        AreEqual(expected, Convert.ToString(new Simulation().ExecuteBatchesScalar(
+            "create type tt as table (a int)",
+            "create function f (@t tt readonly, @m int) returns int as begin return (select count(*) from @t where a > @m); end",
+            query), System.Globalization.CultureInfo.InvariantCulture));
+
+    [TestMethod]
+    public void DropType_ReferencedByFunction_IsMsg3732()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create type tt as table (a int)",
+            "create function f (@t tt readonly) returns table as return select a from @t");
+        sim.AssertSqlError("drop type tt", 3732, "Cannot drop type 'tt' because it is being referenced by object 'f'. There may be other objects that reference this type.");
+    }
 }

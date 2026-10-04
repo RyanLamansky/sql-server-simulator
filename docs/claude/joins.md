@@ -103,6 +103,7 @@ With ≥1 equi-key, RIGHT / FULL route straight to `HashEquiJoin` (their unmatch
 
 **Building the hash over the smaller side was measured and moved nothing** (2026-08-05): an INNER join at fold level 1 over two un-narrowed base tables, building over WWI's 70,510-row `Sales.Invoices` rather than the 228,265-row `Sales.InvoiceLines`, read 102.2 ms min against the control's 97.4, allocation unchanged at 74 MB — both arrangements compute one key per row of *both* sides, which is the cost the build's row-list appends hide behind.
 The `COUNT(DISTINCT …)` per group over that join that prompted it decomposes as 10.6 ms for the bare scan, 49.3 with the join, 81.4 with the `GROUP BY` and 102.5 with the distinct sets, against live's 54 ms at DOP 8, so what is left there is grouping and intra-query parallelism rather than the join strategy.
+**Settled — don't re-pitch:** measured with no gain, and which side real builds is its cost model's choice, not a guarantee.
 
 ### WHERE pushdown into every base-table source
 
@@ -326,6 +327,7 @@ Parsing / type-promotion / error surface live in [`query.md`](query.md) (project
 Without an ORDER BY, a join's rows leave in the order of whichever input real drives, and real picks it by cost (probed 2026-09-29 against SQL Server 2025): for two small unindexed heaps it builds or loops on the **smaller** input — a hash join then returns rows in the larger (probe) input's scan order, a nested loop in the smaller (outer) one's, and which of the two real takes turns on its estimates (over the same two nine- and five-row heaps, `ON h.id = h2.id` hashed and `ON h.g = h2.g` looped).
 A seekable clustered inner gets a nested loop driven by the other input, and two clustered inputs joined on their keys come back in key order.
 The simulator drives from the written left input (or the reorder's driver), so its order matches real's where the left input is the one real drives — the common `FROM big JOIN small` shape and every `LEFT JOIN` over small tables — and differs otherwise; modeling real's choice would need its cost model, so arrival order stands.
+**Settled — don't re-pitch:** real itself doesn't guarantee a join's row order — its cost model picks the driving input from estimates, so the same query's order moves with the data and statistics.
 
 ## EF Core mapping
 

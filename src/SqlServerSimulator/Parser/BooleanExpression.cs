@@ -188,6 +188,7 @@ internal abstract class BooleanExpression : ExpressionNode
         // `p1 OR p2 OR … OR pN` predicate of any length evaluates in a loop
         // rather than recursing per term (the shape that stack-overflowed a
         // long WHERE chain at Run time).
+        context.SimpleParameterizationBlocked = true;
         var operands = new List<BooleanExpression> { first };
         while (context.Token is ReservedKeyword { Keyword: Keyword.Or })
         {
@@ -680,6 +681,8 @@ internal abstract class BooleanExpression : ExpressionNode
 
         // Regular comparison: RHS is a value expression.
         var right = Expression.Parse(context);
+        if (left.IsWrittenConstant && right.IsWrittenConstant)
+            context.SimpleParameterizationBlocked = true;
         if (op is ComparisonOp.Equal or ComparisonOp.NotEqual && ComparesNullTolerantly(context, left, right))
             return new NullTolerantEqualityExpression(left, right, negated: op == ComparisonOp.NotEqual);
         BooleanExpression comparison = op switch
@@ -786,6 +789,7 @@ internal abstract class BooleanExpression : ExpressionNode
 
     private static LikeExpression ParseLike(Expression left, ParserContext context, bool negated)
     {
+        context.SimpleParameterizationBlocked = true;
         var pattern = Expression.Parse(context.MoveNextRequiredReturnSelf());
         Expression? escape = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Escape })
@@ -836,6 +840,7 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private static BooleanExpression ParseInList(Expression left, ParserContext context, bool negated)
     {
+        context.SimpleParameterizationBlocked = true;
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();

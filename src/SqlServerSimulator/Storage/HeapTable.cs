@@ -312,6 +312,14 @@ internal sealed class HeapTable : SchemaObject
     public readonly bool IsTableValuedParameter;
 
     /// <summary>
+    /// The user-defined table type a table variable or table-valued parameter
+    /// was declared with, which is what a table-valued argument must match
+    /// (a table variable of another type, or one declared inline, is Msg 206);
+    /// null for every other table.
+    /// </summary>
+    public Schemas.TableType? DeclaredTableType;
+
+    /// <summary>
     /// Non-null when the table declared <c>PERIOD FOR SYSTEM_TIME (startCol, endCol)</c>.
     /// Carries the ordinals of the two <c>GENERATED ALWAYS AS ROW START / END</c>
     /// columns that bound each row's system-versioned validity range. The

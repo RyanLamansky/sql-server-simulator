@@ -2096,7 +2096,7 @@ internal sealed partial class Selection
                     : ReferenceEquals(batch.RowAddressProbe, self) ? [.. expressions, new RowAddress(0)]
                     : expressions;
                 return aggregates.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null
-                    ? BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, projection, fromClause, outputColumnNames, aggregateOrderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver)
+                    ? AheadOfRowProjection(BuildAggregateProjectionRows(execSources, joins, ResolveColumnType, projection, fromClause, outputColumnNames, aggregateOrderBy, aggregates, windows, windowOperandTypes, windowResultTypes, top, offsetCount, fetchCount, distinct, batch, outerResolver))
                     : windows.Count > 0
                         ? ProjectWindowedRows(execSources, joins, projection, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, windows, windowOperandTypes, windowResultTypes, batch, outerResolver)
                         : ProjectSqlRows(execSources, joins, projection, fromClause.Excluders, outputColumnNames, orderBy, distinct, top, offsetCount, fetchCount, batch, outerResolver);
@@ -2150,6 +2150,13 @@ internal sealed partial class Selection
         }
         selection.StartsConstants = startsConstants;
         selection.HasWindows = windows.Count > 0;
+        selection.SimplyParameterizable = sources.Length == 1 && joins.Length == 0 && IsParameterizableSource(sources[0])
+            && !distinct && windows.Count == 0 && !selection.HasTopOrOffsetOrFetch && fromClause.GroupingSets.Count == 0
+            && fromClause.Having is null && intoTarget is null && !isAssignmentOnly;
+        // A STRING_AGG whose separator casts a variable answers only as a
+        // scalar aggregate (probed 2026-10-04 against SQL Server 2025).
+        if (fromClause.GroupingSets.Count > 0 && aggregates.Find(static aggregate => aggregate.SeparatorCastsVariable) is not null)
+            throw SimulatedSqlException.StringAggSeparatorNotLiteralOrVariable();
         // A plain SELECT-project-filter body can carry an enclosing statement's
         // WHERE conjunct: it applies its projection and its own WHERE to every
         // row and nothing else, so an extra filter there is the same filter one
@@ -2948,6 +2955,11 @@ internal sealed partial class Selection
         {
             return ProjectStreaming(leftmostOrdered, joins, expressions, excluders, top.Count, offsetCount, fetchCount, batch, outerResolver);
         }
+        if (!hasJoinGroup && !distinct && !top.RequiresBuffering && orderBy.Count > 0
+            && TrySortLeftmostSource(sources, joins, expressions, orderBy, excluders, batch, outerResolver) is { } leftmostSorted)
+        {
+            return ProjectStreaming(leftmostSorted, joins, expressions, excluders, top.Count, offsetCount, fetchCount, batch, outerResolver);
+        }
 
         if (!hasJoinGroup)
             sources = MaybeApplyIndexSeek(sources, joins, excluders, batch, outerResolver);
@@ -2972,6 +2984,44 @@ internal sealed partial class Selection
         if (topOrFetch is { } limit)
             rows = rows.Take(limit);
         return rows;
+    }
+
+    /// <summary>
+    /// A FROM source simple parameterization reads as one table: a permanent
+    /// table, a view or a catalog view, where a <c>#temp</c> table, a table
+    /// variable, a derived table, a CTE or a function's rows decline it.
+    /// </summary>
+    private static bool IsParameterizableSource(FromSource source) =>
+        source.DerivedTable is null
+        && (source.BackingCatalogView is not null
+            || source.BackingView is not null
+            || (source.BackingTable is { IsTableVariable: false } table && !table.Name.StartsWith('#')));
+
+    /// <summary>
+    /// <paramref name="rows"/> from an operator real runs to completion ahead
+    /// of any row it passes on — an aggregate, a constant scan — so an error it
+    /// raises is never one an <c>INSERT</c> draws an identity value for (see
+    /// <see cref="SimulatedSqlException.RaisedInRowProjection"/>).
+    /// </summary>
+    internal static IEnumerable<T> AheadOfRowProjection<T>(IEnumerable<T> rows)
+    {
+        using var enumerator = rows.GetEnumerator();
+        while (true)
+        {
+            bool moved;
+            try
+            {
+                moved = enumerator.MoveNext();
+            }
+            catch (SimulatedSqlException error)
+            {
+                error.RaisedInRowProjection = false;
+                throw;
+            }
+            if (!moved)
+                yield break;
+            yield return enumerator.Current;
+        }
     }
 
     private static IEnumerable<SqlValue[]> ProjectStreaming(
@@ -3006,13 +3056,21 @@ internal sealed partial class Selection
             {
                 currentTuple = tuple;
                 var include = true;
-                foreach (var excluder in excluders)
+                try
                 {
-                    if (excluder.Run(rowRuntime) != true)
+                    foreach (var excluder in excluders)
                     {
-                        include = false;
-                        break;
+                        if (excluder.Run(rowRuntime) != true)
+                        {
+                            include = false;
+                            break;
+                        }
                     }
+                }
+                catch (SimulatedSqlException filterError)
+                {
+                    filterError.RaisedInRowProjection = false;
+                    throw;
                 }
                 if (!include)
                     continue;
@@ -3028,8 +3086,16 @@ internal sealed partial class Selection
                 // rows shouldn't burn sequence values.
                 batch.BumpRowStamp();
                 var projected = new SqlValue[expressions.Count];
-                for (var i = 0; i < expressions.Count; i++)
-                    projected[i] = expressions[i].Run(rowRuntime);
+                try
+                {
+                    for (var i = 0; i < expressions.Count; i++)
+                        projected[i] = expressions[i].Run(rowRuntime);
+                }
+                catch (SimulatedSqlException projectionError)
+                {
+                    projectionError.RaisedInRowProjection = true;
+                    throw;
+                }
 
                 yield return projected;
             }
@@ -3061,30 +3127,40 @@ internal sealed partial class Selection
         // Computed once: the column each projection reads, for the DISTINCT
         // ORDER BY check (a term may name the source column behind an alias).
         var projectionSources = ProjectionSourceReferences(expressions);
-        foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
+        // Everything here is read ahead of the first row out, so an error any
+        // row raises precedes every INSERT identity draw.
+        try
         {
-            currentTuple = tuple;
-            var include = true;
-            foreach (var excluder in excluders)
+            foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
             {
-                if (excluder.Run(rowRuntime) != true)
+                currentTuple = tuple;
+                var include = true;
+                foreach (var excluder in excluders)
                 {
-                    include = false;
-                    break;
+                    if (excluder.Run(rowRuntime) != true)
+                    {
+                        include = false;
+                        break;
+                    }
                 }
+                if (!include)
+                    continue;
+
+                // Per-row stamp bump — same rule as the streaming path: only
+                // for rows that pass WHERE.
+                batch.BumpRowStamp();
+                var projected = new SqlValue[expressions.Count];
+                for (var i = 0; i < expressions.Count; i++)
+                    projected[i] = expressions[i].Run(rowRuntime);
+
+                var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, projectionSources, distinct, batch, resolveSource);
+                buffer.Add((projected, keys));
             }
-            if (!include)
-                continue;
-
-            // Per-row stamp bump — same rule as the streaming path: only
-            // for rows that pass WHERE.
-            batch.BumpRowStamp();
-            var projected = new SqlValue[expressions.Count];
-            for (var i = 0; i < expressions.Count; i++)
-                projected[i] = expressions[i].Run(rowRuntime);
-
-            var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, projectionSources, distinct, batch, resolveSource);
-            buffer.Add((projected, keys));
+        }
+        catch (SimulatedSqlException bufferedError)
+        {
+            bufferedError.RaisedInRowProjection = false;
+            throw;
         }
 
         IEnumerable<(SqlValue[] Projected, SqlValue[] Keys)> filtered = buffer;

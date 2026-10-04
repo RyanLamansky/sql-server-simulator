@@ -500,10 +500,53 @@ partial class Simulation
         // and in skip mode it is pure side effect — a `NEXT VALUE FOR`
         // cell would burn a sequence value for a row that never lands.
         long[]? valueTupleStamps = null;
-        var sourceRows = context.Batch.IsSkipping
-            ? []
-            : EvaluateParsedTuples(plan.ValueTuples!, context.Batch, out valueTupleStamps);
+        List<SqlValue[]> sourceRows;
+        try
+        {
+            sourceRows = context.Batch.IsSkipping
+                ? []
+                : EvaluateParsedTuples(plan.ValueTuples!, context.Batch, out valueTupleStamps);
+        }
+        catch (SimulatedSqlException) when (plan.ValueTuples!.Count == 1)
+        {
+            // One row of values is computed past the row's identity draw, where
+            // a longer list is a constant scan computed ahead of every draw
+            // (probed 2026-10-04 against SQL Server 2025).
+            UseUpIdentityValues(context.Batch, plan.DestinationTable, plan.DestinationColumns, 1);
+            throw;
+        }
         return InsertRows(context, plan, sourceRows, valueTupleStamps);
+    }
+
+    /// <summary>
+    /// Draws <paramref name="count"/> identity values for an <c>INSERT</c>
+    /// whose source failed: real draws each row's value as the row reaches it,
+    /// before the row's own values are computed, and a drawn value is never
+    /// given back — so the rows the source produced before the failure use one
+    /// each, and so does the failing row when its error came from that
+    /// computation (see <see cref="SimulatedSqlException.RaisedInRowProjection"/>).
+    /// Nothing is drawn for a table without an identity, an identity the
+    /// statement supplies, or one an <c>INSTEAD OF</c> trigger stands in for.
+    /// </summary>
+    private static void UseUpIdentityValues(BatchContext batch, HeapTable table, HeapColumn[] destinationColumns, int count)
+    {
+        if (count <= 0 || batch.IsSkipping || table.IdentityOrdinal < 0)
+            return;
+        var identityColumn = table.Columns[table.IdentityOrdinal];
+        if (Array.IndexOf(destinationColumns, identityColumn) >= 0 || HasInsteadOfTrigger(batch, table, TriggerActions.Insert))
+            return;
+        for (var i = 0; i < count; i++)
+        {
+            try
+            {
+                _ = GenerateIdentity(identityColumn);
+            }
+            catch (SimulatedSqlException)
+            {
+                // An exhausted identity draws nothing more; the source's error stands.
+                return;
+            }
+        }
     }
 
     /// <summary>
@@ -624,6 +667,12 @@ partial class Simulation
             for (var i = 0; i < rowValues.Length; i++)
                 rowValues[i] = SqlValue.Null(destinationTable.Columns[i].Type);
 
+            // The row draws its identity value ahead of computing its defaults
+            // and converting its values, so one that fails either leaves a gap
+            // the next row skips (probed 2026-10-01 and 2026-10-04 against SQL
+            // Server 2025).
+            Int128? drawnIdentity = drawsIdentity ? GenerateIdentity(identityColumn!) : null;
+
             // Defaults run only for columns not in the destination column list:
             // when an INSERT supplies an explicit value (including explicit
             // NULL), the column's DEFAULT must not fire. This also keeps
@@ -646,11 +695,6 @@ partial class Simulation
                 var defaultValue = column.Default.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), context.Batch));
                 rowValues[i] = CoerceForInsert(EnforceMaxLength(defaultValue, column, destinationTable, context.Connection), column);
             }
-
-            // The row draws its identity value ahead of converting its values,
-            // so one that fails to convert leaves a gap the next row skips
-            // (probed 2026-10-01 against SQL Server 2025).
-            Int128? drawnIdentity = drawsIdentity ? GenerateIdentity(identityColumn!) : null;
 
             for (var i = 0; i < destinationColumns.Length; i++)
             {
@@ -1464,14 +1508,43 @@ partial class Simulation
                 if (ConstantFolding.IsStartupValue(projected))
                     startupValues.Add((destinationColumns[i], projected));
             }
-            ConvertStartupValues(context, destinationTable, startupValues);
+            try
+            {
+                ConvertStartupValues(context, destinationTable, startupValues);
+            }
+            catch (SimulatedSqlException) when (selection.IsSetOperationResult ? !selection.IsBareConstantRow : !selection.ReadsStorage)
+            {
+                // A FROM-less row, or a set operation's first row, converts
+                // past its identity draw; a set operation over constants alone
+                // is a constant scan, converted ahead of every draw.
+                UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, 1);
+                throw;
+            }
         }
 
+        var rows = new List<SqlValue[]>();
+        try
+        {
+            return ReadSelectSourceRows(context, selection, destinationColumns, rows);
+        }
+        catch (SimulatedSqlException sourceError) when (destinationTable is not null)
+        {
+            UseUpIdentityValues(context.Batch, destinationTable, destinationColumns, rows.Count + (sourceError.RaisedInRowProjection ? 1 : 0));
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Runs an <c>INSERT</c>'s source query into <paramref name="rows"/>, which
+    /// holds what it produced if it fails partway.
+    /// </summary>
+    private static List<SqlValue[]> ReadSelectSourceRows(ParserContext context, Selection selection, HeapColumn[] destinationColumns, List<SqlValue[]> rows)
+    {
+        var expectedColumnCount = destinationColumns.Length;
         var resultSet = selection.Execute(context.Batch);
         // A principal without UNMASK writes what it would read (probed
         // 2026-09-27 against SQL Server 2025).
         var masking = DataMasking.Applying(context.Batch, selection.ColumnMasks);
-        var rows = new List<SqlValue[]>();
         foreach (var rowBytes in resultSet.RowBytes)
         {
             var row = RowDecoder.DecodeRow(resultSet.Schema, rowBytes);

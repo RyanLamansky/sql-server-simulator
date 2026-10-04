@@ -36,6 +36,7 @@ internal sealed class VariableReference : Expression
         // Parse-time validation (and capture of the declared type for
         // GetSqlType) — this is what raises Msg 137 if @v was never declared.
         var slot = context.Batch.GetVariableSlot(raw);
+        context.SimpleParameterizationBlocked = true;
         this.declarationSnapshot = context.Batch.DeclarationSnapshotOf(this.VariableName, slot);
         this.DeclaredType = slot.DeclaredType;
         this.spelledNumeric = slot.SpelledNumeric;

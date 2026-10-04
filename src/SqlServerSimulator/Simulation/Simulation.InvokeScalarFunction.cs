@@ -39,7 +39,8 @@ partial class Simulation
         BatchContext outerBatch,
         ScalarFunction function,
         SqlValue[] argValues,
-        bool[] isDefault)
+        bool[] isDefault,
+        HeapTable?[]? tableArguments = null)
     {
         var connection = outerBatch.Connection;
         // EXECUTE-permission check at the invocation seam: once per statement,
@@ -57,7 +58,7 @@ partial class Simulation
         {
             for (var i = 0; i < argValues.Length; i++)
             {
-                if (!isDefault[i] && argValues[i].IsNull)
+                if (!isDefault[i] && argValues[i].IsNull && function.Parameters[i].TableType is null)
                     return SqlValue.Null(function.ReturnType);
             }
         }
@@ -76,6 +77,8 @@ partial class Simulation
         for (var i = 0; i < function.Parameters.Length; i++)
         {
             var param = function.Parameters[i];
+            if (param.TableType is not null)
+                continue;
             var value = isDefault[i] && param.Default is { } defaultExpr
                 ? defaultExpr.Run(new RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), outerBatch))
                     .CoerceTo(param.Type)
@@ -104,6 +107,7 @@ partial class Simulation
         // procedure) — so this frame leaves the exception unresolved.
         var functionOwner = Ownership.EffectiveOwnerId(function.Schema.Database, function);
         var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, OwnershipChainOwnerId = functionOwner, ModuleObjectId = function.ObjectId, CapturesQueryStore = BodyStatementsCaptured(function) };
+        SeedTableValuedParameters(innerBatch, outerBatch, function.Parameters, tableArguments);
         connection.NestingLevel++;
         // Module WITH EXECUTE AS: push the impersonation frame around the body
         // (OWNER → the owner, SELF → the creator, CALLER → no-op, a named user →

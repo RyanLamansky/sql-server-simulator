@@ -405,8 +405,23 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         var serverCollation = batch.Connection.Simulation.ServerCollationName;
 
-        void Add(string name, SqlType type, int? declaredMaxLength, int order, AliasType? alias)
+        void Add(string name, SqlType type, int? declaredMaxLength, int order, AliasType? alias, TableType? tableType = null)
         {
+            // A table-valued parameter reads its type's name, Length -1 and
+            // Prec 0 (probed 2026-10-04 against SQL Server 2025).
+            if (tableType is not null)
+            {
+                rows.Add([
+                    SqlValue.FromSystemName(name),
+                    SqlValue.FromSystemName(tableType.Name),
+                    SqlValue.FromInt16(-1),
+                    SqlValue.FromInt32(0),
+                    SqlValue.Null(SqlType.Int32),
+                    SqlValue.FromInt32(order),
+                    SqlValue.Null(SqlType.SystemName),
+                ]);
+                return;
+            }
             var (maxLength, precision, scale) = HelpTypeGeometry(type, declaredMaxLength);
             // A MAX or xml parameter or return value reads Prec 0 where a
             // column reads its LOB width (probed 2026-10-02 against SQL Server
@@ -432,7 +447,7 @@ partial class Simulation
                 for (var i = 0; i < procedure.Parameters.Length; i++)
                 {
                     var parameter = procedure.Parameters[i];
-                    Add("@" + parameter.Name, parameter.Type, parameter.DeclaredMaxLength, i + 1, parameter.AliasType);
+                    Add("@" + parameter.Name, parameter.Type, parameter.DeclaredMaxLength, i + 1, parameter.AliasType, parameter.TableType);
                 }
 
                 break;
@@ -446,7 +461,7 @@ partial class Simulation
                 else if (function is ClrAggregateFunction aggregate)
                     Add("", aggregate.ReturnType, null, 0, null);
                 for (var i = 0; i < function.Parameters.Length; i++)
-                    Add("@" + function.Parameters[i].Name, function.Parameters[i].Type, null, i + 1, function.Parameters[i].AliasType);
+                    Add("@" + function.Parameters[i].Name, function.Parameters[i].Type, null, i + 1, function.Parameters[i].AliasType, function.Parameters[i].TableType);
                 break;
         }
 

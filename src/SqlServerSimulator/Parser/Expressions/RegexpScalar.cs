@@ -314,10 +314,68 @@ internal sealed class RegexpScalar : Expression
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        var inputType = this.arguments[0].GetSqlType(batch, resolveColumnType);
-        StringScalars.RequireResolvableCollations(LowerNameFor(this.kind), inputType, this.arguments[1].GetSqlType(batch, resolveColumnType));
+        var lower = LowerNameFor(this.kind);
+        SqlType inputType = SqlType.Int32;
+        SqlType patternType = SqlType.Int32;
+        for (var i = 0; i < this.arguments.Length; i++)
+        {
+            var argument = this.arguments[i];
+            var type = argument.GetSqlType(batch, resolveColumnType);
+            switch (this.RoleOf(i))
+            {
+                case Role.Input:
+                    RegexpArguments.BindText(argument, type, lower, i + 1, typeState: 1, maxState: 0);
+                    inputType = type;
+                    break;
+                case Role.Pattern:
+                    RegexpArguments.BindText(argument, type, lower, i + 1, typeState: 1, this.PatternMaxState);
+                    patternType = type;
+                    break;
+                case Role.Replacement:
+                    RegexpArguments.BindText(argument, type, lower, i + 1, typeState: 1, maxState: 0);
+                    break;
+                case Role.Flags:
+                    RegexpArguments.BindFlags(argument, type, lower, i + 1, typeState: 1, (byte)(this.PatternMaxState + 1), maxFirst: false);
+                    break;
+                default:
+                    RegexpArguments.BindNumber(argument, type, lower, i + 1);
+                    break;
+            }
+        }
+        StringScalars.RequireResolvableCollations(lower, inputType, patternType);
         return this.ResolveResultType(inputType, batch);
     }
+
+    /// <summary>What each argument position is, which decides its type rule.</summary>
+    private enum Role
+    {
+        Input,
+        Pattern,
+        Replacement,
+        Number,
+        Flags,
+    }
+
+    private Role RoleOf(int index) => (this.kind, index) switch
+    {
+        (_, 0) => Role.Input,
+        (_, 1) => Role.Pattern,
+        (RegexpScalarKind.Replace, 2) => Role.Replacement,
+        (RegexpScalarKind.Count, 3) or (RegexpScalarKind.Instr, 5) or (RegexpScalarKind.Replace, 5) or (RegexpScalarKind.Substr, 4) => Role.Flags,
+        _ => Role.Number,
+    };
+
+    /// <summary>
+    /// The state real's Msg 8116 carries for a MAX-typed pattern; a MAX-typed
+    /// flags argument's is one more (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private byte PatternMaxState => this.kind switch
+    {
+        RegexpScalarKind.Count => 13,
+        RegexpScalarKind.Replace => 17,
+        RegexpScalarKind.Substr => 19,
+        _ => 21,
+    };
 
     /// <summary>
     /// COUNT / INSTR project <c>int</c>. REPLACE can grow, so it projects the

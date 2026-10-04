@@ -60,6 +60,7 @@ An inner with no such index is a scan per outer row and takes no delay.
 **A fan-out-aware crossover was built and measured out** (2026-08-05): the delay assumes each key selects about one row, and both a key-count probe on `HeapSeekCache` and an ordinal carried on `SemiJoinShape` were tried as the estimator for the real fan-out.
 Neither helped, measured against a control binary: the shape that prompted it (`delete.exists_73k`) correlates on `Sales.Orders`' primary key, so its fan-out is 1; and where fan-out is genuinely high the build loses anyway — `corr.not_exists` (663 Customers over 73k Orders on `CustomerID`, fan-out 111) flips onto the build and regresses from 40.31 ms median to 45.31.
 The model misses an asymmetry: the seek cache persists across executions while the decorrelated build re-runs every statement, so a per-row seek is cheaper than its row count says, and a crossover that improves on the constant has to price that in.
+**Settled — don't re-pitch:** measured with no gain, and real's own operator choice for these shapes is a cost-model decision it doesn't guarantee, so there is no fidelity reason to revisit it either.
 Only the ordinal remains; real picks a set-based operator for each of these shapes (a Merge Join for the ordered-key semi-joins, a Hash Match left anti semi join for the 663-row outer, a Nested Loops over the seeks for a small `IN` drive side, probed 2026-08-05 with `SET STATISTICS XML ON`).
 
 **The one-shot execution runs under the correlation latch** the outer-independence probe already owns (`OuterRowProbe`): a key plan that consulted the outer row — a correlation hidden inside a nested subquery, which the parse-time classification doesn't see into — or that drew a per-call-varying built-in declines the site for the rest of the statement, and the row that triggered the build falls back to its own per-row execution.
@@ -111,10 +112,11 @@ Measured on WideWorldImporters (`Sales.Orders.CustomerID IN (SELECT … FROM Sal
 The materializing first execution reads the inner plan to completion, where the pre-existing per-row walk short-circuited on the first match.
 A runtime error carried by a *later* inner row therefore surfaces where a lucky early match used to hide it — which is the more faithful direction, since real materializes the subquery once.
 
-Not modeled yet (probed 2026-10-01 and 2026-10-03 against SQL Server 2025):
+Probed 2026-10-01 and 2026-10-03 against SQL Server 2025:
 
 - **Msg 8153 from a quantified comparison.** `id > ANY (SELECT k …)` and `id < ANY (…)` over a subquery holding a NULL send the NULL-elimination warning on real, which runs them as an aggregate over the subquery — over a three-row outer table, though not over a one-row one; `= ANY`, `> ALL`, `0 > ANY` and `IN` don't, so which shapes warn follows real's rewrite rather than a rule the simulator models.
-- **`TOP … ORDER BY` ahead of a `UNION` in an `IN` subquery.** `WHERE g IN (SELECT TOP 1 k FROM u ORDER BY k UNION SELECT 3)` answers on real and is Msg 156 here.
+  **Settled — don't re-pitch:** real itself doesn't guarantee the warning — it rides an optimizer rewrite that the outer table's size turns on and off.
+- **Not modeled yet: `TOP … ORDER BY` ahead of a `UNION` in an `IN` subquery.** `WHERE g IN (SELECT TOP 1 k FROM u ORDER BY k UNION SELECT 3)` answers on real and is Msg 156 here.
 
 Set ops (`UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`) are legal in every subquery context (via `Selection.Parse` → `ParseQueryExpression`), so EF Core 7+'s TPC shape (UNION ALL in a derived table) ships end-to-end.
 

@@ -59,7 +59,7 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
         // Msg 257).
         for (var i = 0; i < this.arguments.Length && i < this.function.Parameters.Length; i++)
         {
-            if (this.arguments[i] is { } argument)
+            if (this.arguments[i] is { } argument and not TableValuedArgument)
                 AssignmentRules.RequireAssignable(argument, argument.GetSqlType(batch, resolveColumnType), this.function.Parameters[i].Type);
         }
         return this.function.ReturnType;
@@ -81,9 +81,16 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
         // INPUT (probe-confirmed: body never runs).
         var argCount = this.arguments.Length;
         var values = new SqlValue[argCount];
+        HeapTable?[]? tables = null;
         for (var i = 0; i < argCount; i++)
         {
             var argExpr = this.arguments[i];
+            if (argExpr is TableValuedArgument tableArgument)
+            {
+                values[i] = SqlValue.Null(this.function.Parameters[i].Type);
+                (tables ??= new HeapTable?[argCount])[i] = tableArgument.Resolve(runtime);
+                continue;
+            }
             if (argExpr is null)
             {
                 // DEFAULT slot — resolved inside InvokeScalarFunction since the
@@ -108,7 +115,8 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
             runtime.Batch,
             this.function,
             values,
-            isDefault);
+            isDefault,
+            tables);
     }
 
     internal override string DebugDisplay() =>
@@ -173,19 +181,25 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
         {
             while (true)
             {
+                var slot = arguments.Count;
+                var tableType = slot < function.Parameters.Length ? function.Parameters[slot].TableType : null;
                 if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
                 {
-                    var slot = arguments.Count;
                     if (slot >= function.Parameters.Length)
                         throw SimulatedSqlException.TooManyArgumentsToFunction(declaredName);
-                    if (function.Parameters[slot].Default is null)
+                    // A table-valued parameter's DEFAULT is an empty table, save
+                    // in an inline function, whose plan has no table to stand in
+                    // (probed 2026-10-04 against SQL Server 2025).
+                    if (tableType is not null && function is InlineTableValuedFunction)
+                        throw SimulatedSqlException.InvalidDefaultForParameter(slot + 1);
+                    if (tableType is null && function.Parameters[slot].Default is null)
                         throw SimulatedSqlException.InsufficientArgumentsToFunction(declaredName);
                     arguments.Add(null); // DEFAULT marker
                     context.MoveNextRequired();
                 }
                 else
                 {
-                    arguments.Add(Expression.Parse(context));
+                    arguments.Add(tableType is null ? Expression.Parse(context) : TableValuedArgument.Parse(context, tableType));
                 }
                 if (context.Token is Operator { Character: ')' })
                     break;

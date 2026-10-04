@@ -50,31 +50,17 @@ partial class Simulation
         var outerRuntime = new RuntimeContext(
             outerResolver ?? (name => throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString())),
             outerBatch);
-        var argCount = function.Parameters.Length;
-        var argValues = new SqlValue[argCount];
-        var isDefault = new bool[argCount];
-        for (var i = 0; i < argCount; i++)
-        {
-            var argExpr = arguments[i];
-            if (argExpr is null)
-            {
-                isDefault[i] = true;
-                argValues[i] = SqlValue.Null(function.Parameters[i].Type);
-            }
-            else
-            {
-                argValues[i] = argExpr.Run(outerRuntime).CoerceTo(function.Parameters[i].Type);
-            }
-        }
+        var (argValues, isDefault, tableArguments) = EvaluateFunctionArguments(function, arguments, outerRuntime);
 
-        return InvokeMultiStatementTvfCore(outerBatch, function, argValues, isDefault);
+        return InvokeMultiStatementTvfCore(outerBatch, function, argValues, isDefault, tableArguments);
     }
 
     private IEnumerable<byte[]> InvokeMultiStatementTvfCore(
         BatchContext outerBatch,
         MultiStatementTableValuedFunction function,
         SqlValue[] argValues,
-        bool[] isDefault)
+        bool[] isDefault,
+        HeapTable?[]? tableArguments)
     {
         var connection = outerBatch.Connection;
         using var bodyCommand = new SimulatedDbCommand(this, connection);
@@ -86,6 +72,8 @@ partial class Simulation
         for (var i = 0; i < function.Parameters.Length; i++)
         {
             var param = function.Parameters[i];
+            if (param.TableType is not null)
+                continue;
             var value = isDefault[i] && param.Default is { } defaultExpr
                 ? defaultExpr.Run(new RuntimeContext(_ => throw SimulatedSqlException.MustDeclareScalarVariable(""), outerBatch))
                     .CoerceTo(param.Type)
@@ -133,6 +121,7 @@ partial class Simulation
         // referencing SELECT's line, no procedure), so this frame leaves the
         // exception unresolved for the enclosing statement to stamp.
         var innerBatch = new BatchContext(bodyCommand, variables) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, ModuleObjectId = function.ObjectId, CapturesQueryStore = true };
+        SeedTableValuedParameters(innerBatch, outerBatch, function.Parameters, tableArguments);
         innerBatch.TableVariables[function.ReturnVariableName] = returnTable;
         connection.NestingLevel++;
         var identityScope = IdentityScope.Enter(connection);

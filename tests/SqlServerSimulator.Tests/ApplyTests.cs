@@ -221,4 +221,35 @@ public sealed class ApplyTests
             insert an values (1, 1);
             select x.id from an {apply} apply (select id from an a2 where a2.k = an.k) x
             """)[0]);
+    /// <summary>
+    /// An <c>ORDER BY</c> reading only the outer source sorts that source under
+    /// the <c>APPLY</c>, as real's plan does, so the rows of the outer rows
+    /// ranked ahead of a body's per-row error reach the reader before it; one
+    /// reading a body column sorts above it and sends nothing (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select h.k, x.v from h cross apply (select top (h.g) v from u order by v) x order by h.k", "1:10,2:10,2:20")]
+    [DataRow("select h.k, x.v from h cross apply (select top (h.g) v from u order by v) x order by h.k desc", "4:10")]
+    [DataRow("select h.k, x.v from h outer apply (select top (h.g) v from u order by v) x order by h.k", "1:10,2:10,2:20")]
+    [DataRow("select h.k, x.v from h cross apply (select top (h.g) v from u order by v) x order by h.g", "")]
+    [DataRow("select h.k, x.v from h cross apply (select top (h.g) v from u order by v) x order by x.v", "")]
+    public void PerRowTopError_StreamsTheRowsRankedAheadOfIt(string query, string expectedBeforeError)
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("""
+            create table h (k int, g int); insert h values (1, 1), (2, 2), (3, null), (4, 1);
+            create table u (v int); insert u values (10), (20), (30);
+            """).ExecuteNonQuery();
+        using var command = connection.CreateCommand(query);
+        var read = new List<string>();
+        var error = Throws<SimulatedSqlException>(() =>
+        {
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                read.Add($"{reader.GetInt32(0)}:{reader.GetInt32(1)}");
+        });
+        AreEqual(1014, error.Number);
+        AreEqual(expectedBeforeError, string.Join(",", read));
+    }
 }

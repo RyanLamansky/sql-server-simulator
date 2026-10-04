@@ -55,6 +55,72 @@ internal static class RegexpArguments
     }
 
     /// <summary>
+    /// The compile-time type rule for a text operand — the input, the pattern
+    /// or <c>REGEXP_REPLACE</c>'s replacement: a character string other than a
+    /// legacy LOB, else Msg 8116 at <paramref name="typeState"/>. A nonzero
+    /// <paramref name="maxState"/> refuses a <c>varchar(max)</c> /
+    /// <c>nvarchar(max)</c> too, with real's own
+    /// <c>VARCHAR(MAX)/NVARCHAR(MAX)</c> wording, as every pattern argument
+    /// does (probed 2026-10-04 against SQL Server 2025). A bare <c>NULL</c>
+    /// passes.
+    /// </summary>
+    public static void BindText(Expression argument, SqlType type, string functionLowerName, int argumentIndex, byte typeState, byte maxState)
+    {
+        if (Expression.IsUntypedNullLiteral(argument))
+            return;
+        if (!IsTextType(type))
+            throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(type, argument), argumentIndex, functionLowerName, typeState);
+        if (maxState != 0 && StringScalars.IsMaxForm(type))
+            throw MaxArgument(argumentIndex, functionLowerName, maxState);
+    }
+
+    /// <summary>
+    /// The compile-time type rule for the flags operand: only a bounded
+    /// <c>varchar</c> or <c>char</c> — a Unicode string is Msg 8116 at
+    /// <paramref name="typeState"/>, a <c>varchar(max)</c> the MAX refusal at
+    /// <paramref name="maxState"/>. The scalars and the predicate test the type
+    /// first, so <c>nvarchar(max)</c> reports only that; the rowset members
+    /// (<paramref name="maxFirst"/>) test MAX first and report both (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    public static void BindFlags(Expression argument, SqlType type, string functionLowerName, int argumentIndex, byte typeState, byte maxState, bool maxFirst)
+    {
+        if (Expression.IsUntypedNullLiteral(argument))
+            return;
+        var typeError = type is VarcharSqlType or CharSqlType
+            ? null
+            : SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(type, argument), argumentIndex, functionLowerName, typeState);
+        var maxError = IsTextType(type) && StringScalars.IsMaxForm(type) ? MaxArgument(argumentIndex, functionLowerName, maxState) : null;
+        if (maxFirst && maxError is not null)
+            throw typeError is null ? maxError : SimulatedSqlException.Aggregate([maxError, typeError]);
+        if (typeError is not null)
+            throw typeError;
+        if (maxError is not null)
+            throw maxError;
+    }
+
+    /// <summary>
+    /// The compile-time type rule for a numeric operand — a start, occurrence,
+    /// return option or group: <c>smallint</c>, <c>int</c>, <c>bigint</c> or a
+    /// character string, which converts as the call runs; every other type,
+    /// <c>tinyint</c>, the exact and approximate decimals, <c>money</c>,
+    /// <c>bit</c> and the date and time types among them, is Msg 8116, even
+    /// as a typed NULL (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    public static void BindNumber(Expression argument, SqlType type, string functionLowerName, int argumentIndex)
+    {
+        if (Expression.IsUntypedNullLiteral(argument) || type is Int32SqlType or SmallIntSqlType or BigIntSqlType || IsTextType(type))
+            return;
+        throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(type, argument), argumentIndex, functionLowerName);
+    }
+
+    private static bool IsTextType(SqlType type) =>
+        SqlType.IsCollatedString(type) && type is not (TextSqlType or NTextSqlType);
+
+    private static SimulatedSqlException MaxArgument(int argumentIndex, string functionLowerName, byte state) =>
+        SimulatedSqlException.InvalidArgumentDataType("VARCHAR(MAX)/NVARCHAR(MAX)", argumentIndex, functionLowerName, state);
+
+    /// <summary>
     /// Evaluates an optional numeric operand. Reports <see langword="false"/>
     /// when the argument is absent (the caller keeps its default) or NULL (the
     /// caller returns NULL).

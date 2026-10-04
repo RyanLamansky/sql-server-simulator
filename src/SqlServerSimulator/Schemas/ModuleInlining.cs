@@ -114,8 +114,11 @@ internal static class ModuleInlining
         _ => (false, false),
     };
 
+    // A table-valued parameter keeps a function from inlining (probed
+    // 2026-10-04 against SQL Server 2025).
     private static bool IsInlineableScalar(ScalarFunction function) =>
-        IsInlineableScalar(function.BodyText, function.Name, function.ExecuteAsClause);
+        Array.TrueForAll(function.Parameters, static parameter => parameter.TableType is null)
+        && IsInlineableScalar(function.BodyText, function.Name, function.ExecuteAsClause);
 
     /// <summary>
     /// Whether a scalar function with this body, leaf name and <c>EXECUTE AS</c>

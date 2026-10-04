@@ -46,8 +46,8 @@ Each kind seeds the bind batch the way its invocation would:
 | Kind | Seeded | Frame |
 | --- | --- | --- |
 | Procedure | parameters as typed NULL slots; a TVP parameter as an empty **READONLY** clone of its type; a cursor parameter as an unallocated cursor variable | `ProcFrame` |
-| Scalar UDF | parameters as typed NULL slots | `UdfFrame` (what makes value-form `RETURN` legal) |
-| Multi-statement TVF | parameters, plus the `@r` return table | **none** — the absence is what raises Msg 178 on a value-form `RETURN`, which real also reports at CREATE |
+| Scalar UDF | parameters as typed NULL slots, a TVP parameter as a procedure's | `UdfFrame` (what makes value-form `RETURN` legal) |
+| Multi-statement TVF | parameters as a scalar UDF's, plus the `@r` return table | **none** — the absence is what raises Msg 178 on a value-form `RETURN`, which real also reports at CREATE |
 | DML trigger | empty `INSERTED` / `DELETED` shaped like the parent | `TriggerFrame` over a stand-in `Trigger` (object id 0, never registered) carrying the parent, which `UPDATE(col)` resolves against |
 | DDL trigger | — | `TriggerFrame` over a stand-in `DdlTrigger`, empty `EVENTDATA()` |
 

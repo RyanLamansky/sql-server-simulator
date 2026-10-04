@@ -435,6 +435,83 @@ public sealed class RefusalFidelityTests
     public void StringAgg_ConstantOrVariableSeparator_Aggregates(string call, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"{AggRows} select {call} within group (order by i) from sa"));
 
+    /// <summary>
+    /// A separator that is a constant only through a <c>CAST</c> or
+    /// <c>CONVERT</c> of a literal is Msg 8733 exactly where real's simple
+    /// parameterization takes the statement — an ad hoc SELECT reading one
+    /// permanent table, view or catalog view whole, with nothing in it real
+    /// declines parameterizing for — because the literal becomes a parameter
+    /// there (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sa", true)]
+    [DataRow("select string_agg(s, convert(varchar(2), ',')) from sa", true)]
+    [DataRow("select string_agg(s, convert(varchar(2), ',', 0)) from sa", true)]
+    [DataRow("select string_agg(s, try_cast(',' as varchar(2))) from sa", true)]
+    [DataRow("select string_agg(s, cast(1 as varchar(2))) from sa", true)]
+    [DataRow("select string_agg(s, ',' + cast(',' as varchar(2))) from sa", true)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2)) collate Latin1_General_CI_AS) from sa", true)]
+    [DataRow("select string_agg(s, cast(char(44) as varchar(2))) from sa", true)]
+    [DataRow("select string_agg(s, cast(null as varchar(2))) from sa", false)]
+    [DataRow("select string_agg(coalesce(s, ''), cast(',' as varchar(2))) from sa", true)]
+    [DataRow("select string_agg(cast(i as varchar), cast(',' as varchar(2))) from sa where i = 1", true)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sa where i between 1 and 2", true)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sa as x where x.i <> 3", true)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) within group (order by s) from sa", true)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sa with (nolock)", true)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) as x from sa for json path", true)]
+    [DataRow("select string_agg(name, cast(',' as varchar(2))) from sys.objects", true)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sv", true)]
+    [DataRow("exec('select string_agg(s, cast('','' as varchar(2))) from sa')", true)]
+    [DataRow("select string_agg(upper(s), cast(',' as varchar(2))) from sa", false)]
+    [DataRow("select string_agg(isnull(s, ''), cast(',' as varchar(2))) from sa", false)]
+    [DataRow("select string_agg(case when 1 = 1 then s end, cast(',' as varchar(2))) from sa", false)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sa where i in (1, 2)", false)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sa where i = 1 or i = 2", false)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sa where s like 'a%'", false)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sa where @@rowcount >= 0", false)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sa where exists (select 1)", false)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sa group by i", false)]
+    [DataRow("select top 1 string_agg(s, cast(',' as varchar(2))) from sa", false)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sa option (maxdop 1)", false)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from sa with (index(0))", false)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from (select s from sa) d", false)]
+    [DataRow("select string_agg(a.s, cast(',' as varchar(2))) from sa a join sa b on a.i = b.i", false)]
+    [DataRow("select string_agg(s, cast(',' as varchar(2))) from (values ('a')) v(s)", false)]
+    [DataRow("declare @q int = 1; select @q, string_agg(s, cast(',' as varchar(2))) from sa", false)]
+    [DataRow("exec p", false)]
+    public void StringAgg_ConvertedLiteralSeparator_RefusedWhereParameterized(string sql, bool refused)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            AggRows,
+            "create view sv as select s from sa",
+            "create procedure p as select string_agg(s, cast(',' as varchar(2))) from sa");
+        if (refused)
+            sim.AssertSqlError(sql, 8733, "Separator parameter for STRING_AGG must be a string literal or variable.");
+        else
+            _ = sim.ExecuteScalar(sql);
+    }
+
+    /// <summary>
+    /// A <c>CAST</c> or <c>CONVERT</c> of a variable is a separator a scalar
+    /// aggregate takes and a grouped one refuses (probed 2026-10-04 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select string_agg(s, cast(@v as varchar(2))) within group (order by s) from sa", "a,b")]
+    [DataRow("select string_agg(s, convert(varchar(2), (@v))) within group (order by s) from sa where i > 0", "a,b")]
+    public void StringAgg_ConvertedVariableSeparator_ScalarAggregate(string query, string expected)
+        => AreEqual(expected, new Simulation().ExecuteBatchesScalar(AggRows, "declare @v varchar(5) = ','; " + query));
+
+    [TestMethod]
+    public void StringAgg_ConvertedVariableSeparator_GroupedRaisesMsg8733()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(AggRows);
+        sim.AssertSqlError("declare @v varchar(5) = ','; select string_agg(s, cast(@v as varchar(2))) from sa group by i", 8733, "Separator parameter for STRING_AGG must be a string literal or variable.");
+    }
+
     [TestMethod]
     [DataRow("lag(null)", "lag")]
     [DataRow("lead((null), 1, 5)", "lead")]

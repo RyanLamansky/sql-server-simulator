@@ -154,6 +154,27 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool CursorStatement;
 
     /// <summary>
+    /// Set while a SELECT statement parses when it meets something real's
+    /// simple parameterization declines the statement for — a local variable,
+    /// an <c>IN</c> list, an <c>OR</c>, a <c>LIKE</c>, a comparison of two
+    /// constants, a subquery, an <c>OPTION</c> clause, a <c>TABLESAMPLE</c>,
+    /// an index hint or one of the built-ins
+    /// <see cref="Expression.BlocksSimpleParameterization"/> names (probed
+    /// 2026-10-04 against SQL Server 2025). The statement's own structure is
+    /// judged by <see cref="Selection.SimplyParameterizable"/>.
+    /// </summary>
+    public bool SimpleParameterizationBlocked;
+
+    /// <summary>
+    /// A <c>STRING_AGG</c> separator's Msg 8733 held until its SELECT
+    /// statement has parsed: one that is a constant only through a
+    /// <c>CAST</c> / <c>CONVERT</c> of a literal, which simple
+    /// parameterization turns into a parameter (see
+    /// <see cref="SimpleParameterizationBlocked"/>).
+    /// </summary>
+    public SimulatedSqlException? ParameterizedSeparatorRefusal;
+
+    /// <summary>
     /// Set when a statement's query ends in <c>FOR BROWSE</c>, so the SELECT
     /// dispatch can read the statement again as a browse statement — the
     /// clause arrives after the projection it decides.

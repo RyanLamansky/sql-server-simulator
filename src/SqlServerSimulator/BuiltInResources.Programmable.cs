@@ -1282,14 +1282,16 @@ internal static partial class BuiltInResources
                 for (var i = 0; i < fn.Parameters.Length; i++)
                 {
                     var p = fn.Parameters[i];
-                    var (maxLength, precision, scale) =
-                        GetSysColumnMetadata(new HeapColumn(p.Name, p.Type, maxLength: null, nullable: true));
+                    var fnTvp = p.TableType is not null;
+                    var (maxLength, precision, scale) = fnTvp
+                        ? ((short)SqlType.MaxLengthSentinel, (byte)0, (byte)0)
+                        : GetSysColumnMetadata(new HeapColumn(p.Name, p.Type, maxLength: null, nullable: true));
                     yield return [
                         fnObjectId,
                         SqlValue.FromSystemName("@" + p.Name),
                         SqlValue.FromInt32(i + 1),
-                        SqlValue.FromByte(SpelledTypeId(p.Type, p.SpelledNumeric)),
-                        SqlValue.FromInt32(p.AliasType?.UserTypeId ?? (SpelledTypeId(p.Type, p.SpelledNumeric) is 108 ? 108 : p.Type.UserTypeId)),
+                        SqlValue.FromByte(fnTvp ? (byte)243 : SpelledTypeId(p.Type, p.SpelledNumeric)),
+                        SqlValue.FromInt32(p.TableType?.UserTypeId ?? p.AliasType?.UserTypeId ?? (SpelledTypeId(p.Type, p.SpelledNumeric) is 108 ? 108 : p.Type.UserTypeId)),
                         SqlValue.FromInt16(maxLength),
                         SqlValue.FromByte(precision),
                         SqlValue.FromByte(scale),
@@ -1299,7 +1301,7 @@ internal static partial class BuiltInResources
                         falseBit,
                         fn is ClrFunction && p.Default is { } fnDefault ? ClrDefaultValue(batch, fnDefault) : nullDefault,
                         zeroInt,
-                        falseBit,
+                        SqlValue.FromBoolean(fnTvp),
                         trueBit,
                         VectorDims(p.Type),
                         VectorDesc(p.Type),
@@ -1782,7 +1784,7 @@ internal static partial class BuiltInResources
                 for (var i = 0; i < fn.Parameters.Length; i++)
                 {
                     var param = fn.Parameters[i];
-                    yield return Row(schemaName, fn.Name, i + 1, modeIn, "@" + param.Name, param.Type, param.SpelledNumeric, null, null, param.AliasType);
+                    yield return Row(schemaName, fn.Name, i + 1, modeIn, "@" + param.Name, param.Type, param.SpelledNumeric, null, param.TableType, param.AliasType);
                 }
             }
         }

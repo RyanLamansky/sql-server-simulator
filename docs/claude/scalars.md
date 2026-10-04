@@ -994,8 +994,14 @@ The keyword reservation that comes with it is covered in [`grammar.md`](grammar.
 4. **Flags** — Msg 19303.
 5. **Pattern** compilation — Msg 19300 / 19307 / 19308 / 19309.
 
-**Not modeled yet**: real's operand-type check covers the numeric arguments too, where the simulator converts them implicitly.
-`REGEXP_COUNT('abc', 'b', <start>)` is Msg 8116 on real for a `tinyint`, `decimal` / `numeric`, `money`, `float`, `bit`, `datetime` or `date` start position (`date` is Msg 529 here) and answers for an `int`, `smallint`, `bigint` or a string; the same holds for the start and occurrence arguments of `REGEXP_INSTR`, `REGEXP_SUBSTR` and `REGEXP_REPLACE`, each naming its own argument number (probed 2026-10-03 against SQL Server 2025).
+**Operand types are settled while compiling**, argument by argument in written order and ahead of any NULL, so an untaken branch, an empty table and a module body at `CREATE` raise them (probed 2026-10-04 against SQL Server 2025 across every argument position of the seven members; `RegexpArguments.BindText` / `BindFlags` / `BindNumber`):
+- The input and `REGEXP_REPLACE`'s replacement take any character string but a legacy LOB, MAX included.
+- The pattern takes the same, save that a `varchar(max)` or `nvarchar(max)` one is Msg 8116 naming the type `VARCHAR(MAX)/NVARCHAR(MAX)`, at a state of each member's own: 13 for `REGEXP_COUNT`, 15 for `REGEXP_LIKE`, 17 for `REGEXP_REPLACE`, 19 for `REGEXP_SUBSTR`, 21 for `REGEXP_INSTR`, 23 for `REGEXP_MATCHES`, 26 for `REGEXP_SPLIT_TO_TABLE`.
+- The flags take only a bounded `varchar` or `char`: a Unicode one is Msg 8116 naming its type, even as a typed NULL, and a `varchar(max)` one is the MAX refusal at the pattern's state plus one.
+  The scalars and the predicate test the type first, so `nvarchar(max)` reports only that; the rowset members test MAX first and report both.
+- A start, occurrence, return option or group takes `smallint`, `int`, `bigint` or any character string (converted as the call runs, so `'1.5'` is Msg 245 and `'3000000000'` Msg 248); every other type is Msg 8116 — `tinyint`, `decimal` / `numeric`, `money` / `smallmoney`, `float` / `real`, `bit`, every date and time type, the binary types, `uniqueidentifier`, `sql_variant`, `xml` — even as a typed NULL, while the bare `NULL` keyword passes.
+  An expression's type is what counts: `CAST(1 AS tinyint) + 0` is an `int` and answers.
+- Every refusal is state 1 for the scalars and the predicate, and 25 for `REGEXP_MATCHES` and 28 for `REGEXP_SPLIT_TO_TABLE`.
 
 **Msg 19301** wording is `'<ARG>' value should be greater than or equal to <min> but '<value>' is provided in '<FUNCTION>' function.`, and real's `<min>` isn't always the bound it enforces:
 
@@ -1026,6 +1032,8 @@ The two rowset members instead report a TVF's **Msg 313** / **Msg 8144** at stat
 - `REGEXP_REPLACE` → the **input's** family at container width (`varchar(8000)` / `nvarchar(4000)`), independent of the replacement's family, with MAX carried through unbounded.
   A grown result **truncates silently** at that width rather than raising Msg 8152.
 - `REGEXP_SUBSTR` → the input's own declared width (`varchar(10)` in → `varchar(10)` out; `char(5)` in → `varchar(5)`), MAX carried through.
+
+Not modeled yet: a `char` / `nchar` input keeps its fixed-width family through `REGEXP_REPLACE` on real — `REGEXP_REPLACE(CAST('b' AS char(1)), 'b', 'z')` describes its column as `char`, where the simulator's is `varchar` (probed 2026-10-04 against SQL Server 2025).
 
 ### Per-member semantics
 

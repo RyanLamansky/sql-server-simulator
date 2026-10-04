@@ -1174,6 +1174,14 @@ partial class SimulatedSqlException
     }
 
     /// <summary>
+    /// Mimics SQL Server error 1090 state 4: an inline table-valued function
+    /// call passed <c>DEFAULT</c> to a table-valued parameter (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InvalidDefaultForParameter(int parameterOrdinal) =>
+        new($"Invalid default for parameter {parameterOrdinal}.", 1090, 16, 4);
+
+    /// <summary>
     /// Mimics SQL Server error 352: a <c>CREATE PROCEDURE</c> / <c>CREATE
     /// FUNCTION</c> parameter was typed by a user-defined table type but
     /// didn't include the mandatory <c>READONLY</c> keyword. Probe-confirmed
@@ -1777,6 +1785,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CannotSchemaBindNotSchemaBound(
         string moduleKind, string qualifiedModuleName, string referencedName) =>
         new($"Cannot schema bind {moduleKind} '{qualifiedModuleName}'. '{referencedName}' is not schema bound.", 4513, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 2789 state 2: a <c>WITH SCHEMABINDING</c>
+    /// function's table-valued parameter names its type in one part (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SchemaBoundTableTypeNeedsTwoPartName(string typeName) =>
+        new($"Must specify a two-part name for table '{typeName}' in a schemabound object or a constraint expression.", 2789, 16, 2);
 
     /// <summary>
     /// Mimics SQL Server error 2792, once per site: a <c>WITH SCHEMABINDING</c>

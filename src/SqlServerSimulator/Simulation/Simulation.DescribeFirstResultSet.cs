@@ -92,13 +92,19 @@ partial class Simulation
         try
         {
             var declared = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+            Dictionary<string, HeapTable>? tables = null;
             if (parameters is { IsNull: false } parameterText)
             {
-                foreach (var parameter in ParseSpExecuteSqlParamDefinitions(parameterText.AsString, connection))
-                    declared[parameter.Name] = new VariableSlot(parameter.Type, declaredMaxLength: null, SqlValue.Null(parameter.Type), parameter: null);
+                var declarations = ParseSpExecuteSqlParamDefinitions(parameterText.AsString, connection);
+                foreach (var parameter in declarations)
+                {
+                    if (parameter.TableType is null)
+                        declared[parameter.Name] = new VariableSlot(parameter.Type, declaredMaxLength: null, SqlValue.Null(parameter.Type), parameter: null);
+                }
+                tables = EmptyTableValuedParameters(declarations, batch);
             }
 
-            foreach (var outcome in this.ExecuteDynamicBatch(batch, tsql, declared))
+            foreach (var outcome in this.ExecuteDynamicBatch(batch, tsql, declared, tableVariables: tables))
             {
                 if (outcome is SimulatedQueryResult result)
                 {

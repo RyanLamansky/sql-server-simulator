@@ -575,7 +575,7 @@ internal sealed class AggregateExpression : Expression
         // The value is judged before the separator (probed 2026-09-26 against
         // SQL Server 2025: a binary in both is argument 1's Msg 8116 first).
         var resultType = Aggregators.StringAggAggregator.ResultType(operandType, batch);
-        RejectSeparator(this.Separator!, separatorType, operandType);
+        this.RejectSeparator(this.Separator!, separatorType, operandType, batch);
         return resultType;
     }
 
@@ -587,7 +587,7 @@ internal sealed class AggregateExpression : Expression
     /// and <c>UPPER(',')</c> don't. Both while compiling, the type first
     /// (probed 2026-09-24 against SQL Server 2025).
     /// </summary>
-    private static void RejectSeparator(Expression separator, SqlType separatorType, SqlType operandType)
+    private void RejectSeparator(Expression separator, SqlType separatorType, SqlType operandType, BatchContext batch)
     {
         if (IsUntypedNullLiteral(separator))
             return;
@@ -602,9 +602,56 @@ internal sealed class AggregateExpression : Expression
         var bare = separator;
         while (bare is Parenthesized parenthesized)
             bare = parenthesized.Wrapped;
-        if (bare is not VariableReference && !separator.IsWrittenConstant)
+        if (bare is VariableReference)
+            return;
+        // A CAST or CONVERT of a variable answers as a scalar aggregate's
+        // separator alone, which the query block settles once it knows its
+        // grouping (probed 2026-10-04 against SQL Server 2025).
+        if (bare.PureConversionOperand is { } converted && Peel(converted) is VariableReference)
+        {
+            this.SeparatorCastsVariable = true;
+            return;
+        }
+        if (!separator.IsWrittenConstant)
             throw SimulatedSqlException.StringAggSeparatorNotLiteralOrVariable();
+        // A constant only through a conversion of a literal is one real's
+        // simple parameterization turns into a parameter; the statement
+        // decides once it has parsed.
+        if (ConvertsLiteral(separator) && batch.Parser is { } parser)
+            parser.ParameterizedSeparatorRefusal ??= SimulatedSqlException.StringAggSeparatorNotLiteralOrVariable();
     }
+
+    private static Expression Peel(Expression expression)
+    {
+        while (expression is Parenthesized parenthesized)
+            expression = parenthesized.Wrapped;
+        return expression;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="expression"/> converts a literal other than
+    /// <c>NULL</c> — a <c>CAST</c>, <c>CONVERT</c> or their <c>TRY_</c> forms
+    /// anywhere in it, style or none, which simple parameterization makes a
+    /// parameter of.
+    /// </summary>
+    private static bool ConvertsLiteral(Expression expression)
+    {
+        var converts = false;
+        expression.Walk((node, _) =>
+        {
+            if (node is Cast or ConvertExpression && ((Expression)node).PureConversionOperand is { } operand)
+                converts |= !IsUntypedNullLiteral(operand);
+            return !converts;
+        });
+        return converts;
+    }
+
+    /// <summary>
+    /// Set while binding when the separator is a <c>CAST</c> or
+    /// <c>CONVERT</c> of a variable, which real takes only in a query block
+    /// with no grouping (Msg 8733 otherwise).
+    /// </summary>
+    internal bool SeparatorCastsVariable;
 
     // SUM / AVG / MIN / MAX preserve the operand's decimal-vs-numeric name; the other
     // kinds have non-decimal results the projection-time gate filters out.

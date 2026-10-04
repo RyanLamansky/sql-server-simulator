@@ -288,6 +288,7 @@ The main INSERT path tests once more, *before* the heap write rather than after:
 A reader tests too, against the clustered key of each row it locks: an `UPDLOCK` read's U meets another reader's `RangeS-U`, and a READ COMMITTED read's S meets a `RangeX-X` — but only once the table has changed since the holder's transaction began (`Heap.LastModifiedEpoch` against `SimulatedDbTransaction.BeginEpoch`), since real's READ COMMITTED read takes its S only on a page changed since the oldest open transaction began.
 Probed 2026-09-28: the `RangeX-X` behind an `XLOCK` read, or behind a DELETE that removed nothing, lets the read through, and the same lock refuses it once any write lands on the page — even one rolled back.
 Real's check is per page and the simulator's per heap, so on a table of many pages a write elsewhere refuses a read real would let through.
+**Settled — don't re-pitch:** which page a row sits on is real's allocation accident, not a guarantee, so the per-heap test stands.
 A `RangeX-X` counts in `ActiveDataWriters`, which is what sends the READ COMMITTED reader off its lock-free fast path to test it.
 
 Key-lock waits go through `LockManager.Acquire` like everything else, so they enter the wait-for graph unchanged — two transactions each fencing one range and inserting into the other's deadlock with Msg 1205, and `SET LOCK_TIMEOUT` (or a `NOWAIT` hint on the table, an INSERT target's included) yields Msg 1222.
@@ -339,13 +340,16 @@ And the blocking matrix, session A holding a SERIALIZABLE `k BETWEEN 15 AND 25` 
 - **The access path is the simulator's, not real's optimizer's.**
   Real can scan a small table rather than seek it and then locks every key of the clustered index: probed, a nonclustered seek over four rows, a three-row `BETWEEN` over a 2000-row nonclustered index, a 300-row heap with a nonclustered index and an `EXISTS` driven from the inner table all ran as scans there, where the simulator seeks and locks only the keys the seek reaches.
   Blocking follows the chosen path on both engines, so a shape real scans blocks more there.
+  **Settled — don't re-pitch:** real doesn't guarantee its access path — its optimizer picks scan or seek by cost — so its lock footprint isn't a contract to match.
 - **A nonclustered read takes its lookup row S even when the index covers the query**, where real's covering seek reads no base row — so an update of a column the query never read waits here and proceeds on real.
   Taking it always keeps the non-covering case, the common one, from admitting a write real refuses.
+  **Settled — don't re-pitch:** whether real's plan covers is its optimizer's choice, not a guarantee.
 - **The `UPDLOCK` / `XLOCK` row lock stays on top of the key lock**, where real folds the two into one key lock; the readers and writers that take a row lock meet it there.
   `sys.dm_tran_locks` folds them back (`LockDmvs.FoldRowLocksIntoKeyLocks`), reporting the one key lock in the combined mode — `RangeX-X` for a written key — as real does.
 - **No ghost records.**
   On real a `DELETE` leaves its key behind as a ghost until cleanup runs, and a `ROWLOCK, UPDLOCK` seek for that key locks the ghost, so a concurrent `INSERT` of the key waits; here the seek finds nothing to lock and the insert lands first.
   Real's outcome turns on whether ghost cleanup has run yet (probed 2026-10-02 against SQL Server 2025 through Django's `get_or_create.UpdateOrCreateTransactionTests.test_creation_in_transaction`, whose predecessor deletes the same key).
+  **Settled — don't re-pitch:** real itself doesn't guarantee the outcome — it is a race against its background ghost cleanup's timing.
 - **`resource_description` prints the anchor key**, e.g. `(20)` or `(1,5)`; real prints a hash of it, so only the infinity anchor's `(ffffffffffff)` byte-matches.
 - **A non-default isolation level disables the plan cache.**
   A cached plan's FROM sources carry the lock acquisitions their parsing session made, so replaying one under a different level would settle the wrong session's protection, or none.

@@ -1712,8 +1712,31 @@ public sealed partial class Simulation
     private static Selection ParseSelectStatement(ParserContext context, bool browse)
     {
         using var browseStatement = ParserScope.Enter(ref context.BrowseStatement, browse);
-        return Selection.Parse(context, QueryScope.Statement).AsStatementResult();
+        using var blocked = ParserScope.Enter(ref context.SimpleParameterizationBlocked, false);
+        using var separatorRefusal = ParserScope.Enter(ref context.ParameterizedSeparatorRefusal, null);
+        var subqueriesBefore = context.SubqueriesParsed;
+        var selection = Selection.Parse(context, QueryScope.Statement);
+        // Simple parameterization turns a literal a STRING_AGG separator casts
+        // into a parameter, which is no longer the literal the separator has
+        // to be: real's Msg 8733 for a statement it parameterizes, which is an
+        // ad hoc one, never a module's.
+        if (context.ParameterizedSeparatorRefusal is { } refusal
+            && selection.SimplyParameterizable && !context.SimpleParameterizationBlocked && context.SubqueriesParsed == subqueriesBefore
+            && RunsAdHoc(context.Batch))
+        {
+            throw refusal;
+        }
+        return selection.AsStatementResult();
     }
+
+    /// <summary>
+    /// Whether <paramref name="batch"/> is an ad hoc batch — a client's or
+    /// dynamic SQL's — rather than a module body, whose statements real never
+    /// parameterizes.
+    /// </summary>
+    private static bool RunsAdHoc(BatchContext batch) =>
+        string.IsNullOrEmpty(batch.ErrorProcedureName) && batch.UdfFrame is null && batch.TriggerFrame is null && !batch.CalledFunctionBody
+        && batch.ProcFrame is not { IsDynamicSql: false };
 
     private static PlanCacheKey? TryBuildPlanCacheKey(SimulatedDbCommand command)
         => string.IsNullOrEmpty(command.CommandText)

@@ -583,4 +583,83 @@ public sealed class IdentityTests
         var ex = new Simulation().AssertSqlError(sql, 1754);
         AreEqual(("Defaults cannot be created on columns with an IDENTITY attribute. Table 't', column 'id'.", 1750), (ex.Errors[0].Message, ex.Errors[1].Number));
     }
+    /// <summary>
+    /// A failing <c>INSERT</c> uses up one identity value per row its source
+    /// produced before the failure, plus one for the failing row when the
+    /// error came from computing the row's own values — which real does past
+    /// the row's identity draw — and none when it came from an operator real
+    /// runs ahead of the draws: a filter, a sort, <c>DISTINCT</c>, an
+    /// aggregate, a multi-row <c>VALUES</c> or a set operation over constants
+    /// (probed 2026-10-04 against SQL Server 2025). The table holds one row,
+    /// so the value after the failure reads how many were used up.
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert t (v) values (cast('x' as int))", 2)]
+    [DataRow("insert t (v) values (1/0)", 2)]
+    [DataRow("insert t (v, s) values (1, 1/0)", 2)]
+    [DataRow("insert t (v) values ((select 1/0))", 2)]
+    [DataRow("declare @z int = 0; insert t (v) values (1/@z)", 2)]
+    [DataRow("insert t (v) output inserted.id values (1/0)", 2)]
+    [DataRow("insert t (v) values ('x')", 2)]
+    [DataRow("insert t (v) values (1/0), (2)", 1)]
+    [DataRow("insert t (v) values (1), (1/0)", 1)]
+    [DataRow("insert t (v) values (1), ('x')", 1)]
+    [DataRow("insert t (s) values (1), (300)", 3)]
+    [DataRow("insert t (v) select cast('x' as int)", 2)]
+    [DataRow("insert t (v) select 1/0", 2)]
+    [DataRow("insert t (v) select 1/0 where 1 = 1", 2)]
+    [DataRow("insert t (v, s) select 1, 1/0", 2)]
+    [DataRow("insert t (v) select 'x'", 2)]
+    [DataRow("insert t (s) select 300", 2)]
+    [DataRow("insert t (v) select 10 / (k - 1) from src", 2)]
+    [DataRow("insert t (v) select 10 / (k - 3) from src", 4)]
+    [DataRow("insert t (v) select 10 / (k - 5) from src", 6)]
+    [DataRow("insert t (v) select 10 / (k - 3) from src order by k", 4)]
+    [DataRow("insert t (v) select 10 / (k - 1) from src order by k desc", 6)]
+    [DataRow("insert t (v) select cast(case when k = 3 then 'x' else '1' end as int) from src", 4)]
+    [DataRow("insert t (v) select case when k = 3 then 1/0 else k end from src", 4)]
+    [DataRow("insert t (v) select (select 10 / (k - 3)) from src", 4)]
+    [DataRow("insert t (v) select x from (select 10 / (k - 3) x from src) d", 4)]
+    [DataRow("with c as (select 10 / (k - 3) x from src) insert t (v) select x from c", 4)]
+    [DataRow("insert t (v) select a.x from src cross apply (select 10 / (k - 3) x) a", 4)]
+    [DataRow("insert t (v) select 10 / (s.k - 3) from src s join src s2 on s.k = s2.k", 4)]
+    [DataRow("insert t (v) output inserted.id select 10 / (k - 3) from src", 4)]
+    [DataRow("insert t (v) select k from src where 10 / (3 - k) > 0", 3)]
+    [DataRow("insert t (v) select k from src where 10 / (k - 3) > 0", 1)]
+    [DataRow("insert t (v) select distinct 10 / (k - 3) from src", 1)]
+    [DataRow("insert t (v) select 10 / (k - 3) from src order by 10 / (k - 3)", 1)]
+    [DataRow("insert t (v) select sum(10 / (k - 3)) from src", 1)]
+    [DataRow("insert t (v) select v from (values (1), (2), (1/0)) d(v)", 1)]
+    [DataRow("insert t (v) select * from (values (1/0)) d(v)", 2)]
+    [DataRow("insert t (v) select 1 union all select 1/0", 1)]
+    [DataRow("insert t (v) select 1/0 union all select 1", 1)]
+    [DataRow("insert t (v) select k from src union all select 1/0", 7)]
+    [DataRow("insert t (v) select 1/0 union all select k from src", 2)]
+    [DataRow("insert t (v) select 10 / (k - 3) from src union all select 1", 4)]
+    [DataRow("insert t (s) select k * 100 from src", 4)]
+    [DataRow("insert t (c) values (-1)", 2)]
+    [DataRow("insert t (c) values (1), (-1)", 3)]
+    [DataRow("insert d default values", 2)]
+    [DataRow("insert d (w) values (1)", 2)]
+    [DataRow("insert i (v) values (1/0)", 1)]
+    [DataRow("insert a (v) values (1/0)", 2)]
+    [DataRow("insert a (v) select 10 / (k - 3) from src", 4)]
+    public void FailingInsert_UsesUpIdentityValues(string insert, int expected)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            """
+            create table src (k int); insert src values (1), (2), (3), (4), (5);
+            create table t (id int identity, v int null, s tinyint null, c int null check (c >= 0));
+            create table d (id int identity, v int default (1 / 0), w int null);
+            create table i (id int identity, v int null);
+            create table a (id int identity, v int null);
+            """,
+            "create trigger tri on i instead of insert as set nocount on",
+            "create trigger tra on a after insert as set nocount on",
+            "insert t default values; insert d (v) values (5); insert i default values; insert a default values");
+        var table = insert.Split(' ')[1] is "t" or "d" or "i" or "a" ? insert.Split(' ')[1] : "t";
+        _ = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery(insert));
+        AreEqual(expected, Convert.ToInt32(simulation.ExecuteScalar($"select ident_current('{table}')"), System.Globalization.CultureInfo.InvariantCulture));
+    }
 }

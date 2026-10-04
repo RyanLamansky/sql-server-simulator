@@ -373,7 +373,7 @@ partial class Simulation
         // Try table-valued-parameter binding first. A multi-part name (e.g.
         // `dbo.MyType`) unambiguously means user-defined type; a 1-part name
         // checks TableTypes first with fallback to the scalar parser.
-        var tableType = TryResolveProcedureTableTypeParameter(context);
+        var tableType = TryResolveTableTypeParameter(context, out _);
         if (tableType is not null)
         {
             // READONLY is mandatory after a TVP parameter (probe-confirmed:
@@ -477,13 +477,16 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Probes the cursor for a user-defined table type reference. Returns
-    /// the matched <see cref="TableType"/> with the cursor advanced past the
-    /// type name; returns null (cursor unchanged) for any other shape so the
+    /// Probes the cursor for a user-defined table type reference — a
+    /// procedure's, a function's or an <c>sp_executesql</c> declaration's
+    /// parameter. Returns the matched <see cref="TableType"/> with the cursor
+    /// advanced past the type name, reporting whether the name was written in
+    /// one part; returns null (cursor unchanged) for any other shape so the
     /// caller falls through to the scalar parameter-type parser.
     /// </summary>
-    private static TableType? TryResolveProcedureTableTypeParameter(ParserContext context)
+    private static TableType? TryResolveTableTypeParameter(ParserContext context, out bool onePart)
     {
+        onePart = false;
         if (context.Token is not Name firstName)
             return null;
 
@@ -512,6 +515,7 @@ partial class Simulation
         // 1-part: try TableTypes, fall through to scalar on miss.
         if (!context.Batch.TryResolveTableType(new MultiPartName(firstName.Value), out var singleType))
             return null;
+        onePart = true;
         context.MoveNextOptional();
         return singleType;
     }

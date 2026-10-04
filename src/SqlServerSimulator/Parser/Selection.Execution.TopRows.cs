@@ -405,42 +405,52 @@ partial class Selection
         // Keys go into reused scratch, copied only for a row the selection takes.
         var keys = new SqlValue[orderBy.Count];
         var sequence = 0;
-        foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
+        // The sort reads every row before the first leaves it, so an error any
+        // row raises here precedes every INSERT identity draw.
+        try
         {
-            currentTuple = tuple;
-            var include = true;
-            foreach (var excluder in excluders)
+            foreach (var tuple in EnumerateJoinedRows(sources, joins, batch, outerResolver))
             {
-                if (excluder.Run(rowRuntime) != true)
+                currentTuple = tuple;
+                var include = true;
+                foreach (var excluder in excluders)
                 {
-                    include = false;
-                    break;
+                    if (excluder.Run(rowRuntime) != true)
+                    {
+                        include = false;
+                        break;
+                    }
                 }
-            }
-            if (!include)
-                continue;
+                if (!include)
+                    continue;
 
-            batch.BumpRowStamp();
-            SqlValue[]? projected = null;
-            if (projectEagerly)
-            {
-                projected = new SqlValue[expressions.Count];
-                for (var i = 0; i < projected.Length; i++)
-                    projected[i] = expressions[i].Run(rowRuntime);
-            }
-            for (var k = 0; k < keys.Length; k++)
-            {
-                var column = keyColumns[k];
-                keys[k] = column < 0 ? orderBy[k].Expr!.Run(rowRuntime)
-                    : projected is not null ? projected[column]
-                    : keyOfColumn[column] < k ? keys[keyOfColumn[column]]
-                    : expressions[column].Run(rowRuntime);
-            }
+                batch.BumpRowStamp();
+                SqlValue[]? projected = null;
+                if (projectEagerly)
+                {
+                    projected = new SqlValue[expressions.Count];
+                    for (var i = 0; i < projected.Length; i++)
+                        projected[i] = expressions[i].Run(rowRuntime);
+                }
+                for (var k = 0; k < keys.Length; k++)
+                {
+                    var column = keyColumns[k];
+                    keys[k] = column < 0 ? orderBy[k].Expr!.Run(rowRuntime)
+                        : projected is not null ? projected[column]
+                        : keyOfColumn[column] < k ? keys[keyOfColumn[column]]
+                        : expressions[column].Run(rowRuntime);
+                }
 
-            var admission = selection.Classify(keys, sequence);
-            if (admission != TopRowAdmission.Rejected)
-                selection.Add(admission, (projected is null ? [.. tuple] : null, projected), [.. keys], sequence);
-            sequence++;
+                var admission = selection.Classify(keys, sequence);
+                if (admission != TopRowAdmission.Rejected)
+                    selection.Add(admission, (projected is null ? [.. tuple] : null, projected), [.. keys], sequence);
+                sequence++;
+            }
+        }
+        catch (SimulatedSqlException sortInputError)
+        {
+            sortInputError.RaisedInRowProjection = false;
+            throw;
         }
 
         // The work table STATISTICS IO lists is a full sort's; a small TOP /
@@ -459,8 +469,17 @@ partial class Selection
             currentTuple = entry.Payload.Tuple!;
             batch.BumpRowStamp();
             var projected = new SqlValue[expressions.Count];
-            for (var i = 0; i < projected.Length; i++)
-                projected[i] = keyOfColumn[i] >= 0 ? entry.Keys[keyOfColumn[i]] : expressions[i].Run(rowRuntime);
+            try
+            {
+                for (var i = 0; i < projected.Length; i++)
+                    projected[i] = keyOfColumn[i] >= 0 ? entry.Keys[keyOfColumn[i]] : expressions[i].Run(rowRuntime);
+            }
+            catch (SimulatedSqlException projectionError)
+            {
+                // Above the sort, as real's projection is.
+                projectionError.RaisedInRowProjection = true;
+                throw;
+            }
             yield return projected;
         }
     }

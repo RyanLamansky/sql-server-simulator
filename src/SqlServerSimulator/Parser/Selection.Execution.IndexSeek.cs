@@ -1338,6 +1338,84 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// The sort under an <c>APPLY</c> chain whose <c>ORDER BY</c> reads only its
+    /// leftmost source: real sorts that source's rows and runs each body as its
+    /// row comes out, so the rows of the outer rows ahead of a body's error
+    /// reach the client before it — <c>FROM h CROSS APPLY (SELECT TOP (h.g)
+    /// …) x ORDER BY h.k</c> over a heap sends the rows of every <c>h</c> row
+    /// ranked before the first NULL <c>g</c>, then Msg 1014 (probed 2026-10-04
+    /// against SQL Server 2025). Returns the sources with the leftmost replaced
+    /// by its rows in that order, or null to sort as before.
+    /// </summary>
+    /// <remarks>
+    /// A stable sort of the leftmost rows, each followed by its bodies' rows,
+    /// is the stable sort of the joined rows by the same keys, ties included,
+    /// so the rows come out exactly as the full sort put them. A WHERE
+    /// declines, as for <see cref="TryApplyLeftmostOrderedScan"/>, and so does a
+    /// select list drawing <c>NEXT VALUE FOR</c>.
+    /// </remarks>
+    private static FromSource[]? TrySortLeftmostSource(
+        FromSource[] sources,
+        JoinSpec[] joins,
+        List<Expression> expressions,
+        List<OrderBySpec> orderBy,
+        List<BooleanExpression> excluders,
+        BatchContext batch,
+        Func<MultiPartName, SqlValue>? outerResolver)
+    {
+        var source = sources[0];
+        if (sources.Length < 2 || excluders.Count != 0 || source.BackingTable is null || source.LateralPlan is not null || source.IsPlaceholder)
+            return null;
+        foreach (var join in joins)
+        {
+            if (join.Kind is not (JoinKind.CrossApply or JoinKind.OuterApply))
+                return null;
+        }
+        foreach (var spec in orderBy)
+        {
+            if (spec.Expr is not Reference { ReferencedName: { ImmediateQualifier: not null } name }
+                || FindSourceColumn(sources, name).SourceIndex != 0)
+            {
+                return null;
+            }
+        }
+        foreach (var expression in expressions)
+        {
+            var draws = false;
+            expression.Walk((visited, _) =>
+            {
+                draws |= visited is NextValueFor;
+                return !draws;
+            });
+            if (draws)
+                return null;
+        }
+
+        FromSource[] one = [source];
+        var tuple = new byte[]?[1];
+        var memo = new SourceColumnMemo();
+        SqlValue resolve(MultiPartName name) => ResolveAcrossTuple(one, tuple, name, batch, outerResolver, memo);
+        var runtime = new RuntimeContext(resolve, batch);
+        var sorted = new TopRows<byte[]>(int.MaxValue, orderBy);
+        var sequence = 0;
+        foreach (var row in source.RowsFor(batch))
+        {
+            tuple[0] = row;
+            var keys = new SqlValue[orderBy.Count];
+            for (var k = 0; k < keys.Length; k++)
+                keys[k] = orderBy[k].Expr!.Run(runtime);
+            sorted.Add(TopRowAdmission.Admitted, row, keys, sequence++);
+        }
+
+        var rows = new List<byte[]>(sorted.Count);
+        foreach (var entry in sorted.Rank(0, sorted.Count))
+            rows.Add(entry.Payload);
+        var rewritten = (FromSource[])sources.Clone();
+        rewritten[0] = source.WithFilteredRows(rows);
+        return rewritten;
+    }
+
+    /// <summary>
     /// The ordered scan's rows: <paramref name="order"/> read forward, or from
     /// the end for a descending order, with the per-row checks
     /// <see cref="MaterializeWithLockChecks"/> makes. The first

@@ -199,7 +199,12 @@ internal static class ModuleDependencies
                 Add(entities, procedure, ObjectOrColumnClass, schema.Name, references);
             }
             foreach (var (_, function) in schema.Functions)
-                AddModule(database, entities, function, schema.Name, function.BodyText, function.IsSchemaBound);
+            {
+                var references = AnalyzeBody(database, function.BodyText, function.IsSchemaBound);
+                foreach (var parameter in function.Parameters)
+                    AddTableTypeParameter(database, parameter.TableType, references);
+                Add(entities, function, ObjectOrColumnClass, schema.Name, references);
+            }
             foreach (var (_, trigger) in schema.Triggers)
                 AddModule(database, entities, trigger, schema.Name, trigger.BodyText, isSchemaBound: false);
             foreach (var (_, table) in schema.HeapTables)
@@ -305,20 +310,25 @@ internal static class ModuleDependencies
     /// A procedure's table-valued parameters, which real records as
     /// <see cref="TypeClass"/> references off the parameter declaration rather
     /// than the body (probe-confirmed: <c>referenced_id</c> is the type's
-    /// <c>user_type_id</c> and <c>is_schema_bound_reference</c> is 0).
+    /// <c>user_type_id</c> and <c>is_schema_bound_reference</c> is 0); a
+    /// function's are recorded the same way (probed 2026-10-04 against SQL
+    /// Server 2025).
     /// </summary>
     private static void AddTableTypeParameters(Database database, Procedure procedure, List<Reference> references)
     {
         foreach (var parameter in procedure.Parameters)
+            AddTableTypeParameter(database, parameter.TableType, references);
+    }
+
+    private static void AddTableTypeParameter(Database database, TableType? tableType, List<Reference> references)
+    {
+        if (tableType is null)
+            return;
+        references.Add(new Reference(null, null, SchemaNameOf(database, tableType.SchemaId), tableType.Name, TypeClass)
         {
-            if (parameter.TableType is not { } tableType)
-                continue;
-            references.Add(new Reference(null, null, SchemaNameOf(database, tableType.SchemaId), tableType.Name, TypeClass)
-            {
-                ResolvedType = tableType,
-                HasObjectReference = true,
-            });
-        }
+            ResolvedType = tableType,
+            HasObjectReference = true,
+        });
     }
 
     /// <summary>

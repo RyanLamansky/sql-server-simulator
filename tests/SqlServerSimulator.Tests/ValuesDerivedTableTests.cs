@@ -206,4 +206,25 @@ public sealed class ValuesDerivedTableTests
         IsNull(rows[1][0]);
         AreEqual(2.5m, rows[1][1]);
     }
+    /// <summary>
+    /// Two or more rows are a constant scan computed whole before the first
+    /// row goes out, so a later row's error comes with no row read.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select top 1 v from (values (1), (1/0)) d(v)")]
+    [DataRow("select v from (values (1), (2/0)) d(v) where v = 1")]
+    public void MultiRowValues_LaterRowError_RaisesBeforeTheFirstRow(string sql)
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        using var command = connection.CreateCommand(sql);
+        var error = Throws<SimulatedSqlException>(() =>
+        {
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                Fail("a row was read before the error");
+            }
+        });
+        AreEqual(8134, error.Number);
+    }
 }

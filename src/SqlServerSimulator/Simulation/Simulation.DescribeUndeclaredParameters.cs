@@ -72,10 +72,16 @@ partial class Simulation
     {
         var connection = batch.Connection;
         var declared = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+        Dictionary<string, HeapTable>? tables = null;
         if (parameters is { IsNull: false } parameterText)
         {
-            foreach (var parameter in ParseSpExecuteSqlParamDefinitions(parameterText.AsString, connection))
-                declared[parameter.Name] = new VariableSlot(parameter.Type, declaredMaxLength: null, SqlValue.Null(parameter.Type), parameter: null);
+            var declarations = ParseSpExecuteSqlParamDefinitions(parameterText.AsString, connection);
+            foreach (var parameter in declarations)
+            {
+                if (parameter.TableType is null)
+                    declared[parameter.Name] = new VariableSlot(parameter.Type, declaredMaxLength: null, SqlValue.Null(parameter.Type), parameter: null);
+            }
+            tables = EmptyTableValuedParameters(declarations, batch);
         }
 
         // An undeclared name surfaces as the batch's Msg 137; each one found
@@ -99,7 +105,7 @@ partial class Simulation
             UndeclaredParameterDeduction.Current = deduction;
             try
             {
-                foreach (var _ in this.ExecuteDynamicBatch(batch, tsql, slots))
+                foreach (var _ in this.ExecuteDynamicBatch(batch, tsql, slots, tableVariables: tables))
                 {
                 }
                 break;

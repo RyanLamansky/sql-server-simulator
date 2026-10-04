@@ -71,6 +71,7 @@ Replay is simulator-bound end to end.
 The `random/` slice (391 scripts, 5,295,251 records) sits at **5 divergent records**, all `sim_error_real_ok` — the simulator raises where real answers, never the reverse.
 
 Each is demonstrated irreducible, with a probe showing real's own answer flipping under something no semantics-preserving rule can reproduce: two are the trivial-plan boundary (the statement raises as written and returns no rows once `DISTINCT`, `GROUP BY`, `TOP 2` or a join is added, while `ORDER BY` / `MAX()` / `COUNT(*)` leave it raising), one is written order inside an un-negated `IN` list (`x IN (x/0, x)` answers, `x IN (x, x/0)` raises), and two are per-row short-circuiting that flips with the *data* rather than the text.
+**Settled — don't re-pitch:** real itself doesn't guarantee any of the five answers — each is an accident of the plan it happens to pick (trivial or not, which `IN` element it reaches first, which conjunct its cost model evaluates first per row), so a rule reproducing one would be pinning that accident.
 
 The same comparison in a **`HAVING`** folds unconditionally, because a HAVING always carries a grouping and so never gets the trivial plan — which is why that position is modeled and `WHERE` is not.
 The per-shape evidence is in the "Not folded yet" list in [`query.md`](query.md); the rules the sweep did close are in the "Compile-time predicate folding" section above it.

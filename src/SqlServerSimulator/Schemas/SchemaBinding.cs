@@ -243,7 +243,8 @@ internal static class SchemaBinding
     }
 
     /// <summary>
-    /// Msg 2792: a schema-bound function may not spell a user alias type
+    /// Msg 2789 for a table-valued parameter whose type is named in one part,
+    /// then Msg 2792: a schema-bound function may not spell a user alias type
     /// anywhere — a parameter, a scalar return type, a local variable, or a
     /// table column (the return table's or a local table variable's).
     /// </summary>
@@ -260,6 +261,12 @@ internal static class SchemaBinding
         BatchContext batch, List<UdfParameter> parameters, bool returnsAliasScalar, HeapColumn[]? returnTable,
         string bodyText, int bodyLineBase, int endLine)
     {
+        // A table-valued parameter's type written in one part is Msg 2789,
+        // once for the first such parameter, ahead of the alias-type sites
+        // (probed 2026-10-04 against SQL Server 2025).
+        if (parameters.Find(static parameter => parameter.TableTypeNamedOnePart) is { } onePart)
+            throw SimulatedSqlException.SchemaBoundTableTypeNeedsTwoPartName(onePart.TableType!.Name).PinLine(onePart.LineNumber);
+
         List<(int State, int Line)> sites = [];
         if (returnsAliasScalar)
             sites.Add((1, endLine));

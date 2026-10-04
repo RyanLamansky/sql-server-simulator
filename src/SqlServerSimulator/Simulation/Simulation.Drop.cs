@@ -553,10 +553,8 @@ partial class Simulation
 
         RejectUnauthorizedTypeDrop(context, schema, name, tableType.UserTypeId);
         context.Batch.AcquireStatementLock(tableType.SchemaLock, LockMode.SchemaModification);
-        // Scan every procedure in every schema of the current database for
-        // a parameter that references this table type. Procedures are the
-        // only object kind that can take a TVP today; views / functions
-        // grow this surface when those features land.
+        // Scan every procedure and function in every schema of the current
+        // database for a parameter that references this table type.
         foreach (var (_, s) in context.CurrentDatabase.Schemas)
         {
             foreach (var (_, proc) in s.Procedures)
@@ -564,7 +562,15 @@ partial class Simulation
                 foreach (var param in proc.Parameters)
                 {
                     if (ReferenceEquals(param.TableType, tableType))
-                        throw SimulatedSqlException.CannotDropTypeBecauseReferenced($"{schema.Name}.{tableType.Name}", proc.Name);
+                        throw SimulatedSqlException.CannotDropTypeBecauseReferenced(name.ToString(), proc.Name);
+                }
+            }
+            foreach (var (_, function) in s.Functions)
+            {
+                foreach (var param in function.Parameters)
+                {
+                    if (ReferenceEquals(param.TableType, tableType))
+                        throw SimulatedSqlException.CannotDropTypeBecauseReferenced(name.ToString(), function.Name);
                 }
             }
         }

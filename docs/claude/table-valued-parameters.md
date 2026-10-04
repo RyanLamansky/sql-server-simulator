@@ -50,9 +50,10 @@ Existence checks (probe-confirmed):
 - **`DROP TYPE` against a missing name** → **Msg 218** ("Could not find the type 'X'.
   Either it does not exist or you do not have the necessary permission.").
   `IF EXISTS` suppresses silently.
-- **`DROP TYPE` while referenced by a procedure** → **Msg 3732** ("Cannot drop type 'X' because it is being referenced by object 'Y'.
-  There may be other objects that reference this type.").
-  The simulator scans every procedure in every schema of the current database and names the first one found (real SQL Server emits a single name even when more than one referencer exists).
+- **`DROP TYPE` while referenced by a procedure or function** → **Msg 3732** ("Cannot drop type 'X' because it is being referenced by object 'Y'.
+  There may be other objects that reference this type."), naming the type as the `DROP` wrote it.
+  The simulator scans every procedure and function in every schema of the current database and names the first one found (real SQL Server emits a single name even when more than one referencer exists).
+  Real's Msg 3732 ends the batch, where the simulator's runs on (probed 2026-10-04 against SQL Server 2025).
 
 ## `DECLARE @t MyType` binding
 
@@ -84,7 +85,20 @@ DML statements (`INSERT` / `UPDATE` / `DELETE` / `MERGE`) targeting the paramete
 That lands at **`CREATE PROCEDURE`**, matching real: the CREATE binds the body against a seeded READONLY clone of the parameter's type, so the write is caught there and the procedure isn't created (probe-confirmed level 16, state 1, `Procedure p`, line 1, with `OBJECT_ID('p')` still NULL) — see [`programmable.md`](programmable.md#create-time-body-binding).
 The parameter-list rule is checked at CREATE too: a table-type parameter without `READONLY` raises **Msg 352** (level 15, state 1) and the procedure isn't created.
 
-`DROP TYPE` reference-scan walks every schema's `Procedures` dict and rejects with Msg 3732 if any parameter's `TableType` matches.
+`DROP TYPE` reference-scan walks every schema's `Procedures` and `Functions` dicts and rejects with Msg 3732 if any parameter's `TableType` matches.
+
+## Function and `sp_executesql` TVP parameters
+
+Every function kind — inline, multi-statement and scalar — and an `sp_executesql` declaration take a table-type parameter, under the procedure's rules: `READONLY` is mandatory (Msg 352), the body reads it as a read-only table variable (a write is Msg 10700, at `CREATE` for a function), and its type resolves one- or two-part (`TryResolveTableTypeParameter`, shared by all three parsers; probed 2026-10-04 against SQL Server 2025).
+The differences from a procedure's are real's own:
+- A function parameter's written default is Msg 206 against the type (`NULL is incompatible with tt`), where a procedure's is Msg 102; `sp_executesql`'s default or `OUTPUT` is Msg 102.
+- A `WITH SCHEMABINDING` function whose parameter names its type in one part is Msg 2789 state 2, once, for the first such parameter.
+- A scalar function with one is not inlineable: `sys.sql_modules.is_inlineable` is 0 and `WITH INLINE = ON` is Msg 16203.
+
+A call passes a table variable of the parameter's own type, bare or parenthesized (`Parser/Expressions/TableValuedArgument.cs`, resolved by name as the call runs, so a cached plan reads the replaying batch's variable); the body gets a copy of its rows (`Simulation.CloneTableValuedArgument`, the procedure path's too).
+Anything else is Msg 206 naming what was passed — `NULL`, a scalar type, another table type, or `table` for one declared inline — raised while the batch compiles for a function call and as the call binds for `sp_executesql`, whose binding and declaration errors end only the call, so the caller's batch runs on.
+`DEFAULT` passes an empty table to a scalar or multi-statement function and to `sp_executesql`, where it leaves any parameter unsupplied; an inline function's is Msg 1090 state 4 (`Invalid default for parameter 1.`), which also ends the batch's compile report there.
+The catalog lists a function's TVP parameter as a procedure's — `sys.parameters` type 243, `is_readonly`, `INFORMATION_SCHEMA.PARAMETERS` `table type`, `sp_help`'s row and a `TYPE` row in `sys.sql_expression_dependencies` — and `sp_describe_first_result_set` / `sp_describe_undeclared_parameters` read a declared one as an empty table.
 
 ## EXEC with TVP argument
 
@@ -169,7 +183,6 @@ The common idiom `IF type_id('dbo.MyType') IS NOT NULL DROP TYPE dbo.MyType` wor
 
 ## Fidelity gaps remaining
 
-- **Table-type parameters outside `CREATE PROCEDURE`** — real accepts one in a `CREATE FUNCTION` parameter list, scalar or table-valued, and in an `sp_executesql` parameter declaration, raising the same Msg 352 when `READONLY` is missing; the simulator's parameter-type parsers there don't consult `Schema.TableTypes`, so a scalar function and `sp_executesql` report Msg 2715 (`Cannot find data type tt.`) with Msg 2724 and, under `READONLY`, Msg 346, and an inline function's body reading the parameter is Msg 1087 (probed 2026-10-03 against SQL Server 2025).
 - **`IEnumerable<SqlDataRecord>`** as a TVP value source isn't accepted (SqlClient dependency / reflection path).
 - **Constraint-name hashes** — clones embed the @t name in the hash.
   Real SQL Server's table-type clone names differ in suffix derivation; constraint-violation error wording byte-matches the wider quirks documented in CLAUDE.md (the `PK__#<hex>__<8hex>` shape uses the simulator's FNV-1a convention).

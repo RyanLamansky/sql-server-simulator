@@ -260,6 +260,17 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool EndedCalledBatch;
 
     /// <summary>
+    /// Set when the error was raised computing a row's select-list value in a
+    /// pipelined projection — where real computes it after an <c>INSERT</c>
+    /// has drawn that row's identity value, so the failing row uses one up —
+    /// and cleared again by any operator real evaluates ahead of the draw: a
+    /// filter, a sort key, a <c>DISTINCT</c>, an aggregate, a constant scan
+    /// (probed 2026-10-04 against SQL Server 2025). Read by
+    /// <c>INSERT … SELECT</c> alone.
+    /// </summary>
+    internal bool RaisedInRowProjection;
+
+    /// <summary>
     /// The batch <see cref="EndedCalledBatch"/> was set in: within that batch
     /// the error still ends everything it passes through — a <c>BEGIN … END</c>
     /// block around the failing statement included — and only its caller

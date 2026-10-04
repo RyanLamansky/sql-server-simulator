@@ -1853,6 +1853,13 @@ internal abstract class Expression : ExpressionNode
     /// </summary>
     private static AtAtKeyword MarkOpeningAtAt(ParserContext context, AtAtKeyword keyword)
     {
+        // The @@ functions real's simple parameterization declines a statement
+        // for (probed 2026-10-04 against SQL Server 2025).
+        if (keyword is AtAtKeyword.Dbts or AtAtKeyword.Error or AtAtKeyword.FetchStatus or AtAtKeyword.Identity
+            or AtAtKeyword.NestLevel or AtAtKeyword.ProcId or AtAtKeyword.RowCount)
+        {
+            context.SimpleParameterizationBlocked = true;
+        }
         if (keyword is not (AtAtKeyword.CursorRows or AtAtKeyword.Error or AtAtKeyword.FetchStatus or AtAtKeyword.RowCount or AtAtKeyword.TranCount))
             context.Batch.CurrentStatement.MarkOpensTransaction();
         return keyword;
@@ -1898,6 +1905,31 @@ internal abstract class Expression : ExpressionNode
         _ => false,
     };
 
+    /// <summary>
+    /// The built-ins real's simple parameterization declines a statement for,
+    /// so a literal elsewhere in it stays a literal (probed 2026-10-04 against
+    /// SQL Server 2025, reading each one's showplan for a parameterized text):
+    /// most string, date-part and JSON functions among them, where the
+    /// arithmetic, conversion and metadata built-ins outside this list
+    /// parameterize. Read through <see cref="ParserContext.SimpleParameterizationBlocked"/>.
+    /// </summary>
+    internal static bool BlocksSimpleParameterization(ReadOnlySpan<char> uppercaseName) => uppercaseName switch
+    {
+        "APPLOCK_MODE" or "BINARY_CHECKSUM" or "CEILING" or "CHARINDEX" or "CHECKSUM" or "CHOOSE" or "COLLATIONPROPERTY"
+            or "CONCAT" or "CONCAT_WS" or "CONTEXT_INFO" or "CURSOR_STATUS" or "DATABASEPROPERTYEX" or "DATALENGTH"
+            or "DATEADD" or "DATEDIFF" or "DATEDIFF_BIG" or "DATEFROMPARTS" or "DATENAME" or "DATEPART"
+            or "DATETIMEFROMPARTS" or "DATETRUNC" or "DATE_BUCKET" or "DAY" or "DIFFERENCE" or "ERROR_MESSAGE"
+            or "ERROR_NUMBER" or "FORMATMESSAGE" or "GETANSINULL" or "GREATEST" or "HASHBYTES" or "IDENT_CURRENT"
+            or "IDENT_SEED" or "ISDATE" or "ISJSON" or "ISNULL" or "ISNUMERIC" or "JSON_ARRAY" or "JSON_MODIFY"
+            or "JSON_OBJECT" or "JSON_QUERY" or "JSON_VALUE" or "LEAST" or "LEFT" or "LEN" or "LOWER" or "LTRIM"
+            or "MONTH" or "OBJECT_ID" or "PARSE" or "PATINDEX" or "RAND" or "REGEXP_COUNT" or "REGEXP_REPLACE"
+            or "REPLACE" or "REPLICATE" or "REVERSE" or "RIGHT" or "ROWCOUNT_BIG" or "RTRIM" or "SCHEMA_NAME"
+            or "SERVERPROPERTY" or "SESSION_CONTEXT" or "SOUNDEX" or "SPACE" or "SQL_VARIANT_PROPERTY" or "STR"
+            or "STRING_ESCAPE" or "STUFF" or "SUBSTRING" or "SWITCHOFFSET" or "TIMEFROMPARTS" or "TODATETIMEOFFSET"
+            or "TRANSLATE" or "TRIM" or "TRY_PARSE" or "UPPER" or "XACT_STATE" or "YEAR" => true,
+        _ => false,
+    };
+
     private static Expression ResolveBuiltIn(string name, ParserContext context)
     {
         Span<char> uppercaseName = stackalloc char[name.Length];
@@ -1906,6 +1938,8 @@ internal abstract class Expression : ExpressionNode
         _ = name.ToUpperInvariant(uppercaseName);
         if (OpensStatementTransaction(uppercaseName))
             context.Batch.CurrentStatement.MarkOpensTransaction();
+        if (BlocksSimpleParameterization(uppercaseName))
+            context.SimpleParameterizationBlocked = true;
         BuiltInArity.Check(uppercaseName, context);
         BuiltInArity.CheckWindowClauses(uppercaseName, context);
         if (!ConstantFolding.IsFoldedBuiltIn(uppercaseName))

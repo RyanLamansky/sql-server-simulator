@@ -55,6 +55,17 @@ internal sealed partial class Selection
     internal bool StartsConstants;
 
     /// <summary>
+    /// Whether real's simple parameterization takes this query specification
+    /// as a statement of its own: one permanent table, view or catalog view
+    /// read whole — no join, derived table, CTE, <c>#temp</c> or table
+    /// variable — with no grouping, <c>HAVING</c>, <c>DISTINCT</c>, row limit,
+    /// window, <c>INTO</c> or variable assignment (probed 2026-10-04 against
+    /// SQL Server 2025). What its expressions hold is judged by
+    /// <see cref="ParserContext.SimpleParameterizationBlocked"/>.
+    /// </summary>
+    internal bool SimplyParameterizable;
+
+    /// <summary>
     /// A FROM-less, subquery-free select list with no row limit and no WHERE
     /// that doesn't fold to TRUE — or a set operation over nothing else. Real
     /// folds a set operation whose every branch is one into a constant scan it
@@ -340,7 +351,21 @@ internal sealed partial class Selection
             if (kind != SetOpKind.UnionAll && readsStorage)
                 rows = SortSetOpRows(rows, combinedSchema);
             // Computed whole before the first row goes out; see IsBareConstantRow.
-            return isBareConstantRows ? [.. rows] : rows;
+            // A constant scan and a deduplication both read every row ahead of
+            // the first out, so neither raises past an INSERT's identity draw.
+            if (isBareConstantRows)
+            {
+                try
+                {
+                    return [.. rows];
+                }
+                catch (SimulatedSqlException constantError)
+                {
+                    constantError.RaisedInRowProjection = false;
+                    throw;
+                }
+            }
+            return kind == SetOpKind.UnionAll ? rows : AheadOfRowProjection(rows);
         }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema, updatabilityRejection: SetOperationRejection(kind, left, right))
         {
             IsBareConstantRow = isBareConstantRows,

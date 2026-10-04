@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using SqlServerSimulator.Parser;
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
@@ -321,9 +322,14 @@ partial class Simulation
         string closingEnd,
         bool nativelyCompiled)
     {
-        var variables = SeedFunctionParameters(parameters);
+        var variables = SeedFunctionParameters(CollectionsMarshal.AsSpan(parameters));
         BindModuleBodyAtCreate(outerContext, bodyText, functionName, bodyLineOffset,
-            bodyCommand => new BatchContext(bodyCommand, variables, new UdfFrame(returnType)) { NativelyCompiledBody = nativelyCompiled },
+            bodyCommand =>
+            {
+                var batch = new BatchContext(bodyCommand, variables, new UdfFrame(returnType)) { NativelyCompiledBody = nativelyCompiled };
+                SeedTableValuedParameters(batch, outerContext.Batch, CollectionsMarshal.AsSpan(parameters));
+                return batch;
+            },
             new FunctionBodyShape(),
             rejectsNextValueFor: true,
             closingEnd);
@@ -349,7 +355,7 @@ partial class Simulation
         string closingEnd)
     {
         var outerBatch = outerContext.Batch;
-        var variables = SeedFunctionParameters(parameters);
+        var variables = SeedFunctionParameters(CollectionsMarshal.AsSpan(parameters));
         var returnTable = new HeapTable(
             "@" + returnVariableName,
             outputColumns,
@@ -370,6 +376,7 @@ partial class Simulation
         BindModuleBodyAtCreate(outerContext, bodyText, functionName, bodyLineOffset, bodyCommand =>
         {
             var batch = new BatchContext(bodyCommand, variables);
+            SeedTableValuedParameters(batch, outerBatch, CollectionsMarshal.AsSpan(parameters));
             batch.TableVariables[returnVariableName] = returnTable;
             return batch;
         },
@@ -429,9 +436,13 @@ partial class Simulation
 #pragma warning restore CA2100
             var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
             foreach (var param in function.Parameters)
-                variables[param.Name] = new VariableSlot(param.Type, param.DeclaredMaxLength, SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric };
+            {
+                if (param.TableType is null)
+                    variables[param.Name] = new VariableSlot(param.Type, param.DeclaredMaxLength, SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric };
+            }
             var frame = new UdfFrame(function.ReturnType) { AnalyzesReturnMask = true };
             var analysis = new BatchContext(bodyCommand, variables, frame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true };
+            SeedTableValuedParameters(analysis, batch, function.Parameters);
             var savedQuotedIdentifiers = connection.QuotedIdentifiers;
             var savedAnsiNulls = connection.AnsiNulls;
             connection.QuotedIdentifiers = function.UsesQuotedIdentifier;
@@ -463,11 +474,53 @@ partial class Simulation
     /// Seeds a function's declared parameters as typed NULL variable slots, so
     /// a body reference to <c>@p</c> binds instead of raising Msg 137.
     /// </summary>
-    private static Dictionary<string, VariableSlot> SeedFunctionParameters(List<UdfParameter> parameters)
+    private static Dictionary<string, VariableSlot> SeedFunctionParameters(ReadOnlySpan<UdfParameter> parameters)
     {
         var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         foreach (var param in parameters)
-            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: null, SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric };
+        {
+            if (param.TableType is null)
+                variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: null, SqlValue.Null(param.Type), parameter: null) { SpelledNumeric = param.SpelledNumeric };
+        }
         return variables;
+    }
+
+    /// <summary>
+    /// Seeds a function's table-valued parameters into <paramref name="body"/>
+    /// as read-only table variables — empty at CREATE, and holding a copy of
+    /// the argument's rows (<paramref name="arguments"/>, by parameter
+    /// position) when called; a <c>DEFAULT</c> argument is an empty table.
+    /// </summary>
+    internal static void SeedTableValuedParameters(BatchContext body, BatchContext outerBatch, ReadOnlySpan<UdfParameter> parameters, HeapTable?[]? arguments = null)
+    {
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            if (parameters[i].TableType is { } tableType)
+                body.TableVariables[parameters[i].Name] = CloneTableValuedArgument(tableType, parameters[i].Name, outerBatch, arguments?[i]);
+        }
+    }
+
+    /// <summary>
+    /// A table-valued parameter's read-only table variable: an empty clone of
+    /// its type, filled with <paramref name="supplied"/>'s rows when the call
+    /// passed a table.
+    /// </summary>
+    internal static HeapTable CloneTableValuedArgument(TableType tableType, string parameterName, BatchContext outerBatch, HeapTable? supplied)
+    {
+        var clone = tableType.Clone("@" + parameterName, outerBatch, isTableValuedParameter: true);
+        if (supplied is null)
+            return clone;
+        // Row bytes can point into the source heap's off-row pages (LOB
+        // chains, overflow-pushed var columns), so off-row-capable schemas
+        // decode and re-encode each row against the clone's heap; pointer-free
+        // schemas copy the bytes as-is.
+        var reencode = supplied.Heap.ReclaimColumns is not null;
+        foreach (var row in supplied.Heap.EnumerateRows())
+        {
+            _ = clone.Heap.Insert(reencode
+                ? RowEncoder.EncodeRow(supplied.StoredColumns, RowDecoder.DecodeRow(supplied.StoredColumns, row, supplied.Heap), clone.Heap)
+                : row);
+        }
+        return clone;
     }
 }

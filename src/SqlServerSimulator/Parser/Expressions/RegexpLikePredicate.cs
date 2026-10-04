@@ -1,4 +1,5 @@
 using SqlServerSimulator.Parser.Tokens;
+using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
 
@@ -73,6 +74,14 @@ internal sealed class RegexpLikePredicate : BooleanExpression
             || !RegexpArguments.TryReadFlags(this.flags, runtime, "regexp_like", argumentIndex: 3, out var flagSet)
             ? null
             : RegexDialect.Compile(patternValue.AsString, flagSet, RegexCallSite.Scalar).IsMatch(text.AsString);
+    }
+
+    internal override void Bind(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        RegexpArguments.BindText(this.input, this.input.GetSqlType(batch, resolveColumnType), "regexp_like", 1, typeState: 1, maxState: 0);
+        RegexpArguments.BindText(this.pattern, this.pattern.GetSqlType(batch, resolveColumnType), "regexp_like", 2, typeState: 1, maxState: 15);
+        if (this.flags is not null)
+            RegexpArguments.BindFlags(this.flags, this.flags.GetSqlType(batch, resolveColumnType), "regexp_like", 3, typeState: 1, maxState: 16, maxFirst: false);
     }
 
     internal override void VisitOperandExpressions(Action<Expression> visitor)

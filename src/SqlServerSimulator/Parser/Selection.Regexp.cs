@@ -111,7 +111,44 @@ partial class Selection
         context.MoveNextOptional();
 
         var inputType = input.GetSqlType(context.Batch, outerTypeResolver ?? (_ => SqlType.NVarchar));
+        BindRegexpRowsetArguments(context.Batch, outerTypeResolver, functionName, input, pattern, flags);
         return (input, pattern, flags, SqlType.IsStringCategory(inputType) ? inputType : SqlType.NVarchar);
+    }
+
+    /// <summary>
+    /// The rowset members' compile-time argument types, the scalars' rules at
+    /// the members' own states — every type refusal at 25 for
+    /// <c>REGEXP_MATCHES</c> and 28 for <c>REGEXP_SPLIT_TO_TABLE</c>, a MAX
+    /// pattern at 23 / 26 and MAX flags at 24 / 27 (probed 2026-10-04 against
+    /// SQL Server 2025). An argument naming a column with no enclosing scope to
+    /// type it is left to the run.
+    /// </summary>
+    private static void BindRegexpRowsetArguments(BatchContext batch, Func<MultiPartName, SqlType>? outerTypeResolver, string functionName, Expression input, Expression pattern, Expression? flags)
+    {
+        var matches = functionName == "REGEXP_MATCHES";
+        var lower = matches ? "regexp_matches" : "regexp_split_to_table";
+        var typeState = matches ? (byte)25 : (byte)28;
+        var patternMaxState = matches ? (byte)23 : (byte)26;
+        var unresolved = false;
+        var resolver = outerTypeResolver ?? (_ =>
+        {
+            unresolved = true;
+            return SqlType.NVarchar;
+        });
+
+        bool TryType(Expression argument, out SqlType type)
+        {
+            unresolved = false;
+            type = argument.GetSqlType(batch, resolver);
+            return !unresolved;
+        }
+
+        if (TryType(input, out var type))
+            RegexpArguments.BindText(input, type, lower, 1, typeState, maxState: 0);
+        if (TryType(pattern, out type))
+            RegexpArguments.BindText(pattern, type, lower, 2, typeState, patternMaxState);
+        if (flags is not null && TryType(flags, out type))
+            RegexpArguments.BindFlags(flags, type, lower, 3, typeState, (byte)(patternMaxState + 1), maxFirst: true);
     }
 
     /// <summary>

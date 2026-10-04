@@ -192,6 +192,132 @@ public sealed class RegexpFunctionTests
             8116,
             $"Argument data type {typeName} is invalid for argument {argument} of {function} function.");
 
+    /// <summary>
+    /// A start, occurrence, return option or group takes <c>smallint</c>,
+    /// <c>int</c>, <c>bigint</c> or a string, and every other type is Msg 8116
+    /// while compiling, a typed NULL included; the flags argument takes only a
+    /// bounded <c>varchar</c> / <c>char</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select regexp_count('abcb', 'b', cast(1 as tinyint))", "tinyint", 3, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', 1.0)", "numeric", 3, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', cast(1 as decimal(5, 0)))", "decimal", 3, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', cast(1 as money))", "money", 3, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', cast(1 as float))", "float", 3, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', cast(1 as bit))", "bit", 3, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', cast(1 as datetime))", "datetime", 3, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', cast('2000-01-01' as date))", "date", 3, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', newid())", "uniqueidentifier", 3, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', cast(1 as sql_variant))", "sql_variant", 3, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', cast(null as tinyint))", "tinyint", 3, "regexp_count")]
+    [DataRow("select regexp_count(null, 'b', cast(1 as tinyint))", "tinyint", 3, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', case when 1 = 1 then cast(1 as tinyint) end)", "tinyint", 3, "regexp_count")]
+    [DataRow("select regexp_instr('abcb', 'b', 1, cast(1 as bit), 0, 'c', cast(1 as money))", "bit", 4, "regexp_instr")]
+    [DataRow("select regexp_instr('abcb', 'b', 1, 1, cast(0 as real))", "real", 5, "regexp_instr")]
+    [DataRow("select regexp_instr('abcb', '(b)', 1, 1, 0, 'c', cast(1 as smallmoney))", "smallmoney", 7, "regexp_instr")]
+    [DataRow("select regexp_substr('abcb', 'b', 1, cast(1 as tinyint))", "tinyint", 4, "regexp_substr")]
+    [DataRow("select regexp_substr('abcb', '(b)', 1, 1, 'c', cast('2000-01-01' as datetime2))", "datetime2", 6, "regexp_substr")]
+    [DataRow("select regexp_replace('abcb', 'b', 'z', cast(1 as numeric(5, 2)))", "numeric", 4, "regexp_replace")]
+    [DataRow("select regexp_replace('abcb', 'b', 'z', 1, cast('00:00' as time))", "time", 5, "regexp_replace")]
+    [DataRow("select regexp_count('abcb', 'b', cast(1 as bit), cast(1 as int))", "bit", 3, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', 1, cast(null as int))", "int", 4, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', 1, N'i')", "nvarchar", 4, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', 1, cast('i' as nchar(1)))", "nchar", 4, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', 1, cast('i' as nvarchar(max)))", "nvarchar(max)", 4, "regexp_count")]
+    [DataRow("select regexp_count('abcb', 'b', 1, cast(null as nvarchar(5)))", "nvarchar", 4, "regexp_count")]
+    [DataRow("select regexp_replace('abcb', 'b', 'z', 1, 0, N'i')", "nvarchar", 6, "regexp_replace")]
+    [DataRow("select regexp_instr('abcb', 'b', 1, 1, 0, N'i')", "nvarchar", 6, "regexp_instr")]
+    [DataRow("select regexp_substr('abcb', 'b', 1, 1, N'i')", "nvarchar", 5, "regexp_substr")]
+    [DataRow("select 1 where regexp_like('abc', 'b', N'i')", "nvarchar", 3, "regexp_like")]
+    [DataRow("select 1 where regexp_like('abc', 'b', cast('i' as nvarchar(max)))", "nvarchar(max)", 3, "regexp_like")]
+    public void ArgumentType_Msg8116(string sql, string typeName, int argument, string function) =>
+        new Simulation().AssertSqlError(
+            sql,
+            8116,
+            $"Argument data type {typeName} is invalid for argument {argument} of {function} function.");
+
+    [TestMethod]
+    [DataRow("regexp_count('abcb', 'b', cast(3 as smallint))", "1")]
+    [DataRow("regexp_count('abcb', 'b', cast(3 as bigint))", "1")]
+    [DataRow("regexp_count('abcb', 'b', '3')", "1")]
+    [DataRow("regexp_count('abcb', 'b', N'3')", "1")]
+    [DataRow("regexp_count('abcb', 'b', cast('3' as varchar(max)))", "1")]
+    [DataRow("regexp_count('abcb', 'b', cast(1 as tinyint) + 0)", "2")]
+    [DataRow("regexp_count('abcb', 'b', cast(null as int))", null)]
+    [DataRow("regexp_count('abcb', 'b', null)", null)]
+    [DataRow("regexp_count('abcB', 'b', 1, cast('i' as varchar(8000)))", "2")]
+    [DataRow("regexp_count('abcB', 'b', 1, cast('i' as char(1)))", "2")]
+    [DataRow("regexp_instr('abcb', 'b', 1, 1, '1')", "3")]
+    [DataRow("regexp_instr('abcb', 'b', 1, 1, cast(null as int))", "2")]
+    [DataRow("regexp_substr('abcb', '(b)', 1, 1, 'c', '1')", "b")]
+    [DataRow("regexp_replace('abcb', 'b', cast('z' as nvarchar(max)))", "azcz")]
+    [DataRow("regexp_count(cast('abcb' as nvarchar(max)), 'b')", "2")]
+    public void ArgumentType_Accepted(string expression, string? expected) =>
+        AreEqual(expected, new Simulation().ExecuteScalar($"select cast({expression} as varchar(10))") as string);
+
+    /// <summary>
+    /// A MAX-typed pattern, and a <c>varchar(max)</c> flags argument, are
+    /// refused with real's own <c>VARCHAR(MAX)/NVARCHAR(MAX)</c> wording at a
+    /// state of each member's own; the rowset members test the flags' MAX
+    /// first and report a Unicode one's type error after it.
+    /// </summary>
+    [TestMethod]
+    [DataRow("select regexp_count('abcb', cast('b' as varchar(max)))", 2, "regexp_count", 13)]
+    [DataRow("select regexp_count('abcb', cast(N'b' as nvarchar(max)))", 2, "regexp_count", 13)]
+    [DataRow("select regexp_count('abcb', 'b', 1, cast('c' as varchar(max)))", 4, "regexp_count", 14)]
+    [DataRow("select regexp_replace('abcb', cast('b' as varchar(max)), 'z')", 2, "regexp_replace", 17)]
+    [DataRow("select regexp_replace('abcb', 'b', 'z', 1, 0, cast('c' as varchar(max)))", 6, "regexp_replace", 18)]
+    [DataRow("select regexp_substr('abcb', cast('b' as varchar(max)))", 2, "regexp_substr", 19)]
+    [DataRow("select regexp_substr('abcb', 'b', 1, 1, cast('c' as varchar(max)))", 5, "regexp_substr", 20)]
+    [DataRow("select regexp_instr('abcb', cast('b' as varchar(max)))", 2, "regexp_instr", 21)]
+    [DataRow("select regexp_instr('abcb', 'b', 1, 1, 0, cast('c' as varchar(max)))", 6, "regexp_instr", 22)]
+    [DataRow("select 1 where regexp_like('abc', cast('b' as varchar(max)))", 2, "regexp_like", 15)]
+    [DataRow("select 1 where regexp_like('abc', 'b', cast('i' as varchar(max)))", 3, "regexp_like", 16)]
+    [DataRow("select * from regexp_matches('abc', cast('b' as varchar(max)))", 2, "regexp_matches", 23)]
+    [DataRow("select * from regexp_matches('abc', 'b', cast('i' as varchar(max)))", 3, "regexp_matches", 24)]
+    [DataRow("select * from regexp_split_to_table('abc', cast('b' as varchar(max)))", 2, "regexp_split_to_table", 26)]
+    [DataRow("select * from regexp_split_to_table('abc', 'b', cast('i' as varchar(max)))", 3, "regexp_split_to_table", 27)]
+    public void MaxArgument_Msg8116(string sql, int argument, string function, int state)
+    {
+        var error = new Simulation().AssertSqlError(sql, 8116);
+        AreEqual($"Argument data type VARCHAR(MAX)/NVARCHAR(MAX) is invalid for argument {argument} of {function} function.", error.Errors[0].Message);
+        AreEqual((byte)state, error.Errors[0].State);
+    }
+
+    [TestMethod]
+    [DataRow("select * from regexp_matches(1, 'b')", "int", 1, "regexp_matches", 25)]
+    [DataRow("select * from regexp_matches('abc', 'b', N'i')", "nvarchar", 3, "regexp_matches", 25)]
+    [DataRow("select * from regexp_split_to_table('abc', 1)", "int", 2, "regexp_split_to_table", 28)]
+    [DataRow("select * from regexp_split_to_table('abc', 'b', 1)", "int", 3, "regexp_split_to_table", 28)]
+    public void RowsetArgumentType_Msg8116State(string sql, string typeName, int argument, string function, int state)
+    {
+        var error = new Simulation().AssertSqlError(sql, 8116);
+        AreEqual($"Argument data type {typeName} is invalid for argument {argument} of {function} function.", error.Errors[0].Message);
+        AreEqual((byte)state, error.Errors[0].State);
+    }
+
+    [TestMethod]
+    public void RowsetUnicodeMaxFlags_ReportsBoth()
+    {
+        var error = new Simulation().AssertSqlError("select * from regexp_matches('abc', 'b', cast('i' as nvarchar(max)))", 8116);
+        AreEqual(2, error.Errors.Count);
+        AreEqual("Argument data type VARCHAR(MAX)/NVARCHAR(MAX) is invalid for argument 3 of regexp_matches function.", error.Errors[0].Message);
+        AreEqual("Argument data type nvarchar(max) is invalid for argument 3 of regexp_matches function.", error.Errors[1].Message);
+        AreEqual((byte)25, error.Errors[1].State);
+    }
+
+    /// <summary>
+    /// The argument types are settled while compiling, so an untaken branch,
+    /// an empty table and a procedure body at CREATE all raise.
+    /// </summary>
+    [TestMethod]
+    [DataRow("if 1 = 0 select regexp_count('a', 'a', cast(1 as tinyint))")]
+    [DataRow("create table t (b tinyint, s varchar(10)); exec('select regexp_count(s, ''a'', b) from t')")]
+    [DataRow("create table t (f nvarchar(10), s varchar(10)); exec('select s from t where regexp_like(s, ''a'', f)')")]
+    [DataRow("create procedure p as select regexp_count('a', 'a', cast(1 as tinyint))")]
+    public void ArgumentType_SettledWhileCompiling(string sql) =>
+        new Simulation().AssertSqlError(sql, 8116);
+
     [TestMethod]
     public void LegacyLobArgument_Msg8116() =>
         new Simulation().AssertSqlError(
