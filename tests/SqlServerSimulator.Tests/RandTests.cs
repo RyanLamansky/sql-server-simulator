@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -17,7 +18,7 @@ public sealed class RandTests
     [DataRow(12345, 0.9435973904241444)]
     [DataRow(7, 0.7137037910404728)]
     public void Seeded_MatchesReal(int seed, double expected)
-        => AreEqual(expected, new Simulation().ExecuteScalar($"select rand({seed})"));
+        => AreEqual(expected, new Simulation().ExecuteScalar(string.Create(CultureInfo.InvariantCulture, $"select rand({seed})")));
 
     [TestMethod]
     public void Unseeded_ContinuesTheSessionsSequence()
@@ -37,7 +38,7 @@ public sealed class RandTests
     [DataRow(2147483563)]
     [DataRow(-2147483648)]
     public void Rand_SeedPastModulus_ActsAsZero(int seed)
-        => AreEqual(new Simulation().ExecuteScalar("select rand(0)"), new Simulation().ExecuteScalar($"select rand({seed})"));
+        => AreEqual(new Simulation().ExecuteScalar("select rand(0)"), new Simulation().ExecuteScalar(string.Create(CultureInfo.InvariantCulture, $"select rand({seed})")));
 
     [TestMethod]
     public void Rand_SeedBelowModulus_Seeds()

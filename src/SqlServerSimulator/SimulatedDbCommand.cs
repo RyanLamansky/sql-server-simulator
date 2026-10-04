@@ -153,6 +153,7 @@ public sealed class SimulatedDbCommand : DbCommand
     /// </summary>
     public override int ExecuteNonQuery()
     {
+        using var culture = CultureScope.Engine();
         this.RequireOpenConnection(nameof(ExecuteNonQuery));
         List<SimulatedSqlException>? errors = null;
         List<SimulatedError>? messages = null;
@@ -194,6 +195,7 @@ public sealed class SimulatedDbCommand : DbCommand
     /// </summary>
     public override object? ExecuteScalar()
     {
+        using var culture = CultureScope.Engine();
         this.RequireOpenConnection(nameof(ExecuteScalar));
         List<SimulatedSqlException>? errors = null;
         List<SimulatedError>? messages = null;
@@ -265,6 +267,7 @@ public sealed class SimulatedDbCommand : DbCommand
     /// <inheritdoc/>
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior = default)
     {
+        using var culture = CultureScope.Engine();
         // The reader's constructor drains outcomes up to the first result set,
         // so a cancellation that aborted the batch is already observable here —
         // the check costs no extra eagerness. Real SqlClient throws out of

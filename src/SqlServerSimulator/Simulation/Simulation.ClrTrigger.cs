@@ -64,6 +64,7 @@ partial class Simulation
         SimulatedSqlException? failure;
         try
         {
+            using (CultureScope.Clr())
             using (entry.Assembly.UsesServerContext ? ClrHost.Enter(pipe.Sink, fired, contextConnection) : default(ClrHost.RoutineScope?))
                 _ = entry.Method!.Invoke(null, null);
         }

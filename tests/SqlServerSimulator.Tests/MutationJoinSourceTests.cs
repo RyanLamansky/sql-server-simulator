@@ -47,7 +47,7 @@ public sealed class MutationJoinSourceTests
         {
             var values = new object[record.FieldCount];
             _ = record.GetValues(values);
-            rows.Add(string.Join("|", values));
+            rows.Add(string.Join("|", values.Select(value => value.ToInvariantString())));
         }
 
         return string.Join("; ", rows);

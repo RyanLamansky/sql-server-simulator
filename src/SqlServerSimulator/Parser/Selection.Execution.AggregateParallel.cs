@@ -201,6 +201,7 @@ internal sealed partial class Selection
 
         private static void Loop()
         {
+            CultureScope.SetEngine();
             while (true)
             {
                 Action run;

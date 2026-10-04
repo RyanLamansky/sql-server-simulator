@@ -85,6 +85,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
+        CultureScope.SetEngine();
         Stream transportStream = new NetworkStream(socket, ownsSocket: true);
         TdsTokenWriter? writer = null;
         try
@@ -654,6 +655,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// </summary>
     public async Task RunMarsSessionAsync(SmpSession session, CancellationToken cancellationToken)
     {
+        CultureScope.SetEngine();
         using var logicalStream = new SmpSessionStream(session);
         var transport = new TdsPacketTransport(logicalStream)
         {

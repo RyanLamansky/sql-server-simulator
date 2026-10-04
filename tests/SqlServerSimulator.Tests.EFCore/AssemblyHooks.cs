@@ -9,10 +9,12 @@ public static class AssemblyHooks
     /// Triggers JIT compilation of the most common EF Core path among all tests,
     /// improving the accuracy of their timings. Also functions as a sanity check
     /// against the simulator being completely broken.
+    /// Pins <see cref="HostileCulture"/> first.
     /// </summary>
     [AssemblyInitialize]
     public static async Task HotPath(TestContext context)
     {
+        HostileCulture.Pin();
         if (System.Diagnostics.Debugger.IsAttached)
             return;
 

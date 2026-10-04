@@ -11,10 +11,12 @@ public static class AssemblyHooks
     /// generates an RSA key pair, and JIT compilation of the most common path among
     /// all tests. The latter also improves the accuracy of their timings and
     /// functions as a sanity check against the simulator being completely broken.
+    /// Pins <see cref="HostileCulture"/> first.
     /// </summary>
     [AssemblyInitialize]
     public static void HotPath(TestContext _)
     {
+        HostileCulture.Pin();
         Assert.IsTrue(TdsServerCertificate.Shared.HasPrivateKey);
 
         if (System.Diagnostics.Debugger.IsAttached)

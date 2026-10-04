@@ -249,6 +249,7 @@ internal sealed class ClrUserDefinedType
     {
         try
         {
+            using (CultureScope.Clr())
             using (this.Assembly.UsesServerContext ? ClrHost.Enter(pipe: null) : default(ClrHost.RoutineScope?))
                 return method.Invoke(target, arguments);
         }
@@ -282,7 +283,7 @@ internal sealed class ClrUserDefinedType
     {
         try
         {
-            return this.FromClr(this.Invoke(this.parse, null, [new SqlString(text)]));
+            return this.FromClr(this.Invoke(this.parse, null, [ClrTypeMarshaller.ToSqlString(text, collation: null)]));
         }
         catch (SimulatedSqlException failure) when (failure.Number == 6522)
         {
@@ -373,7 +374,9 @@ internal sealed class ClrUserDefinedType
                 : throw SimulatedSqlException.ClrUdtLengthMismatch(bytes.Length, layout.Size, this.Name);
         }
 
-        var instance = Activator.CreateInstance(this.Type)!;
+        object instance;
+        using (CultureScope.Clr())
+            instance = Activator.CreateInstance(this.Type)!;
         using var reader = new BinaryReader(new MemoryStream(bytes, writable: false));
         _ = this.Invoke(this.read!, instance, [reader]);
         return instance;

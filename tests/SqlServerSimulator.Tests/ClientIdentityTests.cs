@@ -107,7 +107,7 @@ public sealed class ClientIdentityTests
             + " from sys.dm_exec_connections where session_id = @@spid");
         using var reader = command.ExecuteReader();
         IsTrue(reader.Read());
-        AreEqual("Shared memory|FALSE|<local machine>|-1|-1|-1|2|2|2", string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(reader.GetValue)));
+        AreEqual("Shared memory|FALSE|<local machine>|-1|-1|-1|2|2|2", string.Join("|", Enumerable.Range(0, reader.FieldCount).Select(i => reader.GetValue(i).ToInvariantString())));
     }
 
     // The querying session's own request is always listed, running the

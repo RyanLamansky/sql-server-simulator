@@ -69,6 +69,7 @@ internal sealed class ClrFunctionCall(ClrScalarFunction function, Expression?[] 
         SimulatedSqlException? ending;
         try
         {
+            using (CultureScope.Clr())
             using (entry.Assembly.UsesServerContext ? ClrHost.Enter(pipe: null, contextConnection: contextConnection) : default(ClrHost.RoutineScope?))
                 result = entry.Method!.Invoke(null, values);
         }

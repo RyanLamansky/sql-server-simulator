@@ -85,6 +85,8 @@ The overload `AssertSqlError(commandText, errorNumber, expectedMessage)` asserts
   **MSTEST0037** again.
 - **Async tests**: capture `TestContext.CancellationToken` and pass it explicitly through async APIs (**MSTEST0049**).
   The `public TestContext TestContext { get; set; } = null!;` member is required on the class.
+- **Format invariantly whatever a test compares or sends**: the run is pinned to `fi-FI`, whose minus sign is U+2212 and decimal separator a comma, so a negative number interpolated into SQL text is a syntax error and a joined reader value mismatches.
+  Use `value.ToInvariantString()` or `string.Create(CultureInfo.InvariantCulture, $"…")`.
 
 ## Discards (IDE0058)
 
@@ -131,4 +133,5 @@ One ADO.NET command per element, shared open connection — equivalent to splitt
 ## AssemblyHooks
 
 Every test project has [`AssemblyHooks.cs`](AssemblyHooks.cs) with a `[TestClass] [AssemblyInitialize]` to warm shared initialization once before the parallel test run.
+Each project's hook calls `HostileCulture.Pin()` first.
 Don't remove it — without the warm-up the first parallel batch races on shared static init (analyzer Roslyn cache is the most extreme case at ~3× slowdown, but the pattern generalizes).

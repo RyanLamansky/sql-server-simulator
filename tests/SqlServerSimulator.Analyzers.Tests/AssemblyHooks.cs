@@ -12,9 +12,13 @@ public static class AssemblyHooks
     /// method-level parallelism, multiple tests racing through that cold path
     /// contend on shared locks (~3x slowdown observed). Running one trivial
     /// analysis up front warms the caches so each test only does its unique work.
+    /// Pins <see cref="HostileCulture"/> first.
     /// </summary>
     [AssemblyInitialize]
-    public static Task WarmUp(TestContext context) =>
-        new CSharpAnalyzerTest<WrapperPropertyAnalyzer, DefaultVerifier>
+    public static Task WarmUp(TestContext context)
+    {
+        HostileCulture.Pin();
+        return new CSharpAnalyzerTest<WrapperPropertyAnalyzer, DefaultVerifier>
         { TestCode = "internal sealed class C { }" }.RunAsync(context.CancellationToken);
+    }
 }

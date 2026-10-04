@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 using static SqlServerSimulator.TestHelpers;
 
@@ -16,7 +17,7 @@ public sealed class DatePartsBuilderTests
     [DataRow("datefromparts(1, 1, 1)", "0001-01-01")]
     [DataRow("datefromparts(9999, 12, 31)", "9999-12-31")]
     public void DateFromParts_Valid(string expression, string expectedIso) =>
-        AreEqual(DateTime.Parse(expectedIso), ExecuteScalar($"select {expression}"));
+        AreEqual(DateTime.Parse(expectedIso, CultureInfo.InvariantCulture), ExecuteScalar($"select {expression}"));
 
     [TestMethod]
     [DataRow("datefromparts(null, 5, 9)")]
@@ -180,13 +181,13 @@ public sealed class DatePartsBuilderTests
     [DataRow("eomonth(cast('2026-02-15' as date), -1)", "2026-01-31")]
     [DataRow("eomonth('2026-02-15', 1)", "2026-03-31")]
     public void EOMonth_Valid(string expression, string expectedIso) =>
-        AreEqual(DateTime.Parse(expectedIso), ExecuteScalar($"select {expression}"));
+        AreEqual(DateTime.Parse(expectedIso, CultureInfo.InvariantCulture), ExecuteScalar($"select {expression}"));
 
     [TestMethod]
     [DataRow("eomonth('9999-11-30', 1)", "9999-12-31")]
     [DataRow("eomonth('0001-02-15', -1)", "0001-01-31")]
     public void EOMonth_OffsetToTheRangeEdge_Answers(string expression, string expectedIso) =>
-        AreEqual(DateTime.Parse(expectedIso, System.Globalization.CultureInfo.InvariantCulture), ExecuteScalar($"select {expression}"));
+        AreEqual(DateTime.Parse(expectedIso, CultureInfo.InvariantCulture), ExecuteScalar($"select {expression}"));
 
     /// <summary>
     /// An offset past either end of the range is Msg 517 at state 1, naming
@@ -241,7 +242,7 @@ public sealed class DatePartsBuilderTests
     public void FromParts_InvalidPrecision_Class16State2(string expression, int precision)
     {
         var ex = new Simulation().AssertSqlError($"select {expression}", 1002);
-        AreEqual($"Line 1: Specified scale {precision} is invalid.", ex.Message);
+        AreEqual(string.Create(CultureInfo.InvariantCulture, $"Line 1: Specified scale {precision} is invalid."), ex.Message);
         AreEqual(16, ex.Class);
         AreEqual(2, ex.State);
     }
@@ -253,7 +254,7 @@ public sealed class DatePartsBuilderTests
     [DataRow(5, 30, 330)]
     public void DateTimeOffsetFromParts_OffsetsAdd(int hours, int minutes, int total)
         => AreEqual(TimeSpan.FromMinutes(total), ((DateTimeOffset)new Simulation().ExecuteScalar(
-            $"select datetimeoffsetfromparts(2024, 1, 1, 0, 0, 0, 0, {hours}, {minutes}, 3)")!).Offset);
+            string.Create(CultureInfo.InvariantCulture, $"select datetimeoffsetfromparts(2024, 1, 1, 0, 0, 0, 0, {hours}, {minutes}, 3)"))!).Offset);
 
     /// <summary>
     /// A value whose UTC instant or datetime rounding leaves the type's range

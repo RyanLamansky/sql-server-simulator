@@ -163,6 +163,7 @@ partial class Simulation
             : null;
         try
         {
+            using (CultureScope.Clr())
             using (entry.Assembly.UsesServerContext ? ClrHost.Enter(pipe.Sink, contextConnection: contextConnection) : default(ClrHost.RoutineScope?))
                 result = method.Invoke(null, arguments);
         }
@@ -272,6 +273,7 @@ partial class Simulation
 
         private void Start((string Name, SqlDbType Type, long MaxLength, byte Precision, byte Scale)[] columns)
         {
+            using var culture = CultureScope.Engine();
             var collation = this.batch.CurrentDatabase.Collation;
             this.schema = new SqlType[columns.Length];
             this.names = new string[columns.Length];
@@ -286,6 +288,7 @@ partial class Simulation
 
         private void Row(object?[] values)
         {
+            using var culture = CultureScope.Engine();
             var row = new SqlValue[this.schema!.Length];
             for (var i = 0; i < row.Length; i++)
                 row[i] = ClrTypeMarshaller.FromRecordValue(values[i], this.schema[i]);

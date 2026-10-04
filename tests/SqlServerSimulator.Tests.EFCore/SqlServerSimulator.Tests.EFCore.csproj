@@ -6,6 +6,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="..\SqlServerSimulator.Tests\HostileCulture.cs" Link="HostileCulture.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Include="..\SqlServerSimulator.Tests\Extensions.cs" Link="Extensions.cs" />
   </ItemGroup>
 

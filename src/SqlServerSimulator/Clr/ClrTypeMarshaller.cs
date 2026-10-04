@@ -61,7 +61,7 @@ internal static class ClrTypeMarshaller
         ? udt.Udt.ToClr(value)
         : value.IsNull
         ? NullOf(clrType)
-        : clrType == typeof(SqlString) ? new SqlString(value.AsString)
+        : clrType == typeof(SqlString) ? ToSqlString(value.AsString, value.Type.Collation)
             : clrType == typeof(SqlInt32) ? new SqlInt32(value.AsInt32)
             : clrType == typeof(SqlInt64) ? new SqlInt64(value.AsInt64)
             : clrType == typeof(SqlInt16) ? new SqlInt16(value.AsInt16)
@@ -377,17 +377,26 @@ internal static class ClrTypeMarshaller
             DateTime2SqlType => value.AsDateTime2,
             TimeSqlType => value.AsTime,
             DateTimeOffsetSqlType => value.AsDateTimeOffset,
-            VectorSqlType => new SqlString(SimulatedDbDataReader.ClientString(value)),
-            JsonSqlType => new SqlString(value.AsString),
+            VectorSqlType => ToSqlString(SimulatedDbDataReader.ClientString(value), fallback),
+            JsonSqlType => ToSqlString(value.AsString, fallback),
             HierarchyIdSqlType or SpatialSqlType or RowVersionSqlType or ImageSqlType or BinarySqlType or VarbinarySqlType => new SqlBinary(value.AsBytes),
             VarcharSqlType or NVarcharSqlType or CharSqlType or NCharSqlType or TextSqlType or NTextSqlType or SystemNameSqlType
-                => new SqlString(value.AsString, LocaleOf(type.Collation ?? fallback)),
+                => ToSqlString(value.AsString, type.Collation ?? fallback),
             _ => ToClr(value, providerType),
         };
     }
 
-    private static int LocaleOf(Collation collation) =>
-        Collation.TryGetMetrics(collation.Name, out var metrics) ? metrics.Lcid : 1033;
+    /// <summary>
+    /// <paramref name="text"/> as the <see cref="SqlString"/> a routine
+    /// receives, carrying <paramref name="collation"/>'s locale — or
+    /// <c>en-US</c>'s, the culture the CLR host presents, without one. The
+    /// one-argument constructor would take the thread culture's instead, the
+    /// invariant culture's inside the engine, which a routine's own
+    /// <c>new SqlString(…)</c> under <c>en-US</c> then refuses to
+    /// concatenate or compare with.
+    /// </summary>
+    public static SqlString ToSqlString(string text, Collation? collation) =>
+        new(text, collation is not null && Collation.TryGetMetrics(collation.Name, out var metrics) ? metrics.Lcid : 1033);
 
     /// <summary>
     /// A context-connection reader's <c>GetFieldType</c> and

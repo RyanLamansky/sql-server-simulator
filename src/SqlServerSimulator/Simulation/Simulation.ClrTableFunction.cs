@@ -228,6 +228,7 @@ partial class Simulation
         SimulatedSqlException? ending;
         try
         {
+            using (CultureScope.Clr())
             using (usesContext ? ClrHost.Enter(pipe: null, contextConnection: contextConnection) : default(ClrHost.RoutineScope?))
                 rows = method.Invoke(null, values);
         }
@@ -266,6 +267,7 @@ partial class Simulation
             bool advanced;
             try
             {
+                using (CultureScope.Clr())
                 using (usesContext ? ClrHost.Enter(pipe: null) : default(ClrHost.RoutineScope?))
                     advanced = rows.MoveNext();
             }
@@ -278,11 +280,14 @@ partial class Simulation
                 yield break;
 
             Array.Clear(fillArguments);
-            fillArguments[0] = rows.Current;
             try
             {
+                using (CultureScope.Clr())
                 using (usesContext ? ClrHost.Enter(pipe: null) : default(ClrHost.RoutineScope?))
+                {
+                    fillArguments[0] = rows.Current;
                     _ = function.FillRow.Invoke(null, fillArguments);
+                }
             }
             catch (TargetInvocationException ex) when (ex.InnerException is not null)
             {

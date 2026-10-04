@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -178,7 +179,7 @@ public sealed class XmlWellFormednessTests
     [DataRow(8)]
     [DataRow(-1)]
     public void Convert_StyleOtherThanZeroToThree_IsMsg6358(int style)
-        => new Simulation().AssertSqlError($"select convert(xml, '<a/>', {style})", 6358, $"{style} is not a valid style number when converting to XML.");
+        => new Simulation().AssertSqlError(string.Create(CultureInfo.InvariantCulture, $"select convert(xml, '<a/>', {style})"), 6358, string.Create(CultureInfo.InvariantCulture, $"{style} is not a valid style number when converting to XML."));
 
     [TestMethod]
     public void Convert_StyleRefusal_WaitsForANonNullValue_AndTryConvertAbsorbsIt()

@@ -47,6 +47,7 @@ partial class Simulation
 
     private void ImportBacpacCore(Stream stream, string databaseName, int maxDegreeOfParallelism, out BacpacImportResult result)
     {
+        using var culture = CultureScope.Engine();
         if (Databases.ContainsKey(databaseName))
             throw new InvalidOperationException($"A database named '{databaseName}' already exists in this Simulation. Import is a create-only operation; choose a different name via BacpacImportOptions.DatabaseName.");
         result = new BacpacImportResult();

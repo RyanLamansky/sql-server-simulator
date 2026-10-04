@@ -372,6 +372,17 @@ public class ClrAssemblyTests
         Contains("System.InvalidOperationException: Data access is not allowed in this context.", ex.Message);
     }
 
+    /// <summary>
+    /// A routine runs under SQL Server's CLR host culture, <c>en-US</c> with
+    /// .NET Framework's formats, whatever the session's language or the
+    /// host process's culture (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void FrameworkAssembly_RunsUnderTheServersEnUsCulture()
+        => AreEqual("en-US|en-US|1/5/2026 1:04:05 PM|-1,234.50|($1,234.50)|50.00%|\u221E", ClrFrameworkFixture.Simulation(
+                "create function dbo.cul() returns nvarchar(200) as external name simclr.Funcs.Culture")
+            .ExecuteScalar("set language german; select dbo.cul()"));
+
     [TestMethod]
     [Description("An nvarchar(n) return value longer than n is the server's TruncationException, not a silent cut.")]
     public void FrameworkAssembly_ScalarReturnTooLong_RaisesTruncation()

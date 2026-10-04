@@ -29,6 +29,7 @@ public sealed partial class Simulation
     /// </summary>
     public Simulation()
     {
+        using var culture = CultureScope.Engine();
         RandomNumberGenerator.Fill(this.newSequentialIdAnchor);
         this.LobReclamation = new(this);
         // The lock manager sweeps abandoned sessions before every acquisition,
@@ -177,7 +178,11 @@ public sealed partial class Simulation
     /// Creates a simulated database connection.
     /// </summary>
     /// <returns>A new simulated database connection instance.</returns>
-    public SimulatedDbConnection CreateDbConnection() => new(this);
+    public SimulatedDbConnection CreateDbConnection()
+    {
+        using var culture = CultureScope.Engine();
+        return new(this);
+    }
 
     /// <summary>
     /// Seeds <c>msdb.dbo.syspolicy_system_health_state</c> as an empty view so
@@ -517,6 +522,7 @@ public sealed partial class Simulation
         init
         {
             ArgumentNullException.ThrowIfNull(value);
+            using var culture = CultureScope.Engine();
             this.ServerCollation = Collation.TryGet(value)
                 ?? throw new ArgumentException($"Collation '{value}' is not recognized by the simulator.", nameof(value));
             // The ctor seeded the system databases under the baseline collation

@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -39,7 +40,7 @@ public sealed class VectorSearchTests
     }
 
     private static string Search(Simulation sim, string query) =>
-        string.Join(";", sim.ExecuteReader(query).EnumerateRecords().Select(r => $"{r.GetValue(0)}:{r.GetValue(1)}"));
+        string.Join(";", sim.ExecuteReader(query).EnumerateRecords().Select(r => string.Create(CultureInfo.InvariantCulture, $"{r.GetValue(0)}:{r.GetValue(1)}")));
 
     [TestMethod]
     public void CreateVectorIndex_WithoutPreview_IsUnknownObjectType()

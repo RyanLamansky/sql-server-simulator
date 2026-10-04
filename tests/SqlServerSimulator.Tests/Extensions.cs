@@ -1,9 +1,17 @@
-﻿using System.Data.Common;
+﻿using System.Globalization;
+using System.Data.Common;
 
 namespace SqlServerSimulator;
 
 static class Extensions
 {
+    /// <summary>
+    /// <paramref name="value"/> formatted invariantly, as a test compares
+    /// server output: a bare <c>ToString()</c> or interpolation follows the
+    /// pinned <see cref="HostileCulture"/>.
+    /// </summary>
+    public static string ToInvariantString(this object? value) => Convert.ToString(value, CultureInfo.InvariantCulture) ?? "";
+
     public static DbCommand CreateCommand(this Simulation simulation, string? commandText)
         => simulation.CreateOpenConnection().CreateCommand(commandText);
 

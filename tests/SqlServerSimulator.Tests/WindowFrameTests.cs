@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
@@ -50,7 +51,7 @@ public sealed class WindowFrameTests
             """).ExecuteReader();
         var rows = new List<string>();
         while (reader.Read())
-            rows.Add($"{reader.GetInt32(0)}|{reader.GetDecimal(1)}|{reader.GetDecimal(2)}|{reader.GetDecimal(3)}");
+            rows.Add(string.Create(CultureInfo.InvariantCulture, $"{reader.GetInt32(0)}|{reader.GetDecimal(1)}|{reader.GetDecimal(2)}|{reader.GetDecimal(3)}"));
         CollectionAssert.AreEqual(
             new[]
             {

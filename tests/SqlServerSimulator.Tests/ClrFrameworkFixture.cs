@@ -195,6 +195,14 @@ internal static class ClrFrameworkFixture
 
             [SqlFunction]
             public static SqlString Long(SqlInt32 n) { return new SqlString(new string('y', n.Value)); }
+
+            [SqlFunction]
+            public static SqlString Culture()
+            {
+                return new SqlString(CultureInfo.CurrentCulture.Name + "|" + CultureInfo.CurrentUICulture.Name + "|"
+                    + new DateTime(2026, 1, 5, 13, 4, 5).ToString() + "|" + (-1234.5).ToString("N") + "|"
+                    + (-1234.5m).ToString("C") + "|" + (0.5).ToString("P") + "|" + double.PositiveInfinity.ToString());
+            }
         }
 
         [Serializable]

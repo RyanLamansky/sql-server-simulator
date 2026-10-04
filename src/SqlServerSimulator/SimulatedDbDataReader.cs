@@ -51,6 +51,10 @@ public sealed class SimulatedDbDataReader : DbDataReader
             outcome = pending;
             return true;
         }
+        // The outcome stream runs the batch's statements as it advances, so
+        // each advance is an entry into the engine; the rows a result set
+        // serves were produced before it was yielded.
+        using var culture = CultureScope.Engine();
         if (this.outcomes.MoveNext())
         {
             outcome = this.outcomes.Current;
@@ -337,10 +341,13 @@ public sealed class SimulatedDbDataReader : DbDataReader
     /// <c>DataTable.Load</c> and <c>DataAdapter</c> read. <see langword="null"/>
     /// when no result set is current.
     /// </summary>
-    public override DataTable? GetSchemaTable() =>
-        this.currentResult is { } result
-            ? ResultSchemaTable.Build(result, this.connection?.CurrentDatabase.Name ?? string.Empty)
-            : null;
+    public override DataTable? GetSchemaTable()
+    {
+        if (this.currentResult is not { } result)
+            return null;
+        using var culture = CultureScope.Engine();
+        return ResultSchemaTable.Build(result, this.connection?.CurrentDatabase.Name ?? string.Empty);
+    }
 
     /// <inheritdoc/>
     public override float GetFloat(int ordinal)
@@ -570,6 +577,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
             return;
 
         this.closed = true;
+        using var culture = CultureScope.Engine();
         this.cursor.Dispose();
         try
         {

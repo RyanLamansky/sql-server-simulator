@@ -375,6 +375,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// </remarks>
     public override void Commit()
     {
+        using var culture = CultureScope.Engine();
         this.ZombieCheck();
         this.apiCompleted = true;
         if (this.target.TranCount > 1)
@@ -392,6 +393,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// </remarks>
     public override void Rollback()
     {
+        using var culture = CultureScope.Engine();
         if (this.apiCompleted)
             throw new InvalidOperationException("This SqlTransaction has completed; it is no longer usable.");
         this.apiCompleted = true;
@@ -409,6 +411,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// <exception cref="InvalidOperationException">The transaction has completed.</exception>
     public override void Save(string savepointName)
     {
+        using var culture = CultureScope.Engine();
         this.ZombieCheck();
         RejectEmptyName(savepointName);
         this.target.SetSavepointByName(savepointName);
@@ -440,6 +443,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     /// <exception cref="InvalidOperationException">The transaction has completed.</exception>
     public override void Rollback(string savepointName)
     {
+        using var culture = CultureScope.Engine();
         this.ZombieCheck();
         RejectEmptyName(savepointName);
         this.target.RollbackByName(savepointName);
@@ -552,6 +556,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
     {
         if (disposing && !this.Zombied)
         {
+            using var culture = CultureScope.Engine();
             this.apiCompleted = true;
             this.target.EndRollback();
         }

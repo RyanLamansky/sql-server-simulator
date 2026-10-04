@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -71,7 +72,7 @@ public sealed class DateBucketTests
     [DataRow(-5)]
     public void WidthNotPositive_Raises9834(int width)
         => new Simulation().AssertSqlError(
-            $"select date_bucket(day, {width}, cast('2024-01-10' as date))",
+            string.Create(CultureInfo.InvariantCulture, $"select date_bucket(day, {width}, cast('2024-01-10' as date))"),
             9834,
             "Invalid bucket width value passed to date_bucket function. Only positive values are allowed.");
 

@@ -31,6 +31,8 @@ partial class Simulation
     {
         if (this.OpenBulkFile is not { } open)
             return null;
+        // The delegate and the stream it opens are the host's code.
+        using var culture = CultureScope.Host();
         try
         {
             using var stream = open(path);

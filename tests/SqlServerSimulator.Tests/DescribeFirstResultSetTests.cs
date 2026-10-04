@@ -44,7 +44,7 @@ public sealed class DescribeFirstResultSetTests
         while (reader.Read())
         {
             lines.Add(string.Join(" ",
-                reader.IsDBNull(2) ? "-" : reader.GetString(2), reader.GetBoolean(3) ? "null" : "notnull", reader.GetString(5), reader.GetInt16(6),
+                reader.IsDBNull(2) ? "-" : reader.GetString(2), reader.GetBoolean(3) ? "null" : "notnull", reader.GetString(5), reader.GetInt16(6).ToInvariantString(),
                 reader.GetBoolean(27) ? "identity" : "-", reader.GetBoolean(29) ? "updateable" : "-", reader.GetBoolean(30) ? "computed" : "-",
                 reader.GetInt32(35), reader.GetInt32(36)));
         }

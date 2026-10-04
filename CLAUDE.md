@@ -9,6 +9,8 @@ Auto-loaded orientation.
 An **ADO.NET stand-in for `Microsoft.Data.SqlClient`** — consumers create a `Simulation`, get a `SimulatedDbConnection` via `CreateDbConnection()`, and use it with (e.g.) `Microsoft.EntityFrameworkCore.SqlServer` instead of SqlClient over the wire.
 The full ADO.NET concrete-pipeline chain (`SimulatedDb{Connection,Command,Parameter,ParameterCollection,DataReader,Transaction}` + `SimulatedSqlException` + the info-message family) is public with `new`-shadowed strongly-typed returns, mirroring SqlClient's shape so consumers downcast and reach concrete properties identically.
 Public surface beyond that chain is intentionally minimal so internals stay free to refactor; `QualityTests.PublicApiWhitelist` is authoritative and fails on unintended expansion — resist adding to it.
+**The engine runs under the invariant culture, never the host's**: each public member that runs engine code opens `CultureScope.Engine()` for its duration (its XML doc covers lazy work, user callbacks and SQLCLR's own `en-US`), so a new public entry point opens it too.
+Every test project pins `fi-FI` ([`HostileCulture.cs`](tests/SqlServerSimulator.Tests/HostileCulture.cs), linked into the others), so a leak fails CI.
 
 `SqlServerSimulator.EFCore` is a sibling package whose only public method is `UseSqlServerSimulator(DbContextOptionsBuilder, DbConnection)`.
 EF Core's SqlServer provider keeps emitting SQL-Server-flavored SQL; the adapter registers an `IRelationalTypeMappingSourcePlugin` for the (CLR, store) pairs whose default mappings downcast to `SqlParameter` (the simulator's connection isn't a `SqlConnection`).

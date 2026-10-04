@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -494,7 +495,7 @@ public sealed class CatalogProcTests
     }
 
     private static string FkeysSummary(List<Dictionary<string, object?>> rows) => string.Join(";", rows.ConvertAll(r =>
-        $"{r["FKTABLE_NAME"]}.{r["FKCOLUMN_NAME"]}>{r["PKTABLE_NAME"]}.{r["PKCOLUMN_NAME"]}:{r["KEY_SEQ"]}:{r["UPDATE_RULE"]}:{r["DELETE_RULE"]}:{r["FK_NAME"]}"));
+        string.Create(CultureInfo.InvariantCulture, $"{r["FKTABLE_NAME"]}.{r["FKCOLUMN_NAME"]}>{r["PKTABLE_NAME"]}.{r["PKCOLUMN_NAME"]}:{r["KEY_SEQ"]}:{r["UPDATE_RULE"]}:{r["DELETE_RULE"]}:{r["FK_NAME"]}")));
 
     [TestMethod]
     public void SpFkeys_ByPrimaryKeyTable_SortsByForeignKeyTableAndMapsEveryRule()
@@ -599,7 +600,7 @@ public sealed class CatalogProcTests
         string Summary(string column)
         {
             var r = rows.Single(row => (string)row["COLUMN_NAME"]! == column);
-            return $"{r["DATA_TYPE"]}:{r["TYPE_NAME"]}:{r["PRECISION"]}:{r["LENGTH"]}:{r["SCALE"] ?? "-"}:{r["CHAR_OCTET_LENGTH"] ?? "-"}";
+            return string.Create(CultureInfo.InvariantCulture, $"{r["DATA_TYPE"]}:{r["TYPE_NAME"]}:{r["PRECISION"]}:{r["LENGTH"]}:{r["SCALE"] ?? "-"}:{r["CHAR_OCTET_LENGTH"] ?? "-"}");
         }
 
         AreEqual("-9:datetime2:23:46:-:-", Summary("d"));
@@ -627,7 +628,7 @@ public sealed class CatalogProcTests
     }
 
     private static string Describe(List<Dictionary<string, object?>> rows)
-        => string.Join(",", rows.Select(r => $"{r["PROCEDURE_NAME"]}/{r["COLUMN_NAME"]}/{r["COLUMN_TYPE"]}/{r["DATA_TYPE"]}/{r["TYPE_NAME"]}/{r["LENGTH"]}/{r["SCALE"]}/{r["NULLABLE"]}/{r["ORDINAL_POSITION"]}"));
+        => string.Join(",", rows.Select(r => string.Create(CultureInfo.InvariantCulture, $"{r["PROCEDURE_NAME"]}/{r["COLUMN_NAME"]}/{r["COLUMN_TYPE"]}/{r["DATA_TYPE"]}/{r["TYPE_NAME"]}/{r["LENGTH"]}/{r["SCALE"]}/{r["NULLABLE"]}/{r["ORDINAL_POSITION"]}")));
 
     [TestMethod]
     [DataRow("exec sp_sproc_columns 'pr'", "pr;1/@RETURN_VALUE/5/4/int/4/0/0/0,pr;1/@a/1/4/int/4/0/1/1,pr;1/@b/2/-9/nvarchar/20//1/2,pr;1/@dt/1/-9/datetime2/46/3/1/3,pr;1/@t/1/-153/tvt/2147483647//1/4")]
@@ -679,7 +680,7 @@ public sealed class CatalogProcTests
     }
 
     private static string SpecialColumns(List<Dictionary<string, object?>> rows)
-        => string.Join(",", rows.Select(r => $"{r["SCOPE"]}/{r["COLUMN_NAME"]}/{r["DATA_TYPE"]}/{r["TYPE_NAME"]}/{r["PRECISION"]}/{r["LENGTH"]}/{r["SCALE"]}/{r["PSEUDO_COLUMN"]}"));
+        => string.Join(",", rows.Select(r => string.Create(CultureInfo.InvariantCulture, $"{r["SCOPE"]}/{r["COLUMN_NAME"]}/{r["DATA_TYPE"]}/{r["TYPE_NAME"]}/{r["PRECISION"]}/{r["LENGTH"]}/{r["SCALE"]}/{r["PSEUDO_COLUMN"]}")));
 
     [TestMethod]
     [DataRow("exec sp_special_columns 'p'", "1/id/4/int identity/10/4/0/1")]

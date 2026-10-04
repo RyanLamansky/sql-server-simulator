@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -158,7 +159,7 @@ public sealed class RegexpFunctionTests
         new Simulation().AssertSqlError(
             $"select {expression}",
             19301,
-            $"'{argument}' value should be greater than or equal to {reportedMinimum} but '{provided}' is provided in '{function}' function.");
+            string.Create(CultureInfo.InvariantCulture, $"'{argument}' value should be greater than or equal to {reportedMinimum} but '{provided}' is provided in '{function}' function."));
 
     /// <summary>
     /// Per-function arity, reported as Msg 189 with the lowercase name. The

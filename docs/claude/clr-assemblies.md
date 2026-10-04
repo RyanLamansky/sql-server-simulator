@@ -261,6 +261,15 @@ The transaction held when the routine was entered — an explicit one, or a trig
 When the routine returns, an ended transaction is **Msg 3991** and a changed `@@TRANCOUNT` **Msg 3992**; when it throws, either is **Msg 6549** — 6522's report under its own wording, closed by "User transaction, if any, will be rolled back." — and each rolls the transaction back and ends the batch, or under a `TRY` leaves it uncommittable for the batch's end to report (Msg 3998).
 `SqlConnection.BeginTransaction` is `BEGIN TRANSACTION` in the session, nesting inside the caller's; a transaction the routine began with none held on entry rolls back quietly when it returns.
 
+## Culture
+
+A routine reads `en-US` as both `CultureInfo.CurrentCulture` and `CurrentUICulture`, whatever the session's `SET LANGUAGE` (`us_english`, `german`, `french`, `japanese`, `turkish`, `british`, `finnish` and `thai` tried), the login's default language (a login defaulting to `german`) or the database's collation (`Japanese_CI_AS`), probed 2026-10-04 against SQL Server 2025 from a `SAFE` scalar function.
+It is read-only and Gregorian with `UseUserOverride` true, and every `NumberFormatInfo` and `DateTimeFormatInfo` property and standard date format is .NET Framework's Windows `en-US`, which differs from .NET's ICU `en-US` in three ways: a plain space rather than U+202F before the AM/PM designator, two decimal digits for the `N` and `P` formats rather than three, and `($1,234.57)` for a negative currency amount.
+Whether it follows the server's default language or the host OS's locale is unprobed, since changing either is a server-wide setting.
+
+`CultureScope.Clr()` presents that culture around every call into an assembly's code — a routine, a type's or aggregate's members and constructor, a table-valued function's enumerator — inside the invariant culture the engine runs under, and a context-connection command or pipe send the routine makes re-enters the invariant one.
+A string argument's `SqlString` carries its collation's LCID, or `en-US`'s 1033 without one, because the one-argument constructor reads the thread's culture and a routine's own `new SqlString(…)` under `en-US` would then refuse to concatenate with an argument built under the invariant culture.
+
 ## Catalog surface
 
 - **`sys.assemblies`** — one row per registered assembly plus the `Microsoft.SqlServer.Types` system row real always carries (assembly_id 1, principal_id 4, `UNSAFE_ACCESS`, `is_user_defined` 0).
@@ -292,7 +301,8 @@ The strong-named case is unprobed.
   Real also shows its own internal frames — `SqlMetaData.Construct`, `System.Data.SqlServer.Internal.ClrLevelContext` — which have no counterpart, and the shim's public frames are named after its own members, which match Framework's only where the member is the one that throws.
 - **A CLR routine's own exceptions match real's; ones .NET's base library raises carry .NET's wording and frames.**
   A `FormatException` from `int.Parse` reads `The input string 'x' was not in a correct format.` where Framework's reads `Input string was not in a correct format.`, and a stack real reports through `System.Number` shows only the author's frames here; real's own marshalling frames (`SqlBytes.Write`, `XmlSerializer` internals) never show.
-  Code in a registered class also runs under the host's culture, so a `DateTime.ToString()` there can render differently (ICU's narrow no-break space before `AM`).
+- **A routine may set its thread's culture.**
+  Real's `SAFE` host refuses both `CultureInfo.CurrentCulture` and `Thread.CurrentThread.CurrentCulture` assignments with a `SecurityException` (probed 2026-10-04 against SQL Server 2025); here the assignment succeeds and lasts until the call returns.
 - **An aggregate's state never leaves memory.**
   One instance accumulates each whole group, so `Merge` is never called and a `Format.UserDefined` aggregate's `Read` / `Write` never run; real may serialize state between rows, which an aggregate that loses a field in `Write` would show.
 - **A context-connection error's report shows the provider's public frames only.**

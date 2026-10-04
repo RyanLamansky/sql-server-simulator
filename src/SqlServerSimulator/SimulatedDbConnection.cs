@@ -1475,8 +1475,13 @@ public sealed class SimulatedDbConnection : DbConnection
     internal readonly Queue<SimulatedError> PendingMessages = new();
 
     /// <summary>Delivers one message to <see cref="InfoMessage"/> subscribers.</summary>
-    internal void RaiseInfoMessage(SimulatedError message) =>
-        this.InfoMessage?.Invoke(this, new SimulatedInfoMessageEventArgs(new SimulatedErrorCollection([message])));
+    internal void RaiseInfoMessage(SimulatedError message)
+    {
+        if (this.InfoMessage is not { } handlers)
+            return;
+        using var culture = CultureScope.Host();
+        handlers(this, new SimulatedInfoMessageEventArgs(new SimulatedErrorCollection([message])));
+    }
 
     private string connectionString = "";
     private string? pendingUserId;
@@ -1584,6 +1589,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </summary>
     public override void ChangeDatabase(string databaseName)
     {
+        using var culture = CultureScope.Engine();
         if (string.IsNullOrWhiteSpace(databaseName))
             throw new ArgumentException("Database cannot be null, the empty string, or string of only whitespace.", nameof(databaseName));
 
@@ -1617,6 +1623,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// <inheritdoc/>
     public override void Close()
     {
+        using var culture = CultureScope.Engine();
         // SqlClient auto-rolls-back any active transaction when its
         // connection closes. The transaction's own dispose handles the
         // explicit using-pattern; this branch covers raw Close() without
@@ -1645,6 +1652,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </remarks>
     protected override void Dispose(bool disposing)
     {
+        using var culture = disposing ? CultureScope.Engine() : default;
         if (!disposing)
         {
             if (!this.Session.Reclaimed)
@@ -1701,6 +1709,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </remarks>
     public override void Open()
     {
+        using var culture = CultureScope.Engine();
         this.OpenSession();
         try
         {
@@ -1768,6 +1777,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// </remarks>
     protected override DbTransaction BeginDbTransaction(IsolationLevel isolationLevel)
     {
+        using var culture = CultureScope.Engine();
         if (this.CurrentTransaction is { HoldsApiTransaction: true })
             throw new InvalidOperationException("SqlConnection does not support parallel transactions.");
         if (isolationLevel == IsolationLevel.Unspecified)

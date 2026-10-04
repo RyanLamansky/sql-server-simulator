@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -633,7 +634,7 @@ public sealed class HelpProcTests
     {
         using var reader = new Simulation().ExecuteReader($"exec sp_help '{name}'");
         IsTrue(reader.Read());
-        AreEqual(expected, string.Join('|', Enumerable.Range(0, reader.FieldCount).Select(i => reader.IsDBNull(i) ? "" : reader.GetValue(i))));
+        AreEqual(expected, string.Join('|', Enumerable.Range(0, reader.FieldCount).Select(i => reader.GetValue(i).ToInvariantString())));
         IsFalse(reader.Read());
     }
 
@@ -683,7 +684,7 @@ public sealed class HelpProcTests
         _ = reader.NextResult();
         var cells = new List<string>();
         while (reader.Read())
-            cells.Add($"{reader["Parameter_name"]}:{reader["Length"]}:{reader["Prec"]}");
+            cells.Add(string.Create(CultureInfo.InvariantCulture, $"{reader["Parameter_name"]}:{reader["Length"]}:{reader["Prec"]}"));
         Assert.AreEqual("@a:-1:0,@b:-1:0,@c:-1:0,@d:-1:0,@e:10:10", string.Join(",", cells));
     }
 

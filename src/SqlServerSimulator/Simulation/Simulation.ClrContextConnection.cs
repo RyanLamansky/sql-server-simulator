@@ -120,6 +120,7 @@ partial class Simulation
         /// </summary>
         public ContextResult Execute(ContextCommand command)
         {
+            using var culture = CultureScope.Engine();
             var collation = this.connection.CurrentDatabase.Collation;
             var parameters = command.Parameters;
             var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
@@ -161,6 +162,7 @@ partial class Simulation
         /// </summary>
         public void Send(object handle, int fromRow)
         {
+            using var culture = CultureScope.Engine();
             var resultSet = (SimulatedSqlResultSet)handle;
             List<SqlValue[]> rows = [.. resultSet.RowValues.Skip(fromRow)];
             this.pipe!.Forward(new SimulatedSqlResultSet(resultSet.Schema, resultSet.ColumnNames, rows)

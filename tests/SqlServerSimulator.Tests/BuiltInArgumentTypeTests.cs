@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -320,7 +321,7 @@ public sealed class BuiltInArgumentTypeTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery($"create table t (c varchar(10), ch char(3), m varchar(max)); select {expression} as r into t2 from t");
-        AreEqual($"{type}|{maxLength}", sim.ExecuteScalar("select concat(type_name(system_type_id), '|', max_length) from sys.columns where object_id = object_id('t2')"));
+        AreEqual(string.Create(CultureInfo.InvariantCulture, $"{type}|{maxLength}"), sim.ExecuteScalar("select concat(type_name(system_type_id), '|', max_length) from sys.columns where object_id = object_id('t2')"));
     }
 
     [TestMethod]

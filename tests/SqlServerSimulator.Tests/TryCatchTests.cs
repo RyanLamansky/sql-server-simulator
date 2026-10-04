@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -263,7 +264,7 @@ public sealed class TryCatchTests
     public void Throw_Value_NumberBelow50000_RaisesMsg35100(string sql, int number)
     {
         var ex = new Simulation().AssertSqlError(sql, 35100);
-        AreEqual($"Error number {number} in the THROW statement is outside the valid range. Specify an error number in the valid range of 50000 to 2147483647.", ex.Message);
+        AreEqual(string.Create(CultureInfo.InvariantCulture, $"Error number {number} in the THROW statement is outside the valid range. Specify an error number in the valid range of 50000 to 2147483647."), ex.Message);
         AreEqual(10, ex.State);
     }
 

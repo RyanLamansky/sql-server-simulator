@@ -1,3 +1,4 @@
+using System.Globalization;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 
 namespace SqlServerSimulator;
@@ -30,7 +31,7 @@ public sealed class SourcelessAggregateTests
         {
             var values = new string[reader.FieldCount];
             for (var i = 0; i < values.Length; i++)
-                values[i] = reader.IsDBNull(i) ? "NULL" : reader.GetValue(i).ToString()!;
+                values[i] = reader.IsDBNull(i) ? "NULL" : reader.GetValue(i).ToInvariantString();
             rows.Add(string.Join(", ", values));
         }
         return string.Join("; ", rows);
@@ -191,7 +192,7 @@ public sealed class SourcelessAggregateTests
         using var rowCommand = connection.CreateCommand("select * from dest");
         using var rowReader = rowCommand.ExecuteReader();
         IsTrue(rowReader.Read());
-        AreEqual("1, -57, 1", $"{rowReader.GetValue(0)}, {rowReader.GetValue(1)}, {rowReader.GetValue(2)}");
+        AreEqual("1, -57, 1", string.Create(CultureInfo.InvariantCulture, $"{rowReader.GetValue(0)}, {rowReader.GetValue(1)}, {rowReader.GetValue(2)}"));
         IsFalse(rowReader.Read());
     }
 }

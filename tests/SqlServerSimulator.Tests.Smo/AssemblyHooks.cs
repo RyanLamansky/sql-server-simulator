@@ -5,12 +5,17 @@ namespace SqlServerSimulator;
 /// WWI-shaped schema + login + TDS listener) and tears the listener down after.
 /// Warming it here keeps first-touch JIT / TLS-handshake cost out of the test
 /// timings, the same rationale as the sibling oracles' assembly-init warm-up.
+/// Pins <see cref="HostileCulture"/> first.
 /// </summary>
 [TestClass]
 public static class AssemblyHooks
 {
     [AssemblyInitialize]
-    public static void Initialize(TestContext _) => SmoFixture.Initialize();
+    public static void Initialize(TestContext _)
+    {
+        HostileCulture.Pin();
+        SmoFixture.Initialize();
+    }
 
     [AssemblyCleanup]
     public static void Cleanup() => SmoFixture.Cleanup();

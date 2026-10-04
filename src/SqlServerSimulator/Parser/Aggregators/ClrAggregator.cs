@@ -35,8 +35,12 @@ internal sealed class ClrAggregator : Aggregator
         this.function = function;
         this.seen = distinct ? [] : null;
         this.parameters = function.Accumulate.GetParameters();
-        this.instance = Activator.CreateInstance(function.Entry.Type)
-            ?? throw new InvalidOperationException($"CLR aggregate type {function.Entry.Type.FullName} produced no instance.");
+        // The constructor is the aggregate's own code.
+        using (CultureScope.Clr())
+        {
+            this.instance = Activator.CreateInstance(function.Entry.Type)
+                ?? throw new InvalidOperationException($"CLR aggregate type {function.Entry.Type.FullName} produced no instance.");
+        }
         _ = this.Call(function.Init, []);
     }
 
@@ -86,6 +90,7 @@ internal sealed class ClrAggregator : Aggregator
     {
         try
         {
+            using (CultureScope.Clr())
             using (this.function.Entry.Assembly.UsesServerContext ? ClrHost.Enter(pipe: null) : default(ClrHost.RoutineScope?))
                 return method.Invoke(this.instance, arguments);
         }
