@@ -448,7 +448,7 @@ A view target is written through its base table when it has one; a view with non
 
 ### Execution
 
-`Simulation.Merge.cs:ExecuteMerge` is a single-pass walk:
+`Simulation.Merge.Execution.cs:ExecuteMerge` is a single-pass walk:
 
 1. **Materialize source** once into `List<SqlValue[]>` via the parse-time `Func<BatchContext, List<SqlValue[]>>` materializer.
    `VALUES`-form evaluates the tuple expressions; `SELECT`-form runs `Selection.Execute` and decodes via `RowDecoder`; the bare-table / view form reads the table in scan order (clustered-key order when it has one) or runs the view selection respectively, then runs `EvaluateComputedColumns` per row so source-side computed columns are observable from the ON predicate / SET / INSERT projections.

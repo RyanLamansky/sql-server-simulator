@@ -4,7 +4,7 @@ using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
 namespace SqlServerSimulator;
 
 /// <summary>
-/// Perf-regression guard for MERGE's match phase (<c>Simulation.Merge.cs</c>):
+/// Perf-regression guard for MERGE's match phase (<c>Simulation.Merge.Execution.cs</c>):
 /// an indexed target seeks per source row, an unindexed one hashes the source by
 /// the ON's equality keys, and only an ON with no <c>target = source</c> conjunct
 /// falls back to the O(target × source) scan. The correctness suite passes under

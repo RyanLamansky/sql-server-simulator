@@ -909,7 +909,7 @@ public sealed class TriggerTests
     {
         // EF Core 10's batched-SaveChanges emit shape is MERGE…USING (VALUES …)
         // ON 1=0 WHEN NOT MATCHED THEN INSERT … OUTPUT INSERTED. Verify the
-        // trigger dispatch wired into Simulation.Merge.cs fires under that
+        // trigger dispatch wired into Simulation.Merge.Execution.cs fires under that
         // shape (the regular-INSERT path is covered separately).
         //
         // The OUTPUT is dropped from the shape here: real refuses a

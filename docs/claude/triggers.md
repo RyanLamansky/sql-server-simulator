@@ -82,7 +82,7 @@ Server-scope triggers (`CREATE TRIGGER … ON ALL SERVER`) — logon triggers an
   `MaterializePseudoTable` takes a `HeapColumn[]` directly so the same machinery works for table parents (parent's `Columns`) and view parents (view's `OutputColumns`).
 - **DML hooks**: `Simulation.Insert.cs` (INSERT + INSERT … SELECT + INSERT … OUTPUT) detects INSTEAD OF on either the destination view or the destination table and either routes through `ProcessInsteadOfInsertOnView` (for view targets — view INSERT may include non-updatable views) or threads an `insteadOfActive` flag through `ProcessHeapInsert` (for table targets, which skips identity allocation, constraint enforcement, and heap write).
   `Simulation.Update.cs` and `Simulation.Delete.cs` route a view target with INSTEAD OF to `Simulation.InsteadOfView.cs` and thread the table-target detection through their `CommitUpdate` / `CommitDelete` helpers.
-  `Simulation.Merge.cs` settles Msg 5316 once the `WHEN` clauses parse, and `CommitMerge` routes each pending list (inserts, updates, deletes) through trigger-fire or heap-write paths.
+  `Simulation.Merge.cs` settles Msg 5316 once the `WHEN` clauses parse, and `CommitMerge` (`Simulation.Merge.Execution.cs`) routes each pending list (inserts, updates, deletes) through trigger-fire or heap-write paths.
 - **Connection state**: [`SimulatedDbConnection.FiringTriggers`](../../src/SqlServerSimulator/SimulatedDbConnection.cs) (the in-flight trigger stack the gating reads) + `TriggerNestLevel` (surfaced by `TRIGGER_NESTLEVEL()`).
 - **Gating**: `Simulation.CanFireTrigger` — the one predicate behind both nesting rules, called from `FireTriggers`' match loop, `TryFireInsteadOfTrigger`'s, and `HasTrigger`.
 
@@ -157,7 +157,7 @@ Over a table or a view alike they read every column but a computed one as **null
   `UPDATE(col)` / `COLUMNS_UPDATED()` read the view's column positions, `@@ROWCOUNT` is the rows picked, and the trigger fires even when none qualify.
   An UPDATE with a `FROM` clause is **Msg 414**.
   A positioned UPDATE / DELETE (`WHERE CURRENT OF`) through an updatable view keeps the base-row path, where a derived column reads NULL in the pseudo-tables.
-- **MERGE** into a view whose INSTEAD OF triggers take its actions matches against the view's rows under its column names, and hands the triggers view-shaped rows the same way (`Simulation.Merge.cs`, the view-rows target).
+- **MERGE** into a view whose INSTEAD OF triggers take its actions matches against the view's rows under its column names, and hands the triggers view-shaped rows the same way (`Simulation.Merge.cs` and `Simulation.Merge.Execution.cs`, the view-rows target).
   A MERGE into a view real can't write through, with no trigger to take it, binds its `WHEN` clauses against the view's columns first: a derived `UPDATE SET` target or `INSERT` column — listed or implied — is Msg 4406, anything else the view's Msg 4403 / 4405.
 - **A level over the triggered view** — a view, CTE or derived table reading it as its single source — hands the trigger the rows it shows, its statement naming the level's columns → [`programmable.md`](programmable.md#writes-through-a-cte-or-derived-table).
 - **OUTPUT**: to the client it is Msg 334 as on any triggered target; `OUTPUT … INTO` lands its rows before the body runs.
