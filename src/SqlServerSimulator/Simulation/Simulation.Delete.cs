@@ -173,17 +173,19 @@ partial class Simulation
             : PermissionEnforcement.SecurableFor(context.Batch, targetName, (SchemaObject?)sourceView ?? table);
         if (deleteSecurable is { } securable && PermissionEnforcement.Applies(context.Batch, context.Batch.DatabaseFor(securable)))
         {
+            SimulatedSqlException? readDenied = null;
             if (where is not null && securable is not Synonym)
             {
                 var read = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
                 where.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
-                PermissionEnforcement.CheckColumns(context.Batch, Permission.Select, read);
+                readDenied = PermissionEnforcement.ColumnsDenial(context.Batch, Permission.Select, read);
             }
             else if (where is not null)
             {
-                PermissionEnforcement.CheckSchemaObject(context.Batch, "SELECT", securable);
+                readDenied = PermissionEnforcement.SchemaObjectDenial(context.Batch, "SELECT", securable);
             }
-            PermissionEnforcement.CheckSchemaObject(context.Batch, "DELETE", securable);
+            if (PermissionEnforcement.Combine(readDenied, PermissionEnforcement.SchemaObjectDenial(context.Batch, "DELETE", securable)) is { } refusal)
+                throw refusal;
         }
         // Checked even from a module body whose reference to the view is
         // chained.

@@ -292,7 +292,7 @@ partial class Simulation
     {
         target = null!;
         var parsed = ParseHelpObjectName(batch.CurrentDatabase, objectName);
-        return parsed.Count is >= 1 and <= 3 && TryResolveHelpTarget(batch, parsed, out target);
+        return parsed.Count is >= 1 and <= 3 && TryResolveHelpTarget(batch, parsed, out target) && HelpTargetVisible(batch, target);
     }
 
     // The name of the object's effective owner — its explicit one, else its

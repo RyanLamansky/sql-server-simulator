@@ -158,6 +158,21 @@ internal static partial class BuiltInResources
             new("state_desc", nvarchar60Catalog, 60, true),
         ], EnumerateSysDatabasePermissions);
 
+        // sys.user_token / sys.login_token: the session's security tokens —
+        // the effective database principal with public and every role it
+        // belongs to, and the effective login with its server roles (probed
+        // 2026-10-04 against SQL Server 2025).
+        HeapColumn[] TokenColumns() =>
+        [
+            new("principal_id", SqlType.Int32, null, true),
+            new("sid", SqlType.Varbinary, 85, true),
+            new("name", SqlType.NVarchar, 128, true),
+            new("type", SqlType.NVarchar, 128, true),
+            new("usage", SqlType.NVarchar, 128, true),
+        ];
+        Sys("user_token", TokenColumns(), EnumerateUserToken);
+        Sys("login_token", TokenColumns(), EnumerateLoginToken);
+
         // sys.database_role_members: 2-col shipped subset (real SQL Server
         // surfaces just these two — no additional internal columns).
         Sys("database_role_members",
@@ -688,8 +703,75 @@ internal static partial class BuiltInResources
         }
     }
 
+    /// <summary>
+    /// Rows for <c>sys.user_token</c>: <c>dbo</c> alone for a <c>dbo</c>
+    /// session, otherwise the effective principal, <c>public</c>, then the
+    /// roles it belongs to in principal-id order.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateUserToken(Parser.BatchContext batch, Database database)
+    {
+        var effective = batch.Connection.Security.Effective;
+        var closure = PermissionChecker.BuildPrincipalClosure(database, effective.DatabasePrincipalId);
+        var principals = new List<DatabasePrincipal>();
+        foreach (var (_, principal) in database.Principals)
+        {
+            if (closure.Contains(principal.PrincipalId))
+                principals.Add(principal);
+        }
+        principals.Sort(static (a, b) => a.PrincipalId.CompareTo(b.PrincipalId));
+        if (principals.Find(p => p.PrincipalId == effective.DatabasePrincipalId) is { } self)
+            yield return TokenRow(self.PrincipalId, DatabasePrincipalSid(database, self), self.Name, self.TypeCode switch { "A" => "APPLICATION ROLE", _ => "SQL USER" }, "GRANT OR DENY");
+        if (effective.DatabasePrincipalId == Database.DboPrincipalId)
+            yield break;
+        foreach (var principal in principals)
+        {
+            if (principal.PrincipalId != effective.DatabasePrincipalId)
+                yield return TokenRow(principal.PrincipalId, DatabasePrincipalSid(database, principal), principal.Name, "ROLE", "GRANT OR DENY");
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.login_token</c>: the effective login, <c>public</c> and
+    /// its server roles; an identity minted inside one database shows as a
+    /// principal-0 login named by its SID, usable only to deny.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateLoginToken(Parser.BatchContext batch, Database database)
+    {
+        var connection = batch.Connection;
+        var effective = connection.Security.Effective;
+        var simulation = connection.Simulation;
+        if (effective.IsDatabaseScoped && effective.DatabasePrincipalId != Database.DboPrincipalId)
+        {
+            var sid = database.Principals.TryGetValue(effective.DatabasePrincipalName, out var principal) ? DatabasePrincipalSid(database, principal) : null;
+            yield return TokenRow(0, sid, effective.LoginName, "SQL LOGIN", "DENY ONLY    ");
+            yield return TokenRow(2, [0x02], "public", "SERVER ROLE", "DENY ONLY    ");
+            yield break;
+        }
+        var login = effective.LoginName;
+        var loginId = simulation.TryResolveServerPrincipalId(login, out var id) ? id : 1;
+        yield return TokenRow(loginId, loginId == 1 ? [0x01] : DeriveLoginSid(login), login, "SQL LOGIN", "GRANT OR DENY");
+        yield return TokenRow(2, [0x02], "public", "SERVER ROLE", "GRANT OR DENY");
+        foreach (var (roleId, roleName) in Simulation.FixedServerRoles)
+        {
+            if (simulation.IsServerPrincipalInRole(loginId, roleId))
+                yield return TokenRow(roleId, [(byte)roleId], roleName, "SERVER ROLE", "GRANT OR DENY");
+        }
+    }
+
+    private static SqlValue[] TokenRow(int principalId, byte[]? sid, string name, string type, string usage) =>
+    [
+        SqlValue.FromInt32(principalId),
+        sid is null ? SqlValue.Null(SqlType.Varbinary) : SqlValue.FromVarbinary(sid),
+        SqlValue.FromNVarchar(name),
+        SqlValue.FromNVarchar(type),
+        SqlValue.FromNVarchar(usage),
+    ];
+
     private static IEnumerable<SqlValue[]> EnumerateSysDatabaseRoleMembers(Parser.BatchContext batch, Database database)
     {
+        // dbo is a member of db_owner, a membership real lists though no
+        // statement made it (probed 2026-10-04 against SQL Server 2025).
+        yield return [SqlValue.FromInt32(Database.DbOwnerRoleId), SqlValue.FromInt32(Database.DboPrincipalId)];
         foreach (var (roleId, memberId) in database.RoleMembers)
         {
             yield return [

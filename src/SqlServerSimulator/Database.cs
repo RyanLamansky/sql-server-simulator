@@ -40,6 +40,9 @@ internal sealed partial class Database
     /// <summary>Principal id of the <c>sys</c> catalog principal (4).</summary>
     public const int SysPrincipalId = 4;
 
+    /// <summary>Principal id of the <c>db_owner</c> fixed role (16384).</summary>
+    public const int DbOwnerRoleId = 16384;
+
     /// <summary>
     /// Database name (the key in <see cref="Simulation.Databases"/>), mutable
     /// for <c>ALTER DATABASE … MODIFY NAME</c>, which re-keys the registry under

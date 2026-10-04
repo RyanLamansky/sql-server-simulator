@@ -94,13 +94,30 @@ internal sealed class ColLength : Expression
         // columns, a view or a table-valued function (probed 2026-10-02).
         HeapColumn[]? columns;
         if (runtime.Batch.TryResolveTable(multiPart, out var table))
+        {
+            // A table the principal can't see answers NULL, as OBJECT_ID does
+            // (probed 2026-10-04 against SQL Server 2025).
+            var tableDatabase = runtime.Batch.DatabaseFor(table);
+            if (table.Name is not ['#', ..] && !table.IsTableVariable
+                && PermissionEnforcement.TryMetadataVisibilityPrincipal(runtime.Batch, tableDatabase, out var filter) && filter is int principalId
+                && !PermissionChecker.CanViewMetadata(tableDatabase, principalId, table.ObjectId, table.SchemaId, ServerLoginRights.For(runtime.Batch.Connection)))
+            {
+                return SqlValue.Null(SqlType.SmallInt);
+            }
             columns = table.Columns;
+        }
         else if (runtime.Batch.TryResolveCatalogView(multiPart, out var view, out _))
+        {
             columns = view.Columns;
+        }
         else if (runtime.Batch.TryResolveSchema(multiPart, out var schema) && schema.TryFindInSharedNamespace(multiPart.Leaf, out var other))
+        {
             columns = ColumnProperty.ColumnsOf(schema.Database, other.ObjectId);
+        }
         else
+        {
             return SqlValue.Null(SqlType.SmallInt);
+        }
         foreach (var col in columns ?? [])
         {
             // The width sys.columns.max_length reports.

@@ -485,6 +485,7 @@ They were exported by real SQL Server and are therefore already in its canonical
 
 - **No precision cap on `decimal`.** Real applies an internal one that rejects a 29-digit integer part and truncates a long fractional part (`0.1234567890123456789012345678` stores as `0.123456789`); the simulator canonicalizes the digits as written. Values of the size real data carries are unaffected.
 - **A column or variable declared `xml(DOCUMENT …)`** still admits a fragment; only the `CAST` / `CONVERT` target enforces `DOCUMENT`.
+- **`DECLARE @x xml(<missing collection>)`** is Msg 208 here, where real raises Msg 6314 (probed 2026-10-04 against SQL Server 2025); a collection that exists but whose `EXECUTE` the principal lacks is Msg 229 on both.
 - **An XSD that doesn't compile is accepted** at `CREATE` and `ADD` and leaves its values untyped, where real refuses it — a reference to an undefined type is its Msg 2308, for one.
 - Real's expected-element list in a Msg 6965 isn't in declaration order (`'n','f','s','i','dt','b'` for a sequence declared `d, i, s, b, dt, n, f`); the simulator lists the names as declared.
 

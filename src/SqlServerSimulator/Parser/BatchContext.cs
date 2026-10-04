@@ -1013,8 +1013,17 @@ internal sealed partial class BatchContext
     /// </summary>
     public bool EnforcesPermissions =>
         !this.CreateTimeBinding
+        && !this.MultiStatementTvfBody
         && this.UdfFrame is null && (this.TriggerFrame is null || this.IsContextConnectionCommand)
         && (this.ProcFrame is null || this.ProcFrame.IsDynamicSql);
+
+    /// <summary>
+    /// Set on a multi-statement table-valued function's body batch, which
+    /// carries neither frame but chains ownership like every other module
+    /// body (probed 2026-10-04 against SQL Server 2025: a SELECT grant on the
+    /// function reads the owner's table through it).
+    /// </summary>
+    public bool MultiStatementTvfBody;
 
     /// <summary>
     /// The effective owner of the module whose body this batch runs — a
@@ -1131,15 +1140,16 @@ internal sealed partial class BatchContext
     }
 
     /// <summary>
-    /// Object ids of scalar UDFs whose EXECUTE permission has already been
-    /// checked (and passed) in this batch — the once-per-statement memo shared
+    /// Scalar UDFs whose EXECUTE permission, and sequences whose UPDATE, has
+    /// already been checked (and passed) in this batch, keyed with the
+    /// principal it passed for — the once-per-statement memo shared
     /// by the query-context read-source check
     /// (<see cref="PermissionEnforcement.CheckReadSources"/>) and the
     /// non-query invocation-seam check (<c>Simulation.InvokeScalarFunction</c>),
     /// so a UDF invoked in a query isn't re-checked per row and a UDF invoked in
     /// a SET / IF operand is still checked once. Allocated lazily on first use.
     /// </summary>
-    public HashSet<int>? ExecuteCheckedFunctionIds;
+    public HashSet<long>? ExecuteCheckedFunctionIds;
 
     /// <summary>
     /// Current grouping-set context — populated by the aggregate executor

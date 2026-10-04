@@ -125,4 +125,37 @@ public sealed class PrincipalScalarTests
         AreEqual(DBNull.Value, sim.ExecuteScalar("select sid_binary(N'probe_login2')"));
         AreEqual(DBNull.Value, sim.ExecuteScalar("select sid_binary(N'')"));
     }
+
+    // ---- Membership answers a restricted principal gets (probed 2026-10-04 against SQL Server 2025) ----
+
+    [TestMethod]
+    public void IsMember_OfAUserName_AsksWhetherItIsTheEffectiveUser()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u1 without login; create user u2 without login");
+        AreEqual("0|1", sim.ExecuteScalar("execute as user = 'u2'; select concat_ws('|', is_member('u1'), is_member('u2'))"));
+        AreEqual(0, sim.ExecuteScalar("select is_member('u1')"));
+    }
+
+    [TestMethod]
+    public void IsRoleMember_AHiddenMember_IsZeroForAUserAndNullForARole()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u1 without login; create user u2 without login; create role r1; create role r2; alter role r1 add member u1; alter role r2 add member r1; alter role db_datareader add member u2");
+        AreEqual("0|NULL", sim.ExecuteScalar("execute as user = 'u1'; select concat_ws('|', is_rolemember('db_datareader', 'u2'), isnull(cast(is_rolemember('r2', 'r9') as varchar), 'NULL'))"));
+        AreEqual("NULL", sim.ExecuteScalar("execute as user = 'u2'; select isnull(cast(is_rolemember('r2', 'r1') as varchar), 'NULL')"));
+    }
+
+    [TestMethod]
+    public void TakenPrincipalNames_ReportTheStatementsState()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u1 without login; create role r1; create application role ar with password = 'Pw!12345678'");
+        AreEqual((byte)6, sim.AssertSqlError("create user u1 without login", 15023).State);
+        AreEqual((byte)6, sim.AssertSqlError("create user r1 without login", 15023).State);
+        AreEqual((byte)7, sim.AssertSqlError("alter user u1 with name = r1", 15023).State);
+        AreEqual((byte)13, sim.AssertSqlError("alter application role ar with name = u1", 15023).State);
+        _ = sim.AssertSqlError("create user guest without login", 15062);
+        _ = sim.AssertSqlError("create user u1", 15007);
+    }
 }

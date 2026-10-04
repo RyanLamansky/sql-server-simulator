@@ -61,6 +61,16 @@ partial class Simulation
         // A three-part target lands in the named database, so both the object
         // id and the owning-database stamp come from the resolved schema.
         var owningDatabase = schema?.Database;
+        // It takes what CREATE TABLE takes — inside a procedure too, which
+        // ownership chaining doesn't reach (probed 2026-10-04 against SQL
+        // Server 2025: Msg 262).
+        if (schema is not null)
+        {
+            if (!PermissionEnforcement.HasDatabasePermission(batch, schema.Database, "CREATE TABLE"))
+                throw SimulatedSqlException.DatabasePermissionDenied("CREATE TABLE", schema.Database.Name);
+            if (!PermissionEnforcement.HasSchemaAlter(batch, schema))
+                throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
+        }
         // SELECT INTO creates the destination, so a read-only database refuses
         // it whatever the source produces — including no rows at all
         // (probe-confirmed). A #temp destination resolves no schema and stays

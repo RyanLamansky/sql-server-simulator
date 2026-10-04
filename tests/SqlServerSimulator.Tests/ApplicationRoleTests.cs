@@ -288,4 +288,42 @@ public sealed class ApplicationRoleTests
         _ = sim.ExecuteNonQuery("alter role db_datareader add member app1; drop application role app1");
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.database_role_members where member_principal_id not in (select principal_id from sys.database_principals)"));
     }
+
+    // ---- sp_setapprole's own preamble (probed 2026-10-04 against SQL Server 2025) ----
+
+    [TestMethod]
+    public void SetAppRole_RefusesOutsideTheAdHocLevel_AndInATransaction()
+    {
+        var sim = Seeded();
+        var nested = sim.AssertSqlError("exec('exec sp_setapprole ''app1'', ''App!Pass123''')", 15422);
+        AreEqual("sp_setapprole", nested.Errors[0].Procedure);
+        AreEqual(38, nested.Errors[0].LineNumber);
+        _ = sim.AssertSqlError("begin tran; exec sp_setapprole 'app1', 'App!Pass123'", 15002);
+        _ = sim.AssertSqlError("exec sp_setapprole null, 'x'", 15431);
+        _ = sim.AssertSqlError("exec sp_setapprole 'app1', 'App!Pass123', 'bogus'", 15600);
+        AreEqual("app1", sim.ExecuteScalar("exec sp_setapprole 'app1', 'App!Pass123', 'none'; select user_name()"));
+        AreEqual(46, sim.AssertSqlError("exec sp_setapprole 'app1', 'wrong'", 15161).Errors[0].LineNumber);
+    }
+
+    [TestMethod]
+    public void UnsetAppRole_AWrongCookieIsState4()
+    {
+        var sim = Seeded();
+        AreEqual((byte)4, sim.AssertSqlError("""
+            declare @c varbinary(8000);
+            exec sp_setapprole 'app1', 'App!Pass123', @fCreateCookie = true, @cookie = @c output;
+            exec sp_unsetapprole 0x0102
+            """, 15592).State);
+        AreEqual((byte)1, sim.AssertSqlError("exec sp_unsetapprole 0x0102", 15592).State);
+    }
+
+    [TestMethod]
+    public void AppRolePasswords_MeetThePolicy_AndAppRolesAreNoUsers()
+    {
+        var sim = Seeded();
+        _ = sim.AssertSqlError("create application role app9 with password = 'x'", 33062);
+        AreEqual((byte)11, sim.AssertSqlError("create application role app1 with password = 'App!Pass123'", 15023).State);
+        _ = sim.AssertSqlError("drop user app1", 15151);
+        AreEqual(1, sim.ExecuteScalar("exec sp_setapprole 'app1', 'App!Pass123'; select has_dbaccess(db_name())"));
+    }
 }

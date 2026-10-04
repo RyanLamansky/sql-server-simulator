@@ -195,7 +195,7 @@ public sealed class DdlEventCoverageTests
 
     [TestMethod]
     [DataRow("ddl_gdr_database_events", "grant select on t to u", "GRANT_DATABASE")]
-    [DataRow("ddl_application_role_events", "create application role ar with password = 'x'", "CREATE_APPLICATION_ROLE")]
+    [DataRow("ddl_application_role_events", "create application role ar with password = 'Pw!12345678'", "CREATE_APPLICATION_ROLE")]
     [DataRow("ddl_extended_property_events", "exec sp_addextendedproperty 'p', 'v'", "CREATE_EXTENDED_PROPERTY")]
     [DataRow("ddl_xml_schema_collection_events", "create xml schema collection xc as '<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"/>'", "CREATE_XML_SCHEMA_COLLECTION")]
     [DataRow("ddl_fulltext_catalog_events", "create fulltext catalog fc", "CREATE_FULLTEXT_CATALOG")]

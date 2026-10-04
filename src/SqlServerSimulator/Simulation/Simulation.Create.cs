@@ -368,6 +368,7 @@ partial class Simulation
                 throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
             destination = schema.HeapTables;
             schemaId = schema.SchemaId;
+            RequireColumnTypeReferences(context.Batch, heapColumns!);
         }
 
         // Cross-kind name-collision check for permanent tables (Msg 2714).
@@ -3936,15 +3937,31 @@ partial class Simulation
             // Referenced columns must form a PRIMARY KEY or UNIQUE constraint,
             // or an enabled unfiltered unique index (Msg 1776), matched in
             // declared order — see ReferencedColumnsFormKey.
+            // The message names the table as the key wrote it (probed
+            // 2026-10-04 against SQL Server 2025: 'dbo.t' for dbo.t).
             if (!ReferencedColumnsFormKey(referencedTable, refOrdinals))
             {
                 throw SimulatedSqlException.ForeignKeyNoMatchingKey(
-                    referencedTable.Name,
+                    pf.ReferencedTable.ToString(),
                     pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf)));
             }
 
             var fkName = pf.ConstraintName ?? AutoForeignKeyName(childTable.Name, pf.ChildColumnNames, pending.IndexOf(pf));
             RejectForeignKeyColumnMismatch(childTable, pf.ChildFullOrdinals, referencedTable, refOrdinals, fkName);
+
+            // The referenced columns need REFERENCES, checked once the key is
+            // known to match (probed 2026-10-04 against SQL Server 2025: Msg
+            // 1776 comes first, then Msg 230 per column, or Msg 229 with no
+            // column reachable), each followed by Msg 1088 naming the table as
+            // written and Msg 1750.
+            if (!context.Batch.IsSkipping)
+            {
+                var referenced = new ColumnReadTarget(referencedTable);
+                foreach (var ordinal in refOrdinals)
+                    _ = referenced.Ordinals.Add(ordinal + 1);
+                if (PermissionEnforcement.ColumnsDenial(context.Batch, Permission.References, referenced) is { } referencesDenied)
+                    throw SimulatedSqlException.ForeignKeyReferencesDenied(referencesDenied, pf.ReferencedTable.ToString());
+            }
 
             // A computed referencing column has to be PERSISTED (Msg 1764), and
             // then constrains the referential actions to the ones that never
@@ -4422,4 +4439,37 @@ partial class Simulation
             AliasType = column.AliasType,
             MaskingFunction = column.MaskingFunction,
         };
+
+    /// <summary>
+    /// A permanent table's column takes REFERENCES on its alias type (Msg
+    /// 15247 state 4) and on its XML schema collection (Msg 229 then Msg 15247),
+    /// checked once the CREATE TABLE gates pass (probed 2026-10-04 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static void RequireColumnTypeReferences(BatchContext batch, List<HeapColumn?> columns)
+    {
+        if (batch.Connection.Security.EffectiveIsDbo)
+            return;
+        foreach (var column in columns)
+        {
+            if (column is null)
+                continue;
+            if (column.AliasType is { } aliasType
+                && !PermissionEnforcement.HoldsPermission(batch, aliasType.Schema.Database, Permission.References, PermissionChecker.ClassType, aliasType.UserTypeId, aliasType.Schema.SchemaId))
+            {
+                throw SimulatedSqlException.UserDoesNotHavePermission(state: 4);
+            }
+            if (column.XmlSchemaCollection is { } collection)
+            {
+                try
+                {
+                    PermissionEnforcement.CheckXmlSchemaCollection(batch, collection, "REFERENCES");
+                }
+                catch (SimulatedSqlException denied)
+                {
+                    throw SimulatedSqlException.Aggregate([denied, SimulatedSqlException.UserDoesNotHavePermission()]);
+                }
+            }
+        }
+    }
 }

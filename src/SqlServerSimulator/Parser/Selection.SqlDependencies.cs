@@ -172,6 +172,15 @@ partial class Selection
         var database = batch.CurrentDatabase;
         if (ResolveDependencyDmvTarget(nameExpr, classExpr, batch, outerResolver, database) is not { } targetId)
             yield break;
+        // What an entity references is part of its definition, so a principal
+        // that may not read the definition reads no rows (probed 2026-10-04
+        // against SQL Server 2025).
+        if (!batch.Connection.Security.EffectiveIsDbo
+            && Expressions.ObjectProperty.FindObject(database, targetId) is { } target
+            && !PermissionEnforcement.CanSeeDefinition(batch, database, target))
+        {
+            yield break;
+        }
         var entities = ModuleDependencies.ForObject(database, targetId);
         if (entities.Count == 0)
             yield break;

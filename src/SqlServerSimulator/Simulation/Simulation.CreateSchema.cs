@@ -135,9 +135,8 @@ partial class Simulation
 
         context.CurrentDatabase.RejectWriteWhenReadOnly();
 
-        // CREATE SCHEMA isn't a modeled named permission — Msg 15247 for a
-        // non-privileged principal (probe M3).
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
+        // CREATE SCHEMA (under ALTER ANY SCHEMA) — Msg 15247 without it.
+        if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, context.CurrentDatabase, "CREATE SCHEMA"))
             throw SimulatedSqlException.UserDoesNotHavePermission();
 
         // Built-ins: dbo lives in every database; sys / INFORMATION_SCHEMA are
@@ -145,11 +144,18 @@ partial class Simulation
         if (IsReservedSchemaName(context.CurrentDatabase.Collation, schemaName))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schemaName);
 
-        var ownerPrincipalId = Database.DboPrincipalId;
+        // A schema belongs to the principal that creates it unless
+        // AUTHORIZATION names another — one the creator must be able to act as
+        // (probed 2026-10-04 against SQL Server 2025: Msg 15151 naming the
+        // user otherwise).
+        var ownerPrincipalId = context.Connection.Security.Effective.DatabasePrincipalId;
         if (ownerName is not null)
         {
-            if (!context.CurrentDatabase.Principals.TryGetValue(ownerName, out var owner))
+            if (!context.CurrentDatabase.Principals.TryGetValue(ownerName, out var owner)
+                || !PermissionEnforcement.MayActAs(context.Batch, context.CurrentDatabase, owner.PrincipalId))
+            {
                 throw SimulatedSqlException.CannotFindUser(ownerName);
+            }
             ownerPrincipalId = owner.PrincipalId;
         }
 

@@ -43,6 +43,9 @@ internal sealed class NextValueFor : Expression
     /// <summary>The record this reference left for its query spec to settle, or null when it was refused or accepted where it parsed.</summary>
     internal readonly DeferredNextValueRef? Deferred;
 
+    /// <summary>Whether the reference is a column default's, which draws as part of the table's own write and so checks nothing of its own.</summary>
+    private readonly bool inDefault;
+
     public NextValueFor(ParserContext context, MultiPartName sequenceName)
     {
         var scope = context.NextValueForRejection;
@@ -75,6 +78,7 @@ internal sealed class NextValueFor : Expression
             throw SimulatedSqlException.InvalidObjectName(sequenceName);
         }
         this.Sequence = resolved;
+        this.inDefault = context.InDefaultClause;
         context.Batch.BeginImplicitTransaction();
         // Record the reference for any collector in scope (INSERT's Msg 11731
         // gate); collecting here catches a reference at any nesting depth.
@@ -116,6 +120,11 @@ internal sealed class NextValueFor : Expression
         // value, so an enclosing uncorrelated subquery declines to replay its
         // result for the rest of the statement.
         batch.Connection.VolatileEvaluations++;
+        // Drawing a value takes UPDATE on the sequence, checked once per
+        // statement and chained inside a module like any reference (probed
+        // 2026-10-04 against SQL Server 2025).
+        if (!this.inDefault && !batch.Connection.Security.EffectiveIsDbo)
+            PermissionEnforcement.CheckSequenceUpdate(batch, this.Sequence);
         // Advancing is a write, refused in a read-only database when a value
         // is actually drawn (probed 2026-09-25 against SQL Server 2025).
         this.Sequence.Schema.Database.RejectWriteWhenReadOnly();

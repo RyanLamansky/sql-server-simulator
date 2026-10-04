@@ -213,6 +213,7 @@ partial class Simulation
         var ownerPattern = CompileCatalogPattern(tableOwner);
 
         var rows = new List<SqlValue[]>();
+        var visible = PermissionEnforcement.ObjectVisibility(batch, database);
         if (tableQualifier is null || batch.CurrentDatabase.Collation.Equals(tableQualifier, database.Name))
         {
             foreach (var (_, schema) in database.Schemas)
@@ -221,9 +222,15 @@ partial class Simulation
                     continue;
                 var owner = SqlValue.FromSystemName(schema.Name);
                 foreach (var (_, table) in schema.HeapTables)
-                    AddTableRow(rows, owner, table.Name, "TABLE");
+                {
+                    if (visible?.Invoke(table) != false)
+                        AddTableRow(rows, owner, table.Name, "TABLE");
+                }
                 foreach (var (_, view) in schema.Views)
-                    AddTableRow(rows, owner, view.Name, "VIEW");
+                {
+                    if (visible?.Invoke(view) != false)
+                        AddTableRow(rows, owner, view.Name, "VIEW");
+                }
             }
 
             // The catalog views list too, as views of their own schemas
@@ -329,6 +336,7 @@ partial class Simulation
         var columnPattern = CompileCatalogPattern(columnName);
 
         var rows = new List<SqlValue[]>();
+        var visible = PermissionEnforcement.ObjectVisibility(batch, database);
         if (tableQualifier is null || batch.CurrentDatabase.Collation.Equals(tableQualifier, database.Name))
         {
             foreach (var schema in database.Schemas.EnumerateValues().OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
@@ -338,13 +346,13 @@ partial class Simulation
                 var owner = SqlValue.FromSystemName(schema.Name);
                 foreach (var table in schema.HeapTables.EnumerateValues().OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
                 {
-                    if (Matches(namePattern, table.Name))
+                    if (Matches(namePattern, table.Name) && visible?.Invoke(table) != false)
                         AppendColumnRows(rows, qualifier, owner, table.Name, table.Columns, byName, columnPattern, classic);
                 }
 
                 foreach (var view in schema.Views.EnumerateValues().OrderBy(v => v.Name, StringComparer.OrdinalIgnoreCase))
                 {
-                    if (Matches(namePattern, view.Name))
+                    if (Matches(namePattern, view.Name) && visible?.Invoke(view) != false)
                         AppendColumnRows(rows, qualifier, owner, view.Name, view.OutputColumns, byName, columnPattern, classic);
                 }
 

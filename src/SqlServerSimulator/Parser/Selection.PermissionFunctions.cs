@@ -122,6 +122,7 @@ partial class Selection
         var simulation = connection.Simulation;
         string entity;
         Func<string, bool> holds;
+        (Storage.HeapColumn[] Columns, Func<Permission, int, bool> Holds)? columns = null;
         if (BuiltInToken.Comparer.Equals(className, "SERVER"))
         {
             entity = "server";
@@ -153,9 +154,16 @@ partial class Selection
                     && (simulation.Logins.IsEmptyLockFree() || simulation.HoldsServerPrincipalPermission(effective.LoginName, targetId, requested, serverWide));
             };
         }
+        else if (ResolveMyPermissionsSecurable(batch, securable.Run(runtime), className.ToUpperInvariant()) is { } resolved)
+        {
+            entity = resolved.Entity;
+            className = resolved.ClassDescription;
+            holds = resolved.Holds;
+            columns = resolved.Columns;
+        }
         else
         {
-            throw new NotSupportedException($"fn_my_permissions is modeled for the SERVER and LOGIN classes only, not '{className}'.");
+            yield break;
         }
 
         var nameType = (NVarcharSqlType)schema[0];
@@ -166,6 +174,79 @@ partial class Selection
         {
             if (BuiltInToken.Comparer.Equals(row.ClassDescription, className) && holds(row.PermissionName))
                 yield return RowEncoder.EncodeRow(schema, [entityValue, subentity, SqlValue.FromNVarchar(permissionType, row.PermissionName)]);
+        }
+        // A table's or view's columns follow, each column-grantable permission
+        // in turn (probed 2026-10-04 against SQL Server 2025).
+        if (columns is not null)
+        {
+            foreach (var permission in (Permission[])[Permission.Select, Permission.Update, Permission.References])
+            {
+                for (var ordinal = 1; ordinal <= columns.Value.Columns.Length; ordinal++)
+                {
+                    if (columns.Value.Holds(permission, ordinal))
+                        yield return RowEncoder.EncodeRow(schema, [entityValue, SqlValue.FromNVarchar(nameType, columns.Value.Columns[ordinal - 1].Name), SqlValue.FromNVarchar(permissionType, permission.CanonicalName)]);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// A database-side securable <c>fn_my_permissions</c> names: the entity
+    /// name it reports, the built-in class its permissions are listed under,
+    /// the test for each, and for a table or view the per-column test. A
+    /// securable that isn't there lists nothing (probed 2026-10-04 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static (string Entity, string ClassDescription, Func<string, bool> Holds, (Storage.HeapColumn[] Columns, Func<Permission, int, bool> Holds)? Columns)? ResolveMyPermissionsSecurable(
+        BatchContext batch, SqlValue securable, string className)
+    {
+        var database = batch.CurrentDatabase;
+        var connection = batch.Connection;
+        var security = connection.Security;
+        var dbo = security.EffectiveIsDbo;
+        var principalId = security.Effective.DatabasePrincipalId;
+        var server = ServerLoginRights.For(connection);
+        var name = securable.IsNull ? null : securable.CoerceTo(SqlType.NVarchar).AsString;
+        Func<string, bool> Granted(byte securableClass, int majorId, int schemaId) =>
+            dbo ? static _ => true : permission => PermissionChecker.IsGrantedByName(database, principalId, permission, securableClass, majorId, schemaId, server);
+        switch (className)
+        {
+            case "DATABASE":
+                return ("database", className, Granted(PermissionChecker.ClassDatabase, 0, 0), null);
+            case "OBJECT":
+                if (name is null || !Expressions.ObjectId.TryParseObjectName(name, out var objectName)
+                    || !batch.TryResolveSchema(objectName, out var objectSchema) || !objectSchema.TryFindInSharedNamespace(objectName.Leaf, out var obj))
+                {
+                    return null;
+                }
+                var columns = obj switch
+                {
+                    Storage.HeapTable table => table.Columns,
+                    Schemas.View view => view.OutputColumns,
+                    _ => null,
+                };
+                // A restricted principal hears only the permissions the
+                // object's kind takes (probed 2026-10-04 against SQL Server
+                // 2025: a db_owner member's list for a table has no EXECUTE).
+                var objectGranted = Granted(PermissionChecker.ClassObject, obj.ObjectId, obj.SchemaId);
+                return (name, className, dbo ? objectGranted : permission => PermissionChecker.AppliesTo(obj, permission) && objectGranted(permission),
+                    columns is null ? null : (columns, dbo
+                        ? static (_, _) => true
+                        : (permission, ordinal) => PermissionChecker.IsColumnGranted(database, principalId, permission, obj.ObjectId, obj.SchemaId, ordinal, server)));
+            case "SCHEMA":
+                return name is not null && database.Schemas.TryGetValue(name, out var schema)
+                    ? (name, className, Granted(PermissionChecker.ClassSchema, schema.SchemaId, 0), null)
+                    : null;
+            case "APPLICATION ROLE" or "ROLE" or "USER":
+                return name is not null && database.Principals.TryGetValue(name, out var principal)
+                    && className == (principal.TypeCode switch { "A" => "APPLICATION ROLE", "R" => "ROLE", _ => "USER" })
+                    ? (name, className, Granted(PermissionChecker.ClassDatabasePrincipal, principal.PrincipalId, 0), null)
+                    : null;
+            default:
+                // A class real doesn't know lists nothing.
+                return Array.Exists(BuiltinPermissionRows.All, row => row.ClassDescription == className)
+                    ? throw new NotSupportedException($"fn_my_permissions is modeled for the server, database, object, schema and principal classes, not '{className}'.")
+                    : null;
         }
     }
 }

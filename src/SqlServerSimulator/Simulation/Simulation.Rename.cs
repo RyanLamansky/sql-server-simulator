@@ -201,8 +201,13 @@ partial class Simulation
             // CONTROL cover it) and reports the same not-found record a missing
             // object earns — probe-confirmed, so nothing about the object's
             // existence leaks.
-            if (!PermissionEnforcement.HasObjectAlter(batch, database, found.ObjectId, found.SchemaId))
+            // An object the caller can't see reads as missing; one it sees
+            // without ALTER is Msg 297 (probed 2026-10-04 against SQL Server
+            // 2025).
+            if (PermissionEnforcement.ObjectVisibility(batch, database) is { } visible && !visible(found))
                 throw NotFound();
+            if (!PermissionEnforcement.HasObjectAlter(batch, database, found.ObjectId, found.SchemaId))
+                throw SimulatedSqlException.RenameNotPermitted();
             // Collision is against the whole shared object namespace
             // (probe-confirmed: renaming a table onto a view name also raises
             // Msg 15335 "as a object").

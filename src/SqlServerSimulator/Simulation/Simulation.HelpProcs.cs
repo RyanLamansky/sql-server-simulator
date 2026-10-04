@@ -146,6 +146,10 @@ partial class Simulation
             yield break;
         }
 
+        // A module the principal sees without VIEW DEFINITION reads as one
+        // with no text (probed 2026-10-04 against SQL Server 2025).
+        if (target.DefinitionText is not null && target.Object is { } module && !PermissionEnforcement.CanSeeDefinition(batch, batch.CurrentDatabase, module))
+            throw SimulatedSqlException.HelpNoTextForObject(objectName!);
         if (target.DefinitionText is { } definition)
         {
             // A procedure group's text runs on through its numbered procedures.
@@ -634,6 +638,7 @@ partial class Simulation
         ("sp_helpuser", 15198) => (142, null),
         ("sp_recompile", 15165) => (18, null),
         ("sp_refreshsqlmodule" or "sp_refreshview", 15165) => (62, "sys.sp_refreshsqlmodule_internal"),
+        ("sp_rename", 297) => (502, null),
         ("sp_rename", 15225) => (637, null),
         ("sp_rename", 15248) => (269, null),
         ("sp_rename", 15335) => (738, null),
@@ -642,6 +647,11 @@ partial class Simulation
         ("sp_serveroption", 15015) => (112, null),
         ("sp_serveroption", 15247) => (28, null),
         ("sp_serveroption", 15600) => (225, null),
+        ("sp_setapprole", 2762 or 15161) => (46, null),
+        ("sp_setapprole", 15002) => (15, null),
+        ("sp_setapprole", 15422) => (38, null),
+        ("sp_setapprole", 15431) => (22, null),
+        ("sp_setapprole", 15600) => (31, null),
         ("sp_settriggerorder", 15165) => (142, null),
         ("sp_spaceused", 15009) => (153, null),
         ("sp_unbindefault", 15148) => (149, null),
@@ -650,6 +660,7 @@ partial class Simulation
         ("sp_unbindrule", 15148) => (137, null),
         ("sp_unbindrule", 15238) => (79, null),
         ("sp_unbindrule", 15239) => (144, null),
+        ("sp_unsetapprole", 15592) => (22, null),
         _ => null,
     };
 
@@ -806,9 +817,24 @@ partial class Simulation
 
         var database = batch.CurrentDatabase;
         var parsed = ParseHelpObjectName(database, objectName);
-        return parsed.Count is >= 1 and <= 3 && TryResolveHelpTarget(batch, parsed, out var target)
+        return parsed.Count is >= 1 and <= 3 && TryResolveHelpTarget(batch, parsed, out var target) && HelpTargetVisible(batch, target)
             ? target
             : throw SimulatedSqlException.HelpObjectDoesNotExist(objectName, database.Name);
+    }
+
+    // An object the principal can't see is one the help procs can't find
+    // (probed 2026-10-04 against SQL Server 2025: Msg 15009 for a view a
+    // restricted principal holds nothing on).
+    private static bool HelpTargetVisible(BatchContext batch, HelpTarget target)
+    {
+        if (batch.Connection.Security.EffectiveIsDbo
+            || !PermissionEnforcement.TryMetadataVisibilityPrincipal(batch, batch.CurrentDatabase, out var principalId)
+            || principalId is not int filter)
+        {
+            return true;
+        }
+        var governing = target.Object is Trigger trigger ? trigger.Parent : target.Object ?? target.Table!;
+        return PermissionChecker.CanViewMetadata(batch.CurrentDatabase, filter, governing.ObjectId, governing.SchemaId, ServerLoginRights.For(batch.Connection));
     }
 
     // Splits a help proc's @objname into its parts and enforces real's

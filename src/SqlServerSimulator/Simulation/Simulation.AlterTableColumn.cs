@@ -1418,6 +1418,11 @@ partial class Simulation
 
         if (attribute == ColumnAttribute.Masked)
         {
+            // Adding or dropping a mask takes ALTER ANY MASK on top of the
+            // table's ALTER (probed 2026-10-04 against SQL Server 2025: Msg
+            // 15247 state 5).
+            if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, context.Batch.DatabaseFor(table), "ALTER ANY MASK"))
+                throw SimulatedSqlException.UserDoesNotHavePermission(state: 5);
             AlterColumnMask(context, table, target, maskingFunctionText);
             return true;
         }

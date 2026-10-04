@@ -39,13 +39,23 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
-        // CREATE USER isn't a modeled named permission — a non-privileged
-        // principal gets Msg 15247 (probe M3).
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
+        // CREATE USER (under ALTER ANY USER, db_accessadmin's) — Msg 15247
+        // without it, db_ddladmin included (probed 2026-10-04 against SQL
+        // Server 2025).
+        if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, context.CurrentDatabase, "CREATE USER"))
             throw SimulatedSqlException.UserDoesNotHavePermission();
-        // The state says what already holds the name: dbo 1, public 6, any other user 5 (probed 2026-09-30).
+        // guest can't be mapped (Msg 15062); a bare CREATE USER's missing
+        // login is reported ahead of a taken name (probed 2026-10-04 against
+        // SQL Server 2025).
+        if (BuiltInToken.Comparer.Equals(name, "guest"))
+            throw SimulatedSqlException.GuestCannotBeMapped();
+        if (bare && loginLink is not null && !context.Simulation.TryResolveServerPrincipalId(loginLink, out _) && !context.Simulation.Logins.ContainsKey(loginLink))
+            throw SimulatedSqlException.NotAValidLogin(loginLink);
+        // The state says what already holds the name and how the statement
+        // was written: dbo 1, a WITHOUT LOGIN user over any other principal 6,
+        // a login-mapped one 5 (probed 2026-09-30 and 2026-10-04).
         if (context.CurrentDatabase.Principals.TryGetValue(name, out var taken))
-            throw SimulatedSqlException.PrincipalAlreadyExists(name, state: taken.PrincipalId == Database.DboPrincipalId ? (byte)1 : taken.PrincipalId == 0 ? (byte)6 : (byte)5);
+            throw SimulatedSqlException.PrincipalAlreadyExists(name, state: taken.PrincipalId == Database.DboPrincipalId ? (byte)1 : taken.PrincipalId == 0 || withoutLogin ? (byte)6 : (byte)5);
         // sa is a login a user can't be made for.
         if (loginLink is not null && BuiltInToken.Comparer.Equals(loginLink, "sa"))
             throw SimulatedSqlException.CannotUseSpecialPrincipal(loginLink);
@@ -177,9 +187,9 @@ partial class Simulation
 
         var database = context.CurrentDatabase;
         database.RejectWriteWhenReadOnly();
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, database)
-            || !database.Principals.TryGetValue(userName, out var user)
-            || user.TypeCode == "R")
+        if (!database.Principals.TryGetValue(userName, out var user)
+            || user.TypeCode == "R"
+            || !PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.Alter, PermissionChecker.ClassDatabasePrincipal, user.PrincipalId, 0))
         {
             throw SimulatedSqlException.CannotAlterUser(userName);
         }
@@ -195,12 +205,13 @@ partial class Simulation
     /// <summary>
     /// Moves <paramref name="principal"/> to <paramref name="newName"/> in the
     /// database's principal map; memberships and permissions key on its id, so
-    /// they follow. A taken name is Msg 15023 state 10.
+    /// they follow. A taken name is Msg 15023, state 7 renaming a user and 10
+    /// a role (probed 2026-10-04 against SQL Server 2025).
     /// </summary>
     private static void RenamePrincipal(Database database, DatabasePrincipal principal, string newName)
     {
         if (database.Principals.ContainsKey(newName))
-            throw SimulatedSqlException.PrincipalAlreadyExists(newName, state: 10);
+            throw SimulatedSqlException.PrincipalAlreadyExists(newName, state: principal.TypeCode == "R" ? (byte)10 : (byte)7);
         _ = database.Principals.TryRemove(principal.Name, out _);
         principal.Name = newName;
         database.Principals[newName] = principal;
@@ -253,13 +264,16 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
-        // CREATE ROLE isn't a modeled named permission — Msg 15247 for a
-        // non-privileged principal (probe M3).
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
+        // CREATE ROLE (under ALTER ANY ROLE, db_securityadmin's) — Msg 15247
+        // without it (probed 2026-10-04 against SQL Server 2025).
+        if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, context.CurrentDatabase, "CREATE ROLE"))
             throw SimulatedSqlException.UserDoesNotHavePermission();
         if (context.CurrentDatabase.Principals.ContainsKey(name))
             throw SimulatedSqlException.PrincipalAlreadyExists(name, state: 8);
-        var owner = Database.DboPrincipalId;
+        // A role belongs to the principal that creates it unless
+        // AUTHORIZATION names another (probed 2026-10-04 against SQL Server
+        // 2025).
+        var owner = context.Connection.Security.Effective.DatabasePrincipalId;
         if (ownerName is not null)
         {
             owner = context.CurrentDatabase.Principals.TryGetValue(ownerName, out var ownerPrincipal)
@@ -300,10 +314,13 @@ partial class Simulation
         // carry it — probe-confirmed, which is why ALTER ANY ROLE isn't in
         // the DDL category. Msg 15151 at state 2 for the denial, state 1 for
         // a name that isn't a role.
-        if (!PermissionEnforcement.HasDatabasePermission(context.Batch, database, Permission.AlterAnyRole))
-            throw SimulatedSqlException.CannotAlterRole(roleName);
+        // A name that is no role is state 1 whoever asks; the denial is state
+        // 2, and the role's owner needs no grant (probed 2026-10-04 against
+        // SQL Server 2025).
         if (!database.Principals.TryGetValue(roleName, out var role) || role.TypeCode != "R")
             throw SimulatedSqlException.CannotAlterRole(roleName, state: 1);
+        if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.Alter, PermissionChecker.ClassDatabasePrincipal, role.PrincipalId, 0))
+            throw SimulatedSqlException.CannotAlterRole(roleName);
         if (role.PrincipalId == 0)
             throw SimulatedSqlException.PublicRoleMembershipFixed();
         if (!database.Principals.TryGetValue(memberName, out var member))
@@ -312,11 +329,21 @@ partial class Simulation
                 ? SimulatedSqlException.UserOrRoleDoesNotExist(memberName)
                 : SimulatedSqlException.CannotChangeMembershipOfPrincipal(isAdd ? "add" : "drop", memberName);
         }
+        // A fixed role's membership is db_owner's to change — ALTER ANY ROLE,
+        // db_securityadmin's, reaches custom roles only; a missing member is
+        // reported first (probed 2026-10-04 against SQL Server 2025).
+        if (role.IsFixedRole && !context.Batch.Connection.Security.EffectiveIsDbo && PermissionEnforcement.Applies(context.Batch, database)
+            && !PermissionChecker.IsOwner(database, context.Batch.Connection.Security.Effective.DatabasePrincipalId))
+        {
+            throw SimulatedSqlException.CannotAlterRole(roleName);
+        }
         // dbo can't be a member of any role, nor a role of itself (both
         // probed 2026-09-25 against SQL Server 2025).
         if (isAdd && member.PrincipalId == Database.DboPrincipalId)
             throw SimulatedSqlException.CannotUseSpecialPrincipal(member.Name);
-        if (isAdd && member.PrincipalId == role.PrincipalId)
+        // Nor through a cycle: a role already holding this one as a member,
+        // however deep (probed 2026-10-04 against SQL Server 2025).
+        if (isAdd && (member.PrincipalId == role.PrincipalId || (member.TypeCode == "R" && PermissionChecker.BuildPrincipalClosure(database, role.PrincipalId).Contains(member.PrincipalId))))
             throw SimulatedSqlException.RoleMemberOfItself();
         RecordSecurityUndo(context, database);
         if (isAdd)
@@ -423,12 +450,15 @@ partial class Simulation
             if (context.Batch.IsSkipping || newName is null)
                 return true;
             context.CurrentDatabase.RejectWriteWhenReadOnly();
-            if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyRole)
-                || !context.CurrentDatabase.Principals.TryGetValue(roleName, out var renamed)
-                || renamed.TypeCode != "R")
+            if (!context.CurrentDatabase.Principals.TryGetValue(roleName, out var renamed)
+                || renamed.TypeCode != "R"
+                || !PermissionEnforcement.HoldsPermission(context.Batch, context.CurrentDatabase, Permission.Alter, PermissionChecker.ClassDatabasePrincipal, renamed.PrincipalId, 0))
             {
                 throw SimulatedSqlException.CannotAlterRole(roleName);
             }
+            // A fixed role keeps its name (Msg 15150).
+            if (renamed.IsFixedRole)
+                throw SimulatedSqlException.CannotAlterFixedRole(roleName);
             RecordSecurityUndo(context, context.CurrentDatabase);
             RenamePrincipal(context.CurrentDatabase, renamed, newName);
             RecordDdlEvent(context, "ALTER_ROLE", null, newName, "ROLE");
@@ -460,29 +490,53 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
-        // DROP USER needs db_owner (no ALTER ANY USER model) — a non-privileged
-        // principal gets Msg 15151 (probe B). DROP ROLE takes ALTER ANY ROLE
-        // (or ALTER / CONTROL on the role) and its own 15151 wording, at
-        // state 1 rather than ALTER ROLE's state 2.
+        // DROP USER takes ALTER ANY USER (db_accessadmin's), DROP ROLE ALTER
+        // ANY ROLE (or ALTER / CONTROL on the role); a principal without it
+        // gets the not-found Msg 15151 (probed 2026-10-04 against SQL Server
+        // 2025), DROP ROLE's at state 1 rather than ALTER ROLE's state 2.
         if (isRole)
         {
-            if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyRole))
+            // CONTROL on the role — its owner's — admits a drop too (probed
+            // 2026-10-04 against SQL Server 2025).
+            if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyRole)
+                && !(context.CurrentDatabase.Principals.TryGetValue(name, out var dropped) && dropped.TypeCode == "R"
+                    && PermissionEnforcement.HoldsPermission(context.Batch, context.CurrentDatabase, Permission.Control, PermissionChecker.ClassDatabasePrincipal, dropped.PrincipalId, 0)))
+            {
                 throw SimulatedSqlException.CannotDropRole(name);
+            }
         }
-        else if (!PermissionEnforcement.IsOwner(context.Batch, context.CurrentDatabase))
+        else if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, context.CurrentDatabase, "ALTER ANY USER"))
         {
             throw SimulatedSqlException.CannotDropUser(name);
         }
         // DROP USER and DROP ROLE each see only their own kind: a role named to
         // DROP USER, or a user to DROP ROLE, is as missing as any other name
         // (probed 2026-09-29 against SQL Server 2025).
-        if (!context.CurrentDatabase.Principals.TryGetValue(name, out var removed) || removed.TypeCode == "R" != isRole)
+        if (!context.CurrentDatabase.Principals.TryGetValue(name, out var removed) || removed.TypeCode == "R" != isRole || removed.TypeCode == "A")
         {
             return ifExists ? true : throw (isRole ? SimulatedSqlException.CannotDropRole(name) : SimulatedSqlException.CannotDropUser(name));
         }
+        // dbo and the fixed roles can't be dropped (Msg 15150), nor guest
+        // (Msg 15539) — probed 2026-10-04 against SQL Server 2025.
+        if (removed.PrincipalId == Database.DboPrincipalId || removed.IsFixedRole)
+            throw isRole ? SimulatedSqlException.CannotDropFixedRole(removed.Name) : SimulatedSqlException.CannotDropDatabaseOwnerUser(removed.Name);
+        if (removed.PrincipalId == Database.GuestPrincipalId)
+            throw SimulatedSqlException.GuestCannotBeDropped();
+        // A role that still has members can't go, which is checked ahead of
+        // what it owns (probed 2026-10-04 against SQL Server 2025); a user in
+        // roles can, its memberships going with it.
+        if (isRole && context.CurrentDatabase.RoleMembers.Exists(rm => rm.RoleId == removed.PrincipalId))
+            throw SimulatedSqlException.RoleHasMembers();
         // A principal that still owns anything can't be dropped; the refusals
         // name neither the principal nor what it owns (probe-confirmed).
         Ownership.RejectDropOfOwner(context.CurrentDatabase, removed.PrincipalId);
+        // Nor one that granted or denied a permission (probed 2026-10-04
+        // against SQL Server 2025).
+        if (context.CurrentDatabase.Permissions.Exists(p => p.GrantorPrincipalId == removed.PrincipalId && p.GranteePrincipalId != removed.PrincipalId
+            && !(p.Class == PermissionChecker.ClassDatabasePrincipal && p.MajorId == removed.PrincipalId)))
+        {
+            throw SimulatedSqlException.PrincipalHasGrantedPermissions();
+        }
         // Nor can one a module runs as — the OWNER sentinel names no principal.
         foreach (var (_, schema) in context.CurrentDatabase.Schemas)
         {
@@ -492,15 +546,14 @@ partial class Simulation
                     throw SimulatedSqlException.PrincipalIsExecutionContext();
             }
         }
-        // A role that still has members can't go (probed 2026-09-25 against
-        // SQL Server 2025); a user in roles can, its memberships going with it.
-        if (isRole && context.CurrentDatabase.RoleMembers.Exists(rm => rm.RoleId == removed.PrincipalId))
-            throw SimulatedSqlException.RoleHasMembers();
         RecordSecurityUndo(context, context.CurrentDatabase);
         _ = context.CurrentDatabase.Principals.TryRemove(name, out _);
-        // Cascade: drop role memberships that reference the removed principal.
+        // Cascade: drop role memberships that reference the removed principal,
+        // and the permissions it held or that were granted on it.
         _ = context.CurrentDatabase.RoleMembers.RemoveAll(rm =>
             rm.RoleId == removed.PrincipalId || rm.MemberId == removed.PrincipalId);
+        _ = context.CurrentDatabase.Permissions.RemoveAll(p =>
+            p.GranteePrincipalId == removed.PrincipalId || (p.Class == PermissionChecker.ClassDatabasePrincipal && p.MajorId == removed.PrincipalId));
         RecordDdlEvent(context, isRole ? "DROP_ROLE" : "DROP_USER", null, name, isRole ? "ROLE" : "SQL USER");
         return true;
     }

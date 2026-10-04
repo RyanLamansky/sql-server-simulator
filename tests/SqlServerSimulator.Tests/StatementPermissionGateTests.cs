@@ -421,7 +421,7 @@ public sealed class StatementPermissionGateTests
         AreEqual("Cannot alter the role 'r1', because it does not exist or you do not have permission.", ex.Message);
         _ = sim.ExecuteNonQuery("grant alter any role to u");
         _ = sim.ExecuteNonQuery("execute as user = 'u'; alter role r1 add member member1");
-        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.database_role_members"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.database_role_members where role_principal_id = user_id('r1')"));
     }
 
     [TestMethod]
@@ -615,13 +615,127 @@ public sealed class StatementPermissionGateTests
     // ---- Ownership chaining: a module body's DDL isn't gated ----
 
     [TestMethod]
-    public void ModuleBody_DdlIsOwnershipChained()
+    public void ModuleBody_DdlIsCheckedAgainstTheCaller()
     {
+        // Ownership chaining covers data access alone: a procedure's DDL,
+        // TRUNCATE and SET IDENTITY_INSERT answer to its caller.
         var sim = Seeded();
         sim.ExecuteBatches(
             "create procedure dbo.dropper as drop table dbo.t1",
-            "grant execute on object::dbo.dropper to u");
-        _ = sim.ExecuteNonQuery("execute as user = 'u'; exec dbo.dropper");
-        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.tables where name = 't1'"));
+            "create procedure dbo.truncater as truncate table dbo.t1",
+            "grant execute on object::dbo.dropper to u",
+            "grant execute on object::dbo.truncater to u");
+        var ex = sim.AssertSqlError("execute as user = 'u'; exec dbo.dropper", 3701);
+        AreEqual("dbo.dropper", ex.Errors[0].Procedure);
+        _ = sim.AssertSqlError("execute as user = 'u'; exec dbo.truncater", 1088);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.tables where name = 't1'"));
+    }
+
+    // ---- Named permissions behind the principal and statement gates (probed 2026-10-04 against SQL Server 2025) ----
+
+    [TestMethod]
+    public void PrincipalDdl_TakesItsNamedPermission()
+    {
+        var sim = Seeded();
+        sim.ExecuteBatches("create user u2 without login", "alter role db_ddladmin add member u");
+        _ = sim.AssertSqlError("execute as user = 'u'; create user x without login", 15247);
+        _ = sim.AssertSqlError("execute as user = 'u'; create role x", 15247);
+        _ = sim.ExecuteNonQuery("alter role db_ddladmin drop member u; alter role db_accessadmin add member u");
+        _ = sim.ExecuteNonQuery("execute as user = 'u'; create user x without login; drop user x");
+        _ = sim.ExecuteNonQuery("alter role db_accessadmin drop member u; alter role db_securityadmin add member u");
+        _ = sim.ExecuteNonQuery("execute as user = 'u'; create role x; create application role ar with password = 'Pw!12345678'");
+        AreEqual("u", sim.ExecuteScalar("select user_name(owning_principal_id) from sys.database_principals where name = 'x'"));
+        AreEqual(15151, sim.AssertSqlError("execute as user = 'u'; alter role db_datareader add member u2", 15151).Number);
+        _ = sim.ExecuteNonQuery("execute as user = 'u'; alter role x add member u2");
+        _ = sim.AssertSqlError("execute as user = 'u'; drop role x", 15144);
+    }
+
+    [TestMethod]
+    public void CreateSchema_OwnedByItsCreator_AndAuthorizationNeedsImpersonation()
+    {
+        var sim = Seeded();
+        sim.ExecuteBatches("create user u2 without login", "grant create schema to u");
+        _ = sim.ExecuteNonQuery("execute as user = 'u'; exec('create schema x')");
+        AreEqual("u", sim.ExecuteScalar("select user_name(principal_id) from sys.schemas where name = 'x'"));
+        AreEqual("Cannot find the user 'u2', because it does not exist or you do not have permission.", sim.AssertSqlError("execute as user = 'u'; exec('create schema y authorization u2')", 15151).Errors[0].Message);
+    }
+
+    [TestMethod]
+    public void SelectInto_AndIdentityInsert_AreGated()
+    {
+        var sim = Seeded();
+        sim.ExecuteBatches("create table dbo.ti (id int identity, a int)", "grant select on dbo.t1 to u");
+        _ = sim.AssertSqlError("execute as user = 'u'; select * into dbo.copy from dbo.t1", 262);
+        _ = sim.ExecuteNonQuery("execute as user = 'u'; select * into #copy from dbo.t1");
+        var ex = sim.AssertSqlError("execute as user = 'u'; set identity_insert dbo.ti on", 1088);
+        AreEqual((byte)11, ex.State);
+    }
+
+    [TestMethod]
+    public void ColumnTypes_TakeReferences()
+    {
+        var sim = Seeded();
+        sim.ExecuteBatches(
+            "create type dbo.ty from int",
+            "create xml schema collection dbo.xc as N'<xsd:schema xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"><xsd:element name=\"a\" type=\"xsd:int\"/></xsd:schema>'",
+            "grant create table to u; grant alter on schema::dbo to u");
+        AreEqual((byte)4, sim.AssertSqlError("execute as user = 'u'; create table dbo.a (c dbo.ty)", 15247).State);
+        var xml = sim.AssertSqlError("execute as user = 'u'; create table dbo.b (c xml(dbo.xc))", 229);
+        AreEqual("229,15247", string.Join(",", xml.Errors.Select(static e => $"{e.Number}")));
+        _ = sim.ExecuteNonQuery("grant references on type::dbo.ty to u");
+        _ = sim.ExecuteNonQuery("execute as user = 'u'; create table dbo.a (c dbo.ty)");
+        _ = sim.AssertSqlError("execute as user = 'u'; declare @x xml(dbo.xc) = '<a>1</a>'", 229);
+    }
+
+    [TestMethod]
+    public void SchemaBinding_TakesReferencesOnTheBoundObjects()
+    {
+        var sim = Seeded();
+        sim.ExecuteBatches("grant create view to u; grant alter on schema::dbo to u; grant select on dbo.t1 to u");
+        var ex = sim.AssertSqlError("execute as user = 'u'; exec('create view dbo.vb with schemabinding as select id from dbo.t1')", 229);
+        AreEqual("229,1088", string.Join(",", ex.Errors.Select(static e => $"{e.Number}")));
+        AreEqual("vb", ex.Errors[0].Procedure);
+        _ = sim.ExecuteNonQuery("grant references on dbo.t1 to u");
+        _ = sim.ExecuteNonQuery("execute as user = 'u'; exec('create view dbo.vb with schemabinding as select id from dbo.t1')");
+    }
+
+    [TestMethod]
+    public void Sequences_TakeUpdateToDraw_AndAlterRefusesCleanly()
+    {
+        var sim = Seeded();
+        sim.ExecuteBatches("create sequence dbo.sq start with 1", "create procedure dbo.p as select next value for dbo.sq n", "grant execute on dbo.p to u");
+        _ = sim.AssertSqlError("execute as user = 'u'; select next value for dbo.sq", 229);
+        AreEqual(1L, sim.ExecuteScalar("execute as user = 'u'; exec dbo.p"));
+        var ex = sim.AssertSqlError("execute as user = 'u'; alter sequence dbo.sq restart with 5", 15151);
+        AreEqual(1, ex.Errors.Count);
+        _ = sim.ExecuteNonQuery("grant update on dbo.sq to u");
+        AreEqual(2L, sim.ExecuteScalar("execute as user = 'u'; select next value for dbo.sq"));
+    }
+
+    [TestMethod]
+    public void SchemaTransfer_DropsTheObjectsPermissions_AndRefusesTheSystemSchemas()
+    {
+        var sim = Seeded();
+        sim.ExecuteBatches("create schema s", "grant select on dbo.t1 to u");
+        _ = sim.AssertSqlError("alter schema sys transfer dbo.t1", 2710);
+        _ = sim.ExecuteNonQuery("alter schema s transfer dbo.t1");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.database_permissions where class = 1 and grantee_principal_id = user_id('u')"));
+    }
+
+    [TestMethod]
+    public void ModuleBodies_ChainMultiStatementFunctions_AndJudgeSynonymsByTheirBase()
+    {
+        var sim = Seeded();
+        sim.ExecuteBatches(
+            "create user u2 without login",
+            "create schema s authorization u2",
+            "create table s.t2 (id int); insert s.t2 values (1)",
+            "create function dbo.tf() returns @r table (id int) as begin insert @r select id from dbo.t1; return; end",
+            "create synonym dbo.sy for s.t2",
+            "create procedure dbo.p as select count(*) from dbo.sy",
+            "grant select on dbo.tf to u; grant execute on dbo.p to u");
+        AreEqual(0, sim.ExecuteScalar("execute as user = 'u'; select count(*) from dbo.tf()"));
+        var ex = sim.AssertSqlError("execute as user = 'u'; exec dbo.p", 229);
+        Contains("object 't2'", ex.Message);
     }
 }

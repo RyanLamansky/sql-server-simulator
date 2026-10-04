@@ -34,13 +34,18 @@ partial class Simulation
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
 
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
+        // ALTER ANY APPLICATION ROLE, db_securityadmin's (probed 2026-10-04
+        // against SQL Server 2025).
+        if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, context.CurrentDatabase, "ALTER ANY APPLICATION ROLE"))
             throw SimulatedSqlException.UserDoesNotHavePermission();
         var database = context.CurrentDatabase;
         if (database.Principals.ContainsKey(name))
-            throw SimulatedSqlException.PrincipalAlreadyExists(name);
+            throw SimulatedSqlException.PrincipalAlreadyExists(name, state: 11);
         if (password!.Length > PasswordHash.MaxClearTextChars)
             throw SimulatedSqlException.PasswordEncryptionInvalidValue();
+        // An application role's password always meets the login policy
+        // (probed 2026-10-04 against SQL Server 2025: 'x' is Msg 33062).
+        ValidateLoginPassword(name, password);
 
         RecordSecurityUndo(context, database);
         database.Principals[name] = new DatabasePrincipal(
@@ -69,11 +74,12 @@ partial class Simulation
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
 
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
-            throw SimulatedSqlException.UserDoesNotHavePermission();
         var database = context.CurrentDatabase;
-        if (!TryGetApplicationRole(database, name, out var role))
+        if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, database, "ALTER ANY APPLICATION ROLE")
+            || !TryGetApplicationRole(database, name, out var role))
+        {
             throw SimulatedSqlException.CannotAlterApplicationRole(name);
+        }
         RecordSecurityUndo(context, database);
         if (password is not null)
         {
@@ -86,7 +92,7 @@ partial class Simulation
         if (newName is not null && !BuiltInToken.Comparer.Equals(newName, name))
         {
             if (database.Principals.ContainsKey(newName))
-                throw SimulatedSqlException.PrincipalAlreadyExists(newName);
+                throw SimulatedSqlException.PrincipalAlreadyExists(newName, state: 13);
             var renamed = new DatabasePrincipal(
                 role.PrincipalId, newName, ApplicationRoleTypeCode, "APPLICATION_ROLE",
                 isFixedRole: false, role.CreateDate)
@@ -116,8 +122,8 @@ partial class Simulation
             return true;
         context.CurrentDatabase.RejectWriteWhenReadOnly();
 
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, context.CurrentDatabase))
-            throw SimulatedSqlException.UserDoesNotHavePermission();
+        if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, context.CurrentDatabase, "ALTER ANY APPLICATION ROLE"))
+            throw SimulatedSqlException.CannotDropApplicationRole(name);
         var database = context.CurrentDatabase;
         if (!TryGetApplicationRole(database, name, out var role))
             throw SimulatedSqlException.CannotDropApplicationRole(name);
@@ -252,6 +258,22 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
+        // Real's own preamble, in its order (probed 2026-10-04 against SQL
+        // Server 2025): no transaction, a role name, a known @encrypt, and
+        // only at the ad hoc level — never from a procedure or dynamic SQL.
+        if (batch.Connection.CurrentTransaction is not null)
+            throw SimulatedSqlException.ProcedureCannotRunInTransaction("sp_setapprole");
+        if (!args.HasRoleName || args.RoleName.IsNull)
+            throw SimulatedSqlException.RoleNameParameterRequired();
+        if (args.HasEncrypt && !args.Encrypt.IsNull
+            && args.Encrypt.CoerceTo(SqlType.NVarchar).AsString.Trim() is var encrypt
+            && !encrypt.Equals("none", StringComparison.OrdinalIgnoreCase) && !encrypt.Equals("odbc", StringComparison.OrdinalIgnoreCase))
+        {
+            throw SimulatedSqlException.InvalidSystemProcedureOption("sp_setapprole");
+        }
+        if (batch.ProcFrame is not null || batch.Connection.NestingLevel > 0)
+            throw SimulatedSqlException.ApplicationRoleOnlyAtAdHocLevel();
+
         var security = batch.Connection.Security;
         if (security.HasApplicationRole)
             throw SimulatedSqlException.SetApplicationRoleNotInvokedCorrectly();
@@ -289,8 +311,10 @@ partial class Simulation
         var cookie = args.HasCookie && !args.Cookie.IsNull
             ? args.Cookie.CoerceTo(SqlType.Varbinary).AsBytes.ToArray()
             : null;
+        // A cookie that doesn't match an active role's is state 4, no role
+        // at all state 1 (probed 2026-10-04 against SQL Server 2025).
         if (!batch.Connection.Security.TryUnsetApplicationRole(cookie))
-            throw SimulatedSqlException.CannotUnsetApplicationRole();
+            throw SimulatedSqlException.CannotUnsetApplicationRole(batch.Connection.Security.HasApplicationRole ? (byte)4 : (byte)1);
     }
 
     /// <summary>Length of the opaque <c>sp_setapprole</c> cookie, matching real's 50-byte <c>varbinary</c>.</summary>
@@ -311,6 +335,8 @@ partial class Simulation
         public bool HasPassword;
         public SqlValue CreateCookie;
         public bool HasCreateCookie;
+        public SqlValue Encrypt;
+        public bool HasEncrypt;
 
         /// <summary>The <c>@cookie OUTPUT</c> slot sp_setapprole writes the new cookie into.</summary>
         public VariableSlot? CookieSlot;
@@ -322,7 +348,7 @@ partial class Simulation
 
     /// <summary>
     /// Binds positional / named EXEC arguments for <c>sp_setapprole</c>, whose
-    /// positional order is (@rolename, @password, @fCreateCookie, @cookie).
+    /// positional order is (@rolename, @password, @encrypt, @fCreateCookie, @cookie).
     /// A <c>@cookie</c> arg with an OUTPUT slot is the write-back target;
     /// without one it is an input, which only <c>sp_unsetapprole</c> reads.
     /// </summary>
@@ -342,6 +368,9 @@ partial class Simulation
                         result.CookieSlot = outputSlot;
                     else
                         (result.Cookie, result.HasCookie) = (arg.Value, true);
+                    break;
+                case var n when !isUnset && BuiltInToken.Equals(n, "encrypt"):
+                    (result.Encrypt, result.HasEncrypt) = (arg.Value, true);
                     break;
                 case var n when !isUnset && BuiltInToken.Equals(n, "fCreateCookie"):
                     (result.CreateCookie, result.HasCreateCookie) = (arg.Value, true);
@@ -363,8 +392,9 @@ partial class Simulation
             (true, 0) => "cookie",
             (false, 0) => "rolename",
             (false, 1) => "password",
-            (false, 2) => "fCreateCookie",
-            (false, 3) => "cookie",
+            (false, 2) => "encrypt",
+            (false, 3) => "fCreateCookie",
+            (false, 4) => "cookie",
             _ => throw SimulatedSqlException.InvalidProcedureParameters(procName),
         };
     }

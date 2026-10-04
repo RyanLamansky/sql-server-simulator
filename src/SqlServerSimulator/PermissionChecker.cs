@@ -189,8 +189,28 @@ internal static class PermissionEnforcement
     /// check) for a session that bypasses, and for a cross-database reference
     /// whose target principal is <c>dbo</c>.
     /// </summary>
-    private static bool TryResolveScope(BatchContext batch, Database target, out int principalId) =>
-        TryResolveScope(batch, target, objectId: 0, out principalId);
+    /// <remarks>
+    /// This is the form the DDL and statement gates ask, and it holds inside a
+    /// module body too: ownership chaining covers data access alone, so a
+    /// procedure's <c>TRUNCATE</c>, <c>CREATE TABLE</c> or <c>ALTER TABLE</c>
+    /// is checked against its caller (probed 2026-10-04 against SQL Server
+    /// 2025), as is every statement gate a body reaches.
+    /// </remarks>
+    private static bool TryResolveScope(BatchContext batch, Database target, out int principalId)
+    {
+        if (Bypasses(batch.Connection, target) || batch.CreateTimeBinding)
+        {
+            principalId = 0;
+            return false;
+        }
+        if (ReferenceEquals(target, batch.CurrentDatabase))
+        {
+            principalId = batch.Connection.Security.Effective.DatabasePrincipalId;
+            return true;
+        }
+        principalId = ResolveCrossDatabasePrincipal(batch.Connection, target).PrincipalId;
+        return principalId != Database.DboPrincipalId;
+    }
 
     /// <summary>
     /// <see cref="TryResolveScope(BatchContext, Database, out int)"/> for a
@@ -293,6 +313,15 @@ internal static class PermissionEnforcement
         var effective = connection.Security.Effective;
         if (effective.IsDatabaseScoped && !AcceptsDatabaseScopedToken(connection.Simulation, connection.CurrentDatabase, target))
         {
+            // An untrusted token still reaches a database that lets guest in,
+            // as guest (probed 2026-10-04 against SQL Server 2025: USE master
+            // under EXECUTE AS USER answers USER_NAME() = guest).
+            if (target.Principals.TryGetValue("guest", out var guest)
+                && PermissionChecker.IsGranted(target, Database.GuestPrincipalId, Permission.Connect, PermissionChecker.ClassDatabase, 0, 0))
+            {
+                principal = guest;
+                return true;
+            }
             principal = null!;
             return false;
         }
@@ -325,14 +354,25 @@ internal static class PermissionEnforcement
     /// against SQL Server 2025, where the same Msg 916 answers every cross-database
     /// catalog view, filtered and unfiltered alike).
     /// </summary>
-    internal static int? MetadataVisibilityPrincipal(BatchContext batch, Database target)
+    internal static int? MetadataVisibilityPrincipal(BatchContext batch, Database target) =>
+        RestrictedPrincipal(batch, target) is int principalId ? FilteringPrincipal(target, principalId, Rights(batch)) : null;
+
+    /// <summary>
+    /// The principal answering for <paramref name="target"/>, or
+    /// <see langword="null"/> for a session that bypasses every check there —
+    /// Msg 916 when the login can't reach it. The principal-keyed catalog
+    /// views filter by this rather than <see cref="MetadataVisibilityPrincipal"/>,
+    /// since an object-catalog bypass such as <c>db_ddladmin</c>'s leaves the
+    /// principals filtered (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static int? RestrictedPrincipal(BatchContext batch, Database target)
     {
         if (Bypasses(batch.Connection, target))
             return null;
         var principalId = ReferenceEquals(target, batch.CurrentDatabase)
             ? batch.Connection.Security.Effective.DatabasePrincipalId
             : ResolveCrossDatabasePrincipal(batch.Connection, target).PrincipalId;
-        return FilteringPrincipal(target, principalId, Rights(batch));
+        return principalId == Database.DboPrincipalId ? null : principalId;
     }
 
     /// <summary>
@@ -362,6 +402,41 @@ internal static class PermissionEnforcement
             return false;
         principalId = FilteringPrincipal(target, principal.PrincipalId, Rights(batch));
         return true;
+    }
+
+    /// <summary>
+    /// The visibility test the catalog procedures apply to each object they
+    /// list, or <see langword="null"/> when the session sees the whole catalog
+    /// — the same rule the catalog views filter by.
+    /// </summary>
+    internal static Func<Schemas.SchemaObject, bool>? ObjectVisibility(BatchContext batch, Database database)
+    {
+        if (!TryMetadataVisibilityPrincipal(batch, database, out var principalId))
+            return static _ => false;
+        if (principalId is not int filter)
+            return null;
+        var closure = PermissionChecker.BuildPrincipalClosure(database, filter);
+        var server = Rights(batch);
+        return obj => PermissionChecker.CanViewMetadata(database, closure, obj.ObjectId, obj.SchemaId, server);
+    }
+
+    /// <summary>
+    /// Whether the session may read <paramref name="obj"/>'s definition text —
+    /// <c>OBJECT_DEFINITION</c>, <c>sys.sql_modules.definition</c>,
+    /// <c>sp_helptext</c>: it must see the object and hold one of the
+    /// permissions <see cref="PermissionChecker.CanViewDefinition"/> names, a
+    /// trigger's answered on its parent. A <c>dbo</c> session pays one frame read.
+    /// </summary>
+    internal static bool CanSeeDefinition(BatchContext batch, Database database, Schemas.SchemaObject obj)
+    {
+        if (!TryMetadataVisibilityPrincipal(batch, database, out var principalId))
+            return false;
+        if (principalId is not int filter)
+            return true;
+        var governing = obj is Schemas.Trigger trigger ? trigger.Parent : obj;
+        var server = Rights(batch);
+        return PermissionChecker.CanViewMetadata(database, filter, governing.ObjectId, governing.SchemaId, server)
+            && PermissionChecker.CanViewDefinition(database, filter, governing.ObjectId, governing.SchemaId, server);
     }
 
     /// <summary>The principal a catalog read of <paramref name="database"/> filters by, or <see langword="null"/> when <paramref name="principalId"/> sees everything there.</summary>
@@ -436,6 +511,18 @@ internal static class PermissionEnforcement
     private static void CheckReadSource(BatchContext batch, ReferencedSecurable s, Dictionary<int, ColumnReadTarget>? readColumns)
     {
         var database = s.Database;
+        // Inside a module body a synonym's chain is judged on the object it
+        // stands for, which a broken chain names (probed 2026-10-04 against
+        // SQL Server 2025).
+        if (!batch.EnforcesPermissions && ReferenceEquals(database, batch.CurrentDatabase)
+            && Parser.Expressions.ObjectProperty.FindObject(database, s.ObjectId) is Schemas.Synonym synonym
+            && synonym.BaseObject.Count <= 2
+            && batch.TryResolveSchema(synonym.BaseObject, out var baseSchema)
+            && baseSchema.TryFindInSharedNamespace(synonym.BaseObject.Leaf, out var baseObject))
+        {
+            CheckObject(batch, database, s.Permission, baseObject.ObjectId, baseObject.SchemaId, baseObject.Name, baseSchema.Name);
+            return;
+        }
         if (!TryResolveScope(batch, database, s.ObjectId, out var principalId))
             return;
         var permission = Permission.Resolve(s.Permission);
@@ -450,8 +537,16 @@ internal static class PermissionEnforcement
         // A passed EXECUTE check on a scalar UDF invoked in this query memos
         // the object so the per-row invocation seam skips the re-check.
         if (s.Permission.Equals("EXECUTE", StringComparison.OrdinalIgnoreCase))
-            _ = (batch.ExecuteCheckedFunctionIds ??= []).Add(s.ObjectId);
+            _ = (batch.ExecuteCheckedFunctionIds ??= []).Add(CheckedKey(batch, s.ObjectId));
     }
+
+    /// <summary>
+    /// The memo key of a passed once-per-batch check: the object and the
+    /// principal it passed for, so a check that passed before an <c>EXECUTE
+    /// AS</c> or a <c>REVERT</c> doesn't answer for the identity after it.
+    /// </summary>
+    private static long CheckedKey(BatchContext batch, int objectId) =>
+        ((long)batch.Connection.Security.Effective.DatabasePrincipalId << 32) | (uint)objectId;
 
     /// <summary>
     /// Checks the reads of a subquery that carries a securable list of its own —
@@ -739,36 +834,60 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckColumns(BatchContext batch, Permission permission, ColumnReadTarget target)
     {
+        if (ColumnsDenial(batch, permission, target) is { } denied)
+            throw denied;
+    }
+
+    /// <summary><see cref="CheckColumns"/> returning the refusal rather than raising it, so a statement can report every permission it lacks together.</summary>
+    internal static SimulatedSqlException? ColumnsDenial(BatchContext batch, Permission permission, ColumnReadTarget target)
+    {
         if (target.Ordinals.Count == 0)
-            return;
+            return null;
         var database = batch.DatabaseFor(target.Securable);
-        if (TryResolveScope(batch, database, target.Securable.ObjectId, out var principalId))
-            CheckColumnGrants(database, principalId, permission, target, Rights(batch));
+        return TryResolveScope(batch, database, target.Securable.ObjectId, out var principalId)
+            ? ColumnGrantsDenial(database, principalId, permission, target, Rights(batch))
+            : null;
+    }
+
+    /// <summary>
+    /// Joins the refusals of one statement's checks into the single report real
+    /// sends — a <c>DELETE … WHERE</c> lacking both is Msg 229 for
+    /// <c>SELECT</c> and again for <c>DELETE</c>, each column an UPDATE may not
+    /// read or write its own Msg 230 (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException? Combine(SimulatedSqlException? first, SimulatedSqlException? second) =>
+        first is null ? second : second is null ? first : SimulatedSqlException.Aggregate([first, second]);
+
+    private static void CheckColumnGrants(Database database, int principalId, Permission permission, ColumnReadTarget target, ServerLoginRights server)
+    {
+        if (ColumnGrantsDenial(database, principalId, permission, target, server) is { } denied)
+            throw denied;
     }
 
     /// <summary>
     /// Column-level enforcement of <paramref name="permission"/> (SELECT for
-    /// reads, UPDATE for writes). When the principal has no positive grant
-    /// reaching the object at all, the object-level check has already failed →
-    /// Msg 229; otherwise each column is checked in ascending ordinal order and
-    /// the first inaccessible one raises Msg 230.
+    /// reads, UPDATE for writes). While no column of the object is reachable
+    /// the refusal is the object-level Msg 229; otherwise every column the
+    /// statement touches and may not is its own Msg 230, in ascending ordinal
+    /// order (probed 2026-10-04 against SQL Server 2025).
     /// </summary>
-    private static void CheckColumnGrants(Database database, int principalId, Permission permission, ColumnReadTarget target, ServerLoginRights server)
+    private static SimulatedSqlException? ColumnGrantsDenial(Database database, int principalId, Permission permission, ColumnReadTarget target, ServerLoginRights server)
     {
-        // Object-level Msg 229 when the object is inaccessible at object grain
-        // (no grant, or an object / schema / db DENY overriding the grant) AND
-        // the principal holds no column-level grant on it — otherwise the object
-        // is partially accessible and an inaccessible column raises Msg 230.
         var securable = target.Securable;
-        var schemaName = SchemaNameFor(database, securable.SchemaId);
-        var objectAccessible = PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassObject, securable.ObjectId, securable.SchemaId, server);
-        if (!objectAccessible && !PermissionChecker.HasColumnLevelGrant(database, principalId, permission, securable.ObjectId))
-            throw SimulatedSqlException.PermissionDenied(permission.CanonicalName, securable.Name, database.Name, schemaName);
+        var closure = PermissionChecker.BuildPrincipalClosure(database, principalId);
+        var objectAccessible = PermissionChecker.IsGrantedInClosure(database, closure, permission, PermissionChecker.ClassObject, securable.ObjectId, securable.SchemaId, server);
+        if (!objectAccessible
+            && !PermissionChecker.HasAccessibleColumn(database, closure, permission, securable.ObjectId, securable.SchemaId, server))
+        {
+            return SimulatedSqlException.PermissionDenied(permission.CanonicalName, securable.Name, database.Name, SchemaNameFor(database, securable.SchemaId));
+        }
+        List<SimulatedSqlException>? denied = null;
         foreach (var ordinal in target.OrdinalsToCheck())
         {
-            if (!PermissionChecker.IsColumnGranted(database, principalId, permission, securable.ObjectId, securable.SchemaId, ordinal, server))
-                throw SimulatedSqlException.ColumnPermissionDenied(permission.CanonicalName, target.Columns[ordinal - 1].Name, securable.Name, database.Name, schemaName);
+            if (!PermissionChecker.IsColumnGranted(database, closure, permission, securable.ObjectId, securable.SchemaId, ordinal, server))
+                (denied ??= []).Add(SimulatedSqlException.ColumnPermissionDenied(permission.CanonicalName, target.Columns[ordinal - 1].Name, securable.Name, database.Name, SchemaNameFor(database, securable.SchemaId)));
         }
+        return denied is null ? null : SimulatedSqlException.Aggregate(denied);
     }
 
     /// <summary>
@@ -785,10 +904,39 @@ internal static class PermissionEnforcement
         if (!TryResolveScope(batch, database, function.ObjectId, out var principalId))
             return;
         var checkedIds = batch.ExecuteCheckedFunctionIds ??= [];
-        if (!checkedIds.Add(function.ObjectId))
+        var key = CheckedKey(batch, function.ObjectId);
+        if (checkedIds.Contains(key))
             return;
         if (!PermissionChecker.IsGranted(database, principalId, Permission.Execute, PermissionChecker.ClassObject, function.ObjectId, function.SchemaId, Rights(batch)))
             throw SimulatedSqlException.PermissionDenied("EXECUTE", function.Name, database.Name, function.Schema.Name);
+        _ = checkedIds.Add(key);
+    }
+
+    /// <summary>Checks <c>UPDATE</c> on a sequence a <c>NEXT VALUE FOR</c> draws from, once per statement (memoized beside the scalar functions' <c>EXECUTE</c>).</summary>
+    internal static void CheckSequenceUpdate(BatchContext batch, Schemas.Sequence sequence)
+    {
+        var checkedIds = batch.ExecuteCheckedFunctionIds ??= [];
+        var key = CheckedKey(batch, sequence.ObjectId);
+        if (checkedIds.Contains(key))
+            return;
+        CheckSchemaObject(batch, "UPDATE", sequence);
+        _ = checkedIds.Add(key);
+    }
+
+    /// <summary>
+    /// Checks a permission on an XML schema collection in the current
+    /// database — <c>REFERENCES</c> for a column typed by it, <c>EXECUTE</c>
+    /// for a variable — raising Msg 229 naming it (probed 2026-10-04 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static void CheckXmlSchemaCollection(BatchContext batch, Schemas.XmlSchemaCollection collection, string permission)
+    {
+        var database = batch.CurrentDatabase;
+        if (TryResolveScope(batch, database, out var principalId)
+            && !PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), PermissionChecker.ClassXmlSchemaCollection, collection.Id, collection.SchemaId, Rights(batch)))
+        {
+            throw SimulatedSqlException.PermissionDenied(permission, collection.Name, database.Name, SchemaNameFor(database, collection.SchemaId));
+        }
     }
 
     /// <summary>Checks one permission on one object in <paramref name="database"/>; throws Msg 229 (with optional Procedure attribution) on denial. No-op when checks don't apply.</summary>
@@ -810,6 +958,20 @@ internal static class PermissionEnforcement
             return;
         var database = batch.DatabaseFor(securable);
         CheckObject(batch, database, permission, securable.ObjectId, securable.SchemaId, securable.Name, SchemaNameFor(database, securable.SchemaId), procedure);
+    }
+
+    /// <summary><see cref="CheckSchemaObject"/> returning a Msg 229 refusal rather than raising it, so a statement can report every permission it lacks together.</summary>
+    internal static SimulatedSqlException? SchemaObjectDenial(BatchContext batch, string permission, Schemas.SchemaObject securable)
+    {
+        try
+        {
+            CheckSchemaObject(batch, permission, securable);
+            return null;
+        }
+        catch (SimulatedSqlException denied) when (denied.Number == 229)
+        {
+            return denied;
+        }
     }
 
     /// <summary>
@@ -834,7 +996,7 @@ internal static class PermissionEnforcement
     internal static Schemas.SchemaObject SecurableFor(BatchContext batch, MultiPartName writtenName, Schemas.SchemaObject resolved) =>
         batch.TryResolveSynonym(writtenName, out var synonym) ? synonym : resolved;
 
-    private static string SchemaNameFor(Database database, int schemaId)
+    internal static string SchemaNameFor(Database database, int schemaId)
     {
         foreach (var (_, schema) in database.Schemas)
         {
@@ -870,6 +1032,11 @@ internal static class PermissionEnforcement
     internal static bool HasDatabasePermission(BatchContext batch, Database database, Permission permission) =>
         !TryResolveScope(batch, database, out var principalId)
         || PermissionChecker.IsGranted(database, principalId, permission, PermissionChecker.ClassDatabase, 0, 0, Rights(batch));
+
+    /// <summary>Whether the effective principal holds a database permission named by its canonical text — one the <see cref="Permission"/> enum doesn't carry. True for dbo / module bodies.</summary>
+    internal static bool HoldsDatabasePermission(BatchContext batch, Database database, string permissionName) =>
+        !TryResolveScope(batch, database, out var principalId)
+        || PermissionChecker.IsGrantedByName(database, principalId, permissionName, PermissionChecker.ClassDatabase, 0, 0, Rights(batch));
 
     /// <summary>
     /// Whether the effective principal holds CONTROL on <paramref name="schema"/>
@@ -966,7 +1133,7 @@ internal static class PermissionEnforcement
     /// </summary>
     internal static void CheckCreateModule(BatchContext batch, string permission, string moduleName, Schema schema)
     {
-        if (!Applies(batch, schema.Database))
+        if (Bypasses(batch.Connection, schema.Database) || batch.CreateTimeBinding)
             return;
         if (!HasDatabasePermission(batch, schema.Database, permission))
             throw SimulatedSqlException.CreateModulePermissionDenied(permission, schema.Database.Name, moduleName);
@@ -1002,6 +1169,7 @@ internal static class PermissionChecker
 {
     // Fixed database-role principal ids (real SQL Server convention).
     private const int DbOwner = 16384;
+    private const int DbAccessAdmin = 16385;
     private const int DbSecurityAdmin = 16386;
     private const int DbDdlAdmin = 16387;
     private const int DbBackupOperator = 16389;
@@ -1034,53 +1202,123 @@ internal static class PermissionChecker
     internal const byte ClassServerPrincipal = 101;
 
     /// <summary>
+    /// The database permissions each fixed database role carries — what
+    /// <c>fn_my_permissions(NULL, 'DATABASE')</c> lists for a member, less
+    /// <c>CONNECT</c> and the two column-encryption permissions every user holds
+    /// (probed 2026-10-04 against SQL Server 2025). The permission graph takes
+    /// them from there: <c>db_ddladmin</c>'s <c>ALTER ANY SCHEMA</c> reaches
+    /// every object's <c>ALTER</c>, and <c>db_owner</c>'s <c>CONTROL</c> all of it.
+    /// </summary>
+    private static readonly (int RoleId, string[] Permissions)[] FixedRoleGrants =
+    [
+        (DbOwner, ["CONTROL"]),
+        (DbAccessAdmin, ["ALTER ANY USER", "CREATE SCHEMA"]),
+        (DbSecurityAdmin, ["ALTER ANY APPLICATION ROLE", "ALTER ANY ROLE", "CREATE SCHEMA", "VIEW DEFINITION"]),
+        (DbDdlAdmin,
+        [
+            "ALTER ANY ASSEMBLY", "ALTER ANY ASYMMETRIC KEY", "ALTER ANY CERTIFICATE", "ALTER ANY CONTRACT",
+            "ALTER ANY DATABASE DDL TRIGGER", "ALTER ANY DATABASE EVENT NOTIFICATION", "ALTER ANY DATASPACE",
+            "ALTER ANY EXTERNAL DATA SOURCE", "ALTER ANY EXTERNAL FILE FORMAT", "ALTER ANY EXTERNAL JOB",
+            "ALTER ANY EXTERNAL LANGUAGE", "ALTER ANY EXTERNAL LIBRARY", "ALTER ANY EXTERNAL MODEL", "ALTER ANY EXTERNAL STREAM",
+            "ALTER ANY FULLTEXT CATALOG", "ALTER ANY MESSAGE TYPE", "ALTER ANY REMOTE SERVICE BINDING", "ALTER ANY ROUTE",
+            "ALTER ANY SCHEMA", "ALTER ANY SERVICE", "ALTER ANY SYMMETRIC KEY", "ALTER LEDGER", "CHECKPOINT",
+            "CREATE AGGREGATE", "CREATE ASSEMBLY", "CREATE ASYMMETRIC KEY", "CREATE CERTIFICATE", "CREATE CONTRACT",
+            "CREATE DATABASE DDL EVENT NOTIFICATION", "CREATE DEFAULT", "CREATE EXTERNAL LANGUAGE", "CREATE EXTERNAL LIBRARY",
+            "CREATE EXTERNAL MODEL", "CREATE FULLTEXT CATALOG", "CREATE FUNCTION", "CREATE MESSAGE TYPE", "CREATE PROCEDURE",
+            "CREATE QUEUE", "CREATE REMOTE SERVICE BINDING", "CREATE ROUTE", "CREATE RULE", "CREATE SCHEMA", "CREATE SERVICE",
+            "CREATE SYMMETRIC KEY", "CREATE SYNONYM", "CREATE TABLE", "CREATE TYPE", "CREATE VIEW", "CREATE XML SCHEMA COLLECTION",
+            "ENABLE LEDGER", "REFERENCES",
+        ]),
+        (DbBackupOperator, ["BACKUP DATABASE", "BACKUP LOG", "CHECKPOINT"]),
+        (DbDataReader, ["SELECT"]),
+        (DbDataWriter, ["DELETE", "INSERT", "UPDATE"]),
+    ];
+
+    /// <summary>The database permissions the two deny roles deny their members, as a database-scope <c>DENY</c> would.</summary>
+    private static readonly (int RoleId, string[] Permissions)[] FixedRoleDenies =
+    [
+        (DbDenyDataReader, ["SELECT"]),
+        (DbDenyDataWriter, ["DELETE", "INSERT", "UPDATE"]),
+    ];
+
+    /// <summary>
     /// Whether <paramref name="principalId"/> may read the catalog view with id
-    /// <paramref name="viewId"/>: a <c>DENY SELECT</c> reaching it refuses, and
-    /// one of the system objects the database grants <c>public</c>
-    /// <c>SELECT</c> on (<see cref="Database.SeedsPublicSelect"/>)
+    /// <paramref name="viewId"/>: a <c>DENY SELECT</c> reaching it refuses —
+    /// <c>db_denydatareader</c>'s included (probed 2026-10-04 against SQL
+    /// Server 2025) — and one of the system objects the database grants
+    /// <c>public</c> <c>SELECT</c> on (<see cref="Database.SeedsPublicSelect"/>)
     /// needs that grant, or another, still standing — a <c>REVOKE</c> of the
-    /// seeded one refuses it (probed 2026-09-28 against SQL Server 2025). The
-    /// deny roles and data roles don't reach the catalog.
+    /// seeded one refuses it (probed 2026-09-28 against SQL Server 2025).
     /// </summary>
     internal static bool CanReadCatalogView(Database database, int principalId, int viewId, int schemaId)
     {
         var closure = BuildClosure(database, principalId);
-        var satisfiers = BuildSatisfiers(Permission.Select, ClassObject, viewId, schemaId, columnOrdinal: 0);
-        if (HasMatchingRow(database, closure, satisfiers, deny: true))
+        var satisfiers = BuildSatisfiers(database, Permission.Select, ClassObject, viewId, schemaId, columnOrdinal: 0);
+        // A database-scope DENY SELECT doesn't reach the INFORMATION_SCHEMA
+        // views (probed 2026-10-04 against SQL Server 2025).
+        if (schemaId == Database.InformationSchemaId)
+            _ = satisfiers.RemoveAll(s => s.Class == ClassDatabase);
+        if (HasMatchingRow(database, closure, satisfiers, deny: true) || FixedRolesMatch(closure, satisfiers, deny: true))
             return false;
-        return !database.SeedsPublicSelect(viewId)
+        return !(database.SeedsPublicSelect(viewId) || Array.IndexOf(UngrantedSystemObjectIds, viewId) >= 0)
             || closure.Contains(DbOwner)
-            || HasMatchingRow(database, closure, satisfiers, deny: false);
+            || HasMatchingRow(database, closure, satisfiers, deny: false)
+            || FixedRolesMatch(closure, satisfiers, deny: false);
     }
 
-    /// <summary>Whether the effective principal holds <paramref name="permission"/> on the described securable. An off-catalog (<see cref="Permission.Other"/>) request is never satisfied.</summary>
-    internal static bool IsGranted(Database database, int principalId, Permission permission, byte securableClass, int majorId, int schemaId, ServerLoginRights server = default)
-    {
-        if (permission == Permission.Other)
-            return false;
+    /// <summary>
+    /// The system views and functions a user database grants nobody — every
+    /// one a restricted principal there may not read, which
+    /// <c>HAS_PERMS_BY_NAME</c> lists (probed 2026-10-04 against SQL Server
+    /// 2025): <c>sys.sql_expression_dependencies</c>, the
+    /// <c>system_internals_*</c> trio, <c>sysaltfiles</c>,
+    /// <c>database_mirroring_witnesses</c> and five internal functions.
+    /// </summary>
+    private static readonly int[] UngrantedSystemObjectIds =
+        [-1057103479, -1052007962, -857107446, -495, -488, -487, -486, -432442948, -292564105, -214, -192];
 
-        var closure = BuildClosure(database, principalId);
+    /// <summary>Whether the effective principal holds <paramref name="permission"/> on the described securable. An off-catalog (<see cref="Permission.Other"/>) request is never satisfied.</summary>
+    internal static bool IsGranted(Database database, int principalId, Permission permission, byte securableClass, int majorId, int schemaId, ServerLoginRights server = default) =>
+        permission != Permission.Other
+        && IsGrantedInClosure(database, BuildClosure(database, principalId), permission.CanonicalName, securableClass, majorId, schemaId, server, permission);
+
+    /// <summary><see cref="IsGranted(Database, int, Permission, byte, int, int, ServerLoginRights)"/> over a principal closure the caller already built.</summary>
+    internal static bool IsGrantedInClosure(Database database, HashSet<int> closure, Permission permission, byte securableClass, int majorId, int schemaId, ServerLoginRights server = default) =>
+        permission != Permission.Other
+        && IsGrantedInClosure(database, closure, permission.CanonicalName, securableClass, majorId, schemaId, server, permission);
+
+    /// <summary>
+    /// <see cref="IsGranted(Database, int, Permission, byte, int, int, ServerLoginRights)"/>
+    /// for a permission named by its canonical text — one the
+    /// <see cref="Permission"/> enum doesn't carry (<c>CREATE ROLE</c>,
+    /// <c>ALTER ANY USER</c>, …), answered from the same graph.
+    /// </summary>
+    internal static bool IsGrantedByName(Database database, int principalId, string permissionName, byte securableClass, int majorId, int schemaId, ServerLoginRights server = default) =>
+        IsGrantedInClosure(database, BuildClosure(database, principalId), permissionName, securableClass, majorId, schemaId, server, Permission.Resolve(permissionName));
+
+    private static bool IsGrantedInClosure(Database database, HashSet<int> closure, string permissionName, byte securableClass, int majorId, int schemaId, ServerLoginRights server, Permission permission)
+    {
         if (OwnsSecurable(database, closure, securableClass, majorId, schemaId))
             return true;
-        var satisfiers = BuildSatisfiers(permission, securableClass, majorId, schemaId, columnOrdinal: 0);
+        var satisfiers = BuildSatisfiers(database, permissionName, securableClass, majorId, schemaId, columnOrdinal: 0);
 
-        // DENY binds first — explicit D rows, then the deny-roles.
-        if (HasMatchingRow(database, closure, satisfiers, deny: true))
-            return false;
-        if (permission.Category == PermissionCategory.Read && closure.Contains(DbDenyDataReader))
-            return false;
-        if (permission.Category == PermissionCategory.Write && closure.Contains(DbDenyDataWriter))
+        // DENY binds first — explicit D rows, then the deny roles.
+        if (HasMatchingRow(database, closure, satisfiers, deny: true) || FixedRolesMatch(closure, satisfiers, deny: true))
             return false;
 
-        // GRANT test — explicit G/W rows, then the grant-roles.
-        return HasMatchingRow(database, closure, satisfiers, deny: false)
-            || closure.Contains(DbOwner)
-            || (permission.Category == PermissionCategory.Read && closure.Contains(DbDataReader))
-            || (permission.Category == PermissionCategory.Write && closure.Contains(DbDataWriter))
-            || (permission.Category == PermissionCategory.Ddl
-                && closure.Contains(DbDdlAdmin)
-                && !IsBlanketDatabaseAlter(permission, securableClass))
-            || server.Implies(permission, securableClass);
+        // GRANT test — explicit G/W rows, then the fixed roles' own grants,
+        // then the login's server permissions: for a name the enum doesn't
+        // carry, through the database permissions the graph says imply it.
+        if (HasMatchingRow(database, closure, satisfiers, deny: false) || FixedRolesMatch(closure, satisfiers, deny: false))
+            return true;
+        if (permission != Permission.Other)
+            return server.Implies(permission, securableClass);
+        foreach (var s in satisfiers)
+        {
+            if (s.Class == ClassDatabase && Permission.Resolve(s.Name) is var implied && implied != Permission.Other && server.Implies(implied, ClassDatabase))
+                return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -1102,11 +1340,19 @@ internal static class PermissionChecker
                     || (Ownership.EffectiveOwnerId(database, majorId) is int owner && closure.Contains(owner));
             case ClassSchema:
                 return closure.Contains(Ownership.SchemaOwnerId(database, majorId));
+            case ClassType or ClassXmlSchemaCollection:
+                return closure.Contains(Ownership.SchemaOwnerId(database, schemaId));
             case ClassDatabasePrincipal:
                 foreach (var (_, principal) in database.Principals)
                 {
+                    // A user holds CONTROL on itself (probed 2026-10-04
+                    // against SQL Server 2025: fn_my_permissions lists it).
                     if (principal.PrincipalId == majorId)
-                        return principal.TypeCode == "R" && closure.Contains(principal.OwningPrincipalId);
+                    {
+                        return principal.TypeCode == "R"
+                            ? closure.Contains(principal.OwningPrincipalId)
+                            : principal.TypeCode != "A" && majorId > Database.SysPrincipalId && closure.Contains(majorId);
+                    }
                 }
                 return false;
             default:
@@ -1115,78 +1361,102 @@ internal static class PermissionChecker
     }
 
     /// <summary>
-    /// Whether a request is for blanket <c>ALTER</c> on the <em>database</em>
-    /// securable — the one DDL-category request <c>db_ddladmin</c> does not
-    /// answer. Probe-confirmed: a <c>db_ddladmin</c> member runs every object /
-    /// schema / type DDL but still gets Msg 5011 from <c>ALTER DATABASE</c>, so
-    /// the fixed role's virtual DDL grant stops short of reconfiguring the
-    /// database itself. The granular database-scope DDL permissions (CREATE
-    /// TABLE, ALTER ANY SCHEMA, …) are unaffected.
-    /// </summary>
-    private static bool IsBlanketDatabaseAlter(Permission permission, byte securableClass) =>
-        securableClass == ClassDatabase && permission == Permission.Alter;
-
-    /// <summary>
     /// Whether the effective principal may read / write column
     /// <paramref name="columnOrdinal"/> (1-based, matching
-    /// <c>sys.columns.column_id</c>) of the object, under a column-level grant
-    /// model. Same DENY-first / GRANT precedence as <see cref="IsGranted"/>, but
-    /// a matching row at the column's <c>minor_id</c> also satisfies (grant) or
-    /// binds (deny), alongside the object-level (minor 0), schema, and database
-    /// scopes: a column DENY overrides a table GRANT, and a column GRANT stands
-    /// in for an absent table GRANT (probe-confirmed against SQL Server 2025).
+    /// <c>sys.columns.column_id</c>) of the object. A column-level row decides
+    /// for its own grantee ahead of that grantee's object-level row — a column
+    /// <c>GRANT</c> admits the column under the same principal's table
+    /// <c>DENY</c>, and a column <c>REVOKE</c> (the <c>R</c> row a column
+    /// revoke of a table-level grant leaves) takes the column out of that
+    /// principal's table, schema and database grants — while a schema or
+    /// database <c>DENY</c>, another principal's <c>DENY</c> and the deny roles
+    /// still bind (probed 2026-10-04 against SQL Server 2025).
     /// </summary>
-    internal static bool IsColumnGranted(Database database, int principalId, Permission permission, int objectId, int schemaId, int columnOrdinal, ServerLoginRights server = default)
+    internal static bool IsColumnGranted(Database database, int principalId, Permission permission, int objectId, int schemaId, int columnOrdinal, ServerLoginRights server = default) =>
+        IsColumnGranted(database, BuildClosure(database, principalId), permission, objectId, schemaId, columnOrdinal, server);
+
+    /// <summary><see cref="IsColumnGranted(Database, int, Permission, int, int, int, ServerLoginRights)"/> over a closure the caller built once for several columns.</summary>
+    internal static bool IsColumnGranted(Database database, HashSet<int> closure, Permission permission, int objectId, int schemaId, int columnOrdinal, ServerLoginRights server = default)
     {
         if (permission == Permission.Other)
             return false;
 
-        var closure = BuildClosure(database, principalId);
         if (OwnsSecurable(database, closure, ClassObject, objectId, schemaId))
             return true;
-        var satisfiers = BuildSatisfiers(permission, ClassObject, objectId, schemaId, columnOrdinal);
+        var satisfiers = BuildSatisfiers(database, permission.CanonicalName, ClassObject, objectId, schemaId, columnOrdinal);
 
-        // DENY binds first — a column / object / schema / db DENY, then the deny-roles.
-        if (HasMatchingRow(database, closure, satisfiers, deny: true))
+        foreach (var row in database.Permissions)
+        {
+            if (row.State != PermissionState.Deny || !Matches(row, satisfiers) || !closure.Contains(row.GranteePrincipalId))
+                continue;
+            if (row.Class == ClassObject && row.MinorId == 0
+                && HasColumnRow(database, row.GranteePrincipalId, objectId, columnOrdinal, satisfiers, grant: true))
+            {
+                continue;
+            }
             return false;
-        if (permission.Category == PermissionCategory.Read && closure.Contains(DbDenyDataReader))
-            return false;
-        if (permission.Category == PermissionCategory.Write && closure.Contains(DbDenyDataWriter))
+        }
+        if (FixedRolesMatch(closure, satisfiers, deny: true))
             return false;
 
-        // GRANT test — a column / object / schema / db G/W row, then the grant-roles.
-        return HasMatchingRow(database, closure, satisfiers, deny: false)
-            || closure.Contains(DbOwner)
-            || (permission.Category == PermissionCategory.Read && closure.Contains(DbDataReader))
-            || (permission.Category == PermissionCategory.Write && closure.Contains(DbDataWriter))
+        foreach (var row in database.Permissions)
+        {
+            if (row.State is not (PermissionState.Grant or PermissionState.GrantWithGrantOption)
+                || !Matches(row, satisfiers) || !closure.Contains(row.GranteePrincipalId))
+            {
+                continue;
+            }
+            if (row.MinorId == 0 && HasColumnRow(database, row.GranteePrincipalId, objectId, columnOrdinal, satisfiers, grant: false))
+                continue;
+            return true;
+        }
+        return FixedRolesMatch(closure, satisfiers, deny: false)
             || server.Implies(permission, ClassObject);
     }
 
     /// <summary>
-    /// Whether the effective principal holds a <em>column-level</em> GRANT
-    /// (<c>minor_id &gt; 0</c>) of <paramref name="permission"/> (or a covering
-    /// permission) on the object — grant-side only. Pairs with the object-grain
-    /// <see cref="IsGranted"/> to draw the Msg 229 vs 230 boundary: a column that
-    /// fails <see cref="IsColumnGranted"/> raises the column-level Msg 230 when
-    /// the object is object-grain accessible or carries any column grant
-    /// (partial access), and the object-level Msg 229 when neither holds — no
-    /// grant reaches the object, or an object / schema / database DENY (or a
-    /// deny-role) has nullified the object-grain grant entirely.
+    /// Whether <paramref name="granteeId"/> holds a column-level row on
+    /// <paramref name="columnOrdinal"/> of the object for one of the request's
+    /// object-class permissions — a <c>G</c> / <c>W</c> row when
+    /// <paramref name="grant"/>, else an <c>R</c> row.
     /// </summary>
-    internal static bool HasColumnLevelGrant(Database database, int principalId, Permission permission, int objectId)
+    private static bool HasColumnRow(Database database, int granteeId, int objectId, int columnOrdinal, List<Satisfier> satisfiers, bool grant)
     {
-        if (permission == Permission.Other)
-            return false;
-
-        var closure = BuildClosure(database, principalId);
         foreach (var row in database.Permissions)
         {
-            if (row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption
-                && row.Class == ClassObject
-                && row.MajorId == objectId
-                && row.MinorId != 0
+            if (row.GranteePrincipalId != granteeId || row.Class != ClassObject || row.MajorId != objectId || row.MinorId != columnOrdinal)
+                continue;
+            var stateMatches = grant ? row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption : row.State == PermissionState.Revoke;
+            if (stateMatches && Matches(row, satisfiers))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether any of the object's columns is accessible to the principal — what separates the column-level Msg 230
+    /// from the object-level Msg 229 once the object-grain check has failed:
+    /// real reports the object while no column of it is reachable, a column
+    /// grant defeated by a schema <c>DENY</c> included (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static bool HasAccessibleColumn(Database database, int principalId, Permission permission, int objectId, int schemaId, ServerLoginRights server = default) =>
+        HasAccessibleColumn(database, BuildClosure(database, principalId), permission, objectId, schemaId, server);
+
+    /// <summary>
+    /// <see cref="HasAccessibleColumn(Database, int, Permission, int, int, ServerLoginRights)"/>
+    /// over a built closure. Only a column that carries a column-level grant to
+    /// the closure can be reachable here — the object-grain check already
+    /// failed — so just those columns are asked.
+    /// </summary>
+    internal static bool HasAccessibleColumn(Database database, HashSet<int> closure, Permission permission, int objectId, int schemaId, ServerLoginRights server)
+    {
+        foreach (var row in database.Permissions)
+        {
+            if (row.Class == ClassObject && row.MajorId == objectId && row.MinorId != 0
+                && row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption
                 && closure.Contains(row.GranteePrincipalId)
-                && row.Permission.Covers(permission, ClassObject))
+                && IsColumnGranted(database, closure, permission, objectId, schemaId, row.MinorId, server))
             {
                 return true;
             }
@@ -1198,7 +1468,7 @@ internal static class PermissionChecker
     internal static bool IsRoleMember(Database database, int principalId, DatabasePrincipal role) =>
         role.PrincipalId == 0 || BuildClosure(database, principalId).Contains(role.PrincipalId);
 
-    /// <summary>Whether the principal is a (transitive) member of <c>db_owner</c> or <c>db_ddladmin</c> — the "may run any DDL" gate for the 15247 statements.</summary>
+    /// <summary>Whether the principal is a (transitive) member of <c>db_owner</c> or <c>db_ddladmin</c>.</summary>
     internal static bool IsDdlAdminOrOwner(Database database, int principalId)
     {
         var closure = BuildClosure(database, principalId);
@@ -1222,50 +1492,55 @@ internal static class PermissionChecker
 
     /// <summary>
     /// Whether the principal sees every object's metadata regardless of grants:
-    /// a <c>db_owner</c> / <c>db_ddladmin</c> / <c>db_securityadmin</c> member
-    /// (probe-confirmed against SQL Server 2025), or a holder of <c>CONTROL</c> /
-    /// <c>VIEW DEFINITION</c> granted at database scope.
+    /// a <c>db_ddladmin</c> member (probe-confirmed against SQL Server 2025), or
+    /// a holder of <c>VIEW DEFINITION</c> on the database — <c>db_owner</c>'s
+    /// <c>CONTROL</c> and <c>db_securityadmin</c>'s own grant included — that no
+    /// <c>DENY</c> takes away.
     /// </summary>
     internal static bool HasFullMetadataVisibility(Database database, int principalId, ServerLoginRights server = default) =>
         HasFullMetadataVisibility(database, BuildClosure(database, principalId), server);
 
     private static bool HasFullMetadataVisibility(Database database, HashSet<int> closure, ServerLoginRights server)
     {
-        if (closure.Contains(DbOwner) || closure.Contains(DbDdlAdmin) || closure.Contains(DbSecurityAdmin)
-            || server.Implies(Permission.ViewDefinition, ClassDatabase))
-        {
-            return true;
-        }
+        // A DENY of VIEW DEFINITION or CONTROL on a schema or an object hides
+        // what it reaches even from a principal that sees the rest (probed
+        // 2026-10-04 against SQL Server 2025), so such a principal is
+        // filtered object by object.
         foreach (var row in database.Permissions)
         {
-            if (row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption
-                && row.Class == ClassDatabase
-                && row.Permission is Permission.Control or Permission.ViewDefinition
+            if (row.State == PermissionState.Deny && row.Class is ClassObject or ClassSchema
+                && row.Permission is Permission.ViewDefinition or Permission.Control
                 && closure.Contains(row.GranteePrincipalId))
             {
-                return true;
+                return false;
             }
         }
-        return false;
+        return closure.Contains(DbDdlAdmin)
+            || IsGrantedInClosure(database, closure, "VIEW DEFINITION", ClassDatabase, 0, 0, server, Permission.ViewDefinition);
     }
 
     /// <summary>
     /// Whether the principal may see the metadata (catalog-view rows,
     /// <c>OBJECT_ID</c> / <c>OBJECT_NAME</c> / <c>OBJECT_SCHEMA_NAME</c> results)
-    /// of the object with the given id / schema. True under the full-visibility
-    /// bypass (<see cref="HasFullMetadataVisibility(Database,int,ServerLoginRights)"/>), or when the
-    /// principal (or any role in its closure) holds any object-applicable
-    /// permission reaching the object — a direct object-scope grant (any
-    /// permission, any column via <c>minor_id</c>), a schema-scope grant, an
-    /// object-applicable database-scope grant, or the <c>db_datareader</c> /
-    /// <c>db_datawriter</c> fixed roles. DENY does not hide metadata (grant-only
-    /// scan — probe-scoped assumption: metadata-hiding by DENY was not observed).
+    /// of the object with the given id / schema. A <c>DENY</c> of
+    /// <c>VIEW DEFINITION</c> reaching the object hides it whatever else is
+    /// granted; otherwise it shows under the full-visibility bypass
+    /// (<see cref="HasFullMetadataVisibility(Database,int,ServerLoginRights)"/>),
+    /// to its owner, and to a principal holding a grant of any permission that
+    /// applies to its kind — at object scope any row on it, a column's
+    /// included, and at schema and database scope a permission whose graph
+    /// reaches one the object's kind takes, so a schema <c>SELECT</c> reveals
+    /// the schema's tables and views but not its procedures, and
+    /// <c>db_datareader</c> likewise (probed 2026-10-04 against SQL Server 2025).
     /// </summary>
     internal static bool CanViewMetadata(Database database, int principalId, int objectId, int schemaId, ServerLoginRights server = default) =>
         CanViewMetadata(database, BuildClosure(database, principalId), objectId, schemaId, server);
 
     internal static bool CanViewMetadata(Database database, HashSet<int> closure, int objectId, int schemaId, ServerLoginRights server = default)
     {
+        var kind = Parser.Expressions.ObjectProperty.FindObject(database, objectId) is { } found ? KindOf(found) : ObjectKind.Tabular;
+        if (IsDenied(database, closure, "VIEW DEFINITION", ClassObject, objectId, schemaId))
+            return false;
         // A server permission that grants something on every user object
         // reveals it as a database grant would: SELECT ALL USER SECURABLES,
         // and ALTER ANY DATABASE through each database's ALTER (probed
@@ -1277,6 +1552,32 @@ internal static class PermissionChecker
         {
             return true;
         }
+        // A cheap scan for any grant that could reveal the object, then the
+        // confirmation that one of the kind's permissions is actually held —
+        // a grant a DENY cancels reveals nothing (probed 2026-10-04 against
+        // SQL Server 2025: db_datareader beside db_denydatareader sees no
+        // table).
+        if (!HasRevealingGrant(database, closure, objectId, schemaId, kind))
+            return false;
+        foreach (var permission in ApplicablePermissions(kind))
+        {
+            if (IsGrantedInClosure(database, closure, permission, ClassObject, objectId, schemaId, server, Permission.Resolve(permission)))
+                return true;
+        }
+        foreach (var row in database.Permissions)
+        {
+            if (row.Class == ClassObject && row.MajorId == objectId && row.MinorId != 0
+                && row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption && closure.Contains(row.GranteePrincipalId))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool HasRevealingGrant(Database database, HashSet<int> closure, int objectId, int schemaId, ObjectKind kind)
+    {
+        var revealing = RevealingPermissions(kind);
         foreach (var row in database.Permissions)
         {
             if (row.State is not (PermissionState.Grant or PermissionState.GrantWithGrantOption)
@@ -1286,35 +1587,201 @@ internal static class PermissionChecker
             }
             var reveals = row.Class switch
             {
-                ClassDatabase => RevealsObjectMetadata(row.Permission),
+                ClassDatabase => Contains(revealing.Database, row.DisplayName),
                 ClassObject => row.MajorId == objectId,
-                ClassSchema => row.MajorId == schemaId,
+                ClassSchema => row.MajorId == schemaId && Contains(revealing.Schema, row.DisplayName),
                 _ => false,
             };
             if (reveals)
                 return true;
         }
-        // db_datareader / db_datawriter confer SELECT / IUD on every object,
-        // which reveals its metadata. (A slight over-reveal for procedures,
-        // which those roles can't actually access — accepted for simplicity.)
-        return closure.Contains(DbDataReader) || closure.Contains(DbDataWriter);
+        foreach (var (roleId, permissions) in FixedRoleGrants)
+        {
+            if (!closure.Contains(roleId))
+                continue;
+            foreach (var permission in permissions)
+            {
+                if (Contains(revealing.Database, permission))
+                    return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>
-    /// Whether a database-scope grant of this permission reveals every object's
-    /// metadata — the object-applicable permissions do; the connect / create /
-    /// impersonate permissions (notably the <c>CONNECT</c> every user is seeded)
-    /// and the column-encryption <c>VIEW ANY …</c> pair every database grants
-    /// <c>public</c> do not, so they can't blanket-reveal the catalog.
+    /// The database principals a restricted principal sees in
+    /// <c>sys.database_principals</c>: the five catalog principals and the
+    /// fixed roles, itself and every role it belongs to, the principals its
+    /// closure owns, and those it holds a permission on (probed 2026-10-04
+    /// against SQL Server 2025 — a fellow <c>db_datareader</c> member stays
+    /// hidden).
     /// </summary>
-    private static bool RevealsObjectMetadata(Permission permission) => permission switch
+    internal static HashSet<int>? VisiblePrincipals(Database database, int principalId, ServerLoginRights server)
     {
-        Permission.Connect or Permission.CreateFunction or Permission.CreateProcedure
-            or Permission.CreateSequence or Permission.CreateTable or Permission.CreateView
-            or Permission.Impersonate or Permission.ViewAnyColumnEncryptionKeyDefinition
-            or Permission.ViewAnyColumnMasterKeyDefinition or Permission.Other => false,
-        _ => true,
+        var closure = BuildClosure(database, principalId);
+        if (IsGrantedInClosure(database, closure, "VIEW DEFINITION", ClassDatabase, 0, 0, server, Permission.ViewDefinition))
+            return null;
+        // The ALTER ANY permission of each principal kind reveals that kind:
+        // db_accessadmin sees every user, db_securityadmin every role.
+        var users = IsGrantedInClosure(database, closure, "ALTER ANY USER", ClassDatabase, 0, 0, server, Permission.Other);
+        var roles = IsGrantedInClosure(database, closure, "ALTER ANY ROLE", ClassDatabase, 0, 0, server, Permission.Other);
+        var applicationRoles = IsGrantedInClosure(database, closure, "ALTER ANY APPLICATION ROLE", ClassDatabase, 0, 0, server, Permission.Other);
+        var visible = new HashSet<int>(closure);
+        foreach (var (_, principal) in database.Principals)
+        {
+            if (principal.PrincipalId <= Database.SysPrincipalId || principal.IsFixedRole || closure.Contains(principal.OwningPrincipalId)
+                || principal.TypeCode switch { "A" => applicationRoles, "R" => roles, _ => users })
+            {
+                _ = visible.Add(principal.PrincipalId);
+            }
+        }
+        foreach (var row in database.Permissions)
+        {
+            if (row.Class == ClassDatabasePrincipal && row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption
+                && closure.Contains(row.GranteePrincipalId))
+            {
+                _ = visible.Add(row.MajorId);
+            }
+        }
+        return visible;
+    }
+
+    /// <summary>
+    /// The grantees whose <c>sys.database_permissions</c> rows a restricted
+    /// principal sees, or null for all of them: itself and its roles, and
+    /// every principal of a kind whose <c>ALTER ANY</c> permission it holds
+    /// (probed 2026-10-04 against SQL Server 2025: a db_accessadmin member sees
+    /// every user's CONNECT, a db_datareader member only its own).
+    /// </summary>
+    internal static HashSet<int>? VisibleGrantees(Database database, int principalId, ServerLoginRights server)
+    {
+        var closure = BuildClosure(database, principalId);
+        if (IsGrantedInClosure(database, closure, "VIEW DEFINITION", ClassDatabase, 0, 0, server, Permission.ViewDefinition))
+            return null;
+        var users = IsGrantedInClosure(database, closure, "ALTER ANY USER", ClassDatabase, 0, 0, server, Permission.Other);
+        var roles = IsGrantedInClosure(database, closure, "ALTER ANY ROLE", ClassDatabase, 0, 0, server, Permission.Other);
+        var applicationRoles = IsGrantedInClosure(database, closure, "ALTER ANY APPLICATION ROLE", ClassDatabase, 0, 0, server, Permission.Other);
+        if (users || roles || applicationRoles)
+        {
+            foreach (var (_, principal) in database.Principals)
+            {
+                if (principal.TypeCode switch { "A" => applicationRoles, "R" => roles, _ => users })
+                    _ = closure.Add(principal.PrincipalId);
+            }
+        }
+        return closure;
+    }
+
+    /// <summary>Whether a restricted principal sees a user-defined type: its owner, or a holder of any permission on it.</summary>
+    internal static bool CanViewTypeMetadata(Database database, int principalId, int userTypeId, int schemaId, int ownerId, ServerLoginRights server)
+    {
+        var closure = BuildClosure(database, principalId);
+        if (closure.Contains(ownerId))
+            return true;
+        foreach (var name in (string[])["CONTROL", "EXECUTE", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION"])
+        {
+            if (IsGrantedInClosure(database, closure, name, ClassType, userTypeId, schemaId, server, Permission.Resolve(name)))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Whether <c>sys.sql_modules.definition</c>, <c>OBJECT_DEFINITION</c> and
+    /// <c>sp_helptext</c> show the definition of an object the principal can
+    /// see: its owner, or a holder of <c>VIEW DEFINITION</c>, <c>ALTER</c>,
+    /// <c>CONTROL</c> or <c>TAKE OWNERSHIP</c> on it — on its parent table for a
+    /// trigger (probed 2026-10-04 against SQL Server 2025: <c>SELECT</c> or
+    /// <c>EXECUTE</c> alone reveals the row and leaves the definition NULL).
+    /// </summary>
+    internal static bool CanViewDefinition(Database database, int principalId, int objectId, int schemaId, ServerLoginRights server = default)
+    {
+        var closure = BuildClosure(database, principalId);
+        if (HasFullMetadataVisibility(database, closure, server))
+            return true;
+        foreach (var permission in DefinitionPermissions)
+        {
+            if (IsGrantedInClosure(database, closure, permission.CanonicalName, ClassObject, objectId, schemaId, server, permission))
+                return true;
+        }
+        return false;
+    }
+
+    private static readonly Permission[] DefinitionPermissions = [Permission.ViewDefinition, Permission.Alter, Permission.TakeOwnership];
+
+    /// <summary>Whether a <c>DENY</c> reaches <paramref name="permissionName"/> on the securable — an explicit row or a deny role.</summary>
+    private static bool IsDenied(Database database, HashSet<int> closure, string permissionName, byte securableClass, int majorId, int schemaId)
+    {
+        var satisfiers = BuildSatisfiers(database, permissionName, securableClass, majorId, schemaId, columnOrdinal: 0);
+        return HasMatchingRow(database, closure, satisfiers, deny: true) || FixedRolesMatch(closure, satisfiers, deny: true);
+    }
+
+    /// <summary>The kinds of object whose applicable permissions differ.</summary>
+    private enum ObjectKind : byte
+    {
+        Tabular,
+        TableFunction,
+        Procedure,
+        ScalarFunction,
+        Sequence,
+        Other,
+    }
+
+    private static ObjectKind KindOf(Schemas.SchemaObject obj) => obj.ObjectTypeCode switch
+    {
+        "FN" or "FS" => ObjectKind.ScalarFunction,
+        "IF" or "TF" or "FT" => ObjectKind.TableFunction,
+        "P " or "PC" or "X " => ObjectKind.Procedure,
+        "SN" => ObjectKind.Other,
+        "SO" => ObjectKind.Sequence,
+        _ => ObjectKind.Tabular,
     };
+
+    /// <summary>The object permissions each kind takes — the ones whose grant at any scope reveals it.</summary>
+    private static string[] ApplicablePermissions(ObjectKind kind) => kind switch
+    {
+        ObjectKind.Procedure => ["ALTER", "CONTROL", "EXECUTE", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION"],
+        ObjectKind.ScalarFunction => ["ALTER", "CONTROL", "EXECUTE", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION"],
+        ObjectKind.Sequence => ["ALTER", "CONTROL", "REFERENCES", "TAKE OWNERSHIP", "UPDATE", "VIEW DEFINITION"],
+        ObjectKind.TableFunction => ["ALTER", "CONTROL", "DELETE", "INSERT", "REFERENCES", "SELECT", "TAKE OWNERSHIP", "UPDATE", "VIEW DEFINITION"],
+        ObjectKind.Other => ["ALTER", "CONTROL", "DELETE", "EXECUTE", "INSERT", "REFERENCES", "SELECT", "TAKE OWNERSHIP", "UPDATE", "VIEW CHANGE TRACKING", "VIEW DEFINITION"],
+        _ => ["ALTER", "CONTROL", "DELETE", "INSERT", "REFERENCES", "SELECT", "TAKE OWNERSHIP", "UNMASK", "UPDATE", "VIEW CHANGE TRACKING", "VIEW DEFINITION"],
+    };
+
+    /// <summary>Whether <paramref name="permissionName"/> is one <paramref name="obj"/>'s kind takes.</summary>
+    internal static bool AppliesTo(Schemas.SchemaObject obj, string permissionName) =>
+        Contains(ApplicablePermissions(KindOf(obj)), permissionName);
+
+    /// <summary>Per kind, the schema- and database-scope permissions whose grant implies one the kind takes.</summary>
+    private static readonly (string[] Schema, string[] Database)[] RevealingByKind = BuildRevealing();
+
+    private static (string[] Schema, string[] Database) RevealingPermissions(ObjectKind kind) => RevealingByKind[(int)kind];
+
+    private static (string[] Schema, string[] Database)[] BuildRevealing()
+    {
+        var result = new (string[], string[])[(int)ObjectKind.Other + 1];
+        for (var kind = ObjectKind.Tabular; kind <= ObjectKind.Other; kind++)
+        {
+            var schema = new HashSet<string>(StringComparer.Ordinal);
+            var database = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var permission in ApplicablePermissions(kind))
+            {
+                foreach (var link in PermissionGraph.Implying("OBJECT", permission))
+                {
+                    _ = link.Class switch
+                    {
+                        ClassDatabase => database.Add(link.Name),
+                        ClassSchema => schema.Add(link.Name),
+                        _ => false,
+                    };
+                }
+            }
+            result[(int)kind] = ([.. schema], [.. database]);
+        }
+        return result;
+    }
+
+    private static bool Contains(string[] names, string name) => Array.IndexOf(names, name) >= 0;
 
     /// <summary>
     /// The effective principal + every role it belongs to transitively +
@@ -1342,72 +1809,119 @@ internal static class PermissionChecker
         return closure;
     }
 
-    private static bool HasMatchingRow(Database database, HashSet<int> closure, List<(byte Class, int MajorId, int MinorId, Permission Permission)> satisfiers, bool deny)
+    /// <summary>One securable-and-permission a stored row can carry that satisfies (or denies) a request.</summary>
+    private readonly struct Satisfier(byte securableClass, int majorId, int minorId, string name)
+    {
+        public readonly byte Class = securableClass;
+        public readonly int MajorId = majorId;
+        public readonly int MinorId = minorId;
+        public readonly string Name = name;
+    }
+
+    private static bool HasMatchingRow(Database database, HashSet<int> closure, List<Satisfier> satisfiers, bool deny)
     {
         foreach (var row in database.Permissions)
         {
+            // The securable compare rejects most rows on two ints, so it runs
+            // ahead of the closure lookup.
             var stateMatches = deny ? row.State == PermissionState.Deny : row.State is PermissionState.Grant or PermissionState.GrantWithGrantOption;
-            if (!stateMatches || !closure.Contains(row.GranteePrincipalId))
-                continue;
-            foreach (var (cls, majorId, minorId, permission) in satisfiers)
+            if (stateMatches && Matches(row, satisfiers) && closure.Contains(row.GranteePrincipalId))
+                return true;
+        }
+        return false;
+    }
+
+    private static bool Matches(DatabasePermission row, List<Satisfier> satisfiers)
+    {
+        foreach (var s in satisfiers)
+        {
+            if (row.Class == s.Class && row.MajorId == s.MajorId && row.MinorId == s.MinorId
+                && string.Equals(row.DisplayName, s.Name, StringComparison.OrdinalIgnoreCase))
             {
-                if (row.Class == cls && row.MajorId == majorId && row.MinorId == minorId && row.Permission == permission)
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Whether a fixed role in <paramref name="closure"/> grants (or, with <paramref name="deny"/>, denies) a database-scope satisfier.</summary>
+    private static bool FixedRolesMatch(HashSet<int> closure, List<Satisfier> satisfiers, bool deny)
+    {
+        foreach (var (roleId, permissions) in deny ? FixedRoleDenies : FixedRoleGrants)
+        {
+            if (!closure.Contains(roleId))
+                continue;
+            foreach (var s in satisfiers)
+            {
+                if (s.Class == ClassDatabase && Contains(permissions, s.Name))
                     return true;
             }
         }
         return false;
     }
 
+    private static List<Satisfier> BuildSatisfiers(Database database, Permission permission, byte securableClass, int majorId, int schemaId, int columnOrdinal) =>
+        BuildSatisfiers(database, permission.CanonicalName, securableClass, majorId, schemaId, columnOrdinal);
+
     /// <summary>
-    /// The set of (class, major_id, minor_id, permission) tuples a G/W (or D)
-    /// row could carry that would satisfy (or deny) the request: the permission
-    /// itself plus every covering permission, walked up the object → schema →
-    /// database scope chain. For an object-scope request the object-level rows
-    /// carry <c>minor_id 0</c>; when <paramref name="columnOrdinal"/> is non-zero
-    /// the object scope additionally admits a row at that column's
-    /// <c>minor_id</c> (the column-level grant / deny) — so an object-grain
-    /// request (ordinal 0) is never satisfied by a column-scoped row, and a
-    /// column request is satisfied by either its own column row or the
-    /// all-columns object row.
+    /// The (class, major_id, minor_id, permission) tuples a row could carry that
+    /// would satisfy (or deny) the request — every pair
+    /// <see cref="PermissionGraph"/> says implies it, placed on the securable
+    /// itself, its schema or the database. An object-scope link carries
+    /// <c>minor_id 0</c>, and when <paramref name="columnOrdinal"/> is non-zero
+    /// also that column's <c>minor_id</c>, so an object-grain request is never
+    /// satisfied by a column-scoped row.
     /// </summary>
-    private static List<(byte Class, int MajorId, int MinorId, Permission Permission)> BuildSatisfiers(Permission permission, byte securableClass, int majorId, int schemaId, int columnOrdinal)
+    private static List<Satisfier> BuildSatisfiers(Database database, string permissionName, byte securableClass, int majorId, int schemaId, int columnOrdinal)
     {
-        var result = new List<(byte, int, int, Permission)>();
-        switch (securableClass)
+        var links = PermissionGraph.Implying(ClassDescription(database, securableClass, majorId), permissionName);
+        var result = new List<Satisfier>(columnOrdinal == 0 ? links.Length : links.Length * 2);
+        foreach (var link in links)
         {
-            case ClassObject:
-                AddScope(result, ClassObject, majorId, minorId: 0, permission);
-                if (columnOrdinal != 0)
-                    AddScope(result, ClassObject, majorId, columnOrdinal, permission);
-                AddScope(result, ClassSchema, schemaId, minorId: 0, permission);
-                AddScope(result, ClassDatabase, 0, minorId: 0, permission);
-                break;
-            case ClassSchema:
-                AddScope(result, ClassSchema, majorId, minorId: 0, permission);
-                AddScope(result, ClassDatabase, 0, minorId: 0, permission);
-                break;
-            case ClassDatabasePrincipal:
-                AddScope(result, ClassDatabasePrincipal, majorId, minorId: 0, permission);
-                break;
-            case ClassType or ClassXmlSchemaCollection:
-                AddScope(result, securableClass, majorId, minorId: 0, permission);
-                AddScope(result, ClassSchema, schemaId, minorId: 0, permission);
-                AddScope(result, ClassDatabase, 0, minorId: 0, permission);
-                break;
-            case ClassFulltextCatalog:
-                AddScope(result, ClassFulltextCatalog, majorId, minorId: 0, permission);
-                AddScope(result, ClassDatabase, 0, minorId: 0, permission);
-                break;
-            default:
-                AddScope(result, ClassDatabase, 0, minorId: 0, permission);
-                break;
+            var linkMajor = link.Class == securableClass ? majorId
+                : link.Class == ClassSchema ? schemaId
+                : link.Class == ClassDatabase ? 0
+                : majorId;
+            result.Add(new(link.Class, linkMajor, 0, link.Name));
+            if (columnOrdinal != 0 && link.Class == ClassObject)
+                result.Add(new(link.Class, linkMajor, columnOrdinal, link.Name));
         }
         return result;
     }
 
-    private static void AddScope(List<(byte, int, int, Permission)> result, byte cls, int majorId, int minorId, Permission permission)
+    /// <summary>The <c>sys.fn_builtin_permissions</c> class a securable's permissions are listed under.</summary>
+    private static string ClassDescription(Database database, byte securableClass, int majorId)
     {
-        foreach (var p in permission.CoveringChain(cls))
-            result.Add((cls, majorId, minorId, p));
+        switch (securableClass)
+        {
+            case ClassDatabase:
+                return "DATABASE";
+            case ClassObject:
+                return "OBJECT";
+            case ClassSchema:
+                return "SCHEMA";
+            case ClassDatabasePrincipal:
+                foreach (var (_, principal) in database.Principals)
+                {
+                    if (principal.PrincipalId == majorId)
+                    {
+                        return principal.TypeCode switch
+                        {
+                            "A" => "APPLICATION ROLE",
+                            "R" => "ROLE",
+                            _ => "USER",
+                        };
+                    }
+                }
+                return "USER";
+            case ClassType:
+                return "TYPE";
+            case ClassXmlSchemaCollection:
+                return "XML SCHEMA COLLECTION";
+            case ClassFulltextCatalog:
+                return "FULLTEXT CATALOG";
+            default:
+                return "DATABASE";
+        }
     }
 }

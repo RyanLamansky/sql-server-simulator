@@ -177,9 +177,23 @@ internal sealed class HasDbAccess : Expression
         if (arg.IsNull)
             return SqlValue.Null(SqlType.Int32);
         var name = arg.CoerceTo(SqlType.NVarchar).AsString;
-        return runtime.Batch.Connection.Simulation.Databases.TryGetValue(name, out var database)
-            ? SqlValue.FromInt32(IsAccessible(runtime.Batch.Connection, database) ? 1 : 0)
-            : SqlValue.Null(SqlType.Int32);
+        var connection = runtime.Batch.Connection;
+        if (!connection.Simulation.Databases.TryGetValue(name, out var database))
+            return SqlValue.Null(SqlType.Int32);
+        // An identity minted in the session's database — EXECUTE AS USER, an
+        // application role — answers there by its own CONNECT and elsewhere
+        // by whether guest may connect (probed 2026-10-04 against SQL Server
+        // 2025: 1 for master, tempdb and msdb, 0 for model).
+        var effective = connection.Security.Effective;
+        if (effective.IsDatabaseScoped && !PermissionEnforcement.Bypasses(connection, database))
+        {
+            var answering = ReferenceEquals(database, connection.CurrentDatabase) ? effective.DatabasePrincipalId : Database.GuestPrincipalId;
+            // An active application role holds its database.
+            return SqlValue.FromInt32(answering == Database.DboPrincipalId
+                || (connection.Security.HasApplicationRole && ReferenceEquals(database, connection.CurrentDatabase))
+                || PermissionChecker.IsGranted(database, answering, Permission.Connect, PermissionChecker.ClassDatabase, 0, 0) ? 1 : 0);
+        }
+        return SqlValue.FromInt32(IsAccessible(connection, database) ? 1 : 0);
     }
 
     /// <summary>

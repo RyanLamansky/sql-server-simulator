@@ -314,7 +314,7 @@ partial class Simulation
         RejectTimestampParameters(parameters);
 
         if (isSchemaBound)
-            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText);
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf));
 
         var function = new MultiStatementTableValuedFunction(
             schema,
@@ -474,7 +474,7 @@ partial class Simulation
         RejectTimestampParameters(parameters);
 
         if (isSchemaBound)
-            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText);
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf));
 
         var function = new ScalarFunction(
             schema,
@@ -609,7 +609,7 @@ partial class Simulation
         var replaced = ResolveFunctionAlterTarget<InlineTableValuedFunction>(context, schema, functionName, isAlter, createOrAlter);
 
         if (isSchemaBound)
-            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText);
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf));
 
         RejectTimestampParameters(parameters);
 

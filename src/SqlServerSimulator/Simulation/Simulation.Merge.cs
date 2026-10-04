@@ -530,14 +530,15 @@ partial class Simulation
         var target = PermissionEnforcement.SecurableFor(batch, destinationName, destination);
         if (PermissionEnforcement.Applies(batch, batch.DatabaseFor(target)))
         {
-            void Check(string permission) => PermissionEnforcement.CheckSchemaObject(batch, permission, target);
-            Check("SELECT");
+            var denied = PermissionEnforcement.SchemaObjectDenial(batch, "SELECT", target);
             if (insert)
-                Check("INSERT");
+                denied = PermissionEnforcement.Combine(denied, PermissionEnforcement.SchemaObjectDenial(batch, "INSERT", target));
             if (update)
-                Check("UPDATE");
+                denied = PermissionEnforcement.Combine(denied, PermissionEnforcement.SchemaObjectDenial(batch, "UPDATE", target));
             if (delete)
-                Check("DELETE");
+                denied = PermissionEnforcement.Combine(denied, PermissionEnforcement.SchemaObjectDenial(batch, "DELETE", target));
+            if (denied is not null)
+                throw denied;
         }
 
         if (destination is View && joinWrite is not null)

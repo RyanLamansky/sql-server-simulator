@@ -7,8 +7,11 @@ namespace SqlServerSimulator;
 /// principal; <c>EXECUTE AS</c> and module <c>WITH EXECUTE AS</c> push additional
 /// frames.
 /// </summary>
-internal readonly struct SecurityPrincipalFrame(int databasePrincipalId, string databasePrincipalName, string loginName, bool isDatabaseScoped = false)
+internal readonly struct SecurityPrincipalFrame(int databasePrincipalId, string databasePrincipalName, string loginName, bool isDatabaseScoped = false, ExecuteAsGuard guard = default)
 {
+    /// <summary>What a <c>REVERT</c> must satisfy to pop this frame.</summary>
+    public readonly ExecuteAsGuard Guard = guard;
+
     /// <summary><c>sys.database_principals.principal_id</c> of the effective database user.</summary>
     public readonly int DatabasePrincipalId = databasePrincipalId;
 
@@ -34,6 +37,23 @@ internal readonly struct SecurityPrincipalFrame(int databasePrincipalId, string 
     /// the target database normally.
     /// </summary>
     public readonly bool IsDatabaseScoped = isDatabaseScoped;
+}
+
+/// <summary>
+/// The conditions an <c>EXECUTE AS</c> statement attached to its frame:
+/// the database it ran in (a <c>REVERT</c> elsewhere is Msg 15199), and
+/// <c>WITH NO REVERT</c> (Msg 15196) or <c>WITH COOKIE INTO</c> (only a
+/// <c>REVERT WITH COOKIE</c> presenting it pops the frame, Msg 15591
+/// otherwise). A module's <c>WITH EXECUTE AS</c> frame carries
+/// <see cref="Module"/>, which a <c>REVERT</c> in its body leaves alone
+/// (probed 2026-10-04 against SQL Server 2025).
+/// </summary>
+internal readonly struct ExecuteAsGuard(string? databaseName = null, bool noRevert = false, byte[]? cookie = null, bool module = false)
+{
+    public readonly string? DatabaseName = databaseName;
+    public readonly bool NoRevert = noRevert;
+    public readonly byte[]? Cookie = cookie;
+    public readonly bool Module = module;
 }
 
 /// <summary>
@@ -137,20 +157,46 @@ internal sealed class SessionSecurityContext(SecurityPrincipalFrame baseFrame, s
     /// after the session switched databases — a login's identity is per
     /// database, so <c>USE other</c> makes <c>CURRENT_USER</c> the login's user
     /// in <c>other</c> while <c>SYSTEM_USER</c> / <c>ORIGINAL_LOGIN()</c> stay
-    /// put (probe-confirmed). Never reached while impersonating or under an
-    /// application role — both refuse the switch outright.
+    /// put (probe-confirmed). An application role refuses the switch outright.
     /// </summary>
-    public void RebindBaseFrameToDatabaseUser(DatabasePrincipal principal) =>
+    public void RebindBaseFrameToDatabaseUser(DatabasePrincipal principal)
+    {
+        // An impersonating session rebinds the frame in effect, keeping its
+        // login and the guard its REVERT answers to (probed 2026-10-04 against
+        // SQL Server 2025: EXECUTE AS USER then USE master answers guest).
+        if (this.impersonation.Count > 0)
+        {
+            var top = this.impersonation[^1];
+            this.impersonation[^1] = new SecurityPrincipalFrame(principal.PrincipalId, principal.Name, top.LoginName, top.IsDatabaseScoped, top.Guard);
+            return;
+        }
         baseFrame = new SecurityPrincipalFrame(principal.PrincipalId, principal.Name, baseFrame.LoginName);
+    }
 
     /// <summary>Pushes one impersonation frame (<c>EXECUTE AS</c> or a module's <c>WITH EXECUTE AS</c>).</summary>
     public void Push(SecurityPrincipalFrame frame) => this.impersonation.Add(frame);
 
-    /// <summary>Pops one impersonation frame; a stray <c>REVERT</c> at the base identity is a silent no-op (probe-confirmed).</summary>
-    public void Revert()
+    /// <summary>
+    /// Pops one impersonation frame for a <c>REVERT</c> run in
+    /// <paramref name="currentDatabase"/> presenting <paramref name="cookie"/>,
+    /// or raises the refusal its guard calls for. A stray <c>REVERT</c> at the
+    /// base identity, and one reaching a module's own frame, is a silent no-op
+    /// (probe-confirmed).
+    /// </summary>
+    public void Revert(string currentDatabase, byte[]? cookie)
     {
-        if (this.impersonation.Count > 0)
-            this.impersonation.RemoveAt(this.impersonation.Count - 1);
+        if (this.impersonation.Count == 0)
+            return;
+        var guard = this.impersonation[^1].Guard;
+        if (guard.Module)
+            return;
+        if (guard.DatabaseName is { } database && !BuiltInToken.Comparer.Equals(database, currentDatabase))
+            throw SimulatedSqlException.RevertInAnotherDatabase();
+        if (guard.NoRevert)
+            throw SimulatedSqlException.RevertOfNonRevertibleContext();
+        if (guard.Cookie is { } issued ? cookie is null || !issued.AsSpan().SequenceEqual(cookie) : cookie is not null)
+            throw SimulatedSqlException.RevertNeedsMatchingCookie();
+        this.impersonation.RemoveAt(this.impersonation.Count - 1);
     }
 
     /// <summary>Unwinds the stack back to <paramref name="depth"/> frames — the module-exit revert that survives a body that left frames pushed.</summary>

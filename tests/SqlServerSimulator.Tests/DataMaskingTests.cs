@@ -597,4 +597,29 @@ public sealed class DataMaskingTests
         var sim = Seeded("create function dbo.tv(@p varchar(20)) returns table as return select @p v", "grant select on dbo.tv to u");
         AreEqual(expected, AsUser(sim, query));
     }
+
+    // ---- Mask DDL takes ALTER ANY MASK (probed 2026-10-04 against SQL Server 2025) ----
+
+    [TestMethod]
+    public void AddingOrDroppingAMask_TakesAlterAnyMask()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.m (id int, d varchar(20) masked with (function = 'default()'))",
+            "create user u without login; grant select, alter on dbo.m to u");
+        AreEqual((byte)5, sim.AssertSqlError("execute as user = 'u'; alter table dbo.m alter column d drop masked", 15247).State);
+        _ = sim.AssertSqlError("execute as user = 'u'; alter table dbo.m alter column id add masked with (function = 'default()')", 15247);
+        _ = sim.ExecuteNonQuery("grant alter any mask to u");
+        _ = sim.ExecuteNonQuery("execute as user = 'u'; alter table dbo.m alter column d drop masked");
+    }
+
+    [TestMethod]
+    public void HasPermsByName_Unmask_AColumnDenyClearsTheObject()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.m (id int, d varchar(20) masked with (function = 'default()'))",
+            "create user u without login; grant unmask to u; deny unmask (d) on dbo.m to u");
+        AreEqual("1|0", sim.ExecuteScalar("execute as user = 'u'; select concat_ws('|', has_perms_by_name(null, 'DATABASE', 'UNMASK'), has_perms_by_name('dbo.m', 'OBJECT', 'UNMASK'))"));
+    }
 }

@@ -143,7 +143,7 @@ partial class Simulation
         var sqlText = text.ToString();
         var impersonationDepth = connection.Security.ImpersonationDepth;
         if (runAs is var (asLogin, asName))
-            ApplyExecuteAs(connection, connection.CurrentDatabase, asLogin, asName);
+            ApplyExecuteAs(connection, connection.CurrentDatabase, asLogin, asName, ModuleGuard);
         try
         {
             var dynamicBatch = linkedServerName is null

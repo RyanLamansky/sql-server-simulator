@@ -1195,16 +1195,22 @@ partial class Simulation
             return false;
         var sequenceName = BatchContext.ParseObjectName(context);
 
-        if (context.Batch.IsSkipping)
+        // Walk past any option tokens so the dispatch loop's lookahead
+        // doesn't trip on them — for a skipped statement and ahead of a
+        // refusal alike. RESTART WITH and INCREMENT BY are the options that
+        // carry a reserved keyword.
+        void SkipOptions()
         {
-            // Walk past any option tokens so the dispatch loop's lookahead
-            // doesn't trip on them. RESTART WITH and INCREMENT BY are the
-            // options that carry a reserved keyword.
             while (context.MoveNext()
                 && context.Token is not (Operator { Character: ';' } or ReservedKeyword { Keyword: not (Keyword.With or Keyword.By) }))
             {
                 // no-op
             }
+        }
+
+        if (context.Batch.IsSkipping)
+        {
+            SkipOptions();
             return true;
         }
 
@@ -1217,6 +1223,7 @@ partial class Simulation
         if (!PermissionEnforcement.HasObjectAlter(
                 context.Batch, context.Batch.DatabaseFor(sequence), sequence.ObjectId, sequence.SchemaId))
         {
+            SkipOptions();
             throw SimulatedSqlException.CannotAlterSequence(sequenceName.Leaf);
         }
         // TryResolveSequence took Sch-S; upgrade to Sch-M before mutating
@@ -1424,6 +1431,10 @@ partial class Simulation
 
         if (!context.CurrentDatabase.Schemas.TryGetValue(destSchemaName, out var destSchema))
             throw SimulatedSqlException.CannotAlterSchemaDoesNotExist(destSchemaName);
+        // The two system schemas take nothing (probed 2026-10-04 against SQL
+        // Server 2025: Msg 2710 naming the schema).
+        if (destSchema.SchemaId is Database.SysSchemaId or Database.InformationSchemaId)
+            throw SimulatedSqlException.NotTheSpecifiedOwner(destSchema.Name);
         // ALTER on the destination schema is the first half of real's gate, and
         // reports the same Msg 15151 a missing destination earns.
         if (!PermissionEnforcement.HasSchemaAlter(context.Batch, destSchema))
@@ -1443,6 +1454,15 @@ partial class Simulation
         var objectType = classIsType ? TransferType(sourceSchema, destSchema, sourceName.Leaf, context.Batch)
             : classIsXmlSchemaCollection ? TransferXmlSchemaCollection(sourceSchema, destSchema, sourceName.Leaf, context.Batch)
             : TransferObject(sourceSchema, destSchema, sourceName.Leaf, context.Batch);
+        // An object moved to another schema leaves its permissions behind
+        // (probed 2026-10-04 against SQL Server 2025).
+        if (!classIsType && !classIsXmlSchemaCollection && !ReferenceEquals(sourceSchema, destSchema)
+            && destSchema.TryFindInSharedNamespace(sourceName.Leaf, out var moved)
+            && context.CurrentDatabase.Permissions.Exists(p => p.Class == PermissionChecker.ClassObject && p.MajorId == moved.ObjectId))
+        {
+            RecordSecurityUndo(context, context.CurrentDatabase);
+            _ = context.CurrentDatabase.Permissions.RemoveAll(p => p.Class == PermissionChecker.ClassObject && p.MajorId == moved.ObjectId);
+        }
         // Real reports the transferred object, not the schema — SchemaName is
         // the destination, ObjectName the object and ObjectType its kind
         // (TABLE, RULE, TYPE, XML SCHEMA COLLECTION …, probed 2026-09-26).

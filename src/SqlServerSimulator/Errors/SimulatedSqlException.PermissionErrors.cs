@@ -146,8 +146,8 @@ public sealed partial class SimulatedSqlException
     /// write and the linked-server procedures. Severity 16, state 1,
     /// probe-confirmed wording.
     /// </summary>
-    internal static SimulatedSqlException UserDoesNotHavePermission() =>
-        new("User does not have permission to perform this action.", 15247, 16, 1);
+    internal static SimulatedSqlException UserDoesNotHavePermission(byte state = 1) =>
+        new("User does not have permission to perform this action.", 15247, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 5812: <c>RECONFIGURE</c> by a session without
@@ -383,8 +383,8 @@ public sealed partial class SimulatedSqlException
     /// @fCreateCookie = 1</c> issued. Severity 16, state 1, probe-confirmed
     /// wording.
     /// </summary>
-    internal static SimulatedSqlException CannotUnsetApplicationRole() =>
-        new("Cannot unset application role because none was set or the cookie is invalid.", 15592, 16, 1);
+    internal static SimulatedSqlException CannotUnsetApplicationRole(byte state = 1) =>
+        new("Cannot unset application role because none was set or the cookie is invalid.", 15592, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 505: a <c>USE</c> / <c>ChangeDatabase</c> attempt
@@ -419,4 +419,94 @@ public sealed partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException RevokeRequiresCascade() =>
         new("To revoke or deny grantable privileges, specify the CASCADE option.", 4611, 16, 1);
+
+    /// <summary>
+    /// A foreign key whose referenced columns the creator may not reference:
+    /// the REFERENCES denial (Msg 229 or one Msg 230 per column), then Msg
+    /// 1088 state 20 naming the table as written, then Msg 1750 (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForeignKeyReferencesDenied(SimulatedSqlException denied, string referencedTableAsWritten) =>
+        FollowedByConstraintNotCreated(Aggregate([denied, CannotFindObjectForCreateIndex(referencedTableAsWritten, 20)]));
+
+    /// <summary>Mimics SQL Server error 15199: a <c>REVERT</c> run in a database other than the one its <c>EXECUTE AS</c> ran in (probed 2026-10-04 against SQL Server 2025). This and the two REVERT refusals below end the batch.</summary>
+    internal static SimulatedSqlException RevertInAnotherDatabase() =>
+        new("The current security context cannot be reverted. Please switch to the original database where 'Execute As' was called and try it again.", 15199, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>Mimics SQL Server error 15196: a <c>REVERT</c> of an <c>EXECUTE AS … WITH NO REVERT</c> context.</summary>
+    internal static SimulatedSqlException RevertOfNonRevertibleContext() =>
+        new("The current security context is non-revertible. The \"Revert\" statement failed.", 15196, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>Mimics SQL Server error 15591: a <c>REVERT</c> without the cookie its <c>EXECUTE AS … WITH COOKIE INTO</c> issued, or with one it didn't.</summary>
+    internal static SimulatedSqlException RevertNeedsMatchingCookie() =>
+        new("The current security context cannot be reverted using this statement. A cookie may or may not be needed with 'Revert' statement depending on how the context was set with 'Execute As' statement.", 15591, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>Mimics SQL Server error 15533: a <c>REVERT WITH COOKIE</c> whose cookie isn't a <c>varbinary(100)</c> variable.</summary>
+    internal static SimulatedSqlException RevertCookieWrongType() =>
+        new("Invalid data type is supplied in the 'Revert' statement.", 15533, 16, 2);
+
+    /// <summary>Mimics SQL Server error 4617: a GRANT, DENY or REVOKE naming a fixed database role as grantee (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException GrantToSpecialRole() =>
+        new("Cannot grant, deny or revoke permissions to or from special roles.", 4617, 16, 1);
+
+    /// <summary>Mimics SQL Server error 4613: a database-scope GRANT, DENY or REVOKE by a principal without the authority to make it (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException GrantorLacksGrantPermission() =>
+        new("Grantor does not have GRANT permission.", 4613, 16, 1);
+
+    /// <summary>Mimics SQL Server error 4629: a permission on an <c>INFORMATION_SCHEMA</c> view or a system procedure outside <c>master</c> (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException GrantOnServerScopedObjectOutsideMaster() =>
+        new("Permissions on server scoped catalog views or system stored procedures or extended stored procedures can be granted only when the current database is master.", 4629, 16, 10);
+
+    /// <summary>Mimics SQL Server error 15539: <c>DROP USER guest</c> (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException GuestCannotBeDropped() =>
+        new("User 'guest' cannot be dropped, it can only be disabled. The user is already disabled in the current database.", 15539, 16, 1);
+
+    /// <summary>Mimics SQL Server error 15284: dropping a principal that is the grantor of a permission (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException PrincipalHasGrantedPermissions() =>
+        new("The database principal has granted or denied permissions to objects in the database and cannot be dropped.", 15284, 16, 1);
+
+    /// <summary>Mimics SQL Server error 15150: renaming a fixed database role (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException CannotAlterFixedRole(string roleName) =>
+        new($"Cannot alter the role '{roleName}'.", 15150, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1088 state 11 for a <c>SET IDENTITY_INSERT</c>
+    /// the caller holds no <c>ALTER</c> for: the missing-object wording, and
+    /// it ends the batch — a procedure stops at it (probed 2026-10-04 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IdentityInsertDenied(string writtenName) =>
+        new($"Cannot find the object \"{writtenName}\" because it does not exist or you do not have permissions.", 1088, 16, 11) { TerminatesBatch = true };
+
+    /// <summary>
+    /// A schema-bound module's creator lacks REFERENCES on an object the body
+    /// binds to: Msg 229, then Msg 1088 state 18 naming the object's leaf, both
+    /// attributed to the module (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SchemaBoundReferencesDenied(string objectName, string databaseName, string schemaName, string moduleName)
+    {
+        var denied = $"The REFERENCES permission was denied on the object '{objectName}', database '{databaseName}', schema '{schemaName}'.";
+        var notFound = $"Cannot find the object \"{objectName}\" because it does not exist or you do not have permissions.";
+        return Aggregate(
+        [
+            new(denied, new SimulatedError(@class: 14, lineNumber: 0, message: denied, number: 229, procedure: moduleName, server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 5)),
+            new(notFound, new SimulatedError(@class: 16, lineNumber: 0, message: notFound, number: 1088, procedure: moduleName, server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 18)),
+        ]);
+    }
+
+    /// <summary>Mimics SQL Server error 15062: <c>CREATE USER guest</c> (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException GuestCannotBeMapped() =>
+        new("The guest user cannot be mapped to a login name.", 15062, 16, 1);
+
+    /// <summary>Mimics SQL Server error 15431: <c>sp_setapprole</c> with no role name (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException RoleNameParameterRequired() =>
+        new("You must specify the @rolename parameter.", 15431, 16, 1);
+
+    /// <summary>Mimics SQL Server error 15422: <c>sp_setapprole</c> from a procedure or dynamic SQL (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException ApplicationRoleOnlyAtAdHocLevel() =>
+        new("Application roles can only be activated at the ad hoc level.", 15422, 16, 1);
+
+    /// <summary>Mimics SQL Server error 2710: <c>ALTER SCHEMA sys | INFORMATION_SCHEMA TRANSFER …</c> (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException NotTheSpecifiedOwner(string schemaName) =>
+        new($"You are not the owner specified for the object '{schemaName}' in this statement (CREATE, ALTER, TRUNCATE, UPDATE STATISTICS or BULK INSERT).", 2710, 16, 1);
 }

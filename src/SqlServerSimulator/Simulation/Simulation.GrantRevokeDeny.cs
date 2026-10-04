@@ -85,6 +85,7 @@ partial class Simulation
         var permMajorId = 0;
         var securableDisplayName = context.CurrentDatabase.Name;
         MultiPartName? userSecurableName = null;
+        var principalClassWord = "user";
         MultiPartName? objectSecurableName = null;
         List<string>? objectColumns = null;
         var hadOnClause = false;
@@ -111,8 +112,14 @@ partial class Simulation
             {
                 case "DATABASE":
                     permClass = PermissionChecker.ClassDatabase;
+                    // Another database is Msg 4610, one that isn't there Msg
+                    // 15151 (probed 2026-10-04 against SQL Server 2025).
                     if (!context.Batch.IsSkipping && !context.CurrentDatabase.Collation.Equals(securableName.Leaf, context.CurrentDatabase.Name))
-                        throw SimulatedSqlException.GrantOnAnotherDatabase();
+                    {
+                        throw context.Connection.Simulation.Databases.ContainsKey(securableName.Leaf)
+                            ? SimulatedSqlException.GrantOnAnotherDatabase()
+                            : SimulatedSqlException.CannotFindSecurable("database", securableName.Leaf);
+                    }
                     break;
                 case "FULLTEXT CATALOG":
                     permClass = PermissionChecker.ClassFulltextCatalog;
@@ -127,6 +134,7 @@ partial class Simulation
                     // DATABASE_PRINCIPAL.
                     permClass = PermissionChecker.ClassDatabasePrincipal;
                     userSecurableName = securableName;
+                    principalClassWord = "role";
                     break;
                 case "SCHEMA":
                     permClass = PermissionChecker.ClassSchema;
@@ -157,6 +165,10 @@ partial class Simulation
 
         // TO <principal_list> for GRANT / DENY, FROM <principal_list> for
         // REVOKE. Real SQL Server accepts TO for REVOKE too (probe-confirmed).
+        // GRANT and DENY take TO alone; REVOKE either (probed 2026-10-04
+        // against SQL Server 2025: DENY … FROM is Msg 102 at line 0).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.From } && kind != PermissionStatementKind.Revoke)
+            throw SimulatedSqlException.SyntaxErrorNearText("from").PinLine(0);
         if (context.Token is not ReservedKeyword { Keyword: Keyword.To or Keyword.From })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
@@ -190,7 +202,7 @@ partial class Simulation
             context.MoveNextOptional();
         }
         var cascade = false;
-        if (kind == PermissionStatementKind.Revoke
+        if (kind != PermissionStatementKind.Grant
             && (context.Token is ReservedKeyword { Keyword: Keyword.Cascade }
                 || (context.Token is UnquotedString { Value: var revokeTrailer } && revokeTrailer.Equals("CASCADE", StringComparison.OrdinalIgnoreCase))))
         {
@@ -236,7 +248,7 @@ partial class Simulation
         if (objectColumns is not null)
         {
             if (permissions.Exists(p => p.Columns is not null))
-                throw SimulatedSqlException.GrantInvalidColumnListAfterObject();
+                throw SimulatedSqlException.GrantInvalidColumnListAfterObject().PinLine(0);
             for (var i = 0; i < permissions.Count; i++)
                 permissions[i] = (permissions[i].Name, objectColumns);
         }
@@ -260,7 +272,7 @@ partial class Simulation
         if (permissions.Exists(p => p.Columns is not null
             && (permClass != PermissionChecker.ClassObject || !PermissionAcceptsColumnList(p.Name))))
         {
-            throw SimulatedSqlException.GrantSubEntityListNotAllowed();
+            throw SimulatedSqlException.GrantSubEntityListNotAllowed().PinLine(0);
         }
 
         // The permissions a type, an XML schema collection and a full-text
@@ -282,13 +294,20 @@ partial class Simulation
         // read-only).
         database.RejectWriteWhenReadOnly();
         SchemaObject? securableObject = null;
+        DatabasePrincipal? securablePrincipal = null;
 
-        // Resolve a USER::x securable to its target principal id (class 4).
+        // Resolve a USER::x / ROLE::x securable to its target principal id
+        // (class 4). Each class finds only its own kind — an application role
+        // or a fixed role reads as no object at all (probed 2026-10-04
+        // against SQL Server 2025).
         if (userSecurableName is { } targetName)
         {
             if (!database.Principals.TryGetValue(targetName.Leaf, out var targetPrincipal))
-                throw SimulatedSqlException.CannotFindUser(targetName.Leaf);
+                throw SimulatedSqlException.CannotFindSecurable(principalClassWord, targetName.Leaf);
+            if (targetPrincipal.TypeCode == "A" || targetPrincipal.IsFixedRole || principalClassWord == "role" != (targetPrincipal.TypeCode == "R"))
+                throw SimulatedSqlException.CannotFindObject(targetName.Leaf);
             permMajorId = targetPrincipal.PrincipalId;
+            securablePrincipal = targetPrincipal;
         }
         else if (permClass is PermissionChecker.ClassType or PermissionChecker.ClassXmlSchemaCollection or PermissionChecker.ClassFulltextCatalog)
         {
@@ -299,8 +318,14 @@ partial class Simulation
         else if (permClass == PermissionChecker.ClassSchema)
         {
             if (!database.Schemas.TryGetValue(objectSecurableName!.Value.Leaf, out var schema))
-                throw SimulatedSqlException.CannotFindObject(objectSecurableName.Value.Leaf);
+                throw SimulatedSqlException.CannotFindSecurable("schema", objectSecurableName.Value.Leaf);
             permMajorId = schema.SchemaId;
+        }
+        else if (permClass == PermissionChecker.ClassObject
+            && objectSecurableName!.Value.Count >= 3 && objectSecurableName.Value[objectSecurableName.Value.Count - 3] is { Length: > 0 } databasePart
+            && !database.Collation.Equals(databasePart, database.Name))
+        {
+            throw SimulatedSqlException.GrantOnAnotherDatabase();
         }
         else if (permClass == PermissionChecker.ClassObject
             && !TryResolveSecurableObject(context.Batch, objectSecurableName!.Value, out _)
@@ -309,7 +334,13 @@ partial class Simulation
         {
             // A catalog view is a securable of the database it's read in, as
             // the SELECT every database grants public on its system views is
-            // (probed 2026-09-28 against SQL Server 2025).
+            // (probed 2026-09-28 against SQL Server 2025) — except the
+            // INFORMATION_SCHEMA views, which only master grants on (Msg 4629).
+            if (BuiltInResources.CatalogViewsById.Value.TryGetValue(catalogView.ObjectId, out var catalogEntry)
+                && catalogEntry.SchemaName == "INFORMATION_SCHEMA" && !BuiltInToken.Equals(database.Name, MasterDatabaseName))
+            {
+                throw SimulatedSqlException.GrantOnServerScopedObjectOutsideMaster();
+            }
             if (permissions.Exists(p => p.Columns is not null))
                 throw new NotSupportedException("A column-level permission on a catalog view is not supported.");
             permMajorId = catalogView.ObjectId;
@@ -319,7 +350,16 @@ partial class Simulation
         else if (permClass == PermissionChecker.ClassObject)
         {
             if (!TryResolveSecurableObject(context.Batch, objectSecurableName!.Value, out var obj))
+            {
+                // A system procedure is granted on only in master (probed
+                // 2026-10-04 against SQL Server 2025).
+                if (BuiltInToken.Equals(objectSecurableName.Value.ImmediateQualifier ?? "", "sys") && objectSecurableName.Value.Leaf.StartsWith("sp_", StringComparison.OrdinalIgnoreCase)
+                    && !BuiltInToken.Equals(database.Name, MasterDatabaseName))
+                {
+                    throw SimulatedSqlException.GrantOnServerScopedObjectOutsideMaster();
+                }
                 throw SimulatedSqlException.CannotFindObject(objectSecurableName.Value.Leaf);
+            }
             securableObject = obj;
             permMajorId = obj.ObjectId;
             // A synonym is entity-level: real accepts SELECT / UPDATE /
@@ -328,21 +368,61 @@ partial class Simulation
             // the Msg 4615 unknown-column check.
             if (obj is Synonym && permissions.Exists(p => p.Columns is not null))
                 throw SimulatedSqlException.GrantSubEntityListNotAllowedOnSynonym();
+            permissions = ExpandAll(context, permissions, obj.ObjectTypeCode);
             foreach (var (permName, _) in permissions)
+            {
+                if (!PermissionGraph.IsPermissionOf("OBJECT", CanonicalPermissionName(permName)))
+                    throw SimulatedSqlException.SyntaxErrorNearText(CanonicalPermissionName(permName)).PinLine(0);
                 ValidatePermissionAgainstObjectKind(permName, obj.ObjectTypeCode);
+            }
         }
 
+        // The permission names a class carries; any other is Msg 102 near the
+        // name at line 0 (probed 2026-10-04 against SQL Server 2025: CREATE
+        // TABLE on a schema, CONNECT on a table, CREATE SEQUENCE on the
+        // database, which is a schema permission).
+        if (permClass == PermissionChecker.ClassDatabase)
+            permissions = ExpandAll(context, permissions, objectTypeCode: null);
+        if (permClass is PermissionChecker.ClassDatabase or PermissionChecker.ClassSchema or PermissionChecker.ClassDatabasePrincipal)
+        {
+            var classDescription = permClass switch
+            {
+                PermissionChecker.ClassDatabase => "DATABASE",
+                PermissionChecker.ClassSchema => "SCHEMA",
+                _ => securablePrincipal!.TypeCode == "R" ? "ROLE" : "USER",
+            };
+            foreach (var (permName, _) in permissions)
+            {
+                if (!PermissionGraph.IsPermissionOf(classDescription, CanonicalPermissionName(permName)))
+                    throw SimulatedSqlException.SyntaxErrorNearText(CanonicalPermissionName(permName)).PinLine(0);
+            }
+        }
 
-        // Msg 4624: a grant / deny / revoke targeting sa / dbo / sys /
-        // INFORMATION_SCHEMA / entity owner / self is a silent no-op delivered
-        // on the info-message channel at class 0 state 2 (not catchable by
-        // TRY/CATCH; probed 2026-09-28 against SQL Server 2025).
+        // Every grantee resolves before any row changes, so a missing one
+        // leaves the statement's other grantees untouched; a fixed database
+        // role takes no permissions (Msg 4617); and the protected principals
+        // and the securable's owner turn the statement into Msg 4624 on the
+        // info channel — state 2 for sa / dbo / sys / INFORMATION_SCHEMA /
+        // self, state 3 for the owner (probed 2026-10-04 against SQL Server
+        // 2025).
         var effectivePrincipalId = context.Connection.Security.Effective.DatabasePrincipalId;
+        var securableOwnerId = SecurableOwnerId(database, permClass, permMajorId, securableObject, securablePrincipal);
+        var grantees = new List<DatabasePrincipal>(granteeNames.Count);
         foreach (var granteeName in granteeNames)
         {
             if (IsProtectedGrantTarget(database, granteeName, effectivePrincipalId))
             {
                 context.Batch.AppendInfoError(@class: 0, state: 2, number: 4624,
+                    message: "Cannot grant, deny, or revoke permissions to sa, dbo, entity owner, information_schema, sys, or yourself.");
+                return true;
+            }
+            if (!database.Principals.TryGetValue(granteeName, out var grantee))
+                throw SimulatedSqlException.CannotFindUser(granteeName);
+            if (grantee.IsFixedRole && grantee.PrincipalId != Database.PublicPrincipalId)
+                throw SimulatedSqlException.GrantToSpecialRole();
+            if (grantee.PrincipalId == securableOwnerId)
+            {
+                context.Batch.AppendInfoError(@class: 0, state: 3, number: 4624,
                     message: "Cannot grant, deny, or revoke permissions to sa, dbo, entity owner, information_schema, sys, or yourself.");
                 return true;
             }
@@ -356,18 +436,75 @@ partial class Simulation
             {
                 throw SimulatedSqlException.CannotDisableGuestAccess();
             }
+            grantees.Add(grantee);
         }
 
-        // Delegated-authority gate: a non-dbo session may only GRANT / DENY /
-        // REVOKE a permission it holds WITH GRANT OPTION. Missing authority
-        // surfaces the 15151 object-variant (permission errors leak as
-        // "cannot find the object").
-        if (!context.Connection.Security.EffectiveIsDbo)
+        // The grantor. AS names a principal the session is, belongs to or
+        // may impersonate (else Msg 15151 naming it as a user). Its authority
+        // is CONTROL of the securable, db_securityadmin membership, or for
+        // CONNECT db_accessadmin membership, recorded under the securable's
+        // owner — so dbo's grants on a user's object name that user — or else
+        // a grant option on the securable itself, recorded under its own name. DENY takes the second kind alone. Missing authority reads as
+        // the securable not being there, Msg 4613 for the database (probed
+        // 2026-10-04 against SQL Server 2025).
+        var grantorId = effectivePrincipalId;
+        if (asGrantor is not null)
         {
+            var closure = PermissionChecker.BuildPrincipalClosure(database, effectivePrincipalId);
+            if (!database.Principals.TryGetValue(asGrantor, out var asPrincipal)
+                || !(context.Connection.Security.EffectiveIsDbo
+                    || closure.Contains(asPrincipal.PrincipalId)
+                    || closure.Contains(DbSecurityAdminRoleId)
+                    || PermissionChecker.IsGranted(database, effectivePrincipalId, Permission.Impersonate, PermissionChecker.ClassDatabasePrincipal, asPrincipal.PrincipalId, 0)))
+            {
+                throw SimulatedSqlException.CannotFindUser(asGrantor);
+            }
+            grantorId = asPrincipal.PrincipalId;
+        }
+        var recordedGrantor = grantorId;
+        if (grantorId == Database.DboPrincipalId)
+        {
+            recordedGrantor = securableOwnerId;
+        }
+        else
+        {
+            var schemaId = securableObject?.SchemaId ?? 0;
             foreach (var (permName, _) in permissions)
             {
-                if (!HasGrantAuthority(database, effectivePrincipalId, permName, permClass, permMajorId))
-                    throw SimulatedSqlException.CannotFindObject(securableDisplayName);
+                if (HoldsOwnerAuthority(database, grantorId, permName, permClass, permMajorId, schemaId, ServerLoginRights.For(context.Connection)))
+                {
+                    recordedGrantor = securableOwnerId;
+                    continue;
+                }
+                if (kind != PermissionStatementKind.Deny && HasGrantAuthority(database, grantorId, permName, permClass, permMajorId))
+                {
+                    recordedGrantor = grantorId;
+                    continue;
+                }
+                throw permClass switch
+                {
+                    PermissionChecker.ClassDatabase => SimulatedSqlException.GrantorLacksGrantPermission(),
+                    PermissionChecker.ClassSchema => SimulatedSqlException.CannotFindSecurable("schema", securableDisplayName),
+                    _ => SimulatedSqlException.CannotFindObject(securableDisplayName),
+                };
+            }
+        }
+
+        // DENY of a permission a grantee holds with the grant option needs
+        // CASCADE, as REVOKE does (Msg 4611).
+        if (kind == PermissionStatementKind.Deny && !cascade)
+        {
+            foreach (var grantee in grantees)
+            {
+                foreach (var (permName, _) in permissions)
+                {
+                    var permEnum = Permission.Resolve(permName);
+                    if (database.Permissions.Exists(p => p.State == PermissionState.GrantWithGrantOption && p.GranteePrincipalId == grantee.PrincipalId
+                        && p.IsFor(permClass, permMajorId, permEnum, CanonicalPermissionName(permName), database)))
+                    {
+                        throw SimulatedSqlException.RevokeRequiresCascade();
+                    }
+                }
             }
         }
 
@@ -378,16 +515,14 @@ partial class Simulation
                 revokeGrantOptionOnly, withGrantOption, cascade, asGrantor)
             : null;
         RecordSecurityUndo(context, database);
-        foreach (var granteeName in granteeNames)
+        foreach (var grantee in grantees)
         {
-            if (!database.Principals.TryGetValue(granteeName, out var grantee))
-                throw SimulatedSqlException.CannotFindUser(granteeName);
             foreach (var (permName, columns) in permissions)
             {
                 if (columns is null)
                 {
                     ApplyOnePermission(database, kind, revokeGrantOptionOnly, cascade, withGrantOption,
-                        permClass, permMajorId, minorId: 0, permName, grantee.PrincipalId, effectivePrincipalId);
+                        permClass, permMajorId, minorId: 0, CanonicalPermissionName(permName), grantee.PrincipalId, recordedGrantor);
                     continue;
                 }
                 // Column-level grant: one row per named column, minor_id =
@@ -396,7 +531,7 @@ partial class Simulation
                 {
                     var minorId = ResolveColumnMinorId(securableObject, columnName);
                     ApplyOnePermission(database, kind, revokeGrantOptionOnly, cascade, withGrantOption,
-                        permClass, permMajorId, minorId, permName, grantee.PrincipalId, effectivePrincipalId);
+                        permClass, permMajorId, minorId, CanonicalPermissionName(permName), grantee.PrincipalId, recordedGrantor);
                 }
             }
         }
@@ -510,6 +645,84 @@ partial class Simulation
         return (eventType, schemaName, objectName, objectType, elements.ToString());
     }
 
+    /// <summary>The canonical spelling a permission name is stored and validated under: upper case, single-spaced, <c>EXEC</c> as <c>EXECUTE</c>.</summary>
+    private static string CanonicalPermissionName(string permName)
+    {
+        var upper = string.Join(' ', permName.Split(' ', StringSplitOptions.RemoveEmptyEntries)).ToUpperInvariant();
+        return upper == "EXEC" ? "EXECUTE" : upper;
+    }
+
+    /// <summary>
+    /// Expands the deprecated <c>ALL</c> (or <c>ALL PRIVILEGES</c>) into the
+    /// permissions it stands for on the securable's kind, delivering Msg 4628
+    /// on the info channel (probed 2026-10-04 against SQL Server 2025: a
+    /// table's DELETE, INSERT, REFERENCES, SELECT and UPDATE, a procedure's
+    /// EXECUTE, the database's eight statement permissions).
+    /// </summary>
+    private static List<(string Name, List<string>? Columns)> ExpandAll(ParserContext context, List<(string Name, List<string>? Columns)> permissions, string? objectTypeCode)
+    {
+        if (!permissions.Exists(p => CanonicalPermissionName(p.Name) is "ALL" or "ALL PRIVILEGES"))
+            return permissions;
+        context.Batch.AppendInfoError(@class: 0, state: 2, number: 4628,
+            message: "The ALL permission is deprecated and maintained only for compatibility. It DOES NOT imply ALL permissions defined on the entity.");
+        string[] implied = objectTypeCode switch
+        {
+            null => ["BACKUP DATABASE", "BACKUP LOG", "CREATE DEFAULT", "CREATE FUNCTION", "CREATE PROCEDURE", "CREATE RULE", "CREATE TABLE", "CREATE VIEW"],
+            "FN" or "FS" => ["EXECUTE", "REFERENCES"],
+            "P " or "PC" or "X " => ["EXECUTE"],
+            "SO" => ["REFERENCES", "UPDATE"],
+            _ => ["DELETE", "INSERT", "REFERENCES", "SELECT", "UPDATE"],
+        };
+        var expanded = new List<(string Name, List<string>? Columns)>();
+        foreach (var permission in permissions)
+        {
+            if (CanonicalPermissionName(permission.Name) is "ALL" or "ALL PRIVILEGES")
+            {
+                foreach (var name in implied)
+                    expanded.Add((name, permission.Columns));
+            }
+            else
+            {
+                expanded.Add(permission);
+            }
+        }
+        return expanded;
+    }
+
+    /// <summary>
+    /// The principal that owns the securable a permission statement names —
+    /// the grantor a row records when the authority behind it is ownership
+    /// rather than a grant option (probed 2026-10-04 against SQL Server 2025:
+    /// a user owns itself, a schema answers with its owner).
+    /// </summary>
+    private static int SecurableOwnerId(Database database, byte permClass, int permMajorId, SchemaObject? securableObject, DatabasePrincipal? securablePrincipal) => permClass switch
+    {
+        PermissionChecker.ClassObject when securableObject is not null => Ownership.EffectiveOwnerId(database, securableObject),
+        PermissionChecker.ClassSchema => Ownership.SchemaOwnerId(database, permMajorId),
+        PermissionChecker.ClassDatabasePrincipal when securablePrincipal is not null =>
+            securablePrincipal.TypeCode == "R" ? securablePrincipal.OwningPrincipalId : securablePrincipal.PrincipalId,
+        _ => Database.DboPrincipalId,
+    };
+
+    /// <summary>
+    /// Whether <paramref name="grantorId"/> may grant, deny or revoke on the
+    /// securable as its owner would: it holds <c>CONTROL</c> of it, it is a
+    /// <c>db_securityadmin</c> member, or the permission is <c>CONNECT</c> and
+    /// it is a <c>db_accessadmin</c> member (probed 2026-10-04 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static bool HoldsOwnerAuthority(Database database, int grantorId, string permName, byte permClass, int permMajorId, int schemaId, ServerLoginRights server)
+    {
+        var closure = PermissionChecker.BuildPrincipalClosure(database, grantorId);
+        return closure.Contains(DbSecurityAdminRoleId)
+            || (closure.Contains(DbAccessAdminRoleId) && permClass == PermissionChecker.ClassDatabase && CanonicalPermissionName(permName) == "CONNECT")
+            || PermissionChecker.IsGranted(database, grantorId, Permission.Control, permClass, permMajorId, schemaId, server);
+    }
+
+    private const int DbAccessAdminRoleId = 16385;
+
+    private const int DbSecurityAdminRoleId = 16386;
+
     /// <summary>
     /// Parses a parenthesized column list (<c>(a, b, c)</c>) following a
     /// permission name. On entry the cursor is on the opening <c>(</c>; on
@@ -596,6 +809,10 @@ partial class Simulation
             && p.GranteePrincipalId == granteeId
             && MinorMatches(p.MinorId)
             && p.IsFor(permClass, permMajorId, permEnum, permName, database);
+        // A REVOKE takes back only what its grantor granted: dbo's REVOKE
+        // leaves a row a grantee granted under its grant option (probed
+        // 2026-10-04 against SQL Server 2025).
+        bool Revokes(DatabasePermission p, PermissionState state) => Matches(p, state) && p.GrantorPrincipalId == grantorId;
 
         switch (kind)
         {
@@ -604,7 +821,7 @@ partial class Simulation
                 // GRANT replaces whatever state the triple had — a DENY
                 // included, and a plain GRANT after a WITH GRANT OPTION
                 // downgrades W→G (probed 2026-09-28 against SQL Server 2025).
-                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption) || Matches(p, PermissionState.Deny));
+                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption) || Matches(p, PermissionState.Deny) || Matches(p, PermissionState.Revoke));
                 database.Permissions.Add(new DatabasePermission(
                     permClass, permMajorId, minorId, granteePrincipalId: granteeId,
                     grantorPrincipalId: grantorId, permission: permEnum,
@@ -613,18 +830,21 @@ partial class Simulation
 
             case PermissionStatementKind.Deny:
                 // DENY likewise replaces the triple's GRANT as well as a prior
-                // DENY (probed 2026-09-28 against SQL Server 2025).
-                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption) || Matches(p, PermissionState.Deny));
+                // DENY (probed 2026-09-28 against SQL Server 2025); with
+                // CASCADE it also takes back what the grantee granted on.
+                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption) || Matches(p, PermissionState.Deny) || Matches(p, PermissionState.Revoke));
                 database.Permissions.Add(new DatabasePermission(
                     permClass, permMajorId, minorId, granteePrincipalId: granteeId,
                     grantorPrincipalId: grantorId, permission: permEnum, state: PermissionState.Deny, permissionName: storedName));
+                if (cascade)
+                    CascadeRemoveDelegations(database, granteeId, permClass, permMajorId, permName);
                 break;
 
             case PermissionStatementKind.Revoke when revokeGrantOptionOnly:
                 // REVOKE GRANT OPTION FOR: downgrade W→G. With CASCADE, also
                 // remove the rows this grantee delegated. Without CASCADE, a
                 // W row with delegations raises Msg 4611.
-                var wRow = database.Permissions.Find(p => Matches(p, PermissionState.GrantWithGrantOption));
+                var wRow = database.Permissions.Find(p => Revokes(p, PermissionState.GrantWithGrantOption));
                 if (wRow is null)
                     return;
                 if (!cascade)
@@ -639,10 +859,22 @@ partial class Simulation
 
             default:
                 // Plain REVOKE removes both G/W and D rows for the triple.
-                var grantable = database.Permissions.Find(p => Matches(p, PermissionState.GrantWithGrantOption));
+                var grantable = database.Permissions.Find(p => Revokes(p, PermissionState.GrantWithGrantOption));
                 if (grantable is not null && !cascade)
                     throw SimulatedSqlException.RevokeRequiresCascade();
-                _ = database.Permissions.RemoveAll(p => Matches(p, PermissionState.Grant) || Matches(p, PermissionState.GrantWithGrantOption) || Matches(p, PermissionState.Deny));
+                _ = database.Permissions.RemoveAll(p => Revokes(p, PermissionState.Grant) || Revokes(p, PermissionState.GrantWithGrantOption) || Revokes(p, PermissionState.Deny) || Matches(p, PermissionState.Revoke));
+                // A column revoked out of the same grantee's table-level grant
+                // is remembered as an R row, which keeps that grant (and the
+                // grantee's schema and database ones) off the column (probed
+                // 2026-10-04 against SQL Server 2025).
+                if (minorId != 0 && database.Permissions.Exists(p =>
+                    p.MinorId == 0 && p.GranteePrincipalId == granteeId && p.State is PermissionState.Grant or PermissionState.GrantWithGrantOption
+                    && p.IsFor(permClass, permMajorId, permEnum, permName, database)))
+                {
+                    database.Permissions.Add(new DatabasePermission(
+                        permClass, permMajorId, minorId, granteePrincipalId: granteeId,
+                        grantorPrincipalId: grantorId, permission: permEnum, state: PermissionState.Revoke, permissionName: storedName));
+                }
                 if (cascade)
                     CascadeRemoveDelegations(database, granteeId, permClass, permMajorId, permName);
                 break;
@@ -702,13 +934,11 @@ partial class Simulation
                     return true;
                 continue;
             }
-            Permission? current = requested;
-            while (current is Permission p)
-            {
-                if (row.Permission == p)
-                    return true;
-                current = p.Covering(permClass);
-            }
+            // A grant option reaches its own permission; one a covering
+            // permission carries (CONTROL's) is the owner's authority instead,
+            // which HoldsOwnerAuthority answers and records under the owner.
+            if (row.Permission == requested)
+                return true;
         }
         return false;
     }
@@ -754,6 +984,9 @@ partial class Simulation
             || permName.Equals("UPDATE", StringComparison.OrdinalIgnoreCase)
             || permName.Equals("DELETE", StringComparison.OrdinalIgnoreCase);
         var isExecute = permName.Equals("EXECUTE", StringComparison.OrdinalIgnoreCase);
+        // RECEIVE is a queue's permission, which no modeled object kind is.
+        if (permName.Equals("RECEIVE", StringComparison.OrdinalIgnoreCase))
+            throw SimulatedSqlException.PermissionIncompatibleWithObject("RECEIVE");
         // A sequence takes UPDATE, the permission NEXT VALUE FOR reads
         // (probed 2026-09-28 against SQL Server 2025).
         if (isDml && !kindIsTabular && !(objectTypeCode == "SO" && permName.Equals("UPDATE", StringComparison.OrdinalIgnoreCase)))
@@ -802,7 +1035,11 @@ partial class Simulation
                     if (typeSchema.TableTypes.TryGetValue(name.Leaf, out var tableType))
                         return tableType.UserTypeId;
                 }
-                throw SimulatedSqlException.CannotFindType(name.Leaf);
+                // A built-in type's name reads as a missing object (probed
+                // 2026-10-04 against SQL Server 2025).
+                throw name.Count == 1 && Storage.SqlType.IsSystemTypeName(name.Leaf)
+                    ? SimulatedSqlException.CannotFindObject(name.Leaf)
+                    : SimulatedSqlException.CannotFindType(name.Leaf);
             case PermissionChecker.ClassXmlSchemaCollection:
                 return batch.TryResolveSchema(name, out var collectionSchema) && collectionSchema.XmlSchemaCollections.TryGetValue(name.Leaf, out var collection)
                     ? collection.Id

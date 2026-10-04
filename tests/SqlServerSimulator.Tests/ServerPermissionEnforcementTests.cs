@@ -358,8 +358,26 @@ public sealed class ServerPermissionEnforcementTests
         AreEqual("server||CONNECT SQL", new Simulation().ExecuteScalar("select top 1 entity_name + '|' + subentity_name + '|' + permission_name from fn_my_permissions(null, 'SERVER')"));
 
     [TestMethod]
-    public void FnMyPermissions_DatabaseClass_NotModeledYet() =>
-        _ = Throws<NotSupportedException>(() => new Simulation().ExecuteScalar("select count(*) from fn_my_permissions(null, 'DATABASE')"));
+    public void FnMyPermissions_DatabaseClassListsEveryPermissionForDbo() =>
+        AreEqual(109, new Simulation().ExecuteScalar("select count(*) from fn_my_permissions(null, 'DATABASE')"));
+
+    [TestMethod]
+    public void FnMyPermissions_ObjectClassListsGrantsThenColumns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (a int, b int); create user u without login; create role r; alter role r add member u;
+            alter role db_datareader add member u; grant update (b) on t to u; grant insert on t to r
+            """);
+        AreEqual(
+            "|SELECT,|INSERT,a|SELECT,b|SELECT,b|UPDATE",
+            sim.ExecuteScalar("execute as user = 'u'; select string_agg(subentity_name + '|' + permission_name, ',') from fn_my_permissions('dbo.t', 'OBJECT'); revert"));
+        AreEqual("CONNECT,SELECT,VIEW ANY COLUMN ENCRYPTION KEY DEFINITION,VIEW ANY COLUMN MASTER KEY DEFINITION",
+            sim.ExecuteScalar("execute as user = 'u'; select string_agg(permission_name, ',') within group (order by permission_name) from fn_my_permissions(null, 'DATABASE'); revert"));
+        AreEqual("IMPERSONATE,VIEW DEFINITION,ALTER,CONTROL",
+            sim.ExecuteScalar("execute as user = 'u'; select string_agg(permission_name, ',') from fn_my_permissions('u', 'USER'); revert"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from fn_my_permissions('dbo', 'nosuch')"));
+    }
 
     [TestMethod]
     [DataRow("default", 301)]

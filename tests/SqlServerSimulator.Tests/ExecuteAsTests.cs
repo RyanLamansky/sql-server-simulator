@@ -166,11 +166,24 @@ public sealed class ExecuteAsTests
 
     [TestMethod]
     public void Use_UnderImpersonation_Raises916()
-        => new Simulation().AssertSqlError("""
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create database other");
+        _ = sim.AssertSqlError("""
             create user u without login;
             execute as user = 'u';
-            use master
+            use other
             """, 916);
+    }
+
+    [TestMethod]
+    public void Use_UnderImpersonation_IntoAGuestDatabase_RunsAsGuest()
+        => AreEqual("guest", new Simulation().ExecuteScalar("""
+            create user u without login;
+            execute as user = 'u';
+            use master;
+            select user_name()
+            """));
 
     [TestMethod]
     public void Use_AsDbo_StillSwitches()
@@ -479,6 +492,65 @@ public sealed class ExecuteAsTests
         AreEqual(number, Throws<SimulatedSqlException>(() => command.ExecuteNonQuery()).Number);
         command.CommandText = "select concat(@@trancount, ':', (select count(*) from t))";
         AreEqual("0:0", command.ExecuteScalar());
+    }
+
+    // ---- Impersonation edges (probed 2026-10-04 against SQL Server 2025) ----
+
+    [TestMethod]
+    public void ExecuteAs_AUserThatMayNotConnect_Raises916State4()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u without login; deny connect to u");
+        AreEqual((byte)4, sim.AssertSqlError("execute as user = 'u'", 916).State);
+        _ = sim.AssertSqlError("execute as user = 'guest'", 916);
+        _ = sim.AssertSqlError("execute as user = 'sys'", 15517);
+        _ = sim.AssertSqlError("execute as user = 'INFORMATION_SCHEMA'", 15517);
+    }
+
+    [TestMethod]
+    public void ExecuteAs_TakesAVariable_NoRevert_AndACookie()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u without login");
+        AreEqual("u", sim.ExecuteScalar("declare @n sysname = 'u'; execute as user = @n; select user_name()"));
+        var ex = sim.AssertSqlError("execute as user = 'u' with no revert; revert; select 1", 15196);
+        AreEqual(1, ex.Errors.Count);
+        AreEqual("u|50|dbo", sim.ExecuteScalar("""
+            declare @c varbinary(100), @inside sysname, @length int;
+            execute as user = 'u' with cookie into @c;
+            select @inside = user_name(), @length = datalength(@c);
+            revert with cookie = @c;
+            select concat_ws('|', @inside, @length, user_name())
+            """));
+        _ = sim.AssertSqlError("declare @c varbinary(100); execute as user = 'u' with cookie into @c; revert", 15591);
+        _ = sim.AssertSqlError("revert with cookie = 0x01", 15533);
+    }
+
+    [TestMethod]
+    public void Revert_InsideAnExecuteAsOwnerModule_LeavesTheModulesFrame()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create user u without login", "create procedure dbo.p with execute as owner as begin revert; select user_name() end", "grant execute on dbo.p to u");
+        AreEqual("dbo", sim.ExecuteScalar("execute as user = 'u'; exec dbo.p"));
+    }
+
+    [TestMethod]
+    public void SetUser_ImpersonatesAndResets()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u without login");
+        AreEqual("u|dbo", sim.ExecuteScalar("declare @a sysname; setuser 'u'; set @a = user_name(); setuser; select concat_ws('|', @a, user_name())"));
+    }
+
+    [TestMethod]
+    public void ImpersonatedIdentity_HasNoServerRoleAndAnswersHasDbAccessByItsUser()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create user u without login");
+        AreEqual("0|0|1|1|0", sim.ExecuteScalar("""
+            execute as user = 'u';
+            select concat_ws('|', is_srvrolemember('public'), is_srvrolemember('sysadmin'), has_dbaccess(db_name()), has_dbaccess('master'), has_dbaccess('model'))
+            """));
     }
 }
 

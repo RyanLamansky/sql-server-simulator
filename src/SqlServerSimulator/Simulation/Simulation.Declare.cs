@@ -124,6 +124,24 @@ partial class Simulation
                 spelledNumeric = IsNumericTypeWord(context.Token);
                 (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName, out aliasType);
                 spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
+                // A variable typed by a collection takes EXECUTE on it: Msg
+                // 229, the variable declared NULL and its initializer never
+                // run (probed 2026-10-04 against SQL Server 2025).
+                if (xmlSchemaCollection is not null && !context.Batch.IsSkipping && !reExecution)
+                {
+                    try
+                    {
+                        PermissionEnforcement.CheckXmlSchemaCollection(context.Batch, xmlSchemaCollection, "EXECUTE");
+                    }
+                    catch (SimulatedSqlException)
+                    {
+                        context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, SqlValue.Null(declaredType), parameter: null)
+                        {
+                            XmlSchemaCollection = xmlSchemaCollection,
+                        };
+                        throw;
+                    }
+                }
             }
             catch (SimulatedSqlException legacyLob) when (legacyLob.Number == 2739)
             {

@@ -68,9 +68,9 @@ internal sealed class DatabasePermission(
     public readonly string? PermissionName = permissionName;
 
     /// <summary>
-    /// State: Grant / GrantWithGrantOption / Deny / Revoke. Real SQL Server treats
-    /// REVOKE as a row-deletion; the simulator likewise removes rows on REVOKE and
-    /// keeps only live Grant / GrantWithGrantOption / Deny rows.
+    /// State: Grant / GrantWithGrantOption / Deny / Revoke. A REVOKE removes
+    /// the rows it names, except that a column revoked out of the same
+    /// grantee's table-level grant leaves a Revoke row at that column.
     /// </summary>
     public readonly PermissionState State = state;
 
@@ -78,7 +78,7 @@ internal sealed class DatabasePermission(
     public string DisplayName => Permission == Permission.Other ? PermissionName! : Permission.CanonicalName;
 
     /// <summary>The catalog-view <c>type</c> code — the canonical 4-char code, or the first-letter heuristic for an off-catalog name.</summary>
-    public string DisplayTypeCode => Permission == Permission.Other ? DeriveTypeCode(PermissionName!) : Permission.CanonicalTypeCode;
+    public string DisplayTypeCode => Permission == Permission.Other ? PermissionGraph.TypeCodeOf(PermissionName!) ?? DeriveTypeCode(PermissionName!) : Permission.CanonicalTypeCode;
 
     /// <summary>
     /// Whether this row names <paramref name="permission"/> on the

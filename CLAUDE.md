@@ -388,6 +388,7 @@ The feature docs' own **Not modeled yet** sections hold the smaller gaps.
 
 - **A few `SET <option>` toggles still parse and are discarded** — `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family, which return no plans, `ARITHIGNORE`, `FORCEPLAN` → [`session-options.md`](docs/claude/session-options.md#not-modeled-yet).
   The same goes for most `ALTER DATABASE … SET` options → [`database-options.md`](docs/claude/database-options.md).
+- **Row-level security** — `CREATE SECURITY POLICY` and its filter / block predicates → [`permissions.md`](docs/claude/permissions.md#known-gaps).
 - **Heap allocation tracking** (a flat page list, no IAM/PFS) → [`heap-storage.md`](docs/claude/heap-storage.md).
 - **A binder report's ORDER BY Msg 209** for a name two select items share, and a name only a run reaches → [`errors.md`](docs/claude/errors.md#not-modeled-yet-1).
 

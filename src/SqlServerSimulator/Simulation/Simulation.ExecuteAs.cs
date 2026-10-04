@@ -40,20 +40,61 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: '=' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
-        var targetName = context.Token switch
+        // The name may be a variable (probed 2026-10-04 against SQL Server 2025).
+        Expression? targetVariable = null;
+        string? targetName = null;
+        if (context.Token is AtPrefixedString)
         {
-            Literal { Value: { IsNull: false } literal } => literal.AsString,
-            Name named => named.Value,
-            _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-        };
-        context.MoveNextOptional();
+            targetVariable = Expression.Parse(context);
+        }
+        else
+        {
+            targetName = context.Token switch
+            {
+                Literal { Value: { IsNull: false } literal } => literal.AsString,
+                Name named => named.Value,
+                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+            };
+            context.MoveNextOptional();
+        }
+
+        // WITH NO REVERT | WITH COOKIE INTO @c.
+        var noRevert = false;
+        VariableSlot? cookieSlot = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-            ConsumeToStatementBoundary(context);
+        {
+            context.MoveNextRequired();
+            if (context.Token is Name { Value: var noWord } && string.Equals(noWord, "NO", StringComparison.OrdinalIgnoreCase))
+            {
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Revert })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                noRevert = true;
+            }
+            else if (context.Token is Name { Value: var cookieWord } && string.Equals(cookieWord, "COOKIE", StringComparison.OrdinalIgnoreCase))
+            {
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Into })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not AtPrefixedString { Value: var cookieVariable })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                cookieSlot = batch.IsSkipping ? null : batch.GetVariableSlot(cookieVariable);
+            }
+            else
+            {
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            context.MoveNextOptional();
+        }
 
         if (batch.IsSkipping)
             return;
 
-        ApplyExecuteAs(context.Connection, context.CurrentDatabase, isLogin, targetName);
+        targetName ??= targetVariable!.Run(new RuntimeContext(NoColumns, batch)) is { IsNull: false } value
+            ? value.CoerceTo(Storage.SqlType.NVarchar).AsString
+            : throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal("");
+        var cookie = cookieSlot is null ? null : System.Security.Cryptography.RandomNumberGenerator.GetBytes(ApplicationRoleCookieLength);
+        ApplyExecuteAs(context.Connection, context.CurrentDatabase, isLogin, targetName, new ExecuteAsGuard(context.CurrentDatabase.Name, noRevert, cookie));
+        if (cookieSlot is { } slot && cookie is not null)
+            slot.Value = Storage.SqlValue.FromVarbinary(cookie).CoerceTo(slot.DeclaredType);
     }
 
     /// <summary>
@@ -65,7 +106,7 @@ partial class Simulation
     /// impersonation by a non-dbo principal requires IMPERSONATE on the target,
     /// <c>dbo</c> included — see <see cref="RequireImpersonatePermission"/>.
     /// </summary>
-    private static void ApplyExecuteAs(SimulatedDbConnection connection, Database database, bool isLogin, string targetName)
+    private static void ApplyExecuteAs(SimulatedDbConnection connection, Database database, bool isLogin, string targetName, ExecuteAsGuard guard)
     {
         var security = connection.Security;
         if (isLogin)
@@ -78,18 +119,34 @@ partial class Simulation
             if (!TryMapLoginToDatabaseUser(connection.Simulation, database, targetName, out var mapped))
                 throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(targetName, database.Name, state: 4);
             RequireImpersonateLoginPermission(connection, targetName);
-            security.Push(new SecurityPrincipalFrame(mapped.PrincipalId, mapped.Name, targetName));
+            security.Push(new SecurityPrincipalFrame(mapped.PrincipalId, mapped.Name, targetName, guard: guard));
             return;
         }
 
-        if (!database.Principals.TryGetValue(targetName, out var target) || target.TypeCode != "S")
+        // The two catalog principals can't be impersonated (probed 2026-10-04
+        // against SQL Server 2025).
+        if (!database.Principals.TryGetValue(targetName, out var target) || target.TypeCode != "S"
+            || target.PrincipalId is Database.InformationSchemaPrincipalId or Database.SysPrincipalId)
+        {
             throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal(targetName);
+        }
         RequireImpersonatePermission(security, database, target.PrincipalId, targetName);
+        // A user that may not connect — CONNECT revoked or denied, a DENY of
+        // CONTROL, or guest where it isn't enabled — can be impersonated by
+        // no one: Msg 916 state 4, which ends the batch (probed 2026-10-04
+        // against SQL Server 2025, naming guest's identity as public).
+        var loginIdentity = Ownership.LoginIdentity(database, target);
+        if (target.PrincipalId != Database.DboPrincipalId
+            && !PermissionChecker.IsGranted(database, target.PrincipalId, Permission.Connect, PermissionChecker.ClassDatabase, 0, 0))
+        {
+            throw SimulatedSqlException.CannotAccessDatabaseUnderSecurityContext(
+                target.PrincipalId == Database.GuestPrincipalId ? "public" : loginIdentity, database.Name, state: 4);
+        }
         // Database-scoped: an EXECUTE AS USER token carries no server principal,
         // so it can't reach another database (Msg 916 at any cross-database
         // reference) — unlike the LOGIN form above. Impersonating dbo reports
         // the database owner's login.
-        security.Push(new SecurityPrincipalFrame(target.PrincipalId, target.Name, Ownership.LoginIdentity(database, target), isDatabaseScoped: true));
+        security.Push(new SecurityPrincipalFrame(target.PrincipalId, target.Name, loginIdentity, isDatabaseScoped: true, guard));
     }
 
     /// <summary>
@@ -172,11 +229,66 @@ partial class Simulation
     {
         var context = batch.Parser;
         context.MoveNextOptional(); // consume REVERT
+        Expression? cookie = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-            ConsumeToStatementBoundary(context);
+        {
+            if (context.GetNextRequired() is not Name { Value: var cookieWord } || !string.Equals(cookieWord, "COOKIE", StringComparison.OrdinalIgnoreCase)
+                || context.GetNextRequired() is not Operator { Character: '=' })
+            {
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            context.MoveNextRequired();
+            cookie = Expression.Parse(context);
+        }
+        // The cookie must be a varbinary(100) variable, which the batch's
+        // compile settles (probed 2026-10-04 against SQL Server 2025: a
+        // literal is Msg 15533 and nothing in the batch runs).
+        Storage.SqlValue? presentedValue = null;
+        if (cookie is not null)
+        {
+            if (cookie is not Parser.Expressions.VariableReference variable
+                || batch.GetVariableSlot(variable.VariableName) is not { DeclaredType: Storage.VarbinarySqlType, DeclaredMaxLength: 100 } slot)
+            {
+                throw SimulatedSqlException.RevertCookieWrongType();
+            }
+            presentedValue = slot.Value;
+        }
         if (batch.IsSkipping)
             return;
-        context.Connection.Security.Revert();
+        var presented = presentedValue is { IsNull: false } value ? value.AsBytes : null;
+        context.Connection.Security.Revert(context.CurrentDatabase.Name, presented);
+    }
+
+    /// <summary>
+    /// Applies the legacy <c>SETUSER ['user' [WITH NORESET]]</c>: with a name
+    /// it impersonates that user as <c>EXECUTE AS USER</c> does, and bare it
+    /// returns to the session's own identity (probed 2026-10-04 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static void SetUserStatement(BatchContext batch)
+    {
+        var context = batch.Parser;
+        context.MoveNextOptional(); // consume SETUSER
+        string? targetName = null;
+        if (context.Token is Literal { Value: { IsNull: false } literal })
+        {
+            targetName = literal.AsString;
+            context.MoveNextOptional();
+            if (context.Token is ReservedKeyword { Keyword: Keyword.With })
+            {
+                if (context.GetNextRequired() is not Name { Value: var noReset } || !string.Equals(noReset, "NORESET", StringComparison.OrdinalIgnoreCase))
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextOptional();
+            }
+        }
+        if (batch.IsSkipping)
+            return;
+        if (targetName is null)
+        {
+            context.Connection.Security.RevertTo(0);
+            return;
+        }
+        ApplyExecuteAs(context.Connection, context.CurrentDatabase, isLogin: false, targetName, default);
     }
 
     /// <summary>
@@ -218,7 +330,7 @@ partial class Simulation
             // body's cross-database reference even for an `sa` session). Its
             // login is the database owner's, which is what SYSTEM_USER reports
             // and a TRUSTWORTHY crossing maps into the target.
-            connection.Security.Push(new SecurityPrincipalFrame(Database.DboPrincipalId, "dbo", database.OwnerLoginName, isDatabaseScoped: true));
+            connection.Security.Push(new SecurityPrincipalFrame(Database.DboPrincipalId, "dbo", database.OwnerLoginName, isDatabaseScoped: true, ModuleGuard));
             return;
         }
         if (principalId is int id)
@@ -235,14 +347,19 @@ partial class Simulation
                         refusal.PreserveDiagnostics(0, procedureName);
                     throw refusal;
                 }
-                connection.Security.Push(new SecurityPrincipalFrame(principal.PrincipalId, principal.Name, principal.EffectiveLoginIdentity, isDatabaseScoped: true));
+                connection.Security.Push(new SecurityPrincipalFrame(principal.PrincipalId, principal.Name, principal.EffectiveLoginIdentity, isDatabaseScoped: true, ModuleGuard));
                 return;
             }
         }
         if (!database.Principals.TryGetValue(clause, out var target))
             throw SimulatedSqlException.CannotExecuteAsDatabasePrincipal(clause);
-        connection.Security.Push(new SecurityPrincipalFrame(target.PrincipalId, target.Name, target.EffectiveLoginIdentity, isDatabaseScoped: true));
+        connection.Security.Push(new SecurityPrincipalFrame(target.PrincipalId, target.Name, target.EffectiveLoginIdentity, isDatabaseScoped: true, ModuleGuard));
     }
+
+    private static Storage.SqlValue NoColumns(MultiPartName name) => throw SimulatedSqlException.InvalidColumnName(name);
+
+    /// <summary>The guard a module's own <c>WITH EXECUTE AS</c> frame carries: a <c>REVERT</c> in its body leaves it in place.</summary>
+    private static readonly ExecuteAsGuard ModuleGuard = new(module: true);
 
     /// <summary>
     /// The <c>sys.sql_modules.execute_as_principal_id</c> a module's

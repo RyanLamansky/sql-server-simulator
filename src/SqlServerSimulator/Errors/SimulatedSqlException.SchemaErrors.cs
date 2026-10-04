@@ -3272,6 +3272,14 @@ partial class SimulatedSqlException
         new($"Collection specified does not exist in metadata : '{collectionName}'", 6314, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 297 state 3 from <c>sp_rename</c>: the caller
+    /// sees the object but holds no <c>ALTER</c> on it (probed 2026-10-04
+    /// against SQL Server 2025 — an object it can't see is Msg 15225 instead).
+    /// </summary>
+    internal static SimulatedSqlException RenameNotPermitted() =>
+        new("The user does not have permission to perform this action.", new SimulatedError(@class: 16, lineNumber: 0, "The user does not have permission to perform this action.", 297, procedure: "sp_rename", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 3));
+
+    /// <summary>
     /// Mimics SQL Server error 15225: <c>sp_rename</c> could not find the
     /// object to rename (the table / object path, i.e. a NULL <c>@objtype</c>).
     /// Severity 11, state 1, probe-confirmed wording against SQL Server 2025

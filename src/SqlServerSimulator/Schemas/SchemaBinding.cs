@@ -207,7 +207,7 @@ internal static class SchemaBinding
     /// table of that name (probe-confirmed — a schema-bound body whose CTE
     /// shadows <c>dbo.t</c> creates).
     /// </remarks>
-    internal static void EnforceBody(Database database, string moduleKind, string qualifiedModuleName, string bodyText)
+    internal static void EnforceBody(Database database, string moduleKind, string qualifiedModuleName, string bodyText, Action<SchemaObject>? onBound = null)
     {
         var tokens = Tokenize(bodyText);
         var cteNames = DeclaredCteNames(tokens);
@@ -239,6 +239,8 @@ internal static class SchemaBinding
                     throw SimulatedSqlException.CannotSchemaBindNotSchemaBound(
                         moduleKind, qualifiedModuleName, $"{function.Schema.Name}.{function.Name}");
             }
+            if (resolved is not null)
+                onBound?.Invoke(resolved);
         }
     }
 

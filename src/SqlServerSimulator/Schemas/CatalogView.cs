@@ -314,15 +314,43 @@ internal enum DmvGateKind : byte
 /// object views, whose row carries the owning schema + object name instead of an
 /// id).
 /// </summary>
-internal readonly struct MetadataVisibilityKey(int objectIdOrdinal, int schemaNameOrdinal, int objectNameOrdinal)
+internal readonly struct MetadataVisibilityKey(int objectIdOrdinal, int schemaNameOrdinal, int objectNameOrdinal, int definitionOrdinal = -1, MetadataVisibilityKind kind = MetadataVisibilityKind.Object)
 {
+    /// <summary>What the row's governing cells name; for the non-object kinds <see cref="ObjectIdOrdinal"/> holds the principal or type id and <see cref="SchemaNameOrdinal"/> a role member's.</summary>
+    public readonly MetadataVisibilityKind Kind = kind;
+
     public readonly int ObjectIdOrdinal = objectIdOrdinal;
 
     public readonly int SchemaNameOrdinal = schemaNameOrdinal;
 
     public readonly int ObjectNameOrdinal = objectNameOrdinal;
 
+    /// <summary>The column carrying the object's definition text, which reads NULL to a principal that sees the row but may not see the definition; -1 for a view with none.</summary>
+    public readonly int DefinitionOrdinal = definitionOrdinal;
+
     public bool IsNameKeyed => this.ObjectIdOrdinal < 0;
+}
+
+/// <summary>The securables a filtered catalog view's rows are governed by.</summary>
+internal enum MetadataVisibilityKind : byte
+{
+    /// <summary>A schema object, by id or by schema and name.</summary>
+    Object,
+
+    /// <summary>A database principal, by id.</summary>
+    Principal,
+
+    /// <summary>A role membership, shown when either its role or its member is.</summary>
+    RoleMember,
+
+    /// <summary>A type, by <c>user_type_id</c>; the built-in types always show.</summary>
+    Type,
+
+    /// <summary>A module's definition, by id: the row shows when the module's definition does.</summary>
+    Definition,
+
+    /// <summary>A permission row, by grantee: the row shows when the reader is, or belongs to, the grantee.</summary>
+    Grantee,
 }
 
 /// <summary>

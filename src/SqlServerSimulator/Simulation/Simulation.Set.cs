@@ -1103,6 +1103,15 @@ partial class Simulation
                 : SimulatedSqlException.IdentityInsertObjectNotFound(tableName.ToString());
         }
 
+        // Setting it takes ALTER on the table — inside a procedure too, which
+        // ownership chaining doesn't reach — and a refusal reads as the
+        // missing table (probed 2026-10-04 against SQL Server 2025).
+        if (heapTable.Name is not ['#', ..]
+            && !PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(heapTable), heapTable.ObjectId, heapTable.SchemaId))
+        {
+            throw SimulatedSqlException.IdentityInsertDenied(tableName.ToString());
+        }
+
         if (onOff == Keyword.On)
         {
             // A table with no identity column can't be an IDENTITY_INSERT

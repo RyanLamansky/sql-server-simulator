@@ -50,7 +50,8 @@ Bump sites:
 
 - `BatchContext.TryResolveSequence(MultiPartName)` — accepts 1-part names (falls back to `dbo`), 2-part (`schema.seq`), 3-part (`db.schema.seq`, db must match current).
 - `NEXT VALUE FOR` on a non-sequence object that exists as a table / view / etc. → **Msg 11726** (probe-confirmed wording uses the qualified `dbo.name` form).
-- `NEXT VALUE FOR` on a totally missing name → **Msg 208** (the standard "invalid object name").
+- `NEXT VALUE FOR` on a totally missing name → **Msg 208** (the standard "invalid object name"), at state 1 where real raises state 211 (probed 2026-10-04 against SQL Server 2025).
+- A principal other than `dbo` needs `UPDATE` on the sequence (Msg 229), except in a column `DEFAULT`, which ownership chaining covers.
 
 ## `sys.sequences` catalog view
 

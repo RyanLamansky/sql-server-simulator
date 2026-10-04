@@ -3154,6 +3154,12 @@ public sealed partial class Simulation
                 rowCount = 0;
                 break;
 
+            case ReservedKeyword { Keyword: Keyword.SetUser }:
+                SetUserStatement(batch);
+                context.RejectTrailingToken();
+                rowCount = 0;
+                break;
+
             case UnquotedString { ContextualKeyword: ContextualKeyword.Throw }:
                 ParseThrowStatement(batch);
                 context.RejectTrailingToken();

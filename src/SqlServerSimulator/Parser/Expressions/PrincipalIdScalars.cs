@@ -281,20 +281,23 @@ internal sealed class HasPermsByName : Expression
         if (connection.Security.EffectiveIsDbo)
             return this.DboAnswer(runtime, securableVal, classVal);
 
-        var permission = permissionVal.CoerceTo(SqlType.NVarchar).AsString;
+        var permission = permissionVal.CoerceTo(SqlType.NVarchar).AsString.Trim().ToUpperInvariant();
         var className = classVal.CoerceTo(SqlType.NVarchar).AsString;
         var database = runtime.Batch.CurrentDatabase;
         var principalId = connection.Security.Effective.DatabasePrincipalId;
+        var server = ServerLoginRights.For(connection);
 
         byte securableClass;
         var majorId = 0;
         var schemaId = 0;
+        string classDescription;
         Span<char> classBuf = stackalloc char[className.Length];
         _ = className.AsSpan().ToUpperInvariant(classBuf);
         switch (classBuf)
         {
             case "DATABASE":
                 securableClass = PermissionChecker.ClassDatabase;
+                classDescription = "DATABASE";
                 break;
             case "OBJECT":
                 if (securableVal.IsNull)
@@ -304,7 +307,7 @@ internal sealed class HasPermsByName : Expression
                 {
                     // A catalog view answers by its own read rule (probed
                     // 2026-09-28 against SQL Server 2025).
-                    if (permission.Trim().Equals("SELECT", StringComparison.OrdinalIgnoreCase)
+                    if (permission == "SELECT"
                         && ObjectId.TryParseObjectName(objectName, out var parsed)
                         && runtime.Batch.TryResolveCatalogView(parsed, out var catalogView, out var catalogDatabase)
                         && BuiltInResources.CatalogViewsById.Value.TryGetValue(catalogView.ObjectId, out var entry))
@@ -312,23 +315,79 @@ internal sealed class HasPermsByName : Expression
                         var viewSchemaId = entry.SchemaName == "INFORMATION_SCHEMA" ? Database.InformationSchemaId : Database.SysSchemaId;
                         return SqlValue.FromInt32(PermissionChecker.CanReadCatalogView(catalogDatabase, principalId, catalogView.ObjectId, viewSchemaId) ? 1 : 0);
                     }
-                    return SqlValue.Null(SqlType.Int32);
+                    // An object that isn't there is 0, as for dbo (probed
+                    // 2026-10-04 against SQL Server 2025).
+                    return SqlValue.FromInt32(0);
                 }
                 securableClass = PermissionChecker.ClassObject;
+                classDescription = "OBJECT";
                 break;
             case "SCHEMA":
                 if (securableVal.IsNull || !TryResolveSchemaByName(database, securableVal.CoerceTo(SqlType.NVarchar).AsString, out schemaId))
                     return SqlValue.Null(SqlType.Int32);
                 securableClass = PermissionChecker.ClassSchema;
+                classDescription = "SCHEMA";
                 majorId = schemaId;
                 break;
             default:
                 return SqlValue.Null(SqlType.Int32);
         }
 
+        // ANY asks for any permission on the securable; a name the class
+        // doesn't carry is NULL (probed 2026-10-04 against SQL Server 2025).
+        if (permission == "ANY")
+            return SqlValue.FromInt32(HoldsAny(database, principalId, classDescription, securableClass, majorId, schemaId, server) ? 1 : 0);
+        if (!PermissionGraph.IsPermissionOf(classDescription, permission))
+            return SqlValue.Null(SqlType.Int32);
+
+        var columns = securableClass == PermissionChecker.ClassObject ? ColumnsOf(database, majorId) : null;
+        var enumPermission = Permission.Resolve(permission);
+        // A column sub-securable answers for that column, 0 for one the object
+        // lacks; the object itself answers a column-grantable permission only
+        // when every column passes, so a column DENY under a table GRANT reads
+        // 0 (probed 2026-10-04 against SQL Server 2025).
+        if (this.args.Length >= 5 && this.args[3].Run(runtime) is { IsNull: false } subName && columns is not null)
+        {
+            var ordinal = Array.FindIndex(columns, c => BuiltInToken.Comparer.Equals(c.Name, subName.CoerceTo(SqlType.NVarchar).AsString)) + 1;
+            return SqlValue.FromInt32(ordinal > 0 && PermissionChecker.IsColumnGranted(database, principalId, enumPermission, majorId, schemaId, ordinal, server) ? 1 : 0);
+        }
+        if (columns is not null && enumPermission is Permission.Select or Permission.Update or Permission.References or Permission.Unmask)
+        {
+            for (var ordinal = 1; ordinal <= columns.Length; ordinal++)
+            {
+                if (!PermissionChecker.IsColumnGranted(database, principalId, enumPermission, majorId, schemaId, ordinal, server))
+                    return SqlValue.FromInt32(0);
+            }
+            return SqlValue.FromInt32(1);
+        }
         return SqlValue.FromInt32(
-            PermissionChecker.IsGranted(database, principalId, Permission.Resolve(permission), securableClass, majorId, schemaId, ServerLoginRights.For(connection)) ? 1 : 0);
+            PermissionChecker.IsGrantedByName(database, principalId, permission, securableClass, majorId, schemaId, server) ? 1 : 0);
     }
+
+    /// <summary>Whether the principal holds any permission <paramref name="classDescription"/> securables take on this one.</summary>
+    private static bool HoldsAny(Database database, int principalId, string classDescription, byte securableClass, int majorId, int schemaId, ServerLoginRights server)
+    {
+        foreach (var row in BuiltinPermissionRows.All)
+        {
+            if (row.ClassDescription == classDescription
+                && PermissionChecker.IsGrantedByName(database, principalId, row.PermissionName, securableClass, majorId, schemaId, server))
+            {
+                return true;
+            }
+        }
+        return securableClass == PermissionChecker.ClassObject && ColumnsOf(database, majorId) is not null
+            && (PermissionChecker.HasAccessibleColumn(database, principalId, Permission.Select, majorId, schemaId, server)
+                || PermissionChecker.HasAccessibleColumn(database, principalId, Permission.Update, majorId, schemaId, server));
+    }
+
+    /// <summary>The columns of the table or view with id <paramref name="objectId"/>, or null for any other object.</summary>
+    private static Storage.HeapColumn[]? ColumnsOf(Database database, int objectId) =>
+        ObjectProperty.FindObject(database, objectId) switch
+        {
+            Storage.HeapTable table => table.Columns,
+            Schemas.View view => view.OutputColumns,
+            _ => null,
+        };
 
     /// <summary>
     /// The <c>LOGIN</c> class: <paramref name="permissionName"/> on the named
@@ -371,6 +430,9 @@ internal sealed class HasPermsByName : Expression
         var batch = runtime.Batch;
         var className = classVal.CoerceTo(SqlType.NVarchar).AsString.Trim();
         if (!IsSecurableClass(className))
+            return SqlValue.Null(SqlType.Int32);
+        var permission = this.args[2].Run(runtime).CoerceTo(SqlType.NVarchar).AsString.Trim().ToUpperInvariant();
+        if (permission != "ANY" && !PermissionGraph.IsPermissionOf(className.ToUpperInvariant(), permission))
             return SqlValue.Null(SqlType.Int32);
         var isObject = string.Equals(className, "OBJECT", StringComparison.OrdinalIgnoreCase);
         if (!isObject && !string.Equals(className, "SCHEMA", StringComparison.OrdinalIgnoreCase))
@@ -509,13 +571,27 @@ internal sealed class RoleMemberCheck : Expression
         if (principalValue?.IsNull == true)
             return SqlValue.Null(SqlType.Int32);
         var roleName = role.CoerceTo(SqlType.NVarchar).AsString;
+        var connection = runtime.Batch.Connection;
         if (!this.serverScope && principalValue is { } named)
-            return DatabaseMemberOf(runtime.Batch.CurrentDatabase, roleName, named.CoerceTo(SqlType.NVarchar).AsString);
+        {
+            var visible = connection.Security.EffectiveIsDbo ? null
+                : PermissionChecker.VisiblePrincipals(runtime.Batch.CurrentDatabase, connection.Security.Effective.DatabasePrincipalId, ServerLoginRights.For(connection));
+            return DatabaseMemberOf(runtime.Batch.CurrentDatabase, roleName, named.CoerceTo(SqlType.NVarchar).AsString, visible);
+        }
+        // An identity minted inside one database has no server principal and
+        // belongs to no server role, public included (probed 2026-10-04
+        // against SQL Server 2025).
+        if (this.serverScope && this.principalArg is null && connection.Security.Effective.IsDatabaseScoped)
+        {
+            return connection.Simulation.TryResolveServerRole(roleName, out _, out _) || BuiltInToken.Comparer.Equals(roleName, "public")
+                ? SqlValue.FromInt32(0)
+                : SqlValue.Null(SqlType.Int32);
+        }
         if (BuiltInToken.Comparer.Equals(roleName, "public"))
             return SqlValue.FromInt32(1);
         if (this.serverScope)
         {
-            var simulation = runtime.Batch.Connection.Simulation;
+            var simulation = connection.Simulation;
             // A non-role name → NULL.
             if (!simulation.TryResolveServerRole(roleName, out var roleId, out var isFixed))
                 return SqlValue.Null(SqlType.Int32);
@@ -549,7 +625,11 @@ internal sealed class RoleMemberCheck : Expression
             // roles) via the permission checker's role closure.
             return SqlValue.FromInt32(PermissionChecker.IsRoleMember(database, effectiveId, principal) ? 1 : 0);
         }
-        return SqlValue.Null(SqlType.Int32);
+        // A user's name asks whether the effective user is that one (probed
+        // 2026-10-04 against SQL Server 2025).
+        return principal is { TypeCode: "S" or "U" }
+            ? SqlValue.FromInt32(principal.PrincipalId == effectiveId ? 1 : 0)
+            : SqlValue.Null(SqlType.Int32);
     }
 
     /// <summary>
@@ -558,10 +638,14 @@ internal sealed class RoleMemberCheck : Expression
     /// member of itself whatever it is, and otherwise of the roles it reaches
     /// through nesting (probed 2026-09-25 against SQL Server 2025).
     /// </summary>
-    private static SqlValue DatabaseMemberOf(Database database, string roleName, string principalName)
+    private static SqlValue DatabaseMemberOf(Database database, string roleName, string principalName, HashSet<int>? visible)
     {
+        // A member the caller can't see answers as no member — NULL for a
+        // role, 0 for a user (probed 2026-10-04 against SQL Server 2025).
         if (!database.Principals.TryGetValue(principalName, out var member))
             return SqlValue.Null(SqlType.Int32);
+        if (visible?.Contains(member.PrincipalId) == false)
+            return member.TypeCode == "R" ? SqlValue.Null(SqlType.Int32) : SqlValue.FromInt32(0);
         if (BuiltInToken.Comparer.Equals(roleName, "public"))
             return SqlValue.FromInt32(1);
         if (!database.Principals.TryGetValue(roleName, out var roleP))

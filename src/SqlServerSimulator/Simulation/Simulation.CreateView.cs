@@ -201,7 +201,7 @@ partial class Simulation
             schema.Views.TryGetValue(viewName.Leaf, out var existingView) ? existingView : null);
 
         if (isSchemaBound)
-            SchemaBinding.EnforceBody(context.CurrentDatabase, "view", $"{schema.Name}.{viewName.Leaf}", bodyText);
+            SchemaBinding.EnforceBody(context.CurrentDatabase, "view", $"{schema.Name}.{viewName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, viewName.Leaf));
 
         var outputColumns = ComputeViewOutputColumns(context.CurrentDatabase.Collation, bodySelection, renameList, viewName.Leaf);
 

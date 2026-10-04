@@ -12,6 +12,7 @@ It is accepted in `CREATE TABLE`, `ALTER TABLE … ADD`, a `#temp` table, a tabl
 The function text may be an `N'…'` literal.
 
 `ALTER TABLE … ALTER COLUMN c ADD MASKED WITH (…)` sets or replaces the mask and `DROP MASKED` clears it (Msg 16007 when there is none); both are metadata changes a rolled-back transaction reverses.
+For a principal other than `dbo` either one takes `ALTER` on the table and database-scope `ALTER ANY MASK` (`CONTROL` covers it), refusing with Msg 15247 state 5 (probed 2026-10-04 against SQL Server 2025).
 A computed column is Msg 4928, and a column a computed column reads is Msg 5074 then Msg 4922 state 9, whichever way; an index on the column doesn't matter.
 `ALTER COLUMN c <type>` drops the mask — even to the same type — unless it restates one: `ALTER COLUMN c varchar(20) MASKED WITH (…) NULL`, the clause between `COLLATE` and the nullability.
 `SELECT … INTO` never copies a mask.

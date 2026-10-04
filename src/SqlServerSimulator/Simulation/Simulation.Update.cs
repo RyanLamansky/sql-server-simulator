@@ -826,9 +826,11 @@ partial class Simulation
         {
             // A synonym takes no column grants at all, so a reference
             // through one is checked object-grain against the synonym.
-            if (where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch))
-                PermissionEnforcement.CheckSchemaObject(context.Batch, "SELECT", synonym);
-            PermissionEnforcement.CheckSchemaObject(context.Batch, "UPDATE", synonym);
+            var synonymDenied = where is not null || AnySetExpressionReadsColumn(rawAssignments, table, context.Batch)
+                ? PermissionEnforcement.SchemaObjectDenial(context.Batch, "SELECT", synonym)
+                : null;
+            if (PermissionEnforcement.Combine(synonymDenied, PermissionEnforcement.SchemaObjectDenial(context.Batch, "UPDATE", synonym)) is { } synonymRefusal)
+                throw synonymRefusal;
             CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments);
             return;
         }
@@ -844,12 +846,13 @@ partial class Simulation
         where?.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
         foreach (var (_, expr) in rawAssignments)
             expr.VisitColumnReferences(read.Add);
-        PermissionEnforcement.CheckColumns(context.Batch, Permission.Select, read);
+        var readDenied = PermissionEnforcement.ColumnsDenial(context.Batch, Permission.Select, read);
 
         var assigned = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
         foreach (var columnName in SetColumnNames(rawAssignments))
             assigned.Add(columnName);
-        PermissionEnforcement.CheckColumns(context.Batch, Permission.Update, assigned);
+        if (PermissionEnforcement.Combine(readDenied, PermissionEnforcement.ColumnsDenial(context.Batch, Permission.Update, assigned)) is { } refusal)
+            throw refusal;
         CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments);
     }
 

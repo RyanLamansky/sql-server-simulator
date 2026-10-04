@@ -268,4 +268,98 @@ public sealed class ColumnLevelGrantTests
         var ex = sim.AssertSqlError("grant select on schema::dbo (a) to u", 1020);
         Contains("Sub-entity lists", ex.Message);
     }
+
+    // ---- Every refusal one statement earns (probed 2026-10-04 against SQL Server 2025) ----
+
+    private static string Numbers(SimulatedSqlException ex) => string.Join(",", ex.Errors.Select(static e => $"{e.Number}"));
+
+    private static Simulation FourColumns(string grants)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int, a int, b varchar(10), c int); insert dbo.t values (1, 10, 'x', 100)",
+            "create user u without login",
+            grants);
+        return sim;
+    }
+
+    [TestMethod]
+    public void SelectStar_ReportsEveryDeniedColumn()
+    {
+        var ex = FourColumns("grant select (a) on dbo.t to u").AssertSqlError("execute as user = 'u'; select * from dbo.t", 230);
+        AreEqual("230,230,230", Numbers(ex));
+        AreEqual("id,b,c", string.Join(",", ex.Errors.Select(static e => e.Message.Split('\'')[1])));
+    }
+
+    [TestMethod]
+    public void UpdateWithWhere_ReportsTheReadThenTheWrite()
+    {
+        var sim = FourColumns("grant insert on dbo.t to u");
+        AreEqual("229,229", Numbers(sim.AssertSqlError("execute as user = 'u'; update dbo.t set a = 1 where id = 1", 229)));
+        AreEqual("229,229", Numbers(sim.AssertSqlError("execute as user = 'u'; delete dbo.t where id = 1", 229)));
+        AreEqual("229,229", Numbers(FourColumns("grant update on dbo.t to u").AssertSqlError("execute as user = 'u'; merge dbo.t d using (select 9 id) s on d.id = s.id when not matched then insert (id) values (9);", 229)));
+        var columns = FourColumns("grant update (a) on dbo.t to u; grant select (id) on dbo.t to u").AssertSqlError("execute as user = 'u'; update dbo.t set a = 1, b = 'w' where c = 100", 230);
+        AreEqual("230,230", Numbers(columns));
+        Contains("SELECT permission was denied on the column 'c'", columns.Errors[0].Message);
+        Contains("UPDATE permission was denied on the column 'b'", columns.Errors[1].Message);
+    }
+
+    [TestMethod]
+    public void ColumnGrant_BeatsTheSamePrincipalsTableDeny()
+    {
+        var sim = FourColumns("deny select on dbo.t to u; grant select (a) on dbo.t to u");
+        AreEqual(10, sim.ExecuteScalar("execute as user = 'u'; select a from dbo.t"));
+        _ = sim.AssertSqlError("execute as user = 'u'; select b from dbo.t", 230);
+    }
+
+    [TestMethod]
+    public void ColumnGrant_UnderSchemaDeny_IsTheObjectLevel229()
+    {
+        var sim = FourColumns("deny select on schema::dbo to u; grant select (a) on dbo.t to u");
+        _ = sim.AssertSqlError("execute as user = 'u'; select a from dbo.t", 229);
+        var other = FourColumns("create role r; alter role r add member u; deny select on dbo.t to r; grant select (a) on dbo.t to u");
+        _ = other.AssertSqlError("execute as user = 'u'; select a from dbo.t", 229);
+    }
+
+    [TestMethod]
+    public void ColumnRevokeOfATableGrant_LeavesARevokeRow()
+    {
+        var sim = FourColumns("grant select on dbo.t to u; revoke select (b) on dbo.t from u");
+        AreEqual("GRANT:0,REVOKE:3", sim.ExecuteScalar("select string_agg(concat(state_desc, ':', minor_id), ',') within group (order by minor_id) from sys.database_permissions where grantee_principal_id = user_id('u') and class = 1"));
+        AreEqual(10, sim.ExecuteScalar("execute as user = 'u'; select a from dbo.t"));
+        _ = sim.AssertSqlError("execute as user = 'u'; select b from dbo.t", 230);
+        _ = sim.ExecuteNonQuery("grant select on schema::dbo to u");
+        _ = sim.AssertSqlError("execute as user = 'u'; select b from dbo.t", 230);
+        _ = sim.ExecuteNonQuery("revoke select on schema::dbo from u; revoke select on dbo.t from u");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.database_permissions where grantee_principal_id = user_id('u') and class = 1"));
+    }
+
+    [TestMethod]
+    public void HasPermsByName_AnswersColumnsAndTheWholeObject()
+    {
+        var sim = FourColumns("grant select on dbo.t to u; deny select (b) on dbo.t to u; grant update (a) on dbo.t to u");
+        AreEqual("1|0|1|0|0|NULL|1", sim.ExecuteScalar("""
+            execute as user = 'u';
+            select concat_ws('|',
+                has_perms_by_name('dbo.t', 'OBJECT', 'SELECT', 'a', 'COLUMN'),
+                has_perms_by_name('dbo.t', 'OBJECT', 'SELECT', 'b', 'COLUMN'),
+                has_perms_by_name('dbo.t', 'OBJECT', 'UPDATE', 'a', 'COLUMN'),
+                has_perms_by_name('dbo.t', 'OBJECT', 'SELECT'),
+                has_perms_by_name('dbo.t', 'OBJECT', 'SELECT', 'nosuch', 'COLUMN'),
+                isnull(cast(has_perms_by_name('dbo.t', 'OBJECT', 'NOSUCH') as varchar), 'NULL'),
+                has_perms_by_name('dbo.t', 'OBJECT', 'ANY'))
+            """));
+        AreEqual(0, sim.ExecuteScalar("execute as user = 'u'; select has_perms_by_name('dbo.nosuch', 'OBJECT', 'SELECT')"));
+    }
+
+    [TestMethod]
+    public void ForeignKey_NeedsReferencesOnTheReferencedColumns()
+    {
+        var sim = FourColumns("alter table dbo.t alter column id int not null");
+        sim.ExecuteBatches("alter table dbo.t add constraint pk_t primary key (id)", "grant references (a) on dbo.t to u; grant create table to u; grant alter on schema::dbo to u");
+        var ex = sim.AssertSqlError("execute as user = 'u'; create table dbo.child (x int references dbo.t (id))", 230);
+        AreEqual("230,1088,1750", Numbers(ex));
+        AreEqual((byte)20, ex.Errors[1].State);
+        Contains("\"dbo.t\"", ex.Errors[1].Message);
+    }
 }

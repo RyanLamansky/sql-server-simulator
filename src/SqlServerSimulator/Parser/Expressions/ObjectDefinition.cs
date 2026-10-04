@@ -55,7 +55,7 @@ internal sealed class ObjectDefinition : Expression
             foreach (var obj in schema.SchemaObjects())
             {
                 if (obj.ObjectId == id)
-                    return Definition(obj.DefinitionText);
+                    return PermissionEnforcement.CanSeeDefinition(runtime.Batch, database, obj) ? Definition(obj.DefinitionText) : SqlValue.Null(SqlType.NVarcharMax);
             }
         }
         foreach (var (_, ddlTrigger) in database.DdlTriggers)

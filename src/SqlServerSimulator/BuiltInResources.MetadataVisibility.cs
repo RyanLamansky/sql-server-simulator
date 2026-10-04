@@ -67,14 +67,47 @@ internal static partial class BuiltInResources
         foreach (var key in ObjectIdKeyedMetadataViews)
         {
             if (views.TryGetValue(key, out var view))
-                view.MetadataKey = new MetadataVisibilityKey(GoverningObjectIdOrdinal(view), -1, -1);
+                view.MetadataKey = new MetadataVisibilityKey(GoverningObjectIdOrdinal(view), -1, -1, DefinitionOrdinal(key, view));
         }
         foreach (var (key, schemaColumn, objectColumn) in NameKeyedMetadataViews)
         {
             if (views.TryGetValue(key, out var view))
-                view.MetadataKey = new MetadataVisibilityKey(-1, OrdinalOf(view, schemaColumn), OrdinalOf(view, objectColumn));
+                view.MetadataKey = new MetadataVisibilityKey(-1, OrdinalOf(view, schemaColumn), OrdinalOf(view, objectColumn), DefinitionOrdinal(key, view));
+        }
+        // A restricted principal sees the fixed principals, itself, the roles
+        // it belongs to, what it owns and what it holds a permission on; a
+        // role membership when it sees the role or the member; and a
+        // user-defined type it owns or holds a permission on (probed
+        // 2026-10-04 against SQL Server 2025).
+        // A dependency row is part of its referencing module's definition.
+        if (views.TryGetValue("sys.sql_expression_dependencies", out var dependencies))
+            dependencies.MetadataKey = new MetadataVisibilityKey(OrdinalOf(dependencies, "referencing_id"), -1, -1, kind: MetadataVisibilityKind.Definition);
+        // A permission row shows to its grantee and the principals in it
+        // (probed 2026-10-04 against SQL Server 2025: a fellow user's grants,
+        // and dbo's CONNECT, stay hidden).
+        if (views.TryGetValue("sys.database_permissions", out var permissions))
+            permissions.MetadataKey = new MetadataVisibilityKey(OrdinalOf(permissions, "grantee_principal_id"), -1, -1, kind: MetadataVisibilityKind.Grantee);
+        if (views.TryGetValue("sys.database_principals", out var principals))
+            principals.MetadataKey = new MetadataVisibilityKey(OrdinalOf(principals, "principal_id"), -1, -1, kind: MetadataVisibilityKind.Principal);
+        if (views.TryGetValue("sys.database_role_members", out var members))
+            members.MetadataKey = new MetadataVisibilityKey(OrdinalOf(members, "role_principal_id"), OrdinalOf(members, "member_principal_id"), -1, kind: MetadataVisibilityKind.RoleMember);
+        foreach (var key in (string[])["sys.table_types", "sys.types"])
+        {
+            if (views.TryGetValue(key, out var view))
+                view.MetadataKey = new MetadataVisibilityKey(OrdinalOf(view, "user_type_id"), -1, -1, kind: MetadataVisibilityKind.Type);
         }
     }
+
+    // The module views whose definition column reads NULL to a principal who
+    // sees the module without VIEW DEFINITION or the like (probed 2026-10-04
+    // against SQL Server 2025).
+    private static int DefinitionOrdinal(string key, CatalogView view) => key switch
+    {
+        "INFORMATION_SCHEMA.ROUTINES" => OrdinalOf(view, "ROUTINE_DEFINITION"),
+        "INFORMATION_SCHEMA.VIEWS" => OrdinalOf(view, "VIEW_DEFINITION"),
+        "sys.all_sql_modules" or "sys.sql_modules" => OrdinalOf(view, "definition"),
+        _ => -1,
+    };
 
     private static int GoverningObjectIdOrdinal(CatalogView view)
     {
@@ -119,9 +152,71 @@ internal static partial class BuiltInResources
         BatchContext batch,
         Database targetDatabase,
         IEnumerable<SqlValue[]> rows) =>
-        FilteringPrincipal(view, batch, targetDatabase) is not { } principalId || view.MetadataKey is not { } key ? rows
-            : key.IsNameKeyed ? FilterByName(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection))
-            : FilterByObjectId(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection));
+        view.MetadataKey is { Kind: MetadataVisibilityKind.Principal or MetadataVisibilityKind.RoleMember or MetadataVisibilityKind.Grantee } principalKey
+            ? PermissionEnforcement.RestrictedPrincipal(batch, targetDatabase) is int restricted
+                && (principalKey.Kind == MetadataVisibilityKind.Grantee
+                    ? PermissionChecker.VisibleGrantees(targetDatabase, restricted, ServerLoginRights.For(batch.Connection))
+                    : PermissionChecker.VisiblePrincipals(targetDatabase, restricted, ServerLoginRights.For(batch.Connection))) is { } visiblePrincipals
+                ? FilterByPrincipal(rows, principalKey, visiblePrincipals)
+                : rows
+            : FilteringPrincipal(view, batch, targetDatabase) is not { } principalId || view.MetadataKey is not { } key ? rows
+            : key.Kind switch
+            {
+                MetadataVisibilityKind.Type => FilterByType(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
+                MetadataVisibilityKind.Definition => FilterByDefinition(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
+                _ => key.IsNameKeyed ? FilterByName(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection))
+                    : FilterByObjectId(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
+            };
+
+    private static IEnumerable<SqlValue[]> FilterByPrincipal(IEnumerable<SqlValue[]> rows, MetadataVisibilityKey key, HashSet<int> visible)
+    {
+        foreach (var row in rows)
+        {
+            if (visible.Contains(row[key.ObjectIdOrdinal].AsInt32)
+                || (key.Kind == MetadataVisibilityKind.RoleMember && visible.Contains(row[key.SchemaNameOrdinal].AsInt32)))
+            {
+                yield return row;
+            }
+        }
+    }
+
+    private static IEnumerable<SqlValue[]> FilterByDefinition(IEnumerable<SqlValue[]> rows, MetadataVisibilityKey key, Database database, int principalId, ServerLoginRights server)
+    {
+        var visible = BuildVisibleObjectIds(database, principalId, server);
+        var definitions = new HashSet<int>();
+        foreach (var (_, obj) in DefinitionVisibleObjects(database, principalId, server))
+            _ = definitions.Add(obj.ObjectId);
+        foreach (var row in rows)
+        {
+            var id = row[key.ObjectIdOrdinal].AsInt32;
+            if (visible.Contains(id) && definitions.Contains(id))
+                yield return row;
+        }
+    }
+
+    private static IEnumerable<SqlValue[]> FilterByType(IEnumerable<SqlValue[]> rows, MetadataVisibilityKey key, Database database, int principalId, ServerLoginRights server)
+    {
+        var visible = new HashSet<int>();
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, type) in schema.AliasTypes)
+            {
+                if (PermissionChecker.CanViewTypeMetadata(database, principalId, type.UserTypeId, schema.SchemaId, Ownership.EffectiveOwnerId(type), server))
+                    _ = visible.Add(type.UserTypeId);
+            }
+            foreach (var (_, type) in schema.TableTypes)
+            {
+                if (PermissionChecker.CanViewTypeMetadata(database, principalId, type.UserTypeId, schema.SchemaId, type.OwnerPrincipalId ?? schema.PrincipalId, server))
+                    _ = visible.Add(type.UserTypeId);
+            }
+        }
+        foreach (var row in rows)
+        {
+            var id = row[key.ObjectIdOrdinal].AsInt32;
+            if (id <= 256 || visible.Contains(id))
+                yield return row;
+        }
+    }
 
     /// <summary>
     /// Whether <see cref="ApplyMetadataFilter"/> would hand this read every row
@@ -129,7 +224,9 @@ internal static partial class BuiltInResources
     /// user in <paramref name="targetDatabase"/>.
     /// </summary>
     internal static bool ReadsUnfiltered(CatalogView view, BatchContext batch, Database targetDatabase) =>
-        FilteringPrincipal(view, batch, targetDatabase) is null || view.MetadataKey is null;
+        view.MetadataKey is { Kind: MetadataVisibilityKind.Principal or MetadataVisibilityKind.RoleMember or MetadataVisibilityKind.Grantee }
+            ? PermissionEnforcement.RestrictedPrincipal(batch, targetDatabase) is null
+            : FilteringPrincipal(view, batch, targetDatabase) is null || view.MetadataKey is null;
 
     // An unfiltered view of the session's own database asks nothing of the
     // principal, so it short-circuits ahead of the closure build; the
@@ -148,11 +245,17 @@ internal static partial class BuiltInResources
         ServerLoginRights server)
     {
         var visible = BuildVisibleObjectIds(database, principalId, server);
+        var definitions = key.DefinitionOrdinal < 0 ? null : new HashSet<int>();
+        if (definitions is not null)
+        {
+            foreach (var (_, obj) in DefinitionVisibleObjects(database, principalId, server))
+                _ = definitions.Add(obj.ObjectId);
+        }
         foreach (var row in rows)
         {
             var idCell = row[key.ObjectIdOrdinal];
             if (!idCell.IsNull && visible.Contains(idCell.AsInt32))
-                yield return row;
+                yield return definitions is null || definitions.Contains(idCell.AsInt32) ? row : WithoutDefinition(row, key);
         }
     }
 
@@ -164,15 +267,21 @@ internal static partial class BuiltInResources
         ServerLoginRights server)
     {
         var visible = BuildVisibleObjectNames(database, principalId, server);
+        var definitions = key.DefinitionOrdinal < 0 ? null : new HashSet<string>(BuiltInToken.Comparer);
+        if (definitions is not null)
+        {
+            foreach (var (schemaName, obj) in DefinitionVisibleObjects(database, principalId, server))
+                _ = definitions.Add(QualifiedName(schemaName, obj.Name));
+        }
         foreach (var row in rows)
         {
             var schemaCell = row[key.SchemaNameOrdinal];
             var nameCell = row[key.ObjectNameOrdinal];
-            if (!schemaCell.IsNull && !nameCell.IsNull
-                && visible.Contains(QualifiedName(schemaCell.AsString, nameCell.AsString)))
-            {
-                yield return row;
-            }
+            if (schemaCell.IsNull || nameCell.IsNull)
+                continue;
+            var qualified = QualifiedName(schemaCell.AsString, nameCell.AsString);
+            if (visible.Contains(qualified))
+                yield return definitions is null || definitions.Contains(qualified) ? row : WithoutDefinition(row, key);
         }
     }
 
@@ -216,6 +325,29 @@ internal static partial class BuiltInResources
             }
         }
         return visible;
+    }
+
+    // The modules whose definition the principal may read.
+    private static IEnumerable<(string SchemaName, SchemaObject Module)> DefinitionVisibleObjects(Database database, int principalId, ServerLoginRights server)
+    {
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var obj in schema.SchemaObjects())
+            {
+                if (obj.DefinitionText is null)
+                    continue;
+                var (governingId, governingSchema) = GoverningObject(obj);
+                if (PermissionChecker.CanViewDefinition(database, principalId, governingId, governingSchema, server))
+                    yield return (schema.Name, obj);
+            }
+        }
+    }
+
+    private static SqlValue[] WithoutDefinition(SqlValue[] row, MetadataVisibilityKey key)
+    {
+        var copy = (SqlValue[])row.Clone();
+        copy[key.DefinitionOrdinal] = SqlValue.Null(copy[key.DefinitionOrdinal].Type);
+        return copy;
     }
 
     private static void AddConstraintIds(HashSet<int> visible, HeapTable table)

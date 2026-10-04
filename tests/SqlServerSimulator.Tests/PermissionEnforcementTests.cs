@@ -480,4 +480,112 @@ public sealed class PermissionEnforcementTests
     public void FixedRoles_ProjectInDatabasePrincipals()
         => AreEqual(9, new Simulation().ExecuteScalar(
             "select count(*) from sys.database_principals where is_fixed_role = 1 and type = 'R' and name <> 'public'"));
+
+    // ---- The fn_builtin_permissions graph and the fixed roles' own grants (probed 2026-10-04 against SQL Server 2025) ----
+
+    private static Simulation Catalog(string grants)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int primary key, a int)",
+            "create view dbo.v as select id, a from dbo.t",
+            "create procedure dbo.p as select 1 x",
+            "create trigger dbo.tr on dbo.t after insert as select 1 x",
+            "create user u without login; create user u2 without login; create role r; alter role r add member u",
+            grants);
+        return sim;
+    }
+
+    private static string Visible(Simulation sim) =>
+        (string)sim.ExecuteScalar("execute as user = 'u'; select isnull(string_agg(name, ',') within group (order by name), '') from sys.objects where is_ms_shipped = 0 and type in ('U', 'V', 'P')")!;
+
+    [TestMethod]
+    public void SchemaTakeOwnership_DoesNotReachTheObjects()
+    {
+        var sim = Catalog("grant take ownership on schema::dbo to u");
+        AreEqual(0, sim.ExecuteScalar("execute as user = 'u'; select has_perms_by_name('dbo.t', 'OBJECT', 'TAKE OWNERSHIP')"));
+        AreEqual(1, sim.ExecuteScalar("execute as user = 'u'; select has_perms_by_name('dbo', 'SCHEMA', 'TAKE OWNERSHIP')"));
+    }
+
+    [TestMethod]
+    public void FixedRoles_CarryTheirOwnDatabasePermissions()
+    {
+        AreEqual(1, Catalog("alter role db_ddladmin add member u").ExecuteScalar("execute as user = 'u'; select has_perms_by_name('dbo.t', 'OBJECT', 'REFERENCES')"));
+        AreEqual(1, Catalog("alter role db_securityadmin add member u").ExecuteScalar("execute as user = 'u'; select has_perms_by_name('dbo.t', 'OBJECT', 'VIEW DEFINITION')"));
+        AreEqual("BACKUP DATABASE,BACKUP LOG,CHECKPOINT,CONNECT", Catalog("alter role db_backupoperator add member u").ExecuteScalar(
+            "execute as user = 'u'; select string_agg(permission_name, ',') within group (order by permission_name) from fn_my_permissions(null, 'DATABASE') where permission_name not like 'VIEW ANY%'"));
+        _ = Catalog("alter role db_denydatareader add member u").AssertSqlError("execute as user = 'u'; select count(*) from sys.objects", 229);
+    }
+
+    [TestMethod]
+    public void MetadataVisibility_FollowsTheObjectsKind()
+    {
+        AreEqual("t,v", Visible(Catalog("grant select on schema::dbo to u")));
+        AreEqual("t,v", Visible(Catalog("alter role db_datareader add member u")));
+        AreEqual("p", Visible(Catalog("grant execute on schema::dbo to u")));
+        AreEqual("", Visible(Catalog("alter role db_datawriter add member u; alter role db_denydatawriter add member u")));
+        AreEqual("", Visible(Catalog("grant select on dbo.t to u; deny view definition on dbo.t to u")));
+        AreEqual("p,v", Visible(Catalog("grant control to r; deny control on dbo.t to u")));
+    }
+
+    [TestMethod]
+    public void Definitions_NeedViewDefinitionOrAlter()
+    {
+        var sim = Catalog("grant select on dbo.v to u; grant select on dbo.t to u");
+        AreEqual("tr:,v:", sim.ExecuteScalar("execute as user = 'u'; select string_agg(concat(object_name(object_id), ':', definition), ',') within group (order by object_name(object_id)) from sys.sql_modules"));
+        AreEqual(DBNull.Value, sim.ExecuteScalar("execute as user = 'u'; select object_definition(object_id('dbo.v'))"));
+        _ = sim.AssertSqlError("execute as user = 'u'; exec sp_helptext 'dbo.v'", 15197);
+        _ = sim.AssertSqlError("execute as user = 'u'; exec sp_helptext 'dbo.p'", 15009);
+        _ = sim.AssertSqlError("execute as user = 'u'; exec sp_help 'dbo.p'", 15009);
+        _ = sim.ExecuteNonQuery("grant alter on dbo.t to u");
+        AreEqual(1, sim.ExecuteScalar("execute as user = 'u'; select count(*) from sys.sql_modules where object_name(object_id) = 'tr' and definition is not null"));
+    }
+
+    [TestMethod]
+    public void HiddenObjects_LeaveTheCatalogProceduresAndScalars()
+    {
+        var sim = Catalog("grant select on dbo.v to u");
+        AreEqual(DBNull.Value, sim.ExecuteScalar("execute as user = 'u'; select col_length('dbo.t', 'a')"));
+        _ = sim.AssertSqlError("execute as user = 'u'; select count(*) from sys.sql_expression_dependencies", 229);
+    }
+
+    [TestMethod]
+    public void PrincipalCatalogs_ShowWhatTheReaderMaySee()
+    {
+        var sim = Catalog("create role r2 authorization u; create type dbo.ty from int");
+        AreEqual("r,r2,u", sim.ExecuteScalar("execute as user = 'u'; select string_agg(name, ',') within group (order by name) from sys.database_principals where principal_id between 5 and 16383"));
+        AreEqual(0, sim.ExecuteScalar("execute as user = 'u'; select count(*) from sys.types where is_user_defined = 1"));
+        AreEqual(0, sim.ExecuteScalar("execute as user = 'u'; select count(*) from sys.database_permissions where grantee_principal_id = user_id('u2')"));
+        AreEqual("16384:1", sim.ExecuteScalar("select string_agg(concat(role_principal_id, ':', member_principal_id), ',') from sys.database_role_members where role_principal_id = 16384"));
+        _ = sim.ExecuteNonQuery("grant view definition on user::u2 to u; grant references on type::dbo.ty to u");
+        AreEqual("r,r2,u,u2", sim.ExecuteScalar("execute as user = 'u'; select string_agg(name, ',') within group (order by name) from sys.database_principals where principal_id between 5 and 16383"));
+        AreEqual(1, sim.ExecuteScalar("execute as user = 'u'; select count(*) from sys.types where is_user_defined = 1"));
+    }
+
+    [TestMethod]
+    public void SpRename_SplitsAHiddenObjectFromOneWithoutAlter()
+    {
+        _ = Catalog("select 1").AssertSqlError("execute as user = 'u'; exec sp_rename 'dbo.t', 't2'", 15225);
+        _ = Catalog("grant select on dbo.t to u").AssertSqlError("execute as user = 'u'; exec sp_rename 'dbo.t', 't2'", 297);
+    }
+
+    [TestMethod]
+    public void TokensAndMyPermissions()
+    {
+        var sim = Catalog("alter role db_datareader add member u");
+        AreEqual("u,public,r,db_datareader", sim.ExecuteScalar("execute as user = 'u'; select string_agg(name, ',') from sys.user_token"));
+        AreEqual("DENY ONLY    ", sim.ExecuteScalar("execute as user = 'u'; select top (1) usage from sys.login_token"));
+        AreEqual("sa,public,sysadmin", sim.ExecuteScalar("select string_agg(name, ',') from sys.login_token"));
+    }
+
+    [TestMethod]
+    public void ScalarExecuteMemo_IsPerPrincipal()
+    {
+        // A check that passed for one identity in a batch doesn't answer for
+        // the identity after a REVERT / EXECUTE AS.
+        var sim = Catalog("create user u3 without login");
+        sim.ExecuteBatches("create function dbo.f() returns int as begin return 1 end", "grant execute on dbo.f to u");
+        _ = sim.AssertSqlError("execute as user = 'u'; select dbo.f(); revert; execute as user = 'u3'; select dbo.f(); revert", 229);
+        _ = sim.AssertSqlError("execute as user = 'u3'; begin try select dbo.f() end try begin catch end catch; select dbo.f()", 229);
+    }
 }

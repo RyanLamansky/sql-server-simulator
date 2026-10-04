@@ -104,6 +104,23 @@ public sealed partial class Simulation
         }
     }
 
+    /// <summary>
+    /// The REFERENCES check a schema-bound module's creation makes of every
+    /// object its body binds to, or null for a session that bypasses it — Msg
+    /// 229 then Msg 1088 state 18, attributed to the module (probed
+    /// 2026-10-04 against SQL Server 2025, the creator's own grant answering
+    /// whoever owns the object).
+    /// </summary>
+    private static Action<SchemaObject>? SchemaBoundReferenceCheck(BatchContext batch, string moduleLeaf) =>
+        batch.Connection.Security.EffectiveIsDbo ? null : bound =>
+        {
+            var database = batch.DatabaseFor(bound);
+            if (!PermissionEnforcement.HoldsPermission(batch, database, Permission.References, PermissionChecker.ClassObject, bound.ObjectId, bound.SchemaId))
+            {
+                throw SimulatedSqlException.SchemaBoundReferencesDenied(bound.Name, database.Name, PermissionEnforcement.SchemaNameFor(database, bound.SchemaId), moduleLeaf);
+            }
+        };
+
     /// <summary>The noun real spells inside <c>Cannot alter the &lt;kind&gt; '…'</c> for a module being replaced.</summary>
     private static string ModuleKindNoun(SchemaObject module) => module switch
     {
