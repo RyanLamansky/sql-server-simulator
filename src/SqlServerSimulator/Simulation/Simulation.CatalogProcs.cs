@@ -1165,7 +1165,10 @@ partial class Simulation
         !arg.IsDefault && !arg.Value.IsNull && ScalarArguments.CoerceProcedureParameter(arg.Value, SqlType.Bit) != 0;
 
     // Parses @table_type's quoted comma-list ("'TABLE','VIEW'") into an
-    // upper-case set; null / empty means "all types".
+    // upper-case set; null / empty means "all types". Real looks for each
+    // type with its single quotes, so a type written without them selects
+    // nothing (probed 2026-10-04 against SQL Server 2025: 'VIEW' alone
+    // answers no rows).
     private static HashSet<string>? ParseTableTypeList(string? tableType)
     {
         if (string.IsNullOrWhiteSpace(tableType))
@@ -1173,12 +1176,12 @@ partial class Simulation
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var part in tableType.Split(','))
         {
-            var trimmed = part.Trim().Trim('\'', '"').Trim();
-            if (trimmed.Length > 0)
-                _ = set.Add(trimmed);
+            var trimmed = part.Trim();
+            if (trimmed.Length > 2 && trimmed[0] == '\'' && trimmed[^1] == '\'')
+                _ = set.Add(trimmed[1..^1]);
         }
 
-        return set.Count == 0 ? null : set;
+        return set;
     }
 
     // A null pattern matches everything; otherwise a T-SQL LIKE pattern

@@ -4,6 +4,23 @@ sealed class DoubleAtPrefixedString(string command, int index, int length) : Str
 {
     public override ReadOnlySpan<char> Span => Source[2..];
 
+    /// <summary>Whether this names one of the built-in <c>@@</c> functions.</summary>
+    public bool IsBuiltIn
+    {
+        get
+        {
+            var source = this.Span;
+            Span<char> stripped = stackalloc char[source.Length];
+            var pos = 0;
+            for (var i = 0; i < source.Length; i++)
+            {
+                if (source[i] != '_')
+                    stripped[pos++] = source[i];
+            }
+            return Enum.TryParse<AtAtKeyword>(stripped[..pos], true, out _);
+        }
+    }
+
     public AtAtKeyword Parse()
     {
         // Strip underscores so SQL Server's `@@LOCK_TIMEOUT` /

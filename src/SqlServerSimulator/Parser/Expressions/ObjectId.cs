@@ -353,50 +353,88 @@ internal sealed class ObjectId : Expression
     internal override void Describe(NodeShape shape) => shape.Child(this.nameArg).Child(this.typeArg);
 
     /// <summary>
-    /// Splits a runtime-string object name into a <see cref="MultiPartName"/>.
-    /// Honors bracket quoting (<c>[dbo].[foo]</c>) on a per-segment basis;
-    /// trims surrounding whitespace; an empty middle segment substitutes
-    /// <see cref="Database.DefaultSchemaName"/> (so <c>'db..table'</c>
-    /// resolves identically to <c>'db.dbo.table'</c>, matching the
-    /// SQL-grammar <see cref="BatchContext.ParseObjectName"/> rule). 4+
-    /// segments, 0 segments, or unterminated brackets in any segment return
-    /// false.
+    /// Splits a runtime-string object name into a <see cref="MultiPartName"/>
+    /// as real's name parser does (probed 2026-10-04 against SQL Server 2025):
+    /// a part is bracketed (<c>[a.b]</c>, <c>]]</c> escaping <c>]</c>),
+    /// double-quoted (<c>"a.b"</c>, <c>""</c> escaping <c>"</c>) or plain, and
+    /// nothing is trimmed — <c>' dbo.t'</c> names a schema <c>' dbo'</c>, and
+    /// a space beside a quoted part makes the name unparseable. Leading empty
+    /// parts are the omitted server or database, an empty middle part
+    /// substitutes <see cref="Database.DefaultSchemaName"/> (so
+    /// <c>'db..table'</c> resolves as <c>'db.dbo.table'</c>, matching
+    /// <see cref="BatchContext.ParseObjectName"/>), and a trailing empty part,
+    /// more than four parts, a part over 128 characters or a stray quote
+    /// return false.
     /// </summary>
     internal static bool TryParseObjectName(string input, out MultiPartName result)
     {
         result = default;
         if (string.IsNullOrEmpty(input))
             return false;
-        var rawSegments = input.Split('.');
-        var segments = new List<string>(rawSegments.Length);
-        for (var i = 0; i < rawSegments.Length; i++)
+        var segments = new List<string>(4);
+        var leadingEmpty = true;
+        var position = 0;
+        while (true)
         {
-            var segment = rawSegments[i].Trim();
+            string segment;
+            if (position < input.Length && input[position] is '[' or '"')
+            {
+                var close = input[position] == '[' ? ']' : '"';
+                var builder = new System.Text.StringBuilder();
+                var i = position + 1;
+                while (true)
+                {
+                    if (i >= input.Length)
+                        return false;
+                    if (input[i] == close)
+                    {
+                        if (i + 1 < input.Length && input[i + 1] == close)
+                        {
+                            _ = builder.Append(close);
+                            i += 2;
+                            continue;
+                        }
+                        i++;
+                        break;
+                    }
+                    _ = builder.Append(input[i++]);
+                }
+                if (i < input.Length && input[i] != '.')
+                    return false;
+                segment = builder.ToString();
+                position = i;
+                if (segment.Length is 0 or > 128)
+                    return false;
+            }
+            else
+            {
+                var end = input.IndexOf('.', position);
+                if (end < 0)
+                    end = input.Length;
+                segment = input[position..end];
+                if (segment.AsSpan().IndexOfAny('[', ']', '"') >= 0 || segment.Length > 128)
+                    return false;
+                position = end;
+            }
+
+            var last = position >= input.Length;
             if (segment.Length == 0)
             {
-                // Empty middle segment is the `db..table` shorthand for
-                // `db.dbo.table` — substitute the default schema so the
-                // first segment routes to a database, not a current-DB
-                // schema. Leading / trailing empties (`.foo`, `foo.`) drop
-                // through to the count check.
-                var isLeadingOrTrailing = i == 0 || i == rawSegments.Length - 1;
-                if (isLeadingOrTrailing)
-                    continue;
-                segments.Add(Database.DefaultSchemaName);
-                continue;
+                // An omitted server or database leads; an omitted schema sits
+                // in the middle; nothing may trail.
+                if (last)
+                    return false;
+                if (!leadingEmpty)
+                    segments.Add(Database.DefaultSchemaName);
             }
-            if (segment.Length >= 2 && segment[0] == '[' && segment[^1] == ']')
+            else
             {
-                var inner = segment[1..^1];
-                if (inner.AsSpan().Contains('['))
-                    return false; // unbalanced bracket inside bracket
-                segment = inner.Replace("]]", "]", StringComparison.Ordinal);
+                leadingEmpty = false;
+                segments.Add(segment);
             }
-            else if (segment.AsSpan().IndexOfAny('[', ']') >= 0)
-            {
-                return false; // stray bracket
-            }
-            segments.Add(segment);
+            if (last)
+                break;
+            position++;
         }
         if (segments.Count is 0 or > 4)
             return false;

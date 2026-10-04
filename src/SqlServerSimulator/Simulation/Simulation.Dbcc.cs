@@ -67,8 +67,14 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
+        // A file id may carry a sign, which only finds no file.
+        var negativeFirst = false;
+        if (context.Token is Operator { Character: '-' })
+        {
+            negativeFirst = true;
+            context.MoveNextRequired();
+        }
         var firstArg = context.Token;
-        var fileId = isFile && firstArg is Numeric { Value: { IsNull: false } fid } ? fid.AsInt32 : 1;
 
         // Consume any remaining comma-separated arguments (target percent / size,
         // NOTRUNCATE / TRUNCATEONLY / EMPTYFILE) — all parse-and-discard.
@@ -103,6 +109,12 @@ partial class Simulation
         var target = isFile
             ? context.Connection.CurrentDatabase
             : ResolveShrinkDatabase(simulation, context.Connection.CurrentDatabase, firstArg);
+        // Shrinking takes db_owner (Msg 7983, probed 2026-10-04 against SQL
+        // Server 2025), and SHRINKFILE's file must be one of the database's.
+        RequireDbccDatabaseOwner(batch, target, isFile ? "shrinkfile" : "shrinkdatabase");
+        var fileId = 1;
+        if (isFile)
+            fileId = ResolveShrinkFile(target, firstArg, negativeFirst);
 
         ShrinkDatabaseStorage(context.Connection.Simulation, target);
 
@@ -176,7 +188,15 @@ partial class Simulation
         context.MoveNextRequired();
         var (tableName, tableText) = ParseShowStatisticsName(context, parameterNumber: 1);
 
-        if (context.GetNextRequired() is not Operator { Character: ',' })
+        // One argument is Msg 2583, Msg 2528 following it (probed 2026-10-04
+        // against SQL Server 2025).
+        if (context.GetNextRequired() is Operator { Character: ')' })
+        {
+            if (batch.IsSkipping)
+                return true;
+            throw SimulatedSqlException.FollowedByDbccCompleted(SimulatedSqlException.DbccWrongParameterCount(state: 5));
+        }
+        if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
@@ -185,24 +205,33 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.With })
-            throw new NotSupportedException("DBCC SHOW_STATISTICS without WITH HISTOGRAM (the STAT_HEADER / DENSITY_VECTOR / HISTOGRAM three-result-set form) isn't modeled.");
-
-        var option = context.GetNextRequired<Name>();
-        if (!BuiltInToken.Equals(option.Value, "HISTOGRAM"))
-            throw new NotSupportedException($"DBCC SHOW_STATISTICS WITH {option.Value} isn't modeled; only WITH HISTOGRAM ships.");
-
+        // The option list: HISTOGRAM alone ships; the other forms are read so
+        // the name and permission checks they share still answer.
+        string? unsupported = null;
+        var histogram = false;
         var informational = true;
-        var afterOption = context.SaveCheckpoint();
-        if (context.MoveNext() && context.Token is Operator { Character: ',' })
+        var afterParen = context.SaveCheckpoint();
+        if (context.MoveNext() && context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
-            if (context.GetNextRequired<Name>() is not { Value: var second } || !BuiltInToken.Equals(second, "NO_INFOMSGS"))
-                throw new NotSupportedException("DBCC SHOW_STATISTICS WITH HISTOGRAM combined with options other than NO_INFOMSGS isn't modeled.");
-            informational = false;
+            while (true)
+            {
+                var option = context.GetNextRequired<Name>();
+                if (BuiltInToken.Equals(option.Value, "HISTOGRAM"))
+                    histogram = true;
+                else if (BuiltInToken.Equals(option.Value, "NO_INFOMSGS"))
+                    informational = false;
+                else
+                    unsupported ??= option.Value;
+                var afterOption = context.SaveCheckpoint();
+                if (context.MoveNext() && context.Token is Operator { Character: ',' })
+                    continue;
+                context.RestoreCheckpoint(afterOption);
+                break;
+            }
         }
         else
         {
-            context.RestoreCheckpoint(afterOption);
+            context.RestoreCheckpoint(afterParen);
         }
 
         if (batch.IsSkipping)
@@ -210,8 +239,33 @@ partial class Simulation
 
         if (!batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindTableOrObject(tableText);
+        // Reading statistics takes SELECT on the table: Msg 229 then Msg 2557
+        // without it (probed 2026-10-04 against SQL Server 2025).
+        var database = batch.DatabaseFor(table);
+        if (!table.IsTableVariable && table.Name is not ['#', ..]
+            && !PermissionEnforcement.HoldsPermission(batch, database, Permission.Select, PermissionChecker.ClassObject, table.ObjectId, table.SchemaId))
+        {
+            throw SimulatedSqlException.FollowedByDbccCompleted(SimulatedSqlException.ShowStatisticsPermissionDenied(
+                batch.Connection.Security.Effective.DatabasePrincipalName, table.Name, database.Name, SchemaNameOf(database, table), tableText));
+        }
 
-        outcomes.Add(BuildHistogram(batch, table, statName.Leaf));
+        SimulatedSqlResultSet rows;
+        try
+        {
+            rows = BuildHistogram(batch, table, statName.Leaf);
+        }
+        catch (SimulatedSqlException missing) when (missing.Number == 2767 && informational)
+        {
+            throw SimulatedSqlException.FollowedByDbccCompleted(missing);
+        }
+        if (unsupported is not null || !histogram)
+        {
+            throw new NotSupportedException(unsupported is null
+                ? "DBCC SHOW_STATISTICS without WITH HISTOGRAM (the STAT_HEADER / DENSITY_VECTOR / HISTOGRAM three-result-set form) isn't modeled."
+                : $"DBCC SHOW_STATISTICS WITH {unsupported} isn't modeled; only WITH HISTOGRAM ships.");
+        }
+
+        outcomes.Add(rows);
         if (informational)
             AfterDbccRows(batch, outcomes, SimulatedSqlException.DbccExecutionCompletedMessage(batch));
         return true;
@@ -363,6 +417,33 @@ partial class Simulation
     }
 
     /// <summary>
+    /// The file a <c>DBCC SHRINKFILE</c> names, by id or by name; one the
+    /// database doesn't have is Msg 8985, state 2 for an id and 1 for a name
+    /// (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static int ResolveShrinkFile(Database database, Token? firstArg, bool negative)
+    {
+        switch (firstArg)
+        {
+            case Numeric { Value: { IsNull: false } idValue } when SqlType.IsIntegerCategory(idValue.Type):
+                var id = negative ? -idValue.CoerceTo(SqlType.BigInt).AsInt64 : idValue.CoerceTo(SqlType.BigInt).AsInt64;
+                return database.Files.Exists(file => file.FileId == id && !file.IsContainer)
+                    ? (int)id
+                    : throw SimulatedSqlException.ShrinkFileNotFound(id.ToString(CultureInfo.InvariantCulture), database.Name, 2);
+            case Literal { Value: { IsNull: false } text } when SqlType.IsStringCategory(text.Type):
+                return database.FindFile(text.AsString.TrimEnd(' ')) is { } byLiteral
+                    ? byLiteral.FileId
+                    : throw SimulatedSqlException.ShrinkFileNotFound(text.AsString, database.Name, 1);
+            case Name name:
+                return database.FindFile(name.Value) is { } byName
+                    ? byName.FileId
+                    : throw SimulatedSqlException.ShrinkFileNotFound(name.Value, database.Name, 1);
+            default:
+                return 1;
+        }
+    }
+
+    /// <summary>
     /// Resolves the <c>DBCC SHRINKDATABASE</c> first argument to a database: a
     /// bare / bracketed name routes through <see cref="Databases"/>
     /// (Msg 2520 on miss), a numeric database-id through the same
@@ -377,6 +458,10 @@ partial class Simulation
                 return simulation.Databases.TryGetValue(name.Value, out var byName)
                     ? byName
                     : throw SimulatedSqlException.CouldNotFindDatabase(name.Value);
+            case Literal { Value: { IsNull: false } text } when SqlType.IsStringCategory(text.Type):
+                return simulation.Databases.TryGetValue(text.AsString, out var byLiteral)
+                    ? byLiteral
+                    : throw SimulatedSqlException.CouldNotFindDatabase(text.AsString);
             case Numeric { Value: { IsNull: false } idValue } when idValue.AsInt32 == 0:
                 return current;
             case Numeric { Value: { IsNull: false } idValue }:
@@ -513,6 +598,10 @@ partial class Simulation
 
         var runtime = new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch);
         var spid = DbccIntegerArgument(arguments[0].Run(runtime), 1);
+        // A session id past smallint is no session id at all (probed
+        // 2026-10-04 against SQL Server 2025).
+        if (spid > short.MaxValue)
+            throw SimulatedSqlException.DbccParameterIsIncorrect(1);
         var requestId = arguments.Count == 2 ? DbccIntegerArgument(arguments[1].Run(runtime), 2) : 0;
 
         var connection = batch.Connection;

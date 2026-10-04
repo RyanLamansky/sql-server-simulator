@@ -1344,6 +1344,13 @@ partial class SimulatedSqlException
         new($"Procedure expects parameter '@{parameterName}' of type 'nvarchar(max)'.", 214, 16, 21);
 
     /// <summary>
+    /// Mimics SQL Server error 11552: <c>sp_describe_first_result_set</c>'s
+    /// browse mode outside 0 .. 2 (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException BrowseInformationModeNotValid() =>
+        new("The @browse_information_mode parameter expects a tinyint with values 0, 1 or 2.", 11552, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 11503: <c>sp_describe_undeclared_parameters</c>
     /// met two undeclared parameters in one expression (<c>@a = @b</c>), where
     /// neither can type the other. Probe-confirmed against SQL Server 2025

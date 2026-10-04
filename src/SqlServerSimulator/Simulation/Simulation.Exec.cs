@@ -33,9 +33,10 @@ partial class Simulation
     /// invalidates for itself.
     /// </summary>
     private static bool LeavesCatalogUnchanged(string systemProcName) => systemProcName is
-        "sp_column_privileges" or "sp_columns" or "sp_columns_100" or "sp_databases" or "sp_datatype_info"
+        "sp_bindsession" or "sp_column_privileges" or "sp_columns" or "sp_columns_100" or "sp_databases" or "sp_datatype_info" or "sp_dbfixedrolepermission"
         or "sp_datatype_info_100" or "sp_depends" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters"
         or "sp_executesql" or "sp_fkeys" or "sp_getapplock" or "sp_help" or "sp_helpconstraint" or "sp_helpdb"
+        or "sp_getbindtoken" or "sp_helpdbfixedrole" or "sp_helpdevice" or "sp_helpfilegroup" or "sp_helpntgroup" or "sp_helprole"
         or "sp_helpfile" or "sp_helpindex" or "sp_helprotect" or "sp_helpsrvrole" or "sp_helpsrvrolemember" or "sp_helpstats" or "sp_helptext" or "sp_helptrigger"
         or "sp_helpuser" or "sp_MSforeachdb" or "sp_MSforeachtable" or "sp_pkeys" or "sp_query_store_clear_hints"
         or "sp_query_store_clear_message_queues" or "sp_query_store_consistency_check" or "sp_query_store_flush_db" or "sp_query_store_force_plan"
@@ -44,7 +45,7 @@ partial class Simulation
         or "sp_server_info" or "sp_set_session_context" or "sp_spaceused" or "sp_special_columns"
         or "sp_special_columns_100" or "sp_sproc_columns" or "sp_sproc_columns_100" or "sp_statistics"
         or "sp_statistics_100" or "sp_stored_procedures" or "sp_table_privileges" or "sp_tablecollations_100"
-        or "sp_tables" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
+        or "sp_tables" or "sp_validname" or "sp_who" or "sp_who2" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread";
 
     /// <summary>
@@ -255,6 +256,7 @@ partial class Simulation
             "sp_change_users_login" => Uncounted(this.InvokeSpChangeUsersLogin(batch, calledAs)),
             "sp_addtype" => this.InvokeSpAddType(batch, calledAs),
             "sp_autostats" => InvokeSpAutoStats(batch, calledAs),
+            "sp_bindsession" => InvokeSpBindSession(batch),
             "sp_createstats" => this.InvokeSpCreateStats(batch, calledAs),
             "sp_indexoption" => this.InvokeSpIndexOption(batch, calledAs),
             "sp_tableoption" => InvokeSpTableOption(batch, calledAs),
@@ -271,6 +273,7 @@ partial class Simulation
             "sp_datatype_info_100" => InvokeSpDatatypeInfo(batch, classic: false),
             "sp_databases" => Uncounted(InvokeSpDatabases(batch)),
             "sp_cursor_list" => InvokeSpCursorList(batch, CalledName(procName)),
+            "sp_dbfixedrolepermission" => InvokeSpDbFixedRolePermission(batch),
             "sp_depends" => Uncounted(InvokeSpDepends(batch, CalledName(procName))),
             "sp_describe_cursor" => InvokeSpDescribeCursor(batch, CalledName(procName), CursorDescription.Cursor),
             "sp_describe_cursor_columns" => InvokeSpDescribeCursor(batch, CalledName(procName), CursorDescription.Columns),
@@ -299,20 +302,28 @@ partial class Simulation
             "sp_executesql" => ParseSpExecuteSql(batch, returnCodeVar, insertExecSource, procName.Count >= 3 ? procName[procName.Count - 3] : null),
             "sp_fkeys" => Uncounted(InvokeSpFkeys(batch)),
             "sp_getapplock" => InvokeSpGetAppLock(batch, returnCodeVar),
+            "sp_getbindtoken" => InvokeSpGetBindToken(batch, returnCodeVar),
             "sp_help" => Uncounted(InvokeSpHelp(batch, CalledName(procName))),
             "sp_helpconstraint" => Uncounted(InvokeSpHelpConstraint(batch, CalledName(procName))),
             "sp_helpdb" => Uncounted(InvokeSpHelpDb(batch)),
+            "sp_helpdbfixedrole" => InvokeSpHelpDbFixedRole(batch),
+            "sp_helpdevice" => InvokeSpHelpDevice(batch),
             "sp_helpfile" => Uncounted(InvokeSpHelpFile(batch)),
+            "sp_helpfilegroup" => Uncounted(InvokeSpHelpFilegroup(batch)),
             "sp_helpindex" => Uncounted(InvokeSpHelpIndex(batch, CalledName(procName))),
+            "sp_helpntgroup" => InvokeSpHelpNtGroup(batch),
+            "sp_helprole" => InvokeSpHelpRole(batch),
             "sp_helprotect" => InvokeSpHelpProtect(batch),
-            "sp_helpsrvrole" => Uncounted(InvokeSpHelpSrvRole(batch)),
-            "sp_helpsrvrolemember" => Uncounted(InvokeSpHelpSrvRoleMember(batch)),
-            "sp_helpstats" => Uncounted(InvokeSpHelpStats(batch)),
+            "sp_helpsrvrole" => InvokeSpHelpSrvRole(batch),
+            "sp_helpsrvrolemember" => InvokeSpHelpSrvRoleMember(batch),
+            "sp_helpstats" => Uncounted(InvokeSpHelpStats(batch, CalledName(procName))),
             "sp_helptext" => Uncounted(InvokeSpHelpText(batch)),
             "sp_helptrigger" => InvokeSpHelpTrigger(batch),
             "sp_helpuser" => Uncounted(InvokeSpHelpUser(batch)),
-            "sp_MSforeachdb" => this.InvokeSpMsForEachDb(batch),
-            "sp_MSforeachtable" => this.InvokeSpMsForEachTable(batch),
+            // The worker runs each command under NOCOUNT (probed 2026-10-04
+            // against SQL Server 2025).
+            "sp_MSforeachdb" => Uncounted(this.InvokeSpMsForEachDb(batch)),
+            "sp_MSforeachtable" => Uncounted(this.InvokeSpMsForEachTable(batch)),
             "sp_password" => this.InvokeSpPassword(batch, calledAs),
             "sp_pkeys" => InvokeSpPkeys(batch),
             "sp_query_store_clear_hints" => InvokeSpQueryStoreHints(batch, set: false),
@@ -331,14 +342,14 @@ partial class Simulation
             "sp_refreshview" => this.InvokeSpRefreshView(batch),
             "sp_releaseapplock" => InvokeSpReleaseAppLock(batch, returnCodeVar),
             "sp_revokedbaccess" => this.InvokeSpRevokeDbAccess(batch, calledAs),
-            "sp_rename" => InvokeSpRename(batch),
+            "sp_rename" => this.InvokeSpRename(batch, CalledName(procName)),
             "sp_setapprole" => InvokeSpSetAppRole(batch),
             "sp_settriggerorder" => InvokeSpSetTriggerOrder(batch),
             "sp_server_info" => InvokeSpServerInfo(batch),
             "sp_sequence_get_range" => InvokeSpSequenceGetRange(batch, calledAs, returnCodeVar),
             "sp_serveroption" => InvokeSpServerOption(batch),
             "sp_set_session_context" => InvokeSpSetSessionContext(batch),
-            "sp_spaceused" => Uncounted(InvokeSpSpaceUsed(batch)),
+            "sp_spaceused" => Uncounted(InvokeSpSpaceUsed(batch, CalledName(procName))),
             "sp_special_columns" or "sp_special_columns_100" => InvokeSpSpecialColumns(batch, systemProcName),
             "sp_sproc_columns" => InvokeSpSprocColumns(batch, classic: true),
             "sp_sproc_columns_100" => InvokeSpSprocColumns(batch, classic: false),
@@ -351,6 +362,7 @@ partial class Simulation
             "sp_unbindrule" => InvokeSpUnbind(batch, CalledName(procName), isRule: true),
             "sp_unsetapprole" => InvokeSpUnsetAppRole(batch),
             "sp_updateextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Update),
+            "sp_validname" => InvokeSpValidName(batch, returnCodeVar),
             "sp_who" => InvokeSpWho(batch),
             "sp_who2" => InvokeSpWho2(batch),
             "sp_xml_preparedocument" => InvokeSpXmlPrepareDocument(batch, returnCodeVar),
@@ -373,6 +385,15 @@ partial class Simulation
             if (framesScope)
                 yield return new SimulatedProcScopeBoundary(isEnter: true);
             var procedureResult = new SystemProcedureResult();
+            // A system procedure a database part names runs in that database
+            // (probed 2026-10-04 against SQL Server 2025: master..sp_rename
+            // looks for its object in master, tempdb..sp_help finds a #temp
+            // table); sp_executesql switches for its batch alone.
+            if (procName.Count >= 3 && systemProcName != "sp_executesql"
+                && batch.Connection.Simulation.Databases.TryGetValue(procName[procName.Count - 3], out var procedureDatabase))
+            {
+                systemProc = ModuleDatabaseScope.Enumerate(batch.Connection, procedureDatabase, systemProc);
+            }
             try
             {
                 foreach (var outcome in AttributedToSystemProcedure(systemProc, systemProcName!, CalledName(procName), returnCodeVar is null || batch.IsSkipping ? null : batch.GetVariableSlot(returnCodeVar), procedureResult))
@@ -595,7 +616,7 @@ partial class Simulation
             }
 
             if (argName is null && sawNamed)
-                throw SimulatedSqlException.MustPassParameterAsNamed();
+                throw SimulatedSqlException.MustPassParameterAsNamed(arguments.Count + 1);
 
             arguments.Add(ParseExecArgument(context, batch, argName));
 
@@ -701,6 +722,7 @@ partial class Simulation
 
         SqlValue literalValue;
         var untypedNull = false;
+        var numericLiteral = false;
         switch (context.Token)
         {
             case Literal lit:
@@ -708,6 +730,7 @@ partial class Simulation
                 break;
             case Numeric numeric:
                 literalValue = negate ? NegateLiteral(numeric.Value) : numeric.Value;
+                numericLiteral = literalValue.Type is DecimalSqlType;
                 break;
             case ReservedKeyword { Keyword: Keyword.Null }:
                 if (negate) throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -730,7 +753,7 @@ partial class Simulation
         context.MoveNextOptional();
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
             throw SimulatedSqlException.ConstantPassedAsOutput();
-        return new ProcArgument(name, isDefault: false, value: literalValue, outputSlot: null, isUntypedNull: untypedNull);
+        return new ProcArgument(name, isDefault: false, value: literalValue, outputSlot: null, isUntypedNull: untypedNull, isNumericLiteral: numericLiteral);
     }
 
     private static SqlValue NegateLiteral(SqlValue v) =>
@@ -749,8 +772,15 @@ partial class Simulation
 /// invocation writes the proc's final parameter value back into this slot
 /// at exit.
 /// </summary>
-internal readonly struct ProcArgument(string? name, bool isDefault, SqlValue value, VariableSlot? outputSlot, HeapTable? tableValue = null, string? cursorVariableName = null, bool isUntypedNull = false)
+internal readonly struct ProcArgument(string? name, bool isDefault, SqlValue value, VariableSlot? outputSlot, HeapTable? tableValue = null, string? cursorVariableName = null, bool isUntypedNull = false, bool isNumericLiteral = false)
 {
+    /// <summary>
+    /// The argument is a literal with a decimal point, whose type a conversion
+    /// error names <c>numeric</c> as real's does (probed 2026-10-04 against SQL
+    /// Server 2025: <c>Error converting data type numeric to int.</c>).
+    /// </summary>
+    public readonly bool IsNumericLiteral = isNumericLiteral;
+
     public readonly string? Name = name;
     public readonly bool IsDefault = isDefault;
     public readonly SqlValue Value = value;

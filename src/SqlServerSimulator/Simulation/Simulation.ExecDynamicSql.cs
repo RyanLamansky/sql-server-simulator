@@ -225,7 +225,7 @@ partial class Simulation
             if (TryConsumeSpExecuteSqlArgumentName(context) is not null)
                 sawNamedArgument = true;
             else if (sawNamedArgument)
-                throw SimulatedSqlException.MustPassParameterAsNamed();
+                throw SimulatedSqlException.MustPassParameterAsNamed(2);
             var (paramDefsRaw, _) = ParseSpExecuteSqlValueArg(context, batch);
             paramDefsType = paramDefsRaw.Type;
             var paramDefs = paramDefsRaw.CoerceTo(NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault));
@@ -252,7 +252,7 @@ partial class Simulation
             if (argName is not null)
                 sawNamedArgument = true;
             else if (sawNamedArgument)
-                throw SimulatedSqlException.MustPassParameterAsNamed();
+                throw SimulatedSqlException.MustPassParameterAsNamed(3 + argumentValues.Count);
             var isUntypedNull = context.Token is ReservedKeyword { Keyword: Keyword.Null };
             var (argValue, argOutputSlot) = ParseSpExecuteSqlValueArg(context, batch, out var argTable, out var argIsDefault);
             argumentValues.Add((argName, argValue, argOutputSlot, isUntypedNull, argTable, argIsDefault));
@@ -716,6 +716,11 @@ partial class Simulation
                 defaultValue = ParseSpExecuteSqlParamDefault(defContext);
                 defContext.MoveNextRequired();
             }
+            if (defContext.Token is ReservedKeyword { Keyword: Keyword.Not } && defContext.GetNextRequired() is ReservedKeyword { Keyword: Keyword.Null })
+            {
+                declarationErrors.Add(SimulatedSqlException.NotNullParameterNotSupported("@" + name.Value));
+                defContext.MoveNextRequired();
+            }
             var readOnly = NoteReadOnlyScalarParameter(defContext, name, declarationErrors);
 
             var isOutput = false;
@@ -725,6 +730,10 @@ partial class Simulation
                 defContext.MoveNextOptional();
             }
 
+            // A name declared twice is Msg 134 (probed 2026-10-04 against SQL
+            // Server 2025).
+            if (parameters.Exists(declared => BatchContext.VariableNameComparer.Equals(declared.Name, name.Value)))
+                throw SimulatedSqlException.VariableAlreadyDeclared(name.Value);
             parameters.Add(new SpExecuteSqlParam(name.Value, type, declaredMaxLength, isOutput, defaultValue));
 
             if (defContext.Token is Operator { Character: ',' })

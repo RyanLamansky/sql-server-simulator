@@ -229,6 +229,17 @@ internal static partial class BuiltInResources
         // their members, over sys.server_role_members.
         "sp_helpsrvrole",
         "sp_helpsrvrolemember",
+        // The database-role, filegroup, device and Windows-group reports, and
+        // the session-binding and name-validation procedures.
+        "sp_helprole",
+        "sp_helpdbfixedrole",
+        "sp_dbfixedrolepermission",
+        "sp_helpfilegroup",
+        "sp_helpdevice",
+        "sp_helpntgroup",
+        "sp_getbindtoken",
+        "sp_bindsession",
+        "sp_validname",
         // sp_depends: the deprecated dependency report, over the same analysis
         // sys.sql_expression_dependencies and the dm_sql_referen*_entities pair
         // project. See docs/claude/catalog-views.md.

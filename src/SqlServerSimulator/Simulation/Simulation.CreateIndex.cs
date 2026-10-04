@@ -266,6 +266,11 @@ partial class Simulation
         // options would read that expression differently (Msg 1934, naming
         // every offending option). A plain index over plain columns is
         // unaffected (probe-confirmed).
+        // A table created under ANSI_NULLS OFF carries that capture, which
+        // refuses such an index first (Msg 1935, probed 2026-10-04 against SQL
+        // Server 2025).
+        if ((filter is not null || IndexCoversComputedColumn(table, index)) && !table.UsesAnsiNulls)
+            throw SimulatedSqlException.ObjectCreatedWithSetOptionsOff(table.Name, "ANSI_NULLS");
         if ((filter is not null || IndexCoversComputedColumn(table, index)) && IncorrectSetOptionNames(context) is { } setOptions)
             throw SimulatedSqlException.IncorrectSetOptions("CREATE INDEX", setOptions);
 

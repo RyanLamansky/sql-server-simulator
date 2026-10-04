@@ -1138,4 +1138,34 @@ public sealed class StoredProcedureTests
     [TestMethod]
     public void AlterOfAMissingProcedure_Msg208State6()
         => AreEqual((byte)6, new Simulation().AssertSqlError("alter proc nosuch as select 1", 208).Errors[0].State);
+
+    /// <summary>
+    /// Msg 119 names the offending argument's place in the whole list, and a
+    /// decimal literal's conversion error calls it numeric (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ArgumentErrors_NameWhatRealNames()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create proc dbo.p @a int, @b varchar(10) = 'x' as select @a");
+        Assert.StartsWith("Must pass parameter number 4 ", sim.AssertSqlError("exec sp_executesql N'select @x, @y', N'@x int, @y int', @y = 2, 1", 119).Errors[0].Message);
+        Assert.StartsWith("Must pass parameter number 2 ", sim.AssertSqlError("exec dbo.p @a = 1, 'x'", 119).Errors[0].Message);
+        AreEqual("Error converting data type numeric to int.", sim.AssertSqlError("exec dbo.p 99999999999", 8114).Errors[0].Message);
+        AreEqual("Error converting data type numeric to int.", sim.AssertSqlError("exec sp_lock 99999999999", 8114).Errors[0].Message);
+        AreEqual(5, sim.AssertSqlError("exec sp_lock 'x'", 8114).Errors[0].State);
+    }
+
+    /// <summary>
+    /// sp_executesql refuses a parameter declared twice (Msg 134) or NOT NULL
+    /// (Msg 11555), probed 2026-10-04 against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void SpExecuteSql_DeclarationRefusals()
+    {
+        var sim = new Simulation();
+        _ = sim.AssertSqlError("exec sp_executesql N'select @x', N'@x int, @x int', 1, 2", 134);
+        AreEqual("The parameter '@x' has been declared as NOT NULL. NOT NULL parameters are only supported with natively compiled modules, except for inline table-valued functions.",
+            sim.AssertSqlError("exec sp_executesql N'select @x', N'@x int not null', 1", 11555).Errors[0].Message);
+    }
 }

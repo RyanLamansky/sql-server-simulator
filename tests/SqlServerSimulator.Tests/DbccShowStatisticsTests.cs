@@ -191,4 +191,23 @@ public sealed class DbccShowStatisticsTests
             () => sim.ExecuteScalar("dbcc show_statistics(N't', N'pk_t') with STATS_STREAM"));
         Contains("STATS_STREAM", ex.Message);
     }
+
+    /// <summary>
+    /// The checks every form shares run first (probed 2026-10-04 against SQL
+    /// Server 2025): one argument is Msg 2583, a missing table Msg 2501, a
+    /// missing statistic Msg 2767 and no SELECT on the table Msg 229 then 2557,
+    /// each but the table closed with Msg 2528.
+    /// </summary>
+    [TestMethod]
+    public void SharedChecks_PrecedeTheForm()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table dbo.t (id int primary key, b varchar(10)); create index ix_b on dbo.t(b); create user lo without login");
+        CollectionAssert.AreEqual(new[] { 2583, 2528 }, sim.AssertSqlError("dbcc show_statistics('dbo.t')", 2583).Errors.Select(static e => e.Number).ToArray());
+        _ = sim.AssertSqlError("dbcc show_statistics('dbo.nosuch', ix_b)", 2501);
+        CollectionAssert.AreEqual(new[] { 2767, 2528 }, sim.AssertSqlError("dbcc show_statistics('dbo.t', nosuch)", 2767).Errors.Select(static e => e.Number).ToArray());
+        var denied = sim.AssertSqlError("execute as user = 'lo'; dbcc show_statistics('dbo.t', ix_b) with histogram", 229);
+        CollectionAssert.AreEqual(new[] { 229, 2557, 2528 }, denied.Errors.Select(static e => e.Number).ToArray());
+        AreEqual("User 'lo' does not have permission to run DBCC SHOW_STATISTICS for object 'dbo.t'.", denied.Errors[1].Message);
+    }
 }

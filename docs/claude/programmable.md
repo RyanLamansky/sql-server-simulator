@@ -718,9 +718,11 @@ Probed against SQL Server 2025.
 - **Msg 201** (`"Procedure or function 'X' expects parameter '@Y', which was not supplied."`) for a missing required parameter (no default), state 4, and only then **Msg 8145** for a named argument matching no parameter.
 - **Msg 8143** (`"Parameter '@X' was supplied multiple times."`) for duplicate named args.
   **Not modeled yet**: real counts the arguments first, so a repeated named argument to a one-parameter procedure (`EXEC p @a = 1, @a = 2`) is Msg 8144 there, at line 0 under the procedure, where the list's parse raises Msg 8143 here (probed 2026-10-03 against SQL Server 2025).
-- **Msg 119** (mixing named-then-positional) — verbatim wording probe-confirmed.
+- **Msg 119** (mixing named-then-positional) — verbatim wording probe-confirmed; its parameter number counts `sp_executesql`'s statement and declaration arguments.
+- `sp_executesql` refuses a declaration naming a parameter twice (**Msg 134**) or declaring one `NOT NULL` (**Msg 11555**) (probed 2026-10-04 against SQL Server 2025).
 - **Not modeled yet**: an `sp_executesql` declaration missing its `@` (`N'a int'`) is Msg 102 on both, which real follows with a Msg 137 for the statement's `@a` (probed 2026-10-03 against SQL Server 2025).
-- **Not modeled yet**: a `decimal` argument past its parameter's precision is Msg 8114 state 5 naming `numeric to decimal` on real and `decimal to decimal` here; `@a int VARYING OUTPUT` on a scalar parameter is Msg 102 near `varying` on real and Msg 156 near the keyword here; and `@@PROCID` in an ad hoc batch reads a nonzero id that changes per batch on real and 0 here (probed 2026-10-03 against SQL Server 2025).
+- **Msg 8114** state 5 for an argument that won't convert names a written number with a decimal point or past `int`'s range as `numeric`, the type real gives the literal (probed 2026-10-04 against SQL Server 2025).
+- **Not modeled yet**: `@a int VARYING OUTPUT` on a scalar parameter is Msg 102 near `varying` on real and Msg 156 near the keyword here; and `@@PROCID` in an ad hoc batch reads a nonzero id that changes per batch on real and 0 here (probed 2026-10-03 against SQL Server 2025).
 - **Msg 8162** state 2, at line 0 under the procedure, for a variable passed `OUTPUT` to a parameter not declared `OUTPUT`, and the procedure doesn't run; **Msg 179** for a constant passed `OUTPUT`, as the batch compiles — for `sp_executesql`'s arguments too (probed 2026-10-02).
 
 **OUTPUT parameters**:

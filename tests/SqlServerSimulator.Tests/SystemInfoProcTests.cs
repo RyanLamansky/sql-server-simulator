@@ -824,11 +824,29 @@ public sealed class SystemInfoProcTests
         var row = Sets(sim, "exec sp_helpuser 'u_bare'")[0].Rows[0];
         IsNull(row[2]);
         IsNull(row[3]);
-        // Neither a per-user default schema nor a SID is modeled — the same
-        // NULLs sys.database_principals reports.
-        IsNull(row[4]);
-        IsNull(row[6]);
+        // The default schema and SID sys.database_principals reports (probed
+        // 2026-10-04 against SQL Server 2025).
+        AreEqual("dbo", row[4]);
+        CollectionAssert.AreEqual((byte[])sim.ExecuteScalar("select sid from sys.database_principals where name = 'u_bare'")!, (byte[])row[6]!);
         AreEqual("u_bare", row[0]);
+    }
+
+    /// <summary>
+    /// dbo reports its db_owner membership, a default schema and the owner's
+    /// SID, guest its own schema and SID 0x00, and db_owner lists dbo as a
+    /// member (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void HelpUser_DboAndGuest_ReportMembershipSchemaAndSid()
+    {
+        var sim = new Simulation();
+        var rows = Sets(sim, "exec sp_helpuser")[0].Rows;
+        CollectionAssert.AreEqual(new object?[] { "dbo", "db_owner", "sa", "master", "dbo", "1         " }, rows[0][..6]);
+        CollectionAssert.AreEqual(new byte[] { 0x01 }, (byte[])rows[0][6]!);
+        CollectionAssert.AreEqual(new object?[] { "guest", "public", null, null, "guest", "2         " }, rows[1][..6]);
+        CollectionAssert.AreEqual(new byte[] { 0x00 }, (byte[])rows[1][6]!);
+        var owners = Sets(sim, "exec sp_helpuser 'db_owner'")[0].Rows;
+        CollectionAssert.AreEqual(new object?[] { "db_owner", 16384, "dbo", 1 }, owners[0]);
     }
 
     [TestMethod]
@@ -854,6 +872,22 @@ public sealed class SystemInfoProcTests
             "The name supplied (nosuchuser) is not a user, role, or aliased login.");
 
     // ===== sp_MSforeachtable =====
+
+    /// <summary>
+    /// The worker runs each command under NOCOUNT, so no statement reports a
+    /// count (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ForEachTable_CommandsReportNoCount()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.k1 (a int); create table dbo.k2 (a int)");
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "exec sp_MSforeachtable 'insert ? values (1)'";
+        AreEqual(-1, command.ExecuteNonQuery());
+    }
 
     private static Simulation ForEachFixture()
     {

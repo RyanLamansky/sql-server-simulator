@@ -258,8 +258,10 @@ partial class Simulation
             // A PERSISTED computed column stores its expression's value, so
             // real refuses to create one from a session whose SET options
             // would read the expression differently (Msg 1934,
-            // probe-confirmed — the non-persisted form is accepted).
-            if (pending.Persisted && IncorrectSetOptionNames(context) is { } setOptions)
+            // probe-confirmed — the non-persisted form is accepted). ANSI_NULLS
+            // is the table's own capture instead, which an index over the
+            // column later refuses (Msg 1935, probed 2026-10-04).
+            if (pending.Persisted && IncorrectSetOptionNames(context, exemptAnsiNulls: true) is { } setOptions)
                 throw SimulatedSqlException.IncorrectSetOptions("CREATE TABLE", setOptions);
             // …and refuses one whose expression isn't deterministic at all
             // (Msg 4936), since the stored value could then disagree with a

@@ -117,4 +117,13 @@ public sealed class DescribeUndeclaredParametersTests
         AreEqual(20, sim.AssertSqlError("exec sp_describe_undeclared_parameters", 201).State);
         AreEqual(21, sim.AssertSqlError("exec sp_describe_undeclared_parameters null", 214).State);
     }
+
+    /// <summary>The analysis reports at the statement's line, 1 (probed 2026-10-04 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void AnalysisRefusals_AtLineOne()
+    {
+        var sim = WithTable();
+        AreEqual(1, sim.AssertSqlError("\n\nexec sp_describe_undeclared_parameters N'select @p'", 11506).Errors[0].LineNumber);
+        AreEqual(1, sim.AssertSqlError("\n\nexec sp_describe_undeclared_parameters N'select * from dq where id = @p or bi = @p'", 11508).Errors[0].LineNumber);
+    }
 }

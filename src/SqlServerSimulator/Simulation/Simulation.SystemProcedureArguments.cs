@@ -55,8 +55,58 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// Refuses an argument list a system procedure whose own parser reads the
+    /// values can't bind, as real's parameter binder refuses it, before the
+    /// procedure runs: any argument to one declaring no parameters is Msg 8146,
+    /// a positional argument past <paramref name="parameterNames"/> Msg 8144,
+    /// one of the leading <paramref name="required"/> parameters left out (or
+    /// given <c>DEFAULT</c>) Msg 201, and a name that is no parameter Msg 8145,
+    /// in that order (probed 2026-10-04 against SQL Server 2025: sp_rename,
+    /// sp_help, sp_spaceused, sp_helpsort). Each is a binding refusal, which
+    /// leaves the caller's return code alone.
+    /// </summary>
+    private static void RequireSystemProcedureShape(string procedure, List<ProcArgument> arguments, string[] parameterNames, int required = 0)
+    {
+        try
+        {
+            if (parameterNames.Length == 0)
+            {
+                if (arguments.Count > 0)
+                    throw SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine(procedure, state: 2);
+                return;
+            }
+            var positional = 0;
+            foreach (var argument in arguments)
+            {
+                if (argument.Name is null && ++positional > parameterNames.Length)
+                    throw SimulatedSqlException.TooManyArgumentsToFunction(procedure);
+            }
+            for (var i = 0; i < required; i++)
+            {
+                var parameterName = parameterNames[i];
+                var supplied = (i < arguments.Count && arguments[i] is { Name: null, IsDefault: false })
+                    || arguments.Exists(argument => argument is { Name: { } name, IsDefault: false } && BuiltInToken.Equals(name, parameterName));
+                if (!supplied)
+                    throw SimulatedSqlException.ProcedureExpectsParameter(procedure, parameterName);
+            }
+            foreach (var argument in arguments)
+            {
+                if (argument.Name is { } name && Array.FindIndex(parameterNames, parameter => BuiltInToken.Equals(name, parameter)) < 0)
+                    throw SimulatedSqlException.NotAParameterForProcedure(name, procedure);
+            }
+        }
+        catch (SimulatedSqlException refusal)
+        {
+            refusal.SystemProcedureBindingError = true;
+            throw;
+        }
+    }
+
     private static SqlValue[] BindArguments(string procedure, List<ProcArgument> arguments, SystemProcedureParameter[] parameters)
     {
+        if (parameters.Length == 0 && arguments.Count > 0)
+            throw SimulatedSqlException.ArgumentsSuppliedToParameterlessRoutine(procedure, state: 2);
         var supplied = new ProcArgument?[parameters.Length];
         string? unknownName = null;
         for (var i = 0; i < arguments.Count; i++)
@@ -92,13 +142,13 @@ partial class Simulation
         {
             var parameter = parameters[i];
             values[i] = supplied[i] is { IsDefault: false } argument
-                ? ConvertToParameter(argument.Value, parameter)
+                ? ConvertToParameter(argument.Value, parameter, argument.IsNumericLiteral)
                 : parameter.Default!.Value;
         }
         return values;
     }
 
-    private static SqlValue ConvertToParameter(SqlValue value, SystemProcedureParameter parameter)
+    private static SqlValue ConvertToParameter(SqlValue value, SystemProcedureParameter parameter, bool numericLiteral)
     {
         if (parameter.MaxLength > 0)
         {
@@ -116,9 +166,11 @@ partial class Simulation
         }
         catch (SimulatedSqlException refusal) when (refusal.Number == 8114)
         {
-            // Binding a procedure's argument reports the conversion at state 1
-            // (probed 2026-09-30 against SQL Server 2025).
-            throw SimulatedSqlException.ConvertingDataTypeError(value.Type, parameter.Type.SqlServerName, 1);
+            // Binding a procedure's argument reports the conversion at state 5
+            // (probed 2026-10-04 against SQL Server 2025: sp_lock, sp_addmessage).
+            throw numericLiteral
+                ? SimulatedSqlException.ConvertingDataTypeError("numeric", parameter.Type.SqlServerName)
+                : SimulatedSqlException.ConvertingDataTypeError(value.Type, parameter.Type.SqlServerName);
         }
         return parameter.Type == SqlType.SmallInt ? SqlValue.FromInt16((short)number) : SqlValue.FromInt32(number);
     }

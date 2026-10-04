@@ -125,4 +125,38 @@ public sealed class SessionContextTests
     [DataRow("client_net_address", 48)]
     public void ConnectionProperty_StringsCarryTheirDeclaredLength(string property, int maxLength)
         => AreEqual(maxLength, ExecuteScalar($"select cast(sql_variant_property(connectionproperty('{property}'), 'MaxLength') as int)"));
+
+    /// <summary>
+    /// Keys compare without case in their first character alone and without
+    /// trailing spaces (probed 2026-10-04 against SQL Server 2025): a key set
+    /// as <c>Key</c> reads back as <c>key</c> but not <c>KEY</c>.
+    /// </summary>
+    [TestMethod]
+    public void KeyComparison_FirstCharacterIgnoresCase()
+    {
+        AreEqual("1|1|", ExecuteScalar("exec sp_set_session_context 'Key', 1; select concat(cast(session_context(N'Key') as int), '|', cast(session_context(N'key ') as int), '|', cast(session_context(N'KEY') as int))"));
+        AreEqual("1|2", ExecuteScalar("exec sp_set_session_context 'key', 1; exec sp_set_session_context 'KEY', 2; select concat(cast(session_context(N'Key') as int), '|', cast(session_context(N'KEY') as int))"));
+    }
+
+    /// <summary>The procedure's own refusals (probed 2026-10-04 against SQL Server 2025).</summary>
+    [TestMethod]
+    [DataRow("exec sp_set_session_context 'k'", 16903)]
+    [DataRow("exec sp_set_session_context 'k', 1, 0, 5", 16914)]
+    [DataRow("exec sp_set_session_context 5, 1", 225)]
+    [DataRow("exec sp_set_session_context '', 1", 15666)]
+    [DataRow("declare @k nvarchar(200) = replicate('k', 129); exec sp_set_session_context @k, 1", 15666)]
+    [DataRow("declare @v nvarchar(max) = N'abc'; exec sp_set_session_context 'k', @v", 15600)]
+    [DataRow("declare @v xml = '<a/>'; exec sp_set_session_context 'k', @v", 15600)]
+    [DataRow("exec sp_set_session_context 'k', 1, null", 15600)]
+    [DataRow("exec sp_set_session_context 'k', 1, 'x'", 15600)]
+    public void Refusals(string sql, int number)
+    {
+        var error = new Simulation().AssertSqlError(sql, number);
+        AreEqual((1, "sp_set_session_context"), (error.Errors[0].LineNumber, error.Errors[0].Procedure));
+    }
+
+    /// <summary>A name that is no parameter is ignored (probed 2026-10-04 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void UnknownName_Ignored()
+        => AreEqual(DBNull.Value, ExecuteScalar("exec sp_set_session_context @key = 'k', @val = 1; select session_context(N'k')"));
 }

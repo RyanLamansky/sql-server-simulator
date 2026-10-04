@@ -10,7 +10,7 @@ Everything below was probed 2026-09-28 against SQL Server 2025 through the `.vs/
 - **What settles at parse, what at run.**
   A `WITH` word that is no DBCC option at all is Msg 195 state 4 while the batch compiles, so none of it runs; `MAXDOP` without `= n` is the same.
   Everything else raises when the statement runs: an unknown subcommand (Msg 2526 state 3), an option the subcommand doesn't take (Msg 2532), the wrong argument count (Msg 2583) and an unusable argument (Msg 2560, state 9 unless noted).
-  A known subcommand the simulator hasn't built (`PAGE`, `IND`, `SHOWCONTIG`, `MEMORYSTATUS`, …) is `NotSupportedException`, not Msg 2526.
+  A known subcommand the simulator hasn't built (`PAGE`, `IND`, `SHOWCONTIG`, `MEMORYSTATUS`, …) is `NotSupportedException`, not Msg 2526 — after the permission refusal real raises first for a caller outside `sysadmin`: Msg 2571 for `PAGE`, `IND`, `MEMORYSTATUS` and `OUTPUTBUFFER` (state 1) and `DBINFO` (state 14), Msg 7983 for `PROCCACHE` without `db_owner` (probed 2026-10-04 against SQL Server 2025).
 - **Messages.**
   Msg 2528 closes every successful run, `WITH NO_INFOMSGS` silencing it and every other informational line — and, for `INDEXDEFRAG` and `SHRINKFILE`, the result set too.
   A command's rows close with their own counted DONE before Msg 2528, which a second DONE follows; `CHECKCONSTRAINTS` alone sends Msg 2528 before its rows' DONE and leaves that DONE uncounted (`AfterDbccRows`, and the wire test in `StatementDoneWireTests`).
@@ -45,6 +45,8 @@ The session's `SET` options in real's fixed order: `textsize`, `rowcount` when s
 
 ## `OPENTRAN`
 
+A refusal for want of `db_owner` is followed by Msg 2528 unless `NO_INFOMSGS` (probed 2026-10-04 against SQL Server 2025).
+
 Reports the oldest transaction that has *written* to the database — changed a row or the catalog there, or holds a write lock (an `UPDATE` finding no row still takes one) — since real counts only a transaction with a logged change; a transaction that has only read is "No active open transactions." (Msg 7969).
 `tempdb` counts writes to temporary tables.
 The report is Msg 7968 through 7978, naming the transaction for its `BEGIN TRAN`, else `user_transaction` or `implicit_transaction`, with UID -1, the login's SID and a start time in style 109; `TABLERESULTS` returns the same lines as `OLDACT_*` rows under a column named for the database.
@@ -55,7 +57,8 @@ The report is Msg 7968 through 7978, naming the transaction for its `BEGIN TRAN`
   Another keyword is Msg 2526 state 12, the wait-stats name without `CLEAR` state 15.
 - `LOGINFO` cuts the log file into four virtual log files the way real cuts a log under 64 MB — each a whole number of 64 KB units, the last taking the remainder — the first active.
 - `TRACEON` / `TRACEOFF` take flags 0 through 17798 (0 accepted and never listed; others are Msg 2560 state 17 / 30 and change nothing), `-1` among them making the change server-wide (`Simulation.GlobalTraceFlags`).
-  `TRACESTATUS` lists every flag on with no argument or `-1`, else a row per named flag; no row sends no result set.
+  `TRACESTATUS` lists every flag on with no argument or `-1`, else a row per named flag; no row sends no result set, and a flag outside -1 .. 17798 is Msg 2560 state 31 at its position (probed 2026-10-04).
+- `INPUTBUFFER` of a session id no session holds is Msg 7955 state 1, and one past `smallint` Msg 2560 (probed 2026-10-04).
 - `HELP` prints a documented subcommand's syntax verbatim, echoing the name as written, or with `'?'` every documented name, each as a message numbered 0 at line 0; an undocumented subcommand real knows is Msg 8987 state 1, another word state 2.
 
 ## `CHECKCONSTRAINTS`
@@ -79,10 +82,10 @@ The rows violating the `FOREIGN KEY` and `CHECK` constraints, modeled exactly be
 A simulated database is always consistent, so each check reports a healthy one:
 
 - `CHECKDB [( database [, NOINDEX] )]`: Msg 2536 heading the database, Msg 7966 when `NOINDEX` is given, the eight Service Broker lines (Msg 8997) for the metadata every database carries, Msg 2536 and 2593 for each user table (`schema.table` outside `dbo`), and Msg 8989.
-  `PHYSICAL_ONLY` keeps only the heading and summary, and with `DATA_PURITY` or `EXTENDED_LOGICAL_CHECKS` is Msg 2532 state 5.
+  `PHYSICAL_ONLY` keeps only the heading and summary, and with `DATA_PURITY` is Msg 2532 state 2, with `EXTENDED_LOGICAL_CHECKS` state 5 (probed 2026-10-04).
   `TABLERESULTS` returns the Msg 8997, 2593 and 8989 lines as rows of real's 23-column shape.
-- `CHECKFILEGROUP [( filegroup )]`: `CHECKDB` over the tables on one filegroup, without the Service Broker lines; an unknown filegroup is Msg 3027.
-- `CHECKTABLE ( table [, NOINDEX | index_id] )`: Msg 2536 and 2593 for the table, a `#temp` table by its padded internal name.
+- `CHECKFILEGROUP [( filegroup )]`: `CHECKDB` over the tables on one filegroup, without the Service Broker lines; an unknown filegroup name is Msg 3027 and an unknown id Msg 8932 state 0 (probed 2026-10-04).
+- `CHECKTABLE ( table [, NOINDEX | index_id] )`: Msg 2536 and 2593 for the table, a `#temp` table by its padded internal name; an index id the table has no index under is Msg 7999 state 7 naming the number (probed 2026-10-04).
   Under a database-scoped identity — `EXECUTE AS USER`, `dbo` included — it is Msg 916 state 2 after the permission check, naming the server principal as a refused `USE` does (a login, or a `WITHOUT LOGIN` user's `S-1-9-3-…` SID string), and the batch ends unless a `TRY` catches it: real's check reads an internal snapshot of the database, which that identity can't reach, while `WITH TABLOCK` takes locks instead and runs.
   The other checks run under the same identity (probed 2026-09-28 against SQL Server 2025, with real's SID-derived name there where the simulator's is its own deterministic one).
 - `CHECKALLOC`: the heading, Msg 2538 / 8915 for the data file and 2539 / 8918 for the database, and Msg 8989.
@@ -92,7 +95,7 @@ A simulated database is always consistent, so each check reports a healthy one:
 
 ## Table maintenance
 
-`UPDATEUSAGE`, `CLEANTABLE` and `DBREINDEX` only validate and report, the simulator's counts never going stale, its dropped columns reclaimed as they drop and its indexes never fragmenting; an index name the table lacks is Msg 7999 (state 4 from `DBREINDEX`, 8 from the others).
+`UPDATEUSAGE`, `CLEANTABLE` and `DBREINDEX` only validate and report — a `DBREINDEX` fill factor outside 0 .. 100 is Msg 129 state 2 (probed 2026-10-04) — the simulator's counts never going stale, its dropped columns reclaimed as they drop and its indexes never fragmenting; an index name the table lacks is Msg 7999 (state 4 from `DBREINDEX`, 8 from the others).
 `INDEXDEFRAG` returns the pages scanned and none moved or removed — for the named index, or one row per index (the heap's with a NULL name) — and is Msg 8920 inside a user transaction.
 
 ## Divergences
@@ -100,10 +103,12 @@ A simulated database is always consistent, so each check reports a healthy one:
 - Values that describe real's physical storage are read off the simulator's own: a table's page count is its heap's data pages, `CHECKALLOC`'s totals are the user tables' pages in whole uniform extents, `WITH ESTIMATEONLY` adds those pages to what a fresh database reports (2435 KB for `CHECKDB`, 351 for `CHECKALLOC`), `SQLPERF(LOGSPACE)` reports a fixed 54 pages of log in use, `LOGINFO`'s active file and every `OPENTRAN` LSN carry sequence number 34, and the system databases' logs are the size of any other.
 - `CHECKDB`, `CHECKFILEGROUP` and `CHECKALLOC` list no system base tables and no per-allocation-unit lines, which real prints for its catalog (over a hundred objects in a fresh database).
 - Real leaves `@@ROWCOUNT` after the consistency checks at a count its internal queries leave behind; the simulator leaves 0.
-- A permission refusal from `OPENTRAN` is followed by Msg 2528 on real; the error ends the statement here.
+- Real's Query Store opens a transaction of its own in each user database, which `OPENTRAN` reports as the oldest (`QDS batch nested transaction`) — and as written to a user transaction that has only read, where the simulator, keeping no such transaction, reports none (probed 2026-10-04 against SQL Server 2025).
 - Messages stay in English under `SET LANGUAGE`, as the engine's other messages do.
 
 ## Not modeled yet
 
+- `SHOWCONTIG`'s permission refusal: real refuses a caller without the table's `ALTER` with Msg 229 naming the `DBCC` permission on the table before anything else.
+- Message language: real words Msg 2528 in the session language (`Die DBCC-Ausführung wurde abgeschlossen. …` under Deutsch), where the simulator's stays English.
 - `DBCC PAGE` (without trace flag 3604 real prints only the completion message, and `WITH TABLERESULTS` returns an empty `ParentObject` / `Object` / `Field` / `VALUE` set; a page past the database is Msg 8968), `IND`, `SHOWCONTIG`, `OUTPUTBUFFER`, `PROCCACHE`, `MEMORYSTATUS`, `TUPLEMOVER`, `CLONEDATABASE` and the other undocumented commands, the repair options, and `CHECKALLOC … WITH TABLERESULTS`.
 - `CHECKDB … WITH TABLOCK`'s Msg 5232 noting that the catalog and Service Broker checks were skipped.

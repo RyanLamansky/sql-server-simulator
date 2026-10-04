@@ -30,6 +30,18 @@ internal sealed class Language(short langId, string name, string alias, string d
     /// <inheritdoc cref="Months"/>
     public readonly string Days = days;
 
+    /// <summary><see cref="Months"/> one per element, January first: the names <c>DATENAME(month, …)</c> answers.</summary>
+    public readonly string[] MonthNames = months.Split(',');
+
+    /// <summary><see cref="ShortMonths"/> one per element, January first.</summary>
+    public readonly string[] ShortMonthNames = shortMonths.Split(',');
+
+    /// <summary>
+    /// <see cref="Days"/> one per element, reordered Sunday first: the names
+    /// <c>DATENAME(weekday, …)</c> answers.
+    /// </summary>
+    public readonly string[] DayNames = [days.Split(',')[6], .. days.Split(',')[..6]];
+
     /// <summary>
     /// Every installed language, in <c>langid</c> order — which is also
     /// <c>sys.syslanguages</c>'s own order.
@@ -71,6 +83,94 @@ internal sealed class Language(short langId, string name, string alias, string d
         new(32, "ไทย", "Thai", "dmy", 7, 1054, 1054, "มกราคม,กุมภาพันธ์,มีนาคม,เมษายน,พฤษภาคม,มิถุนายน,กรกฎาคม,สิงหาคม,กันยายน,ตุลาคม,พฤศจิกายน,ธันวาคม", "ม.ค.,ก.พ.,มี.ค.,เม.ย.,พ.ค.,มิ.ย.,ก.ค.,ส.ค.,ก.ย.,ต.ค.,พ.ย.,ธ.ค.", "จันทร์,อังคาร,พุธ,พฤหัสบดี,ศุกร์,เสาร์,อาทิตย์"),
         new(33, "norsk (bokmål)", "Bokmål", "dmy", 1, 1044, 1044, "januar,februar,mars,april,mai,juni,juli,august,september,oktober,november,desember", "jan,feb,mar,apr,mai,jun,jul,aug,sep,okt,nov,des", "mandag,tirsdag,onsdag,torsdag,fredag,lørdag,søndag"),
     ];
+
+    /// <summary>
+    /// The culture <c>FORMAT</c> uses for this language when the call names
+    /// none (probed 2026-10-04 against SQL Server 2025: <c>'MMMM'</c> reads
+    /// <c>février</c> under <c>SET LANGUAGE French</c>).
+    /// </summary>
+    public string CultureName => this.Lcid switch
+    {
+        1025 => "ar-SA",
+        1026 => "bg-BG",
+        1028 => "zh-TW",
+        1029 => "cs-CZ",
+        1030 => "da-DK",
+        1031 => "de-DE",
+        1032 => "el-GR",
+        1035 => "fi-FI",
+        1036 => "fr-FR",
+        1038 => "hu-HU",
+        1040 => "it-IT",
+        1041 => "ja-JP",
+        1042 => "ko-KR",
+        1043 => "nl-NL",
+        1044 => "nb-NO",
+        1045 => "pl-PL",
+        1046 => "pt-BR",
+        1048 => "ro-RO",
+        1049 => "ru-RU",
+        1050 => "hr-HR",
+        1051 => "sk-SK",
+        1053 => "sv-SE",
+        1054 => "th-TH",
+        1055 => "tr-TR",
+        1060 => "sl-SI",
+        1061 => "et-EE",
+        1062 => "lv-LV",
+        1063 => "lt-LT",
+        2052 => "zh-CN",
+        2057 => "en-GB",
+        2068 => "nn-NO",
+        2070 => "pt-PT",
+        3082 => "es-ES",
+        _ => "en-US",
+    };
+
+    /// <summary>
+    /// Msg 5703 as a <c>SET LANGUAGE</c> to this language sends it, in the
+    /// language's own words where SQL Server installs its messages (captured
+    /// 2026-10-04 from SQL Server 2025).
+    /// </summary>
+    public string ChangedMessage => this.LangId switch
+    {
+        1 => $"Die Spracheneinstellung wurde in {this.Name} geändert.",
+        2 => $"Le paramètre de langue est passé à {this.Name}.",
+        3 => $"言語設定が {this.Name} に変更されました。",
+        4 => $"Sprogindstillingen blev ændret til {this.Name}.",
+        5 => $"Se cambió la configuración de idioma a {this.Name}.",
+        6 => $"L'impostazione della lingua è stata sostituita con {this.Name}.",
+        7 => $"De taalinstelling is gewijzigd in {this.Name}.",
+        9 => $"A definição de idioma foi alterada para {this.Name}.",
+        10 => $"Kieliasetukseksi muutettiin {this.Name}.",
+        11 => $"Ändrade språkinställningen till {this.Name}.",
+        12 => $"Nastavení jazyka bylo změněno na {this.Name}.",
+        13 => $"Nyelvi beállítás átállítva a következőre: {this.Name}.",
+        14 => $"Zmieniono ustawienia języka na {this.Name}.",
+        19 => $"Η ρύθμιση γλώσσας άλλαξε σε {this.Name}.",
+        21 => $"Язык изменен на {this.Name}.",
+        22 => $"Dil ayarı '{this.Name}' olarak değiştirildi.",
+        27 => $"Definição do idioma alterada para {this.Name}.",
+        28 => $"已將語言設定變更為 {this.Name}。",
+        29 => $"언어 설정이 {this.Name}(으)로 변경되었습니다.",
+        30 => $"已将语言设置更改为 {this.Name}。",
+        33 => $"Endret språkinnstilling til {this.Name}.",
+        _ => $"Changed language setting to {this.Name}.",
+    };
+
+    private static readonly AsyncLocal<Language?> current = new();
+
+    /// <summary>
+    /// The language of the session whose statement is running, published by
+    /// the dispatch loop beside <see cref="Storage.DateOrder.Current"/> for the
+    /// string → date-time conversion, whose month names follow it. Unset, it
+    /// is <see cref="Default"/>.
+    /// </summary>
+    public static Language Current
+    {
+        get => current.Value ?? Default;
+        set => current.Value = value;
+    }
 
     /// <summary>The instance default — <c>us_english</c>, langid 0, DATEFIRST 7.</summary>
     public static readonly Language Default = All[0];

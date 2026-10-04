@@ -39,14 +39,24 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        // The table is a string holding a name, or the name written bare.
+        // The table is a string holding a name, or the name written bare; a
+        // variable, or any argument another type of value, is Msg 2560 naming
+        // its position (probed 2026-10-04 against SQL Server 2025).
         context.MoveNextRequired();
         string writtenName;
         MultiPartName tableName;
+        SimulatedSqlException? refusal = null;
         if (context.Token is Literal { Value: { IsNull: false } text } && SqlType.IsStringCategory(text.Type))
         {
             writtenName = text.AsString;
             tableName = Parser.Expressions.ObjectId.TryParseObjectName(writtenName, out var parsed) ? parsed : default;
+            context.MoveNextRequired();
+        }
+        else if (context.Token is AtPrefixedString or Literal or Numeric)
+        {
+            writtenName = "";
+            tableName = default;
+            refusal = SimulatedSqlException.DbccParameterIsIncorrect(1);
             context.MoveNextRequired();
         }
         else
@@ -70,23 +80,48 @@ partial class Simulation
                     if (context.GetNextRequired() is Operator { Character: ',' })
                     {
                         context.MoveNextRequired();
-                        newValue = ParseReseedValue(context, batch);
+                        if (context.Token is Literal)
+                        {
+                            refusal ??= SimulatedSqlException.DbccParameterIsIncorrect(3);
+                            context.MoveNextRequired();
+                        }
+                        else
+                        {
+                            newValue = ParseReseedValue(context, batch);
+                        }
                     }
                     break;
                 default:
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                    // Any other word is Msg 2560 at the second parameter
+                    // (probed 2026-10-04 against SQL Server 2025).
+                    if (context.Token is not Name)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    refusal ??= SimulatedSqlException.DbccParameterIsIncorrect(2, 6);
+                    context.MoveNextRequired();
+                    break;
             }
         }
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
+        // NO_INFOMSGS is the one option it takes; any other is Msg 2532.
         var informational = true;
         var afterParen = context.SaveCheckpoint();
         context.MoveNextOptional();
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
         {
-            _ = context.GetNextRequired<Name>();
-            informational = false;
+            while (true)
+            {
+                var option = context.GetNextRequired<Name>();
+                if (!BuiltInToken.Equals(option.Value, "NO_INFOMSGS"))
+                    refusal ??= SimulatedSqlException.DbccWithOptionNotValid();
+                informational = false;
+                var afterOption = context.SaveCheckpoint();
+                if (context.MoveNext() && context.Token is Operator { Character: ',' })
+                    continue;
+                context.RestoreCheckpoint(afterOption);
+                break;
+            }
         }
         else
         {
@@ -95,12 +130,25 @@ partial class Simulation
 
         if (batch.IsSkipping)
             return true;
+        if (refusal is not null)
+            throw refusal;
 
         if (tableName.Count == 0 || !batch.TryResolveTable(tableName, out var table))
+        {
+            // A view or another object by the name is Msg 5239 (probed
+            // 2026-10-04 against SQL Server 2025).
+            if (tableName.Count > 0 && batch.TryResolveSchema(tableName, out var schema) && schema.TryFindInSharedNamespace(tableName.Leaf, out var other))
+                throw SimulatedSqlException.DbccObjectTypeNotSupported(other.ObjectId, other.Name);
             throw SimulatedSqlException.CannotFindTableOrObject(writtenName);
+        }
+        // It takes the table's control — ownership, db_owner or db_ddladmin —
+        // ALTER not sufficing, else Msg 2557 state 5 (probed 2026-10-04).
+        var database = batch.DatabaseFor(table);
+        if (!table.IsTableVariable && table.Name is not ['#', ..] && !PermissionEnforcement.HasObjectControl(batch, database, table.ObjectId, table.SchemaId))
+            throw SimulatedSqlException.DbccObjectPermissionDenied(batch.Connection.Security.Effective.DatabasePrincipalName, "CHECKIDENT", table.Name, 5);
         var ordinal = Array.FindIndex(table.Columns, column => column.Identity is not null);
         if (ordinal < 0)
-            throw SimulatedSqlException.NoIdentityColumn(writtenName);
+            throw SimulatedSqlException.NoIdentityColumn(table.Name);
         var column = table.Columns[ordinal];
         var identity = column.Identity!;
 

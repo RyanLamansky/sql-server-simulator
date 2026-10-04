@@ -527,4 +527,24 @@ public sealed class ObjectIdTests
     [DataRow("sysobjects", -105)]
     public void CatalogView_HasRealsObjectId(string name, int expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select object_id('{name}')"));
+
+    /// <summary>
+    /// A name parses as real's parser reads it (probed 2026-10-04 against SQL
+    /// Server 2025): brackets and double quotes take dots and their own
+    /// doubled close, nothing is trimmed, and a trailing empty part, a stray
+    /// quote or a space beside a quoted part makes it unparseable.
+    /// </summary>
+    [TestMethod]
+    public void NameParsing_FollowsReal()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.[a.b] (x int); create table dbo.[a]]b] (x int); create table dbo.[a[b] (x int); create table dbo.t (x int); create table dbo.[ sp] (x int)");
+        AreEqual("a.b|a.b|a]b|a[b|t| sp|t", sim.ExecuteScalar("""
+            select concat_ws('|', object_name(object_id('[a.b]')), object_name(object_id('"a.b"')), object_name(object_id('dbo.[a]]b]')),
+                object_name(object_id('[a[b]')), object_name(object_id('"dbo"."t"')), object_name(object_id(' sp')), object_name(object_id('.dbo.t')))
+            """));
+        AreEqual(0, sim.ExecuteScalar("""
+            select count(object_id(n)) from (values (' dbo . t '), ('dbo. t'), ('[dbo] .[t]'), ('dbo.[t'), ('dbo.t]'), ('t.'), ('[]'), ('dbo..t')) v(n)
+            """));
+    }
 }

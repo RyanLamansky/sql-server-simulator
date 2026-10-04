@@ -166,10 +166,174 @@ public sealed class RenameProcTests
             exec sp_rename 'dbo.t.ix1', 'ix2', 'INDEX'
             """, 15335).Message);
 
+    /// <summary>
+    /// sp_rename's own argument checks, in real's order and at real's lines:
+    /// the binder's refusals, then an unrecognized @objtype, a NULL @newname, a
+    /// NULL @objname, an empty @newname (after sp_validname's own error) and an
+    /// unparseable @objname (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void UnmodeledObjtype_RaisesNotSupported()
-        => Assert.Contains("USERDATATYPE", Throws<NotSupportedException>(
-            () => new Simulation().ExecuteNonQuery("exec sp_rename 'dbo.foo', 'bar', 'USERDATATYPE'")).Message);
+    [DataRow("exec sp_rename 'dbo.t'", 201, 0, "Procedure or function 'sp_rename' expects parameter '@newname', which was not supplied.")]
+    [DataRow("exec sp_rename 'dbo.t', 't9', 'OBJECT', 'x'", 8144, 0, "Procedure or function sp_rename has too many arguments specified.")]
+    [DataRow("exec sp_rename @obj = 'dbo.t', @newname = 't9'", 201, 0, "Procedure or function 'sp_rename' expects parameter '@objname', which was not supplied.")]
+    [DataRow("exec sp_rename @objname = 'dbo.t', @newname = 't9', @x = 1", 8145, 0, "@x is not a parameter for procedure sp_rename.")]
+    [DataRow("exec sp_rename 'dbo.t', 't9', 'TABLE'", 15249, 90, "Error: Explicit @objtype 'TABLE' is unrecognized.")]
+    [DataRow("exec sp_rename 'dbo.t', null", 15223, 96, "Error: The input parameter 'NewName' is not allowed to be null.")]
+    [DataRow("exec sp_rename null, 'x'", 15223, 101, "Error: The input parameter 'OldName' is not allowed to be null.")]
+    [DataRow("exec sp_rename 'a.b.c.d.e', 'x'", 15253, 120, "Syntax error parsing SQL identifier 'a.b.c.d.e'.")]
+    [DataRow("exec sp_rename '[dbo.t', 'x'", 15253, 120, "Syntax error parsing SQL identifier '[dbo.t'.")]
+    public void ArgumentRefusals(string call, int number, int line, string message)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int)");
+        var ex = sim.AssertSqlError(call, number);
+        AreEqual(message, ex.Errors[0].Message);
+        AreEqual(line, ex.Errors[0].LineNumber);
+        AreEqual("sp_rename", ex.Errors[0].Procedure);
+    }
+
+    [TestMethod]
+    public void EmptyNewName_RefusedBySpValidnameFirst()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table t (a int)");
+        var ex = sim.AssertSqlError("exec sp_rename 'dbo.t', ''", 15004);
+        HasCount(2, ex.Errors);
+        AreEqual(("sp_validname", 17, "Name cannot be NULL."), (ex.Errors[0].Procedure, ex.Errors[0].LineNumber, ex.Errors[0].Message));
+        AreEqual((15224, (byte)15, 109), (ex.Errors[1].Number, ex.Errors[1].State, ex.Errors[1].LineNumber));
+    }
+
+    /// <summary>
+    /// A new name is a <c>sysname</c> argument, cut to 128 characters, and the
+    /// <c>varchar(13)</c> @objtype compares without its trailing spaces
+    /// (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Arguments_TakeTheirParameterWidths()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"create table t (a int); exec sp_rename 'dbo.t', '{new string('x', 140)}'; exec sp_rename 'dbo.{new string('x', 128)}.a', 'b', 'COLUMN   '");
+        AreEqual(128, sim.ExecuteScalar("select len(name) from sys.tables"));
+        AreEqual("b", sim.ExecuteScalar("select name from sys.columns where object_id = object_id(N'dbo." + new string('x', 128) + "')"));
+    }
+
+    /// <summary>
+    /// USERDATATYPE renames an alias or table type, which a NULL @objtype
+    /// reaches too when no object answers the name; the columns declared with
+    /// it report the new name (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void UserDataType_Renames()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create type dbo.ud from int", "create type dbo.tt as table (k int)", "create table dbo.w (z dbo.ud)");
+        _ = sim.ExecuteNonQuery("exec sp_rename 'dbo.ud', 'ud2', 'USERDATATYPE'; exec sp_rename 'tt', 'tt2'");
+        AreEqual("ud2", sim.ExecuteScalar("select type_name(user_type_id) from sys.columns where object_id = object_id('dbo.w')"));
+        AreEqual(2, sim.ExecuteScalar("select count(*) from sys.types where name in ('ud2', 'tt2')"));
+        AreEqual(1, sim.ExecuteScalar("exec sp_rename 'dbo.ud2', 'ud3', 'USERDATATYPE'; select @@rowcount"));
+    }
+
+    [TestMethod]
+    [DataRow("exec sp_rename 'dbo.nosuch', 'x', 'USERDATATYPE'", 15248, 215)]
+    [DataRow("exec sp_rename 'int', 'x', 'USERDATATYPE'", 4185, 205)]
+    [DataRow("exec sp_rename 'dbo.ud', 'ud2', 'USERDATATYPE'", 15335, 824)]
+    [DataRow("exec sp_rename 'dbo.t.nosuch', 'x', 'STATISTICS'", 15248, 481)]
+    [DataRow("exec sp_rename 'st_b', 'x', 'STATISTICS'", 15248, 481)]
+    [DataRow("exec sp_rename 'dbo.t.st_b', 'ix_a', 'STATISTICS'", 15335, 882)]
+    [DataRow("exec sp_rename 'dbo.t.nosuch', 'x', 'INDEX'", 15248, 450)]
+    [DataRow("exec sp_rename 'dbo.t.ix_a', 'pk_t', 'INDEX'", 15335, 738)]
+    [DataRow("exec sp_rename 'dbo.t.ix_a', 'st_b', 'INDEX'", 15335, 738)]
+    [DataRow("exec sp_rename 'dbo.nosuch', 'x', 'OBJECT'", 15248, 620)]
+    public void KindRefusals_AtTheirLines(string call, int number, int line)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create type dbo.ud from int",
+            "create type dbo.ud2 from int",
+            "create table dbo.t (id int not null constraint pk_t primary key, a int, b int); create index ix_a on dbo.t (a); create statistics st_b on dbo.t (b)");
+        var ex = sim.AssertSqlError(call, number);
+        AreEqual(line, ex.Errors[0].LineNumber);
+    }
+
+    /// <summary>
+    /// STATISTICS renames a statistic, or an index's, which renames the index;
+    /// INDEX renames a key constraint's index together with the constraint,
+    /// and an indexed view's index (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void StatisticsAndKeyIndexes_Rename()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int not null constraint pk_t primary key, a int, b int); create index ix_a on dbo.t (a); create statistics st_b on dbo.t (b)",
+            "create view dbo.v with schemabinding as select id, a from dbo.t",
+            "create unique clustered index cx on dbo.v (id)");
+        _ = sim.ExecuteNonQuery("""
+            exec sp_rename 'dbo.t.st_b', 'st2', 'STATISTICS';
+            exec sp_rename 'dbo.t.ix_a', 'ix2', 'STATISTICS';
+            exec sp_rename 'dbo.t.pk_t', 'pk2', 'INDEX';
+            exec sp_rename 'dbo.v.cx', 'cx2', 'INDEX'
+            """);
+        AreEqual("pk2,ix2,st2", sim.ExecuteScalar("select string_agg(name, ',') within group (order by stats_id) from sys.stats where object_id = object_id('dbo.t')"));
+        AreEqual("pk2", sim.ExecuteScalar("select name from sys.key_constraints"));
+        AreEqual("cx2", sim.ExecuteScalar("select name from sys.indexes where object_id = object_id('dbo.v')"));
+    }
+
+    /// <summary>
+    /// DATABASE is real's sys.sp_renamedb: Msg 5021 and no caution on success,
+    /// Msg 15010 / 15032 under that procedure's name otherwise (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Database_Renames()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.Add(e.Message);
+        using var command = connection.CreateCommand();
+        command.CommandText = "create database d1; exec sp_rename 'd1', 'd2', 'DATABASE'; select name from sys.databases where name like 'd_'";
+        AreEqual("d2", command.ExecuteScalar());
+        CollectionAssert.AreEqual(new[] { "The database name 'd2' has been set." }, messages);
+        var missing = sim.AssertSqlError("exec sp_rename 'nosuch', 'x', 'DATABASE'", 15010);
+        AreEqual(("sys.sp_renamedb", 29), (missing.Errors[0].Procedure, missing.Errors[0].LineNumber));
+        AreEqual(36, sim.AssertSqlError("exec sp_rename 'd2', 'master', 'DATABASE'", 15032).Errors[0].LineNumber);
+    }
+
+    /// <summary>
+    /// A column or index rename needs ALTER on its table: without it a visible
+    /// table is Msg 297 from line 242 and an invisible one isn't found; a
+    /// <c>#temp</c> table is found only from tempdb (probed 2026-10-04 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Subobject_PermissionsAndTempTables()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table dbo.t (a int); create index ix on dbo.t (a); create user lo without login; create user hi without login; grant select on dbo.t to lo");
+        AreEqual(242, sim.AssertSqlError("execute as user = 'lo'; exec sp_rename 'dbo.t.a', 'b', 'COLUMN'", 297).Errors[0].LineNumber);
+        _ = sim.AssertSqlError("execute as user = 'lo'; exec sp_rename 'dbo.t.ix', 'ix2', 'INDEX'", 297);
+        _ = sim.AssertSqlError("execute as user = 'hi'; exec sp_rename 'dbo.t.a', 'b', 'COLUMN'", 15248);
+        _ = sim.AssertSqlError("create table #tt (q int); exec sp_rename '#tt.q', 'q2', 'COLUMN'", 15248);
+    }
+
+    /// <summary>
+    /// The caution and errors name the procedure as the call did, a database
+    /// part runs it in that database, and a name with a dot inside brackets
+    /// parses (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CalledName_DatabaseContext_AndBracketedDots()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.[d.e] (x int); create table dbo.u (k int)");
+        AreEqual("sys.sp_rename", sim.AssertSqlError("exec sys.sp_rename 'dbo.nosuch', 'x'", 15225).Errors[0].Procedure);
+        Contains("current database 'master'", sim.AssertSqlError("exec master..sp_rename 'dbo.u', 'u2'", 15225).Errors[0].Message);
+        _ = sim.ExecuteNonQuery("exec sp_rename '[d.e]', 'de'");
+        AreEqual("de,u", sim.ExecuteScalar("select string_agg(name, ',') within group (order by name) from sys.tables"));
+        AreEqual(1, sim.ExecuteScalar("exec sp_rename 'dbo.u', 'u2'; select @@rowcount"));
+    }
 
     [TestMethod]
     public void Rename_ViaStoredProcedureCommandType_MutatesCatalog()

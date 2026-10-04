@@ -43,8 +43,7 @@ partial class Simulation
         dbcc.AllowOptions(DbccOptions.NoInfoMessages | DbccOptions.AllErrorMessages | DbccOptions.TabLock | DbccOptions.EstimateOnly
             | DbccOptions.PhysicalOnly | DbccOptions.TableResults | DbccOptions.MaxDop
             | (isDatabase ? DbccOptions.DataPurity | DbccOptions.ExtendedLogicalChecks : DbccOptions.None));
-        if (dbcc.Has(DbccOptions.PhysicalOnly) && dbcc.Has(DbccOptions.DataPurity | DbccOptions.ExtendedLogicalChecks))
-            throw SimulatedSqlException.DbccWithOptionNotValid(5);
+        RejectPhysicalOnlyCombination(dbcc);
         dbcc.RequireArgumentCount(0, 2);
         RejectRepairArgument(dbcc, 1);
 
@@ -118,13 +117,21 @@ partial class Simulation
     {
         dbcc.AllowOptions(DbccOptions.NoInfoMessages | DbccOptions.AllErrorMessages | DbccOptions.TabLock | DbccOptions.EstimateOnly
             | DbccOptions.PhysicalOnly | DbccOptions.TableResults | DbccOptions.MaxDop | DbccOptions.DataPurity | DbccOptions.ExtendedLogicalChecks);
-        if (dbcc.Has(DbccOptions.PhysicalOnly) && dbcc.Has(DbccOptions.DataPurity | DbccOptions.ExtendedLogicalChecks))
-            throw SimulatedSqlException.DbccWithOptionNotValid(5);
+        RejectPhysicalOnlyCombination(dbcc);
         dbcc.RequireArgumentCount(1, 2);
         RejectRepairArgument(dbcc, 1);
         var (table, display, database) = ResolveDbccTable(batch, dbcc, 0, allowTemporary: true);
         if (!PermissionEnforcement.HasObjectControl(batch, database, table.ObjectId, table.SchemaId))
             throw SimulatedSqlException.DbccObjectPermissionDenied(batch.Connection.Security.Effective.DatabasePrincipalName, "checktable", table.Name, 3);
+        // An index id the table has no index under is Msg 7999 state 7 naming
+        // the number (probed 2026-10-04 against SQL Server 2025).
+        if (dbcc.Arguments.Count == 2 && dbcc.Arguments[1].Kind != DbccArgumentKind.Name
+            && dbcc.Arguments[1].Evaluate(batch) is { IsNull: false } indexValue && SqlType.IsIntegerCategory(indexValue.Type))
+        {
+            var indexId = indexValue.CoerceTo(SqlType.BigInt).AsInt64;
+            if (!table.IndexIdentities().Exists(identity => identity.IndexId == indexId))
+                throw SimulatedSqlException.DbccIndexNotFound(indexId.ToString(CultureInfo.InvariantCulture), table.Name, 7);
+        }
         batch.Connection.LastStatementRowCount = 0;
         if (dbcc.Has(DbccOptions.EstimateOnly))
         {
@@ -247,6 +254,8 @@ partial class Simulation
             throw SimulatedSqlException.DbccObjectPermissionDenied(batch.Connection.Security.Effective.DatabasePrincipalName, "DBREINDEX", table.Name, 1);
         if (dbcc.Arguments.Count > 1 && dbcc.StringArgument(batch, 1) is { Length: > 0 } indexName && FindIndex(table, indexName) is null)
             throw SimulatedSqlException.DbccIndexNotFound(indexName, table.Name, 4);
+        if (dbcc.Arguments.Count > 2 && dbcc.IntegerArgument(batch, 2) is var fillFactor and (< 0 or > 100))
+            throw SimulatedSqlException.DbccFillFactorNotValid(fillFactor);
         batch.Connection.LastStatementRowCount = table.Heap.RowCount;
         return DbccCompleted(batch, dbcc, []);
     }
@@ -619,8 +628,23 @@ partial class Simulation
     }
 
     /// <summary>
+    /// <c>PHYSICAL_ONLY</c> refuses <c>DATA_PURITY</c> with Msg 2532 state 2
+    /// and <c>EXTENDED_LOGICAL_CHECKS</c> with state 5 (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    private static void RejectPhysicalOnlyCombination(DbccInvocation dbcc)
+    {
+        if (!dbcc.Has(DbccOptions.PhysicalOnly))
+            return;
+        if (dbcc.Has(DbccOptions.DataPurity))
+            throw SimulatedSqlException.DbccWithOptionNotValid(2);
+        if (dbcc.Has(DbccOptions.ExtendedLogicalChecks))
+            throw SimulatedSqlException.DbccWithOptionNotValid(5);
+    }
+
+    /// <summary>
     /// <c>CHECKFILEGROUP</c>'s filegroup: named or by id, the primary one when
-    /// absent; one the database lacks is Msg 3027.
+    /// absent or 0; a name the database lacks is Msg 3027, an id Msg 8932.
     /// </summary>
     private static int ResolveDbccFilegroup(BatchContext batch, Database database, DbccInvocation dbcc)
     {
@@ -640,7 +664,8 @@ partial class Simulation
                 if (entry.Value == id)
                     return id;
             }
-            throw SimulatedSqlException.FilegroupNotInDatabase(id.ToString(CultureInfo.InvariantCulture), database.Name);
+            // Probed 2026-10-04 against SQL Server 2025.
+            throw SimulatedSqlException.FilegroupIdNotFound(id, database.Name);
         }
         var name = value.CoerceTo(SqlType.NVarchar).AsString;
         return database.Filegroups.TryGetValue(name, out var filegroupId)

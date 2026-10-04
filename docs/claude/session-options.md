@@ -18,13 +18,24 @@ Two clocks, probed against SQL Server 2025:
 ## How far a `SET` reaches
 
 A procedure, trigger or dynamic-SQL body's `SET` applies inside the body and reverts when the body returns, the caller's value restored by `SimulatedDbConnection.SessionOptionScope` at each invocation seam and around a parameterized ad-hoc command (which SqlClient sends as `sp_executesql`).
-That holds for `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `ARITHIGNORE`, `CONCAT_NULL_YIELDS_NULL`, `NUMERIC_ROUNDABORT`, `ANSI_NULL_DFLT_ON` / `_OFF`, `IMPLICIT_TRANSACTIONS`, `CURSOR_CLOSE_ON_COMMIT`, `NOEXEC`, `DEADLOCK_PRIORITY`, `XACT_ABORT`, `ROWCOUNT`, `DATEFIRST`, `DATEFORMAT`, `NOCOUNT`, `TEXTSIZE` and `STATISTICS IO` / `TIME` (probed 2026-09-28: a procedure setting five of the ANSI toggles reads `@@OPTIONS` 9568 inside and the caller 5432 after).
+That holds for `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `ARITHIGNORE`, `CONCAT_NULL_YIELDS_NULL`, `NUMERIC_ROUNDABORT`, `ANSI_NULL_DFLT_ON` / `_OFF`, `IMPLICIT_TRANSACTIONS`, `CURSOR_CLOSE_ON_COMMIT`, `NOEXEC`, `DEADLOCK_PRIORITY`, `XACT_ABORT`, `ROWCOUNT`, `DATEFIRST`, `DATEFORMAT`, `NOCOUNT`, `TEXTSIZE` and `STATISTICS IO` / `TIME` (probed 2026-09-28: a procedure setting five of the ANSI toggles reads `@@OPTIONS` 9568 inside and the caller 5432 after), and for `LANGUAGE`, `LOCK_TIMEOUT`, the transaction isolation level, `FMTONLY` and `IDENTITY_INSERT` (probed 2026-10-04).
 `ANSI_NULLS` and `QUOTED_IDENTIFIER` are the exceptions: a procedure or trigger body ignores its own `SET` of them, running under the setting captured when the module was created, while dynamic SQL applies them to its own batch.
+A function body may `SET` those two — and nothing else, Msg 443 refusing the rest — and ignores them the same way (probed 2026-10-04).
 `PARSEONLY` in a procedure, trigger or function body refuses the `CREATE` with Msg 1059, at line 0 wherever the `SET` sits (probed 2026-09-28).
 
-## Refused forms
+## Lists and refused forms
 
-An on/off option given any other value is Msg 102 state 4 naming the option (`SET NOCOUNT maybe` is near `'nocount'`), `SET @@x = …` is Msg 137 state 1 naming `@@x`, and an isolation level outside the five is Msg 102 at it (probed 2026-10-02 against SQL Server 2025).
+A comma list of on/off options (`SET NOCOUNT, XACT_ABORT ON`) applies every one as it would alone, `NOEXEC` last so the options beside it still take effect, and `SET STATISTICS IO, TIME ON` takes a list too (probed 2026-10-04 against SQL Server 2025).
+
+An on/off option given any other value is Msg 102 state 4 naming the option (`SET NOCOUNT maybe` is near `'nocount'`), `SET @@x = …` is Msg 137 state 1 naming `@@x` — but a built-in `@@` function there is Msg 102 at it (`SET @@ROWCOUNT = 5`) — and an isolation level outside the five is Msg 102 at it (probed 2026-10-02 and 2026-10-04 against SQL Server 2025).
+The value-taking options refuse a value their grammar has no slot for (probed 2026-10-04):
+
+- `LOCK_TIMEOUT` takes an `int` literal alone, a sign allowed, and `QUERY_GOVERNOR_COST_LIMIT` a number alone; anything else — a string, NULL, a variable, a value past `int` — is Msg 102 state 3 near the option's name in upper case.
+- `TEXTSIZE` takes no variable (Msg 102 at it); `ROWCOUNT` takes an integer variable, any other type — a string holding a number, a decimal — being Msg 507.
+- `DATEFIRST` given a string or NULL is Msg 2743 state 3, `DATEFORMAT` and `LANGUAGE` given a number or NULL Msg 2743 state 2, and `DEADLOCK_PRIORITY` given NULL or a string other than its three names Msg 2755; each ends only the statement.
+- `SET OFFSETS keyword [, …] ON | OFF` and `SET FIPS_FLAGGER 'ENTRY' | 'FULL' | 'INTERMEDIATE' | OFF` parse and are discarded, another flagger level being Msg 102 state 3 at it.
+- A `SET SHOWPLAN_*` in a procedure, function or trigger body refuses the `CREATE` with Msg 1067 state 1 at line 0, and turning one on must be the batch's only statement — Msg 1067 state 1 at line 0 after another statement or in a list, state 2 ahead of one — while turning one off may sit anywhere else.
+- `SET IDENTITY_INSERT`'s refusals (Msg 1088, 8105, 8106, 8107) name the table as written and end the batch (`EndingBatch`).
 
 ## `@@OPTIONS`, `SESSIONPROPERTY` and `sys.dm_exec_sessions`
 
@@ -109,6 +120,10 @@ While either option is on the session skips the plan cache and the compiled-batc
 
 ## Not modeled yet
 
+- `FIPS_FLAGGER`'s warnings: real sends Msg 1021 (`FIPS Warning: Line 1 has the non-ANSI statement 'SET'.`) for each statement outside the level, where the simulator sends none.
+- `SET ROWCOUNT` doesn't cap a static cursor's population, where real's `@@CURSOR_ROWS` reads the capped count (1 under `ROWCOUNT 1`, probed 2026-10-04).
+- `sys.dm_exec_sessions.ansi_defaults` reads the session's `QUOTED_IDENTIFIER`, where real reads the batch's parse-time value, so a batch that ends with `SET ANSI_DEFAULTS OFF` reads 0 for its earlier `ON` on real.
+- `sys.dm_exec_cached_plans` and `sys.dm_exec_plan_attributes`, through which real reports a plan's `set_options`, `language_id`, `date_format` and `date_first` cache keys.
 - `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family return plans; they parse and are discarded, so no result set arrives and a `SHOWPLAN` batch runs where real only describes it.
 - `STATISTICS IO` lists nothing for a catalog view, where real lists the system base tables it read (`sysschobjs` …), and a system procedure's statements report nothing, where real's report each of its own (`sp_help`'s compile and a Msg 3612 per statement).
 - `STATISTICS IO` orders a hash join's, an `EXCEPT`'s and a foreign-key check's tables by the simulator's own read order, which is not always real's (a hash join's build side first, a referenced table ahead of the written one), and lists no `Worktable` for an `UPDATE` of a key column, where real's split-sort lists one.

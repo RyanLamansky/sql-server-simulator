@@ -145,6 +145,9 @@ public sealed partial class SimulatedSqlException : DbException
     /// </summary>
     internal bool TerminatesBatch { get; private init; }
 
+    /// <summary>A copy of a freshly made exception that ends its batch, as <see cref="TerminatesBatch"/> describes.</summary>
+    internal SimulatedSqlException EndingBatch() => new(this.Message, [.. this.Errors]) { TerminatesBatch = true };
+
     /// <summary>
     /// What <c>@@ERROR</c> reads after this error, where that isn't its
     /// number: a <c>RAISERROR</c> of an unregistered id at severity 11 and up,

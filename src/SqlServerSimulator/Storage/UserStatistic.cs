@@ -45,7 +45,7 @@ internal sealed class UserStatistic(string name, int statsId, int[] columnFullOr
     public UserStatistic Remapped(int[] oldToNew)
         => new(this.Name, this.StatsId, [.. this.ColumnFullOrdinals.Select(o => oldToNew[o])], this.NoRecompute, this.CreateDate, this.Filter, this.FilterDefinition, [.. this.FilterColumnFullOrdinals.Select(o => oldToNew[o])]);
 
-    public readonly string Name = name;
+    public string Name = name;
 
     /// <summary>Per-table id, unique against every index id on the table.</summary>
     public readonly int StatsId = statsId;

@@ -57,8 +57,8 @@ internal sealed class SessionContext : Expression
 /// <summary>
 /// SQL <c>CONTEXT_INFO()</c>: returns the session's 128-byte context-info
 /// buffer, or NULL when <c>SET CONTEXT_INFO</c> hasn't run. The buffer is
-/// always exactly 128 bytes once set (SQL Server right-pads / truncates),
-/// so <c>DATALENGTH(CONTEXT_INFO())</c> is 128. Result type is
+/// right-padded to 128 bytes once set, so <c>DATALENGTH(CONTEXT_INFO())</c>
+/// is 128, and NULL when the value set was empty. Result type is
 /// <see cref="SqlType.Varbinary"/>.
 /// </summary>
 internal sealed class ContextInfoFunction : Expression
@@ -69,10 +69,14 @@ internal sealed class ContextInfoFunction : Expression
             throw SimulatedSqlException.FunctionRequiresNArguments("context_info", 0);
     }
 
-    public override SqlValue Run(RuntimeContext runtime) =>
-        runtime.Batch.Connection.ContextInfo is { } bytes
-            ? SqlValue.FromVarbinary(bytes)
-            : SqlValue.Null(SqlType.Varbinary);
+    public override SqlValue Run(RuntimeContext runtime)
+    {
+        if (runtime.Batch.Connection.ContextInfo is not { Length: > 0 } bytes)
+            return SqlValue.Null(SqlType.Varbinary);
+        var padded = new byte[128];
+        bytes.CopyTo(padded, 0);
+        return SqlValue.FromVarbinary(padded);
+    }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Varbinary;
 

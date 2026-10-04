@@ -159,6 +159,15 @@ partial class SimulatedSqlException
         new($"The variable name '@{name}' has already been declared. Variable names must be unique within a query batch or stored procedure.", 134, 15, 1);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 11555 — a parameter declared <c>NOT NULL</c>
+    /// outside a natively compiled module or inline function, an
+    /// <c>sp_executesql</c> declaration's included (probed 2026-10-04 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NotNullParameterNotSupported(string name) =>
+        new($"The parameter '{name}' has been declared as NOT NULL. NOT NULL parameters are only supported with natively compiled modules, except for inline table-valued functions.", 11555, 15, 1);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 141 — fired when a <c>SELECT</c> mixes
     /// variable assignment (<c>@v = expr</c>) with non-assignment
     /// projection elements in the same projection list.
@@ -345,10 +354,12 @@ partial class SimulatedSqlException
     /// Mimics SQL Server's Msg 119 — an EXEC mixed positional and named
     /// arguments incorrectly: once a <c>@name = value</c> appeared, every
     /// following argument must also be in that form. State 1 / class 15;
-    /// verbatim wording probe-confirmed against SQL Server 2025.
+    /// verbatim wording probe-confirmed against SQL Server 2025, the number
+    /// being the offending argument's position in the whole list (probed
+    /// 2026-10-04: <c>sp_executesql</c>'s statement and declarations count).
     /// </summary>
-    internal static SimulatedSqlException MustPassParameterAsNamed() =>
-        new("Must pass parameter number 2 and subsequent parameters as '@name = value'. After the form '@name = value' has been used, all subsequent parameters must be passed in the form '@name = value'.", 119, 15, 1);
+    internal static SimulatedSqlException MustPassParameterAsNamed(int number) =>
+        new($"Must pass parameter number {number} and subsequent parameters as '@name = value'. After the form '@name = value' has been used, all subsequent parameters must be passed in the form '@name = value'.", 119, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server's Msg 487 — a module's <c>WITH</c> clause named an

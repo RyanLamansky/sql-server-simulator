@@ -7,6 +7,7 @@ A fully-dead interior page is reused in place but never removed from `Heap.Pages
 
 `DBCC SHRINKDATABASE`/`SHRINKFILE` trim only the *trailing* run of dead/freed-LOB pages (`Heap.TrimTrailingDeadPages` / `TrimTrailingFreeLobPages`, after a version-store GC); interior dead + version-/lock-pinned tail pages stay.
 SHRINKDATABASE emits no result set, only a Msg 5201 per file saying it had no free space to give back; SHRINKFILE returns the per-file row with sizes from heap page totals (no physical file model) — the rest of the DBCC family is in [`dbcc.md`](dbcc.md).
+Both take `db_owner` (Msg 7983 state 36), and SHRINKFILE's file must be one of the database's — an unknown id, a signed one included, is Msg 8985 state 2 and an unknown name state 1 (probed 2026-10-04 against SQL Server 2025).
 
 A versioning-on **autocommit** UPDATE/DELETE reclaims its superseded chains via a statement-end GC pass when no snapshot is open.
 

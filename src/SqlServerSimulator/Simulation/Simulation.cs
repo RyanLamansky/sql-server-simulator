@@ -3268,9 +3268,11 @@ public sealed partial class Simulation
                             break;
                         default:
                             // A block leaves @@ROWCOUNT as its last statement
-                            // set it (probed 2026-09-26 against SQL Server 2025).
+                            // set it (probed 2026-09-26 against SQL Server 2025),
+                            // and @@ERROR likewise (probed 2026-10-04).
                             foreach (var o in ParseBeginBlock(batch))
                                 yield return o;
+                            batch.CurrentStatement.SuppressErrorReset = true;
                             break;
                     }
                     break;

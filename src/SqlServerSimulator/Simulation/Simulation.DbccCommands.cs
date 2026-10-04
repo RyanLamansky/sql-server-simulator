@@ -117,9 +117,40 @@ partial class Simulation
             "UPDATEUSAGE" => RunDbccUpdateUsage(batch, dbcc),
             "USEROPTIONS" => RunDbccUserOptions(batch, dbcc),
             _ => IsUnbuiltDbccCommand(upper)
-                ? throw new NotSupportedException($"DBCC {name.ToUpperInvariant()} isn't modeled.")
+                ? throw UnbuiltDbccCommand(batch, upper)
                 : throw SimulatedSqlException.DbccStatementIncorrect(),
         };
+    }
+
+    /// <summary>
+    /// What an unbuilt subcommand answers: the permission refusal real raises
+    /// first — Msg 2571 for the server-scope ones, Msg 7983 for
+    /// <c>PROCCACHE</c> (db_owner) — and otherwise <see cref="NotSupportedException"/>
+    /// (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static Exception UnbuiltDbccCommand(BatchContext batch, ReadOnlySpan<char> upper)
+    {
+        if (!IsSysadminSession(batch))
+        {
+            switch (upper)
+            {
+                case "DBINFO":
+                    return DbccPermissionDenied(batch, "dbinfo", 14);
+                case "IND":
+                    return DbccPermissionDenied(batch, "ind", 1);
+                case "MEMORYSTATUS":
+                    return DbccPermissionDenied(batch, "memorystatus", 1);
+                case "OUTPUTBUFFER":
+                    return DbccPermissionDenied(batch, "outputbuffer", 1);
+                case "PAGE":
+                    return DbccPermissionDenied(batch, "page", 1);
+                case "PROCCACHE" when !PermissionEnforcement.IsOwner(batch, batch.CurrentDatabase):
+                    return SimulatedSqlException.DbccDatabasePermissionDenied(batch.Connection.Security.Effective.DatabasePrincipalName, "proccache", batch.CurrentDatabase.Name);
+                default:
+                    break;
+            }
+        }
+        return new NotSupportedException($"DBCC {upper} isn't modeled.");
     }
 
     /// <summary>
@@ -587,7 +618,8 @@ partial class Simulation
     /// <c>DBCC TRACESTATUS [( trace# [, …] [, -1] )] [WITH NO_INFOMSGS]</c>: every
     /// flag on — server-wide or for the session — when no flag or <c>-1</c> is
     /// named, else a row per named flag whether on or not. No row at all sends
-    /// no result set. Open to every session.
+    /// no result set. Open to every session; a flag past the valid range is
+    /// Msg 2560.
     /// </summary>
     private static List<SimulatedStatementOutcome> RunDbccTraceStatus(BatchContext batch, DbccInvocation dbcc)
     {
@@ -602,6 +634,10 @@ partial class Simulation
         for (var i = 0; i < dbcc.Arguments.Count; i++)
         {
             var flag = dbcc.IntegerArgument(batch, i);
+            // A flag outside -1 .. 17798 is Msg 2560 state 31 naming its
+            // position (probed 2026-10-04 against SQL Server 2025).
+            if (flag is < -1 or > MaxTraceFlag)
+                throw SimulatedSqlException.DbccParameterIsIncorrect(i + 1, 31);
             if (flag == -1)
                 all = true;
             else if (flag is > 0 and <= short.MaxValue && !named.Contains((int)flag))

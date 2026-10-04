@@ -360,6 +360,32 @@ partial class SimulatedSqlException
         new($"Cannot set key '{key}' in the session context. The key has been set as read_only for this session.", 15664, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 15666: an <c>sp_set_session_context</c> key that
+    /// is empty or longer than 256 bytes (probed 2026-10-04 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException SessionContextKeyTooLong(string key) =>
+        new($"Cannot set key '{key}' in the session context. The size of the key cannot exceed 256 bytes.", 15666, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 15600 as <c>sp_set_session_context</c> raises it,
+    /// naming the internal <c>sp_set_connection_context</c>: a MAX-typed or xml
+    /// value, or a NULL or non-numeric <c>@read_only</c> (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InvalidConnectionContextOption() =>
+        new("An invalid parameter or option was specified for procedure 'sp_set_connection_context'.", 15600, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server errors 16903 and 16914: <c>sp_set_session_context</c>
+    /// given fewer than two arguments or more than three (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ConnectionContextParameterCount(bool tooMany) => tooMany
+        ? new("The \"sp_set_connection_context\" procedure was called with too many parameters.", 16914, 16, 1)
+        : new("The \"sp_set_connection_context\" procedure was called with an incorrect number of parameters.", 16903, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 225: the parameters supplied to a system
     /// procedure are not valid — raised here for a NULL / missing <c>@key</c>
     /// to <c>sp_set_session_context</c>. Class 16 State 1.
@@ -409,8 +435,8 @@ partial class SimulatedSqlException
     /// too many parameters. Probed 2026-09-25 against SQL Server 2025 on
     /// <c>DBCC INPUTBUFFER</c>, state 3.
     /// </summary>
-    internal static SimulatedSqlException DbccWrongParameterCount() =>
-        new("An incorrect number of parameters was given to the DBCC statement.", 2583, 16, 3);
+    internal static SimulatedSqlException DbccWrongParameterCount(byte state = 3) =>
+        new("An incorrect number of parameters was given to the DBCC statement.", 2583, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 2532: a <c>DBCC</c> statement's <c>WITH</c>
@@ -431,10 +457,10 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 7955: <c>DBCC INPUTBUFFER</c> of a session id
-    /// no session holds. State 2, probed 2026-09-25 against SQL Server 2025.
+    /// no session holds. State 1, probed 2026-10-04 against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException InvalidSpidSpecified(int spid) =>
-        new($"Invalid SPID {spid} specified.", 7955, 16, 2);
+        new($"Invalid SPID {spid} specified.", 7955, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 7960: <c>DBCC INPUTBUFFER</c> naming a request
@@ -3568,8 +3594,67 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException RenameDuplicateName(string newName, string kind) =>
         RenameError($"Error: The new name '{newName}' is already in use as a {kind} name and would cause a duplicate that is not permitted.", 15335);
 
-    private static SimulatedSqlException RenameError(string message, int number) =>
-        new(message, new SimulatedError(@class: 11, lineNumber: 0, message, number, procedure: "sp_rename", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 1));
+    /// <summary>
+    /// Mimics SQL Server error 15249: an <c>sp_rename</c> <c>@objtype</c>
+    /// outside the six it takes, echoed as passed (probed 2026-10-04 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException RenameObjectTypeUnrecognized(string objectType) =>
+        RenameError($"Error: Explicit @objtype '{objectType}' is unrecognized.", 15249);
+
+    /// <summary>
+    /// Mimics SQL Server error 15223: a NULL <c>sp_rename</c> argument —
+    /// <c>NewName</c> at state 11, <c>OldName</c> at state 1 (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException RenameParameterIsNull(string parameter, byte state) =>
+        RenameError($"Error: The input parameter '{parameter}' is not allowed to be null.", 15223, state);
+
+    /// <summary>
+    /// Mimics SQL Server error 15224: an <c>sp_rename</c> <c>@newname</c>
+    /// sp_validname refuses, at state 15 from line 109, after sp_validname's
+    /// own Msg 15004 (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException RenameNewNameInvalid(string newName, string procedure)
+    {
+        var message = $"Error: The value for the @newname parameter contains invalid characters or violates a basic restriction ({newName}).";
+        return FollowedBy(ValidNameCannotBeNull(), new(message, new SimulatedError(@class: 11, lineNumber: 109, message, 15224, procedure, server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 15)))
+            .PinLine(109, keepStamped: true);
+    }
+
+    /// <summary>
+    /// Mimics SQL Server error 15253: an <c>sp_rename</c> <c>@objname</c> that
+    /// doesn't parse as a name of at most four parts (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException RenameIdentifierSyntax(string objectName) =>
+        RenameError($"Syntax error parsing SQL identifier '{objectName}'.", 15253);
+
+    /// <summary>
+    /// Mimics SQL Server error 15004: <c>sp_validname</c> given an empty or
+    /// NULL name, from line 17 of its source (probed 2026-10-04 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ValidNameCannotBeNull() =>
+        new("Name cannot be NULL.", new SimulatedError(@class: 16, lineNumber: 17, "Name cannot be NULL.", 15004, procedure: "sp_validname", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 1));
+
+    /// <summary>
+    /// Mimics SQL Server error 15032: <c>sys.sp_renamedb</c>'s new name taken
+    /// by another database (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DatabaseNameAlreadyExistsForRename(string databaseName) =>
+        new($"The database '{databaseName}' already exists. Specify a unique database name.", 15032, 16, 1);
+
+    private static SimulatedSqlException RenameError(string message, int number, byte state = 1) =>
+        new(message, new SimulatedError(@class: 11, lineNumber: 0, message, number, procedure: "", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: state));
+
+    /// <summary>
+    /// Mimics SQL Server error 1935: an index over a computed column, or a
+    /// filtered one, on a table created under the named SET options off
+    /// (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ObjectCreatedWithSetOptionsOff(string objectName, string options) =>
+        new($"Cannot create index. Object '{objectName}' was created with the following SET options off: '{options}'.", 1935, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 1934: a statement under SET options real's

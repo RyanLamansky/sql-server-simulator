@@ -60,7 +60,9 @@ partial class Simulation
         }
         if (tsql is not { } statement)
             throw SimulatedSqlException.ProcedureExpectsParameter("sp_describe_undeclared_parameters", "tsql", state: 20);
-        if (statement.IsNull)
+        // Only a Unicode string is a statement (probed 2026-10-04 against SQL
+        // Server 2025).
+        if (statement.IsNull || !SqlType.IsNationalStringCategory(statement.Type))
             throw SimulatedSqlException.ProcedureExpectsNVarcharMaxParameter("tsql");
 
         var rows = this.DescribeUndeclaredParameters(batch, statement.AsString, parameters);
@@ -136,16 +138,18 @@ partial class Simulation
             if (!undeclared.Contains(name))
                 continue;
             if (uses > 1)
-                throw SimulatedSqlException.UndeclaredParameterUsedTwice(name);
+                throw SimulatedSqlException.UndeclaredParameterUsedTwice(name).PinLine(1);
         }
+        // The analysis reports at the statement's own line, 1 (probed
+        // 2026-10-04 against SQL Server 2025).
         if (deduction.Failure is { } failure)
-            throw failure;
+            throw failure.PinLine(1);
         foreach (var (name, _) in ordered)
         {
             if (!undeclared.Contains(name))
                 continue;
             if (!deduction.Deduced.TryGetValue(name, out var deduced))
-                throw SimulatedSqlException.ParameterTypeNotUnique(name);
+                throw SimulatedSqlException.ParameterTypeNotUnique(name).PinLine(1);
             rows.Add(DescribeUndeclaredParameter(rows.Count + 1, name, deduced.Type, deduced.Numeric));
         }
         return rows;

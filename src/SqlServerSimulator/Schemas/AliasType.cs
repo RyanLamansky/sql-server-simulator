@@ -47,7 +47,7 @@ internal sealed class AliasType(
     /// </summary>
     public int? OwnerPrincipalId;
 
-    public readonly string Name = name;
+    public string Name = name;
 
     /// <summary>
     /// The resolved built-in type the alias wraps (e.g. <c>nvarchar(50)</c>'s

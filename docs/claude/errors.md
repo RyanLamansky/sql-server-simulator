@@ -68,7 +68,7 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 
 ### Not modeled yet
 
-- **Msg 5703 is English whatever the language**; real words it in the language being switched to (`Die Spracheneinstellung wurde in Deutsch geändert.`).
+- **Every diagnostic but Msg 5703 is English whatever the language**; real words its errors and messages in the session's language after `SET LANGUAGE` (`Fehler beim Konvertieren des varchar-Werts "x" in den int-Datentyp.` for Msg 245 under Deutsch, probed 2026-10-04 against SQL Server 2025).
 - **Msg 8153 over a constant `VALUES` source grouped into single-row groups** isn't sent by real (`SELECT x, SUM(y) FROM (VALUES (1, NULL), (2, 3)) v(x, y) GROUP BY x`), which evaluates those groups while compiling; the same data in a table warns on both.
 - **Msg 1708**, the warning a `CREATE TABLE` whose largest row can pass 8060 bytes sends, isn't sent; its rule isn't settled — two `varchar(8000)` columns draw none while `char(8000), char(50), varchar(10)` does (probed 2026-10-01 against SQL Server 2025).
 

@@ -188,6 +188,16 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException SyntaxErrorNear(Token? token, byte state = 1) => new($"Incorrect syntax near '{token?.ErrorText}'.", 102, 15, state);
 
+    /// <summary>
+    /// Mimics SQL Server error 1067: a <c>SET SHOWPLAN_*</c> switch beside
+    /// another statement (state 2), in a list or in a module body (state 1),
+    /// probed 2026-10-04 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ShowplanNotAlone(byte state) =>
+        new("The SET SHOWPLAN statements must be the only statements in the batch.", 1067, 15, state);
+
+    internal static SimulatedSqlException SyntaxErrorNear(string text, byte state) => new($"Incorrect syntax near '{text}'.", 102, 15, state);
+
     internal static SimulatedSqlException SyntaxErrorNear(char c) => new($"Incorrect syntax near '{c}'.", 102, 15, 1);
 
     /// <summary>
@@ -417,8 +427,17 @@ partial class SimulatedSqlException
         new SimulatedSqlException("Cannot set or reset the 'parseonly' option within a procedure or function.", 1059, 15, 1).PinLine(0);
 
     /// <summary>
-    /// Mimics SQL Server error 2743: <c>SET CONTEXT_INFO</c> given a variable
-    /// holding NULL or a string (probed 2026-09-28 against SQL Server 2025).
+    /// Mimics SQL Server error 2743 state 2: <c>SET DATEFORMAT</c> or
+    /// <c>SET LANGUAGE</c> given NULL or a number (probed 2026-10-04 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OptionRequiresString(string option) =>
+        new($"SET {option} option requires character string parameter.", 2743, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 2743: <c>SET CONTEXT_INFO</c> given a NULL, a
+    /// string or more than 128 bytes (probed 2026-09-28 and 2026-10-04 against
+    /// SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException ContextInfoRequiresBinary() =>
         new("SET CONTEXT_INFO option requires varbinary (128) NOT NULL parameter.", 2743, 16, 3);

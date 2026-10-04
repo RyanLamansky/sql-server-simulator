@@ -61,8 +61,8 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
-        var (objectName, triggerType) = ParseHelpArgs(arguments, "sp_helptrigger", "triggertype");
-        var target = ResolveHelpTarget(batch, "sp_helptrigger", objectName);
+        var (objectName, triggerType) = ParseHelpArgs(arguments, "sp_helptrigger", "triggertype", firstName: "tabname");
+        var target = ResolveHelpTarget(batch, objectName);
         if (target.Object is not (HeapTable or View))
             throw SimulatedSqlException.HelpObjectDoesNotExist(objectName!, batch.CurrentDatabase.Name);
 
@@ -114,13 +114,13 @@ partial class Simulation
     /// membership set. A name that is neither is Msg 15198.
     /// </summary>
     /// <remarks>
-    /// <c>DefSchemaName</c> and <c>SID</c> report NULL, which is what
-    /// <c>sys.database_principals</c> reports for the same principals — the
-    /// simulator's principal model carries neither a per-user default schema
-    /// (every name resolves through <c>dbo</c>) nor a security identifier.
-    /// <c>LoginName</c> is the user's <c>CREATE USER … FOR LOGIN</c> link and
-    /// <c>DefDBName</c> is that login's default database, the <c>master</c>
-    /// every login reports through <c>sys.server_principals</c>.
+    /// <c>DefSchemaName</c> and <c>SID</c> report what
+    /// <c>sys.database_principals</c> does for the same principal, and dbo
+    /// reports its <c>db_owner</c> membership (probed 2026-10-04 against SQL
+    /// Server 2025). <c>LoginName</c> is the user's <c>CREATE USER … FOR
+    /// LOGIN</c> link and <c>DefDBName</c> is that login's default database,
+    /// the <c>master</c> every login reports through
+    /// <c>sys.server_principals</c>.
     /// </remarks>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelpUser(BatchContext batch)
     {
@@ -133,7 +133,7 @@ partial class Simulation
         var users = HelpUserRows(database, name);
         if (users.Count > 0 || name is null)
         {
-            yield return HelpUserResultSet(users);
+            yield return HelpUserResultSet(database, users);
             yield break;
         }
 
@@ -172,11 +172,11 @@ partial class Simulation
     // One entry per (user, role) pair, with a lone 'public' entry for a user in
     // no role — real's LEFT JOIN through sys.database_role_members. Database
     // roles themselves are excluded (u.type <> 'R').
-    private static List<(string User, string Role, string? Login, int UserId)> HelpUserRows(
+    private static List<(string User, string Role, string? Login, DatabasePrincipal Principal)> HelpUserRows(
         Database database, string? only)
     {
         var members = HelpUserRoleMembers(database);
-        var rows = new List<(string User, string Role, string? Login, int UserId)>();
+        var rows = new List<(string User, string Role, string? Login, DatabasePrincipal Principal)>();
         foreach (var (_, principal) in database.Principals)
         {
             if (principal.TypeCode == "R")
@@ -194,25 +194,27 @@ partial class Simulation
                 foreach (var (_, role) in database.Principals)
                 {
                     if (role.PrincipalId == roleId)
-                        rows.Add((principal.Name, role.Name, login, principal.PrincipalId));
+                        rows.Add((principal.Name, role.Name, login, principal));
                 }
             }
 
             if (rows.Count == before)
-                rows.Add((principal.Name, "public", login, principal.PrincipalId));
+                rows.Add((principal.Name, "public", login, principal));
         }
 
         rows.Sort(static (a, b) => string.Compare(a.User, b.User, StringComparison.OrdinalIgnoreCase));
         return rows;
     }
 
+    // dbo's db_owner membership is one no statement made, which real lists
+    // as sys.database_role_members does.
     private static (int RoleId, int MemberId)[] HelpUserRoleMembers(Database database)
     {
         lock (database.RoleMembers)
-            return [.. database.RoleMembers];
+            return [(Database.DbOwnerRoleId, Database.DboPrincipalId), .. database.RoleMembers];
     }
 
-    private static SimulatedSqlResultSet HelpUserResultSet(List<(string User, string Role, string? Login, int UserId)> rows)
+    private static SimulatedSqlResultSet HelpUserResultSet(Database database, List<(string User, string Role, string? Login, DatabasePrincipal Principal)> rows)
     {
         // Real widens each name column to the widest value it is about to
         // report — measuring nvarchar UserName / RoleName / LoginName /
@@ -222,15 +224,13 @@ partial class Simulation
         var roleWidth = HelpUserWidth(rows, 9, static r => r.Role.Length * 2);
         var loginWidth = HelpUserWidth(rows, 9, static r => (r.Login?.Length ?? 0) * 2);
         var databaseWidth = HelpUserWidth(rows, 9, static r => r.Login is null ? 0 : HelpUserDefaultDatabase.Length * 2);
+        var schemaWidth = HelpUserWidth(rows, 9, static r => (HelpUserDefaultSchema(r.Principal)?.Length ?? 0) * 2);
 
         var userType = NVarcharSqlType.Get(userWidth, Collation.Baseline, Coercibility.Implicit);
         var roleType = NVarcharSqlType.Get(roleWidth, Collation.Baseline, Coercibility.Implicit);
         var loginType = NVarcharSqlType.Get(loginWidth, Collation.Baseline, Coercibility.Implicit);
         var databaseType = NVarcharSqlType.Get(databaseWidth, Collation.Baseline, Coercibility.Implicit);
-        // Every principal's default schema is dbo and no principal carries a
-        // security identifier, so both columns are the all-NULL case whose
-        // width falls back to real's floor.
-        var schemaType = NVarcharSqlType.Get(9, Collation.Baseline, Coercibility.Implicit);
+        var schemaType = NVarcharSqlType.Get(schemaWidth, Collation.Baseline, Coercibility.Implicit);
 
         SqlType[] schema =
             [userType, roleType, loginType, databaseType, schemaType, HelpUserIdType, HelpUserSidType];
@@ -241,29 +241,38 @@ partial class Simulation
         var nullDatabase = SqlValue.Null(databaseType);
         var defaultDatabase = SqlValue.FromString(databaseType, Truncate(HelpUserDefaultDatabase, databaseWidth));
         var cells = new List<SqlValue[]>(rows.Count);
-        foreach (var (user, role, login, userId) in rows)
+        foreach (var (user, role, login, principal) in rows)
         {
             cells.Add([
                 SqlValue.FromString(userType, Truncate(user, userWidth)),
                 SqlValue.FromString(roleType, Truncate(role, roleWidth)),
                 login is null ? nullLogin : SqlValue.FromString(loginType, Truncate(login, loginWidth)),
                 login is null ? nullDatabase : defaultDatabase,
-                nullSchemaName,
-                SqlValue.FromString(HelpUserIdType, userId.ToString(CultureInfo.InvariantCulture)),
-                nullSid,
+                HelpUserDefaultSchema(principal) is { } defaultSchema ? SqlValue.FromString(schemaType, Truncate(defaultSchema, schemaWidth)) : nullSchemaName,
+                SqlValue.FromString(HelpUserIdType, principal.PrincipalId.ToString(CultureInfo.InvariantCulture)),
+                BuiltInResources.DatabasePrincipalSid(database, principal) is { } sid ? SqlValue.FromVarbinary(sid) : nullSid,
             ]);
         }
 
         return new SimulatedSqlResultSet(schema, SpHelpUserColumnNames, cells);
     }
 
+    // The default schema sys.database_principals reports: a declared one, else
+    // guest's own and dbo for every other user, none for the catalog
+    // principals.
+    private static string? HelpUserDefaultSchema(DatabasePrincipal principal) =>
+        principal.DefaultSchemaName
+            ?? (principal.PrincipalId == Database.GuestPrincipalId ? principal.Name
+                : principal.PrincipalId is Database.SysPrincipalId or Database.InformationSchemaPrincipalId ? null
+                : Database.DefaultSchemaName);
+
     // The default database sys.server_principals reports for every login.
     private const string HelpUserDefaultDatabase = "master";
 
     private static int HelpUserWidth(
-        List<(string User, string Role, string? Login, int UserId)> rows,
+        List<(string User, string Role, string? Login, DatabasePrincipal Principal)> rows,
         int floor,
-        Func<(string User, string Role, string? Login, int UserId), int> length)
+        Func<(string User, string Role, string? Login, DatabasePrincipal Principal), int> length)
     {
         var max = 0;
         foreach (var row in rows)

@@ -128,7 +128,7 @@ partial class Simulation
             yield break;
 
         var (objectName, columnName) = ParseHelpArgs(arguments, "sp_helptext", "columnname");
-        var target = ResolveHelpTarget(batch, "sp_helptext", objectName);
+        var target = ResolveHelpTarget(batch, objectName);
 
         if (columnName is not null)
         {
@@ -219,28 +219,27 @@ partial class Simulation
         List<ProcArgument> arguments, string procedureName, string? secondName = null,
         string firstName = "objname")
     {
+        RequireSystemProcedureShape(procedureName, arguments, secondName is null ? [firstName] : [firstName, secondName],
+            required: procedureName is "sp_depends" or "sp_helpconstraint" or "sp_helpindex" or "sp_helpstats" or "sp_helptext" or "sp_helptrigger" or "sp_recompile" or "sp_refreshsqlmodule" or "sp_refreshview" ? 1 : 0);
         string? first = null, second = null;
         var positional = 0;
         foreach (var arg in arguments)
         {
             if (arg.Name is null)
             {
-                switch (positional++)
-                {
-                    case 0: first = CatalogStringArg(arg); break;
-                    case 1 when secondName is not null: second = CatalogStringArg(arg); break;
-                    default: throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
-                }
-
-                continue;
+                if (positional++ == 0)
+                    first = CatalogStringArg(arg);
+                else
+                    second = CatalogStringArg(arg);
             }
-
-            if (BuiltInToken.Equals(arg.Name, firstName))
+            else if (BuiltInToken.Equals(arg.Name, firstName))
+            {
                 first = CatalogStringArg(arg);
-            else if (secondName is not null && BuiltInToken.Equals(arg.Name, secondName))
-                second = CatalogStringArg(arg);
+            }
             else
-                throw SimulatedSqlException.InvalidProcedureParameters(procedureName);
+            {
+                second = CatalogStringArg(arg);
+            }
         }
 
         return (first, second);
@@ -270,7 +269,7 @@ partial class Simulation
             yield return Printed(SimulatedSqlException.NoIndexesMessage(batch, procedureName, objectName));
             yield break;
         }
-        var target = ResolveHelpTarget(batch, "sp_helpindex", objectName);
+        var target = ResolveHelpTarget(batch, objectName);
         foreach (var outcome in HelpIndexResultSets(batch, target, objectName!, procedureName))
             yield return outcome;
     }
@@ -308,8 +307,8 @@ partial class Simulation
     // columnstore, ignore-duplicate-keys, uniqueness, the constraint role, then
     // the filegroup. A hypothetical index ends at its uniqueness with
     // ", hypothetical" and no location (probed 2026-10-02 against SQL Server
-    // 2025). The auto-create / stats-no-recompute clauses real can also emit
-    // have no simulator counterpart, so they never appear. An index on a
+    // 2025). STATISTICS_NORECOMPUTE adds ", stats no recompute" ahead of the
+    // location (probed 2026-10-04). An index on a
     // partition scheme is located on the scheme (probed 2026-09-27 against SQL
     // Server 2025). A memory-optimized table's index is located in MEMORY, a
     // trailing space after it, and a hash index reads "nonclustered hash"
@@ -327,6 +326,7 @@ partial class Simulation
             + (identity.Index is { IsHypothetical: true } ? ", hypothetical" : "")
             + (kind == KeyConstraintKind.PrimaryKey ? ", primary key" : "")
             + (kind == KeyConstraintKind.Unique ? ", unique key" : "")
+            + (identity.Constraint?.StatisticsNoRecompute ?? identity.Index!.StatisticsNoRecompute ? ", stats no recompute" : "")
             + (identity.Index is { IsHypothetical: true } ? "" : memoryOptimized ? " located in MEMORY " : " located on " + location);
     }
 
@@ -388,14 +388,14 @@ partial class Simulation
     /// Msg 15574 (<c>STATS</c>) or Msg 15575 (<c>ALL</c>) and no result set.
     /// A table's <c>CREATE STATISTICS</c> objects list under both forms.
     /// </remarks>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelpStats(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpHelpStats(BatchContext batch, string procedureName)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
 
         var (objectName, results) = ParseHelpArgs(arguments, "sp_helpstats", "results");
-        var target = ResolveHelpTarget(batch, "sp_helpstats", objectName);
+        var target = ResolveHelpTarget(batch, objectName);
 
         // The @results parameter's own nvarchar(5) width applies before the
         // value check, so anything longer is compared by its first 5 chars.
@@ -405,7 +405,7 @@ partial class Simulation
         var includeIndexes = BuiltInToken.Equals(option, "ALL");
         if (!includeIndexes && !BuiltInToken.Equals(option, "STATS"))
         {
-            batch.AppendInfoError(@class: 1, state: 1, number: 50000, message: "Invalid option: " + option);
+            yield return Printed(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 36, 50000, "Invalid option: " + option, @class: 1));
             yield break;
         }
 
@@ -437,10 +437,10 @@ partial class Simulation
 
         if (rows.Count == 0)
         {
-            batch.AppendInfoError(@class: 10, state: 1, number: includeIndexes ? 15575 : 15574,
-                message: includeIndexes
+            yield return Printed(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 63, includeIndexes ? 15575 : 15574,
+                includeIndexes
                     ? "This object does not have any statistics or indexes."
-                    : "This object does not have any statistics.");
+                    : "This object does not have any statistics."));
             yield break;
         }
 
@@ -466,7 +466,13 @@ partial class Simulation
 
         var (objectName, nomsgArg) = ParseHelpArgs(arguments, "sp_helpconstraint", "nomsg");
         var nomsg = nomsgArg is not null && BuiltInToken.Equals(nomsgArg, "nomsg");
-        var target = ResolveHelpTarget(batch, "sp_helpconstraint", objectName);
+        // A constraint or a catalog view is an object with no constraints of
+        // its own (probed 2026-10-04 against SQL Server 2025).
+        HeapTable? table = null;
+        if (objectName is not null && TryResolveHelpTargetForHelp(batch, objectName, out var target))
+            table = target.Object as HeapTable;
+        else if (objectName is null || !batch.TryResolveCatalogView(ParseHelpObjectName(batch.CurrentDatabase, objectName), out _, out _))
+            _ = ResolveHelpTarget(batch, objectName);
         if (!nomsg)
         {
             List<SqlValue[]> echo = [[SqlValue.FromString(HelpObjectNameType, objectName!)]];
@@ -475,24 +481,24 @@ partial class Simulation
             yield return HelpBlankLine(batch, procedureName, 287);
         }
 
-        foreach (var outcome in HelpConstraintResultSets(batch, target, objectName!, procedureName))
+        foreach (var outcome in HelpConstraintResultSets(batch, table, objectName!, procedureName))
             yield return outcome;
     }
 
     private static IEnumerable<SimulatedStatementOutcome> HelpConstraintResultSets(
-        BatchContext batch, HelpTarget target, string objectName, string procedureName)
+        BatchContext batch, HeapTable? table, string objectName, string procedureName)
     {
         var database = batch.CurrentDatabase;
-        var rows = target.Table is { } table ? BuildHelpConstraintRows(database, table) : [];
+        var rows = table is not null ? BuildHelpConstraintRows(database, table) : [];
         yield return rows.Count == 0
             ? HelpNoConstraints(batch, procedureName, 340, objectName)
             : new SimulatedSqlResultSet(SpHelpConstraintSchema, SpHelpConstraintColumnNames, rows) { ColumnNullability = SpHelpConstraintNullability };
         yield return HelpBlankLine(batch, procedureName, 342);
 
         var referencing = new List<SqlValue[]>();
-        if (target.Table is { } referenced)
+        if (table is not null)
         {
-            foreach (var fk in referenced.IncomingForeignKeys)
+            foreach (var fk in table.IncomingForeignKeys)
             {
                 referencing.Add([SqlValue.FromString(HelpReferencingFkType,
                     $"{HelpTableReference(database, fk.ChildTable)}: {fk.Name}")]);
@@ -512,7 +518,7 @@ partial class Simulation
 
         // A node table closes with the edge constraints naming it (probed
         // 2026-09-27 against SQL Server 2025).
-        if (target.Table is { GraphKind: GraphTableKind.Node } node
+        if (table is { GraphKind: GraphTableKind.Node } node
             && EdgeConstraintsReferencing(database, node) is { Count: > 0 } edges)
         {
             var edgeRows = edges.ConvertAll(pair => new[] { SqlValue.FromString(HelpReferencingFkType, $"{HelpTableReference(database, pair.Edge)}: {pair.Constraint.Name}") });
@@ -528,7 +534,7 @@ partial class Simulation
 
     /// <summary>The procedures that write their own return code, so an error never sets the generic 1.</summary>
     private static bool OwnsReturnCode(string systemProcName) =>
-        systemProcName is "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_xml_preparedocument" or "sp_xml_removedocument" or "xp_qv";
+        systemProcName is "sp_executesql" or "sp_getapplock" or "sp_getbindtoken" or "sp_releaseapplock" or "sp_validname" or "sp_xml_preparedocument" or "sp_xml_removedocument" or "xp_qv";
 
     /// <summary>
     /// Passes a system procedure's outcomes through, attributing an error it
@@ -561,7 +567,7 @@ partial class Simulation
                     foreach (var entry in exception.Errors)
                         entry.Procedure = inner;
                 }
-                exception.RaisedBySystemProcedure = exception.Number != 201;
+                exception.RaisedBySystemProcedure = exception.Number != 201 && !exception.SystemProcedureBindingError;
                 if (returnCode is not null && exception.RaisedBySystemProcedure)
                     returnCode.Value = SqlValue.FromInt32(exception.SystemProcedureReturnCode).CoerceTo(returnCode.DeclaredType);
                 throw;
@@ -604,7 +610,13 @@ partial class Simulation
         // sp_executesql's own missing statement is at line 1 (probed
         // 2026-10-02 against SQL Server 2025).
         ("sp_executesql", 201) => (1, null),
+        ("sp_describe_first_result_set" or "sp_describe_undeclared_parameters", 201 or 214 or 11552) => (1, null),
+        // The extended procedures report every error at line 1 (probed
+        // 2026-10-04 against SQL Server 2025).
+        ("sp_bindsession" or "sp_getbindtoken", _) => (1, null),
         (_, 201) => (0, null),
+        ("sp_datatype_info" or "sp_datatype_info_100" or "sp_server_info", 8114) => (0, null),
+        (_, 8144 or 8145 or 8146) when exception.SystemProcedureBindingError => (0, null),
         ("sp_addextendedproperty" or "sp_updateextendedproperty", 15600) when exception.Class == 15 => (22, null),
         ("sp_dropextendedproperty", 15600) when exception.Class == 15 => (14, null),
         ("sp_addextendedproperty", 15096 or 15135 or 15233 or 15600) => (37, null),
@@ -633,21 +645,39 @@ partial class Simulation
         ("sp_configure", 15247) => (105, null),
         ("sp_describe_first_result_set", 11515) => (1, null),
         ("sp_depends", 15009) => (25, null),
+        ("sp_depends", 15250) => (16, null),
         ("sp_fkeys", 15252) => (20, null),
         ("sp_help", 15009) => (79, null),
+        ("sp_help", 15250) => (61, null),
         ("sp_helpconstraint", 15009) => (47, null),
+        ("sp_helpconstraint", 15250) => (39, null),
         ("sp_helpdb", 15010) => (45, null),
+        ("sp_helpdevice", 15012) => (34, null),
+        ("sp_helpfile", 15325) => (28, null),
+        ("sp_helpfilegroup", 15325) => (19, null),
         ("sp_helpindex", 15009) => (41, null),
+        ("sp_helpindex", 15250) => (33, null),
+        ("sp_helpntgroup", 15420) => (9, null),
+        ("sp_helprole", 15409) => (9, null),
+        ("sp_helprotect", 15300) => (80, null),
+        ("sp_helprotect", 15302) => (89, null),
         ("sp_helprotect", 15330) => (291, null),
-        ("sp_helpsrvrole" or "sp_helpsrvrolemember", 15412) => (10, null),
+        ("sp_dbfixedrolepermission" or "sp_helpdbfixedrole" or "sp_helpsrvrole" or "sp_helpsrvrolemember", 15412) => (10, null),
         ("sp_helpstats", 15009) => (31, null),
+        ("sp_helpstats", 15250) => (23, null),
         ("sp_helptext", 15009) => (54, null),
         ("sp_helptext", 15197) => (107, null),
+        ("sp_helptext", 15250) => (44, null),
+        ("sp_helptext", 15645) => (70, null),
+        ("sp_helptext", 15646) => (75, null),
         ("sp_helptrigger", 15009) => (23, null),
+        ("sp_helptrigger", 15250) => (16, null),
+        ("sp_helptrigger", 15305) => (30, null),
         ("sp_helpuser", 15198) => (142, null),
         ("sp_recompile", 15165) => (18, null),
         ("sp_refreshsqlmodule" or "sp_refreshview", 15165) => (62, "sys.sp_refreshsqlmodule_internal"),
         ("sp_refreshsqlmodule" or "sp_refreshview", 208) => (85, "sys.sp_refreshsqlmodule_internal"),
+        ("sp_rename", _) when exception.SystemProcedureLine is { } renameLine => (renameLine, null),
         ("sp_rename", 297) => (502, null),
         ("sp_rename", 15225) => (637, null),
         ("sp_rename", 15248) => (269, null),
@@ -657,6 +687,7 @@ partial class Simulation
         ("sp_serveroption", 15015) => (112, null),
         ("sp_serveroption", 15247) => (28, null),
         ("sp_serveroption", 15600) => (225, null),
+        ("sp_set_session_context", _) => (1, null),
         ("sp_setapprole", 2762 or 15161) => (46, null),
         ("sp_setapprole", 15002) => (15, null),
         ("sp_setapprole", 15422) => (38, null),
@@ -664,6 +695,9 @@ partial class Simulation
         ("sp_setapprole", 15600) => (31, null),
         ("sp_settriggerorder", _) when exception.SystemProcedureLine is { } triggerOrderLine => (triggerOrderLine, null),
         ("sp_spaceused", 15009) => (153, null),
+        ("sp_spaceused", 15143) => (105, null),
+        ("sp_spaceused", 15234) => (160, null),
+        ("sp_spaceused", 15250) => (132, null),
         ("sp_unbindefault", 15148) => (149, null),
         ("sp_unbindefault", 15236) => (73, null),
         ("sp_unbindefault", 15237) => (156, null),
@@ -671,13 +705,18 @@ partial class Simulation
         ("sp_unbindrule", 15238) => (79, null),
         ("sp_unbindrule", 15239) => (144, null),
         ("sp_unsetapprole", 15592) => (22, null),
+        ("sp_who", 15007) => (59, null),
+        ("sp_who2", 15007) => (77, null),
         _ => null,
     };
 
     // The name a system procedure's own messages carry: as it was called,
     // schema and all (probed 2026-09-26: sp_helpindex vs sys.sp_helpindex).
+    // A name with a database part reads as written (probed 2026-10-04:
+    // master..sp_help, master.dbo.sp_rename).
     private static string CalledName(MultiPartName name) =>
-        name.Count > 1 && name.ImmediateQualifier is { Length: > 0 } schema ? $"{schema}.{name.Leaf}" : name.Leaf;
+        name.Count >= 3 ? name.WithoutOmittedLeading().Written
+        : name.Count > 1 && name.ImmediateQualifier is { Length: > 0 } schema ? $"{schema}.{name.Leaf}" : name.Leaf;
 
     // Most system procedures run under SET NOCOUNT ON, so their result sets
     // report no row count; the dispatch wraps each that does (probed
@@ -820,12 +859,13 @@ partial class Simulation
     /// argument is Msg 201, a three-part name naming another database is Msg
     /// 15250, and an unresolvable name is Msg 15009.
     /// </summary>
-    private static HelpTarget ResolveHelpTarget(BatchContext batch, string procedureName, string? objectName)
+    private static HelpTarget ResolveHelpTarget(BatchContext batch, string? objectName)
     {
-        if (objectName is null)
-            throw SimulatedSqlException.ProcedureExpectsParameter(procedureName, "objname");
-
         var database = batch.CurrentDatabase;
+        // A NULL the call passed is a name like any other, which no object has.
+        if (objectName is null)
+            throw SimulatedSqlException.HelpObjectDoesNotExist("(null)", database.Name);
+
         var parsed = ParseHelpObjectName(database, objectName);
         return parsed.Count is >= 1 and <= 3 && TryResolveHelpTarget(batch, parsed, out var target) && HelpTargetVisible(batch, target)
             ? target
@@ -868,6 +908,16 @@ partial class Simulation
     private static bool TryResolveHelpTarget(BatchContext batch, MultiPartName name, out HelpTarget target)
     {
         target = null!;
+        // From tempdb a #temp name finds the session's table, which reads
+        // under its padded internal name (probed 2026-10-04 against SQL
+        // Server 2025: tempdb..sp_help '#t').
+        var database = batch.CurrentDatabase;
+        if (BatchContext.IsLocalTempName(name.Leaf) && database.Collation.Equals(database.Name, TempdbDatabaseName)
+            && batch.TryResolveTable(name, out var temp) && database.Schemas.TryGetValue(Database.DefaultSchemaName, out var tempSchema))
+        {
+            target = new HelpTarget(tempSchema, temp, temp.InternalName ?? temp.Name);
+            return true;
+        }
         if (!batch.TryResolveSchema(name, out var schema))
             return false;
 
@@ -969,11 +1019,11 @@ internal sealed class HelpTarget
     /// </summary>
     public readonly HeapColumn[]? Columns;
 
-    public HelpTarget(Schema schema, SchemaObject schemaObject)
+    public HelpTarget(Schema schema, SchemaObject schemaObject, string? displayName = null)
     {
         this.Schema = schema;
         this.Object = schemaObject;
-        this.Name = schemaObject.Name;
+        this.Name = displayName ?? schemaObject.Name;
         this.TypeCode = schemaObject.ObjectTypeCode;
         this.CreateDate = schemaObject.CreateDate;
         this.Table = schemaObject as HeapTable;

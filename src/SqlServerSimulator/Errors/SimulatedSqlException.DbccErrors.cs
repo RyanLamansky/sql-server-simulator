@@ -61,7 +61,7 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException DbccNoHelpAvailable(string statement, byte state) =>
         new($"No help available for DBCC statement '{statement}'.", 8987, 16, state);
 
-    /// <summary>Msg 7999: <c>DBCC DBREINDEX</c> (state 4), <c>INDEXDEFRAG</c> or <c>UPDATEUSAGE</c> (state 8) naming an index the table doesn't have.</summary>
+    /// <summary>Msg 7999: <c>DBCC DBREINDEX</c> (state 4), <c>INDEXDEFRAG</c> or <c>UPDATEUSAGE</c> (state 8) naming an index the table doesn't have, or <c>CHECKTABLE</c> (state 7) an index id.</summary>
     internal static SimulatedSqlException DbccIndexNotFound(string indexName, string tableName, byte state) =>
         new($"Could not find any index named '{indexName}' for table '{tableName}'.", 7999, 16, state);
 
@@ -80,6 +80,40 @@ partial class SimulatedSqlException
     /// <summary>Msg 3027: <c>DBCC CHECKFILEGROUP</c> naming a filegroup the database doesn't have.</summary>
     internal static SimulatedSqlException FilegroupNotInDatabase(string filegroupName, string databaseName) =>
         new($"The filegroup \"{filegroupName}\" is not part of database \"{databaseName}\".", 3027, 16, 3);
+
+    /// <summary>
+    /// <paramref name="error"/> followed by the class-0 Msg 2528 real still
+    /// closes the statement with: <c>SHOW_STATISTICS</c>' missing statistic or
+    /// argument (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FollowedByDbccCompleted(SimulatedSqlException error)
+    {
+        const string Completed = "DBCC execution completed. If DBCC printed error messages, contact your system administrator.";
+        return FollowedBy(error, new(Completed, new SimulatedError(@class: 0, lineNumber: 0, Completed, 2528, procedure: "", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 1)));
+    }
+
+    /// <summary>
+    /// <c>DBCC SHOW_STATISTICS</c> without <c>SELECT</c> on its table: Msg 229
+    /// then Msg 2557 class 16 state 7 naming the table as written (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ShowStatisticsPermissionDenied(string userName, string tableName, string databaseName, string schemaName, string writtenName)
+    {
+        var message = $"User '{userName}' does not have permission to run DBCC SHOW_STATISTICS for object '{writtenName}'.";
+        return FollowedBy(PermissionDenied("SELECT", tableName, databaseName, schemaName), new(message, 2557, 16, 7));
+    }
+
+    /// <summary>Msg 129 state 2: a <c>DBCC DBREINDEX</c> fill factor outside 0 .. 100, at run time (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException DbccFillFactorNotValid(long value) =>
+        new($"Fillfactor {value} is not a valid percentage; fillfactor must be between 1 and 100.", 129, 16, 2);
+
+    /// <summary>Msg 8985: <c>DBCC SHRINKFILE</c> naming a file the database doesn't have — state 2 for an id, 1 for a name (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException ShrinkFileNotFound(string file, string databaseName, byte state) =>
+        new($"Could not locate file '{file}' for database '{databaseName}' in sys.database_files. The file either does not exist, or was dropped.", 8985, 16, state);
+
+    /// <summary>Msg 8932: <c>DBCC CHECKFILEGROUP</c> naming a filegroup id the database doesn't have (probed 2026-10-04 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException FilegroupIdNotFound(int filegroupId, string databaseName) =>
+        new($"Could not find filegroup ID {filegroupId} in sys.filegroups for database '{databaseName}'.", 8932, 16, 0);
 
     /// <summary>The text of Msg 5201, <c>DBCC SHRINKDATABASE</c> passing over a file with no free space to give back.</summary>
     internal static string ShrinkSkippedFileText(int fileId, short databaseId) =>

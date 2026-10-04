@@ -294,6 +294,7 @@ ON validates the target: a table with no identity column raises **Msg 8106** (`T
 A view is Msg 8105 and a missing object Msg 1088, each named as written (probed 2026-10-01).
 
 `DBCC CHECKIDENT` (`Simulation.CheckIdent.cs`) reports and reseeds, and a reseed rolls back with its transaction though a generated value never does.
+It takes the table's control — ownership, `db_owner` or `db_ddladmin`, `ALTER` not sufficing — else Msg 2557 state 5; a view is Msg 5239, a table without an identity Msg 7997 naming it bare, an argument of the wrong kind Msg 2560 naming its position (a variable for the table state 9, another word than `NORESEED` / `RESEED` state 6, a string reseed value state 9), and a `WITH` option but `NO_INFOMSGS` Msg 2532 (probed 2026-10-04 against SQL Server 2025).
 The one rule that isn't a plain assignment: a table that hasn't generated a value since it was created or truncated takes the reseed value *itself* on its next insert, where one that has takes the value after it; the pending value shows through `IDENT_CURRENT` but not through CHECKIDENT's own report, which still says `NULL` (probed 2026-09-24).
 
 **The identity values a failing `INSERT` uses up** follow where real's plan draws them: per row, as the row reaches the insert, ahead of computing the row's own select-list values, its defaults and its conversions into the columns — and a drawn value is never given back (probed 2026-10-04 against SQL Server 2025).

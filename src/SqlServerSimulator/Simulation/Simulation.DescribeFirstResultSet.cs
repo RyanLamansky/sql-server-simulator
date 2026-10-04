@@ -44,7 +44,7 @@ partial class Simulation
         if (batch.IsSkipping)
             yield break;
 
-        SqlValue? tsql = null, parameters = null;
+        SqlValue? tsql = null, parameters = null, browseMode = null;
         var positional = 0;
         foreach (var argument in arguments)
         {
@@ -58,12 +58,19 @@ partial class Simulation
             {
                 case 0: tsql = argument.Value; break;
                 case 1: parameters = argument.Value; break;
-                case 2: break;
+                case 2: browseMode = argument.Value; break;
                 default: throw SimulatedSqlException.TooManyArgumentsToFunction("sp_describe_first_result_set");
             }
         }
-        if (tsql is not { IsNull: false } text)
-            throw SimulatedSqlException.ProcedureExpectsParameter("sp_describe_first_result_set", "tsql");
+        // A missing statement is Msg 201 state 20, and a NULL or non-Unicode
+        // one Msg 214, at line 1 (probed 2026-10-04 against SQL Server 2025);
+        // a browse mode outside 0 .. 2 is Msg 11552.
+        if (tsql is not { } text)
+            throw SimulatedSqlException.ProcedureExpectsParameter("sp_describe_first_result_set", "tsql", state: 20);
+        if (text.IsNull || !SqlType.IsNationalStringCategory(text.Type))
+            throw SimulatedSqlException.ProcedureExpectsNVarcharMaxParameter("tsql");
+        if (browseMode is { IsNull: false } mode && (!SqlType.IsIntegerCategory(mode.Type) || mode.CoerceTo(SqlType.BigInt).AsInt64 is < 0 or > 2))
+            throw SimulatedSqlException.BrowseInformationModeNotValid();
 
         var rows = this.DescribeFirstResult(batch, text.AsString, parameters);
         yield return new SimulatedSqlResultSet(DescribeSchema, DescribeColumnNames, rows.ConvertAll(row => RowEncoder.EncodeRow(DescribeSchema, row)));
@@ -266,6 +273,10 @@ partial class Simulation
         DateTimeSqlType => (notNull ? 61 : 111, 8),
         DecimalSqlType => (numeric ? 108 : 106, 17),
         XmlSqlType => (241, 8100),
+        // rowversion travels as BIGBINARY and sql_variant at 8009 (probed
+        // 2026-10-04 against SQL Server 2025).
+        SqlVariantSqlType => (98, 8009),
+        _ when type == SqlType.RowVersion => (173, 8),
         // A vector-aware client's own token for the type (probed 2026-09-26
         // against SQL Server 2025).
         VectorSqlType => (245, maxLength),

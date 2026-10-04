@@ -553,6 +553,10 @@ partial class Simulation
                     if (coerced.IsNull)
                         batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.NullReturnStatusMessage(batch, procFrame.ProcedureName));
                     procFrame.ReturnCode = coerced.IsNull ? 0 : coerced.AsInt32;
+                    // A RETURN that completes is a statement that succeeded,
+                    // which the caller's @@ERROR reads (probed 2026-10-04
+                    // against SQL Server 2025).
+                    batch.Connection.LastErrorNumber = 0;
                 }
                 batch.ReturnSignaled = true;
             }

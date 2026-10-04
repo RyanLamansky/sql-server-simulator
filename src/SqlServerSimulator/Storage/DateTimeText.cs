@@ -338,11 +338,11 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
             return '\0';
         }
 
-        /// <summary>Reads an English month name, three-letter or in full, returning 1–12 or 0.</summary>
+        /// <summary>Reads a month name in the session's language (<see cref="MonthNumber"/>), returning 1–12 or 0.</summary>
         private int ReadMonthName()
         {
             var start = this.Position;
-            while (!this.AtEnd && char.IsAsciiLetter(this.text[this.Position]))
+            while (!this.AtEnd && char.IsLetter(this.text[this.Position]))
                 this.Position++;
             var month = MonthNumber(this.text[start..this.Position]);
             if (month == 0)
@@ -353,7 +353,7 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
         public readonly bool StartsMonthName()
         {
             var i = this.Position;
-            while (i < this.text.Length && char.IsAsciiLetter(this.text[i]))
+            while (i < this.text.Length && char.IsLetter(this.text[i]))
                 i++;
             return i > this.Position && MonthNumber(this.text[this.Position..i]) != 0;
         }
@@ -745,9 +745,28 @@ internal readonly struct DateTimeText(DateOnly? date, long timeTicks, TimeSpan? 
         "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER",
     ];
 
-    /// <summary>1–12 for an English month name, three-letter or in full (case aside); 0 otherwise.</summary>
+    /// <summary>
+    /// 1–12 for a month name in the session's language (case aside); 0
+    /// otherwise. us_english takes a name in full or its first three letters;
+    /// another language its own full or abbreviated names from
+    /// <c>sys.syslanguages</c>, and no English one (probed 2026-10-04 against
+    /// SQL Server 2025: '1 März 2020' reads under Deutsch, '1 March 2020'
+    /// doesn't).
+    /// </summary>
     private static int MonthNumber(ReadOnlySpan<char> word)
     {
+        var language = Language.Current;
+        if (language != Language.Default)
+        {
+            var months = language.MonthNames;
+            var shortMonths = language.ShortMonthNames;
+            for (var i = 0; i < months.Length; i++)
+            {
+                if (word.Equals(months[i], StringComparison.OrdinalIgnoreCase) || word.Equals(shortMonths[i], StringComparison.OrdinalIgnoreCase))
+                    return i + 1;
+            }
+            return 0;
+        }
         for (var i = 0; i < MonthNames.Length; i++)
         {
             var name = MonthNames[i].AsSpan();

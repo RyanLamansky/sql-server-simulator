@@ -14,58 +14,48 @@ partial class Simulation
         "Caution: Changing any part of an object name could break scripts and stored procedures.";
 
     // Real raises it from line 801 of sp_rename's own text, so it names that
-    // line and the procedure whatever was renamed (probed 2026-09-26).
-    private static void QueueRenameCaution(BatchContext batch)
+    // line and the procedure as the call named it, whatever was renamed
+    // (probed 2026-09-26 and 2026-10-04).
+    private static void QueueRenameCaution(BatchContext batch, string procedureName)
     {
         var caution = batch.InfoMessage(@class: 10, state: 1, number: 15477, message: RenameCautionMessage);
         caution.LineNumber = 801;
-        caution.Procedure = "sp_rename";
+        caution.Procedure = procedureName;
         batch.Connection.PendingMessages.Enqueue(caution);
     }
 
+    // sp_rename's parameters, as sys.all_parameters declares them: @objname
+    // nvarchar(1035), @newname sysname, @objtype varchar(13). A longer value is
+    // cut to the parameter's width as any procedure argument is.
+    private static readonly string[] RenameParameterNames = ["objname", "newname", "objtype"];
+
     /// <summary>
     /// Handles <c>EXEC sp_rename @objname, @newname [, @objtype]</c> — the
-    /// object / column / index rename schema-migration tools (Alembic's
-    /// <c>rename_table</c> / <c>alter_column</c>, SSMS) emit. Reachable through
-    /// both <c>EXEC sp_rename …</c> and the RPC-by-name path (a name-form system
-    /// proc is re-synthesized as an <c>EXEC</c>), so a single dispatch arm serves
-    /// both. Supports positional and named (<c>@objname=</c> / <c>@newname=</c> /
-    /// <c>@objtype=</c>) arguments.
+    /// object / column / index / statistics / type / database rename
+    /// schema-migration tools (Alembic's <c>rename_table</c> /
+    /// <c>alter_column</c>, SSMS, EF Core) emit. Reachable through both
+    /// <c>EXEC sp_rename …</c> and the RPC-by-name path (a name-form system proc
+    /// is re-synthesized as an <c>EXEC</c>), so a single dispatch arm serves
+    /// both.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// Probe-confirmed behavior (SQL Server 2025, 2026-07-23):
-    /// </para>
-    /// <list type="bullet">
-    /// <item>Success mutates catalog state and buffers Msg 15477 (severity 10)
-    /// as an info message; the proc returns 0.</item>
-    /// <item><c>@objtype</c> NULL / omitted renames a table (or object); the
-    /// resolved leaf moves within its schema. A table.leaf name no object
-    /// answers renames that table's column or index instead. A missing object
-    /// → Msg 15225 with <c>@itemtype</c> rendered as <c>(null)</c>.</item>
-    /// <item><c>@objtype</c> = COLUMN / INDEX (case-insensitive) renames a column
-    /// / index of <c>[schema.]table.leaf</c>. A missing parent table or leaf →
-    /// Msg 15248 ("ambiguous or the claimed @objtype is wrong").</item>
-    /// <item>A colliding <c>@newname</c> → Msg 15335, naming the kind as
-    /// <c>@objtype</c> spelled it or, without one, as real inferred it.</item>
-    /// <item><c>@newname</c> is used verbatim as the new leaf — real does not
-    /// parse it as a multi-part name.</item>
-    /// </list>
-    /// <para>
-    /// Other <c>@objtype</c> values (USERDATATYPE / STATISTICS / DATABASE / …)
-    /// raise <see cref="NotSupportedException"/> naming the unmodeled type — a
-    /// divergence from real, which distinguishes Msg 15248 (recognized but not
-    /// found) from Msg 15249 (unrecognized) for those. #temp tables aren't
-    /// special-cased: their DB-scoped resolution miss surfaces Msg 15225, which
-    /// matches real (real resolves <c>@objname</c> in the current database, so a
-    /// bare <c>#t</c> isn't found either).
-    /// </para>
+    /// The checks run in real's order (probed 2026-10-04 against SQL Server
+    /// 2025): the argument binding, an <c>@objtype</c> outside COLUMN /
+    /// DATABASE / INDEX / OBJECT / STATISTICS / USERDATATYPE (Msg 15249), a
+    /// NULL <c>@newname</c> then a NULL <c>@objname</c> (Msg 15223), an empty
+    /// <c>@newname</c> (sp_validname's Msg 15004, then Msg 15224), and an
+    /// <c>@objname</c> that doesn't parse as a name of at most four parts
+    /// (Msg 15253) — each at its own line of real's source. Success sends the
+    /// Msg 15477 caution and leaves <c>@@ROWCOUNT</c> at 1, as real's last
+    /// statement does; a rename inside a transaction rolls back with it.
     /// </remarks>
-    private IEnumerable<SimulatedStatementOutcome> InvokeSpRename(BatchContext batch)
+    private IEnumerable<SimulatedStatementOutcome> InvokeSpRename(BatchContext batch, string procedureName)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
             yield break;
+
+        RequireSystemProcedureShape("sp_rename", arguments, RenameParameterNames, required: 2);
 
         // Ahead of every resolution: real reports Msg 3930 for an sp_rename of
         // a missing object too, where the read-only gate in each Rename* helper
@@ -73,49 +63,60 @@ partial class Simulation
         RejectWriteInDoomedTransaction(batch.Connection);
 
         var (objName, newName, objType) = ParseSpRenameArgs(arguments);
+        var kind = objType?.TrimEnd(' ');
+        if (kind is not null && !BuiltInToken.EqualsAny(kind, "COLUMN", "DATABASE", "INDEX", "OBJECT", "STATISTICS", "USERDATATYPE"))
+            throw SimulatedSqlException.RenameObjectTypeUnrecognized(objType!).AtSystemProcedureLine(90);
+        if (newName is null)
+            throw SimulatedSqlException.RenameParameterIsNull("NewName", state: 11).AtSystemProcedureLine(96);
+        if (objName is null)
+            throw SimulatedSqlException.RenameParameterIsNull("OldName", state: 1).AtSystemProcedureLine(101);
+        if (newName.Length == 0)
+        {
+            // sp_rename asks sp_validname, whose own refusal arrives first.
+            throw SimulatedSqlException.RenameNewNameInvalid(newName, procedureName);
+        }
 
-        // @objname / @newname are mandatory. Real raises Msg 201 on a missing
-        // one; the simulator surfaces the generic invalid-parameters error —
-        // schema-migration callers always pass both.
-        if (string.IsNullOrEmpty(objName) || string.IsNullOrEmpty(newName))
-            throw SimulatedSqlException.InvalidProcedureParameters("sp_rename");
+        if (kind is not null && BuiltInToken.Equals(kind, "DATABASE"))
+        {
+            RenameDatabase(batch, objName, newName);
+            batch.Connection.LastStatementRowCount = 1;
+            yield break;
+        }
+
+        if (!ObjectId.TryParseObjectName(objName, out _))
+            throw SimulatedSqlException.RenameIdentifierSyntax(objName).AtSystemProcedureLine(120);
 
         try
         {
             // Without @objtype a table.leaf name no object answers renames the
-            // column, else the index, it names, and the collision message
-            // names the kind in lower case where a passed @objtype is echoed
-            // as written (probed 2026-09-30 against SQL Server 2025).
-            var inferred = objType is null ? InferredSubobjectKind(batch, objName) : null;
-            if (inferred == "column")
+            // column, else the index, it names, and a name no object or
+            // subobject answers renames the user type it names; the collision
+            // message names the kind in lower case where a passed @objtype is
+            // echoed as written (probed 2026-09-30 against SQL Server 2025).
+            var inferred = kind is null ? InferredSubobjectKind(batch, objName) : null;
+            if (inferred == "column" || (kind is not null && BuiltInToken.Equals(kind, "COLUMN")))
             {
-                RenameColumn(batch, objName, newName, inferred);
+                RenameColumn(batch, objName, newName, inferred ?? objType!);
                 RecordRenameEvent(batch, objName, "COLUMN");
             }
-            else if (inferred == "index")
+            else if (inferred == "index" || (kind is not null && BuiltInToken.Equals(kind, "INDEX")))
             {
-                RenameIndex(batch, objName, newName, inferred);
+                RenameIndex(batch, objName, newName, inferred ?? objType!, procedureName);
                 RecordRenameEvent(batch, objName, "INDEX");
             }
-            else if (objType is null || BuiltInToken.Equals(objType, "OBJECT"))
+            else if (inferred == "userdatatype" || (kind is not null && BuiltInToken.Equals(kind, "USERDATATYPE")))
             {
-                var renamedKind = RenameObject(batch, objName, newName, objType);
-                RecordRenameEvent(batch, objName, renamedKind);
+                this.RenameUserType(batch, objName, newName, procedureName);
             }
-            else if (BuiltInToken.Equals(objType, "COLUMN"))
+            else if (kind is not null && BuiltInToken.Equals(kind, "STATISTICS"))
             {
-                RenameColumn(batch, objName, newName, objType);
-                RecordRenameEvent(batch, objName, "COLUMN");
-            }
-            else if (BuiltInToken.Equals(objType, "INDEX"))
-            {
-                RenameIndex(batch, objName, newName, objType);
-                RecordRenameEvent(batch, objName, "INDEX");
+                RenameStatistics(batch, objName, newName, procedureName);
+                RecordRenameEvent(batch, objName, "STATISTICS");
             }
             else
             {
-                throw new NotSupportedException(
-                    $"sp_rename with @objtype '{objType}' is not modeled; supported @objtype values are COLUMN, INDEX, and a table / object rename (NULL @objtype).");
+                var renamedKind = this.RenameObject(batch, objName, newName, objType);
+                RecordRenameEvent(batch, objName, renamedKind);
             }
         }
         catch (SimulatedSqlException refused) when (refused.Number is 3906 or 4928 or 5074)
@@ -124,12 +125,12 @@ partial class Simulation
             // reading the column or the column computed, so the caution
             // precedes the Msg 3906, 5074 or 4928 (probed 2026-09-25 and
             // 2026-09-30).
-            QueueRenameCaution(batch);
+            QueueRenameCaution(batch, procedureName);
             throw;
         }
 
-        QueueRenameCaution(batch);
-        yield break;
+        QueueRenameCaution(batch, procedureName);
+        batch.Connection.LastStatementRowCount = 1;
     }
 
     /// <summary>
@@ -165,29 +166,21 @@ partial class Simulation
         var positional = 0;
         foreach (var arg in arguments)
         {
-            if (arg.Name is null)
+            var slot = arg.Name is { } name
+                ? Array.FindIndex(RenameParameterNames, parameter => BuiltInToken.Equals(name, parameter))
+                : positional++;
+            var value = CatalogStringArg(arg);
+            switch (slot)
             {
-                switch (positional++)
-                {
-                    case 0: objName = CatalogStringArg(arg); break;
-                    case 1: newName = CatalogStringArg(arg); break;
-                    case 2: objType = CatalogStringArg(arg); break;
-                    default: throw SimulatedSqlException.InvalidProcedureParameters("sp_rename");
-                }
-
-                continue;
-            }
-
-            switch (arg.Name)
-            {
-                case var n when BuiltInToken.Equals(n, "objname"): objName = CatalogStringArg(arg); break;
-                case var n when BuiltInToken.Equals(n, "newname"): newName = CatalogStringArg(arg); break;
-                case var n when BuiltInToken.Equals(n, "objtype"): objType = CatalogStringArg(arg); break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_rename");
+                case 0: objName = Truncated(value, 1035); break;
+                case 1: newName = Truncated(value, 128); break;
+                default: objType = Truncated(value, 13); break;
             }
         }
 
         return (objName, newName, objType);
+
+        static string? Truncated(string? value, int width) => value is { } text && text.Length > width ? text[..width] : value;
     }
 
     /// <summary>
@@ -205,7 +198,7 @@ partial class Simulation
         var database = batch.CurrentDatabase;
         SimulatedSqlException NotFound() => objType is null
             ? SimulatedSqlException.RenameItemNotFound(objName, database.Name, "(null)")
-            : SimulatedSqlException.RenameAmbiguousOrWrongType("OBJECT");
+            : SimulatedSqlException.RenameAmbiguousOrWrongType("OBJECT").AtSystemProcedureLine(620);
         if (!ObjectId.TryParseObjectName(objName, out var name) || !batch.TryResolveSchema(name, out var schema))
             throw NotFound();
 
@@ -340,7 +333,7 @@ partial class Simulation
     private void RenameColumn(BatchContext batch, string objName, string newName, string kind)
     {
         if (!TrySplitTableAndLeaf(objName, out var tableName, out var columnName)
-            || !batch.TryResolveTable(tableName, out var table))
+            || !TryResolveRenameParent(batch, tableName, out var table))
         {
             throw SimulatedSqlException.RenameAmbiguousOrWrongType("COLUMN");
         }
@@ -414,24 +407,55 @@ partial class Simulation
         BumpSchemaVersion();
     }
 
-    private void RenameIndex(BatchContext batch, string objName, string newName, string kind)
+    private void RenameIndex(BatchContext batch, string objName, string newName, string kind, string procedureName)
     {
-        if (!TrySplitTableAndLeaf(objName, out var tableName, out var indexName)
-            || !batch.TryResolveTable(tableName, out var table))
+        if (!TrySplitTableAndLeaf(objName, out var tableName, out var indexName))
+            throw SimulatedSqlException.RenameAmbiguousOrWrongType("INDEX").AtSystemProcedureLine(450);
+        // An indexed view's index renames as a table's does.
+        if (TryResolveRenameView(batch, tableName, out var view))
         {
-            throw SimulatedSqlException.RenameAmbiguousOrWrongType("INDEX");
+            this.RenameViewIndex(batch, view, indexName, newName, kind);
+            return;
         }
+        if (!TryResolveRenameParent(batch, tableName, out var table))
+            throw SimulatedSqlException.RenameAmbiguousOrWrongType("INDEX").AtSystemProcedureLine(450);
 
         var collation = batch.CurrentDatabase.Collation;
+        // A PRIMARY KEY or UNIQUE constraint's index is the constraint: the
+        // rename renames both (probed 2026-10-04 against SQL Server 2025).
+        KeyConstraint? keyTarget = null;
+        foreach (var key in table.KeyConstraints)
+        {
+            if (collation.Equals(key.Name, newName) && !collation.Equals(key.Name, indexName))
+                throw SimulatedSqlException.RenameDuplicateName(newName, kind).AtSystemProcedureLine(738);
+            if (collation.Equals(key.Name, indexName))
+                keyTarget = key;
+        }
+        // A statistic's name is taken too (probed 2026-10-04).
+        foreach (var statistic in table.UserStatistics)
+        {
+            if (collation.Equals(statistic.Name, newName))
+                throw SimulatedSqlException.RenameDuplicateName(newName, kind).AtSystemProcedureLine(738);
+        }
         Storage.Index? target = null;
         foreach (var index in table.Indexes)
         {
             // The index itself is no clash: a change of case alone renames
             // (probed 2026-09-30 against SQL Server 2025).
             if (collation.Equals(index.Name, newName) && !collation.Equals(index.Name, indexName))
-                throw SimulatedSqlException.RenameDuplicateName(newName, kind);
+                throw SimulatedSqlException.RenameDuplicateName(newName, kind).AtSystemProcedureLine(738);
             if (collation.Equals(index.Name, indexName))
                 target = index;
+        }
+        if (keyTarget is not null)
+        {
+            table.OwningDatabase?.RejectWriteWhenReadOnly();
+            batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+            RecordTableDdlUndo(batch, table);
+            (keyTarget.Name, keyTarget.ModifyDate) = (newName, batch.CurrentStatement.UtcNow);
+            _ = target?.Name = newName;
+            this.BumpSchemaVersion();
+            return;
         }
         // A JSON index renames the same way (probed 2026-09-27 against SQL
         // Server 2025).
@@ -439,7 +463,7 @@ partial class Simulation
         foreach (var jsonIndex in table.JsonIndexes)
         {
             if (collation.Equals(jsonIndex.Name, newName))
-                throw SimulatedSqlException.RenameDuplicateName(newName, kind);
+                throw SimulatedSqlException.RenameDuplicateName(newName, kind).AtSystemProcedureLine(738);
             if (collation.Equals(jsonIndex.Name, indexName))
                 jsonTarget = jsonIndex;
         }
@@ -447,17 +471,17 @@ partial class Simulation
         foreach (var vectorIndex in table.VectorIndexes)
         {
             if (collation.Equals(vectorIndex.Name, newName))
-                throw SimulatedSqlException.RenameDuplicateName(newName, kind);
+                throw SimulatedSqlException.RenameDuplicateName(newName, kind).AtSystemProcedureLine(738);
             if (collation.Equals(vectorIndex.Name, indexName))
                 vectorTarget = vectorIndex;
         }
         if (target is null && jsonTarget is null && vectorTarget is null)
-            throw SimulatedSqlException.RenameAmbiguousOrWrongType("INDEX");
+            throw SimulatedSqlException.RenameAmbiguousOrWrongType("INDEX").AtSystemProcedureLine(450);
         // A vector index keeps its name (probed 2026-09-29 against SQL Server
         // 2025).
         if (vectorTarget is not null)
         {
-            QueueRenameCaution(batch);
+            QueueRenameCaution(batch, procedureName);
             throw SimulatedSqlException.VectorIndexRename();
         }
 
@@ -472,6 +496,194 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Resolves the table a column, index or statistics rename names, as
+    /// real's sp_rename sees it: a <c>#temp</c> table only from tempdb, and a
+    /// table the caller can't see as missing, while one it sees without
+    /// <c>ALTER</c> is Msg 297 from line 242 (probed 2026-10-04 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static bool TryResolveRenameParent(BatchContext batch, MultiPartName tableName, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out HeapTable? table)
+    {
+        table = null;
+        var database = batch.CurrentDatabase;
+        if (BatchContext.IsLocalTempName(tableName.Leaf) && !database.Collation.Equals(database.Name, TempdbDatabaseName))
+            return false;
+        if (!batch.TryResolveTable(tableName, out var resolved))
+            return false;
+        if (resolved.OwningDatabase is { } owner && owner == database && !resolved.IsTableVariable && !BatchContext.IsLocalTempName(resolved.Name))
+        {
+            if (PermissionEnforcement.ObjectVisibility(batch, database) is { } visible && !visible(resolved))
+                return false;
+            if (!PermissionEnforcement.HasObjectAlter(batch, database, resolved.ObjectId, resolved.SchemaId))
+                throw SimulatedSqlException.RenameNotPermitted().AtSystemProcedureLine(242);
+        }
+        table = resolved;
+        return true;
+    }
+
+    /// <summary>The view an index rename's parent name resolves to, when it is one.</summary>
+    private static bool TryResolveRenameView(BatchContext batch, MultiPartName name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out View? view)
+    {
+        view = null;
+        if (!batch.TryResolveSchema(name, out var schema) || !schema.Views.TryGetValue(name.Leaf, out var found))
+            return false;
+        var database = batch.CurrentDatabase;
+        if (PermissionEnforcement.ObjectVisibility(batch, database) is { } visible && !visible(found))
+            return false;
+        if (!PermissionEnforcement.HasObjectAlter(batch, database, found.ObjectId, found.SchemaId))
+            throw SimulatedSqlException.RenameNotPermitted().AtSystemProcedureLine(242);
+        view = found;
+        return true;
+    }
+
+    private void RenameViewIndex(BatchContext batch, View view, string indexName, string newName, string kind)
+    {
+        var collation = batch.CurrentDatabase.Collation;
+        Storage.Index? target = null;
+        foreach (var index in view.Indexes)
+        {
+            if (collation.Equals(index.Name, newName) && !collation.Equals(index.Name, indexName))
+                throw SimulatedSqlException.RenameDuplicateName(newName, kind).AtSystemProcedureLine(738);
+            if (collation.Equals(index.Name, indexName))
+                target = index;
+        }
+        if (target is null)
+            throw SimulatedSqlException.RenameAmbiguousOrWrongType("INDEX").AtSystemProcedureLine(450);
+        batch.CurrentDatabase.RejectWriteWhenReadOnly();
+        var oldName = target.Name;
+        target.Name = newName;
+        RecordDdlUndo(batch, () => target.Name = oldName);
+        this.BumpSchemaVersion();
+    }
+
+    /// <summary>
+    /// The <c>STATISTICS</c> form: renames a statistic of
+    /// <c>[schema.]table.name</c> — a <c>CREATE STATISTICS</c> one, or an
+    /// index's, which renames the index — with Msg 15248 from line 481 when
+    /// nothing answers and, after the caution, Msg 15335 from line 882 for a
+    /// name another statistic or index holds (probed 2026-10-04 against SQL
+    /// Server 2025).
+    /// </summary>
+    private void RenameStatistics(BatchContext batch, string objName, string newName, string procedureName)
+    {
+        if (!TrySplitTableAndLeaf(objName, out var tableName, out var statisticName)
+            || !TryResolveRenameParent(batch, tableName, out var table))
+        {
+            throw SimulatedSqlException.RenameAmbiguousOrWrongType("STATISTICS").AtSystemProcedureLine(481);
+        }
+        var collation = batch.CurrentDatabase.Collation;
+        var statistic = table.UserStatistics.Find(candidate => collation.Equals(candidate.Name, statisticName));
+        var index = table.Indexes.Find(candidate => collation.Equals(candidate.Name, statisticName));
+        var key = table.KeyConstraints.Find(candidate => collation.Equals(candidate.Name, statisticName));
+        if (statistic is null && index is null && key is null)
+            throw SimulatedSqlException.RenameAmbiguousOrWrongType("STATISTICS").AtSystemProcedureLine(481);
+        var taken = table.UserStatistics.Exists(candidate => candidate != statistic && collation.Equals(candidate.Name, newName))
+            || table.Indexes.Exists(candidate => candidate != index && collation.Equals(candidate.Name, newName))
+            || table.KeyConstraints.Exists(candidate => candidate != key && collation.Equals(candidate.Name, newName));
+        if (taken)
+        {
+            QueueRenameCaution(batch, procedureName);
+            throw SimulatedSqlException.RenameDuplicateName(newName, "STATISTICS").AtSystemProcedureLine(882);
+        }
+        table.OwningDatabase?.RejectWriteWhenReadOnly();
+        batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
+        RecordTableDdlUndo(batch, table);
+        _ = statistic?.Name = newName;
+        _ = index?.Name = newName;
+        if (key is not null)
+            (key.Name, key.ModifyDate) = (newName, batch.CurrentStatement.UtcNow);
+        this.BumpSchemaVersion();
+    }
+
+    /// <summary>
+    /// The <c>USERDATATYPE</c> form, and a NULL-<c>@objtype</c> name only a
+    /// type answers: renames an alias or table type, which every column,
+    /// parameter and variable declared with it then reports under the new
+    /// name. A system type is Msg 4185 from line 205, nothing by the name Msg
+    /// 15248 from line 215, and, after the caution, a name another type holds
+    /// Msg 15335 from line 824 (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private void RenameUserType(BatchContext batch, string objName, string newName, string procedureName)
+    {
+        if (!ObjectId.TryParseObjectName(objName, out var name) || name.Count > 2)
+            throw SimulatedSqlException.RenameAmbiguousOrWrongType("USERDATATYPE").AtSystemProcedureLine(215);
+        if (name.Count == 1 && SqlType.IsSystemTypeName(name.Leaf))
+            throw SimulatedSqlException.ActionNotAllowedOnSystemType().AtSystemProcedureLine(205);
+        if (!batch.TryResolveSchema(name, out var schema))
+            throw SimulatedSqlException.RenameAmbiguousOrWrongType("USERDATATYPE").AtSystemProcedureLine(215);
+        var database = batch.CurrentDatabase;
+        if (schema.AliasTypes.TryGetValue(name.Leaf, out var alias))
+        {
+            if (!PermissionEnforcement.HasDatabasePermission(batch, database, Permission.Alter) && !batch.Connection.Security.EffectiveIsDbo)
+                throw SimulatedSqlException.RenameNotPermitted();
+            RequireFreeTypeName(alias.Name);
+            database.RejectWriteWhenReadOnly();
+            var oldName = alias.Name;
+            _ = schema.AliasTypes.TryRemove(oldName, out _);
+            alias.Name = newName;
+            schema.AliasTypes[newName] = alias;
+            RecordDdlUndo(batch, () =>
+            {
+                _ = schema.AliasTypes.TryRemove(newName, out _);
+                alias.Name = oldName;
+                schema.AliasTypes[oldName] = alias;
+            });
+        }
+        else if (schema.TableTypes.TryGetValue(name.Leaf, out var tableType))
+        {
+            if (!PermissionEnforcement.HasDatabasePermission(batch, database, Permission.Alter) && !batch.Connection.Security.EffectiveIsDbo)
+                throw SimulatedSqlException.RenameNotPermitted();
+            RequireFreeTypeName(tableType.Name);
+            database.RejectWriteWhenReadOnly();
+            var oldName = tableType.Name;
+            _ = schema.TableTypes.TryRemove(oldName, out _);
+            tableType.Name = newName;
+            schema.TableTypes[newName] = tableType;
+            RecordDdlUndo(batch, () =>
+            {
+                _ = schema.TableTypes.TryRemove(newName, out _);
+                tableType.Name = oldName;
+                schema.TableTypes[oldName] = tableType;
+            });
+        }
+        else
+        {
+            throw SimulatedSqlException.RenameAmbiguousOrWrongType("USERDATATYPE").AtSystemProcedureLine(215);
+        }
+        this.BumpSchemaVersion();
+
+        void RequireFreeTypeName(string current)
+        {
+            if (database.Collation.Equals(current, newName))
+                return;
+            if (schema.AliasTypes.ContainsKey(newName) || schema.TableTypes.ContainsKey(newName) || schema.XmlSchemaCollections.ContainsKey(newName))
+            {
+                QueueRenameCaution(batch, procedureName);
+                throw SimulatedSqlException.RenameDuplicateName(newName, "USERDATATYPE").AtSystemProcedureLine(824);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The <c>DATABASE</c> form, which real hands to <c>sys.sp_renamedb</c>:
+    /// the rename <c>ALTER DATABASE … MODIFY NAME</c> makes, with its Msg 5021
+    /// notice and no caution, a missing database Msg 15010 from line 29 and a
+    /// name another database holds Msg 15032 from line 36, both naming
+    /// <c>sys.sp_renamedb</c> (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static void RenameDatabase(BatchContext batch, string databaseName, string newName)
+    {
+        var databases = batch.Connection.Simulation.Databases;
+        if (!databases.TryGetValue(databaseName, out var target))
+            throw AtProcedureLine(SimulatedSqlException.HelpDatabaseDoesNotExist(databaseName), "sys.sp_renamedb", 29);
+        if (databases.TryGetValue(newName, out var holder) && holder != target)
+            throw AtProcedureLine(SimulatedSqlException.DatabaseNameAlreadyExistsForRename(newName), "sys.sp_renamedb", 36);
+        if (!PermissionEnforcement.HasDatabasePermission(batch, target, Permission.Alter))
+            throw SimulatedSqlException.AlterDatabasePermissionDenied(target.Name);
+        RenameDatabaseTo(batch, target, newName);
+    }
+
+    /// <summary>
     /// What a NULL-<c>@objtype</c> <c>sp_rename</c> of <paramref name="objName"/>
     /// renames when no object in the shared namespace answers the name:
     /// <c>"column"</c> or <c>"index"</c> for a table.leaf whose table has one
@@ -482,7 +694,14 @@ partial class Simulation
         if (ObjectId.TryParseObjectName(objName, out var name) && batch.TryResolveSchema(name, out var schema) && schema.TryFindInSharedNamespace(name.Leaf, out _))
             return null;
         if (!TrySplitTableAndLeaf(objName, out var tableName, out var leaf) || !batch.TryResolveTable(tableName, out var table))
-            return null;
+        {
+            // A name only a type answers renames the type (probed 2026-10-04
+            // against SQL Server 2025).
+            return ObjectId.TryParseObjectName(objName, out var typeName) && typeName.Count <= 2 && batch.TryResolveSchema(typeName, out var typeSchema)
+                && (typeSchema.AliasTypes.ContainsKey(typeName.Leaf) || typeSchema.TableTypes.ContainsKey(typeName.Leaf))
+                ? "userdatatype"
+                : null;
+        }
         var collation = batch.CurrentDatabase.Collation;
         if (Array.Exists(table.Columns, column => collation.Equals(column.Name, leaf)))
             return "column";

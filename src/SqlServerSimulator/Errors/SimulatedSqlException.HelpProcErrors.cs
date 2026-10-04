@@ -89,6 +89,45 @@ partial class SimulatedSqlException
         new($"The current database does not contain a file named '{fileName}'.", 15325, 16, 1);
 
     /// <summary>
+    /// Msg 15325 as <c>sp_helpfilegroup</c> raises it, the substitution being
+    /// the word <c>filegroup</c> (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException HelpFilegroupDoesNotExist(string filegroupName) =>
+        new($"The current database does not contain a filegroup named '{filegroupName}'.", 15325, 16, 1);
+
+    /// <summary>Mimics SQL Server's Msg 15012 — <c>sp_helpdevice</c> naming a backup device that doesn't exist.</summary>
+    internal static SimulatedSqlException BackupDeviceDoesNotExist(string deviceName) =>
+        new($"The device '{deviceName}' does not exist. Use sys.backup_devices to show available devices.", 15012, 16, 1);
+
+    /// <summary>Mimics SQL Server's Msg 15420 — <c>sp_helpntgroup</c> naming a Windows group the database has no user for.</summary>
+    internal static SimulatedSqlException WindowsGroupDoesNotExist(string groupName) =>
+        new($"The group '{groupName}' does not exist in this database.", 15420, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 591 state 51 — <c>sp_getbindtoken</c>'s argument
+    /// not passed <c>OUTPUT</c>, which ends the batch (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException BindTokenParameterNotOutput() =>
+        new("sp_getbindtoken: The formal parameter \"@out_token\" was defined as OUTPUT, but the actual parameter was not declared as OUTPUT.", 591, 16, 51) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 3921 — <c>sp_getbindtoken</c> outside a
+    /// transaction, which ends the batch (probed 2026-10-04 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException NoTransactionForBindToken() =>
+        new("Cannot get a transaction token if there is no transaction active. Reissue the statement after a transaction has been started", 3921, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 3909 — an <c>sp_bindsession</c> token that names
+    /// no transaction, which ends the batch (probed 2026-10-04 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException BindTokenIsInvalid() =>
+        new("Session binding token is invalid.", 3909, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
     /// Mimics SQL Server's Msg 15300 — <c>sp_helprotect</c>'s
     /// <c>@permissionarea</c> argument containing neither <c>O</c> nor
     /// <c>S</c>. Real upper-cases the argument before reporting it and

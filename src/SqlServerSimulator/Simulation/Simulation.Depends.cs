@@ -83,7 +83,7 @@ partial class Simulation
             yield break;
 
         var (objectName, _) = ParseHelpArgs(arguments, "sp_depends");
-        var target = ResolveHelpTarget(batch, "sp_depends", objectName);
+        var target = ResolveHelpTarget(batch, objectName);
         var database = batch.CurrentDatabase;
         var entities = ModuleDependencies.Enumerate(database);
         // A CHECK or DEFAULT constraint answers for its own expression.

@@ -93,6 +93,7 @@ partial class Simulation
         var boundOutputSlots = new VariableSlot?[procedure.Parameters.Length];
         var boundIsDefault = new bool[procedure.Parameters.Length];
         var boundIsUntypedNull = new bool[procedure.Parameters.Length];
+        var boundIsNumericLiteral = new bool[procedure.Parameters.Length];
         var boundTableValues = new HeapTable?[procedure.Parameters.Length];
         var boundCursorArgNames = new string?[procedure.Parameters.Length];
         // A binding error reports line 0 and names the procedure as the EXEC
@@ -141,6 +142,7 @@ partial class Simulation
             boundOutputSlots[paramIndex] = arg.OutputSlot;
             boundIsDefault[paramIndex] = arg.IsDefault;
             boundIsUntypedNull[paramIndex] = arg.IsUntypedNull;
+            boundIsNumericLiteral[paramIndex] = arg.IsNumericLiteral;
             boundTableValues[paramIndex] = arg.TableValue;
             boundCursorArgNames[paramIndex] = arg.CursorVariableName;
         }
@@ -229,7 +231,8 @@ partial class Simulation
                 AssignmentRules.RequireAssignable(boundValues[i]!.Value.Type, param.Type);
             // A CLR procedure's conversion failure carries state 1 (probed
             // 2026-09-28 against SQL Server 2025).
-            var coerced = BindParameterValue(boundValues[i]!.Value, param.Type, param.DeclaredMaxLength, attributionName, procedure.ClrEntry is null ? (byte)5 : (byte)1);
+            var coerced = BindParameterValue(boundValues[i]!.Value, param.Type, param.DeclaredMaxLength, attributionName, procedure.ClrEntry is null ? (byte)5 : (byte)1,
+                sourceName: boundIsNumericLiteral[i] && !boundIsDefault[i] ? "numeric" : null);
             variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, coerced, parameter: null) { SpelledNumeric = param.SpelledNumeric };
         }
 
@@ -509,7 +512,7 @@ partial class Simulation
     /// both reported at line 0 and attributed to <paramref name="procedure"/>
     /// (empty for <c>sp_executesql</c>).
     /// </summary>
-    internal static SqlValue BindParameterValue(SqlValue value, SqlType target, int? declaredMaxLength, string procedure, byte conversionState = 5)
+    internal static SqlValue BindParameterValue(SqlValue value, SqlType target, int? declaredMaxLength, string procedure, byte conversionState = 5, string? sourceName = null)
     {
         try
         {
@@ -526,7 +529,9 @@ partial class Simulation
         }
         catch (Exception ex) when (ex is OverflowException || (ex is SimulatedSqlException sql && Parser.Expressions.Cast.IsConversionFailure(sql.Number)))
         {
-            var converting = SimulatedSqlException.ConvertingDataTypeError(value.Type, SimulatedSqlException.FamilyRootName(target), conversionState);
+            var converting = sourceName is not null
+                ? SimulatedSqlException.ConvertingDataTypeError(sourceName, SimulatedSqlException.FamilyRootName(target), conversionState)
+                : SimulatedSqlException.ConvertingDataTypeError(value.Type, SimulatedSqlException.FamilyRootName(target), conversionState);
             converting.PreserveDiagnostics(0, procedure);
             throw converting;
         }

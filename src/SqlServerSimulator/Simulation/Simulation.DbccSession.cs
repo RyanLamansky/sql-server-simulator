@@ -25,7 +25,16 @@ partial class Simulation
         dbcc.AllowOptions(DbccOptions.NoInfoMessages | DbccOptions.TableResults);
         dbcc.RequireArgumentCount(0, 1);
         var database = ResolveDbccDatabase(batch, dbcc.Arguments.Count == 1 ? dbcc.Arguments[0] : null, 1);
-        RequireDbccDatabaseOwner(batch, database, "opentran");
+        // Real closes even this refusal with Msg 2528 (probed 2026-10-04
+        // against SQL Server 2025).
+        try
+        {
+            RequireDbccDatabaseOwner(batch, database, "opentran");
+        }
+        catch (SimulatedSqlException refused) when (!dbcc.Has(DbccOptions.NoInfoMessages))
+        {
+            throw SimulatedSqlException.FollowedByDbccCompleted(refused);
+        }
         var informational = !dbcc.Has(DbccOptions.NoInfoMessages);
         if (OldestWritingTransaction(batch.Connection.Simulation, database) is not var (connection, transaction))
         {

@@ -152,11 +152,8 @@ internal abstract class SchemaObject(string name, int objectId, int schemaId, Da
     /// <c>OBJECTPROPERTY(id, 'IsAnsiNullsOn' | 'ExecIsAnsiNullsOn')</c>.
     /// Unlike <see cref="UsesQuotedIdentifier"/> a table captures it too —
     /// real answers 0 for a table created under <c>SET ANSI_NULLS OFF</c>
-    /// (probe-confirmed).
-    /// Metadata only: real also freezes a module's <c>=</c>-against-NULL
-    /// comparison semantics to the captured setting, which the simulator does
-    /// not model — <c>SET ANSI_NULLS OFF</c> parses and discards, so every
-    /// comparison stays ANSI whatever this records.
+    /// (probe-confirmed), and an index over a table's computed column or a
+    /// filtered one refuses a table captured off (Msg 1935).
     /// </summary>
     public bool UsesAnsiNulls = true;
 

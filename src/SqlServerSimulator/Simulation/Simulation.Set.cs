@@ -38,8 +38,10 @@ partial class Simulation
         {
             ReservedKeyword { Keyword: Keyword.Identity_Insert } => TryParseSetIdentityInsert(context),
             AtPrefixedString variableToken => TryParseSetVariable(context, variableToken),
-            // `SET @@x = …` names a variable no DECLARE can make (probed
-            // 2026-10-02 against SQL Server 2025).
+            // `SET @@x = …` names a variable no DECLARE can make, and a built-in
+            // @@ function no SET can assign (probed 2026-10-02 and 2026-10-04
+            // against SQL Server 2025: SET @@ROWCOUNT is Msg 102 at it).
+            DoubleAtPrefixedString { IsBuiltIn: true } builtIn => throw SimulatedSqlException.SyntaxErrorNear(builtIn),
             DoubleAtPrefixedString global => throw SimulatedSqlException.MustDeclareSetTarget(global.ErrorText[1..]),
             _ => TryParseSetSessionOption(context, afterSet),
         };
@@ -65,6 +67,8 @@ partial class Simulation
                 return TryParseSetTransactionIsolationLevel(context);
             case ReservedKeyword { Keyword: Keyword.Statistics }:
                 return TryParseSetStatistics(context);
+            case ReservedKeyword { Keyword: Keyword.Offsets }:
+                return TryParseSetOffsets(context);
             // ReservedKeyword options that take an integer (ROWCOUNT / TEXTSIZE).
             // They tokenize as ReservedKeyword because the words appear in the
             // T-SQL reserved set; the SET parser accepts them by Keyword check.
@@ -75,6 +79,11 @@ partial class Simulation
 
         if (afterSet is not UnquotedString unquoted)
             return false;
+
+        // FIPS_FLAGGER parses and is discarded (probed 2026-10-04 against SQL
+        // Server 2025), as is OFFSETS, a reserved keyword dispatched above.
+        if (unquoted.Value.Equals("FIPS_FLAGGER", StringComparison.OrdinalIgnoreCase))
+            return TryParseSetFipsFlagger(context);
 
         if (!RecognizedOptions.TryGetValue(unquoted.Value, out var firstKind))
             return TryRaiseUnrecognizedSetOption(context, unquoted);
@@ -103,14 +112,23 @@ partial class Simulation
             }
             if (context.Token is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } commaOnOff)
                 return false;
+            // A SHOWPLAN switch must stand alone (probed 2026-10-04 against
+            // SQL Server 2025).
+            if (sessionOptionNames.Exists(IsShowplanOption))
+                throw SimulatedSqlException.ShowplanNotAlone(state: 1).PinLine(0);
             var commaOn = commaOnOff.Keyword == Keyword.On;
             context.Batch.CurrentStatement.DoneKind = commaOn ? StatementDoneKind.SetOptionOn : StatementDoneKind.SetOptionOff;
             if (affectsQuotedIdentifier)
                 ApplyQuotedIdentifierOption(context, commaOn);
-            // Every listed option shares the trailing ON|OFF value.
-            foreach (var listed in sessionOptionNames)
-                RecordSessionStateOption(context, listed, commaOn);
-            FunctionBodyShape.NoteSideEffect(context.Batch, commaOn ? "SET OPTION ON" : "SET OPTION OFF", FunctionBodyShape.StatementOperatorState);
+            // Every listed option shares the trailing ON|OFF value and takes
+            // effect as it would alone (probed 2026-10-04 against SQL Server
+            // 2025: SET NOCOUNT, XACT_ABORT ON sets both).
+            // NOEXEC applies last, so the options listed with it still take
+            // effect (probed 2026-10-04: SET NOEXEC, NOCOUNT ON sets both).
+            foreach (var listed in sessionOptionNames.OrderBy(listed => listed.Equals("NOEXEC", StringComparison.OrdinalIgnoreCase)))
+                ApplyOnOffOption(context, listed, commaOn);
+            if (!sessionOptionNames.TrueForAll(IsModuleIgnoredOption))
+                FunctionBodyShape.NoteSideEffect(context.Batch, commaOn ? "SET OPTION ON" : "SET OPTION OFF", FunctionBodyShape.StatementOperatorState);
             return true;
         }
 
@@ -118,23 +136,68 @@ partial class Simulation
         // preamble sends `SET LOCK_TIMEOUT -1`, where `-1` tokenizes as an
         // Operator('-') followed by the Numeric.
         var negativeInteger = false;
-        if (firstKind is SetOptionKind.Integer or SetOptionKind.IntegerOrIdent && context.Token is Operator { Character: '-' })
+        if (firstKind is SetOptionKind.Integer or SetOptionKind.IntegerOrIdent or SetOptionKind.Binary && context.Token is Operator { Character: '-' })
         {
             negativeInteger = true;
             context.MoveNextRequired();
         }
 
+        // The value-taking options' refusals of a value their grammar has no
+        // slot for (probed 2026-10-04 against SQL Server 2025): LOCK_TIMEOUT
+        // takes an int literal alone and QUERY_GOVERNOR_COST_LIMIT a number
+        // alone, each anything else Msg 102 state 3 at the option's name;
+        // DATEFIRST given a string or NULL is Msg 2743 state 3, and DATEFORMAT
+        // or LANGUAGE given a number or NULL Msg 2743 state 2, each ending only
+        // the statement.
+        if (firstName.Equals("LOCK_TIMEOUT", StringComparison.OrdinalIgnoreCase)
+            && !(context.Token is Numeric { Value: { IsNull: false, Type: var lockType } } && lockType == SqlType.Int32))
+        {
+            throw SimulatedSqlException.SyntaxErrorNear("LOCK_TIMEOUT", state: 3);
+        }
+        if (firstName.Equals("QUERY_GOVERNOR_COST_LIMIT", StringComparison.OrdinalIgnoreCase) && context.Token is not Numeric)
+            throw SimulatedSqlException.SyntaxErrorNear("QUERY_GOVERNOR_COST_LIMIT", state: 3);
+        if (firstName.Equals("DATEFIRST", StringComparison.OrdinalIgnoreCase) && context.Token is Literal or ReservedKeyword { Keyword: Keyword.Null })
+        {
+            if (context.Batch.IsSkipping)
+                return true;
+            throw SimulatedSqlException.DateFirstRequiresInteger();
+        }
+        if ((firstName.Equals("DATEFORMAT", StringComparison.OrdinalIgnoreCase) || firstName.Equals("LANGUAGE", StringComparison.OrdinalIgnoreCase))
+            && context.Token is Numeric or ReservedKeyword { Keyword: Keyword.Null })
+        {
+            if (context.Batch.IsSkipping)
+                return true;
+            throw SimulatedSqlException.OptionRequiresString(firstName.ToUpperInvariant());
+        }
+        if (firstName.Equals("DEADLOCK_PRIORITY", StringComparison.OrdinalIgnoreCase) && context.Token is ReservedKeyword { Keyword: Keyword.Null })
+        {
+            if (context.Batch.IsSkipping)
+                return true;
+            throw SimulatedSqlException.DeadlockPriorityInvalid();
+        }
+        if (firstName.Equals("CONTEXT_INFO", StringComparison.OrdinalIgnoreCase))
+            return SetContextInfo(context, negativeInteger);
+
         if (!ConsumeValueForKind(context, firstKind))
             return false;
 
+        if (IsShowplanOption(firstName))
+            RequireShowplanAlone(context, context.Token is ReservedKeyword { Keyword: Keyword.On });
+
         // Every SET form but `SET @v = …` is a side-effecting operator inside a
         // function body; real names the boolean toggles 'SET OPTION ON' / 'OFF'
-        // and lumps the value-taking ones under 'SET COMMAND'.
-        FunctionBodyShape.NoteSideEffect(
-            context.Batch,
-            firstKind != SetOptionKind.OnOff ? "SET COMMAND"
-                : context.Token is ReservedKeyword { Keyword: Keyword.On } ? "SET OPTION ON" : "SET OPTION OFF",
-            FunctionBodyShape.StatementOperatorState);
+        // and lumps the value-taking ones under 'SET COMMAND'. A function body
+        // may SET the two options every module captures at CREATE, which it
+        // ignores as a procedure does (probed 2026-10-04 against SQL Server
+        // 2025).
+        if (!IsModuleIgnoredOption(firstName))
+        {
+            FunctionBodyShape.NoteSideEffect(
+                context.Batch,
+                firstKind != SetOptionKind.OnOff ? "SET COMMAND"
+                    : context.Token is ReservedKeyword { Keyword: Keyword.On } ? "SET OPTION ON" : "SET OPTION OFF",
+                FunctionBodyShape.StatementOperatorState);
+        }
 
         // QUOTED_IDENTIFIER and PARSEONLY, which apply while the batch
         // compiles, send no DONE of their own.
@@ -146,10 +209,8 @@ partial class Simulation
         if (IsQuotedIdentifierOption(firstName) && context.Token is ReservedKeyword { Keyword: var qiOnOff })
             ApplyQuotedIdentifierOption(context, qiOnOff == Keyword.On);
 
-        // Record the on/off options the session keeps state for; the rest
-        // no-op inside RecordSessionStateOption.
         if (firstKind == SetOptionKind.OnOff && context.Token is ReservedKeyword { Keyword: var onOff })
-            RecordSessionStateOption(context, firstName, onOff == Keyword.On);
+            ApplyOnOffOption(context, firstName, onOff == Keyword.On);
 
         // DATEFIRST names the weekday the week starts on, in 1..7 — read by
         // @@DATEFIRST, by DATEPART / DATENAME's weekday and week units and by
@@ -194,7 +255,10 @@ partial class Simulation
             if (Language.Find(languageName) is { } language)
             {
                 context.Connection.Language = language;
-                context.Connection.PendingMessages.Enqueue(SimulatedSqlException.LanguageChangedMessage(context.Batch, language.Name));
+                // A procedure, trigger or dynamic batch changes it silently
+                // (probed 2026-10-04 against SQL Server 2025).
+                if (context.Batch.ProcFrame is null && context.Batch.TriggerFrame is null)
+                    context.Connection.PendingMessages.Enqueue(SimulatedSqlException.LanguageChangedMessage(context.Batch, language));
                 if (!context.Batch.DateFirstSetExplicitly)
                     context.Connection.DateFirst = language.DateFirst;
                 if (!context.Batch.DateFormatSetExplicitly)
@@ -211,17 +275,6 @@ partial class Simulation
             }
         }
 
-        // XACT_ABORT promotes the statement-terminating run-time errors to
-        // batch-aborting, transaction-rolling ones. A procedure / trigger /
-        // dynamic-SQL body's SET binds for the body's duration and the
-        // invocation seam restores the caller's value
-        // (SimulatedDbConnection.SessionOptionScope).
-        if (firstName.Equals("XACT_ABORT", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping
-            && context.Token is ReservedKeyword { Keyword: var xactOnOff })
-        {
-            context.Connection.XactAbort = xactOnOff == Keyword.On;
-        }
-
         // LOCK_TIMEOUT is the one Integer-shape option that has semantic
         // effect — it drives lock-acquisition wait via
         // SimulatedDbConnection.LockTimeoutMillis. Every other Integer /
@@ -234,76 +287,162 @@ partial class Simulation
                 context.Connection.LockTimeoutMillis = negativeInteger ? -literal.AsInt32 : literal.AsInt32;
         }
 
-        // FMTONLY carries semantic effect: while ON, SELECT returns
-        // metadata-only zero-row results and data-modifying statements are
-        // suppressed. Session-scoped like LOCK_TIMEOUT; gated on !IsSkipping so
-        // a never-taken IF branch's SET FMTONLY doesn't perturb the session.
-        if (firstName.Equals("FMTONLY", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping
-            && context.Token is ReservedKeyword { Keyword: var fmtOnOff })
-        {
-            context.Connection.FmtOnly = fmtOnOff == Keyword.On;
-        }
-
-        // NOCOUNT carries semantic effect: while ON, a statement's DONE token
-        // omits the rows-affected count (DONE_COUNT), so an ODBC / pyodbc driver
-        // advances past an INSERT's rowcount to a trailing SELECT SCOPE_IDENTITY()
-        // — the identity-retrieval pattern mssql-django and most SQL-Server data
-        // layers emit. Session-scoped like FMTONLY, gated on !IsSkipping.
-        if (firstName.Equals("NOCOUNT", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping
-            && context.Token is ReservedKeyword { Keyword: var nocountOnOff })
-        {
-            context.Connection.NoCount = nocountOnOff == Keyword.On || context.Connection.RunningLogonTriggers;
-        }
-
-        // NOEXEC compiles each statement without running it. It applies as it
-        // runs, and SET NOEXEC OFF is the one statement that still runs under
-        // it (probed 2026-09-28 against SQL Server 2025).
-        if (firstName.Equals("NOEXEC", StringComparison.OrdinalIgnoreCase)
-            && context.Token is ReservedKeyword { Keyword: var noExecOnOff }
-            && !context.Batch.SkipsForControlFlow)
-        {
-            context.Connection.NoExec = context.Batch.NoExecActive = noExecOnOff == Keyword.On;
-        }
-
-        // PARSEONLY applies while the batch parses, governing the batch that
-        // sets it, so Simulation.ScanParseTimeOptions settles it ahead of the
-        // batch rather than here; a module body refuses it as the module is
-        // created.
-        if (firstName.Equals("PARSEONLY", StringComparison.OrdinalIgnoreCase)
-            && (context.Batch.UdfFrame is not null || context.Batch.TriggerFrame is not null || context.Batch.ProcFrame is { IsDynamicSql: false }))
-        {
-            throw SimulatedSqlException.ParseOnlyInModule();
-        }
-
         if (firstName.Equals("DEADLOCK_PRIORITY", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping)
             context.Connection.DeadlockPriority = ReadDeadlockPriority(context, negativeInteger);
 
-        // CONTEXT_INFO carries semantic effect: store the binary value,
-        // right-padded / truncated to exactly 128 bytes (SQL Server's
-        // fixed buffer), surfaced by CONTEXT_INFO(). A variable's value
-        // converts to binary, a NULL or a string one refused with Msg 2743
-        // (probed 2026-09-28 against SQL Server 2025).
-        if (firstName.Equals("CONTEXT_INFO", StringComparison.OrdinalIgnoreCase) && !context.Batch.IsSkipping)
+        return true;
+    }
+
+    private static bool IsShowplanOption(string name) =>
+        name.Equals("SHOWPLAN_ALL", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("SHOWPLAN_TEXT", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("SHOWPLAN_XML", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsModuleIgnoredOption(string name) =>
+        name.Equals("ANSI_NULLS", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("QUOTED_IDENTIFIER", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// A <c>SET SHOWPLAN_*</c> switch inside a module refuses the
+    /// <c>CREATE</c> with Msg 1067 state 1 at line 0, and turning one on must
+    /// be the batch's only statement: after another it is Msg 1067 state 1 at
+    /// line 0, ahead of one state 2 at its own line, either as the batch
+    /// compiles, so none of it runs; turning one off may sit beside anything
+    /// (probed 2026-10-04 against SQL Server 2025). Cursor on the <c>ON</c> /
+    /// <c>OFF</c>.
+    /// </summary>
+    private static void RequireShowplanAlone(ParserContext context, bool on)
+    {
+        var batch = context.Batch;
+        if (batch.UdfFrame is not null || batch.TriggerFrame is not null || batch.ProcFrame is { IsDynamicSql: false })
+            throw SimulatedSqlException.ShowplanNotAlone(state: 1).PinLine(0);
+        if (!on)
+            return;
+        if (batch.BlockDepth > 0 || batch.HasDispatchedStatement)
+            throw SimulatedSqlException.ShowplanNotAlone(state: 1).PinLine(0);
+        var checkpoint = context.SaveCheckpoint();
+        var next = context.GetNextOptional();
+        while (next is Operator { Character: ';' })
+            next = context.GetNextOptional();
+        context.RestoreCheckpoint(checkpoint);
+        if (next is not null)
+            throw SimulatedSqlException.ShowplanNotAlone(state: 2);
+    }
+
+    /// <summary>
+    /// <c>SET OFFSETS keyword [, …] ON | OFF</c>, each keyword one of
+    /// <c>SELECT</c> / <c>FROM</c> / <c>ORDER</c> / <c>TABLE</c> /
+    /// <c>PROCEDURE</c> / <c>STATEMENT</c> / <c>PARAM</c> / <c>EXECUTE</c>.
+    /// </summary>
+    private static bool TryParseSetOffsets(ParserContext context)
+    {
+        while (true)
         {
-            var assigned = context.Token switch
+            var keyword = context.GetNextRequired();
+            var word = keyword switch
             {
-                AtPrefixedString variable => context.Batch.GetVariableSlot(variable.Value).Value switch
-                {
-                    { IsNull: true } => throw SimulatedSqlException.ContextInfoRequiresBinary(),
-                    { Type: var held } when SqlType.IsStringCategory(held) => throw SimulatedSqlException.ContextInfoRequiresBinary(),
-                    var held => held.CoerceTo(SqlType.Varbinary),
-                },
-                Literal literal => literal.Value,
-                _ => SqlValue.Null(SqlType.Varbinary),
+                ReservedKeyword reserved => reserved.Keyword.ToString(),
+                UnquotedString text => text.Value,
+                _ => null,
             };
-            if (assigned is { IsNull: false } binary)
-            {
-                var source = binary.AsBytes;
-                var buffer = new byte[128];
-                Array.Copy(source, buffer, Math.Min(source.Length, 128));
-                context.Connection.ContextInfo = buffer;
-            }
+            if (word is null || !BuiltInToken.EqualsAny(word, "EXECUTE", "FROM", "ORDER", "PARAM", "PROCEDURE", "SELECT", "STATEMENT", "TABLE"))
+                throw SimulatedSqlException.SyntaxErrorNear(keyword);
+            if (context.GetNextRequired() is not Operator { Character: ',' })
+                break;
         }
+        context.Batch.CurrentStatement.DoneKind = StatementDoneKind.SetValue;
+        return context.Token is ReservedKeyword { Keyword: Keyword.On or Keyword.Off };
+    }
+
+    /// <summary><c>SET FIPS_FLAGGER 'ENTRY' | 'FULL' | 'INTERMEDIATE' | OFF</c>; its warnings aren't sent.</summary>
+    private static bool TryParseSetFipsFlagger(ParserContext context)
+    {
+        var value = context.GetNextRequired();
+        if (value is ReservedKeyword { Keyword: Keyword.Off }
+            || (value is Literal { Value: { IsNull: false } level } && BuiltInToken.EqualsAny(level.AsString, "ENTRY", "FULL", "INTERMEDIATE")))
+        {
+            context.Batch.CurrentStatement.DoneKind = StatementDoneKind.SetValue;
+            return true;
+        }
+        throw SimulatedSqlException.SyntaxErrorNear(value, state: 3);
+    }
+
+    /// <summary>
+    /// Applies one on/off option as it runs, alone or in a comma list: the
+    /// session state <see cref="RecordSessionStateOption"/> keeps, and the
+    /// options with an effect of their own — <c>XACT_ABORT</c> (a body's SET
+    /// binds for the body, <see cref="SimulatedDbConnection.SessionOptionScope"/>
+    /// restoring the caller's), <c>FMTONLY</c>, <c>NOCOUNT</c> (a statement's
+    /// DONE then omits its row count, the identity-retrieval pattern ODBC
+    /// drivers depend on), <c>NOEXEC</c> (which applies as it runs, and whose
+    /// OFF is the one statement still running under it, probed 2026-09-28) and
+    /// <c>PARSEONLY</c>, which applies while the batch parses
+    /// (<see cref="ScanParseTimeOptions"/>) and a module body refuses.
+    /// </summary>
+    private static void ApplyOnOffOption(ParserContext context, string name, bool on)
+    {
+        RecordSessionStateOption(context, name, on);
+        var batch = context.Batch;
+        if (name.Equals("NOEXEC", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!batch.SkipsForControlFlow)
+                context.Connection.NoExec = batch.NoExecActive = on;
+            return;
+        }
+        if (name.Equals("PARSEONLY", StringComparison.OrdinalIgnoreCase))
+        {
+            if (batch.UdfFrame is not null || batch.TriggerFrame is not null || batch.ProcFrame is { IsDynamicSql: false })
+                throw SimulatedSqlException.ParseOnlyInModule();
+            return;
+        }
+        if (batch.IsSkipping)
+            return;
+        if (name.Equals("XACT_ABORT", StringComparison.OrdinalIgnoreCase))
+            context.Connection.XactAbort = on;
+        else if (name.Equals("FMTONLY", StringComparison.OrdinalIgnoreCase))
+            context.Connection.FmtOnly = on;
+        else if (name.Equals("NOCOUNT", StringComparison.OrdinalIgnoreCase))
+            context.Connection.NoCount = on || context.Connection.RunningLogonTriggers;
+    }
+
+    /// <summary>
+    /// <c>SET CONTEXT_INFO</c>: stores up to 128 bytes for <c>CONTEXT_INFO()</c>
+    /// and the session DMVs, from a binary literal, a number (its binary
+    /// form, a sign allowed) or a variable of any type but a string; a NULL,
+    /// a string or a value past 128 bytes is Msg 2743, ending only the
+    /// statement (probed 2026-09-28 and 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static bool SetContextInfo(ParserContext context, bool negative)
+    {
+        var batch = context.Batch;
+        SqlValue value;
+        switch (context.Token)
+        {
+            case AtPrefixedString variable:
+                value = batch.GetVariableSlot(variable.Value).Value;
+                break;
+            case Literal { Value: var literal }:
+                value = literal;
+                break;
+            case Numeric { Value: var number }:
+                value = negative ? NegateLiteral(number) : number;
+                break;
+            case ReservedKeyword { Keyword: Keyword.Null }:
+                value = SqlValue.Null(SqlType.Varbinary);
+                break;
+            default:
+                return false;
+        }
+        FunctionBodyShape.NoteSideEffect(batch, "SET COMMAND", FunctionBodyShape.StatementOperatorState);
+        context.Batch.CurrentStatement.DoneKind = StatementDoneKind.SetValue;
+        if (batch.IsSkipping)
+            return true;
+        if (value.IsNull || SqlType.IsStringCategory(value.Type))
+            throw SimulatedSqlException.ContextInfoRequiresBinary();
+        var bytes = value.CoerceTo(SqlType.Varbinary).AsBytes;
+        if (bytes.Length > 128)
+            throw SimulatedSqlException.ContextInfoRequiresBinary();
+        context.Connection.ContextInfo = bytes;
         return true;
     }
 
@@ -553,30 +692,41 @@ partial class Simulation
     /// </summary>
     private static bool TryParseSetStatistics(ParserContext context)
     {
-        var subOption = context.GetNextRequired();
-        var onOff = context.GetNextRequired();
-        if (subOption is not StringToken || onOff is not ReservedKeyword { Keyword: var statisticsOnOff and (Keyword.On or Keyword.Off) })
+        // A comma list shares the trailing ON | OFF (probed 2026-10-04 against
+        // SQL Server 2025: SET STATISTICS IO, TIME ON).
+        var names = new List<string>(2);
+        while (true)
+        {
+            if (context.GetNextRequired() is not StringToken subOption)
+                return false;
+            names.Add(subOption.ToString());
+            if (context.GetNextRequired() is not Operator { Character: ',' })
+                break;
+        }
+        if (context.Token is not ReservedKeyword { Keyword: var statisticsOnOff and (Keyword.On or Keyword.Off) })
             return false;
         context.Batch.CurrentStatement.DoneKind = statisticsOnOff == Keyword.On ? StatementDoneKind.SetStatisticsOn : StatementDoneKind.SetStatisticsOff;
         var on = statisticsOnOff == Keyword.On;
-        var name = subOption.ToString();
-        if (BuiltInToken.Equals(name, "IO") || BuiltInToken.Equals(name, "TIME"))
+        foreach (var name in names)
         {
-            var batch = context.Batch;
-            if (!batch.IsSkipping && batch.UdfFrame is null)
+            if (BuiltInToken.Equals(name, "IO") || BuiltInToken.Equals(name, "TIME"))
             {
-                if (BuiltInToken.Equals(name, "IO"))
-                    context.Connection.StatisticsIo = on;
-                else
-                    context.Connection.StatisticsTime = on;
+                var batch = context.Batch;
+                if (!batch.IsSkipping && batch.UdfFrame is null)
+                {
+                    if (BuiltInToken.Equals(name, "IO"))
+                        context.Connection.StatisticsIo = on;
+                    else
+                        context.Connection.StatisticsTime = on;
+                }
             }
-        }
-        else
-        {
-            var listed = BuiltInToken.Equals(name, "PROFILE") ? ListedOnlyOptions.StatisticsProfile
-                : BuiltInToken.Equals(name, "XML") ? ListedOnlyOptions.StatisticsXml
-                : ListedOnlyOptions.None;
-            RecordListedOnlyOption(context, listed, on);
+            else
+            {
+                var listed = BuiltInToken.Equals(name, "PROFILE") ? ListedOnlyOptions.StatisticsProfile
+                    : BuiltInToken.Equals(name, "XML") ? ListedOnlyOptions.StatisticsXml
+                    : ListedOnlyOptions.None;
+                RecordListedOnlyOption(context, listed, on);
+            }
         }
         FunctionBodyShape.NoteSideEffect(
             context.Batch,
@@ -613,22 +763,26 @@ partial class Simulation
             value = context.GetNextRequired();
         }
 
-        // The variable form (`SET ROWCOUNT @n` / `SET TEXTSIZE @n`) reads the
-        // slot's runtime value; real accepts a bigint there even though a
-        // literal past the int range is Msg 1080.
+        // The variable form (`SET ROWCOUNT @n`) reads the slot's runtime
+        // value; real accepts a bigint there even though a literal past the int
+        // range is Msg 1080, and refuses any other type with Msg 507 (a string
+        // holding a number and a decimal included). TEXTSIZE's grammar has no
+        // variable slot: Msg 102 at it (probed 2026-10-04 against SQL Server
+        // 2025).
         if (value is AtPrefixedString variable)
         {
+            if (applyTextSize)
+                throw SimulatedSqlException.SyntaxErrorNear(value);
             var slot = context.Batch.GetVariableSlot(variable.Value);
             if (context.Batch.IsSkipping)
                 return true;
             var slotValue = slot.Value;
-            var requested = slotValue.IsNull ? (long?)null : slotValue.CoerceTo(SqlType.BigInt).AsInt64;
-            if (applyTextSize)
-                context.Connection.TextSize = requested is not { } t ? 4096 : t == -1 ? -1 : t <= 0 ? 4096 : (int)Math.Min(t, int.MaxValue);
-            else if (requested is not { } rows || rows < 0)
+            if (slotValue.IsNull || !SqlType.IsIntegerCategory(slotValue.Type))
                 throw SimulatedSqlException.InvalidRowCountArgument();
-            else
-                context.Connection.RowCountLimit = rows;
+            var rows = slotValue.CoerceTo(SqlType.BigInt).AsInt64;
+            if (rows < 0)
+                throw SimulatedSqlException.InvalidRowCountArgument();
+            context.Connection.RowCountLimit = rows;
             return true;
         }
 
@@ -706,7 +860,8 @@ partial class Simulation
     /// Reads <c>SET DEADLOCK_PRIORITY</c>'s value — <c>LOW</c> / <c>NORMAL</c>
     /// / <c>HIGH</c>, an integer in -10..10, or a variable holding either,
     /// a NULL variable reading as <c>NORMAL</c> — raising Msg 2755 for
-    /// anything else (probed 2026-09-28 against SQL Server 2025).
+    /// anything else, a string holding a number included (probed 2026-09-28
+    /// and 2026-10-04 against SQL Server 2025).
     /// </summary>
     private static int ReadDeadlockPriority(ParserContext context, bool negative)
     {
@@ -726,7 +881,6 @@ partial class Simulation
             return text.Equals("LOW", StringComparison.OrdinalIgnoreCase) ? -5
                 : text.Equals("NORMAL", StringComparison.OrdinalIgnoreCase) ? 0
                 : text.Equals("HIGH", StringComparison.OrdinalIgnoreCase) ? 5
-                : int.TryParse(text, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var parsed) && parsed is >= -10 and <= 10 ? parsed
                 : throw SimulatedSqlException.DeadlockPriorityInvalid();
         }
         if (!SqlType.IsIntegerCategory(value.Type))
@@ -1095,12 +1249,13 @@ partial class Simulation
             return true;
 
         // A view is Msg 8105 and a missing object Msg 1088, each naming the
-        // object as written (probed 2026-10-01 against SQL Server 2025).
+        // object as written (probed 2026-10-01 against SQL Server 2025); every
+        // refusal of the statement ends the batch (probed 2026-10-04).
         if (!context.Batch.TryResolveTable(tableName, out var heapTable))
         {
-            throw context.Batch.TryResolveView(tableName, out _)
+            throw (context.Batch.TryResolveView(tableName, out _)
                 ? SimulatedSqlException.IdentityInsertNotUserTable(tableName.ToString())
-                : SimulatedSqlException.IdentityInsertObjectNotFound(tableName.ToString());
+                : SimulatedSqlException.IdentityInsertObjectNotFound(tableName.ToString())).EndingBatch();
         }
 
         // Setting it takes ALTER on the table — inside a procedure too, which
@@ -1109,7 +1264,7 @@ partial class Simulation
         if (heapTable.Name is not ['#', ..]
             && !PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(heapTable), heapTable.ObjectId, heapTable.SchemaId))
         {
-            throw SimulatedSqlException.IdentityInsertDenied(tableName.ToString());
+            throw SimulatedSqlException.IdentityInsertDenied(tableName.ToString()).EndingBatch();
         }
 
         if (onOff == Keyword.On)
@@ -1117,10 +1272,11 @@ partial class Simulation
             // A table with no identity column can't be an IDENTITY_INSERT
             // target — Msg 8106 (probe-confirmed against SQL Server 2025).
             if (heapTable.IdentityOrdinal < 0)
-                throw SimulatedSqlException.TableHasNoIdentityForSet(heapTable.Name);
-            // Msg 8107 names the held table three-part.
+                throw SimulatedSqlException.TableHasNoIdentityForSet(tableName.ToString()).EndingBatch();
+            // Msg 8107 names the held table three-part and the requested one
+            // as written.
             if (context.Connection.IdentityInsertTable is string held && !context.Batch.CurrentDatabase.Collation.Equals(held, heapTable.Name))
-                throw SimulatedSqlException.IdentityInsertAlreadyOn(context.Connection.IdentityInsertQualifiedName ?? held, heapTable.Name);
+                throw SimulatedSqlException.IdentityInsertAlreadyOn(context.Connection.IdentityInsertQualifiedName ?? held, tableName.ToString()).EndingBatch();
             context.Connection.IdentityInsertTable = heapTable.Name;
             context.Connection.IdentityInsertQualifiedName = QualifyForTruncationMessage(heapTable);
         }

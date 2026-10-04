@@ -748,4 +748,56 @@ public sealed class DbccCommandTests
         var ex = simulation.AssertSqlError($"execute as user = 'u'; {command}", 2571);
         AreEqual($"User 'u' does not have permission to run DBCC {name}.", ex.Errors[0].Message);
     }
+
+    // ---- argument and permission refusals (probed 2026-10-04 against SQL Server 2025) ----
+
+    [TestMethod]
+    [DataRow("dbcc checkident('dbo.t', reseed, 'x')", 2560, (byte)9, "Parameter 3 is incorrect for this DBCC statement.")]
+    [DataRow("dbcc checkident('dbo.t', foo)", 2560, (byte)6, "Parameter 2 is incorrect for this DBCC statement.")]
+    [DataRow("declare @o int = 1; dbcc checkident(@o, noreseed)", 2560, (byte)9, "Parameter 1 is incorrect for this DBCC statement.")]
+    [DataRow("dbcc checkident('dbo.t') with tableresults", 2532, (byte)1, "One or more WITH options specified are not valid for this command.")]
+    [DataRow("dbcc checkident('dbo.h')", 7997, (byte)1, "'h' does not contain an identity column.")]
+    [DataRow("dbcc inputbuffer(9999)", 7955, (byte)1, "Invalid SPID 9999 specified.")]
+    [DataRow("dbcc inputbuffer(32768)", 2560, (byte)9, "Parameter 1 is incorrect for this DBCC statement.")]
+    [DataRow("dbcc checkdb with physical_only, data_purity", 2532, (byte)2, "One or more WITH options specified are not valid for this command.")]
+    [DataRow("dbcc checktable('dbo.t', 99)", 7999, (byte)7, "Could not find any index named '99' for table 't'.")]
+    [DataRow("dbcc checkfilegroup(99)", 8932, (byte)0, "Could not find filegroup ID 99 in sys.filegroups for database 'simulated'.")]
+    [DataRow("dbcc tracestatus(3604, 99999)", 2560, (byte)31, "Parameter 2 is incorrect for this DBCC statement.")]
+    [DataRow("dbcc dbreindex('dbo.t', '', 101)", 129, (byte)2, "Fillfactor 101 is not a valid percentage; fillfactor must be between 1 and 100.")]
+    [DataRow("dbcc shrinkfile(99)", 8985, (byte)2, "Could not locate file '99' for database 'simulated' in sys.database_files. The file either does not exist, or was dropped.")]
+    [DataRow("dbcc shrinkfile(-1)", 8985, (byte)2, "Could not locate file '-1' for database 'simulated' in sys.database_files. The file either does not exist, or was dropped.")]
+    [DataRow("dbcc shrinkfile('nosuchfile')", 8985, (byte)1, "Could not locate file 'nosuchfile' for database 'simulated' in sys.database_files. The file either does not exist, or was dropped.")]
+    [DataRow("dbcc shrinkdatabase('nosuchdb')", 2520, (byte)12, "Could not find database 'nosuchdb'. The database either does not exist, or was dropped before a statement tried to use it. Verify if the database exists by querying the sys.databases catalog view.")]
+    public void ArgumentRefusals(string sql, int number, byte state, string message)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.t (id int identity primary key, a int); create table dbo.h (k int)");
+        var error = sim.AssertSqlError(sql, number);
+        AreEqual((state, message), (error.Errors[0].State, error.Errors[0].Message));
+    }
+
+    /// <summary>
+    /// CHECKIDENT takes the table's control — ALTER doesn't suffice — and a
+    /// view is Msg 5239; SHRINKDATABASE takes db_owner; an unbuilt subcommand
+    /// refuses an unprivileged caller before it is unsupported (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Permissions_AndUnbuiltSubcommands()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int identity primary key, a int); create user lo without login; grant alter on dbo.t to lo",
+            "create view dbo.v as select id from dbo.t");
+        var checkident = sim.AssertSqlError("execute as user = 'lo'; dbcc checkident('dbo.t', noreseed)", 2557);
+        AreEqual("User 'lo' does not have permission to run DBCC CHECKIDENT for object 't'.", checkident.Errors[0].Message);
+        Assert.Contains("(object 'v')", sim.AssertSqlError("dbcc checkident('dbo.v')", 5239).Errors[0].Message);
+        AreEqual(36, sim.AssertSqlError("execute as user = 'lo'; dbcc shrinkdatabase(0)", 7983).Errors[0].State);
+        AreEqual("User 'lo' does not have permission to run DBCC page.", sim.AssertSqlError("execute as user = 'lo'; dbcc page(0, 1, 1, 0)", 2571).Errors[0].Message);
+        AreEqual(14, sim.AssertSqlError("execute as user = 'lo'; dbcc dbinfo", 2571).Errors[0].State);
+        _ = sim.AssertSqlError("execute as user = 'lo'; dbcc proccache", 7983);
+        _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("dbcc page(0, 1, 1, 0)"));
+        var opentran = sim.AssertSqlError("execute as user = 'lo'; dbcc opentran", 7983);
+        AreEqual(2528, opentran.Errors[^1].Number);
+    }
 }

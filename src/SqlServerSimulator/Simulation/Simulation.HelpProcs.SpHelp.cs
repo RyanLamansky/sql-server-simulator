@@ -218,7 +218,7 @@ partial class Simulation
             foreach (var outcome in HelpIndexResultSets(batch, target, objectName, "sys.sp_helpindex"))
                 yield return outcome;
             yield return HelpBlankLine(batch, procedureName, 206);
-            foreach (var outcome in HelpConstraintResultSets(batch, target, objectName, "sys.sp_helpconstraint"))
+            foreach (var outcome in HelpConstraintResultSets(batch, helpTable, objectName, "sys.sp_helpconstraint"))
                 yield return outcome;
             foreach (var outcome in HelpReferencingViewResultSets(batch, target, objectName, procedureName))
                 yield return outcome;

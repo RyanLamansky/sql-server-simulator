@@ -115,7 +115,7 @@ partial class Simulation
     /// and <c>'0 KB'</c> for the other two.
     /// </para>
     /// </remarks>
-    private static IEnumerable<SimulatedStatementOutcome> InvokeSpSpaceUsed(BatchContext batch)
+    private static IEnumerable<SimulatedStatementOutcome> InvokeSpSpaceUsed(BatchContext batch, string procedureName)
     {
         var arguments = ParseExecArguments(batch.Parser, batch);
         if (batch.IsSkipping)
@@ -141,12 +141,12 @@ partial class Simulation
             throw SimulatedSqlException.SpaceUsedRemoteOnlyHasNoRemotePart(objectName is null ? (byte)1 : (byte)2);
 
         var database = batch.CurrentDatabase;
-        var target = objectName is null ? null : ResolveHelpTarget(batch, "sp_spaceused", objectName);
+        var target = objectName is null ? null : ResolveHelpTarget(batch, objectName);
 
         // DBCC UPDATEUSAGE has nothing to correct (the page counts are read
         // live), but real prints a single space after running it.
         if (updateUsage is not null && BuiltInToken.Equals(updateUsage, "true"))
-            batch.AppendPrintMessage(" ");
+            yield return HelpBlankLine(batch, procedureName, 201);
 
         if (target is null)
         {
@@ -240,9 +240,12 @@ partial class Simulation
     private static SqlValue SpaceMegabytes(long pages) =>
         SqlValue.FromString(SpaceSizeType, (pages / 128m).ToString("F2", CultureInfo.InvariantCulture) + " MB");
 
+    private static readonly string[] SpaceUsedParameterNames = ["objname", "updateusage", "mode", "oneresultset", "include_total_xtp_storage"];
+
     private static (string? ObjectName, string? UpdateUsage, string Mode, bool OneResultSet, bool IncludeXtp) ParseSpSpaceUsedArgs(
         List<ProcArgument> arguments)
     {
+        RequireSystemProcedureShape("sp_spaceused", arguments, SpaceUsedParameterNames);
         string? objectName = null, updateUsage = null;
         var mode = "ALL";
         bool oneResultSet = false, includeXtp = false;
@@ -257,8 +260,7 @@ partial class Simulation
                     case 1: updateUsage = CatalogStringArg(arg); break;
                     case 2: mode = CatalogStringArg(arg) ?? mode; break;
                     case 3: oneResultSet = CatalogFlagArg(arg); break;
-                    case 4: includeXtp = CatalogFlagArg(arg); break;
-                    default: throw SimulatedSqlException.InvalidProcedureParameters("sp_spaceused");
+                    default: includeXtp = CatalogFlagArg(arg); break;
                 }
 
                 continue;
@@ -270,8 +272,7 @@ partial class Simulation
                 case var n when BuiltInToken.Equals(n, "updateusage"): updateUsage = CatalogStringArg(arg); break;
                 case var n when BuiltInToken.Equals(n, "mode"): mode = CatalogStringArg(arg) ?? mode; break;
                 case var n when BuiltInToken.Equals(n, "oneresultset"): oneResultSet = CatalogFlagArg(arg); break;
-                case var n when BuiltInToken.Equals(n, "include_total_xtp_storage"): includeXtp = CatalogFlagArg(arg); break;
-                default: throw SimulatedSqlException.InvalidProcedureParameters("sp_spaceused");
+                default: includeXtp = CatalogFlagArg(arg); break;
             }
         }
 

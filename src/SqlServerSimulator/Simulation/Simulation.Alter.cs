@@ -198,10 +198,22 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        var newName = newNameToken.Value;
+        RenameDatabaseTo(context.Batch, target, newNameToken.Value);
+        return true;
+    }
+
+    /// <summary>
+    /// Renames <paramref name="target"/>, re-keying <see cref="Databases"/>,
+    /// with real's Msg 5021 notice and, for a session sitting in it, Msg 5701 —
+    /// the rename <c>ALTER DATABASE … MODIFY NAME</c> and <c>sp_rename</c>'s
+    /// <c>DATABASE</c> form share. A system database is Msg 5016 and a name
+    /// another database holds Msg 1801 state 4.
+    /// </summary>
+    private static void RenameDatabaseTo(BatchContext batch, Database target, string newName)
+    {
         if (SystemDatabaseNames.Contains(target.Name))
             throw SimulatedSqlException.CannotRenameSystemDatabase(target.Name);
-        var databases = context.Connection.Simulation.Databases;
+        var databases = batch.Connection.Simulation.Databases;
         lock (databases)
         {
             if (databases.TryGetValue(newName, out var holder) && holder != target)
@@ -210,11 +222,10 @@ partial class Simulation
             target.Name = newName;
             databases[newName] = target;
         }
-        var messages = context.Connection.PendingMessages;
-        messages.Enqueue(SimulatedSqlException.DatabaseNameSetMessage(context.Batch, newName));
-        if (context.CurrentDatabase == target)
-            messages.Enqueue(SimulatedSqlException.DatabaseContextChangedMessage(context.Batch, newName));
-        return true;
+        var messages = batch.Connection.PendingMessages;
+        messages.Enqueue(SimulatedSqlException.DatabaseNameSetMessage(batch, newName));
+        if (batch.CurrentDatabase == target)
+            messages.Enqueue(SimulatedSqlException.DatabaseContextChangedMessage(batch, newName));
     }
 
     /// <summary>

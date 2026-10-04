@@ -244,4 +244,33 @@ public sealed class DescribeFirstResultSetTests
         ex = new Simulation().AssertSqlError("select 1;\n\nexec sp_describe_first_result_set N'select * from nosuch'", 208);
         AreEqual("11529 1 sp_describe_first_result_set", $"{ex.Errors[1].Number} {ex.Errors[1].LineNumber} {ex.Errors[1].Procedure}");
     }
+
+    /// <summary>
+    /// rowversion describes as BIGBINARY (173) and sql_variant at 8009 (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void RowVersionAndVariant_TdsTypes()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dr (id int, g rowversion)");
+        AreEqual("g notnull timestamp 8 - - - 173 8", Describe(sim, "select g from dr"));
+        Assert.EndsWith(" 98 8009", Describe(sim, "select cast(1 as sql_variant) v"));
+    }
+
+    /// <summary>
+    /// The statement must be a Unicode string, and the browse mode 0 to 2, each
+    /// refused at line 1 (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_describe_first_result_set", 201, (byte)20)]
+    [DataRow("exec sp_describe_first_result_set null", 214, (byte)21)]
+    [DataRow("exec sp_describe_first_result_set 'select 1 a'", 214, (byte)21)]
+    [DataRow("exec sp_describe_first_result_set N'select 1 a', null, 3", 11552, (byte)1)]
+    [DataRow("exec sp_describe_undeclared_parameters 'select @p'", 214, (byte)21)]
+    public void ArgumentRefusals(string sql, int number, byte state)
+    {
+        var error = new Simulation().AssertSqlError(sql, number);
+        AreEqual((state, 1), (error.Errors[0].State, error.Errors[0].LineNumber));
+    }
 }

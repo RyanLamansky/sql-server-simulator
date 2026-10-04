@@ -183,6 +183,7 @@ partial class Simulation
             // here, having no session of its own; an unchanged order republishes
             // for free.
             DateOrder.Current = batch.Connection.DateFormat;
+            Language.Current = batch.Connection.Language;
             batch.CurrentStatement.BeginDispatch();
             batch.CurrentStatement.ChangesTableStructure = ChangesTableStructure(batch.Parser);
             this.FramesStatement = batch.Connection.FramesEveryStatement && !batch.IsSkipping;

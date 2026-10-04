@@ -8,10 +8,10 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// SQL <c>DATENAME(&lt;datepart&gt;, &lt;date-expr&gt;)</c>: returns the
 /// localized string form of the date/time part identified by the bare
 /// <c>datepart</c> keyword. Result is always <see cref="SqlType.NVarchar"/>.
-/// Two parts surface as month/weekday names rather than digit strings —
-/// <c>month</c> → <c>January</c>...<c>December</c>; <c>weekday</c> →
-/// <c>Sunday</c>...<c>Saturday</c> (en-US, matching SQL Server's default
-/// language). Every other part is the same integer
+/// Two parts surface as names rather than digit strings — <c>month</c> and
+/// <c>weekday</c>, in the session language's own names (<c>sys.syslanguages</c>'
+/// months and days: <c>März</c> under <c>SET LANGUAGE Deutsch</c>, probed
+/// 2026-10-04 against SQL Server 2025). Every other part is the same integer
 /// <see cref="DatePart.Run"/> would compute, formatted via
 /// <see cref="CultureInfo.InvariantCulture"/>. The projected result type is
 /// a fixed <c>nvarchar(30)</c> — probe-confirmed against SQL Server 2025
@@ -28,17 +28,6 @@ namespace SqlServerSimulator.Parser.Expressions;
 internal sealed class DateName : Expression
 {
     private static readonly NVarcharSqlType ResultType = NVarcharSqlType.Get(30, Collation.Baseline, Coercibility.CoercibleDefault);
-
-    private static readonly string[] MonthNames =
-    [
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December",
-    ];
-
-    private static readonly string[] DayOfWeekNames =
-    [
-        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
-    ];
 
     private readonly DatePartKind kind;
     private readonly string keywordText;
@@ -60,13 +49,13 @@ internal sealed class DateName : Expression
         DatePartKinds.RequireCompatible(this.kind, value.Type, "datename");
         return this.kind switch
         {
-            DatePartKind.Month => SqlValue.FromNVarchar(ResultType, MonthNames[DatePartKinds.Extract(this.kind, value) - 1]),
+            DatePartKind.Month => SqlValue.FromNVarchar(ResultType, runtime.Batch.Connection.Language.MonthNames[DatePartKinds.Extract(this.kind, value) - 1]),
             // The weekday NAME is the calendar day's own, so it ignores
             // DATEFIRST — probe-confirmed that DATENAME(dw, <a Friday>) reads
             // 'Friday' under DATEFIRST 5, where DATEPART(dw, …) reads 1. Every
             // other unit reads the number DATEPART would, DATEFIRST included
             // (week moves with it).
-            DatePartKind.Weekday => SqlValue.FromNVarchar(ResultType, DayOfWeekNames[DatePartKinds.Extract(this.kind, value) - 1]),
+            DatePartKind.Weekday => SqlValue.FromNVarchar(ResultType, runtime.Batch.Connection.Language.DayNames[DatePartKinds.Extract(this.kind, value) - 1]),
             // The offset reads as real writes it, ±hh:mm (probed 2026-09-24).
             DatePartKind.TzOffset => SqlValue.FromNVarchar(ResultType, FormatOffset(DatePartKinds.Extract(this.kind, value))),
             _ => SqlValue.FromNVarchar(ResultType, DatePartKinds.Extract(this.kind, value, runtime.Batch.Connection.DateFirst).ToString(CultureInfo.InvariantCulture)),

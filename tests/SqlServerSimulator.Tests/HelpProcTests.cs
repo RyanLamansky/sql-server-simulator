@@ -699,4 +699,159 @@ public sealed class HelpProcTests
             cells.Add($"{reader["Column_name"]}:{reader["FixedLenNullInSource"]}:{(reader["Collation"] is DBNull ? "NULL" : reader["Collation"])}");
         Assert.AreEqual("x:(n/a):NULL,g:no:NULL,m:yes:NULL,h:no:NULL,h2:yes:NULL", string.Join(",", cells));
     }
+
+    /// <summary>
+    /// Each procedure raises its refusals from its own source line, under the
+    /// name the call used (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_help 'other.dbo.t_full'", 15250, 61, "sp_help")]
+    [DataRow("exec sp_helpindex 'other.dbo.t_full'", 15250, 33, "sp_helpindex")]
+    [DataRow("exec sp_helpconstraint 'other.dbo.t_full'", 15250, 39, "sp_helpconstraint")]
+    [DataRow("exec sp_helpstats 'other.dbo.t_full'", 15250, 23, "sp_helpstats")]
+    [DataRow("exec sp_helptrigger 'other.dbo.t_full'", 15250, 16, "sp_helptrigger")]
+    [DataRow("exec sp_depends 'other.dbo.t_full'", 15250, 16, "sp_depends")]
+    [DataRow("exec sp_helptext 'other.dbo.t_full'", 15250, 44, "sp_helptext")]
+    [DataRow("exec sp_spaceused 'other.dbo.t_full'", 15250, 132, "sp_spaceused")]
+    [DataRow("exec sp_helprotect null, null, null, 'x'", 15300, 80, "sp_helprotect")]
+    [DataRow("exec sp_helprotect 'other.dbo.t_full'", 15302, 89, "sp_helprotect")]
+    [DataRow("exec sp_helptrigger 'dbo.t_full', 'FOO'", 15305, 30, "sp_helptrigger")]
+    [DataRow("exec sp_helptext 'dbo.t_full', 'zz'", 15645, 70, "sp_helptext")]
+    [DataRow("exec sp_helptext 'dbo.t_full', 'name'", 15646, 75, "sp_helptext")]
+    [DataRow("exec sp_helpfile 'nosuch'", 15325, 28, "sp_helpfile")]
+    [DataRow("exec sp_spaceused 'dbo.PK_t_full'", 15234, 160, "sp_spaceused")]
+    [DataRow("exec sp_spaceused null, 'maybe'", 15143, 105, "sp_spaceused")]
+    [DataRow("exec sp_who 'nosuchlogin'", 15007, 59, "sp_who")]
+    [DataRow("exec sp_who2 'nosuchlogin'", 15007, 77, "sp_who2")]
+    [DataRow("exec sp_helpindex null", 15009, 41, "sp_helpindex")]
+    [DataRow("exec sp_helptext null", 15009, 54, "sp_helptext")]
+    [DataRow("exec sys.sp_helpindex 'nosuch'", 15009, 41, "sys.sp_helpindex")]
+    [DataRow("exec sp_help @obj = 'x'", 8145, 0, "sp_help")]
+    [DataRow("exec sp_help 'x', 'y'", 8144, 0, "sp_help")]
+    [DataRow("exec sp_spaceused @foo = 1", 8145, 0, "sp_spaceused")]
+    [DataRow("exec sp_helpsort 1", 8146, 0, "sp_helpsort")]
+    public void Refusals_AtTheirSourceLines(string call, int number, int line, string procedure)
+    {
+        var error = NewFixture().AssertSqlError(call, number);
+        AreEqual((line, procedure), (error.Errors[0].LineNumber, error.Errors[0].Procedure));
+    }
+
+    /// <summary>
+    /// The help procedures' notices name the procedure and line too, and
+    /// sp_helpconstraint of a constraint or a catalog view reports an object
+    /// without constraints (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Notices_AndConstraintlessObjects()
+    {
+        var sim = NewFixture();
+        var stats = RunHelp(sim, "exec sp_helpstats 'dbo.t_full'").Errors.Single();
+        AreEqual((15574, 63, "sp_helpstats"), (stats.Number, stats.LineNumber, stats.Procedure));
+        var option = RunHelp(sim, "exec sp_helpstats 'dbo.t_full', 'XX'").Errors.Single();
+        AreEqual((50000, (byte)1, 36, "Invalid option: XX"), (option.Number, option.Class, option.LineNumber, option.Message));
+        foreach (var name in new[] { "PK_t_full", "sys.objects" })
+        {
+            var (sets, errors) = RunHelp(sim, $"exec sp_helpconstraint '{name}'");
+            HasCount(1, sets);
+            CollectionAssert.AreEqual(new[] { 0, 15469, 0, 15470 }, errors.ConvertAll(static e => e.Number));
+        }
+    }
+
+    /// <summary>STATISTICS_NORECOMPUTE reads in the description (probed 2026-10-04 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void HelpIndex_StatsNoRecompute()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.h (k int); create index ix_n on dbo.h(k) with (statistics_norecompute = on)");
+        AreEqual("nonclustered, stats no recompute located on PRIMARY", ResultSets(sim, "exec sp_helpindex 'dbo.h'")[0].Rows[0][1]);
+    }
+
+    /// <summary>
+    /// A database part runs the procedure there: from tempdb a #temp table
+    /// answers under its internal name, and the messages name the procedure
+    /// as written (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DatabaseQualifiedCall_RunsInThatDatabase()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        var errors = new List<SimulatedError>();
+        connection.InfoMessage += (_, e) => errors.AddRange(e.Errors);
+        using var command = connection.CreateCommand();
+        command.CommandText = "create table #tmp (x int primary key); exec tempdb..sp_help '#tmp'";
+        using (var reader = command.ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            Assert.StartsWith("#tmp___", (string)reader[0]);
+        }
+        IsTrue(errors.Exists(static e => e.Procedure == "tempdb..sp_help"));
+    }
+
+    /// <summary>
+    /// The role, filegroup, device and Windows-group reports (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void RoleAndFilegroupReports()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create role r1; create application role ar with password = 'Pw!12345678'; create user u1 without login");
+        var roles = ResultSets(sim, "exec sp_helprole")[0];
+        CollectionAssert.AreEqual(new[] { "RoleName", "RoleId", "IsAppRole" }, roles.Names);
+        CollectionAssert.AreEqual(new object?[] { "public", 0, 0 }, roles.Rows[0]);
+        CollectionAssert.AreEqual(new object?[] { "r1", 5, 0 }, roles.Rows[1]);
+        CollectionAssert.AreEqual(new object?[] { "ar", 6, 1 }, roles.Rows[2]);
+        CollectionAssert.AreEqual(new object?[] { "db_owner", 16384, 0 }, roles.Rows[3]);
+        HasCount(12, roles.Rows);
+        AreEqual(9, sim.AssertSqlError("exec sp_helprole 'u1'", 15409).Errors[0].LineNumber);
+        CollectionAssert.AreEqual(new object?[] { "db_owner", "DB Owners" }, ResultSets(sim, "exec sp_helpdbfixedrole 'DB_OWNER'")[0].Rows.Single());
+        AreEqual(10, sim.AssertSqlError("exec sp_helpdbfixedrole 'r1'", 15412).Errors[0].LineNumber);
+        var writer = ResultSets(sim, "exec sp_dbfixedrolepermission 'db_datawriter'")[0];
+        CollectionAssert.AreEqual(new object?[] { "db_datawriter", "UPDATE permission on any object" }, writer.Rows[2]);
+        HasCount(94, ResultSets(sim, "exec sp_dbfixedrolepermission")[0].Rows);
+        var filegroups = ResultSets(sim, "exec sp_helpfilegroup 'primary'");
+        CollectionAssert.AreEqual(new object?[] { "PRIMARY", (short)1, 1 }, filegroups[0].Rows.Single());
+        AreEqual((short)1, filegroups[1].Rows.Single()[1]);
+        AreEqual(19, sim.AssertSqlError("exec sp_helpfilegroup 'nosuch'", 15325).Errors[0].LineNumber);
+        IsEmpty(ResultSets(sim, "exec sp_helpdevice")[0].Rows);
+        AreEqual(34, sim.AssertSqlError("exec sp_helpdevice 'x'", 15012).Errors[0].LineNumber);
+        IsEmpty(ResultSets(sim, "exec sp_helpntgroup")[0].Rows);
+        AreEqual(9, sim.AssertSqlError("exec sp_helpntgroup 'x'", 15420).Errors[0].LineNumber);
+    }
+
+    /// <summary>
+    /// sp_validname, sp_getbindtoken and sp_bindsession (probed 2026-10-04
+    /// against SQL Server 2025): a token takes a transaction and an OUTPUT
+    /// variable, and their refusals end the batch.
+    /// </summary>
+    [TestMethod]
+    public void ValidNameAndBindToken()
+    {
+        var sim = new Simulation();
+        AreEqual(0, sim.ExecuteScalar("declare @rc int = -1; exec @rc = sp_validname 'abc'; select @rc"));
+        AreEqual(1, sim.ExecuteScalar("declare @rc int = -1; exec @rc = sp_validname '', 0; select @rc"));
+        var refused = sim.AssertSqlError("exec sp_validname ''", 15004);
+        AreEqual((17, "sp_validname"), (refused.Errors[0].LineNumber, refused.Errors[0].Procedure));
+        AreEqual("1|32", sim.ExecuteScalar("begin tran; declare @t varchar(255), @rc int; exec @rc = sp_getbindtoken @t output; select concat(@rc, '|', len(@t)); rollback"));
+        _ = sim.AssertSqlError("declare @t varchar(255); exec sp_getbindtoken @t output", 3921);
+        _ = sim.AssertSqlError("begin tran; exec sp_getbindtoken 'x'", 591);
+        _ = sim.AssertSqlError("exec sp_bindsession 'nosuch'", 3909);
+        AreEqual(0, sim.ExecuteScalar("declare @rc int = -1; exec @rc = sp_bindsession null; select @rc"));
+    }
+
+    /// <summary>
+    /// sp_tables looks for each table type with its quotes, so one written
+    /// without them selects nothing (probed 2026-10-04 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    public void Tables_UnquotedTypeSelectsNothing()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table dbo.k (a int)");
+        IsEmpty(ResultSets(sim, "exec sp_tables 'k', @table_type = 'TABLE'")[0].Rows);
+        HasCount(1, ResultSets(sim, "exec sp_tables 'k', @table_type = \"'TABLE'\"")[0].Rows);
+    }
 }

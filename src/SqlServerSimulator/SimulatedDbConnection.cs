@@ -505,9 +505,24 @@ public sealed class SimulatedDbConnection : DbConnection
         private readonly int deadlockPriority = connection.DeadlockPriority;
         private readonly bool statisticsIo = connection.StatisticsIo;
         private readonly bool statisticsTime = connection.StatisticsTime;
+        private readonly Language language = connection.Language;
+        private readonly int lockTimeoutMillis = connection.LockTimeoutMillis;
+        private readonly IsolationLevel isolationLevel = connection.SessionIsolationLevel;
+        private readonly bool fmtOnly = connection.FmtOnly;
+        private readonly string? identityInsertTable = connection.IdentityInsertTable;
+        private readonly string? identityInsertQualifiedName = connection.IdentityInsertQualifiedName;
 
         public void Restore(SimulatedDbConnection connection)
         {
+            // LANGUAGE, LOCK_TIMEOUT, the isolation level, FMTONLY and
+            // IDENTITY_INSERT revert with the rest (probed 2026-10-04 against
+            // SQL Server 2025).
+            connection.Language = this.language;
+            connection.LockTimeoutMillis = this.lockTimeoutMillis;
+            connection.SessionIsolationLevel = this.isolationLevel;
+            connection.FmtOnly = this.fmtOnly;
+            connection.IdentityInsertTable = this.identityInsertTable;
+            connection.IdentityInsertQualifiedName = this.identityInsertQualifiedName;
             connection.XactAbort = this.xactAbort;
             connection.RowCountLimit = this.rowCountLimit;
             connection.DateFirst = this.dateFirst;
@@ -767,7 +782,11 @@ public sealed class SimulatedDbConnection : DbConnection
         }
     }
 
-    internal void EndCommand() => _ = Interlocked.Decrement(ref this.commandsInFlight);
+    internal void EndCommand()
+    {
+        _ = Interlocked.Decrement(ref this.commandsInFlight);
+        this.ReportedContextInfo = this.ContextInfo;
+    }
 
     /// <summary>Drops the physical connection under this session: the TDS endpoint's socket, for a session it hosts.</summary>
     internal Action? AbortTransport;
@@ -1389,16 +1408,24 @@ public sealed class SimulatedDbConnection : DbConnection
     /// — a read-only key rejects further writes with Msg 15664. Session-scoped:
     /// lives for the connection's lifetime, persisting across batches.
     /// </summary>
-    internal readonly Dictionary<string, (SqlValue Value, bool ReadOnly)> SessionContext = new(StringComparer.Ordinal);
+    internal readonly Dictionary<string, (SqlValue Value, bool ReadOnly)> SessionContext = new(SessionContextKeyComparer.Instance);
 
     /// <summary>
-    /// Backs <c>CONTEXT_INFO()</c> / <c>SET CONTEXT_INFO</c>. Null until the
-    /// first <c>SET CONTEXT_INFO</c>; once set, a 128-byte buffer (SQL Server
-    /// right-pads or truncates the supplied binary to exactly 128 bytes, so
-    /// <c>DATALENGTH(CONTEXT_INFO())</c> is always 128 after a set).
-    /// Session-scoped.
+    /// Backs <c>CONTEXT_INFO()</c> / <c>SET CONTEXT_INFO</c>: the bytes as set,
+    /// at most 128, null until the first <c>SET CONTEXT_INFO</c>.
+    /// <c>CONTEXT_INFO()</c> right-pads them to 128 and reads an empty value as
+    /// NULL, while <c>sys.dm_exec_requests</c> reports them as set (probed
+    /// 2026-10-04 against SQL Server 2025). Session-scoped.
     /// </summary>
     internal byte[]? ContextInfo;
+
+    /// <summary>
+    /// The <see cref="ContextInfo"/> the session had when its last command
+    /// ended, which is what <c>sys.dm_exec_sessions</c> reports — a
+    /// <c>SET CONTEXT_INFO</c> shows there from the next batch on (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal byte[]? ReportedContextInfo;
 
     /// <summary>
     /// Active session-scoped trace flags toggled via <c>DBCC TRACEON(N)</c>

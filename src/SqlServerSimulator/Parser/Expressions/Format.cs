@@ -17,7 +17,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// <item><description>Rejected types raise <strong>Msg 8116</strong>: <c>varchar</c>, <c>nvarchar</c>, <c>char</c>, <c>nchar</c>, <c>bit</c>, <c>binary</c>, etc.</description></item>
 /// <item><description>NULL value → NULL output. A bare NULL format → Msg 8116; a typed NULL one formats as no format string would.</description></item>
 /// <item><description>The format string and culture take a string and nothing else (Msg 8116, xml and the legacy LOB types included).</description></item>
-/// <item><description>Culture defaults to <c>en-US</c>. A culture name Windows can't parse — NULL included, and whatever the value — is Msg 9818; one it parses but doesn't know (<c>'qq-QQ'</c>) takes what Windows synthesizes for it (probed 2026-09-29 against SQL Server 2025).</description></item>
+/// <item><description>Culture defaults to the session language's (<c>en-US</c> under us_english, probed 2026-10-04). A culture name Windows can't parse — NULL included, and whatever the value — is Msg 9818; one it parses but doesn't know (<c>'qq-QQ'</c>) takes what Windows synthesizes for it (probed 2026-09-29 against SQL Server 2025).</description></item>
 /// <item><description>Unrecognized .NET format token: passthrough (probe: <c>FORMAT(1234, 'qq qq')</c> → <c>'qq qq'</c>); .NET <see cref="FormatException"/> (e.g. <c>FORMAT(decimal, 'D5')</c>) → NULL.</description></item>
 /// </list>
 /// </remarks>
@@ -46,7 +46,9 @@ internal sealed partial class Format : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         // The culture is judged before a NULL value answers NULL.
-        var culture = this.culture is null ? FormatCulture.Default : ResolveCulture(this.culture.Run(runtime));
+        var culture = this.culture is not null ? ResolveCulture(this.culture.Run(runtime))
+            : runtime.Batch.Connection.Language is var language && language != Language.Default ? FormatCulture.Resolve(language.CultureName)
+            : FormatCulture.Default;
         var formatValue = this.format.Run(runtime);
         var valueValue = this.value.Run(runtime);
         RejectUnsupportedValueType(valueValue.Type);

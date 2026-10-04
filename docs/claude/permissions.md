@@ -908,7 +908,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
   - `ALTER AUTHORIZATION` with a missing new owner and an unpermitted securable reports the owner first on real, the securable here;
   - `CREATE FULLTEXT CATALOG` makes the creator the owner on real (it can then drop it) and a later reference by a non-owner is Msg 7641 state 4, where the simulator records `dbo` and answers state 5 or Msg 208;
   - a database-scope `DENY VIEW DEFINITION` narrows `sys.database_permissions` further on real than the grantee rule here;
-  - `sp_helprole` isn't built, `sp_helpuser` reports no `DefSchemaName` / `SID`, and unbracketed `ALTER ROLE public …` is Msg 102 on real;
+  - unbracketed `ALTER ROLE public …` is Msg 102 on real;
   - `DROP SYNONYM` names the synonym as written in Msg 3701 on real, the leaf here.
 - **`ALTER TABLE ADD`-column SET-reads detection** on the joined form isn't distinguished — a joined UPDATE / DELETE SELECT-checks all backing-table sources unconditionally.
 - **Guest enable/disable**, **`CREATE USER … FROM EXTERNAL PROVIDER`** + the `WITH` option tail — parse-and-discard.

@@ -105,7 +105,10 @@ A `SET DATEFIRST` *after* the language simply wins as the later write.
 An unrecognized name is **Msg 2740** class 16 state 1 (`SET LANGUAGE failed because '<n>' is not an official language name or a language alias on this SQL Server.`), and the batch carries on past it.
 Inside a `BEGIN TRY` block real swallows the failure outright — nothing raised, no `CATCH` entered, the statement no-ops and the body continues (probe-confirmed, dynamic SQL included) — while an `IF` / `WHILE` / `BEGIN…END` body is not a TRY frame and still raises.
 
-**Not modeled**: the message language itself (every diagnostic stays English) and month and weekday names in any language but English for `DATENAME` / `FORMAT`; `sys.syslanguages`' name-list columns carry real's text.
+The names follow the language too (probed 2026-10-04 against SQL Server 2025): `DATENAME`'s month and weekday read `sys.syslanguages`' own lists (`März`, `Sonntag`; Japanese months are `01` … `12`), a date string's month name is read in the session language alone (`'1 März 2020'` under Deutsch, where `'1 March 2020'` fails), `FORMAT` without a culture formats in the language's (`Language.CultureName`, `février` under French), and Msg 5703 is worded in the language switched to, sent only outside a procedure, trigger or dynamic batch.
+A procedure or dynamic batch's `SET LANGUAGE` reverts when it returns.
+
+**Not modeled yet**: the message language of every other diagnostic — real words its errors and DBCC's Msg 2528 in the session language (`Fehler beim Konvertieren des varchar-Werts "x" in den int-Datentyp.` for Msg 245 under Deutsch), where the simulator's stay English.
 
 **Implicit operand coercion** (date argument, all three functions): string operands route through `DatePartKinds.CoerceDateArgumentImplicit` → `CoerceTo(datetime2(7))`, except that `DATEADD` reads a string as `datetime` (its result type, and the type its Msg 517 names; probed 2026-09-23), and so does `DATEDIFF` beside a number, a binary or a bare `NULL` — `DATEDIFF(ms, 0, '1900-01-01 00:00:00.001')` is 0, rounded to 1/300 s, and a string the legacy grammar reads as out of range is Msg 242 there (probed 2026-09-25); integer operands → `CoerceTo(datetime)` (days-since-1900-01-01).
 `ParseDateTime2` also accepts a **bare time-of-day string** (`HH:mm[:ss[.fffffff]]`, anchored to 1900-01-01), so `DATEDIFF(second, '11:15:00', <time>)` / `DATEPART(microsecond, '11:15:00')` coerce like real (a Django DurationField/TimeField pattern) rather than raising Msg 241.
@@ -760,9 +763,9 @@ These carry real per-session state on `SimulatedDbConnection` (not placeholder c
 
 - **`sp_set_session_context @key, @value [, @read_only]`** + **`SESSION_CONTEXT(N'key')`** — per-session key/value store (backs multi-tenant / row-level-security patterns).
   Named and positional argument forms both work.
-  Keys are **case-sensitive** (ordinal — `TenantId` ≠ `tenantid`, matching SQL Server's binary key comparison regardless of database collation).
+  Keys compare exactly but for their **first character, which ignores case**, and trailing spaces (probed 2026-10-04 against SQL Server 2025: a key set as `Key` reads back as `key` but not `KEY`, `key` and `KEY` are two keys, and `TenantId` ≠ `tenantid`) — `SessionContextKeyComparer`.
   A missing key reads as NULL; the key is a `sysname` and takes an `nvarchar` alone — a bare NULL, an `nchar` or a `varchar` raises **Msg 8116** while compiling (`session_context` lowercase in the wording), and a typed NULL key reads NULL (probed 2026-09-26 against SQL Server 2025).
-  `sp_set_session_context` with a NULL `@key` raises **Msg 225**; re-setting a key previously stored with `@read_only = 1` raises **Msg 15664**.
+  `sp_set_session_context` refuses, at line 1 under its own name (probed 2026-10-04): fewer than two arguments with **Msg 16903** and more than three with **Msg 16914** (a name that is no parameter is ignored), a NULL or non-string `@key` with **Msg 225**, an empty one or one past 256 bytes with **Msg 15666**, a MAX-typed or `xml` value and a NULL or non-numeric `@read_only` with **Msg 15600** naming `sp_set_connection_context`; re-setting a key previously stored with `@read_only = 1` raises **Msg 15664**.
   Like real SQL Server, `SESSION_CONTEXT` returns **`sql_variant`** preserving the stored value's base type — an `int` stored round-trips as `int`, an `nvarchar` as `nvarchar`.
   The common `WHERE int_col = SESSION_CONTEXT(N'key')` shape works by the comparison path converting the column side up to `sql_variant` and matching within the exact-numeric family (the family rules below).
 - **`SESSIONPROPERTY(name)`** (`Parser/Expressions/SessionProperty.cs`) — the current session setting for one of the ANSI / arithmetic SET options: `ANSI_NULLS`, `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `CONCAT_NULL_YIELDS_NULL`, `NUMERIC_ROUNDABORT`, `QUOTED_IDENTIFIER`.
@@ -773,9 +776,10 @@ These carry real per-session state on `SimulatedDbConnection` (not placeholder c
   A `SET` inside a procedure, trigger or dynamic-SQL body applies there and reverts on return, `ANSI_NULLS` aside, which a procedure or trigger body ignores — see [`session-options.md`](session-options.md#how-far-a-set-reaches).
   `ANSI_PADDING` alone is recorded without its storage semantics: trailing-space padding on assignment isn't modeled.
   Names are case-insensitive; an unknown option name returns NULL.
-- **`CONTEXT_INFO()`** + **`SET CONTEXT_INFO <binary>`** — the legacy single 128-byte slot.
-  NULL until set; once set, SQL Server stores exactly 128 bytes (right-padded / truncated), so `DATALENGTH(CONTEXT_INFO())` is always 128 afterward.
-  The value may be a binary literal or a variable, whose value converts to binary — an `int` as its four bytes — while a NULL or a string one is Msg 2743 (probed 2026-09-28 against SQL Server 2025).
+- **`CONTEXT_INFO()`** + **`SET CONTEXT_INFO <value>`** — the legacy single 128-byte slot.
+  NULL until set; the value is kept as set, at most 128 bytes, and `CONTEXT_INFO()` right-pads it to 128, so `DATALENGTH(CONTEXT_INFO())` reads 128 — and NULL for an empty `0x`.
+  The value may be a binary literal, a number written with or without a sign (its binary form, `-1` as `0xFFFFFFFF`), or a variable of any non-string type; a NULL, a string or a value past 128 bytes is Msg 2743, ending the statement alone (probed 2026-09-28 and 2026-10-04 against SQL Server 2025).
+  `sys.dm_exec_requests.context_info` reports the bytes as set, `sys.sysprocesses` them padded to `binary(128)`, and `sys.dm_exec_sessions` the value as the session's previous batch ended (`ReportedContextInfo`, empty `0x` before any), the same batch's `SET` showing there only from the next one.
 - **`CONNECTIONPROPERTY(name)`** — `sql_variant` (like real), reading the same transport `sys.dm_exec_connections` reports ([`catalog-views.md`](catalog-views.md)): `TCP` and the endpoints over the TDS endpoint, real's `Shared memory` shape in-process.
   Real's base types hold: `nvarchar` throughout, but a `varchar` `client_net_address` and a `smallint` `local_tcp_port` (probed 2026-09-25).
 - **`CURRENT_TRANSACTION_ID()`** — bigint from a server-wide counter: one id per user transaction, drawn at its BEGIN, and a fresh one for each autocommit statement that asks; `sys.dm_tran_current_transaction` / `dm_tran_active_transactions` / `dm_tran_session_transactions` list the same ids (probed 2026-09-25).

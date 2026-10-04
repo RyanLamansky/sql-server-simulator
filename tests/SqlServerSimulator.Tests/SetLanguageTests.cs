@@ -167,4 +167,28 @@ public sealed class SetLanguageTests
         AreEqual((short)1033, Scalar("select msglangid from sys.syslanguages where alias = 'British English'"));
         AreEqual(8, Scalar("select count(*) from sys.syslanguages where datefirst = 7"));
     }
+
+    /// <summary>
+    /// DATENAME's month and weekday names, a month name in a date string, and
+    /// FORMAT's culture follow the session language, and Msg 5703 speaks it
+    /// (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void NamesFollowTheLanguage()
+    {
+        AreEqual("März|Sonntag", Scalar("set language Deutsch; select concat(datename(month, '2020-03-01'), '|', datename(weekday, '20200301'))"));
+        AreEqual("02|土曜日", Scalar("set language Japanese; select concat(datename(month, '2020-02-01'), '|', datename(weekday, '2020-02-01'))"));
+        AreEqual(new DateTime(2020, 3, 1), Scalar("set language Deutsch; select cast('1 März 2020' as datetime)"));
+        AreEqual(DBNull.Value, Scalar("set language Deutsch; select try_cast('1 March 2020' as datetime)"));
+        AreEqual("février", Scalar("set language French; select format(cast('2020-02-01' as date), 'MMMM')"));
+        var sim = new Simulation();
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.Add(e.Message);
+        using var command = connection.CreateCommand();
+        command.CommandText = "set language Deutsch; set language us_english";
+        _ = command.ExecuteNonQuery();
+        CollectionAssert.AreEqual(new[] { "Die Spracheneinstellung wurde in Deutsch geändert.", "Changed language setting to us_english." }, messages);
+    }
 }

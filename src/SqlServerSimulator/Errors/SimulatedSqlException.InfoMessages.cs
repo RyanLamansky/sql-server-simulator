@@ -87,11 +87,11 @@ partial class SimulatedSqlException
         batch.InfoMessage(@class: 0, state: 1, number: 5701, $"Changed database context to '{databaseName}'.");
 
     /// <summary>
-    /// Msg 5703, after every <c>SET LANGUAGE</c>. Real words it in the language
-    /// being switched to; this is the English wording.
+    /// Msg 5703, after every <c>SET LANGUAGE</c> outside a module, in the words
+    /// of the language being switched to (<see cref="Language.ChangedMessage"/>).
     /// </summary>
-    internal static SimulatedError LanguageChangedMessage(BatchContext batch, string languageName) =>
-        batch.InfoMessage(@class: 0, state: 1, number: 5703, $"Changed language setting to {languageName}.");
+    internal static SimulatedError LanguageChangedMessage(BatchContext batch, Language language) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 5703, language.ChangedMessage);
 
     /// <summary>
     /// Msg 3613, <c>SET STATISTICS TIME</c>'s report on a compile — a batch's,
@@ -140,8 +140,8 @@ partial class SimulatedSqlException
     /// it by the name it was called by and to the line of real's source that
     /// prints it (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedError SystemProcedureMessage(BatchContext batch, string procedure, int line, int number, string text) =>
-        new(@class: 0, lineNumber: line, message: text, number: number, procedure: procedure, server: batch.Connection.DataSource, source: "SqlServerSimulator", state: 1);
+    internal static SimulatedError SystemProcedureMessage(BatchContext batch, string procedure, int line, int number, string text, byte @class = 0) =>
+        new(@class: @class, lineNumber: line, message: text, number: number, procedure: procedure, server: batch.Connection.DataSource, source: "SqlServerSimulator", state: 1);
 
     /// <summary>The blank line (<c>PRINT ''</c>, one space) the help procedures print between their sections.</summary>
     internal static SimulatedError HelpBlankLineMessage(BatchContext batch, string procedure, int line) =>

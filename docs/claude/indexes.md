@@ -599,7 +599,7 @@ The filter takes exactly a filtered index's grammar, and the refusals are shared
 The filter binds before the statement's own names: its columns before the key columns (Msg 207 ahead of Msg 1911) and its table before the statement's (Msg 208 for a missing one, where the same statement with no filter is Msg 1088).
 A statistic **depends on its key and filter columns**: `ALTER TABLE … DROP COLUMN` of either is Msg 5074 then 4922, and so is an `ALTER COLUMN` that changes a key column's type or nullability or touches a filter column at all (widening a `varchar` key is free); a filtered index's filter columns hold the same way, and `sp_rename … 'COLUMN'` refuses a filter's column from line 905 of the procedure, its key columns free to move (probed 2026-09-30 against SQL Server 2025).
 `DBCC SHOW_STATISTICS … WITH HISTOGRAM` reads a user statistic's leading column over the rows its filter admits.
-Not modeled yet: the `STAT_HEADER` and `DENSITY_VECTOR` forms (a header's `Filter Expression` and `Unfiltered Rows` among them), a histogram's NULL step and real's compression of a few distinct values into fewer steps (three values `1, 2, 3` are the steps `1` and `3` on real, three steps here), and Msg 2528 after a `Msg 2767` miss.
+Not modeled yet: the `STAT_HEADER` and `DENSITY_VECTOR` forms (a header's `Filter Expression` and `Unfiltered Rows` among them), a histogram's NULL step, real's compression of a few distinct values into fewer steps (three values `1, 2, 3` are the steps `1` and `3` on real, three steps here), and staleness: an index built over an empty table reports no header values and an empty histogram on real until its statistics update, where the simulator reads the live rows (probed 2026-10-04 against SQL Server 2025).
 
 Auto-created column statistics (the `_WA_Sys_*` rows real materializes on first predicate use) still aren't modeled — see [`catalog-views.md`](catalog-views.md).
 
@@ -621,8 +621,8 @@ The result set is the probe-confirmed 5 columns: `RANGE_HI_KEY` (typed as the **
 The **MIN value is always the first step and MAX the last**, matching real's histogram envelope — load-bearing for DacFx, whose bacpac-export chunker interpolates boundary parameters between adjacent steps and overflows its arithmetic client-side (`Double` → `Int32` conversion failure) when the MIN anchor is missing.
 Step *placement* still diverges from real's sampled max-diff algorithm; the values are honest and self-consistent with `COUNT(*)` / `MIN` / `MAX`.
 An empty table yields a 0-row result set.
-Errors mirror real: unresolvable table → Msg 2501, unknown statistic → Msg 2767, NULL / unparseable argument → Msg 2560 (all probe-confirmed class/state).
-Only `WITH HISTOGRAM` is modeled, Msg 2528 following the rows unless `NO_INFOMSGS` joins it — the no-`WITH` three-result-set form and every other option (`STAT_HEADER` / `DENSITY_VECTOR` / `STATS_STREAM`) raise `NotSupportedException` naming the option.
+Errors mirror real: unresolvable table → Msg 2501, unknown statistic → Msg 2767, NULL / unparseable argument → Msg 2560 (all probe-confirmed class/state); one argument → Msg 2583 state 5, and a caller without `SELECT` on the table → Msg 229 then Msg 2557 state 7 naming the table as written, Msg 2528 closing each of these and the Msg 2767 (probed 2026-10-04 against SQL Server 2025).
+Only `WITH HISTOGRAM` is modeled, Msg 2528 following the rows unless `NO_INFOMSGS` joins it — the no-`WITH` three-result-set form and every other option (`STAT_HEADER` / `DENSITY_VECTOR` / `STATS_STREAM`) raise `NotSupportedException` naming the option, after the checks above.
 `STATS_STREAM` (the serialized histogram blob SMO's `Statistic.Stream` reads) isn't modeled yet — see [`backlog.md`](backlog.md).
 
 ## EF Migrations integration

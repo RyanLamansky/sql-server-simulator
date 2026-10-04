@@ -548,17 +548,17 @@ partial class Simulation
     /// ANSI_WARNINGS-implies-ARITHABORT rule standing in for it.
     /// </para>
     /// </summary>
-    internal static string? IncorrectSetOptionNames(ParserContext context)
+    internal static string? IncorrectSetOptionNames(ParserContext context, bool exemptAnsiNulls = false)
     {
         // The parse-position setting, so a module body answers from its own
         // creation-time capture rather than the caller's session.
         if (!context.QuotedIdentifiers)
             return QuotedIdentifierOptionName;
         var connection = context.Connection;
-        if (connection is { AnsiNulls: true, ConcatNullYieldsNull: true, AnsiWarnings: true, AnsiPadding: true, NumericRoundabort: false })
+        if (connection is { ConcatNullYieldsNull: true, AnsiWarnings: true, AnsiPadding: true, NumericRoundabort: false } && (connection.AnsiNulls || exemptAnsiNulls))
             return null;
         var offenders = new List<string>(5);
-        if (!connection.AnsiNulls)
+        if (!connection.AnsiNulls && !exemptAnsiNulls)
             offenders.Add("ANSI_NULLS");
         if (!connection.ConcatNullYieldsNull)
             offenders.Add("CONCAT_NULL_YIELDS_NULL");

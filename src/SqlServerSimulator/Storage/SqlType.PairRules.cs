@@ -425,8 +425,11 @@ partial class SqlType
     }
 
     private static bool IsMaxLengthVariantPair(SqlType maxSide, SqlType variantSide) =>
-        variantSide is SqlVariantSqlType
-        && maxSide is VarcharSqlType { length: MaxLengthSentinel } or NVarcharSqlType { length: MaxLengthSentinel } or VarbinarySqlType { length: MaxLengthSentinel };
+        variantSide is SqlVariantSqlType && IsMaxLength(maxSide);
+
+    /// <summary>Whether <paramref name="type"/> is <c>varchar(max)</c>, <c>nvarchar(max)</c> or <c>varbinary(max)</c>.</summary>
+    internal static bool IsMaxLength(SqlType type) =>
+        type is VarcharSqlType { length: MaxLengthSentinel } or NVarcharSqlType { length: MaxLengthSentinel } or VarbinarySqlType { length: MaxLengthSentinel };
 
     /// <summary>
     /// Msg 257, or Msg 260 when the converted operand is a column: real names

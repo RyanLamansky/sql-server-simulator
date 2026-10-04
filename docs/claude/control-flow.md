@@ -43,7 +43,7 @@ A statement that fails resets it to 0 as well, whether the batch continues past 
 
 **`@@ERROR`**: error number of the most-recently-completed statement; `int`.
 Backed by `SimulatedDbConnection.LastErrorNumber`, which the per-statement dispatch wrapper sets to a failed statement's number, whether a `CATCH` or the client receives the error, and resets to 0 when a statement succeeds.
-`StatementContext.SuppressErrorReset` exempts the statements that leave it alone: a `RAISERROR(..., sev ≤ 10, ...) WITH SETERROR`, which forces 50000; a `DECLARE` with no initializer; and an `EXEC` of a procedure or dynamic SQL, after which it reads whatever the body's last statement left.
+`StatementContext.SuppressErrorReset` exempts the statements that leave it alone: a `RAISERROR(..., sev ≤ 10, ...) WITH SETERROR`, which forces 50000; a `DECLARE` with no initializer; and an `EXEC` of a procedure or dynamic SQL, after which it reads whatever the body's last statement left; and a `BEGIN … END` block, which reads as its last statement left it — a procedure body's `RETURN` resets it like any statement, so a caller after `select 1/0; return 4` reads 0 (probed 2026-10-04 against SQL Server 2025).
 An `IF` or `WHILE` condition resets it, so the branch or loop body reads 0; a cursor `DECLARE` and one with any initializer reset it as statements do (all probed 2026-09-24 against SQL Server 2025).
 
 **`@@TRANCOUNT`** / **`XACT_STATE()`**: transaction-state surface.
