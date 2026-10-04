@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -12,13 +13,6 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class JsonTypeTests
 {
-    private static void AssertError(string commandText, int number, byte state, string message)
-    {
-        var ex = new Simulation().AssertSqlError(commandText, number);
-        AreEqual(message, ex.Errors[0].Message);
-        AreEqual(state, ex.Errors[0].State);
-    }
-
     [TestMethod]
     [DataRow(@"{""a"" : 1,  ""b"":[1, 2 ,3]}", @"{""a"":1,""b"":[1,2,3]}")]
     [DataRow("  {  \"a\"  :  1 , \"b\" : [ 1 , 2 ] }\t\r\n", @"{""a"":1,""b"":[1,2]}")]
@@ -113,21 +107,21 @@ public sealed class JsonTypeTests
     [DataRow("[1e29]", 1007, 5, "The number '1e29' is out of the range for numeric representation (maximum precision 38).")]
     [DataRow("[12345678901234567890123456789012345678901234567890]", 1007, 3, "The number '12345678901234567890123456789012345678901234567890' is out of the range for numeric representation (maximum precision 38).")]
     public void Text_Refusals(string input, int number, int state, string message) =>
-        AssertError($"select cast(N'{input}' as json)", number, (byte)state, message);
+        AssertSqlError($"select cast(N'{input}' as json)", number, (byte)state, message);
 
     [TestMethod]
     public void Text_ControlCharacterAndFormFeedAreRefused()
     {
-        AssertError("select cast('[\"a' + char(9) + 'b\"]' as json)", 13609, 9, "JSON text is not properly formatted. Unexpected character '\"' is found at position 1.");
-        AssertError("select cast('[1,' + char(12) + '2]' as json)", 13609, 9, "JSON text is not properly formatted. Unexpected character '\f' is found at position 3.");
+        AssertSqlError("select cast('[\"a' + char(9) + 'b\"]' as json)", 13609, 9, "JSON text is not properly formatted. Unexpected character '\"' is found at position 1.");
+        AssertSqlError("select cast('[1,' + char(12) + '2]' as json)", 13609, 9, "JSON text is not properly formatted. Unexpected character '\f' is found at position 3.");
     }
 
     [TestMethod]
     public void Text_Limits()
     {
-        AssertError("select cast(replicate(cast('[' as varchar(max)), 129) + replicate(cast(']' as varchar(max)), 129) as json)", 13645, 1, "Nested level of JSON document exceeds limit 128.");
-        AssertError("select cast(N'[' + (select string_agg(cast('1' as nvarchar(max)), ',') from generate_series(1, 65536)) + ']' as json)", 13647, 1, "Number of items in one object/array exceeds limit 65535 in JSON type.");
-        AssertError("select cast(N'{' + (select string_agg(cast(concat('\"k', value, '\":1') as nvarchar(max)), ',') from generate_series(1, 32769)) + '}' as json)", 13649, 1, "Number of unique keys exceeds limit 32768 in JSON type.");
+        AssertSqlError("select cast(replicate(cast('[' as varchar(max)), 129) + replicate(cast(']' as varchar(max)), 129) as json)", 13645, 1, "Nested level of JSON document exceeds limit 128.");
+        AssertSqlError("select cast(N'[' + (select string_agg(cast('1' as nvarchar(max)), ',') from generate_series(1, 65536)) + ']' as json)", 13647, 1, "Number of items in one object/array exceeds limit 65535 in JSON type.");
+        AssertSqlError("select cast(N'{' + (select string_agg(cast(concat('\"k', value, '\":1') as nvarchar(max)), ',') from generate_series(1, 32769)) + '}' as json)", 13649, 1, "Number of unique keys exceeds limit 32768 in JSON type.");
     }
 
     [TestMethod]
@@ -138,7 +132,7 @@ public sealed class JsonTypeTests
     [DataRow("create type jt from json", 13657, 1, "Cannot create alias types from a JSON data type.")]
     [DataRow("create table t (j json collate Latin1_General_CI_AS)", 447, 1, "Expression type json is invalid for COLLATE clause.")]
     public void Declaration_Refusals(string commandText, int number, int state, string message) =>
-        AssertError(commandText, number, (byte)state, message);
+        AssertSqlError(commandText, number, (byte)state, message);
 
     [TestMethod]
     public void Storage_EverySiteCanonicalizes()
@@ -184,7 +178,7 @@ public sealed class JsonTypeTests
             select '<' + cast(@j as char(10)) + '>|<' + cast(@j as nchar(10)) + '>|' + cast(@j as varchar(3)) + '|' + cast(@j as sysname)
             """));
         AreEqual("{\"a\":1}", sim.ExecuteScalar("select convert(nvarchar(max), cast('{\"a\":1}' as json), 1)"));
-        AssertError("declare @j json = '[1,2,3]'; select cast(@j as nvarchar(5))", 13639, 1, "Target string size is too small to represent the JSON instance.");
+        AssertSqlError("declare @j json = '[1,2,3]'; select cast(@j as nvarchar(5))", 13639, 1, "Target string size is too small to represent the JSON instance.");
         AreEqual(1, sim.ExecuteScalar("select iif(try_cast(cast('[1,2,3]' as json) as varchar(3)) is null and try_cast('abc' as json) is null, 1, 0)"));
         _ = sim.AssertSqlError("select try_cast('[1e400]' as json)", 1007);
     }
@@ -213,8 +207,8 @@ public sealed class JsonTypeTests
         var sim = new Simulation();
         AreEqual("[1.0000000e+000,2.0000000e+000]", sim.ExecuteScalar("select cast(cast(cast('[1, 2]' as json) as vector(2)) as varchar(max))"));
         AreEqual("[1.0000000000,2.5000000000,-3.0000000000]|73", sim.ExecuteScalar("declare @v vector(3) = '[1, 2.5, -3]'; declare @j json = @v; select cast(@j as nvarchar(max)) + '|' + cast(datalength(@j) as varchar(10))"));
-        AssertError("declare @j json = '[1,2]'; declare @v vector(3) = @j", 42204, 2, "The vector dimensions 3 and 2 do not match.");
-        AssertError("declare @j json = '{\"a\":1}'; declare @v vector(2) = @j", 13670, 20, "Input JSON is not a valid Vector : 'Key-Value Not Supported'.");
+        AssertSqlError("declare @j json = '[1,2]'; declare @v vector(3) = @j", 42204, 2, "The vector dimensions 3 and 2 do not match.");
+        AssertSqlError("declare @j json = '{\"a\":1}'; declare @v vector(2) = @j", 13670, 20, "Input JSON is not a valid Vector : 'Key-Value Not Supported'.");
     }
 
     [TestMethod]
@@ -435,7 +429,7 @@ public sealed class JsonTypeTests
     [DataRow("'$.i' returning date", 529, (byte)1, "Explicit conversion from data type int to date is not allowed.")]
     [DataRow("'strict $.b' returning date", 529, (byte)1, "Explicit conversion from data type bit to date is not allowed.")]
     public void JsonValueReturningStrictFailure(string pathAndClause, int number, byte state, string message) =>
-        AssertError($$"""declare @j json = '{"s":"abc","big":12345678901,"b":true,"x":"zz","o":[1],"i":5}'; select json_value(@j, {{pathAndClause}})""", number, state, message);
+        AssertSqlError($$"""declare @j json = '{"s":"abc","big":12345678901,"b":true,"x":"zz","o":[1],"i":5}'; select json_value(@j, {{pathAndClause}})""", number, state, message);
 
     [TestMethod]
     public void JsonValueReturningStrictNullIsNull() =>
@@ -471,7 +465,7 @@ public sealed class JsonTypeTests
     [DataRow("geography", "geography")]
     [DataRow("dbo.foo", "dbo.foo")]
     public void JsonValueReturningRefusedType(string type, string near) =>
-        AssertError($$"""declare @j json = '{"a":1}'; select json_value(@j, '$.a' returning {{type}})""", 102, 29, $"Incorrect syntax near '{near}'.");
+        AssertSqlError($$"""declare @j json = '{"a":1}'; select json_value(@j, '$.a' returning {{type}})""", 102, 29, $"Incorrect syntax near '{near}'.");
 
     [TestMethod]
     public void JsonValueReturningRefusesAnAliasType() =>
@@ -481,7 +475,7 @@ public sealed class JsonTypeTests
     [DataRow("declare @j json = '{\"a\":1}'; select json_value(@j, '$.a' returning nvarchar)")]
     [DataRow("select json_value('{\"a\":42}', '$.a' returning int)")]
     public void JsonValueReturningNearReturning(string commandText) =>
-        AssertError(commandText, 102, 1, "Incorrect syntax near 'RETURNING'.");
+        AssertSqlError(commandText, 102, 1, "Incorrect syntax near 'RETURNING'.");
 
     [TestMethod]
     [DataRow("$.p[*].n", """["J","K","L"]""")]
@@ -512,7 +506,7 @@ public sealed class JsonTypeTests
     [DataRow("declare @j json = '{\"p\":[1]}'; select json_query(@j, 'strict $.z[*]' with array wrapper)", (byte)5)]
     [DataRow("declare @j nvarchar(max) = N'{\"p\":[1]}'; select json_query(@j, 'strict $.z' with array wrapper)", (byte)2)]
     public void JsonQueryWithArrayWrapperStrictMiss(string commandText, byte state) =>
-        AssertError(commandText, 13608, state, "Property cannot be found on the specified JSON path.");
+        AssertSqlError(commandText, 13608, state, "Property cannot be found on the specified JSON path.");
 
     [TestMethod]
     [DataRow("$.p[*]", """[{"n" : "J", "n": 2},3,"a\/b","é",1e2]""")]

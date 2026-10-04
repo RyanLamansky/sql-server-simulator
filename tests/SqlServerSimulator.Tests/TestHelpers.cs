@@ -1,3 +1,5 @@
+using System.Data.Common;
+
 namespace SqlServerSimulator;
 
 internal static class TestHelpers
@@ -42,6 +44,17 @@ internal static class TestHelpers
     }
 
     /// <summary>
+    /// <see cref="AssertSqlError(string, int, string)"/> that also pins the error's
+    /// <paramref name="state"/>, for the errors real raises in several states.
+    /// </summary>
+    public static void AssertSqlError(string commandText, int errorNumber, byte state, string expectedMessage)
+    {
+        var error = AssertSqlError(commandText, errorNumber).Errors[0];
+        Assert.AreEqual(expectedMessage, error.Message);
+        Assert.AreEqual(state, error.State);
+    }
+
+    /// <summary>
     /// Verifies that <paramref name="commandText"/> raises a <see cref="SimulatedSqlException"/> with
     /// the given <paramref name="expectedMessage"/>. For tests that don't pin an error number.
     /// </summary>
@@ -50,4 +63,11 @@ internal static class TestHelpers
         var ex = Assert.Throws<SimulatedSqlException>(() => ExecuteScalar(commandText));
         Assert.AreEqual(expectedMessage, ex.Message);
     }
+
+    /// <summary>How many rows <paramref name="table"/> holds, read on <paramref name="connection"/>, inside whatever transaction it has open.</summary>
+    public static int CountRows(DbConnection connection, string table) =>
+        (int)connection.CreateCommand($"select count(*) from {table}").ExecuteScalar()!;
+
+    /// <summary>The number of every entry <paramref name="error"/> carries, in the order the batch raised them.</summary>
+    public static int[] Numbers(SimulatedSqlException error) => [.. error.Errors.Select(static entry => entry.Number)];
 }

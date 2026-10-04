@@ -546,6 +546,7 @@ public sealed class IdentityTests
     [TestMethod]
     [DataRow("insert t (b) values (1); insert t (b) values (1000)", 3)]
     [DataRow("insert t (b) values (1), (2), (1000)", 4)]
+    [DataRow("merge t using (values (1000)) s(b) on 1 = 0 when not matched then insert (b) values (s.b);", 2)]
     public void Identity_FailedConversion_ConsumesTheValue(string failing, int next)
     {
         var simulation = new Simulation();

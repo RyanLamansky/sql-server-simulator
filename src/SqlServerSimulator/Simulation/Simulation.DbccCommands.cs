@@ -454,7 +454,7 @@ partial class Simulation
         var known = BuiltInToken.EqualsAny(store, "ALL") || Array.Exists(SystemCacheStoreNames, name => BuiltInToken.Equals(name, store));
         if (!known)
         {
-            foreach (var database in simulation.Databases.Values)
+            foreach (var (_, database) in simulation.Databases)
             {
                 if (BuiltInToken.Equals(database.Name, store) || BuiltInToken.Equals($"ObjPerm - {database.Name}", store))
                 {

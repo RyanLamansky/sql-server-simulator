@@ -702,7 +702,7 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt64(location.QueryId),
                     SqlValue.FromInt64(location.PlanId),
                     SqlValue.FromInt64(1),
-                    SqlValue.FromDateTime(location.Timestamp.ToLocalTime()),
+                    SqlValue.FromDateTime(location.Timestamp),
                     SqlValue.FromInt32(1),
                     SqlValue.FromNVarchar("MANUAL"),
                 ]);

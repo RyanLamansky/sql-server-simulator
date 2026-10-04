@@ -1,5 +1,6 @@
 using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -15,9 +16,6 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class TempTableTests
 {
-    private static int CountRows(DbConnection conn, string table) =>
-        (int)conn.CreateCommand($"select count(*) from {table}").ExecuteScalar()!;
-
     private static void Exec(DbConnection conn, string sql) =>
         _ = conn.CreateCommand(sql).ExecuteNonQuery();
 

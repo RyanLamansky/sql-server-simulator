@@ -436,8 +436,6 @@ partial class Simulation
             typeName.Leaf,
             underlyingType: resolvedType,
             declaredMaxLength: resolvedMaxLength,
-            declaredPrecision: null,
-            declaredScale: declaredScale,
             isNullable: isNullable,
             userTypeId: context.CurrentDatabase.AllocateUserTypeId(),
             createDate: context.Batch.CurrentStatement.UtcNow,

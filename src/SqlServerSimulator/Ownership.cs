@@ -84,7 +84,7 @@ internal static class Ownership
             if (schema.PrincipalId == principalId)
                 throw SimulatedSqlException.PrincipalOwnsASchema();
         }
-        foreach (var owner in database.FixedRoleSchemaOwners.Values)
+        foreach (var (_, owner) in database.FixedRoleSchemaOwners)
         {
             if (owner == principalId)
                 throw SimulatedSqlException.PrincipalOwnsASchema();

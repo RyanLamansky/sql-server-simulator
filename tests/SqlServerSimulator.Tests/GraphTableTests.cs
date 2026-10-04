@@ -321,6 +321,7 @@ public sealed class GraphTableTests
     [DataRow("insert L select c.$node_id, p.$node_id, 1 from Person p, City c where p.id = 1 and c.id = 10", "INSERT statement conflicted with the EDGE constraint \"ec\"")]
     [DataRow("insert L2 values ('{\"type\":\"node\",\"schema\":\"dbo\",\"table\":\"Person\",\"id\":55}', (select $node_id from City where id = 10))", "INSERT statement conflicted with the EDGE constraint \"ec2\"")]
     [DataRow("insert L2 select p.$node_id, c.$node_id from Person p, City c where p.id = 2 and c.id = 10; delete Person where id = 2", "DELETE statement conflicted with the EDGE REFERENCE constraint \"ec2\"")]
+    [DataRow("insert L2 select p.$node_id, c.$node_id from Person p, City c where p.id = 2 and c.id = 10; merge Person using (values (2)) s(id) on Person.id = s.id when matched then delete;", "DELETE statement conflicted with the EDGE REFERENCE constraint \"ec2\"")]
     [DataRow("alter table L add constraint ec3 connection (X to X)", null)]
     public void EdgeConstraint_Enforcement(string statement, string? message)
     {

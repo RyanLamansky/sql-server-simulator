@@ -147,10 +147,10 @@ partial class Simulation
                 CascadeDeleteChildRows(fk, matchingChildRows, context, depth, noActionChecks);
                 break;
             case ReferentialAction.SetNull:
-                CascadeSetChildKeysToValue(fk, matchingChildRows, useDefault: false, context, depth, verb);
+                RewriteChildFkColumns(fk, WithoutParentValues(matchingChildRows), context, depth, CascadeWriteMode.SetNull, verb);
                 break;
             case ReferentialAction.SetDefault:
-                CascadeSetChildKeysToValue(fk, matchingChildRows, useDefault: true, context, depth, verb);
+                RewriteChildFkColumns(fk, WithoutParentValues(matchingChildRows), context, depth, CascadeWriteMode.SetDefault, verb);
                 break;
         }
     }
@@ -449,7 +449,7 @@ partial class Simulation
             var oldKeys = new List<SqlValue[]>(changedPairs.Count);
             foreach (var (oldFull, _) in changedPairs)
                 oldKeys.Add(oldFull);
-            var matching = new List<(int PageIndex, int SlotIndex, SqlValue[] Full, SqlValue[] ParentNew)>();
+            var matching = new List<(int PageIndex, int SlotIndex, SqlValue[] Full, SqlValue[]? ParentNew)>();
             foreach (var (pageIndex, slotIndex, childFull, parentIndex) in MatchChildRowsToParents(fk, oldKeys, context.Batch))
                 matching.Add((pageIndex, slotIndex, childFull, changedPairs[parentIndex].New));
             if (matching.Count == 0)
@@ -460,13 +460,13 @@ partial class Simulation
                 case ReferentialAction.NoAction:
                     throw BuildParentSideViolation(fk, context, verb);
                 case ReferentialAction.Cascade:
-                    RewriteChildFkColumns(fk, matching, context, depth, mode: CascadeWriteMode.MatchParentNew);
+                    RewriteChildFkColumns(fk, matching, context, depth, CascadeWriteMode.MatchParentNew, verb);
                     break;
                 case ReferentialAction.SetNull:
-                    RewriteChildFkColumns(fk, matching, context, depth, mode: CascadeWriteMode.SetNull);
+                    RewriteChildFkColumns(fk, matching, context, depth, CascadeWriteMode.SetNull, verb);
                     break;
                 case ReferentialAction.SetDefault:
-                    RewriteChildFkColumns(fk, matching, context, depth, mode: CascadeWriteMode.SetDefault, verb);
+                    RewriteChildFkColumns(fk, matching, context, depth, CascadeWriteMode.SetDefault, verb);
                     break;
             }
         }
@@ -474,17 +474,33 @@ partial class Simulation
 
     private enum CascadeWriteMode { MatchParentNew, SetNull, SetDefault }
 
+    /// <summary>
+    /// A DELETE's matched child rows in the shape <see cref="RewriteChildFkColumns"/>
+    /// takes, for the SET NULL and SET DEFAULT actions, which read no parent value.
+    /// </summary>
+    private static List<(int PageIndex, int SlotIndex, SqlValue[] Full, SqlValue[]? ParentNew)> WithoutParentValues(
+        List<(int PageIndex, int SlotIndex, SqlValue[] FullValues)> matchingChildRows) =>
+        matchingChildRows.ConvertAll(row => (row.PageIndex, row.SlotIndex, row.FullValues, (SqlValue[]?)null));
+
+    /// <summary>
+    /// Rewrites the FK columns of the child rows a referential action reaches
+    /// — to the parent's new key for CASCADE, to NULL or the column default —
+    /// as an UPDATE of the child would: the rewritten rows take their
+    /// rowversion, ROW START and computed columns, and are judged against the
+    /// child's CHECK constraints, keys and indexed views as one set before any
+    /// of them lands, Msg 547 naming the parent's statement (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
     private static void RewriteChildFkColumns(
         ForeignKey fk,
-        List<(int PageIndex, int SlotIndex, SqlValue[] Full, SqlValue[] ParentNew)> matching,
+        List<(int PageIndex, int SlotIndex, SqlValue[] Full, SqlValue[]? ParentNew)> matching,
         ParserContext context,
         int depth,
         CascadeWriteMode mode,
-        string verb = "UPDATE")
+        string verb)
     {
         var childTable = fk.ChildTable;
         var undoLog = childTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
-        var newPairs = new List<(SqlValue[] OldFull, SqlValue[] NewFull)>(matching.Count);
         // A cascade's rewrite records against the FK columns it set.
         var tracking = childTable.ChangeTracking;
         var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(childTable);
@@ -492,16 +508,17 @@ partial class Simulation
         List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
         foreach (var (pageIndex, slotIndex, _, _) in matching)
             VersionStore.CheckSnapshotUpdateConflict(context.Batch, childTable, (pageIndex, slotIndex));
+
+        var rewrites = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>(matching.Count);
         foreach (var (pageIndex, slotIndex, full, parentNew) in matching)
         {
-            var oldClone = (SqlValue[])full.Clone();
             var newRow = (SqlValue[])full.Clone();
             for (var i = 0; i < fk.ChildColumnOrdinals.Length; i++)
             {
                 var ord = fk.ChildColumnOrdinals[i];
                 newRow[ord] = mode switch
                 {
-                    CascadeWriteMode.MatchParentNew => parentNew[fk.ReferencedColumnOrdinals[i]],
+                    CascadeWriteMode.MatchParentNew => parentNew![fk.ReferencedColumnOrdinals[i]],
                     CascadeWriteMode.SetNull => SqlValue.Null(childTable.Columns[ord].Type),
                     CascadeWriteMode.SetDefault => EvaluateColumnDefault(childTable.Columns[ord], context),
                     _ => throw new InvalidOperationException(),
@@ -510,27 +527,36 @@ partial class Simulation
             // The FK columns just moved, so anything computed from them has to
             // move with them — a PERSISTED computed column otherwise keeps the
             // pre-cascade value on disk (probe-confirmed: real recomputes).
-            // A system-versioned child starts the rewritten row's period now
-            // and keeps the old one in its history, as an UPDATE of it does.
+            StampUpdatedRow(childTable, newRow, context.Batch);
+            EnforceCheckConstraints(childTable, newRow, context.Batch, "UPDATE", reportedVerb: verb);
+            rewrites.Add((pageIndex, slotIndex, newRow, (SqlValue[])full.Clone()));
+        }
+        EnforceKeyConstraintsForUpdate(childTable, rewrites, context.Batch);
+        EnforceUniqueIndexesForUpdate(childTable, rewrites, context.Batch);
+
+        var newPairs = new List<(SqlValue[] OldFull, SqlValue[] NewFull)>(rewrites.Count);
+        foreach (var (pageIndex, slotIndex, newRow, fullOld) in rewrites)
+        {
+            var oldRow = fullOld!;
+            // A system-versioned child keeps the old row in its history, as an
+            // UPDATE of it does.
             if (childTable.SystemVersioning is { } history && childTable.PeriodColumns is { } period)
-            {
-                newRow[period.StartOrdinal] = SqlValue.FromDateTime2(childTable.Columns[period.StartOrdinal].Type, context.Batch.SystemTimeUtc);
-                WriteHistoryRow(childTable, history, period, oldClone, context, undoLog);
-            }
-            EvaluateComputedColumns(childTable, newRow, context.Batch);
+                WriteHistoryRow(childTable, history, period, oldRow, context, undoLog);
             var rewritten = RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap);
-            tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldClone, newRow, trackedColumns, ref keyMoves);
+            tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldRow, newRow, trackedColumns, ref keyMoves);
             RewriteRowAt(context, childTable, pageIndex, slotIndex, rewritten, undoLog);
             ClusteredScan.NoteKeyAssignment(childTable, fk.ChildColumnOrdinals, (pageIndex, slotIndex), undoLog);
-            newPairs.Add((oldClone, newRow));
+            newPairs.Add((oldRow, newRow));
         }
         if (mode == CascadeWriteMode.SetDefault)
             RequireDefaultedParents(fk, newPairs, context, verb);
         tracking?.RecordKeyMoves(context.Batch, childTable, keyMoves);
         childTable.NoteColumnsUpdated(fk.ChildColumnOrdinals);
+        context.Batch.Connection.Simulation.EnforceIndexedViews(childTable, context.Batch);
         // Recurse: the child rows just got their FK columns rewritten — if
         // those columns are themselves a key referenced by another FK, that
-        // FK's UPDATE action fires.
+        // FK's UPDATE action fires. Under a parent's DELETE too, the change to
+        // the child is an UPDATE.
         EnforceIncomingFkOnUpdate(childTable, newPairs, context, depth + 1);
         FireCascadeUpdateTriggers(childTable, fk.ChildColumnOrdinals, newPairs, context);
     }
@@ -557,60 +583,6 @@ partial class Simulation
         }
 
         FireCascadeTriggers(childTable, TriggerActions.Update, newRows, oldRows, changedOrdinals, context);
-    }
-
-    private static void CascadeSetChildKeysToValue(
-        ForeignKey fk,
-        List<(int PageIndex, int SlotIndex, SqlValue[] FullValues)> matchingChildRows,
-        bool useDefault,
-        ParserContext context,
-        int depth,
-        string verb)
-    {
-        var childTable = fk.ChildTable;
-        var undoLog = childTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog;
-        var newPairs = new List<(SqlValue[] OldFull, SqlValue[] NewFull)>(matchingChildRows.Count);
-        // A cascade's rewrite records against the FK columns it set.
-        var tracking = childTable.ChangeTracking;
-        var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(childTable);
-        var trackedColumns = tracking?.UpdatedColumns(childTable, keyOrdinals, fk.ChildColumnOrdinals);
-        List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
-        CheckCascadeSnapshotConflicts(context.Batch, childTable, matchingChildRows);
-        foreach (var (pageIndex, slotIndex, full) in matchingChildRows)
-        {
-            var oldClone = (SqlValue[])full.Clone();
-            var newRow = (SqlValue[])full.Clone();
-            for (var i = 0; i < fk.ChildColumnOrdinals.Length; i++)
-            {
-                var ord = fk.ChildColumnOrdinals[i];
-                newRow[ord] = useDefault
-                    ? EvaluateColumnDefault(childTable.Columns[ord], context)
-                    : SqlValue.Null(childTable.Columns[ord].Type);
-            }
-            // A system-versioned child starts the rewritten row's period now
-            // and keeps the old one in its history, as an UPDATE of it does.
-            if (childTable.SystemVersioning is { } history && childTable.PeriodColumns is { } period)
-            {
-                newRow[period.StartOrdinal] = SqlValue.FromDateTime2(childTable.Columns[period.StartOrdinal].Type, context.Batch.SystemTimeUtc);
-                WriteHistoryRow(childTable, history, period, oldClone, context, undoLog);
-            }
-            EvaluateComputedColumns(childTable, newRow, context.Batch);
-            var rewritten = RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap);
-            tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldClone, newRow, trackedColumns, ref keyMoves);
-            RewriteRowAt(context, childTable, pageIndex, slotIndex, rewritten, undoLog);
-            ClusteredScan.NoteKeyAssignment(childTable, fk.ChildColumnOrdinals, (pageIndex, slotIndex), undoLog);
-            newPairs.Add((oldClone, newRow));
-        }
-        if (useDefault)
-            RequireDefaultedParents(fk, newPairs, context, verb);
-        tracking?.RecordKeyMoves(context.Batch, childTable, keyMoves);
-        childTable.NoteColumnsUpdated(fk.ChildColumnOrdinals);
-        // For SET NULL / SET DEFAULT under a DELETE on parent, the recursion
-        // shape is still UPDATE on the child (the FK column changed). Use the
-        // UPDATE-flavored recursion so downstream incoming FKs see the right
-        // verb context.
-        EnforceIncomingFkOnUpdate(childTable, newPairs, context, depth + 1);
-        FireCascadeUpdateTriggers(childTable, fk.ChildColumnOrdinals, newPairs, context);
     }
 
     /// <summary>

@@ -1,5 +1,6 @@
 using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -40,9 +41,6 @@ public sealed class InsteadOfTriggerTests
         rows.Sort((a, b) => (a.Item2 ?? -1).CompareTo(b.Item2 ?? -1));
         return rows;
     }
-
-    private static int CountRows(DbConnection connection, string table) =>
-        (int)connection.CreateCommand($"select count(*) from {table}").ExecuteScalar()!;
 
     // === INSTEAD OF INSERT on a table ===
 

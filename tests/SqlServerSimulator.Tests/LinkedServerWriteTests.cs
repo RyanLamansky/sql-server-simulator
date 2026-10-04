@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -21,8 +22,6 @@ public class LinkedServerWriteTests
         _ = local.ExecuteNonQuery($"exec sp_addlinkedserver 'OTHER', '{product}'");
         return (local, remote);
     }
-
-    private static int[] Numbers(SimulatedSqlException error) => [.. error.Errors.Cast<SimulatedError>().Select(entry => entry.Number)];
 
     [TestMethod]
     public void Insert_Values_LeavesIdentityScalarsNull()

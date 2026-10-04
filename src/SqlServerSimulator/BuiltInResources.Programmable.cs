@@ -69,9 +69,9 @@ internal static partial class BuiltInResources
                 new("DOMAIN_NAME", SqlType.SystemName, 128, true),
             ];
         Iso("COLUMNS", ColumnsShape(ordinalNullable: true), (batch, database) =>
-            EnumerateInformationSchemaColumns(batch, database, defaultCollation, unicodeCs, radix10, radix2, routineColumns: false));
+            EnumerateInformationSchemaColumns(batch, database, unicodeCs, radix10, radix2, routineColumns: false));
         Iso("ROUTINE_COLUMNS", ColumnsShape(ordinalNullable: false), (batch, database) =>
-            EnumerateInformationSchemaColumns(batch, database, defaultCollation, unicodeCs, radix10, radix2, routineColumns: true));
+            EnumerateInformationSchemaColumns(batch, database, unicodeCs, radix10, radix2, routineColumns: true));
 
         // INFORMATION_SCHEMA.SCHEMATA: ISO-standard 6-column shape. Rows cover
         // the materialized schemas plus the catalog-only fixed ones (guest and
@@ -1038,11 +1038,6 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// Rows for <c>sys.views</c>: one row per <see cref="View"/> in every
-    /// schema. <c>is_date_correlation_view</c> is always False (the feature
-    /// isn't modeled).
-    /// </summary>
-    /// <summary>
     /// One <c>sys.system_views</c> row per catalog view, shaped as
     /// <c>sys.views</c>' rows are, with <c>is_ms_shipped</c> set.
     /// </summary>
@@ -1131,6 +1126,11 @@ internal static partial class BuiltInResources
         }
     }
 
+    /// <summary>
+    /// Rows for <c>sys.views</c>: one row per <see cref="View"/> in every
+    /// schema. <c>is_date_correlation_view</c> is always False (the feature
+    /// isn't modeled).
+    /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateViews(Parser.BatchContext batch, Database database)
     {
         var falseBit = SqlValue.FromBoolean(false);
@@ -1402,7 +1402,6 @@ internal static partial class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaColumns(
         Parser.BatchContext batch,
         Database database,
-        SqlValue defaultCollation,
         SqlValue unicodeCs,
         SqlValue radix10,
         SqlValue radix2,
@@ -1418,7 +1417,6 @@ internal static partial class BuiltInResources
         var yesNullable = SqlValue.FromVarchar("YES");
         var noNullable = SqlValue.FromVarchar("NO");
         var dbDefaultCollation = SqlValue.FromSystemName(database.CollationName);
-        _ = defaultCollation;
         // ORDINAL_POSITION resequences 1..N over the live columns — unlike
         // sys.columns.column_id it fills the hole DROP COLUMN leaves
         // (probe-confirmed).
@@ -1579,12 +1577,6 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// Rows for <c>INFORMATION_SCHEMA.ROUTINES</c>: procedures plus functions.
-    /// ROUTINE_TYPE distinguishes PROCEDURE vs FUNCTION; DATA_TYPE carries
-    /// the return-type family for scalar UDFs, 'TABLE' for inline TVFs, NULL
-    /// for procedures.
-    /// </summary>
-    /// <summary>
     /// Rows for <c>INFORMATION_SCHEMA.ROUTINES</c>, one per procedure and
     /// function, in real's 51 columns (probed 2026-09-26 against SQL Server
     /// 2025): a scalar function's return type described as
@@ -1680,14 +1672,6 @@ internal static partial class BuiltInResources
             ? SqlValue.Null(SqlType.NVarchar)
             : SqlValue.FromNVarchar(text.Length > 4000 ? text[..4000] : text);
 
-    /// <summary>
-    /// Rows for <c>INFORMATION_SCHEMA.PARAMETERS</c>: per-parameter entries
-    /// for procedures plus functions. ORDINAL_POSITION is 1-based for
-    /// declared parameters; CHARACTER_MAXIMUM_LENGTH is set only for string
-    /// types. PARAMETER_MODE is 'IN' for non-OUTPUT params, 'INOUT' for
-    /// OUTPUT-declared procedure params (probe-confirmed); functions have
-    /// no OUTPUT semantics so all UDF params project as 'IN'.
-    /// </summary>
     /// <summary>
     /// Rows for <c>INFORMATION_SCHEMA.PARAMETERS</c>: one per procedure and
     /// function parameter, and a scalar function's return value as row 0 —
@@ -1790,6 +1774,13 @@ internal static partial class BuiltInResources
         }
     }
 
+    /// <summary>A type's catalog id with a <c>numeric</c> spelling honored: 108 rather than 106.</summary>
+    private static byte SpelledTypeId(SqlType type, bool spelledNumeric) =>
+        spelledNumeric && type is DecimalSqlType ? (byte)108 : type.SystemTypeId;
+
+    private static SqlValue IsoDataTypeName(SqlType type, bool spelledNumeric) =>
+        spelledNumeric && type is DecimalSqlType ? SqlValue.FromSystemName("numeric") : IsoDataTypeName(type);
+
     /// <summary>
     /// The type name the INFORMATION_SCHEMA views report. These resolve an
     /// alias to the type it stands for, so a <c>sysname</c> column or
@@ -1798,13 +1789,6 @@ internal static partial class BuiltInResources
     /// views keep the alias instead, which is why this doesn't live on
     /// <see cref="SqlType.SqlServerName"/>.
     /// </summary>
-    /// <summary>A type's catalog id with a <c>numeric</c> spelling honored: 108 rather than 106.</summary>
-    private static byte SpelledTypeId(SqlType type, bool spelledNumeric) =>
-        spelledNumeric && type is DecimalSqlType ? (byte)108 : type.SystemTypeId;
-
-    private static SqlValue IsoDataTypeName(SqlType type, bool spelledNumeric) =>
-        spelledNumeric && type is DecimalSqlType ? SqlValue.FromSystemName("numeric") : IsoDataTypeName(type);
-
     private static SqlValue IsoDataTypeName(SqlType type) =>
         SqlValue.FromSystemName(type == SqlType.SystemName ? "nvarchar" : type.SqlServerName);
 

@@ -484,7 +484,6 @@ public sealed class TableBuilder
         _ => throw new ArgumentException($"Unknown referential action: '{action}'. Expected CASCADE / SET NULL / SET DEFAULT / NO ACTION / null."),
     };
 
-    /// <summary>Emits the table-type-flavored column element (SqlTableTypeSimpleColumn).</summary>
     /// <summary>
     /// A <c>SqlTableTypeSimpleColumn</c>, written the way DacFx writes one.
     /// </summary>

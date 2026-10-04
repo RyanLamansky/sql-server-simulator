@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -12,13 +13,6 @@ namespace SqlServerSimulator;
 public sealed class JsonContainsTests
 {
     private const string Document = """{"a":1,"b":[1,2,3],"c":{"d":"x"},"e":null,"f":true,"g":false,"s":"Hi","n":1.50,"big":100}""";
-
-    private static void AssertError(string commandText, int number, byte state, string message)
-    {
-        var ex = new Simulation().AssertSqlError(commandText, number);
-        AreEqual(message, ex.Errors[0].Message);
-        AreEqual(state, ex.Errors[0].State);
-    }
 
     private static object? Contains(string arguments, string document = Document) =>
         new Simulation().ExecuteScalar($"declare @j json = '{document}'; select json_contains(@j, {arguments})");
@@ -156,7 +150,7 @@ public sealed class JsonContainsTests
     public void ArgumentTypes(string commandText, int argument, byte state, string message)
     {
         _ = argument;
-        AssertError(commandText, 8116, state, message);
+        AssertSqlError(commandText, 8116, state, message);
     }
 
     [TestMethod]
@@ -169,7 +163,7 @@ public sealed class JsonContainsTests
     [DataRow("declare @j json = '[1]', @v int; select json_contains(@j, @v, '$[*]', 5)")]
     [DataRow("declare @j json = '[1]'; select json_contains(@j, 1, '$.z', 5)")]
     public void ModeOutsideZeroAndOne(string commandText) =>
-        AssertError(commandText, 13692, 1, "The comparison_mode argument of JSON_CONTAINS must be 0 or 1.");
+        AssertSqlError(commandText, 13692, 1, "The comparison_mode argument of JSON_CONTAINS must be 0 or 1.");
 
     [TestMethod]
     public void ModeIsCheckedPerRow() =>
@@ -179,7 +173,7 @@ public sealed class JsonContainsTests
     [DataRow("declare @j json = '[1]'; select json_contains(@j)")]
     [DataRow("declare @j json = '[1]'; select json_contains(@j, 1, '$', 0, 1)")]
     public void ArgumentCount(string commandText) =>
-        AssertError(commandText, 189, 1, "The json_contains function requires 2 to 4 arguments.");
+        AssertSqlError(commandText, 189, 1, "The json_contains function requires 2 to 4 arguments.");
 
     [TestMethod]
     [DataRow("$[*]", 1)]
@@ -253,7 +247,7 @@ public sealed class JsonContainsTests
     [DataRow("$[l]", 'l', 2, (byte)21)]
     [DataRow("append $.b", 'a', 0, (byte)14)]
     public void MalformedAccessor(string path, char character, int position, byte state) =>
-        AssertError(
+        AssertSqlError(
             $"declare @j json = '[1]'; select json_contains(@j, 1, '{path}')",
             13607,
             state,
@@ -263,7 +257,7 @@ public sealed class JsonContainsTests
     [DataRow("declare @j json = '[1,2,3]'; select json_contains(@j, 1, '$[2 to 0]')")]
     [DataRow("select json_value('{\"p\":[1]}', '$.p[2 to 0]')")]
     public void ReversedRange(string commandText) =>
-        AssertError(commandText, 13660, 1, "Reversed indexing not yet supported for advanced JSON array accessors.");
+        AssertSqlError(commandText, 13660, 1, "Reversed indexing not yet supported for advanced JSON array accessors.");
 
     [TestMethod]
     public void ReversedRangeWaitsForADocument() =>
@@ -308,7 +302,7 @@ public sealed class JsonContainsTests
 
     [TestMethod]
     public void TextDocumentStrictMultipleValues() =>
-        AssertError("""declare @j nvarchar(max) = N'{"p":[1,2,3]}'; select json_value(@j, 'strict $.p[*]')""", 13608, 2, "Property cannot be found on the specified JSON path.");
+        AssertSqlError("""declare @j nvarchar(max) = N'{"p":[1,2,3]}'; select json_value(@j, 'strict $.p[*]')""", 13608, 2, "Property cannot be found on the specified JSON path.");
 
     [TestMethod]
     [DataRow("json_value(@j, '$.p[last]')", "Last operator", (byte)2)]
@@ -325,7 +319,7 @@ public sealed class JsonContainsTests
     [DataRow("(select x from openjson(@j) with (x int '$.p[last]'))", "Last operator", (byte)2)]
     [DataRow("(select x from openjson(@j) with (x int '$.p[1,2]'))", "Comma operator", (byte)5)]
     public void TextDocumentRefusals(string call, string what, byte state) =>
-        AssertError(
+        AssertSqlError(
             $$"""declare @j nvarchar(max) = N'{"p":[1,2,3]}'; select {{call}}""",
             13660,
             state,
@@ -369,13 +363,13 @@ public sealed class JsonContainsTests
     [DataRow("$.*")]
     [DataRow("$.p[0 to 1]")]
     public void JsonModifyOverJsonRefusesManyValuedPaths(string path) =>
-        AssertError($$"""declare @j json = '{"p":[1,2,3]}'; select json_modify(@j, '{{path}}', 9)""", 13660, 5, "JsonModify not yet supported for advanced JSON array accessors.");
+        AssertSqlError($$"""declare @j json = '{"p":[1,2,3]}'; select json_modify(@j, '{{path}}', 9)""", 13660, 5, "JsonModify not yet supported for advanced JSON array accessors.");
 
     [TestMethod]
     [DataRow("strict $.p[0, 1]")]
     [DataRow("strict $.e[last]")]
     public void JsonModifyStrictMisses(string path) =>
-        AssertError($$"""declare @j json = '{"p":[1,2,3],"e":[]}'; select json_modify(@j, '{{path}}', 9)""", 13608, 5, "Property cannot be found on the specified JSON path.");
+        AssertSqlError($$"""declare @j json = '{"p":[1,2,3],"e":[]}'; select json_modify(@j, '{{path}}', 9)""", 13608, 5, "Property cannot be found on the specified JSON path.");
 
     [TestMethod]
     public void JsonModifyLastOfAnEmptyArrayLeavesTheDocument() =>
@@ -387,7 +381,7 @@ public sealed class JsonContainsTests
     [DataRow("select x from openjson(@j) with (x int '$.p[*]')", (byte)3)]
     [DataRow("select x from openjson(@j) with (x int '$.*')", (byte)3)]
     public void OpenJsonWildcardsOverJson(string query, byte state) =>
-        AssertError($$"""declare @j json = '{"p":[1,2,3]}'; {{query}}""", 13665, state, "OpenJson support with complex path parameters not yet supported for JSON native data type.");
+        AssertSqlError($$"""declare @j json = '{"p":[1,2,3]}'; {{query}}""", 13665, state, "OpenJson support with complex path parameters not yet supported for JSON native data type.");
 
     [TestMethod]
     public void OpenJsonOpensTheOneSelectedValue() =>
@@ -406,5 +400,5 @@ public sealed class JsonContainsTests
     [DataRow("json_query(@j, 'append $.a')")]
     [DataRow("json_path_exists(@j, 'append $.a')")]
     public void AppendPrefixOutsideJsonModify(string call) =>
-        AssertError($"declare @j nvarchar(max) = N'{{\"a\":[1]}}'; select {call}", 13607, 14, "JSON path is not properly formatted. Unexpected character 'a' is found at position 0.");
+        AssertSqlError($"declare @j nvarchar(max) = N'{{\"a\":[1]}}'; select {call}", 13607, 14, "JSON path is not properly formatted. Unexpected character 'a' is found at position 0.");
 }

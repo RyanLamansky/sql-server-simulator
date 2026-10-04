@@ -110,15 +110,6 @@ internal sealed partial class Selection
     internal FromSource[]? BranchFromSources;
 
     /// <summary>
-    /// Combines two SELECT plans via a set operator (UNION / UNION ALL /
-    /// INTERSECT / EXCEPT). Validates that the branches have the same
-    /// column count (Msg 205), promotes per-column types via
-    /// <see cref="SqlType.Promote"/>, and rejects per-branch ORDER BY
-    /// (which the parser tolerates greedily for the first branch via
-    /// <see cref="HasOrderBy"/>; if it stuck around when a set operator
-    /// follows, that's a syntax error).
-    /// </summary>
-    /// <summary>
     /// How a write through a body that is this set operation is refused: a
     /// <c>UNION</c> at its top as <see cref="ViewUpdatabilityRejection.Union"/>
     /// or <see cref="ViewUpdatabilityRejection.UnionAll"/>, an <c>EXCEPT</c>
@@ -151,6 +142,15 @@ internal sealed partial class Selection
         _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
     };
 
+    /// <summary>
+    /// Combines two SELECT plans via a set operator (UNION / UNION ALL /
+    /// INTERSECT / EXCEPT). Validates that the branches have the same
+    /// column count (Msg 205), promotes per-column types via
+    /// <see cref="SqlType.Promote"/>, and rejects per-branch ORDER BY
+    /// (which the parser tolerates greedily for the first branch via
+    /// <see cref="HasOrderBy"/>; if it stuck around when a set operator
+    /// follows, that's a syntax error).
+    /// </summary>
     /// <param name="left">The plan on the left of the set operator.</param>
     /// <param name="right">The plan on the right of the set operator.</param>
     /// <param name="kind">Which set operator joins them.</param>

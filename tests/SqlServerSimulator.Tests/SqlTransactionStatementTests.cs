@@ -1,5 +1,6 @@
 using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -15,9 +16,6 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class SqlTransactionStatementTests
 {
-    private static int CountRows(DbConnection conn, string table) =>
-        (int)conn.CreateCommand($"select count(*) from {table}").ExecuteScalar()!;
-
     private static DbConnection NewSeededConnection()
     {
         var conn = new Simulation().CreateOpenConnection();

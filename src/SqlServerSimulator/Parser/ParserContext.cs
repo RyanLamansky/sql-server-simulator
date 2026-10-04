@@ -419,20 +419,6 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public List<string>? RuleVariables;
 
     /// <summary>
-    /// When non-null, every <see cref="Expressions.WindowExpression"/>
-    /// constructor registers itself here. Scoped by Selection.Parse around
-    /// projection parsing — the executor needs the list to detect the
-    /// windowed-projection branch (buffer + partition + sort + bind) and
-    /// to know which expressions to bind row-number values into per row.
-    /// </summary>
-    /// <summary>
-    /// When non-null, every <c>NEXT VALUE FOR</c> parsed records its sequence
-    /// here. Mirrors <see cref="AggregateCollector"/> / <see cref="WindowCollector"/>:
-    /// collecting at construction catches a reference at any nesting depth
-    /// without a tree walk. INSERT installs one around its <c>VALUES</c> tuple
-    /// parse to enforce Msg 11731.
-    /// </summary>
-    /// <summary>
     /// When non-null, the parse records the structural facts an indexed view
     /// is judged on into it. Installed only by the validation parse
     /// <c>CREATE INDEX</c> runs over a view's stored body, so every recording
@@ -440,8 +426,22 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// </summary>
     public IndexedViewShape? IndexedViewShapeCollector;
 
+    /// <summary>
+    /// When non-null, every <c>NEXT VALUE FOR</c> parsed records its sequence
+    /// here. Mirrors <see cref="AggregateCollector"/> / <see cref="WindowCollector"/>:
+    /// collecting at construction catches a reference at any nesting depth
+    /// without a tree walk. INSERT installs one around its <c>VALUES</c> tuple
+    /// parse to enforce Msg 11731.
+    /// </summary>
     public List<Schemas.Sequence>? SequenceCollector;
 
+    /// <summary>
+    /// When non-null, every <see cref="Expressions.WindowExpression"/>
+    /// constructor registers itself here. Scoped by Selection.Parse around
+    /// projection parsing — the executor needs the list to detect the
+    /// windowed-projection branch (buffer + partition + sort + bind) and
+    /// to know which expressions to bind row-number values into per row.
+    /// </summary>
     public List<Expressions.WindowExpression>? WindowCollector;
 
     /// <summary>

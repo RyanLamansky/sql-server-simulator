@@ -424,12 +424,6 @@ internal sealed class ObjectProperty : Expression
     }
 
     /// <summary>
-    /// True for objects carrying a SQL module body (the objects
-    /// <c>sys.sql_modules</c> rows exist for): procedures, views, triggers,
-    /// and the function family. Module-scoped OBJECTPROPERTY names return
-    /// NULL for everything else.
-    /// </summary>
-    /// <summary>
     /// 1 / 0 when <paramref name="obj"/> is a trigger holding (or not holding)
     /// the requested ordering slot for <paramref name="action"/>; NULL for
     /// anything that isn't a trigger.
@@ -439,6 +433,12 @@ internal sealed class ObjectProperty : Expression
             ? null
             : ((first ? trigger.FirstForActions : trigger.LastForActions) & action) != 0 ? 1 : 0;
 
+    /// <summary>
+    /// True for objects carrying a SQL module body (the objects
+    /// <c>sys.sql_modules</c> rows exist for): procedures, views, triggers,
+    /// and the function family. Module-scoped OBJECTPROPERTY names return
+    /// NULL for everything else.
+    /// </summary>
     private static bool IsSqlModule(SchemaObject obj) =>
         obj is Procedure { ClrEntry: null } or View or Trigger { ClrEntry: null } or ScalarFunction or InlineTableValuedFunction or MultiStatementTableValuedFunction;
 
@@ -449,12 +449,6 @@ internal sealed class ObjectProperty : Expression
         return SqlType.Int32;
     }
 
-    /// <summary>
-    /// Adapts <see cref="ObjectPropertyEx.TableFlagByName"/> to this function's
-    /// <c>int?</c> result shape: real answers the whole <c>TableHas*</c> family
-    /// from the plain <c>OBJECTPROPERTY</c> as well as the EX form
-    /// (probe-confirmed), so both route through the one mapping.
-    /// </summary>
     /// <summary>
     /// The rest of the <c>Table*</c> family, answered for a table and a
     /// table-valued function (off across the board for the latter, save a

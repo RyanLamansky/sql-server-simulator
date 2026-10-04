@@ -9,15 +9,6 @@ namespace SqlServerSimulator.Parser;
 internal sealed partial class Selection
 {
     /// <summary>
-    /// Evaluates each ORDER BY item against the current row. Ordinal items
-    /// index directly into the projected row. Expression items resolve column
-    /// references through an output-first resolver; without DISTINCT, names
-    /// not in the output fall back to source columns (matching SQL Server's
-    /// rule that ORDER BY can reference non-selected source columns). With
-    /// DISTINCT, source fallback would be ambiguous post-dedup so a missing
-    /// output match raises Msg 145.
-    /// </summary>
-    /// <summary>
     /// Whether a term names the same column a projection or grouping key
     /// reads. The leaf must match, and two qualifiers must agree when both
     /// sides carry one — either side written unqualified matches on the leaf,
@@ -51,6 +42,15 @@ internal sealed partial class Selection
         return sources;
     }
 
+    /// <summary>
+    /// Evaluates each ORDER BY item against the current row. Ordinal items
+    /// index directly into the projected row. Expression items resolve column
+    /// references through an output-first resolver; without DISTINCT, names
+    /// not in the output fall back to source columns (matching SQL Server's
+    /// rule that ORDER BY can reference non-selected source columns). With
+    /// DISTINCT, source fallback would be ambiguous post-dedup so a missing
+    /// output match raises Msg 145.
+    /// </summary>
     private static SqlValue[] ComputeOrderKeys(
         List<OrderBySpec> orderBy,
         SqlValue[] projected,

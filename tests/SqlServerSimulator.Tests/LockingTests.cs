@@ -17,7 +17,7 @@ namespace SqlServerSimulator;
 /// </summary>
 [TestClass]
 // Every test here hands work to a threadpool thread and then asserts, on a
-// deadline, that it *started*, so the class needs a thread to be available
+// deadline, that it is seen waiting, so the class needs a thread to be available
 // promptly. That holds only while no other test monopolizes the pool — the
 // suite's rule is that a test which blocks a thread for a meaningful time
 // carries [DoNotParallelize] (see WaitForDelayTests' CommandTimeout cases).
@@ -130,23 +130,11 @@ public sealed class LockingTests
         _ = writer.CreateCommand("begin tran; insert t values (42)").ExecuteNonQuery();
 
         // Reader on a separate thread tries to count rows — blocks on X.
-        var readerStarted = new ManualResetEventSlim();
-        var readerResult = (int?)null;
-        var readerTask = Task.Run(() =>
-        {
-            readerStarted.Set();
-            readerResult = (int)reader.CreateCommand("select count(*) from t").ExecuteScalar()!;
-        }, TestContext.CancellationToken);
-
-        IsTrue(readerStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        // Give the reader thread time to enter the wait.
-        await Task.Delay(100, TestContext.CancellationToken);
-        IsNull(readerResult);
+        var readerTask = await sim.StartBlocked(reader, "select count(*) from t", TestContext.CancellationToken);
 
         // Commit the writer's tx → reader unblocks and observes the row.
         _ = writer.CreateCommand("commit tran").ExecuteNonQuery();
-        await readerTask;
-        AreEqual(1, readerResult);
+        AreEqual(1, (await readerTask).Single());
     }
 
     [TestMethod]
@@ -234,22 +222,10 @@ public sealed class LockingTests
 
         _ = writer.CreateCommand("begin tran; update b set v = 2 where id = 1").ExecuteNonQuery();
 
-        var readerStarted = new ManualResetEventSlim();
-        var readerResult = (object?)null;
-        var readerTask = Task.Run(() =>
-        {
-            readerStarted.Set();
-            readerResult = reader.CreateCommand(
-                "select b.v from a with (nowait, updlock) join b on b.id = a.id").ExecuteScalar();
-        }, TestContext.CancellationToken);
-
-        IsTrue(readerStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(100, TestContext.CancellationToken);
-        IsNull(readerResult);
+        var readerTask = await sim.StartBlocked(reader, "select b.v from a with (nowait, updlock) join b on b.id = a.id", TestContext.CancellationToken);
 
         _ = writer.CreateCommand("commit tran").ExecuteNonQuery();
-        await readerTask;
-        AreEqual(2, readerResult);
+        AreEqual(2, (await readerTask).Single());
     }
 
     [TestMethod]
@@ -311,19 +287,10 @@ public sealed class LockingTests
 
         _ = holder.CreateCommand("begin tran; select * from t with (holdlock)").ExecuteScalar();
 
-        var writeStarted = new ManualResetEventSlim();
-        var writeTask = Task.Run(() =>
-        {
-            writeStarted.Set();
-            _ = writer.CreateCommand("insert t values (2)").ExecuteNonQuery();
-        }, TestContext.CancellationToken);
-
-        IsTrue(writeStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(100, TestContext.CancellationToken);
-        IsFalse(writeTask.IsCompleted);
+        var writeTask = await sim.StartBlocked(writer, "insert t values (2)", TestContext.CancellationToken);
 
         _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
-        await writeTask;
+        _ = await writeTask;
         AreEqual(2, sim.ExecuteScalar("select count(*) from t"));
     }
 
@@ -341,41 +308,15 @@ public sealed class LockingTests
         _ = connA.CreateCommand("begin tran; update t1 set id = 10").ExecuteNonQuery();
         _ = connB.CreateCommand("begin tran; update t2 set id = 20").ExecuteNonQuery();
 
-        Exception? aError = null;
-        Exception? bError = null;
-        using var aStarted = new ManualResetEventSlim();
-        using var bStarted = new ManualResetEventSlim();
-        var taskA = Task.Run(() =>
-        {
-            aStarted.Set();
-            try { _ = connA.CreateCommand("update t2 set id = 11").ExecuteNonQuery(); }
-            catch (Exception ex) { aError = ex; }
-        }, TestContext.CancellationToken);
-        // Wait for A to enter the wait, then have B request t1 → cycle.
-        IsTrue(aStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(100, TestContext.CancellationToken);
+        // A is seen waiting before B asks, so B is the one that closes the
+        // cycle and, at equal deadlock priority, the victim.
+        var taskA = await sim.StartBlocked(connA, "update t2 set id = 11", TestContext.CancellationToken);
+        AreEqual(1205, Throws<SimulatedSqlException>(() => connB.CreateCommand("update t1 set id = 21").ExecuteNonQuery()).Number);
 
-        var taskB = Task.Run(() =>
-        {
-            bStarted.Set();
-            try { _ = connB.CreateCommand("update t1 set id = 21").ExecuteNonQuery(); }
-            catch (Exception ex) { bError = ex; }
-        }, TestContext.CancellationToken);
-
-        IsTrue(bStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.WhenAll(taskA, taskB).WaitAsync(TimeSpan.FromSeconds(5), TestContext.CancellationToken);
-
-        // Exactly one connection was the victim — at equal deadlock
-        // priority, the connection that closed the cycle.
-        IsTrue(aError is null ^ bError is null);
-        var victim = aError ?? bError;
-        IsNotNull(victim);
-        var ex = IsInstanceOfType<SimulatedSqlException>(victim);
-        AreEqual(1205, ex.Number);
-
-        // Clean up — the non-victim's tx is still alive.
-        var survivor = aError is null ? connA : connB;
-        _ = survivor.CreateCommand("commit").ExecuteNonQuery();
+        // B's rollback released t2, so A's update goes through.
+        _ = await taskA.WaitAsync(TimeSpan.FromSeconds(10), TestContext.CancellationToken);
+        _ = connA.CreateCommand("commit").ExecuteNonQuery();
+        AreEqual(11, sim.ExecuteScalar("select id from t2"));
     }
 
     public TestContext TestContext { get; set; } = null!;
@@ -490,19 +431,10 @@ public sealed class LockingTests
 
         _ = holder.CreateCommand("begin tran; select * from t with (updlock)").ExecuteScalar();
 
-        var otherStarted = new ManualResetEventSlim();
-        var otherTask = Task.Run(() =>
-        {
-            otherStarted.Set();
-            _ = other.CreateCommand("select * from t with (updlock)").ExecuteScalar();
-        }, TestContext.CancellationToken);
-
-        IsTrue(otherStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(100, TestContext.CancellationToken);
-        IsFalse(otherTask.IsCompleted);
+        var otherTask = await sim.StartBlocked(other, "select * from t with (updlock)", TestContext.CancellationToken);
 
         _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
-        await otherTask;
+        _ = await otherTask;
     }
 
     [TestMethod]
@@ -518,21 +450,10 @@ public sealed class LockingTests
 
         _ = holder.CreateCommand("begin tran; select * from t with (xlock)").ExecuteScalar();
 
-        var readStarted = new ManualResetEventSlim();
-        var readResult = (int?)null;
-        var readTask = Task.Run(() =>
-        {
-            readStarted.Set();
-            readResult = (int)reader.CreateCommand("select count(*) from t").ExecuteScalar()!;
-        }, TestContext.CancellationToken);
-
-        IsTrue(readStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(100, TestContext.CancellationToken);
-        IsNull(readResult);
+        var readTask = await sim.StartBlocked(reader, "select count(*) from t", TestContext.CancellationToken);
 
         _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
-        await readTask;
-        AreEqual(1, readResult);
+        AreEqual(1, (await readTask).Single());
     }
 
     [TestMethod]
@@ -548,21 +469,10 @@ public sealed class LockingTests
 
         _ = holder.CreateCommand("begin tran; insert t with (tablockx) values (1)").ExecuteNonQuery();
 
-        var readStarted = new ManualResetEventSlim();
-        var readResult = (int?)null;
-        var readTask = Task.Run(() =>
-        {
-            readStarted.Set();
-            readResult = (int)reader.CreateCommand("select count(*) from t").ExecuteScalar()!;
-        }, TestContext.CancellationToken);
-
-        IsTrue(readStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(100, TestContext.CancellationToken);
-        IsNull(readResult);
+        var readTask = await sim.StartBlocked(reader, "select count(*) from t", TestContext.CancellationToken);
 
         _ = holder.CreateCommand("commit tran").ExecuteNonQuery();
-        await readTask;
-        AreEqual(1, readResult);
+        AreEqual(1, (await readTask).Single());
     }
 
     [TestMethod]
@@ -581,19 +491,10 @@ public sealed class LockingTests
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select * from t").ExecuteScalar();
 
-        var writeStarted = new ManualResetEventSlim();
-        var writeTask = Task.Run(() =>
-        {
-            writeStarted.Set();
-            _ = writer.CreateCommand("insert t values (2)").ExecuteNonQuery();
-        }, TestContext.CancellationToken);
-
-        IsTrue(writeStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(100, TestContext.CancellationToken);
-        IsFalse(writeTask.IsCompleted);
+        var writeTask = await sim.StartBlocked(writer, "insert t values (2)", TestContext.CancellationToken);
 
         _ = reader.CreateCommand("commit tran").ExecuteNonQuery();
-        await writeTask;
+        _ = await writeTask;
         AreEqual(2, sim.ExecuteScalar("select count(*) from t"));
     }
 
@@ -620,19 +521,10 @@ public sealed class LockingTests
         AreEqual(2, sim.ExecuteScalar("select count(*) from t with (nolock)"));
 
         // Concurrent UPDATE of the ALREADY-READ row — should block.
-        var upStarted = new ManualResetEventSlim();
-        var upTask = Task.Run(() =>
-        {
-            upStarted.Set();
-            _ = writer.CreateCommand("update t set id = 10 where id = 1").ExecuteNonQuery();
-        }, TestContext.CancellationToken);
-
-        IsTrue(upStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(100, TestContext.CancellationToken);
-        IsFalse(upTask.IsCompleted);
+        var upTask = await sim.StartBlocked(writer, "update t set id = 10 where id = 1", TestContext.CancellationToken);
 
         _ = reader.CreateCommand("commit tran").ExecuteNonQuery();
-        await upTask;
+        _ = await upTask;
     }
 
     [TestMethod]

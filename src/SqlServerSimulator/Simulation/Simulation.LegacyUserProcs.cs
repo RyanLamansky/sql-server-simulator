@@ -406,7 +406,7 @@ partial class Simulation
                         throw AtSystemProcedureLine(calledAs, SimulatedSqlException.UserAbsentOrInvalid(userName), 140);
                     var existing = users.Find(other => other.TypeCode == "S" && !IsOrphan(other) && other.LoginName is { } linked && BuiltInToken.Comparer.Equals(linked, loginName));
                     if (existing is not null)
-                        throw AtSystemProcedureLine(calledAs, SimulatedSqlException.LoginAlreadyHasUser(existing.Name), 175);
+                        throw AtSystemProcedureLine(calledAs, SimulatedSqlException.LoginAlreadyHasAccount(existing.Name), 175);
                     user!.LoginName = loginName;
                     user.LoginPrincipalId = simulation.TryResolveServerPrincipalId(loginName, out var relinkedId) ? relinkedId : 0;
                     yield break;

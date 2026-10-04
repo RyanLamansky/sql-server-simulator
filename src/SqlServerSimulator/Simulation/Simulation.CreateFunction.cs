@@ -148,26 +148,6 @@ partial class Simulation
             schema.Functions.TryGetValue(functionName.Leaf, out var existing) ? existing as T : null);
 
     /// <summary>
-    /// Parses the multi-statement TVF tail: <c>@r TABLE (cols) [WITH option ...]
-    /// AS BEGIN ... END</c>. Cursor on entry: the <c>@variable</c> token after
-    /// <c>RETURNS</c>. The body's contents may freely <c>INSERT</c> into
-    /// <c>@r</c> (registered as a table variable in the per-call child batch),
-    /// and bare <c>RETURN;</c> projects the accumulated rows. Value-form
-    /// <c>RETURN N</c> in the body raises Msg 178 at invoke time (probe-
-    /// confirmed against real SQL Server, which surfaces this at CREATE time;
-    /// the simulator defers to runtime — same convention scalar UDFs use).
-    /// </summary>
-    /// <remarks>
-    /// Column-list parsing reuses
-    /// <see cref="TryParseTableVariableColumnsAndConstraints"/> so the
-    /// <c>RETURNS @r TABLE</c> grammar accepts the same column features as
-    /// <c>DECLARE @t TABLE</c> — typed columns, IDENTITY, computed columns,
-    /// inline / table-level CHECK, PRIMARY KEY / UNIQUE. Named constraints
-    /// (<c>CONSTRAINT pk PRIMARY KEY</c>) and FOREIGN KEY remain rejected
-    /// here too (Msg 102, inherited from the column-list parser's
-    /// <c>isTableVariable: true</c> branch).
-    /// </remarks>
-    /// <summary>
     /// Draws again, from <paramref name="ownerName"/>, the auto-names the
     /// shared column-list parser drew from <paramref name="tableName"/>, for
     /// the two tables real names otherwise than their errors do: a return
@@ -199,6 +179,26 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// Parses the multi-statement TVF tail: <c>@r TABLE (cols) [WITH option ...]
+    /// AS BEGIN ... END</c>. Cursor on entry: the <c>@variable</c> token after
+    /// <c>RETURNS</c>. The body's contents may freely <c>INSERT</c> into
+    /// <c>@r</c> (registered as a table variable in the per-call child batch),
+    /// and bare <c>RETURN;</c> projects the accumulated rows. Value-form
+    /// <c>RETURN N</c> in the body raises Msg 178 at invoke time (probe-
+    /// confirmed against real SQL Server, which surfaces this at CREATE time;
+    /// the simulator defers to runtime — same convention scalar UDFs use).
+    /// </summary>
+    /// <remarks>
+    /// Column-list parsing reuses
+    /// <see cref="TryParseTableVariableColumnsAndConstraints"/> so the
+    /// <c>RETURNS @r TABLE</c> grammar accepts the same column features as
+    /// <c>DECLARE @t TABLE</c> — typed columns, IDENTITY, computed columns,
+    /// inline / table-level CHECK, PRIMARY KEY / UNIQUE. Named constraints
+    /// (<c>CONSTRAINT pk PRIMARY KEY</c>) and FOREIGN KEY remain rejected
+    /// here too (Msg 102, inherited from the column-list parser's
+    /// <c>isTableVariable: true</c> branch).
+    /// </remarks>
     private static bool ParseMultiStatementTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, List<SimulatedSqlException> declarationErrors, bool isAlter, bool createOrAlter)
     {
         var returnVariableName = ((AtPrefixedString)context.Token!).Value;
@@ -510,17 +510,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses the inline-TVF tail. Cursor on entry: the <c>TABLE</c> reserved
-    /// keyword (right after <c>RETURNS</c>). The grammar accepted:
-    /// <code>
-    /// TABLE [WITH option [, option ...]] AS RETURN [(] &lt;select&gt; [)]
-    /// </code>
-    /// where <c>option</c> is <c>SCHEMABINDING</c> (parse-and-ignore) or
-    /// <c>ENCRYPTION</c> (parse-and-ignore). <c>RETURNS NULL ON NULL
-    /// INPUT</c> in the <c>WITH</c> slot of a TVF raises Msg 487 (probe-
-    /// confirmed — that option is scalar-only).
-    /// </summary>
-    /// <summary>
     /// Steps past the <c>AS</c> that introduces a function body, if it's
     /// there. Returns whether one was consumed; the cursor ends on the first
     /// body token either way.
@@ -544,6 +533,17 @@ partial class Simulation
         return true;
     }
 
+    /// <summary>
+    /// Parses the inline-TVF tail. Cursor on entry: the <c>TABLE</c> reserved
+    /// keyword (right after <c>RETURNS</c>). The grammar accepted:
+    /// <code>
+    /// TABLE [WITH option [, option ...]] AS RETURN [(] &lt;select&gt; [)]
+    /// </code>
+    /// where <c>option</c> is <c>SCHEMABINDING</c> (parse-and-ignore) or
+    /// <c>ENCRYPTION</c> (parse-and-ignore). <c>RETURNS NULL ON NULL
+    /// INPUT</c> in the <c>WITH</c> slot of a TVF raises Msg 487 (probe-
+    /// confirmed — that option is scalar-only).
+    /// </summary>
     private static bool ParseInlineTvfTail(ParserContext context, Schema schema, MultiPartName functionName, List<UdfParameter> parameters, List<SimulatedSqlException> declarationErrors, bool isAlter, bool createOrAlter)
     {
         context.MoveNextRequired(); // step past TABLE

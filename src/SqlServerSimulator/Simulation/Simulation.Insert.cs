@@ -920,17 +920,31 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Advances the ROW START of a row an UPDATE or a MERGE's update rewrites
-    /// to the write's system time; ROW END stays at max, the row being
-    /// still current.
-    /// Gated like <see cref="StampInsertedPeriod"/> on the GENERATED ALWAYS
-    /// markers, so a table with versioning switched OFF still advances (probed
-    /// 2026-10-02 against SQL Server 2025, UPDATE and MERGE alike).
+    /// Fills the columns a rewritten row takes from the write rather than from
+    /// its SET list, once the set columns hold their new values: each
+    /// rowversion column's next value, the ROW START, then the computed
+    /// columns, which may read either. Shared by every write that rewrites a
+    /// row — an UPDATE, a MERGE's update through a table or a join view, a
+    /// foreign key's cascade — so none of them misses one.
     /// </summary>
-    private static void AdvanceUpdatedPeriodStart(HeapTable table, SqlValue[] newValues, BatchContext batch)
+    /// <remarks>
+    /// ROW START advances to the write's system time while ROW END stays at
+    /// max, the row being still current. It is gated like
+    /// <see cref="StampInsertedPeriod"/> on the GENERATED ALWAYS markers, so a
+    /// table with versioning switched OFF still advances (probed 2026-10-02
+    /// against SQL Server 2025, UPDATE and MERGE alike; 2026-10-04 for a
+    /// cascade, which bumps the child's rowversion too).
+    /// </remarks>
+    private static void StampUpdatedRow(HeapTable table, SqlValue[] newValues, BatchContext batch)
     {
+        for (var i = 0; i < table.Columns.Length; i++)
+        {
+            if (table.Columns[i].Type == SqlType.RowVersion)
+                newValues[i] = SqlValue.FromRowVersion(batch.DatabaseFor(table).AllocateRowVersion());
+        }
         if (table.PeriodColumns is { } pc && table.Columns[pc.StartOrdinal].GeneratedAs != GeneratedAlwaysAsRow.None)
             newValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, batch.SystemTimeUtc);
+        EvaluateComputedColumns(table, newValues, batch);
     }
 
     /// <summary>
@@ -947,13 +961,6 @@ partial class Simulation
         _ => false,
     };
 
-    /// <summary>
-    /// Parses INSERT's <c>VALUES (…), (…)</c> source via the shared
-    /// <c>ParseValuesTuples</c> helper, then eagerly evaluates each cell
-    /// expression to a <see cref="SqlValue"/>. VALUES expressions can't
-    /// reference columns; the column-resolver hook always raises
-    /// <see cref="SimulatedSqlException.InvalidColumnName(string)"/>.
-    /// </summary>
     /// <summary>
     /// <b>Msg 11731</b> — a multi-row <c>VALUES</c> constructor may not
     /// reference a sequence that one of the target's unlisted columns also
@@ -1094,6 +1101,27 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Runs a <c>VALUES</c> arity check — or the scan for an explicit value in
+    /// an engine-written column, which real reports among them — recording
+    /// its refusal, while a statement is read for its whole bind error report,
+    /// rather than throwing: real reports it after every unbindable name, the
+    /// column list's and the values' alike (probed 2026-09-27: `INSERT t (a,
+    /// x1) VALUES (1, 2, 3)` is Msg 207 then Msg 110, and a ragged list's
+    /// names come ahead of its Msg 10709).
+    /// </summary>
+    private static void ReportingArity(ParserContext context, Action check)
+    {
+        try
+        {
+            check();
+        }
+        catch (SimulatedSqlException arity) when (context.Batch.BindErrors is { } report && (context.Token is null || report.Covers(context.Token)))
+        {
+            report.Record(arity, context.Token?.StartIndex ?? (report.Command.Length - 1), BindClause.InsertArity);
+        }
+    }
+
+    /// <summary>
     /// Validates an <c>INSERT … VALUES</c> tuple width against the destination
     /// column list. Real SQL Server settles this while compiling the statement,
     /// so it fires from an untaken <c>IF</c> branch and aborts a
@@ -1115,27 +1143,6 @@ partial class Simulation
     /// Ragged tuples carry no single width to measure, so they skip this check
     /// and fall to Msg 10709 in <see cref="RejectRaggedValueTuples"/>.
     /// </remarks>
-    /// <summary>
-    /// Runs a <c>VALUES</c> arity check — or the scan for an explicit value in
-    /// an engine-written column, which real reports among them — recording
-    /// its refusal, while a statement is read for its whole bind error report,
-    /// rather than throwing: real reports it after every unbindable name, the
-    /// column list's and the values' alike (probed 2026-09-27: `INSERT t (a,
-    /// x1) VALUES (1, 2, 3)` is Msg 207 then Msg 110, and a ragged list's
-    /// names come ahead of its Msg 10709).
-    /// </summary>
-    private static void ReportingArity(ParserContext context, Action check)
-    {
-        try
-        {
-            check();
-        }
-        catch (SimulatedSqlException arity) when (context.Batch.BindErrors is { } report && (context.Token is null || report.Covers(context.Token)))
-        {
-            report.Record(arity, context.Token?.StartIndex ?? (report.Command.Length - 1), BindClause.InsertArity);
-        }
-    }
-
     private static void RejectValuesArityMismatch(
         List<Expression[]> valueTuples,
         HeapColumn[] destinationColumns,
@@ -1383,15 +1390,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses and executes the <c>SELECT</c>-source side of <c>INSERT … SELECT</c>.
-    /// Validates the projection-count vs insert-list count at parse time
-    /// (Msg 120 / Msg 121, matching SQL Server's pre-execution diagnostic),
-    /// then buffers the result into a list of rows so the existing per-row
-    /// encode loop can run unchanged. Buffering also makes self-insert
-    /// (<c>INSERT t SELECT … FROM t</c>) safe — the source materializes
-    /// before any destination write.
-    /// </summary>
-    /// <summary>
     /// Runs an <c>INSERT</c>'s SELECT source when it's written parenthesized —
     /// <c>INSERT INTO t (cols) (SELECT …)</c> — consuming the wrapping parens
     /// around the query <see cref="ExecuteSelectSource"/> reads.
@@ -1436,6 +1434,15 @@ partial class Simulation
         return rows;
     }
 
+    /// <summary>
+    /// Parses and executes the <c>SELECT</c>-source side of <c>INSERT … SELECT</c>.
+    /// Validates the projection-count vs insert-list count at parse time
+    /// (Msg 120 / Msg 121, matching SQL Server's pre-execution diagnostic),
+    /// then buffers the result into a list of rows so the existing per-row
+    /// encode loop can run unchanged. Buffering also makes self-insert
+    /// (<c>INSERT t SELECT … FROM t</c>) safe — the source materializes
+    /// before any destination write.
+    /// </summary>
     private static List<SqlValue[]> ExecuteSelectSource(
         ParserContext context,
         HeapColumn[] destinationColumns,
@@ -1783,17 +1790,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Implicit-column-list expansion for an INSERT through a view (no
-    /// explicit <c>(col, …)</c> list after the view name). The implicit
-    /// list is the view's projected columns mapped to their base ordinals,
-    /// filtered to writable shape (skip computed, skip rowversion, skip
-    /// identity unless <c>SET IDENTITY_INSERT ON</c> is active on the base
-    /// table). Derived view columns drop out of the implicit list since
-    /// they can't be written anyway — INSERTs that omit them are valid
-    /// (only an explicit name reference to a derived column would raise
-    /// Msg 4406).
-    /// </summary>
-    /// <summary>
     /// The implicit insert column list a <c>MERGE … WHEN NOT MATCHED THEN
     /// INSERT</c> with no column list uses against a view target. Unlike
     /// INSERT's positional list, this one silently drops the columns MERGE
@@ -1817,6 +1813,17 @@ partial class Simulation
         return [.. implicitList];
     }
 
+    /// <summary>
+    /// Implicit-column-list expansion for an INSERT through a view (no
+    /// explicit <c>(col, …)</c> list after the view name). The implicit
+    /// list is the view's projected columns mapped to their base ordinals,
+    /// filtered to writable shape (skip computed, skip rowversion, skip
+    /// identity unless <c>SET IDENTITY_INSERT ON</c> is active on the base
+    /// table). Derived view columns drop out of the implicit list since
+    /// they can't be written anyway — INSERTs that omit them are valid
+    /// (only an explicit name reference to a derived column would raise
+    /// Msg 4406).
+    /// </summary>
     private static HeapColumn[] BuildImplicitInsertColumnsForView(View destinationView, HeapTable baseTable, string writtenName)
     {
         var implicitList = new List<HeapColumn>();

@@ -1102,14 +1102,6 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// Rows for <c>INFORMATION_SCHEMA.DOMAINS</c>, one per alias type and
-    /// table type in <c>user_type_id</c> order, an alias type's base type
-    /// described as <c>INFORMATION_SCHEMA.COLUMNS</c> describes a column of it
-    /// and a table type's DATA_TYPE <c>table type</c> with no facets (probed
-    /// 2026-09-26 against SQL Server 2025). DOMAIN_DEFAULT is the whole
-    /// definition of the <c>CREATE DEFAULT</c> object bound to an alias type.
-    /// </summary>
-    /// <summary>
     /// Rows for <c>INFORMATION_SCHEMA.DOMAIN_CONSTRAINTS</c>: each alias type
     /// carrying a bound rule, in alias order, the rule named in its own schema.
     /// </summary>
@@ -1192,6 +1184,14 @@ internal static partial class BuiltInResources
         }
     }
 
+    /// <summary>
+    /// Rows for <c>INFORMATION_SCHEMA.DOMAINS</c>, one per alias type and
+    /// table type in <c>user_type_id</c> order, an alias type's base type
+    /// described as <c>INFORMATION_SCHEMA.COLUMNS</c> describes a column of it
+    /// and a table type's DATA_TYPE <c>table type</c> with no facets (probed
+    /// 2026-09-26 against SQL Server 2025). DOMAIN_DEFAULT is the whole
+    /// definition of the <c>CREATE DEFAULT</c> object bound to an alias type.
+    /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateInformationSchemaDomains(Parser.BatchContext batch, Database database)
     {
         _ = batch;

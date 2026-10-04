@@ -52,7 +52,7 @@ partial class Simulation
     private static string RequireValidName(SqlValue name)
     {
         if (name.IsNull || name.AsString.Length == 0)
-            throw AtProcedureLine(SimulatedSqlException.ValidNameRequired(), "sys.sp_validname", 17);
+            throw AtProcedureLine(SimulatedSqlException.NameCannotBeNull(), "sys.sp_validname", 17);
         return name.AsString;
     }
 

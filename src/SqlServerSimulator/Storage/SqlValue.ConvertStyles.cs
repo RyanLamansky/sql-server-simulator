@@ -63,7 +63,7 @@ internal readonly partial struct SqlValue
     private static string FormatDateSourceWithStyle(DateOnly date, int style, string targetWord) => style switch
     {
         0 or 100 or 9 or 109 => FormatLegacyDate(date),
-        13 or 113 => $"{date:dd MMM yyyy}",
+        13 or 113 => string.Create(CultureInfo.InvariantCulture, $"{date:dd MMM yyyy}"),
         20 or 21 or 23 or 25 or 120 or 121 or 126 or 127 => date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
         22 or 1 => date.ToString("MM/dd/yy", CultureInfo.InvariantCulture),
         101 => date.ToString("MM/dd/yyyy", CultureInfo.InvariantCulture),
@@ -110,13 +110,13 @@ internal readonly partial struct SqlValue
         {
             0 or 100 => $"{FormatLegacyDate(date)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: false, ':', "", spaceBeforeAmPm: false)}",
             9 or 109 => $"{FormatLegacyDate(date)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, ':', frac, spaceBeforeAmPm: false)}",
-            13 or 113 => $"{date:dd MMM yyyy} {Format24HourTime(time, ':', frac)}",
-            20 or 120 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', "")}",
-            21 or 25 or 121 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', frac)}",
-            22 => $"{date:MM/dd/yy} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', "", spaceBeforeAmPm: true)}",
+            13 or 113 => string.Create(CultureInfo.InvariantCulture, $"{date:dd MMM yyyy} {Format24HourTime(time, ':', frac)}"),
+            20 or 120 => string.Create(CultureInfo.InvariantCulture, $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', "")}"),
+            21 or 25 or 121 => string.Create(CultureInfo.InvariantCulture, $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', frac)}"),
+            22 => string.Create(CultureInfo.InvariantCulture, $"{date:MM/dd/yy} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', "", spaceBeforeAmPm: true)}"),
             // smalldatetime's ISO 8601 form carries no fraction (probed
             // 2026-09-26 against SQL Server 2025).
-            126 or 127 => $"{date:yyyy-MM-dd}T{Format24HourTime(time, '.', sourceTypeWord == "smalldatetime" ? "" : IsoFraction(frac))}",
+            126 or 127 => string.Create(CultureInfo.InvariantCulture, $"{date:yyyy-MM-dd}T{Format24HourTime(time, '.', sourceTypeWord == "smalldatetime" ? "" : IsoFraction(frac))}"),
             8 or 24 or 108 => Format24HourTime(time, '.', ""),
             14 or 114 => Format24HourTime(time, ':', frac),
             130 => $"{FormatHijriDateOnly(dt, withMonthName: true)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, ':', frac, spaceBeforeAmPm: false)}",
@@ -140,11 +140,11 @@ internal readonly partial struct SqlValue
         {
             0 or 100 => $"{FormatLegacyDate(date)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: false, '.', "", spaceBeforeAmPm: false)}",
             9 or 109 => $"{FormatLegacyDate(date)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', frac, spaceBeforeAmPm: false)}",
-            13 or 113 => $"{date:dd MMM yyyy} {Format24HourTime(time, '.', frac)}",
-            20 or 120 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', "")}",
-            21 or 25 or 121 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', frac)}",
-            22 => $"{date:MM/dd/yy} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', "", spaceBeforeAmPm: true)}",
-            126 or 127 => $"{date:yyyy-MM-dd}T{Format24HourTime(time, '.', IsoFraction(frac))}",
+            13 or 113 => string.Create(CultureInfo.InvariantCulture, $"{date:dd MMM yyyy} {Format24HourTime(time, '.', frac)}"),
+            20 or 120 => string.Create(CultureInfo.InvariantCulture, $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', "")}"),
+            21 or 25 or 121 => string.Create(CultureInfo.InvariantCulture, $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', frac)}"),
+            22 => string.Create(CultureInfo.InvariantCulture, $"{date:MM/dd/yy} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', "", spaceBeforeAmPm: true)}"),
+            126 or 127 => string.Create(CultureInfo.InvariantCulture, $"{date:yyyy-MM-dd}T{Format24HourTime(time, '.', IsoFraction(frac))}"),
             8 or 24 or 108 => Format24HourTime(time, '.', ""),
             14 or 114 => Format24HourTime(time, '.', frac),
             130 => $"{FormatHijriDateOnly(dt, withMonthName: true)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', frac, spaceBeforeAmPm: false)}",
@@ -199,14 +199,14 @@ internal readonly partial struct SqlValue
         {
             0 or 100 => $"{FormatLegacyDate(date)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: false, '.', "", spaceBeforeAmPm: false)} {offset}",
             9 or 109 => $"{FormatLegacyDate(date)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', frac, spaceBeforeAmPm: false)} {offset}",
-            22 => $"{date:MM/dd/yy} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', "", spaceBeforeAmPm: true)} {offset}",
+            22 => string.Create(CultureInfo.InvariantCulture, $"{date:MM/dd/yy} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', "", spaceBeforeAmPm: true)} {offset}"),
             130 => $"{FormatHijriDateOnly(dto.DateTime, withMonthName: true)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', frac, spaceBeforeAmPm: false)} {offset}",
             131 => $"{FormatHijriDateOnly(dto.DateTime, withMonthName: false)} {FormatAmPm12HourTime(time, paddedHour: true, includeSeconds: true, '.', frac, spaceBeforeAmPm: false)} {offset}",
-            13 or 113 => $"{date:dd MMM yyyy} {Format24HourTime(time, '.', frac)} {offset}",
+            13 or 113 => string.Create(CultureInfo.InvariantCulture, $"{date:dd MMM yyyy} {Format24HourTime(time, '.', frac)} {offset}"),
             14 or 114 => $"{Format24HourTime(time, '.', frac)} {offset}",
             8 or 24 or 108 => $"{Format24HourTime(time, '.', "")} {offset}",
-            20 or 120 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', "")} {offset}",
-            21 or 25 or 121 => $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', frac)} {offset}",
+            20 or 120 => string.Create(CultureInfo.InvariantCulture, $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', "")} {offset}"),
+            21 or 25 or 121 => string.Create(CultureInfo.InvariantCulture, $"{date:yyyy-MM-dd} {Format24HourTime(time, '.', frac)} {offset}"),
             126 => FormatIsoDateTimeOffset(dto, precision, withOffset: true),
             127 => FormatIsoDateTimeOffset(dto.ToUniversalTime(), precision, withOffset: false) + "Z",
             23 or 1 or 2 or 3 or 4 or 5 or 6 or 7 or 10 or 11 or 12 or 101 or 102 or 103 or 104 or 105 or 106 or 107 or 110 or 111 or 112 => FormatDateSourceWithStyle(date, style, "varchar"),
@@ -263,7 +263,7 @@ internal readonly partial struct SqlValue
     /// </summary>
     private static string Format24HourTime(TimeOnly time, char fracSep, string fractional) =>
         fractional.Length > 0
-            ? $"{time:HH:mm:ss}{fracSep}{fractional}"
+            ? string.Create(CultureInfo.InvariantCulture, $"{time:HH:mm:ss}{fracSep}{fractional}")
             : time.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
 
     /// <summary>
@@ -468,14 +468,6 @@ internal readonly partial struct SqlValue
     }
 
     /// <summary>
-    /// CONVERT-style string formatting for a <c>varbinary</c>/<c>binary</c>/<c>image</c>
-    /// source. Style 0 reinterprets bytes character-by-character through the
-    /// target's encoding (the collation's ANSI code page for <c>varchar</c>,
-    /// UTF-16 LE for <c>nvarchar</c>). Style 1 emits <c>"0xHHHH…"</c> with uppercase hex
-    /// digits; style 2 emits bare <c>"HHHH…"</c>. Any other style raises
-    /// Msg 281 with <c>"varbinary"</c> as the source family name.
-    /// </summary>
-    /// <summary>
     /// Reinterprets bytes as UTF-16 LE, zero-padding a dangling odd byte into
     /// a final character rather than letting the decoder substitute U+FFFD.
     /// Probe-confirmed: real turns <c>0x010203</c> into two characters that
@@ -491,6 +483,14 @@ internal readonly partial struct SqlValue
         return SystemNameSqlType.Utf16LeDecode(padded);
     }
 
+    /// <summary>
+    /// CONVERT-style string formatting for a <c>varbinary</c>/<c>binary</c>/<c>image</c>
+    /// source. Style 0 reinterprets bytes character-by-character through the
+    /// target's encoding (the collation's ANSI code page for <c>varchar</c>,
+    /// UTF-16 LE for <c>nvarchar</c>). Style 1 emits <c>"0xHHHH…"</c> with uppercase hex
+    /// digits; style 2 emits bare <c>"HHHH…"</c>. Any other style raises
+    /// Msg 281 with <c>"varbinary"</c> as the source family name.
+    /// </summary>
     internal SqlValue CoerceBinaryToStringWithStyle(SqlType target, int style)
     {
         var bytes = this.AsBytes;

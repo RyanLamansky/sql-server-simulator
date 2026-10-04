@@ -84,7 +84,8 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 15063: <c>CREATE USER … FOR LOGIN</c> naming the
-    /// login that owns the database, which is already there as <c>dbo</c>.
+    /// login that owns the database, which is already there as <c>dbo</c>, or
+    /// <c>sp_change_users_login</c> mapping a login that already has a user.
     /// Probed 2026-09-27 against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException LoginAlreadyHasAccount(string userName) =>

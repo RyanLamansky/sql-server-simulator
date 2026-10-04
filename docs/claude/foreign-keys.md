@@ -118,13 +118,11 @@ Every column an FK can legally name is stored — a PERSISTED computed column ha
 
 ### Parent side (DELETE / UPDATE / MERGE-DELETE / MERGE-UPDATE)
 
-**The enforcement reads each deleted row's decoded old values, so every DELETE path has to decide it needs them.**
-`DELETE` has two execution paths — the no-FROM `DELETE FROM t WHERE …` and the aliased `DELETE <alias> FROM …` — and each decides up front whether to decode a full old row (an output clause, a trigger, system-versioning, or an incoming FK all require it).
-Both funnel into `CommitDelete`, whose parent-side pass builds its row list from the decoded values and does nothing when every one of them is null.
-Omitting the incoming-FK term from either path's decision therefore disables **every** referential action for that path silently — no Msg 547, no CASCADE, no SET NULL — leaving orphaned children rather than failing.
-The aliased path did exactly that until 2026-08-06; `ForeignKeyTests` now pins all four spellings (plain, aliased, aliased-with-join, and joined to a table variable — the shape an INSTEAD OF trigger body takes against `DELETED`) and asserts the resulting row counts, not just the error.
+**The enforcement reads each written row's decoded old values, so every DELETE and UPDATE walk has to decide it needs them.**
+The walks — plain, aliased, joined, through a view — each decode a full old row only when something reads it, and `CommitDelete` / `CommitUpdate` skip a row whose image is null, so a walk that left out the incoming-FK term disabled **every** referential action for its form silently: no Msg 547, no CASCADE, no SET NULL, orphaned children rather than a failure.
+The aliased DELETE and the joined UPDATE each shipped that way, which is why every walk asks one predicate (`DeleteNeedsOldRows` / `UpdateNeedsOldRows`) and `ForeignKeyTests` pins every spelling by the resulting row counts, not just the error.
 
-**Msg 547 names the table's own database**, like Msg 515 — not the simulator's default database name, which the whole 547 family hardcoded until the same date.
+**Msg 547 names the table's own database**, like Msg 515 — not the simulator's default database name.
 
 **Which constraint is named when several conflict**: the first in `table.IncomingForeignKeys`, i.e. creation order, matching real's own first-by-object-id choice.
 Two databases built from one model by different tools can order their FKs differently, so the *name* in the message can differ between them even though both picked "first" correctly.
@@ -151,6 +149,8 @@ Cascade chains recurse up to `MaxCascadeDepth` (32) and then raise `NotSupported
 **An action writes its child rows as a DELETE or UPDATE of them does** (`Simulation.DeleteRowAt` / `RewriteRowAt`, probed 2026-10-01 against SQL Server 2025): under each row's X with its pre-image noted, its version captured for a SNAPSHOT or RCSI reader — who reads the children as they were through the cascade's commit — and a system-versioned child's old row written to its history, the rewritten row's period starting at the statement's time.
 A SNAPSHOT transaction whose cascade meets a child another transaction changed since its snapshot raises Msg 3960 naming the child table.
 The writes once skipped the version store, so a snapshot read the cascade's effect while it was still in flight, and a delete cascade took no row X at all.
+
+**A rewrite is judged as an UPDATE of the child** (probed 2026-10-04 against SQL Server 2025): the rewritten rows take a new rowversion, ROW START and computed columns (`StampUpdatedRow`, the step every UPDATE-shaped write shares), the child's CHECK constraints refuse naming the parent's statement (`The DELETE statement conflicted with the CHECK constraint …` under a SET NULL), and its keys and indexed views judge the rewritten rows as one set before any lands (Msg 2627 for two children a SET NULL leaves with the same key).
 
 ## A referential action fires the child's triggers
 

@@ -155,11 +155,7 @@ partial class Simulation
         var seen = new HashSet<(int Page, int Slot)>();
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
         var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
-        var oldSnapshotNeeded = output is not null
-            || HasAfterTrigger(batch, table, TriggerActions.Update)
-            || HasInsteadOfTrigger(batch, table, TriggerActions.Update)
-            || table.SystemVersioning is not null
-            || table.IncomingForeignKeys.Count > 0;
+        var oldSnapshotNeeded = UpdateNeedsOldRows(batch, table, table, output);
         var partners = output is { ReadsPartners: true } ? new OutputPartnerRows(sources) : null;
 
         // Hoisted per-row scaffolding: one mutable tuple slot, one cached
@@ -309,14 +305,7 @@ partial class Simulation
         var seen = new HashSet<(int Page, int Slot)>();
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
         var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
-        // CommitDelete's foreign-key enforcement reads the decoded old rows,
-        // as on the joined table path.
-        var needsFull = output is not null
-            || HasAfterTrigger(batch, table, TriggerActions.Delete)
-            || HasInsteadOfTrigger(batch, table, TriggerActions.Delete)
-            || table.SystemVersioning is not null
-            || table.IncomingForeignKeys.Count > 0
-            || table.GraphKind == GraphTableKind.Node;
+        var needsFull = DeleteNeedsOldRows(batch, table, table, output);
         var partners = output is { ReadsPartners: true } ? new OutputPartnerRows(sources) : null;
 
         byte[]?[] currentTuple = [];

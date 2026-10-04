@@ -164,6 +164,37 @@ internal sealed class LockResource
 }
 
 /// <summary>
+/// Terminal condition of a <see cref="LockManager.TryAcquire"/> call. The
+/// throwing <see cref="LockManager.Acquire"/> maps <see cref="TimedOut"/> to
+/// Msg 1222 and <see cref="Deadlocked"/> to Msg 1205; the application-lock
+/// path maps all four to <c>sp_getapplock</c> return codes.
+/// </summary>
+internal enum LockAcquireOutcome
+{
+    /// <summary>Granted without blocking (includes same-owner re-entrance).</summary>
+    Granted,
+
+    /// <summary>Granted after at least one wait on the gate.</summary>
+    GrantedAfterWait,
+
+    /// <summary>The timeout elapsed while conflicting holders remained.</summary>
+    TimedOut,
+
+    /// <summary>The caller was chosen as the deadlock victim (same-thread conflict or wait-for cycle).</summary>
+    Deadlocked,
+
+    /// <summary>
+    /// The command was cancelled while waiting — its <c>CommandTimeout</c>
+    /// elapsed, a client sent an attention, or an in-process caller called
+    /// <c>Cancel()</c>. Distinct from <see cref="TimedOut"/>, which is the
+    /// session's own <c>SET LOCK_TIMEOUT</c> and reports Msg 1222; a
+    /// cancellation reports whatever the command surface reports for an
+    /// aborted execution.
+    /// </summary>
+    Cancelled,
+}
+
+/// <summary>
 /// Per-<see cref="Simulation"/> lock coordinator. Owns the single gate
 /// every Acquire / Release operation serializes through, plus the
 /// cycle-detection walker. The single-gate model trades raw concurrency
@@ -222,37 +253,6 @@ internal sealed class LockResource
 /// holders under the gate, so the snapshot is consistent.
 /// </para>
 /// </remarks>
-/// <summary>
-/// Terminal condition of a <see cref="LockManager.TryAcquire"/> call. The
-/// throwing <see cref="LockManager.Acquire"/> maps <see cref="TimedOut"/> to
-/// Msg 1222 and <see cref="Deadlocked"/> to Msg 1205; the application-lock
-/// path maps all four to <c>sp_getapplock</c> return codes.
-/// </summary>
-internal enum LockAcquireOutcome
-{
-    /// <summary>Granted without blocking (includes same-owner re-entrance).</summary>
-    Granted,
-
-    /// <summary>Granted after at least one wait on the gate.</summary>
-    GrantedAfterWait,
-
-    /// <summary>The timeout elapsed while conflicting holders remained.</summary>
-    TimedOut,
-
-    /// <summary>The caller was chosen as the deadlock victim (same-thread conflict or wait-for cycle).</summary>
-    Deadlocked,
-
-    /// <summary>
-    /// The command was cancelled while waiting — its <c>CommandTimeout</c>
-    /// elapsed, a client sent an attention, or an in-process caller called
-    /// <c>Cancel()</c>. Distinct from <see cref="TimedOut"/>, which is the
-    /// session's own <c>SET LOCK_TIMEOUT</c> and reports Msg 1222; a
-    /// cancellation reports whatever the command surface reports for an
-    /// aborted execution.
-    /// </summary>
-    Cancelled,
-}
-
 internal sealed class LockManager
 {
     /// <summary>
@@ -656,12 +656,6 @@ internal sealed class LockManager
         return true;
     }
 
-    /// <summary>
-    /// Whether <paramref name="owner"/> already holds <paramref name="mode"/>
-    /// on <paramref name="resource"/> — lets a caller that re-covers the same
-    /// keys once per outer row skip the re-entrant acquisition, which would
-    /// otherwise pile up one held-lock entry per pass.
-    /// </summary>
     /// <summary>How many acquisitions of <paramref name="mode"/> by <paramref name="owner"/> on <paramref name="resource"/> are outstanding.</summary>
     public int HoldCount(LockResource resource, LockMode mode, SessionToken owner)
     {
@@ -676,6 +670,12 @@ internal sealed class LockManager
         }
     }
 
+    /// <summary>
+    /// Whether <paramref name="owner"/> already holds <paramref name="mode"/>
+    /// on <paramref name="resource"/> — lets a caller that re-covers the same
+    /// keys once per outer row skip the re-entrant acquisition, which would
+    /// otherwise pile up one held-lock entry per pass.
+    /// </summary>
     public bool IsHeldBy(LockResource resource, LockMode mode, SessionToken owner)
     {
         lock (this.gate)

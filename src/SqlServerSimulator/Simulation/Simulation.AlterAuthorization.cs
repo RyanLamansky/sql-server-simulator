@@ -245,7 +245,7 @@ partial class Simulation
                 if (hadEntry)
                     database.FixedRoleSchemaOwners[schemaId] = moved;
                 else
-                    _ = database.FixedRoleSchemaOwners.Remove(schemaId);
+                    _ = database.FixedRoleSchemaOwners.TryRemove(schemaId, out _);
             });
         }
         if (previous != newOwner)

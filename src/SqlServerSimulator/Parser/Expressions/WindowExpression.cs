@@ -745,16 +745,6 @@ internal sealed class WindowExpression : Expression
     }
 
     /// <summary>
-    /// Wraps an aggregate function that's followed by <c>OVER (...)</c>.
-    /// Entered with cursor on the <c>OVER</c> keyword. Pops the just-parsed
-    /// aggregate from the surrounding <see cref="ParserContext.AggregateCollector"/>
-    /// (since it's evaluated through the window infrastructure rather than
-    /// the GROUP BY pass), parses the OVER clause, and registers the
-    /// resulting <see cref="WindowExpression"/> with
-    /// <see cref="ParserContext.WindowCollector"/>. Leaves the cursor on
-    /// the OVER's closing <c>)</c>.
-    /// </summary>
-    /// <summary>
     /// The refusal of an operand with no type — the bare <c>NULL</c>, or a
     /// derived column filled only with it: Msg 8117 state 3 for the offset and
     /// value functions, the aggregate's own for an aggregate window, and null
@@ -767,6 +757,16 @@ internal sealed class WindowExpression : Expression
         _ => null,
     };
 
+    /// <summary>
+    /// Wraps an aggregate function that's followed by <c>OVER (...)</c>.
+    /// Entered with cursor on the <c>OVER</c> keyword. Pops the just-parsed
+    /// aggregate from the surrounding <see cref="ParserContext.AggregateCollector"/>
+    /// (since it's evaluated through the window infrastructure rather than
+    /// the GROUP BY pass), parses the OVER clause, and registers the
+    /// resulting <see cref="WindowExpression"/> with
+    /// <see cref="ParserContext.WindowCollector"/>. Leaves the cursor on
+    /// the OVER's closing <c>)</c>.
+    /// </summary>
     public static WindowExpression WrapAggregate(AggregateExpression aggregate, ParserContext context)
     {
         var window = WrapAggregateCore(aggregate, context);

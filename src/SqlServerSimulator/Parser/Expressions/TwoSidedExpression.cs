@@ -612,14 +612,6 @@ internal abstract class TwoSidedExpression : Expression
             : IntegerArithmetic(left, right, op, compute);
 
     /// <summary>
-    /// Float / real arithmetic. Both sides convert to <see cref="double"/>;
-    /// result is <c>float</c> unless both operands were <c>real</c>, in
-    /// which case it stays <c>real</c>. Divide-by-zero raises Msg 8134 to
-    /// match the decimal path; native IEEE infinities/NaN aren't surfaced
-    /// (real SQL Server raises 8134 for divide-by-zero on float too,
-    /// verified earlier).
-    /// </summary>
-    /// <summary>
     /// Money / smallmoney arithmetic. Result stays in money when both sides
     /// are money or when one side is integer (verified <c>$5 + $3 → money</c>,
     /// <c>$5 * 3 → money</c>). Same-money-pair preserves the wider of the
@@ -678,6 +670,12 @@ internal abstract class TwoSidedExpression : Expression
             : Decimal38.FromInt64(integer);
     }
 
+    /// <summary>
+    /// Float / real arithmetic, its result type <see cref="SqlType.PromoteForArithmetic"/>'s.
+    /// Divide-by-zero raises Msg 8134 to match the decimal path; native IEEE
+    /// infinities/NaN aren't surfaced (real SQL Server raises 8134 for
+    /// divide-by-zero on float too).
+    /// </summary>
     private protected static SqlValue ApproximateArithmetic(SqlValue left, SqlValue right, char op)
     {
         // The result type comes from the same promotion source of truth the

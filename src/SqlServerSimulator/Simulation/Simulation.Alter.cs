@@ -206,9 +206,9 @@ partial class Simulation
         {
             if (databases.TryGetValue(newName, out var holder) && holder != target)
                 throw SimulatedSqlException.DatabaseAlreadyExists(newName, state: 4);
-            _ = databases.Remove(target.Name);
+            _ = databases.TryRemove(target.Name, out _);
             target.Name = newName;
-            databases.Add(newName, target);
+            databases[newName] = target;
         }
         var messages = context.Connection.PendingMessages;
         messages.Enqueue(SimulatedSqlException.DatabaseNameSetMessage(context.Batch, newName));

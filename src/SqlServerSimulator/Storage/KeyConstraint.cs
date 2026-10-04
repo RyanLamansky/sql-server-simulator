@@ -127,13 +127,6 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     public readonly int ObjectId = objectId;
 
     /// <summary>
-    /// The phrase SQL Server emits in Msg 2627 for this constraint kind:
-    /// <c>"PRIMARY KEY"</c> or <c>"UNIQUE KEY"</c>. SQL Server uses the
-    /// <c>UNIQUE KEY</c> wording — not <c>UNIQUE</c> — for unique-constraint
-    /// violations; the constraint type itself is still spelled <c>UNIQUE</c>
-    /// in DDL.
-    /// </summary>
-    /// <summary>
     /// <c>IGNORE_DUP_KEY</c> as declared in the constraint's <c>WITH (…)</c>
     /// clause: an INSERT whose row would duplicate this key skips that row and
     /// continues, instead of raising Msg 2627. Readonly because real refuses to
@@ -216,5 +209,12 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     /// </summary>
     public readonly Schemas.DataSpaceClause? WrittenDataSpace = options.DataSpace;
 
+    /// <summary>
+    /// The phrase SQL Server emits in Msg 2627 for this constraint kind:
+    /// <c>"PRIMARY KEY"</c> or <c>"UNIQUE KEY"</c>. SQL Server uses the
+    /// <c>UNIQUE KEY</c> wording — not <c>UNIQUE</c> — for unique-constraint
+    /// violations; the constraint type itself is still spelled <c>UNIQUE</c>
+    /// in DDL.
+    /// </summary>
     public string ViolationKindWord => this.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE KEY";
 }

@@ -1049,19 +1049,6 @@ internal sealed partial class Selection
         scope.ParenthesizedInStatement && !context.BindingViewDefinition && context.Batch.UdfFrame is null;
 
     /// <summary>
-    /// Whether the <c>(</c> under the cursor opens a query expression: a
-    /// <c>SELECT</c>, or a parenthesized query that a set operator or the
-    /// closing parenthesis follows — <c>((SELECT 1) UNION (SELECT 2))</c> and
-    /// <c>((SELECT 1))</c>, but not <c>((SELECT 1) d JOIN …)</c>, whose
-    /// parentheses group a join. Every position that opens a query with its
-    /// own <c>(</c> (a derived table, an <c>APPLY</c> body, a subquery, a CTE)
-    /// reads a set-operation chain of parenthesized branches through it
-    /// (probed 2026-10-01 against SQL Server 2025). Restores the cursor.
-    /// </summary>
-    internal static bool OpensParenthesizedQuery(ParserContext context) =>
-        ScanParenthesizedQuery(context, enclosingLevel: false, closeCounts: true);
-
-    /// <summary>
     /// Whether the <c>(</c> under the cursor, the first token inside another
     /// parenthesis, opens a query that a set operator follows — the first
     /// branch of <c>((SELECT 1) UNION (SELECT 2))</c> — or, with
@@ -1069,24 +1056,19 @@ internal sealed partial class Selection
     /// in <c>((SELECT 1))</c>. Restores the cursor; a site reaching the inner
     /// <c>(</c> anyway asks here so an ordinary grouping pays a token test.
     /// </summary>
-    internal static bool LeadsParenthesizedQuery(ParserContext context, bool closeCounts) =>
-        ScanParenthesizedQuery(context, enclosingLevel: true, closeCounts);
-
-    /// <summary>
-    /// One forward pass from the <c>(</c> under the cursor answering whether it
-    /// — or, with <paramref name="enclosingLevel"/>, the parenthesis enclosing
-    /// it — holds a query. The innermost of the leading parentheses holds one
-    /// when a <c>SELECT</c> opens it; each one out holds one when a set
-    /// operator or its own close follows the close of the one inside it, the
-    /// enclosing parenthesis's own close counting only with
+    /// <remarks>
+    /// One forward pass: the innermost of the leading parentheses holds a
+    /// query when a <c>SELECT</c> opens it, and each one out holds one when a
+    /// set operator or its own close follows the close of the one inside it,
+    /// the enclosing parenthesis's own close counting only with
     /// <paramref name="closeCounts"/>. Iterative, so no depth of nesting
-    /// reaches the stack. Restores the cursor.
-    /// </summary>
-    private static bool ScanParenthesizedQuery(ParserContext context, bool enclosingLevel, bool closeCounts)
+    /// reaches the stack.
+    /// </remarks>
+    internal static bool LeadsParenthesizedQuery(ParserContext context, bool closeCounts)
     {
         var checkpoint = context.SaveCheckpoint();
-        // Levels count from the cursor's parenthesis as 1; the enclosing one is 0.
-        var target = enclosingLevel ? 0 : 1;
+        // Levels count from the cursor's parenthesis as 1; the enclosing one,
+        // whose answer this is, is 0.
         var depth = 1;
         var token = context.GetNextOptional();
         while (token is Operator { Character: '(' })
@@ -1098,7 +1080,7 @@ internal sealed partial class Selection
         // Every level from queryLevel in holds a query.
         var queryLevel = depth;
         var opens = token is ReservedKeyword { Keyword: Keyword.Select };
-        while (opens && queryLevel > target)
+        while (opens && queryLevel > 0)
         {
             if (context.GetNextOptional() is not { } current)
             {
@@ -1127,7 +1109,7 @@ internal sealed partial class Selection
                     opens = false;
                     break;
                 }
-                if (--queryLevel <= target)
+                if (--queryLevel <= 0)
                     break;
                 depth--;
             }
@@ -2590,21 +2572,6 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Parses the FROM clause: the leftmost source plus zero or more JOIN
-    /// clauses, followed by the optional WHERE / GROUP BY / HAVING /
-    /// ORDER BY tail. Builds the <see cref="FromSource"/>[] /
-    /// <see cref="JoinSpec"/>[] pair the projector consumes, and registers
-    /// the multi-source type resolver in
-    /// <see cref="ParserContext.OuterTypeResolver"/> so any subqueries
-    /// inside WHERE / HAVING / ON predicates see the chained scope stack.
-    /// </summary>
-    /// <remarks>
-    /// On entry, <see cref="ParserContext.Token"/> is the FROM keyword.
-    /// On return, the cursor is positioned past the WHERE / GROUP BY /
-    /// HAVING / ORDER BY tail, ready for the outer dispatch loop to
-    /// observe the next un-consumed token.
-    /// </remarks>
-    /// <summary>
     /// Scans forward from the cursor for this SELECT's own <c>FROM</c> keyword
     /// and returns a checkpoint positioned on it, or <see langword="null"/>
     /// when the statement has no FROM (<c>SELECT 1</c>) or the scan leaves the
@@ -2723,6 +2690,21 @@ internal sealed partial class Selection
         }
     }
 
+    /// <summary>
+    /// Parses the FROM clause: the leftmost source plus zero or more JOIN
+    /// clauses, followed by the optional WHERE / GROUP BY / HAVING /
+    /// ORDER BY tail. Builds the <see cref="FromSource"/>[] /
+    /// <see cref="JoinSpec"/>[] pair the projector consumes, and registers
+    /// the multi-source type resolver in
+    /// <see cref="ParserContext.OuterTypeResolver"/> so any subqueries
+    /// inside WHERE / HAVING / ON predicates see the chained scope stack.
+    /// </summary>
+    /// <remarks>
+    /// On entry, <see cref="ParserContext.Token"/> is the FROM keyword.
+    /// On return, the cursor is positioned past the WHERE / GROUP BY /
+    /// HAVING / ORDER BY tail, ready for the outer dispatch loop to
+    /// observe the next un-consumed token.
+    /// </remarks>
     private static void ParseFromSourceAndJoins(
         ParserContext context,
         QueryScope scope,
@@ -3039,16 +3021,6 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Parses a JOIN's <c>ON</c> predicate with the sources parsed so far
-    /// installed as the enclosing scope, so a subquery inside the predicate
-    /// types its own projection against them — the same chaining
-    /// <see cref="ConsumeWhereOrderByWithOuterScope"/> gives the WHERE clause.
-    /// SMO's index-scripting query nests
-    /// <c>(select min(index_id) from sys.indexes where object_id =
-    /// tbl.object_id)</c> inside an ON, which needs the outer <c>tbl</c> in
-    /// scope for the inner query to bind.
-    /// </summary>
-    /// <summary>
     /// Parses a FROM source's argument list with the source's scope as the
     /// outer scope of any subquery inside it, so a subquery argument under
     /// <c>APPLY</c> correlates to the left side as a bare column argument
@@ -3062,6 +3034,16 @@ internal sealed partial class Selection
         return parse();
     }
 
+    /// <summary>
+    /// Parses a JOIN's <c>ON</c> predicate with the sources parsed so far
+    /// installed as the enclosing scope, so a subquery inside the predicate
+    /// types its own projection against them — the same chaining
+    /// <see cref="ConsumeWhereOrderByWithOuterScope"/> gives the WHERE clause.
+    /// SMO's index-scripting query nests
+    /// <c>(select min(index_id) from sys.indexes where object_id =
+    /// tbl.object_id)</c> inside an ON, which needs the outer <c>tbl</c> in
+    /// scope for the inner query to bind.
+    /// </summary>
     private static BooleanExpression ParseOnPredicateWithScope(ParserContext context, List<FromSource> sources, int scopeStart, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         var scope = sources.GetRange(scopeStart, sources.Count - scopeStart).ToArray();
@@ -3090,7 +3072,7 @@ internal sealed partial class Selection
     /// constructor) or <c>WITH</c> (a CTE prefix, which no query in a
     /// parenthesized position may carry — routing it to the derived-table
     /// branch is what gets it real's Msg 156 instead of a join group's
-    /// Msg 102), nor a parenthesized query (<see cref="OpensParenthesizedQuery"/>,
+    /// Msg 102), nor a parenthesized query (<see cref="LeadsParenthesizedQuery"/>,
     /// a derived table over a set operation of parenthesized branches).
     /// Entered with the cursor on the token preceding the source
     /// (<c>FROM</c> / a JOIN keyword / a comma / the group's own <c>(</c> when
@@ -3485,15 +3467,6 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Parses one FROM source (see <see cref="ParseSingleFromSourceCore"/>)
-    /// and applies any trailing <c>PIVOT</c> / <c>UNPIVOT</c> table operator.
-    /// The postfix wrapper lives here so both the leftmost source and every
-    /// join-right source pick up PIVOT / UNPIVOT without changing their call
-    /// sites; the cursor-after-source contract is preserved either way (a
-    /// PIVOT / UNPIVOT clause consumes through its own alias and stops at the
-    /// next lookahead token).
-    /// </summary>
-    /// <summary>
     /// Records a real table / view / TVF read on the active securable sink for
     /// the execution-time SELECT permission check, and hands back the
     /// <see cref="Schemas.Synonym"/> the reference was written as (null for a
@@ -3548,6 +3521,15 @@ internal sealed partial class Selection
         }
     }
 
+    /// <summary>
+    /// Parses one FROM source (see <see cref="ParseSingleFromSourceCore"/>)
+    /// and applies any trailing <c>PIVOT</c> / <c>UNPIVOT</c> table operator.
+    /// The postfix wrapper lives here so both the leftmost source and every
+    /// join-right source pick up PIVOT / UNPIVOT without changing their call
+    /// sites; the cursor-after-source contract is preserved either way (a
+    /// PIVOT / UNPIVOT clause consumes through its own alias and stops at the
+    /// next lookahead token).
+    /// </summary>
     private static FromSource ParseSingleFromSource(ParserContext context, QueryScope scope) =>
         ApplyOptionalPivotUnpivot(context, ParseSingleFromSourceCore(context, scope), scope.OuterTypeResolver);
 
@@ -4343,16 +4325,6 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Wraps a built-in rowset function's synthesized plan (OPENJSON /
-    /// STRING_SPLIT / GENERATE_SERIES / fn_listextendedproperty) as a FROM
-    /// source: projects the plan's schema into per-column
-    /// <see cref="HeapColumn"/>s (all nullable — these sources have no
-    /// storage-backed constraints), consumes the optional alias, and defers
-    /// execution to the plan via <see cref="FromSource.LateralPlan"/>. Entered
-    /// with the cursor just past the function's closing <c>)</c> (each parser
-    /// consumes through its own argument list).
-    /// </summary>
-    /// <summary>
     /// Whether a name is one of the <c>sys.</c>-qualified system TVFs the FROM
     /// clause dispatches by name, which an APPLY routes the way it routes a
     /// user TVF — the monitoring shape
@@ -4363,6 +4335,16 @@ internal sealed partial class Selection
         && BuiltInToken.Equals(name.ImmediateQualifier, "sys")
         && BuiltInToken.EqualsAny(name.Leaf, "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_sql_text", "dm_fts_parser", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
 
+    /// <summary>
+    /// Wraps a built-in rowset function's synthesized plan (OPENJSON /
+    /// STRING_SPLIT / GENERATE_SERIES / fn_listextendedproperty) as a FROM
+    /// source: projects the plan's schema into per-column
+    /// <see cref="HeapColumn"/>s (all nullable — these sources have no
+    /// storage-backed constraints), consumes the optional alias, and defers
+    /// execution to the plan via <see cref="FromSource.LateralPlan"/>. Entered
+    /// with the cursor just past the function's closing <c>)</c> (each parser
+    /// consumes through its own argument list).
+    /// </summary>
     private static FromSource BuiltInRowsetSource(ParserContext context, Selection plan)
     {
         var columns = new HeapColumn[plan.Schema.Length];
@@ -5692,12 +5674,6 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// The ordinal an ORDER BY term names when it is an integer literal, or
-    /// null. Parentheses and unary minus are peeled — real's grammar takes a
-    /// signed integer constant here — so <c>(1)</c> is ordinal 1 and <c>-1</c>
-    /// is ordinal -1 (out of range, Msg 108).
-    /// </summary>
-    /// <summary>
     /// Whether an ORDER BY term is a variable real reads as a column position
     /// (Msg 1008): a <see cref="VariableReference"/> reachable through pure
     /// conversions only — <c>@v</c>, <c>(@v)</c>, <c>((@v))</c>,
@@ -5712,6 +5688,12 @@ internal sealed partial class Selection
         return expr is VariableReference;
     }
 
+    /// <summary>
+    /// The ordinal an ORDER BY term names when it is an integer literal, or
+    /// null. Parentheses and unary minus are peeled — real's grammar takes a
+    /// signed integer constant here — so <c>(1)</c> is ordinal 1 and <c>-1</c>
+    /// is ordinal -1 (out of range, Msg 108).
+    /// </summary>
     private static int? IntegerOrdinalOf(Expression expr) => expr switch
     {
         Value { IsLiteral: true, Constant: { IsNull: false } constant } when constant.Type == SqlType.Int32 => constant.AsInt32,

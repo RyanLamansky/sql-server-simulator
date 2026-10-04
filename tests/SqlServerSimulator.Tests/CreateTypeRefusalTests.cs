@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -11,8 +12,6 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class CreateTypeRefusalTests
 {
-    private static int[] Numbers(SimulatedSqlException error) => [.. error.Errors.Select(static e => e.Number)];
-
     [TestMethod]
     [DataRow("char", 2724, 1)]
     [DataRow("binary", 2724, 1)]

@@ -445,11 +445,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Splits a <c>[db.][schema.]table.leaf</c> object name into the parent
-    /// table's <see cref="MultiPartName"/> and the trailing column / index leaf.
-    /// Returns false for a bare 1-part name (no parent table to resolve against).
-    /// </summary>
-    /// <summary>
     /// What a NULL-<c>@objtype</c> <c>sp_rename</c> of <paramref name="objName"/>
     /// renames when no object in the shared namespace answers the name:
     /// <c>"column"</c> or <c>"index"</c> for a table.leaf whose table has one
@@ -471,6 +466,11 @@ partial class Simulation
             : null;
     }
 
+    /// <summary>
+    /// Splits a <c>[db.][schema.]table.leaf</c> object name into the parent
+    /// table's <see cref="MultiPartName"/> and the trailing column / index leaf.
+    /// Returns false for a bare 1-part name (no parent table to resolve against).
+    /// </summary>
     private static bool TrySplitTableAndLeaf(string objName, out MultiPartName tableName, out string leaf)
     {
         tableName = default;

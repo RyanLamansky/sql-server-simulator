@@ -55,7 +55,7 @@ partial class Simulation
             && !context.Simulation.TryResolveServerPrincipalId(loginLink, out _)
             && !context.Simulation.Logins.ContainsKey(loginLink))
         {
-            throw SimulatedSqlException.HelpLoginIsNotValid(loginLink);
+            throw SimulatedSqlException.NotAValidLogin(loginLink);
         }
         // The database owner's login is already here as dbo (probed 2026-09-27).
         if (loginLink is not null && context.CurrentDatabase.Collation.Equals(loginLink, context.CurrentDatabase.OwnerLoginName))
@@ -471,14 +471,14 @@ partial class Simulation
         }
         else if (!PermissionEnforcement.IsOwner(context.Batch, context.CurrentDatabase))
         {
-            throw SimulatedSqlException.DropUserPermissionDenied(name);
+            throw SimulatedSqlException.CannotDropUser(name);
         }
         // DROP USER and DROP ROLE each see only their own kind: a role named to
         // DROP USER, or a user to DROP ROLE, is as missing as any other name
         // (probed 2026-09-29 against SQL Server 2025).
         if (!context.CurrentDatabase.Principals.TryGetValue(name, out var removed) || removed.TypeCode == "R" != isRole)
         {
-            return ifExists ? true : throw (isRole ? SimulatedSqlException.CannotDropRole(name) : SimulatedSqlException.DropUserPermissionDenied(name));
+            return ifExists ? true : throw (isRole ? SimulatedSqlException.CannotDropRole(name) : SimulatedSqlException.CannotDropUser(name));
         }
         // A principal that still owns anything can't be dropped; the refusals
         // name neither the principal nor what it owns (probe-confirmed).

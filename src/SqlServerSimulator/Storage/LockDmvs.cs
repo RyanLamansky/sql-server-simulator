@@ -609,7 +609,7 @@ internal static class LockDmvs
     /// </summary>
     internal static string DescribeResource(Simulation sim, LockResource resource)
     {
-        foreach (var db in sim.Databases.Values)
+        foreach (var (_, db) in sim.Databases)
         {
             foreach (var (_, schema) in db.Schemas)
             {

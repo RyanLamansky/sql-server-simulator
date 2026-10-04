@@ -3,6 +3,15 @@ namespace SqlServerSimulator;
 partial class SimulatedSqlException
 {
     /// <summary>
+    /// <b>Msg -2</b> — a <c>CommandTimeout</c> expiry. Like
+    /// <see cref="CommandCancelled"/> this is manufactured client-side rather
+    /// than sent by a server, and carries SqlClient's own wording (double space
+    /// included) with Class 11 / State 0 — probe-confirmed against SqlClient
+    /// 7.0.2 driving SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ExecutionTimeoutExpired() => new(ExecutionTimeoutExpiredMessage, -2, 11, 0);
+
+    /// <summary>
     /// The client-side exception a cancelled command surfaces — <b>Msg 0</b>,
     /// not a server error: real SQL Server sends no error token for an
     /// attention, so SqlClient manufactures this from its own state and the
@@ -15,15 +24,6 @@ partial class SimulatedSqlException
     /// reader, both surface <c>TaskCanceledException</c> from the ADO.NET base
     /// class on real and here alike.</para>
     /// </summary>
-    /// <summary>
-    /// <b>Msg -2</b> — a <c>CommandTimeout</c> expiry. Like
-    /// <see cref="CommandCancelled"/> this is manufactured client-side rather
-    /// than sent by a server, and carries SqlClient's own wording (double space
-    /// included) with Class 11 / State 0 — probe-confirmed against SqlClient
-    /// 7.0.2 driving SQL Server 2025.
-    /// </summary>
-    internal static SimulatedSqlException ExecutionTimeoutExpired() => new(ExecutionTimeoutExpiredMessage, -2, 11, 0);
-
     internal static SimulatedSqlException CommandCancelled() => new(CommandCancelledMessage, 0, 11, 0);
 
     private const string ExecutionTimeoutExpiredMessage =

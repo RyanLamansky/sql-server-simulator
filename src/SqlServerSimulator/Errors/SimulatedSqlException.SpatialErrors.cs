@@ -316,15 +316,6 @@ partial class SimulatedSqlException
         new($"Could not find property or field '{member}' for type '{clrTypeName}' in assembly '{assemblyName}'.", 6592, 16, 3);
 
     /// <summary>
-    /// Mimics SQL Server error 6506: a CLR-type method was called that the type
-    /// doesn't expose — <c>NumRings()</c> on <c>geometry</c>, say, which is a
-    /// geography-only extension.
-    /// </summary>
-    /// <remarks>Real emits this one without a trailing period, unlike <see cref="ClrPropertyNotFound"/>.</remarks>
-    internal static SimulatedSqlException ClrMethodNotFound(string member, string clrTypeName) =>
-        new($"Could not find method '{member}' for type '{clrTypeName}' in assembly 'Microsoft.SqlServer.Types'", 6506, 16, 10);
-
-    /// <summary>
     /// Mimics SQL Server error 6210: a spatial operand reached <c>MAX</c> /
     /// <c>MIN</c>, which order their input. Real leads its response with this
     /// one and follows with the ordinary Msg 8117, so the pair travels together

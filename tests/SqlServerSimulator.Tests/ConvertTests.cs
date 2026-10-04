@@ -510,6 +510,34 @@ public sealed class ConvertTests
     public void Convert_DateTime_AllStyles(int style, string expected) =>
         AreEqual(expected, ExecuteScalar($"select convert(varchar(40), cast('2026-05-13T14:25:36.123' as datetime), {style})"));
 
+    /// <summary>
+    /// The styles read the same whatever the host's culture: month names,
+    /// separators and the calendar are the server's, not the machine's.
+    /// </summary>
+    [TestMethod]
+    [DataRow("de-DE")]
+    [DataRow("fi-FI")]
+    [DataRow("th-TH")]
+    public void Convert_DateStyles_IgnoreTheHostCulture(string culture)
+    {
+        var host = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo(culture);
+        try
+        {
+            AreEqual("13 May 2026 14:25:36:123|05/13/26  2:25:36 PM|2026-05-13T14:25:36.1234567|13 May 2026 14:25:36.1234567 +00:00", ExecuteScalar("""
+                select concat_ws('|',
+                    convert(varchar(40), cast('2026-05-13T14:25:36.123' as datetime), 113),
+                    convert(varchar(40), cast('2026-05-13T14:25:36.123' as datetime), 22),
+                    convert(varchar(40), cast('2026-05-13T14:25:36.1234567' as datetime2), 126),
+                    convert(varchar(40), cast('2026-05-13 14:25:36.1234567 +00:00' as datetimeoffset), 113))
+                """));
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = host;
+        }
+    }
+
     [TestMethod]
     [DataRow(0, "May 13 2026  2:25PM")]
     [DataRow(9, "May 13 2026  2:25:00:000PM")]

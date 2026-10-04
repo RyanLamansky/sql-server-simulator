@@ -222,6 +222,34 @@ public sealed class MergeJoinViewTests
         _ = simulation.AssertSqlError("merge v using (values (9)) s(x) on 1 = 0 when not matched then insert (x) values (s.x);", 515);
     }
 
+    /// <summary>The written table's CHECK refuses an update as the MERGE statement's (probed 2026-10-04).</summary>
+    [TestMethod]
+    public void Update_RefusedByACheck_NamesTheMergeStatement()
+        => Assert.Contains("The MERGE statement conflicted with the CHECK constraint", Seeded("alter table a add check (x > 0)")
+            .AssertSqlError("merge v using (values (1)) s(id) on v.id = s.id when matched then update set x = -1;", 547).Errors[0].Message);
+
+    /// <summary>An update advances the written table's ROW START, as a MERGE into the table itself does.</summary>
+    [TestMethod]
+    public void Update_AdvancesTheWrittenTablesRowStart()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            """
+            create table a (id int primary key, x int, b_id int,
+                s datetime2 generated always as row start, e datetime2 generated always as row end, period for system_time (s, e));
+            create table b (id int primary key, y int);
+            insert a (id, x, b_id) values (1, 10, 1);
+            insert b values (1, 100);
+            """,
+            "create view v as select a.id, a.x, b.y from a join b on a.b_id = b.id");
+        AreEqual("advanced", simulation.ExecuteScalar("""
+            declare @s0 datetime2 = (select s from a);
+            waitfor delay '00:00:00.020';
+            merge v using (values (1)) s(id) on v.id = s.id when matched then update set x = 11;
+            select iif((select s from a) > @s0, 'advanced', 'same')
+            """));
+    }
+
     [TestMethod]
     public void WhenCondition_ReadsTheOtherTablesColumns()
     {

@@ -93,8 +93,10 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 6506: the method named by an
-    /// <c>EXTERNAL NAME</c> clause does not exist on the type. Real SQL
-    /// Server's text has no terminating period.
+    /// <c>EXTERNAL NAME</c> clause does not exist on the type, or — state 10 —
+    /// a method call names one a CLR type doesn't expose, <c>NumRings()</c> on
+    /// <c>geometry</c> say, a geography-only extension. Real SQL Server's text
+    /// has no terminating period.
     /// </summary>
     internal static SimulatedSqlException ClrMethodNotFound(string methodName, string typeName, string assemblyName, byte state = 1) =>
         new($"Could not find method '{methodName}' for type '{typeName}' in assembly '{assemblyName}'", 6506, 16, state);

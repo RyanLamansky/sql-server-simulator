@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -11,13 +12,6 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class VectorTests
 {
-    private static void AssertError(string commandText, int number, byte state, string message)
-    {
-        var ex = new Simulation().AssertSqlError(commandText, number);
-        AreEqual(message, ex.Errors[0].Message);
-        AreEqual(state, ex.Errors[0].State);
-    }
-
     [TestMethod]
     [DataRow("[1, 2, 3]", "[1.0000000e+000,2.0000000e+000,3.0000000e+000]")]
     [DataRow("[0.1, 123456789.123]", "[1.0000000e-001,1.2345679e+008]")]
@@ -69,7 +63,7 @@ public sealed class VectorTests
     [DataRow("[3.4028236e38, 1]", 42241, 1, "Input JSON contains out-of-range values for float32.")]
     [DataRow("[1,2,3]", 42204, 4, "The vector dimensions 2 and 3 do not match.")]
     public void TextForm_Refusals(string input, int number, int state, string message) =>
-        AssertError($"select cast(N'{input}' as vector(2))", number, (byte)state, message);
+        AssertSqlError($"select cast(N'{input}' as vector(2))", number, (byte)state, message);
 
     [TestMethod]
     [DataRow("declare @v vector(3, float16)", 195, 1, "'float16' is not a recognized vector base type.")]
@@ -84,7 +78,7 @@ public sealed class VectorTests
     [DataRow("declare @d decimal(5, float32)", 102, 1, "Incorrect syntax near 'decimal'.")]
     [DataRow("create type vt from vector(3)", 42212, 1, "Cannot create alias types from a vector datatype.")]
     public void TypeSpec_Refusals(string commandText, int number, int state, string message) =>
-        AssertError(commandText, number, (byte)state, message);
+        AssertSqlError(commandText, number, (byte)state, message);
 
     [TestMethod]
     [DataRow("declare @v vector")]
@@ -252,7 +246,7 @@ public sealed class VectorTests
     [DataRow("select sql_variant_property(v, 'BaseType') from t", 8116, 6, "Argument data type vector is invalid for argument 1 of sql_variant_property function.")]
     [DataRow("select string_agg(v, ',') from t", 8116, 1, "Argument data type vector is invalid for argument 1 of string_agg function.")]
     public void Comparability_Refusals(string query, int number, int state, string message) =>
-        AssertError($"create table t (v vector(2)); {query}", number, (byte)state, message);
+        AssertSqlError($"create table t (v vector(2)); {query}", number, (byte)state, message);
 
     [TestMethod]
     public void Comparability_CountAndIsNullStillWork() =>
@@ -274,7 +268,7 @@ public sealed class VectorTests
     [DataRow("create table t (v vector(2) collate Latin1_General_CI_AS)", 447, 1, "Expression type vector is invalid for COLLATE clause.")]
     [DataRow("create table t (id int, v vector(2), c as vector_norm(v, 'norm2') persisted)", 4936, 1, "Computed column 'c' in table 't' cannot be persisted because the column is non-deterministic.")]
     public void Ddl_Refusals(string commandText, int number, int state, string message) =>
-        AssertError(commandText, number, (byte)state, message);
+        AssertSqlError(commandText, number, (byte)state, message);
 
     [TestMethod]
     public void Ddl_KeyRefusalIsFollowedByMsg1750()
@@ -392,7 +386,7 @@ public sealed class VectorTests
     [DataRow("vector_norm(@v)", 174, 1, "The vector_norm function requires 2 argument(s).")]
     [DataRow("vectorproperty(@v)", 174, 1, "The vectorproperty function requires 2 argument(s).")]
     public void Functions_Refusals(string call, int number, int state, string message) =>
-        AssertError($"declare @v vector(2) = '[1,2]', @w vector(3) = '[1,2,3]', @big vector(2) = '[3e38,-3e38]'; select {call}", number, (byte)state, message);
+        AssertSqlError($"declare @v vector(2) = '[1,2]', @w vector(3) = '[1,2,3]', @big vector(2) = '[3e38,-3e38]'; select {call}", number, (byte)state, message);
 
     [TestMethod]
     public void Functions_TwoArgumentDistanceReportsBothArityErrors()

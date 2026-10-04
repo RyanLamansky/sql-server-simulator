@@ -1,5 +1,5 @@
-using System.Data.Common;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -15,9 +15,6 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class StatementAtomicityTests
 {
-    private static int CountRows(DbConnection conn, string table) =>
-        (int)conn.CreateCommand($"select count(*) from {table}").ExecuteScalar()!;
-
     [TestMethod]
     public void MultiRowInsert_PrimaryKeyViolation_RollsBackEntireStatement()
     {

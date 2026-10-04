@@ -9,12 +9,6 @@ namespace SqlServerSimulator;
 partial class SimulatedSqlException
 {
     /// <summary>
-    /// Msg 282, when a procedure's <c>RETURN</c> value is NULL; names the
-    /// procedure as it is stored, whatever the <c>EXEC</c> spelled. SqlClient
-    /// raises no <c>InfoMessage</c> for it when it trails a result set under
-    /// <c>ExecuteReader</c> or <c>ExecuteScalar</c>, though real sends it.
-    /// </summary>
-    /// <summary>
     /// Msg 337, class 0: a float literal below the smallest normal value,
     /// which reads as 0; <paramref name="literal"/> is its written text.
     /// </summary>
@@ -32,6 +26,12 @@ partial class SimulatedSqlException
         return note;
     }
 
+    /// <summary>
+    /// Msg 282, when a procedure's <c>RETURN</c> value is NULL; names the
+    /// procedure as it is stored, whatever the <c>EXEC</c> spelled. SqlClient
+    /// raises no <c>InfoMessage</c> for it when it trails a result set under
+    /// <c>ExecuteReader</c> or <c>ExecuteScalar</c>, though real sends it.
+    /// </summary>
     internal static SimulatedError NullReturnStatusMessage(BatchContext batch, string procedureName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 282, $"The '{procedureName}' procedure attempted to return a status of NULL, which is not allowed. A status of 0 will be returned instead.");
 

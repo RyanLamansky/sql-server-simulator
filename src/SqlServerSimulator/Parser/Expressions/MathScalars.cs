@@ -70,6 +70,15 @@ internal static class MathScalars
     }
 
     /// <summary>
+    /// <paramref name="argument"/>, unless it is a bare <c>NULL</c>, which a
+    /// function declaring its value <c>float</c> takes as a <c>float</c> NULL:
+    /// <c>ABS(NULL)</c> is a <c>float</c> column where <c>ABS(1)</c> keeps
+    /// <c>int</c> (probed 2026-09-26 against SQL Server 2025).
+    /// </summary>
+    public static Expression FloatForBareNull(Expression argument) =>
+        Expression.IsUntypedNullLiteral(argument) ? new Value(SqlValue.Null(SqlType.Float)) : argument;
+
+    /// <summary>
     /// Applies SQL Server's implicit string-to-float cast for math scalar
     /// inputs. String operands route through
     /// <see cref="SqlValue.CoerceTo"/> targeting <c>float</c> (Msg 8114
@@ -79,15 +88,6 @@ internal static class MathScalars
     /// <c>DEGREES(N'1')</c>, <c>SIGN('0')</c>, etc. all accept varchar /
     /// nvarchar / nchar / char input.
     /// </summary>
-    /// <summary>
-    /// <paramref name="argument"/>, unless it is a bare <c>NULL</c>, which a
-    /// function declaring its value <c>float</c> takes as a <c>float</c> NULL:
-    /// <c>ABS(NULL)</c> is a <c>float</c> column where <c>ABS(1)</c> keeps
-    /// <c>int</c> (probed 2026-09-26 against SQL Server 2025).
-    /// </summary>
-    public static Expression FloatForBareNull(Expression argument) =>
-        Expression.IsUntypedNullLiteral(argument) ? new Value(SqlValue.Null(SqlType.Float)) : argument;
-
     public static SqlValue CoerceImplicit(SqlValue value) =>
         SqlType.IsStringCategory(value.Type) ? value.CoerceTo(SqlType.Float) : value;
 

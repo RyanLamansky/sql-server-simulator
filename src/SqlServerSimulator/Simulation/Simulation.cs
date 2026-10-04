@@ -44,7 +44,7 @@ public sealed partial class Simulation
         // re-points each system database's collation to the chosen server
         // collation.
         foreach (var (name, id) in SystemDatabaseIds)
-            this.Databases.Add(name, new Database(name, this.ServerCollation) { Id = id });
+            this.Databases[name] = new Database(name, this.ServerCollation) { Id = id };
         // Real ships master / tempdb / msdb with cross-database chaining on and
         // msdb trustworthy; model and every user database start with both off
         // (probe-confirmed against SQL Server 2025). A new database never
@@ -560,8 +560,12 @@ public sealed partial class Simulation
     /// (Msg 911 on miss). Fresh connections pick the lazy seed when present,
     /// else the alphabetically-first entry (see
     /// <see cref="SimulatedDbConnection"/>'s ResolveInitialDatabase).
+    /// Every session reads it while another may create, drop or rename a
+    /// database, so it is concurrent; a writer still takes its lock, which
+    /// serializes the read-modify-writes (id allocation, the rename's re-key,
+    /// the name checks) the dictionary alone can't make atomic.
     /// </summary>
-    internal readonly Dictionary<string, Database> Databases = new(BuiltInToken.Comparer);
+    internal readonly ConcurrentDictionary<string, Database> Databases = new(BuiltInToken.Comparer);
 
     /// <summary>
     /// Assigns <paramref name="db"/> the smallest free <c>database_id</c> ≥ 5
@@ -593,13 +597,14 @@ public sealed partial class Simulation
         if (this.Databases.TryGetValue(ModelDatabaseName, out var model))
             db.ScopedConfiguration.CopyFrom(model.ScopedConfiguration);
         var used = new HashSet<short>();
-        foreach (var existing in this.Databases.Values)
+        foreach (var (_, existing) in this.Databases)
             _ = used.Add(existing.Id);
         short id = 5;
         while (used.Contains(id))
             id++;
         db.Id = id;
-        this.Databases.Add(db.Name, db);
+        if (!this.Databases.TryAdd(db.Name, db))
+            throw new ArgumentException($"A database named '{db.Name}' is already registered.", nameof(db));
     }
 
     /// <summary>
@@ -2845,18 +2850,6 @@ public sealed partial class Simulation
         && !(IsDeferredCompileError(ex) && !ex.EndedCalledBatch);
 
     /// <summary>
-    /// True for an error that ends the whole batch rather than its statement:
-    /// a compile error of a statement the batch's compile deferred
-    /// (<see cref="IsDeferredCompileError"/>) or any severity-15 error — a
-    /// syntax error the compile walk stopped short of, or a run-time one such
-    /// as a negative TOP's Msg 127 — the procedure or dynamic SQL it ended
-    /// hasn't already contained, an uncaught <c>THROW</c>, or an error
-    /// <c>SET XACT_ABORT ON</c> promoted (probed 2026-09-26 against SQL Server
-    /// 2025). After a syntax error none of the batch runs on, where resuming
-    /// at the next boundary keyword would read the broken statement's tail as
-    /// statements of its own.
-    /// </summary>
-    /// <summary>
     /// Refuses <c>CREATE</c> / <c>ALTER</c> / <c>DROP DATABASE</c> and
     /// <c>ALTER DATABASE SCOPED CONFIGURATION</c> inside a user transaction —
     /// Msg 226 (states 5, 6, 7) or Msg 574 for the drop — ahead of the rest of
@@ -2955,6 +2948,18 @@ public sealed partial class Simulation
         }
     }
 
+    /// <summary>
+    /// True for an error that ends the whole batch rather than its statement:
+    /// a compile error of a statement the batch's compile deferred
+    /// (<see cref="IsDeferredCompileError"/>) or any severity-15 error — a
+    /// syntax error the compile walk stopped short of, or a run-time one such
+    /// as a negative TOP's Msg 127 — the procedure or dynamic SQL it ended
+    /// hasn't already contained, an uncaught <c>THROW</c>, or an error
+    /// <c>SET XACT_ABORT ON</c> promoted (probed 2026-09-26 against SQL Server
+    /// 2025). After a syntax error none of the batch runs on, where resuming
+    /// at the next boundary keyword would read the broken statement's tail as
+    /// statements of its own.
+    /// </summary>
     private static bool EndsBatch(SimulatedSqlException ex)
         => ((IsDeferredCompileError(ex) || (ex.Class == 15 && !ex.RaisedByRaiserror)) && !ex.EndedCalledBatch) || ex.TerminatesBatch || ex.XactAbortPromoted || ex.IsAttention;
 
@@ -3786,27 +3791,6 @@ public sealed partial class Simulation
     }
 
     /// <summary>
-    /// Wraps a mutation statement (INSERT / UPDATE / DELETE / MERGE) with
-    /// statement-level atomicity. Routes mutations to the connection's
-    /// active transaction's <see cref="UndoLog"/> when one exists (Bundle 2
-    /// — explicit <c>BeginTransaction</c>); otherwise creates a fresh
-    /// per-statement log (Bundle 1 — auto-commit). In both cases the
-    /// statement captures a marker at entry; on exception only the entries
-    /// appended this statement are unwound, which matches SQL Server's
-    /// "failed statement leaves the surrounding transaction alive" behavior
-    /// (probe-confirmed 2026-05-08). Identity / rowversion counters bypass
-    /// the log entirely.
-    /// </summary>
-    /// <summary>
-    /// Parses <c>SAVE TRAN[SACTION] &lt;name&gt;</c> and records the active
-    /// transaction's current undo-log position against the name. EF Core 10
-    /// emits this per SaveChanges call inside an active
-    /// <c>Database.BeginTransaction</c> so a failed SaveChanges can roll
-    /// back just that save's writes via <c>ROLLBACK TRANSACTION &lt;name&gt;</c>.
-    /// Returns false if the next token isn't <c>TRAN</c> / <c>TRANSACTION</c>
-    /// (the <c>case … when</c> dispatch falls through to a syntax error).
-    /// </summary>
-    /// <summary>
     /// The transaction or savepoint name under the cursor, refused past 32
     /// characters while compiling (Msg 103 state 2, probe-confirmed against
     /// SQL Server 2025 for every statement that takes one).
@@ -3835,6 +3819,15 @@ public sealed partial class Simulation
         return held.Length > SimulatedDbTransaction.MaxNameLength ? held[..SimulatedDbTransaction.MaxNameLength] : held;
     }
 
+    /// <summary>
+    /// Parses <c>SAVE TRAN[SACTION] &lt;name&gt;</c> and records the active
+    /// transaction's current undo-log position against the name. EF Core 10
+    /// emits this per SaveChanges call inside an active
+    /// <c>Database.BeginTransaction</c> so a failed SaveChanges can roll
+    /// back just that save's writes via <c>ROLLBACK TRANSACTION &lt;name&gt;</c>.
+    /// Returns false if the next token isn't <c>TRAN</c> / <c>TRANSACTION</c>
+    /// (the <c>case … when</c> dispatch falls through to a syntax error).
+    /// </summary>
     private static bool TryParseSavepoint(ParserContext context)
     {
         if (!context.MoveNext() || context.Token is not ReservedKeyword { Keyword: Keyword.Tran or Keyword.Transaction })
@@ -4233,6 +4226,18 @@ public sealed partial class Simulation
         }
     }
 
+    /// <summary>
+    /// Wraps a mutation statement (INSERT / UPDATE / DELETE / MERGE) with
+    /// statement-level atomicity. Routes mutations to the connection's
+    /// active transaction's <see cref="UndoLog"/> when one exists (an
+    /// explicit <c>BeginTransaction</c>); otherwise creates a fresh
+    /// per-statement log (auto-commit). In both cases the
+    /// statement captures a marker at entry; on exception only the entries
+    /// appended this statement are unwound, which matches SQL Server's
+    /// "failed statement leaves the surrounding transaction alive" behavior
+    /// (probe-confirmed 2026-05-08). Identity / rowversion counters bypass
+    /// the log entirely.
+    /// </summary>
     private static SimulatedStatementOutcome RunMutation(ParserContext context, Func<ParserContext, SimulatedStatementOutcome> body)
     {
         context.Batch.CurrentStatement.WritesRows = true;

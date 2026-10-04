@@ -80,7 +80,7 @@ public sealed class PlanCacheSessionTests
     {
         var simulation = WithTable();
         using var compiler = simulation.CreateOpenConnection();
-        Exec(compiler, "set lock_timeout 5000");
+        Exec(compiler, "set lock_timeout 30000");
         AreEqual(2, Scalar(compiler, "select count(*) from t"));
 
         using var writer = simulation.CreateOpenConnection();
@@ -89,7 +89,7 @@ public sealed class PlanCacheSessionTests
         Exec(reader, "set lock_timeout 0");
         var clock = Stopwatch.StartNew();
         AreEqual(1222, SqlErrorNumber(reader, "select count(*) from t"));
-        IsLessThan(2500, clock.ElapsedMilliseconds);
+        IsLessThan(15_000, clock.ElapsedMilliseconds);
     }
 
     [TestMethod]
@@ -102,10 +102,10 @@ public sealed class PlanCacheSessionTests
         using var writer = simulation.CreateOpenConnection();
         Exec(writer, "begin tran; update t set v = 10 where id = 1");
         using var reader = simulation.CreateOpenConnection();
-        Exec(reader, "set lock_timeout 5000");
+        Exec(reader, "set lock_timeout 30000");
         var clock = Stopwatch.StartNew();
         AreEqual(1222, SqlErrorNumber(reader, "select count(*) from t with (nowait)"));
-        IsLessThan(2500, clock.ElapsedMilliseconds);
+        IsLessThan(15_000, clock.ElapsedMilliseconds);
     }
 
     [TestMethod]

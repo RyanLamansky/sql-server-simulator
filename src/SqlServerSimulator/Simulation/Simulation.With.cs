@@ -8,21 +8,6 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Parses a <c>WITH [XMLNAMESPACES (…),] cte_name [(col, …)] AS
-    /// (SELECT …) [, …]</c> prefix and registers each binding on
-    /// <paramref name="context"/>'s <see cref="ParserContext.CteBindings"/> /
-    /// <see cref="ParserContext.XmlNamespaces"/>. The bindings live for the
-    /// immediately-following statement only — the statement loop clears
-    /// the slots on its next iteration.
-    /// </summary>
-    /// <remarks>
-    /// On entry <see cref="ParserContext.Token"/> is the <c>WITH</c>
-    /// keyword. On return it sits on the first token of the dispatched
-    /// statement (<c>SELECT</c> / <c>INSERT</c> / <c>UPDATE</c> /
-    /// <c>DELETE</c> / <c>MERGE</c>) so the surrounding switch can resume
-    /// dispatch.
-    /// </remarks>
-    /// <summary>
     /// Parses a stored body's query — an optional <c>WITH cte [, …]</c> prefix
     /// followed by the <c>SELECT</c> it scopes to — at statement depth. The
     /// seam every body-parse site shares: <c>CREATE</c> / <c>ALTER VIEW</c> and
@@ -108,6 +93,21 @@ partial class Simulation
             context.Batch.CurrentStatement.ChangeTrackingContext = value.IsNull ? null : value.AsBytes;
     }
 
+    /// <summary>
+    /// Parses a <c>WITH [XMLNAMESPACES (…),] cte_name [(col, …)] AS
+    /// (SELECT …) [, …]</c> prefix and registers each binding on
+    /// <paramref name="context"/>'s <see cref="ParserContext.CteBindings"/> /
+    /// <see cref="ParserContext.XmlNamespaces"/>. The bindings live for the
+    /// immediately-following statement only — the statement loop clears
+    /// the slots on its next iteration.
+    /// </summary>
+    /// <remarks>
+    /// On entry <see cref="ParserContext.Token"/> is the <c>WITH</c>
+    /// keyword. On return it sits on the first token of the dispatched
+    /// statement (<c>SELECT</c> / <c>INSERT</c> / <c>UPDATE</c> /
+    /// <c>DELETE</c> / <c>MERGE</c>) so the surrounding switch can resume
+    /// dispatch.
+    /// </remarks>
     private static void ParseCteBindings(ParserContext context)
     {
         var bindings = new Dictionary<string, CteBinding>(StringComparer.OrdinalIgnoreCase);

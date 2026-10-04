@@ -168,7 +168,7 @@ partial class Simulation
             ]);
         }
         if (only is not null && rows.Count == 0)
-            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.ServerDoesNotExistForHelp(values[0].AsString.TrimEnd(' ')), 19);
+            throw AtSystemProcedureLine(calledAs, SimulatedSqlException.LinkedServerDoesNotExist(values[0].AsString.TrimEnd(' ')), 19);
         yield return new SimulatedSqlResultSet(
             [SqlType.NVarchar, SqlType.GetChar(30), SqlType.Varchar, SqlType.GetChar(4), SqlType.NVarchar, SqlType.Int32, SqlType.Int32],
             ["name", "network_name", "status", "id", "collation_name", "connect_timeout", "query_timeout"], rows);

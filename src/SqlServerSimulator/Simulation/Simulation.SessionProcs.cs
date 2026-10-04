@@ -248,7 +248,7 @@ partial class Simulation
         // login sys.server_principals carries) and the logins the live sessions
         // report are the simulator's whole login evidence.
         if (filter.Login is { } loginName && !WhoLoginExists(simulation, connections, loginName))
-            throw SimulatedSqlException.HelpLoginIsNotValid(loginName);
+            throw SimulatedSqlException.NotAValidLogin(loginName);
 
         var sessions = new List<WhoSession>(connections.Length);
         foreach (var connection in connections)

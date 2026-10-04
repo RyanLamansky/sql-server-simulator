@@ -127,6 +127,17 @@ public sealed class IndexedViewTests
         AreEqual(3, sim.ExecuteScalar("select count(*) from dbo.b where id in (1,2,3)"));
     }
 
+    /// <summary>A MERGE's inserted and updated rows are judged as an INSERT's and an UPDATE's are.</summary>
+    [TestMethod]
+    [DataRow("merge dbo.b as t using (values (1)) s(id) on 1 = 0 when not matched then insert values (s.id, 99, 999);")]
+    [DataRow("merge dbo.b as t using (values (3)) s(id) on t.id = s.id when matched then update set id = 2;")]
+    public void Merge_ProducingDuplicateViewKey_Msg2601(string merge)
+    {
+        var sim = SeedIndexedView();
+        Contains("'dbo.v'", sim.AssertSqlError(merge, 2601).Message);
+        AreEqual("1,2,3", sim.ExecuteScalar("select string_agg(id, ',') within group (order by id) from dbo.b"));
+    }
+
     [TestMethod]
     public void Insert_NonDuplicate_Succeeds()
     {

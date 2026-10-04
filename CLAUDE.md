@@ -195,6 +195,9 @@ Write to them up front to save a build round trip:
 - **SSS009**: a non-public type is not a `record`; use a plain class or struct with readonly fields, implementing `IEquatable<T>` if it is a key (`Simulation.PlanCacheKey`).
 - **SSS012**: never read a `ConcurrentDictionary`'s `.Values` / `.Keys` (a lock sweep and a full copy per read) or `.IsEmpty` (a lock sweep whenever it answers yes); enumerate the dictionary (`foreach (var (_, v) in dict)`, `dict.EnumerateValues()`, `dict.IsEmptyLockFree()`), and take `dict.ToArray()` where a point-in-time snapshot is the point.
 - **SSS013**: hold a `ParserContext` field for a lexical scope with a guard — `using var x = ParserScope.Enter(ref context.Field, value);`, `ParserScope.Save`, or an `Enter*` method on `ParserContext` for a grouped position — never a saved local restored in a `finally`.
+- **SSS014**: a `$"…"` that becomes a `string` formats its holes with the current culture, which CA1305 doesn't check; build one holding a date, time or floating-point hole with `string.Create(CultureInfo.InvariantCulture, $"…")`.
+- **SSS015**: never read the host's local clock or zone (`DateTime.Now`, `TimeZoneInfo.Local`, `ToLocalTime()`); the simulated server's clock is UTC — the statement's `UtcNow`, the transaction's `SystemTimeUtc`.
+- **SSS016**: one `///` comment, one `<summary>`; a second is a member inserted between another member's documentation and its declaration, so move the displaced block back to its member.
 - A deliberate exception takes `#pragma warning disable SSSnnn` plus a one-line rationale.
 - **MSTEST0049**: async tests thread `TestContext.CancellationToken` (`public TestContext TestContext { get; set; } = null!;`).
 - **MSTEST0037**: prefer `Assert.IsEmpty(values)` and typed asserts over generic ones.

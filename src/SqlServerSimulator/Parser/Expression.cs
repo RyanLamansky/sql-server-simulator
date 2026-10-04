@@ -1647,6 +1647,18 @@ internal abstract class Expression : ExpressionNode
     }
 
     /// <summary>
+    /// The diagnostic an operand that admits only scalar expressions raises,
+    /// picked by what the left-to-right reading met first: a column reference
+    /// already recorded outranks the construct now being refused, since real
+    /// reports <c>PRINT bbb + (SELECT 1)</c> as Msg 128 and
+    /// <c>PRINT (SELECT 1) + bbb</c> as Msg 1046.
+    /// </summary>
+    internal static SimulatedSqlException ScalarOnlyOperandError(ParserContext context) =>
+        context.ScalarOnlyColumnReference is { } reference
+            ? SimulatedSqlException.NameNotPermittedInThisContext(reference.ReferencedName.ToString())
+            : SimulatedSqlException.SubqueriesNotAllowedInThisContext();
+
+    /// <summary>
     /// Parses a grouped expression starting at the opening <c>(</c>. Two
     /// shapes share the leading paren: a parenthesized expression
     /// (<c>(1 + 2)</c>, parses as <see cref="Parenthesized"/>) or a scalar
@@ -1659,18 +1671,6 @@ internal abstract class Expression : ExpressionNode
     /// charges the shared nesting budget before recursing (Msg 191 on
     /// overflow).
     /// </summary>
-    /// <summary>
-    /// The diagnostic an operand that admits only scalar expressions raises,
-    /// picked by what the left-to-right reading met first: a column reference
-    /// already recorded outranks the construct now being refused, since real
-    /// reports <c>PRINT bbb + (SELECT 1)</c> as Msg 128 and
-    /// <c>PRINT (SELECT 1) + bbb</c> as Msg 1046.
-    /// </summary>
-    internal static SimulatedSqlException ScalarOnlyOperandError(ParserContext context) =>
-        context.ScalarOnlyColumnReference is { } reference
-            ? SimulatedSqlException.NameNotPermittedInThisContext(reference.ReferencedName.ToString())
-            : SimulatedSqlException.SubqueriesNotAllowedInThisContext();
-
     private static Expression ParseGroupedExpression(ParserContext context)
     {
         context.MoveNextRequired();

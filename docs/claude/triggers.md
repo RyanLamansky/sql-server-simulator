@@ -66,11 +66,11 @@ Server-scope triggers (`CREATE TRIGGER … ON ALL SERVER`) — logon triggers an
 
 ## Implementation map
 
-- **Storage**: [`Trigger`](../../src/SqlServerSimulator/Trigger.cs) class (Schema / Name / ObjectId / **Parent** (`object` — HeapTable or View) / Actions flags / Timing / BodyText / IsDisabled / CreateDate / `ParentObjectId` accessor), [`Schema.Triggers`](../../src/SqlServerSimulator/Schema.cs) per-schema dict.
+- **Storage**: [`Trigger`](../../src/SqlServerSimulator/Schemas/Trigger.cs) class (Schema / Name / ObjectId / **Parent** (`object` — HeapTable or View) / Actions flags / Timing / BodyText / IsDisabled / CreateDate / `ParentObjectId` accessor), [`Schema.Triggers`](../../src/SqlServerSimulator/Schema.cs) per-schema dict.
 - **Parser**: [`Simulation.CreateTrigger.cs`](../../src/SqlServerSimulator/Simulation/Simulation.CreateTrigger.cs) (CREATE + ALTER + CREATE OR ALTER + DISABLE/ENABLE), routed from `Simulation.Create.cs` / `Simulation.Alter.cs`.
   `DROP TRIGGER` routed through the shared `Simulation.Drop.cs` dispatch (which also cascade-drops triggers when DROP TABLE / DROP VIEW removes the parent).
 - **Frame**: [`TriggerFrame`](../../src/SqlServerSimulator/Parser/TriggerFrame.cs) holds the per-fire pseudo-table instances.
-  Set on the child `BatchContext` via the new trigger-body constructor; read by [`BatchContext.TryResolveTable`](../../src/SqlServerSimulator/Parser/BatchContext.cs) ahead of the temp / `@t` / schema dispatch.
+  Set on the child `BatchContext` via the new trigger-body constructor; read by [`BatchContext.TryResolveTable`](../../src/SqlServerSimulator/Parser/BatchContext.Resolution.cs) ahead of the temp / `@t` / schema dispatch.
 - **Dispatch**: [`Simulation.InvokeTrigger.cs`](../../src/SqlServerSimulator/Simulation/Simulation.InvokeTrigger.cs) — `FireTriggers` walks every schema's `Triggers` dict, materializes the pseudo-tables once per fire, allocates a child `BatchContext`, runs the body via `DispatchStatementsUntil`.
   `TryFireInsteadOfTrigger` is the single-trigger INSTEAD OF dispatch; returns `true` if a trigger fired.
   `HasAfterTrigger` / `HasInsteadOfTrigger` are the fast-path predicates DML sites call first to avoid per-row snapshot capture when no trigger is attached.

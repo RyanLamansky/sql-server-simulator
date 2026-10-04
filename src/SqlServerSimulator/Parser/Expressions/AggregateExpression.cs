@@ -408,11 +408,6 @@ internal sealed class AggregateExpression : Expression
     };
 
     /// <summary>
-    /// A CLR aggregate's arguments each bind to their declared parameter's
-    /// type as an assignment would; the result is the declared
-    /// <c>RETURNS</c> type.
-    /// </summary>
-    /// <summary>
     /// A spatial aggregate's operand binds like a CLR parameter of the
     /// aggregate's own type — a string converts, an <c>int</c> is Msg 206 —
     /// and the result is that type.
@@ -423,6 +418,11 @@ internal sealed class AggregateExpression : Expression
         return this.SpatialType!;
     }
 
+    /// <summary>
+    /// A CLR aggregate's arguments each bind to their declared parameter's
+    /// type as an assignment would; the result is the declared
+    /// <c>RETURNS</c> type.
+    /// </summary>
     private SqlType BindClrArguments(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var function = this.ClrFunction!;
@@ -661,15 +661,6 @@ internal sealed class AggregateExpression : Expression
         this.Kind is AggregateKind.Max or AggregateKind.Min or AggregateKind.Sum ? this.Operand?.ResultAliasType : null;
 
     /// <summary>
-    /// Maps <c>SUM</c>'s operand type to its result type per SQL Server's
-    /// rules: integer family widens to <see cref="SqlType.Int32"/> for
-    /// tinyint/smallint and stays at the operand type for int/bigint;
-    /// decimal becomes <c>decimal(38, s)</c> preserving scale; <c>real</c>
-    /// widens to <c>float</c>; float and money pass through. Probed against
-    /// SQL Server 2025 — int does NOT auto-widen to bigint, so an overflowing
-    /// sum raises Msg 8115.
-    /// </summary>
-    /// <summary>
     /// <c>APPROX_PERCENTILE_CONT</c> reads any number into <c>float</c>;
     /// <c>APPROX_PERCENTILE_DISC</c> answers in its operand's type but takes
     /// no <c>decimal</c> / <c>numeric</c>; anything else is Msg 402 against
@@ -758,6 +749,15 @@ internal sealed class AggregateExpression : Expression
         _ => throw SimulatedSqlException.OperandDataTypeInvalid(operandType, "product"),
     };
 
+    /// <summary>
+    /// Maps <c>SUM</c>'s operand type to its result type per SQL Server's
+    /// rules: integer family widens to <see cref="SqlType.Int32"/> for
+    /// tinyint/smallint and stays at the operand type for int/bigint;
+    /// decimal becomes <c>decimal(38, s)</c> preserving scale; <c>real</c>
+    /// widens to <c>float</c>; float and money pass through. Probed against
+    /// SQL Server 2025 — int does NOT auto-widen to bigint, so an overflowing
+    /// sum raises Msg 8115.
+    /// </summary>
     private static SqlType DeriveSumResultType(SqlType operandType) => operandType switch
     {
         var t when t == SqlType.TinyInt || t == SqlType.SmallInt => SqlType.Int32,

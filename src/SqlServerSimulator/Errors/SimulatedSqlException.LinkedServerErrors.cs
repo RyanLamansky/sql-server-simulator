@@ -193,10 +193,6 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException RemoteRowDataNotConvertible(LinkedServer server) =>
         new($"Cannot get the data of the row from the OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\". Could not convert the data value due to reasons other than sign mismatch or overflow.", 7346, 16, 2) { TerminatesBatch = true };
 
-    /// <summary>Msg 179: an <c>OUTPUT</c> argument to <c>EXEC … AT</c> that isn't a variable.</summary>
-    internal static SimulatedSqlException OutputOnConstantArgument() =>
-        new("Cannot use the OUTPUT option when passing a constant to a stored procedure.", 179, 15, 1);
-
     /// <summary>
     /// Msg 102 at state 3, near the closing parenthesis: <c>EXEC ( … )</c>
     /// passing arguments without an <c>AT</c> naming the server they're for.

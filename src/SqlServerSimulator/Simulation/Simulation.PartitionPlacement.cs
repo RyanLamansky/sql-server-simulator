@@ -11,13 +11,6 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Skips trailing <c>ON &lt;filegroup&gt;</c> and <c>TEXTIMAGE_ON &lt;filegroup&gt;</c>
-    /// placement clauses where the placement isn't recorded.
-    /// </summary>
-    internal static void SkipOptionalFilegroupClause(ParserContext context) =>
-        _ = ParseOptionalDataSpaceClause(context, out _);
-
-    /// <summary>
     /// Parses the trailing placement clauses of a table, an index or a key
     /// constraint: <c>ON name</c> or <c>ON scheme(column [, …])</c>, then
     /// <c>TEXTIMAGE_ON name</c>, whose name comes back in

@@ -293,13 +293,6 @@ internal sealed class ColumnProperty : Expression
     }
 
     /// <summary>
-    /// A table column's <c>IsIndexable</c>: 0 for a MAX, LOB, xml or spatial
-    /// type or a vector, else 1 for a stored column and, for a computed one, 1 when it is
-    /// deterministic and either persisted or precise (probed 2026-09-26 against
-    /// SQL Server 2025 under the default SET options, which that answer also
-    /// weighs on real).
-    /// </summary>
-    /// <summary>
     /// A view column's <c>IsIndexable</c>: 0 unless the view is schema-bound,
     /// then — as a table's column — 0 for a MAX, LOB, xml, spatial or vector
     /// type, and otherwise 1 for a deterministic column that is precise or
@@ -322,6 +315,13 @@ internal sealed class ColumnProperty : Expression
         column.IsLob || column.Type is XmlSqlType or GeographySqlType or GeometrySqlType or VectorSqlType
             or VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel };
 
+    /// <summary>
+    /// A table column's <c>IsIndexable</c>: 0 for a MAX, LOB, xml or spatial
+    /// type or a vector, else 1 for a stored column and, for a computed one, 1 when it is
+    /// deterministic and either persisted or precise (probed 2026-09-26 against
+    /// SQL Server 2025 under the default SET options, which that answer also
+    /// weighs on real).
+    /// </summary>
     private static int IsIndexable(Database database, FoundColumn found)
     {
         var column = found.Column;

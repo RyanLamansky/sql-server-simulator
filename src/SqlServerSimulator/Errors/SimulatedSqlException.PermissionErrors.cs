@@ -48,12 +48,6 @@ public sealed partial class SimulatedSqlException
         new($"Invalid column name '{columnName}'.", 4615, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 1019: a <c>GRANT</c> / <c>REVOKE</c> named a column
-    /// list both after a permission and after the object name
-    /// (<c>GRANT SELECT (a) ON t (b)</c>). Severity 15, state 1, probe-confirmed
-    /// wording.
-    /// </summary>
-    /// <summary>
     /// Mimics SQL Server error 4610: a <c>DATABASE::</c> securable naming a
     /// database other than the current one (probed 2026-09-28 against SQL
     /// Server 2025).
@@ -61,6 +55,12 @@ public sealed partial class SimulatedSqlException
     internal static SimulatedSqlException GrantOnAnotherDatabase() =>
         new("You can only grant or revoke permissions on objects in the current database.", 4610, 16, 1);
 
+    /// <summary>
+    /// Mimics SQL Server error 1019: a <c>GRANT</c> / <c>REVOKE</c> named a column
+    /// list both after a permission and after the object name
+    /// (<c>GRANT SELECT (a) ON t (b)</c>). Severity 15, state 1, probe-confirmed
+    /// wording.
+    /// </summary>
     internal static SimulatedSqlException GrantInvalidColumnListAfterObject() =>
         new("Invalid column list after object name in GRANT/REVOKE statement.", 1019, 15, 1);
 
@@ -323,15 +323,6 @@ public sealed partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException FullTextCatalogNotFoundOrDenied(string catalogName, string databaseName, byte state = 5) =>
         new($"Full-Text catalog '{catalogName}' does not exist in database '{databaseName}' or user does not have permission to perform this action.", 7641, 16, state);
-
-    /// <summary>
-    /// Mimics SQL Server error 15151 for a <c>DROP USER</c> denied to a principal
-    /// that isn't <c>dbo</c> / a <c>db_owner</c> member (the simulator has no
-    /// ALTER ANY USER model). Severity 16, state 1 (state approximate — the
-    /// reference login can't reach the check).
-    /// </summary>
-    internal static SimulatedSqlException DropUserPermissionDenied(string name) =>
-        new($"Cannot drop the user '{name}', because it does not exist or you do not have permission.", 15151, 16, 1);
 
     /// <summary>Mimics SQL Server error 15151: <c>ALTER APPLICATION ROLE</c> naming one that doesn't exist (probed 2026-09-29 against SQL Server 2025).</summary>
     internal static SimulatedSqlException CannotAlterApplicationRole(string name) =>

@@ -436,11 +436,6 @@ internal sealed class XmlDml
     }
 
     /// <summary>
-    /// Writes the replacement string into the target. Emptying a text node
-    /// removes it, so the owning element comes back self-closing — real's
-    /// answer to <c>replace value of (…/text())[1] with ""</c>.
-    /// </summary>
-    /// <summary>
     /// The column reference a <c>sql:column</c> argument writes. Real takes the
     /// multi-part form — AdventureWorks' <c>Sales.iduSalesOrderDetail</c> reads
     /// <c>sql:column("inserted.LineTotal")</c> — so the dots separate qualifiers
@@ -533,6 +528,11 @@ internal sealed class XmlDml
         element.SetAttributeValue(SchemaInstance + "nil", "true");
     }
 
+    /// <summary>
+    /// Writes the replacement string into the target. Emptying a text node
+    /// removes it, so the owning element comes back self-closing — real's
+    /// answer to <c>replace value of (…/text())[1] with ""</c>.
+    /// </summary>
     private static void ReplaceValue(XObject target, string replacement)
     {
         switch (target)

@@ -50,7 +50,6 @@ internal static partial class BuiltInResources
     private static readonly CharSqlType charTwo = CharSqlType.Get(2, Collation.Catalog, Coercibility.Implicit);
     private static readonly CharSqlType charOne = CharSqlType.Get(1, Collation.Catalog, Coercibility.Implicit);
     private static readonly SqlValue notMsShipped = SqlValue.FromBoolean(false);
-    private static readonly SqlValue defaultCollation = SqlValue.FromSystemName("SQL_Latin1_General_CP1_CI_AS");
 
     /// <summary>
     /// Shared empty row set for the AlwaysOn Availability-Group catalog views

@@ -443,14 +443,6 @@ internal sealed class Cast : Expression
     }
 
     /// <summary>
-    /// Runs the value-level coercion shared by CAST and CONVERT: rejects
-    /// uniqueidentifier-to-too-narrow-string with the target-specific Msg
-    /// 8170 / 8115, then delegates to <see cref="SqlValue.CoerceTo"/>,
-    /// rewraps <see cref="OverflowException"/> as the generic Msg 8115, and
-    /// finally enforces the narrow-string rules described in
-    /// <see cref="EnforceTargetMaxLength"/>.
-    /// </summary>
-    /// <summary>
     /// Whether an explicit <c>CAST</c> / <c>CONVERT</c> out of a legacy LOB type
     /// is one real SQL Server refuses outright with Msg 529 — the payload's
     /// parseability never enters into it, so <c>CAST(&lt;text '5'&gt; AS int)</c>
@@ -673,6 +665,14 @@ internal sealed class Cast : Expression
             ? SqlValue.FromString(rendered.Type, rendered.AsString.PadLeft(length))
             : rendered;
 
+    /// <summary>
+    /// Runs the value-level coercion shared by CAST and CONVERT: rejects
+    /// uniqueidentifier-to-too-narrow-string with the target-specific Msg
+    /// 8170 / 8115, then delegates to <see cref="SqlValue.CoerceTo"/>,
+    /// rewraps <see cref="OverflowException"/> as the generic Msg 8115, and
+    /// finally enforces the narrow-string rules described in
+    /// <see cref="EnforceTargetMaxLength"/>.
+    /// </summary>
     internal static SqlValue ApplyCoercion(SqlValue value, SqlType targetType, int? targetMaxLength, Collation? budgetCollation = null)
     {
         if (IsRejectedLegacyLobConversion(value.Type, targetType))
@@ -933,13 +933,6 @@ internal sealed class Cast : Expression
     internal static bool IsVectorConversionFailure(int number) => number is 13609 or 13639 or 13670 or 42204 or 42211 or 42241;
 
     /// <summary>
-    /// Set of <see cref="SimulatedSqlException.Number"/> values that
-    /// <c>TRY_CAST</c> / <c>TRY_CONVERT</c> swallow into <c>NULL</c> — the
-    /// documented "conversion failed" surface. Anything else (Msg 529
-    /// explicit-cast rejection, Msg 243 unknown type, etc.) propagates so
-    /// the caller still sees genuine programming errors.
-    /// </summary>
-    /// <summary>
     /// Whether <c>TRY_CAST</c> / <c>TRY_CONVERT</c> answer NULL for this
     /// failure: every <see cref="IsConversionFailure"/> number, a vector's, a
     /// CLR type's library failure into that type, and a hierarchyid's into a
@@ -960,6 +953,13 @@ internal sealed class Cast : Expression
     internal static bool TryTruncationFails(SqlValue source, SqlType target) =>
         !source.IsNull && source.Type == SqlType.Date && target is BinarySqlType { length: < 3 } or VarbinarySqlType { length: > 0 and < 3 };
 
+    /// <summary>
+    /// Set of <see cref="SimulatedSqlException.Number"/> values that
+    /// <c>TRY_CAST</c> / <c>TRY_CONVERT</c> swallow into <c>NULL</c> — the
+    /// documented "conversion failed" surface. Anything else (Msg 529
+    /// explicit-cast rejection, Msg 243 unknown type, etc.) propagates so
+    /// the caller still sees genuine programming errors.
+    /// </summary>
     internal static bool IsConversionFailure(int number) => number is
         210    // a binary the legacy date-time layout can't read
         or 220 // ArithmeticOverflowForDataType (integer → tinyint/smallint)

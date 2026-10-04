@@ -166,9 +166,7 @@ internal sealed class SpatialRelateOperand
     /// Which of interior / boundary contain <paramref name="p"/>. Both false
     /// means the point is in the exterior; both true is reachable, since the
     /// component classes aren't normalized against each other.
-    /// </summary>
-    /// <summary>
-    /// Where a point lies relative to this operand. <paramref name="hosts"/>
+    /// <paramref name="hosts"/>
     /// names the segments a computed crossing lies on, which the orientation
     /// test can't be trusted to confirm: the crossing is rounded to a double,
     /// and the rounding can leave it a hair off both lines.

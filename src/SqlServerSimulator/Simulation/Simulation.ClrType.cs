@@ -62,8 +62,6 @@ partial class Simulation
             typeName.Leaf,
             underlyingType: udt.SqlType,
             declaredMaxLength: udt.MaxByteSize,
-            declaredPrecision: null,
-            declaredScale: null,
             isNullable: true,
             userTypeId: udt.UserTypeId,
             createDate: context.Batch.CurrentStatement.UtcNow,

@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -12,8 +13,6 @@ namespace SqlServerSimulator;
 [TestClass]
 public sealed class ParameterDeclarationErrorTests
 {
-    private static int[] Numbers(SimulatedSqlException error) => [.. error.Errors.Select(entry => entry.Number)];
-
     [TestMethod]
     [DataRow("create function f(@p timestamp) returns int as begin return 1 end")]
     [DataRow("create function f(@p rowversion) returns int as begin return 1 end")]

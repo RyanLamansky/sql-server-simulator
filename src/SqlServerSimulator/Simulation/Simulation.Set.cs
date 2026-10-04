@@ -905,16 +905,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses <c>SET @g.STSrid = expr</c> — the one assignable member of a
-    /// spatial value. Cursor enters on the <c>.</c>.
-    /// </summary>
-    /// <remarks>
-    /// Every other spatial property is read-only, which real reports as
-    /// Msg 6595; a name that isn't a member at all reports Msg 6592. A NULL
-    /// right-hand side surfaces as the bare .NET argument failure real emits
-    /// with no 24xxx code, and an SRID outside 0..999999 as Msg 24100.
-    /// </remarks>
-    /// <summary>
     /// Routes <c>SET @v.&lt;member&gt; …</c> to the one instance-member form
     /// that has a mutator: an XML method call (only <c>.modify()</c> is one —
     /// anything else is Msg 8113) or the spatial <c>STSrid</c> property
@@ -968,6 +958,16 @@ partial class Simulation
         return TryParseSetSpatialProperty(context, slot);
     }
 
+    /// <summary>
+    /// Parses <c>SET @g.STSrid = expr</c> — the one assignable member of a
+    /// spatial value. Cursor enters on the <c>.</c>.
+    /// </summary>
+    /// <remarks>
+    /// Every other spatial property is read-only, which real reports as
+    /// Msg 6595; a name that isn't a member at all reports Msg 6592. A NULL
+    /// right-hand side surfaces as the bare .NET argument failure real emits
+    /// with no 24xxx code, and an SRID outside 0..999999 as Msg 24100.
+    /// </remarks>
     private static bool TryParseSetSpatialProperty(ParserContext context, VariableSlot slot)
     {
         if (context.GetNextRequired() is not Name member)

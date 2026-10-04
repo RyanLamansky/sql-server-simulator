@@ -89,7 +89,7 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ProcedureCannotRunInTransaction(string procedure) =>
         new($"The procedure 'sys.{procedure}' cannot be executed within a transaction.", 15002, 16, 1);
 
-    /// <summary>Msg 15600 at class 15: an option or value a <c>sys.sp_*</c> option procedure doesn't accept.</summary>
+    /// <summary>Msg 15600 at class 15: an option, value or parameter a <c>sys.sp_*</c> procedure doesn't accept — the option procedures, the linked-server ones, <c>sp_settriggerorder</c>.</summary>
     internal static SimulatedSqlException InvalidSystemProcedureOption(string procedure) =>
         new($"An invalid parameter or option was specified for procedure 'sys.{procedure}'.", 15600, 15, 1);
 
@@ -131,10 +131,6 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException InvalidLoginNameCharacters(string name) =>
         new($"'{name}' is not a valid name because it contains invalid characters.", 15006, 16, 1);
 
-    /// <summary>Msg 15004 as <c>sys.sp_validname</c> raises it for a NULL or empty name.</summary>
-    internal static SimulatedSqlException ValidNameRequired() =>
-        new("Name cannot be NULL.", 15004, 16, 1);
-
     /// <summary>Msg 15021: <c>sp_addlogin</c>'s <c>@encryptopt</c> asking to skip encryption of a password that isn't a hash.</summary>
     internal static SimulatedSqlException PasswordParameterInvalid() =>
         new("Invalid value given for parameter PASSWORD. Specify a valid parameter value.", 15021, 16, 2);
@@ -151,7 +147,7 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CheckExpirationNeedsPolicy() =>
         new("The CHECK_EXPIRATION option cannot be used when CHECK_POLICY is OFF.", 15122, 16, 1);
 
-    /// <summary>Msg 15007 from a legacy security procedure: a login it can't find.</summary>
+    /// <summary>Msg 15007: a login a legacy security procedure, <c>sp_who</c> / <c>sp_who2</c>'s <c>@loginame</c> or <c>CREATE USER … FOR LOGIN</c> can't find.</summary>
     internal static SimulatedSqlException NotAValidLogin(string name) =>
         new($"'{name}' is not a valid login or you do not have permission.", 15007, 16, 1);
 
@@ -163,7 +159,7 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException UserDoesNotExistInDatabase(string user) =>
         new($"User '{user}' does not exist in the current database.", 15008, 16, 1);
 
-    /// <summary>Msg 15151 as <c>sp_revokedbaccess</c> raises it for a user it can't drop.</summary>
+    /// <summary>Msg 15151: a user <c>DROP USER</c> or <c>sp_revokedbaccess</c> can't drop, absent or not the caller's to drop.</summary>
     internal static SimulatedSqlException CannotDropUser(string user) =>
         new($"Cannot drop the user '{user}', because it does not exist or you do not have permission.", 15151, 16, 1);
 
@@ -183,15 +179,8 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException UserAbsentOrInvalid(string user) =>
         new($"Terminating this procedure. The User name '{user}' is absent or invalid.", 15291, 16, 1);
 
-    /// <summary>Msg 15063 from <c>sp_change_users_login</c>: the login already has a user.</summary>
-    internal static SimulatedSqlException LoginAlreadyHasUser(string user) =>
-        new($"The login already has an account with the user name '{user}'.", 15063, 16, 1);
-
     /// <summary>Msg 15286: <c>sp_change_users_login</c> with an <c>@Action</c> it doesn't know.</summary>
     internal static SimulatedSqlException UnrecognizedChangeUsersLoginAction(string action) =>
         new($"Terminating this procedure. The @action '{action}' is unrecognized. Try 'REPORT', 'UPDATE_ONE', or 'AUTO_FIX'.", 15286, 16, 1);
 
-    /// <summary>Msg 15015 from <c>sp_helpserver</c>: a name that is no server.</summary>
-    internal static SimulatedSqlException ServerDoesNotExistForHelp(string name) =>
-        new($"The server '{name}' does not exist. Use sp_helpserver to show available servers.", 15015, 16, 1);
 }

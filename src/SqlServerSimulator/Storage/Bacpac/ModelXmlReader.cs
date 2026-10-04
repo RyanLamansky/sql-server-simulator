@@ -1706,18 +1706,6 @@ internal static class ModelXmlReader
         : " PERSISTED NOT NULL";
 
     /// <summary>
-    /// Phase 8 walker: re-visits each <c>SqlTable</c> element and emits
-    /// <c>ALTER TABLE [schema].[table] ADD [col] AS (expr) [PERSISTED]</c>
-    /// for every <c>SqlComputedColumn</c> entry the original table-creation
-    /// pass (phase 2) deferred. Running after phase 7 means UDFs referenced
-    /// in the computed expression already exist; CREATE TABLE's column-list
-    /// parser was the constraint that forced the deferral. The
-    /// <c>ExpressionScript</c> body arrives parenthesized already (DACFx
-    /// emits e.g. <c>(concat([X],N' ',[Y]))</c>), so the loader emits it
-    /// verbatim without re-wrapping. <c>IsPersisted</c> picks the optional
-    /// PERSISTED marker.
-    /// </summary>
-    /// <summary>
     /// Emits <c>ALTER TABLE base SET (SYSTEM_VERSIONING = ON (HISTORY_TABLE = name))</c>
     /// for each base SqlTable element that carries the
     /// <c>TemporalSystemVersioningHistoryTable</c> relationship. Element
@@ -1747,6 +1735,18 @@ internal static class ModelXmlReader
         _ = command.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// Phase 8 walker: re-visits each <c>SqlTable</c> element and emits
+    /// <c>ALTER TABLE [schema].[table] ADD [col] AS (expr) [PERSISTED]</c>
+    /// for every <c>SqlComputedColumn</c> entry the original table-creation
+    /// pass (phase 2) deferred. Running after phase 7 means UDFs referenced
+    /// in the computed expression already exist; CREATE TABLE's column-list
+    /// parser was the constraint that forced the deferral. The
+    /// <c>ExpressionScript</c> body arrives parenthesized already (DACFx
+    /// emits e.g. <c>(concat([X],N' ',[Y]))</c>), so the loader emits it
+    /// verbatim without re-wrapping. <c>IsPersisted</c> picks the optional
+    /// PERSISTED marker.
+    /// </summary>
     private static void EmitDeferredComputedColumns(XElement tableElement, DbConnection connection, BacpacImportResult result, HashSet<string> deferredComputedTables)
     {
         var tableName = tableElement.Attribute("Name")?.Value;

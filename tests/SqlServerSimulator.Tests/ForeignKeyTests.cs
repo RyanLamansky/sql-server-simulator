@@ -1005,6 +1005,84 @@ public sealed class ForeignKeyTests
     }
 
     /// <summary>
+    /// The UPDATE forms decide the same way, so changing a referenced key
+    /// has to refuse through every spelling.
+    /// </summary>
+    [TestMethod]
+    [DataRow("update p set id = 3 where id = 1")]
+    [DataRow("update x set id = 3 from p x where x.id = 1")]
+    [DataRow("update x set id = 3 from p x inner join c on c.pid = x.id")]
+    [DataRow("declare @d table (id int); insert @d values (1); update x set id = 3 from @d d inner join p x on x.id = d.id")]
+    public void ParentSideForeignKey_IsEnforcedByEveryUpdateForm(string updateStatement)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int not null primary key);
+            create table c (id int not null primary key, pid int not null references p(id));
+            insert p values (1), (2);
+            insert c values (10, 1)
+            """);
+        _ = sim.AssertSqlError(updateStatement, 547);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from p where id = 1"));
+    }
+
+    /// <summary>
+    /// A referential action's rewrite of the child is judged as an UPDATE of
+    /// it: a CHECK refuses naming the parent's statement, and a key refuses a
+    /// duplicate the rewrite makes (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table c (id int primary key, pk int references p on update cascade, check (pk > 5)); insert c values (1, 10)",
+        "update p set k = 1 where k = 10", 547, "The UPDATE statement conflicted with the CHECK constraint")]
+    [DataRow("create table c (id int primary key, pk int references p on delete set null, check (pk is not null)); insert c values (1, 10)",
+        "delete p where k = 10", 547, "The DELETE statement conflicted with the CHECK constraint")]
+    [DataRow("create table c (id int primary key, pk int unique references p on delete set null); insert c values (1, 10), (2, 20)",
+        "delete p", 2627, "Violation of UNIQUE KEY constraint")]
+    public void ReferentialAction_JudgesTheRewrittenChildRows(string child, string statement, int number, string message)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create table p (k int primary key); insert p values (10), (20); " + child);
+        Assert.Contains(message, sim.AssertSqlError(statement, number).Errors[0].Message);
+        AreEqual(2, sim.ExecuteScalar("select count(*) from p"));
+    }
+
+    /// <summary>The rewritten child row takes a new rowversion and ROW START, as an UPDATE of it does.</summary>
+    [TestMethod]
+    public void ReferentialAction_StampsTheRewrittenChildRow()
+        => AreEqual("bumped,advanced", new Simulation().ExecuteScalar("""
+            create table p (k int primary key);
+            create table c (id int primary key, pk int references p on update cascade, rv rowversion,
+                s datetime2 generated always as row start, e datetime2 generated always as row end, period for system_time (s, e));
+            insert p values (10);
+            insert c (id, pk) values (1, 10);
+            declare @rv binary(8), @s datetime2;
+            select @rv = rv, @s = s from c;
+            waitfor delay '00:00:00.020';
+            update p set k = 7;
+            select concat(iif((select rv from c) = @rv, 'same', 'bumped'), ',', iif((select s from c) > @s, 'advanced', 'same'))
+            """));
+
+    /// <summary>
+    /// ON UPDATE CASCADE and SET NULL fire through the joined UPDATE form.
+    /// </summary>
+    [TestMethod]
+    public void ReferentialActions_FireThroughTheJoinedUpdateForm()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table p (id int not null primary key);
+            create table cas (id int not null primary key, pid int null references p(id) on update cascade);
+            create table sn (id int not null primary key, pid int null references p(id) on update set null);
+            insert p values (1), (2);
+            insert cas values (10, 1), (11, 2);
+            insert sn values (20, 1), (21, 2);
+            update x set id = 3 from p x inner join (select 1 as k) s on s.k = x.id
+            """);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from cas where pid = 3"));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sn where pid is null"));
+    }
+
+    /// <summary>
     /// Msg 547 names the table's own database, not the simulator's default —
     /// the same rule Msg 515 follows.
     /// </summary>

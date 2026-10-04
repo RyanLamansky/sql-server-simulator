@@ -1223,16 +1223,6 @@ partial class Simulation
         return true;
     }
 
-    /// <summary>
-    /// The <c>BUCKET_COUNT</c> a hash index can't do without (Msg 10789,
-    /// raised compiling the batch, naming an unnamed key's index as the empty
-    /// string — probed 2026-10-02 against SQL Server 2025).
-    /// </summary>
-    private static IndexOptions RequireBucketCount(IndexOptions options, string? indexName, string tableName) =>
-        !options.IsHash || options.BucketCount is not null
-            ? options
-            : throw SimulatedSqlException.BucketCountRequired(indexName ?? "", tableName);
-
     private static bool IsLegacyStatisticsOnly(ParserContext context, IndexOptionStatement statement) =>
         statement == IndexOptionStatement.CreateIndex && context.Token is StringToken { Span: var name } && name.Equals("STATISTICS_ONLY", StringComparison.OrdinalIgnoreCase);
 
@@ -1458,31 +1448,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Shared column-list parser used by both <c>CREATE TABLE</c> and
-    /// <c>DECLARE @t TABLE</c>. Cursor on entry: the opening <c>(</c> of the
-    /// column list. Cursor on exit: the closing <c>)</c> (not consumed — the
-    /// caller consumes it). Returns <c>false</c> if the list is structurally
-    /// malformed (the caller surfaces this as a parse-time syntax error).
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Two-pass column resolution: regular columns build a <see cref="HeapColumn"/>
-    /// during pass 1; computed columns leave a placeholder entry plus an entry
-    /// in <paramref name="pendingComputed"/> to be resolved after the column
-    /// list is closed (so forward column references inside computed
-    /// expressions can bind). Identity / rowversion validation also fires
-    /// during pass 1.
-    /// </para>
-    /// <para>
-    /// When <paramref name="isTableVariable"/> is <c>true</c>, two paths
-    /// raise Msg 102 (probe-confirmed against SQL Server 2025):
-    /// <c>CONSTRAINT name</c> (table-level or inline) and <c>REFERENCES</c>.
-    /// Real SQL Server's grammar disallows both inside <c>DECLARE @t TABLE</c>.
-    /// All other column-constraint clauses (IDENTITY / UNIQUE / CHECK /
-    /// computed / rowversion) are accepted uniformly in both shapes.
-    /// </para>
-    /// </remarks>
-    /// <summary>
     /// Shared column-list parser for CREATE TABLE, DECLARE @t TABLE, and
     /// CREATE TYPE … AS TABLE. The <c>isTableVariable</c> and
     /// <c>isTableType</c> flags gate the table-variable- and table-type-
@@ -1493,6 +1458,22 @@ partial class Simulation
     /// three sites. Distinct flags rather than one combined flag because
     /// future restrictions may diverge.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Cursor on entry: the opening <c>(</c> of the
+    /// column list. Cursor on exit: the closing <c>)</c> (not consumed — the
+    /// caller consumes it). Returns <c>false</c> if the list is structurally
+    /// malformed (the caller surfaces this as a parse-time syntax error).
+    /// </para>
+    /// <para>
+    /// Two-pass column resolution: regular columns build a <see cref="HeapColumn"/>
+    /// during pass 1; computed columns leave a placeholder entry plus an entry
+    /// in <paramref name="pendingComputed"/> to be resolved after the column
+    /// list is closed (so forward column references inside computed
+    /// expressions can bind). Identity / rowversion validation also fires
+    /// during pass 1.
+    /// </para>
+    /// </remarks>
     private static bool ParseColumnList(
         ParserContext context,
         string tableName,
@@ -2251,14 +2232,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses the optional suffix of a computed-column declaration (after the
-    /// expression): bare empty, <c>PERSISTED</c>, or <c>PERSISTED NOT NULL</c>.
-    /// Any other constraint keyword in this position (<c>IDENTITY</c>,
-    /// <c>DEFAULT</c>, bare <c>NULL</c>/<c>NOT NULL</c>, or <c>PERSISTED NULL</c>)
-    /// raises Msg 8183 — real SQL Server's blanket "computed columns must be
-    /// persisted to carry a NULL/NOT NULL/CHECK/FK constraint" error.
-    /// </summary>
-    /// <summary>
     /// Wraps a captured computed-column expression's source text in a single
     /// outer paren pair unless it is already fully parenthesized (a single
     /// balanced group enclosing the whole expression). Mirrors SQL Server's
@@ -2323,6 +2296,14 @@ partial class Simulation
         return s.Length - 1;
     }
 
+    /// <summary>
+    /// Parses the optional suffix of a computed-column declaration (after the
+    /// expression): bare empty, <c>PERSISTED</c>, or <c>PERSISTED NOT NULL</c>.
+    /// Any other constraint keyword in this position (<c>IDENTITY</c>,
+    /// <c>DEFAULT</c>, bare <c>NULL</c>/<c>NOT NULL</c>, or <c>PERSISTED NULL</c>)
+    /// raises Msg 8183 — real SQL Server's blanket "computed columns must be
+    /// persisted to carry a NULL/NOT NULL/CHECK/FK constraint" error.
+    /// </summary>
     private static (bool Persisted, bool Nullable) ParseComputedSuffix(ParserContext context)
     {
         var persisted = false;
@@ -2591,14 +2572,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Materializes pending CHECK declarations into <see cref="CheckConstraint"/>
-    /// records, generating SQL-Server-shaped auto-names for any without a
-    /// caller-supplied <c>CONSTRAINT name</c>: <c>CK__&lt;table8&gt;__&lt;col8&gt;__&lt;8hex&gt;</c>
-    /// for inline constraints, <c>CK__&lt;table8&gt;__&lt;8hex&gt;</c> for
-    /// table-level. The 8-hex suffix is a stable FNV-1a hash of the
-    /// constraint shape, same convention as <see cref="AutoConstraintName"/>.
-    /// </summary>
-    /// <summary>
     /// Validates the temporal DDL: every <c>GENERATED ALWAYS AS ROW START/END</c>
     /// column must be <c>datetime2</c> NOT NULL (Msg 13501 / 13587); if any
     /// generated column is present the table must declare <c>PERIOD FOR
@@ -2786,6 +2759,14 @@ partial class Simulation
         return several ? null : single;
     }
 
+    /// <summary>
+    /// Materializes pending CHECK declarations into <see cref="CheckConstraint"/>
+    /// records, generating SQL-Server-shaped auto-names for any without a
+    /// caller-supplied <c>CONSTRAINT name</c>: <c>CK__&lt;table8&gt;__&lt;col8&gt;__&lt;8hex&gt;</c>
+    /// for inline constraints, <c>CK__&lt;table8&gt;__&lt;8hex&gt;</c> for
+    /// table-level. The 8-hex suffix is a stable FNV-1a hash of the
+    /// constraint shape, same convention as <see cref="AutoConstraintName"/>.
+    /// </summary>
     internal static CheckConstraint[] ResolveCheckConstraints(
         string tableName,
         IReadOnlyList<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
@@ -3188,17 +3169,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Generates the auto-name SQL Server uses for an unnamed PK/UNIQUE
-    /// constraint: <c>PK__&lt;tablefirst8&gt;__&lt;16hex&gt;</c> /
-    /// <c>UQ__&lt;tablefirst8&gt;__&lt;16hex&gt;</c>. The 16-hex suffix is a
-    /// deterministic FNV-1a 64-bit hash of the table name plus participating
-    /// column names — stable across simulator runs (so tests can assert on it
-    /// when needed) and shaped like a real-server auto-name (so violation
-    /// messages look authentic). The simulator doesn't reproduce SQL Server's
-    /// object-id-derived suffix because that would require modeling system
-    /// catalog allocations.
-    /// </summary>
-    /// <summary>
     /// Parses the inline column-level FOREIGN KEY tail starting from
     /// <c>REFERENCES</c>: <c>REFERENCES qualifiedTable [(col)] [ON DELETE action]
     /// [ON UPDATE action]</c>. Entered with the cursor on <c>REFERENCES</c>;
@@ -3474,12 +3444,6 @@ partial class Simulation
                 this.ReferencedColumnNames, this.DeleteAction, this.UpdateAction, this.NotForReplication);
     }
 
-    /// <summary>
-    /// One inline index declared in a CREATE TABLE — the table-level
-    /// <c>INDEX name (cols)</c> or the column-level <c>col type INDEX name</c>
-    /// form. Columns are captured by name and resolved to the built table
-    /// after the column list is complete (see <c>AddInlineIndexes</c>).
-    /// </summary>
     /// <summary>
     /// An index an inline <c>INDEX</c> clause declared, kept until the table it
     /// lands on exists — once for a CREATE TABLE or table variable, once per
@@ -3791,6 +3755,17 @@ partial class Simulation
             throw SimulatedSqlException.RowSizeExceedsMaximum(tableName, minimum, overhead, Heap.MaxRowSize);
     }
 
+    /// <summary>
+    /// Generates the auto-name SQL Server uses for an unnamed PK/UNIQUE
+    /// constraint: <c>PK__&lt;tablefirst8&gt;__&lt;16hex&gt;</c> /
+    /// <c>UQ__&lt;tablefirst8&gt;__&lt;16hex&gt;</c>. The 16-hex suffix is a
+    /// deterministic FNV-1a 64-bit hash of the table name plus participating
+    /// column names — stable across simulator runs (so tests can assert on it
+    /// when needed) and shaped like a real-server auto-name (so violation
+    /// messages look authentic). The simulator doesn't reproduce SQL Server's
+    /// object-id-derived suffix because that would require modeling system
+    /// catalog allocations.
+    /// </summary>
     internal static string AutoConstraintName(string tableName, KeyConstraintKind kind, int[] fullOrdinals, IReadOnlyList<HeapColumn> heapColumns)
     {
         const ulong fnvOffset = 14695981039346656037;
@@ -3825,22 +3800,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Resolves each <see cref="PendingForeignKey"/> against the live schema
-    /// dict: looks up the referenced table, validates the FK's referenced
-    /// column list matches a PRIMARY KEY / UNIQUE constraint on the parent
-    /// (Msg 1776), checks that no cascade action would close a cycle or
-    /// introduce multiple cascade paths to the same table (Msg 1785), then
-    /// wires up the matching <see cref="ForeignKey"/> instance on both the
-    /// child's <see cref="HeapTable.OutgoingForeignKeys"/> and the parent's
-    /// <see cref="HeapTable.IncomingForeignKeys"/>.
-    /// </summary>
-    /// <remarks>
-    /// All validation runs across the full pending list before any mutation,
-    /// so a partially constructed FK set never leaks into the schema. A
-    /// validation failure raises and the caller (CREATE TABLE) rolls the
-    /// table back out of its dict.
-    /// </remarks>
-    /// <summary>
     /// Refuses a FOREIGN KEY whose column pairs differ in type (Msg 1778),
     /// length, precision or scale (1753) or collation (1757).
     /// </summary>
@@ -3859,6 +3818,22 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// Resolves each <see cref="PendingForeignKey"/> against the live schema
+    /// dict: looks up the referenced table, validates the FK's referenced
+    /// column list matches a PRIMARY KEY / UNIQUE constraint on the parent
+    /// (Msg 1776), checks that no cascade action would close a cycle or
+    /// introduce multiple cascade paths to the same table (Msg 1785), then
+    /// wires up the matching <see cref="ForeignKey"/> instance on both the
+    /// child's <see cref="HeapTable.OutgoingForeignKeys"/> and the parent's
+    /// <see cref="HeapTable.IncomingForeignKeys"/>.
+    /// </summary>
+    /// <remarks>
+    /// All validation runs across the full pending list before any mutation,
+    /// so a partially constructed FK set never leaks into the schema. A
+    /// validation failure raises and the caller (CREATE TABLE) rolls the
+    /// table back out of its dict.
+    /// </remarks>
     private static void ResolveForeignKeys(HeapTable childTable, List<PendingForeignKey> pending, ParserContext context)
     {
         if (pending.Count == 0)
@@ -4327,16 +4302,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Raises <b>Msg 4936</b> for a <c>PERSISTED</c> computed column whose
-    /// expression real classifies nondeterministic. The determinism question is
-    /// the same one <c>OBJECTPROPERTY(…, 'IsDeterministic')</c> answers for a
-    /// schema-bound module, and it is asked at every declaration site —
-    /// <c>CREATE TABLE</c>'s inline form and <c>ALTER TABLE … ADD</c> alike
-    /// (probe-confirmed, including that <c>CONVERT(varchar(20), &lt;datetime
-    /// col&gt;, 112)</c> is persistable where style 0 is not, which is the
-    /// conversion-style rule the shared walk already carries).
-    /// </summary>
-    /// <summary>
     /// Whether <paramref name="table"/> carries an INSTEAD OF trigger covering
     /// any of <paramref name="verbs"/> — the half of the cascade conflict a
     /// foreign-key declaration has to check.
@@ -4408,6 +4373,16 @@ partial class Simulation
             throw SimulatedSqlException.ComputedColumnImpreciseForIndex(indexName, tableName, column.Name, viaConstraint);
     }
 
+    /// <summary>
+    /// Raises <b>Msg 4936</b> for a <c>PERSISTED</c> computed column whose
+    /// expression real classifies nondeterministic. The determinism question is
+    /// the same one <c>OBJECTPROPERTY(…, 'IsDeterministic')</c> answers for a
+    /// schema-bound module, and it is asked at every declaration site —
+    /// <c>CREATE TABLE</c>'s inline form and <c>ALTER TABLE … ADD</c> alike
+    /// (probe-confirmed, including that <c>CONVERT(varchar(20), &lt;datetime
+    /// col&gt;, 112)</c> is persistable where style 0 is not, which is the
+    /// conversion-style rule the shared walk already carries).
+    /// </summary>
     private static void RejectNondeterministicPersisted(
         ParserContext context, List<HeapColumn?> scope, string columnName, string tableName, string definition)
     {

@@ -210,11 +210,6 @@ internal static partial class BuiltInResources
     }.ToFrozenDictionary(BuiltInToken.Comparer);
 
     /// <summary>
-    /// Replaces each view <see cref="RealColumnOrder"/> lists with one
-    /// presenting its columns in real's order. Runs before anything records a
-    /// column ordinal against the registry.
-    /// </summary>
-    /// <summary>
     /// The columns real lists on these catalog views that answer alike for
     /// every object the simulator can hold, with that answer (probed
     /// 2026-09-26 against SQL Server 2025: replication, CDC and ledger flags
@@ -362,6 +357,11 @@ internal static partial class BuiltInResources
         }
     }
 
+    /// <summary>
+    /// Replaces each view <see cref="RealColumnOrder"/> lists with one
+    /// presenting its columns in real's order. Runs before anything records a
+    /// column ordinal against the registry.
+    /// </summary>
     private static void ApplyRealColumnOrder(Dictionary<string, CatalogView> views)
     {
         var replaced = new Dictionary<CatalogView, CatalogView>(ReferenceEqualityComparer.Instance);

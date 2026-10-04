@@ -9,22 +9,6 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Parses <c>EXEC ( &lt;string-expression&gt; )</c> — dynamic SQL via
-    /// EXEC. The string operand is evaluated in the caller's batch (so
-    /// concatenation works: <c>EXEC ('SELECT ' + @col + ' FROM t')</c>),
-    /// then the resulting string is re-tokenized and dispatched as a fresh
-    /// batch inside its own <see cref="BatchContext"/>. Outer variables
-    /// are NOT visible inside the dynamic batch (probe-confirmed: real SQL
-    /// Server raises Msg 137 if the dynamic SQL references an outer
-    /// <c>@var</c>). Result sets from the dynamic batch propagate to the
-    /// outer caller.
-    /// </summary>
-    /// <remarks>
-    /// Cursor on entry: the opening <c>(</c> after EXEC. Cursor on exit:
-    /// the token after the closing <c>)</c>. Skip-mode evaluates the
-    /// expression (cursor advance) but suppresses the dispatch.
-    /// </remarks>
-    /// <summary>
     /// Holds <c>EXEC ( … )</c>'s operand to real's grammar — string literals
     /// and variables joined by <c>+</c>, nothing else: a function call, a
     /// parenthesis, a binary literal, <c>NULL</c> or <c>COLLATE</c> is a syntax
@@ -48,6 +32,22 @@ partial class Simulation
         context.RestoreCheckpoint(checkpoint);
     }
 
+    /// <summary>
+    /// Parses <c>EXEC ( &lt;string-expression&gt; )</c> — dynamic SQL via
+    /// EXEC. The string operand is evaluated in the caller's batch (so
+    /// concatenation works: <c>EXEC ('SELECT ' + @col + ' FROM t')</c>),
+    /// then the resulting string is re-tokenized and dispatched as a fresh
+    /// batch inside its own <see cref="BatchContext"/>. Outer variables
+    /// are NOT visible inside the dynamic batch (probe-confirmed: real SQL
+    /// Server raises Msg 137 if the dynamic SQL references an outer
+    /// <c>@var</c>). Result sets from the dynamic batch propagate to the
+    /// outer caller.
+    /// </summary>
+    /// <remarks>
+    /// Cursor on entry: the opening <c>(</c> after EXEC. Cursor on exit:
+    /// the token after the closing <c>)</c>. Skip-mode evaluates the
+    /// expression (cursor advance) but suppresses the dispatch.
+    /// </remarks>
     private IEnumerable<SimulatedStatementOutcome> ParseExecDynamicSql(BatchContext batch, bool insertExecSource = false)
     {
         var context = batch.Parser;
@@ -80,7 +80,7 @@ partial class Simulation
             context.MoveNextRequired();
             var argument = ParseExecArgument(context, batch, name: null);
             if (argument.OutputSlot is null && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output or ContextualKeyword.Out })
-                throw SimulatedSqlException.OutputOnConstantArgument();
+                throw SimulatedSqlException.ConstantPassedAsOutput();
             arguments.Add(argument);
         }
         if (context.Token is not Operator { Character: ')' })
@@ -483,12 +483,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses one sp_executesql positional / named-value argument. Accepts
-    /// the same shapes as a regular EXEC argument
-    /// (<see cref="ParseExecArgument"/>) but doesn't enforce the no-mixed-
-    /// position rule — sp_executesql's grammar is more permissive.
-    /// </summary>
-    /// <summary>
     /// Consumes an <c>@name =</c> prefix and returns the name, leaving the
     /// cursor on the value. Returns null with the cursor unmoved when the next
     /// token isn't one — an <c>@</c>-variable holding the argument's value
@@ -510,6 +504,12 @@ partial class Simulation
         return null;
     }
 
+    /// <summary>
+    /// Parses one sp_executesql positional / named-value argument. Accepts
+    /// the same shapes as a regular EXEC argument
+    /// (<see cref="ParseExecArgument"/>) but doesn't enforce the no-mixed-
+    /// position rule — sp_executesql's grammar is more permissive.
+    /// </summary>
     private static (SqlValue Value, VariableSlot? OutputSlot) ParseSpExecuteSqlValueArg(ParserContext context, BatchContext batch) =>
         ParseSpExecuteSqlValueArg(context, batch, out _, out _);
 

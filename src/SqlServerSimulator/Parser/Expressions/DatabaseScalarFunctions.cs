@@ -63,7 +63,7 @@ internal sealed class DbId : Expression
     /// numeric-id form. Yielded in ascending id order.
     /// </summary>
     internal static IEnumerable<(Database Database, short Id)> DatabasesWithIds(Simulation simulation) =>
-        simulation.Databases.Values.OrderBy(static d => d.Id).Select(static d => (d, d.Id));
+        simulation.Databases.EnumerateValues().OrderBy(static d => d.Id).Select(static d => (d, d.Id));
 
     /// <summary>
     /// The database carrying <paramref name="requested"/> as its

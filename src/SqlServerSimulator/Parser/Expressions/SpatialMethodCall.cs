@@ -316,7 +316,7 @@ internal sealed class SpatialMethodCall : Expression
     }
 
     private SimulatedSqlException ReportMissing(SpatialSqlType type) => this.writtenAsMethod
-        ? SimulatedSqlException.ClrMethodNotFound(this.memberName, type.ClrTypeName)
+        ? SimulatedSqlException.ClrMethodNotFound(this.memberName, type.ClrTypeName, "Microsoft.SqlServer.Types", state: 10)
         : SimulatedSqlException.ClrPropertyNotFound(this.memberName, type.ClrTypeName);
 
     private SqlValue Evaluate(RuntimeContext runtime, SpatialGeometry value, SpatialSqlType type, Member member)

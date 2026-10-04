@@ -429,17 +429,17 @@ internal static partial class BuiltInResources
             new("vector_base_type", SqlType.TinyInt, null, true),
         ];
         IEnumerable<SqlValue[]> ColumnRows(Parser.BatchContext batch, Database database, CatalogFilter filter) =>
-            EnumerateColumns(batch, database, defaultCollation, nullCollation, filter, userColumns: true, systemColumns: false);
+            EnumerateColumns(batch, database, nullCollation, filter, userColumns: true, systemColumns: false);
         SysP("columns", ColumnsShape(), ["object_id"], ColumnRows);
         // sys.all_columns adds sys.system_columns: the catalog views' own
         // columns, each in its type's collation (probed 2026-09-26 against SQL
         // Server 2025).
         SysP("all_columns", ColumnsShape(), ["object_id"], (batch, database, filter) =>
-            EnumerateColumns(batch, database, defaultCollation, nullCollation, filter, userColumns: true, systemColumns: true));
+            EnumerateColumns(batch, database, nullCollation, filter, userColumns: true, systemColumns: true));
         // sys.system_columns declares its flag columns NOT NULL where
         // sys.columns doesn't (probed 2026-09-26 against SQL Server 2025).
         SysP("system_columns", NotNullable(ColumnsShape(), "is_computed", "is_sparse", "is_column_set", "is_dropped_ledger_column", "is_hidden", "is_replicated", "is_non_sql_subscribed", "is_merge_published", "is_dts_replicated", "is_data_deletion_filter_column"), ["object_id"], (batch, database, filter) =>
-            EnumerateColumns(batch, database, defaultCollation, nullCollation, filter, userColumns: false, systemColumns: true));
+            EnumerateColumns(batch, database, nullCollation, filter, userColumns: false, systemColumns: true));
 
         // sys.identity_columns / sys.computed_columns / sys.masked_columns:
         // sys.columns' row (the vector columns aside) for each column the view
@@ -456,7 +456,7 @@ internal static partial class BuiltInResources
             .ToArray();
         HeapColumn[] FamilyShape(params HeapColumn[] own) => [.. familyOrdinals.Select(i => ColumnsShape()[i]), .. own];
         IEnumerable<(SqlValue[] Row, HeapColumn Column, ColumnHost Host)> UserColumnRows(Parser.BatchContext batch, Database database) =>
-            EnumerateColumnRows(batch, database, defaultCollation, nullCollation, CatalogFilter.None, userColumns: true, systemColumns: false);
+            EnumerateColumnRows(batch, database, nullCollation, CatalogFilter.None, userColumns: true, systemColumns: false);
         Sys("identity_columns", NotNullable(FamilyShape(
             new("seed_value", SqlType.SqlVariant, null, true),
             new("increment_value", SqlType.SqlVariant, null, true),
@@ -535,17 +535,15 @@ internal static partial class BuiltInResources
     private static IEnumerable<SqlValue[]> EnumerateColumns(
         Parser.BatchContext batch,
         Database database,
-        SqlValue defaultCollation,
         SqlValue nullCollation,
         CatalogFilter filter,
         bool userColumns,
         bool systemColumns) =>
-        EnumerateColumnRows(batch, database, defaultCollation, nullCollation, filter, userColumns, systemColumns).Select(static entry => entry.Row);
+        EnumerateColumnRows(batch, database, nullCollation, filter, userColumns, systemColumns).Select(static entry => entry.Row);
 
     private static IEnumerable<(SqlValue[] Row, HeapColumn Column, ColumnHost Host)> EnumerateColumnRows(
         Parser.BatchContext batch,
         Database database,
-        SqlValue defaultCollation,
         SqlValue nullCollation,
         CatalogFilter filter,
         bool userColumns,
@@ -604,12 +602,8 @@ internal static partial class BuiltInResources
         // so their rows keep the 0 default below.
         SqlValue XmlCollectionIdFor(HeapColumn c) =>
             c.XmlSchemaCollection is { } coll ? SqlValue.FromInt32(coll.Id) : zeroInt;
-        // The per-database default collation flows from CurrentDatabase.
-        // The captured defaultCollation arg is a legacy fallback; today the
-        // active database's CollationName drives the value, with per-column
-        // overrides taking precedence when present.
+        // The database's own collation, which a column's declared one overrides.
         var dbDefaultCollation = SqlValue.FromSystemName(database.CollationName);
-        _ = defaultCollation;
         // A computed column reports its expression's collation (probed
         // 2026-10-02 against SQL Server 2025: `AS 'x' COLLATE German_PhoneBook_CI_AS`).
         SqlValue CollationFor(HeapColumn c) =>

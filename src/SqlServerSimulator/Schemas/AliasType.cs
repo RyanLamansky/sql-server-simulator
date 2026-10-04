@@ -33,8 +33,6 @@ internal sealed class AliasType(
     string name,
     SqlType underlyingType,
     int? declaredMaxLength,
-    int? declaredPrecision,
-    int? declaredScale,
     bool isNullable,
     int userTypeId,
     DateTime createDate,
@@ -54,11 +52,10 @@ internal sealed class AliasType(
     /// <summary>
     /// The resolved built-in type the alias wraps (e.g. <c>nvarchar(50)</c>'s
     /// underlying is the simulator's <c>NVarchar</c> singleton). The fully-
-    /// resolved <c>SqlType</c> instance — declared length / precision / scale
-    /// from the CREATE TYPE source are captured in
-    /// <see cref="DeclaredMaxLength"/> / <see cref="DeclaredPrecision"/> /
-    /// <see cref="DeclaredScale"/> alongside since the singleton itself is
-    /// dimension-agnostic for most variable-length types.
+    /// resolved <c>SqlType</c> instance — the declared length from the
+    /// CREATE TYPE source is captured in <see cref="DeclaredMaxLength"/>
+    /// alongside since the singleton itself is dimension-agnostic for most
+    /// variable-length types.
     /// </summary>
     public readonly SqlType UnderlyingType = underlyingType;
 
@@ -70,22 +67,6 @@ internal sealed class AliasType(
     /// <c>bit</c>).
     /// </summary>
     public readonly int? DeclaredMaxLength = declaredMaxLength;
-
-    /// <summary>
-    /// Surfaced as the <c>sys.types.precision</c> column for the alias row.
-    /// Set from the underlying type's intrinsic precision (e.g. 10 for
-    /// <c>int</c>, 0 for <c>nvarchar</c>); not the CREATE TYPE
-    /// numeric-precision argument (that lands in
-    /// <see cref="DeclaredMaxLength"/> for <c>decimal</c> /
-    /// <c>numeric</c> / <c>datetime2</c> / <c>time</c> /
-    /// <c>datetimeoffset</c>).
-    /// </summary>
-    public readonly int? DeclaredPrecision = declaredPrecision;
-
-    /// <summary>
-    /// Decimal / numeric scale parameter. Null for non-decimal underlyings.
-    /// </summary>
-    public readonly int? DeclaredScale = declaredScale;
 
     /// <summary>
     /// Nullability marker from the CREATE TYPE declaration. Bare <c>CREATE

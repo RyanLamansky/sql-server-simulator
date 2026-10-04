@@ -164,9 +164,10 @@ internal sealed partial class Database
     /// Owners <c>ALTER AUTHORIZATION ON SCHEMA::</c> gave the nine fixed-role
     /// schemas (<c>db_owner</c> … <c>db_denydatawriter</c>), keyed by schema id.
     /// Those schemas exist only as catalog rows, so a moved owner is kept here;
-    /// an absent entry is the like-id role, real's default.
+    /// an absent entry is the like-id role, real's default. Concurrent, as
+    /// every session's ownership checks read it while one may move an owner.
     /// </summary>
-    public readonly Dictionary<int, int> FixedRoleSchemaOwners = [];
+    public readonly ConcurrentDictionary<int, int> FixedRoleSchemaOwners = [];
 
     private int nextSchemaId = 4;
 
@@ -777,13 +778,6 @@ internal sealed partial class Database
     /// Server 2025); which failures consume one is the caller's ordering.
     /// </summary>
     public int AllocatePartitionSchemeId() => Interlocked.Increment(ref this.nextPartitionSchemeId);
-
-    /// <summary>
-    /// The data space named <paramref name="name"/> among the filegroups and
-    /// the partition schemes, the one name space <c>sys.data_spaces</c> lists.
-    /// </summary>
-    public bool HasDataSpaceNamed(string name) =>
-        this.Filegroups.ContainsKey(name) || this.PartitionSchemes.ContainsKey(name);
 }
 
 /// <summary>

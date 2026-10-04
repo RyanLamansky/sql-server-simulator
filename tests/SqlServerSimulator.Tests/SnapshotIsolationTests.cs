@@ -152,6 +152,29 @@ public sealed class SnapshotIsolationTests
         AreEqual(3960, ex.Number);
     }
 
+    /// <summary>A MERGE's update and delete actions judge the conflict as UPDATE and DELETE do.</summary>
+    [TestMethod]
+    [DataRow("merge t using (values (1)) s(id) on t.id = s.id when matched then update set v = 300;")]
+    [DataRow("merge t using (values (1)) s(id) on t.id = s.id when matched then delete;")]
+    public void Msg3960_SnapshotMerge_OnConcurrentCommittedUpdate_Throws(string merge)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            alter database current set allow_snapshot_isolation on;
+            create table t (id int not null primary key, v int);
+            insert t values (1, 100)
+            """);
+
+        using var siConn = sim.CreateOpenConnection();
+        _ = siConn.CreateCommand("set transaction isolation level snapshot; begin tran; select v from t where id = 1").ExecuteScalar();
+
+        using (var rcConn = sim.CreateOpenConnection())
+            _ = rcConn.CreateCommand("update t set v = 200 where id = 1").ExecuteNonQuery();
+
+        AreEqual(3960, Throws<SimulatedSqlException>(() => siConn.CreateCommand(merge).ExecuteNonQuery()).Number);
+        AreEqual(200, sim.ExecuteScalar("select v from t where id = 1"));
+    }
+
     [TestMethod]
     public void RcsiReader_SeesCommittedValue_NotBlockedByUncommittedWriter()
     {

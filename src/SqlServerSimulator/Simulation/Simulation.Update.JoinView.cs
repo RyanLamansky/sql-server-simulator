@@ -128,11 +128,7 @@ partial class Simulation
 
         // The view's own INSTEAD OF triggers took their own path, so the only
         // one that can claim the write is the base table's.
-        var oldSnapshotNeeded = output is not null
-            || HasAfterTrigger(batch, table, TriggerActions.Update)
-            || HasInsteadOfTrigger(batch, table, TriggerActions.Update)
-            || table.SystemVersioning is not null
-            || table.IncomingForeignKeys.Count > 0;
+        var oldSnapshotNeeded = UpdateNeedsOldRows(batch, table, table, output);
 
         // Hoisted scaffolding: one mutable tuple slot, one resolver per level,
         // one RuntimeContext each reused across the loop — see CLAUDE.md's

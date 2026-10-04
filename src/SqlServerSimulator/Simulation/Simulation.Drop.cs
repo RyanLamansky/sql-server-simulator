@@ -242,7 +242,7 @@ partial class Simulation
         bool removed;
         lock (simulation.Databases)
         {
-            removed = simulation.Databases.Remove(name);
+            removed = simulation.Databases.TryRemove(name, out _);
             if (!removed && !ifExists)
                 throw SimulatedSqlException.CannotDropDatabaseNotFound(name);
         }
@@ -296,15 +296,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Returns the name of any object currently residing in
-    /// <paramref name="schema"/> — used by the non-empty-schema rejection
-    /// path. Walks the shared-namespace objects via
-    /// <see cref="Schema.SchemaObjects"/> first (so DML-targetable objects
-    /// surface preferentially); falls through to <see cref="Schema.TableTypes"/>
-    /// which occupies the parallel type namespace. Returns <c>null</c> when
-    /// the schema is completely empty.
-    /// </summary>
-    /// <summary>
     /// The <c>DROP TYPE</c> gate — schema ALTER (or the CONTROL that covers it),
     /// or CONTROL on the type itself. Denial is Msg 218, the same record a
     /// missing type earns, naming the type as written.
@@ -318,6 +309,15 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// Returns the name of any object currently residing in
+    /// <paramref name="schema"/> — used by the non-empty-schema rejection
+    /// path. Walks the shared-namespace objects via
+    /// <see cref="Schema.SchemaObjects"/> first (so DML-targetable objects
+    /// surface preferentially); falls through to <see cref="Schema.TableTypes"/>
+    /// which occupies the parallel type namespace. Returns <c>null</c> when
+    /// the schema is completely empty.
+    /// </summary>
     private static string? FirstSchemaResident(Schema schema)
     {
         foreach (var obj in schema.SchemaObjects())
@@ -709,19 +709,16 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Removes one entry from the target schema's <see cref="Schema.Functions"/>
-    /// dict. Routing mirrors <see cref="DropOneTable"/>'s regular-table branch:
-    /// resolve the schema, lookup the leaf, raise Msg 3701 (function variant)
-    /// on miss unless <paramref name="ifExists"/> is set. Functions don't
-    /// participate in the undo log — same asymmetry as regular CREATE TABLE /
-    /// DROP TABLE (only temp-table DDL is transactional).
-    /// </summary>
-    /// <summary>
     /// Drops one function — or, for <c>DROP AGGREGATE</c>
     /// (<paramref name="aggregate"/>), one CLR aggregate, which shares the
     /// function namespace but answers only to its own <c>DROP</c> (Msg 3705
     /// either way round, probed 2026-09-28 against SQL Server 2025).
     /// </summary>
+    /// <remarks>
+    /// Routing mirrors <see cref="DropOneTable"/>'s regular-table branch:
+    /// resolve the schema, lookup the leaf, raise Msg 3701 (function variant)
+    /// on miss unless <paramref name="ifExists"/> is set.
+    /// </remarks>
     private static void DropOneFunction(ParserContext context, MultiPartName name, bool ifExists, bool aggregate = false)
     {
         if (context.Batch.IsSkipping)

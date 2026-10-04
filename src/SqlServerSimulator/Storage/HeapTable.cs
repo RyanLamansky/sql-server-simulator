@@ -829,31 +829,6 @@ internal sealed class HeapTable : SchemaObject
     internal string DebugDisplay() => $"{this.Name} ({string.Join(", ", this.Columns.Select(c => c.Name))})";
 
     /// <summary>
-    /// The canonical <c>sys.indexes</c> identity rows for this table — the
-    /// single source of truth for index-id allocation that every consumer
-    /// reads (<c>sys.indexes</c> / <c>sys.index_columns</c> / <c>sys.stats</c>
-    /// / <c>sys.stats_columns</c> / <c>sys.partitions</c> /
-    /// <c>sys.dm_db_partition_stats</c> / <c>sys.allocation_units</c> /
-    /// <c>sys.key_constraints.unique_index_id</c> / <c>INDEX_COL</c> /
-    /// <c>INDEXKEY_PROPERTY</c> / <c>STATS_DATE</c>). Allocation mirrors SQL
-    /// Server exactly (probe-confirmed against SQL Server 2025, 2026-07-16):
-    /// <list type="bullet">
-    /// <item><description>The single <b>clustered</b> entry — a clustered
-    /// PRIMARY KEY / UNIQUE constraint (<see cref="KeyConstraint.IsClustered"/>)
-    /// or a <c>CREATE CLUSTERED INDEX</c> (<see cref="Index.IsClustered"/>),
-    /// whichever has the lowest object id — takes <c>index_id = 1</c>,
-    /// <c>type = 1</c>, and suppresses the HEAP row.</description></item>
-    /// <item><description>With no clustered entry the table is a heap: one
-    /// synthetic row at <c>index_id = 0</c>, <c>type = 0</c>, no backing
-    /// object.</description></item>
-    /// <item><description>Every remaining (nonclustered) constraint / index —
-    /// including a NONCLUSTERED PRIMARY KEY — takes <c>index_id = 2..N</c>,
-    /// <c>type = 2</c>, in object-id (creation) order. On a heap the
-    /// nonclustered ids still start at 2, never reusing the clustered slot's
-    /// id 1.</description></item>
-    /// </list>
-    /// </summary>
-    /// <summary>
     /// Whether a clustered PRIMARY KEY, UNIQUE constraint or index orders the
     /// table — whose rows real locks and reports as keys rather than a heap's
     /// row ids.
@@ -951,6 +926,31 @@ internal sealed class HeapTable : SchemaObject
         return next;
     }
 
+    /// <summary>
+    /// The canonical <c>sys.indexes</c> identity rows for this table — the
+    /// single source of truth for index-id allocation that every consumer
+    /// reads (<c>sys.indexes</c> / <c>sys.index_columns</c> / <c>sys.stats</c>
+    /// / <c>sys.stats_columns</c> / <c>sys.partitions</c> /
+    /// <c>sys.dm_db_partition_stats</c> / <c>sys.allocation_units</c> /
+    /// <c>sys.key_constraints.unique_index_id</c> / <c>INDEX_COL</c> /
+    /// <c>INDEXKEY_PROPERTY</c> / <c>STATS_DATE</c>). Allocation mirrors SQL
+    /// Server exactly (probe-confirmed against SQL Server 2025, 2026-07-16):
+    /// <list type="bullet">
+    /// <item><description>The single <b>clustered</b> entry — a clustered
+    /// PRIMARY KEY / UNIQUE constraint (<see cref="KeyConstraint.IsClustered"/>)
+    /// or a <c>CREATE CLUSTERED INDEX</c> (<see cref="Index.IsClustered"/>),
+    /// whichever has the lowest object id — takes <c>index_id = 1</c>,
+    /// <c>type = 1</c>, and suppresses the HEAP row.</description></item>
+    /// <item><description>With no clustered entry the table is a heap: one
+    /// synthetic row at <c>index_id = 0</c>, <c>type = 0</c>, no backing
+    /// object.</description></item>
+    /// <item><description>Every remaining (nonclustered) constraint / index —
+    /// including a NONCLUSTERED PRIMARY KEY — takes <c>index_id = 2..N</c>,
+    /// <c>type = 2</c>, in object-id (creation) order. On a heap the
+    /// nonclustered ids still start at 2, never reusing the clustered slot's
+    /// id 1.</description></item>
+    /// </list>
+    /// </summary>
     public List<IndexIdentity> IndexIdentities()
     {
         this.SettleIndexIds();

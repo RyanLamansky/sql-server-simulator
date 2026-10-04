@@ -13,15 +13,11 @@ namespace SqlServerSimulator;
 /// </summary>
 [TestClass]
 // Same scheduling caveat as LockingTests: every blocking assertion here hands
-// work to a threadpool thread and asserts on a deadline that it *started*, so
-// a test elsewhere that monopolizes the pool surfaces as failures here rather
-// than at its own site.
+// work to a threadpool thread and asserts on a deadline that it is seen
+// waiting, so a test elsewhere that monopolizes the pool surfaces as failures
+// here rather than at its own site.
 public sealed class KeyRangeLockTests
 {
-    /// <summary>See <c>LockingTests.ThreadStartTimeoutMs</c> — only ever waited
-    /// out on the failure path.</summary>
-    private const int ThreadStartTimeoutMs = 10_000;
-
     /// <summary>Window a "didn't block" assertion gives the background statement
     /// to actually finish before it is called a hang.</summary>
     private static readonly TimeSpan ProceedTimeout = TimeSpan.FromSeconds(5);
@@ -56,24 +52,14 @@ public sealed class KeyRangeLockTests
         return sim;
     }
 
-    // Runs `writeSql` on `writer` from a threadpool thread and asserts it is
-    // still blocked after the holder has had time to matter, then releases the
-    // holder and drains the write. Returns once the write has completed.
-    private async Task AssertBlocksUntil(DbConnection holder, DbConnection writer, string writeSql, string release)
+    // Runs `writeSql` on `writer` from a threadpool thread, asserts it waits,
+    // then releases the holder and drains the write. Returns once the write
+    // has completed.
+    private async Task AssertBlocksUntil(Simulation sim, DbConnection holder, DbConnection writer, string writeSql, string release)
     {
-        using var started = new ManualResetEventSlim();
-        var task = Task.Run(
-            () =>
-            {
-                started.Set();
-                _ = writer.CreateCommand(writeSql).ExecuteNonQuery();
-            },
-            TestContext.CancellationToken);
-        IsTrue(started.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(150, TestContext.CancellationToken);
-        IsFalse(task.IsCompleted, $"expected `{writeSql}` to block");
+        var task = await sim.StartBlocked(writer, writeSql, TestContext.CancellationToken);
         _ = holder.CreateCommand(release).ExecuteNonQuery();
-        await task;
+        _ = await task;
     }
 
     // Runs `sql` on `conn` from a threadpool thread and asserts it completes
@@ -113,7 +99,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         AreEqual(0, reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k = 40").ExecuteScalar());
-        await AssertBlocksUntil(reader, writer, "insert t values (40, 9)", "commit tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert t values (40, 9)", "commit tran");
 
         AreEqual(4, sim.ExecuteScalar("select count(*) from t"));
     }
@@ -126,7 +112,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k between 15 and 25").ExecuteScalar();
-        await AssertBlocksUntil(reader, writer, "insert t values (22, 9)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert t values (22, 9)", "rollback tran");
     }
 
     [TestMethod]
@@ -155,7 +141,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k > 25").ExecuteScalar();
-        await AssertBlocksUntil(reader, writer, "insert t values (5000, 9)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert t values (5000, 9)", "rollback tran");
     }
 
     [TestMethod]
@@ -181,7 +167,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k between 15 and 25").ExecuteScalar();
-        await AssertBlocksUntil(reader, writer, "update t set v = 99 where k = 20", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "update t set v = 99 where k = 20", "rollback tran");
     }
 
     [TestMethod]
@@ -194,7 +180,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k between 15 and 25").ExecuteScalar();
-        await AssertBlocksUntil(reader, writer, "update t set k = 21 where k = 30", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "update t set k = 21 where k = 30", "rollback tran");
     }
 
     [TestMethod]
@@ -205,7 +191,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k between 15 and 25").ExecuteScalar();
-        await AssertBlocksUntil(reader, writer, "delete t where k = 20", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "delete t where k = 20", "rollback tran");
     }
 
     [TestMethod]
@@ -247,7 +233,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where v = 2").ExecuteScalar();
-        await AssertBlocksUntil(reader, writer, "insert t values (999, 9)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert t values (999, 9)", "rollback tran");
     }
 
     [TestMethod]
@@ -271,7 +257,7 @@ public sealed class KeyRangeLockTests
 
         AreEqual(2, reader.CreateCommand(
             "set transaction isolation level serializable; begin tran; select count(*) from two where a = 1 or b = 2").ExecuteScalar());
-        await AssertBlocksUntil(reader, writer, "insert two values (999, 7, 7)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert two values (999, 7, 7)", "rollback tran");
     }
 
     [TestMethod]
@@ -282,7 +268,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t").ExecuteScalar();
-        await AssertBlocksUntil(reader, writer, "insert t values (999, 9)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert t values (999, 9)", "rollback tran");
     }
 
     [TestMethod]
@@ -313,7 +299,7 @@ public sealed class KeyRangeLockTests
 
         _ = reader.CreateCommand("begin tran; select count(*) from t with (holdlock) where k between 15 and 25").ExecuteScalar();
         await AssertProceeds(writer, "insert t values (35, 9)");
-        await AssertBlocksUntil(reader, writer, "insert t values (22, 8)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert t values (22, 8)", "rollback tran");
     }
 
     [TestMethod]
@@ -326,7 +312,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k between 15 and 25").ExecuteScalar();
-        await AssertBlocksUntil(reader, writer, "set transaction isolation level read uncommitted; insert t values (22, 9)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "set transaction isolation level read uncommitted; insert t values (22, 9)", "rollback tran");
     }
 
     [TestMethod]
@@ -363,38 +349,12 @@ public sealed class KeyRangeLockTests
         _ = connA.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k between 100 and 200").ExecuteScalar();
         _ = connB.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from t where k between 300 and 400").ExecuteScalar();
 
-        Exception? aError = null;
-        Exception? bError = null;
-        using var aStarted = new ManualResetEventSlim();
-        using var bStarted = new ManualResetEventSlim();
-        var taskA = Task.Run(
-            () =>
-            {
-                aStarted.Set();
-                try { _ = connA.CreateCommand("insert t values (350, 1)").ExecuteNonQuery(); }
-                catch (Exception ex) { aError = ex; }
-            },
-            TestContext.CancellationToken);
-        IsTrue(aStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(150, TestContext.CancellationToken);
-
-        var taskB = Task.Run(
-            () =>
-            {
-                bStarted.Set();
-                try { _ = connB.CreateCommand("insert t values (150, 1)").ExecuteNonQuery(); }
-                catch (Exception ex) { bError = ex; }
-            },
-            TestContext.CancellationToken);
-        IsTrue(bStarted.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.WhenAll(taskA, taskB).WaitAsync(TimeSpan.FromSeconds(10), TestContext.CancellationToken);
-
-        IsTrue(aError is null ^ bError is null);
-        var victim = aError ?? bError;
-        IsNotNull(victim);
-        AreEqual(1205, IsInstanceOfType<SimulatedSqlException>(victim).Number);
-
-        _ = (aError is null ? connA : connB).CreateCommand("rollback").ExecuteNonQuery();
+        // A is seen waiting before B asks, so B is the one that closes the
+        // cycle and, at equal deadlock priority, the victim.
+        var taskA = await sim.StartBlocked(connA, "insert t values (350, 1)", TestContext.CancellationToken);
+        AreEqual(1205, Throws<SimulatedSqlException>(() => connB.CreateCommand("insert t values (150, 1)").ExecuteNonQuery()).Number);
+        _ = await taskA.WaitAsync(TimeSpan.FromSeconds(10), TestContext.CancellationToken);
+        _ = connA.CreateCommand("rollback").ExecuteNonQuery();
     }
 
     [TestMethod]
@@ -446,7 +406,7 @@ public sealed class KeyRangeLockTests
         _ = reader.CreateCommand("select count(*) from t where k between 15 and 25").ExecuteScalar();
 
         await AssertProceeds(writer, "insert t values (35, 9)");
-        await AssertBlocksUntil(reader, writer, "insert t values (22, 8)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert t values (22, 8)", "rollback tran");
     }
 
     [TestMethod]
@@ -460,7 +420,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1 and b between 2 and 5").ExecuteScalar();
-        await AssertBlocksUntil(reader, writer, "insert ck values (1, 3, 900)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert ck values (1, 3, 900)", "rollback tran");
     }
 
     [TestMethod]
@@ -492,7 +452,7 @@ public sealed class KeyRangeLockTests
 
         AreEqual(0, reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1 and b = 3").ExecuteScalar());
         await AssertProceeds(writer, "insert ck values (1, 6, 902)");
-        await AssertBlocksUntil(reader, writer, "insert ck values (1, 3, 903)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert ck values (1, 3, 903)", "rollback tran");
     }
 
     [TestMethod]
@@ -507,7 +467,7 @@ public sealed class KeyRangeLockTests
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1").ExecuteScalar();
         await AssertProceeds(writer, "insert ck values (2, 5, 904)");
-        await AssertBlocksUntil(reader, writer, "insert ck values (1, 100, 905)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert ck values (1, 100, 905)", "rollback tran");
     }
 
     [TestMethod]
@@ -520,7 +480,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where a = 1 and b between 2 and 5").ExecuteScalar();
-        await AssertBlocksUntil(reader, writer, "update ck set a = 1, b = 4 where a = 3 and b = 1", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "update ck set a = 1, b = 4 where a = 3 and b = 1", "rollback tran");
     }
 
     [TestMethod]
@@ -533,7 +493,7 @@ public sealed class KeyRangeLockTests
         using var writer = sim.CreateOpenConnection();
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select count(*) from ck where b = 2").ExecuteScalar();
-        await AssertBlocksUntil(reader, writer, "insert ck values (9, 9, 906)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert ck values (9, 9, 906)", "rollback tran");
     }
 
     [TestMethod]
@@ -625,7 +585,7 @@ public sealed class KeyRangeLockTests
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select v from t with (updlock) where k between 15 and 25").ExecuteScalar();
         await AssertProceeds(writer, "insert t values (35, 9)");
-        await AssertBlocksUntil(reader, writer, "insert t values (22, 8)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert t values (22, 8)", "rollback tran");
     }
 
     [TestMethod]
@@ -639,6 +599,7 @@ public sealed class KeyRangeLockTests
 
         _ = readerA.CreateCommand("set transaction isolation level serializable; begin tran; select v from t with (updlock) where k between 15 and 25").ExecuteScalar();
         await AssertBlocksUntil(
+            sim,
             readerA,
             readerB,
             "set transaction isolation level serializable; begin tran; select v from t with (updlock) where k between 15 and 25",
@@ -673,6 +634,7 @@ public sealed class KeyRangeLockTests
 
         _ = readerA.CreateCommand("set transaction isolation level serializable; begin tran; select v from t with (xlock) where k between 15 and 25").ExecuteScalar();
         await AssertBlocksUntil(
+            sim,
             readerA,
             readerB,
             "set transaction isolation level serializable; begin tran; select v from t where k between 15 and 25",
@@ -692,7 +654,7 @@ public sealed class KeyRangeLockTests
 
         _ = reader.CreateCommand("set transaction isolation level serializable; begin tran; select k from t with (updlock) where v = 2").ExecuteScalar();
         AreEqual(4, reader.CreateCommand("select count(*) from sys.dm_tran_locks where resource_type = 'KEY' and request_mode = 'RangeS-U'").ExecuteScalar());
-        await AssertBlocksUntil(reader, writer, "insert t values (999, 9)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert t values (999, 9)", "rollback tran");
     }
 
     [TestMethod]
@@ -708,7 +670,7 @@ public sealed class KeyRangeLockTests
         // A second, unrelated statement on the same transaction proves the
         // range survived the first statement's end.
         _ = reader.CreateCommand("select 1").ExecuteScalar();
-        await AssertBlocksUntil(reader, writer, "insert t values (22, 9)", "rollback tran");
+        await AssertBlocksUntil(sim, reader, writer, "insert t values (22, 9)", "rollback tran");
     }
 
     /// <summary>

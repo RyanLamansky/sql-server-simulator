@@ -14,12 +14,6 @@ internal sealed partial class TdsSession
     private byte lastTmIsolation;
 
     /// <summary>
-    /// Handles a Transaction Manager request (begin / commit / rollback /
-    /// save), mapping it onto the session connection's transaction API.
-    /// SqlClient sends these for the <c>SqlTransaction</c> object model;
-    /// SQL-text transactions never arrive this way.
-    /// </summary>
-    /// <summary>
     /// Test-only entry to the TM request handler over a caller-supplied
     /// connection and writer, with no socket / login. The SqlClient oracle
     /// begins each transaction explicitly and never sets <c>fBeginXact</c>, so
@@ -50,6 +44,12 @@ internal sealed partial class TdsSession
         this.ExecuteBatchAsync(message, writer, CancellationToken.None).AsTask().GetAwaiter().GetResult();
     }
 
+    /// <summary>
+    /// Handles a Transaction Manager request (begin / commit / rollback /
+    /// save), mapping it onto the session connection's transaction API.
+    /// SqlClient sends these for the <c>SqlTransaction</c> object model;
+    /// SQL-text transactions never arrive this way.
+    /// </summary>
     private void ExecuteTransactionManagerRequest(TdsMessage message, TdsTokenWriter writer)
     {
         // A pooled connection's first request after reuse may be this one —

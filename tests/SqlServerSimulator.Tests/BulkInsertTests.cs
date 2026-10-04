@@ -507,4 +507,22 @@ public class BulkInsertTests
                 bulk insert t from 'd.csv' with (formatfile = 'f.xml');
                 select string_agg(concat(id, ':', name), ',') within group (order by id) from t
                 """));
+
+    /// <summary>
+    /// A bulk-loaded row's ROW START is its transaction's system time, as any
+    /// other write's is, so a later UPDATE in the transaction finds no period
+    /// ending before it began (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SystemVersionedTarget_StampsTheTransactionsSystemTime()
+        => AreEqual(1, WithFiles(("f.txt", "1\t\n2\t\n")).ExecuteScalar("""
+            create table t (id int primary key, v int null,
+                ts datetime2 generated always as row start hidden, te datetime2 generated always as row end hidden,
+                period for system_time (ts, te)) with (system_versioning = on);
+            begin tran;
+            waitfor delay '00:00:00.050';
+            bulk insert t from 'f.txt';
+            update t set v = 1;
+            select count(distinct ts) from t
+            """));
 }

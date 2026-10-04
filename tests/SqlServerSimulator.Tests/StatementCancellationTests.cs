@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -171,8 +172,6 @@ public sealed class StatementCancellationTests
             canceller.Join();
         }
     }
-
-    private static int[] Numbers(SimulatedSqlException error) => [.. error.Errors.Select(static e => e.Number)];
 
     [TestMethod]
     public void Timeout_InterruptsARecursionWithoutALimit()

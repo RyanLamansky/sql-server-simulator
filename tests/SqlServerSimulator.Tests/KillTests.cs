@@ -113,7 +113,7 @@ public sealed class KillTests
         var spid = victim.CreateCommand("select @@spid").ExecuteScalar();
         var running = Task.Run(() => victim.CreateCommand("begin tran; insert t values (1); waitfor delay '00:00:30'").ExecuteNonQuery(), TestContext.CancellationToken);
 
-        _ = SpinWait.SpinUntil(() => (int)simulation.ExecuteScalar($"select count(*) from sys.dm_exec_requests where session_id = {spid}")! == 1, TimeSpan.FromSeconds(10));
+        IsTrue(SpinWait.SpinUntil(() => (int)simulation.ExecuteScalar($"select count(*) from sys.dm_exec_requests where session_id = {spid}")! == 1, TimeSpan.FromSeconds(10)));
         _ = simulation.ExecuteNonQuery($"kill {spid}");
 
         var error = Throws<SimulatedSqlException>(() => running.GetAwaiter().GetResult());
@@ -133,7 +133,7 @@ public sealed class KillTests
         var spid = victim.CreateCommand("select @@spid").ExecuteScalar();
         var running = Task.Run(() => victim.CreateCommand("begin try waitfor delay '00:00:30' end try begin catch select 'caught' end catch").ExecuteScalar(), TestContext.CancellationToken);
 
-        _ = SpinWait.SpinUntil(() => (int)simulation.ExecuteScalar($"select count(*) from sys.dm_exec_requests where session_id = {spid}")! == 1, TimeSpan.FromSeconds(10));
+        IsTrue(SpinWait.SpinUntil(() => (int)simulation.ExecuteScalar($"select count(*) from sys.dm_exec_requests where session_id = {spid}")! == 1, TimeSpan.FromSeconds(10)));
         _ = simulation.ExecuteNonQuery($"kill {spid}");
 
         AreEqual(596, Throws<SimulatedSqlException>(() => running.GetAwaiter().GetResult()).Number);

@@ -137,16 +137,20 @@ public sealed class LockResourceTests
         var resource = new LockResource();
         var holder = sim.CreateDbConnection();
         var waiter = sim.CreateDbConnection();
+        using var held = new ManualResetEventSlim();
         var holderTask = Task.Run(() =>
         {
             holder.CurrentExecutingThreadId = Environment.CurrentManagedThreadId;
             sim.LockManager.Acquire(resource, LockMode.SchemaStability, holder.Session, 0);
+            held.Set();
             Thread.Sleep(100);
             sim.LockManager.Release(resource, LockMode.SchemaStability, holder.Session);
             holder.CurrentExecutingThreadId = null;
         }, TestContext.CancellationToken);
-        await Task.Delay(20, TestContext.CancellationToken);
-        sim.LockManager.Acquire(resource, LockMode.SchemaModification, waiter.Session, 1000);
+        // The holder has its Sch-S before the Sch-M is asked for, however late
+        // its thread starts; a fixed delay let the waiter win the race.
+        IsTrue(held.Wait(10_000, TestContext.CancellationToken));
+        sim.LockManager.Acquire(resource, LockMode.SchemaModification, waiter.Session, 10_000);
         sim.LockManager.Release(resource, LockMode.SchemaModification, waiter.Session);
         await holderTask;
     }

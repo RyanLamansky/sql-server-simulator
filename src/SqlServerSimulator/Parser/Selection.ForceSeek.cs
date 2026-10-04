@@ -5,6 +5,13 @@ namespace SqlServerSimulator.Parser;
 partial class Selection
 {
     /// <summary>
+    /// The joined UPDATE / DELETE's form of the check, over its FROM clause
+    /// and its WHERE.
+    /// </summary>
+    internal static void ValidateForcedSeeks(ParserContext context, FromSource[] sources, JoinSpec[] joins, BooleanExpression? where)
+        => ValidateForcedSeeks(context, sources, joins, where is null ? [] : [where], projections: null, soleSubqueryColumn: null);
+
+    /// <summary>
     /// Refuses a query real's optimizer can't plan under its <c>FORCESEEK</c>
     /// hints — Msg 8622, raised once the query's predicates have parsed. A
     /// hinted source needs some predicate an index seek can answer: a
@@ -28,13 +35,6 @@ partial class Selection
     /// batch keeps this one from being reported.
     /// </para>
     /// </summary>
-    /// <summary>
-    /// The joined UPDATE / DELETE's form of the check, over its FROM clause
-    /// and its WHERE.
-    /// </summary>
-    internal static void ValidateForcedSeeks(ParserContext context, FromSource[] sources, JoinSpec[] joins, BooleanExpression? where)
-        => ValidateForcedSeeks(context, sources, joins, where is null ? [] : [where], projections: null, soleSubqueryColumn: null);
-
     private static void ValidateForcedSeeks(
         ParserContext context,
         FromSource[] sources,

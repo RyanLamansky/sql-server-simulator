@@ -13,11 +13,9 @@ namespace SqlServerSimulator;
 /// </summary>
 [TestClass]
 // Same scheduling caveat as LockingTests: the blocking assertions hand work to
-// a threadpool thread and assert on a deadline that it started.
+// a threadpool thread and assert on a deadline that it is seen waiting.
 public sealed class UncommittedKeyTests
 {
-    private const int ThreadStartTimeoutMs = 10_000;
-
     public TestContext TestContext { get; set; } = null!;
 
     private static Simulation Keyed()
@@ -35,32 +33,21 @@ public sealed class UncommittedKeyTests
         return sim;
     }
 
-    // Runs `sql` on `conn` from a threadpool thread, asserts it is still
-    // blocked once the holder has had time to matter, then runs `release` on
-    // the holder and returns the blocked statement's outcome.
-    private async Task<Exception?> BlockedUntil(DbConnection holder, DbConnection conn, string sql, string release)
+    // Runs `sql` on `conn` from a threadpool thread, asserts it waits, then
+    // runs `release` on the holder and returns the blocked statement's outcome.
+    private async Task<Exception?> BlockedUntil(Simulation sim, DbConnection holder, DbConnection conn, string sql, string release)
     {
-        using var started = new ManualResetEventSlim();
-        var task = Task.Run(
-            () =>
-            {
-                started.Set();
-                try
-                {
-                    _ = conn.CreateCommand(sql).ExecuteNonQuery();
-                    return null;
-                }
-                catch (SimulatedSqlException error)
-                {
-                    return (Exception)error;
-                }
-            },
-            TestContext.CancellationToken);
-        IsTrue(started.Wait(ThreadStartTimeoutMs, TestContext.CancellationToken));
-        await Task.Delay(150, TestContext.CancellationToken);
-        IsFalse(task.IsCompleted, $"expected `{sql}` to block");
+        var task = await sim.StartBlocked(conn, sql, TestContext.CancellationToken);
         _ = holder.CreateCommand(release).ExecuteNonQuery();
-        return await task;
+        try
+        {
+            _ = await task;
+            return null;
+        }
+        catch (SimulatedSqlException error)
+        {
+            return error;
+        }
     }
 
     [TestMethod]
@@ -95,7 +82,7 @@ public sealed class UncommittedKeyTests
         using var other = sim.CreateOpenConnection();
 
         _ = holder.CreateCommand("begin tran; delete t where k = 10").ExecuteNonQuery();
-        var outcome = await BlockedUntil(holder, other, "insert t values (10, 9)", "rollback");
+        var outcome = await BlockedUntil(sim, holder, other, "insert t values (10, 9)", "rollback");
 
         AreEqual(2627, IsInstanceOfType<SimulatedSqlException>(outcome).Number);
         AreEqual("10:1", sim.ExecuteScalar("select string_agg(concat(k, ':', v), ',') from t where k = 10"));
@@ -109,7 +96,7 @@ public sealed class UncommittedKeyTests
         using var other = sim.CreateOpenConnection();
 
         _ = holder.CreateCommand("begin tran; delete t where k = 10").ExecuteNonQuery();
-        IsNull(await BlockedUntil(holder, other, "insert t values (10, 9)", "commit"));
+        IsNull(await BlockedUntil(sim, holder, other, "insert t values (10, 9)", "commit"));
 
         AreEqual("10:9", sim.ExecuteScalar("select string_agg(concat(k, ':', v), ',') from t where k = 10"));
     }
@@ -122,7 +109,7 @@ public sealed class UncommittedKeyTests
         using var other = sim.CreateOpenConnection();
 
         _ = holder.CreateCommand("begin tran; insert t values (22, 1)").ExecuteNonQuery();
-        var outcome = await BlockedUntil(holder, other, "insert t values (22, 9)", "commit");
+        var outcome = await BlockedUntil(sim, holder, other, "insert t values (22, 9)", "commit");
 
         AreEqual(2627, IsInstanceOfType<SimulatedSqlException>(outcome).Number);
     }
@@ -135,7 +122,7 @@ public sealed class UncommittedKeyTests
         using var other = sim.CreateOpenConnection();
 
         _ = holder.CreateCommand("begin tran; insert t values (22, 1)").ExecuteNonQuery();
-        IsNull(await BlockedUntil(holder, other, "insert t values (22, 9)", "rollback"));
+        IsNull(await BlockedUntil(sim, holder, other, "insert t values (22, 9)", "rollback"));
 
         AreEqual(9, sim.ExecuteScalar("select v from t where k = 22"));
     }
@@ -180,7 +167,7 @@ public sealed class UncommittedKeyTests
         using var other = sim.CreateOpenConnection();
 
         _ = holder.CreateCommand("begin tran; insert g values (1)").ExecuteNonQuery();
-        IsNull(await BlockedUntil(holder, other, "insert g values (1)", "commit"));
+        IsNull(await BlockedUntil(sim, holder, other, "insert g values (1)", "commit"));
 
         AreEqual(1, sim.ExecuteScalar("select count(*) from g"));
     }
@@ -199,22 +186,13 @@ public sealed class UncommittedKeyTests
         var sim = Keyed();
         using var first = sim.CreateOpenConnection();
         using var second = sim.CreateOpenConnection();
-        using var observer = sim.CreateOpenConnection();
 
         _ = first.CreateCommand("begin tran; insert t values (41, 1)").ExecuteNonQuery();
         _ = second.CreateCommand("begin tran; insert t values (42, 2)").ExecuteNonQuery();
-        var firstSpid = (short)first.CreateCommand("select @@spid").ExecuteScalar()!;
-        var blocked = Task.Run(() => first.CreateCommand("insert t values (42, 1)").ExecuteNonQuery(), TestContext.CancellationToken);
-        var waited = System.Diagnostics.Stopwatch.StartNew();
-        while ((int)observer.CreateCommand($"select count(*) from sys.dm_os_waiting_tasks where session_id = {firstSpid}").ExecuteScalar()! == 0)
-        {
-            IsFalse(blocked.IsCompleted, "the first insert was to wait on the second's key");
-            IsLessThan(ThreadStartTimeoutMs, waited.ElapsedMilliseconds, "the first insert never waited");
-            await Task.Delay(5, TestContext.CancellationToken);
-        }
+        var blocked = await sim.StartBlocked(first, "insert t values (42, 1)", TestContext.CancellationToken);
 
         AreEqual(1205, Throws<SimulatedSqlException>(() => second.CreateCommand("insert t values (41, 2)").ExecuteNonQuery()).Number);
-        AreEqual(1, await blocked);
+        _ = await blocked;
         _ = first.CreateCommand("commit").ExecuteNonQuery();
         AreEqual("41:1,42:1", sim.ExecuteScalar("select string_agg(concat(k, ':', v), ',') within group (order by k) from t where k > 40"));
     }
@@ -273,7 +251,7 @@ public sealed class UncommittedKeyTests
         using var other = sim.CreateOpenConnection();
 
         _ = holder.CreateCommand("begin tran; delete t where k = 10").ExecuteNonQuery();
-        IsNull(await BlockedUntil(holder, other, "select count(*) from t", "rollback"));
+        IsNull(await BlockedUntil(sim, holder, other, "select count(*) from t", "rollback"));
         AreEqual(3, other.CreateCommand("select count(*) from t").ExecuteScalar());
     }
 
@@ -325,7 +303,7 @@ public sealed class UncommittedKeyTests
         using var other = sim.CreateOpenConnection();
 
         _ = holder.CreateCommand("begin tran; insert p values (2)").ExecuteNonQuery();
-        var outcome = await BlockedUntil(holder, other, "insert c values (10, 2)", "rollback");
+        var outcome = await BlockedUntil(sim, holder, other, "insert c values (10, 2)", "rollback");
 
         AreEqual(547, IsInstanceOfType<SimulatedSqlException>(outcome).Number);
         AreEqual(0, sim.ExecuteScalar("select count(*) from c where pid = 2"));

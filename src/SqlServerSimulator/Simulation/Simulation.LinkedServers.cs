@@ -148,7 +148,7 @@ partial class Simulation
             else if (BuiltInToken.Equals(name, "droplogins")
                 && !arg.Value.IsNull && !BuiltInToken.Equals(arg.Value.CoerceTo(SqlType.SystemName).AsString.TrimEnd(), "droplogins"))
             {
-                throw SimulatedSqlException.InvalidLinkedServerParameter("sys.sp_dropserver");
+                throw SimulatedSqlException.InvalidSystemProcedureOption("sp_dropserver");
             }
         }
 
@@ -226,7 +226,7 @@ partial class Simulation
         else if (BuiltInToken.Equals(text, "false") || BuiltInToken.Equals(text, "off"))
             enabled = false;
         else
-            throw SimulatedSqlException.InvalidLinkedServerParameter("sys.sp_serveroption");
+            throw SimulatedSqlException.InvalidSystemProcedureOption("sp_serveroption");
 
         if (BuiltInToken.Equals(option, "rpc out"))
             linkedServer.RpcOut = enabled;
@@ -235,7 +235,7 @@ partial class Simulation
         else if (BuiltInToken.Equals(option, "remote proc transaction promotion"))
             linkedServer.RemoteProcTransactionPromotion = enabled;
         else if (!IsDiscardedServerOption(option))
-            throw SimulatedSqlException.InvalidLinkedServerParameter("sys.sp_serveroption");
+            throw SimulatedSqlException.InvalidSystemProcedureOption("sp_serveroption");
     }
 
     /// <summary>

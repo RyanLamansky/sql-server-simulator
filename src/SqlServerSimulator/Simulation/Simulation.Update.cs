@@ -471,20 +471,6 @@ partial class Simulation
         source.WrittenObjectName ?? source.Qualifier ?? table.Name;
 
     /// <summary>
-    /// The <c>xml(&lt;collection&gt;)</c> binding <paramref name="columnName"/>
-    /// carries on <paramref name="targetTable"/>, or null when the column is
-    /// untyped — or when the statement is the alias form, whose target the FROM
-    /// clause only names after the SET list has parsed.
-    /// </summary>
-    /// <summary>
-    /// Whether <c>col.modify(…)</c> is the <c>json</c> type's mutator rather
-    /// than xml's: the column's own type says so where the target is known.
-    /// The alias form names its target only in the FROM clause, which parses
-    /// after the SET list, so there the argument count decides — the json
-    /// method takes a path and a value where xml's takes one XML-DML string.
-    /// The cursor stays on the <c>(</c>.
-    /// </summary>
-    /// <summary>
     /// The CLR user-defined type of <paramref name="targetTable"/>'s column
     /// <paramref name="columnName"/>, or <see langword="null"/>.
     /// </summary>
@@ -502,6 +488,14 @@ partial class Simulation
         return null;
     }
 
+    /// <summary>
+    /// Whether <c>col.modify(…)</c> is the <c>json</c> type's mutator rather
+    /// than xml's: the column's own type says so where the target is known.
+    /// The alias form names its target only in the FROM clause, which parses
+    /// after the SET list, so there the argument count decides — the json
+    /// method takes a path and a value where xml's takes one XML-DML string.
+    /// The cursor stays on the <c>(</c>.
+    /// </summary>
     private static bool IsJsonMutatorTarget(ParserContext context, HeapTable? targetTable, string columnName)
     {
         if (targetTable is not null)
@@ -532,6 +526,12 @@ partial class Simulation
         return twoArguments;
     }
 
+    /// <summary>
+    /// The <c>xml(&lt;collection&gt;)</c> binding <paramref name="columnName"/>
+    /// carries on <paramref name="targetTable"/>, or null when the column is
+    /// untyped — or when the statement is the alias form, whose target the FROM
+    /// clause only names after the SET list has parsed.
+    /// </summary>
     private static Schemas.XmlSchemaCollection? XmlSchemaCollectionOf(ParserContext context, HeapTable? targetTable, string columnName)
     {
         if (targetTable is null)
@@ -786,16 +786,7 @@ partial class Simulation
             if (sourceView?.CheckOptionCheck is { } co && !co(newValues, context.Batch))
                 throw SimulatedSqlException.ViewCheckOptionViolation();
 
-            // Snapshot the old row when OUTPUT, AFTER UPDATE triggers, or
-            // an INSTEAD OF UPDATE on the parent (table or view) needs it
-            // for DELETED.<col> resolution.
-            var insteadOfParent = (SchemaObject?)sourceView ?? table;
-            var oldSnapshotNeeded = output is not null
-                || HasAfterTrigger(context.Batch, table, TriggerActions.Update)
-                || HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Update)
-                || table.SystemVersioning is not null
-                || table.IncomingForeignKeys.Count > 0;
-            var oldSnapshot = oldSnapshotNeeded ? fullValues : null;
+            var oldSnapshot = UpdateNeedsOldRows(context.Batch, table, (SchemaObject?)sourceView ?? table, output) ? fullValues : null;
             return (newValues, oldSnapshot);
         }
     }
@@ -997,10 +988,7 @@ partial class Simulation
         var affected = new List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)>();
         var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
         var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
-        var oldSnapshotNeeded = output is not null
-            || HasAfterTrigger(context.Batch, table, TriggerActions.Update)
-            || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Update)
-            || table.SystemVersioning is not null;
+        var oldSnapshotNeeded = UpdateNeedsOldRows(context.Batch, table, table, output);
         var partners = output is { ReadsPartners: true } ? new OutputPartnerRows(sources) : null;
 
         // Hoisted per-row scaffolding: one mutable tuple slot, one cached
@@ -1254,6 +1242,21 @@ partial class Simulation
         if (cap < rows.Count)
             rows.RemoveRange(cap, rows.Count - cap);
     }
+
+    /// <summary>
+    /// Whether an UPDATE walk keeps each row's decoded old image for
+    /// <see cref="CommitUpdate"/>, which reads it for OUTPUT's and the
+    /// triggers' DELETED, the history row, and the incoming foreign keys'
+    /// checks and cascades. Those skip a row whose image is null, so every
+    /// UPDATE walk asks here, since one answering without the foreign-key
+    /// term would change a referenced key with no Msg 547 and no cascade.
+    /// </summary>
+    private static bool UpdateNeedsOldRows(BatchContext batch, HeapTable table, SchemaObject insteadOfParent, OutputProjection? output) =>
+        output is not null
+        || HasAfterTrigger(batch, table, TriggerActions.Update)
+        || HasInsteadOfTrigger(batch, insteadOfParent, TriggerActions.Update)
+        || table.SystemVersioning is not null
+        || table.IncomingForeignKeys.Count > 0;
 
     /// <summary>
     /// Phase 2 (PK / UNIQUE validation) + phase 3 (tombstone old, insert
@@ -1719,12 +1722,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Resolves the raw <c>SET</c> column-name pairs to ordinals against the
-    /// target table, rejecting writes to identity / computed / rowversion /
-    /// GENERATED ALWAYS columns up-front so the per-row loop never has to
-    /// re-check.
-    /// </summary>
-    /// <summary>
     /// Parse-time column-type resolver for the UPDATE target, so a subquery in
     /// a SET expression can bind the target's columns
     /// (<c>SET alias = (SELECT MAX(v) FROM (VALUES (t.name),(t.goes_by)) x(v))</c>,
@@ -1765,6 +1762,12 @@ partial class Simulation
             join.OnPredicate?.Bind(batch, resolveColumnType);
     }
 
+    /// <summary>
+    /// Resolves the raw <c>SET</c> column-name pairs to ordinals against the
+    /// target table, rejecting writes to identity / computed / rowversion /
+    /// GENERATED ALWAYS columns up-front so the per-row loop never has to
+    /// re-check.
+    /// </summary>
     private static List<(int Ordinal, Expression Expr)> ResolveSetAssignments(
         List<(string? ColumnName, Expression Expr)> rawAssignments,
         HeapTable table,
@@ -2206,17 +2209,9 @@ partial class Simulation
             EnforceRule(table, newValues, ordinal, context.Batch);
         }
 
-        for (var ci = 0; ci < table.Columns.Length; ci++)
-        {
-            if (table.Columns[ci].Type == SqlType.RowVersion)
-                newValues[ci] = SqlValue.FromRowVersion(context.Batch.DatabaseFor(table).AllocateRowVersion());
-        }
-
         // The pre-update ROW START surfaces in `fullValues` for the
         // history-row copy that CommitUpdate writes.
-        AdvanceUpdatedPeriodStart(table, newValues, context.Batch);
-
-        EvaluateComputedColumns(table, newValues, context.Batch);
+        StampUpdatedRow(table, newValues, context.Batch);
         if (enforceConstraints)
         {
             EnforceNotNull(table, newValues, "UPDATE");

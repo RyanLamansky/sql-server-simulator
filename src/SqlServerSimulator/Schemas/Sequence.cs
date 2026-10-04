@@ -147,11 +147,6 @@ internal sealed class Sequence(
     public SqlValue AsDeclaredVariant(Int128 value) => SqlValue.FromVariant(this.WrapAsDeclaredType(value));
 
     /// <summary>
-    /// Computes and reserves the next value for emission. Caller is
-    /// responsible for the per-row cache check before calling — this method
-    /// always advances. Raises Msg 11728 when no-cycle and already exhausted.
-    /// </summary>
-    /// <summary>
     /// Whether this draw allocates the first cache block since CREATE or
     /// <c>RESTART</c> and the block is longer than the values left — real's
     /// Msg 11729. Probed 2026-09-23 against SQL Server 2025: the default cache
@@ -171,6 +166,11 @@ internal sealed class Sequence(
         return available < (this.CacheSize ?? 50);
     }
 
+    /// <summary>
+    /// Computes and reserves the next value for emission. Caller is
+    /// responsible for the per-row cache check before calling — this method
+    /// always advances. Raises Msg 11728 when no-cycle and already exhausted.
+    /// </summary>
     public SqlValue Advance()
     {
         if (this.IsExhausted)

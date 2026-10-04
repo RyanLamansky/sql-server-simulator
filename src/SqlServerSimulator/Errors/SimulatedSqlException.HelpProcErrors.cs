@@ -123,13 +123,6 @@ partial class SimulatedSqlException
         new("There are no matching rows on which to report.", 15330, 11, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 15007 — <c>sp_who</c> / <c>sp_who2</c>'s
-    /// <c>@loginame</c> argument naming no known login.
-    /// </summary>
-    internal static SimulatedSqlException HelpLoginIsNotValid(string loginName) =>
-        new($"'{loginName}' is not a valid login or you do not have permission.", 15007, 16, 1);
-
-    /// <summary>
     /// Mimics SQL Server's Msg 15412 — <c>sp_helpsrvrolemember</c> /
     /// <c>sp_helpsrvrole</c> given a name that is no fixed server role (a
     /// custom server role included, for the first).

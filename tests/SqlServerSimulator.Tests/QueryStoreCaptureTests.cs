@@ -471,10 +471,13 @@ public sealed class QueryStoreCaptureTests
         var sim = CapturingAll();
         using var holder = sim.CreateOpenConnection();
         _ = holder.CreateCommand("begin tran; update t set b = 5 where a = 1").ExecuteNonQuery();
-        var blocked = Task.Run(() => sim.ExecuteScalar("select b from t where a = 1"), TestContext.CancellationToken);
+        using var waiter = sim.CreateOpenConnection();
+        // The wait is timed from when the reader is seen waiting, not from when
+        // its thread was asked to start, which a loaded machine can delay.
+        var blocked = await sim.StartBlocked(waiter, "select b from t where a = 1", TestContext.CancellationToken);
         await Task.Delay(300, TestContext.CancellationToken);
         _ = holder.CreateCommand("commit").ExecuteNonQuery();
-        AreEqual(5, await blocked);
+        AreEqual(5, (await blocked).Single());
         using var reader = sim.ExecuteReader("""
             select w.wait_category_desc, w.total_query_wait_time_ms, rs.last_cpu_time, rs.last_duration
             from sys.query_store_wait_stats w join sys.query_store_runtime_stats rs on rs.plan_id = w.plan_id

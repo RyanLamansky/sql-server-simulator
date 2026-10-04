@@ -332,7 +332,7 @@ partial class Simulation
             fastForward)
         {
             Handle = batch.Connection.LastCursorHandle += 2,
-            CreationTime = DateTime.Now,
+            CreationTime = batch.CurrentStatement.UtcNow,
             DeclaringText = batch.Parser.Command.CommandText,
             DeclaringStart = batch.CurrentStatement.StartIndex,
             DeclaringEnd = Math.Max(batch.CurrentStatement.StartIndex, batch.Parser.PreviousTokenEnd - 1),

@@ -366,13 +366,6 @@ partial class SimulatedSqlException
         new("Arithmetic overflow error converting expression to data type numeric.", 8115, 16, 8);
 
     /// <summary>
-    /// Mimics SQL Server error 8115 with a target-name slot — used by
-    /// money / smallmoney range overflows where the message text reads
-    /// <c>"... converting numeric to data type smallmoney"</c>. The numeric/
-    /// expression source-word matches what real SQL Server emits when the
-    /// overflow happens in the integer-to-target widening path.
-    /// </summary>
-    /// <summary>
     /// Mimics SQL Server error 8115 naming both ends — the shape a conversion
     /// out of a character source reports when the number it read is wider than
     /// the destination's precision (probed 2026-08-05:

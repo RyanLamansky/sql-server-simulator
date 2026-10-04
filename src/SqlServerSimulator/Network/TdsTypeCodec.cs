@@ -1286,6 +1286,9 @@ internal static class TdsTypeCodec
             : "Microsoft.SqlServer.Types.SqlGeometry" + tail;
     }
 
+    /// <summary>The collation of the <c>varchar(max)</c> a vector or json column travels as.</summary>
+    private static readonly Collation VectorWireCollation = Collation.Get("Latin1_General_100_BIN2_UTF8");
+
     /// <summary>
     /// The assembly-qualified CLR type name a hierarchyid UDT COLMETADATA
     /// advertises — the string SqlClient exposes as
@@ -1294,9 +1297,6 @@ internal static class TdsTypeCodec
     /// <c>GetSqlBytes</c> / <c>GetBytes</c>. Version/token probe-matched to SQL
     /// Server 2025 (2026-07-16).
     /// </summary>
-    /// <summary>The collation of the <c>varchar(max)</c> a vector or json column travels as.</summary>
-    private static readonly Collation VectorWireCollation = Collation.Get("Latin1_General_100_BIN2_UTF8");
-
     internal const string HierarchyIdAssemblyQualifiedName =
         "Microsoft.SqlServer.Types.SqlHierarchyId, Microsoft.SqlServer.Types, Version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91";
 }

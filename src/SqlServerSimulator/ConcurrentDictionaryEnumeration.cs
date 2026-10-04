@@ -20,13 +20,6 @@ internal static class ConcurrentDictionaryEnumeration
             yield return value;
     }
 
-    public static IEnumerable<TKey> EnumerateKeys<TKey, TValue>(this ConcurrentDictionary<TKey, TValue> dictionary)
-        where TKey : notnull
-    {
-        foreach (var (key, _) in dictionary)
-            yield return key;
-    }
-
     /// <summary>
     /// Whether <paramref name="dictionary"/> holds no entry, answered by its
     /// enumerator's first step. <see cref="ConcurrentDictionary{TKey, TValue}.IsEmpty"/>

@@ -8,22 +8,6 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
-    /// Parses and executes <c>DELETE [FROM] &lt;table&gt; [WHERE pred]</c>
-    /// (single-table form), <c>DELETE [FROM] &lt;alias&gt; FROM &lt;table&gt; AS &lt;alias&gt; [WHERE]</c>
-    /// (single-source EF7+ <c>ExecuteDelete</c> form), and the joined-source
-    /// form (<c>DELETE [FROM] &lt;alias&gt; FROM t AS &lt;alias&gt; JOIN u AS b ON ... [WHERE]</c>)
-    /// that EF Core emits for <c>ExecuteDelete</c> over collection navigations.
-    /// Rows matching the predicate are tombstoned at the page level; their
-    /// payload bytes and any LOB chains are not reclaimed (CLAUDE.md flags
-    /// this as a leak quirk pending the LOB-lifecycle bundle).
-    /// </summary>
-    /// <remarks>
-    /// In the joined-source form, the same target row may surface in
-    /// multiple join tuples; SQL Server deletes each unique target exactly
-    /// once (probe-confirmed). The simulator dedupes by (page, slot)
-    /// during enumeration to match.
-    /// </remarks>
-    /// <summary>
     /// A parenthesized list directly after a <c>DELETE</c> target is a legacy
     /// hint list real refuses, so a query there is the syntax error at its
     /// <c>SELECT</c> rather than the next statement (probed 2026-10-01 against
@@ -41,6 +25,20 @@ partial class Simulation
         context.RestoreCheckpoint(onTarget);
     }
 
+    /// <summary>
+    /// Parses and executes <c>DELETE [FROM] &lt;table&gt; [WHERE pred]</c>
+    /// (single-table form), <c>DELETE [FROM] &lt;alias&gt; FROM &lt;table&gt; AS &lt;alias&gt; [WHERE]</c>
+    /// (single-source EF7+ <c>ExecuteDelete</c> form), and the joined-source
+    /// form (<c>DELETE [FROM] &lt;alias&gt; FROM t AS &lt;alias&gt; JOIN u AS b ON ... [WHERE]</c>)
+    /// that EF Core emits for <c>ExecuteDelete</c> over collection navigations.
+    /// Rows matching the predicate are tombstoned at the page level.
+    /// </summary>
+    /// <remarks>
+    /// In the joined-source form, the same target row may surface in
+    /// multiple join tuples; SQL Server deletes each unique target exactly
+    /// once (probe-confirmed). The simulator dedupes by (page, slot)
+    /// during enumeration to match.
+    /// </remarks>
     private static SimulatedStatementOutcome ParseDelete(ParserContext context)
     {
         // Real binds FROM, then WHERE, then OUTPUT (probed 2026-09-27).
@@ -199,12 +197,7 @@ partial class Simulation
         var lobStore = table.Heap;
 
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
-        var insteadOfParent = (SchemaObject?)sourceView ?? table;
-        var hasDeleteTriggers = HasAfterTrigger(context.Batch, table, TriggerActions.Delete);
-        var insteadOfActive = HasInsteadOfTrigger(context.Batch, insteadOfParent, TriggerActions.Delete);
-        var needsFullForTriggers = hasDeleteTriggers || insteadOfActive;
-        var needsFullForHistory = table.SystemVersioning is not null;
-        var needsFullForFk = table.IncomingForeignKeys.Count > 0 || table.GraphKind == GraphTableKind.Node;
+        var needsFull = DeleteNeedsOldRows(context.Batch, table, (SchemaObject?)sourceView ?? table, output);
 
         // The walk reads the rows as it goes and never meets a row another
         // session deleted meanwhile; real's read meets the deleted key and
@@ -304,7 +297,7 @@ partial class Simulation
         {
             fullOld = null;
             SqlValue[]? fullValues = null;
-            if (where is not null || output is not null || sourceView is not null || needsFullForTriggers || needsFullForHistory || needsFullForFk)
+            if (where is not null || sourceView is not null || needsFull)
             {
                 fullValues = DecodeFullRow(table, rowBytes);
                 EvaluateComputedColumns(table, fullValues, context.Batch);
@@ -329,7 +322,7 @@ partial class Simulation
                     return false;
             }
 
-            fullOld = (output is null && !needsFullForTriggers && !needsFullForHistory && !needsFullForFk) ? null : fullValues;
+            fullOld = needsFull ? fullValues : null;
             return true;
         }
     }
@@ -411,19 +404,7 @@ partial class Simulation
         var deleted = new List<(int PageIndex, int SlotIndex, SqlValue[]? FullOld)>();
         var walkGeneration = Volatile.Read(ref table.Heap.MutationGeneration);
         var judgedRows = new List<(int PageIndex, int SlotIndex, byte[] Bytes)>();
-
-        // The incoming-FK term is load-bearing, not an optimization:
-        // CommitDelete's parent-side enforcement reads the decoded old rows,
-        // and skips silently when every one of them is null. Without it a
-        // joined DELETE tombstones a referenced parent row and leaves the
-        // child orphaned — where the no-FROM path raises Msg 547 — so the two
-        // forms have to agree on when the full row is needed.
-        var needsFull = output is not null
-            || HasAfterTrigger(context.Batch, table, TriggerActions.Delete)
-            || HasInsteadOfTrigger(context.Batch, table, TriggerActions.Delete)
-            || table.SystemVersioning is not null
-            || table.IncomingForeignKeys.Count > 0
-            || table.GraphKind == GraphTableKind.Node;
+        var needsFull = DeleteNeedsOldRows(context.Batch, table, table, output);
         var partners = output is { ReadsPartners: true } ? new OutputPartnerRows(sources) : null;
 
         // Hoisted per-row scaffolding — see ExecuteJoinedUpdate.
@@ -510,6 +491,23 @@ partial class Simulation
             return false;
         }
     }
+
+    /// <summary>
+    /// Whether a DELETE walk keeps each row's decoded old image for
+    /// <see cref="CommitDelete"/>, which reads it for OUTPUT's and the
+    /// triggers' DELETED, the history row, and the parent-side checks of
+    /// incoming foreign keys and edge constraints. Those skip a row whose
+    /// image is null, so every DELETE walk asks here, since one answering
+    /// without the foreign-key term would tombstone a referenced row and
+    /// leave its child orphaned.
+    /// </summary>
+    private static bool DeleteNeedsOldRows(BatchContext batch, HeapTable table, SchemaObject insteadOfParent, OutputProjection? output) =>
+        output is not null
+        || HasAfterTrigger(batch, table, TriggerActions.Delete)
+        || HasInsteadOfTrigger(batch, insteadOfParent, TriggerActions.Delete)
+        || table.SystemVersioning is not null
+        || table.IncomingForeignKeys.Count > 0
+        || table.GraphKind == GraphTableKind.Node;
 
     /// <summary>
     /// Tombstones the deleted rows and emits OUTPUT.DELETED projection rows

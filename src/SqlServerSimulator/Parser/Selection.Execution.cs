@@ -865,16 +865,6 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Builds the plan for a SELECT whose FROM clause has at least one
-    /// source (and possibly JOINs). Static work — output schema, validation
-    /// of ordinal ORDER BY items, LOB-in-DISTINCT/ORDER-BY checks — happens
-    /// here. The deferred closure runs per <see cref="Execute"/> call,
-    /// accepting the outer-row resolver and dispatching to the aggregate or
-    /// simple projection path; each row tuple (one byte[] per source, null
-    /// in unmatched LEFT-JOIN slots) is decoded column-by-column on demand
-    /// and projected through <see cref="Expression.Run(RuntimeContext)"/>.
-    /// </summary>
-    /// <summary>
     /// <paramref name="expressions"/> with each bare reference to a source
     /// column that source re-draws per row (<see cref="FromSource.VolatileRefresh"/>)
     /// replaced by the expression that draws it — a body passing a nested
@@ -1435,6 +1425,16 @@ internal sealed partial class Selection
         }
     }
 
+    /// <summary>
+    /// Builds the plan for a SELECT whose FROM clause has at least one
+    /// source (and possibly JOINs). Static work — output schema, validation
+    /// of ordinal ORDER BY items, LOB-in-DISTINCT/ORDER-BY checks — happens
+    /// here. The deferred closure runs per <see cref="Execute"/> call,
+    /// accepting the outer-row resolver and dispatching to the aggregate or
+    /// simple projection path; each row tuple (one byte[] per source, null
+    /// in unmatched LEFT-JOIN slots) is decoded column-by-column on demand
+    /// and projected through <see cref="Expression.Run(RuntimeContext)"/>.
+    /// </summary>
     private static Selection BuildSqlProjection(
         BatchContext parseBatch,
         FromSource[] sources,
@@ -2533,15 +2533,6 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Per-projection-column decimal-vs-numeric reported type name for
-    /// result-set metadata. A column reports <c>numeric</c> only when its
-    /// result is <c>decimal</c>-family AND the expression carries a
-    /// numeric-named source (see <see cref="Expression.ResultReportsNumeric"/>);
-    /// returns null when no column qualifies (the common case), so most plans
-    /// carry no extra array. The two names share one <see cref="SqlType"/>, so
-    /// this stays projection-time metadata and never influences storage.
-    /// </summary>
-    /// <summary>
     /// Raises Msg 493 for a <c>.nodes()</c> column <paramref name="expression"/>
     /// reads outside an xml method's receiver or an <c>IS [NOT] NULL</c> test.
     /// </summary>
@@ -2633,6 +2624,15 @@ internal sealed partial class Selection
         return identity;
     }
 
+    /// <summary>
+    /// Per-projection-column decimal-vs-numeric reported type name for
+    /// result-set metadata. A column reports <c>numeric</c> only when its
+    /// result is <c>decimal</c>-family AND the expression carries a
+    /// numeric-named source (see <see cref="Expression.ResultReportsNumeric"/>);
+    /// returns null when no column qualifies (the common case), so most plans
+    /// carry no extra array. The two names share one <see cref="SqlType"/>, so
+    /// this stays projection-time metadata and never influences storage.
+    /// </summary>
     private static bool[]? ColumnReportsNumericOf(List<Expression> expressions, SqlType[] schema)
     {
         bool[]? reportsNumeric = null;

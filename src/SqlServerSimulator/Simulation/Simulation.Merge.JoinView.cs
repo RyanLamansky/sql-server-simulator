@@ -343,14 +343,9 @@ partial class Simulation
                 newValues[ordinal] = CoerceForWrite(EnforceMaxLength(newView[i], column, table, context.Connection), column, batch);
                 EnforceRule(table, newValues, ordinal, batch);
             }
-            for (var ci = 0; ci < table.Columns.Length; ci++)
-            {
-                if (table.Columns[ci].Type == SqlType.RowVersion)
-                    newValues[ci] = SqlValue.FromRowVersion(batch.DatabaseFor(table).AllocateRowVersion());
-            }
-            EvaluateComputedColumns(table, newValues, batch);
+            StampUpdatedRow(table, newValues, batch);
             EnforceNotNull(table, newValues, "UPDATE");
-            EnforceCheckConstraints(table, newValues, batch, "UPDATE");
+            EnforceCheckConstraints(table, newValues, batch, "UPDATE", reportedVerb: "MERGE");
             if (plan.ChecksOption && !PathRowRemainsVisible(batch, plan.Chain, plan.Path, table, newValues))
                 throw SimulatedSqlException.ViewCheckOptionViolation();
             baseUpdates.Add((address.Page, address.Slot, oldValues, newValues, sourceValues));

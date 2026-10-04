@@ -892,23 +892,6 @@ partial class Simulation
         return (materialize, defaultAlias, columnNames, sourceSchema, masks, Replayable: false, nullability);
     }
 
-    /// <summary>
-    /// Parses the 1+ WHEN clauses following MERGE's ON predicate.
-    /// Enforces the grammar rules SQL Server probes confirmed:
-    /// <list type="bullet">
-    /// <item>WHEN MATCHED admits UPDATE or DELETE (Msg 10711 rejects INSERT).</item>
-    /// <item>WHEN NOT MATCHED [BY TARGET] admits INSERT only (Msg 10710 rejects UPDATE/DELETE), and may appear at most once (Msg 10714).</item>
-    /// <item>WHEN NOT MATCHED BY SOURCE admits UPDATE or DELETE (Msg 10711 rejects INSERT).</item>
-    /// <item>Within MATCHED and NOT MATCHED BY SOURCE families, an unconditional clause cannot be followed by a conditional one (Msg 5324).</item>
-    /// </list>
-    /// </summary>
-    /// <summary>
-    /// Types a column reference against the MERGE's own two sides: the target
-    /// (by alias, by the target's own name, or unqualified) and then the
-    /// source. Installed as <see cref="ParserContext.OuterTypeResolver"/> while
-    /// the ON predicate and the WHEN clauses parse, so a correlated subquery
-    /// inside either binds to a MERGE column rather than failing to resolve.
-    /// </summary>
     /// <summary>Which sides of a <c>MERGE</c> a clause's column names bind against.</summary>
     private enum MergeNameScope
     {
@@ -924,6 +907,13 @@ partial class Simulation
         // is Msg 4104 (probed 2026-10-01 against SQL Server 2025).
         || (context.Batch.CurrentDatabase.Collation.Equals(alias, otherSpelling) && context.Batch.CurrentDatabase.Collation.Equals(name.ImmediateQualifier, otherSpelling));
 
+    /// <summary>
+    /// Types a column reference against the MERGE's own two sides: the target
+    /// (by alias, by the target's own name, or unqualified) and then the
+    /// source. Installed as <see cref="ParserContext.OuterTypeResolver"/> while
+    /// the ON predicate and the WHEN clauses parse, so a correlated subquery
+    /// inside either binds to a MERGE column rather than failing to resolve.
+    /// </summary>
     private static SqlType ResolveMergeColumnType(
         ParserContext context,
         MultiPartName name,
@@ -973,6 +963,16 @@ partial class Simulation
             : throw SimulatedSqlException.MultiPartIdentifierCouldNotBeBound(name.ToString());
     }
 
+    /// <summary>
+    /// Parses the 1+ WHEN clauses following MERGE's ON predicate.
+    /// Enforces the grammar rules SQL Server probes confirmed:
+    /// <list type="bullet">
+    /// <item>WHEN MATCHED admits UPDATE or DELETE (Msg 10711 rejects INSERT).</item>
+    /// <item>WHEN NOT MATCHED [BY TARGET] admits INSERT only (Msg 10710 rejects UPDATE/DELETE), and may appear at most once (Msg 10714).</item>
+    /// <item>WHEN NOT MATCHED BY SOURCE admits UPDATE or DELETE (Msg 10711 rejects INSERT).</item>
+    /// <item>Within MATCHED and NOT MATCHED BY SOURCE families, an unconditional clause cannot be followed by a conditional one (Msg 5324).</item>
+    /// </list>
+    /// </summary>
     private static List<WhenClause> ParseMergeWhenClauses(
         ParserContext context,
         HeapTable destinationTable,
@@ -1627,14 +1627,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Runs the prepared MERGE plan against the live target heap. The
-    /// source <see cref="Selection"/> materializes into a list once;
-    /// each target row is scanned, its action chosen via the first
-    /// applicable WHEN clause, and queued. Unmatched source rows fall
-    /// into the <c>WHEN NOT MATCHED [BY TARGET]</c> clause if present.
-    /// All queued mutations apply atomically before triggers fire.
-    /// </summary>
-    /// <summary>
     /// Maps a user-typed target column name to its base-table ordinal and
     /// type. For a view target, looks up the name in
     /// <see cref="View.OutputColumns"/> and translates via
@@ -1677,6 +1669,14 @@ partial class Simulation
         return false;
     }
 
+    /// <summary>
+    /// Runs the prepared MERGE plan against the live target heap. The
+    /// source <see cref="Selection"/> materializes into a list once;
+    /// each target row is scanned, its action chosen via the first
+    /// applicable WHEN clause, and queued. Unmatched source rows fall
+    /// into the <c>WHEN NOT MATCHED [BY TARGET]</c> clause if present.
+    /// All queued mutations apply atomically before triggers fire.
+    /// </summary>
     private static SimulatedStatementOutcome ExecuteMerge(
         ParserContext context,
         HeapTable destinationTable,
@@ -2318,14 +2318,7 @@ partial class Simulation
             EnforceRule(destinationTable, newValues, ord, context.Batch);
         }
 
-        for (var ci = 0; ci < destinationTable.Columns.Length; ci++)
-        {
-            if (destinationTable.Columns[ci].Type == SqlType.RowVersion)
-                newValues[ci] = SqlValue.FromRowVersion(context.Batch.DatabaseFor(destinationTable).AllocateRowVersion());
-        }
-
-        AdvanceUpdatedPeriodStart(destinationTable, newValues, context.Batch);
-        EvaluateComputedColumns(destinationTable, newValues, context.Batch);
+        StampUpdatedRow(destinationTable, newValues, context.Batch);
         EnforceNotNull(destinationTable, newValues, "UPDATE");
         EnforceCheckConstraints(destinationTable, newValues, context.Batch, "UPDATE", reportedVerb: "MERGE");
 
@@ -2375,6 +2368,12 @@ partial class Simulation
             if (!identityListed && identityInsertOn)
                 throw SimulatedSqlException.ExplicitIdentityRequired(destinationTable.Name);
         }
+
+        // The row draws its identity value as it reaches the insert, ahead of
+        // its defaults and conversions, and never gives it back: a row failing
+        // in them uses one up, as an INSERT's does (probed 2026-10-04 against
+        // SQL Server 2025). INSTEAD OF INSERT draws none.
+        Int128? drawnIdentity = identityColumn is not null && !identityListed && !insteadOfInsert ? GenerateIdentity(identityColumn) : null;
 
         // Defaults for columns absent from the INSERT branch's list.
         for (var i = 0; i < destinationTable.Columns.Length; i++)
@@ -2437,7 +2436,7 @@ partial class Simulation
             }
             else
             {
-                rowValues[identityOrdinal] = CoerceForIdentity(GenerateIdentity(identityColumn), identityColumn);
+                rowValues[identityOrdinal] = CoerceForIdentity(drawnIdentity!.Value, identityColumn);
             }
         }
 
@@ -2520,6 +2519,14 @@ partial class Simulation
         var insteadOfInsert = pendingInserts.Count > 0 && HasInsteadOfTrigger(context.Batch, insteadOfTarget, TriggerActions.Insert);
         var insteadOfUpdate = pendingUpdates.Count > 0 && HasInsteadOfTrigger(context.Batch, insteadOfTarget, TriggerActions.Update);
         var insteadOfDelete = pendingDeletes.Count > 0 && HasInsteadOfTrigger(context.Batch, insteadOfTarget, TriggerActions.Delete);
+
+        // SNAPSHOT isolation write-conflict, as CommitUpdate and CommitDelete
+        // judge it: a row another transaction changed since the snapshot is
+        // Msg 3960.
+        foreach (var (page, slot, _, _, _) in pendingUpdates)
+            VersionStore.CheckSnapshotUpdateConflict(context.Batch, destinationTable, (page, slot));
+        foreach (var (page, slot, _, _) in pendingDeletes)
+            VersionStore.CheckSnapshotUpdateConflict(context.Batch, destinationTable, (page, slot), delete: true);
 
         // The guard's second check, for a write another session raced, reads
         // the same list the check below does: the updates first, then the inserts.
@@ -2615,16 +2622,7 @@ partial class Simulation
         if (!insteadOfDelete)
         {
             foreach (var (page, slot, oldValues, _) in pendingDeletes)
-            {
-                destinationTable.ChangeTracking?.RecordRow(context.Batch, destinationTable, oldValues, ChangeTrackingOperation.Delete);
-                if (lockableTable)
-                {
-                    context.Batch.AcquireRowLockTxScoped(destinationTable, page, slot, LockMode.Exclusive, RowLockPurpose.Delete);
-                    context.Batch.NoteSupersededRow(destinationTable, page, slot);
-                    CaptureMergeVersion(context.Batch, destinationTable, page, slot, VersionWriteKind.Delete);
-                }
-                destinationTable.Heap.DeleteAt(page, slot, undoLog, ReclaimSuperseded(destinationTable, context));
-            }
+                DeleteRowAt(context, destinationTable, page, slot, oldValues, undoLog);
         }
         var tracking = destinationTable.ChangeTracking;
         if (!insteadOfUpdate)
@@ -2673,25 +2671,31 @@ partial class Simulation
         if (selfReferencing && outgoingRows is not null)
             EnforceOutgoingForeignKeys(destinationTable, outgoingRows, context, "MERGE", selfReferencing: true);
 
+        // The written rows judged against any unique-indexed view over the
+        // table, as an INSERT's and an UPDATE's are (Msg 2601).
+        if ((!insteadOfUpdate && pendingUpdates.Count > 0) || (!insteadOfInsert && pendingInserts.Count > 0))
+            context.Batch.Connection.Simulation.EnforceIndexedViews(destinationTable, context.Batch);
+
         // Incoming-FK cascade for MERGE's DELETE/UPDATE actions on the
         // destination. INSTEAD OF paths bypass (the trigger handles its own
-        // DML).
-        if (destinationTable.IncomingForeignKeys.Count > 0)
+        // DML). A deleted graph node's edge constraints are judged as a
+        // DELETE's: real's Msg 547 names the DELETE statement even under a
+        // MERGE (probed 2026-10-04 against SQL Server 2025).
+        if (!insteadOfDelete && pendingDeletes.Count > 0 && (destinationTable.IncomingForeignKeys.Count > 0 || destinationTable.GraphKind == GraphTableKind.Node))
         {
-            if (!insteadOfDelete && pendingDeletes.Count > 0)
-            {
-                var oldRows = new List<SqlValue[]>(pendingDeletes.Count);
-                foreach (var (_, _, oldValues, _) in pendingDeletes)
-                    oldRows.Add(oldValues);
-                EnforceIncomingForeignKeysOnDelete(destinationTable, oldRows, context, "MERGE", depth: 0);
-            }
-            if (!insteadOfUpdate && pendingUpdates.Count > 0)
-            {
-                var pairs = new List<(SqlValue[] OldFull, SqlValue[] NewFull)>(pendingUpdates.Count);
-                foreach (var (_, _, oldValues, newValues, _) in pendingUpdates)
-                    pairs.Add((oldValues, newValues));
-                EnforceIncomingFkOnUpdate(destinationTable, pairs, context, depth: 0, verb: "MERGE");
-            }
+            var oldRows = new List<SqlValue[]>(pendingDeletes.Count);
+            foreach (var (_, _, oldValues, _) in pendingDeletes)
+                oldRows.Add(oldValues);
+            EnforceIncomingForeignKeysOnDelete(destinationTable, oldRows, context, "MERGE", depth: 0);
+            if (destinationTable.GraphKind == GraphTableKind.Node)
+                EnforceEdgeConstraintsOnNodeDelete(destinationTable, oldRows, context);
+        }
+        if (!insteadOfUpdate && pendingUpdates.Count > 0 && destinationTable.IncomingForeignKeys.Count > 0)
+        {
+            var pairs = new List<(SqlValue[] OldFull, SqlValue[] NewFull)>(pendingUpdates.Count);
+            foreach (var (_, _, oldValues, newValues, _) in pendingUpdates)
+                pairs.Add((oldValues, newValues));
+            EnforceIncomingFkOnUpdate(destinationTable, pairs, context, depth: 0, verb: "MERGE");
         }
 
         // Identity counter: only advances when the inserts actually hit the

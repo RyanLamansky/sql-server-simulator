@@ -213,17 +213,6 @@ internal static class StringScalars
     public static int CoerceLengthArgument(SqlValue count) => ScalarArguments.CoerceToInt(count);
 
     /// <summary>
-    /// Returns the projection-schema string type for a string scalar
-    /// applied to an input typed at <paramref name="sourceType"/>. String
-    /// sources pass through (the function preserves the input type);
-    /// implicit-castable sources promote to <c>varchar</c> in the active
-    /// database collation, matching the runtime coercion in
-    /// <see cref="CoerceToVarchar"/>; everything else passes through (the
-    /// runtime path raises the same Msg 8116 at that point — projection
-    /// schema only needs to be roughly correct since the value never
-    /// materializes).
-    /// </summary>
-    /// <summary>
     /// The result type of a function that rewrites its string argument's
     /// characters — UPPER / LOWER / LTRIM / RTRIM / TRIM / REVERSE: a
     /// fixed-width <c>char(n)</c> / <c>nchar(n)</c> argument comes back as
@@ -238,6 +227,17 @@ internal static class StringScalars
         _ => ResolveResultType(sourceType, batch),
     };
 
+    /// <summary>
+    /// Returns the projection-schema string type for a string scalar
+    /// applied to an input typed at <paramref name="sourceType"/>. String
+    /// sources pass through (the function preserves the input type);
+    /// implicit-castable sources promote to <c>varchar</c> in the active
+    /// database collation, matching the runtime coercion in
+    /// <see cref="CoerceToVarchar"/>; everything else passes through (the
+    /// runtime path raises the same Msg 8116 at that point — projection
+    /// schema only needs to be roughly correct since the value never
+    /// materializes).
+    /// </summary>
     public static SqlType ResolveResultType(SqlType sourceType, BatchContext batch) =>
         SqlType.IsStringCategory(sourceType) || !IsCoerceableToVarchar(sourceType)
             ? sourceType

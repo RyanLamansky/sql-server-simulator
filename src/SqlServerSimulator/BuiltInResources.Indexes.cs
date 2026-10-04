@@ -900,15 +900,6 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// Shared (table, index_id) identity stream backing <c>sys.partitions</c>,
-    /// <c>sys.allocation_units</c>, <c>sys.dm_db_partition_stats</c>, and
-    /// <c>sys.stats</c>. A thin per-database flattening of
-    /// <see cref="HeapTable.IndexIdentities"/> — the same allocation authority
-    /// <see cref="EnumerateSysIndexes"/> reads — so every id these views report
-    /// agrees with <c>sys.indexes</c>. Name is the constraint/index name (null
-    /// only for the heap).
-    /// </summary>
-    /// <summary>
     /// A table type's own indexes, which real's <c>sys.stats</c> /
     /// <c>sys.stats_columns</c> list under its type table though no partition
     /// view does (probed 2026-09-26 against SQL Server 2025).
@@ -935,6 +926,15 @@ internal static partial class BuiltInResources
         identity.Index is not { IsHypothetical: true }
         && (identity.Type is 0 or 1 or 5 || !(identity.Index?.IsDisabled ?? identity.Constraint?.IsDisabled ?? false));
 
+    /// <summary>
+    /// Shared (table, index_id) identity stream backing <c>sys.partitions</c>,
+    /// <c>sys.allocation_units</c>, <c>sys.dm_db_partition_stats</c>, and
+    /// <c>sys.stats</c>. A thin per-database flattening of
+    /// <see cref="HeapTable.IndexIdentities"/> — the same allocation authority
+    /// <see cref="EnumerateSysIndexes"/> reads — so every id these views report
+    /// agrees with <c>sys.indexes</c>. Name is the constraint/index name (null
+    /// only for the heap).
+    /// </summary>
     private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index, PartitionPlacement? Placement)> EnumerateTableIndexIdentities(Database database, Parser.BatchContext? batch, bool storageOnly = true)
     {
         foreach (var (_, schema) in database.Schemas)

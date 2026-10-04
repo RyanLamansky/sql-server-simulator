@@ -67,14 +67,6 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
         ?? this.rowBytes!.Select(bytes => RowDecoder.DecodeRow(this.schema, bytes));
 
     /// <summary>
-    /// Drains the row sequence into a list, keeping whichever form the producer
-    /// yielded, and reports the row count. The dispatch loop calls this at the
-    /// statement boundary — statement atomicity requires the rows be produced
-    /// before the next statement runs, and <c>@@ROWCOUNT</c> requires the count
-    /// — so a projecting SELECT holds <see cref="SqlValue"/> rows from here to
-    /// the client instead of a page image it would decode straight back.
-    /// </summary>
-    /// <summary>
     /// Caps the row sequence at the session's <c>SET ROWCOUNT</c> value, doing
     /// nothing when the option is off (<c>0</c>). Applied to a statement's own
     /// result — the top-level SELECT, the source a <c>SELECT … INTO</c> or an
@@ -110,6 +102,14 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
         return this;
     }
 
+    /// <summary>
+    /// Drains the row sequence into a list, keeping whichever form the producer
+    /// yielded, and reports the row count. The dispatch loop calls this at the
+    /// statement boundary — statement atomicity requires the rows be produced
+    /// before the next statement runs, and <c>@@ROWCOUNT</c> requires the count
+    /// — so a projecting SELECT holds <see cref="SqlValue"/> rows from here to
+    /// the client instead of a page image it would decode straight back.
+    /// </summary>
     /// <remarks>
     /// A row that raises leaves the rows before it in place, so a statement
     /// its own error cut short can still send them (see <see cref="EndedByError"/>).

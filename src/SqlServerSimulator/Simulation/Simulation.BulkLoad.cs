@@ -240,12 +240,7 @@ partial class Simulation
                     rowValues[i] = SqlValue.FromRowVersion(context.Batch.DatabaseFor(table).AllocateRowVersion());
             }
 
-            if (table.PeriodColumns is { } pc
-                && table.Columns[pc.StartOrdinal].GeneratedAs != GeneratedAlwaysAsRow.None)
-            {
-                rowValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, batch.CurrentStatement.UtcNow);
-                rowValues[pc.EndOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.EndOrdinal].Type, DateTime.MaxValue);
-            }
+            StampInsertedPeriod(table, rowValues, batch);
 
             EvaluateComputedColumns(table, rowValues, batch);
             if (insteadOf)

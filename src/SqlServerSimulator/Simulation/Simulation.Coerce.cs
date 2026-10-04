@@ -158,15 +158,6 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Coerces an INSERT source value to the destination column's type,
-    /// converting any overflow into the SQL Server-shaped error — the
-    /// source-type-keyed Msg 220 / 232 / 237 family via
-    /// <see cref="SimulatedSqlException.TryConversionOverflow"/>, or the
-    /// generic Msg 8115 where the chooser declines. Truncation of
-    /// strings/bytes is handled separately by <see cref="EnforceMaxLength"/>
-    /// before this method runs.
-    /// </summary>
-    /// <summary>
     /// <see cref="CoerceForInsert(SqlValue, HeapColumn)"/> for a value an
     /// INSERT, UPDATE or MERGE writes, where a conversion the session lets
     /// overflow (<see cref="BatchContext.AbsorbsArithmeticFault"/>) stores
@@ -208,6 +199,15 @@ partial class Simulation
         return ReferenceEquals(canonical, coerced.AsString) ? coerced : SqlValue.FromXml(canonical);
     }
 
+    /// <summary>
+    /// Coerces an INSERT source value to the destination column's type,
+    /// converting any overflow into the SQL Server-shaped error — the
+    /// source-type-keyed Msg 220 / 232 / 237 family via
+    /// <see cref="SimulatedSqlException.TryConversionOverflow"/>, or the
+    /// generic Msg 8115 where the chooser declines. Truncation of
+    /// strings/bytes is handled separately by <see cref="EnforceMaxLength"/>
+    /// before this method runs.
+    /// </summary>
     private static SqlValue CoerceForInsert(SqlValue source, SqlType targetType)
     {
         try
@@ -431,15 +431,6 @@ partial class Simulation
             : QualifyTableName(table, database)[(database.Name.Length + 1)..];
 
     /// <summary>
-    /// Evaluates each declared CHECK constraint against the new row. A
-    /// predicate that evaluates to <c>false</c> (definitely-false in SQL
-    /// Server's three-valued logic) raises Msg 547 naming the constraint;
-    /// <c>true</c> and <c>null</c> (UNKNOWN) both pass — the latter matches
-    /// SQL Server's documented "NULL → row passes CHECK" rule. Resolver
-    /// matches the row's column ordinals via case-insensitive name compare,
-    /// the same shape <see cref="EvaluateComputedColumns"/> uses.
-    /// </summary>
-    /// <summary>
     /// Judges the bound rules (an INSERT's) and CHECK constraints of a row
     /// <paramref name="verb"/> writes; <paramref name="reportedVerb"/> is the
     /// statement Msg 547 names where it isn't that verb — a MERGE's actions
@@ -461,6 +452,15 @@ partial class Simulation
     // Apart from EnforceCheckConstraints so the closure the resolver captures
     // is allocated only for a table with CHECK constraints, not per row of
     // every insert.
+    /// <summary>
+    /// Evaluates each declared CHECK constraint against the new row. A
+    /// predicate that evaluates to <c>false</c> (definitely-false in SQL
+    /// Server's three-valued logic) raises Msg 547 naming the constraint;
+    /// <c>true</c> and <c>null</c> (UNKNOWN) both pass — the latter matches
+    /// SQL Server's documented "NULL → row passes CHECK" rule. Resolver
+    /// matches the row's column ordinals via case-insensitive name compare,
+    /// the same shape <see cref="EvaluateComputedColumns"/> uses.
+    /// </summary>
     private static void JudgeCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch, string verb)
     {
         SqlValue ResolveByName(MultiPartName reference)

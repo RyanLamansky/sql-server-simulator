@@ -805,12 +805,6 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Per-group state inside <c>BuildAggregateProjectionRows</c>: the
-    /// resolved key tuple (used to populate non-aggregate projection slots
-    /// from the GROUP BY's column references) plus one aggregator per
-    /// <see cref="AggregateExpression"/> in the projection.
-    /// </summary>
-    /// <summary>
     /// Under a grouping-set form, the grouping expression each projection
     /// takes its value from, or null where it computes: a projection that
     /// reads only bare grouping columns computes from them (NULL where its set
@@ -865,6 +859,12 @@ internal sealed partial class Selection
         return expression;
     }
 
+    /// <summary>
+    /// Per-group state inside <c>BuildAggregateProjectionRows</c>: the
+    /// resolved key tuple (used to populate non-aggregate projection slots
+    /// from the GROUP BY's column references) plus one aggregator per
+    /// <see cref="AggregateExpression"/> in the projection.
+    /// </summary>
     private sealed class GroupState(SqlValue[] keyValues, Aggregator[] aggregators)
     {
         public readonly SqlValue[] KeyValues = keyValues;

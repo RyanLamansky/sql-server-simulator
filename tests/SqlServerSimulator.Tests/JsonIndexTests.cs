@@ -1,4 +1,5 @@
 using static Microsoft.VisualStudio.TestTools.UnitTesting.Assert;
+using static SqlServerSimulator.TestHelpers;
 
 namespace SqlServerSimulator;
 
@@ -11,13 +12,6 @@ namespace SqlServerSimulator;
 public sealed class JsonIndexTests
 {
     private const string Table = "create table t (id int primary key, d json, e json, n nvarchar(max));";
-
-    private static void AssertError(string commandText, int number, byte state, string message)
-    {
-        var ex = new Simulation().AssertSqlError(commandText, number);
-        AreEqual(message, ex.Errors[0].Message);
-        AreEqual(state, ex.Errors[0].State);
-    }
 
     [TestMethod]
     public void DefaultPathIsTheWholeDocument() =>
@@ -127,7 +121,7 @@ public sealed class JsonIndexTests
     [DataRow("create json index ji on t(d) for ('xx')", 13607, (byte)22, "JSON path is not properly formatted. Unexpected character 'x' is found at position 0.")]
     [DataRow("create json index ji on t(d) for ('append $.a')", 13607, (byte)14, "JSON path is not properly formatted. Unexpected character 'a' is found at position 0.")]
     public void Refusals(string statement, int number, byte state, string message) =>
-        AssertError($"{Table} {statement}", number, state, message);
+        AssertSqlError($"{Table} {statement}", number, state, message);
 
     [TestMethod]
     public void DroppingThePrimaryKeyIsRefused()
@@ -153,7 +147,7 @@ public sealed class JsonIndexTests
     [DataRow("'$.a[0 to 1]'", (byte)3)]
     [DataRow("'$.*'", (byte)3)]
     public void InvalidPaths(string paths, byte state) =>
-        AssertError($"{Table} create json index ji on t(d) for ({paths})", 13683, state, "Invalid JSON paths in JSON index.");
+        AssertSqlError($"{Table} create json index ji on t(d) for ({paths})", 13683, state, "Invalid JSON paths in JSON index.");
 
     [TestMethod]
     [DataRow("'$.ab', '$.a'")]
@@ -171,7 +165,7 @@ public sealed class JsonIndexTests
     [DataRow("optimize_for_sequential_key")]
     [DataRow("statistics_incremental")]
     public void OptionsTheStatementDoesNotTake(string option) =>
-        AssertError($"{Table} create json index ji on t(d) with ({option} = on)", 153, 35, $"Invalid usage of the option {option} in the CREATE JSON INDEX statement.");
+        AssertSqlError($"{Table} create json index ji on t(d) with ({option} = on)", 153, 35, $"Invalid usage of the option {option} in the CREATE JSON INDEX statement.");
 
     [TestMethod]
     public void UnknownOption()

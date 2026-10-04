@@ -450,23 +450,14 @@ public partial class QualityTests
             }
         }
 
+        var uncited = unknown.Distinct().Order().ToArray();
         Assert.IsEmpty(
-            unknown.Distinct().Order(),
+            uncited,
             "Markdown cites message numbers no error factory raises. Either the citation is stale, or "
-            + $"the message is one real raises and the simulator doesn't — in which case add it to {nameof(CitedButNotRaised)}.");
+            + $"the message is one real raises and the simulator doesn't — in which case add it to {nameof(CitedButNotRaised)}."
+            + Environment.NewLine + string.Join(Environment.NewLine, uncited));
     }
 
-    /// <summary>
-    /// Every <c>SomeFile.cs</c> a Markdown file names must exist, and every
-    /// cross-document link must resolve to a real file and a real heading.
-    /// </summary>
-    /// <remarks>
-    /// A code pointer that no longer resolves is the same failure as a stale
-    /// message number — the doc reads as authoritative and sends the reader
-    /// nowhere. The shapes this catches: a file folded into its caller, a
-    /// shorthand name that omits the type's own prefix, a renamed member, and a
-    /// heading whose slug nobody could have predicted.
-    /// </remarks>
     /// <summary>
     /// Source text carries no raw control character other than tab and the
     /// line breaks: a separator or sentinel is written as an escape
@@ -497,6 +488,18 @@ public partial class QualityTests
         Assert.IsEmpty(offenders, "Raw control characters in: " + string.Join(", ", offenders));
     }
 
+    /// <summary>
+    /// Every <c>SomeFile.cs</c> a Markdown file names must exist, and every
+    /// link to a Markdown document or heading must resolve to a real file and a
+    /// real heading, whether it crosses documents or stays within one.
+    /// </summary>
+    /// <remarks>
+    /// A code pointer that no longer resolves is the same failure as a stale
+    /// message number — the doc reads as authoritative and sends the reader
+    /// nowhere. The shapes this catches: a file folded into its caller, a
+    /// shorthand name that omits the type's own prefix, a renamed member, and a
+    /// heading whose slug nobody could have predicted.
+    /// </remarks>
     [TestMethod]
     [Description("Pins every file reference and cross-document link in Markdown to something that exists.")]
     public void DocumentedReferencesResolve()
@@ -527,45 +530,74 @@ public partial class QualityTests
 
             foreach (Match match in DocLinkPattern.Matches(text))
             {
-                var targetPath = Path.Combine(docsDirectory, match.Groups[1].Value);
+                var target = match.Groups[1].Value;
+                var anchor = match.Groups[2].Value;
+                if (target.Length == 0 && anchor.Length == 0)
+                    continue;
+
+                var targetPath = target.Length == 0 ? path : Path.Combine(Path.GetDirectoryName(path)!, target);
                 if (!File.Exists(targetPath))
                 {
-                    broken.Add($"{name}: no such document `{match.Groups[1].Value}`");
+                    broken.Add($"{name}: no such document `{target}`");
                     continue;
                 }
 
-                var anchor = match.Groups[2].Value;
                 if (anchor.Length != 0 && !HeadingSlugs(File.ReadAllText(targetPath)).Contains(anchor[1..]))
-                    broken.Add($"{name}: no heading `{anchor}` in `{match.Groups[1].Value}`");
+                    broken.Add($"{name}: no heading `{anchor}` in `{(target.Length == 0 ? name : target)}`");
+            }
+
+            foreach (Match match in PathLinkPattern.Matches(text))
+            {
+                var target = match.Groups[1].Value;
+                var targetPath = Path.Combine(Path.GetDirectoryName(path)!, target);
+                if (!File.Exists(targetPath) && !Directory.Exists(targetPath))
+                    broken.Add($"{name}: no such path `{target}`");
             }
         }
 
-        Assert.IsEmpty(broken.Distinct().Order(), "Markdown references that no longer resolve.");
+        var unresolved = broken.Distinct().Order().ToArray();
+        Assert.IsEmpty(
+            unresolved,
+            $"Markdown references that no longer resolve.{Environment.NewLine}" + string.Join(Environment.NewLine, unresolved));
     }
 
     /// <summary>
-    /// GitHub's heading-anchor slug: lowercase, drop everything that isn't
-    /// alphanumeric / space / hyphen, then hyphenate the spaces. A heading whose
-    /// slug is hard to predict — one carrying code spans, ellipses and slashes —
-    /// is better rewritten than linked to carefully.
+    /// GitHub's heading-anchor slugs: lowercase, drop everything that isn't a
+    /// letter, digit, underscore, space or hyphen, then hyphenate the spaces; a
+    /// repeated slug takes <c>-1</c>, <c>-2</c>… in document order. A heading
+    /// whose slug is hard to predict — one carrying code spans, ellipses and
+    /// slashes — is better rewritten than linked to carefully.
     /// </summary>
-    private static HashSet<string> HeadingSlugs(string markdown) => HeadingPattern
-        .Matches(markdown)
-        .Select(match => SlugStripPattern.Replace(match.Groups[1].Value.ToLowerInvariant(), "").Replace(' ', '-'))
-        .ToHashSet(StringComparer.Ordinal);
+    private static HashSet<string> HeadingSlugs(string markdown)
+    {
+        HashSet<string> slugs = new(StringComparer.Ordinal);
+        foreach (Match match in HeadingPattern.Matches(markdown))
+        {
+            var slug = SlugStripPattern.Replace(match.Groups[1].Value.ToLowerInvariant(), "").Replace(' ', '-');
+            var unique = slug;
+            for (var repeat = 1; !slugs.Add(unique); repeat++)
+                unique = $"{slug}-{repeat}";
+        }
+
+        return slugs;
+    }
 
     /// <summary>A backticked source-file name, the way the docs point at code.</summary>
     [GeneratedRegex(@"`([A-Za-z0-9_./]+\.cs)`")]
     private static partial Regex SourceFilePattern { get; }
 
-    /// <summary>A relative link to a sibling document, with an optional heading anchor.</summary>
-    [GeneratedRegex(@"\]\(([a-z0-9-]+\.md)(#[a-z0-9-]+)?\)")]
+    /// <summary>A relative link to a document, a heading anchor, or both; a link with neither is no match.</summary>
+    [GeneratedRegex(@"\]\(((?:[\w.-]+/)*[\w.-]+\.md)?(#[\w-]+)?\)")]
     private static partial Regex DocLinkPattern { get; }
 
     [GeneratedRegex(@"^#+ (.+)$", RegexOptions.Multiline)]
     private static partial Regex HeadingPattern { get; }
 
-    [GeneratedRegex("[^a-z0-9 -]")]
+    /// <summary>A relative link out of the docs to a file or directory that isn't a Markdown document.</summary>
+    [GeneratedRegex(@"\]\(((?:\.\./)+[^)#\s]+?)(?<!\.md)(?:#[^)\s]*)?\)")]
+    private static partial Regex PathLinkPattern { get; }
+
+    [GeneratedRegex(@"[^\p{L}\p{N}_ -]")]
     private static partial Regex SlugStripPattern { get; }
 
     /// <summary>
@@ -580,7 +612,7 @@ public partial class QualityTests
     /// </summary>
     private static readonly int[] CitedButNotRaised = [
         185, 311, 355, 557, 1708, 1724, 1784,
-        1789, 2023, 2219, 2308, 2390, 3604, 3915, 3920,
+        1789, 1969, 2023, 2219, 2308, 2390, 3604, 3915, 3920,
         4624, 4628, 5232, 5508, 5592, 6338, 6947,
         8711, 8968, 9341,
         10343, 11406, 11509, 11521, 11525, 13519, 13643, 13656, 15249, 15457, 15459, 15460,

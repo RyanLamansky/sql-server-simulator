@@ -179,7 +179,7 @@ partial class Simulation
             throw SimulatedSqlException.CannotUseSpecialPrincipal(name);
         if (simulation.Logins.ContainsKey(name))
         {
-            foreach (var database in simulation.Databases.Values)
+            foreach (var (_, database) in simulation.Databases)
             {
                 if (database.Collation.Equals(database.OwnerLoginName, name))
                     throw SimulatedSqlException.LoginOwnsDatabases(name);
@@ -278,7 +278,7 @@ partial class Simulation
     /// </summary>
     private static void ValidateLoginDefaults(Simulation simulation, string? database, string? language)
     {
-        if (database is not null && !simulation.Databases.Values.Any(candidate => BuiltInToken.Comparer.Equals(candidate.Name, database)))
+        if (database is not null && !simulation.Databases.EnumerateValues().Any(candidate => BuiltInToken.Comparer.Equals(candidate.Name, database)))
             throw SimulatedSqlException.DefaultDatabaseDoesNotExist(database);
         if (language is not null && Language.Find(language) is null)
             throw SimulatedSqlException.NotAnOfficialLanguageName(language);

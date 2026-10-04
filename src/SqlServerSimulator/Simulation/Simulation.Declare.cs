@@ -333,10 +333,6 @@ partial class Simulation
         throw SimulatedSqlException.InvalidColumnName(name);
 
     /// <summary>
-    /// The type-resolver twin of <see cref="NoColumnResolver"/>, for binding
-    /// a FROM-less condition (<c>IF</c> / <c>WHILE</c>) while compiling.
-    /// </summary>
-    /// <summary>
     /// Moves past the rest of a type spec whose lookup failed, to the
     /// initializer, the next declaration, or the end of the statement.
     /// </summary>
@@ -350,6 +346,10 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// The type-resolver twin of <see cref="NoColumnResolver"/>, for binding
+    /// a FROM-less condition (<c>IF</c> / <c>WHILE</c>) while compiling.
+    /// </summary>
     internal static SqlType NoColumnTypeResolver(MultiPartName name) =>
         throw SimulatedSqlException.InvalidColumnName(name);
 

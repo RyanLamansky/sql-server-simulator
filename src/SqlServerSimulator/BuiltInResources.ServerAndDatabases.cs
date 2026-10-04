@@ -1303,15 +1303,6 @@ internal static partial class BuiltInResources
         }
     }
 
-    /// <summary>
-    /// Rows for <c>sys.database_mirroring</c> — one per database (join key
-    /// <c>database_id</c>, ordered via <see cref="Parser.Expressions.DbId.DatabasesWithIds"/>).
-    /// The simulator never mirrors a database, so every <c>mirroring_*</c>
-    /// column is NULL on every row, matching a live SQL Server 2025's
-    /// non-mirrored shape. SSMS's Object-Explorer enumeration LEFT JOINs this
-    /// to <c>sys.databases</c> on <c>database_id</c> and reads
-    /// <c>ISNULL(mirroring_role, 0)</c> / <c>ISNULL(mirroring_state + 1, 0)</c>.
-    /// </summary>
     /// <summary>The one row of <c>sys.dm_os_sys_info</c>, read from the host process at query time.</summary>
     private static SqlValue[][] DmOsSysInfoRows(Simulation simulation)
     {
@@ -1546,13 +1537,6 @@ internal static partial class BuiltInResources
     };
 
     /// <summary>
-    /// Rows for <c>sys.dm_exec_sessions</c> — one per live connection on the
-    /// simulation, snapshotted under the registry lock. Session-backed
-    /// columns read the connection's real state; the rest are the
-    /// probe-confirmed fresh-session defaults documented at the
-    /// registration site.
-    /// </summary>
-    /// <summary>
     /// The <c>ansi_defaults</c> column: whether all seven options
     /// <c>SET ANSI_DEFAULTS</c> sets are on — it reads 0 again once any one of
     /// them is turned off (probed 2026-09-28 against SQL Server 2025).
@@ -1561,6 +1545,13 @@ internal static partial class BuiltInResources
         connection.AnsiNulls && connection.AnsiNullDefaultOn && connection.AnsiPadding && connection.AnsiWarnings
         && connection.CursorCloseOnCommit && connection.ImplicitTransactions && connection.QuotedIdentifiers;
 
+    /// <summary>
+    /// Rows for <c>sys.dm_exec_sessions</c> — one per live connection on the
+    /// simulation, snapshotted under the registry lock. Session-backed
+    /// columns read the connection's real state; the rest are the
+    /// probe-confirmed fresh-session defaults documented at the
+    /// registration site.
+    /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDmExecSessions(Parser.BatchContext batch, Database database)
     {
         _ = database;
@@ -1639,6 +1630,15 @@ internal static partial class BuiltInResources
         }
     }
 
+    /// <summary>
+    /// Rows for <c>sys.database_mirroring</c> — one per database (join key
+    /// <c>database_id</c>, ordered via <see cref="Parser.Expressions.DbId.DatabasesWithIds"/>).
+    /// The simulator never mirrors a database, so every <c>mirroring_*</c>
+    /// column is NULL on every row, matching a live SQL Server 2025's
+    /// non-mirrored shape. SSMS's Object-Explorer enumeration LEFT JOINs this
+    /// to <c>sys.databases</c> on <c>database_id</c> and reads
+    /// <c>ISNULL(mirroring_role, 0)</c> / <c>ISNULL(mirroring_state + 1, 0)</c>.
+    /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDatabaseMirroring(Parser.BatchContext batch, Database database)
     {
         _ = database;

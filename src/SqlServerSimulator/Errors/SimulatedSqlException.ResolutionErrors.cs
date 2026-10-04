@@ -326,9 +326,9 @@ partial class SimulatedSqlException
         new($"The formal parameter \"@{parameterName}\" was not declared as an OUTPUT parameter, but the actual parameter passed in requested output.", 8162, 16, 2);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 179 — an <c>EXEC</c> or <c>sp_executesql</c>
-    /// argument that is a constant marked <c>OUTPUT</c> (probed 2026-10-02
-    /// against SQL Server 2025).
+    /// Mimics SQL Server's Msg 179 — an <c>EXEC</c>, <c>EXEC … AT</c> or
+    /// <c>sp_executesql</c> argument that is a constant marked <c>OUTPUT</c>
+    /// (probed 2026-10-02 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException ConstantPassedAsOutput() =>
         new("Cannot use the OUTPUT option when passing a constant to a stored procedure.", 179, 15, 1);

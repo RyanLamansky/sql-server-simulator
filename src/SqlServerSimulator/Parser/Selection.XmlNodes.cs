@@ -31,12 +31,6 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Parses an <c>xmlexpr.nodes('xquery') [AS] alias(column)</c> FROM / APPLY
-    /// source. On entry the cursor is on the first token of the xml target
-    /// expression; on return it sits just past the closing <c>)</c> of the
-    /// column-alias list.
-    /// </summary>
-    /// <summary>
     /// Whether the token under the cursor opens <c>&lt;target&gt;.nodes(</c>,
     /// read ahead without consuming.
     /// </summary>
@@ -53,6 +47,12 @@ internal sealed partial class Selection
         return isNodes;
     }
 
+    /// <summary>
+    /// Parses an <c>xmlexpr.nodes('xquery') [AS] alias(column)</c> FROM / APPLY
+    /// source. On entry the cursor is on the first token of the xml target
+    /// expression; on return it sits just past the closing <c>)</c> of the
+    /// column-alias list.
+    /// </summary>
     private static FromSource ParseXmlNodesSource(ParserContext context, FromSource[] leftSources)
     {
         // The xml target names a column of the APPLY's left side, so install

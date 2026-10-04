@@ -67,7 +67,7 @@ This is the backstop for what pushdown can't narrow; the two together are what t
 **Where the code lives:** `BuiltInResources` is a `partial class` split across topical files `BuiltInResources.<Topic>.cs`.
 The registrations are grouped by topic into per-file `Register<Topic>(views)` methods — `CoreObjects`, `ColumnFamily`, `Programmable` (incl. the `INFORMATION_SCHEMA.*` views), `ConstraintsAndTriggers`, `Indexes`, `Security`, `FullTextXmlSpatial`, `ServerAndDatabases` — which the root `BuiltInResources.cs` bootstrap (`BuildCatalogViews`) invokes in registration order.
 Each view's `Sys("name", columns, rows)` (or `Iso(...)` for `INFORMATION_SCHEMA`) registration is colocated in the same partial as its row-provider enumerator and any view-private helpers; the local `Sys` / `Iso` helpers are redeclared per `Register` method.
-Shared statics (`nvarchar60Catalog` / `nvarchar128Catalog` / `lsnNumeric` / `charTwo` / `charOne` / `notMsShipped` / `defaultCollation` / `EmptyCatalogRows`) and the `systypes` system heap table live in the root and `BuiltInResources.SystemTables.cs`.
+Shared statics (`nvarchar60Catalog` / `nvarchar128Catalog` / `lsnNumeric` / `charTwo` / `charOne` / `notMsShipped` / `EmptyCatalogRows`) and the `systypes` system heap table live in the root and `BuiltInResources.SystemTables.cs`.
 **New catalog work lands in the matching topic partial** (add the `Sys(...)` call to its `Register` method and the enumerator to the same file); a genuinely new topic gets a new `BuiltInResources.<Topic>.cs` + a `Register<Topic>` call in the bootstrap.
 
 Views:
@@ -296,7 +296,7 @@ Remaining quirk: a decimal-declared sequence's inner reports BaseType `numeric` 
 ### Creation-time SET-option capture
 
 `SchemaObject.UsesQuotedIdentifier` and `SchemaObject.UsesAnsiNulls` each record the session setting in effect when the object was created, re-stamped by `ALTER` / `CREATE OR ALTER`.
-They surface as `sys.sql_modules.uses_quoted_identifier` / `uses_ansi_nulls` and, for a table, `sys.tables.uses_ansi_nulls`, plus the `OBJECTPROPERTY` read-backs described [below](#objectproperty--objectpropertyex).
+They surface as `sys.sql_modules.uses_quoted_identifier` / `uses_ansi_nulls` and, for a table, `sys.tables.uses_ansi_nulls`, plus the `OBJECTPROPERTY` read-backs described [below](#metadata-scalars).
 The two differ in what a *table* records: `QUOTED_IDENTIFIER` is a constant 1 for any table (real answers 1 regardless of the creating session), while `ANSI_NULLS` genuinely captures — a table created under `SET ANSI_NULLS OFF` reports 0, and `SELECT … INTO` captures the same way (all probe-confirmed).
 The `QUOTED_IDENTIFIER` capture is behavioral as well as metadata — a module body parses under it (see [`grammar.md`](grammar.md#per-object-creation-time-capture)).
 The `ANSI_NULLS` capture is behavioral too: a module invocation swaps it in for its body, whose `= NULL` comparisons read it (`SimulatedDbConnection.AnsiNulls`).

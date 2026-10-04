@@ -18,7 +18,7 @@ The edge-probe harness (`.vs/edge-probe`, `--linked`) maps a loopback `lb` on bo
 
 ## Reads
 
-Four-part-name `srv.db.schema.t` references in FROM (parsed in [`Selection.cs::ParseSingleFromSource`](../../src/SqlServerSimulator/Parser/Selection.cs)), and a MERGE's `USING` source, route through [`BatchContext.TryResolveLinkedServerTable`](../../src/SqlServerSimulator/Parser/BatchContext.cs): leading segment → `Simulation.ActiveLinkedServers`, then 2nd/3rd/4th segments → the remote's table or view (direct in-process dict access, matching real SQL Server's "metadata at compile, data at execute" linked-server contract).
+Four-part-name `srv.db.schema.t` references in FROM (parsed in [`Selection.cs::ParseSingleFromSource`](../../src/SqlServerSimulator/Parser/Selection.cs)), and a MERGE's `USING` source, route through [`BatchContext.TryResolveLinkedServerTable`](../../src/SqlServerSimulator/Parser/BatchContext.Resolution.cs): leading segment → `Simulation.ActiveLinkedServers`, then 2nd/3rd/4th segments → the remote's table or view (direct in-process dict access, matching real SQL Server's "metadata at compile, data at execute" linked-server contract).
 A `sys` or `INFORMATION_SCHEMA` name reads the remote's catalog view, its columns found by running it once as `OPENQUERY` does.
 
 Execution opens a fresh `SimulatedDbConnection` on the remote, in the named database, and issues `SELECT <the columns the query names> FROM [db].[schema].[t]` through the remote's full pipeline: parser, planner, lock manager, exception factories, session state.

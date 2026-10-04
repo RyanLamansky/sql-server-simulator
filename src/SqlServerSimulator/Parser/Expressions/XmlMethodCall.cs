@@ -364,11 +364,6 @@ internal sealed class XmlMethodCall : Expression
     }
 
     /// <summary>
-    /// Static result type, used by projection schema inference: <c>value</c>
-    /// returns its requested target type; <c>exist</c> returns <c>bit</c>;
-    /// <c>nodes</c> / <c>query</c> surface as <c>xml</c>.
-    /// </summary>
-    /// <summary>
     /// A binary target reads the value as base64, as <c>xs:base64Binary</c>
     /// does, and text that isn't base64 as NULL; a fixed-length target pads
     /// (probed 2026-10-02 against SQL Server 2025).
@@ -382,6 +377,11 @@ internal sealed class XmlMethodCall : Expression
         return target is RowVersionSqlType ? value.CoerceTo(SqlType.GetBinary(8)).CoerceTo(target) : value.CoerceTo(target);
     }
 
+    /// <summary>
+    /// Static result type, used by projection schema inference: <c>value</c>
+    /// returns its requested target type; <c>exist</c> returns <c>bit</c>;
+    /// <c>nodes</c> / <c>query</c> surface as <c>xml</c>.
+    /// </summary>
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) =>
         this.method switch
         {

@@ -580,15 +580,6 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     }
 
     /// <summary>
-    /// Non-NULL SQL <c>hierarchyid</c> value from raw OrdPath bytes, stored
-    /// verbatim (no validation or re-encoding) — the passthrough path for BACPAC
-    /// import, the ADO.NET byte-parameter path, and <c>CAST(varbinary AS
-    /// hierarchyid)</c>, which real doesn't validate either. Lets a value in
-    /// an unmodeled tier still round-trip through storage even though
-    /// <see cref="AsHierarchyId"/> / <c>ToString()</c> can't decode it. The caller
-    /// transfers ownership of the array.
-    /// </summary>
-    /// <summary>
     /// Non-NULL value of a CLR user-defined type, as its serialized bytes. The
     /// array is held by reference; callers shouldn't mutate it after
     /// construction.
@@ -599,6 +590,15 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         return new(type, 0, bytes, isNull: false);
     }
 
+    /// <summary>
+    /// Non-NULL SQL <c>hierarchyid</c> value from raw OrdPath bytes, stored
+    /// verbatim (no validation or re-encoding) — the passthrough path for BACPAC
+    /// import, the ADO.NET byte-parameter path, and <c>CAST(varbinary AS
+    /// hierarchyid)</c>, which real doesn't validate either. Lets a value in
+    /// an unmodeled tier still round-trip through storage even though
+    /// <see cref="AsHierarchyId"/> / <c>ToString()</c> can't decode it. The caller
+    /// transfers ownership of the array.
+    /// </summary>
     public static SqlValue FromHierarchyIdBytes(byte[] ordPathBytes)
     {
         ArgumentNullException.ThrowIfNull(ordPathBytes);
@@ -847,7 +847,6 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             ? throw new InvalidOperationException($"Value is {this.Type}, not hierarchyid.")
             : HierarchyIdOrdPath.DecodeCanonical((byte[])this.reference!);
 
-    /// <summary>Returns the raw canonical OrdPath bytes backing a hierarchyid value (zero-copy). Throws if NULL or not a hierarchyid value.</summary>
     /// <summary>A CLR user-defined type's serialized bytes.</summary>
     public byte[] AsClrUdtBytes => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
@@ -855,6 +854,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
             ? throw new InvalidOperationException($"Value is {this.Type}, not a CLR user-defined type.")
             : (byte[])this.reference!;
 
+    /// <summary>Returns the raw canonical OrdPath bytes backing a hierarchyid value (zero-copy). Throws if NULL or not a hierarchyid value.</summary>
     public byte[] AsHierarchyIdBytes => this.IsNull
         ? throw new InvalidOperationException("Value is NULL.")
         : this.Type != SqlType.HierarchyId

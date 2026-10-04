@@ -351,12 +351,6 @@ partial class SimulatedSqlException
         new("Invalid argument for SET ROWCOUNT. Must be a non-null non-negative integer.", 507, 16, 2);
 
     /// <summary>
-    /// Mimics SQL Server error 2742: <c>SET DATEFIRST</c> was given a value
-    /// outside 1..7. Probe-confirmed against SQL Server 2025: Class 16,
-    /// State 1, with the offending value echoed into the message, and a NULL
-    /// variable rendered as <c>0</c>.
-    /// </summary>
-    /// <summary>
     /// Mimics SQL Server error 2743: <c>SET DATEFIRST</c> was given a value
     /// that isn't an <c>int</c> — a literal past the int range, or a
     /// <c>bigint</c> variable. Probe-confirmed against SQL Server 2025:
@@ -406,16 +400,15 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ContextInfoRequiresBinary() =>
         new("SET CONTEXT_INFO option requires varbinary (128) NOT NULL parameter.", 2743, 16, 3);
 
+    /// <summary>
+    /// Mimics SQL Server error 2742: <c>SET DATEFIRST</c> was given a value
+    /// outside 1..7. Probe-confirmed against SQL Server 2025: Class 16,
+    /// State 1, with the offending value echoed into the message, and a NULL
+    /// variable rendered as <c>0</c>.
+    /// </summary>
     internal static SimulatedSqlException DateFirstOutOfRange(long value) =>
         new($"SET DATEFIRST {value.ToString(System.Globalization.CultureInfo.InvariantCulture)} is out of range.", 2742, 16, 1);
 
-    /// <summary>
-    /// Mimics SQL Server error 2740: <c>SET LANGUAGE</c> named neither an
-    /// official language name nor an alias. Probe-confirmed against SQL Server
-    /// 2025 (2026-08-08): Class 16, State 1, the batch continuing past it —
-    /// and swallowed entirely inside a <c>TRY</c> block, which is why the
-    /// caller checks the frame depth before raising.
-    /// </summary>
     /// <summary>
     /// Mimics SQL Server error 132: two <c>label:</c> declarations in one batch
     /// or module body share a name. Probe-confirmed against SQL Server 2025
@@ -442,6 +435,13 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException GotoCannotJumpIntoTryOrCatch() =>
         new("GOTO cannot be used to jump into a TRY or CATCH scope.", 1026, 15, 0);
 
+    /// <summary>
+    /// Mimics SQL Server error 2740: <c>SET LANGUAGE</c> named neither an
+    /// official language name nor an alias. Probe-confirmed against SQL Server
+    /// 2025 (2026-08-08): Class 16, State 1, the batch continuing past it —
+    /// and swallowed entirely inside a <c>TRY</c> block, which is why the
+    /// caller checks the frame depth before raising.
+    /// </summary>
     internal static SimulatedSqlException LanguageNotFound(string name) =>
         new($"SET LANGUAGE failed because '{name}' is not an official language name or a language alias on this SQL Server.", 2740, 16, 1);
 

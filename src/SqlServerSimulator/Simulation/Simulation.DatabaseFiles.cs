@@ -191,7 +191,7 @@ partial class Simulation
     /// <summary>Whether any file of any database this simulation hosts sits at <paramref name="path"/>.</summary>
     private static bool PhysicalPathInUse(Simulation simulation, string path, DatabaseFile? except = null)
     {
-        foreach (var database in simulation.Databases.Values)
+        foreach (var (_, database) in simulation.Databases)
         {
             foreach (var file in database.FilesInOrder())
             {
@@ -223,7 +223,6 @@ partial class Simulation
         return null;
     }
 
-    /// <summary>The file <paramref name="spec"/> describes, with the defaults a file written without <c>SIZE</c> / <c>MAXSIZE</c> / <c>FILEGROWTH</c> takes.</summary>
     /// <summary>
     /// A container of the <c>MEMORY_OPTIMIZED_DATA</c> filegroup
     /// <paramref name="dataSpaceId"/>: the lowest free id from 65537, with no
@@ -254,6 +253,7 @@ partial class Simulation
         }
     }
 
+    /// <summary>The file <paramref name="spec"/> describes, with the defaults a file written without <c>SIZE</c> / <c>MAXSIZE</c> / <c>FILEGROWTH</c> takes.</summary>
     private static DatabaseFile NewFile(int fileId, bool isLog, FileSpecification spec, int dataSpaceId, int sizePages) =>
         new(fileId, isLog, spec.Name!, spec.FileName!, isLog ? 0 : dataSpaceId, sizePages,
             spec.MaxSizePages ?? -1, spec.Growth ?? BuiltInResources.FileGrowthPages, spec.GrowthIsPercent);

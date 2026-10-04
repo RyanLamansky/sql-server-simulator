@@ -1312,17 +1312,17 @@ partial class SimulatedSqlException
         new("The metadata could not be determined because every code path results in an error; see previous errors for some of these.", 11529, 16, 1);
 
     /// <summary>
-    /// Mimics SQL Server's Msg 11501 — <c>sp_describe_first_result_set</c>'s
-    /// batch doesn't compile, reported after the batch's own errors.
-    /// Probe-confirmed against SQL Server 2025 (2026-09-24).
-    /// </summary>
-    /// <summary>
     /// Mimics SQL Server error 198: <c>FOR BROWSE</c> on a set operation.
     /// Probe-confirmed against SQL Server 2025 (2026-09-26).
     /// </summary>
     internal static SimulatedSqlException BrowseModeWithSetOperator() =>
         new("Browse mode is invalid for statements containing a UNION, INTERSECT or EXCEPT operator.", 198, 15, 1);
 
+    /// <summary>
+    /// Mimics SQL Server's Msg 11501 — <c>sp_describe_first_result_set</c>'s
+    /// batch doesn't compile, reported after the batch's own errors.
+    /// Probe-confirmed against SQL Server 2025 (2026-09-24).
+    /// </summary>
     internal static SimulatedSqlException BatchCouldNotBeAnalyzed(byte state = 1) =>
         new("The batch could not be analyzed because of compile errors.", 11501, 16, state);
 

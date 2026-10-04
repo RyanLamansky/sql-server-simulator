@@ -1032,19 +1032,9 @@ partial class SimulatedSqlException
         new($"An invalid parameter or option was specified for procedure '{procLabel}'.", 15600, 15, 1) { EndedCalledBatch = true };
 
     /// <summary>
-    /// Shares Msg 15600 wording with
-    /// <see cref="InvalidExtendedPropertyParameter"/> — real SQL Server
-    /// surfaces the same error number for any system-procedure parameter
-    /// validation miss. Used by the linked-server sprocs
-    /// (<c>sp_addlinkedserver</c> / <c>sp_dropserver</c> /
-    /// <c>sp_addlinkedsrvlogin</c> / etc.).
-    /// </summary>
-    internal static SimulatedSqlException InvalidLinkedServerParameter(string procLabel) =>
-        new($"An invalid parameter or option was specified for procedure '{procLabel}'.", 15600, 15, 1);
-
-    /// <summary>
     /// Mimics SQL Server error 15004: <c>sp_addlinkedserver</c> given a NULL
-    /// <c>@server</c>. Probed 2026-09-25 against SQL Server 2025.
+    /// <c>@server</c>, or <c>sys.sp_validname</c> a NULL or empty name.
+    /// Probed 2026-09-25 against SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException NameCannotBeNull() =>
         new("Name cannot be NULL.", 15004, 16, 1);
@@ -1054,8 +1044,7 @@ partial class SimulatedSqlException
     /// First / Last / None, or an <c>@stmttype</c> outside INSERT / UPDATE /
     /// DELETE. Shares the wording every system-procedure parameter miss uses.
     /// </summary>
-    internal static SimulatedSqlException InvalidTriggerOrderParameter() =>
-        new("An invalid parameter or option was specified for procedure 'sys.sp_settriggerorder'.", 15600, 15, 1);
+    internal static SimulatedSqlException InvalidTriggerOrderParameter() => InvalidSystemProcedureOption("sp_settriggerorder");
 
     /// <summary>
     /// Mimics SQL Server error 15165: <c>sp_settriggerorder</c> named an
