@@ -121,6 +121,10 @@ partial class Simulation
         if (context.Token is UnquotedString contextWord && Collation.Baseline.Equals(contextWord.Value, "CHANGE_TRACKING_CONTEXT"))
         {
             ParseChangeTrackingContext(context);
+            // Only a DML statement or a SELECT may follow (an EXEC is Msg 156
+            // at itself; probed 2026-10-04 against SQL Server 2025).
+            if (context.Token is ReservedKeyword { Keyword: not (Keyword.Select or Keyword.Insert or Keyword.Update or Keyword.Delete or Keyword.Merge or Keyword.With) } follower)
+                throw SimulatedSqlException.SyntaxErrorNearKeyword(follower);
             if (context.Token is not Operator { Character: ',' })
                 return;
             context.MoveNextRequired();

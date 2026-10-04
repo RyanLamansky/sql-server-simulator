@@ -86,6 +86,8 @@ partial class Simulation
             throw SimulatedSqlException.ChangeTrackingNotEnabledOnDatabaseForTable(isTemp ? TempdbDatabaseName : database.Name, table.Name);
         if (table.ChangeTracking is not null)
             throw SimulatedSqlException.ChangeTrackingAlreadyEnabledOnTable(table.Name);
+        if (table.IsHistoryTable)
+            throw SimulatedSqlException.ChangeTrackingOnTemporalHistoryTable(QualifyTableName(table, database));
         if (!table.KeyConstraints.Exists(key => key.Kind == KeyConstraintKind.PrimaryKey))
             throw SimulatedSqlException.ChangeTrackingRequiresPrimaryKey(table.Name);
         table.ChangeTracking = new TableChangeTracking(trackColumnsUpdated, database.ChangeTrackingVersion);
@@ -116,7 +118,7 @@ partial class Simulation
                         turnOn = true;
                         var afterOn = context.SaveCheckpoint();
                         if (context.GetNextOptional() is Operator { Character: '(' })
-                            hasOptions = ParseChangeTrackingOptions(context, pending);
+                            hasOptions = ParseChangeTrackingOptions(context, pending, repeatedState: 2);
                         else
                             context.RestoreCheckpoint(afterOn);
                         break;
@@ -142,7 +144,7 @@ partial class Simulation
                     pending.RetentionUnit = current.RetentionUnit;
                     pending.AutoCleanup = current.AutoCleanup;
                 }
-                hasOptions = ParseChangeTrackingOptions(context, pending);
+                hasOptions = ParseChangeTrackingOptions(context, pending, repeatedState: 1);
                 break;
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -186,9 +188,11 @@ partial class Simulation
     /// Parses a change tracking option block from just past its <c>(</c> to its
     /// <c>)</c>, which the cursor is left on, into <paramref name="pending"/>.
     /// A malformed option is Msg 102 at the token real names: the value when
-    /// it is a word, else the option's own name.
+    /// it is a word or a fractional number, else the option's own name. A
+    /// repeated option is Msg 5091 at <paramref name="repeatedState"/>: 2 in the
+    /// <c>= ON (…)</c> form (probed 2026-10-04 against SQL Server 2025).
     /// </summary>
-    private static bool ParseChangeTrackingOptions(ParserContext context, DatabaseChangeTracking pending)
+    private static bool ParseChangeTrackingOptions(ParserContext context, DatabaseChangeTracking pending, byte repeatedState)
     {
         var seenRetention = false;
         var seenCleanup = false;
@@ -206,7 +210,7 @@ partial class Simulation
             if (BuiltInToken.Equals(option.Value, "AUTO_CLEANUP"))
             {
                 if (seenCleanup)
-                    throw SimulatedSqlException.ChangeTrackingOptionRepeated(option.Value);
+                    throw SimulatedSqlException.ChangeTrackingOptionRepeated(option.Value, repeatedState);
                 seenCleanup = true;
                 if (context.GetNextRequired() is not Operator { Character: '=' })
                     throw SyntaxErrorAtOption();
@@ -221,14 +225,14 @@ partial class Simulation
             else if (BuiltInToken.Equals(option.Value, "CHANGE_RETENTION"))
             {
                 if (seenRetention)
-                    throw SimulatedSqlException.ChangeTrackingOptionRepeated(option.Value);
+                    throw SimulatedSqlException.ChangeTrackingOptionRepeated(option.Value, repeatedState);
                 seenRetention = true;
                 if (context.GetNextRequired() is not Operator { Character: '=' })
                     throw SyntaxErrorAtOption();
                 var amount = context.GetNextRequired() switch
                 {
                     Numeric { Value: { IsNull: false, Type: var type } value } when type == SqlType.Int32 => value.AsInt32,
-                    Operator { Character: '-' } => throw SimulatedSqlException.SyntaxErrorNear(context),
+                    Operator { Character: '-' } or Numeric { Value.Type: DecimalSqlType { scale: > 0 } } => throw SimulatedSqlException.SyntaxErrorNear(context),
                     _ => throw SyntaxErrorAtOption(),
                 };
                 if (context.GetNextRequired() is not Name unit)

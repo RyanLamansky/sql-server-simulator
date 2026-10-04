@@ -501,21 +501,37 @@ partial class Simulation
         // cell would burn a sequence value for a row that never lands.
         long[]? valueTupleStamps = null;
         List<SqlValue[]> sourceRows;
+        // Every tuple computes ahead of the first row's write, so a row's
+        // defaults find the values its own tuple drew by its stamp: a DEFAULT
+        // cell and a NEXT VALUE FOR of the same sequence share one value, row
+        // by row (probed 2026-10-04 against SQL Server 2025).
+        var batch = context.Batch;
+        var retainsDraws = plan.ValueTuples!.Count > 1 && batch.SequenceValuesByRow is null;
+        if (retainsDraws)
+            batch.SequenceValuesByRow = [];
         try
         {
-            sourceRows = context.Batch.IsSkipping
-                ? []
-                : EvaluateParsedTuples(plan.ValueTuples!, context.Batch, out valueTupleStamps);
+            try
+            {
+                sourceRows = batch.IsSkipping
+                    ? []
+                    : EvaluateParsedTuples(plan.ValueTuples!, batch, out valueTupleStamps);
+            }
+            catch (SimulatedSqlException) when (plan.ValueTuples!.Count == 1)
+            {
+                // One row of values is computed past the row's identity draw, where
+                // a longer list is a constant scan computed ahead of every draw
+                // (probed 2026-10-04 against SQL Server 2025).
+                UseUpIdentityValues(batch, plan.DestinationTable, plan.DestinationColumns, 1);
+                throw;
+            }
+            return InsertRows(context, plan, sourceRows, valueTupleStamps);
         }
-        catch (SimulatedSqlException) when (plan.ValueTuples!.Count == 1)
+        finally
         {
-            // One row of values is computed past the row's identity draw, where
-            // a longer list is a constant scan computed ahead of every draw
-            // (probed 2026-10-04 against SQL Server 2025).
-            UseUpIdentityValues(context.Batch, plan.DestinationTable, plan.DestinationColumns, 1);
-            throw;
+            if (retainsDraws)
+                batch.SequenceValuesByRow = null;
         }
-        return InsertRows(context, plan, sourceRows, valueTupleStamps);
     }
 
     /// <summary>
@@ -956,7 +972,9 @@ partial class Simulation
     /// </summary>
     private static bool IsImplicitInsertColumn(HeapColumn column) => column.GraphKind switch
     {
-        GraphColumnKind.None => column.Identity is null && column.Computed is null,
+        // A HIDDEN period column drops out of the positional list as well
+        // (probed 2026-10-04 against SQL Server 2025).
+        GraphColumnKind.None => column.Identity is null && column.Computed is null && !column.IsHidden,
         GraphColumnKind.FromIdComputed or GraphColumnKind.ToIdComputed => true,
         _ => false,
     };

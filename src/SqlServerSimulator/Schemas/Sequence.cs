@@ -26,7 +26,7 @@ namespace SqlServerSimulator.Schemas;
 /// Cache options (<c>CACHE n</c> / <c>NO CACHE</c>) don't batch allocation
 /// — the simulator is in-process so the optimization that backs real SQL
 /// Server's CACHE semantics doesn't apply — and are kept for the Msg 11729
-/// warning (<see cref="AllocatesShortFirstCache"/>) and for
+/// warning (<see cref="CacheExceedsAvailableValues"/>) and for
 /// <c>sys.sequences</c>' <c>is_cached</c> / <c>cache_size</c>.
 /// </para>
 /// </remarks>
@@ -79,10 +79,11 @@ internal sealed class Sequence(
     public long? CacheSize;
 
     /// <summary>
-    /// Whether a value has been drawn since CREATE or the last <c>RESTART</c>,
-    /// which is when real allocates the first cache block.
+    /// Whether the declaration spelled the type <c>numeric</c>, which
+    /// <c>sys.sequences</c> reports as its own type (108) and a drawn value
+    /// carries as its <c>sql_variant</c> base type.
     /// </summary>
-    public bool FirstCacheAllocated;
+    public bool SpelledNumeric;
 
     /// <summary>
     /// The next value to emit from <c>NEXT VALUE FOR</c>. Initially equals
@@ -134,7 +135,7 @@ internal sealed class Sequence(
     /// wrapped in the sequence's declared scalar type.
     /// </summary>
     public SqlValue LastUsedValueAsVariant => this.LastUsedValue is { } value
-        ? SqlValue.FromVariant(this.WrapAsDeclaredType(value))
+        ? this.AsDeclaredVariant(value)
         : SqlValue.Null(SqlType.SqlVariant);
 
     /// <summary>
@@ -144,26 +145,108 @@ internal sealed class Sequence(
     /// <c>maximum_value</c> / <c>current_value</c> columns of
     /// <c>sys.sequences</c>, each a sql_variant in real SQL Server.
     /// </summary>
-    public SqlValue AsDeclaredVariant(Int128 value) => SqlValue.FromVariant(this.WrapAsDeclaredType(value));
+    public SqlValue AsDeclaredVariant(Int128 value) => this.DeclaredType is DecimalSqlType && !this.SpelledNumeric
+        ? SqlValue.FromVariantNamedDecimal(this.WrapAsDeclaredType(value))
+        : SqlValue.FromVariant(this.WrapAsDeclaredType(value));
 
     /// <summary>
-    /// Whether this draw allocates the first cache block since CREATE or
-    /// <c>RESTART</c> and the block is longer than the values left — real's
-    /// Msg 11729. Probed 2026-09-23 against SQL Server 2025: the default cache
-    /// is 50 values, <c>NO CACHE</c> and <c>CYCLE</c> never warn, and a later
-    /// block that runs short doesn't warn again.
+    /// Whether the declared cache is longer than the values left from the
+    /// position the next draw takes — real's Msg 11729, which it sends from the
+    /// <c>CREATE</c> or <c>ALTER SEQUENCE</c> that leaves the sequence so, never
+    /// from a draw (probed 2026-10-04 against SQL Server 2025: a <c>tinyint</c>
+    /// sequence drawn from 100 to its end sends nothing). The default cache is
+    /// 50 values, and <c>NO CACHE</c>, a cache of 1 and <c>CYCLE</c> never warn.
     /// </summary>
-    public bool AllocatesShortFirstCache()
+    public bool CacheExceedsAvailableValues()
     {
-        if (this.FirstCacheAllocated)
-            return false;
-        this.FirstCacheAllocated = true;
-        if (this.CacheSize == 0 || this.Cycle || this.IsExhausted)
+        if (this.CacheSize is 0 or 1 || this.Cycle || this.IsExhausted)
             return false;
         var bound = this.Increment > 0 ? this.MaxValue : this.MinValue;
         // The distance between two decimal(38, 0) bounds can pass Int128.
         var available = (((System.Numerics.BigInteger)bound - (System.Numerics.BigInteger)this.CurrentValue) / (System.Numerics.BigInteger)this.Increment) + 1;
         return available < (this.CacheSize ?? 50);
+    }
+
+    /// <summary>
+    /// Moves the next position to follow the last value drawn under the
+    /// options an <c>ALTER SEQUENCE</c> without <c>RESTART</c> left, which is
+    /// what real does: the next draw is the last one plus the new increment,
+    /// wrapping or exhausting against the new bounds, and an exhausted sequence
+    /// whose new options leave room draws again (probed 2026-10-04 against SQL
+    /// Server 2025). A sequence nothing has been drawn from keeps its position.
+    /// </summary>
+    public void RepositionAfterAlter()
+    {
+        if (this.LastUsedValue is not { } last)
+            return;
+        var next = (System.Numerics.BigInteger)last + (System.Numerics.BigInteger)this.Increment;
+        if (next > (System.Numerics.BigInteger)this.MaxValue || next < (System.Numerics.BigInteger)this.MinValue)
+        {
+            if (this.Cycle)
+            {
+                this.CurrentValue = this.Increment > 0 ? this.MinValue : this.MaxValue;
+                this.IsExhausted = false;
+            }
+            else
+            {
+                this.IsExhausted = true;
+            }
+            return;
+        }
+        this.CurrentValue = (Int128)next;
+        this.IsExhausted = false;
+    }
+
+    /// <summary>
+    /// Reserves <paramref name="size"/> consecutive values for
+    /// <c>sp_sequence_get_range</c>, reporting the first, the last and how
+    /// many times the range wrapped. A no-cycle range past the bound is Msg
+    /// 11732 and leaves the sequence as it was; a cycling one wraps to the
+    /// opposite bound as often as it needs (probed 2026-10-04 against SQL
+    /// Server 2025: <c>tinyint</c> from 250 for 20 values ends at 13 having
+    /// wrapped once).
+    /// </summary>
+    public (Int128 First, Int128 Last, int Cycles) DrawRange(long size)
+    {
+        if (this.IsExhausted)
+            throw SimulatedSqlException.SequenceRangeExceedsLimit(this.Name);
+        var increment = (System.Numerics.BigInteger)this.Increment;
+        var first = (System.Numerics.BigInteger)this.CurrentValue;
+        var ascending = this.Increment > 0;
+        var bound = (System.Numerics.BigInteger)(ascending ? this.MaxValue : this.MinValue);
+        var wrapStart = (System.Numerics.BigInteger)(ascending ? this.MinValue : this.MaxValue);
+        var toBound = ((bound - first) / increment) + 1;
+        System.Numerics.BigInteger last;
+        var cycles = 0;
+        if (size <= toBound)
+        {
+            last = first + ((size - 1) * increment);
+        }
+        else if (!this.Cycle)
+        {
+            throw SimulatedSqlException.SequenceRangeExceedsLimit(this.Name);
+        }
+        else
+        {
+            var perCycle = ((bound - wrapStart) / increment) + 1;
+            var beyond = size - toBound - 1;
+            cycles = (int)(1 + (beyond / perCycle));
+            last = wrapStart + (beyond % perCycle * increment);
+        }
+        this.LastUsedValue = (Int128)last;
+        var next = last + increment;
+        if (ascending ? next > bound : next < bound)
+        {
+            if (this.Cycle)
+                this.CurrentValue = (Int128)wrapStart;
+            else
+                this.IsExhausted = true;
+        }
+        else
+        {
+            this.CurrentValue = (Int128)next;
+        }
+        return ((Int128)first, (Int128)last, cycles);
     }
 
     /// <summary>
@@ -206,7 +289,7 @@ internal sealed class Sequence(
     /// Wraps a value as the sequence's declared type. The integer family uses
     /// the matching narrow value; decimal types carry it at scale 0.
     /// </summary>
-    private SqlValue WrapAsDeclaredType(Int128 value) => this.DeclaredType switch
+    internal SqlValue WrapAsDeclaredType(Int128 value) => this.DeclaredType switch
     {
         TinyIntSqlType => SqlValue.FromByte((byte)value),
         SmallIntSqlType => SqlValue.FromInt16((short)value),

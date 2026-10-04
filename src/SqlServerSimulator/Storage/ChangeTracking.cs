@@ -144,7 +144,10 @@ internal sealed class TableChangeTracking(bool trackColumnsUpdated, long minVali
                 var operation = last.Last == ChangeTrackingOperation.Delete ? ChangeTrackingOperation.Delete
                     : history[first].First == ChangeTrackingOperation.Insert ? ChangeTrackingOperation.Insert
                     : ChangeTrackingOperation.Update;
-                result.Add(new NetRowChange(last.Key, last.Version, creation, operation,
+                // A key written again in another spelling its collation calls
+                // equal keeps the spelling the row's tracking began with (probed
+                // 2026-10-04 against SQL Server 2025).
+                result.Add(new NetRowChange(history[0].Key, last.Version, creation, operation,
                     operation == ChangeTrackingOperation.Update && this.TrackColumnsUpdated ? columns : null, last.Context));
             }
         }
@@ -228,18 +231,31 @@ internal sealed class TableChangeTracking(bool trackColumnsUpdated, long minVali
     public void RecordRow(BatchContext batch, HeapTable table, SqlValue[] row, ChangeTrackingOperation operation) =>
         this.Record(batch, table, KeyOf(row, KeyOrdinals(table)), operation, null);
 
+    /// <summary>Whether an update setting <paramref name="setOrdinals"/> writes a key column, which makes each row it changes a key move.</summary>
+    public static bool SetsKey(int[] keyOrdinals, IReadOnlyList<int> setOrdinals)
+    {
+        foreach (var ordinal in setOrdinals)
+        {
+            if (Array.IndexOf(keyOrdinals, ordinal) >= 0)
+                return true;
+        }
+        return false;
+    }
+
     /// <summary>
-    /// Records an <c>UPDATE</c> of one row. A row whose key the update changed
-    /// is a delete of the old key and an insert of the new one, which the
-    /// caller hands back through <paramref name="keyMoves"/> so a statement
-    /// records every such delete ahead of every such insert — one row can
-    /// move onto a key another row is leaving.
+    /// Records an <c>UPDATE</c> of one row. A row whose key the update set —
+    /// to a new value or to the one it had (probed 2026-10-04 against SQL
+    /// Server 2025: <c>SET id = id</c> reports a new creation version) — is a
+    /// delete of the old key and an insert of the new one, which the caller
+    /// hands back through <paramref name="keyMoves"/> so a statement records
+    /// every such delete ahead of every such insert — one row can move onto a
+    /// key another row is leaving.
     /// </summary>
-    public void RecordUpdate(BatchContext batch, HeapTable table, int[] keyOrdinals, SqlValue[] oldRow, SqlValue[] newRow, int[]? columns, ref List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves)
+    public void RecordUpdate(BatchContext batch, HeapTable table, int[] keyOrdinals, SqlValue[] oldRow, SqlValue[] newRow, int[]? columns, bool setsKey, ref List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves)
     {
         var oldKey = KeyOf(oldRow, keyOrdinals);
         var newKey = KeyOf(newRow, keyOrdinals);
-        if (new SqlValueKey(oldKey).Equals(new SqlValueKey(newKey)))
+        if (!setsKey && new SqlValueKey(oldKey).Equals(new SqlValueKey(newKey)))
             this.Record(batch, table, oldKey, ChangeTrackingOperation.Update, columns);
         else
             (keyMoves ??= []).Add((oldKey, newKey));

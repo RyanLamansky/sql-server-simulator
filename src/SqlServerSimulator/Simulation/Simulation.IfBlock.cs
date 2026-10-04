@@ -490,7 +490,11 @@ partial class Simulation
             if (batch.UdfFrame is null && batch.ProcFrame is null or { IsDynamicSql: true })
                 throw SimulatedSqlException.ReturnWithValueNotAllowed();
 
-            var valueExpr = Expression.Parse(context);
+            // A RETURN's value is one of the places real refuses a sequence
+            // draw as nested (probed 2026-10-04 against SQL Server 2025).
+            Expression valueExpr;
+            using (context.EnterNextValueForScope(NextValueForScope.Nested))
+                valueExpr = Expression.Parse(context);
             if (batch.UdfFrame is { AnalyzesReturnMask: true } analyzed)
                 analyzed.ReturnMask = DataMask.Merge(analyzed.ReturnMask, DataMask.Of(valueExpr, static _ => null, typeOf: null));
             // A scalar function's result takes its value as an assignment

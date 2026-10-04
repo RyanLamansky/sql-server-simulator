@@ -225,6 +225,16 @@ partial class Simulation
             throw SimulatedSqlException.ObjectDoesNotExistForTrigger(parentName.ToString(), triggerName.Leaf, parentView is null ? (byte)4 : (byte)6);
         }
 
+        // A history table takes no trigger, and a system-versioned table no
+        // INSTEAD OF one (probed 2026-10-04 against SQL Server 2025).
+        if (parent is HeapTable { IsHistoryTable: true } or HeapTable { SystemVersioning: not null } && (parent is HeapTable { IsHistoryTable: true } || timing == TriggerTiming.InsteadOf))
+        {
+            var temporal = (HeapTable)parent;
+            var refusal = SimulatedSqlException.CannotCreateTriggerOnTemporalTable(QualifyTableName(temporal, context.Batch.DatabaseFor(temporal)), temporal.IsHistoryTable ? (byte)1 : (byte)2);
+            refusal.PreserveDiagnostics(parentLine, triggerName.Leaf);
+            throw refusal;
+        }
+
         // A memory-optimized table takes only a natively compiled trigger
         // (probed 2026-10-02 against SQL Server 2025).
         if (parent is HeapTable { IsMemoryOptimized: true } && !options.NativeCompilation)

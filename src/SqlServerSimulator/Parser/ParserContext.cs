@@ -483,6 +483,12 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool AllowsWindowExpressions = true;
 
     /// <summary>
+    /// True while an <c>UPDATE</c> or <c>MERGE</c> statement parses, where a
+    /// <c>NEXT VALUE FOR</c> may not carry an <c>OVER</c> (Msg 11717).
+    /// </summary>
+    public bool InUpdateOrMerge;
+
+    /// <summary>
     /// True while a query block's own <c>WHERE</c> parses, where an
     /// aggregate-like <c>GROUPING</c> / <c>GROUPING_ID</c> call is Msg 147.
     /// A nested query block clears it.

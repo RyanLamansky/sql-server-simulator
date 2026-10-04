@@ -44,6 +44,8 @@ internal static partial class BuiltInResources
         "sp_set_session_context",
         "sp_getapplock",
         "sp_releaseapplock",
+        // Reserves a range of a sequence's values through OUTPUT parameters.
+        "sp_sequence_get_range",
         // Application-role activation: sp_setapprole swaps the session's
         // database principal for the role's and pins the session to its
         // database; sp_unsetapprole takes it back with the issued cookie.

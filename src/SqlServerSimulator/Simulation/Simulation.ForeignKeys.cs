@@ -505,6 +505,7 @@ partial class Simulation
         var tracking = childTable.ChangeTracking;
         var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(childTable);
         var trackedColumns = tracking?.UpdatedColumns(childTable, keyOrdinals, fk.ChildColumnOrdinals);
+        var setsKey = tracking is not null && TableChangeTracking.SetsKey(keyOrdinals, fk.ChildColumnOrdinals);
         List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
         foreach (var (pageIndex, slotIndex, _, _) in matching)
             VersionStore.CheckSnapshotUpdateConflict(context.Batch, childTable, (pageIndex, slotIndex));
@@ -543,7 +544,7 @@ partial class Simulation
             if (childTable.SystemVersioning is { } history && childTable.PeriodColumns is { } period)
                 WriteHistoryRow(childTable, history, period, oldRow, context, undoLog);
             var rewritten = RowEncoder.EncodeRow(childTable.StoredColumns, ProjectStoredValues(childTable, newRow), childTable.Heap);
-            tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldRow, newRow, trackedColumns, ref keyMoves);
+            tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldRow, newRow, trackedColumns, setsKey, ref keyMoves);
             RewriteRowAt(context, childTable, pageIndex, slotIndex, rewritten, undoLog);
             ClusteredScan.NoteKeyAssignment(childTable, fk.ChildColumnOrdinals, (pageIndex, slotIndex), undoLog);
             newPairs.Add((oldRow, newRow));

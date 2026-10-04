@@ -117,11 +117,19 @@ partial class SimulatedSqlException
         batch.InfoMessage(@class: 0, state: 1, number: 1992, $"Warning: Foreign key '{foreignKey}' on table '{childTable}' referencing table '{referencedTable}' was disabled as a result of disabling the index '{index}'.");
 
     /// <summary>
-    /// Msg 11729, when a sequence's first cache block is longer than the values
-    /// it has left; names the sequence without its schema.
+    /// Msg 11729, when a sequence's declared cache is longer than the values it
+    /// has left; names the sequence without its schema.
     /// </summary>
     internal static SimulatedError SequenceCacheExceedsRangeMessage(BatchContext batch, string sequenceName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 11729, $"The sequence object '{sequenceName}' cache size is greater than the number of available values.");
+
+    /// <summary>
+    /// Msg 11707, which a <c>CREATE</c> or <c>ALTER SEQUENCE</c> naming
+    /// <c>CACHE 1</c> sends; <c>sys.sequences</c> still reports the cache as 1
+    /// (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedError SequenceCacheSetToNoCacheMessage(BatchContext batch, string sequenceName) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 11707, $"The cache size for sequence object '{sequenceName}' has been set to NO CACHE.");
 
     /// <summary>
     /// A message a system procedure prints from its own body, attributed to

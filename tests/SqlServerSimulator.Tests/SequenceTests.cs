@@ -290,9 +290,11 @@ public sealed class SequenceTests
         var simulation = new Simulation();
         _ = simulation.ExecuteNonQuery("create sequence sb as int start with 1 increment by 1");
         AreEqual(1, simulation.ExecuteScalar<int>("select next value for sb"));
+        // The next draw follows the last by the new increment (probed
+        // 2026-10-04 against SQL Server 2025).
         _ = simulation.ExecuteNonQuery("alter sequence sb increment by 10");
-        AreEqual(2, simulation.ExecuteScalar<int>("select next value for sb"));
-        AreEqual(12, simulation.ExecuteScalar<int>("select next value for sb"));
+        AreEqual(11, simulation.ExecuteScalar<int>("select next value for sb"));
+        AreEqual(21, simulation.ExecuteScalar<int>("select next value for sb"));
     }
 
     [TestMethod]
@@ -355,15 +357,15 @@ public sealed class SequenceTests
         AreEqual(2, simulation.ExecuteScalar<int>("select current_value from sys.sequences where name = 'sysview2'"));
     }
 
-    // A decimal sequence's inner type reports BaseType 'numeric' — the
-    // simulator's single decimal family surfaces as numeric (documented quirk),
-    // diverging from real's 'decimal' for a decimal-declared sequence.
+    // A decimal sequence's values report the spelling it was declared with
+    // (probed 2026-10-04 against SQL Server 2025).
     [TestMethod]
     [DataRow("bigint", "bigint")]
     [DataRow("int", "int")]
     [DataRow("smallint", "smallint")]
     [DataRow("tinyint", "tinyint")]
-    [DataRow("decimal(18,0)", "numeric")]
+    [DataRow("decimal(18,0)", "decimal")]
+    [DataRow("numeric(18,0)", "numeric")]
     public void SysSequences_StartValue_InnerBaseTypeMatchesDeclaredType(string declared, string expectedBaseType)
         => AreEqual(expectedBaseType, new Simulation().ExecuteScalar($"""
             create sequence sv_bt as {declared} start with 5;
@@ -667,5 +669,242 @@ public sealed class SequenceTests
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create sequence dbo.s1; create sequence dbo.s2 as smallint");
         CollectionAssert.AreEqual(new[] { false, false }, sim.ColumnNullability("select next value for dbo.s1, next value for dbo.s2"));
+    }
+
+    // Differential sweep against SQL Server 2025, probed 2026-10-04.
+
+    [TestMethod]
+    [DataRow("create sequence s as int minvalue 10 maxvalue 5", 11705)]
+    [DataRow("create sequence s as int minvalue 5 maxvalue 5", 11705)]
+    [DataRow("create sequence s as int start with 1 start with 2", 11712)]
+    [DataRow("create sequence s as int cycle no cycle", 11712)]
+    [DataRow("create sequence s as int minvalue 1 no minvalue", 11712)]
+    [DataRow("create sequence s as int cache 0", 11706)]
+    [DataRow("create sequence s as int start with 1.0", 11708)]
+    [DataRow("create sequence s as int increment by 3.0", 11708)]
+    [DataRow("create sequence #s", 11714)]
+    [DataRow("create sequence s as int cache -1", 102)]
+    [DataRow("create sequence s as int start with 1e2", 102)]
+    [DataRow("create sequence s as int, start with 1", 102)]
+    public void Create_RefusesWhatRealRefuses(string sql, int error) =>
+        new Simulation().AssertSqlError(sql, error);
+
+    [TestMethod]
+    [DataRow("alter sequence s start with 5", 11710)]
+    [DataRow("alter sequence s as bigint", 11711)]
+    [DataRow("alter sequence s", 11715)]
+    [DataRow("alter sequence s restart restart", 11712)]
+    [DataRow("alter sequence s minvalue 50", 11704)]
+    [DataRow("alter sequence s maxvalue 5", 11704)]
+    [DataRow("alter sequence s maxvalue 0", 11705)]
+    [DataRow("alter sequence s restart with -5", 11703)]
+    [DataRow("alter sequence s restart with 1.5", 11708)]
+    [DataRow("alter sequence s cache 0", 11706)]
+    [DataRow("alter sequence nosuch restart", 15151)]
+    [DataRow("alter sequence t restart", 15151)]
+    public void Alter_RefusesWhatRealRefuses(string sql, int error)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as int start with 10 increment by 5 minvalue 0 maxvalue 1000 no cache; create table t (a int)");
+        _ = simulation.ExecuteScalar("select next value for s");
+        _ = simulation.ExecuteScalar("select next value for s");
+        _ = simulation.AssertSqlError(sql, error);
+        // A refused ALTER leaves the sequence as it was.
+        AreEqual(20, simulation.ExecuteScalar<int>("select next value for s"));
+    }
+
+    [TestMethod]
+    public void Alter_NoMinOrMaxValue_RestoresTheTypeBounds()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as int start with 10 minvalue 5 maxvalue 100; alter sequence s no minvalue no maxvalue");
+        AreEqual("-2147483648|2147483647", simulation.ExecuteScalar("select concat(cast(minimum_value as int), '|', cast(maximum_value as int)) from sys.sequences"));
+    }
+
+    [TestMethod]
+    public void Alter_OfAnExhaustedSequence_ResumesFromTheLastValue()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as int start with 1 maxvalue 2 no cache");
+        _ = simulation.ExecuteScalar("select next value for s");
+        _ = simulation.ExecuteScalar("select next value for s");
+        _ = simulation.ExecuteNonQuery("alter sequence s increment by -1");
+        IsFalse((bool)simulation.ExecuteScalar("select is_exhausted from sys.sequences")!);
+        AreEqual(1, simulation.ExecuteScalar<int>("select next value for s"));
+    }
+
+    [TestMethod]
+    public void Alter_RollsBackWithItsTransaction()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as int start with 1 no cache");
+        _ = simulation.ExecuteNonQuery("begin tran; alter sequence s restart with 100; rollback");
+        AreEqual(1, simulation.ExecuteScalar<int>("select next value for s"));
+    }
+
+    [TestMethod]
+    public void Exhaustion_EndsTheBatch()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as int start with 1 maxvalue 1 no cache; create table log (a int)");
+        _ = simulation.ExecuteScalar("select next value for s");
+        _ = simulation.AssertSqlError("select next value for s; insert log values (1)", 11728);
+        AreEqual(0, simulation.ExecuteScalar<int>("select count(*) from log"));
+        // A TRY catches it.
+        AreEqual(11728, simulation.ExecuteScalar<int>("declare @e int; begin try declare @x int = next value for s; end try begin catch set @e = error_number(); end catch; select @e"));
+    }
+
+    [TestMethod]
+    public void NumericSpelling_IsKeptThroughTheCatalogAndTheValues()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as numeric(5, 0)");
+        AreEqual("108|numeric", simulation.ExecuteScalar("select concat(system_type_id, '|', type_name(system_type_id)) from sys.sequences"));
+        AreEqual("numeric", simulation.ExecuteScalar("select sql_variant_property(next value for s, 'BaseType')"));
+    }
+
+    [TestMethod]
+    public void Over_DrawsInItsOwnOrder()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as int start with 1 no cache");
+        using var reader = simulation.ExecuteReader("select x, next value for s over (order by x desc) n from (values (1), (2), (3)) v(x) order by x");
+        var pairs = new List<string>();
+        while (reader.Read())
+            pairs.Add($"{reader.GetInt32(0)}:{reader.GetInt32(1)}");
+        CollectionAssert.AreEqual(new[] { "1:3", "2:2", "3:1" }, pairs);
+    }
+
+    [TestMethod]
+    public void Over_OrdersAnInsertSelectsDraws()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create sequence s as int start with 1 no cache;
+            create table src (k int, x varchar(5)); insert src values (3, 'c'), (1, 'a'), (2, 'b');
+            create table t (n int, x varchar(5));
+            insert t select next value for s over (order by k desc), x from src
+            """);
+        AreEqual("1c 2b 3a", simulation.ExecuteScalar("select string_agg(concat(n, x), ' ') within group (order by n) from t"));
+    }
+
+    [TestMethod]
+    [DataRow("select next value for s over (partition by x order by x) from (values (1)) v(x)", 11716)]
+    [DataRow("select next value for s over () from (values (1)) v(x)", 11718)]
+    [DataRow("update t set n = next value for s over (order by k)", 11717)]
+    public void Over_RefusesWhatRealRefuses(string sql, int error)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as int no cache; create table t (k int, n int)");
+        _ = simulation.AssertSqlError(sql, error);
+    }
+
+    [TestMethod]
+    public void DefaultKeyword_SharesItsRowsDraw()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create sequence s as int start with 1 no cache;
+            create table t (a int default next value for s, b int);
+            insert t (a, b) values (default, next value for s), (default, next value for s)
+            """);
+        AreEqual("1=1 2=2", simulation.ExecuteScalar("select string_agg(concat(a, '=', b), ' ') within group (order by a) from t"));
+    }
+
+    [TestMethod]
+    public void AddedDefaultColumn_DrawsPerExistingRow()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create sequence s as int start with 1 no cache;
+            create table t (b int); insert t values (1), (2);
+            alter table t add a int not null default next value for s
+            """);
+        AreEqual(2, simulation.ExecuteScalar<int>("select count(distinct a) from t"));
+    }
+
+    [TestMethod]
+    public void AssigningSelect_RefusesTwoDrawsOfOneSequence()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as int no cache");
+        _ = simulation.AssertSqlError("declare @a int, @b int; select @a = next value for s, @b = next value for s", 11736);
+    }
+
+    [TestMethod]
+    [DataRow("create procedure p as return next value for s")]
+    [DataRow("select * from (values (next value for s)) v(n)")]
+    [DataRow("create type tt as table (a int default next value for s)")]
+    public void NestedPositions_Refuse11719(string sql)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as int no cache");
+        _ = simulation.AssertSqlError(sql, 11719);
+    }
+
+    [TestMethod]
+    public void TopCount_IsRefusedWithoutDrawing()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as int no cache");
+        _ = simulation.AssertSqlError("select top (next value for s) x from (values (1)) v(x)", 11720);
+        AreEqual(-2147483648, simulation.ExecuteScalar<int>("select next value for s"));
+    }
+
+    [TestMethod]
+    public void NextValueFor_NamesAViewOrAVariable()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create sequence s", "create view v as select 1 x");
+        _ = simulation.AssertSqlError("select next value for v", 11726);
+        simulation.ValidateSyntaxError("declare @n sysname = 's'; select next value for @n", "@n");
+    }
+
+    [TestMethod]
+    public void Drop_RefusesASequenceADefaultDrawsFrom()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s; create table t (a int constraint df default next value for s)");
+        simulation.AssertSqlError("drop sequence s", 3729, "Cannot DROP SEQUENCE 's' because it is being referenced by object 'df'.");
+        AreEqual("df", simulation.ExecuteScalar("select object_name(referencing_id) from sys.sql_expression_dependencies where referenced_id = object_id('s')"));
+    }
+
+    [TestMethod]
+    public void GetRange_ReservesARange()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as int start with 1 increment by 1 no cache");
+        AreEqual("1|5|0|6", simulation.ExecuteScalar("""
+            declare @f sql_variant, @l sql_variant, @c int;
+            exec sp_sequence_get_range @sequence_name = N's', @range_size = 5, @range_first_value = @f output, @range_last_value = @l output, @range_cycle_count = @c output;
+            select concat(cast(@f as int), '|', cast(@l as int), '|', @c, '|', next value for s)
+            """));
+    }
+
+    [TestMethod]
+    public void GetRange_WrapsACyclingSequence()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as tinyint start with 250 cycle no cache");
+        AreEqual("250|13|1", simulation.ExecuteScalar("""
+            declare @f sql_variant, @l sql_variant, @c int;
+            exec sp_sequence_get_range 's', 20, @f output, @l output, @c output;
+            select concat(cast(@f as int), '|', cast(@l as int), '|', @c)
+            """));
+    }
+
+    [TestMethod]
+    [DataRow("declare @f sql_variant; exec sp_sequence_get_range 's', 6, @f output", 11732)]
+    [DataRow("declare @f sql_variant; exec sp_sequence_get_range 's', 0, @f output", 11733)]
+    [DataRow("declare @f sql_variant; exec sp_sequence_get_range 'nosuch', 1, @f output", 208)]
+    [DataRow("exec sp_sequence_get_range 's', 3", 201)]
+    [DataRow("declare @f int; exec sp_sequence_get_range 's', 3, @f output", 257)]
+    public void GetRange_RefusesWhatRealRefuses(string sql, int error)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s as int start with 1 minvalue 1 maxvalue 5 no cache");
+        _ = simulation.AssertSqlError(sql, error);
+        // Nothing was reserved.
+        AreEqual(1, simulation.ExecuteScalar<int>("select next value for s"));
     }
 }

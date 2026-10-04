@@ -325,6 +325,7 @@ internal static class CatalogViewObjectIds
         ["sp_releaseapplock"] = -395959103,
         ["sp_rename"] = -1058549068,
         ["sp_revokedbaccess"] = -103770002,
+        ["sp_sequence_get_range"] = -347351180,
         ["sp_serveroption"] = -60611724,
         ["sp_server_info"] = -450276887,
         ["sp_set_session_context"] = -715290006,

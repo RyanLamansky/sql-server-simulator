@@ -74,6 +74,13 @@ internal sealed partial class Selection
         }
 
         var table = ResolveChangeTableTarget(context, name);
+        // A branch the run skips was compiled with the batch only when its
+        // table existed then, and that compile has already refused an untracked
+        // one; a table the batch itself created defers the statement, which a
+        // branch never taken then never compiles (probed 2026-10-04 against SQL
+        // Server 2025).
+        if (table is { ChangeTracking: null } && context.Batch.IsSkipping && !context.Batch.CompilingForRun && !context.Batch.CreateTimeBinding)
+            table = null;
         if (table is null)
         {
             context.Batch.CurrentStatement.BindsDeferredSource = true;
@@ -83,9 +90,13 @@ internal sealed partial class Selection
         // refuses even from a branch never taken or a module body at CREATE
         // (probed 2026-09-27 against SQL Server 2025).
         if (table.ChangeTracking is null)
-            throw SimulatedSqlException.ChangeTrackingNotEnabledOnTable(table.Name);
+            throw SimulatedSqlException.ChangeTrackingNotEnabledOnTable(name.ToString());
         if (alias is null)
             throw SimulatedSqlException.ChangeTableRequiresAlias();
+        // Reading a table's changes takes VIEW CHANGE TRACKING on it beside
+        // SELECT (probed 2026-10-04 against SQL Server 2025).
+        if (!context.Batch.IsSkipping && !context.Batch.Connection.Security.EffectiveIsDbo)
+            PermissionEnforcement.CheckSchemaObject(context.Batch, "VIEW CHANGE TRACKING", table);
 
         var plan = versionForm
             ? BindChangeTableVersion(context, table, versionColumns!, versionValues!)
@@ -236,6 +247,10 @@ internal sealed partial class Selection
             }
         }
 
+        // A negative version, written or in a variable, answers nothing
+        // (probed 2026-10-04 against SQL Server 2025).
+        if (lastSync < 0)
+            yield break;
         var changes = tracking.NetChanges(lastSync);
         changes.Sort(static (a, b) => CompareKeys(a.Key, b.Key));
         foreach (var change in changes)
@@ -325,13 +340,17 @@ internal sealed partial class Selection
     }
 
     /// <summary>
-    /// Binds <c>VERSION</c>'s lists to <paramref name="table"/>: every column
-    /// must be a key column (Msg 22111), then the list must be as long as the
-    /// key (Msg 22110), then the values as long as the columns (Msg 22103).
+    /// Binds <c>VERSION</c>'s lists to <paramref name="table"/>: the list must
+    /// be as long as the key (Msg 22110), then every column must be a key
+    /// column (Msg 22111), then the values as long as the columns (Msg 22103)
+    /// — probed 2026-10-04 against SQL Server 2025, where <c>(c)</c> against a
+    /// two-column key is 22110 and <c>(a, c)</c> is 22111.
     /// </summary>
     private static Selection BindChangeTableVersion(ParserContext context, HeapTable table, List<string> columns, List<Expression> values)
     {
         var keyOrdinals = TableChangeTracking.KeyOrdinals(table);
+        if (columns.Count != keyOrdinals.Length)
+            throw SimulatedSqlException.ChangeTableVersionColumnCount(table.Name);
         var collation = context.Batch.DatabaseFor(table).Collation;
         var lookupOrdinals = new int[columns.Count];
         for (var i = 0; i < columns.Count; i++)
@@ -342,8 +361,6 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.ChangeTableVersionColumnNotInKey(column, table.Name);
             lookupOrdinals[i] = ordinal;
         }
-        if (lookupOrdinals.Length != keyOrdinals.Length)
-            throw SimulatedSqlException.ChangeTableVersionColumnCount(table.Name);
         if (values.Count != lookupOrdinals.Length)
             throw SimulatedSqlException.ChangeTableVersionArgumentsInvalid();
 

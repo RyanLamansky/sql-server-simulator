@@ -1180,14 +1180,22 @@ partial class Simulation
     /// <summary>
     /// Parses <c>ALTER SEQUENCE [schema.]name [RESTART [WITH n]] [INCREMENT BY n]
     /// [MINVALUE n | NO MINVALUE] [MAXVALUE n | NO MAXVALUE] [CYCLE | NO CYCLE]
-    /// [CACHE n | NO CACHE]</c>. Entered with <see cref="ParserContext.Token"/>
-    /// on the <c>SEQUENCE</c> contextual keyword. <c>RESTART</c> resets
-    /// <see cref="Sequence.CurrentValue"/> to the explicit value or to
-    /// <see cref="Sequence.StartValue"/>, and clears
-    /// <see cref="Sequence.IsExhausted"/>. Other options replace the
-    /// matching field. Probe-confirmed: ALTER SEQUENCE accepts the same
-    /// option subset as CREATE SEQUENCE.
+    /// [CACHE [n] | NO CACHE]</c>. Entered with <see cref="ParserContext.Token"/>
+    /// on the <c>SEQUENCE</c> contextual keyword. The options are read whole —
+    /// their grammar refusals (Msg 11710 / 11711 / 11712 / 11715) are real's
+    /// parse errors — then checked against the sequence and applied together,
+    /// so a refused statement leaves it as it was.
     /// </summary>
+    /// <remarks>
+    /// Probed 2026-10-04 against SQL Server 2025: <c>NO MINVALUE</c> /
+    /// <c>NO MAXVALUE</c> restore the type's bounds; equal bounds are Msg
+    /// 11705; a <c>RESTART WITH</c> outside the new range is Msg 11703, and
+    /// without one a current value outside it is Msg 11704; without
+    /// <c>RESTART</c> the next draw follows the last one by the new increment
+    /// (<see cref="Sequence.RepositionAfterAlter"/>); the statement rolls back
+    /// with its transaction; and it sends Msg 11729 when it leaves the cache
+    /// longer than the values left.
+    /// </remarks>
     private static bool TryParseAlterSequence(ParserContext context)
     {
         context.MoveNextRequired();
@@ -1195,27 +1203,92 @@ partial class Simulation
             return false;
         var sequenceName = BatchContext.ParseObjectName(context);
 
-        // Walk past any option tokens so the dispatch loop's lookahead
-        // doesn't trip on them — for a skipped statement and ahead of a
-        // refusal alike. RESTART WITH and INCREMENT BY are the options that
-        // carry a reserved keyword.
-        void SkipOptions()
+        var seen = new SequenceOptionsSeen();
+        Int128? restartWith = null;
+        bool restartFractional = false, incrementFractional = false, minFractional = false, maxFractional = false;
+        Int128? increment = null;
+        (Int128? Value, bool Written) minValue = default, maxValue = default;
+        bool? cycle = null;
+        (long? Size, bool Written) cache = default;
+        var any = false;
+        while (context.MoveNext())
         {
-            while (context.MoveNext()
-                && context.Token is not (Operator { Character: ';' } or ReservedKeyword { Keyword: not (Keyword.With or Keyword.By) }))
+            switch (context.Token)
             {
-                // no-op
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Restart }:
+                    {
+                        NoteSequenceOption(ref seen.Restart, "RESTART");
+                        var afterRestart = context.SaveCheckpoint();
+                        if (context.MoveNext() && context.Token is ReservedKeyword { Keyword: Keyword.With })
+                            restartWith = ReadSignedIntegerLiteral(context, out restartFractional);
+                        else
+                            context.RestoreCheckpoint(afterRestart);
+                        break;
+                    }
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Start }:
+                    throw SimulatedSqlException.SequenceArgumentNotInAlter("START WITH");
+                case ReservedKeyword { Keyword: Keyword.As }:
+                    throw SimulatedSqlException.SequenceArgumentNotInAlter("AS");
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Increment }:
+                    NoteSequenceOption(ref seen.Increment, "INCREMENT BY");
+                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
+                        return false;
+                    increment = ReadSignedIntegerLiteral(context, out incrementFractional);
+                    break;
+                case UnquotedString { ContextualKeyword: ContextualKeyword.MinValue }:
+                    NoteSequenceOption(ref seen.MinValue, "MINVALUE");
+                    minValue = (ReadSignedIntegerLiteral(context, out minFractional), true);
+                    break;
+                case UnquotedString { ContextualKeyword: ContextualKeyword.MaxValue }:
+                    NoteSequenceOption(ref seen.MaxValue, "MAXVALUE");
+                    maxValue = (ReadSignedIntegerLiteral(context, out maxFractional), true);
+                    break;
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Cycle }:
+                    NoteSequenceOption(ref seen.Cycle, "CYCLE");
+                    cycle = true;
+                    break;
+                case UnquotedString { ContextualKeyword: ContextualKeyword.No }:
+                    switch (context.GetNextRequired())
+                    {
+                        case UnquotedString { ContextualKeyword: ContextualKeyword.Cycle }:
+                            NoteSequenceOption(ref seen.Cycle, "CYCLE");
+                            cycle = false;
+                            break;
+                        case UnquotedString { ContextualKeyword: ContextualKeyword.Cache }:
+                            NoteSequenceOption(ref seen.Cache, "CACHE");
+                            cache = (0, true);
+                            break;
+                        case UnquotedString { ContextualKeyword: ContextualKeyword.MinValue }:
+                            NoteSequenceOption(ref seen.MinValue, "MINVALUE");
+                            minValue = (null, true);
+                            break;
+                        case UnquotedString { ContextualKeyword: ContextualKeyword.MaxValue }:
+                            NoteSequenceOption(ref seen.MaxValue, "MAXVALUE");
+                            maxValue = (null, true);
+                            break;
+                        default:
+                            return false;
+                    }
+                    break;
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Cache }:
+                    NoteSequenceOption(ref seen.Cache, "CACHE");
+                    cache = (ReadOptionalCacheSize(context), true);
+                    if (cache.Size == 0)
+                        throw SimulatedSqlException.SequenceCacheMustBePositive(sequenceName.ToString());
+                    break;
+                default:
+                    goto optionsRead;
             }
+            any = true;
         }
-
+    optionsRead:
+        if (!any)
+            throw SimulatedSqlException.AlterSequenceWithoutOptions();
         if (context.Batch.IsSkipping)
-        {
-            SkipOptions();
             return true;
-        }
 
         if (!context.Batch.TryResolveSequence(sequenceName, out var sequence))
-            throw SimulatedSqlException.InvalidObjectName(sequenceName);
+            throw SimulatedSqlException.CannotAlterSequence(sequenceName.Leaf);
         // ALTER SEQUENCE needs ALTER on the sequence (schema ALTER / object
         // CONTROL cover it) — Msg 15151, the same record a missing sequence
         // earns, naming the leaf (probe-confirmed).
@@ -1223,7 +1296,6 @@ partial class Simulation
         if (!PermissionEnforcement.HasObjectAlter(
                 context.Batch, context.Batch.DatabaseFor(sequence), sequence.ObjectId, sequence.SchemaId))
         {
-            SkipOptions();
             throw SimulatedSqlException.CannotAlterSequence(sequenceName.Leaf);
         }
         // TryResolveSequence took Sch-S; upgrade to Sch-M before mutating
@@ -1231,112 +1303,67 @@ partial class Simulation
         // sequence (NEXT VALUE FOR) will wait on the Sch-M acquire.
         context.Batch.AcquireStatementLock(sequence.SchemaLock, LockMode.SchemaModification);
 
-        // A refused option leaves the sequence as it was, the ones before it
-        // in the statement included.
-        var before = (sequence.StartValue, sequence.CurrentValue, sequence.Increment, sequence.MinValue, sequence.MaxValue, sequence.Cycle, sequence.CacheSize, sequence.IsExhausted, sequence.FirstCacheAllocated, sequence.LastUsedValue);
-        try
-        {
-            return AlterSequenceOptions(context, sequence);
-        }
-        catch (SimulatedSqlException)
-        {
-            (sequence.StartValue, sequence.CurrentValue, sequence.Increment, sequence.MinValue, sequence.MaxValue, sequence.Cycle, sequence.CacheSize, sequence.IsExhausted, sequence.FirstCacheAllocated, sequence.LastUsedValue) = before;
-            throw;
-        }
-    }
+        var displayName = sequenceName.ToString();
+        var type = sequence.DeclaredType;
+        var (typeMin, typeMax) = SequenceTypeBounds(type);
+        if (increment == 0 && !incrementFractional)
+            throw SimulatedSqlException.SequenceIncrementCannotBeZero(displayName);
+        if (increment is { } writtenIncrement && (incrementFractional || IsOutsideSequenceType(type, writtenIncrement)))
+            throw SimulatedSqlException.SequenceArgumentOutOfRange("INCREMENT BY");
+        if (minValue.Value is { } writtenMin && (minFractional || IsOutsideSequenceType(type, writtenMin)))
+            throw SimulatedSqlException.SequenceArgumentOutOfRange("MINVALUE");
+        if (maxValue.Value is { } writtenMax && (maxFractional || IsOutsideSequenceType(type, writtenMax)))
+            throw SimulatedSqlException.SequenceArgumentOutOfRange("MAXVALUE");
+        if (restartWith is { } writtenRestart && (restartFractional || IsOutsideSequenceType(type, writtenRestart)))
+            throw SimulatedSqlException.SequenceArgumentOutOfRange("RESTART WITH");
 
-    /// <summary>Applies an <c>ALTER SEQUENCE</c>'s options in written order.</summary>
-    private static bool AlterSequenceOptions(ParserContext context, Sequence sequence)
-    {
-        while (context.MoveNext())
+        var newMin = minValue.Written ? minValue.Value ?? typeMin : sequence.MinValue;
+        var newMax = maxValue.Written ? maxValue.Value ?? typeMax : sequence.MaxValue;
+        if (newMin >= newMax)
+            throw SimulatedSqlException.SequenceMinNotBelowMax(displayName);
+        if (seen.Restart)
         {
-            switch (context.Token)
-            {
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Restart }:
-                    {
-                        // RESTART [WITH n]: peek WITH; if present, read the
-                        // value; otherwise reset to the original start value.
-                        var afterRestart = context.SaveCheckpoint();
-                        if (context.MoveNext() && context.Token is ReservedKeyword { Keyword: Keyword.With })
-                        {
-                            // RESTART WITH n moves the sequence's *start* as
-                            // well as its position — probe-confirmed against
-                            // SQL Server 2025: sys.sequences.start_value
-                            // reports n afterwards, and a later bare RESTART
-                            // returns to n rather than to the value the
-                            // sequence was declared with.
-                            sequence.StartValue = ReadSequenceArgument(context, sequence.DeclaredType, "RESTART WITH");
-                            sequence.CurrentValue = sequence.StartValue;
-                        }
-                        else
-                        {
-                            context.RestoreCheckpoint(afterRestart);
-                            sequence.CurrentValue = sequence.StartValue;
-                        }
-                        sequence.IsExhausted = false;
-                        sequence.FirstCacheAllocated = false;
-                        // RESTART clears the runtime last-used marker (real
-                        // reports last_used_value NULL after a restart, until
-                        // the next NEXT VALUE FOR).
-                        sequence.LastUsedValue = null;
-                        continue;
-                    }
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Increment }:
-                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
-                        return false;
-                    sequence.Increment = ReadSignedIntegerLiteral(context);
-                    if (sequence.Increment != 0 && IsOutsideSequenceType(sequence.DeclaredType, sequence.Increment))
-                        throw SimulatedSqlException.SequenceArgumentOutOfRange("INCREMENT BY");
-                    if (sequence.Increment == 0)
-                        throw SimulatedSqlException.SequenceIncrementCannotBeZero(sequence.FullName);
-                    continue;
-                case UnquotedString { ContextualKeyword: ContextualKeyword.MinValue }:
-                    sequence.MinValue = ReadSequenceArgument(context, sequence.DeclaredType, "MINVALUE");
-                    continue;
-                case UnquotedString { ContextualKeyword: ContextualKeyword.MaxValue }:
-                    sequence.MaxValue = ReadSequenceArgument(context, sequence.DeclaredType, "MAXVALUE");
-                    continue;
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Cycle }:
-                    sequence.Cycle = true;
-                    continue;
-                case UnquotedString { ContextualKeyword: ContextualKeyword.No }:
-                    {
-                        var afterNo = context.GetNextRequired();
-                        switch (afterNo)
-                        {
-                            case UnquotedString { ContextualKeyword: ContextualKeyword.Cycle }:
-                                sequence.Cycle = false;
-                                continue;
-                            case UnquotedString { ContextualKeyword: ContextualKeyword.Cache }:
-                                sequence.CacheSize = 0;
-                                continue;
-                            case UnquotedString { ContextualKeyword: ContextualKeyword.MinValue or ContextualKeyword.MaxValue }:
-                                continue;
-                            default:
-                                return false;
-                        }
-                    }
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Cache }:
-                    {
-                        var afterCache = context.SaveCheckpoint();
-                        if (!context.MoveNext() || context.Token is not (Numeric or Operator { Character: '-' or '+' }))
-                        {
-                            context.RestoreCheckpoint(afterCache);
-                            sequence.CacheSize = null;
-                        }
-                        else
-                        {
-                            context.RestoreCheckpoint(afterCache);
-                            sequence.CacheSize = ReadCacheSize(context);
-                        }
-                        continue;
-                    }
-                default:
-                    RecordDdlEvent(context, "ALTER_SEQUENCE", sequence.Schema.Name, sequence.Name, "SEQUENCE");
-                    return true;
-            }
+            var restartAt = restartWith ?? sequence.StartValue;
+            if (restartAt < newMin || restartAt > newMax)
+                throw SimulatedSqlException.SequenceStartOutOfRange(displayName);
         }
+        else
+        {
+            var current = sequence.LastUsedValue ?? sequence.CurrentValue;
+            if (current < newMin || current > newMax)
+                throw SimulatedSqlException.SequenceCurrentValueOutOfRange(current.ToString(System.Globalization.CultureInfo.InvariantCulture), displayName);
+        }
+
+        var before = (sequence.StartValue, sequence.CurrentValue, sequence.Increment, sequence.MinValue, sequence.MaxValue, sequence.Cycle, sequence.CacheSize, sequence.IsExhausted, sequence.LastUsedValue);
+        sequence.MinValue = newMin;
+        sequence.MaxValue = newMax;
+        if (increment is { } newIncrement)
+            sequence.Increment = newIncrement;
+        if (cycle is { } newCycle)
+            sequence.Cycle = newCycle;
+        if (cache.Written)
+            sequence.CacheSize = cache.Size;
+        if (seen.Restart)
+        {
+            // RESTART WITH n moves the sequence's *start* as well as its
+            // position — probe-confirmed against SQL Server 2025:
+            // sys.sequences.start_value reports n afterwards, and a later bare
+            // RESTART returns to n rather than to the value the sequence was
+            // declared with. RESTART clears the last-used marker too.
+            if (restartWith is { } restart)
+                sequence.StartValue = restart;
+            sequence.CurrentValue = sequence.StartValue;
+            sequence.IsExhausted = false;
+            sequence.LastUsedValue = null;
+        }
+        else
+        {
+            sequence.RepositionAfterAlter();
+        }
+        RecordDdlUndo(context, () =>
+            (sequence.StartValue, sequence.CurrentValue, sequence.Increment, sequence.MinValue, sequence.MaxValue, sequence.Cycle, sequence.CacheSize, sequence.IsExhausted, sequence.LastUsedValue) = before);
         RecordDdlEvent(context, "ALTER_SEQUENCE", sequence.Schema.Name, sequence.Name, "SEQUENCE");
+        SendSequenceCacheMessages(context.Batch, sequence);
         return true;
     }
 
@@ -1990,6 +2017,7 @@ partial class Simulation
                 throw SimulatedSqlException.SystemVersioningNotOn(QualifyTableName(table, context.CurrentDatabase));
 
             var historyTable = table.SystemVersioning;
+            RecordTableDdlUndo(context, historyTable);
             table.SystemVersioning = null;
             historyTable.IsHistoryTable = false;
             return true;
@@ -2009,6 +2037,8 @@ partial class Simulation
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
         if (baseTable.PeriodColumns is null)
             throw SimulatedSqlException.SystemVersioningRequiresPeriod(state: 1);
+        if (baseTable.SystemVersioning is null && !baseTable.KeyConstraints.Exists(static key => key.Kind == KeyConstraintKind.PrimaryKey))
+            throw SimulatedSqlException.TemporalTableRequiresPrimaryKey(QualifyTableName(baseTable, context.CurrentDatabase));
 
         // Re-issuing SET ON against the sibling the base already has is how a
         // retention period is changed in place; every other re-issue is a
@@ -2039,6 +2069,8 @@ partial class Simulation
             RejectUnusableHistoryTable(context, existingHistory);
             ValidateHistoryTableShape(context, baseTable, existingHistory);
             RequireHistoryCleanupIndex(context, baseTable, existingHistory, options);
+            CheckHistoryConsistency(context, baseTable, existingHistory, options);
+            RecordTableDdlUndo(context, existingHistory);
             resolvedHistory = existingHistory;
         }
         else
@@ -2052,6 +2084,9 @@ partial class Simulation
             resolvedHistory.OwningDatabase = historySchema.Database;
             if (!historySchema.HeapTables.TryAdd(resolvedHistory.Name, resolvedHistory))
                 throw SimulatedSqlException.ThereIsAlreadyAnObject(resolvedHistory.Name);
+            // A transaction that rolls back takes the built table with it
+            // (probed 2026-10-04 against SQL Server 2025).
+            RecordSlotUndo<HeapTable>(context, historySchema.HeapTables, resolvedHistory.Name, null);
         }
 
         baseTable.SystemVersioning = resolvedHistory;

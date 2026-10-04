@@ -23,9 +23,8 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// stamp cache.</description></item>
 /// <item><description>Across rows (e.g. <c>SELECT next FROM 3-row-table</c>),
 /// values advance by <c>increment</c>.</description></item>
-/// <item><description>NULL handling: a sequence never emits NULL; the
-/// <c>OVER</c> clause is parsed-and-ignored (the simulator iterates in a
-/// single deterministic order regardless).</description></item>
+/// <item><description>NULL handling: a sequence never emits NULL. An
+/// <c>OVER (ORDER BY …)</c> orders the draws (<see cref="OverRank"/>).</description></item>
 /// <item><description>No-cycle exhaustion raises Msg 11728 from
 /// <see cref="Sequence.Advance"/>.</description></item>
 /// <item><description>Restricted contexts are gated at parse via
@@ -45,6 +44,14 @@ internal sealed class NextValueFor : Expression
 
     /// <summary>Whether the reference is a column default's, which draws as part of the table's own write and so checks nothing of its own.</summary>
     private readonly bool inDefault;
+
+    /// <summary>
+    /// The <c>ROW_NUMBER()</c> over this reference's <c>OVER (ORDER BY …)</c>,
+    /// set once the clause parses: the row it ranks k takes the statement's
+    /// k-th draw (probed 2026-10-04 against SQL Server 2025). Null without an
+    /// <c>OVER</c>, or where no query block ranks rows.
+    /// </summary>
+    internal WindowExpression? OverRank;
 
     public NextValueFor(ParserContext context, MultiPartName sequenceName)
     {
@@ -73,8 +80,11 @@ internal sealed class NextValueFor : Expression
             // A synonym is a non-sequence object here even when its base IS a
             // sequence: probe-confirmed that real refuses NEXT VALUE FOR through
             // a synonym with the same Msg 11726.
-            if (context.Batch.TryResolveSynonym(sequenceName, out _) || context.Batch.TryResolveTable(sequenceName, out _))
+            if (context.Batch.TryResolveSynonym(sequenceName, out _) || context.Batch.TryResolveTable(sequenceName, out _)
+                || (context.Batch.TryResolveSchema(sequenceName, out var schema) && schema.HasNameInSharedNamespace(sequenceName.Leaf)))
+            {
                 throw SimulatedSqlException.ObjectIsNotASequence(sequenceName.ToString());
+            }
             throw SimulatedSqlException.InvalidObjectName(sequenceName);
         }
         this.Sequence = resolved;
@@ -114,8 +124,12 @@ internal sealed class NextValueFor : Expression
     public override SqlValue Run(RuntimeContext runtime)
     {
         var batch = runtime.Batch;
+        if (this.OverRank is { } rank)
+            return this.DrawRanked(runtime, rank);
         if (batch.SequenceRowCache.TryGetValue(this.Sequence, out var entry) && entry.Stamp == batch.CurrentRowStamp)
             return entry.Value;
+        if (batch.SequenceValuesByRow?.TryGetValue((this.Sequence, batch.CurrentRowStamp), out var retained) == true)
+            return retained;
         // Advancing the sequence is both a side effect and a per-row-varying
         // value, so an enclosing uncorrelated subquery declines to replay its
         // result for the rest of the statement.
@@ -128,12 +142,40 @@ internal sealed class NextValueFor : Expression
         // Advancing is a write, refused in a read-only database when a value
         // is actually drawn (probed 2026-09-25 against SQL Server 2025).
         this.Sequence.Schema.Database.RejectWriteWhenReadOnly();
-        if (this.Sequence.AllocatesShortFirstCache())
-            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SequenceCacheExceedsRangeMessage(batch, this.Sequence.Name));
         var value = this.Sequence.Advance();
         batch.SequenceRowCache[this.Sequence] = (batch.CurrentRowStamp, value);
+        if (batch.SequenceValuesByRow is { } byRow)
+            byRow[(this.Sequence, batch.CurrentRowStamp)] = value;
         return value;
     }
+
+    /// <summary>
+    /// The value for a row <paramref name="rank"/> places k-th: the statement's
+    /// k-th draw from the sequence, drawing up to it when the rows arrive out of
+    /// rank order.
+    /// </summary>
+    private SqlValue DrawRanked(RuntimeContext runtime, WindowExpression rank)
+    {
+        var batch = runtime.Batch;
+        var position = (int)rank.Run(runtime).AsInt64;
+        var draws = batch.CurrentStatement.OrderedSequenceDraws ??= [];
+        if (!draws.TryGetValue(this.Sequence, out var drawn))
+            draws[this.Sequence] = drawn = [];
+        while (drawn.Count < position)
+        {
+            batch.Connection.VolatileEvaluations++;
+            if (drawn.Count == 0)
+            {
+                if (!batch.Connection.Security.EffectiveIsDbo)
+                    PermissionEnforcement.CheckSequenceUpdate(batch, this.Sequence);
+                this.Sequence.Schema.Database.RejectWriteWhenReadOnly();
+            }
+            drawn.Add(this.Sequence.Advance());
+        }
+        return drawn[position - 1];
+    }
+
+    internal override bool ResultReportsNumeric => this.Sequence.SpelledNumeric;
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.Sequence.DeclaredType;
 

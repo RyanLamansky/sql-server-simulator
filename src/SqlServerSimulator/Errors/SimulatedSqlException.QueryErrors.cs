@@ -1558,8 +1558,8 @@ partial class SimulatedSqlException
     /// and real SQL Server pads temp-table names out to their internal
     /// suffix-extended form.
     /// </summary>
-    internal static SimulatedSqlException ForSystemTimeRequiresVersionedTable(string qualifiedTableName) =>
-        new($"Temporal FOR SYSTEM_TIME clause can only be used with system-versioned tables. '{qualifiedTableName}' is not a system-versioned table.", 13544, 16, 2);
+    internal static SimulatedSqlException ForSystemTimeRequiresVersionedTable(string qualifiedTableName, byte state = 2) =>
+        new($"Temporal FOR SYSTEM_TIME clause can only be used with system-versioned tables. '{qualifiedTableName}' is not a system-versioned table.", 13544, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 213 as raised by <c>INSERT … EXEC</c> when a

@@ -29,17 +29,24 @@ partial class Simulation
         if (context.Token is not Name)
             return false;
         var sequenceName = BatchContext.ParseObjectName(context);
+        if (BatchContext.IsLocalTempName(sequenceName.Leaf) || BatchContext.IsGlobalTempName(sequenceName.Leaf))
+            throw SimulatedSqlException.InvalidSequenceName(sequenceName.Leaf);
 
         // Defaults: declared type bigint, increment 1, cycle off. Min/max/start
         // resolve after the AS clause picks the type (since the type's natural
         // bounds drive the defaults).
         SqlType declaredType = SqlType.BigInt;
+        var spelledNumeric = false;
         Int128? startValue = null;
         Int128 increment = 1;
         Int128? minValue = null;
         Int128? maxValue = null;
         var cycle = false;
         long? cacheSize = null;
+        var seen = new SequenceOptionsSeen();
+        // A fractional literal is out of every sequence type's domain, which
+        // real reports with the range refusals, in their order.
+        bool startFractional = false, incrementFractional = false, minFractional = false, maxFractional = false;
 
         while (context.MoveNext())
         {
@@ -52,95 +59,102 @@ partial class Simulation
                     var qualifiedTypeName = BatchContext.ParseObjectName(context);
                     var typeName = (Name)context.Token;
                     declaredType = ResolveSequenceType(context, qualifiedTypeName, typeName, sequenceName.ToString());
+                    spelledNumeric = declaredType is DecimalSqlType && qualifiedTypeName.Count == 1 && typeName.Value.Equals("numeric", StringComparison.OrdinalIgnoreCase);
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Start }:
+                    NoteSequenceOption(ref seen.Start, "START WITH");
                     if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.With })
                         return false;
-                    startValue = ReadSignedIntegerLiteral(context);
+                    startValue = ReadSignedIntegerLiteral(context, out startFractional);
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Increment }:
+                    NoteSequenceOption(ref seen.Increment, "INCREMENT BY");
                     if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.By })
                         return false;
-                    increment = ReadSignedIntegerLiteral(context);
+                    increment = ReadSignedIntegerLiteral(context, out incrementFractional);
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.MinValue }:
-                    minValue = ReadSignedIntegerLiteral(context);
+                    NoteSequenceOption(ref seen.MinValue, "MINVALUE");
+                    minValue = ReadSignedIntegerLiteral(context, out minFractional);
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.MaxValue }:
-                    maxValue = ReadSignedIntegerLiteral(context);
+                    NoteSequenceOption(ref seen.MaxValue, "MAXVALUE");
+                    maxValue = ReadSignedIntegerLiteral(context, out maxFractional);
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.No }:
                     {
                         // NO MIN/MAX/CYCLE/CACHE: parsed and treated as the
                         // default. NO CYCLE is explicit-default (sequence
                         // stays no-cycle); NO CACHE is kept for Msg 11729.
-                        var afterNo = context.GetNextRequired();
-                        if (afterNo is UnquotedString { ContextualKeyword: ContextualKeyword.Cache })
-                            cacheSize = 0;
-                        if (afterNo is not UnquotedString
-                            {
-                                ContextualKeyword:
-                                    ContextualKeyword.MinValue or ContextualKeyword.MaxValue
-                                    or ContextualKeyword.Cycle or ContextualKeyword.Cache
-                            })
+                        switch (context.GetNextRequired())
                         {
-                            return false;
+                            case UnquotedString { ContextualKeyword: ContextualKeyword.Cache }:
+                                NoteSequenceOption(ref seen.Cache, "CACHE");
+                                seen.NoCache = true;
+                                cacheSize = 0;
+                                continue;
+                            case UnquotedString { ContextualKeyword: ContextualKeyword.Cycle }:
+                                NoteSequenceOption(ref seen.Cycle, "CYCLE");
+                                continue;
+                            case UnquotedString { ContextualKeyword: ContextualKeyword.MinValue }:
+                                NoteSequenceOption(ref seen.MinValue, "MINVALUE");
+                                minValue = null;
+                                continue;
+                            case UnquotedString { ContextualKeyword: ContextualKeyword.MaxValue }:
+                                NoteSequenceOption(ref seen.MaxValue, "MAXVALUE");
+                                maxValue = null;
+                                continue;
+                            default:
+                                return false;
                         }
-                        continue;
                     }
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Cycle }:
+                    NoteSequenceOption(ref seen.Cycle, "CYCLE");
                     cycle = true;
                     continue;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Cache }:
-                    {
-                        // Optional explicit cache size: CACHE n. Peek for a
-                        // signed-integer literal; if absent, restore and let
-                        // the loop's MoveNext pick up the next option keyword.
-                        var afterCache = context.SaveCheckpoint();
-                        if (!context.MoveNext()
-                            || context.Token is not (Numeric or Operator { Character: '-' or '+' }))
-                        {
-                            context.RestoreCheckpoint(afterCache);
-                        }
-                        else
-                        {
-                            // Already advanced past CACHE; the literal-read
-                            // helper expects to advance from the keyword it
-                            // followed. Restore and re-read so the helper
-                            // sees CACHE as its anchor.
-                            context.RestoreCheckpoint(afterCache);
-                            cacheSize = ReadCacheSize(context);
-                        }
-                        continue;
-                    }
+                    NoteSequenceOption(ref seen.Cache, "CACHE");
+                    cacheSize = ReadOptionalCacheSize(context);
+                    continue;
                 default:
                     goto exitOptionLoop;
             }
         }
     exitOptionLoop:
+        // Options are separated by nothing (probed 2026-10-04 against SQL
+        // Server 2025: a comma is a syntax error at itself).
+        if (context.Token is Operator { Character: ',' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
 
         // Type-natural bounds for default min/max; a written value outside
         // them is Msg 11708, the increment checked first, then the minimum,
         // the maximum and the start (probed 2026-10-02 against SQL Server 2025).
         var (typeMin, typeMax) = SequenceTypeBounds(declaredType);
-        bool OutOfType(Int128? value) => value < typeMin || value > typeMax;
-        if (increment == 0)
-            throw SimulatedSqlException.SequenceIncrementCannotBeZero(sequenceName.ToString());
-        if (OutOfType(increment))
+        bool OutOfType(Int128? value, bool fractional) => fractional || value < typeMin || value > typeMax;
+        var displayName = sequenceName.ToString();
+        if (increment == 0 && !incrementFractional)
+            throw SimulatedSqlException.SequenceIncrementCannotBeZero(displayName);
+        if (OutOfType(increment, incrementFractional))
             throw SimulatedSqlException.SequenceArgumentOutOfRange("INCREMENT BY");
-        if (OutOfType(minValue))
+        if (OutOfType(minValue, minFractional))
             throw SimulatedSqlException.SequenceArgumentOutOfRange("MINVALUE");
-        if (OutOfType(maxValue))
+        if (OutOfType(maxValue, maxFractional))
             throw SimulatedSqlException.SequenceArgumentOutOfRange("MAXVALUE");
-        if (OutOfType(startValue))
+        if (OutOfType(startValue, startFractional))
             throw SimulatedSqlException.SequenceArgumentOutOfRange("START WITH");
         var resolvedMin = minValue ?? typeMin;
         var resolvedMax = maxValue ?? typeMax;
         var ascending = increment > 0;
         var resolvedStart = startValue ?? (ascending ? resolvedMin : resolvedMax);
 
+        // Equal bounds are refused too, ahead of the start's range (probed
+        // 2026-10-04 against SQL Server 2025).
+        if (resolvedMin >= resolvedMax)
+            throw SimulatedSqlException.SequenceMinNotBelowMax(displayName);
         if (resolvedStart < resolvedMin || resolvedStart > resolvedMax)
-            throw SimulatedSqlException.SequenceStartOutOfRange(sequenceName.ToString());
+            throw SimulatedSqlException.SequenceStartOutOfRange(displayName);
+        if (cacheSize == 0 && seen.Cache && !seen.NoCache)
+            throw SimulatedSqlException.SequenceCacheMustBePositive(displayName);
 
         if (context.Batch.IsSkipping)
             return true;
@@ -168,6 +182,7 @@ partial class Simulation
             cycle)
         {
             CacheSize = cacheSize,
+            SpelledNumeric = spelledNumeric,
         };
 
         // The object namespace is shared with tables / views / functions / procs;
@@ -177,7 +192,59 @@ partial class Simulation
             throw SimulatedSqlException.ThereIsAlreadyAnObject(sequenceName.ToString(), state: 8);
         RecordSlotUndo<Sequence>(context, schema.Sequences, sequence.Name, null);
         RecordDdlEvent(context, "CREATE_SEQUENCE", schema.Name, sequence.Name, "SEQUENCE");
+        SendSequenceCacheMessages(context.Batch, sequence);
         return true;
+    }
+
+    /// <summary>
+    /// The informational messages a <c>CREATE</c> or <c>ALTER SEQUENCE</c>
+    /// sends about the cache it leaves: Msg 11707 for a cache of 1, and Msg
+    /// 11729 when the cache is longer than the values left.
+    /// </summary>
+    private static void SendSequenceCacheMessages(BatchContext batch, Sequence sequence)
+    {
+        if (sequence.CacheSize == 1)
+            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SequenceCacheSetToNoCacheMessage(batch, sequence.Name));
+        if (sequence.CacheExceedsAvailableValues())
+            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.SequenceCacheExceedsRangeMessage(batch, sequence.Name));
+    }
+
+    /// <summary>
+    /// Which options a <c>CREATE</c> or <c>ALTER SEQUENCE</c> has written, for
+    /// Msg 11712 on the second; a <c>NO</c> form and its positive are one
+    /// option (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private struct SequenceOptionsSeen
+    {
+        public bool Start, Increment, MinValue, MaxValue, Cycle, Cache, NoCache, Restart;
+    }
+
+    /// <summary>Marks an option of <see cref="SequenceOptionsSeen"/> written, Msg 11712 when it already was.</summary>
+    private static void NoteSequenceOption(ref bool flag, string argument)
+    {
+        if (flag)
+            throw SimulatedSqlException.SequenceArgumentRepeated(argument);
+        flag = true;
+    }
+
+    /// <summary>
+    /// Reads the optional size after <c>CACHE</c>, the cursor on the keyword
+    /// and left on the last token read; null for a bare <c>CACHE</c>. A sign is
+    /// a syntax error at itself, and a size wider than <c>int</c> one at the
+    /// number (probed 2026-10-02 and 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static long? ReadOptionalCacheSize(ParserContext context)
+    {
+        var afterCache = context.SaveCheckpoint();
+        if (!context.MoveNext() || context.Token is not (Numeric or Operator { Character: '-' or '+' }))
+        {
+            context.RestoreCheckpoint(afterCache);
+            return null;
+        }
+        if (context.Token is Operator { Character: '-' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.RestoreCheckpoint(afterCache);
+        return ReadCacheSize(context);
     }
 
     /// <summary>
@@ -240,7 +307,15 @@ partial class Simulation
     /// <see cref="ParserContext.MoveNext"/> to step forward to the next
     /// option keyword.
     /// </summary>
-    private static Int128 ReadSignedIntegerLiteral(ParserContext context)
+    private static Int128 ReadSignedIntegerLiteral(ParserContext context) => ReadSignedIntegerLiteral(context, out _);
+
+    /// <summary>
+    /// <see cref="ReadSignedIntegerLiteral(ParserContext)"/>, reporting through
+    /// <paramref name="fractional"/> a literal written with a decimal point,
+    /// which no sequence type takes (Msg 11708); a float literal is a syntax
+    /// error at itself (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static Int128 ReadSignedIntegerLiteral(ParserContext context, out bool fractional)
     {
         var first = context.GetNextRequired();
         var negative = false;
@@ -262,6 +337,11 @@ partial class Simulation
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+        if (numericToken.Value.Type is not (Int32SqlType or DecimalSqlType))
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        fractional = numericToken.Value.Type is DecimalSqlType { scale: > 0 };
+        if (fractional)
+            return 0;
         var literal = numericToken.Value.CoerceTo(DecimalSqlType.Get(38, 0)).AsDecimal38;
         var v = (Int128)literal.Magnitude;
         return negative != literal.IsNegative ? -v : v;
@@ -285,8 +365,8 @@ partial class Simulation
     /// </summary>
     private static Int128 ReadSequenceArgument(ParserContext context, SqlType type, string argument)
     {
-        var value = ReadSignedIntegerLiteral(context);
-        return IsOutsideSequenceType(type, value) ? throw SimulatedSqlException.SequenceArgumentOutOfRange(argument) : value;
+        var value = ReadSignedIntegerLiteral(context, out var fractional);
+        return fractional || IsOutsideSequenceType(type, value) ? throw SimulatedSqlException.SequenceArgumentOutOfRange(argument) : value;
     }
 
     /// <summary>Whether <paramref name="value"/> falls outside a sequence of <paramref name="type"/>'s range.</summary>

@@ -58,7 +58,13 @@ partial class Simulation
         List<string>? constraintNames = null;
         while (true)
         {
-            if (context.Token is Name or UnquotedString && !IsEdgeConstraintAhead(context))
+            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Period })
+            {
+                // A period declared beside the columns it pairs, as CREATE
+                // TABLE declares one (probed 2026-10-04 against SQL Server 2025).
+                (columns ??= new AddedColumns(context, tableName)).PendingPeriod.Add(ParsePeriodColumnNames(context));
+            }
+            else if (context.Token is Name or UnquotedString && !IsEdgeConstraintAhead(context))
             {
                 (columns ??= new AddedColumns(context, tableName)).ParseOne(context);
             }
@@ -106,7 +112,10 @@ partial class Simulation
         try
         {
             if (columns is not null)
+            {
                 columnsUndo = ApplyAddedColumns(context, columns, primaryKeyColumns);
+                ApplyAddedPeriod(context, columns);
+            }
             foreach (var start in constraintStarts)
             {
                 context.RestoreCheckpoint(start);
@@ -169,6 +178,14 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             explicitName = nameToken.Value;
             context.MoveNextRequired();
+        }
+
+        // A history table takes neither a CHECK nor a PRIMARY KEY (probed
+        // 2026-10-04 against SQL Server 2025).
+        if (!context.Batch.IsSkipping && context.Token is ReservedKeyword { Keyword: Keyword.Check or Keyword.Primary } kind
+            && context.Batch.TryResolveTable(tableName, out var historyTable) && historyTable.IsHistoryTable)
+        {
+            throw SimulatedSqlException.HistoryTableConstraint(kind.Keyword == Keyword.Primary, QualifyTableName(historyTable, context.Batch.DatabaseFor(historyTable)));
         }
 
         return context.Token switch
@@ -1269,6 +1286,73 @@ partial class Simulation
     /// </remarks>
     private static bool ParseAddPeriod(ParserContext context, MultiPartName tableName)
     {
+        var (startName, endName) = ParsePeriodColumnNames(context);
+        // Another element after the period makes it one of an ADD list.
+        if (context.Token is Operator { Character: ',' })
+        {
+            context.MoveNextRequired();
+            var added = new AddedColumns(context, tableName);
+            added.PendingPeriod.Add((startName, endName));
+            while (true)
+            {
+                added.ParseOne(context);
+                if (context.Token is not Operator { Character: ',' })
+                    break;
+                context.MoveNextRequired();
+            }
+            context.RejectTrailingToken();
+            if (context.Batch.IsSkipping)
+                return true;
+            var columnsUndo = ApplyAddedColumns(context, added, primaryKeyColumns: null);
+            try
+            {
+                ApplyAddedPeriod(context, added);
+            }
+            catch
+            {
+                columnsUndo.Restore();
+                throw;
+            }
+            return true;
+        }
+
+        if (context.Batch.IsSkipping)
+            return true;
+
+        if (!context.Batch.TryResolveTable(tableName, out var table))
+            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+        if (table.PeriodColumns is not null)
+            throw SimulatedSqlException.TemporalPeriodAlreadyDefined(QualifyTableName(table, context.CurrentDatabase));
+
+        var collation = context.CurrentDatabase.Collation;
+        var startOrdinal = RequirePeriodColumn(table, collation, startName, tableName.Leaf, missingState: 5);
+        var endOrdinal = RequirePeriodColumn(table, collation, endName, tableName.Leaf, missingState: 6);
+        if (((DateTime2SqlType)table.Columns[startOrdinal].Type).precision
+            != ((DateTime2SqlType)table.Columns[endOrdinal].Type).precision)
+        {
+            throw SimulatedSqlException.TemporalPeriodColumnPrecisionMismatch();
+        }
+
+        RequireEveryRowAtMaxPeriodEnd(table, endOrdinal, QualifyTableName(table, context.CurrentDatabase));
+        RequireNoOpenRowStartingInFuture(context, table, startOrdinal);
+
+        // End first, so the degenerate `(vf, vf)` real accepts leaves the one
+        // column marked ROW START, as real leaves it.
+        var columns = (HeapColumn[])table.Columns.Clone();
+        columns[endOrdinal] = WithGeneratedAlways(columns[endOrdinal], GeneratedAlwaysAsRow.End);
+        columns[startOrdinal] = WithGeneratedAlways(columns[startOrdinal], GeneratedAlwaysAsRow.Start);
+        table.Columns = columns;
+        table.PeriodColumns = (startOrdinal, endOrdinal);
+        table.RecomputeStorageProjections();
+        return true;
+    }
+
+    /// <summary>
+    /// Reads <c>PERIOD FOR SYSTEM_TIME (start, end)</c> from the <c>PERIOD</c>
+    /// word, leaving the cursor on the token after the closing parenthesis.
+    /// </summary>
+    private static (string Start, string End) ParsePeriodColumnNames(ParserContext context)
+    {
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.For })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.System_Time })
@@ -1284,35 +1368,48 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+        return (startName.Value, endName.Value);
+    }
 
-        if (context.Batch.IsSkipping)
-            return true;
-
-        if (!context.Batch.TryResolveTable(tableName, out var table))
-            throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
-        if (table.PeriodColumns is not null)
+    /// <summary>
+    /// Settles the period an <c>ALTER TABLE … ADD</c> list declared beside its
+    /// <c>GENERATED ALWAYS AS ROW START | END</c> columns, once they are added:
+    /// the pair is checked as <c>CREATE TABLE</c> checks one — a generated
+    /// column without a period is Msg 13509 — and the rows the defaults filled
+    /// meet <c>ADD PERIOD</c>'s own conditions.
+    /// </summary>
+    private static void ApplyAddedPeriod(ParserContext context, AddedColumns columns)
+    {
+        var table = columns.Table;
+        if (columns.PendingPeriod.Count == 0 && !Array.Exists(table.Columns, static column => column.GeneratedAs != GeneratedAlwaysAsRow.None))
+            return;
+        if (table.PeriodColumns is not null && columns.PendingPeriod.Count > 0)
             throw SimulatedSqlException.TemporalPeriodAlreadyDefined(QualifyTableName(table, context.CurrentDatabase));
+        if (table.PeriodColumns is not null)
+            return;
+        if (ResolvePeriodColumns(context.CurrentDatabase.Collation, [.. table.Columns], columns.PendingPeriod) is not { } period)
+            return;
+        var qualified = QualifyTableName(table, context.CurrentDatabase);
+        RequireEveryRowAtMaxPeriodEnd(table, period.EndOrdinal, qualified);
+        RequireNoOpenRowStartingInFuture(context, table, period.StartOrdinal);
+        table.PeriodColumns = period;
+    }
 
-        var collation = context.CurrentDatabase.Collation;
-        var startOrdinal = RequirePeriodColumn(table, collation, startName.Value, tableName.Leaf, missingState: 5);
-        var endOrdinal = RequirePeriodColumn(table, collation, endName.Value, tableName.Leaf, missingState: 6);
-        if (((DateTime2SqlType)table.Columns[startOrdinal].Type).precision
-            != ((DateTime2SqlType)table.Columns[endOrdinal].Type).precision)
+    /// <summary>
+    /// Raises Msg 13542 when an open row — every row, once the end check has
+    /// passed — starts its period after the statement's time (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    private static void RequireNoOpenRowStartingInFuture(ParserContext context, HeapTable table, int startOrdinal)
+    {
+        var now = context.Batch.CurrentStatement.UtcNow;
+        var storageOrdinal = table.StorageOrdinals[startOrdinal];
+        foreach (var row in table.Heap.EnumerateRows())
         {
-            throw SimulatedSqlException.TemporalPeriodColumnPrecisionMismatch();
+            var value = RowDecoder.DecodeColumn(table.StoredColumns, row, storageOrdinal, table.Heap);
+            if (!value.IsNull && value.AsDateTime2 > now)
+                throw SimulatedSqlException.AddPeriodStartInFuture(QualifyTableName(table, context.CurrentDatabase));
         }
-
-        RequireEveryRowAtMaxPeriodEnd(table, endOrdinal, QualifyTableName(table, context.CurrentDatabase));
-
-        // End first, so the degenerate `(vf, vf)` real accepts leaves the one
-        // column marked ROW START, as real leaves it.
-        var columns = (HeapColumn[])table.Columns.Clone();
-        columns[endOrdinal] = WithGeneratedAlways(columns[endOrdinal], GeneratedAlwaysAsRow.End);
-        columns[startOrdinal] = WithGeneratedAlways(columns[startOrdinal], GeneratedAlwaysAsRow.Start);
-        table.Columns = columns;
-        table.PeriodColumns = (startOrdinal, endOrdinal);
-        table.RecomputeStorageProjections();
-        return true;
     }
 
     /// <summary>
@@ -1327,8 +1424,10 @@ partial class Simulation
             var column = table.Columns[i];
             if (!collation.Equals(column.Name, columnName) || column.Computed is not null)
                 continue;
+            // ADD PERIOD reports the type at state 3 (probed 2026-10-04 against
+            // SQL Server 2025).
             if (column.Type is not DateTime2SqlType)
-                throw SimulatedSqlException.TemporalGeneratedColumnInvalidType(column.Name);
+                throw SimulatedSqlException.TemporalGeneratedColumnInvalidType(column.Name, state: 3);
             return column.Nullable
                 ? throw SimulatedSqlException.TemporalPeriodColumnNullable(column.Name, state: 3)
                 : i;

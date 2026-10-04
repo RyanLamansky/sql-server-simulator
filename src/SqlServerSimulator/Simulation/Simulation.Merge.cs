@@ -40,6 +40,7 @@ partial class Simulation
     /// </remarks>
     private static SimulatedStatementOutcome ParseMerge(ParserContext context)
     {
+        using var inMerge = ParserScope.Enter(ref context.InUpdateOrMerge, true);
         var start = context.SaveCheckpoint();
         if (ParseMerge(context, readsViewRows: null) is { } outcome)
             return outcome;
@@ -1232,6 +1233,10 @@ partial class Simulation
                     throw SimulatedSqlException.InternalGraphColumnAccess(col.Name, state: 1);
                 if (col.Type == SqlType.RowVersion)
                     throw SimulatedSqlException.CannotInsertExplicitTimestamp();
+                // A period column takes no value from an insert action (probed
+                // 2026-10-04 against SQL Server 2025).
+                if (col.GeneratedAs != GeneratedAlwaysAsRow.None)
+                    throw SimulatedSqlException.CannotInsertExplicitGeneratedAlways(QualifyTableName(destinationTable, context.Batch.DatabaseFor(destinationTable)));
                 if (insertColumns.Contains(col))
                     throw SimulatedSqlException.ColumnAssignedMoreThanOnce(col.Name);
                 insertColumns.Add(col);
@@ -1407,6 +1412,8 @@ partial class Simulation
                         throw SimulatedSqlException.ColumnCannotBeModified(targetColumn.Name);
                     if (targetColumn.Type == SqlType.RowVersion)
                         throw SimulatedSqlException.CannotUpdateTimestampColumn();
+                    if (targetColumn.GeneratedAs != GeneratedAlwaysAsRow.None)
+                        throw SimulatedSqlException.CannotUpdateGeneratedAlways(QualifyTableName(destinationTable, context.Batch.DatabaseFor(destinationTable)));
                     if (setsDefault)
                         rhs = ColumnDefaultValue.Bind(targetColumn);
                     AssignmentRules.RequireAssignable(rhs, rhs.GetSqlType(context.Batch, resolveType), targetColumn.Type);
@@ -2630,6 +2637,7 @@ partial class Simulation
         {
             var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(destinationTable);
             var trackedColumns = tracking?.UpdatedColumns(destinationTable, keyOrdinals, updatedColumnOrdinals);
+            var setsKey = tracking is not null && TableChangeTracking.SetsKey(keyOrdinals, updatedColumnOrdinals);
             List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
             var lobColumns = LegacyLobColumnsAmong(destinationTable, updatedColumnOrdinals);
             for (var u = 0; u < pendingUpdates.Count; u++)
@@ -2637,7 +2645,7 @@ partial class Simulation
                 var (page, slot, oldValues, newValues, _) = pendingUpdates[u];
                 if (lobColumns is not null)
                     NoteRootedLobNulls(destinationTable, lobColumns, page, slot, oldValues, newValues);
-                tracking?.RecordUpdate(context.Batch, destinationTable, keyOrdinals, oldValues, newValues, trackedColumns, ref keyMoves);
+                tracking?.RecordUpdate(context.Batch, destinationTable, keyOrdinals, oldValues, newValues, trackedColumns, setsKey, ref keyMoves);
                 var storedNew = ProjectStoredValues(destinationTable, newValues);
                 var rewritten = RowEncoder.EncodeRow(destinationTable.StoredColumns, storedNew, destinationTable.Heap);
                 if (lockableTable)

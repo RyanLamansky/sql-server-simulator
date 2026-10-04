@@ -84,6 +84,10 @@ partial class Simulation
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         if (table.VectorIndexes.Count > 0)
             throw SimulatedSqlException.VectorIndexedTableTruncate(table.Name);
+        // A system-versioned table and its history can't be truncated while
+        // linked (probed 2026-10-04 against SQL Server 2025).
+        if (table.SystemVersioning is not null || table.IsHistoryTable)
+            throw SimulatedSqlException.TruncateSystemVersionedTable(QualifyTableName(table, batch.DatabaseFor(table)));
 
         // TRUNCATE requires ALTER on the object; denial surfaces as Msg 1088
         // (its own double-quoted shape), not Msg 229.

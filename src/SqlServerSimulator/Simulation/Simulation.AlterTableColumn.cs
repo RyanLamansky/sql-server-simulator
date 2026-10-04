@@ -31,6 +31,9 @@ partial class Simulation
         public readonly List<(int Index, string Name, Expression Expression, bool Persisted, bool Nullable, string Definition)> PendingComputed = [];
         public readonly List<PendingForeignKey> PendingForeignKeys = [];
         public readonly List<int> WithValuesColumns = [];
+
+        /// <summary>A <c>PERIOD FOR SYSTEM_TIME</c> element of the list, naming the period pair its columns declare.</summary>
+        public readonly List<(string StartCol, string EndCol)> PendingPeriod = [];
         private int identityCount;
 
         public AddedColumns(ParserContext context, MultiPartName tableName)
@@ -56,7 +59,7 @@ partial class Simulation
                 this.PendingKeys,
                 this.PendingChecks,
                 this.PendingComputed,
-                pendingPeriod: null,
+                this.PendingPeriod,
                 this.PendingForeignKeys,
                 ref this.identityCount,
                 withValuesColumns: this.WithValuesColumns,
@@ -87,6 +90,10 @@ partial class Simulation
     private static AddedColumnsUndo ApplyAddedColumns(ParserContext context, AddedColumns added, List<string>? primaryKeyColumns)
     {
         var table = added.Table;
+        // A history table's columns follow its base's, never a statement of
+        // their own (probed 2026-10-04 against SQL Server 2025).
+        if (table.IsHistoryTable)
+            throw SimulatedSqlException.HistoryTableColumnChange("ADD", null, QualifyTableName(table, context.Batch.DatabaseFor(table)));
         var heapColumns = added.HeapColumns;
         var pendingChecks = added.PendingChecks;
         var collation = context.Batch.CurrentDatabase.Collation;
@@ -162,6 +169,24 @@ partial class Simulation
             }
         }
 
+        // A system-versioned table's history takes the columns too, which
+        // refuses an identity or a computed column outright, and a sparse one
+        // the engine-built history's PAGE compression can't hold (probed
+        // 2026-10-04 against SQL Server 2025).
+        var history = table.SystemVersioning;
+        if (history is not null)
+        {
+            foreach (var c in newColumns)
+            {
+                if (c.Identity is not null)
+                    throw SimulatedSqlException.HistoryTableCannotTakeIdentity(QualifyTableName(history, context.Batch.DatabaseFor(history)));
+                if (c.Computed is not null)
+                    throw SimulatedSqlException.ComputedColumnWhileSystemVersioned();
+                if (c.IsSparse && history.PageCompressed)
+                    throw SimulatedSqlException.SparseColumnsIncompatibleWithCompression(history.Name);
+            }
+        }
+
         // Shift PK / UQ FullOrdinals to the combined-column index space.
         var shiftedKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)>();
         foreach (var k in added.PendingKeys)
@@ -231,6 +256,8 @@ partial class Simulation
                 ValidateExistingRowsForCheckConstraint(context, table, table.CheckConstraints[i]);
             for (var i = originalFkCount; i < table.OutgoingForeignKeys.Count; i++)
                 ValidateExistingRowsForForeignKey(context, table, table.OutgoingForeignKeys[i]);
+            if (history is not null)
+                undo.History = AddHistoryColumns(context, history, newColumns, added.WithValuesColumns);
         }
         catch
         {
@@ -266,13 +293,60 @@ partial class Simulation
         private readonly int maxColumnId = table.MaxColumnIdUsed;
         private readonly Heap heap = table.Heap;
 
+        /// <summary>The history table's own undo, when the table is system-versioned.</summary>
+        public AddedColumnsUndo? History;
+
         public void Restore()
         {
             table.Columns = this.columns;
             table.RecomputeStorageProjections();
             table.MaxColumnIdUsed = this.maxColumnId;
             table.Heap = this.heap;
+            this.History?.Restore();
         }
+    }
+
+    /// <summary>
+    /// Adds to <paramref name="history"/> the plain counterparts of the columns
+    /// an <c>ALTER TABLE … ADD</c> gave its system-versioned base — no
+    /// identity, default or constraint, as a built history mirrors its base —
+    /// filling its rows the way the base's were filled, a NOT NULL column's
+    /// default included (probed 2026-10-04 against SQL Server 2025). Returns
+    /// what puts the history back.
+    /// </summary>
+    private static AddedColumnsUndo AddHistoryColumns(ParserContext context, HeapTable history, HeapColumn[] baseColumns, List<int> withValuesColumns)
+    {
+        RecordTableDdlUndo(context, history);
+        var undo = new AddedColumnsUndo(history);
+        var historyColumns = new HeapColumn[baseColumns.Length];
+        var defaults = new Expression?[baseColumns.Length];
+        for (var i = 0; i < baseColumns.Length; i++)
+        {
+            var c = baseColumns[i];
+            historyColumns[i] = new HeapColumn(c.Name, c.Type, c.MaxLength, c.Nullable, collation: c.Collation, spelledNumeric: c.SpelledNumeric)
+            {
+                AliasType = c.AliasType,
+                IsSparse = c.IsSparse,
+            };
+            defaults[i] = c.Default;
+        }
+        var existingCount = history.Columns.Length;
+        var combined = new HeapColumn[existingCount + historyColumns.Length];
+        Array.Copy(history.Columns, combined, existingCount);
+        Array.Copy(historyColumns, 0, combined, existingCount, historyColumns.Length);
+        history.Columns = combined;
+        history.RecomputeStorageProjections();
+        history.AssignColumnIds();
+        try
+        {
+            RewriteHeapForAddColumns(history, historyColumns, existingCount, withValuesColumns, context, defaults);
+        }
+        catch
+        {
+            undo.Restore();
+            throw;
+        }
+        return undo;
     }
 
     private static void ResolveComputedColumnsForAddColumn(
@@ -357,7 +431,7 @@ partial class Simulation
     /// (<paramref name="withValuesColumns"/>). After the rewrite, <paramref name="table"/>'s old <c>Heap</c>
     /// is discarded.
     /// </summary>
-    private static void RewriteHeapForAddColumns(HeapTable table, HeapColumn[] newColumns, int existingCount, List<int> withValuesColumns, ParserContext context)
+    private static void RewriteHeapForAddColumns(HeapTable table, HeapColumn[] newColumns, int existingCount, List<int> withValuesColumns, ParserContext context, Expression?[]? defaults = null)
     {
         var anyRows = false;
         foreach (var _ in table.Heap.EnumerateRows())
@@ -372,6 +446,9 @@ partial class Simulation
         // probe-confirmed that GETDATE() in a DEFAULT backfill produces a
         // single timestamp for every existing row).
         var backfillValues = new SqlValue?[newColumns.Length];
+        // …except a sequence draw, which each existing row takes its own of
+        // (probed 2026-10-04 against SQL Server 2025).
+        var drawsPerRow = new bool[newColumns.Length];
         static SqlValue ResolveNothing(MultiPartName reference) => throw SimulatedSqlException.InvalidColumnName(reference);
         var batch = context.Batch;
         var runtime = new RuntimeContext(ResolveNothing, batch);
@@ -388,7 +465,14 @@ partial class Simulation
             }
             if (c.Identity is not null || c.Type == SqlType.RowVersion)
                 continue;
-            if (c.Default is { } defaultExpr)
+            if ((defaults?[i] ?? c.Default) is not { } defaultExpr)
+                continue;
+            defaultExpr.Walk((node, _) =>
+            {
+                drawsPerRow[i] |= node is Parser.Expressions.NextValueFor;
+                return true;
+            });
+            if (!drawsPerRow[i])
                 backfillValues[i] = defaultExpr.Run(runtime).CoerceTo(c.Type);
         }
 
@@ -427,11 +511,14 @@ partial class Simulation
                 newStoredValues[i] = RowDecoder.DecodeColumn(preAddStoredColumns, oldBytes, i, oldHeap);
 
             var newStorageIndex = preAddStoredCount;
+            batch.BumpRowStamp();
             for (var i = 0; i < newColumns.Length; i++)
             {
                 var c = newColumns[i];
                 if (!c.IsStored)
                     continue;
+                if (drawsPerRow[i])
+                    backfillValues[i] = (defaults?[i] ?? c.Default)!.Run(runtime).CoerceTo(c.Type);
                 newStoredValues[newStorageIndex] = c.Identity is not null
                     ? CoerceForIdentity(GenerateIdentity(c), c)
                     : c.Type == SqlType.RowVersion
@@ -524,6 +611,8 @@ partial class Simulation
 
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+        if (table.IsHistoryTable)
+            throw SimulatedSqlException.HistoryTableColumnChange("DROP", null, QualifyTableName(table, context.Batch.DatabaseFor(table)));
 
         var toDropOrdinals = new List<int>();
         foreach (var name in names)
@@ -553,14 +642,14 @@ partial class Simulation
         if (toDropOrdinals.Count == 0)
             return true;
 
-        // Per-column dependency check: one Msg 5074 per blocker, then Msg 4922.
-        foreach (var ordinal in toDropOrdinals)
-        {
-            var col = table.Columns[ordinal];
-            var blockers = CollectColumnBlockers(context.Batch.CurrentDatabase, table, ordinal, col, includeCheckAndDefault: true, includeIndexes: true, includeStatistics: true, includeFilterIndexes: true);
-            if (blockers.Count > 0)
-                throw SimulatedSqlException.ColumnHasDependencies("DROP COLUMN", col.Name, blockers);
-        }
+        // A system-versioned table's history drops the same columns, and what
+        // depends on them there blocks the drop as well — the cleanup index on
+        // the period pair, say (probed 2026-10-04 against SQL Server 2025).
+        var history = table.SystemVersioning;
+        var historyOrdinals = history is null ? null : HistoryOrdinalsFor(table, history, toDropOrdinals, context.Batch.CurrentDatabase.Collation);
+        RejectColumnDropBlockers(context, table, toDropOrdinals);
+        if (history is not null)
+            RejectColumnDropBlockers(context, history, historyOrdinals!);
 
         var dataColumns = table.Columns.Count(column => column.Computed is null);
         foreach (var ordinal in toDropOrdinals)
@@ -569,6 +658,52 @@ partial class Simulation
                 throw SimulatedSqlException.DropColumnLeavesNoDataColumn(table.Columns[ordinal].Name, table.Name);
         }
 
+        DropColumnsAt(table, toDropOrdinals);
+        if (history is not null)
+        {
+            RecordTableDdlUndo(context, history);
+            DropColumnsAt(history, historyOrdinals!);
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// The positions in <paramref name="history"/> of the columns of
+    /// <paramref name="table"/> at <paramref name="ordinals"/>, matched by name
+    /// as the versioning link's shape check matched them.
+    /// </summary>
+    private static List<int> HistoryOrdinalsFor(HeapTable table, HeapTable history, List<int> ordinals, Collation collation)
+    {
+        var mapped = new List<int>(ordinals.Count);
+        foreach (var ordinal in ordinals)
+        {
+            var match = Array.FindIndex(history.Columns, column => collation.Equals(column.Name, table.Columns[ordinal].Name));
+            if (match >= 0)
+                mapped.Add(match);
+        }
+        return mapped;
+    }
+
+    /// <summary>Raises Msg 5074 per object depending on a column about to be dropped, then Msg 4922.</summary>
+    private static void RejectColumnDropBlockers(ParserContext context, HeapTable table, List<int> toDropOrdinals)
+    {
+        foreach (var ordinal in toDropOrdinals)
+        {
+            var col = table.Columns[ordinal];
+            var blockers = CollectColumnBlockers(context.Batch.CurrentDatabase, table, ordinal, col, includeCheckAndDefault: true, includeIndexes: true, includeStatistics: true, includeFilterIndexes: true);
+            if (blockers.Count > 0)
+                throw SimulatedSqlException.ColumnHasDependencies("DROP COLUMN", col.Name, blockers);
+        }
+    }
+
+    /// <summary>
+    /// Removes the columns at <paramref name="toDropOrdinals"/> from
+    /// <paramref name="table"/>: remaps every surviving constraint, index,
+    /// foreign key, statistic and the period pair, rewrites the rows and swaps
+    /// the column array.
+    /// </summary>
+    private static void DropColumnsAt(HeapTable table, List<int> toDropOrdinals)
+    {
         // Apply phase. Build full-ordinal and storage-ordinal mappings
         // (old → new), then remap every surviving constraint / index / FK,
         // rewrite the heap projecting surviving storage slots, and swap the
@@ -653,9 +788,10 @@ partial class Simulation
         }
         table.Columns = newColumns;
         table.RecomputeStorageProjections();
-
-        return true;
+        if (table.PeriodColumns is { } period && oldFullToNew[period.StartOrdinal] >= 0 && oldFullToNew[period.EndOrdinal] >= 0)
+            table.PeriodColumns = (oldFullToNew[period.StartOrdinal], oldFullToNew[period.EndOrdinal]);
     }
+
 
     /// <summary>
     /// Returns true when the given CHECK predicate references a column
@@ -826,6 +962,8 @@ partial class Simulation
         }
         if (ordinal < 0)
             throw SimulatedSqlException.AlterColumnDoesNotExist(columnName, table.Name);
+        if (table.IsHistoryTable)
+            throw SimulatedSqlException.HistoryTableColumnChange("ALTER", columnName, QualifyTableName(table, context.Batch.DatabaseFor(table)));
 
         var existingCol = table.Columns[ordinal];
         if (existingCol.GraphKind != GraphColumnKind.None)
@@ -988,6 +1126,7 @@ partial class Simulation
         // Columns array, swap it in, then do the heap walk under the new
         // schema. If the walk throws, restore the original.
         var originalColumns = table.Columns;
+        var originalHeap = table.Heap;
         var newColumns = (HeapColumn[])table.Columns.Clone();
         newColumns[ordinal] = newColumn;
         table.Columns = newColumns;
@@ -999,15 +1138,66 @@ partial class Simulation
         try
         {
             RewriteHeapForAlterColumn(table, ordinal, newColumn, originalColumns, context.Batch);
+            // A system-versioned table's history takes the same change, and its
+            // rows meet the new definition too — a NULL there refuses NOT NULL
+            // with Msg 515 naming the history table (probed 2026-10-04 against
+            // SQL Server 2025).
+            if (table.SystemVersioning is { } history
+                && Array.FindIndex(history.Columns, column => context.Batch.CurrentDatabase.Collation.Equals(column.Name, existingCol.Name)) is >= 0 and var historyOrdinal)
+            {
+                AlterHistoryColumn(context, history, historyOrdinal, newColumn);
+            }
         }
         catch
         {
             table.Columns = originalColumns;
             table.RecomputeStorageProjections();
+            table.Heap = originalHeap;
             throw;
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Gives <paramref name="history"/>'s column at <paramref name="ordinal"/>
+    /// the type, nullability and collation an <c>ALTER COLUMN</c> gave its
+    /// base's <paramref name="baseColumn"/>, rewriting its rows; a failure puts
+    /// the history back and propagates.
+    /// </summary>
+    private static void AlterHistoryColumn(ParserContext context, HeapTable history, int ordinal, HeapColumn baseColumn)
+    {
+        RecordTableDdlUndo(context, history);
+        var existing = history.Columns[ordinal];
+        var historyColumn = new HeapColumn(
+            existing.Name,
+            baseColumn.Type,
+            baseColumn.MaxLength,
+            baseColumn.Nullable,
+            collation: baseColumn.Collation,
+            spelledNumeric: baseColumn.SpelledNumeric)
+        {
+            AliasType = baseColumn.AliasType,
+            ColumnId = existing.ColumnId,
+            IsSparse = baseColumn.IsSparse,
+        };
+        var originalColumns = history.Columns;
+        var originalHeap = history.Heap;
+        var columns = (HeapColumn[])originalColumns.Clone();
+        columns[ordinal] = historyColumn;
+        history.Columns = columns;
+        history.RecomputeStorageProjections();
+        try
+        {
+            RewriteHeapForAlterColumn(history, ordinal, historyColumn, originalColumns, context.Batch);
+        }
+        catch
+        {
+            history.Columns = originalColumns;
+            history.RecomputeStorageProjections();
+            history.Heap = originalHeap;
+            throw;
+        }
     }
 
     /// <summary>

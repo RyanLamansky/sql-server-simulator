@@ -345,6 +345,15 @@ internal sealed class HeapTable : SchemaObject
     public bool IsHistoryTable;
 
     /// <summary>
+    /// Whether the engine built this table as a history sibling, which real
+    /// gives <c>PAGE</c> compression unless a column is sparse —
+    /// <c>sys.partitions.data_compression</c>, and why a sparse column can't
+    /// be added to its base later (Msg 11418; probed 2026-10-04 against SQL
+    /// Server 2025). Rows are stored the same either way.
+    /// </summary>
+    public bool PageCompressed;
+
+    /// <summary>
     /// A memory-optimized table (<c>WITH (MEMORY_OPTIMIZED = ON)</c>), or the
     /// backing table of a memory-optimized table type. Its rows live on the
     /// ordinary heap; what changes is the surface — the DDL it refuses, its

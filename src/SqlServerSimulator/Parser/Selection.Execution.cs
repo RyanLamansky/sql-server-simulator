@@ -2441,7 +2441,7 @@ internal sealed partial class Selection
             var expression = expressions[i];
             while (expression is Expressions.NamedExpression named)
                 expression = named.Inner;
-            computed[i] = expression is not (Expressions.Reference or Expressions.AggregateExpression or Expressions.WindowExpression);
+            computed[i] = expression is not (Expressions.Reference or Expressions.AggregateExpression or Expressions.WindowExpression or Expressions.NextValueFor);
         }
         return computed;
     }
@@ -2463,7 +2463,9 @@ internal sealed partial class Selection
                 expression = named.Inner;
             flags[i] = expression switch
             {
-                Expressions.AggregateExpression or Expressions.WindowExpression => 0x00,
+                // A sequence draw reads as neither updatable nor computed
+                // (probed 2026-10-04 against SQL Server 2025).
+                Expressions.AggregateExpression or Expressions.WindowExpression or Expressions.NextValueFor => 0x00,
                 Reference when source[i] >= 0 => SourceColumnWireFlags(sources[source[i]], ordinal[i]),
                 Reference => 0x08,
                 _ => 0x20,
@@ -2474,6 +2476,10 @@ internal sealed partial class Selection
 
     private static byte SourceColumnWireFlags(FromSource from, int ordinal)
     {
+        // A FOR SYSTEM_TIME source is read-only, as is a period column
+        // (probed 2026-10-04 against SQL Server 2025).
+        if (from.Rows is TemporalRowSource)
+            return 0x00;
         // A derived table or CTE passes its columns' updatability through but
         // not their computed flag (probed 2026-09-26 against SQL Server 2025).
         if (from.LateralPlan is { ColumnWireFlags: { } inner } && ordinal < inner.Length)
@@ -2491,7 +2497,7 @@ internal sealed partial class Selection
             // A graph pseudo-column reads as updatable, not computed (probed
             // 2026-09-27 against SQL Server 2025).
             { Computed: not null, GraphKind: GraphColumnKind.None } => 0x20,
-            { Type: RowVersionSqlType } => 0x00,
+            { Type: RowVersionSqlType } or { GeneratedAs: not GeneratedAlwaysAsRow.None } => 0x00,
             _ => 0x08,
         };
     }

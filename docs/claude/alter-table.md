@@ -218,12 +218,15 @@ It is what `SET (SYSTEM_VERSIONING = ON)` needs, so the pair re-arms a table who
 
 Checks run in real's own probed order:
 
-1. **Msg 13597** when the table already carries a period, ahead of every column check.
-2. Per column, start then end: **Msg 4924** when the column doesn't exist (a *computed* column counts as absent — real doesn't offer one as a candidate), then **Msg 13501** when it isn't `datetime2`, then **Msg 13587** when it's nullable.
+1. **Msg 13597** (state 2) when the table already carries a period, ahead of every column check.
+2. Per column, start then end: **Msg 4924** when the column doesn't exist (a *computed* column counts as absent — real doesn't offer one as a candidate), then **Msg 13501** (state 3) when it isn't `datetime2`, then **Msg 13587** when it's nullable.
 3. **Msg 13513** when the two `datetime2` precisions disagree (each precision on its own is fine).
-4. **Msg 13575** when an existing row's end-of-period value falls short of the maximum its declared precision holds; an empty table passes, and the check reads the end column alone — a start ahead of its end doesn't raise.
+4. **Msg 13575** (state 0) when an existing row's end-of-period value falls short of the maximum its declared precision holds; an empty table passes, and the check reads the end column alone — a start ahead of its end doesn't raise.
+5. **Msg 13542** (state 0) when an open row's period starts after the statement's time (probed 2026-10-04 against SQL Server 2025).
 
 Naming the same column twice is legal, as on real, and leaves that one column marked ROW START.
+
+The period may also be declared in the `ADD` list that adds its `GENERATED ALWAYS AS ROW START | END` columns, as `CREATE TABLE` declares one — `ADD s datetime2 GENERATED ALWAYS AS ROW START NOT NULL DEFAULT …, e …, PERIOD FOR SYSTEM_TIME (s, e)` — the existing rows taking the columns' defaults before the checks above run; a generated column added without its period is Msg 13509 (probed 2026-10-04 against SQL Server 2025).
 
 ## DROP PERIOD FOR SYSTEM_TIME
 

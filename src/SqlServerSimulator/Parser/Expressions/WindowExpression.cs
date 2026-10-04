@@ -205,6 +205,18 @@ internal sealed class WindowExpression : Expression
         return ignore;
     }
 
+    /// <summary>
+    /// A <c>ROW_NUMBER()</c> over <paramref name="orderBy"/>, registered with
+    /// the query block in scope, which ranks the rows a
+    /// <c>NEXT VALUE FOR … OVER (ORDER BY …)</c> draws for; null where no query
+    /// block collects windows — a <c>VALUES</c> row, whose one row needs no
+    /// ranking.
+    /// </summary>
+    internal static WindowExpression? RegisterSequenceRank(ParserContext context, OrderBySpec[] orderBy) =>
+        context.AllowsWindowExpressions && context.WindowCollector is not null
+            ? Register(context, new WindowExpression(WindowKind.RowNumber, [], orderBy, aggregateInfo: null))
+            : null;
+
     private static WindowExpression Register(ParserContext context, WindowExpression expression)
     {
         // Outside any query block — an UPDATE's SET list, say — no select

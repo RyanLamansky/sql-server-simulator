@@ -53,7 +53,13 @@ partial class Selection
     /// into the body's child batch (holding none of the caller's variables) and
     /// what makes the wrapper safe to rebuild per push rather than per parse.
     /// </param>
-    internal static Selection ForView(View view, HeapColumn[]? columns = null, List<BooleanExpression>? pushedPredicates = null)
+    /// <param name="systemTime">
+    /// The <c>FOR SYSTEM_TIME</c> the reference carries, applied to every
+    /// system-versioned table the body reads, its bounds evaluated against the
+    /// referencing batch each time the body runs; null for an ordinary
+    /// reference.
+    /// </param>
+    internal static Selection ForView(View view, HeapColumn[]? columns = null, List<BooleanExpression>? pushedPredicates = null, ForSystemTimeClause? systemTime = null)
     {
         columns ??= view.OutputColumns;
         var schema = new SqlType[columns.Length];
@@ -69,10 +75,10 @@ partial class Selection
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             rowSource: (outerBatch, _) =>
-                outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates))
+                outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates, InheritedFor(systemTime, outerBatch)))
         {
             PredicatePushdown = templates => ForView(
-                view, columns, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates]),
+                view, columns, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates], systemTime),
             // Whether the body groups can't be known here — it isn't parsed
             // until the reference executes — but CREATE VIEW already classified
             // it: the updatability rejection names the aggregate / GROUP BY
@@ -83,5 +89,19 @@ partial class Selection
                 is ViewUpdatabilityRejection.Aggregate or ViewUpdatabilityRejection.GroupBy,
             VolatileColumns = view.VolatileColumns,
         };
+    }
+
+    /// <summary>
+    /// The clause a view reference applies to its body for one run, its bounds
+    /// evaluated in <paramref name="batch"/>; null without a clause.
+    /// </summary>
+    private static InheritedSystemTime? InheritedFor(ForSystemTimeClause? clause, BatchContext batch)
+    {
+        if (clause is not { } systemTime)
+            return null;
+        var datetime2 = SqlType.GetDateTime2(7);
+        SqlValue? Bound(Expression? expression) => expression is null ? null
+            : TemporalRowSource.EvaluateBound(expression, batch) is { } instant ? SqlValue.FromDateTime2(datetime2, instant) : SqlValue.Null(datetime2);
+        return new InheritedSystemTime(systemTime.Kind, Bound(systemTime.Lower), Bound(systemTime.Upper));
     }
 }

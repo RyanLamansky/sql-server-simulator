@@ -144,7 +144,7 @@ partial class Simulation
                         break;
                 }
             }
-            catch (SimulatedSqlException error) when (error.Number is 3701 or 3726 or 3729)
+            catch (SimulatedSqlException error) when (error.Number is 3701 or 3726 or 3729 or 13552)
             {
                 (refused ??= []).Add(error);
             }
@@ -501,12 +501,44 @@ partial class Simulation
 
         if (!PermissionEnforcement.HasDropAuthority(context.Batch, schema, existing.ObjectId))
             throw SimulatedSqlException.DropObjectPermissionDenied("sequence", name.Leaf);
+        // A column default drawing from the sequence holds it, and real names
+        // the default constraint (probed 2026-10-04 against SQL Server 2025).
+        if (DefaultConstraintDrawingFrom(schema.Database, existing) is { } holder)
+            throw SimulatedSqlException.CannotDropReferencedBySchemaBoundObject("DROP SEQUENCE", name.ToString(), holder);
         context.Batch.AcquireStatementLock(existing.SchemaLock, LockMode.SchemaModification);
         if (!schema.Sequences.TryRemove(name.Leaf, out var removed) && !ifExists)
             throw SimulatedSqlException.CannotDropSequenceDoesNotExist(name.ToString());
         if (removed is not null)
             RecordSlotUndo(context, schema.Sequences, name.Leaf, removed);
         RecordDdlEvent(context, "DROP_SEQUENCE", schema.Name, name.Leaf, "SEQUENCE");
+    }
+
+    /// <summary>
+    /// The name of a default constraint in <paramref name="database"/> whose
+    /// expression draws from <paramref name="sequence"/>, or null when none does.
+    /// </summary>
+    private static string? DefaultConstraintDrawingFrom(Database database, Sequence sequence)
+    {
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, table) in schema.HeapTables)
+            {
+                foreach (var column in table.Columns)
+                {
+                    if (column is not { DefaultConstraint: { } constraint, Default: { } expression })
+                        continue;
+                    var draws = false;
+                    expression.Walk((node, _) =>
+                    {
+                        draws |= node is Parser.Expressions.NextValueFor reference && ReferenceEquals(reference.Sequence, sequence);
+                        return !draws;
+                    });
+                    if (draws)
+                        return constraint.Name;
+                }
+            }
+        }
+        return null;
     }
 
     /// <summary>
@@ -1013,8 +1045,10 @@ partial class Simulation
                 // resolved: a DROP INDEX naming a missing table or a missing
                 // index still reports its own Msg 3701 (probe-confirmed).
                 table.OwningDatabase?.RejectWriteWhenReadOnly();
+                // The refusal names the table as written (probed 2026-10-04
+                // against SQL Server 2025).
                 if (table.Indexes[i].IsClustered && RetentionCleanupDependsOn(context, table))
-                    throw SimulatedSqlException.CannotDropRetentionCleanupIndex(qualifiedTableName, indexName);
+                    throw SimulatedSqlException.CannotDropRetentionCleanupIndex(tableName.ToString(), indexName);
                 table.SettleIndexIds();
                 var indexId = table.Indexes[i].IndexId;
                 if (table.IncomingForeignKeys.Exists(fk => BuiltInResources.ResolveForeignKeyIndexId(fk) == indexId))

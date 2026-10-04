@@ -50,6 +50,7 @@ partial class Simulation
         var bindErrors = context.Batch.BindErrors;
         bindErrors?.OpenScope(context.Token);
         bindErrors?.SetBarriers(BindClause.SetTarget, BindClause.SetValue);
+        using var inUpdate = ParserScope.Enter(ref context.InUpdateOrMerge, true);
         context.MoveNextRequired();
         var top = Selection.ParseDmlTopClause(context);
         // A name that resolves to nothing is the alias of the FROM clause
@@ -1361,6 +1362,7 @@ partial class Simulation
         var tracking = table.ChangeTracking;
         var keyOrdinals = tracking is null ? [] : TableChangeTracking.KeyOrdinals(table);
         var trackedColumns = tracking?.UpdatedColumns(table, keyOrdinals, updatedColumnOrdinals);
+        var setsKey = tracking is not null && TableChangeTracking.SetsKey(keyOrdinals, updatedColumnOrdinals);
         List<(SqlValue[] OldKey, SqlValue[] NewKey)>? keyMoves = null;
         var lobColumns = LegacyLobColumnsAmong(table, updatedColumnOrdinals);
         for (var i = 0; i < affected.Count; i++)
@@ -1369,7 +1371,7 @@ partial class Simulation
             table.OwningDatabase?.RejectWriteWhenReadOnly();
             if (lobColumns is not null)
                 NoteRootedLobNulls(table, lobColumns, pageIndex, slotIndex, fullOld, fullNew);
-            tracking?.RecordUpdate(context.Batch, table, keyOrdinals, fullOld ?? DecodeFullRow(table, table.Heap.ReadSlotBytes(pageIndex, slotIndex)!), fullNew, trackedColumns, ref keyMoves);
+            tracking?.RecordUpdate(context.Batch, table, keyOrdinals, fullOld ?? DecodeFullRow(table, table.Heap.ReadSlotBytes(pageIndex, slotIndex)!), fullNew, trackedColumns, setsKey, ref keyMoves);
             if (lockableTable)
             {
                 // A row the target walk held is under its X already.

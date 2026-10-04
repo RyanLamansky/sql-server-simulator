@@ -31,17 +31,23 @@ partial class Simulation
     /// projection isn't known before that). Null for an ordinary reference; a
     /// body whose shape can't take them keeps running unchanged.
     /// </param>
+    /// <param name="systemTime">
+    /// The <c>FOR SYSTEM_TIME</c> the reference applies to the body's
+    /// system-versioned tables; null for an ordinary reference, whose body then
+    /// inherits whatever <paramref name="outerBatch"/> carries — a view nested
+    /// in a view read <c>FOR SYSTEM_TIME</c>.
+    /// </param>
     /// <remarks>
     /// The body binds and runs in the view's own database, one row at a time,
     /// since the referencing statement consumes it lazily.
     /// </remarks>
     internal IEnumerable<byte[]> InvokeView(
-        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates = null)
+        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates = null, InheritedSystemTime? systemTime = null)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
             throw SimulatedSqlException.MaximumNestingLevelExceeded();
-        var rows = InvokeViewCore(outerBatch, view, columnCount, pushedPredicates);
+        var rows = InvokeViewCore(outerBatch, view, columnCount, pushedPredicates, systemTime ?? outerBatch.InheritedSystemTime);
         return ReferenceEquals(view.Schema.Database, connection.CurrentDatabase)
             ? rows
             : ModuleDatabaseScope.Enumerate(connection, view.Schema.Database, rows);
@@ -68,15 +74,20 @@ partial class Simulation
     /// statement compiles; any other failure returns the recorded columns
     /// unchanged, so the body's own error surfaces at execution.
     /// </remarks>
-    internal HeapColumn[] BindViewColumns(BatchContext outerBatch, View view, MultiPartName writtenName, out Selection? body)
+    internal HeapColumn[] BindViewColumns(BatchContext outerBatch, View view, MultiPartName writtenName, out Selection? body, ForSystemTimeClause? systemTime = null)
     {
         body = null;
         Selection plan;
+        // A FOR SYSTEM_TIME on the reference binds with the body, so a table
+        // of it carrying its own is refused here (Msg 13590), and a body that
+        // reads no system-versioned table at all is Msg 13544 naming the view
+        // (probed 2026-10-04 against SQL Server 2025).
+        var inherited = systemTime is { } clause ? new InheritedSystemTime(clause.Kind, null, null) : outerBatch.InheritedSystemTime;
         try
         {
-            plan = ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: true);
+            plan = ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: true, inherited);
         }
-        catch (SimulatedSqlException error) when (error.Number is 207 or 208 or 4104 or 15281)
+        catch (SimulatedSqlException error) when (error.Number is 207 or 208 or 4104 or 15281 or 13590)
         {
             throw SimulatedSqlException.FollowedByViewBindingFailure(error, writtenName, view.Name);
         }
@@ -84,6 +95,8 @@ partial class Simulation
         {
             return view.OutputColumns;
         }
+        if (systemTime is not null && inherited is { Applied: false })
+            throw SimulatedSqlException.ForSystemTimeRequiresVersionedTable($"{view.Schema.Database.Name}.{view.Schema.Name}.{view.Name}", state: 1);
 
         body = plan;
         var recorded = view.OutputColumns;
@@ -155,7 +168,7 @@ partial class Simulation
     internal Selection ParseViewBodyPlan(BatchContext outerBatch, View view) =>
         view.UnstoredBody ?? ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: false);
 
-    private Selection ParseViewBodyPlan(BatchContext outerBatch, View view, bool releaseStatementSchemaLocks)
+    private Selection ParseViewBodyPlan(BatchContext outerBatch, View view, bool releaseStatementSchemaLocks, InheritedSystemTime? systemTime = null)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -174,7 +187,7 @@ partial class Simulation
         connection.QuotedIdentifiers = view.UsesQuotedIdentifier;
         var savedAnsiNulls = connection.AnsiNulls;
         connection.AnsiNulls = view.UsesAnsiNulls;
-        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32)) { SuppressDiagnosticsResolution = true, InlinedCalls = outerBatch.InlinedCalls };
+        var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32)) { SuppressDiagnosticsResolution = true, InlinedCalls = outerBatch.InlinedCalls, InheritedSystemTime = systemTime };
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
         connection.NestingLevel++;
         try
@@ -200,7 +213,7 @@ partial class Simulation
     }
 
     private IEnumerable<byte[]> InvokeViewCore(
-        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates)
+        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates, InheritedSystemTime? systemTime)
     {
         var connection = outerBatch.Connection;
         using var bodyCommand = new SimulatedDbCommand(this, connection);
@@ -226,7 +239,7 @@ partial class Simulation
         connection.AnsiNulls = view.UsesAnsiNulls;
         // Body errors attribute to the outer statement that referenced the view
         // (probe-confirmed: real reports the outer SELECT's line, no procedure).
-        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true };
+        var innerBatch = new BatchContext(bodyCommand, variables, dummyFrame) { SuppressDiagnosticsResolution = true, InheritedSystemTime = systemTime };
         // The body is part of the referencing statement, not a statement of its
         // own, so its current-time calls read that statement's freeze.
         innerBatch.AdoptStatementFreezeFrom(outerBatch);

@@ -1203,8 +1203,9 @@ public sealed class TemporalTableTests
         simulation.AssertSqlError(
             "drop index ix_CustomersHistory on CustomersHistory",
             13766,
-            "Cannot drop the clustered index 'dbo.CustomersHistory.ix_CustomersHistory' because it is being used for automatic cleanup of aged data. Consider setting HISTORY_RETENTION_PERIOD to INFINITE on the corresponding system-versioned temporal table if you need to drop this index.");
-        // The deprecated two-part DROP INDEX form reports it identically.
+            "Cannot drop the clustered index 'CustomersHistory.ix_CustomersHistory' because it is being used for automatic cleanup of aged data. Consider setting HISTORY_RETENTION_PERIOD to INFINITE on the corresponding system-versioned temporal table if you need to drop this index.");
+        // The table is named as written (probed 2026-10-04 against SQL Server
+        // 2025), the deprecated two-part form's schema included.
         AreEqual(13766, simulation.AssertSqlError("drop index dbo.CustomersHistory.ix_CustomersHistory", 13766).Number);
         AreEqual(1, simulation.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('dbo.CustomersHistory') and type_desc = 'CLUSTERED'"));
     }
@@ -1438,5 +1439,360 @@ public sealed class TemporalTableTests
 
         AreEqual(13535, Throws<SimulatedSqlException>(() => early.CreateCommand("update Customers set Name = 'z' where Id = 1").ExecuteNonQuery()).Number);
         _ = early.CreateCommand("if @@trancount > 0 rollback").ExecuteNonQuery();
+    }
+
+    // Differential sweep against SQL Server 2025, probed 2026-10-04.
+
+    private const string VersionedT = """
+        create table t (id int not null primary key, v int null, w varchar(20) null,
+            ValidFrom datetime2 generated always as row start not null, ValidTo datetime2 generated always as row end not null,
+            period for system_time (ValidFrom, ValidTo)) with (system_versioning = on (history_table = dbo.t_h))
+        """;
+
+    private const string HistoryShape = "id int not null, v int null, w varchar(20) null, ValidFrom datetime2 not null, ValidTo datetime2 not null";
+
+    private const string PlainPeriodT = """
+        create table t (id int not null primary key, v int null, w varchar(20) null,
+            ValidFrom datetime2 generated always as row start not null, ValidTo datetime2 generated always as row end not null,
+            period for system_time (ValidFrom, ValidTo))
+        """;
+
+    [TestMethod]
+    [DataRow("create table q (id int primary key, s datetime2 generated always as row start not null, s2 datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e))", 13502)]
+    [DataRow("create table q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e), period for system_time (s, e))", 13508)]
+    [DataRow("create table q (id int primary key, s datetime2(7) generated always as row start not null, e datetime2(3) generated always as row end not null, period for system_time (s, e))", 13513)]
+    [DataRow("create table q (id int, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e)) with (system_versioning = on)", 13553)]
+    [DataRow("create table q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e)) with (system_versioning = on (history_table = qh))", 13539)]
+    [DataRow("create table q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e)) with (system_versioning = on (history_table = #qh))", 13567)]
+    [DataRow("create table #q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e)) with (system_versioning = on)", 13568)]
+    [DataRow("declare @q table (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e))", 13572)]
+    [DataRow("create table q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e)) with (system_versioning = on (history_table = dbo.q))", 13574)]
+    [DataRow("create table q (id int primary key, s datetime2 generated always as row start collate Latin1_General_CI_AS not null, e datetime2 generated always as row end not null, period for system_time (s, e))", 156)]
+    [DataRow("create table q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e)) with (system_versioning = on (history_table = dbo.qh, history_table = dbo.qh2))", 102)]
+    [DataRow("create table q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e)) with (system_versioning = on (history_retention_period = 365243 days))", 13749)]
+    [DataRow("create table q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e)) with (system_versioning = on (history_retention_period = 1001 years))", 13749)]
+    [DataRow("create table q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e)) with (system_versioning = on (history_retention_period = 2147483648 days))", 1080)]
+    public void Create_RefusesWhatRealRefuses(string sql, int error) =>
+        new Simulation().AssertSqlError(sql, error);
+
+    [TestMethod]
+    public void PeriodDeclarationError_RefusesTheWholeBatch()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table log (a int)");
+        _ = simulation.AssertSqlError(
+            "insert log values (1); if 1 = 0 create table q (id int primary key, s datetime generated always as row start not null, e datetime generated always as row end not null, period for system_time (s, e))",
+            13501);
+        AreEqual(0, simulation.ExecuteScalar<int>("select count(*) from log"));
+    }
+
+    [TestMethod]
+    public void PeriodEndColumnNullable_IsState2()
+    {
+        var error = new Simulation().AssertSqlError(
+            "create table q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end null, period for system_time (s, e))", 13587);
+        AreEqual(2, error.State);
+    }
+
+    [TestMethod]
+    public void SystemVersioningOff_DeclaresAPlainPeriodTable()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e)) with (system_versioning = off)");
+        AreEqual("NON_TEMPORAL_TABLE", simulation.ExecuteScalar("select temporal_type_desc from sys.tables where name = 'q'"));
+    }
+
+    [TestMethod]
+    public void HistoryNamingAView_Is13511()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create view qh as select 1 x");
+        simulation.AssertSqlError(
+            "create table q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e)) with (system_versioning = on (history_table = dbo.qh))",
+            13511,
+            "Specified object 'dbo.qh' cannot be used as history table.");
+    }
+
+    [TestMethod]
+    public void HistoryNamingAVersionedTable_Is13566()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(VersionedT);
+        _ = simulation.ExecuteNonQuery("create table q (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e))");
+        _ = simulation.AssertSqlError("alter table q set (system_versioning = on (history_table = dbo.t))", 13566);
+    }
+
+    [TestMethod]
+    [DataRow(HistoryShape + ", c as id + 1", 13519)]
+    [DataRow(HistoryShape + ", g uniqueidentifier rowguidcol null", 13580)]
+    [DataRow("id int not null, v int null, w varchar(20) null, ValidFrom datetime2 null, ValidTo datetime2 not null", 13530)]
+    [DataRow("id int not null, v int sparse null, w varchar(20) null, ValidFrom datetime2 not null, ValidTo datetime2 not null", 13533)]
+    public void Adoption_RefusesWhatRealRefuses(string historyColumns, int error)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create table t_h ({historyColumns}); create table log (a int)");
+        _ = simulation.ExecuteNonQuery(PlainPeriodT);
+        // The refusal ends the batch.
+        _ = simulation.AssertSqlError("alter table t set (system_versioning = on (history_table = dbo.t_h)); insert log values (1)", error);
+        AreEqual(0, simulation.ExecuteScalar<int>("select count(*) from log"));
+    }
+
+    [TestMethod]
+    [DataRow("('2001-01-01', '2000-01-01')", 13541)]
+    [DataRow("('2000-01-01', '9999-12-31 23:59:59.9999999')", 13543)]
+    [DataRow("('2000-01-01', '2002-01-01'), ('2001-01-01', '2003-01-01')", 13573)]
+    [DataRow("('2000-01-01', '2001-01-01'), ('2000-01-01', '2001-01-01')", 13573)]
+    public void DataConsistencyCheck_RefusesInconsistentHistory(string periods, int error)
+    {
+        var simulation = new Simulation();
+        var rows = string.Join(", ", periods.Split("), (").Select(period => "(1, 1, 'a', " + period.Trim('(', ')') + ")"));
+        _ = simulation.ExecuteNonQuery($"create table t_h ({HistoryShape}); insert t_h values {rows}");
+        _ = simulation.ExecuteNonQuery(PlainPeriodT);
+        _ = simulation.AssertSqlError("alter table t set (system_versioning = on (history_table = dbo.t_h))", error);
+        // DATA_CONSISTENCY_CHECK = OFF links it anyway.
+        _ = simulation.ExecuteNonQuery("alter table t set (system_versioning = on (history_table = dbo.t_h, data_consistency_check = off))");
+        AreEqual("HISTORY_TABLE", simulation.ExecuteScalar("select temporal_type_desc from sys.tables where name = 't_h'"));
+    }
+
+    [TestMethod]
+    public void AdoptedRowEndingBeforeItStarts_StaysVisibleToAll()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create table t_h ({HistoryShape}); insert t_h values (1, 1, 'a', '2001-01-01', '2000-01-01')");
+        _ = simulation.ExecuteNonQuery(PlainPeriodT);
+        _ = simulation.ExecuteNonQuery("alter table t set (system_versioning = on (history_table = dbo.t_h, data_consistency_check = off))");
+        AreEqual(1, simulation.ExecuteScalar<int>("select count(*) from t for system_time all"));
+    }
+
+    [TestMethod]
+    public void FiniteRetention_AcceptsAClusteredColumnstoreHistory()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"create table t_h ({HistoryShape}); create clustered columnstore index cx on t_h");
+        _ = simulation.ExecuteNonQuery(VersionedT.Replace("history_table = dbo.t_h", "history_table = dbo.t_h, history_retention_period = 1 day", StringComparison.Ordinal));
+        AreEqual(1, simulation.ExecuteScalar<int>("select history_retention_period from sys.tables where name = 't'"));
+    }
+
+    [TestMethod]
+    public void SetSystemVersioning_RollsBackWithItsTransaction()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(PlainPeriodT);
+        _ = simulation.ExecuteNonQuery("begin tran; alter table t set (system_versioning = on (history_table = dbo.t_h)); rollback");
+        AreEqual("t", simulation.ExecuteScalar("select string_agg(name, ',') from sys.tables"));
+        _ = simulation.ExecuteNonQuery("alter table t set (system_versioning = on (history_table = dbo.t_h))");
+        _ = simulation.ExecuteNonQuery("begin tran; alter table t set (system_versioning = off); rollback");
+        AreEqual("t:2,t_h:1", simulation.ExecuteScalar("select string_agg(concat(name, ':', temporal_type), ',') within group (order by name) from sys.tables"));
+    }
+
+    [TestMethod]
+    public void AddWithGeneratedColumnsAndPeriod_DeclaresThePeriod()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table q (id int primary key); insert q values (1);
+            alter table q add s datetime2 generated always as row start hidden not null constraint dfs default sysutcdatetime(),
+                e datetime2 generated always as row end hidden not null constraint dfe default convert(datetime2, '9999-12-31 23:59:59.9999999'),
+                period for system_time (s, e);
+            alter table q set (system_versioning = on (history_table = dbo.qh));
+            update q set id = id
+            """);
+        AreEqual(1, simulation.ExecuteScalar<int>("select count(*) from qh"));
+        AreEqual(1, simulation.ExecuteScalar<int>("select count(*) from sys.periods"));
+    }
+
+    [TestMethod]
+    [DataRow("alter table q add s datetime2 generated always as row start not null default sysutcdatetime()", 13509)]
+    [DataRow("alter table q add s datetime2 not null default '2090-01-01', e datetime2 not null default '9999-12-31 23:59:59.9999999'; alter table q add period for system_time (s, e)", 13542)]
+    public void AddPeriod_RefusesWhatRealRefuses(string sql, int error)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table q (id int primary key); insert q values (1)");
+        _ = simulation.AssertSqlError(sql, error);
+    }
+
+    [TestMethod]
+    public void SchemaChanges_PropagateToHistory()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(VersionedT);
+        _ = simulation.ExecuteNonQuery("insert t (id) values (1)");
+        Thread.Sleep(20);
+        _ = simulation.ExecuteNonQuery("update t set v = 1");
+        _ = simulation.ExecuteNonQuery("alter table t add z int not null default 7, b varchar(max) null");
+        _ = simulation.ExecuteNonQuery("alter table t drop column w");
+        _ = simulation.ExecuteNonQuery("alter table t alter column v bigint null");
+        _ = simulation.ExecuteNonQuery("exec sp_rename 't.z', 'z2', 'COLUMN'");
+        AreEqual("id:int,v:bigint,ValidFrom:datetime2,ValidTo:datetime2,z2:int,b:varchar", simulation.ExecuteScalar(
+            "select string_agg(concat(name, ':', type_name(user_type_id)), ',') within group (order by column_id) from sys.columns where object_id = object_id('t_h')"));
+        AreEqual(7, simulation.ExecuteScalar<int>("select z2 from t_h"));
+        // The period pair followed its columns past the dropped one.
+        AreEqual(2, simulation.ExecuteScalar<int>("select count(*) from t for system_time all"));
+    }
+
+    [TestMethod]
+    public void AlterColumnNotNull_MeetsTheHistorysNulls()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(VersionedT);
+        _ = simulation.ExecuteNonQuery("insert t (id) values (1)");
+        Thread.Sleep(20);
+        _ = simulation.ExecuteNonQuery("update t set v = 1");
+        _ = simulation.AssertSqlError("alter table t alter column v int not null", 515);
+        IsTrue((bool)simulation.ExecuteScalar("select is_nullable from sys.columns where object_id = object_id('t') and name = 'v'")!);
+    }
+
+    [TestMethod]
+    [DataRow("alter table t add z int identity", 13704)]
+    [DataRow("alter table t add z as v + 1", 13724)]
+    [DataRow("alter table t add z int sparse null", 11418)]
+    [DataRow("alter table t_h add z int null", 13550)]
+    [DataRow("alter table t_h drop column w", 13551)]
+    [DataRow("alter table t_h alter column w varchar(50) null", 13548)]
+    [DataRow("alter table t_h add constraint ck check (id > 0)", 13564)]
+    [DataRow("alter table t_h add constraint pk primary key (id, ValidFrom)", 13558)]
+    [DataRow("alter table t drop column ValidTo", 5074)]
+    [DataRow("truncate table t", 13545)]
+    [DataRow("truncate table t_h", 13545)]
+    [DataRow("merge t d using (select 1 id) s on d.id = s.id when not matched then insert (id, ValidFrom) values (1, '2000-01-01');", 13536)]
+    [DataRow("merge t d using (select 1 id) s on d.id = s.id when matched then update set ValidTo = '2000-01-01';", 13537)]
+    public void VersionedTable_RefusesWhatRealRefuses(string sql, int error)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(VersionedT);
+        _ = simulation.AssertSqlError(sql, error);
+    }
+
+    [TestMethod]
+    [DataRow("update t_h set v = 1", 13561)]
+    [DataRow("delete t_h", 13560)]
+    [DataRow("merge t_h d using (select 1 id) s on d.id = s.id when matched then delete;", 13562)]
+    public void HistoryWrite_RefusesTheWholeBatch(string write, int error)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(VersionedT + "; create table log (a int)");
+        _ = simulation.AssertSqlError("insert log values (1); " + write, error);
+        AreEqual(0, simulation.ExecuteScalar<int>("select count(*) from log"));
+    }
+
+    [TestMethod]
+    public void DropOfBothTables_ReportsEach()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(VersionedT);
+        var error = simulation.AssertSqlError("drop table t, t_h", 13552);
+        AreEqual(2, error.Errors.Count);
+    }
+
+    [TestMethod]
+    public void BuiltHistory_IsPageCompressed_AndMirrorsSparseAndComputedColumns()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(VersionedT.Replace("w varchar(20) null,", "w varchar(20) null, c as v * 2,", StringComparison.Ordinal));
+        AreEqual("PAGE", simulation.ExecuteScalar("select data_compression_desc from sys.partitions where object_id = object_id('t_h')"));
+        IsFalse((bool)simulation.ExecuteScalar("select is_computed from sys.columns where object_id = object_id('t_h') and name = 'c'")!);
+        _ = simulation.ExecuteNonQuery("insert t (id, v) values (1, 5)");
+        Thread.Sleep(20);
+        _ = simulation.ExecuteNonQuery("update t set v = 6");
+        AreEqual(10, simulation.ExecuteScalar<int>("select c from t_h"));
+    }
+
+    [TestMethod]
+    public void HiddenPeriodColumns_LeaveTheImplicitInsertList()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(VersionedT.Replace("row start not null", "row start hidden not null", StringComparison.Ordinal).Replace("row end not null", "row end hidden not null", StringComparison.Ordinal));
+        _ = simulation.ExecuteNonQuery("insert t values (1, 1, 'a')");
+        _ = simulation.AssertSqlError("insert t values (2, 1, 'a', default, default)", 213);
+    }
+
+    [TestMethod]
+    public void ForSystemTimeOnAView_AppliesToItsTables()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(VersionedT, "create view vt as select id, v from dbo.t", "create view vv as select * from vt");
+        _ = simulation.ExecuteNonQuery("insert t (id, v) values (1, 10)");
+        Thread.Sleep(20);
+        _ = simulation.ExecuteNonQuery("update t set v = 11");
+        AreEqual(2, simulation.ExecuteScalar<int>("select count(*) from vt for system_time all"));
+        AreEqual(2, simulation.ExecuteScalar<int>("select count(*) from vv for system_time all as a"));
+        AreEqual(0, simulation.ExecuteScalar<int>("declare @d datetime2 = '2000-01-01'; select count(*) from vt for system_time as of @d"));
+    }
+
+    [TestMethod]
+    public void ForSystemTimeOnAView_RefusesWhatRealRefuses()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            VersionedT,
+            "create table c (id int)",
+            "create view vc as select id from dbo.c",
+            "create view vs as select id from dbo.t for system_time all");
+        _ = simulation.AssertSqlError("select * from vc for system_time all", 13544);
+        _ = simulation.AssertSqlError("select * from vs for system_time all", 13590);
+        simulation.ValidateSyntaxError("select * from t a for system_time all", "for");
+    }
+
+    [TestMethod]
+    public void ForSystemTimeArguments_TakeWhatRealTakes()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(VersionedT + "; insert t (id) values (1)");
+        AreEqual(1, simulation.ExecuteScalar<int>("select count(*) from t for system_time as of {ts '2099-01-01 00:00:00'}"));
+        AreEqual(1, simulation.ExecuteScalar<int>("declare @d sql_variant = cast('9999-12-31' as datetime2); select count(*) from t for system_time as of @d"));
+        simulation.AssertSqlError(
+            "declare @x time = '10:00'; select * from t for system_time as of @x",
+            402,
+            "The data types datetime2 and time are incompatible in the less than or equal to operator.");
+        _ = simulation.AssertSqlError("create procedure p @d int as select count(*) from dbo.t for system_time as of @d", 206);
+    }
+
+    [TestMethod]
+    public void ForSystemTime_ReadsTheCurrentRowsInKeyOrder()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(VersionedT + "; insert t (id, v) values (3, 3), (1, 1), (2, 2)");
+        AreEqual("1,2,3", simulation.ExecuteScalar("select string_agg(cast(id as varchar(5)), ',') from t for system_time all"));
+    }
+
+    [TestMethod]
+    [DataRow("create trigger tr on t instead of update as select 1 x", 2)]
+    [DataRow("create trigger tr on t_h after insert as select 1 x", 1)]
+    public void Trigger_RefusedOnTemporalTables(string create, int state)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(VersionedT);
+        var error = simulation.AssertSqlError(create, 13569);
+        AreEqual(state, error.State);
+    }
+
+    [TestMethod]
+    public void TriggerWrite_SharesTheFiringStatementsTime()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(VersionedT, "create trigger tr on t after insert as update t set w = 'trg' where id in (select id from inserted)");
+        _ = simulation.ExecuteNonQuery("insert t (id, v) values (1, 1)");
+        // The trigger's update leaves a zero-duration version, which every
+        // FOR SYSTEM_TIME form hides.
+        AreEqual(1, simulation.ExecuteScalar<int>("select count(*) from t_h"));
+        AreEqual(1, simulation.ExecuteScalar<int>("select count(*) from t for system_time all"));
+    }
+
+    [TestMethod]
+    public void DescribeFirstResultSet_ReadsTemporalColumnsAsNotUpdatable()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(VersionedT);
+        AreEqual("id:0,v:0,w:0,ValidFrom:0,ValidTo:0", DescribeUpdatability(simulation, "select id, v, w, ValidFrom, ValidTo from t for system_time all"));
+        AreEqual("id:1,ValidFrom:0", DescribeUpdatability(simulation, "select id, ValidFrom from t"));
+    }
+
+    private static string DescribeUpdatability(Simulation simulation, string query)
+    {
+        using var reader = simulation.ExecuteReader($"exec sp_describe_first_result_set N'{query}'");
+        var parts = new List<string>();
+        while (reader.Read())
+            parts.Add($"{reader["name"]}:{((bool)reader["is_updateable"] ? 1 : 0)}");
+        return string.Join(",", parts);
     }
 }

@@ -1103,9 +1103,10 @@ public class BacpacLoaderTests
         // The bug this fixes: WWI's Application.People has a mid-table
         // computed column, and its People_Archive history sibling (all
         // simple columns, true order) must share identical column ordinals
-        // — else SQL Server rejects the re-exported bacpac with Msg 13524.
-        // Emitting the computed column inline at its model ordinal keeps
-        // base and history column_id sequences byte-identical.
+        // — else SQL Server rejects the re-exported bacpac with Msg 13524 (and
+        // a computed column in the history with Msg 13519). Emitting the
+        // computed column inline at its model ordinal keeps base and history
+        // column_id sequences byte-identical.
         using var bacpac = BacpacBuilder.Create()
             .Table("dbo", "Person", t => t
                 .Column("PersonID", "int")
@@ -1119,7 +1120,7 @@ public class BacpacLoaderTests
             .Table("dbo", "Person_Archive", t => t
                 .Column("PersonID", "int")
                 .Column("FullName", "nvarchar(50)")
-                .ComputedColumn("SearchName", "(concat([FullName],N'!'))")
+                .Column("SearchName", "nvarchar(51)")
                 .Column("Note", "nvarchar(50)", nullable: true)
                 .Column("ValidFrom", "datetime2(7)")
                 .Column("ValidTo", "datetime2(7)"))

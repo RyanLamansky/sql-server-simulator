@@ -312,6 +312,13 @@ partial class Simulation
 
         context.Batch.NoteTempTableCreation(tableName.Leaf);
 
+        // The period declaration is checked as the batch compiles: a refusal
+        // stops the whole batch, an un-taken branch's included (probed
+        // 2026-10-04 against SQL Server 2025).
+        var resolvedPeriod = ResolvePeriodColumns(context.Batch.CurrentDatabase.Collation, heapColumns!, pendingPeriod);
+        if (systemVersioning is { On: false })
+            systemVersioning = null;
+
         // In a skipped IF branch, gate both the existence check (Msg 2714)
         // and the dict add: the safe-CREATE idiom (`IF NOT EXISTS (...) CREATE
         // TABLE foo (...)`) relies on the un-taken CREATE not surfacing
@@ -382,7 +389,6 @@ partial class Simulation
         var (keyObjectIds, indexObjectIds) = AllocateDeclarationObjectIds(context.CurrentDatabase, pendingKeys, pendingIndexes);
         var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow, keyObjectIds);
         var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
-        var resolvedPeriod = ResolvePeriodColumns(context.Batch.CurrentDatabase.Collation, heapColumns!, pendingPeriod);
 
         // History-table pre-validation when SYSTEM_VERSIONING = ON: the parent
         // must have PeriodColumns, and the history table's schema must
@@ -396,23 +402,30 @@ partial class Simulation
         HeapTable? existingHistory = null;
         if (systemVersioning is { } options)
         {
+            // A temporary table can't be versioned, nor can a history table be
+            // temporary (probed 2026-10-04 against SQL Server 2025).
+            if (isTempTable)
+                throw SimulatedSqlException.TemporalTableInTempdb(tableName.Leaf);
             if (resolvedPeriod is null)
                 throw SimulatedSqlException.SystemVersioningRequiresPeriod();
+            if (!pendingKeys.Exists(static key => key.Kind == KeyConstraintKind.PrimaryKey))
+                throw SimulatedSqlException.TemporalTableRequiresPrimaryKey($"{schema!.Database.Name}.{schema.Name}.{tableName.Leaf}");
             if (options.HistoryTable is { } hn)
             {
                 if (!context.Batch.TryResolveSchema(hn, out historySchema))
                     throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(hn.Count >= 2 ? hn.ImmediateQualifier! : Database.DefaultSchemaName);
+                // Naming the table being created reads as a history table with
+                // a period of its own.
+                if (ReferenceEquals(historySchema, schema) && context.Batch.CurrentDatabase.Collation.Equals(hn.Leaf, tableName.Leaf))
+                    throw SimulatedSqlException.HistoryTableContainsPeriod($"{schema!.Database.Name}.{schema.Name}.{tableName.Leaf}");
                 if (historySchema.HeapTables.TryGetValue(hn.Leaf, out existingHistory))
                     RejectUnusableHistoryTable(context, existingHistory);
                 else if (historySchema.HasNameInSharedNamespace(hn.Leaf))
-                    throw SimulatedSqlException.ThereIsAlreadyAnObject(hn.Leaf);
+                    throw SimulatedSqlException.ObjectCannotBeHistoryTable($"{historySchema.Name}.{hn.Leaf}");
             }
             else
             {
-                // The auto-generated name lands in the base table's own
-                // schema, which a temp table doesn't have — and real rejects
-                // system-versioning a temp table outright.
-                historySchema = schema ?? throw new NotSupportedException("SYSTEM_VERSIONING on a temp table isn't modeled.");
+                historySchema = schema!;
             }
             historyDestination = historySchema.HeapTables;
         }
@@ -466,6 +479,7 @@ partial class Simulation
                 {
                     ValidateHistoryTableShape(context, heapTable, existingHistory);
                     RequireHistoryCleanupIndex(context, heapTable, existingHistory, versioning);
+                    CheckHistoryConsistency(context, heapTable, existingHistory, versioning);
                 }
                 catch
                 {
@@ -620,9 +634,14 @@ partial class Simulation
             switch (option)
             {
                 case UnquotedString { ContextualKeyword: ContextualKeyword.System_Versioning }:
-                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On })
-                        throw new NotSupportedException("SYSTEM_VERSIONING must be set to ON in CREATE TABLE.");
-                    systemVersioning = ParseSystemVersioningOnOptions(context);
+                    // OFF declares the table as it would be without the clause
+                    // (probed 2026-10-04 against SQL Server 2025).
+                    systemVersioning = context.GetNextRequired() switch
+                    {
+                        ReservedKeyword { Keyword: Keyword.On } => ParseSystemVersioningOnOptions(context),
+                        ReservedKeyword { Keyword: Keyword.Off } => new SystemVersioningOptions(null, -1, HistoryRetentionUnit.Infinite, on: false),
+                        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                    };
                     break;
                 case StringToken name when name.Span.Equals("DATA_COMPRESSION", StringComparison.OrdinalIgnoreCase):
                     if (context.GetNextRequired() is not StringToken level
@@ -714,9 +733,11 @@ partial class Simulation
     /// enclosing <c>)</c> next.
     /// </summary>
     /// <remarks>
-    /// <c>DATA_CONSISTENCY_CHECK = ON|OFF</c> parses-and-discards: the
-    /// simulator doesn't enforce the temporal-data-consistency rules that the
-    /// option toggles (caller-trusted history rows in the loader path).
+    /// <c>DATA_CONSISTENCY_CHECK</c> decides whether an adopted history
+    /// table's rows are checked (<see cref="CheckHistoryConsistency"/>). An
+    /// option written twice is Msg 102 at severity 16 naming it upper-cased,
+    /// and a history table named in other than two parts Msg 13539 (probed
+    /// 2026-10-04 against SQL Server 2025).
     /// </remarks>
     private static SystemVersioningOptions ParseSystemVersioningOnOptions(ParserContext context)
     {
@@ -730,15 +751,24 @@ partial class Simulation
         MultiPartName? historyTable = null;
         var retentionPeriod = -1;
         var retentionUnit = HistoryRetentionUnit.Infinite;
+        bool? dataConsistencyCheck = null;
         while (true)
         {
             switch (context.GetNextRequired())
             {
                 case UnquotedString { ContextualKeyword: ContextualKeyword.History_Table }:
+                    if (historyTable is not null)
+                        throw SimulatedSqlException.SystemVersioningOptionRepeated("HISTORY_TABLE", 12);
                     if (context.GetNextRequired() is not Operator { Character: '=' })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     context.MoveNextRequired();
                     historyTable = BatchContext.ParseObjectName(context);
+                    // Only schema.table names a history table, and not a
+                    // temporary one (probed 2026-10-04 against SQL Server 2025).
+                    if (BatchContext.IsLocalTempName(historyTable.Value.Leaf) || BatchContext.IsGlobalTempName(historyTable.Value.Leaf))
+                        throw SimulatedSqlException.HistoryTableInTempdb(historyTable.Value.Leaf);
+                    if (historyTable.Value.Count != 2)
+                        throw SimulatedSqlException.HistoryTableNotTwoPartName(historyTable.Value.ToString());
                     break;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.History_Retention_Period }:
                     if (context.GetNextRequired() is not Operator { Character: '=' })
@@ -746,10 +776,13 @@ partial class Simulation
                     (retentionPeriod, retentionUnit) = ParseHistoryRetentionPeriod(context);
                     break;
                 case UnquotedString { ContextualKeyword: ContextualKeyword.Data_Consistency_Check }:
+                    if (dataConsistencyCheck is not null)
+                        throw SimulatedSqlException.SystemVersioningOptionRepeated("DATA_CONSISTENCY_CHECK", 13);
                     if (context.GetNextRequired() is not Operator { Character: '=' })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
-                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    dataConsistencyCheck = context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.On or Keyword.Off } toggle
+                        ? toggle.Keyword == Keyword.On
+                        : throw SimulatedSqlException.SyntaxErrorNear(context);
                     break;
                 default:
                     throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -758,7 +791,7 @@ partial class Simulation
                 break;
         }
         return context.Token is Operator { Character: ')' }
-            ? new SystemVersioningOptions(historyTable, retentionPeriod, retentionUnit)
+            ? new SystemVersioningOptions(historyTable, retentionPeriod, retentionUnit, dataConsistencyCheck ?? true)
             : throw SimulatedSqlException.SyntaxErrorNear(context);
     }
 
@@ -780,6 +813,10 @@ partial class Simulation
         }
         if (context.Token is not Numeric { IntegerLiteralDigitCount: > 0 } count)
         {
+            // A number past int, or a fractional one, is out of range (probed
+            // 2026-10-04 against SQL Server 2025).
+            if (context.Token is Numeric other)
+                throw SimulatedSqlException.IntegerValueOutOfRange(other.Source.ToString());
             return context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Infinite } && !negated
                 ? (-1, HistoryRetentionUnit.Infinite)
                 : throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -797,10 +834,22 @@ partial class Simulation
             "YEAR" or "YEARS" => HistoryRetentionUnit.Year,
             _ => throw SimulatedSqlException.InvalidHistoryRetentionUnit(unitToken.Span.ToString()),
         };
-        // Real validates the count only after the unit parses.
-        return period is > 0 and <= int.MaxValue
+        // Real validates the count only after the unit parses, and keeps at
+        // most 1,000 years — 365,242 days, 52,177 weeks, 12,000 months — which
+        // it refuses while the batch compiles (probed 2026-10-04 against SQL
+        // Server 2025).
+        if (period is <= 0 or > int.MaxValue)
+            throw SimulatedSqlException.InvalidHistoryRetentionPeriod(period.ToString(CultureInfo.InvariantCulture));
+        var (limit, unitName) = unit switch
+        {
+            HistoryRetentionUnit.Day => (365242, "days"),
+            HistoryRetentionUnit.Week => (52177, "weeks"),
+            HistoryRetentionUnit.Month => (12000, "months"),
+            _ => (1000, "years"),
+        };
+        return period <= limit
             ? ((int)period, unit)
-            : throw SimulatedSqlException.InvalidHistoryRetentionPeriod(period.ToString(CultureInfo.InvariantCulture));
+            : throw SimulatedSqlException.HistoryRetentionTooBig((int)period, unitName);
     }
 
     /// <summary>
@@ -836,7 +885,12 @@ partial class Simulation
     /// </summary>
     private static void RejectUnusableHistoryTable(ParserContext context, HeapTable candidate)
     {
-        if (candidate.IsHistoryTable || candidate.SystemVersioning is not null)
+        // A versioned base named as the history is "temporal table … in use"
+        // (Msg 13566), another base's history Msg 13514 (probed 2026-10-04
+        // against SQL Server 2025).
+        if (candidate.SystemVersioning is not null)
+            throw SimulatedSqlException.TemporalTableAlreadyInUse(QualifyTableName(candidate, context.CurrentDatabase));
+        if (candidate.IsHistoryTable)
             throw SimulatedSqlException.HistoryTableAlreadyInUse(QualifyTableName(candidate, context.CurrentDatabase));
     }
 
@@ -869,6 +923,12 @@ partial class Simulation
             throw SimulatedSqlException.HistoryTableHasConstraints(qualifiedHistory);
         if (history.Columns.Any(c => c.Identity is not null))
             throw SimulatedSqlException.HistoryTableHasIdentityColumn(qualifiedHistory);
+        // A computed column and a ROWGUIDCOL are refused ahead of the column
+        // count (probed 2026-10-04 against SQL Server 2025).
+        if (history.Columns.Any(c => c.Computed is not null))
+            throw SimulatedSqlException.HistoryTableHasComputedColumn(qualifiedHistory);
+        if (history.Columns.Any(c => c.IsRowGuidCol))
+            throw SimulatedSqlException.HistoryTableHasRowGuidColumn(qualifiedHistory);
         if (baseTable.Columns.Length != history.Columns.Length)
             throw SimulatedSqlException.HistoryTableColumnCountMismatch(qualifiedBase, baseTable.Columns.Length, qualifiedHistory, history.Columns.Length);
 
@@ -886,8 +946,73 @@ partial class Simulation
                 throw SimulatedSqlException.HistoryTableColumnTypeMismatch(baseColumn.Name, historyType, qualifiedHistory, baseType, qualifiedBase);
             if (!string.Equals(baseColumn.Collation ?? databaseCollationName, historyColumn.Collation ?? databaseCollationName, StringComparison.OrdinalIgnoreCase))
                 throw SimulatedSqlException.HistoryTableColumnCollationMismatch(baseColumn.Name, qualifiedBase, qualifiedHistory);
+            // A period column's counterpart has its own refusal for being
+            // nullable, and a sparse column must stay sparse (probed 2026-10-04
+            // against SQL Server 2025).
+            if (baseColumn.GeneratedAs != GeneratedAlwaysAsRow.None && historyColumn.Nullable)
+                throw SimulatedSqlException.HistoryPeriodColumnNullable(historyColumn.Name, qualifiedHistory, qualifiedBase);
             if (baseColumn.Nullable != historyColumn.Nullable)
                 throw SimulatedSqlException.HistoryTableColumnNullabilityMismatch(baseColumn.Name, qualifiedBase, qualifiedHistory);
+            if (baseColumn.IsSparse != historyColumn.IsSparse)
+                throw SimulatedSqlException.HistoryColumnSparseMismatch(baseColumn.Name, qualifiedBase, qualifiedHistory);
+        }
+    }
+
+    /// <summary>
+    /// <c>DATA_CONSISTENCY_CHECK</c>, on unless the link said <c>OFF</c>: an
+    /// adopted history table's rows may not end before they start (Msg 13541),
+    /// end in the future — the maximum included (Msg 13543) — or overlap
+    /// another row of the same key (Msg 13573, identical rows included),
+    /// checked in that order across the whole table (probed 2026-10-04 against
+    /// SQL Server 2025). A row ending as it starts passes.
+    /// </summary>
+    private static void CheckHistoryConsistency(ParserContext context, HeapTable baseTable, HeapTable history, SystemVersioningOptions options)
+    {
+        if (!options.DataConsistencyCheck || baseTable.PeriodColumns is not { } period)
+            return;
+        var rows = new List<SqlValue[]>();
+        foreach (var bytes in history.Heap.EnumerateRows())
+            rows.Add(DecodeFullRow(history, bytes));
+        if (rows.Count == 0)
+            return;
+        var qualifiedHistory = QualifyTableName(history, context.CurrentDatabase);
+        // The shape check has matched the two tables column for column.
+        var (start, end) = period;
+        foreach (var row in rows)
+        {
+            if (row[end].AsDateTime2 < row[start].AsDateTime2)
+                throw SimulatedSqlException.HistoryEndBeforeStart(qualifiedHistory);
+        }
+        var now = context.Batch.CurrentStatement.UtcNow;
+        foreach (var row in rows)
+        {
+            if (row[end].AsDateTime2 > now)
+                throw SimulatedSqlException.HistoryEndInFuture(qualifiedHistory);
+        }
+        var collation = context.CurrentDatabase.Collation;
+        var keyOrdinals = new List<int>();
+        foreach (var ordinal in TableChangeTracking.KeyOrdinals(baseTable))
+        {
+            var match = Array.FindIndex(history.Columns, column => collation.Equals(column.Name, baseTable.Columns[ordinal].Name));
+            if (match >= 0)
+                keyOrdinals.Add(match);
+        }
+        var byKey = new Dictionary<SqlValueKey, List<(DateTime Start, DateTime End)>>();
+        foreach (var row in rows)
+        {
+            var key = new SqlValueKey([.. keyOrdinals.Select(ordinal => row[ordinal])]);
+            if (!byKey.TryGetValue(key, out var periods))
+                byKey[key] = periods = [];
+            periods.Add((row[start].AsDateTime2, row[end].AsDateTime2));
+        }
+        foreach (var (_, periods) in byKey)
+        {
+            periods.Sort(static (a, b) => a.Start.CompareTo(b.Start));
+            for (var i = 1; i < periods.Count; i++)
+            {
+                if (periods[i].Start < periods[i - 1].End)
+                    throw SimulatedSqlException.HistoryOverlappingRecords(qualifiedHistory);
+            }
         }
     }
 
@@ -923,6 +1048,10 @@ partial class Simulation
         var clusteredLeadingOrdinal = -1;
         foreach (var index in history.Indexes)
         {
+            // A clustered columnstore index serves as well (probed 2026-10-04
+            // against SQL Server 2025), as the message itself suggests.
+            if (index is { IsClustered: true, IsColumnstore: true })
+                return;
             if (index.IsClustered && index.KeyColumns.Length > 0)
             {
                 clusteredLeadingOrdinal = index.KeyColumns[0].ColumnOrdinal;
@@ -944,13 +1073,19 @@ partial class Simulation
     /// retention pair defaults to the INFINITE (-1 / -1) every system-versioned
     /// table starts at.
     /// </summary>
-    private readonly struct SystemVersioningOptions(MultiPartName? historyTable, int retentionPeriod, HistoryRetentionUnit retentionUnit)
+    private readonly struct SystemVersioningOptions(MultiPartName? historyTable, int retentionPeriod, HistoryRetentionUnit retentionUnit, bool dataConsistencyCheck = true, bool on = true)
     {
         public readonly MultiPartName? HistoryTable = historyTable;
 
         public readonly int RetentionPeriod = retentionPeriod;
 
         public readonly HistoryRetentionUnit RetentionUnit = retentionUnit;
+
+        /// <summary><c>DATA_CONSISTENCY_CHECK</c>, on unless written <c>OFF</c>: whether an adopted history table's rows are checked.</summary>
+        public readonly bool DataConsistencyCheck = dataConsistencyCheck;
+
+        /// <summary>False for a <c>CREATE TABLE</c>'s <c>SYSTEM_VERSIONING = OFF</c>, which links nothing.</summary>
+        public readonly bool On = on;
 
         /// <summary>The auto-named, INFINITE-retention form: bare <c>= ON</c>.</summary>
         public static SystemVersioningOptions Bare => new(null, -1, HistoryRetentionUnit.Infinite);
@@ -1390,6 +1525,9 @@ partial class Simulation
         for (var i = 0; i < parent.Columns.Length; i++)
         {
             var pc = parent.Columns[i];
+            // A computed column becomes a plain one holding the value the base
+            // row computed, and a sparse one stays sparse (probed 2026-10-04
+            // against SQL Server 2025).
             historyColumns[i] = new HeapColumn(
                 pc.Name,
                 pc.Type,
@@ -1397,17 +1535,15 @@ partial class Simulation
                 nullable: pc.Nullable,
                 identity: null,
                 defaultExpression: null,
-                computedExpression: pc.Computed,
-                isPersisted: pc.IsPersisted,
                 generatedAs: GeneratedAlwaysAsRow.None,
                 // A history sibling's period columns are never hidden, whatever
                 // the parent's (probed 2026-10-02 against SQL Server 2025).
                 isHidden: false,
                 collation: pc.Collation,
-                computedDefinition: pc.ComputedDefinition,
                 spelledNumeric: pc.SpelledNumeric)
             {
                 AliasType = pc.AliasType,
+                IsSparse = pc.IsSparse,
             };
         }
         var history = new HeapTable(
@@ -1421,6 +1557,7 @@ partial class Simulation
             IsHistoryTable = true,
             PeriodInheritedFromBase = true,
             UsesAnsiNulls = context.Batch.Connection.AnsiNulls,
+            PageCompressed = !Array.Exists(parent.Columns, static column => column.IsSparse),
         };
         VersionStore.NoteDefinitionChange(context.Batch, history);
         // Real gives every engine-built history table a non-unique clustered
@@ -1582,9 +1719,12 @@ partial class Simulation
             // doesn't expose the period declaration in those contexts).
             if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Period })
             {
-                if (isTableVariable || isTableType || pendingPeriod is null)
-                    throw SimulatedSqlException.SyntaxErrorNear(context);
-                if (pendingPeriod.Count > 0)
+                // A table variable's period is refused by name (probed
+                // 2026-10-04 against SQL Server 2025); a second period is
+                // recorded for ResolvePeriodColumns' Msg 13508.
+                if (isTableVariable)
+                    throw SimulatedSqlException.TableVariableWithPeriod();
+                if (isTableType || pendingPeriod is null)
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.For })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1880,7 +2020,9 @@ partial class Simulation
                     // The period clause comes ahead of any NULL / NOT NULL:
                     // `datetime2 NOT NULL GENERATED …` is Msg 102 at GENERATED
                     // (probed 2026-09-25 against SQL Server 2025).
-                    if (isTableVariable || isTableType || nullable.HasValue)
+                    if (isTableVariable)
+                        throw SimulatedSqlException.TableVariableWithPeriod();
+                    if (isTableType || nullable.HasValue)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Always })
                         throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -1911,6 +2053,13 @@ partial class Simulation
                         isHidden = true;
                         context.MoveNextRequired();
                     }
+                    // A period column takes no COLLATE or SPARSE: either is a
+                    // syntax error at itself (probed 2026-10-04 against SQL
+                    // Server 2025).
+                    if (context.Token is ReservedKeyword { Keyword: Keyword.Collate } collateKeyword)
+                        throw SimulatedSqlException.SyntaxErrorNearKeyword(collateKeyword);
+                    if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Sparse })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Not }:
                     // NOT introduces either the NOT NULL nullability marker or
@@ -1968,7 +2117,17 @@ partial class Simulation
                 case ReservedKeyword { Keyword: Keyword.Default } when defaultExpression is null:
                     context.MoveNextRequired();
                     var defaultStart = context.Token.StartIndex;
-                    defaultExpression = ParseDefaultClauseExpression(context);
+                    // A table type's default is one of the stored expressions
+                    // Msg 11719 names (probed 2026-10-04 against SQL Server 2025).
+                    if (isTableType)
+                    {
+                        using (context.EnterNextValueForScope(NextValueForScope.Nested))
+                            defaultExpression = ParseDefaultClauseExpression(context);
+                    }
+                    else
+                    {
+                        defaultExpression = ParseDefaultClauseExpression(context);
+                    }
                     defaultDefinition = context.CanonicalDefinitionFrom(defaultStart, predicate: false) ?? $"({context.SourceTextFrom(defaultStart)})";
                     continue;
                 case ReservedKeyword { Keyword: Keyword.Default }:
@@ -2598,16 +2757,23 @@ partial class Simulation
         {
             if (heapColumns[i] is not { } column || column.GeneratedAs == GeneratedAlwaysAsRow.None)
                 continue;
+            var start = column.GeneratedAs == GeneratedAlwaysAsRow.Start;
             if (column.Type is not DateTime2SqlType)
                 throw SimulatedSqlException.TemporalGeneratedColumnInvalidType(column.Name);
+            // An end column's nullability is reported at state 2 (probed
+            // 2026-10-04 against SQL Server 2025).
             if (column.Nullable)
-                throw SimulatedSqlException.TemporalPeriodColumnNullable(column.Name);
-            if (column.GeneratedAs == GeneratedAlwaysAsRow.Start)
+                throw SimulatedSqlException.TemporalPeriodColumnNullable(column.Name, start ? (byte)1 : (byte)2);
+            if ((start ? generatedStartOrdinal : generatedEndOrdinal) >= 0)
+                throw SimulatedSqlException.TemporalGeneratedColumnRepeated(start);
+            if (start)
                 generatedStartOrdinal = i;
             else
                 generatedEndOrdinal = i;
         }
 
+        if (pendingPeriod.Count > 1)
+            throw SimulatedSqlException.TemporalPeriodRepeated();
         if (pendingPeriod.Count == 0)
         {
             return (generatedStartOrdinal >= 0 || generatedEndOrdinal >= 0)
@@ -2622,11 +2788,13 @@ partial class Simulation
         if (generatedEndOrdinal < 0)
             throw SimulatedSqlException.TemporalRowEndMissing();
         var (declaredStart, declaredEnd) = pendingPeriod[0];
-        return !collation.Equals(declaredStart, heapColumns[generatedStartOrdinal]!.Name)
-            ? throw SimulatedSqlException.TemporalPeriodStartNotMatching()
-            : !collation.Equals(declaredEnd, heapColumns[generatedEndOrdinal]!.Name)
-                ? throw SimulatedSqlException.TemporalPeriodEndNotMatching()
-                : (generatedStartOrdinal, generatedEndOrdinal);
+        if (!collation.Equals(declaredStart, heapColumns[generatedStartOrdinal]!.Name))
+            throw SimulatedSqlException.TemporalPeriodStartNotMatching();
+        if (!collation.Equals(declaredEnd, heapColumns[generatedEndOrdinal]!.Name))
+            throw SimulatedSqlException.TemporalPeriodEndNotMatching();
+        return heapColumns[generatedStartOrdinal]!.Type is DateTime2SqlType startType && heapColumns[generatedEndOrdinal]!.Type is DateTime2SqlType endType && startType.precision != endType.precision
+            ? throw SimulatedSqlException.TemporalPeriodColumnPrecisionMismatch()
+            : (generatedStartOrdinal, generatedEndOrdinal);
     }
 
     /// <summary>

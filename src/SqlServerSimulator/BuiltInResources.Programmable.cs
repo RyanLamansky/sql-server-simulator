@@ -937,7 +937,7 @@ internal static partial class BuiltInResources
         foreach (var (schema, seq) in sequences)
         {
             var schemaId = SqlValue.FromInt32(schema.SchemaId);
-            var (systemTypeId, userTypeId) = SequenceTypeIds(seq.DeclaredType);
+            var (systemTypeId, userTypeId) = seq.SpelledNumeric ? ((byte)108, 108) : SequenceTypeIds(seq.DeclaredType);
             var (precision, scale) = SequencePrecisionScale(seq.DeclaredType);
             yield return [
                 SqlValue.FromSystemName(seq.Name),

@@ -58,9 +58,17 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ChangeTrackingOnSystemDatabase(string databaseName) =>
         FollowedByAlterDatabaseFailed(new($"Database '{databaseName}' is a system database. Change tracking settings cannot be modified for system databases.", 5090, 16, 1));
 
+    /// <summary>
+    /// Mimics SQL Server error 13563: <c>ENABLE CHANGE_TRACKING</c> on a
+    /// temporal history table, ahead of its primary key check (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ChangeTrackingOnTemporalHistoryTable(string qualifiedTableName) =>
+        new($"Enabling Change Tracking for a temporal history table '{qualifiedTableName}' is not allowed.", 13563, 16, 1);
+
     /// <summary>Mimics SQL Server error 5091: one change tracking option written twice in the block.</summary>
-    internal static SimulatedSqlException ChangeTrackingOptionRepeated(string optionName) =>
-        new($"ALTER DATABASE change tracking option '{optionName}' was specified more than once. Each option can be specified only once.", 5091, 15, 1);
+    internal static SimulatedSqlException ChangeTrackingOptionRepeated(string optionName, byte state) =>
+        new($"ALTER DATABASE change tracking option '{optionName}' was specified more than once. Each option can be specified only once.", 5091, 15, state);
 
     /// <summary>
     /// Mimics SQL Server error 5092: a <c>CHANGE_RETENTION</c> of zero, or one

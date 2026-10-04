@@ -388,6 +388,14 @@ partial class Simulation
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         batch.AcquireStatementLock(table.SchemaLock, LockMode.SchemaModification);
         RecordTableDdlUndo(batch, table);
+        // A system-versioned table's history column takes the new name too
+        // (probed 2026-10-04 against SQL Server 2025).
+        if (table.SystemVersioning is { } history
+            && Array.FindIndex(history.Columns, column => collation.Equals(column.Name, renamed.Name)) is >= 0 and var historyOrdinal)
+        {
+            RecordTableDdlUndo(batch, history);
+            history.Columns[historyOrdinal].Name = newName;
+        }
         table.Columns[ordinal].Name = newName;
         BumpSchemaVersion();
     }

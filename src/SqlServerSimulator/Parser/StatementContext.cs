@@ -49,6 +49,17 @@ internal sealed class StatementContext
     public Dictionary<object, object>? SubqueryResults;
 
     /// <summary>
+    /// The values this statement has drawn, in draw order, from each sequence
+    /// its <c>NEXT VALUE FOR … OVER (ORDER BY …)</c> references read: the row
+    /// ranked k takes the k-th, so the draws follow the <c>OVER</c> ordering
+    /// whatever order the rows are projected in. Keyed by sequence because
+    /// every reference to one sequence in a statement writes the same
+    /// <c>OVER</c> (Msg 11727). Cleared with the statement's other per-run
+    /// caches.
+    /// </summary>
+    public Dictionary<Schemas.Sequence, List<Storage.SqlValue>>? OrderedSequenceDraws;
+
+    /// <summary>
     /// The heap addresses of the rows this statement's scans and seeks have
     /// handed out, while something in it reads a <see cref="RowLocator"/>;
     /// null otherwise, which is what keeps every producer's per-row cost at
@@ -496,6 +507,7 @@ internal sealed class StatementContext
         this.UtcNow = DateTime.UtcNow;
         this.StatementScopedValues = null;
         this.SubqueryResults = null;
+        this.OrderedSequenceDraws = null;
         this.RowAddresses = null;
         this.CatalogViewRows = null;
 #if DEBUG

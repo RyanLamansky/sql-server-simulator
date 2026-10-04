@@ -37,7 +37,8 @@ public sealed class ChangeTrackingTests
     [DataRow("update t set id = id + 1;", "1", "1D2/ 2U2/2 3U2/2 4I2/2")]
     [DataRow("update t set a = 1 where 1 = 0;", "1", "")]
     [DataRow("", "null", "1I1/1 2I1/1 3I1/1")]
-    [DataRow("", "-1", "1I1/1 2I1/1 3I1/1")]
+    [DataRow("", "-1", "")]
+    [DataRow("update t set id = id where id = 1;", "1", "1U2/2")]
     [DataRow("update t set a = 1;", "99", "")]
     public void Changes_NetsEachRow(string writes, string lastSync, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"""
@@ -220,7 +221,8 @@ public sealed class ChangeTrackingTests
     }
 
     [TestMethod]
-    [DataRow("select * from changetable(version t, (id, a), (1, 1)) v", 22111)]
+    [DataRow("select * from changetable(version t, (id, a), (1, 1)) v", 22110)]
+    [DataRow("select * from changetable(version t, (a), (1)) v", 22111)]
     [DataRow("select * from changetable(version k, (id), (1)) v", 22110)]
     [DataRow("select * from changetable(version k, (id, s, id), (1, 'x', 1)) v", 22110)]
     [DataRow("select * from changetable(version k, (id, s), (1)) v", 22103)]
@@ -413,5 +415,91 @@ public sealed class ChangeTrackingTests
         AreEqual(DBNull.Value, sim.ExecuteScalar("select change_tracking_current_version()"));
         AreEqual(0, sim.ExecuteNonQuery("with change_tracking_context (0x01) delete t"));
         _ = sim.AssertSqlError("select * from changetable(changes t, 0) c", 22105);
+    }
+
+    // Differential sweep against SQL Server 2025, probed 2026-10-04.
+
+    [TestMethod]
+    [DataRow("alter database current set change_tracking = on (change_retention = 3 days, change_retention = 3 days)", 5091)]
+    [DataRow("alter database current set change_tracking = on (change_retention = 1.5 days)", 102)]
+    public void DatabaseOptions_RefuseWhatRealRefuses(string sql, int error) =>
+        new Simulation().AssertSqlError(sql, error);
+
+    [TestMethod]
+    public void DatabaseOptions_RepeatedInTheOnForm_IsState2()
+    {
+        var error = new Simulation().AssertSqlError("alter database current set change_tracking = on (auto_cleanup = on, auto_cleanup = off)", 5091);
+        AreEqual(2, error.State);
+    }
+
+    [TestMethod]
+    public void Enable_RefusesAHistoryTable()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            alter database current set change_tracking = on;
+            create table v (id int primary key, s datetime2 generated always as row start not null, e datetime2 generated always as row end not null, period for system_time (s, e))
+                with (system_versioning = on (history_table = dbo.v_h))
+            """);
+        simulation.AssertSqlError("alter table v_h enable change_tracking", 13563, "Enabling Change Tracking for a temporal history table 'simulated.dbo.v_h' is not allowed.");
+    }
+
+    [TestMethod]
+    public void UntrackedTable_InABranchNeverTaken_OfTheBatchCreatingIt_IsNotRefused()
+    {
+        var simulation = new Simulation();
+        AreEqual("after", simulation.ExecuteScalar("""
+            alter database current set change_tracking = on;
+            create table u (id int primary key);
+            if 1 = 0 select * from changetable(changes u, 0) c;
+            select 'after'
+            """));
+    }
+
+    [TestMethod]
+    public void UntrackedTable_IsNamedAsWritten()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("alter database current set change_tracking = on; create table u (id int primary key)");
+        simulation.AssertSqlError("select * from changetable(changes dbo.u, 0) c", 22105, "Change tracking is not enabled on table 'dbo.u'.");
+    }
+
+    [TestMethod]
+    public void Context_FollowedByExec_IsASyntaxError()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("alter database current set change_tracking = on");
+        _ = simulation.AssertSqlError("with change_tracking_context (0x01) exec sp_who", 156);
+    }
+
+    [TestMethod]
+    public void ChangeTable_TakesViewChangeTracking()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"""
+            {Tracked}
+            create user u without login;
+            grant select on t to u
+            """);
+        simulation.AssertSqlError(
+            "execute as user = 'u'; select * from changetable(changes t, 0) c",
+            229,
+            "The VIEW CHANGE TRACKING permission was denied on the object 't', database 'simulated', schema 'dbo'.");
+        _ = simulation.ExecuteNonQuery("grant view change tracking on t to u");
+        AreEqual(0, simulation.ExecuteScalar<int>("execute as user = 'u'; select count(*) from changetable(changes t, 0) c"));
+    }
+
+    [TestMethod]
+    public void KeyRewrittenInAnotherSpelling_KeepsTheFirstSpelling()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            alter database current set change_tracking = on;
+            create table k (k varchar(10) collate Latin1_General_CI_AS primary key, v int);
+            alter table k enable change_tracking;
+            insert k values ('b', 1);
+            update k set k = 'B' where k = 'b'
+            """);
+        AreEqual("b", simulation.ExecuteScalar("select k from changetable(changes k, 0) c"));
     }
 }

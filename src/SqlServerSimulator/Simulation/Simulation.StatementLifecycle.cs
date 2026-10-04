@@ -569,7 +569,9 @@ partial class Simulation
                 // MERGE's Msg 5324 is its parser's, so nothing follows it
                 // (probed 2026-10-01), and neither does an inline function's
                 // Msg 1090 for a table-valued DEFAULT (probed 2026-10-04).
-                if (ex.Number is 529 or 1090 or 5324 or 8622)
+                // A FOR SYSTEM_TIME over a view reading no versioned table
+                // (Msg 13544) ends it the same way (probed 2026-10-04).
+                if (ex.Number is 529 or 1090 or 5324 or 8622 or 13544)
                     batch.BatchAborted = true;
             }
             else if (CaughtByTryFrame(batch, ex))

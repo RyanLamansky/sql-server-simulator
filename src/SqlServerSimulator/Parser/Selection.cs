@@ -1754,7 +1754,11 @@ internal sealed partial class Selection
             // Parse-time validation of the count / percent literal, mirroring
             // SQL Server's compile-time rejection. A module body binding a
             // parameter has no value to check (see ResolveRowCountLimit).
-            if (!ReadsOuterColumns(topExpression, topPercent, context, scope.OuterTypeResolver))
+            // A count drawing from a sequence is refused once the statement's
+            // clauses are read, and evaluating it here would draw.
+            var drawsSequence = false;
+            topExpression.Walk((node, _) => !(drawsSequence |= node is NextValueFor));
+            if (!drawsSequence && !ReadsOuterColumns(topExpression, topPercent, context, scope.OuterTypeResolver))
             {
                 if (!topPercent)
                     _ = ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch);
@@ -1878,6 +1882,8 @@ internal sealed partial class Selection
         // the start and after a comma, false once an element (and any alias it
         // took) is complete.
         var elementExpected = true;
+        // The sequences the assignments read, for Msg 11736.
+        List<Schemas.Sequence>? assignedSequences = null;
         fromClause.ProjectionRefsStart = context.DeferredNextValueRefs?.Count ?? 0;
         using var selectList = ParserScope.Enter(ref context.InliningClause, InliningClause.SelectList);
         do
@@ -2025,7 +2031,15 @@ internal sealed partial class Selection
                         {
                             var slot = context.Batch.GetVariableSlot(atPrefixed.Value);
                             context.MoveNextRequired();
-                            var rhs = Expression.Parse(context);
+                            Expression rhs;
+                            assignedSequences ??= [];
+                            using (ParserScope.Enter(ref context.SequenceCollector, assignedSequences))
+                                rhs = Expression.Parse(context);
+                            // One sequence drawn twice across a variable-assigning
+                            // SELECT is refused as the statement runs, ending the
+                            // batch (probed 2026-10-04 against SQL Server 2025).
+                            if (!context.Batch.IsSkipping && assignedSequences.Count != assignedSequences.Distinct().Count())
+                                throw SimulatedSqlException.NextValueForTwiceInAssignment();
                             expressions.Add(new AssignmentExpression(slot, rhs));
                         }
                         // The compound forms, `@v += expr` and its siblings, read
@@ -3530,8 +3544,22 @@ internal sealed partial class Selection
     /// PIVOT / UNPIVOT clause consumes through its own alias and stops at the
     /// next lookahead token).
     /// </summary>
-    private static FromSource ParseSingleFromSource(ParserContext context, QueryScope scope) =>
-        ApplyOptionalPivotUnpivot(context, ParseSingleFromSourceCore(context, scope), scope.OuterTypeResolver);
+    private static FromSource ParseSingleFromSource(ParserContext context, QueryScope scope)
+    {
+        var source = ParseSingleFromSourceCore(context, scope);
+        // FOR SYSTEM_TIME belongs straight after a table's or view's name, so
+        // one past an alias or hints — or after any other source — is a syntax
+        // error at FOR (probed 2026-10-04 against SQL Server 2025).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.For } forKeyword)
+        {
+            var atFor = context.SaveCheckpoint();
+            var followsSystemTime = context.GetNextOptional() is UnquotedString { ContextualKeyword: ContextualKeyword.System_Time };
+            context.RestoreCheckpoint(atFor);
+            if (followsSystemTime)
+                throw SimulatedSqlException.SyntaxErrorNearText(forKeyword.Source.ToString());
+        }
+        return ApplyOptionalPivotUnpivot(context, source, scope.OuterTypeResolver);
+    }
 
     /// <summary>
     /// Parses one FROM source: a table name (with optional alias) or a
@@ -3904,11 +3932,14 @@ internal sealed partial class Selection
                 // the caller's parser cursor.
                 if (context.Batch.TryResolveView(objectName, out var resolvedView))
                 {
-                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out var viewBody);
+                    // FOR SYSTEM_TIME after a view's name applies to the tables
+                    // its body reads (probed 2026-10-04 against SQL Server 2025).
+                    var viewSystemTime = ParseOptionalForSystemTimeClause(context);
+                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out var viewBody, viewSystemTime);
                     var viewColumnNames = new string[viewColumns.Length];
                     for (var ci = 0; ci < viewColumnNames.Length; ci++)
                         viewColumnNames[ci] = viewColumns[ci].Name;
-                    var viewAlias = ConsumeOptionalAlias(context);
+                    var viewAlias = viewSystemTime is null ? ConsumeOptionalAlias(context) : ConsumeOptionalAliasAtCurrent(context);
                     var viewHints = ParseOptionalFromSourceHints(context, viewAlias is not null, objectName.ToString());
                     // NOEXPAND reads an indexed view's materialized index
                     // rather than expanding its body, which is one of the
@@ -3935,7 +3966,7 @@ internal sealed partial class Selection
                         storageOrdinals: null,
                         lobStore: null,
                         rows: [],
-                        lateralPlan: Selection.ForView(resolvedView, viewColumns),
+                        lateralPlan: Selection.ForView(resolvedView, viewColumns, systemTime: viewSystemTime),
                         backingView: resolvedView,
                         viaSynonym: viewSynonym,
                         autoElementName: viewAlias ?? objectName.ToString(),
@@ -4054,6 +4085,20 @@ internal sealed partial class Selection
                 // non-temporal target is Msg 13544.
                 var forPath = ParseOptionalForPath(context);
                 var temporalRowSource = forPath ? null : ParseOptionalForSystemTime(context, heapTable);
+                var clauseParsed = temporalRowSource is not null;
+                // A FOR SYSTEM_TIME a view reference carries applies to every
+                // system-versioned table its body reads, one of which may not
+                // carry its own (Msg 13590; probed 2026-10-04 against SQL
+                // Server 2025).
+                if (context.Batch.InheritedSystemTime is { } inherited && heapTable is { SystemVersioning: { } inheritedHistory, PeriodColumns: { } inheritedPeriod })
+                {
+                    if (clauseParsed)
+                        throw SimulatedSqlException.ForSystemTimeAppliedTwice(objectName.ToString());
+                    inherited.Applied = true;
+                    temporalRowSource = new TemporalRowSource(heapTable, inheritedHistory, inheritedPeriod, inherited.Kind,
+                        inherited.Lower is { } inheritedLower ? new Value(inheritedLower) : null,
+                        inherited.Upper is { } inheritedUpper ? new Value(inheritedUpper) : null);
+                }
 
                 // FOR SYSTEM_TIME leaves the cursor at the post-clause lookahead
                 // token (its ALL / AS-OF-expr parse already advanced past the
@@ -4064,9 +4109,9 @@ internal sealed partial class Selection
                 // form. Without this the token after a trailing WHERE / alias is
                 // stranded and a draining consumer re-parses it into a spurious
                 // syntax error.
-                var heapAlias = temporalRowSource is null
-                    ? ConsumeOptionalAlias(context)
-                    : ConsumeOptionalAliasAtCurrent(context);
+                var heapAlias = clauseParsed
+                    ? ConsumeOptionalAliasAtCurrent(context)
+                    : ConsumeOptionalAlias(context);
                 ParseOptionalTableSample(context);
                 var heapHints = ParseOptionalFromSourceHints(context, heapAlias is not null, objectName.ToString());
                 ValidateIndexHintArguments(context.Batch.CurrentDatabase.Collation, heapHints, heapTable, $"{objectName.ImmediateQualifier ?? Database.DefaultSchemaName}.{heapTable.Name}");
@@ -4385,7 +4430,10 @@ internal sealed partial class Selection
         // closing ')'. A subquery in a cell reads the same scope a bare cell
         // reference does — under APPLY, the left side.
         List<Expression[]> tuples;
+        // A VALUES derived table is a nested query to the sequence refusals
+        // (Msg 11719, probed 2026-10-04 against SQL Server 2025).
         using (ParserScope.Enter(ref context.OuterTypeResolver, outerTypeResolver ?? context.OuterTypeResolver))
+        using (context.EnterNextValueForScope(NextValueForScope.Nested))
         {
             tuples = Simulation.ParseValuesTuples(context);
         }
@@ -6107,6 +6155,34 @@ internal sealed partial class Selection
         if (heapTable is not null && (heapTable.SystemVersioning is null || heapTable.PeriodColumns is null))
             throw SimulatedSqlException.ForSystemTimeRequiresVersionedTable(QualifiedNameFor(context, heapTable));
 
+        var clause = ParseForSystemTimeArguments(context);
+        return heapTable is null
+            ? null
+            : new TemporalRowSource(heapTable, heapTable.SystemVersioning!, heapTable.PeriodColumns!.Value, clause.Kind, clause.Lower, clause.Upper);
+    }
+
+    /// <summary>
+    /// Peeks past the name at the cursor for <c>FOR SYSTEM_TIME</c> and parses
+    /// the clause when it is there, leaving the cursor past it; otherwise
+    /// leaves the cursor where it was and returns null.
+    /// </summary>
+    private static ForSystemTimeClause? ParseOptionalForSystemTimeClause(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var forToken = context.GetNextOptional();
+        var systemTimeToken = forToken is ReservedKeyword { Keyword: Keyword.For } ? context.GetNextOptional() : null;
+        if (systemTimeToken is UnquotedString { ContextualKeyword: ContextualKeyword.System_Time })
+            return ParseForSystemTimeArguments(context);
+        context.RestoreCheckpoint(checkpoint);
+        return null;
+    }
+
+    /// <summary>
+    /// Parses a <c>FOR SYSTEM_TIME</c> clause's form and bounds, the cursor on
+    /// <c>SYSTEM_TIME</c> on entry and on the token past the clause on exit.
+    /// </summary>
+    private static ForSystemTimeClause ParseForSystemTimeArguments(ParserContext context)
+    {
         context.MoveNextRequired();
         TemporalQueryKind kind;
         Expression? lower = null;
@@ -6173,9 +6249,7 @@ internal sealed partial class Selection
                 throw TemporalSyntaxError(context);
         }
 
-        return heapTable is null
-            ? null
-            : new TemporalRowSource(heapTable, heapTable.SystemVersioning!, heapTable.PeriodColumns!.Value, kind, lower, upper);
+        return new ForSystemTimeClause(kind, lower, upper);
     }
 
     /// <summary>
@@ -6190,14 +6264,24 @@ internal sealed partial class Selection
     /// </summary>
     private static Expression ParseTemporalTimeArgument(ParserContext context)
     {
-        Expression argument = context.Token switch
+        var argument = context.Token switch
         {
             Numeric number => new Value(number.Value, number.IntegerLiteralDigitCount),
             Literal literal => new Value(literal.Value),
             AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),
+            // An ODBC escape is a literal too (probed 2026-10-04 against SQL
+            // Server 2025: {ts '…'}).
+            Operator { Character: '{' } => Expression.ParseOdbcEscape(context),
             _ => throw TemporalSyntaxError(context),
         };
+        // A variable's declared type is judged as the statement compiles, so a
+        // module body refuses one at CREATE (probed 2026-10-04 against SQL
+        // Server 2025: an int procedure parameter is Msg 206).
+        if (argument is VariableReference { DeclaredType: { Category: SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate or SqlTypeCategory.UniqueIdentifier } declared })
+        {
+            throw SimulatedSqlException.OperandTypeClash(SqlType.GetDateTime2(7), declared);
+        }
         context.MoveNextOptional();
         return argument;
     }
@@ -6230,6 +6314,28 @@ internal sealed partial class Selection
         var schemaName = db.Schemas.EnumerateValues().FirstOrDefault(s => s.SchemaId == heapTable.SchemaId)?.Name ?? Database.DefaultSchemaName;
         return $"{db.Name}.{schemaName}.{heapTable.Name}";
     }
+}
+
+/// <summary>A parsed <c>FOR SYSTEM_TIME</c> clause: its form and up to two bound expressions.</summary>
+internal readonly struct ForSystemTimeClause(TemporalQueryKind kind, Expression? lower, Expression? upper)
+{
+    public readonly TemporalQueryKind Kind = kind;
+    public readonly Expression? Lower = lower;
+    public readonly Expression? Upper = upper;
+}
+
+/// <summary>
+/// The <c>FOR SYSTEM_TIME</c> a view reference applies to its body, its bounds
+/// evaluated where the reference is (null while the body only binds), and
+/// whether any system-versioned table of the body took it — one that none
+/// does is Msg 13544 naming the view.
+/// </summary>
+internal sealed class InheritedSystemTime(TemporalQueryKind kind, SqlValue? lower, SqlValue? upper)
+{
+    public readonly TemporalQueryKind Kind = kind;
+    public readonly SqlValue? Lower = lower;
+    public readonly SqlValue? Upper = upper;
+    public bool Applied;
 }
 
 /// <summary>
@@ -6280,7 +6386,9 @@ internal sealed class TemporalRowSource(
         // Evaluate the bounds once at iteration start. A NULL bound makes
         // every comparison unknown, so the whole source is empty (real
         // returns no rows rather than raising).
-        var lower = TemporalRowSource.EvaluateBound(lowerBound, batch);
+        // AS OF's bound meets the period start first, in a <= comparison
+        // (probed 2026-10-04 against SQL Server 2025).
+        var lower = TemporalRowSource.EvaluateBound(lowerBound, batch, kind == TemporalQueryKind.AsOf ? "less than or equal to" : "greater than");
         var upper = TemporalRowSource.EvaluateBound(upperBound, batch);
         if ((lowerBound is not null && lower is null) || (upperBound is not null && upper is null))
             yield break;
@@ -6290,7 +6398,10 @@ internal sealed class TemporalRowSource(
         var lowerTime = lower ?? default;
         var upperTime = upper ?? default;
 
-        foreach (var bytes in parent.Heap.EnumerateRows())
+        // The current rows come in their clustered key's order, ahead of the
+        // history's, as real's scan of the two reads them (probed 2026-10-04
+        // against SQL Server 2025).
+        foreach (var bytes in ClusteredScan.Rows(parent))
         {
             if (this.RowMatches(parent.StoredColumns, bytes, parent.Heap, startStored, endStored, lowerTime, upperTime, DateTime.MinValue))
                 yield return bytes;
@@ -6305,7 +6416,7 @@ internal sealed class TemporalRowSource(
         // heap, so a history row's off-row values — chains on the history
         // heap — are brought inline first; read through the parent, their
         // page indexes would name its unrelated chains.
-        foreach (var bytes in history.Heap.EnumerateRows())
+        foreach (var bytes in ClusteredScan.Rows(history))
         {
             if (this.RowMatches(history.StoredColumns, bytes, history.Heap, startStored, endStored, lowerTime, upperTime, cutoff))
                 yield return RowEncoder.EncodeRow(history.StoredColumns, RowDecoder.DecodeRow(history.StoredColumns, bytes, history.Heap));
@@ -6321,7 +6432,7 @@ internal sealed class TemporalRowSource(
     /// (integer, decimal, money, float, bit, uniqueidentifier) raises
     /// Msg 206.
     /// </summary>
-    private static DateTime? EvaluateBound(Expression? expression, BatchContext batch)
+    internal static DateTime? EvaluateBound(Expression? expression, BatchContext batch, string operatorName = "greater than")
     {
         if (expression is null)
             return null;
@@ -6330,9 +6441,17 @@ internal sealed class TemporalRowSource(
         var raw = expression.Run(new RuntimeContext(name => throw SimulatedSqlException.InvalidColumnName(name), batch));
         if (raw.IsNull)
             return null;
+        // A sql_variant converts by the value it holds (probed 2026-10-04
+        // against SQL Server 2025).
+        if (raw.Type is SqlVariantSqlType)
+        {
+            raw = raw.AsVariantInner;
+            if (raw.IsNull)
+                return null;
+        }
         var target = SqlType.GetDateTime2(7);
         if (raw.Type is TimeSqlType or BinarySqlType or VarbinarySqlType)
-            throw SimulatedSqlException.IncompatibleDataTypesInOperator(target, raw.Type, "greater than");
+            throw SimulatedSqlException.IncompatibleDataTypesInOperator(target, raw.Type, operatorName);
         if (raw.Type.Category is not (SqlTypeCategory.String or SqlTypeCategory.DateTime))
             throw SimulatedSqlException.OperandTypeClash(target, raw.Type);
         // EF Core 10 emits the bounds as Varchar / NVarchar literals;
@@ -6345,8 +6464,10 @@ internal sealed class TemporalRowSource(
         var rowStart = RowDecoder.DecodeColumn(storedColumns, bytes, startStored, lobStore).AsDateTime2;
         var rowEnd = RowDecoder.DecodeColumn(storedColumns, bytes, endStored, lobStore).AsDateTime2;
         // Zero-duration versions are invisible to every form, so the
-        // period predicate only sees rows that were current for a while.
-        return rowStart < rowEnd && rowEnd >= retentionCutoff && kind switch
+        // period predicate only sees rows that were current for a while; a row
+        // ending before it starts, which only an adopted history holds, stays
+        // visible to ALL (probed 2026-10-04 against SQL Server 2025).
+        return rowStart != rowEnd && rowEnd >= retentionCutoff && kind switch
         {
             TemporalQueryKind.All => true,
             TemporalQueryKind.AsOf => rowStart <= lower && lower < rowEnd,

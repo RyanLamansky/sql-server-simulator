@@ -484,9 +484,11 @@ partial class SimulatedSqlException
     /// confirmed wording — real SQL Server uses the same Msg / wording for
     /// <c>CREATE TABLE missingschema.t</c>, <c>CREATE SCHEMA dbo</c> (when
     /// targeting a built-in / reserved schema), and a few other lookups.
+    /// A TRY catches it, and uncaught it ends the batch (probed 2026-10-04
+    /// against SQL Server 2025 for <c>CREATE TABLE</c>).
     /// </summary>
     internal static SimulatedSqlException SpecifiedSchemaNameDoesNotExist(string schemaName) =>
-        new($"The specified schema name \"{schemaName}\" either does not exist or you do not have permission to use it.", 2760, 16, 1);
+        new($"The specified schema name \"{schemaName}\" either does not exist or you do not have permission to use it.", 2760, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 2705: <c>SELECT … INTO target</c> produced a
@@ -751,7 +753,7 @@ partial class SimulatedSqlException
     /// SQL Server 2025.
     /// </summary>
     internal static SimulatedSqlException SequenceIncrementCannotBeZero(string fullName) =>
-        new($"The increment for sequence object '{fullName}' cannot be zero.", 11700, 16, 1);
+        new($"The increment for sequence object '{fullName}' cannot be zero.", 11700, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 11702: <c>CREATE SEQUENCE</c> declared a
@@ -767,7 +769,7 @@ partial class SimulatedSqlException
     /// the sequence's data type (probed 2026-10-02 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException SequenceArgumentOutOfRange(string argument) =>
-        new($"An invalid value was specified for argument '{argument}' for the given data type.", 11708, 16, 1);
+        new($"An invalid value was specified for argument '{argument}' for the given data type.", 11708, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 11703: <c>CREATE SEQUENCE</c> declared a
@@ -776,7 +778,116 @@ partial class SimulatedSqlException
     /// Probe-confirmed verbatim wording.
     /// </summary>
     internal static SimulatedSqlException SequenceStartOutOfRange(string fullName) =>
-        new($"The start value for sequence object '{fullName}' must be between the minimum and maximum value of the sequence object.", 11703, 16, 1);
+        new($"The start value for sequence object '{fullName}' must be between the minimum and maximum value of the sequence object.", 11703, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 11704: an <c>ALTER SEQUENCE</c> leaves the
+    /// sequence's current value — <c>sys.sequences.current_value</c>, as
+    /// <paramref name="currentValue"/> renders it — outside its new range.
+    /// Catchable, and ends the batch uncaught (probed 2026-10-04 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SequenceCurrentValueOutOfRange(string currentValue, string name) =>
+        new($"The current value '{currentValue}' for sequence object '{name}' must be between the minimum and maximum value of the sequence object.", 11704, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 11705: a sequence's minimum is not below its
+    /// maximum, equal bounds included, checked ahead of the start value's
+    /// range (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SequenceMinNotBelowMax(string name) =>
+        new($"The minimum value for sequence object '{name}' must be less than its maximum value.", 11705, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 11706: <c>CACHE 0</c> (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SequenceCacheMustBePositive(string name) =>
+        new($"The cache size for sequence object '{name}' must be greater than 0.", 11706, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 11710 / 11711: an <c>ALTER SEQUENCE</c> naming
+    /// <c>START WITH</c> or <c>AS</c>, which only <c>CREATE</c> takes (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SequenceArgumentNotInAlter(string argument) =>
+        argument == "AS"
+            ? new("Argument 'AS' cannot be used in an ALTER SEQUENCE statement.", 11711, 15, 1)
+            : new($"Argument '{argument}' cannot be used in an ALTER SEQUENCE statement.", 11710, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11712: a sequence option written twice, a
+    /// <c>NO</c> form and its positive counting as the same option (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SequenceArgumentRepeated(string argument) =>
+        new($"Argument '{argument}' can not be specified more than once.", 11712, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11714: <c>CREATE SEQUENCE</c> of a temporary
+    /// name (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException InvalidSequenceName(string name) =>
+        new($"Invalid sequence name '{name}'.", 11714, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11715: an <c>ALTER SEQUENCE</c> with no option
+    /// (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AlterSequenceWithoutOptions() =>
+        new("No properties specified for ALTER SEQUENCE.", 11715, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11716 / 11717 / 11718: an <c>OVER</c> on
+    /// <c>NEXT VALUE FOR</c> that partitions, sits in a default, an
+    /// <c>UPDATE</c> or a <c>MERGE</c>, or is empty (probed 2026-10-04 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NextValueForPartitionBy() =>
+        new("NEXT VALUE FOR function does not support the PARTITION BY clause.", 11716, 15, 1);
+
+    /// <inheritdoc cref="NextValueForPartitionBy"/>
+    internal static SimulatedSqlException NextValueForOverNotAllowed() =>
+        new("NEXT VALUE FOR function does not support the OVER clause in default constraints, UPDATE statements, or MERGE statements.", 11717, 15, 1);
+
+    /// <inheritdoc cref="NextValueForPartitionBy"/>
+    internal static SimulatedSqlException NextValueForEmptyOver() =>
+        new("NEXT VALUE FOR function does not support an empty OVER clause.", 11718, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 11736: two references to one sequence in a
+    /// <c>SET</c> or a variable-assigning <c>SELECT</c> (probed 2026-10-04
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NextValueForTwiceInAssignment() =>
+        new("Only one instance of NEXT VALUE FOR function per sequence object is allowed in SET or SELECT with variable assignment.", 11736, 16, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 11732 / 11733, which <c>sp_sequence_get_range</c>
+    /// raises from its internal procedure: a range past a no-cycle sequence's
+    /// bound, which ends the batch uncaught, and a range size that isn't
+    /// positive (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SequenceRangeExceedsLimit(string name) =>
+        FromSequenceRangeInternal(new($"The requested range for sequence object '{name}' exceeds the maximum or minimum limit. Retry with a smaller range.", 11732, 16, 1) { TerminatesBatch = true });
+
+    /// <inheritdoc cref="SequenceRangeExceedsLimit"/>
+    internal static SimulatedSqlException SequenceRangeSizeNotPositive() =>
+        FromSequenceRangeInternal(new("Parameter '@range_size' must be a positive integer.", 11733, 16, 1) { TerminatesBatch = true });
+
+    /// <summary>
+    /// Mimics the Msg 208 <c>sp_sequence_get_range</c> raises, at state 134
+    /// from its internal procedure, for a name that isn't a sequence (probed
+    /// 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException SequenceRangeObjectNotFound(string name) =>
+        FromSequenceRangeInternal(new($"Invalid object name '{name}'.", 208, 16, 134));
+
+    private static SimulatedSqlException FromSequenceRangeInternal(SimulatedSqlException error)
+    {
+        error.PreserveDiagnostics(1, "sys.sp_sequence_get_range_internal");
+        return error;
+    }
 
     /// <summary>
     /// Mimics SQL Server error 11731 — a multi-row <c>VALUES</c> row
@@ -890,7 +1001,7 @@ partial class SimulatedSqlException
     /// any schema (probed 2026-09-23).
     /// </summary>
     internal static SimulatedSqlException SequenceExhausted(string name) =>
-        new($"The sequence object '{name}' has reached its minimum or maximum value. Restart the sequence object to allow new values to be generated.", 11728, 16, 1);
+        new($"The sequence object '{name}' has reached its minimum or maximum value. Restart the sequence object to allow new values to be generated.", 11728, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 219: <c>CREATE TYPE</c> targeted a name that
@@ -1826,8 +1937,8 @@ partial class SimulatedSqlException
     /// AS ROW START / END</c> must be typed <c>datetime2</c>. Probe-confirmed
     /// wording against SQL Server 2025.
     /// </summary>
-    internal static SimulatedSqlException TemporalGeneratedColumnInvalidType(string columnName) =>
-        new($"Temporal generated always column '{columnName}' has invalid data type.", 13501, 16, 1);
+    internal static SimulatedSqlException TemporalGeneratedColumnInvalidType(string columnName, byte state = 1) =>
+        new($"Temporal generated always column '{columnName}' has invalid data type.", 13501, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 13504: <c>PERIOD FOR SYSTEM_TIME (startCol, endCol)</c>
@@ -1897,15 +2008,15 @@ partial class SimulatedSqlException
     /// column alone — a start ahead of its end passes. Probe-confirmed wording.
     /// </summary>
     internal static SimulatedSqlException AddPeriodEndNotMaxDatetime(string qualifiedTableName) =>
-        new($"ADD PERIOD FOR SYSTEM_TIME failed because table '{qualifiedTableName}' contains records where end of period is not equal to MAX datetime.", 13575, 16, 1);
+        new($"ADD PERIOD FOR SYSTEM_TIME failed because table '{qualifiedTableName}' contains records where end of period is not equal to MAX datetime.", 13575, 16, 0);
 
     /// <summary>
     /// Mimics SQL Server error 13597: <c>ALTER TABLE … ADD PERIOD FOR
     /// SYSTEM_TIME</c> on a table that already carries one. Real raises it
     /// ahead of every column check. Probe-confirmed wording.
     /// </summary>
-    internal static SimulatedSqlException TemporalPeriodAlreadyDefined(string qualifiedTableName) =>
-        new($"Temporal SYSTEM_TIME period is already defined on table '{qualifiedTableName}'.", 13597, 16, 1);
+    internal static SimulatedSqlException TemporalPeriodAlreadyDefined(string qualifiedTableName, byte state = 2) =>
+        new($"Temporal SYSTEM_TIME period is already defined on table '{qualifiedTableName}'.", 13597, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 4924: <c>ALTER TABLE … ADD PERIOD FOR
@@ -2021,7 +2132,7 @@ partial class SimulatedSqlException
     /// <c>CREATE TABLE</c> and <c>ALTER TABLE</c> paths.
     /// </summary>
     internal static SimulatedSqlException HistoryTableAlreadyInUse(string qualifiedTableName) =>
-        new($"History table '{qualifiedTableName}' is already in use.", 13514, 16, 1);
+        new($"History table '{qualifiedTableName}' is already in use.", 13514, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 13515: the candidate history table carries a
@@ -2030,14 +2141,14 @@ partial class SimulatedSqlException
     /// and before any column-shape comparison. Probe-confirmed wording.
     /// </summary>
     internal static SimulatedSqlException HistoryTableHasUniqueKeys(string qualifiedHistoryName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedHistoryName}' has custom unique keys defined. Consider dropping all unique keys and trying again.", 13515, 16, 1);
+        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedHistoryName}' has custom unique keys defined. Consider dropping all unique keys and trying again.", 13515, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 13516: the candidate history table declares
     /// FOREIGN KEY constraints. Probe-confirmed wording.
     /// </summary>
     internal static SimulatedSqlException HistoryTableHasForeignKeys(string qualifiedHistoryName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedHistoryName}' has foreign keys defined. Consider dropping all foreign keys and trying again.", 13516, 16, 1);
+        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedHistoryName}' has foreign keys defined. Consider dropping all foreign keys and trying again.", 13516, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 13517: the candidate history table declares
@@ -2046,21 +2157,21 @@ partial class SimulatedSqlException
     /// wording.
     /// </summary>
     internal static SimulatedSqlException HistoryTableHasConstraints(string qualifiedHistoryName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedHistoryName}' has table or column constraints defined. Consider dropping all table and column constraints and trying again.", 13517, 16, 1);
+        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedHistoryName}' has table or column constraints defined. Consider dropping all table and column constraints and trying again.", 13517, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 13518: the candidate history table has an
     /// IDENTITY column. Probe-confirmed wording.
     /// </summary>
     internal static SimulatedSqlException HistoryTableHasIdentityColumn(string qualifiedHistoryName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedHistoryName}' has IDENTITY column specification. Consider dropping all IDENTITY column specifications and trying again.", 13518, 16, 1);
+        new($"Setting SYSTEM_VERSIONING to ON failed because history table '{qualifiedHistoryName}' has IDENTITY column specification. Consider dropping all IDENTITY column specifications and trying again.", 13518, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 13523: base and candidate history table have
     /// different column counts. Probe-confirmed wording.
     /// </summary>
     internal static SimulatedSqlException HistoryTableColumnCountMismatch(string qualifiedTableName, int baseColumnCount, string qualifiedHistoryName, int historyColumnCount) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because table '{qualifiedTableName}' has {baseColumnCount} columns and table '{qualifiedHistoryName}' has {historyColumnCount} columns.", 13523, 16, 1);
+        new($"Setting SYSTEM_VERSIONING to ON failed because table '{qualifiedTableName}' has {baseColumnCount} columns and table '{qualifiedHistoryName}' has {historyColumnCount} columns.", 13523, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 13524: the columns at the same 1-based ordinal
@@ -2070,7 +2181,7 @@ partial class SimulatedSqlException
     /// earlier one. Probe-confirmed wording.
     /// </summary>
     internal static SimulatedSqlException HistoryTableColumnNameMismatch(string historyColumnName, int ordinal, string qualifiedHistoryName, string baseColumnName, string qualifiedTableName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because column '{historyColumnName}' at ordinal {ordinal} in history table '{qualifiedHistoryName}' has a different name than the column '{baseColumnName}' at the same ordinal in table '{qualifiedTableName}'.", 13524, 16, 1);
+        new($"Setting SYSTEM_VERSIONING to ON failed because column '{historyColumnName}' at ordinal {ordinal} in history table '{qualifiedHistoryName}' has a different name than the column '{baseColumnName}' at the same ordinal in table '{qualifiedTableName}'.", 13524, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 13525: matching columns have different declared
@@ -2079,21 +2190,21 @@ partial class SimulatedSqlException
     /// wording.
     /// </summary>
     internal static SimulatedSqlException HistoryTableColumnTypeMismatch(string columnName, string historyType, string qualifiedHistoryName, string baseType, string qualifiedTableName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because column '{columnName}' has data type {historyType.Replace("(MAX)", "(max)", StringComparison.Ordinal)} in history table '{qualifiedHistoryName}' which is different from corresponding column type {baseType.Replace("(MAX)", "(max)", StringComparison.Ordinal)} in table '{qualifiedTableName}'.", 13525, 16, 1);
+        new($"Setting SYSTEM_VERSIONING to ON failed because column '{columnName}' has data type {historyType.Replace("(MAX)", "(max)", StringComparison.Ordinal)} in history table '{qualifiedHistoryName}' which is different from corresponding column type {baseType.Replace("(MAX)", "(max)", StringComparison.Ordinal)} in table '{qualifiedTableName}'.", 13525, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 13526: matching columns resolve to different
     /// collations. Probe-confirmed wording.
     /// </summary>
     internal static SimulatedSqlException HistoryTableColumnCollationMismatch(string columnName, string qualifiedTableName, string qualifiedHistoryName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because column '{columnName}' does not have the same collation in tables '{qualifiedTableName}' and '{qualifiedHistoryName}'.", 13526, 16, 1);
+        new($"Setting SYSTEM_VERSIONING to ON failed because column '{columnName}' does not have the same collation in tables '{qualifiedTableName}' and '{qualifiedHistoryName}'.", 13526, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 13531: matching columns differ in nullability,
     /// in either direction. Probe-confirmed wording.
     /// </summary>
     internal static SimulatedSqlException HistoryTableColumnNullabilityMismatch(string columnName, string qualifiedTableName, string qualifiedHistoryName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because column '{columnName}' does not have the same nullability attribute in tables '{qualifiedTableName}' and '{qualifiedHistoryName}'.", 13531, 16, 1);
+        new($"Setting SYSTEM_VERSIONING to ON failed because column '{columnName}' does not have the same nullability attribute in tables '{qualifiedTableName}' and '{qualifiedHistoryName}'.", 13531, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 13574: the candidate history table declares a
@@ -2101,7 +2212,7 @@ partial class SimulatedSqlException
     /// history-table rejection. Probe-confirmed wording.
     /// </summary>
     internal static SimulatedSqlException HistoryTableContainsPeriod(string qualifiedHistoryName) =>
-        new($"Setting SYSTEM_VERSIONING to ON failed because temporal history table '{qualifiedHistoryName}' contains SYSTEM_TIME period.", 13574, 16, 1);
+        new($"Setting SYSTEM_VERSIONING to ON failed because temporal history table '{qualifiedHistoryName}' contains SYSTEM_TIME period.", 13574, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 13743: <c>HISTORY_RETENTION_PERIOD</c> was given

@@ -19,7 +19,7 @@ partial class Simulation
     private static bool OpensImplicitTransaction(string systemProcName) => systemProcName is not (
         "sp_addlinkedserver" or "sp_addlinkedsrvlogin" or "sp_addrolemember" or "sp_describe_first_result_set"
         or "sp_describe_undeclared_parameters" or "sp_droplinkedsrvlogin" or "sp_droprolemember" or "sp_dropserver"
-        or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_serveroption" or "sp_set_session_context"
+        or "sp_executesql" or "sp_getapplock" or "sp_releaseapplock" or "sp_sequence_get_range" or "sp_serveroption" or "sp_set_session_context"
         or "sp_setapprole" or "sp_unsetapprole" or "sp_xml_preparedocument" or "sp_xml_removedocument"
         or "xp_getnetname" or "xp_instance_regread" or "xp_msver" or "xp_qv" or "xp_regread");
 
@@ -335,6 +335,7 @@ partial class Simulation
             "sp_setapprole" => InvokeSpSetAppRole(batch),
             "sp_settriggerorder" => InvokeSpSetTriggerOrder(batch),
             "sp_server_info" => InvokeSpServerInfo(batch),
+            "sp_sequence_get_range" => InvokeSpSequenceGetRange(batch, calledAs, returnCodeVar),
             "sp_serveroption" => InvokeSpServerOption(batch),
             "sp_set_session_context" => InvokeSpSetSessionContext(batch),
             "sp_spaceused" => Uncounted(InvokeSpSpaceUsed(batch)),

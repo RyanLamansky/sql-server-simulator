@@ -997,8 +997,9 @@ internal static partial class BuiltInResources
     /// share of it, so it reflects same-batch INSERT/DELETE. partition_id /
     /// hobt_id are synthetic-deterministic (distinct per partition; not SQL
     /// Server's allocation-unit ids). Rowstore compression is unmodeled: data_compression
-    /// = 0 (NONE) but for a columnstore index's 3 / 4, and xml_compression = 0
-    /// (OFF).
+    /// = 0 (NONE) but for a columnstore index's 3 / 4 and an engine-built
+    /// history table's 2 (<see cref="HeapTable.PageCompressed"/>), and
+    /// xml_compression = 0 (OFF).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysPartitions(Parser.BatchContext batch, Database database)
     {
@@ -1008,6 +1009,7 @@ internal static partial class BuiltInResources
         SqlValue[] noneCompression = [SqlValue.FromByte(0), SqlValue.FromNVarchar("NONE")];
         SqlValue[] columnstoreCompression = [SqlValue.FromByte(3), SqlValue.FromNVarchar("COLUMNSTORE")];
         SqlValue[] archiveCompression = [SqlValue.FromByte(4), SqlValue.FromNVarchar("COLUMNSTORE_ARCHIVE")];
+        SqlValue[] pageCompression = [SqlValue.FromByte(2), SqlValue.FromNVarchar("PAGE")];
         var xmlOff = SqlValue.FromBoolean(false);
         var xmlOffDesc = SqlValue.FromVarchar(VarcharSqlType.Get(3, Collation.Catalog, Coercibility.Implicit), "OFF");
         var census = new PartitionCensus();
@@ -1015,6 +1017,7 @@ internal static partial class BuiltInResources
         {
             var compression = index is { IsColumnstore: true } columnstore
                 ? (columnstore.ColumnstoreArchive ? archiveCompression : columnstoreCompression)
+                : table.PageCompressed && indexId <= 1 ? pageCompression
                 : noneCompression;
             foreach (var unit in census.Units(table, indexId, placement))
             {

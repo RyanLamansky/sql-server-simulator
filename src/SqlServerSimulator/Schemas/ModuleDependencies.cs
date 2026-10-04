@@ -406,6 +406,22 @@ internal static class ModuleDependencies
         {
             if (tokens[i] is not Name)
                 continue;
+            // A default's sequence draw is an object reference to the sequence
+            // (probed 2026-10-04 against SQL Server 2025).
+            if (i + 3 < tokens.Count
+                && tokens[i] is Name { Value: var next } && next.Equals("NEXT", StringComparison.OrdinalIgnoreCase)
+                && tokens[i + 1] is Name { Value: var value } && value.Equals("VALUE", StringComparison.OrdinalIgnoreCase)
+                && tokens[i + 2] is ReservedKeyword { Keyword: Keyword.For } && tokens[i + 3] is Name)
+            {
+                i += 3;
+                if (BuildObjectReference(database, ReadName(tokens, ref i)) is { } sequenceReference)
+                {
+                    var recorded = Remember(byKey, ordered, sequenceReference);
+                    recorded.HasObjectReference = true;
+                    recorded.IsSchemaBound = true;
+                }
+                continue;
+            }
             var name = ReadName(tokens, ref i);
             if (name.SegmentCount >= 2)
             {

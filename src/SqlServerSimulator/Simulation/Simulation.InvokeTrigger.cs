@@ -426,6 +426,11 @@ partial class Simulation
                     ContinueOnError = ContinuesCalledBatch(outerBatch),
                     OwnershipChainOwnerId = chainOwner,
                     ModuleObjectId = objectId,
+                    // The body writes inside the firing statement's
+                    // transaction, so a system-versioned table it changes
+                    // takes that statement's time (probed 2026-10-04 against
+                    // SQL Server 2025).
+                    FiringStatementSystemTimeUtc = outerBatch.SystemTimeUtc,
                 };
                 // The firing statement's reads report ahead of the body, whose
                 // compile STATISTICS TIME reports first (probed 2026-09-28

@@ -7,6 +7,7 @@ Probed against SQL Server 2025.
 ## Type, start, range, cycle
 
 - **Allowed types**: `tinyint`, `smallint`, `int`, `bigint`, `decimal(p, 0)`, `numeric(p, 0)`.
+  A `numeric` sequence keeps the spelling (`Sequence.SpelledNumeric`): `sys.sequences` reports type 108, and a drawn value's `sql_variant` base type is `numeric`, a `decimal` one's `decimal` (probed 2026-10-04 against SQL Server 2025).
   Non-zero decimal scale → **Msg 11702**.
   Non-integer types (`float`, `real`, string family) → same Msg 11702.
   Default type when `AS` omitted: `bigint`.
@@ -18,12 +19,14 @@ Probed against SQL Server 2025.
   A written `INCREMENT BY`, `MINVALUE`, `MAXVALUE`, `START WITH` or `RESTART WITH` outside the declared type is **Msg 11708** naming the argument — checked increment (after its zero check, Msg 11700) then minimum, maximum and start, whatever the written order — and a `CACHE` wider than `int` is a syntax error at the number (probed 2026-10-02 against SQL Server 2025).
   A refused `ALTER SEQUENCE` leaves the sequence as it was.
 - **`INCREMENT BY 0`** → **Msg 11700**.
-- **`START WITH` outside `[minvalue, maxvalue]`** → **Msg 11703**.
+- **`START WITH` outside `[minvalue, maxvalue]`** → **Msg 11703**, checked after a minimum not below the maximum — equal bounds included — which is **Msg 11705**.
+- **The option grammar** (probed 2026-10-04 against SQL Server 2025): an option written twice is **Msg 11712** naming it, a `NO` form and its positive counting as one; a literal with a decimal point is **Msg 11708** for its argument and a float literal a syntax error at itself; options take no separating comma; `CACHE 0` is **Msg 11706**, `CACHE 1` sends Msg 11707 (`… has been set to NO CACHE.`) yet reports a cache of 1, and a signed cache is a syntax error at the sign; a temporary name is **Msg 11714**.
+  The data-dependent refusals — 11700, 11703, 11704, 11705, 11708 and an exhausted draw's 11728 — are catchable and end the batch uncaught.
 - **Cycle**: ascending wrap → `minvalue`; descending wrap → `maxvalue`.
   No-cycle exhaustion sticks (`Sequence.IsExhausted`) until `ALTER SEQUENCE … RESTART`; subsequent `NEXT VALUE FOR` → **Msg 11728**.
 - **`CACHE n` / `NO CACHE`**: parse-and-ignore (the simulator doesn't model the batched-allocation optimization that real SQL Server's CACHE represents).
   `sys.sequences` reports the declaration as real does (probed 2026-09-26): `is_cached` is 0 only under `NO CACHE`, and `cache_size` is an explicit `CACHE n`'s size, NULL for the default, a bare `CACHE` and `NO CACHE`.
-  The declared size does one more thing: the first draw after CREATE or `RESTART` sends real's **Msg 11729** (`The sequence object 's' cache size is greater than the number of available values.`) when the cache — 50 values by default — is longer than the values left before the bound, and neither `NO CACHE` nor `CYCLE` ever does (probed 2026-09-23).
+  The declared size does one more thing: the `CREATE` or `ALTER SEQUENCE` that leaves the cache — 50 values by default — longer than the values left before the bound sends real's **Msg 11729** (`The sequence object 's' cache size is greater than the number of available values.`), and neither `NO CACHE`, a cache of 1 nor `CYCLE` ever does; no draw sends it, a `tinyint` sequence drawn from 100 to its end included (probed 2026-10-04 against SQL Server 2025).
 
 ## `NEXT VALUE FOR` semantics — per-row dedup
 
@@ -46,10 +49,26 @@ Bump sites:
 - **`UPDATE` per-row** — both single-table and joined paths bump before evaluating the SET-list expressions.
 
 
+## `ALTER SEQUENCE`
+
+The options are read whole before anything is checked, so their grammar refusals are real's parse errors: `START WITH` is **Msg 11710**, `AS` **Msg 11711**, no option at all **Msg 11715** and one written twice **Msg 11712** (probed 2026-10-04 against SQL Server 2025).
+`NO MINVALUE` / `NO MAXVALUE` restore the type's bounds.
+Then, against the new options: equal or crossed bounds are **Msg 11705**, a `RESTART WITH` outside them **Msg 11703**, and without a restart a current value (`sys.sequences.current_value`) outside them **Msg 11704** naming it; a missing sequence, or another kind of object, is **Msg 15151**.
+Without `RESTART` the next draw follows the last one by the new increment, wrapping or exhausting against the new bounds — so an exhausted sequence whose new options leave room draws again — while one nothing has been drawn from keeps its position (`Sequence.RepositionAfterAlter`).
+The statement rolls back with its transaction, and sends Msg 11729 as `CREATE` does.
+
+## `sp_sequence_get_range`
+
+`sp_sequence_get_range @sequence_name, @range_size, @range_first_value OUTPUT [, @range_last_value OUTPUT [, @range_cycle_count OUTPUT [, @sequence_increment OUTPUT [, @sequence_min_value OUTPUT [, @sequence_max_value OUTPUT]]]]]` reserves a range (`Sequence.DrawRange`), reporting it through `sql_variant`s of the sequence's type: a cycling sequence wraps to its opposite bound as often as it needs, counting the wraps — `tinyint` from 250 for 20 values ends at 13 having wrapped once (probed 2026-10-04 against SQL Server 2025).
+Binding refusals are the procedure's own at line 0: a missing `@range_first_value` **Msg 201**, an output variable of another type **Msg 257**.
+The body's come from `sys.sp_sequence_get_range_internal` at line 1: a name that isn't a sequence **Msg 208** at state 134, a size that isn't positive **Msg 11733**, and a no-cycle range past the bound **Msg 11732**, which ends the batch uncaught and reserves nothing.
+Like a draw, a reserved range isn't handed back by a rollback.
+
 ## Resolution / lookup
 
 - `BatchContext.TryResolveSequence(MultiPartName)` — accepts 1-part names (falls back to `dbo`), 2-part (`schema.seq`), 3-part (`db.schema.seq`, db must match current).
-- `NEXT VALUE FOR` on a non-sequence object that exists as a table / view / etc. → **Msg 11726** (probe-confirmed wording uses the qualified `dbo.name` form).
+- `NEXT VALUE FOR` on a non-sequence object that exists as a table / view / etc. → **Msg 11726** (probe-confirmed wording uses the qualified `dbo.name` form); a variable after `FOR` is a syntax error at itself (probed 2026-10-04).
+- `DROP SEQUENCE` of a sequence a column default draws from is **Msg 3729** naming the default constraint, and `sys.sql_expression_dependencies` lists the default as referencing the sequence (probed 2026-10-04 against SQL Server 2025).
 - `NEXT VALUE FOR` on a totally missing name → **Msg 208** (the standard "invalid object name"), at state 1 where real raises state 211 (probed 2026-10-04 against SQL Server 2025).
 - A principal other than `dbo` needs `UPDATE` on the sequence (Msg 229), except in a column `DEFAULT`, which ownership chaining covers.
 
@@ -86,6 +105,8 @@ Detection collects the tuples' sequence references through `ParserContext.Sequen
 A sequence buried inside a larger default expression (`NEXT VALUE FOR s + 1`) isn't detected — the bare form is what a sequence default takes in practice.
 
 These shapes stay legal and each advance once per row, matching real: the defaulted column listed explicitly, a *different* sequence in the constructor, and a multi-row insert whose tuples reference no sequence.
+A listed column's `DEFAULT` keyword shares its row's draw too, in a multi-row constructor as well (probed 2026-10-04): every tuple computes ahead of the first write, so `BatchContext.SequenceValuesByRow` keeps each tuple's draws by its stamp for the row's defaults to find.
+`ALTER TABLE … ADD` of a column defaulting to a draw gives each existing row its own (probed 2026-10-04).
 
 ## Catalog state: `current_value` vs `last_used_value`
 
@@ -116,7 +137,7 @@ Every neighbouring pair below was probed directly (SQL Server 2025, 2026-08-05).
 
 | # | Msg | the reference sits in | probed refusals |
 |---|---|---|---|
-| 1 | **11719** | a nested query or stored expression | derived table, CTE, subquery, `EXISTS` / `APPLY` body, view / function body, **CHECK constraint**, **computed column**, a `MERGE`'s `USING` derived table |
+| 1 | **11719** | a nested query or stored expression | derived table (a `VALUES` one included), CTE, subquery, `EXISTS` / `APPLY` body, view / function body, **CHECK constraint**, **computed column**, a table type's default, a procedure's `RETURN` value, a `MERGE`'s `USING` derived table |
 | 2 | **11725** | an aggregate's argument | `SUM` / `MAX` / `MIN` / `COUNT` / `STRING_AGG`, `DISTINCT` argument, the reference nested inside a larger argument expression; a **windowed** call (`SUM(…) OVER ()`) is 11720 instead, the trailing `OVER` being found by a token scan past the argument list |
 | 3 | **11721** | a statement that dedupes or combines rowsets | `DISTINCT`, `UNION`, `UNION ALL`, `EXCEPT`, `INTERSECT` — in *either* branch; a nested query's own `DISTINCT` doesn't count |
 | 4 | **11723** | a statement carrying an `ORDER BY`, the reference naming no `OVER` | the select list, or a clause of the same statement |
@@ -127,6 +148,9 @@ Every neighbouring pair below was probed directly (SQL Server 2025, 2026-08-05).
 | 9 | **11738** | a statement real declines to define it in at all | `PRINT` |
 
 **`CHOOSE` is named in Msg 11741's text and accepts a reference anyway** — in the index slot as much as a value slot (probe-confirmed), so it doesn't route through the refusal.
+
+**Msg 11736** refuses one sequence drawn twice across a variable-assigning `SELECT`, as the statement runs, ending the batch (probed 2026-10-04).
+A `TOP` count's reference is never evaluated before its refusal settles, so it draws nothing.
 
 **An `OVER` on the reference lifts exactly one refusal, #4.**
 `SELECT NEXT VALUE FOR s OVER (ORDER BY id) FROM t ORDER BY id` runs; the same reference under a `DISTINCT`, an aggregate, a `CASE`, a restricted clause or a `TOP` / `OFFSET` is refused as it would be without the `OVER`.
@@ -174,12 +198,22 @@ Such a derived table is *uncorrelated*, so real evaluates it **once** for the wh
 A FROM-less `SELECT` bakes its projection at parse time, which *evaluates* it — so `CREATE PROCEDURE p AS SELECT NEXT VALUE FOR s` drew a value while binding the body, where real leaves `last_used_value` NULL (probe-confirmed 2026-08-05).
 The bake declines whenever the parsing batch is skipping — an un-taken branch or a module body being bound at `CREATE` — which costs nothing, since a skipped statement yields no rows for anyone to read.
 
+## `NEXT VALUE FOR … OVER (ORDER BY …)`
+
+The values follow the `OVER` ordering, not the order rows are projected in: the reference registers a `ROW_NUMBER()` over the ordering with its query block (`NextValueFor.OverRank`), and the row ranked k takes the statement's k-th draw from the sequence (`StatementContext.OrderedSequenceDraws`) — so `INSERT … SELECT NEXT VALUE FOR s OVER (ORDER BY k DESC), …` numbers the rows by descending `k` (probed 2026-10-04 against SQL Server 2025).
+A `VALUES` row has no query block to rank it and draws as it would without the clause.
+`PARTITION BY` is **Msg 11716**, an empty `OVER ()` **Msg 11718**, and an `OVER` in a default, an `UPDATE` or a `MERGE` **Msg 11717**.
+
 ## Deferred
 
-- `NEXT VALUE FOR ... OVER (ORDER BY ...)` — the OVER clause is parsed and discarded (the simulator iterates in a single deterministic order regardless of the OVER's ordering hint; the row-by-row sequence-advance pattern is the same with or without OVER).
 - Multi-name `DROP SEQUENCE a, b, c` — the comma-separated form works (inherited from the shared DROP parser); each name is dropped independently with `IF EXISTS` applied uniformly.
 - `INFORMATION_SCHEMA.SEQUENCES` — ISO-standard surface, not shipped.
   Apps that query catalogs typically use `sys.sequences` instead.
-- *(the VALUES + DEFAULT double-advance is fixed — see [One value per row](#one-value-per-row) below)*
-- **CREATE SEQUENCE in transaction undo log** — sequence creation isn't logged.
-  Same asymmetry as CREATE TABLE for regular (non-temp) tables, documented as a quirk.
+
+## Not modeled yet
+
+- **An `INSERT … SELECT`'s draw shared with a defaulted column**: real gives a row's `DEFAULT NEXT VALUE FOR s` the value its select list drew from `s`, where the simulator draws the default afresh (probed 2026-10-04).
+- **A table variable whose column defaults to a draw** is refused by real without a message, the whole batch included; the simulator accepts it.
+- **A `#temp` table's default naming a sequence** resolves the name in `tempdb` on real (Msg 208 at state 211 for a sequence of the user database), here in the current database.
+- **`EXEC p NEXT VALUE FOR s`** is Msg 102 at `next` on real, at `value` here.
+- **A named window**, `NEXT VALUE FOR s OVER w`, is accepted, but its ordering isn't applied to the draws.

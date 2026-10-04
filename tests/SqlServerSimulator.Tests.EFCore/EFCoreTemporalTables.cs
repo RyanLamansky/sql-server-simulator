@@ -1,4 +1,8 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Storage;
 using System.ComponentModel.DataAnnotations.Schema;
 
 namespace SqlServerSimulator;
@@ -212,5 +216,75 @@ public class EFCoreTemporalTables
         CollectionAssert.AreEqual(new[] { 100m }, Credits(context.Customers.TemporalContainedIn(insertTime, updateTime)));
         // A range reaching max datetime2 contains the current version too.
         CollectionAssert.AreEqual(new[] { 100m, 999m }, Credits(context.Customers.TemporalContainedIn(insertTime, DateTime.MaxValue)));
+    }
+
+    /// <summary>
+    /// A migration adding a column to a temporal table sends EF's plain
+    /// <c>ALTER TABLE … ADD</c>, which the history table has to take too: the
+    /// earlier version then reads the new column as NULL through
+    /// <c>TemporalAll</c> (probed 2026-10-04 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void AddColumnMigration_ReachesTheHistory()
+    {
+        var simulation = new Simulation();
+        using (var context = new ScoredCustomerContext(simulation, scored: false))
+        {
+            _ = context.Database.EnsureCreated();
+            _ = context.Add(new ScoredCustomer { Id = 1, Name = "alice" });
+            _ = context.SaveChanges();
+        }
+        Thread.Sleep(50);
+
+        using var before = new ScoredCustomerContext(simulation, scored: false);
+        using var after = new ScoredCustomerContext(simulation, scored: true);
+        var afterModel = after.GetService<IDesignTimeModel>().Model;
+        var operations = after.GetService<IMigrationsModelDiffer>().GetDifferences(
+            before.GetService<IDesignTimeModel>().Model.GetRelationalModel(), afterModel.GetRelationalModel());
+        var commands = after.GetService<IMigrationsSqlGenerator>().Generate(operations, afterModel);
+        after.GetService<IMigrationCommandExecutor>().ExecuteNonQuery(commands, after.GetService<IRelationalConnection>());
+
+        var alice = after.Customers.Single();
+        after.Entry(alice).Property("Score").CurrentValue = 7;
+        _ = after.SaveChanges();
+        var scores = after.Customers
+            .TemporalAll()
+            .OrderBy(c => EF.Property<DateTime>(c, "PeriodStart"))
+            .Select(c => EF.Property<int?>(c, "Score"))
+            .ToArray();
+        CollectionAssert.AreEqual(new int?[] { null, 7 }, scores);
+    }
+
+    private sealed class ScoredCustomer
+    {
+        public int Id { get; set; }
+
+        [Column(TypeName = "nvarchar(30)")]
+        public string Name { get; set; } = "";
+    }
+
+    private sealed class ScoredCustomerContext(Simulation simulation, bool scored) : DbContext
+    {
+        public bool Scored { get; } = scored;
+
+        public DbSet<ScoredCustomer> Customers => Set<ScoredCustomer>();
+
+        protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder) =>
+            optionsBuilder
+                .UseSqlServer(simulation.CreateDbConnection())
+                .ReplaceService<IModelCacheKeyFactory, ScoredModelCacheKeyFactory>();
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            _ = modelBuilder.Entity<ScoredCustomer>().Property(c => c.Id).ValueGeneratedNever();
+            _ = modelBuilder.Entity<ScoredCustomer>().ToTable("Customers", b => b.IsTemporal());
+            if (this.Scored)
+                _ = modelBuilder.Entity<ScoredCustomer>().Property<int?>("Score");
+        }
+    }
+
+    private sealed class ScoredModelCacheKeyFactory : IModelCacheKeyFactory
+    {
+        public object Create(DbContext context, bool designTime) => (context.GetType(), ((ScoredCustomerContext)context).Scored, designTime);
     }
 }

@@ -171,7 +171,8 @@ internal static partial class BuiltInResources
             {
                 var type = sequence.DeclaredType;
                 var (precision, scale) = SequencePrecisionScale(type);
-                var typeName = SqlValue.FromNVarchar(type.SqlServerName);
+                var spelledName = sequence.SpelledNumeric ? "numeric" : type.SqlServerName;
+                var typeName = SqlValue.FromNVarchar(spelledName);
                 var (declaredPrecision, declaredScale) = type is DecimalSqlType ? ((byte)38, (byte)38) : (precision, (byte)0);
                 yield return
                 [
@@ -187,7 +188,7 @@ internal static partial class BuiltInResources
                     sequence.AsDeclaredVariant(sequence.MaxValue),
                     sequence.AsDeclaredVariant(sequence.Increment),
                     SqlValue.FromBoolean(sequence.Cycle),
-                    SqlValue.FromSystemName(type.SqlServerName),
+                    SqlValue.FromSystemName(spelledName),
                     SqlValue.FromByte(declaredPrecision),
                     SqlValue.FromByte(declaredScale),
                 ];

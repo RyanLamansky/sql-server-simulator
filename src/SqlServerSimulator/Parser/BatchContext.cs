@@ -93,7 +93,14 @@ internal sealed partial class BatchContext
     /// else the statement's frozen <see cref="StatementContext.UtcNow"/>
     /// (probed 2026-10-03 against SQL Server 2025).
     /// </summary>
-    public DateTime SystemTimeUtc => this.Connection.CurrentTransaction?.BeginTimeUtc ?? this.CurrentStatement.UtcNow;
+    public DateTime SystemTimeUtc => this.Connection.CurrentTransaction?.BeginTimeUtc ?? this.FiringStatementSystemTimeUtc ?? this.CurrentStatement.UtcNow;
+
+    /// <summary>
+    /// In a trigger body fired outside a transaction, the firing statement's
+    /// <see cref="SystemTimeUtc"/>, which every write of the body shares; null
+    /// elsewhere.
+    /// </summary>
+    public DateTime? FiringStatementSystemTimeUtc;
 
     /// <summary>
     /// The line of the last top-level statement this batch's dispatch loop
@@ -1401,6 +1408,21 @@ internal sealed partial class BatchContext
     /// entries automatically invalid.
     /// </summary>
     public readonly Dictionary<Sequence, (long Stamp, SqlValue Value)> SequenceRowCache = [];
+
+    /// <summary>
+    /// Every value drawn by row stamp, kept while a multi-row <c>INSERT …
+    /// VALUES</c> computes its tuples ahead of writing them, so a row's DEFAULT
+    /// re-entering its tuple's stamp finds the value that tuple drew after
+    /// later tuples have moved <see cref="SequenceRowCache"/> on. Null otherwise.
+    /// </summary>
+    public Dictionary<(Sequence Sequence, long Stamp), SqlValue>? SequenceValuesByRow;
+
+    /// <summary>
+    /// The <c>FOR SYSTEM_TIME</c> a view reference applies to the body this
+    /// batch runs or binds — a nested view's body inherits it in turn — or
+    /// null outside such a body.
+    /// </summary>
+    public InheritedSystemTime? InheritedSystemTime;
 
     /// <summary>
     /// Bumps <see cref="CurrentRowStamp"/> to start a new per-row evaluation

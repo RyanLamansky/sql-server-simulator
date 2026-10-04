@@ -184,9 +184,10 @@ public sealed class MessageStreamTests
     }
 
     /// <summary>
-    /// A sequence whose first cache block — 50 values by default — is longer
-    /// than the values it has left warns once, ahead of the first draw's
-    /// result; <c>NO CACHE</c> never warns.
+    /// A sequence whose cache — 50 values by default — is longer than the
+    /// values it has left warns from the <c>CREATE</c> or <c>ALTER</c> that
+    /// leaves it so, never from a draw; <c>NO CACHE</c> never warns (probed
+    /// 2026-10-04 against SQL Server 2025).
     /// </summary>
     [TestMethod]
     [DataRow("create sequence s as tinyint start with 250", true)]
@@ -194,11 +195,13 @@ public sealed class MessageStreamTests
     [DataRow("create sequence s as tinyint start with 200", false)]
     [DataRow("create sequence s as int start with 1 maxvalue 100 cache 60", false)]
     [DataRow("create sequence s as tinyint start with 250 no cache", false)]
-    public void SequenceShortOfItsCache_WarnsOnTheFirstDraw(string create, bool warns)
+    [DataRow("create sequence s as tinyint start with 100 no cache; alter sequence s cache 200", true)]
+    [DataRow("create sequence s as tinyint start with 100; alter sequence s restart with 250", true)]
+    public void SequenceShortOfItsCache_WarnsFromItsDefinition(string create, bool warns)
     {
-        var (connection, log) = Open(create);
+        var (connection, log) = Open("select 1");
         using var command = connection.CreateCommand();
-        command.CommandText = "select next value for s; select next value for s";
+        command.CommandText = create + "; select next value for s; select next value for s";
         using (var reader = command.ExecuteReader())
         {
             log.Add("returned");

@@ -1725,7 +1725,7 @@ internal abstract class Expression : ExpressionNode
     /// built-in pass through).</item>
     /// </list>
     /// </summary>
-    private static Expression ParseOdbcEscape(ParserContext context)
+    internal static Expression ParseOdbcEscape(ParserContext context)
     {
         var collation = context.Batch.CurrentDatabase.Collation;
         if (context.GetNextRequired() is not Name escapeToken)
@@ -2333,24 +2333,25 @@ internal abstract class Expression : ExpressionNode
         var forToken = context.GetNextOptional();
         var nameToken = context.GetNextOptional();
         if (valueToken is not UnquotedString { ContextualKeyword: ContextualKeyword.Value }
-            || forToken is not ReservedKeyword { Keyword: Keyword.For }
-            || nameToken is not Tokens.Name)
+            || forToken is not ReservedKeyword { Keyword: Keyword.For })
         {
             context.RestoreCheckpoint(checkpoint);
             return null;
         }
+        // Past NEXT VALUE FOR only a sequence name parses (a variable is a
+        // syntax error at itself; probed 2026-10-04 against SQL Server 2025).
+        if (nameToken is not Tokens.Name)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
         var sequenceName = BatchContext.ParseObjectName(context);
         var nvf = new NextValueFor(context, sequenceName);
         context.Batch.CurrentStatement.MarkOpensTransaction();
 
-        // Optional OVER (ORDER BY ...) — parsed and discarded. The simulator
-        // iterates rows in one deterministic order regardless of the OVER
-        // hint; the sequence-advance pattern across rows is unchanged. The
-        // body still goes through the window parser rather than a token skip
-        // so its ORDER BY reaches the Msg 5308 / 5309 constant gate — the
-        // message real reports here names NEXT VALUE FOR by name. Peek for
-        // OVER via a save/restore so the outer loop's GetNextOptional resumes
-        // at the correct token whether OVER is present or not.
+        // Optional OVER (ORDER BY ...), whose ordering the draws follow. The
+        // body goes through the window parser so its ORDER BY reaches the Msg
+        // 5308 / 5309 constant gate — the message real reports here names
+        // NEXT VALUE FOR by name. Peek for OVER via a save/restore so the
+        // outer loop's GetNextOptional resumes at the correct token whether
+        // OVER is present or not.
         // Count the draw for the two refusals a finished statement settles
         // (Msg 11721 / 11723); only the ORDER BY one exempts an OVER, so the
         // two counters part company here.
@@ -2366,7 +2367,7 @@ internal abstract class Expression : ExpressionNode
         if (nvf.Deferred is { } deferred)
             deferred.Windowed = true;
         // A named window (`OVER w`) is accepted as real accepts it (probed
-        // 2026-09-24); like the inline body, the ordering it names is discarded.
+        // 2026-09-24); the ordering it names isn't applied to the draws.
         if (context.GetNextRequired() is Name windowName)
         {
             RequireSameOverDefinition(context, nvf, "@" + windowName.Value.ToUpperInvariant());
@@ -2403,7 +2404,16 @@ internal abstract class Expression : ExpressionNode
         context.RestoreCheckpoint(bodyStart);
         RequireSameOverDefinition(context, nvf, signature.AppendJoin(' ', parts).ToString());
         context.MoveNextRequired();
-        _ = WindowExpression.ParseWindowBody(context);
+        var body = WindowExpression.ParseWindowBody(context);
+        // Only an ordering may follow the reference, and only where a query
+        // block ranks rows (probed 2026-10-04 against SQL Server 2025).
+        if (body.IsEmpty)
+            throw SimulatedSqlException.NextValueForEmptyOver();
+        if (body.PartitionBy.Length > 0)
+            throw SimulatedSqlException.NextValueForPartitionBy();
+        if (context.InDefaultClause || context.InUpdateOrMerge)
+            throw SimulatedSqlException.NextValueForOverNotAllowed();
+        nvf.OverRank = WindowExpression.RegisterSequenceRank(context, body.OrderBy);
         return nvf;
     }
 

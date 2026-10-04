@@ -72,7 +72,18 @@ partial class Simulation
     private static DmlTarget ParseDmlTarget(ParserContext context, RemoteWriteKind? remoteKind)
     {
         var name = ParseDmlTargetName(context, remoteKind, out var remote);
-        return remote is not null ? DmlTarget.ForRemote(name, remote) : ResolveDmlTarget(context, name, remoteKind);
+        if (remote is not null)
+            return DmlTarget.ForRemote(name, remote);
+        var target = ResolveDmlTarget(context, name, remoteKind);
+        // A linked history table takes no UPDATE, DELETE or MERGE, refused as
+        // the batch compiles (probed 2026-10-04 against SQL Server 2025).
+        if (target.Table is { IsHistoryTable: true } history && target.View is null)
+        {
+            throw SimulatedSqlException.CannotWriteTemporalHistoryTable(
+                remoteKind switch { RemoteWriteKind.Update => "UPDATE", RemoteWriteKind.Delete => "DELETE", _ => "MERGE" },
+                QualifyTableName(history, context.Batch.DatabaseFor(history)));
+        }
+        return target;
     }
 
     /// <summary>
