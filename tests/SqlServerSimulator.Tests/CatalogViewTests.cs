@@ -1268,7 +1268,7 @@ public sealed class CatalogViewTests
 
     [TestMethod]
     public void ExtendedSystemProcedures_AreTypedX()
-        => AreEqual(2, new Simulation().ExecuteScalar("select count(*) from sys.system_objects where name in ('sp_executesql', 'xp_msver', 'sp_help') and type = 'X'"));
+        => AreEqual(4, new Simulation().ExecuteScalar("select count(*) from sys.system_objects where name in ('sp_executesql', 'xp_msver', 'sp_help', 'sp_getbindtoken', 'sp_bindsession') and type = 'X'"));
 
     [TestMethod]
     public void SelectStar_ListsColumnsInRealsOrder()

@@ -110,6 +110,6 @@ What carries over from them:
 
 Standing results, each the last full run:
 
-- **Django** (2026-10-02): the 132-app ORM slice (9,295 tests), `schema` and 70 further apps (7,263 tests) — the whole suite but GIS, PostgreSQL and two apps whose migrations fail on both — fail identically on both engines: 0 simulator-only, 0 real-only.
-- **EF Core** `v10.0.2` (2026-10-02): of 51,446 results real fails none and the simulator 2, both asserting the order of rows an `ORDER BY` leaves tied, which is settled as a plan accident (see the backlog's row-order entry).
-- **SMO** (2026-10-02): no simulator bug among the non-matching rows; what is unbuilt is listed in the backlog's TDS section.
+- **Django** (2026-10-05): the 132-app ORM slice (9,295 tests), `schema` and 70 further apps (7,263 tests) — the whole suite but GIS, PostgreSQL and two apps whose migrations fail on both — fail identically on both engines: 0 simulator-only, and real-only only the ghost-record race `get_or_create` hits on real (see the no-ghost-records divergence in [`locking.md`](locking.md)).
+- **EF Core** `v10.0.2` (2026-10-05): of 51,446 results real fails none and the simulator 2, both asserting the order of rows an `ORDER BY` leaves tied, which is settled as a plan accident (see the backlog's row-order entry).
+- **SMO** (2026-10-05): no simulator bug among the non-matching rows; what is unbuilt is listed in the backlog's TDS section.

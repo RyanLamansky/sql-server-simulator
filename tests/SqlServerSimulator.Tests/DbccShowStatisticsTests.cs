@@ -81,6 +81,32 @@ public sealed class DbccShowStatisticsTests
     }
 
     [TestMethod]
+    public void NonPersistedComputedKey_EvaluatesTheColumn()
+    {
+        // The key column has no row slot, so each step's value is evaluated
+        // off the row (WideWorldImporters' Sales.Invoices shape), through an
+        // index and a constraint alike.
+        using var reader = new Simulation().ExecuteReader(
+            """
+            create table t (id int not null primary key, v int not null, d as v * 2, constraint uq_d unique (d));
+            insert t values (1, 10), (2, 20);
+            create index ix_t_d on t(d);
+            dbcc show_statistics(N't', N'ix_t_d') with histogram, no_infomsgs;
+            dbcc show_statistics(N't', N'uq_d') with histogram, no_infomsgs;
+            """);
+
+        for (var set = 0; set < 2; set++)
+        {
+            IsTrue(set == 0 || reader.NextResult());
+            IsTrue(reader.Read());
+            AreEqual(20, reader.GetInt32(0));
+            IsTrue(reader.Read());
+            AreEqual(40, reader.GetInt32(0));
+            IsFalse(reader.Read());
+        }
+    }
+
+    [TestMethod]
     public void StringLeadingKey_RangeHiKeyTypedNVarchar()
     {
         using var reader = new Simulation().ExecuteReader(

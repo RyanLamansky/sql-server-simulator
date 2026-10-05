@@ -306,9 +306,20 @@ partial class Simulation
             if (identity.IsHeap || !BuiltInToken.Equals(identity.Name, statisticsName))
                 continue;
 
-            var leadingOrdinal = identity.Constraint is { } key
-                ? key.StorageOrdinals[0]
-                : identity.Index!.KeyColumns[0].StorageOrdinal;
+            var (leadingOrdinal, leadingFull) = identity.Constraint is { } key
+                ? (key.StorageOrdinals[0], key.FullOrdinals[0])
+                : (identity.Index!.KeyColumns[0].StorageOrdinal, identity.Index.KeyColumns[0].ColumnOrdinal);
+            if (leadingOrdinal < 0)
+            {
+                // A non-persisted computed key column has no row slot; its
+                // value is evaluated off the decoded row.
+                SqlValue[]? computedRow = null;
+                return ComputeHistogram(table.Columns[leadingFull].Type, table, rowBytes =>
+                {
+                    computedRow = DecodeFullRowWithComputed(table, rowBytes, batch, ref computedRow);
+                    return computedRow[leadingFull];
+                });
+            }
             var storedColumns = table.StoredColumns;
             var lobStore = table.Heap;
             return ComputeHistogram(table.Schema[leadingOrdinal], table, rowBytes => RowDecoder.DecodeColumn(storedColumns, rowBytes, leadingOrdinal, lobStore));
