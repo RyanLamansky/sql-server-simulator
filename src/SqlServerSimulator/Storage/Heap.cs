@@ -269,6 +269,14 @@ internal sealed class Heap
     public long LastRowCountChangeGeneration;
 
     /// <summary>
+    /// Every visible row inserted or deleted, the half of a statistic's
+    /// modification count every column shares (see
+    /// <see cref="HeapTable.ModificationCount"/>). Advanced under the latch;
+    /// like <see cref="MutationGeneration"/>, never rolled back.
+    /// </summary>
+    public long RowModifications;
+
+    /// <summary>
     /// A process-wide clock that advances once per transaction begun (see
     /// <c>SimulatedDbTransaction.BeginEpoch</c>), so a heap's
     /// <see cref="LastModifiedEpoch"/> orders against a transaction's start.
@@ -562,7 +570,10 @@ internal sealed class Heap
         this.RowCount++;
         this.MutationGeneration++;
         if (journalEvent)
+        {
             this.LastRowCountChangeGeneration = this.MutationGeneration;
+            this.RowModifications++;
+        }
         this.LastModifiedEpoch = Volatile.Read(ref ModificationEpoch);
         undoLog?.RecordInsert(this, pageIndex, slotIndex);
         if (journalEvent && this.SeekJournalActive)
@@ -995,7 +1006,10 @@ internal sealed class Heap
         var oldImage = journalEvent && this.SeekJournalActive ? this.ReadSlotBytes(pageIndex, slotIndex) : null;
         this.MutationGeneration++;
         if (journalEvent)
+        {
             this.LastRowCountChangeGeneration = this.MutationGeneration;
+            this.RowModifications++;
+        }
         this.LastModifiedEpoch = Volatile.Read(ref ModificationEpoch);
         var page = this.Pages[pageIndex];
         if (page.IsSlotForwarded(slotIndex))

@@ -253,4 +253,22 @@ public sealed class DisabledIndexTests
             insert t values (2, 1);
             select count(*) from t
             """));
+
+    /// <summary>
+    /// An index hint naming a disabled index is Msg 315 by name and Msg 316 by
+    /// id (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void IndexHint_OnADisabledIndex_IsRefused()
+    {
+        const string setup = "create table t (id int primary key, a int); create index ix_a on t (a); alter index ix_a on t disable; ";
+        new Simulation().AssertSqlError(
+            setup + "select id from dbo.t with (index(ix_a))",
+            315,
+            "Index \"ix_a\" on table \"dbo.t\" (specified in the FROM clause) is disabled or resides in a filegroup which is not online.");
+        new Simulation().AssertSqlError(
+            setup + "select id from dbo.t with (index(2))",
+            316,
+            "The index ID 2 on table \"dbo.t\" (specified in the FROM clause) is disabled or resides in a filegroup which is not online.");
+    }
 }

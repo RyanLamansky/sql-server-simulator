@@ -210,6 +210,7 @@ partial class Simulation
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+        SkipOptionClause(context);
         RejectStrayToken(context);
     }
 
@@ -228,7 +229,7 @@ partial class Simulation
     {
         context.MoveNextRequired();
         if (!BatchContext.IsTableVariableName(targetName.Leaf))
-            Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
+            Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false), targetName.ToString(), "MERGE");
         if (context.Token is ReservedKeyword { Keyword: Keyword.As })
             context.MoveNextRequired();
         if (context.Token is Name and not UnquotedString { ContextualKeyword: ContextualKeyword.Using })

@@ -53,7 +53,7 @@ partial class Simulation
         if (!BatchContext.IsTableVariableName(destinationName.Leaf))
         {
             targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
-            Selection.ValidateDmlTargetHints(targetHints);
+            Selection.ValidateDmlTargetHints(targetHints, destinationName.ToString(), "INSERT");
         }
 
         var target = ResolveDmlTarget(context, destinationName, RemoteWriteKind.Insert);
@@ -85,7 +85,7 @@ partial class Simulation
     private static SimulatedStatementOutcome ProcessRemoteInsert(ParserContext context, RemoteWrite remoteWrite, Selection.DmlTopLimit? top, MultiPartName destinationName)
     {
         context.MoveNextRequired();
-        Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false));
+        Selection.ValidateDmlTargetHints(Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false), destinationName.ToString(), "INSERT");
         var checkpoint = context.SaveCheckpoint();
         if (context.Token is Operator { Character: '(' })
         {
@@ -424,6 +424,7 @@ partial class Simulation
             RejectSequenceDefaultOutsideColumnList(valueTuples, tupleSequences, destinationTable, destinationColumns);
             ReportingArity(context, () => RejectValuesArityMismatch(valueTuples, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable));
         }
+        Selection.ParseOptionalDmlOptionClause(context);
 
         if (valueTuples is not null)
         {

@@ -168,13 +168,23 @@ partial class Simulation
                 // REBUILD takes an optional PARTITION = ALL and its own WITH (…)
                 // option block; neither describes anything a heap has.
                 context.MoveNextOptional();
+                var partitionAll = IsPartitionAll(context);
                 namedPartition = ParseOptionalIndexPartitionClause(context, out partitionNumber);
+                // An option list without its WITH is a syntax error at the
+                // first option (probed 2026-10-05 against SQL Server 2025).
+                if (context.Token is Operator { Character: '(' })
+                {
+                    context.MoveNextRequired();
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
                 jsonRefusal = targetsJson ? new JsonRebuildRefusal() : null;
                 rebuildOptions = ParseOptionalIndexWithClause(
                     context,
                     targetsJson ? IndexOptionStatement.RebuildJsonIndex : targetColumnstore == true ? IndexOptionStatement.RebuildColumnstoreIndex : IndexOptionStatement.AlterIndexRebuild,
                     indexName,
                     jsonRefusal);
+                if (rebuildOptions.CompressionOnPartitions && !partitionAll)
+                    throw SimulatedSqlException.CompressionPartitionsWithoutPartitionAll();
                 break;
         }
 
@@ -256,10 +266,15 @@ partial class Simulation
                 }
             }
 
-            // A hypothetical index takes every form and nothing changes
-            // (probed 2026-10-02 against SQL Server 2025).
-            if (table.HypotheticalIndexes.Exists(hypothetical => collation.Equals(hypothetical.Name, indexName)))
+            // A hypothetical index takes every form and nothing changes but
+            // its disabled flag (probed 2026-10-02 and 2026-10-05 against SQL
+            // Server 2025).
+            if (table.HypotheticalIndexes.Find(hypothetical => collation.Equals(hypothetical.Name, indexName)) is { } hypotheticalIndex)
+            {
+                if (form is AlterIndexForm.Disable or AlterIndexForm.Rebuild)
+                    hypotheticalIndex.IsDisabled = form == AlterIndexForm.Disable;
                 return true;
+            }
 
             // Real takes no ALTER INDEX form on a vector index (probed
             // 2026-09-29 against SQL Server 2025).
@@ -404,8 +419,14 @@ partial class Simulation
             case AlterIndexForm.Disable:
                 constraint.IsDisabled = true;
                 DisableForeignKeysOn(batch, table, constraint.IndexId, constraint.Name);
+                if (constraint.IsClustered)
+                    DisableNonclusteredWithClustered(batch, table);
                 break;
             case AlterIndexForm.Rebuild:
+                // A rebuild may not touch a key's IGNORE_DUP_KEY either
+                // (probed 2026-10-05 against SQL Server 2025).
+                if (rebuildOptions.IgnoreDupKeyWritten)
+                    throw SimulatedSqlException.IgnoreDupKeyOnConstraintIndex(constraint.Name);
                 if (constraint.IsDisabled)
                     ValidateExistingRowsForKeyConstraint(table, constraint, batch);
                 constraint.IsDisabled = false;
@@ -414,6 +435,10 @@ partial class Simulation
                 constraint.AllowRowLocks = rebuildOptions.AllowRowLocks ?? constraint.AllowRowLocks;
                 constraint.AllowPageLocks = rebuildOptions.AllowPageLocks ?? constraint.AllowPageLocks;
                 constraint.StatisticsNoRecompute = rebuildOptions.StatisticsNoRecompute ?? constraint.StatisticsNoRecompute;
+                constraint.DataCompression = rebuildOptions.DataCompression ?? constraint.DataCompression;
+                constraint.XmlCompression = rebuildOptions.XmlCompression ?? constraint.XmlCompression;
+                // A rebuild rebuilds the index's statistic from every row.
+                BuildStatistics(batch, table, statistic => ReferenceEquals(statistic.State, constraint.Statistics));
                 break;
             case AlterIndexForm.Reorganize:
                 // Nothing to compact in a flat page list, but a disabled index
@@ -454,6 +479,35 @@ partial class Simulation
         }
     }
 
+    /// <summary>
+    /// Disables every nonclustered index and key of <paramref name="table"/>
+    /// along with its clustered index, which holds the rows they point into,
+    /// with a Msg 3750 apiece after the foreign keys' Msg 1992 — in index id
+    /// order. Rebuilding the clustered index alone leaves them disabled
+    /// (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    private static void DisableNonclusteredWithClustered(BatchContext batch, HeapTable table)
+    {
+        foreach (var identity in table.IndexIdentities())
+        {
+            switch (identity)
+            {
+                case { Constraint: { IsClustered: false, IsDisabled: false } key }:
+                    key.IsDisabled = true;
+                    DisableForeignKeysOn(batch, table, key.IndexId, key.Name);
+                    break;
+                case { Index: { IsClustered: false, IsDisabled: false, IsColumnstore: false } index }:
+                    index.IsDisabled = true;
+                    DisableForeignKeysOn(batch, table, index.IndexId, index.Name);
+                    break;
+                default:
+                    continue;
+            }
+            if (!batch.IsSkipping)
+                batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.IndexDisabledWithClusteredMessage(batch, identity.Name!, table.Name));
+        }
+    }
+
     private static void ApplyToIndex(
         ParserContext context, HeapTable table, Storage.Index index, AlterIndexForm form, bool? ignoreDupKey, int? compressionDelay, IndexOptions rebuildOptions, string writtenTableName)
     {
@@ -463,8 +517,20 @@ partial class Simulation
                 index.IsDisabled = true;
                 table.SettleIndexIds();
                 DisableForeignKeysOn(context.Batch, table, index.IndexId, index.Name);
+                if (index.IsClustered)
+                    DisableNonclusteredWithClustered(context.Batch, table);
                 break;
             case AlterIndexForm.Rebuild:
+                // A rebuild sets IGNORE_DUP_KEY as SET does, refusing it on a
+                // non-unique index (probed 2026-10-05 against SQL Server 2025).
+                if (rebuildOptions.IgnoreDupKeyWritten)
+                {
+                    if (!index.IsUnique)
+                        throw SimulatedSqlException.IgnoreDupKeyOnNonUniqueIndexAlter(index.Name);
+                    if (index.Filter is not null && rebuildOptions.IgnoreDupKey)
+                        throw SimulatedSqlException.IgnoreDupKeyOnFilteredIndex("alter", index.Name, SchemaQualifyTableName(table, context.CurrentDatabase));
+                    index.IgnoreDupKey = rebuildOptions.IgnoreDupKey;
+                }
                 // Rows that accumulated while the index was out of service are
                 // re-validated on the way back in, exactly as a fresh CREATE
                 // UNIQUE INDEX would be: Msg 1505 on a duplicate. A REBUILD of an
@@ -483,6 +549,10 @@ partial class Simulation
                 index.AllowPageLocks = rebuildOptions.AllowPageLocks ?? index.AllowPageLocks;
                 index.StatisticsNoRecompute = rebuildOptions.StatisticsNoRecompute ?? index.StatisticsNoRecompute;
                 index.ColumnstoreArchive = rebuildOptions.ColumnstoreArchive ?? index.ColumnstoreArchive;
+                index.DataCompression = rebuildOptions.DataCompression ?? index.DataCompression;
+                index.XmlCompression = rebuildOptions.XmlCompression ?? index.XmlCompression;
+                if (!index.IsColumnstore)
+                    BuildStatistics(context.Batch, table, statistic => ReferenceEquals(statistic.State, index.Statistics));
                 break;
             case AlterIndexForm.Reorganize:
                 if (index.IsDisabled)
@@ -654,6 +724,18 @@ partial class Simulation
         "MAX_DURATION",
         "WAIT_AT_LOW_PRIORITY",
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Whether the cursor sits on <c>PARTITION = ALL</c>, leaving it there.</summary>
+    private static bool IsPartitionAll(ParserContext context)
+    {
+        if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Partition })
+            return false;
+        var checkpoint = context.SaveCheckpoint();
+        var all = context.MoveNext() && context.Token is Operator { Character: '=' }
+            && context.MoveNext() && context.Token is ReservedKeyword { Keyword: Keyword.All };
+        context.RestoreCheckpoint(checkpoint);
+        return all;
+    }
 
     /// <summary>
     /// Parses the optional <c>PARTITION = { ALL | &lt;number&gt; }</c> clause

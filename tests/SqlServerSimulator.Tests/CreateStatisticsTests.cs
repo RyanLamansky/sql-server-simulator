@@ -4,10 +4,10 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// Behavioral tests for <c>CREATE STATISTICS</c> / <c>DROP STATISTICS</c> and
-/// the <c>sys.stats</c> / <c>sys.stats_columns</c> rows they produce. The
-/// simulator models the declaration rather than a histogram — nothing about
-/// query execution reads a statistic — so the contract is catalog identity.
-/// Probed against SQL Server 2025 on 2026-08-06.
+/// the <c>sys.stats</c> / <c>sys.stats_columns</c> rows they produce; the
+/// histogram a statistic builds is <c>UpdateStatisticsTests</c>' and
+/// <c>DbccShowStatisticsTests</c>' business. Probed against SQL Server 2025 on
+/// 2026-08-06 and 2026-10-05.
 /// </summary>
 [TestClass]
 public sealed class CreateStatisticsTests
@@ -59,8 +59,8 @@ public sealed class CreateStatisticsTests
             """));
 
     /// <summary>
-    /// The sampling options describe how real would scan the data to build a
-    /// histogram there isn't one of here, so they parse and discard.
+    /// The sampling options describe how real scans the data to build its
+    /// histogram; every statistic here is built from every row.
     /// </summary>
     [TestMethod]
     [DataRow("with fullscan")]
@@ -147,4 +147,48 @@ public sealed class CreateStatisticsTests
             create statistics st_1 on t (c);
             select count(*) from sys.stats where object_id = object_id('t')
             """));
+
+    /// <summary>
+    /// CREATE STATISTICS' own option and shape refusals (probed 2026-10-05
+    /// against SQL Server 2025): its option words are a closed list that
+    /// shares none of UPDATE STATISTICS' extras, and a conflict names the
+    /// later option first.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create statistics st on t (b) with sample 101 percent", 1031)]
+    [DataRow("create statistics st on t (b) with sample -1 percent", 102)]
+    [DataRow("create statistics st on t (b) with fullscan, sample 50 percent", 1052)]
+    [DataRow("create statistics st on t (b) with sample 50 percent, sample 10 rows", 1052)]
+    [DataRow("create statistics st on t (b) with fullscan, fullscan", 1039)]
+    [DataRow("create statistics st on t (b) with persist_sample_percent = on", 153)]
+    [DataRow("create statistics st on t (b) with incremental = on", 9108)]
+    [DataRow("create statistics st on t (b) with stats_stream = 0x00", 9105)]
+    [DataRow("create statistics st on t (b) with rowcount = 5, pagecount = 1", 155)]
+    [DataRow("create statistics st on t (b) with no_recompute", 155)]
+    [DataRow("create statistics st on t (b) with resample", 102)]
+    [DataRow("create statistics st on t (b, b)", 1909)]
+    [DataRow("create table x (k int, d xml); create statistics st on x (d)", 1977)]
+    [DataRow("create table g (k int, s geography); create statistics st on g (s)", 1978)]
+    public void Refusals_MatchReal(string statement, int number)
+        => _ = new Simulation().AssertSqlError($"{Table} {statement}", number);
+
+    [TestMethod]
+    public void OnAViewNotSchemaBound_IsMsg1939()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(Table, "create view v as select a from t");
+        sim.AssertSqlError("create statistics st on v (a)", 1939, "Cannot create statistics on view 'v' because the view is not schema bound.");
+    }
+
+    [TestMethod]
+    public void Conflict_NamesTheLaterOptionFirst()
+        => new Simulation().AssertSqlError(
+            $"{Table} create statistics st on t (b) with fullscan, sample 50 percent",
+            1052,
+            "Conflicting CREATE STATISTICS options \"PERCENT\" and \"FULLSCAN\".");
+
+    [TestMethod]
+    public void DropStatistics_OnAnIndex_IsMsg3739()
+        => new Simulation().AssertSqlError(
+            $"{Table} create index ix on t (b); drop statistics t.ix", 3739, "Cannot DROP the index 't.ix' because it is not a statistics collection.");
 }

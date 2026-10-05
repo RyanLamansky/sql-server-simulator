@@ -4,11 +4,12 @@ namespace SqlServerSimulator;
 
 /// <summary>
 /// The inline join-algorithm hint — <c>MERGE</c> / <c>HASH</c> / <c>LOOP</c> /
-/// <c>REMOTE</c> between the join type and <c>JOIN</c>. Accept-and-discard: it
-/// names the physical operator real should use, and the simulator picks its
-/// own, so it can never change an answer. The statement-level
-/// <c>OPTION (MERGE JOIN)</c> spelling is separate and was already accepted.
-/// Grammar probe-confirmed against SQL Server 2025.
+/// <c>REMOTE</c> between the join type and <c>JOIN</c> — and the statement's
+/// <c>OPTION (… JOIN)</c> hints. The simulator picks its own operator, so a
+/// hint never changes an answer; what it does reproduce is real's refusals:
+/// a plan the hinted algorithms can't build (Msg 8622), an inline hint the
+/// OPTION hints exclude (Msg 1042), and the REMOTE restrictions. Probed
+/// against SQL Server 2025.
 /// </summary>
 [TestClass]
 public sealed class InlineJoinHintTests
@@ -112,6 +113,61 @@ public sealed class InlineJoinHintTests
         var messages = new List<int>();
         connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(error => error.Number));
         _ = connection.CreateCommand($"select count(*) from jh1 a {join} jh2 b on b.id = a.id").ExecuteScalar();
+        AreEqual(expected, messages.Count(number => number == 8625));
+    }
+
+    [TestMethod]
+    [DataRow("select count(*) from jh1 a inner hash join jh2 b on b.id > a.id")]
+    [DataRow("select count(*) from jh1 a left merge join jh2 b on b.id > a.id")]
+    [DataRow("select count(*) from jh1 a inner hash join jh2 b on b.id = 1")]
+    [DataRow("select count(*) from jh1 a inner hash join jh2 b on b.id = a.id or b.w = a.v")]
+    [DataRow("select count(*) from jh1 a join jh2 b on b.id > a.id option (hash join)")]
+    [DataRow("select count(*) from jh1 a cross join jh2 b option (merge join)")]
+    [DataRow("select count(*) from jh1 a, jh2 b where b.id > a.id option (hash join)")]
+    [DataRow("select count(*) from jh1 a full join jh2 b on b.id > a.id option (hash join)")]
+    [DataRow("select count(*) from jh1 a inner merge join jh1 b with (forceseek) on b.id = a.id")]
+    public void AnAlgorithmThePredicatesCantBuild_IsMsg8622(string query)
+        => _ = Seeded().AssertSqlError(query, 8622);
+
+    [TestMethod]
+    [DataRow("select count(*) from jh1 a inner hash join jh2 b on b.id = a.id + 1")]
+    [DataRow("select count(*) from jh1 a inner hash join jh2 b on isnull(b.id, 0) = a.id")]
+    [DataRow("select count(*) from jh1 a inner merge join jh2 b on b.id > a.id and b.w = a.v")]
+    [DataRow("select count(*) from jh1 a left hash join jh2 b on b.id > a.id where b.w = a.v")]
+    [DataRow("select count(*) from jh1 a full merge join jh2 b on b.id > a.id")]
+    [DataRow("select count(*) from jh1 a, jh2 b where b.id = a.id option (hash join)")]
+    [DataRow("select count(*) from jh1 a cross join jh2 b option (loop join)")]
+    [DataRow("select count(*) from jh1 a join jh2 b on b.id > a.id option (hash join, loop join)")]
+    public void AnAlgorithmThePredicatesBuild_IsTaken(string query)
+        => _ = Seeded().ExecuteScalar(query);
+
+    [TestMethod]
+    [DataRow("select count(*) from jh1 a inner loop join jh2 b on b.id = a.id option (merge join)", 1042)]
+    [DataRow("select count(*) from jh1 a left loop join jh2 b on b.id = a.id option (hash join)", 1042)]
+    [DataRow("select count(*) from jh1 a inner remote join jh2 b on b.id = a.id option (hash join)", 1071)]
+    [DataRow("select count(*) from jh1 a left remote join jh2 b on b.id = a.id", 1072)]
+    public void InlineHintsMeetTheOptionClausesRules(string query, int number)
+        => _ = Seeded().AssertSqlError(query, number);
+
+    [TestMethod]
+    public void AnInlineHintTheOptionClauseIncludes_IsTaken()
+        => AreEqual(2, Seeded().ExecuteScalar("select count(*) from jh1 a inner loop join jh2 b on b.id = a.id option (hash join, loop join)"));
+
+    /// <summary>
+    /// Msg 8625 goes once per statement however many joins carry a hint, not
+    /// at all under <c>OPTION (FORCE ORDER)</c>, and for a query an
+    /// <c>IF</c> tests too (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(*) from jh1 a inner hash join jh2 b on b.id = a.id inner loop join jh1 c on c.id = b.id", 1)]
+    [DataRow("select count(*) from jh1 a inner hash join jh2 b on b.id = a.id option (force order)", 0)]
+    [DataRow("if exists (select 1 from jh1 a inner hash join jh2 b on b.id = a.id) select 1", 1)]
+    public void Msg8625_PerStatement(string batch, int expected)
+    {
+        using var connection = (SimulatedDbConnection)Seeded().CreateOpenConnection();
+        var messages = new List<int>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(error => error.Number));
+        _ = connection.CreateCommand(batch).ExecuteScalar();
         AreEqual(expected, messages.Count(number => number == 8625));
     }
 }

@@ -548,7 +548,11 @@ partial class Simulation
             storageOrdinals[i] = table.StorageOrdinals[fullOrdinals[i]];
         }
 
-        var isClustered = clustered ?? (kind == KeyConstraintKind.PrimaryKey);
+        // A PRIMARY KEY written without CLUSTERED over a table that already has
+        // a clustered index takes a nonclustered one (probed 2026-10-05 against
+        // SQL Server 2025).
+        var isClustered = clustered ?? (kind == KeyConstraintKind.PrimaryKey
+            && !table.KeyConstraints.Exists(static k => k.IsClustered) && !table.Indexes.Exists(static ix => ix.IsClustered));
         RejectIndexShapeForTable(table, explicitName, isClustered, isColumnstore: false, indexOptions, hasFilter: false, hasInclude: false);
 
         // One clustered index per table, counting a clustered PK / UNIQUE
@@ -574,7 +578,9 @@ partial class Simulation
             RejectIndexOnEmptyFilegroup(context.Batch, table, filegroup);
         table.KeyConstraints.Add(constraint);
         table.NoteStatisticsCreated(constraint.Name, context.CurrentDatabase.Collation);
-        WarnOfWideIndexKey(context.Batch, table.Columns, fullOrdinals, constraint.Name, isClustered);
+        BuildStatistics(context.Batch, table, statistic => isClustered ? statistic.User is null : ReferenceEquals(statistic.State, constraint.Statistics));
+        constraint.KeyMayExceedLimit = WarnOfWideIndexKey(context.Batch, table.Columns, fullOrdinals, constraint.Name, isClustered);
+        table.KeysMayExceedLimit |= constraint.KeyMayExceedLimit;
         if (isClustered)
         {
             table.Partitioning = placement;
@@ -714,6 +720,7 @@ partial class Simulation
         var storedColumns = table.StoredColumns;
         var lobStore = table.Heap;
         SqlValue[]? fullRow = null;
+        SqlValue[]? lowestDuplicate = null;
         foreach (var rowBytes in table.Heap.EnumerateRows())
         {
             SqlValue[] key;
@@ -731,15 +738,18 @@ partial class Simulation
                 key = ReadKeyByFullOrdinals(constraint.FullOrdinals, fullRow);
             }
 
-            if (!seen.Add(new SqlValueKey(key)))
-            {
-                // A memory-optimized table reports the duplicate as an insert
-                // would, naming the table alone (probed 2026-10-02 against SQL
-                // Server 2025).
-                throw table.IsMemoryOptimized
-                    ? SimulatedSqlException.ViolationOfKeyConstraint(constraint.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE KEY", constraint.Name, table.Name, FormatIndexKeyValues(key))
-                    : SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.DuplicateKeyOnCreate(QualifiedForViolation(table), constraint.Name, FormatIndexKeyValues(key)));
-            }
+            // The duplicate quoted is the first in key order (see CompareIndexKeys).
+            if (!seen.Add(new SqlValueKey(key)) && (lowestDuplicate is null || CompareIndexKeys(key, lowestDuplicate, constraint.IsDescending) < 0))
+                lowestDuplicate = key;
+        }
+        if (lowestDuplicate is not null)
+        {
+            // A memory-optimized table reports the duplicate as an insert
+            // would, naming the table alone (probed 2026-10-02 against SQL
+            // Server 2025).
+            throw table.IsMemoryOptimized
+                ? SimulatedSqlException.ViolationOfKeyConstraint(constraint.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE KEY", constraint.Name, table.Name, FormatIndexKeyValues(lowestDuplicate))
+                : SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.DuplicateKeyOnCreate(QualifiedForViolation(table), constraint.Name, FormatIndexKeyValues(lowestDuplicate)));
         }
     }
 

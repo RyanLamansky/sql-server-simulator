@@ -64,7 +64,7 @@ partial class Simulation
         context.MoveNextOptional();
 
         var optionsWritten = context.Token is ReservedKeyword { Keyword: Keyword.With };
-        var noRecompute = ParseStatisticsOptions(context);
+        var options = ParseStatisticsOptions(context);
 
         // The filter follows the options; one written ahead of them is a
         // keyword real stops at (probed 2026-09-30 against SQL Server 2025).
@@ -77,9 +77,9 @@ partial class Simulation
             context.MoveNextRequired();
             RejectFilterPredicateKeywords(context);
             filter = BooleanExpression.Parse(context);
-            CheckFilterPredicate(filter, statistics: true, statisticsName, targetTableName.Leaf);
+            CheckFilterPredicate(filter, statistics: true, statisticsName, targetTableName.ToString());
             filterDefinition = filter.RenderFilterDefinition(context.Batch);
-            noRecompute = ParseStatisticsOptions(context) || noRecompute;
+            options = ParseStatisticsOptions(context).Or(options);
         }
 
         if (context.Batch.IsSkipping)
@@ -87,6 +87,10 @@ partial class Simulation
 
         if (!context.Batch.TryResolveTable(targetTableName, out var table))
         {
+            // A view takes statistics only once schema bound (Msg 1939, probed
+            // 2026-10-05 against SQL Server 2025).
+            if (context.Batch.TryResolveView(targetTableName, out var view) && !view.IsSchemaBound)
+                throw SimulatedSqlException.StatisticsOnViewNotSchemaBound(view.Name);
             throw filter is not null
                 ? SimulatedSqlException.InvalidObjectName(targetTableName, state: 101)
                 : SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
@@ -95,6 +99,12 @@ partial class Simulation
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         if (!PermissionEnforcement.HasObjectAlter(context.Batch, context.Batch.DatabaseFor(table), table.ObjectId, table.SchemaId))
             throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
+        // Nothing here is partitioned, and a statistics stream comes from a
+        // statistic real built (probed 2026-10-05 against SQL Server 2025).
+        if (options.Incremental && table.Partitioning is null)
+            throw SimulatedSqlException.StatisticsCannotBeIncremental(state: 1);
+        if (options.StatsStream)
+            throw SimulatedSqlException.StatisticsStreamCorrupt();
 
         var collation = context.Batch.CurrentDatabase.Collation;
         foreach (var existing in table.UserStatistics)
@@ -126,23 +136,39 @@ partial class Simulation
             }
             if (ordinal < 0)
                 throw SimulatedSqlException.IndexColumnMissing(columnNames[i]);
+            if (Array.IndexOf(ordinals, ordinal, 0, i) >= 0)
+                throw SimulatedSqlException.DuplicateStatisticsColumn(table.Columns[ordinal].Name);
+            // An xml or spatial column takes no statistic (probed 2026-10-05).
+            if (table.Columns[ordinal].Type is XmlSqlType)
+                throw SimulatedSqlException.StatisticsOnXmlColumn(statisticsName, targetTableName.ToString(), table.Columns[ordinal].Name);
+            if (table.Columns[ordinal].Type is SpatialSqlType)
+                throw SimulatedSqlException.VectorKeyColumnInvalid(table.Columns[ordinal].Name, targetTableName.ToString(), state: 1);
             // Statistics take the same determinism / precision gate an index
             // key does — real's Msg 2729 / 2799 both name "index or statistics".
             if (table.Columns[ordinal].Type is VectorSqlType or JsonSqlType or ClrUdtSqlType { Udt.IsByteOrdered: false })
                 throw SimulatedSqlException.VectorKeyColumnInvalid(table.Columns[ordinal].Name, targetTableName.ToString(), table.Columns[ordinal].Type switch { JsonSqlType => 3, VectorSqlType => 4, _ => 1 });
-            RejectComputedKeyColumnNotIndexable(context.Batch, table, table.Columns[ordinal], statisticsName, viaConstraint: false);
+            RejectComputedKeyColumnNotIndexable(context.CurrentDatabase, table.Columns, targetTableName.ToString(), table.Columns[ordinal], statisticsName, viaConstraint: false);
             ordinals[i] = ordinal;
         }
+
+        // Building the statistic evaluates a computed column over every row
+        // (probed 2026-10-05 against SQL Server 2025).
+        List<int> computed = [.. ordinals.Where(ordinal => table.Columns[ordinal] is { Computed: not null, IsPersisted: false })];
+        if (computed.Count > 0)
+            EvaluateComputedColumnsOverRows(table, computed, context.Batch, endsColumnRewrite: false);
 
         var created = new UserStatistic(
             statisticsName,
             NextStatisticsId(table),
             ordinals,
-            noRecompute,
+            options.NoRecompute,
             context.Batch.CurrentStatement.UtcNow,
             filter,
             filterDefinition,
             filterOrdinals);
+        created.Statistics.HasPersistedSample = options.PersistSample;
+        created.Statistics.AutoDrop = options.AutoDrop;
+        created.Statistics.Snapshot = BuildStatisticsSnapshot(context.Batch, table, ordinals, ordinals, filter);
         table.UserStatistics.Add(created);
         RecordDdlUndo(context, () => _ = table.UserStatistics.Remove(created));
         table.NoteStatisticsCreated(statisticsName, context.CurrentDatabase.Collation);
@@ -166,6 +192,10 @@ partial class Simulation
             context.MoveNextRequired();
             pending.Add(BatchContext.ParseObjectName(context));
             context.MoveNextOptional();
+            // The CREATE-style `name ON table` isn't DROP STATISTICS' grammar
+            // (Msg 1053, probed 2026-10-05 against SQL Server 2025).
+            if (context.Token is ReservedKeyword { Keyword: Keyword.On })
+                throw SimulatedSqlException.DropStatisticsNeedsObjectDotName();
         } while (context.Token is Operator { Character: ',' });
 
         if (context.Batch.IsSkipping)
@@ -185,6 +215,10 @@ partial class Simulation
 
             var collation = context.Batch.CurrentDatabase.Collation;
             var index = table.UserStatistics.FindIndex(s => collation.Equals(s.Name, written.Leaf));
+            // An index's statistic goes only with its index (Msg 3739, probed
+            // 2026-10-05 against SQL Server 2025).
+            if (index < 0 && table.IndexIdentities().Exists(identity => identity.Name is { } name && collation.Equals(name, written.Leaf)))
+                throw SimulatedSqlException.CannotDropIndexStatistics(written.ToString());
             if (index < 0)
                 throw SimulatedSqlException.CannotDropStatistics(written.ToString());
             var dropped = table.UserStatistics[index];
@@ -214,46 +248,131 @@ partial class Simulation
     /// </summary>
     private static int NextStatisticsId(HeapTable table) => table.NextFreeIndexId();
 
+    /// <summary>What a <c>CREATE STATISTICS</c> option list wrote.</summary>
+    private readonly struct CreateStatisticsOptions(bool noRecompute, bool persistSample, bool autoDrop, bool incremental, bool statsStream)
+    {
+        public readonly bool NoRecompute = noRecompute;
+        public readonly bool PersistSample = persistSample;
+        public readonly bool AutoDrop = autoDrop;
+        public readonly bool Incremental = incremental;
+        public readonly bool StatsStream = statsStream;
+
+        public CreateStatisticsOptions Or(CreateStatisticsOptions other) =>
+            new(this.NoRecompute || other.NoRecompute, this.PersistSample || other.PersistSample, this.AutoDrop || other.AutoDrop,
+                this.Incremental || other.Incremental, this.StatsStream || other.StatsStream);
+    }
+
+    /// <summary>The sampling options in the order real names a conflicting pair (probed 2026-10-05).</summary>
+    private static readonly string[] CreateStatisticsSamplingOrder = ["STATS_STREAM", "ROWS", "PERCENT", "FULLSCAN"];
+
     /// <summary>
-    /// Consumes the optional <c>WITH</c> option list, returning whether
-    /// <c>NORECOMPUTE</c> appeared. Everything else is accepted and discarded.
+    /// Consumes the optional <c>WITH</c> option list of <c>CREATE
+    /// STATISTICS</c>, raising real's option errors as it parses (probed
+    /// 2026-10-05 against SQL Server 2025): an unknown name — or a value-less
+    /// option given one — Msg 155, a repeated one Msg 1039, two sampling
+    /// choices Msg 1052, a percent past 100 Msg 1031, a non-integer sample
+    /// Msg 102, <c>PERSIST_SAMPLE_PERCENT = ON</c> without a sampling choice
+    /// Msg 153 and a <c>MAXDOP</c> past 32767 Msg 304.
     /// </summary>
-    private static bool ParseStatisticsOptions(ParserContext context)
+    private static CreateStatisticsOptions ParseStatisticsOptions(ParserContext context)
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
-            return false;
+            return default;
 
-        var noRecompute = false;
-        var depth = 0;
-        context.MoveNextRequired();
-        while (context.Token is { } token)
+        bool noRecompute = false, persistSample = false, autoDrop = false, incremental = false, statsStream = false;
+        var seen = new List<string>();
+        string? sampling = null;
+        // An option name is an identifier, at most 128 characters.
+        Span<char> buffer = stackalloc char[128];
+        do
         {
-            switch (token)
+            var token = context.GetNextRequired();
+            var source = token.Source;
+            var written = token is ReservedKeyword ? source.ToString().ToUpperInvariant() : source.ToString();
+            var upper = buffer[..Math.Min(source.Length, buffer.Length)];
+            _ = source[..upper.Length].ToUpperInvariant(upper);
+            var valued = NextIsEquals(context);
+            string recorded;
+            switch (upper)
             {
-                case Operator { Character: '(' }:
-                    depth++;
+                case "AUTO_DROP" when valued:
+                    autoDrop = ParseOnOffValue(context);
+                    recorded = "AUTO_DROP";
                     break;
-                case Operator { Character: ')' }:
-                    depth--;
+                case "FULLSCAN" when !valued:
+                    sampling = ConflictingCreateStatisticsOption(sampling, "FULLSCAN");
+                    recorded = "FULLSCAN";
                     break;
-                // A comma at the top of the option list separates options; one
-                // inside a parenthesized option value belongs to that value.
-                case Operator { Character: ',' } when depth == 0:
+                case "INCREMENTAL" when valued:
+                    incremental = ParseOnOffValue(context);
+                    recorded = "INCREMENTAL";
                     break;
-                case Name option when option.Value.Equals("NORECOMPUTE", StringComparison.OrdinalIgnoreCase):
+                case "MAXDOP" when valued:
+                    context.MoveNextRequired();
+                    context.MoveNextRequired();
+                    if (ReadIntegerOptionLiteral(context) > 32767)
+                        throw SimulatedSqlException.IndexMaxDopOutOfRange(context.Token.Source.ToString());
+                    recorded = "MAXDOP";
+                    break;
+                case "NORECOMPUTE" when !valued:
                     noRecompute = true;
+                    recorded = "NORECOMPUTE";
                     break;
-                case Operator or Name or Numeric or Literal:
+                case "PERSIST_SAMPLE_PERCENT" when valued:
+                    persistSample = ParseOnOffValue(context);
+                    recorded = "PERSIST_SAMPLE_PERCENT";
+                    break;
+                case "RESAMPLE":
+                    throw SimulatedSqlException.SyntaxErrorNearText("RESAMPLE");
+                case "SAMPLE" when !valued:
+                    if (context.GetNextRequired() is not Numeric { Value: var amount } || amount.Type != SqlType.Int32)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    var unit = context.GetNextRequired() switch
+                    {
+                        ReservedKeyword { Keyword: Keyword.Percent } => "PERCENT",
+                        UnquotedString { ContextualKeyword: ContextualKeyword.Rows } => "ROWS",
+                        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                    };
+                    if (unit == "PERCENT" && amount.AsInt32 > 100)
+                        throw SimulatedSqlException.TopPercentOutOfRange();
+                    sampling = ConflictingCreateStatisticsOption(sampling, unit);
+                    recorded = "SAMPLE";
+                    break;
+                case "STATS_STREAM" when valued:
+                    context.MoveNextRequired();
+                    context.MoveNextRequired();
+                    sampling = ConflictingCreateStatisticsOption(sampling, "STATS_STREAM");
+                    statsStream = true;
+                    recorded = "STATS_STREAM";
                     break;
                 default:
-                    // A reserved keyword ends the option list — the statement
-                    // is over and the next one begins.
-                    return noRecompute;
+                    throw SimulatedSqlException.UnrecognizedCreateStatisticsOption(written);
             }
+            RecordOption(seen, recorded);
             context.MoveNextOptional();
-            if (context.Token is null)
-                break;
-        }
-        return noRecompute;
+        } while (context.Token is Operator { Character: ',' });
+
+        if (persistSample && sampling is null)
+            throw SimulatedSqlException.InvalidUsageOfIndexOption("PERSIST_SAMPLE_PERCENT", "CREATE STATISTICS");
+        return new CreateStatisticsOptions(noRecompute, persistSample, autoDrop, incremental, statsStream);
+    }
+
+    /// <summary>Whether the token after the cursor is <c>=</c>, leaving the cursor where it is.</summary>
+    private static bool NextIsEquals(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var equals = context.MoveNext() && context.Token is Operator { Character: '=' };
+        context.RestoreCheckpoint(checkpoint);
+        return equals;
+    }
+
+    /// <summary>Takes <paramref name="option"/> as the sampling choice, or raises Msg 1052 naming the two in real's order.</summary>
+    private static string ConflictingCreateStatisticsOption(string? chosen, string option)
+    {
+        if (chosen is null || chosen == option)
+            return option;
+        return Array.IndexOf(CreateStatisticsSamplingOrder, chosen) < Array.IndexOf(CreateStatisticsSamplingOrder, option)
+            ? throw SimulatedSqlException.ConflictingCreateStatisticsOptions(chosen, option)
+            : throw SimulatedSqlException.ConflictingCreateStatisticsOptions(option, chosen);
     }
 }

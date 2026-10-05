@@ -35,9 +35,12 @@ partial class Simulation
     /// A statistic a report lists: an index's, or a <c>CREATE STATISTICS</c>
     /// one, in <c>stats_id</c> order.
     /// </summary>
-    private readonly struct ReportedStatistic(string name, int leadingOrdinal, Action<bool> setNoRecompute, bool noRecompute)
+    private readonly struct ReportedStatistic(string name, int leadingOrdinal, Action<bool> setNoRecompute, bool noRecompute, StatisticsState? state = null)
     {
         public readonly string Name = name;
+
+        /// <summary>The statistic's state, whose snapshot dates it; null for an indexed view's.</summary>
+        public readonly StatisticsState? State = state;
         public readonly int LeadingOrdinal = leadingOrdinal;
         public readonly bool NoRecompute = noRecompute;
         public readonly Action<bool> SetNoRecompute = setNoRecompute;
@@ -51,14 +54,14 @@ partial class Simulation
             if (identity.IsHeap || identity.Name is not { } name || identity.Index is { IsColumnstore: true })
                 continue;
             if (identity.Constraint is { } constraint)
-                list.Add(new(name, constraint.FullOrdinals.Length > 0 ? constraint.FullOrdinals[0] : -1, value => constraint.StatisticsNoRecompute = value, constraint.StatisticsNoRecompute));
+                list.Add(new(name, constraint.FullOrdinals.Length > 0 ? constraint.FullOrdinals[0] : -1, value => constraint.StatisticsNoRecompute = value, constraint.StatisticsNoRecompute, constraint.Statistics));
             else if (identity.Index is { } index)
-                list.Add(new(name, index.KeyFullOrdinals.Length > 0 ? index.KeyFullOrdinals[0] : -1, value => index.StatisticsNoRecompute = value, index.StatisticsNoRecompute));
+                list.Add(new(name, index.KeyFullOrdinals.Length > 0 ? index.KeyFullOrdinals[0] : -1, value => index.StatisticsNoRecompute = value, index.StatisticsNoRecompute, index.Statistics));
         }
         if (userStatistics is not null)
         {
             foreach (var statistic in userStatistics)
-                list.Add(new(statistic.Name, statistic.ColumnFullOrdinals.Length > 0 ? statistic.ColumnFullOrdinals[0] : -1, value => statistic.NoRecompute = value, statistic.NoRecompute));
+                list.Add(new(statistic.Name, statistic.ColumnFullOrdinals.Length > 0 ? statistic.ColumnFullOrdinals[0] : -1, value => statistic.NoRecompute = value, statistic.NoRecompute, statistic.Statistics));
         }
         return list;
     }
@@ -116,6 +119,7 @@ partial class Simulation
                 {
                     updated++;
                     table.MarkStatisticsFresh([statistic.Name], collation);
+                    BuildStatistics(batch, table, candidate => ReferenceEquals(candidate.State, statistic.State));
                     yield return ProcedureMessage(batch, calledAs, 173, 15652, $"    {QuoteIdentifier(statistic.Name)} has been updated...");
                 }
                 else
@@ -135,7 +139,8 @@ partial class Simulation
     /// <c>sp_autostats @tblname [, @flagc [, @indname]]</c> reports a table's or
     /// indexed view's automatic-statistics setting per statistic, or sets it for
     /// all of them or the one named: OFF is <c>sys.stats.no_recompute</c> = 1.
-    /// The report has no <c>Last Updated</c> date, since nothing here builds one.
+    /// <c>Last Updated</c> is when each was last built, NULL for one built over
+    /// an empty table and not since.
     /// A <c>@flagc</c> that is neither ON nor OFF answers the usage message.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpAutoStats(BatchContext batch, string calledAs)
@@ -207,7 +212,7 @@ partial class Simulation
             rows.Add([
                 SqlValue.FromNVarchar(QuoteIdentifier(statistic.Name)),
                 SqlValue.FromVarchar(statistic.NoRecompute ? "OFF" : "ON"),
-                SqlValue.Null(SqlType.DateTime),
+                statistic.State?.Snapshot is { } snapshot ? SqlValue.FromDateTime(snapshot.Updated) : SqlValue.Null(SqlType.DateTime),
             ]);
         }
         var autoUpdate = database.Switches.HasFlag(DatabaseSwitches.AutoUpdateStatistics) ? "ON" : "OFF";

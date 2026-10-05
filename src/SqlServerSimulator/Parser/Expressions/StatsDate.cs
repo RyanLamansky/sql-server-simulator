@@ -47,11 +47,15 @@ internal sealed class StatsDate : Expression
         if (ObjectProperty.FindObject(runtime.Batch.CurrentDatabase, objectId) is not HeapTable table)
             return SqlValue.Null(SqlType.DateTime);
 
-        // Use the same resolver as INDEX_COL / INDEXKEY_PROPERTY so the
-        // stats_id and sys.indexes.index_id agree. Unknown id → NULL.
-        return IndexLookup.ResolveByIndexId(table, statsId) is null
-            ? SqlValue.Null(SqlType.DateTime)
-            : SqlValue.FromDateTime(table.CreateDate);
+        // When the statistic was last built — NULL for one built over an
+        // empty table and not since, as real reports it (probed 2026-10-05
+        // against SQL Server 2025) — or NULL for an unknown id.
+        foreach (var statistic in Simulation.StatisticsOn(table))
+        {
+            if (statistic.StatsId == statsId)
+                return statistic.State.Snapshot is { } snapshot ? SqlValue.FromDateTime(snapshot.Updated) : SqlValue.Null(SqlType.DateTime);
+        }
+        return SqlValue.Null(SqlType.DateTime);
     }
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)

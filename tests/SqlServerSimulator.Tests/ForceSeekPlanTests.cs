@@ -190,4 +190,40 @@ public sealed class ForceSeekPlanTests
         using var connection = sim.CreateOpenConnection();
         AreEqual(2, connection.CreateCommand("select count(*) from t with (forceseek) where a in (1, 2)").ExecuteScalar());
     }
+
+    /// <summary>
+    /// INDEX(0), the heap or clustered scan, beside any other index is a plan
+    /// no access path builds — Msg 8622 in state 2 — while repeating one index
+    /// is fine (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select count(*) from t with (index(0, 1))")]
+    [DataRow("select count(*) from t with (index(ia, 0))")]
+    [DataRow("select count(*) from t with (index(0), index(2))")]
+    public void IndexZeroBesideAnotherIndex_IsMsg8622State2(string query)
+        => AreEqual(2, new Simulation().AssertSqlError(Setup + query, 8622).State);
+
+    [TestMethod]
+    public void IndexRepeated_IsTaken()
+        => Accepts("select count(*) from t with (index(0, 0)); select count(*) from t with (index(1, 1))");
+
+    /// <summary>
+    /// FORCESEEK's nested form names its index by id as well as by name, the
+    /// messages then giving the id as its name, and index 0 seeks nothing.
+    /// </summary>
+    [TestMethod]
+    public void ForceSeek_ByIndexId()
+    {
+        // The inline indexes take their ids in reverse, as on real: ia is 4.
+        Accepts("select count(*) from t with (forceseek(4(a))) where a = 1");
+        AreEqual(
+            "The query processor could not produce a query plan because the name 'k' in the FORCESEEK hint on table or view 't' did not match the key column names of the index '4'.",
+            new Simulation().AssertSqlError(Setup + "select count(*) from t with (forceseek(4(k))) where a = 1", 362).Message);
+        _ = new Simulation().AssertSqlError(Setup + "select count(*) from t with (forceseek(9(k))) where k = 1", 307);
+        _ = new Simulation().AssertSqlError(Setup + "select count(*) from t with (forceseek(0(k))) where k = 1", 10749);
+    }
+
+    [TestMethod]
+    public void ForceSeek_ADisabledIndexSeeksNothing()
+        => _ = new Simulation().AssertSqlError(Setup + "alter index ia on t disable; alter index iab on t disable; select count(*) from t with (forceseek) where a = 1", 8622);
 }

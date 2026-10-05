@@ -828,14 +828,37 @@ internal sealed partial class Selection
         // closed-list per Selection.Hints.cs; MAXRECURSION applies to in-
         // scope recursive CTEs, everything else recognized is discarded
         // (the simulator has nothing to dispatch on a hint against).
+        // Only the statement's own query takes one: a subquery's, a derived
+        // table's, a CTE's or an EXISTS test's is Msg 156 at the keyword, and
+        // so is a set operator or a second OPTION after it, while a FOR XML /
+        // FOR JSON clause may follow it (probed 2026-10-05 against SQL Server
+        // 2025).
+        OptionClause? optionClause = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Option } optionKeyword)
         {
-            if (DefinesModuleQuery(context, scope))
+            if (DefinesModuleQuery(context, scope) || scope.Position is QueryPosition.Derived or QueryPosition.Subquery or QueryPosition.Exists)
                 throw SimulatedSqlException.SyntaxErrorNearKeyword(optionKeyword);
-            ParseOptionClause(context);
+            optionClause = ParseOptionClause(context);
             bareProjectionStatement = false;
             context.SimpleParameterizationBlocked = true;
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect or Keyword.Option } trailing)
+                throw SimulatedSqlException.SyntaxErrorNearKeyword(trailing);
+            if (ReferenceEquals(combined, beforeForClauses) && context.Token is ReservedKeyword { Keyword: Keyword.For })
+            {
+                combined = ParseOptionalForXml(context, ParseOptionalForJson(context, combined, scope), scope);
+                if (!ReferenceEquals(combined, beforeForClauses))
+                    combined.SimplyParameterizable = beforeForClauses.SimplyParameterizable;
+            }
         }
+        // The statement's hints are settled where its outermost query ends.
+        var endsStatement = scope.Position switch
+        {
+            QueryPosition.Statement => ownsSecurableSink || context.DefiningModuleQuery != DefiningModuleQuery.None,
+            QueryPosition.InsertSource or QueryPosition.ParenthesizedInsertSource or QueryPosition.Inlined => true,
+            _ => false,
+        };
+        if (endsStatement)
+            SettleStatementHints(context, optionClause);
 
         if (ownsSecurableSink)
         {
@@ -1232,6 +1255,44 @@ internal sealed partial class Selection
         {
             bindErrors?.CloseScope(context.Token);
         }
+    }
+
+    /// <summary>
+    /// Whether the query block can read a base-table column in a predicate at
+    /// all — a base table among its sources and some clause that loads
+    /// statistics — so the common predicate-free or table-free block skips
+    /// gathering operands.
+    /// </summary>
+    private static bool ReadsPredicateColumns(List<FromSource> sources, FromClause fromClause, List<JoinSpec> joins, bool distinct)
+    {
+        if (!sources.Exists(static source => source.BackingTable is { IsTableVariable: false }))
+            return false;
+        return distinct || fromClause.Excluders.Count > 0 || fromClause.Having is not null || fromClause.GroupByAllFilter is not null
+            || fromClause.AllGroupingExpressions.Count > 0 || joins.Exists(static join => join.OnPredicate is not null);
+    }
+
+    /// <summary>
+    /// The expressions whose column references the optimizer loads statistics
+    /// for: the WHERE's and HAVING's operands, every join's ON, the GROUP BY,
+    /// and the select list of a DISTINCT.
+    /// </summary>
+    private static List<Expression> PredicateOperands(FromClause fromClause, List<JoinSpec> joins, List<Expression>? distinctList)
+    {
+        var operands = new List<Expression>();
+        foreach (var excluder in fromClause.Excluders)
+            excluder.VisitOperandExpressions(operands.Add);
+        fromClause.Having?.VisitOperandExpressions(operands.Add);
+        if (fromClause.GroupByAllFilter is { } groupByAllFilter)
+        {
+            foreach (var excluder in groupByAllFilter)
+                excluder.VisitOperandExpressions(operands.Add);
+        }
+        foreach (var join in joins)
+            join.OnPredicate?.VisitOperandExpressions(operands.Add);
+        operands.AddRange(fromClause.AllGroupingExpressions);
+        if (distinctList is not null)
+            operands.AddRange(distinctList);
+        return operands;
     }
 
     /// <summary>
@@ -2229,6 +2290,8 @@ internal sealed partial class Selection
                     }
                     RejectMisplacedIdentityFunction(context, expressions, intoTarget);
                     ValidateForcedSeeks(context, [.. sources], [.. joins], fromClause.Having is { } having ? [.. fromClause.Excluders, having] : fromClause.Excluders, expressions, scope.Position == QueryPosition.Subquery && expressions.Count == 1 ? expressions[0] : null);
+                    if (!context.Batch.IsSkipping && ReadsPredicateColumns(sources, fromClause, joins, distinct))
+                        Simulation.LoadPredicateStatistics(context.Batch, sources, PredicateOperands(fromClause, joins, distinct ? expressions : null));
                     ApplyShortestPath(context, scope, sources, joins, expressions, fromClause);
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, fromClause.Match?.StarOrder(sources) ?? sources);
                     JoinSpec[] joinArray = [.. joins];

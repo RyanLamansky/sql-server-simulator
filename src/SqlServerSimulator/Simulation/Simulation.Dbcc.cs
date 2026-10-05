@@ -148,28 +148,25 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Parses and executes <c>DBCC SHOW_STATISTICS(&lt;table&gt;, &lt;stat&gt;) WITH
-    /// HISTOGRAM</c> — DacFx's bacpac-export chunking probe — peeking past the
-    /// <c>DBCC</c> keyword and restoring the cursor (returning false) on any
-    /// other subcommand. Both argument forms real accepts are handled: a
-    /// <c>N'...'</c> string literal whose content is a 1- / 2-part bracketed name
-    /// (DacFx's form) and a bare dotted identifier. Only <c>WITH HISTOGRAM</c>
-    /// (Msg 2528 after the rows) and <c>WITH HISTOGRAM, NO_INFOMSGS</c> are
-    /// modeled; the no-WITH three-result-set form and every other WITH option
-    /// (STAT_HEADER / DENSITY_VECTOR / STATS_STREAM) raise
-    /// <see cref="NotSupportedException"/> naming the unmodeled option.
+    /// Parses and executes <c>DBCC SHOW_STATISTICS(&lt;table&gt;, &lt;stat&gt;)
+    /// [WITH option [, …]]</c> — among others DacFx's bacpac-export chunking
+    /// probe — peeking past the <c>DBCC</c> keyword and restoring the cursor
+    /// (returning false) on any other subcommand. Each argument is a
+    /// <c>N'...'</c> string literal holding a 1- / 2-part name (DacFx's form),
+    /// a bare dotted identifier, or a variable holding the name.
     /// </summary>
     /// <remarks>
-    /// The named statistic is matched against the table's index-backed stats via
-    /// the canonical <see cref="HeapTable.IndexIdentities"/> allocator; a heap
-    /// identity (no backing index) can't match and a miss raises Msg 2767. The
-    /// histogram is generated honestly from live heap data but as a single bucket
-    /// (real emits up to ~200 steps): <c>RANGE_HI_KEY</c> = MAX of the leading key
-    /// column, <c>EQ_ROWS</c> = rows equal to that max, <c>RANGE_ROWS</c> = the
-    /// remaining non-null rows, <c>DISTINCT_RANGE_ROWS</c> = distinct non-null
-    /// values minus one, <c>AVG_RANGE_ROWS</c> = <c>RANGE_ROWS / DISTINCT_RANGE_ROWS</c>
-    /// (1 when there are no range rows, matching real's single-row convention).
-    /// An empty table yields an empty (0-row) result set.
+    /// The report reads the statistic's snapshot — the rows as they stood when
+    /// it was last built (see <see cref="StatisticsSnapshot"/>) — in up to
+    /// three result sets, in real's fixed order: the <c>STAT_HEADER</c> row,
+    /// the <c>DENSITY_VECTOR</c> and the <c>HISTOGRAM</c>, all three when no
+    /// option picks among them. A statistic built over an empty table reports
+    /// a header of NULLs and no density or histogram rows. <c>STATS_STREAM</c>
+    /// (the serialized statistic) raises <see cref="NotSupportedException"/>.
+    /// Errors mirror real: an unknown option is Msg 195 while compiling, an
+    /// unresolvable table Msg 2501, an unknown statistic Msg 2767, a NULL,
+    /// numeric or unparseable argument Msg 2560 (probed 2026-10-05 against SQL
+    /// Server 2025).
     /// </remarks>
     private static bool TryParseShowStatistics(ParserContext context, BatchContext batch, out List<SimulatedStatementOutcome> outcomes)
     {
@@ -186,7 +183,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
-        var (tableName, tableText) = ParseShowStatisticsName(context, parameterNumber: 1);
+        var tableArgument = ParseShowStatisticsArgument(context, parameterNumber: 1);
 
         // One argument is Msg 2583, Msg 2528 following it (probed 2026-10-04
         // against SQL Server 2025).
@@ -200,15 +197,12 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
         context.MoveNextRequired();
-        var (statName, _) = ParseShowStatisticsName(context, parameterNumber: 2);
+        var statisticArgument = ParseShowStatisticsArgument(context, parameterNumber: 2);
 
         if (context.GetNextRequired() is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        // The option list: HISTOGRAM alone ships; the other forms are read so
-        // the name and permission checks they share still answer.
-        string? unsupported = null;
-        var histogram = false;
+        bool header = false, density = false, histogram = false, statsStream = false;
         var informational = true;
         var afterParen = context.SaveCheckpoint();
         if (context.MoveNext() && context.Token is ReservedKeyword { Keyword: Keyword.With })
@@ -218,10 +212,16 @@ partial class Simulation
                 var option = context.GetNextRequired<Name>();
                 if (BuiltInToken.Equals(option.Value, "HISTOGRAM"))
                     histogram = true;
+                else if (BuiltInToken.Equals(option.Value, "STAT_HEADER"))
+                    header = true;
+                else if (BuiltInToken.Equals(option.Value, "DENSITY_VECTOR"))
+                    density = true;
                 else if (BuiltInToken.Equals(option.Value, "NO_INFOMSGS"))
                     informational = false;
+                else if (BuiltInToken.Equals(option.Value, "STATS_STREAM"))
+                    statsStream = true;
                 else
-                    unsupported ??= option.Value;
+                    throw SimulatedSqlException.WithOptionNotRecognized(option.Value);
                 var afterOption = context.SaveCheckpoint();
                 if (context.MoveNext() && context.Token is Operator { Character: ',' })
                     continue;
@@ -233,9 +233,14 @@ partial class Simulation
         {
             context.RestoreCheckpoint(afterParen);
         }
+        if (!header && !density && !histogram)
+            header = density = histogram = true;
 
         if (batch.IsSkipping)
             return true;
+
+        var (tableName, tableText) = ResolveShowStatisticsArgument(batch, tableArgument, parameterNumber: 1);
+        var (statName, _) = ResolveShowStatisticsArgument(batch, statisticArgument, parameterNumber: 2);
 
         if (!batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.CannotFindTableOrObject(tableText);
@@ -249,182 +254,150 @@ partial class Simulation
                 batch.Connection.Security.Effective.DatabasePrincipalName, table.Name, database.Name, SchemaNameOf(database, table), tableText));
         }
 
-        SimulatedSqlResultSet rows;
-        try
+        var collation = batch.CurrentDatabase.Collation;
+        TableStatistic? found = null;
+        foreach (var candidate in StatisticsOn(table))
         {
-            rows = BuildHistogram(batch, table, statName.Leaf);
+            if (collation.Equals(candidate.Name, statName.Leaf))
+            {
+                found = candidate;
+                break;
+            }
         }
-        catch (SimulatedSqlException missing) when (missing.Number == 2767 && informational)
+        if (found is not { } statistic)
         {
-            throw SimulatedSqlException.FollowedByDbccCompleted(missing);
+            var missing = SimulatedSqlException.CouldNotLocateStatistics(statName.Leaf);
+            throw informational ? SimulatedSqlException.FollowedByDbccCompleted(missing) : missing;
         }
-        if (unsupported is not null || !histogram)
-        {
-            throw new NotSupportedException(unsupported is null
-                ? "DBCC SHOW_STATISTICS without WITH HISTOGRAM (the STAT_HEADER / DENSITY_VECTOR / HISTOGRAM three-result-set form) isn't modeled."
-                : $"DBCC SHOW_STATISTICS WITH {unsupported} isn't modeled; only WITH HISTOGRAM ships.");
-        }
+        if (statsStream)
+            throw new NotSupportedException("DBCC SHOW_STATISTICS WITH STATS_STREAM (the serialized statistic) isn't modeled.");
 
-        outcomes.Add(rows);
+        var snapshot = statistic.State.Snapshot;
+        if (header)
+            outcomes.Add(StatisticsHeader(statistic, snapshot));
+        if (density)
+            outcomes.Add(StatisticsDensityVector(snapshot));
+        if (histogram)
+            outcomes.Add(StatisticsHistogram(table.Columns[statistic.LeadingOrdinal].Type, snapshot));
         if (informational)
             AfterDbccRows(batch, outcomes, SimulatedSqlException.DbccExecutionCompletedMessage(batch));
         return true;
     }
 
-    /// <summary>
-    /// Reads one <c>DBCC SHOW_STATISTICS</c> argument as an object name: a
-    /// <c>N'[schema].[table]'</c> string literal (parsed with the same seam
-    /// <c>OBJECT_ID</c> uses) or a bare dotted / bracketed identifier. Returns the
-    /// parsed <see cref="MultiPartName"/> plus the raw text real echoes in its
-    /// Msg 2501. A NULL or unparseable argument raises Msg 2560.
-    /// </summary>
-    private static (MultiPartName Name, string Display) ParseShowStatisticsName(ParserContext context, int parameterNumber)
+    private static readonly SqlType[] StatisticsHeaderSchema =
+    [
+        SqlType.SystemName,
+        NVarcharSqlType.Get(20, Collation.Baseline, Coercibility.CoercibleDefault),
+        SqlType.BigInt,
+        SqlType.BigInt,
+        SqlType.SmallInt,
+        SqlType.Real,
+        SqlType.Real,
+        NCharSqlType.Get(3, Collation.Baseline, Coercibility.CoercibleDefault),
+        NVarcharSqlType.Get(-1, Collation.Baseline, Coercibility.CoercibleDefault),
+        SqlType.BigInt,
+        SqlType.Float,
+    ];
+
+    private static readonly string[] StatisticsHeaderColumnNames =
+        ["Name", "Updated", "Rows", "Rows Sampled", "Steps", "Density", "Average key length", "String Index", "Filter Expression", "Unfiltered Rows", "Persisted Sample Percent"];
+
+    private static readonly SqlType[] DensityVectorSchema =
+        [SqlType.Real, SqlType.Real, NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.CoercibleDefault)];
+
+    private static readonly string[] DensityVectorColumnNames = ["All density", "Average Length", "Columns"];
+
+    /// <summary>The <c>STAT_HEADER</c> row: every value NULL but the name for a statistic without a snapshot.</summary>
+    private static SimulatedSqlResultSet StatisticsHeader(TableStatistic statistic, StatisticsSnapshot? snapshot)
     {
-        if (context.Token is Literal literal)
+        SqlValue[] row = snapshot is null
+            ? [SqlValue.FromSystemName(statistic.Name), .. StatisticsHeaderSchema[1..].Select(static type => SqlValue.Null(type))]
+            :
+            [
+                SqlValue.FromSystemName(statistic.Name),
+                SqlValue.FromString(StatisticsHeaderSchema[1], SqlValue.FromDateTime(snapshot.Updated).CoerceTo(SqlType.NVarchar).AsString),
+                SqlValue.FromInt64(snapshot.Rows),
+                SqlValue.FromInt64(snapshot.Rows),
+                SqlValue.FromInt16((short)snapshot.Histogram.Length),
+                SqlValue.FromSingle(snapshot.HeaderDensity),
+                SqlValue.FromSingle(snapshot.AverageKeyLength),
+                SqlValue.FromString(StatisticsHeaderSchema[7], snapshot.StringIndex ? "YES" : "NO "),
+                statistic.FilterDefinition is null ? SqlValue.Null(StatisticsHeaderSchema[8]) : SqlValue.FromString(StatisticsHeaderSchema[8], statistic.FilterDefinition),
+                SqlValue.FromInt64(snapshot.UnfilteredRows),
+                SqlValue.FromDouble(0),
+            ];
+        return new SimulatedSqlResultSet(StatisticsHeaderSchema, StatisticsHeaderColumnNames, [RowEncoder.EncodeRow(StatisticsHeaderSchema, row)]);
+    }
+
+    private static SimulatedSqlResultSet StatisticsDensityVector(StatisticsSnapshot? snapshot)
+    {
+        var rows = new List<byte[]>();
+        foreach (var entry in snapshot?.DensityVector ?? [])
         {
-            if (literal.Value.IsNull)
-                throw SimulatedSqlException.DbccParameterIsIncorrect(parameterNumber);
-            var text = literal.Value.CoerceTo(SqlType.NVarchar).AsString;
-            return ObjectId.TryParseObjectName(text, out var parsed)
-                ? (parsed, text)
-                : throw SimulatedSqlException.DbccParameterIsIncorrect(parameterNumber);
+            rows.Add(RowEncoder.EncodeRow(DensityVectorSchema,
+                [SqlValue.FromSingle(entry.AllDensity), SqlValue.FromSingle(entry.AverageLength), SqlValue.FromString(DensityVectorSchema[2], entry.Columns)]));
         }
-        var name = BatchContext.ParseObjectName(context);
-        return (name, name.ToString());
+        return new SimulatedSqlResultSet(DensityVectorSchema, DensityVectorColumnNames, [.. rows]);
     }
 
     /// <summary>
-    /// Resolves <paramref name="statisticsName"/> to an index-backed statistic on
-    /// <paramref name="table"/> and builds its single-bucket histogram result set.
-    /// The synthetic heap identity (no backing index) can't match; a miss raises
-    /// Msg 2767.
+    /// The <c>HISTOGRAM</c> rows. <c>RANGE_HI_KEY</c> carries the leading key
+    /// column's own type, so it round-trips over the wire through the standard
+    /// codecs; the first non-NULL step is always the MIN value and the last the
+    /// MAX — load-bearing for DacFx, whose bacpac-export chunker interpolates
+    /// between adjacent steps and overflows client-side without the MIN anchor.
     /// </summary>
-    private static SimulatedSqlResultSet BuildHistogram(BatchContext batch, HeapTable table, string statisticsName)
-    {
-        foreach (var identity in table.IndexIdentities())
-        {
-            if (identity.IsHeap || !BuiltInToken.Equals(identity.Name, statisticsName))
-                continue;
-
-            var (leadingOrdinal, leadingFull) = identity.Constraint is { } key
-                ? (key.StorageOrdinals[0], key.FullOrdinals[0])
-                : (identity.Index!.KeyColumns[0].StorageOrdinal, identity.Index.KeyColumns[0].ColumnOrdinal);
-            if (leadingOrdinal < 0)
-            {
-                // A non-persisted computed key column has no row slot; its
-                // value is evaluated off the decoded row.
-                SqlValue[]? computedRow = null;
-                return ComputeHistogram(table.Columns[leadingFull].Type, table, rowBytes =>
-                {
-                    computedRow = DecodeFullRowWithComputed(table, rowBytes, batch, ref computedRow);
-                    return computedRow[leadingFull];
-                });
-            }
-            var storedColumns = table.StoredColumns;
-            var lobStore = table.Heap;
-            return ComputeHistogram(table.Schema[leadingOrdinal], table, rowBytes => RowDecoder.DecodeColumn(storedColumns, rowBytes, leadingOrdinal, lobStore));
-        }
-
-        // A CREATE STATISTICS object describes its leading column over the rows
-        // its filter admits, the filter judged as a filtered index's is.
-        var collation = batch.CurrentDatabase.Collation;
-        if (table.UserStatistics.Find(statistic => collation.Equals(statistic.Name, statisticsName)) is { } user)
-        {
-            var leadingFull = user.ColumnFullOrdinals[0];
-            SqlValue[]? fullRow = null;
-            return ComputeHistogram(table.Columns[leadingFull].Type, table, rowBytes =>
-            {
-                fullRow = DecodeFullRowWithComputed(table, rowBytes, batch, ref fullRow);
-                return user.Filter is { } filter && EvaluateIndexFilter(filter, table, fullRow, batch) != true ? null : fullRow[leadingFull];
-            });
-        }
-        throw SimulatedSqlException.CouldNotLocateStatistics(statisticsName);
-    }
-
-    /// <summary>
-    /// Scans <paramref name="table"/>'s live rows once, reading the leading key
-    /// column through <paramref name="readLeading"/> (null for a row the
-    /// statistic's filter leaves out), and folds the values into a multi-step histogram: one step
-    /// per distinct leading-key value up to 200 steps, else 200 boundary steps
-    /// evenly spaced over the sorted distinct values. The first step is always
-    /// the MIN value and the last the MAX, matching real SQL Server's
-    /// histogram envelope — DacFx's bacpac-export chunking interpolates
-    /// between adjacent RANGE_HI_KEY steps, and a histogram without the MIN
-    /// anchor overflows its boundary arithmetic client-side.
-    /// <c>RANGE_HI_KEY</c> carries the leading key column's own type so it
-    /// round-trips over the wire through the standard codecs. An empty table
-    /// yields a 0-row result set.
-    /// </summary>
-    private static SimulatedSqlResultSet ComputeHistogram(SqlType keyType, HeapTable table, Func<byte[], SqlValue?> readLeading)
+    private static SimulatedSqlResultSet StatisticsHistogram(SqlType keyType, StatisticsSnapshot? snapshot)
     {
         SqlType[] schema = [keyType, SqlType.Real, SqlType.Real, SqlType.BigInt, SqlType.Real];
-
-        var counts = new Dictionary<SqlValueKey, (SqlValue Value, long Count)>();
-        foreach (var rowBytes in table.Heap.EnumerateRows())
+        var rows = new List<byte[]>();
+        foreach (var step in snapshot?.Histogram ?? [])
         {
-            if (readLeading(rowBytes) is not { IsNull: false } value)
-                continue;
-            var key = new SqlValueKey([value]);
-            counts[key] = counts.TryGetValue(key, out var existing)
-                ? (existing.Value, existing.Count + 1)
-                : (value, 1);
-        }
-
-        if (counts.Count == 0)
-            return new SimulatedSqlResultSet(schema, HistogramColumnNames, Array.Empty<byte[]>());
-
-        var sorted = new (SqlValue Value, long Count)[counts.Count];
-        var n = 0;
-        foreach (var entry in counts.Values)
-            sorted[n++] = entry;
-        Array.Sort(sorted, static (a, b) => a.Value.CompareTo(b.Value));
-
-        // Boundary indices into the sorted distinct array: every distinct
-        // value when they fit in 200 steps, else 200 evenly-spaced indices.
-        // Index 0 (MIN) and index n-1 (MAX) are always present.
-        const int maxSteps = 200;
-        var stepIndexes = new List<int>(Math.Min(maxSteps, sorted.Length));
-        if (sorted.Length <= maxSteps)
-        {
-            for (var i = 0; i < sorted.Length; i++)
-                stepIndexes.Add(i);
-        }
-        else
-        {
-            var previous = -1;
-            for (var k = 0; k < maxSteps; k++)
-            {
-                var index = (int)((long)k * (sorted.Length - 1) / (maxSteps - 1));
-                if (index == previous)
-                    continue;
-                stepIndexes.Add(index);
-                previous = index;
-            }
-        }
-
-        var rows = new byte[stepIndexes.Count][];
-        var lowerExclusive = -1;
-        for (var step = 0; step < stepIndexes.Count; step++)
-        {
-            var boundary = stepIndexes[step];
-            long rangeRows = 0;
-            for (var i = lowerExclusive + 1; i < boundary; i++)
-                rangeRows += sorted[i].Count;
-            var distinctRangeRows = Math.Max(0, boundary - lowerExclusive - 1);
-            var avgRangeRows = distinctRangeRows == 0 ? 1f : (float)rangeRows / distinctRangeRows;
-            SqlValue[] row =
+            rows.Add(RowEncoder.EncodeRow(schema,
             [
-                sorted[boundary].Value,
-                SqlValue.FromSingle(rangeRows),
-                SqlValue.FromSingle(sorted[boundary].Count),
-                SqlValue.FromInt64(distinctRangeRows),
-                SqlValue.FromSingle(avgRangeRows),
-            ];
-            rows[step] = RowEncoder.EncodeRow(schema, row);
-            lowerExclusive = boundary;
+                step.RangeHighKey.IsNull ? SqlValue.Null(keyType) : step.RangeHighKey,
+                SqlValue.FromSingle(step.RangeRows),
+                SqlValue.FromSingle(step.EqualRows),
+                SqlValue.FromInt64(step.DistinctRangeRows),
+                SqlValue.FromSingle(step.AverageRangeRows),
+            ]));
         }
+        return new SimulatedSqlResultSet(schema, HistogramColumnNames, [.. rows]);
+    }
 
-        return new SimulatedSqlResultSet(schema, HistogramColumnNames, rows);
+    /// <summary>
+    /// Reads one <c>DBCC SHOW_STATISTICS</c> argument: a string literal, a
+    /// bare dotted / bracketed identifier, or a variable, resolved to a name
+    /// when the statement runs. A NULL or numeric argument is Msg 2560.
+    /// </summary>
+    private static object ParseShowStatisticsArgument(ParserContext context, int parameterNumber) => context.Token switch
+    {
+        Literal literal => literal.Value.IsNull ? throw SimulatedSqlException.DbccParameterIsIncorrect(parameterNumber) : literal.Value,
+        Numeric => throw SimulatedSqlException.DbccParameterIsIncorrect(parameterNumber),
+        AtPrefixedString variable => variable.Span.ToString(),
+        _ => BatchContext.ParseObjectName(context),
+    };
+
+    /// <summary>
+    /// Resolves a parsed <c>DBCC SHOW_STATISTICS</c> argument to the name it
+    /// holds and the text real echoes in its Msg 2501; a variable is read now.
+    /// </summary>
+    private static (MultiPartName Name, string Display) ResolveShowStatisticsArgument(BatchContext batch, object argument, int parameterNumber)
+    {
+        if (argument is MultiPartName name)
+            return (name, name.ToString());
+        var value = argument switch
+        {
+            SqlValue literal => literal,
+            string variable => batch.Variables.TryGetValue(variable, out var slot) ? slot.Value : throw SimulatedSqlException.MustDeclareScalarVariable(variable),
+            _ => throw SimulatedSqlException.DbccParameterIsIncorrect(parameterNumber),
+        };
+        if (value.IsNull)
+            throw SimulatedSqlException.DbccParameterIsIncorrect(parameterNumber);
+        var text = value.CoerceTo(SqlType.NVarchar).AsString;
+        return ObjectId.TryParseObjectName(text, out var parsed)
+            ? (parsed, text)
+            : throw SimulatedSqlException.DbccParameterIsIncorrect(parameterNumber);
     }
 
     /// <summary>

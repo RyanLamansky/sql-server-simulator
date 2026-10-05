@@ -106,7 +106,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
 
-        var (includeColumnNames, filter, filterDefinition, indexOptions) = ParseIndexTail(context, indexName, targetTableName.Leaf, acceptsInclude: true, IndexOptionStatement.CreateIndex);
+        var (includeColumnNames, filter, filterDefinition, indexOptions) = ParseIndexTail(context, indexName, targetTableName.ToString(), acceptsInclude: true, IndexOptionStatement.CreateIndex, refuseFilter: isClustered);
         var ignoreDupKey = indexOptions.IgnoreDupKey;
 
         // Both statement-shape checks precede every name-resolution error,
@@ -122,6 +122,8 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
+        if (context.Batch.TryResolveSynonym(targetTableName, out _))
+            throw SimulatedSqlException.IndexOnNonTableObject(targetTableName.ToString());
         if (!context.Batch.TryResolveTable(targetTableName, out var table))
         {
             // CREATE INDEX ON a view → indexed (materialized) view. Views live
@@ -137,6 +139,12 @@ partial class Simulation
                 context.Batch.Connection.Simulation.CreateIndexOnView(context, view, indexName, isUnique, isClustered, keyColumns, includeColumnNames, filter, filterDefinition, indexOptions);
                 RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", view.Name, "VIEW");
                 return true;
+            }
+            // A synonym, function or procedure of that name is no table to index
+            // (probed 2026-10-05 against SQL Server 2025).
+            if (context.Batch.TryResolveFunctionName(targetTableName, out _) || context.Batch.TryResolveProcedure(targetTableName, out _))
+            {
+                throw SimulatedSqlException.IndexOnNonTableObject(targetTableName.ToString());
             }
             // A filter binds first, so its table is an ordinary missing object.
             throw filter is not null
@@ -155,6 +163,10 @@ partial class Simulation
             throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
 
         var qualifiedTableName = FormatQualifiedTableName(targetTableName, table);
+        // A nonclustered index points into the clustered one, which has to be
+        // in service (probed 2026-10-05 against SQL Server 2025).
+        if (!isClustered && !indexOptions.StatisticsOnly && DisabledClusteredIndexName(table) is not null)
+            throw SimulatedSqlException.NonclusteredOnDisabledClustered(indexName, targetTableName.ToString());
 
         // Unlike Msg 1916, this one names the table, so it can only be raised
         // once the target has bound — probe-confirmed: a filtered index over a
@@ -164,11 +176,25 @@ partial class Simulation
 
         if (filter is not null)
         {
-            _ = BindFilterColumns(context.Batch, table, filter);
+            foreach (var ordinal in BindFilterColumns(context.Batch, table, filter))
+            {
+                if (table.Columns[ordinal].Type is ClrUdtSqlType or HierarchyIdSqlType or SpatialSqlType)
+                    throw SimulatedSqlException.FilteredIndexOnClrColumn(indexName, targetTableName.ToString(), table.Columns[ordinal].Name);
+            }
             RejectComputedColumnInIndexFilter(context.Batch, table, indexName, targetTableName.ToString(), filter);
+            RejectFilterConstantTypes(context.Batch, table, indexName, targetTableName.ToString(), filter);
         }
 
         RejectIndexColumnTypes(context.Batch.CurrentDatabase.Collation, table, [.. keyColumns.Select(static k => k.Name)], includeColumnNames, indexName, targetTableName.ToString());
+        if (keyColumns.Count > MaxIndexKeyColumns)
+            throw SimulatedSqlException.TooManyIndexKeyColumns(indexName, targetTableName.ToString(), keyColumns.Count);
+        // A table or view holds at most 999 nonclustered indexes (probed
+        // 2026-10-05 against SQL Server 2025).
+        if (!isClustered && !indexOptions.DropExisting
+            && table.Indexes.Count(static ix => !ix.IsClustered) + table.KeyConstraints.Count(static key => !key.IsClustered) >= 999)
+        {
+            throw SimulatedSqlException.TooManyNonclusteredIndexes(indexName);
+        }
 
         // DROP_EXISTING = ON replaces the index of that name, keeping its
         // index_id; without it the name must be new (probed 2026-09-26
@@ -185,7 +211,10 @@ partial class Simulation
             if (context.Batch.CurrentDatabase.Collation.Equals(kc.Name, indexName))
                 replacedConstraint = indexOptions.DropExisting ? kc : throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString());
         }
-        if (table.JsonIndexes.Exists(json => context.Batch.CurrentDatabase.Collation.Equals(json.Name, indexName))
+        // Indexes and statistics share one per-table namespace (probed
+        // 2026-10-05 against SQL Server 2025: Msg 1913 names both).
+        if (table.UserStatistics.Exists(statistic => context.Batch.CurrentDatabase.Collation.Equals(statistic.Name, indexName))
+            || table.JsonIndexes.Exists(json => context.Batch.CurrentDatabase.Collation.Equals(json.Name, indexName))
             || table.VectorIndexes.Exists(vector => context.Batch.CurrentDatabase.Collation.Equals(vector.Name, indexName))
             || table.HypotheticalIndexes.Exists(hypothetical => context.Batch.CurrentDatabase.Collation.Equals(hypothetical.Name, indexName)))
         {
@@ -194,7 +223,7 @@ partial class Simulation
         if (indexOptions.DropExisting)
         {
             if (replaced is null && replacedConstraint is null)
-                throw SimulatedSqlException.IndexNotFoundForDropExisting(indexName, table.Name);
+                throw SimulatedSqlException.IndexNotFoundForDropExisting(indexName, targetTableName.ToString());
             if ((replaced?.IsClustered ?? replacedConstraint!.IsClustered) && !isClustered)
                 throw SimulatedSqlException.DropExistingClusteredToNonclustered();
         }
@@ -208,7 +237,7 @@ partial class Simulation
                 table.KeyConstraints.FirstOrDefault(k => k.IsClustered)?.Name
                 ?? table.Indexes.FirstOrDefault(ix => ix.IsClustered && ix != replaced)?.Name;
             if (existingClustered is not null)
-                throw SimulatedSqlException.MoreThanOneClusteredIndex(table.Name, existingClustered);
+                throw SimulatedSqlException.MoreThanOneClusteredIndex(targetTableName.ToString(), existingClustered);
         }
 
         RejectDuplicateIndexColumns(context.Batch.CurrentDatabase.Collation, [.. keyColumns.Select(static k => k.Name)], includeColumnNames, inline: false);
@@ -228,6 +257,14 @@ partial class Simulation
         for (var i = 0; i < includeColumnNames.Count; i++)
         {
             var fullOrdinal = ResolveColumnOrdinal(context.Batch.CurrentDatabase.Collation, table, includeColumnNames[i]);
+            // An included computed column is stored in the index, so it has to
+            // be deterministic, though it may be imprecise (probed 2026-10-05
+            // against SQL Server 2025).
+            if (table.Columns[fullOrdinal] is { Computed: not null, IsPersisted: false, ComputedDefinition: { } includedDefinition } included
+                && !Schemas.ModuleDeterminism.IsComputedColumnDeterministic(context.CurrentDatabase, table.Columns, includedDefinition))
+            {
+                throw SimulatedSqlException.ComputedColumnNotDeterministicForIndex(included.Name, targetTableName.ToString(), viaConstraint: false);
+            }
             resolvedIncludeColumns[i] = table.StorageOrdinals[fullOrdinal];
             resolvedIncludeOrdinals[i] = fullOrdinal;
         }
@@ -245,6 +282,9 @@ partial class Simulation
             }
             constraint.FillFactor = indexOptions.FillFactor ?? 0;
             constraint.IsPadded = indexOptions.PadIndex ?? false;
+            constraint.DataCompression = indexOptions.DataCompression ?? 0;
+            constraint.XmlCompression = indexOptions.XmlCompression ?? false;
+            BuildStatistics(context.Batch, table, statistic => ReferenceEquals(statistic.State, constraint.Statistics));
             RecordDdlEvent(context, "CREATE_INDEX", EventSchemaName(targetTableName), indexName, "INDEX", table.Name, "TABLE");
             return true;
         }
@@ -286,9 +326,24 @@ partial class Simulation
             return true;
         }
 
-        WarnOfWideIndexKey(context.Batch, table.Columns, [.. resolvedKeyColumns.Select(static key => key.ColumnOrdinal)], indexName, isClustered);
+        index.KeyMayExceedLimit = WarnOfWideIndexKey(context.Batch, table.Columns, [.. resolvedKeyColumns.Select(static key => key.ColumnOrdinal)], indexName, isClustered, rejectFixedOverflow: true);
+        if (index.KeyMayExceedLimit)
+        {
+            table.KeysMayExceedLimit = true;
+            SqlValue[]? existing = null;
+            foreach (var rowBytes in table.Heap.EnumerateRows())
+                RejectOversizedEntry(index.Name, index.KeyFullOrdinals, isClustered, DecodeFullRowWithComputed(table, rowBytes, context.Batch, ref existing));
+        }
         var placement = PlacementFor(context.Batch, table, index.WrittenDataSpace);
         var filegroup = FilegroupFor(context.Batch, table, index.WrittenDataSpace);
+        // Partition-level options need a partitioned index (probed 2026-10-05
+        // against SQL Server 2025).
+        if (placement is null && indexOptions.CompressionOnPartitions)
+            throw SimulatedSqlException.PartitionNumberOnUnpartitionedCreate(indexName);
+        if (placement is null && indexOptions.StatisticsIncremental)
+            throw SimulatedSqlException.StatisticsCannotBeIncremental(state: 9);
+        if (IndexCoversComputedColumn(table, index))
+            EvaluateIndexedComputedColumns(table, index, context.Batch);
         if (isUnique)
         {
             RequirePartitionColumnInUniqueKey(placement, table, [.. resolvedKeyColumns.Select(static key => key.ColumnOrdinal)], indexName, isConstraint: false);
@@ -308,6 +363,9 @@ partial class Simulation
             table.Indexes.Add(index);
         }
         table.NoteStatisticsCreated(index.Name, context.CurrentDatabase.Collation);
+        // Building an index builds its statistic; a clustered one rebuilds
+        // every index, whose rows now point into it.
+        BuildStatistics(context.Batch, table, statistic => isClustered ? statistic.User is null : ReferenceEquals(statistic.State, index.Statistics));
         if (isClustered)
         {
             table.Partitioning = placement;
@@ -353,6 +411,43 @@ partial class Simulation
 
         if (offending is not null)
             throw SimulatedSqlException.FilteredIndexOnComputedColumn(indexName, qualifiedTableName, offending, forStatistics);
+    }
+
+    /// <summary>
+    /// Refuses a filter comparing a CLR-typed column (Msg 10619) or comparing a
+    /// column with a constant the column would have to be converted to — an
+    /// approximate number against an exact column, a non-string against a
+    /// string column, a Unicode string against a non-Unicode one (Msg 10611);
+    /// an exact number of higher precedence, money, a binary or a date string
+    /// is converted to the column instead (probed 2026-10-05 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static void RejectFilterConstantTypes(BatchContext batch, HeapTable table, string indexName, string writtenTableName, BooleanExpression filter)
+    {
+        var collation = batch.CurrentDatabase.Collation;
+        filter.VisitFilterComparisons((name, constant) =>
+        {
+            if (Array.Find(table.Columns, column => collation.Equals(column.Name, name.Leaf)) is not { } column)
+                return;
+            if (column.Type is ClrUdtSqlType or HierarchyIdSqlType or SpatialSqlType)
+                throw SimulatedSqlException.FilteredIndexOnClrColumn(indexName, writtenTableName, column.Name);
+            SqlType constantType;
+            try
+            {
+                constantType = constant.GetSqlType(batch, static name => throw SimulatedSqlException.InvalidColumnName(name));
+            }
+            catch (SimulatedSqlException)
+            {
+                return;
+            }
+            var columnType = column.Type;
+            var columnIsString = columnType.Category == SqlTypeCategory.String;
+            var refused = (constantType.Category == SqlTypeCategory.Approximate && columnType.Category != SqlTypeCategory.Approximate)
+                || (columnIsString && constantType.Category != SqlTypeCategory.String && constantType is not (VarbinarySqlType or BinarySqlType))
+                || (columnType is VarcharSqlType or CharSqlType && constantType is NVarcharSqlType or NCharSqlType);
+            if (refused)
+                throw SimulatedSqlException.FilterConstantOfHigherPrecedence(indexName, writtenTableName, column.Name);
+        });
     }
 
     /// <summary>
@@ -520,17 +615,20 @@ partial class Simulation
                 case { Type: XmlSqlType or SpatialSqlType } typed when inline:
                     throw SimulatedSqlException.KeyColumnInvalidType(typed.Name, writtenTableName);
                 case { Type: XmlSqlType } xml:
-                    throw SimulatedSqlException.IndexKeyOnXmlColumn(indexName, table.Name, xml.Name);
+                    throw SimulatedSqlException.IndexKeyOnXmlColumn(indexName, writtenTableName, xml.Name);
                 case { Type: SpatialSqlType } spatial:
                     throw SimulatedSqlException.VectorKeyColumnInvalid(spatial.Name, writtenTableName, state: 1);
                 case { Type: not (VectorSqlType or JsonSqlType), IsLob: true } lob:
                     throw SimulatedSqlException.KeyColumnInvalidType(lob.Name, writtenTableName);
+                // A computed column's MAX type rides on its type alone.
+                case { Computed: not null, Type: VarcharSqlType { length: SqlType.MaxLengthSentinel } or NVarcharSqlType { length: SqlType.MaxLengthSentinel } or VarbinarySqlType { length: SqlType.MaxLengthSentinel } } computedMax:
+                    throw SimulatedSqlException.KeyColumnInvalidType(computedMax.Name, writtenTableName);
             }
         }
         foreach (var name in includeColumnNames)
         {
             if (Array.Find(table.Columns, column => collation.Equals(column.Name, name)) is { Type.IsLegacyLob: true } legacy)
-                throw SimulatedSqlException.IncludedColumnInvalidType(legacy.Name, table.Name);
+                throw SimulatedSqlException.IncludedColumnInvalidType(legacy.Name, writtenTableName);
         }
     }
 
@@ -576,6 +674,7 @@ partial class Simulation
         // whole row — the latter because the value exists nowhere else.
         var needsFullRow = index.Filter is not null || !index.KeysAreStored;
         SqlValue[]? fullRow = null;
+        SqlValue[]? lowestDuplicate = null;
 
         foreach (var rowBytes in table.Heap.EnumerateRows())
         {
@@ -598,9 +697,37 @@ partial class Simulation
                 key = ReadKeyByFullOrdinals(index.KeyFullOrdinals, fullRow!);
             }
 
-            if (!seen.Add(new SqlValueKey(key)))
-                throw SimulatedSqlException.DuplicateKeyOnCreate(qualifiedTableName, index.Name, FormatIndexKeyValues(key));
+            if (!seen.Add(new SqlValueKey(key)) && (lowestDuplicate is null || CompareIndexKeys(key, lowestDuplicate, index.KeyColumns) < 0))
+                lowestDuplicate = key;
         }
+        if (lowestDuplicate is not null)
+            throw SimulatedSqlException.DuplicateKeyOnCreate(qualifiedTableName, index.Name, FormatIndexKeyValues(lowestDuplicate));
+    }
+
+    /// <summary>
+    /// Orders two key tuples as the index orders them — each column ascending or
+    /// descending as declared, a NULL lowest — which is the order real's sort
+    /// meets duplicates in when it builds a unique index, so the duplicate a
+    /// Msg 1505 quotes is the first in key order, not in write order (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static int CompareIndexKeys(SqlValue[] x, SqlValue[] y, IndexKeyColumn[] columns) =>
+        CompareIndexKeys(x, y, i => i < columns.Length && columns[i].IsDescending);
+
+    /// <inheritdoc cref="CompareIndexKeys(SqlValue[], SqlValue[], IndexKeyColumn[])"/>
+    internal static int CompareIndexKeys(SqlValue[] x, SqlValue[] y, Func<int, bool> isDescending)
+    {
+        for (var i = 0; i < x.Length; i++)
+        {
+            int c;
+            if (x[i].IsNull || y[i].IsNull)
+                c = x[i].IsNull == y[i].IsNull ? 0 : x[i].IsNull ? -1 : 1;
+            else
+                c = x[i].CompareTo(y[i]);
+            if (c != 0)
+                return isDescending(i) ? -c : c;
+        }
+        return 0;
     }
 
     /// <summary>
@@ -653,7 +780,7 @@ partial class Simulation
     /// <c>IGNORE_DUP_KEY</c>, the one with a semantic here, is discarded.
     /// </summary>
     private static (List<string> IncludeColumnNames, BooleanExpression? Filter, string? FilterDefinition, IndexOptions Options) ParseIndexTail(
-        ParserContext context, string indexName, string tableLeaf, bool acceptsInclude, IndexOptionStatement statement = IndexOptionStatement.Unchecked, string? optionIndexName = null)
+        ParserContext context, string indexName, string tableLeaf, bool acceptsInclude, IndexOptionStatement statement = IndexOptionStatement.Unchecked, string? optionIndexName = null, bool refuseFilter = false)
     {
         var includeColumnNames = new List<string>();
         if (acceptsInclude && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Include })
@@ -676,6 +803,10 @@ partial class Simulation
         string? filterDefinition = null;
         if (context.Token is ReservedKeyword { Keyword: Keyword.Where })
         {
+            // A clustered index takes no filter: the parser stops at WHERE
+            // (probed 2026-10-05 against SQL Server 2025).
+            if (refuseFilter)
+                throw SimulatedSqlException.SyntaxErrorNearText("WHERE");
             context.MoveNextRequired();
             RejectFilterPredicateKeywords(context);
             filter = BooleanExpression.Parse(context);
@@ -689,6 +820,17 @@ partial class Simulation
 
         var options = ParseOptionalIndexWithClause(context, statement, optionIndexName)
             .WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
+        // An index's FILESTREAM_ON names where FILESTREAM data goes, which no
+        // table here has (Msg 1716 state 2, probed 2026-10-05).
+        if (statement == IndexOptionStatement.CreateIndex && context.Token is StringToken { Span: var fileStreamKeyword }
+            && fileStreamKeyword.Equals("FILESTREAM_ON", StringComparison.OrdinalIgnoreCase))
+        {
+            if (context.GetNextRequired() is not Name)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+            if (!context.Batch.IsSkipping)
+                throw SimulatedSqlException.FileStreamOnWithoutFileStreamColumns(state: 2);
+        }
         return (includeColumnNames, filter, filterDefinition, options);
     }
 

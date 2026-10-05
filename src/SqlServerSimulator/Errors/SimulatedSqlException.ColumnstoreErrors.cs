@@ -89,9 +89,20 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException ColumnstoreInvalidCompression(byte @class) =>
         new("This is not a valid data compression setting for a columnstore index. Please choose COLUMNSTORE or COLUMNSTORE_ARCHIVE compression.", 10799, @class, 1);
 
-    /// <summary>Mimics SQL Server's Msg 10798 — a columnstore <c>DATA_COMPRESSION</c> level rebuilding a rowstore index.</summary>
-    internal static SimulatedSqlException RowstoreColumnstoreCompression() =>
-        new("This is not a valid data compression setting for this object. It can only be used with columnstore indexes. Please choose NONE, PAGE, or ROW compression.", 10798, 16, 1);
+    /// <summary>
+    /// Mimics SQL Server's Msg 10798 — a columnstore <c>DATA_COMPRESSION</c>
+    /// level for a rowstore index: class 16 rebuilding one, class 15 creating
+    /// one (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException RowstoreColumnstoreCompression(byte level = 16) =>
+        new("This is not a valid data compression setting for this object. It can only be used with columnstore indexes. Please choose NONE, PAGE, or ROW compression.", 10798, level, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 7711 state 1: an index's <c>DATA_COMPRESSION</c>
+    /// written twice for the whole object (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DataCompressionSpecifiedTwice() =>
+        new("The DATA_COMPRESSION option was specified more than once for the table, or for at least one of its partitions if the table is partitioned.", 7711, 16, 1);
 
     /// <summary>Mimics SQL Server's Msg 35364 — <c>ALTER INDEX … SET (COMPRESSION_DELAY = …)</c> on a rowstore index.</summary>
     internal static SimulatedSqlException CompressionDelayOnRowstoreIndex() =>

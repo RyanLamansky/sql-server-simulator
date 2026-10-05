@@ -55,7 +55,7 @@ partial class Simulation
             throw NonUpdatableViewError(leadingView, leadingIdent.ToString(), delete: true);
         context.MoveNextOptional();
         var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
-        Selection.ValidateDmlTargetHints(targetHints);
+        Selection.ValidateDmlTargetHints(targetHints, leadingIdent.ToString(), "DELETE");
         // A write's target takes no NOEXPAND, an indexed view's included
         // (probed 2026-10-04 against SQL Server 2025).
         if (targetHints.NoExpand)
@@ -120,6 +120,9 @@ partial class Simulation
             else
                 where = Selection.ParseAndBindPredicate(context, Selection.TargetColumnTypeResolver(context.Batch, targetName, table, sourceView));
         }
+        Selection.ParseOptionalDmlOptionClause(context);
+        if (sourceView is null)
+            LoadPredicateStatistics(context.Batch, table, where);
 
         var plan = new DeletePlan(targetName, table, where, positionedCursor, output, top, serializableHint, sourceView);
         NoteDmlPlan(
@@ -394,8 +397,10 @@ partial class Simulation
             context.MoveNextRequired();
             where = Selection.ParseAndBindPredicate(context, Selection.ColumnTypeResolverFor(sources), sources, joins);
         }
+        Selection.ParseOptionalDmlOptionClause(context);
         BindJoinPredicatesWhileReporting(context.Batch, joins, Selection.ColumnTypeResolverFor(sources));
         Selection.ValidateForcedSeeks(context, sources, joins, where);
+        LoadJoinedPredicateStatistics(context.Batch, sources, joins, where);
 
         // Skip mode has bound everything it needs; enumerating the join would
         // run its sources, a NEXT VALUE FOR among them.

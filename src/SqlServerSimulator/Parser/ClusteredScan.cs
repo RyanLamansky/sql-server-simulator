@@ -273,6 +273,10 @@ internal static class ClusteredScan
             {
                 ordinals[i] = index.KeyColumns[i].StorageOrdinal;
                 descending[i] = index.KeyColumns[i].IsDescending;
+                // A non-persisted computed key column has no stored value to
+                // order by, so such a scan keeps the heap's order.
+                if (ordinals[i] < 0)
+                    return null;
             }
             return (ordinals, descending);
         }

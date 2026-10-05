@@ -174,6 +174,15 @@ partial class Simulation
         /// </summary>
         public StatementLifecycle(BatchContext batch, bool atBatchStart)
         {
+            // An inline join hint in a statement whose own query doesn't
+            // settle its hints — an IF's condition, a SET's subquery — sends
+            // its Msg 8625 as the next statement begins, still on its own line.
+            if (batch.Parser.JoinOrderEnforced)
+            {
+                batch.Parser.JoinOrderEnforced = false;
+                batch.AppendInfoError(@class: 0, state: 0, SimulatedSqlException.JoinOrderEnforcedMessageNumber, SimulatedSqlException.JoinOrderEnforcedMessage);
+            }
+
             // Snapshot the statement-start line before parser advance — used as
             // ERROR_LINE() default when an error fires inside this statement.
             batch.CurrentStatement.StartLine = batch.Parser.Token?.LineNumber ?? 1;
@@ -193,6 +202,7 @@ partial class Simulation
             DateOrder.Current = batch.Connection.DateFormat;
             Language.Current = batch.Connection.Language;
             batch.CurrentStatement.BeginDispatch();
+            batch.Parser.JoinHintSites = null;
             batch.CurrentStatement.ChangesTableStructure = ChangesTableStructure(batch.Parser);
             this.FramesStatement = batch.Connection.FramesEveryStatement && !batch.IsSkipping;
             this.StartDoneKind = this.FramesStatement ? StatementDoneKindOf(batch.Parser) : null;

@@ -114,6 +114,13 @@ partial class SimulatedSqlException
         batch.InfoMessage(@class: 0, state: 1, number: 8153, "Warning: Null value is eliminated by an aggregate or other SET operation.");
 
     /// <summary>
+    /// Msg 3750: a nonclustered index disabled along with its table's clustered
+    /// one, the table named bare (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedError IndexDisabledWithClusteredMessage(BatchContext batch, string index, string table) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 3750, $"Warning: Index '{index}' on table '{table}' was disabled as a result of disabling the clustered index on the table.");
+
+    /// <summary>
     /// Msg 1992, once per FOREIGN KEY that disabling the unique index it rests
     /// on took out of service (probed 2026-10-02 against SQL Server 2025).
     /// </summary>

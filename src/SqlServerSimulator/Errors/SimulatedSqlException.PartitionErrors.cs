@@ -131,8 +131,8 @@ partial class SimulatedSqlException
         new("Cannot use TEXTIMAGE_ON when a table has no text, ntext, image, varchar(max), nvarchar(max), non-FILESTREAM varbinary(max), xml or large CLR type columns.", 1709, 16, 1);
 
     /// <summary>Msg 1716: <c>FILESTREAM_ON</c> on a table without a FILESTREAM column (probed 2026-09-30 against SQL Server 2025).</summary>
-    internal static SimulatedSqlException FileStreamOnWithoutFileStreamColumns() =>
-        new("FILESTREAM_ON cannot be specified when a table has no FILESTREAM columns. Remove the FILESTREAM_ON clause from the statement, or add a FILESTREAM column to the table.", 1716, 16, 1);
+    internal static SimulatedSqlException FileStreamOnWithoutFileStreamColumns(byte state = 1) =>
+        new("FILESTREAM_ON cannot be specified when a table has no FILESTREAM columns. Remove the FILESTREAM_ON clause from the statement, or add a FILESTREAM column to the table.", 1716, 16, state);
 
     /// <summary>Msg 1924 state 2: a table or index created on a read-only filegroup (probed 2026-09-28 against SQL Server 2025).</summary>
     internal static SimulatedSqlException FilegroupIsReadOnly(string name) =>
@@ -307,4 +307,11 @@ partial class SimulatedSqlException
     /// <summary>Msg 4967: a SWITCH out of a table another table's foreign key references.</summary>
     internal static SimulatedSqlException SwitchSourceReferenced(string source, string constraintName) =>
         new($"ALTER TABLE SWITCH statement failed. SWITCH is not allowed because source table '{source}' contains primary key for constraint '{constraintName}'.", 4967, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 10737: a rebuild's compression option names partitions without the
+    /// statement's <c>PARTITION = ALL</c> (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CompressionPartitionsWithoutPartitionAll() =>
+        new("In an ALTER TABLE REBUILD or ALTER INDEX REBUILD statement, when a partition is specified in a DATA_COMPRESSION clause, PARTITION=ALL must be specified. The PARTITION=ALL clause is used to reinforce that all partitions of the table or index will be rebuilt, even if only a subset is specified in the DATA_COMPRESSION clause.", 10737, 15, 1);
 }

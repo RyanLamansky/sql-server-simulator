@@ -22,7 +22,8 @@ public sealed class DbccShowStatisticsWireTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, """
             create table t (id int not null, constraint pk_t primary key (id));
-            insert t values (1), (2), (3), (4), (5)
+            insert t values (1), (2), (3), (4), (5);
+            update statistics t
             """);
 
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
@@ -55,7 +56,8 @@ public sealed class DbccShowStatisticsWireTests
         var simulation = new Simulation();
         Wire.ExecInProc(simulation, """
             create table s (code nvarchar(10) not null, constraint pk_s primary key (code));
-            insert s values (N'alpha'), (N'bravo'), (N'charlie')
+            insert s values (N'alpha'), (N'bravo'), (N'charlie');
+            update statistics s
             """);
 
         await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);

@@ -5,10 +5,11 @@ namespace SqlServerSimulator;
 /// <summary>
 /// Public-surface tests for <c>DBCC SHOW_STATISTICS(&lt;table&gt;, &lt;stat&gt;)
 /// WITH HISTOGRAM</c> — the statement DacFx runs before bulk-reading each table
-/// during a bacpac export, to chunk it into extraction ranges. The simulator
-/// synthesizes an honest multi-step histogram from live heap data: one step per
-/// distinct leading-key value up to 200 steps, MIN always the first step and
-/// MAX the last (the envelope DacFx interpolates between); these assert the probe-confirmed 5-column shape, the
+/// during a bacpac export, to chunk it into extraction ranges. The histogram
+/// describes the rows as the statistic was last built — at its index's creation
+/// over existing rows, by UPDATE STATISTICS, or by an automatic update — one
+/// step per distinct leading-key value up to 200 steps, MIN always the first
+/// step and MAX the last (the envelope DacFx interpolates between); these assert the probe-confirmed 5-column shape, the
 /// dynamic <c>RANGE_HI_KEY</c> typing, the empty-table empty result set, the
 /// Msg 2767 miss, and the unmodeled-option rejection. Column layout / values are
 /// probe-confirmed against SQL Server 2025.
@@ -20,6 +21,7 @@ public sealed class DbccShowStatisticsTests
         """
         create table t (id int not null, v int null, constraint pk_t primary key (id));
         insert t values (1, 0), (2, 0), (3, 0), (4, 0), (5, 0);
+        update statistics t;
         """;
 
     [TestMethod]
@@ -91,6 +93,7 @@ public sealed class DbccShowStatisticsTests
             create table t (id int not null primary key, v int not null, d as v * 2, constraint uq_d unique (d));
             insert t values (1, 10), (2, 20);
             create index ix_t_d on t(d);
+            update statistics t;
             dbcc show_statistics(N't', N'ix_t_d') with histogram, no_infomsgs;
             dbcc show_statistics(N't', N'uq_d') with histogram, no_infomsgs;
             """);
@@ -113,6 +116,7 @@ public sealed class DbccShowStatisticsTests
             """
             create table s (code nvarchar(10) not null, constraint pk_s primary key (code));
             insert s values (N'alpha'), (N'bravo'), (N'charlie');
+            update statistics s;
             dbcc show_statistics(N's', N'pk_s') with histogram
             """);
 
@@ -152,6 +156,7 @@ public sealed class DbccShowStatisticsTests
             """
             create table one (id int not null, constraint pk_one primary key (id));
             insert one values (7);
+            update statistics one;
             dbcc show_statistics(N'one', N'pk_one') with histogram
             """);
 
@@ -236,4 +241,60 @@ public sealed class DbccShowStatisticsTests
         CollectionAssert.AreEqual(new[] { 229, 2557, 2528 }, denied.Errors.Select(static e => e.Number).ToArray());
         AreEqual("User 'lo' does not have permission to run DBCC SHOW_STATISTICS for object 'dbo.t'.", denied.Errors[1].Message);
     }
+
+    private const string Indexed = """
+        create table t (id int not null constraint pk_t primary key, a int);
+        insert t values (1, 10), (2, 20), (3, 20);
+        create index ix_a on t (a);
+        """;
+
+    /// <summary>
+    /// The density vector carries one row per key prefix, a nonclustered
+    /// index's followed by the clustered key it reaches its rows by (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DensityVector_AppendsTheClusteredKey()
+    {
+        using var reader = new Simulation().ExecuteReader(Indexed + "dbcc show_statistics('t', ix_a) with density_vector, no_infomsgs");
+        IsTrue(reader.Read());
+        AreEqual(0.5f, reader.GetFloat(0));
+        AreEqual("a", reader.GetString(2));
+        IsTrue(reader.Read());
+        AreEqual(1f / 3, reader.GetFloat(0));
+        AreEqual("a, id", reader.GetString(2));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void StatHeader_OverAStatisticNeverBuilt_IsNulls()
+    {
+        using var reader = new Simulation().ExecuteReader("""
+            create table t (id int not null constraint pk_t primary key);
+            insert t values (1);
+            dbcc show_statistics('t', pk_t) with stat_header, no_infomsgs
+            """);
+        IsTrue(reader.Read());
+        AreEqual("pk_t", reader.GetString(0));
+        IsTrue(reader.IsDBNull(1));
+        IsTrue(reader.IsDBNull(2));
+        IsFalse(reader.Read());
+    }
+
+    [TestMethod]
+    public void StatisticArgument_MayBeAVariable()
+        => AreEqual(10, new Simulation().ExecuteScalar(Indexed + "declare @s sysname = N'ix_a'; dbcc show_statistics('t', @s) with histogram, no_infomsgs"));
+
+    [TestMethod]
+    [DataRow("dbcc show_statistics('t', ix_a) with nosuch", 195, "'nosuch' is not a recognized option.")]
+    [DataRow("dbcc show_statistics('t', 2) with histogram", 2560, "Parameter 2 is incorrect for this DBCC statement.")]
+    public void Arguments_Refusals(string statement, int number, string message)
+        => new Simulation().AssertSqlError(Indexed + statement, number, message);
+
+    [TestMethod]
+    public void StatsHistogramDmv_ReadsTheSameSteps()
+        => AreEqual("10:1,20:2", new Simulation().ExecuteScalar(Indexed + """
+            select string_agg(concat(cast(range_high_key as int), ':', cast(equal_rows as int)), ',') within group (order by step_number)
+            from sys.dm_db_stats_histogram(object_id('t'), 2)
+            """));
 }

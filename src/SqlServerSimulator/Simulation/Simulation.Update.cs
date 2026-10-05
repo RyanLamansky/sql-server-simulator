@@ -84,7 +84,7 @@ partial class Simulation
 
         context.MoveNextRequired();
         var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
-        Selection.ValidateDmlTargetHints(targetHints);
+        Selection.ValidateDmlTargetHints(targetHints, leadingIdent.ToString(), "UPDATE");
         // A write's target takes no NOEXPAND, an indexed view's included
         // (probed 2026-10-04 against SQL Server 2025).
         if (targetHints.NoExpand)
@@ -604,6 +604,9 @@ partial class Simulation
             else
                 where = Selection.ParseAndBindPredicate(context, targetTypeResolver);
         }
+        Selection.ParseOptionalDmlOptionClause(context);
+        if (sourceView is null)
+            LoadPredicateStatistics(context.Batch, table, where);
 
         var plan = new UpdatePlan(targetName, table, rawAssignments, assignments, setMasks, where, positionedCursor, output, top, serializableHint, sourceView);
         NoteDmlPlan(
@@ -1002,8 +1005,10 @@ partial class Simulation
             context.MoveNextRequired();
             where = Selection.ParseAndBindPredicate(context, tupleTypeResolver, sources, joins);
         }
+        Selection.ParseOptionalDmlOptionClause(context);
         BindJoinPredicatesWhileReporting(context.Batch, joins, tupleTypeResolver);
         Selection.ValidateForcedSeeks(context, sources, joins, where);
+        LoadJoinedPredicateStatistics(context.Batch, sources, joins, where);
 
         // Skip mode has bound everything it needs; enumerating the join would
         // run its sources, a NEXT VALUE FOR among them.
@@ -1428,7 +1433,7 @@ partial class Simulation
             ClusteredScan.NoteKeyAssignment(table, updatedColumnOrdinals, (pageIndex, slotIndex), undoLog);
         }
         tracking?.RecordKeyMoves(context.Batch, table, keyMoves);
-        table.NoteColumnsUpdated(updatedColumnOrdinals);
+        table.NoteColumnsUpdated(updatedColumnOrdinals, affected.Count);
 
         // Indexed-view maintenance: re-evaluate any unique-indexed view over
         // this table on the post-update base rows and enforce uniqueness
@@ -2480,6 +2485,11 @@ partial class Simulation
     /// </summary>
     private static void EnforceKeyConstraintsForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, BatchContext batch, int onlyRow = -1)
     {
+        if (table.KeysMayExceedLimit)
+        {
+            for (var i = Math.Max(onlyRow, 0); i < (onlyRow < 0 ? affected.Count : onlyRow + 1); i++)
+                EnforceIndexKeyLength(table, affected[i].FullNew);
+        }
         if (table.KeyConstraints.Count == 0)
             return;
 

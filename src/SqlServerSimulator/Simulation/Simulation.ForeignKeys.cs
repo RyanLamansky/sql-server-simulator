@@ -552,7 +552,7 @@ partial class Simulation
         if (mode == CascadeWriteMode.SetDefault)
             RequireDefaultedParents(fk, newPairs, context, verb);
         tracking?.RecordKeyMoves(context.Batch, childTable, keyMoves);
-        childTable.NoteColumnsUpdated(fk.ChildColumnOrdinals);
+        childTable.NoteColumnsUpdated(fk.ChildColumnOrdinals, newPairs.Count);
         context.Batch.Connection.Simulation.EnforceIndexedViews(childTable, context.Batch);
         // Recurse: the child rows just got their FK columns rewritten — if
         // those columns are themselves a key referenced by another FK, that

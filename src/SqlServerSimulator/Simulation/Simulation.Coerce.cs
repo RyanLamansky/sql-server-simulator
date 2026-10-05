@@ -492,6 +492,11 @@ partial class Simulation
         }
     }
 
+    /// <summary>The name of <paramref name="table"/>'s clustered index when it is disabled, else null.</summary>
+    internal static string? DisabledClusteredIndexName(HeapTable table) =>
+        table.KeyConstraints.Find(static key => key is { IsDisabled: true, IsClustered: true })?.Name
+        ?? table.Indexes.Find(static index => index is { IsDisabled: true, IsClustered: true })?.Name;
+
     /// <summary>
     /// Raises Msg 8655 when <paramref name="table"/> carries a <i>disabled
     /// clustered</i> index. On real the clustered index <b>is</b> the table's
@@ -635,6 +640,58 @@ partial class Simulation
                 return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// Evaluates every non-persisted computed column <paramref name="index"/>
+    /// stores over every existing row, as building the index does on real, so
+    /// an expression failing on some row — an overflow, malformed JSON — ends
+    /// the <c>CREATE INDEX</c> with that row's error (probed 2026-10-05 against
+    /// SQL Server 2025).
+    /// </summary>
+    private static void EvaluateIndexedComputedColumns(HeapTable table, StoredIndex index, BatchContext batch)
+    {
+        List<int> ordinals = [];
+        foreach (var key in index.KeyColumns)
+        {
+            if (table.Columns[key.ColumnOrdinal] is { Computed: not null, IsPersisted: false })
+                ordinals.Add(key.ColumnOrdinal);
+        }
+        foreach (var ordinal in index.IncludedColumnOrdinals)
+        {
+            if (table.Columns[ordinal] is { Computed: not null, IsPersisted: false })
+                ordinals.Add(ordinal);
+        }
+        if (ordinals.Count == 0)
+            return;
+        EvaluateComputedColumnsOverRows(table, ordinals, batch, endsColumnRewrite: true);
+    }
+
+    /// <summary>
+    /// Evaluates the computed columns at <paramref name="ordinals"/> over every
+    /// row, raising the first row's error — marked as ending a column rewrite
+    /// when <paramref name="endsColumnRewrite"/>, which an index build's error
+    /// is (Msg 3621 follows it at line 1) and a statistic's isn't.
+    /// </summary>
+    internal static void EvaluateComputedColumnsOverRows(HeapTable table, List<int> ordinals, BatchContext batch, bool endsColumnRewrite)
+    {
+        SqlValue[]? buffer = null;
+        foreach (var rowBytes in table.Heap.EnumerateRows())
+        {
+            var full = DecodeFullRow(table, rowBytes, ref buffer);
+            foreach (var ordinal in ordinals)
+            {
+                try
+                {
+                    full[ordinal] = EvaluateComputedColumn(table, full, ordinal, batch);
+                }
+                catch (SimulatedSqlException evaluation) when (endsColumnRewrite)
+                {
+                    evaluation.EndedColumnRewrite = true;
+                    throw;
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -853,6 +910,8 @@ partial class Simulation
     /// </summary>
     private static RowKeyVerdict EnforceKeyConstraints(HeapTable destinationTable, SqlValue[] rowValues, SqlValue[] storedRowValues, BatchContext batch)
     {
+        if (destinationTable.KeysMayExceedLimit)
+            EnforceIndexKeyLength(destinationTable, rowValues);
         if (destinationTable.KeyConstraints.Count == 0)
             return RowKeyVerdict.Unique;
 

@@ -226,8 +226,151 @@ partial class SimulatedSqlException
     /// no statement runs and no <c>TRY</c> in the batch catches it (probed
     /// 2026-09-28 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException ForceSeekPlanInfeasible() =>
-        new("Query processor could not produce a query plan because of the hints defined in this query. Resubmit the query without specifying any hints and without using SET FORCEPLAN.", 8622, 16, 1);
+    /// <param name="state">
+    /// 1 for a plan no hinted access path or join algorithm can build; 2 for
+    /// an <c>INDEX</c> hint naming index 0 beside another index (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </param>
+    internal static SimulatedSqlException ForceSeekPlanInfeasible(byte state = 1) =>
+        new("Query processor could not produce a query plan because of the hints defined in this query. Resubmit the query without specifying any hints and without using SET FORCEPLAN.", 8622, 16, state);
+
+    /// <summary>
+    /// Msg 10749 — <c>FORCESEEK(0 (col))</c>, the seek naming the heap or
+    /// clustered scan (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForceSeekOnIndexZero() =>
+        new("The FORCESEEK hint cannot be used with index 0. Correct the index provided to the FORCESEEK hint and resubmit the query.", 10749, 16, 1);
+
+    /// <summary>
+    /// Msg 309 — an <c>INDEX</c> hint naming an XML index (probed 2026-10-05
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlIndexInHint(string indexName, string qualifiedTableName) =>
+        new($"Cannot use index \"{indexName}\" on table \"{qualifiedTableName}\" in a hint. XML indexes are not allowed in hints.", 309, 16, 1);
+
+    /// <summary>
+    /// Msg 315 — an <c>INDEX</c> hint naming a disabled index (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IndexHintNameDisabled(string indexName, string qualifiedTableName) =>
+        new($"Index \"{indexName}\" on table \"{qualifiedTableName}\" (specified in the FROM clause) is disabled or resides in a filegroup which is not online.", 315, 16, 1);
+
+    /// <summary>
+    /// Msg 316 — an <c>INDEX</c> hint naming a disabled index by its id
+    /// (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IndexHintIdDisabled(int indexId, string qualifiedTableName) =>
+        new($"The index ID {indexId} on table \"{qualifiedTableName}\" (specified in the FROM clause) is disabled or resides in a filegroup which is not online.", 316, 16, 1);
+
+    /// <summary>
+    /// Msg 650 — <c>READPAST</c> under a level other than READ COMMITTED or
+    /// REPEATABLE READ, whether a hint beside it or the session sets it
+    /// (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ReadPastOutsideReadCommitted() =>
+        new("You can only specify the READPAST lock in the READ COMMITTED or REPEATABLE READ isolation levels.", 650, 16, 1);
+
+    /// <summary>
+    /// Msg 651 — <c>PAGLOCK</c> on a table whose index disallows page locks
+    /// (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PageLockHintInhibited(string qualifiedTableName) =>
+        new($"Cannot use the PAGE granularity hint on the table \"{qualifiedTableName}\" because locking at the specified granularity is inhibited.", 651, 16, 1);
+
+    /// <summary>
+    /// Msg 4102 — <c>READPAST</c> on an <c>INSERT</c> target (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ReadPastOnInsertTarget() =>
+        new("The READPAST lock hint is only allowed on target tables of UPDATE and DELETE and on tables specified in an explicit FROM clause.", 4102, 15, 1);
+
+    /// <summary>
+    /// Msg 10724 — <c>FORCESEEK</c> on an <c>INSERT</c>, <c>UPDATE</c> or
+    /// <c>DELETE</c> target, which real reports at line 15 wherever the
+    /// statement sits (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ForceSeekOnDmlTarget() =>
+        new SimulatedSqlException("The FORCESEEK hint is not allowed for target tables of INSERT, UPDATE, or DELETE statements.", 10724, 15, 1).PinLine(15);
+
+    /// <summary>Msg 10745 — <see cref="ForceSeekOnDmlTarget"/>'s <c>FORCESCAN</c> sibling.</summary>
+    internal static SimulatedSqlException ForceScanOnDmlTarget() =>
+        new SimulatedSqlException("The FORCESCAN hint is not allowed for target tables of INSERT, UPDATE, or DELETE statements.", 10745, 15, 1).PinLine(15);
+
+    /// <summary>
+    /// Msg 1042 — two values for one <c>OPTION</c> hint, a grant percent
+    /// outside 0–100, or an inline join hint the <c>OPTION</c> clause's join
+    /// hints don't include (class 16 for the last). Probed 2026-10-05 against
+    /// SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException ConflictingOptimizerHints(string hint, byte @class = 15) =>
+        new($"Conflicting {hint} optimizer hints specified.", 1042, @class, 1);
+
+    /// <summary>Msg 1071 — an inline <c>REMOTE</c> join beside an <c>OPTION</c> join hint.</summary>
+    internal static SimulatedSqlException JoinAlgorithmWithRemoteJoin() =>
+        new("Cannot specify a JOIN algorithm with a remote JOIN.", 1071, 16, 1);
+
+    /// <summary>Msg 1072 — <c>REMOTE</c> on an outer join.</summary>
+    internal static SimulatedSqlException RemoteHintOnOuterJoin() =>
+        new("A REMOTE hint can only be specified with an INNER JOIN clause.", 1072, 15, 1);
+
+    /// <summary>
+    /// Msg 310 — a <c>MAXRECURSION</c> over 32767 (probed 2026-10-05 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException MaxRecursionOutOfRange(string value) =>
+        new($"The value {value} specified for the MAXRECURSION option exceeds the allowed maximum of 32767.", 310, 15, 1);
+
+    /// <summary>Msg 10768 — a second <c>LABEL</c> in one <c>OPTION</c> clause.</summary>
+    internal static SimulatedSqlException LabelHintRepeated() =>
+        new("LABEL hint can only be used one time in the query. Modify the query and re-run it.", 10768, 15, 1);
+
+    /// <summary>Msg 320 — an <c>OPTIMIZE FOR</c> value that isn't a literal.</summary>
+    internal static SimulatedSqlException OptimizeForValueNotLiteral(string variable) =>
+        new($"The compile-time variable value for '{variable}' in the OPTIMIZE FOR clause must be a literal.", 320, 15, 1);
+
+    /// <summary>Msg 4131 — one variable given twice across the <c>OPTIMIZE FOR</c> clauses.</summary>
+    internal static SimulatedSqlException OptimizeForVariableRepeated(string variable) =>
+        new($"A compile-time literal value is specified more than once for the variable \"{variable}\" in one or more OPTIMIZE FOR clauses.", 4131, 16, 1);
+
+    /// <summary>Msg 4132 — an <c>OPTIMIZE FOR</c> value the variable's type can't take.</summary>
+    internal static SimulatedSqlException OptimizeForValueNotConvertible(string variable) =>
+        new($"The value specified for the variable \"{variable}\" in the OPTIMIZE FOR clause could not be implicitly converted to that variable's type.", 4132, 16, 1);
+
+    /// <summary>
+    /// Msg 8695 — <c>USE PLAN</c> with an empty plan (probed 2026-10-05
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException MalformedUsePlan() =>
+        new("Cannot execute query because of incorrectly formed XML plan in USE PLAN hint. Verify that XML plan is a legal plan suitable for plan forcing. See Books Online for additional details.", 8695, 16, 4);
+
+    /// <summary>
+    /// Msg 6913 — a <c>USE PLAN</c> document whose root element the showplan
+    /// schema doesn't declare (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException UsePlanFailsShowplanSchema(string rootName) =>
+        new($"XML Validation: Declaration not found for element '{rootName}'. Location: /*:{rootName}[1]", 6913, 16, 1);
+
+    /// <summary>
+    /// Msg 8720 — two <c>TABLE HINT</c> clauses for one object (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TableHintClauseRepeated(string objectName) =>
+        new($"Cannot execute query. There is more than one TABLE HINT clause specified for object '{objectName}'. Use at most one such TABLE HINT clause per table reference.", 8720, 16, 0);
+
+    /// <summary>
+    /// Msg 8722 — a <c>TABLE HINT</c> clause carrying a semantic hint the
+    /// object's own <c>WITH</c> clause lacks.
+    /// </summary>
+    internal static SimulatedSqlException SemanticTableHintMismatch(string hint, string objectName) =>
+        new($"Cannot execute query. Semantic affecting hint '{hint}' appears in the 'TABLE HINT' clause of object '{objectName}' but not in the corresponding 'WITH' clause.  Change the OPTION (TABLE HINTS...) clause so the semantic affecting hints match the WITH clause.", 8722, 16, 1);
+
+    /// <summary>
+    /// Msg 8723 — a <c>TABLE HINT</c> clause naming no exposed name of the
+    /// query: the object must be written as the query exposes it, its alias
+    /// when it has one.
+    /// </summary>
+    internal static SimulatedSqlException TableHintObjectNotInQuery(string objectName) =>
+        new($"Cannot execute query. Object '{objectName}' is specified in the TABLE HINT clause, but is not used in the query or does not match the alias specified in the query. Table references in the TABLE HINT clause must match the WITH clause.", 8723, 16, 1);
 
     /// <summary>
     /// Msg 10746 — <c>FORCESCAN</c> and <c>FORCESEEK</c> on one table

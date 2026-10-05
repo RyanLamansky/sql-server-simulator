@@ -6,21 +6,15 @@ namespace SqlServerSimulator.Parser;
 
 /// <summary>
 /// Table hints (<c>WITH (NOLOCK [, …])</c> on FROM sources, JOIN-RHS, and
-/// UPDATE / DELETE targets) and statement-level <c>OPTION (…)</c> hints.
-/// The simulator doesn't model locking / isolation / planner choice /
-/// indexes, so all recognized hint shapes parse-and-discard. The value of
-/// shipping this is grammar compatibility — applications and EF Core
-/// pipelines (TagWith → hint) can emit hint clauses without tripping
-/// <see cref="SimulatedSqlException"/>.
+/// INSERT / UPDATE / DELETE / MERGE targets). The lock hints drive the lock
+/// manager and the index hints are checked against the table and the
+/// predicates; the statement-level <c>OPTION (…)</c> clause lives in
+/// <c>Selection.StatementHints.cs</c>.
 /// </summary>
 /// <remarks>
-/// Closed accept-lists per probe (SQL Server 2025, 2026-05-14):
-/// unknown table-hint name → Msg 321
-/// (<c>"&lt;name&gt;" is not a recognized table hints option.</c>);
-/// unknown OPTION hint name → Msg 102 generic syntax error
-/// (<c>Incorrect syntax near '&lt;name&gt;'</c>). Conflict-detection
-/// (<c>Msg 1047</c> for NOLOCK + XLOCK etc.) isn't modeled because the
-/// simulator has no lock state to conflict over.
+/// Closed accept-list per probe (SQL Server 2025, 2026-05-14): an unknown
+/// table-hint name is Msg 321
+/// (<c>"&lt;name&gt;" is not a recognized table hints option.</c>).
 /// </remarks>
 internal sealed partial class Selection
 {
@@ -60,6 +54,24 @@ internal sealed partial class Selection
 
         /// <summary><c>FORCESCAN</c>, which takes no arguments.</summary>
         ForceScan,
+
+        /// <summary><c>ROWLOCK</c>.</summary>
+        RowLock,
+
+        /// <summary><c>PAGLOCK</c>.</summary>
+        PagLock,
+
+        /// <summary>
+        /// <c>IGNORE_CONSTRAINTS</c> / <c>IGNORE_TRIGGERS</c>: bulk-load hints
+        /// a read refuses (Msg 8171).
+        /// </summary>
+        BulkLoadOnly,
+
+        /// <summary>
+        /// <c>KEEPIDENTITY</c> / <c>KEEPDEFAULTS</c>: bulk-load hints a read
+        /// takes and discards, which a write's target refuses (Msg 8171).
+        /// </summary>
+        BulkLoadKeep,
     }
 
     /// <summary>
@@ -71,11 +83,9 @@ internal sealed partial class Selection
     /// </summary>
     /// <remarks>
     /// Sourced from SQL Server's "Table Hints (Transact-SQL)" docs plus
-    /// the probe-confirmed entries. Trust-region note: <c>READONLY</c>
-    /// is technically only valid on a TVP-typed parameter, not a FROM
-    /// source; the simulator accepts it everywhere because the parser
-    /// doesn't carry per-site rejection rules and real apps don't put it
-    /// on regular tables.
+    /// the probe-confirmed entries. <c>READONLY</c>, a table-valued
+    /// parameter's declaration keyword, is no table hint (Msg 321, probed
+    /// 2026-10-05 against SQL Server 2025).
     /// </remarks>
     private static readonly FrozenDictionary<string, TableHintKind> TableHintNames = new Dictionary<string, TableHintKind>
     {
@@ -94,16 +104,15 @@ internal sealed partial class Selection
         ["INDEX"] = TableHintKind.Index,
         ["FORCESEEK"] = TableHintKind.ForceSeek,
         ["FORCESCAN"] = TableHintKind.ForceScan,
-        ["IGNORE_CONSTRAINTS"] = TableHintKind.Discard,
-        ["IGNORE_TRIGGERS"] = TableHintKind.Discard,
-        ["KEEPDEFAULTS"] = TableHintKind.Discard,
-        ["KEEPIDENTITY"] = TableHintKind.Discard,
-        ["PAGLOCK"] = TableHintKind.Discard,
+        ["IGNORE_CONSTRAINTS"] = TableHintKind.BulkLoadOnly,
+        ["IGNORE_TRIGGERS"] = TableHintKind.BulkLoadOnly,
+        ["KEEPDEFAULTS"] = TableHintKind.BulkLoadKeep,
+        ["KEEPIDENTITY"] = TableHintKind.BulkLoadKeep,
+        ["PAGLOCK"] = TableHintKind.PagLock,
         ["READCOMMITTED"] = TableHintKind.ReadCommitted,
         ["READCOMMITTEDLOCK"] = TableHintKind.ReadCommittedLock,
-        ["READONLY"] = TableHintKind.Discard,
         ["REMOTE"] = TableHintKind.Discard,
-        ["ROWLOCK"] = TableHintKind.Discard,
+        ["ROWLOCK"] = TableHintKind.RowLock,
         ["SNAPSHOT"] = TableHintKind.Discard,
         ["SPATIAL_WINDOW_MAX_CELLS"] = TableHintKind.Discard,
     }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
@@ -115,39 +124,6 @@ internal sealed partial class Selection
     /// </summary>
     private static readonly FrozenDictionary<string, TableHintKind>.AlternateLookup<ReadOnlySpan<char>> TableHintLookup =
         TableHintNames.GetAlternateLookup<ReadOnlySpan<char>>();
-
-    /// <summary>
-    /// First-word vocabulary accepted inside <c>OPTION (...)</c>. Each entry
-    /// is matched case-insensitively against the leading token; trailing
-    /// words (<c>PLAN</c> / <c>ORDER</c> / <c>UNION</c> / <c>GROUP</c> /
-    /// <c>JOIN</c>), arguments (<c>MAXDOP N</c> / <c>FAST N</c>), and nested
-    /// parens (<c>OPTIMIZE FOR (...)</c>, <c>USE PLAN N'...'</c>) are
-    /// consumed-and-discarded by <see cref="ConsumeOneOptionHint"/>. Two
-    /// entries carry more than a skip: <c>MAXRECURSION</c> overrides the
-    /// per-CTE recursion limit (argument parsed strictly), and
-    /// <c>USE HINT('name')</c> validates its string argument by name
-    /// (<see cref="ConsumeUseHint"/> — Msg 10715 on an unknown hint).
-    /// </summary>
-    private static readonly FrozenSet<string> OptionHintFirstWords = new HashSet<string>
-    {
-        "RECOMPILE", "MAXRECURSION", "MAXDOP", "FAST",
-        "LOOP", "HASH", "MERGE",
-        "FORCE",
-        "KEEPFIXED", "KEEP", "ROBUST",
-        "OPTIMIZE", "USE",
-        "EXPAND",
-        "IGNORE_NONCLUSTERED_COLUMNSTORE_INDEX", "NO_PERFORMANCE_SPOOL",
-        "QUERYTRACEON",
-        "TABLE", "PARAMETERIZATION",
-        "ORDER", "CONCAT",
-    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
-
-    /// <summary>
-    /// Span-keyed view of <see cref="OptionHintFirstWords"/>, for the same
-    /// reason <see cref="TableHintLookup"/> exists.
-    /// </summary>
-    private static readonly FrozenSet<string>.AlternateLookup<ReadOnlySpan<char>> OptionHintFirstWordLookup =
-        OptionHintFirstWords.GetAlternateLookup<ReadOnlySpan<char>>();
 
     /// <summary>
     /// Valid <c>OPTION (USE HINT('name'))</c> hint names — the contents of
@@ -322,6 +298,27 @@ internal sealed partial class Selection
         /// 10794), lower-cased as real names it; null when none was.
         /// </summary>
         public string? RefusedByMemoryOptimized;
+        /// <summary><c>ROWLOCK</c>, which no other granularity hint may join (Msg 1047).</summary>
+        public bool RowLock;
+        /// <summary><c>PAGLOCK</c>, which no other granularity hint may join (Msg 1047).</summary>
+        public bool PagLock;
+        /// <summary>
+        /// The first <c>IGNORE_CONSTRAINTS</c> / <c>IGNORE_TRIGGERS</c>
+        /// written, as written; a read refuses it (Msg 8171).
+        /// </summary>
+        public string? BulkLoadOnlyHint;
+        /// <summary>
+        /// The first of the four bulk-load hints written, as written; a
+        /// write's target refuses it (Msg 8171).
+        /// </summary>
+        public string? BulkLoadHint;
+        /// <summary>
+        /// The first hint written that changes what the read means — a lock,
+        /// isolation or granularity hint, or <c>NOEXPAND</c> — as written; an
+        /// <c>OPTION (TABLE HINT …)</c> may carry one only where the source's
+        /// own <c>WITH</c> clause does (Msg 8722).
+        /// </summary>
+        public string? FirstSemanticHint;
     }
 
     /// <summary>
@@ -523,6 +520,10 @@ internal sealed partial class Selection
                 ValidateHintCombinations(info);
                 return;
             }
+            // Real takes a hint written straight after another without the
+            // comma (probed 2026-10-05 against SQL Server 2025).
+            if (context.Token is not null && TableHintLookup.ContainsKey(context.Token.Source))
+                continue;
             if (context.Token is not Operator { Character: ',' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
@@ -534,13 +535,14 @@ internal sealed partial class Selection
     /// beside <c>FORCESCAN</c>, Msg 10747 a nested <c>FORCESEEK(ix(cols))</c>
     /// beside an <c>INDEX</c> hint, Msg 10750 <c>FORCESCAN</c> beside more
     /// than one index (probed 2026-09-28 against SQL Server 2025).
-    /// Msg 1047 fires when
-    /// <c>NOLOCK</c> / <c>READUNCOMMITTED</c> appears alongside any locking
-    /// hint that would require a real lock (UPDLOCK, XLOCK, HOLDLOCK,
-    /// SERIALIZABLE, REPEATABLEREAD, TABLOCKX). Probe-confirmed against SQL
-    /// Server 2025 (2026-05-14): the message wording is fixed
-    /// ("Conflicting locking hints specified.") regardless of which pair
-    /// actually conflicted.
+    /// Msg 1047 refuses two isolation levels (<c>NOLOCK</c> /
+    /// <c>READUNCOMMITTED</c>, <c>READCOMMITTED</c>, <c>READCOMMITTEDLOCK</c>,
+    /// <c>REPEATABLEREAD</c>, <c>SERIALIZABLE</c> / <c>HOLDLOCK</c>,
+    /// <c>SNAPSHOT</c>), two granularities (<c>ROWLOCK</c>, <c>PAGLOCK</c>,
+    /// <c>TABLOCK</c>, <c>TABLOCKX</c>), <c>UPDLOCK</c> beside <c>XLOCK</c>,
+    /// and a dirty read beside any lock it can't take; Msg 650 refuses
+    /// <c>READPAST</c> beside a dirty read or <c>SERIALIZABLE</c> (the whole
+    /// pair matrix probed 2026-10-05 against SQL Server 2025).
     /// </summary>
     private static void ValidateHintCombinations(TableHintInfo info)
     {
@@ -550,26 +552,51 @@ internal sealed partial class Selection
             throw SimulatedSqlException.ParameterizedForceSeekWithIndexHint();
         if (info.ForceScan && info.IndexArguments is { Count: > 1 })
             throw SimulatedSqlException.ForceScanWithSeveralIndexes();
-        if (!info.NoLock)
-            return;
-        if (info.UpdLock || info.XLock || info.Serializable || info.Repeatable || info.TabLockX)
+        var levels = (info.NoLock ? 1 : 0) + (info.ReadCommitted ? 1 : 0) + (info.ReadCommittedLock ? 1 : 0)
+            + (info.Repeatable ? 1 : 0) + (info.Serializable ? 1 : 0) + (info.Snapshot ? 1 : 0);
+        var granularities = (info.RowLock ? 1 : 0) + (info.PagLock ? 1 : 0) + (info.TabLock ? 1 : 0) + (info.TabLockX ? 1 : 0);
+        if (levels > 1
+            || granularities > 1
+            || (info.UpdLock && info.XLock)
+            || (info.NoLock && (info.UpdLock || info.XLock || granularities > 0)))
+        {
             throw SimulatedSqlException.ConflictingLockingHints();
+        }
+        if (info.ReadPast && (info.NoLock || info.Serializable))
+            throw SimulatedSqlException.ReadPastOutsideReadCommitted();
     }
 
     /// <summary>
     /// Validates DML-target-specific hint restrictions. Called by INSERT /
     /// UPDATE / DELETE / MERGE target sites after
     /// <see cref="ParseOptionalTableHints"/> returns. Msg 1065 rejects
-    /// <c>NOLOCK</c> / <c>READUNCOMMITTED</c>; Msg 1069 rejects
-    /// <c>INDEX(…)</c> / <c>FORCESEEK</c> / <c>FORCESCAN</c>. Both
-    /// probe-confirmed verbatim.
+    /// <c>NOLOCK</c> / <c>READUNCOMMITTED</c>; on an INSERT, UPDATE or DELETE
+    /// target Msg 10724 rejects <c>FORCESEEK</c>, Msg 10745 <c>FORCESCAN</c>
+    /// and Msg 1069 <c>INDEX(…)</c>, which a MERGE target takes and checks
+    /// against its table; Msg 4102 rejects <c>READPAST</c> on an INSERT
+    /// target, and Msg 8171 any bulk-load hint (probed 2026-10-05 against SQL
+    /// Server 2025).
     /// </summary>
-    internal static void ValidateDmlTargetHints(TableHintInfo info)
+    /// <param name="info">The hints the target carries.</param>
+    /// <param name="writtenName">The target as written, which Msg 8171 names.</param>
+    /// <param name="verb">The statement's verb, upper case.</param>
+    internal static void ValidateDmlTargetHints(TableHintInfo info, string writtenName, string verb)
     {
         if (info.NoLock)
             throw SimulatedSqlException.NoLockHintNotAllowedOnDmlTarget();
-        if (info.IndexHint)
-            throw SimulatedSqlException.IndexHintsOnlyInFromOrOption();
+        if (verb != "MERGE")
+        {
+            if (info.ForceSeek)
+                throw SimulatedSqlException.ForceSeekOnDmlTarget();
+            if (info.ForceScan)
+                throw SimulatedSqlException.ForceScanOnDmlTarget();
+            if (info.IndexHint)
+                throw SimulatedSqlException.IndexHintsOnlyInFromOrOption();
+        }
+        if (info.ReadPast && verb == "INSERT")
+            throw SimulatedSqlException.ReadPastOnInsertTarget();
+        if (info.BulkLoadHint is { } bulkHint)
+            throw SimulatedSqlException.BulkTableHintInvalid(bulkHint, writtenName);
     }
 
     /// <summary>
@@ -599,59 +626,87 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Validates the captured <c>INDEX</c>-hint arguments against the
-    /// resolved target table. Called from FROM-source / JOIN-RHS heap-table
-    /// paths after the table has been resolved (DML targets short-circuit
-    /// earlier via <see cref="ValidateDmlTargetHints"/> / Msg 1069 — index
-    /// existence is never reached on those sites). Integer-form id rules
-    /// (probe-confirmed against SQL Server 2025): <c>0</c> is always valid
-    /// (the "heap scan" reference, accepted even on clustered tables);
-    /// <c>N &gt;= 1</c> is valid iff <c>N &lt;= sys.indexes</c> row-count for the
-    /// table excluding the heap row, equivalently
-    /// <c>KeyConstraints.Count + Indexes.Count</c>. Name form matches
-    /// case-insensitively against PRIMARY KEY / UNIQUE constraint names
-    /// (<see cref="HeapTable.KeyConstraints"/>) plus <c>CREATE INDEX</c>
-    /// entries (<see cref="HeapTable.Indexes"/>). The first failing
-    /// argument raises Msg 307 (id form) or Msg 308 (name form) verbatim;
-    /// remaining arguments don't run.
+    /// resolved target table, in written order, the first failing argument
+    /// raising. An id is checked against the table's <c>sys.indexes</c> ids:
+    /// <c>0</c> is always valid, the heap row's <c>1</c> is not (Msg 307), and
+    /// a disabled index's id is Msg 316. A name is matched against the PRIMARY
+    /// KEY / UNIQUE constraints and the indexes, a disabled one being Msg 315
+    /// and an XML index's Msg 309; anything else is Msg 308 (probed
+    /// 2026-10-05 against SQL Server 2025).
     /// </summary>
     internal static void ValidateIndexHintArguments(Collation collation, TableHintInfo info, HeapTable table, string qualifiedTableName)
     {
         if (info.IndexArguments is not { } args)
             return;
-        var maxValidId = table.KeyConstraints.Count + table.Indexes.Count;
+        List<IndexIdentity>? identities = null;
         foreach (var arg in args)
         {
             if (arg.Id is { } id)
             {
-                if (id != 0 && (id < 1 || id > maxValidId))
+                if (id == 0)
+                    continue;
+                identities ??= table.IndexIdentities();
+                var identity = identities.Find(candidate => candidate.IndexId == id && (candidate.Constraint is not null || candidate.Index is not null));
+                if (identity.Constraint is null && identity.Index is null)
                     throw SimulatedSqlException.IndexHintIdNotFound(id, qualifiedTableName);
+                if (identity.Constraint?.IsDisabled ?? identity.Index!.IsDisabled)
+                    throw SimulatedSqlException.IndexHintIdDisabled(id, qualifiedTableName);
                 continue;
             }
             var name = arg.Name!;
-            var found = false;
-            foreach (var kc in table.KeyConstraints)
+            if (table.KeyConstraints.Find(key => collation.Equals(key.Name, name)) is { } constraint)
             {
-                if (collation.Equals(kc.Name, name))
-                {
-                    found = true;
-                    break;
-                }
+                if (constraint.IsDisabled)
+                    throw SimulatedSqlException.IndexHintNameDisabled(name, qualifiedTableName);
+                continue;
             }
-            if (!found)
+            if (table.Indexes.Find(index => collation.Equals(index.Name, name)) is { } named)
             {
-                foreach (var idx in table.Indexes)
-                {
-                    if (collation.Equals(idx.Name, name))
-                    {
-                        found = true;
-                        break;
-                    }
-                }
+                if (named.IsDisabled)
+                    throw SimulatedSqlException.IndexHintNameDisabled(name, qualifiedTableName);
+                continue;
             }
-            if (!found)
-                throw SimulatedSqlException.IndexHintNameNotFound(name, qualifiedTableName);
+            if (table.XmlIndexes.Exists(index => collation.Equals(index.Name, name)))
+                throw SimulatedSqlException.XmlIndexInHint(name, qualifiedTableName);
+            throw SimulatedSqlException.IndexHintNameNotFound(name, qualifiedTableName);
         }
     }
+
+    /// <summary>
+    /// The hint checks that read the session or the table rather than the
+    /// hint list alone: <c>READPAST</c> in a READ UNCOMMITTED, SERIALIZABLE or
+    /// SNAPSHOT session without a hint naming a level it takes (Msg 650,
+    /// ahead of the snapshot refusal Msg 3952), and <c>PAGLOCK</c> on a table
+    /// whose heap or clustered index disallows page locks (Msg 651). Both
+    /// probed 2026-10-05 against SQL Server 2025.
+    /// </summary>
+    private static void ValidateLockGranularityHints(ParserContext context, TableHintInfo hints, HeapTable table, MultiPartName writtenName)
+    {
+        if (hints.ReadPast && !context.Batch.IsSkipping && !(hints.ReadCommitted || hints.ReadCommittedLock || hints.Repeatable)
+            && context.Connection.SessionIsolationLevel is System.Data.IsolationLevel.ReadUncommitted or System.Data.IsolationLevel.Serializable or System.Data.IsolationLevel.Snapshot)
+        {
+            throw SimulatedSqlException.ReadPastOutsideReadCommitted();
+        }
+        if (hints.PagLock)
+        {
+            var allowed = KeyLockGroup.ClusteredOwner(table) switch
+            {
+                KeyConstraint key => key.AllowPageLocks,
+                Storage.Index index => index.AllowPageLocks,
+                _ => table.HeapAllowPageLocks,
+            };
+            if (!allowed)
+                throw SimulatedSqlException.PageLockHintInhibited(IndexHintTableName(writtenName, table));
+        }
+    }
+
+    /// <summary>
+    /// The table name the index-hint errors give: schema-qualified as the
+    /// query wrote or defaulted it, a temporary table by its name alone
+    /// (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static string IndexHintTableName(MultiPartName writtenName, HeapTable table) =>
+        table.Name.StartsWith('#') ? table.Name : $"{writtenName.ImmediateQualifier ?? Database.DefaultSchemaName}.{table.Name}";
 
     /// <summary>
     /// The name, lower-cased, Msg 10794 gives a table hint a memory-optimized
@@ -713,6 +768,11 @@ internal sealed partial class Selection
         // NOWAIT zeroes the lock timeout for the hinted table so a conflict
         // raises Msg 1222 at once. Everything else parses-and-discards.
         info.RefusedByMemoryOptimized ??= MemoryOptimizedRefusedHint(sourceSpan);
+        if (kind is not (TableHintKind.Discard or TableHintKind.Index or TableHintKind.ForceSeek or TableHintKind.ForceScan or TableHintKind.BulkLoadOnly or TableHintKind.BulkLoadKeep)
+            || sourceSpan.Equals("SNAPSHOT", StringComparison.OrdinalIgnoreCase))
+        {
+            info.FirstSemanticHint ??= sourceSpan.ToString();
+        }
         if (sourceSpan.Equals("SNAPSHOT", StringComparison.OrdinalIgnoreCase))
             info.Snapshot = true;
         switch (kind)
@@ -729,6 +789,13 @@ internal sealed partial class Selection
             case TableHintKind.NoExpand: info.NoExpand = true; break;
             case TableHintKind.ReadCommitted: info.ReadCommitted = true; break;
             case TableHintKind.ReadCommittedLock: info.ReadCommittedLock = true; break;
+            case TableHintKind.RowLock: info.RowLock = true; break;
+            case TableHintKind.PagLock: info.PagLock = true; break;
+            case TableHintKind.BulkLoadOnly:
+                info.BulkLoadOnlyHint ??= sourceSpan.ToString();
+                info.BulkLoadHint ??= info.BulkLoadOnlyHint;
+                break;
+            case TableHintKind.BulkLoadKeep: info.BulkLoadHint ??= sourceSpan.ToString(); break;
 
             case TableHintKind.Index:
                 context.SimpleParameterizationBlocked = true;
@@ -760,7 +827,7 @@ internal sealed partial class Selection
                     // consumer of the parenthesized run.
                     var checkpoint = context.SaveCheckpoint();
                     context.MoveNextRequired();
-                    if (context.Token is Name)
+                    if (context.Token is Name or Numeric)
                     {
                         CaptureOneIndexArgument(context, ref info);
                         // The index name is followed by its own parenthesized
@@ -873,13 +940,19 @@ internal sealed partial class Selection
     {
         if (info.ForceSeekColumns is not { } seekColumns || info.IndexArguments is not { Count: > 0 } args)
             return;
-        if (args[0].Name is not { } indexName)
-            return;
+        // The id form names the index by its sys.indexes id, which the
+        // messages then give as the name (probed 2026-10-05 against SQL Server
+        // 2025); index 0, the heap or clustered scan, seeks nothing.
+        if (args[0].Id == 0)
+            throw SimulatedSqlException.ForceSeekOnIndexZero();
+        var indexName = args[0].Name ?? args[0].Id!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (args[0].Id is not null)
+            table.SettleIndexIds();
 
         string[]? keyColumnNames = null;
         foreach (var constraint in table.KeyConstraints)
         {
-            if (!collation.Equals(constraint.Name, indexName))
+            if (args[0].Id is { } constraintId ? constraint.IndexId != constraintId : !collation.Equals(constraint.Name, indexName))
                 continue;
             keyColumnNames = new string[constraint.StorageOrdinals.Length];
             for (var i = 0; i < keyColumnNames.Length; i++)
@@ -890,7 +963,7 @@ internal sealed partial class Selection
         {
             foreach (var index in table.Indexes)
             {
-                if (!collation.Equals(index.Name, indexName))
+                if (args[0].Id is { } namedId ? index.IndexId != namedId : !collation.Equals(index.Name, indexName))
                     continue;
                 keyColumnNames = new string[index.KeyColumns.Length];
                 for (var i = 0; i < keyColumnNames.Length; i++)
@@ -944,91 +1017,10 @@ internal sealed partial class Selection
                 info.IndexArguments.Add(IndexHintArgument.ForId(value.AsInt32));
                 return;
             case Name nameToken:
-                info.IndexArguments.Add(IndexHintArgument.ForName(nameToken.Source.ToString()));
+                info.IndexArguments.Add(IndexHintArgument.ForName(nameToken.Value));
                 return;
             default:
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
-    }
-
-    /// <summary>
-    /// Parses the trailing <c>OPTION (hint [, …])</c> clause. Recognized
-    /// first-words (per <see cref="OptionHintFirstWords"/>) are accepted
-    /// and discarded; <c>MAXRECURSION N</c> additionally overrides every
-    /// in-scope <see cref="CteBinding"/>'s recursion limit. Unknown
-    /// first-word → Msg 102 (matches probe). Cursor on entry: the
-    /// <c>OPTION</c> keyword. Cursor on exit: the next un-consumed token.
-    /// </summary>
-    private static void ParseOptionClause(ParserContext context)
-    {
-        if (context.GetNextRequired() is not Operator { Character: '(' })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        while (true)
-        {
-            context.MoveNextRequired();
-            ConsumeOneOptionHint(context);
-            if (context.Token is Operator { Character: ')' })
-            {
-                context.MoveNextOptional();
-                return;
-            }
-            if (context.Token is not Operator { Character: ',' })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-        }
-    }
-
-    /// <summary>
-    /// Consumes a single OPTION-clause hint. <c>MAXRECURSION N</c> is
-    /// strict-parsed (integer literal 0–32767, applied to every in-scope
-    /// CTE binding). Other recognized first-words skip tokens — handling
-    /// nested parens — until the next <c>,</c> or <c>)</c> at depth 0.
-    /// </summary>
-    private static void ConsumeOneOptionHint(ParserContext context)
-    {
-        if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.MaxRecursion })
-        {
-            if (context.GetNextRequired() is not Numeric { Value: { IsNull: false } limitValue })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            var limit = limitValue.AsInt32;
-            if (limit is < 0 or > 32_767)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            if (context.CteBindings is { } bindings)
-            {
-                foreach (var binding in bindings.Values)
-                    binding.MaxRecursion = limit;
-            }
-            context.MoveNextRequired();
-            return;
-        }
-        // USE HINT is the one OPTION hint whose argument SQL Server validates
-        // by name (Msg 10715 on an unknown hint). Detect `USE HINT` specifically
-        // — `USE PLAN N'…'` and any other USE-prefixed hint fall through to the
-        // generic skip below — and hand off before the generic path consumes it.
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Use })
-        {
-            var checkpoint = context.SaveCheckpoint();
-            context.MoveNextRequired();
-            var isUseHint = context.Token is Name useHintKeyword
-                && useHintKeyword.Source.Equals("HINT", StringComparison.OrdinalIgnoreCase);
-            context.RestoreCheckpoint(checkpoint);
-            if (isUseHint)
-            {
-                ConsumeUseHint(context);
-                return;
-            }
-        }
-        if (context.Token is null || !OptionHintFirstWordLookup.Contains(context.Token.Source))
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.Token.Source.Equals("RECOMPILE", StringComparison.OrdinalIgnoreCase))
-            context.Batch.CurrentStatement.Recompiles = true;
-        context.MoveNextRequired();
-        while (context.Token is not (Operator { Character: ')' } or Operator { Character: ',' }))
-        {
-            if (context.Token is Operator { Character: '(' })
-            {
-                SkipBalancedParens(context);
-            }
-            context.MoveNextRequired();
         }
     }
 

@@ -70,8 +70,19 @@ partial class SimulatedSqlException
         new("Cannot perform a indexdefrag operation inside a user transaction. Terminate the transaction and reissue the statement.", 8920, 16, 2);
 
     /// <summary>Msg 2521: a DBCC database argument naming an id no database has.</summary>
-    internal static SimulatedSqlException CouldNotFindDatabaseId(long databaseId) =>
-        new($"Could not find database ID {databaseId}. The database ID either does not exist, or the database was dropped before a statement tried to use it. Verify if the database ID exists by querying the sys.databases catalog view.", 2521, 16, 10);
+    internal static SimulatedSqlException CouldNotFindDatabaseId(long databaseId, byte state = 10) =>
+        new($"Could not find database ID {databaseId}. The database ID either does not exist, or the database was dropped before a statement tried to use it. Verify if the database ID exists by querying the sys.databases catalog view.", 2521, 16, state);
+
+    /// <summary>
+    /// Msg 2591: <c>sys.dm_db_index_physical_stats</c> naming an index id the
+    /// table lacks, the table named bare in double quotes (probed 2026-10-05).
+    /// </summary>
+    internal static SimulatedSqlException IndexIdNotInCatalog(int indexId, string tableName) =>
+        new($"Cannot find a row in the system catalog with the index ID {indexId} for table \"{tableName}\".", 2591, 16, 40);
+
+    /// <summary>Msg 2561: a system function's numbered argument it can't take (probed 2026-10-05).</summary>
+    internal static SimulatedSqlException ParameterIncorrectForStatement(int parameterNumber) =>
+        new($"Parameter {parameterNumber} is incorrect for this statement.", 2561, 16, 1);
 
     /// <summary>Msg 2573: a DBCC table argument naming an object id no table has.</summary>
     internal static SimulatedSqlException CouldNotFindObjectId(int objectId) =>

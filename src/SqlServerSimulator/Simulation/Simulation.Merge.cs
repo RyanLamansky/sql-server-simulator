@@ -132,7 +132,8 @@ partial class Simulation
         if (!BatchContext.IsTableVariableName(destinationName.Leaf))
         {
             var targetHints = Selection.ParseOptionalTableHints(context, allowLegacyParenForm: false);
-            Selection.ValidateDmlTargetHints(targetHints);
+            Selection.ValidateDmlTargetHints(targetHints, destinationName.ToString(), "MERGE");
+            Selection.ValidateIndexHintArguments(context.Batch.CurrentDatabase.Collation, targetHints, destinationTable, Selection.IndexHintTableName(destinationName, destinationTable));
             serializableHint = targetHints.Serializable;
         }
         // Phase 1b: acquire table-IX on the MERGE target; row-X on each
@@ -280,6 +281,7 @@ partial class Simulation
         // it compiles, so a MERGE without one never runs (probed 2026-09-26).
         // A stray word where the ; belongs is a syntax error at the word
         // (probed 2026-09-30).
+        Selection.ParseOptionalDmlOptionClause(context);
         if (context.Token is not Operator { Character: ';' })
             throw EndsStatement(context.Token) ? SimulatedSqlException.MergeMustBeTerminated() : SimulatedSqlException.SyntaxErrorNear(context);
 

@@ -33,7 +33,7 @@ internal sealed class DataLength(ParserContext context) : Expression
         return this.returnsBigInt ? SqlValue.FromInt64(byteCount) : SqlValue.FromInt32(byteCount);
     }
 
-    private static int ByteCount(SqlValue value)
+    internal static int ByteCount(SqlValue value)
     {
         // Spatial values report the CLR-UDT serialization length (what a
         // real server stores and sends), not the byte count of the WKT text

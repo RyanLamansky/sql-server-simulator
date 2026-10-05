@@ -26,7 +26,7 @@ public sealed class QueryHintTests
         => AreEqual(3, new Simulation().ExecuteScalar("""
             create table t (id int primary key);
             insert t values (1), (2), (3);
-            select count(*) from t with (holdlock, readpast, rowlock)
+            select count(*) from t with (updlock, readpast, rowlock)
             """));
 
     [TestMethod]
@@ -848,4 +848,263 @@ public sealed class QueryHintTests
     [TestMethod]
     public void ForceSeek_WithoutTheNestedForm_SeeksAnyLeadingKey()
         => AreEqual(1, new Simulation().ExecuteScalar($"{SeekTable} select count(*) from t with (forceseek) where a = 1"));
+
+    private const string HintTable = """
+        create table t (id int not null constraint pk_t primary key, a int null);
+        create index ix_a on t (a);
+        insert t values (1, 10), (2, 20);
+        """;
+
+    /// <summary>
+    /// The lock-hint pairs real refuses: two isolation levels, two
+    /// granularities, UPDLOCK beside XLOCK and a dirty read beside a lock
+    /// (Msg 1047), and READPAST beside a dirty read or SERIALIZABLE (Msg 650);
+    /// the whole pair matrix probed 2026-10-05 against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    [DataRow("nolock, readcommitted", 1047)]
+    [DataRow("readuncommitted, rowlock", 1047)]
+    [DataRow("readcommitted, serializable", 1047)]
+    [DataRow("repeatableread, holdlock", 1047)]
+    [DataRow("readcommittedlock, readcommitted", 1047)]
+    [DataRow("snapshot, nolock", 1047)]
+    [DataRow("rowlock, paglock", 1047)]
+    [DataRow("rowlock, tablock", 1047)]
+    [DataRow("tablock, tablockx", 1047)]
+    [DataRow("updlock, xlock", 1047)]
+    [DataRow("nolock, readpast", 650)]
+    [DataRow("holdlock, readpast", 650)]
+    public void ConflictingLockHints_AreRefused(string hints, int number)
+        => _ = new Simulation().AssertSqlError($"{HintTable} select count(*) from t with ({hints})", number);
+
+    [TestMethod]
+    [DataRow("serializable, holdlock")]
+    [DataRow("nolock, nowait")]
+    [DataRow("updlock, tablockx")]
+    [DataRow("repeatableread, readpast")]
+    [DataRow("xlock, rowlock")]
+    public void CompatibleLockHints_AreAccepted(string hints)
+        => AreEqual(2, new Simulation().ExecuteScalar($"{HintTable} select count(*) from t with ({hints})"));
+
+    [TestMethod]
+    [DataRow("serializable")]
+    [DataRow("read uncommitted")]
+    public void ReadPast_UnderASessionLevelOtherThanReadCommitted_IsMsg650(string level)
+        => _ = new Simulation().AssertSqlError(
+            $"{HintTable} set transaction isolation level {level}; select count(*) from t with (readpast)", 650);
+
+    [TestMethod]
+    public void ReadPast_WithAHintNamingItsOwnLevel_IgnoresTheSessionLevel()
+        => AreEqual(2, new Simulation().ExecuteScalar(
+            $"{HintTable} set transaction isolation level serializable; select count(*) from t with (readpast, readcommitted)"));
+
+    [TestMethod]
+    public void ReadOnly_IsNoTableHint()
+        => new Simulation().AssertSqlError(
+            $"{HintTable} select count(*) from t with (readonly)", 321, "\"readonly\" is not a recognized table hints option.");
+
+    [TestMethod]
+    public void HintsWrittenWithoutAComma_AreTaken()
+        => AreEqual(2, new Simulation().ExecuteScalar($"{HintTable} select count(*) from t with (index(ix_a) nolock)"));
+
+    [TestMethod]
+    [DataRow("ignore_triggers")]
+    [DataRow("ignore_constraints")]
+    public void BulkLoadHint_OnARead_IsMsg8171(string hint)
+        => new Simulation().AssertSqlError(
+            $"{HintTable} select count(*) from dbo.t with ({hint})", 8171, $"Hint '{hint}' on object 'dbo.t' is invalid.");
+
+    [TestMethod]
+    public void KeepIdentity_OnARead_IsDiscarded()
+        => AreEqual(2, new Simulation().ExecuteScalar($"{HintTable} select count(*) from t with (keepidentity, keepdefaults)"));
+
+    [TestMethod]
+    [DataRow("insert dbo.t with (keepdefaults) values (3, 3)", "keepdefaults")]
+    [DataRow("insert dbo.t with (tablock, keepidentity) select 3, 3", "keepidentity")]
+    [DataRow("update dbo.t with (ignore_triggers) set a = 1", "ignore_triggers")]
+    [DataRow("delete dbo.t with (keepidentity)", "keepidentity")]
+    [DataRow("merge dbo.t with (ignore_constraints) x using (select 1 k) s on s.k = x.id when matched then delete;", "ignore_constraints")]
+    public void BulkLoadHint_OnAWriteTarget_IsMsg8171(string statement, string hint)
+        => new Simulation().AssertSqlError($"{HintTable} {statement}", 8171, $"Hint '{hint}' on object 'dbo.t' is invalid.");
+
+    [TestMethod]
+    [DataRow("delete t with (forceseek)", 10724)]
+    [DataRow("update t with (forceseek) set a = 1", 10724)]
+    [DataRow("insert t with (forceseek) values (3, 3)", 10724)]
+    [DataRow("delete t with (forcescan)", 10745)]
+    [DataRow("update t with (index(ix_a)) set a = 1", 1069)]
+    [DataRow("insert t with (readpast) select 3, 3", 4102)]
+    public void WriteTargetHints_AreRefused(string statement, int number)
+        => _ = new Simulation().AssertSqlError($"{HintTable} {statement}", number);
+
+    [TestMethod]
+    public void ReadPast_OnAnUpdateOrDeleteTarget_IsTaken()
+        => AreEqual(0, new Simulation().ExecuteScalar($"{HintTable} update t with (readpast) set a = a where id = 9; delete t with (readpast) where id = 9; select @@rowcount"));
+
+    [TestMethod]
+    public void MergeTarget_TakesAnIndexHint_CheckedAgainstItsTable()
+    {
+        AreEqual(1, new Simulation().ExecuteScalar(
+            $"{HintTable} merge t with (index(ix_a)) x using (select 1 k) s on s.k = x.id when matched then delete; select count(*) from t"));
+        new Simulation().AssertSqlError(
+            $"{HintTable} merge dbo.t with (index(nosuch)) x using (select 1 k) s on s.k = x.id when matched then delete;",
+            308,
+            "Index 'nosuch' on table 'dbo.t' (specified in the FROM clause) does not exist.");
+    }
+
+    [TestMethod]
+    public void IndexHint_BracketedName_Resolves()
+        => AreEqual(2, new Simulation().ExecuteScalar($"{HintTable} select count(*) from t with (index([ix_a]))"));
+
+    [TestMethod]
+    public void IndexHint_IdsFollowSysIndexes()
+    {
+        // A heap has no index 1, and its first nonclustered index is 2.
+        const string heap = "create table h (k int, v int); create index nx on h (v); insert h values (1, 1);";
+        AreEqual(1, new Simulation().ExecuteScalar($"{heap} select count(*) from h with (index(2))"));
+        new Simulation().AssertSqlError(
+            $"{heap} select count(*) from dbo.h with (index(1))", 307, "Index ID 1 on table 'dbo.h' (specified in the FROM clause) does not exist.");
+    }
+
+    [TestMethod]
+    public void IndexHint_OnAnXmlIndex_IsMsg309()
+        => new Simulation().AssertSqlError("""
+            create table x (id int primary key, doc xml);
+            create primary xml index px on x (doc);
+            select count(*) from dbo.x with (index(px))
+            """, 309, "Cannot use index \"px\" on table \"dbo.x\" in a hint. XML indexes are not allowed in hints.");
+
+    [TestMethod]
+    public void IndexHint_OnATempTable_NamesItAlone()
+        => new Simulation().AssertSqlError(
+            "create table #x (a int primary key); select a from #x with (index(nosuch))",
+            308,
+            "Index 'nosuch' on table '#x' (specified in the FROM clause) does not exist.");
+
+    [TestMethod]
+    public void IndexHint_InAModuleBody_IsCheckedWhenItRuns()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(HintTable);
+        _ = sim.ExecuteNonQuery("create view v as select id from t with (index(nosuch))");
+        _ = sim.AssertSqlError("select id from v", 308);
+    }
+
+    [TestMethod]
+    public void PagLock_WhereThePageLocksAreDisallowed_IsMsg651()
+        => new Simulation().AssertSqlError(
+            $"{HintTable} alter index pk_t on t set (allow_page_locks = off); select id from dbo.t with (paglock)",
+            651,
+            "Cannot use the PAGE granularity hint on the table \"dbo.t\" because locking at the specified granularity is inhibited.");
+
+    [TestMethod]
+    public void IndexHint_OnACatalogView_IsIgnoredWithMsg4430()
+    {
+        var messages = new List<string>();
+        using var connection = (SimulatedDbConnection)new Simulation().CreateOpenConnection();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(error => error.Message));
+        _ = connection.CreateCommand("select count(*) from sys.objects with (index(1))").ExecuteScalar();
+        CollectionAssert.Contains(messages, "Warning: Index hints supplied for view 'sys.objects' will be ignored.");
+    }
+
+    [TestMethod]
+    public void HintsOnACteReference_AreDiscarded()
+        => AreEqual(2, new Simulation().ExecuteScalar($"{HintTable} with c as (select id from t) select count(*) from c with (nolock, index(ix_a))"));
+
+    [TestMethod]
+    [DataRow("update t set a = 0 where id = 1 option (recompile)")]
+    [DataRow("update x set a = 0 from t x join t y on y.id = x.id where x.id = 1 option (hash join, maxdop 1)")]
+    [DataRow("delete t where id = 1 option (maxdop 1)")]
+    [DataRow("delete x from t x join t y on y.id = x.id where x.id = 1 option (loop join)")]
+    [DataRow("insert t values (3, 30) option (recompile)")]
+    [DataRow("merge t x using (select 1 k) s on s.k = x.id when matched then update set a = 0 option (loop join);")]
+    public void WriteStatements_TakeAnOptionClause(string statement)
+        => AreEqual(1, new Simulation().ExecuteScalar($"{HintTable} {statement} select @@rowcount"));
+
+    /// <summary>
+    /// The OPTION clause's own grammar and argument checks (probed 2026-10-05
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("maxdop 32768", 304)]
+    [DataRow("maxdop -1", 102)]
+    [DataRow("maxdop 'a'", 102)]
+    [DataRow("maxdop 1, maxdop 2", 1042)]
+    [DataRow("fast 1, fast 2", 1042)]
+    [DataRow("fast 2147483648", 102)]
+    [DataRow("maxrecursion 32768", 310)]
+    [DataRow("maxrecursion 1, maxrecursion 2", 1042)]
+    [DataRow("max_grant_percent = 101", 1042)]
+    [DataRow("min_grant_percent = 1e1", 102)]
+    [DataRow("label = 'a', label = 'b'", 10768)]
+    [DataRow("label = 1", 102)]
+    [DataRow("parameterization forced", 102)]
+    [DataRow("remote join", 155)]
+    [DataRow("hash join merge join", 156)]
+    [DataRow("maxdop 1 recompile", 102)]
+    [DataRow("optimize for ()", 102)]
+    [DataRow("use plan N''", 8695)]
+    [DataRow("use plan N'<x/>'", 6913)]
+    public void OptionClause_ArgumentErrors(string hints, int number)
+        => _ = new Simulation().AssertSqlError($"{HintTable} select id from t option ({hints})", number);
+
+    [TestMethod]
+    [DataRow("maxdop 1, maxdop 1")]
+    [DataRow("maxdop 0, fast 2147483647")]
+    [DataRow("min_grant_percent = 0, max_grant_percent = 10.5")]
+    [DataRow("label = N'x'")]
+    [DataRow("hash group, order group, concat union, merge union, hash union")]
+    [DataRow("keep plan, keepfixed plan, robust plan, expand views, no_performance_spool, ignore_nonclustered_columnstore_index")]
+    [DataRow("optimize for unknown, force order, recompile")]
+    public void OptionClause_ValidHints_AreTaken(string hints)
+        => AreEqual(2, new Simulation().ExecuteScalar($"{HintTable} select count(*) from t option ({hints})"));
+
+    [TestMethod]
+    [DataRow("(@q = 1)", 137, "Must declare the scalar variable \"@q\".")]
+    [DataRow("(@p = 'x')", 4132, "The value specified for the variable \"@p\" in the OPTIMIZE FOR clause could not be implicitly converted to that variable's type.")]
+    [DataRow("(@p unknown), optimize for (@p = 1)", 4131, "A compile-time literal value is specified more than once for the variable \"@p\" in one or more OPTIMIZE FOR clauses.")]
+    [DataRow("(@p = @p)", 320, "The compile-time variable value for '@p' in the OPTIMIZE FOR clause must be a literal.")]
+    [DataRow("(@d = 5)", 206, "Operand type clash: int is incompatible with date")]
+    public void OptimizeFor_ChecksItsVariables(string clause, int number, string message)
+        => new Simulation().AssertSqlError(
+            $"{HintTable} declare @p int = 1, @d date; select id from t where a > @p and @d is null option (optimize for {clause})", number, message);
+
+    [TestMethod]
+    public void OptimizeFor_TakesLiteralsItsVariablesConvert()
+        => AreEqual(2, new Simulation().ExecuteScalar(
+            $"{HintTable} declare @p int = 1, @q int; select count(*) from t where a > @p or a = @q option (optimize for (@p = '5', @q unknown))"));
+
+    [TestMethod]
+    [DataRow("select id from t where id in (select id from t option (maxdop 1))")]
+    [DataRow("select * from (select id from t option (maxdop 1)) d")]
+    [DataRow("if exists (select 1 from t option (maxdop 1)) select 1")]
+    [DataRow("select id from t option (maxdop 1) union select id from t")]
+    [DataRow("select id from t option (maxdop 1) option (recompile)")]
+    public void OptionClause_OnlyClosesTheStatementsOwnQuery(string statement)
+        => _ = new Simulation().AssertSqlError($"{HintTable} {statement}", 156);
+
+    [TestMethod]
+    public void OptionClause_MayPrecedeForXml()
+        => AreEqual("<row id=\"1\"/><row id=\"2\"/>", new Simulation().ExecuteScalar($"{HintTable} select id from t order by id option (maxdop 1) for xml raw"));
+
+    /// <summary>
+    /// A TABLE HINT names a source as the query exposes it — its alias when it
+    /// has one — and may carry no semantic hint the source's own WITH clause
+    /// lacks (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select id from dbo.t option (table hint(t, index(ix_a)))", 8723)]
+    [DataRow("select x.id from dbo.t x option (table hint(dbo.t, index(ix_a)))", 8723)]
+    [DataRow("select id from dbo.t option (table hint(dbo.t, index(ix_a)), table hint(dbo.t, index(ix_a)))", 8720)]
+    [DataRow("select id from dbo.t option (table hint(dbo.t, nolock))", 8722)]
+    [DataRow("select id from dbo.t option (table hint(dbo.t, index(nosuch)))", 308)]
+    [DataRow("select id from dbo.t option (table hint(dbo.t, forcescan, forceseek))", 10746)]
+    [DataRow("select id from dbo.t where a + 1 = 2 option (table hint(dbo.t, forceseek))", 8622)]
+    public void TableHintClause_IsCheckedAgainstTheQuery(string statement, int number)
+        => _ = new Simulation().AssertSqlError($"{HintTable} {statement}", number);
+
+    [TestMethod]
+    public void TableHintClause_MatchingTheExposedName_IsTaken()
+        => AreEqual(1, new Simulation().ExecuteScalar(
+            $"{HintTable} select count(*) from dbo.t x with (nolock) where x.a = 10 option (table hint(x, nolock, forceseek))"));
 }

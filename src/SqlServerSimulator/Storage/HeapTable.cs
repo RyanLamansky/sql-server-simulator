@@ -354,6 +354,23 @@ internal sealed class HeapTable : SchemaObject
     public bool PageCompressed;
 
     /// <summary>
+    /// The heap's own <c>DATA_COMPRESSION</c> — 0 <c>NONE</c>, 1 <c>ROW</c>, 2
+    /// <c>PAGE</c> — from <c>CREATE TABLE … WITH</c> or <c>ALTER TABLE …
+    /// REBUILD WITH</c>, which <c>sys.partitions</c> reports for index 0; a
+    /// clustered index reports its own. Rows are stored the same either way.
+    /// </summary>
+    public byte HeapDataCompression;
+
+    /// <summary>The heap's own <c>XML_COMPRESSION</c>, alongside <see cref="HeapDataCompression"/>.</summary>
+    public bool HeapXmlCompression;
+
+    /// <summary>
+    /// Whether some index or key was declared wider than it can hold, so writes
+    /// measure each row's key against it — a gate that stays set once raised.
+    /// </summary>
+    public bool KeysMayExceedLimit;
+
+    /// <summary>
     /// A memory-optimized table (<c>WITH (MEMORY_OPTIMIZED = ON)</c>), or the
     /// backing table of a memory-optimized table type. Its rows live on the
     /// ordinary heap; what changes is the surface — the DDL it refuses, its
@@ -526,7 +543,7 @@ internal sealed class HeapTable : SchemaObject
     /// <c>CREATE STATISTICS</c>-declared standalone statistics, in creation
     /// order. Catalog-only — see <see cref="UserStatistic"/>.
     /// </summary>
-    public readonly List<UserStatistic> UserStatistics = [];
+    public List<UserStatistic> UserStatistics = [];
 
     /// <summary><c>sys.tables.lock_on_bulk_load</c>, set by <c>sp_tableoption 'table lock on bulk load'</c>.</summary>
     public bool LockOnBulkLoad;
@@ -582,9 +599,34 @@ internal sealed class HeapTable : SchemaObject
             this.NoteStatisticsCreated(name, collation);
     }
 
-    /// <summary>Notes that an UPDATE assigned the columns at <paramref name="ordinals"/> (full-row positions).</summary>
-    public void NoteColumnsUpdated(IEnumerable<int> ordinals)
+    // How many row updates assigned each column (full-row position), the
+    // per-column half of a statistic's modification count.
+    private long[]? columnModifications;
+
+    /// <summary>
+    /// The modifications a statistic leading with the column at
+    /// <paramref name="leadingOrdinal"/> counts: every row inserted or deleted,
+    /// plus every row update that assigned the column — real's per-column
+    /// modification counter.
+    /// </summary>
+    public long ModificationCount(int leadingOrdinal) =>
+        this.Heap.RowModifications
+        + (this.columnModifications is { } counts && (uint)leadingOrdinal < (uint)counts.Length ? counts[leadingOrdinal] : 0);
+
+    /// <summary>Notes that an UPDATE assigned the columns at <paramref name="ordinals"/> (full-row positions) in <paramref name="rows"/> rows.</summary>
+    public void NoteColumnsUpdated(IReadOnlyList<int> ordinals, int rows = 0)
     {
+        if (rows > 0)
+        {
+            var counts = this.columnModifications;
+            if (counts is null || counts.Length < this.Columns.Length)
+                this.columnModifications = counts = counts is null ? new long[this.Columns.Length] : [.. counts, .. new long[this.Columns.Length - counts.Length]];
+            foreach (var ordinal in ordinals)
+            {
+                if ((uint)ordinal < (uint)counts.Length)
+                    counts[ordinal] += rows;
+            }
+        }
         var updated = this.columnUpdatedAt;
         if (updated is null || updated.Length < this.Columns.Length)
             this.columnUpdatedAt = updated = updated is null ? new long[this.Columns.Length] : [.. updated, .. new long[this.Columns.Length - updated.Length]];

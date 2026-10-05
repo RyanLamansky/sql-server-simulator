@@ -996,10 +996,10 @@ internal static partial class BuiltInResources
     /// the table's live <see cref="Storage.Heap.RowCount"/> or the partition's
     /// share of it, so it reflects same-batch INSERT/DELETE. partition_id /
     /// hobt_id are synthetic-deterministic (distinct per partition; not SQL
-    /// Server's allocation-unit ids). Rowstore compression is unmodeled: data_compression
-    /// = 0 (NONE) but for a columnstore index's 3 / 4 and an engine-built
-    /// history table's 2 (<see cref="HeapTable.PageCompressed"/>), and
-    /// xml_compression = 0 (OFF).
+    /// Server's allocation-unit ids). data_compression and
+    /// xml_compression report each rowset's declared compression
+    /// (<see cref="RowstoreCompressionOf"/>), a columnstore index's 3 / 4 and an
+    /// engine-built history table's 2 (<see cref="HeapTable.PageCompressed"/>).
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysPartitions(Parser.BatchContext batch, Database database)
     {
@@ -1009,16 +1009,20 @@ internal static partial class BuiltInResources
         SqlValue[] noneCompression = [SqlValue.FromByte(0), SqlValue.FromNVarchar("NONE")];
         SqlValue[] columnstoreCompression = [SqlValue.FromByte(3), SqlValue.FromNVarchar("COLUMNSTORE")];
         SqlValue[] archiveCompression = [SqlValue.FromByte(4), SqlValue.FromNVarchar("COLUMNSTORE_ARCHIVE")];
+        SqlValue[] rowCompression = [SqlValue.FromByte(1), SqlValue.FromNVarchar("ROW")];
         SqlValue[] pageCompression = [SqlValue.FromByte(2), SqlValue.FromNVarchar("PAGE")];
         var xmlOff = SqlValue.FromBoolean(false);
         var xmlOffDesc = SqlValue.FromVarchar(VarcharSqlType.Get(3, Collation.Catalog, Coercibility.Implicit), "OFF");
+        var xmlOn = SqlValue.FromBoolean(true);
+        var xmlOnDesc = SqlValue.FromVarchar(VarcharSqlType.Get(3, Collation.Catalog, Coercibility.Implicit), "ON");
         var census = new PartitionCensus();
         foreach (var (table, indexId, _, _, index, placement) in EnumerateTableIndexIdentities(database, batch))
         {
+            var (level, xmlCompressed) = RowstoreCompressionOf(table, indexId, index);
             var compression = index is { IsColumnstore: true } columnstore
                 ? (columnstore.ColumnstoreArchive ? archiveCompression : columnstoreCompression)
                 : table.PageCompressed && indexId <= 1 ? pageCompression
-                : noneCompression;
+                : level switch { 1 => rowCompression, 2 => pageCompression, _ => noneCompression };
             foreach (var unit in census.Units(table, indexId, placement))
             {
                 var partitionIdValue = SqlValue.FromInt64(unit.PartitionId);
@@ -1032,11 +1036,30 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt64(unit.Rows),
                     filestreamFg,
                     .. compression,
-                    xmlOff,
-                    xmlOffDesc,
+                    xmlCompressed ? xmlOn : xmlOff,
+                    xmlCompressed ? xmlOnDesc : xmlOffDesc,
                 ];
             }
         }
+    }
+
+    /// <summary>
+    /// The rowstore <c>DATA_COMPRESSION</c> level and <c>XML_COMPRESSION</c> of
+    /// one of <paramref name="table"/>'s rowsets: the heap's own for index 0,
+    /// else the index's or key constraint's.
+    /// </summary>
+    private static (byte Level, bool Xml) RowstoreCompressionOf(HeapTable table, int indexId, Storage.Index? index)
+    {
+        if (index is not null)
+            return (index.DataCompression, index.XmlCompression);
+        if (indexId == 0)
+            return (table.HeapDataCompression, table.HeapXmlCompression);
+        foreach (var key in table.KeyConstraints)
+        {
+            if (key.IndexId == indexId)
+                return (key.DataCompression, key.XmlCompression);
+        }
+        return (0, false);
     }
 
     /// <summary>
@@ -1326,6 +1349,8 @@ internal static partial class BuiltInResources
             // A filtered index's statistics carry its filter (probed 2026-09-26
             // against SQL Server 2025).
             var filtered = table.Indexes.Find(index => index.Filter is not null && string.Equals(index.Name, name, StringComparison.Ordinal));
+            var key = index is null ? table.KeyConstraints.Find(key => string.Equals(key.Name, name, StringComparison.Ordinal)) : null;
+            var state = index?.Statistics ?? key?.Statistics;
             yield return
             [
                 SqlValue.FromInt32(table.ObjectId),
@@ -1333,15 +1358,15 @@ internal static partial class BuiltInResources
                 SqlValue.FromInt32(indexId),
                 falseBit, // auto_created
                 falseBit, // user_created
-                index is null ? (table.KeyConstraints.Find(key => string.Equals(key.Name, name, StringComparison.Ordinal))?.StatisticsNoRecompute == true ? trueBit : falseBit) : (index.StatisticsNoRecompute ? trueBit : falseBit), // no_recompute
+                index is null ? (key?.StatisticsNoRecompute == true ? trueBit : falseBit) : (index.StatisticsNoRecompute ? trueBit : falseBit), // no_recompute
                 filtered is null ? falseBit : trueBit, // has_filter
                 filtered?.FilterDefinition is { } filter ? SqlValue.FromNVarchar(filter) : nullFilter,
                 falseBit, // is_temporary
                 falseBit, // is_incremental
-                falseBit, // has_persisted_sample
+                state?.HasPersistedSample == true ? trueBit : falseBit, // has_persisted_sample
                 zeroInt,  // stats_generation_method
                 methodDesc,
-                falseBit, // auto_drop
+                state?.AutoDrop == true ? trueBit : falseBit, // auto_drop
                 primaryRole,
                 primaryRoleDesc,
                 nullName, // replica_name
@@ -1361,17 +1386,17 @@ internal static partial class BuiltInResources
                         tableObjectId,
                         SqlValue.FromSystemName(statistic.Name),
                         SqlValue.FromInt32(statistic.StatsId),
-                        falseBit, // auto_created
-                        trueBit,  // user_created
+                        statistic.AutoCreated ? trueBit : falseBit, // auto_created
+                        statistic.AutoCreated ? falseBit : trueBit, // user_created
                         statistic.NoRecompute ? trueBit : falseBit,
                         statistic.Filter is null ? falseBit : trueBit, // has_filter
                         statistic.FilterDefinition is { } statisticFilter ? SqlValue.FromNVarchar(statisticFilter) : nullFilter,
                         falseBit, // is_temporary
                         falseBit, // is_incremental
-                        falseBit, // has_persisted_sample
+                        statistic.Statistics.HasPersistedSample ? trueBit : falseBit, // has_persisted_sample
                         zeroInt,  // stats_generation_method
                         methodDesc,
-                        falseBit, // auto_drop
+                        statistic.Statistics.AutoDrop ? trueBit : falseBit, // auto_drop
                         primaryRole,
                         primaryRoleDesc,
                         nullName, // replica_name

@@ -58,6 +58,7 @@ internal static class ComputedColumnPrecision
         "SIN",
         "SQRT",
         "SQUARE",
+        "STR",
         "TAN",
     }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
 

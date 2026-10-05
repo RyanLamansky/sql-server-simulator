@@ -20,8 +20,18 @@ namespace SqlServerSimulator.Storage;
 /// standalone one takes the next free slot.
 /// </para>
 /// </remarks>
-internal sealed class UserStatistic(string name, int statsId, int[] columnFullOrdinals, bool noRecompute, DateTime createDate, Parser.BooleanExpression? filter = null, string? filterDefinition = null, int[]? filterColumnFullOrdinals = null)
+internal sealed class UserStatistic(string name, int statsId, int[] columnFullOrdinals, bool noRecompute, DateTime createDate, Parser.BooleanExpression? filter = null, string? filterDefinition = null, int[]? filterColumnFullOrdinals = null, bool autoCreated = false, StatisticsState? statistics = null)
 {
+    /// <summary>
+    /// Whether the optimizer created this statistic for a column a query read
+    /// (<c>_WA_Sys_…</c>, <c>sys.stats.auto_created</c>), which a change to the
+    /// column drops rather than refuses.
+    /// </summary>
+    public readonly bool AutoCreated = autoCreated;
+
+    /// <summary>The statistic's last build and the options it was built under.</summary>
+    public readonly StatisticsState Statistics = statistics ?? new();
+
     /// <summary>
     /// The <c>WHERE</c> predicate of a filtered statistic, judged against a
     /// row's stored values like a filtered index's; <see langword="null"/> for
@@ -43,7 +53,7 @@ internal sealed class UserStatistic(string name, int statsId, int[] columnFullOr
 
     /// <summary>The same statistic with its column ordinals mapped through <paramref name="oldToNew"/>, as a column drop renumbers them.</summary>
     public UserStatistic Remapped(int[] oldToNew)
-        => new(this.Name, this.StatsId, [.. this.ColumnFullOrdinals.Select(o => oldToNew[o])], this.NoRecompute, this.CreateDate, this.Filter, this.FilterDefinition, [.. this.FilterColumnFullOrdinals.Select(o => oldToNew[o])]);
+        => new(this.Name, this.StatsId, [.. this.ColumnFullOrdinals.Select(o => oldToNew[o])], this.NoRecompute, this.CreateDate, this.Filter, this.FilterDefinition, [.. this.FilterColumnFullOrdinals.Select(o => oldToNew[o])], this.AutoCreated, this.Statistics);
 
     public string Name = name;
 

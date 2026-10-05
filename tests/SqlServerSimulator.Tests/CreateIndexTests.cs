@@ -361,7 +361,7 @@ public sealed class CreateIndexTests
             """);
         var ex = Throws<SimulatedSqlException>(() => sim.ExecuteNonQuery("drop index uq_a on t"));
         AreEqual(3723, ex.Number);
-        Contains("UNIQUE constraint enforcement", ex.Message);
+        Contains("UNIQUE KEY constraint enforcement", ex.Message);
     }
 
     // --- sys.indexes catalog shape ---
@@ -899,6 +899,14 @@ public sealed class CreateIndexTests
     [DataRow("a <> 1", "([a]<>(1))")]
     [DataRow("a = -1", "([a]=(-1))")]
     [DataRow("d > '2020-01-01'", "([d]>'2020-01-01')")]
+    [DataRow("a = 5000000000", "([a]=(5000000000.))")]
+    [DataRow("a = 10.", "([a]=(10.))")]
+    [DataRow("a = cast(10 as int)", "([a]=CONVERT([int],(10)))")]
+    [DataRow("a = 0x0A", "([a]=0x0A)")]
+    [DataRow("a = $5", "([a]=($5.0000))")]
+    [DataRow("a = .5", "([a]=(0.5))")]
+    [DataRow("a in (10)", "([a]=(10))")]
+    [DataRow("a !< 10", "([a]>=(10))")]
     public void FilteredIndex_AcceptedShape_StoresItsDefinition(string predicate, string definition)
         => AreEqual(definition, new Simulation().ExecuteScalar($"{FilterTable} create index ix on fx(a) where {predicate}; select filter_definition from sys.indexes where name = 'ix'"));
 
@@ -1078,4 +1086,167 @@ public sealed class CreateIndexTests
             drop index ixh on t;
             select count(*) from sys.indexes where object_id = object_id('t') and index_id > 0
             """));
+
+    private const string OptionTable = """
+        create table t (id int not null, a int null, b varchar(20) null);
+        insert t values (3, 30, 'c'), (1, 10, 'a'), (2, 20, 'b');
+        """;
+
+    /// <summary>
+    /// The index-option values and combinations real refuses (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create index ix on t (a) with (fillfactor = '50')", 102)]
+    [DataRow("create index ix on t (a) with (fillfactor = 50.5)", 1080)]
+    [DataRow("create index ix on t (a) with (pad_index = 1)", 153)]
+    [DataRow("create index ix on t (a) with (maxdop = -1)", 304)]
+    [DataRow("create index ix on t (a) with (data_compression = columnstore)", 10798)]
+    [DataRow("create index ix on t (a) with (data_compression = xpress)", 102)]
+    [DataRow("create index ix on t (a) with (data_compression = row, data_compression = page)", 7711)]
+    [DataRow("create index ix on t (a) with (data_compression = row on partitions (1))", 7729)]
+    [DataRow("create index ix on t (a) with (statistics_incremental = on)", 9108)]
+    [DataRow("create index ix on t (a) with (online = off (wait_at_low_priority (max_duration = 1, abort_after_wait = self)))", 155)]
+    [DataRow("create index ix on t (a) with (drop_existing = on)", 7999)]
+    [DataRow("create index ix on t (a) with allow_dup_row", 1070)]
+    [DataRow("create unique index ix on t (id) with online = on", 156)]
+    [DataRow("create index ix on t (a) filestream_on [PRIMARY]", 1716)]
+    public void IndexOptions_Refusals(string statement, int number)
+        => _ = new Simulation().AssertSqlError(OptionTable + statement, number);
+
+    [TestMethod]
+    public void IndexOptions_LegacyBareForms_AreTaken()
+        => AreEqual(70, new Simulation().ExecuteScalar(OptionTable + """
+            create index ix on t (a) with pad_index, fillfactor = 70, sort_in_tempdb, statistics_norecompute;
+            select cast(fill_factor as int) from sys.indexes where object_id = object_id('t') and name = 'ix'
+            """));
+
+    /// <summary>
+    /// <c>DATA_COMPRESSION</c> and <c>XML_COMPRESSION</c> are recorded on the
+    /// index's partitions, from CREATE INDEX, the CREATE TABLE options and a
+    /// rebuild alike.
+    /// </summary>
+    [TestMethod]
+    public void DataCompression_ReachesSysPartitions()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create table t (id int not null primary key, a int) with (data_compression = page);
+            create index ix on t (a) with (data_compression = row);
+            """);
+        AreEqual("PAGE", sim.ExecuteScalar("select data_compression_desc from sys.partitions where object_id = object_id('t') and index_id = 1"));
+        AreEqual("ROW", sim.ExecuteScalar("select data_compression_desc from sys.partitions where object_id = object_id('t') and index_id = 2"));
+        _ = sim.ExecuteNonQuery("alter index ix on t rebuild with (data_compression = none)");
+        AreEqual("NONE", sim.ExecuteScalar("select data_compression_desc from sys.partitions where object_id = object_id('t') and index_id = 2"));
+    }
+
+    [TestMethod]
+    [DataRow("create table k (x char(1701)); create index ix on k (x)", 1944)]
+    [DataRow("create table k (x char(901)); create clustered index ix on k (x)", 1944)]
+    [DataRow("create table k (x varchar(1000), y varchar(1000)); create clustered index ix on k (x, y); insert k values (replicate('a', 500), replicate('b', 500))", 1946)]
+    [DataRow("create table k (x varchar(1000), y varchar(1000)); create index ix on k (x, y); insert k values (replicate('a', 1000), replicate('b', 1000))", 1946)]
+    public void KeyLength_Limits(string statement, int number)
+        => _ = new Simulation().AssertSqlError(statement, number);
+
+    [TestMethod]
+    public void KeyLength_AWideVariableKey_WarnsAndAdmitsShortEntries()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            create table k (x varchar(1000), y varchar(1000));
+            create index ix on k (x, y);
+            insert k values ('a', 'b');
+            select count(*) from k
+            """));
+
+    [TestMethod]
+    public void KeyColumns_AtMost32()
+    {
+        var columns = string.Join(", ", Enumerable.Range(1, 33).Select(static i => $"c{i}"));
+        var declared = string.Join(", ", Enumerable.Range(1, 33).Select(static i => $"c{i} int"));
+        new Simulation().AssertSqlError(
+            $"create table k ({declared}); create index ix on dbo.k ({columns})",
+            1904,
+            "The index 'ix' on table 'dbo.k' has 33 columns in the key list. The maximum limit for index key column list is 32.");
+    }
+
+    [TestMethod]
+    [DataRow("create synonym sy for t; create index ix on dbo.sy (a)", 1914)]
+    [DataRow("create statistics st on t (a); create index st on t (b)", 1913)]
+    [DataRow("create table k (x xml); create index ix on k (x)", 1977)]
+    [DataRow("create table k (x geography); create index ix on k (x)", 1978)]
+    [DataRow("create table k (x varchar(max)); create index ix on k (x)", 1919)]
+    [DataRow("create table k (y int, x text); create index ix on k (y) include (x)", 1999)]
+    [DataRow("create table k (a int, c as getdate()); create index ix on k (a) include (c)", 2729)]
+    public void IndexShape_Refusals(string statement, int number)
+        => _ = new Simulation().AssertSqlError(OptionTable + statement, number);
+
+    [TestMethod]
+    public void ComputedKeyReadingData_IsMsg2709()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(OptionTable);
+        _ = sim.ExecuteNonQuery("create function dbo.f(@a int) returns int with schemabinding as begin return (select count(*) from dbo.t where a = @a) end");
+        sim.AssertSqlError(
+            "create table k (a int, c as dbo.f(a)); create index ix on dbo.k (c)",
+            2709,
+            "Column 'c' in table 'dbo.k' cannot be used in an index or statistics or as a partition key because it does user or system data access.");
+    }
+
+    [TestMethod]
+    public void UniqueIndex_ReportsTheLowestDuplicate()
+        => new Simulation().AssertSqlError(
+            OptionTable + "insert t values (9, 30, 'x'), (8, 10, 'y'); create unique index ix on t (a)",
+            1505,
+            "The CREATE UNIQUE INDEX statement terminated because a duplicate key was found for the object name 'dbo.t' and the index name 'ix'. The duplicate key value is (10).");
+
+    [TestMethod]
+    public void ClusteredIndex_OnANonPersistedComputedColumn_IsReadable()
+        => AreEqual(3, new Simulation().ExecuteScalar("""
+            create table k (a int, b int, c as (b * -1));
+            insert k values (1, 1), (2, 3), (3, 2);
+            create clustered index cx on k (c);
+            select count(*) from k
+            """));
+
+    /// <summary>
+    /// DROP INDEX's options and forms (probed 2026-10-05 against SQL Server
+    /// 2025): ONLINE drops only a clustered index, and a nonclustered one
+    /// takes no clustered-only option.
+    /// </summary>
+    [TestMethod]
+    [DataRow("drop index ix_a on t with (online = on)", 3745)]
+    [DataRow("drop index ix_a on t with (maxdop = 1)", 3748)]
+    [DataRow("drop index ix_a on t with (move to [PRIMARY])", 3748)]
+    [DataRow("drop index ix_a on t with (nosuch = 1)", 155)]
+    [DataRow("drop index ix_a on t, ix_b on t with (online = on)", 3744)]
+    [DataRow("drop index dbo.t.ix_a.x", 166)]
+    [DataRow("drop statistics dbo.t.ix_a", 3739)]
+    [DataRow("drop statistics st on t", 1053)]
+    public void DropIndex_Refusals(string statement, int number)
+        => _ = new Simulation().AssertSqlError(
+            "create table t (id int primary key, a int, b int); create index ix_a on t (a); create index ix_b on t (b); create statistics st on t (b); " + statement,
+            number);
+
+    [TestMethod]
+    public void DropIndex_ClusteredWithOptions_IsTaken()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table t (id int, a int);
+            create clustered index cx on t (id);
+            drop index cx on t with (online = off, maxdop = 1, move to [PRIMARY]);
+            select count(*) from sys.indexes where object_id = object_id('t') and index_id = 1
+            """));
+
+    /// <summary>
+    /// The filter refusals that name the written table and the filter's column
+    /// (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create index ix on dbo.fx (a) where s = N'a'", 10611, "Filtered index 'ix' cannot be created on table 'dbo.fx' because the column 's' in the filter expression is compared with a constant of higher data type precedence or of a different collation. Converting a column to the data type of a constant is not supported for filtered indexes. To resolve this error, explicitly convert the constant to the same data type and collation as the column 's'.")]
+    [DataRow("create index ix on dbo.fx (a) where a = null", 10620, "Filtered index 'ix' cannot be created on table 'dbo.fx' because the filter expression contains a comparison with a literal NULL value. Rewrite the comparison to use the IS [NOT] NULL comparison operator to test for NULL values.")]
+    [DataRow("create table dbo.k (a int, h hierarchyid); create index ix on dbo.k (a) where h is not null", 10619, "Filtered index 'ix' cannot be created on table 'dbo.k' because the column 'h' in the filter expression is of a CLR data type. Rewrite the filter expression so that it does not include this column.")]
+    public void FilteredIndex_Refusals_NameTheWrittenTable(string statement, int number, string message)
+        => new Simulation().AssertSqlError($"{FilterTable} {statement}", number, message);
+
+    [TestMethod]
+    public void FilteredIndex_Clustered_IsASyntaxError()
+        => new Simulation().AssertSqlError($"{FilterTable} create clustered index ix on fx (a) where a > 1", 102, "Incorrect syntax near 'WHERE'.");
 }

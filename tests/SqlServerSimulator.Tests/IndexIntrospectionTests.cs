@@ -243,19 +243,25 @@ public sealed class IndexIntrospectionTests
     public void StatsDate_PK_ReturnsNonNullDateTime()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create table t (id int primary key)");
+        _ = sim.ExecuteNonQuery("create table t (id int primary key); insert t values (1); update statistics t");
         var v = sim.ExecuteScalar("select stats_date(object_id('t'), 1)");
         _ = IsInstanceOfType<DateTime>(v);
         IsGreaterThan(new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Unspecified), (DateTime)v!);
     }
 
     [TestMethod]
-    public void StatsDate_NamedIndex_MatchesTableCreateDate()
+    public void StatsDate_StatisticBuiltOverEmptyTable_Null()
+        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
+            "create table t (id int primary key); insert t values (1); " +
+            "select stats_date(object_id('t'), 1)"));
+
+    [TestMethod]
+    public void StatsDate_UpdatedTogether_Match()
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery(
-            "create table t (id int primary key, a int); " +
-            "create index ix on t(a)");
+            "create table t (id int primary key, a int); insert t values (1, 1); " +
+            "create index ix on t(a); update statistics t");
         var pk = (DateTime)sim.ExecuteScalar("select stats_date(object_id('t'), 1)")!;
         var ix = (DateTime)sim.ExecuteScalar("select stats_date(object_id('t'), 2)")!;
         AreEqual(pk, ix);
@@ -450,5 +456,47 @@ public sealed class IndexIntrospectionTests
             alter table t add constraint uq3 unique (b, c);
             select string_agg(concat(name, '=', index_id), ' ') within group (order by index_id)
             from sys.indexes where object_id = object_id('t') and index_id > 0
+            """));
+
+    private const string DmvTable = """
+        create table t (id int not null constraint pk_t primary key, a int);
+        create index ix_a on t (a);
+        create statistics st on t (a);
+        insert t values (1, 10), (2, 20);
+        """;
+
+    /// <summary>
+    /// <c>sys.dm_db_index_physical_stats</c> answers a row per index, and
+    /// refuses the arguments real does (probed 2026-10-05 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    public void IndexPhysicalStats_OneRowPerIndex()
+        => AreEqual("1,2", new Simulation().ExecuteScalar(DmvTable + """
+            select string_agg(cast(index_id as varchar(5)), ',') within group (order by index_id)
+            from sys.dm_db_index_physical_stats(db_id(), object_id('dbo.t'), null, null, null)
+            """));
+
+    [TestMethod]
+    [DataRow("select count(*) from sys.dm_db_index_physical_stats(db_id(), object_id('dbo.t'), 99, null, null)", 2591)]
+    [DataRow("select count(*) from sys.dm_db_index_physical_stats(db_id(), object_id('dbo.t'), null, null, 'BOGUS')", 2561)]
+    [DataRow("select count(*) from sys.dm_db_index_physical_stats(-5, null, null, null, null)", 2521)]
+    public void IndexPhysicalStats_Refusals(string query, int number)
+        => _ = new Simulation().AssertSqlError(DmvTable + query, number);
+
+    [TestMethod]
+    [DataRow("select count(*) from sys.dm_db_index_usage_stats where object_id = object_id('t')", 0)]
+    [DataRow("select count(*) from sys.dm_db_missing_index_details", 0)]
+    [DataRow("select count(*) from sys.dm_db_index_operational_stats(db_id(), object_id('t'), null, null)", 0)]
+    [DataRow("select count(*) from sysindexes where id = object_id('t') and indid in (1, 2)", 2)]
+    [DataRow("select count(*) from sysindexkeys where id = object_id('t')", 2)]
+    [DataRow("select count(*) from sys.dm_db_stats_properties(object_id('t'), 3)", 1)]
+    public void IndexDmvs_Shapes(string query, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar(DmvTable + query));
+
+    [TestMethod]
+    public void StatisticIds_ResolveInTheIndexColumnFunctions()
+        => AreEqual("a|1", new Simulation().ExecuteScalar(DmvTable + """
+            select concat(index_col('t', 3, 1), '|', indexkey_property(object_id('t'), 3, 1, 'ColumnId') - 1)
             """));
 }

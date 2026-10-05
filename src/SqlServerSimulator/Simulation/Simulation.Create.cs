@@ -182,8 +182,9 @@ partial class Simulation
         }
         SystemVersioningOptions? systemVersioning = null;
         var memoryOptimization = default(MemoryOptimizationOptions);
+        (byte? Data, bool? Xml) tableCompression = default;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
-            systemVersioning = ParseTableOptions(context, tableDataSpace is not null, out memoryOptimization);
+            systemVersioning = ParseTableOptions(context, tableDataSpace is not null, out memoryOptimization, out tableCompression);
         var memoryOptimized = memoryOptimization.MemoryOptimized;
         if (memoryOptimized && (BatchContext.IsLocalTempName(tableName.Leaf) || BatchContext.IsGlobalTempName(tableName.Leaf)))
             throw SimulatedSqlException.TemporaryMemoryOptimizedTable();
@@ -391,7 +392,7 @@ partial class Simulation
         ValidateTableDeclaration(createTargetDatabase, tableName.Leaf, memoryOptimization, heapColumns, pendingKeys, pendingIndexes);
 
         var (keyObjectIds, indexObjectIds) = AllocateDeclarationObjectIds(context.CurrentDatabase, pendingKeys, pendingIndexes);
-        var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow, keyObjectIds);
+        var keyConstraints = ResolveKeyConstraints(tableName.Leaf, heapColumns!, pendingKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow, keyObjectIds, tableName.ToString());
         var checkConstraints = ResolveCheckConstraints(tableName.Leaf, pendingChecks, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
 
         // History-table pre-validation when SYSTEM_VERSIONING = ON: the parent
@@ -455,7 +456,16 @@ partial class Simulation
             GraphKind = graphKind,
             IsMemoryOptimized = memoryOptimized,
             Durability = memoryOptimization.Durability,
+            HeapDataCompression = tableCompression.Data ?? 0,
+            HeapXmlCompression = tableCompression.Xml ?? false,
         };
+        // The table's storage options describe its rows, which a clustered key
+        // declared with it holds (probed 2026-10-05 against SQL Server 2025).
+        if (Array.Find(keyConstraints, static key => key.IsClustered) is { } clusteredKey)
+        {
+            clusteredKey.DataCompression = tableCompression.Data ?? clusteredKey.DataCompression;
+            clusteredKey.XmlCompression = tableCompression.Xml ?? clusteredKey.XmlCompression;
+        }
         AttachGraphColumns(heapTable);
         PlaceNewTable(context.Batch, heapTable, tableDataSpace, textImageOn, fileStreamOn);
         if (isGlobalTempTable)
@@ -578,7 +588,10 @@ partial class Simulation
             });
         }
         foreach (var key in keyConstraints)
-            WarnOfWideIndexKey(context.Batch, heapTable.Columns, key.FullOrdinals, key.Name, key.IsClustered);
+        {
+            key.KeyMayExceedLimit = WarnOfWideIndexKey(context.Batch, heapTable.Columns, key.FullOrdinals, key.Name, key.IsClustered);
+            heapTable.KeysMayExceedLimit |= key.KeyMayExceedLimit;
+        }
         // Real raises no DDL event for a temp table (tempdb owns it), only for
         // a permanent one in the current database.
         if (!isTempTable)
@@ -590,23 +603,69 @@ partial class Simulation
     /// Sends Msg 1945 when an index's or key's widest key passes what its kind
     /// can hold — 900 bytes clustered, 1700 nonclustered — the sum of its
     /// columns' declared byte lengths; the index is built all the same
-    /// (probed 2026-10-01 against SQL Server 2025).
+    /// (probed 2026-10-01 against SQL Server 2025). Returns whether a row's
+    /// key can pass the limit, which each write then measures
+    /// (<see cref="EnforceIndexKeyLength"/>). With <paramref name="rejectFixedOverflow"/>
+    /// a key whose fixed-length columns alone pass it is Msg 1944 instead,
+    /// since every row's would (probed 2026-10-05).
     /// </summary>
-    internal static void WarnOfWideIndexKey(BatchContext batch, HeapColumn[] columns, int[] keyFullOrdinals, string indexName, bool clustered)
+    internal static bool WarnOfWideIndexKey(BatchContext batch, HeapColumn[] columns, int[] keyFullOrdinals, string indexName, bool clustered, bool rejectFixedOverflow = false)
     {
-        if (batch.IsSkipping)
-            return;
         var length = 0;
+        var fixedLength = 0;
         foreach (var ordinal in keyFullOrdinals)
         {
             var columnLength = BuiltInResources.GetSysColumnMetadata(columns[ordinal]).MaxLength;
             if (columnLength < 0)
-                return;
+                return false;
             length += columnLength;
+            if (columns[ordinal].Type.IsFixedLength)
+                fixedLength += columnLength;
+        }
+        var limit = clustered ? 900 : 1700;
+        if (rejectFixedOverflow && fixedLength > limit)
+            throw SimulatedSqlException.IndexKeyTooLarge(indexName, fixedLength, clustered, limit);
+        if (length <= limit)
+            return false;
+        if (!batch.IsSkipping)
+            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.WideIndexKeyMessage(batch, clustered, limit, indexName, length));
+        return true;
+    }
+
+    /// <summary>
+    /// Raises Msg 1946 when <paramref name="rowValues"/>' key for an index or
+    /// key whose declared width can pass its limit actually does: the sum of
+    /// the key values' stored lengths, a <c>sql_variant</c> carrying 8 bytes
+    /// of its own (probed 2026-10-05 against SQL Server 2025). The insert and
+    /// update enforcement paths call it ahead of the uniqueness checks.
+    /// </summary>
+    internal static void EnforceIndexKeyLength(HeapTable table, SqlValue[] rowValues)
+    {
+        foreach (var key in table.KeyConstraints)
+        {
+            if (key.KeyMayExceedLimit && !key.IsDisabled)
+                RejectOversizedEntry(key.Name, key.FullOrdinals, key.IsClustered, rowValues);
+        }
+        foreach (var index in table.Indexes)
+        {
+            if (index.KeyMayExceedLimit && !index.IsDisabled)
+                RejectOversizedEntry(index.Name, index.KeyFullOrdinals, index.IsClustered, rowValues);
+        }
+    }
+
+    private static void RejectOversizedEntry(string indexName, int[] fullOrdinals, bool clustered, SqlValue[] rowValues)
+    {
+        var length = 0;
+        foreach (var ordinal in fullOrdinals)
+        {
+            var value = rowValues[ordinal];
+            if (value.IsNull)
+                continue;
+            length += Parser.Expressions.DataLength.ByteCount(value) + (value.Type is SqlVariantSqlType ? 8 : 0);
         }
         var limit = clustered ? 900 : 1700;
         if (length > limit)
-            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.WideIndexKeyMessage(batch, clustered, limit, indexName, length));
+            throw SimulatedSqlException.IndexEntryTooLong(length, indexName, limit, clustered);
     }
 
     /// <summary>
@@ -622,8 +681,9 @@ partial class Simulation
     /// closing <c>)</c>. Returns the system-versioning options, or null when
     /// none were given.
     /// </summary>
-    private static SystemVersioningOptions? ParseTableOptions(ParserContext context, bool placed, out MemoryOptimizationOptions memoryOptimization)
+    private static SystemVersioningOptions? ParseTableOptions(ParserContext context, bool placed, out MemoryOptimizationOptions memoryOptimization, out (byte? Data, bool? Xml) compression)
     {
+        compression = default;
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         SystemVersioningOptions? systemVersioning = null;
@@ -655,12 +715,16 @@ partial class Simulation
                     {
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     }
+                    compression.Data = level.Span.Equals("ROW", StringComparison.OrdinalIgnoreCase) ? (byte)1
+                        : level.Span.Equals("PAGE", StringComparison.OrdinalIgnoreCase) ? (byte)2
+                        : (byte)0;
                     RejectOnPartitions(context);
                     dataCompression = true;
                     break;
                 case StringToken name when name.Span.Equals("XML_COMPRESSION", StringComparison.OrdinalIgnoreCase):
-                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
+                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } xmlToggle)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
+                    compression.Xml = xmlToggle.Keyword == Keyword.On;
                     RejectOnPartitions(context);
                     break;
                 case StringToken name when name.Span.Equals("MEMORY_OPTIMIZED", StringComparison.OrdinalIgnoreCase):
@@ -1118,6 +1182,14 @@ partial class Simulation
         // the hypothetical index's STATISTICS_ONLY, in any order (probed
         // 2026-10-02 against SQL Server 2025).
         context.MoveNextRequired();
+        if (statement == IndexOptionStatement.CreateIndex && context.Token is StringToken or ReservedKeyword { Keyword: Keyword.FillFactor })
+            return ParseLegacyCreateIndexOptions(context);
+        // A rebuild takes only the parenthesized list (probed 2026-10-05).
+        if (statement is IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.RebuildColumnstoreIndex or IndexOptionStatement.RebuildJsonIndex
+            && context.Token is not Operator { Character: '(' })
+        {
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
         if (context.Token is ReservedKeyword { Keyword: Keyword.FillFactor } || IsLegacyStatisticsOnly(context, statement))
         {
             byte? legacyFillFactor = null;
@@ -1158,6 +1230,11 @@ partial class Simulation
         bool? statisticsNoRecompute = null;
         var statisticsOnly = false;
         int? bucketCount = null;
+        byte? dataCompression = null;
+        bool? xmlCompression = null;
+        var compressionOnPartitions = false;
+        var statisticsIncremental = false;
+        var ignoreDupKeyWritten = false;
         var depth = 1;
         // Two-token lookbehind over the balanced skip: the option name, then its
         // '='. Only a name at the list's own depth counts — a nested group is
@@ -1196,6 +1273,8 @@ partial class Simulation
                 {
                     throw SimulatedSqlException.Aggregate([unknown, SimulatedSqlException.InvalidUsageOfIndexOption(name)]);
                 }
+                if (statement is IndexOptionStatement.CreateIndex or IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.AlterTable)
+                    ValidateIndexOptionValue(context, name, statement);
                 if (jsonRefusal is { State: 0 } && valueToken is ReservedKeyword { Keyword: Keyword.On })
                     jsonRefusal.Note(name);
                 maxDuration |= name.Equals("MAX_DURATION", StringComparison.OrdinalIgnoreCase);
@@ -1219,20 +1298,38 @@ partial class Simulation
                     continue;
                 case ReservedKeyword { Keyword: Keyword.On or Keyword.Off } toggle when sawEquals:
                     var on = toggle.Keyword == Keyword.On;
-                    if (namedOption == "IGNORE_DUP_KEY")
-                        ignoreDupKey = on;
-                    else if (namedOption == "PAD_INDEX")
-                        padIndex = on;
-                    else if (namedOption == "DROP_EXISTING")
-                        dropExisting = on;
-                    else if (namedOption == "ALLOW_ROW_LOCKS")
-                        allowRowLocks = on;
-                    else if (namedOption == "ALLOW_PAGE_LOCKS")
-                        allowPageLocks = on;
-                    else if (namedOption == "OPTIMIZE_FOR_SEQUENTIAL_KEY")
-                        optimizeForSequentialKey = on;
-                    else if (namedOption == "STATISTICS_NORECOMPUTE")
-                        statisticsNoRecompute = on;
+                    switch (namedOption)
+                    {
+                        case "ALLOW_PAGE_LOCKS":
+                            allowPageLocks = on;
+                            break;
+                        case "ALLOW_ROW_LOCKS":
+                            allowRowLocks = on;
+                            break;
+                        case "DROP_EXISTING":
+                            dropExisting = on;
+                            break;
+                        case "IGNORE_DUP_KEY":
+                            ignoreDupKey = on;
+                            ignoreDupKeyWritten = true;
+                            break;
+                        case "OPTIMIZE_FOR_SEQUENTIAL_KEY":
+                            optimizeForSequentialKey = on;
+                            break;
+                        case "PAD_INDEX":
+                            padIndex = on;
+                            break;
+                        case "STATISTICS_INCREMENTAL":
+                            statisticsIncremental = on;
+                            break;
+                        case "STATISTICS_NORECOMPUTE":
+                            statisticsNoRecompute = on;
+                            break;
+                        case "XML_COMPRESSION" when depth == 1:
+                            xmlCompression = on;
+                            compressionOnPartitions |= FollowedByOnPartitions(context);
+                            break;
+                    }
                     break;
                 case Numeric or Operator { Character: '-' } when sawEquals && namedOption == "FILLFACTOR":
                     fillFactor = ReadFillFactor(context);
@@ -1278,6 +1375,25 @@ partial class Simulation
                     {
                         throw SimulatedSqlException.RowstoreColumnstoreCompression();
                     }
+                    else if (columnstoreLevel && statement == IndexOptionStatement.CreateIndex)
+                    {
+                        throw SimulatedSqlException.RowstoreColumnstoreCompression(15);
+                    }
+                    else if (!columnstoreLevel && depth == 1)
+                    {
+                        var compressionLevel = level.Span.Equals("ROW", StringComparison.OrdinalIgnoreCase) ? (byte)1
+                            : level.Span.Equals("PAGE", StringComparison.OrdinalIgnoreCase) ? (byte)2
+                            : level.Span.Equals("NONE", StringComparison.OrdinalIgnoreCase) ? (byte)0
+                            : statement == IndexOptionStatement.Unchecked ? (byte)0
+                            : throw SimulatedSqlException.SyntaxErrorNear(context);
+                        var onPartitions = FollowedByOnPartitions(context);
+                        // Named twice for the whole object is Msg 7711 (probed
+                        // 2026-10-05 against SQL Server 2025).
+                        if (dataCompression is not null && !onPartitions && !compressionOnPartitions && statement != IndexOptionStatement.Unchecked)
+                            throw SimulatedSqlException.DataCompressionSpecifiedTwice();
+                        dataCompression = compressionLevel;
+                        compressionOnPartitions |= onPartitions;
+                    }
                     break;
                 case StringToken name when depth == 1 && name.Span.Equals("COMPRESSION_DELAY", StringComparison.OrdinalIgnoreCase):
                     namedOption = "COMPRESSION_DELAY";
@@ -1309,6 +1425,12 @@ partial class Simulation
                 case StringToken name when depth == 1 && name.Span.Equals("STATISTICS_NORECOMPUTE", StringComparison.OrdinalIgnoreCase):
                     namedOption = "STATISTICS_NORECOMPUTE";
                     continue;
+                case StringToken name when depth == 1 && name.Span.Equals("STATISTICS_INCREMENTAL", StringComparison.OrdinalIgnoreCase):
+                    namedOption = "STATISTICS_INCREMENTAL";
+                    continue;
+                case StringToken name when depth == 1 && name.Span.Equals("XML_COMPRESSION", StringComparison.OrdinalIgnoreCase):
+                    namedOption = "XML_COMPRESSION";
+                    continue;
             }
 
             namedOption = null;
@@ -1329,7 +1451,10 @@ partial class Simulation
                 throw SimulatedSqlException.ColumnstoreResumable();
         }
         context.MoveNextOptional();
-        return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting, compressionDelay, columnstoreArchive, allowRowLocks, allowPageLocks, optimizeForSequentialKey, statisticsNoRecompute: statisticsNoRecompute, statisticsOnly: statisticsOnly, bucketCount: bucketCount);
+        return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting, compressionDelay, columnstoreArchive, allowRowLocks, allowPageLocks, optimizeForSequentialKey,
+            statisticsNoRecompute: statisticsNoRecompute, statisticsOnly: statisticsOnly, bucketCount: bucketCount,
+            dataCompression: dataCompression, xmlCompression: xmlCompression, compressionOnPartitions: compressionOnPartitions, statisticsIncremental: statisticsIncremental,
+            ignoreDupKeyWritten: ignoreDupKeyWritten);
     }
 
     /// <summary>
@@ -1506,12 +1631,186 @@ partial class Simulation
         var negative = context.Token is Operator { Character: '-' };
         if (negative)
             context.MoveNextRequired();
-        if (context.Token is not Numeric { Value: { IsNull: false } number })
-            throw SimulatedSqlException.SyntaxErrorNear(context);
-        var value = negative ? -number.AsInt32 : number.AsInt32;
+        var value = ReadIntegerOptionLiteral(context);
+        if (negative)
+            value = -value;
         return value is < 1 or > 100
             ? throw SimulatedSqlException.FillFactorOutOfRange(value)
             : (byte)value;
+    }
+
+    /// <summary>
+    /// <c>CREATE INDEX</c>'s legacy unparenthesized option list, the cursor on
+    /// its first name: each item a bare <c>PAD_INDEX</c>, <c>IGNORE_DUP_KEY</c>,
+    /// <c>SORT_IN_TEMPDB</c>, <c>STATISTICS_NORECOMPUTE</c> or
+    /// <c>DROP_EXISTING</c>, or a <c>FILLFACTOR</c> / <c>STATISTICS_ONLY</c>
+    /// given a number. Real refuses any other bare name with Msg 153 naming the
+    /// CREATE INDEX statement, any other name given a number with Msg 153 naming
+    /// the INDEX statement, a non-number value as a syntax error and
+    /// <c>ALLOW_DUP_ROW</c> with Msg 1070 (probed 2026-10-05 against SQL Server
+    /// 2025).
+    /// </summary>
+    private static IndexOptions ParseLegacyCreateIndexOptions(ParserContext context)
+    {
+        byte? fillFactor = null;
+        bool? padIndex = null;
+        bool? statisticsNoRecompute = null;
+        bool ignoreDupKey = false, dropExisting = false, statisticsOnly = false;
+        // An identifier is at most 128 characters.
+        Span<char> buffer = stackalloc char[128];
+        while (true)
+        {
+            if (context.Token is not (StringToken or ReservedKeyword { Keyword: Keyword.FillFactor }))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            var name = context.Token.Source.ToString();
+            var upper = buffer[..Math.Min(name.Length, buffer.Length)];
+            _ = name.AsSpan(0, upper.Length).ToUpperInvariant(upper);
+            if (context.GetNextOptional() is Operator { Character: '=' })
+            {
+                context.MoveNextRequired();
+                var negative = context.Token is Operator { Character: '-' };
+                if (negative)
+                    context.MoveNextRequired();
+                if (context.Token is not Numeric)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                switch (upper)
+                {
+                    case "FILLFACTOR":
+                        var value = ReadIntegerOptionLiteral(context);
+                        fillFactor = (negative ? -value : value) is var written and >= 1 and <= 100
+                            ? (byte)written
+                            : throw SimulatedSqlException.FillFactorOutOfRange(negative ? -value : value);
+                        break;
+                    case "STATISTICS_ONLY":
+                        statisticsOnly = true;
+                        break;
+                    default:
+                        throw SimulatedSqlException.InvalidUsageOfIndexOption(name);
+                }
+                context.MoveNextOptional();
+            }
+            else
+            {
+                switch (upper)
+                {
+                    case "ALLOW_DUP_ROW":
+                        throw SimulatedSqlException.IndexOptionNoLongerSupported(name);
+                    case "DROP_EXISTING":
+                        dropExisting = true;
+                        break;
+                    case "IGNORE_DUP_KEY":
+                        ignoreDupKey = true;
+                        break;
+                    case "PAD_INDEX":
+                        padIndex = true;
+                        break;
+                    case "SORT_IN_TEMPDB":
+                        break;
+                    case "STATISTICS_NORECOMPUTE":
+                        statisticsNoRecompute = true;
+                        break;
+                    default:
+                        throw SimulatedSqlException.InvalidUsageOfIndexOption(name, "CREATE INDEX");
+                }
+            }
+            if (context.Token is not Operator { Character: ',' })
+                break;
+            context.MoveNextRequired();
+        }
+        return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting, statisticsNoRecompute: statisticsNoRecompute, statisticsOnly: statisticsOnly);
+    }
+
+    /// <summary>
+    /// Reads the integer literal an index option's value slot takes, the cursor
+    /// on it: a decimal or one past <c>int</c> is Msg 1080 echoing it as
+    /// written, and anything else — a float, a string, a binary — is Msg 102
+    /// near it (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    private static int ReadIntegerOptionLiteral(ParserContext context) => context.Token switch
+    {
+        Numeric { Value: { IsNull: false } number } when number.Type == SqlType.Int32 => number.AsInt32,
+        Numeric { Value: { IsNull: false } number } when number.Type.Category == SqlTypeCategory.Decimal =>
+            throw SimulatedSqlException.IntegerValueOutOfRange(context.Token.Source.ToString()),
+        _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+    };
+
+    /// <summary>
+    /// Whether the token after a compression level is the <c>ON PARTITIONS</c>
+    /// suffix, leaving the cursor where it was.
+    /// </summary>
+    private static bool FollowedByOnPartitions(ParserContext context)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        var onPartitions = context.MoveNext() && context.Token is ReservedKeyword { Keyword: Keyword.On }
+            && context.MoveNext() && context.Token is StringToken { Span: var word } && word.Equals("PARTITIONS", StringComparison.OrdinalIgnoreCase);
+        context.RestoreCheckpoint(checkpoint);
+        return onPartitions;
+    }
+
+    /// <summary>
+    /// Validates a relational index option's value the way real's grammar does,
+    /// the cursor on the option's name and restored on exit (probed 2026-10-05
+    /// against SQL Server 2025): an <c>ON</c> / <c>OFF</c> option given a
+    /// number is Msg 153 naming it — but for <c>ONLINE</c>, <c>RESUMABLE</c>,
+    /// <c>XML_COMPRESSION</c> and <c>IGNORE_DUP_KEY</c>, whose grammar reads a
+    /// keyword there, Msg 102 near the number; <c>FILLFACTOR</c> and
+    /// <c>MAXDOP</c> take an integer literal (<see cref="ReadIntegerOptionLiteral"/>),
+    /// <c>MAXDOP</c> within 0 to 32767 (Msg 304); <c>DATA_COMPRESSION</c> takes a
+    /// level word; and <c>ONLINE = OFF</c> takes no low-priority list, which
+    /// <c>CREATE INDEX</c> refuses as an unrecognized option.
+    /// </summary>
+    private static void ValidateIndexOptionValue(ParserContext context, string name, IndexOptionStatement statement)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        if (!(context.MoveNext() && context.Token is Operator { Character: '=' } && context.MoveNext()))
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return;
+        }
+        Span<char> upper = stackalloc char[name.Length];
+        _ = name.AsSpan().ToUpperInvariant(upper);
+        switch (upper)
+        {
+            case "ALLOW_PAGE_LOCKS" or "ALLOW_ROW_LOCKS" or "DROP_EXISTING" or "OPTIMIZE_FOR_SEQUENTIAL_KEY" or "PAD_INDEX"
+                or "SORT_IN_TEMPDB" or "STATISTICS_INCREMENTAL" or "STATISTICS_NORECOMPUTE":
+                if (context.Token is Numeric)
+                    throw SimulatedSqlException.InvalidUsageOfIndexOption(name);
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                break;
+            case "IGNORE_DUP_KEY" or "ONLINE" or "RESUMABLE" or "XML_COMPRESSION":
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } toggle)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (toggle.Keyword == Keyword.Off && statement == IndexOptionStatement.CreateIndex && upper is "ONLINE"
+                    && context.MoveNext() && context.Token is Operator { Character: '(' } && context.MoveNext() && context.Token is StringToken lowPriority)
+                {
+                    throw SimulatedSqlException.UnrecognizedIndexOption(lowPriority.Source.ToString().ToUpperInvariant(), "CREATE INDEX");
+                }
+                break;
+            case "FILLFACTOR":
+                if (context.Token is Operator { Character: '-' })
+                    context.MoveNextRequired();
+                _ = ReadIntegerOptionLiteral(context);
+                break;
+            case "MAXDOP":
+                var negative = context.Token is Operator { Character: '-' };
+                if (negative)
+                    context.MoveNextRequired();
+                var maxdop = ReadIntegerOptionLiteral(context);
+                if (negative || maxdop > 32767)
+                    throw SimulatedSqlException.IndexMaxDopOutOfRange((negative ? "-" : "") + context.Token.Source.ToString());
+                break;
+            case "DATA_COMPRESSION":
+                if (context.Token is not StringToken { Span: var level }
+                    || !(level.Equals("NONE", StringComparison.OrdinalIgnoreCase) || level.Equals("ROW", StringComparison.OrdinalIgnoreCase)
+                        || level.Equals("PAGE", StringComparison.OrdinalIgnoreCase) || level.Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase)
+                        || level.Equals("COLUMNSTORE_ARCHIVE", StringComparison.OrdinalIgnoreCase)))
+                {
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
+                break;
+        }
+        context.RestoreCheckpoint(checkpoint);
     }
 
     /// <summary>
@@ -3214,6 +3513,9 @@ partial class Simulation
         return true;
     }
 
+    /// <summary>The most key columns an index or key takes (Msg 1904 past it).</summary>
+    private const int MaxIndexKeyColumns = 32;
+
     /// <summary>
     /// Validates the queued PK/UNIQUE constraints against the resolved column
     /// list and translates them into <see cref="KeyConstraint"/> records keyed
@@ -3243,7 +3545,8 @@ partial class Simulation
         IReadOnlyList<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         Database database,
         DateTime createDate,
-        int[]? objectIds = null)
+        int[]? objectIds = null,
+        string? writtenTableName = null)
     {
         if (pendingKeys.Count == 0)
             return [];
@@ -3268,6 +3571,10 @@ partial class Simulation
             if (IsClusteredKey(pendingKeys, c) && ++clusteredCount > 1)
                 throw SimulatedSqlException.MultipleClusteredConstraints(tableName);
 
+            // A key of more than 32 columns names an empty index (probed
+            // 2026-10-05 against SQL Server 2025).
+            if (pending.FullOrdinals.Length > MaxIndexKeyColumns)
+                throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.TooManyIndexKeyColumns("", writtenTableName ?? tableName, pending.FullOrdinals.Length), state: 0);
             var constraintName = pending.Name ?? AutoConstraintName(tableName, pending.Kind, pending.FullOrdinals, heapColumns);
             var storageOrdinals = new int[pending.FullOrdinals.Length];
             for (var i = 0; i < pending.FullOrdinals.Length; i++)
@@ -4558,6 +4865,8 @@ partial class Simulation
         HeapColumn[] scope = [.. scopeColumns];
         if (!Schemas.ModuleDeterminism.IsComputedColumnDeterministic(database, scope, definition))
             throw SimulatedSqlException.ComputedColumnNotDeterministicForIndex(column.Name, tableName, viaConstraint);
+        if (Schemas.ModuleDeterminism.ComputedColumnAccessesData(database, definition))
+            throw SimulatedSqlException.ComputedColumnAccessesDataForIndex(column.Name, tableName, viaConstraint);
         if (!Schemas.ComputedColumnPrecision.IsPrecise(scope, column.Type, definition))
             throw SimulatedSqlException.ComputedColumnImpreciseForIndex(indexName, tableName, column.Name, viaConstraint);
     }

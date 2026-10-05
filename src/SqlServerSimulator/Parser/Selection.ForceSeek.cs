@@ -43,6 +43,7 @@ partial class Selection
         List<Expression>? projections,
         Expression? soleSubqueryColumn)
     {
+        RecordJoinHintSite(context, sources, joins, excluders);
         var batch = context.Batch;
         if (batch.IsSkipping ? !batch.CompilingForRun : batch.CreateTimeBinding)
             return;
@@ -63,9 +64,19 @@ partial class Selection
                     join.OnPredicate?.CollectConjuncts(conjuncts);
             }
 
+            table.SettleIndexIds();
+            // INDEX(0) — the heap or clustered scan — beside an index that
+            // is anything else is a plan no access path builds (state 2,
+            // probed 2026-10-05 against SQL Server 2025).
+            if (hints.IndexArguments is { Count: > 1 } arguments
+                && arguments.Exists(static argument => argument.Id == 0)
+                && arguments.Exists(static argument => argument.Id != 0))
+            {
+                throw SimulatedSqlException.ForceSeekPlanInfeasible(state: 2);
+            }
             if (hints.ForceSeek
                 ? !ForcedSeekIsFeasible(batch, source, i, sources, table, hints, conjuncts, soleSubqueryColumn)
-                : !ForcedScanIsFeasible(batch, source, i, sources, table, hints, conjuncts, projections))
+                : hints.ForceScan && !ForcedScanIsFeasible(batch, source, i, sources, table, hints, conjuncts, projections))
             {
                 throw SimulatedSqlException.ForceSeekPlanInfeasible();
             }
@@ -85,14 +96,16 @@ partial class Selection
         var leads = new HashSet<int>();
         foreach (var owner in EnumerateKeyOwners(table))
         {
-            (string Name, int[] Ordinals, bool Clustered) described = owner switch
+            // A disabled index seeks nothing (probed 2026-10-05 against SQL
+            // Server 2025).
+            (string Name, int[] Ordinals, int IndexId, bool Disabled) described = owner switch
             {
-                KeyConstraint key => (key.Name, key.StorageOrdinals, key.IsClustered),
-                Storage.Index index => (index.Name, index.KeyStorageOrdinals, index.IsClustered),
-                _ => ("", [], false),
+                KeyConstraint key => (key.Name, key.StorageOrdinals, key.IndexId, key.IsDisabled),
+                Storage.Index index => (index.Name, index.KeyStorageOrdinals, index.IndexId, index.IsDisabled),
+                _ => ("", [], -1, true),
             };
-            var (name, ordinals, clustered) = described;
-            if (ordinals.Length != 0 && ordinals[0] >= 0 && NamedByIndexHint(batch, hints, name, clustered))
+            var (name, ordinals, indexId, disabled) = described;
+            if (!disabled && ordinals.Length != 0 && ordinals[0] >= 0 && NamedByIndexHint(batch, hints, name, indexId))
                 _ = leads.Add(ordinals[0]);
         }
         if (leads.Count == 0)
@@ -138,13 +151,13 @@ partial class Selection
         var carried = new HashSet<int>();
         foreach (var owner in EnumerateKeyOwners(table))
         {
-            var (name, isClustered, ordinals) = owner switch
+            var (name, isClustered, indexId, ordinals) = owner switch
             {
-                KeyConstraint key => (key.Name, key.IsClustered, key.StorageOrdinals),
-                Storage.Index index => (index.Name, index.IsClustered, [.. index.KeyStorageOrdinals, .. index.IncludedColumns]),
-                _ => ("", false, []),
+                KeyConstraint key => (key.Name, key.IsClustered, key.IndexId, key.StorageOrdinals),
+                Storage.Index index => (index.Name, index.IsClustered, index.IndexId, [.. index.KeyStorageOrdinals, .. index.IncludedColumns]),
+                _ => ("", false, -1, []),
             };
-            if (!NamedByIndexHint(batch, hints, name, isClustered))
+            if (!NamedByIndexHint(batch, hints, name, indexId))
                 continue;
             if (isClustered)
                 return true;
@@ -184,15 +197,14 @@ partial class Selection
 
     // Whether an index hint beside FORCESEEK lets the seek use this key or
     // index: every key when none names one, else only those it names — by
-    // name, or as index_id 1 for the clustered one. An id past 1 is taken to
-    // name some nonclustered index; INDEX(0), the heap, names no key.
-    private static bool NamedByIndexHint(BatchContext batch, TableHintInfo hints, string name, bool clustered)
+    // name or by index_id; INDEX(0), the heap, names no key.
+    private static bool NamedByIndexHint(BatchContext batch, TableHintInfo hints, string name, int indexId)
     {
         if (hints.IndexArguments is not { Count: > 0 } arguments)
             return true;
         foreach (var argument in arguments)
         {
-            if (argument.Name is { } named ? batch.CurrentDatabase.Collation.Equals(named, name) : argument.Id == 1 ? clustered : argument.Id > 1 && !clustered)
+            if (argument.Name is { } named ? batch.CurrentDatabase.Collation.Equals(named, name) : argument.Id == indexId)
                 return true;
         }
         return false;

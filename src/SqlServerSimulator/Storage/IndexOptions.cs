@@ -22,7 +22,12 @@ internal readonly struct IndexOptions(
     bool? statisticsNoRecompute = null,
     bool statisticsOnly = false,
     int? bucketCount = null,
-    bool isHash = false)
+    bool isHash = false,
+    byte? dataCompression = null,
+    bool? xmlCompression = null,
+    bool compressionOnPartitions = false,
+    bool statisticsIncremental = false,
+    bool ignoreDupKeyWritten = false)
 {
     public readonly bool IgnoreDupKey = ignoreDupKey;
 
@@ -71,6 +76,24 @@ internal readonly struct IndexOptions(
     public readonly bool IsHash = isHash;
 
     /// <summary>
+    /// A rowstore <c>DATA_COMPRESSION</c> when given — 0 <c>NONE</c>, 1 <c>ROW</c>,
+    /// 2 <c>PAGE</c> — which <c>sys.partitions.data_compression</c> reports.
+    /// </summary>
+    public readonly byte? DataCompression = dataCompression;
+
+    /// <summary><c>XML_COMPRESSION</c> when given — <c>sys.partitions.xml_compression</c>.</summary>
+    public readonly bool? XmlCompression = xmlCompression;
+
+    /// <summary>A compression option carried an <c>ON PARTITIONS (…)</c> list.</summary>
+    public readonly bool CompressionOnPartitions = compressionOnPartitions;
+
+    /// <summary><c>STATISTICS_INCREMENTAL = ON</c>, which only a partitioned index takes.</summary>
+    public readonly bool StatisticsIncremental = statisticsIncremental;
+
+    /// <summary>Whether the clause named <c>IGNORE_DUP_KEY</c> at all, which a rebuild checks against its target.</summary>
+    public readonly bool IgnoreDupKeyWritten = ignoreDupKeyWritten;
+
+    /// <summary>
     /// The bucket count a hash index declared with <paramref name="options"/>
     /// keeps: its <c>BUCKET_COUNT</c> rounded up to a power of two (probed
     /// 2026-10-02 against SQL Server 2025: 100 keeps 128), or 0 for any other
@@ -82,7 +105,8 @@ internal readonly struct IndexOptions(
     /// <summary>These options declared <c>HASH</c>.</summary>
     public IndexOptions AsHash() =>
         new(this.IgnoreDupKey, this.FillFactor, this.PadIndex, this.DropExisting, this.CompressionDelay, this.ColumnstoreArchive,
-            this.AllowRowLocks, this.AllowPageLocks, this.OptimizeForSequentialKey, this.DataSpace, this.StatisticsNoRecompute, this.StatisticsOnly, this.BucketCount, isHash: true);
+            this.AllowRowLocks, this.AllowPageLocks, this.OptimizeForSequentialKey, this.DataSpace, this.StatisticsNoRecompute, this.StatisticsOnly, this.BucketCount, isHash: true,
+            this.DataCompression, this.XmlCompression, this.CompressionOnPartitions, this.StatisticsIncremental, this.IgnoreDupKeyWritten);
 
     /// <summary>The <c>ON</c> placement clause written after the options, if any.</summary>
     public readonly Schemas.DataSpaceClause? DataSpace = dataSpace;
@@ -90,5 +114,6 @@ internal readonly struct IndexOptions(
     /// <summary>These options with <paramref name="clause"/> as the placement.</summary>
     public IndexOptions WithDataSpace(Schemas.DataSpaceClause? clause) =>
         new(this.IgnoreDupKey, this.FillFactor, this.PadIndex, this.DropExisting, this.CompressionDelay, this.ColumnstoreArchive,
-            this.AllowRowLocks, this.AllowPageLocks, this.OptimizeForSequentialKey, clause, this.StatisticsNoRecompute, this.StatisticsOnly, this.BucketCount, this.IsHash);
+            this.AllowRowLocks, this.AllowPageLocks, this.OptimizeForSequentialKey, clause, this.StatisticsNoRecompute, this.StatisticsOnly, this.BucketCount, this.IsHash,
+            this.DataCompression, this.XmlCompression, this.CompressionOnPartitions, this.StatisticsIncremental, this.IgnoreDupKeyWritten);
 }

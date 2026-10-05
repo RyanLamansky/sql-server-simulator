@@ -62,8 +62,21 @@ internal sealed class IndexKeyProperty : Expression
         if (ObjectProperty.FindObject(runtime.Batch.CurrentDatabase, objectId) is not HeapTable table)
             return SqlValue.Null(SqlType.Int32);
 
+        var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
         if (IndexLookup.ResolveByIndexId(table, indexId) is not { } resolved)
-            return SqlValue.Null(SqlType.Int32);
+        {
+            // A standalone statistic's columns answer too, never descending.
+            var statisticColumn = IndexLookup.StatisticKeyColumn(table, indexId, keyId);
+            if (statisticColumn < 0)
+                return SqlValue.Null(SqlType.Int32);
+            Span<char> statisticProperty = stackalloc char[prop.Length];
+            return prop.AsSpan().ToUpperInvariant(statisticProperty) switch
+            {
+                8 when statisticProperty is "COLUMNID" => SqlValue.FromInt32(table.Columns[statisticColumn].ColumnId),
+                12 when statisticProperty is "ISDESCENDING" => SqlValue.FromInt32(0),
+                _ => SqlValue.Null(SqlType.Int32),
+            };
+        }
 
         // Only the key ordinal is declared smallint here; the object and
         // index ids are int (probe-confirmed 2026-07-31 by the target type
@@ -71,7 +84,6 @@ internal sealed class IndexKeyProperty : Expression
         if (IndexLookup.GetKeyColumn(resolved.Constraint, resolved.Index, keyId) is not { } keyCol)
             return SqlValue.Null(SqlType.Int32);
 
-        var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
         Span<char> upper = stackalloc char[prop.Length];
         return prop.AsSpan().ToUpperInvariant(upper) switch
         {

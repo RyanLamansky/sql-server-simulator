@@ -166,6 +166,31 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool SimpleParameterizationBlocked;
 
     /// <summary>
+    /// The query specifications the statement has parsed so far, which its
+    /// <c>OPTION</c> clause's join and table hints are checked against once
+    /// it has parsed (see <see cref="Selection.SettleStatementHints"/>); reset
+    /// as each statement begins.
+    /// </summary>
+    public List<Selection.JoinHintSite>? JoinHintSites;
+
+    /// <summary>
+    /// An inline join hint was written in the statement, which fixes the join
+    /// order and earns Msg 8625 unless the <c>OPTION</c> clause forces the
+    /// order itself; reset as each statement begins.
+    /// </summary>
+    public bool JoinOrderEnforced;
+
+    /// <summary>
+    /// Whether the command text spells <c>OPTION</c> anywhere, which a
+    /// statement's <c>OPTION</c> clause needs; read once per command, so the
+    /// hint checks can skip recording <see cref="JoinHintSites"/> for the
+    /// common text that has none.
+    /// </summary>
+    public bool CommandMentionsOption => this.commandMentionsOption ??= this.Command.CommandText.Contains("option", StringComparison.OrdinalIgnoreCase);
+
+    private bool? commandMentionsOption;
+
+    /// <summary>
     /// A <c>STRING_AGG</c> separator's Msg 8733 held until its SELECT
     /// statement has parsed: one that is a constant only through a
     /// <c>CAST</c> / <c>CONVERT</c> of a literal, which simple

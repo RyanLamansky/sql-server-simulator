@@ -55,7 +55,7 @@ partial class Simulation
             orderNames = ParseColumnstoreColumnList(context);
         }
 
-        var (_, filter, filterDefinition, options) = ParseIndexTail(context, indexName, targetTableName.Leaf, acceptsInclude: false, IndexOptionStatement.CreateColumnstoreIndex, indexName);
+        var (_, filter, filterDefinition, options) = ParseIndexTail(context, indexName, targetTableName.ToString(), acceptsInclude: false, IndexOptionStatement.CreateColumnstoreIndex, indexName);
 
         if (context.Batch.IsSkipping)
             return true;
@@ -80,7 +80,7 @@ partial class Simulation
                 replaced = options.DropExisting ? existing : throw SimulatedSqlException.IndexAlreadyExists(indexName, targetTableName.ToString());
         }
         if (options.DropExisting && replaced is null)
-            throw SimulatedSqlException.IndexNotFoundForDropExisting(indexName, table.Name);
+            throw SimulatedSqlException.IndexNotFoundForDropExisting(indexName, targetTableName.ToString());
         if (replaced is { IsClustered: true } && !isClustered)
             throw SimulatedSqlException.DropExistingClusteredToNonclustered();
 

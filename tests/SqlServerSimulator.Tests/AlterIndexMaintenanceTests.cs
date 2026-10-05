@@ -216,4 +216,59 @@ public sealed class AlterIndexMaintenanceTests
         var ex = new Simulation().AssertSqlError("create table t (id int primary key, a int); create index ix on t(a); alter index ix on t set (Allow_Row_Locks = 5)", 153);
         AreEqual("Invalid usage of the option Allow_Row_Locks in the INDEX statement.", ex.Errors[0].Message);
     }
+
+    private const string RebuildTable = """
+        create table t (id int not null constraint pk_t primary key, a int, c int);
+        create index ix_a on t (a);
+        create unique index ux_c on t (c);
+        insert t values (1, 1, 1), (2, 2, 2);
+        """;
+
+    /// <summary>
+    /// What a rebuild refuses (probed 2026-10-05 against SQL Server 2025):
+    /// IGNORE_DUP_KEY on a non-unique index or a constraint's, per-partition
+    /// compression without <c>PARTITION = ALL</c>, and options without
+    /// <c>WITH</c>.
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter index ix_a on t rebuild with (ignore_dup_key = on)", 1915)]
+    [DataRow("alter index ix_a on t set (ignore_dup_key = on)", 1915)]
+    [DataRow("alter index pk_t on t rebuild with (ignore_dup_key = on)", 1979)]
+    [DataRow("alter index ix_a on t rebuild with (data_compression = page on partitions (1))", 10737)]
+    [DataRow("alter index ix_a on t rebuild (fillfactor = 80)", 156)]
+    public void Rebuild_Refusals(string statement, int number)
+        => _ = new Simulation().AssertSqlError(RebuildTable + statement, number);
+
+    [TestMethod]
+    public void Rebuild_IgnoreDupKey_OnAUniqueIndex_IsSet()
+        => IsTrue(new Simulation().ExecuteScalar<bool>(RebuildTable + """
+            alter index ux_c on t rebuild with (ignore_dup_key = on);
+            select ignore_dup_key from sys.indexes where name = 'ux_c'
+            """));
+
+    /// <summary>
+    /// Disabling the clustered index disables every nonclustered one with it,
+    /// each reported by Msg 3750, and leaves the table refusing new indexes
+    /// (Msg 1987) and new columns (Msg 1974) until it is rebuilt.
+    /// </summary>
+    [TestMethod]
+    public void DisablingTheClusteredIndex_DisablesTheRest()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(RebuildTable);
+        using var connection = (SimulatedDbConnection)sim.CreateOpenConnection();
+        var messages = new List<string>();
+        connection.InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(error => error.Message));
+        _ = connection.CreateCommand("alter index pk_t on t disable").ExecuteNonQuery();
+        CollectionAssert.AreEqual(
+            new[]
+            {
+                "Warning: Index 'ix_a' on table 't' was disabled as a result of disabling the clustered index on the table.",
+                "Warning: Index 'ux_c' on table 't' was disabled as a result of disabling the clustered index on the table.",
+            },
+            messages);
+        AreEqual(3, sim.ExecuteScalar("select count(*) from sys.indexes where object_id = object_id('t') and is_disabled = 1"));
+        _ = sim.AssertSqlError("create index ix_new on t (c)", 1987);
+        _ = sim.AssertSqlError("alter table t add z int", 1974);
+    }
 }

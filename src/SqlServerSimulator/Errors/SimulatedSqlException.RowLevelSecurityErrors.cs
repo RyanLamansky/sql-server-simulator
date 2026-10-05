@@ -125,7 +125,8 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 166: a database-qualified policy name, or a
     /// predicate's database-qualified target. <paramref name="clause"/> is the
     /// statement real names: <c>CREATE SECURITY POLICY</c>, <c>ADD/ALTER FILTER
-    /// PREDICATE</c>, <c>ADD/ALTER BLOCK PREDICATE</c>.
+    /// PREDICATE</c>, <c>ADD/ALTER BLOCK PREDICATE</c> — and <c>DROP INDEX</c>
+    /// for its deprecated <c>table.index</c> form with a database prefix.
     /// </summary>
     internal static SimulatedSqlException SecurityPolicyNameDatabaseQualified(string clause) =>
         new($"'{clause}' does not allow specifying the database name as a prefix to the object name.", 166, 15, 1);

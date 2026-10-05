@@ -45,6 +45,10 @@ partial class Simulation
                 throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
             this.Table = table;
             this.identityCount = table.IdentityOrdinal >= 0 ? 1 : 0;
+            // A table whose clustered index is disabled takes no new column
+            // (probed 2026-10-05 against SQL Server 2025).
+            if (!context.Batch.IsSkipping && DisabledClusteredIndexName(table) is { } disabled)
+                throw SimulatedSqlException.OperationOnTableWithDisabledClusteredIndex(table.Name, disabled);
         }
 
         /// <summary>Parses one column definition, leaving the cursor on the token after it.</summary>
@@ -694,6 +698,20 @@ partial class Simulation
             if (blockers.Count > 0)
                 throw SimulatedSqlException.ColumnHasDependencies("DROP COLUMN", col.Name, blockers);
         }
+        foreach (var ordinal in toDropOrdinals)
+            DropAutoStatisticsOn(table, ordinal);
+    }
+
+    /// <summary>
+    /// Drops the auto-created statistics on the column at
+    /// <paramref name="ordinal"/>, which dropping the column or changing its
+    /// type takes with it where a user statistic would refuse (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    private static void DropAutoStatisticsOn(HeapTable table, int ordinal)
+    {
+        if (table.UserStatistics.Exists(statistic => statistic.AutoCreated && statistic.DependsOn(ordinal)))
+            table.UserStatistics = table.UserStatistics.FindAll(statistic => !(statistic.AutoCreated && statistic.DependsOn(ordinal)));
     }
 
     /// <summary>
@@ -1093,6 +1111,8 @@ partial class Simulation
             includeForeignKeys: isSizeChange);
         if (blockers.Count > 0)
             throw SimulatedSqlException.ColumnHasDependencies("ALTER COLUMN", columnName, blockers);
+        if (keyBlocks)
+            DropAutoStatisticsOn(table, ordinal);
         var maskingFunction = maskingFunctionText is null ? null : MaskingFunction.Parse(maskingFunctionText, columnName, newType);
 
         var newColumn = new HeapColumn(
@@ -1264,7 +1284,9 @@ partial class Simulation
         {
             foreach (var statistic in table.UserStatistics)
             {
-                if (includeStatistics ? statistic.DependsOn(ordinal) : statistic.FiltersOn(ordinal))
+                // An auto-created statistic goes with the change instead (see
+                // DropAutoStatisticsOn).
+                if (!statistic.AutoCreated && (includeStatistics ? statistic.DependsOn(ordinal) : statistic.FiltersOn(ordinal)))
                     blockers.Add((statistic.Name, SimulatedSqlException.AlterColumnBlockerKind.Statistics, 5, int.MaxValue - 1));
             }
         }

@@ -940,6 +940,7 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
+        List<(string IndexName, MultiPartName TableName, bool OldSyntax, DropIndexOptions Options)> entries = [];
         while (true)
         {
             var firstName = BatchContext.ParseObjectName(context);
@@ -947,6 +948,7 @@ partial class Simulation
             string indexName;
             MultiPartName tableName;
             var oldSyntax = context.Token is not ReservedKeyword { Keyword: Keyword.On };
+            var options = default(DropIndexOptions);
             if (!oldSyntax)
             {
                 // Standard `index_name ON table` form.
@@ -954,25 +956,119 @@ partial class Simulation
                 context.MoveNextRequired();
                 tableName = BatchContext.ParseObjectName(context);
                 context.MoveNextOptional();
+                options = ParseDropIndexOptions(context);
             }
             else
             {
                 // Deprecated `table.index` (also `schema.table.index`) form,
                 // accepted by real SQL Server: the rightmost segment names the
                 // index, the remaining left segments name the table. A missing
-                // index still raises Msg 3701 through DropOneIndex.
+                // index still raises Msg 3701 through DropOneIndex. It takes no
+                // database prefix (Msg 166, probed 2026-10-05 against SQL
+                // Server 2025).
                 if (firstName.Count < 2)
                     throw SimulatedSqlException.DropIndexNeedsTableAndIndex();
+                if (firstName.Count > 3)
+                    throw SimulatedSqlException.SecurityPolicyNameDatabaseQualified("DROP INDEX");
                 indexName = firstName.Leaf;
                 tableName = WithoutLeaf(firstName);
             }
-            DropOneIndex(context, indexName, tableName, ifExists, oldSyntax);
+            entries.Add((indexName, tableName, oldSyntax, options));
 
             if (context.Token is not Operator { Character: ',' })
                 break;
             context.MoveNextRequired();
         }
+        // An online drop stands alone (probed 2026-10-05 against SQL Server 2025).
+        if (entries.Count > 1 && entries.Exists(static entry => entry.Options.Online))
+            throw SimulatedSqlException.OnlineDropIndexMustStandAlone();
+        foreach (var (indexName, tableName, oldSyntax, options) in entries)
+            DropOneIndex(context, indexName, tableName, ifExists, oldSyntax, options);
         return true;
+    }
+
+    /// <summary>
+    /// What a <c>DROP INDEX … ON table WITH (…)</c> clause wrote:
+    /// <c>ONLINE = ON</c>, and whether it named <c>MAXDOP</c> or <c>MOVE TO</c>
+    /// (with its filegroup), the clauses only a clustered index's drop takes.
+    /// </summary>
+    private readonly struct DropIndexOptions(bool online, bool clusteredOnly, string? moveTo)
+    {
+        public readonly bool Online = online;
+        public readonly bool ClusteredOnly = clusteredOnly;
+        public readonly string? MoveTo = moveTo;
+    }
+
+    /// <summary>
+    /// Parses a <c>DROP INDEX</c> entry's <c>WITH ( ONLINE = ON | OFF | MAXDOP
+    /// = n | MOVE TO place [, …] )</c> list, refusing what real does while
+    /// compiling (probed 2026-10-05 against SQL Server 2025): another index
+    /// option is Msg 102 near its name, an unknown name Msg 155 then 102, a
+    /// low-priority list after <c>ONLINE</c> Msg 102 near its parenthesis and a
+    /// <c>MAXDOP</c> past 32767 Msg 304.
+    /// </summary>
+    private static DropIndexOptions ParseDropIndexOptions(ParserContext context)
+    {
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
+            return default;
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        bool online = false, clusteredOnly = false;
+        string? moveTo = null;
+        while (true)
+        {
+            var nameToken = context.GetNextRequired();
+            if (nameToken is not StringToken { Span: var name })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (name.Equals("ONLINE", StringComparison.OrdinalIgnoreCase))
+            {
+                if (context.GetNextRequired() is not Operator { Character: '=' }
+                    || context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } toggle)
+                {
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
+                online = toggle.Keyword == Keyword.On;
+            }
+            else if (name.Equals("MAXDOP", StringComparison.OrdinalIgnoreCase))
+            {
+                if (context.GetNextRequired() is not Operator { Character: '=' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+                if (ReadIntegerOptionLiteral(context) > 32767)
+                    throw SimulatedSqlException.IndexMaxDopOutOfRange(context.Token.Source.ToString());
+                clusteredOnly = true;
+            }
+            else if (name.Equals("MOVE", StringComparison.OrdinalIgnoreCase))
+            {
+                if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.To })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                moveTo = context.GetNextRequired() is Name place ? place.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is Operator { Character: '(' })
+                {
+                    SkipBalancedParens(context);
+                    context.MoveNextRequired();
+                }
+                clusteredOnly = true;
+                if (context.Token is Operator { Character: ',' })
+                    continue;
+                if (context.Token is not Operator { Character: ')' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                break;
+            }
+            else
+            {
+                throw IndexOptionNames.Contains(nameToken.Source.ToString())
+                    ? SimulatedSqlException.SyntaxErrorNear(context)
+                    : SimulatedSqlException.Aggregate([SimulatedSqlException.UnrecognizedIndexOption(nameToken.Source.ToString(), "DROP INDEX"), SimulatedSqlException.SyntaxErrorNear(context)]);
+            }
+            if (context.GetNextRequired() is Operator { Character: ',' })
+                continue;
+            if (context.Token is not Operator { Character: ')' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            break;
+        }
+        context.MoveNextOptional();
+        return new DropIndexOptions(online, clusteredOnly, moveTo);
     }
 
     /// <summary>
@@ -1038,7 +1134,7 @@ partial class Simulation
     /// 2025).</item>
     /// </list>
     /// </summary>
-    private static void DropOneIndex(ParserContext context, string indexName, MultiPartName tableName, bool ifExists, bool oldSyntax)
+    private static void DropOneIndex(ParserContext context, string indexName, MultiPartName tableName, bool ifExists, bool oldSyntax, DropIndexOptions options = default)
     {
         if (context.Batch.IsSkipping)
         {
@@ -1080,7 +1176,11 @@ partial class Simulation
         foreach (var kc in table.KeyConstraints)
         {
             if (context.Batch.CurrentDatabase.Collation.Equals(kc.Name, indexName))
-                throw SimulatedSqlException.ExplicitDropIndexNotAllowed(tableName.ToString(), indexName, kc.Kind == KeyConstraintKind.PrimaryKey ? "PRIMARY KEY" : "UNIQUE", state: 4);
+            {
+                throw kc.Kind == KeyConstraintKind.PrimaryKey
+                    ? SimulatedSqlException.ExplicitDropIndexNotAllowed(tableName.ToString(), indexName, "PRIMARY KEY", state: 4)
+                    : SimulatedSqlException.ExplicitDropIndexNotAllowed(tableName.ToString(), indexName, "UNIQUE KEY", state: 5);
+            }
         }
 
         for (var i = 0; i < table.Indexes.Count; i++)
@@ -1095,10 +1195,18 @@ partial class Simulation
                 // against SQL Server 2025).
                 if (table.Indexes[i].IsClustered && RetentionCleanupDependsOn(context, table))
                     throw SimulatedSqlException.CannotDropRetentionCleanupIndex(tableName.ToString(), indexName);
+                // Only a clustered index's drop takes ONLINE = ON, MAXDOP and
+                // MOVE TO (probed 2026-10-05 against SQL Server 2025).
+                if (!table.Indexes[i].IsClustered && options.Online)
+                    throw SimulatedSqlException.OnlyClusteredIndexDropsOnline();
+                if (!table.Indexes[i].IsClustered && options.ClusteredOnly)
+                    throw SimulatedSqlException.NonclusteredDropWithClusteredClause($"{tableName}.{indexName}");
                 table.SettleIndexIds();
                 var indexId = table.Indexes[i].IndexId;
                 if (table.IncomingForeignKeys.Exists(fk => BuiltInResources.ResolveForeignKeyIndexId(fk) == indexId))
                     throw SimulatedSqlException.ExplicitDropIndexNotAllowed(tableName.ToString(), indexName, "FOREIGN KEY", state: 6);
+                if (options.MoveTo is { } moveTo)
+                    table.FilegroupId = FilegroupFor(context.Batch, table, new Schemas.DataSpaceClause(moveTo, null));
                 table.Indexes.RemoveAt(i);
                 RecordDdlEvent(context, "DROP_INDEX", EventSchemaName(tableName), indexName, "INDEX", table.Name, "TABLE");
                 return;

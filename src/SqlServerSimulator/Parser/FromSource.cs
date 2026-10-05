@@ -81,6 +81,13 @@ internal sealed class FromSource(
     public Selection.TableHintInfo? ForcedAccessPath;
 
     /// <summary>
+    /// The hints a base table's own <c>WITH</c> clause wrote, which an
+    /// <c>OPTION (TABLE HINT …)</c> clause for it is measured against; null
+    /// for every other source.
+    /// </summary>
+    public Selection.TableHintInfo? WrittenHints;
+
+    /// <summary>
     /// The object this source names, spelled as the FROM clause wrote it and
     /// with any alias ignored — <c>g1</c>, <c>dbo.g1</c>, <c>@t</c>. Null for a
     /// source that has no object of its own (a derived table, a CTE, a table
@@ -554,6 +561,17 @@ internal sealed class JoinSpec(JoinKind kind, BooleanExpression? onPredicate)
 
     /// <inheritdoc cref="ScopeStart"/>
     public int ScopeEnd = -1;
+
+    /// <summary>
+    /// The algorithm an inline join hint names (<c>INNER HASH JOIN</c>), which
+    /// the statement's <c>OPTION</c> join hints must include and the join's
+    /// predicates must make buildable; <see cref="Selection.JoinAlgorithms.None"/>
+    /// without one.
+    /// </summary>
+    public Selection.JoinAlgorithms Algorithm;
+
+    /// <summary>An inline <c>REMOTE</c> join hint, which takes no <c>OPTION</c> join hint beside it.</summary>
+    public bool Remote;
 }
 
 /// <summary>

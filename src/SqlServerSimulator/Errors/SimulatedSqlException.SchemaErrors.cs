@@ -1741,6 +1741,17 @@ partial class SimulatedSqlException
     }
 
     /// <summary>
+    /// Mimics SQL Server error 2709: a computed column named as an index or
+    /// statistics key that calls a schema-bound function reading user data
+    /// (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ComputedColumnAccessesDataForIndex(string columnName, string tableName, bool viaConstraint)
+    {
+        var error = new SimulatedSqlException($"Column '{columnName}' in table '{tableName}' cannot be used in an index or statistics or as a partition key because it does user or system data access.", 2709, 16, 1);
+        return viaConstraint ? FollowedByConstraintNotCreated(error) : error;
+    }
+
+    /// <summary>
     /// Mimics SQL Server error 2799: a non-persisted computed column named as
     /// an index or statistics key whose expression touches <c>float</c> /
     /// <c>real</c> anywhere — real won't key on a value it can't reproduce bit
@@ -2874,8 +2885,8 @@ partial class SimulatedSqlException
     /// Mimics SQL Server error 9108: <c>UPDATE STATISTICS … INCREMENTAL = ON</c>
     /// over a statistic on an unpartitioned table (probed 2026-09-25).
     /// </summary>
-    internal static SimulatedSqlException StatisticsCannotBeIncremental() =>
-        new("This type of statistics is not supported to be incremental.", 9108, 16, 2);
+    internal static SimulatedSqlException StatisticsCannotBeIncremental(byte state = 2) =>
+        new("This type of statistics is not supported to be incremental.", 9108, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 9111: <c>UPDATE STATISTICS … RESAMPLE ON
@@ -2933,8 +2944,134 @@ partial class SimulatedSqlException
     /// is legal). Probe-confirmed verbatim, including the option name echoed as
     /// the statement spelled it and the generic "INDEX statement" framing.
     /// </summary>
-    internal static SimulatedSqlException InvalidUsageOfIndexOption(string optionName) =>
-        new($"Invalid usage of the option {optionName} in the INDEX statement.", 153, 15, 1);
+    internal static SimulatedSqlException InvalidUsageOfIndexOption(string optionName, string statement = "INDEX") =>
+        new($"Invalid usage of the option {optionName} in the {statement} statement.", 153, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1914 state 2: <c>CREATE INDEX</c> naming a
+    /// synonym, function or procedure, named as written (probed 2026-10-05
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IndexOnNonTableObject(string writtenName) =>
+        new($"Index cannot be created on object '{writtenName}' because the object is not a user table or view.", 1914, 16, 2);
+
+    /// <summary>
+    /// Mimics SQL Server error 1944: an index whose fixed-length key columns
+    /// alone pass its kind's limit (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IndexKeyTooLarge(string indexName, int length, bool clustered, int limit) =>
+        new($"Index '{indexName}' was not created because the index key size is at least {length} bytes. The {(clustered ? "clustered" : "nonclustered")} index key size cannot exceed {limit} bytes. If the index key includes implicit key columns, the index key size cannot exceed 2600 bytes.", 1944, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1946 state 3: a written row's key passes its
+    /// index's limit. Uncaught it ends the batch and rolls the transaction
+    /// back (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IndexEntryTooLong(int length, string indexName, int limit, bool clustered) =>
+        new($"Operation failed. The index entry of length {length} bytes for the index '{indexName}' exceeds the maximum length of {limit} bytes for {(clustered ? "clustered" : "nonclustered")} indexes.", 1946, 16, 3) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 1904: an index or key of more than 32 columns,
+    /// the table named as written (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TooManyIndexKeyColumns(string indexName, string tableName, int count) =>
+        new($"The index '{indexName}' on table '{tableName}' has {count} columns in the key list. The maximum limit for index key column list is 32.", 1904, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1910: a thousandth nonclustered index (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException TooManyNonclusteredIndexes(string indexName) =>
+        new($"Could not create nonclustered index '{indexName}' because it exceeds the maximum of 999 allowed per table or view.", 1910, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10611: a filtered index comparing a column with
+    /// a constant the column would have to be converted to (probed 2026-10-05
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FilterConstantOfHigherPrecedence(string indexName, string tableName, string columnName) =>
+        new($"Filtered index '{indexName}' cannot be created on table '{tableName}' because the column '{columnName}' in the filter expression is compared with a constant of higher data type precedence or of a different collation. Converting a column to the data type of a constant is not supported for filtered indexes. To resolve this error, explicitly convert the constant to the same data type and collation as the column '{columnName}'.", 10611, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 10619: a filtered index's predicate reading a
+    /// CLR-typed column (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FilteredIndexOnClrColumn(string indexName, string tableName, string columnName) =>
+        new($"Filtered index '{indexName}' cannot be created on table '{tableName}' because the column '{columnName}' in the filter expression is of a CLR data type. Rewrite the filter expression so that it does not include this column.", 10619, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1974 state 4: <c>ALTER TABLE</c> adding a column
+    /// to a table whose clustered index is disabled, the table named bare
+    /// (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OperationOnTableWithDisabledClusteredIndex(string tableName, string indexName) =>
+        new($"Cannot perform the specified operation on table '{tableName}' because its clustered index '{indexName}' is disabled.", 1974, 16, 4);
+
+    /// <summary>
+    /// Mimics SQL Server error 1987 state 2: a nonclustered index over a table
+    /// whose clustered index is disabled, the table named as written (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NonclusteredOnDisabledClustered(string indexName, string tableName) =>
+        new($"Cannot create nonclustered index '{indexName}' on table '{tableName}' because its clustered index is disabled.", 1987, 16, 2);
+
+    /// <summary>Mimics SQL Server error 3745: <c>ONLINE = ON</c> dropping a nonclustered index (probed 2026-10-05).</summary>
+    internal static SimulatedSqlException OnlyClusteredIndexDropsOnline() =>
+        new("Only a clustered index can be dropped online.", 3745, 16, 1);
+
+    /// <summary>Mimics SQL Server error 3744: an online <c>DROP INDEX</c> listing more than one index (probed 2026-10-05).</summary>
+    internal static SimulatedSqlException OnlineDropIndexMustStandAlone() =>
+        new("Only a single clause is allowed in a statement where an index is dropped online.", 3744, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 3748: <c>MAXDOP</c> or <c>MOVE TO</c> dropping a
+    /// nonclustered index, named as written with the index (probed 2026-10-05).
+    /// </summary>
+    internal static SimulatedSqlException NonclusteredDropWithClusteredClause(string writtenName) =>
+        new($"Cannot drop non-clustered index '{writtenName}' using drop clustered index clause.", 3748, 16, 1);
+
+    /// <summary>Mimics SQL Server error 3739: <c>DROP STATISTICS</c> naming an index's statistic (probed 2026-10-05).</summary>
+    internal static SimulatedSqlException CannotDropIndexStatistics(string writtenName) =>
+        new($"Cannot DROP the index '{writtenName}' because it is not a statistics collection.", 3739, 11, 1);
+
+    /// <summary>Mimics SQL Server error 1053: <c>DROP STATISTICS name ON table</c> (probed 2026-10-05).</summary>
+    internal static SimulatedSqlException DropStatisticsNeedsObjectDotName() =>
+        new("For DROP STATISTICS, you must provide both the object (table or view) name and the statistics name, in the form \"objectname.statisticsname\".", 1053, 15, 1);
+
+    /// <summary>Mimics SQL Server error 155: an option <c>CREATE STATISTICS</c> doesn't take (probed 2026-10-05).</summary>
+    internal static SimulatedSqlException UnrecognizedCreateStatisticsOption(string optionName) =>
+        new($"'{optionName}' is not a recognized CREATE STATISTICS option.", 155, 15, 1);
+
+    /// <summary>Mimics SQL Server error 1052: two sampling choices in one <c>CREATE STATISTICS</c> (probed 2026-10-05).</summary>
+    internal static SimulatedSqlException ConflictingCreateStatisticsOptions(string first, string second) =>
+        new($"Conflicting CREATE STATISTICS options \"{first}\" and \"{second}\".", 1052, 15, 1);
+
+    /// <summary>Mimics SQL Server error 9105: a <c>STATS_STREAM</c> no statistic produced (probed 2026-10-05).</summary>
+    internal static SimulatedSqlException StatisticsStreamCorrupt() =>
+        new("The provided statistics stream is corrupt.", 9105, 16, 1);
+
+    /// <summary>Mimics SQL Server error 1939: statistics on a view that isn't schema bound, named bare (probed 2026-10-05).</summary>
+    internal static SimulatedSqlException StatisticsOnViewNotSchemaBound(string viewName) =>
+        new($"Cannot create statistics on view '{viewName}' because the view is not schema bound.", 1939, 16, 1);
+
+    /// <summary>Mimics SQL Server error 1909: a statistic naming one column twice (probed 2026-10-05).</summary>
+    internal static SimulatedSqlException DuplicateStatisticsColumn(string columnName) =>
+        new($"Cannot use duplicate column names in statistics. Column name '{columnName}' listed more than once.", 1909, 16, 1);
+
+    /// <summary>Mimics SQL Server error 1977: a statistic over an <c>xml</c> column, the table named as written (probed 2026-10-05).</summary>
+    internal static SimulatedSqlException StatisticsOnXmlColumn(string statisticsName, string tableName, string columnName) =>
+        new($"Could not create statistics '{statisticsName}' on table '{tableName}'. Only XML Index can be created on XML column '{columnName}'.", 1977, 16, 1);
+
+    /// <summary>Mimics SQL Server error 1092: <c>STATS_STREAM</c> without exactly one statistic named (probed 2026-10-05).</summary>
+    internal static SimulatedSqlException StatsStreamNeedsOneStatistic(int count) =>
+        new($"In this context {count} statistics name(s) cannot be specified for option 'STATS_STREAM'.", 1092, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1070: a <c>CREATE INDEX</c> option real dropped,
+    /// echoed as written (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException IndexOptionNoLongerSupported(string optionName) =>
+        new($"CREATE INDEX option '{optionName}' is no longer supported.", 1070, 15, 1);
 
     /// <summary>
     /// Mimics SQL Server error 11438: an index built with <c>RESUMABLE = ON</c>
@@ -2964,8 +3101,8 @@ partial class SimulatedSqlException
     /// a storage option's <c>ON PARTITIONS</c> names the create index statement
     /// and an empty index (probed 2026-09-25 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException PartitionNumberOnUnpartitionedCreate() =>
-        new("Cannot specify partition number in the create index statement as the index '' is not partitioned.", 7729, 16, 3);
+    internal static SimulatedSqlException PartitionNumberOnUnpartitionedCreate(string indexName = "") =>
+        new($"Cannot specify partition number in the create index statement as the index '{indexName}' is not partitioned.", 7729, 16, 3);
 
     /// <summary>
     /// Mimics SQL Server error 7735: the rebuild / reorganize flavour of the
@@ -3240,6 +3377,16 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException NoExpandHintInvalid(string objectName, byte state) =>
         new($"Hint 'noexpand' on object '{objectName}' is invalid.", 8171, 16, state);
+
+    /// <summary>
+    /// Msg 8171, state 1 — a bulk-load table hint (<c>IGNORE_CONSTRAINTS</c>,
+    /// <c>IGNORE_TRIGGERS</c>, and on a write's target also
+    /// <c>KEEPIDENTITY</c> / <c>KEEPDEFAULTS</c>) outside
+    /// <c>INSERT … SELECT … FROM OPENROWSET(BULK …)</c>, named as written
+    /// (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException BulkTableHintInvalid(string hint, string objectName) =>
+        new($"Hint '{hint}' on object '{objectName}' is invalid.", 8171, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 1939: <c>CREATE INDEX</c> on a view that wasn't

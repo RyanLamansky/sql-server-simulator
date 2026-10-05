@@ -160,6 +160,9 @@ internal sealed class IndexProperty : Expression
 
     private static int? Evaluate(FoundIndex found, string property)
     {
+        // The name compares as a padded string: trailing blanks don't count
+        // (probed 2026-10-05 against SQL Server 2025).
+        property = property.TrimEnd(' ');
         Span<char> upper = stackalloc char[property.Length];
         return upper[..property.AsSpan().ToUpperInvariant(upper)] switch
         {

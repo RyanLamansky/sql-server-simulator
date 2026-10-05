@@ -68,7 +68,12 @@ internal sealed class IndexCol : Expression
         }
 
         if (IndexLookup.ResolveByIndexId(table, indexId) is not { } resolved)
-            return SqlValue.Null(MetadataNameType(runtime.Batch));
+        {
+            var statisticColumn = IndexLookup.StatisticKeyColumn(table, indexId, keyId);
+            return statisticColumn < 0
+                ? SqlValue.Null(MetadataNameType(runtime.Batch))
+                : SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), table.Columns[statisticColumn].Name);
+        }
 
         if (IndexLookup.GetKeyColumn(resolved.Constraint, resolved.Index, keyId) is not { } keyCol)
             return SqlValue.Null(MetadataNameType(runtime.Batch));

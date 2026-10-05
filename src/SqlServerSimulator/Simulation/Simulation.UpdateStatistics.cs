@@ -55,9 +55,14 @@ partial class Simulation
             context.MoveNextOptional();
         }
 
-        var (noRecompute, onPartitions, incremental) = context.Token is ReservedKeyword { Keyword: Keyword.With }
+        var options = context.Token is ReservedKeyword { Keyword: Keyword.With }
             ? ParseUpdateStatisticsOptions(context)
-            : (false, false, false);
+            : default;
+        var (noRecompute, onPartitions, incremental) = (options.NoRecompute, options.OnPartitions, options.Incremental);
+        // A statistics stream loads one named statistic (Msg 1092, probed
+        // 2026-10-05 against SQL Server 2025).
+        if (options.StatsStream && (targets?.Count ?? 0) != 1)
+            throw SimulatedSqlException.StatsStreamNeedsOneStatistic(targets?.Count ?? 0);
 
         if (context.Batch.IsSkipping)
             return true;
@@ -124,10 +129,45 @@ partial class Simulation
                 index.StatisticsNoRecompute = noRecompute;
         }
         table?.MarkStatisticsFresh(targets, collation);
+        // The update rebuilds what it reached — standalone statistics under
+        // COLUMNS, index statistics under INDEX, both otherwise — and records
+        // the sampling and drop options it ran under on each.
+        if (table is not null)
+        {
+            foreach (var statistic in StatisticsOn(table))
+            {
+                if ((targets is not null && !targets.Exists(target => collation.Equals(statistic.Name, target)))
+                    || (options.Scope == "COLUMNS" && statistic.User is null)
+                    || (options.Scope == "INDEX" && statistic.User is not null))
+                {
+                    continue;
+                }
+                BuildStatistics(context.Batch, table, statistic);
+                if (options.PersistSample is { } persist)
+                    statistic.State.HasPersistedSample = persist;
+                if (options.AutoDrop is { } autoDrop)
+                    statistic.State.AutoDrop = autoDrop;
+            }
+        }
         // The event names the table as its target and no statistic of its
         // own (probed 2026-10-04 against SQL Server 2025).
         RecordDdlEvent(context, "UPDATE_STATISTICS", EventSchemaName(tableName), null, "STATISTICS", tableName.Leaf, table is null ? "VIEW" : "TABLE");
         return true;
+    }
+
+    /// <summary>What an <c>UPDATE STATISTICS</c> option list wrote; the nullable options are null when unwritten.</summary>
+    private readonly struct UpdateStatisticsOptions(bool noRecompute, bool onPartitions, bool incremental, bool? persistSample, bool? autoDrop, string? scope, bool statsStream)
+    {
+        public readonly bool NoRecompute = noRecompute;
+        public readonly bool OnPartitions = onPartitions;
+        public readonly bool Incremental = incremental;
+        public readonly bool? PersistSample = persistSample;
+        public readonly bool? AutoDrop = autoDrop;
+
+        /// <summary><c>ALL</c>, <c>COLUMNS</c> or <c>INDEX</c>, or null.</summary>
+        public readonly string? Scope = scope;
+
+        public readonly bool StatsStream = statsStream;
     }
 
     /// <summary>
@@ -136,8 +176,10 @@ partial class Simulation
     /// <c>RESAMPLE ON PARTITIONS</c> and <c>INCREMENTAL = ON</c> were among them.
     /// Entered with the cursor on <c>WITH</c>.
     /// </summary>
-    private static (bool NoRecompute, bool OnPartitions, bool Incremental) ParseUpdateStatisticsOptions(ParserContext context)
+    private static UpdateStatisticsOptions ParseUpdateStatisticsOptions(ParserContext context)
     {
+        bool? persistSample = null, autoDrop = null;
+        var statsStream = false;
         var noRecompute = false;
         var onPartitions = false;
         var incremental = false;
@@ -217,11 +259,28 @@ partial class Simulation
                     break;
                 case Name name when BuiltInToken.Equals(name.Value, "PERSIST_SAMPLE_PERCENT"):
                     option = "PERSIST_SAMPLE_PERCENT";
-                    _ = ParseOnOffValue(context);
+                    persistSample = ParseOnOffValue(context);
                     break;
                 case Name name when BuiltInToken.Equals(name.Value, "AUTO_DROP"):
                     option = "AUTO_DROP";
-                    _ = ParseOnOffValue(context);
+                    autoDrop = ParseOnOffValue(context);
+                    break;
+                // The undocumented page and row count overrides parse and are
+                // discarded (probed 2026-10-05 against SQL Server 2025).
+                case ReservedKeyword { Keyword: Keyword.RowCount }:
+                case Name name when BuiltInToken.Equals(name.Value, "PAGECOUNT"):
+                    option = token.Source.ToString().ToUpperInvariant();
+                    if (context.GetNextRequired() is not Operator { Character: '=' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (context.GetNextRequired() is not Numeric)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    break;
+                case Name name when BuiltInToken.Equals(name.Value, "STATS_STREAM"):
+                    option = "STATS_STREAM";
+                    if (context.GetNextRequired() is not Operator { Character: '=' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    context.MoveNextRequired();
+                    statsStream = true;
                     break;
                 case Name name:
                     throw SimulatedSqlException.UnrecognizedUpdateStatisticsOption(name.Value);
@@ -231,14 +290,17 @@ partial class Simulation
             RecordOption(seen, option);
             context.MoveNextOptional();
         } while (context.Token is Operator { Character: ',' });
-        return (noRecompute, onPartitions, incremental);
+        // Persisting a sample needs one to persist (Msg 153, probed 2026-10-05).
+        if (persistSample == true && sampling is null)
+            throw SimulatedSqlException.InvalidUsageOfIndexOption("PERSIST_SAMPLE_PERCENT", "UPDATE STATISTICS");
+        return new UpdateStatisticsOptions(noRecompute, onPartitions, incremental, persistSample, autoDrop, scope, statsStream);
     }
 
     /// <summary>The sampling options in the order real names a conflicting pair.</summary>
     private static readonly string[] SamplingOrder = ["PERCENT", "ROWS", "RESAMPLE", "FULLSCAN"];
 
     /// <summary>The scope options in the order real names a conflicting pair.</summary>
-    private static readonly string[] ScopeOrder = ["ALL", "COLUMNS", "INDEX"];
+    private static readonly string[] ScopeOrder = ["ALL", "INDEX", "COLUMNS"];
 
     /// <summary>
     /// Takes <paramref name="option"/> as its group's choice, or raises Msg 1052

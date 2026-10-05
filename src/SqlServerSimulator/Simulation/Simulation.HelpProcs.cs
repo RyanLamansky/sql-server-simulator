@@ -437,7 +437,9 @@ partial class Simulation
 
         if (rows.Count == 0)
         {
-            yield return Printed(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, 63, includeIndexes ? 15575 : 15574,
+            // Real sends the two from different lines (probed 2026-10-05 against
+            // SQL Server 2025).
+            yield return Printed(SimulatedSqlException.SystemProcedureMessage(batch, procedureName, includeIndexes ? 67 : 63, includeIndexes ? 15575 : 15574,
                 includeIndexes
                     ? "This object does not have any statistics or indexes."
                     : "This object does not have any statistics."));

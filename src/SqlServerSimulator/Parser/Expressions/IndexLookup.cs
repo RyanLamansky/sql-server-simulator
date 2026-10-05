@@ -40,6 +40,23 @@ internal static class IndexLookup
     }
 
     /// <summary>
+    /// The <see cref="HeapTable.Columns"/> position of the
+    /// <paramref name="keyId"/>-th (1-based) column of the standalone statistic
+    /// <paramref name="statsId"/> names, or -1 — which <c>INDEX_COL</c> and
+    /// <c>INDEXKEY_PROPERTY</c> answer as they do an index's (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    public static int StatisticKeyColumn(HeapTable table, int statsId, int keyId)
+    {
+        foreach (var statistic in table.UserStatistics)
+        {
+            if (statistic.StatsId == statsId)
+                return keyId >= 1 && keyId <= statistic.ColumnFullOrdinals.Length ? statistic.ColumnFullOrdinals[keyId - 1] : -1;
+        }
+        return -1;
+    }
+
+    /// <summary>
     /// Returns the (storage-ordinal, IsDescending) pair for the
     /// <paramref name="keyId"/>-th (1-based) key column of the resolved
     /// index, or <c>null</c> if <paramref name="keyId"/> is out of range or

@@ -578,12 +578,14 @@ One row per (index, column):
 ## `CREATE STATISTICS` / `DROP STATISTICS`
 
 `CREATE STATISTICS <name> ON <table> (<column> [, …]) [WITH <option> [, …]]` records a standalone statistics object on the table; `DROP STATISTICS <table>.<name> [, …]` removes one (each entry addressing its own table, so the leaf is the statistic and everything before it the table).
-What's modeled is the **declaration**, not a histogram — the simulator makes no cardinality estimates, so a statistic changes nothing about how a query runs.
-What it does carry is catalog identity: `sys.stats` rows with `user_created = 1` and `sys.stats_columns` rows in the declared column order, which is what DacFx re-exports, SSMS scripts, and a bacpac's `SqlStatistic` elements round-trip through.
+It carries catalog identity — `sys.stats` rows with `user_created = 1` and `sys.stats_columns` rows in the declared column order, which is what DacFx re-exports, SSMS scripts, and a bacpac's `SqlStatistic` elements round-trip through — and a histogram, under [The statistics lifecycle](#the-statistics-lifecycle).
 
 `stats_id` is drawn from the **same per-table pool the index ids use** — an index-backed statistic shares its index's id, so a table whose PK takes index_id 1 gives its first standalone statistic stats_id 2, a heap's first is 2 as well, and a gap a dropped index or statistic left is filled first (see [Index-id allocation](#index-id-allocation)).
 
-Of the WITH options only `NORECOMPUTE` is observable (`sys.stats.no_recompute`); the sampling family (`FULLSCAN`, `SAMPLE n {PERCENT | ROWS}`, `PERSIST_SAMPLE_PERCENT`, `INCREMENTAL`, `MAXDOP`, `AUTO_DROP`) describes how real would scan the data to build a histogram there isn't one of here, so those parse and discard.
+Its option list is strict and closed — `FULLSCAN`, `SAMPLE n {PERCENT | ROWS}`, `NORECOMPUTE`, `INCREMENTAL`, `AUTO_DROP`, `MAXDOP`, `STATS_STREAM` — with none of UPDATE STATISTICS' extras (`ROWCOUNT`, `RESAMPLE`, a bare `PERSIST_SAMPLE_PERCENT`), and a conflict names the later option first (`CreateStatisticsOptions`, probed 2026-10-05 against SQL Server 2025).
+`INCREMENTAL = ON` over an unpartitioned table is Msg 9108, any `STATS_STREAM` value Msg 9105 (the stream itself isn't modeled), a repeated column Msg 1909, an XML column Msg 1977, a spatial one Msg 1978, a view not schema-bound Msg 1939.
+`DROP STATISTICS` of an index is Msg 3739, and the `ON` form Msg 1053.
+Every statistic is built from every row, so the sampling options change nothing a query reads.
 
 Diagnostics, probe-confirmed against SQL Server 2025:
 
@@ -598,32 +600,48 @@ Diagnostics, probe-confirmed against SQL Server 2025:
 The filter takes exactly a filtered index's grammar, and the refusals are shared: Msg 156 / 102 for `OR`, `LIKE`, `BETWEEN`, `NOT`, Msg 112 (state 4) for a variable, Msg 1046 for a subquery, Msg 10620 for a comparison with a literal `NULL` (`b = NULL`, `b IN (1, NULL)`; a `NULL` on the left is Msg 10735), Msg 10735 for anything else that isn't an AND of column-against-constant comparisons, and Msg 10609 for a computed column, each naming the table as written.
 The filter binds before the statement's own names: its columns before the key columns (Msg 207 ahead of Msg 1911) and its table before the statement's (Msg 208 for a missing one, where the same statement with no filter is Msg 1088).
 A statistic **depends on its key and filter columns**: `ALTER TABLE … DROP COLUMN` of either is Msg 5074 then 4922, and so is an `ALTER COLUMN` that changes a key column's type or nullability or touches a filter column at all (widening a `varchar` key is free); a filtered index's filter columns hold the same way, and `sp_rename … 'COLUMN'` refuses a filter's column from line 905 of the procedure, its key columns free to move (probed 2026-09-30 against SQL Server 2025).
-`DBCC SHOW_STATISTICS … WITH HISTOGRAM` reads a user statistic's leading column over the rows its filter admits.
-Not modeled yet: the `STAT_HEADER` and `DENSITY_VECTOR` forms (a header's `Filter Expression` and `Unfiltered Rows` among them), a histogram's NULL step, real's compression of a few distinct values into fewer steps (three values `1, 2, 3` are the steps `1` and `3` on real, three steps here), and staleness: an index built over an empty table reports no header values and an empty histogram on real until its statistics update, where the simulator reads the live rows (probed 2026-10-04 against SQL Server 2025).
 
-Auto-created column statistics (the `_WA_Sys_*` rows real materializes on first predicate use) still aren't modeled — see [`catalog-views.md`](catalog-views.md).
+`UPDATE STATISTICS <table> [<name> | (<name> [, …])] [WITH <option> [, …]]` rebuilds the statistics it reaches (`ALL` / `INDEX` / `COLUMNS` choosing which), each taking `no_recompute` from whether this update wrote `NORECOMPUTE`, `has_persisted_sample` from `PERSIST_SAMPLE_PERCENT = ON` and `auto_drop` from `AUTO_DROP` (probed 2026-09-25 and 2026-10-05 against SQL Server 2025).
+Its option list is strict, since real's option errors are the observable part; the numbers and their order live on `TryParseUpdateStatistics` (`STATS_STREAM` is Msg 1092 without exactly one statistic named, `ROWCOUNT` / `PAGECOUNT` are taken and change nothing).
 
-`UPDATE STATISTICS <table> [<name> | (<name> [, …])] [WITH <option> [, …]]` has no histogram to rebuild, so it is its validation plus one catalog effect: each user-created statistic it reaches takes `no_recompute` from whether this update wrote `NORECOMPUTE`, clearing an earlier one as real does (probed 2026-09-25 against SQL Server 2025).
-Real flips an index-backed statistic's flag the same way, where the simulator's index statistics always report 0.
-Its option list is strict where `CREATE STATISTICS`' isn't, since real's option errors are the observable part; the numbers and their order live on `TryParseUpdateStatistics`.
+## The statistics lifecycle
 
-## `DBCC SHOW_STATISTICS(<table>, <stat>) WITH HISTOGRAM`
+Every statistic — an index's, a key constraint's, a standalone or an automatic one — carries a `StatisticsState` whose `StatisticsSnapshot` describes the rows as they stood when it was last built (`Simulation.StatisticsLifecycle.cs`): the histogram of its leading column, the density of each key prefix, the header's figures, and the leading column's modification count at the time.
+That is what `DBCC SHOW_STATISTICS`, `STATS_DATE`, `sys.dm_db_stats_properties` and `sys.dm_db_stats_histogram` report, so a statistic built over an empty table — every key constraint declared in its `CREATE TABLE` — reports a header of NULLs and no histogram until it is built again, however many rows arrive, as on real (probed 2026-10-04 and 2026-10-05 against SQL Server 2025).
 
-DacFx's `sqlpackage /Action:Export` runs one `dbcc show_statistics(N'[schema].[table]', N'<index-or-stat-name>') with histogram` per table (using the PK / clustered-index statistic name) before bulk-reading it, to chunk the table into extraction ranges — so the DATA phase of a bacpac export needs this parsed.
+A statistic is built by `CREATE INDEX` over existing rows (a clustered one rebuilding the table's other index statistics), a constraint added over rows, `ALTER INDEX … REBUILD`, `UPDATE STATISTICS`, `sp_updatestats`, and the optimizer.
+The optimizer's part is `LoadQueryStatistics`, run for each base-table column a query's predicates read — the WHERE, a join's ON, the HAVING, the GROUP BY, a DISTINCT list, an UPDATE's or DELETE's WHERE — as the query parses: under `AUTO_UPDATE_STATISTICS` it rebuilds every statistic leading with the column that is stale (no snapshot over a table with rows, or modified past real's threshold — 500 modifications up to 500 rows, 6 below 6 rows in a temporary table, else the lesser of 500 + 20 % and √(1000 n)), short of `NORECOMPUTE`; under `AUTO_CREATE_STATISTICS`, a column no statistic leads gets an automatic one, `_WA_Sys_<column id>_<object id>` in eight-digit hex, `auto_created` and `auto_drop` set.
+The modification count is the heap's visible inserts and deletes plus each column's updated rows (`HeapTable.ModificationCount`), which `modification_counter` reports.
+
+The histogram has one step per distinct value up to 200, a leading `NULL` step counting the rows whose leading column is NULL; past 200 values, 200 boundaries spread evenly over the sorted values, MIN and MAX always among them, `RANGE_ROWS` / `DISTINCT_RANGE_ROWS` folded from the values between and `AVG_RANGE_ROWS` = `RANGE_ROWS / DISTINCT_RANGE_ROWS` (**1** with no range rows).
+The MIN-first, MAX-last envelope is load-bearing for DacFx, whose bacpac-export chunker interpolates boundary parameters between adjacent steps and overflows client-side when the MIN anchor is missing.
+A nonclustered index's density vector runs on over the clustered key, unique or not (`a`, then `a, id`).
+
+Not modeled yet:
+
+- **Step compaction** — real merges adjacent values of similar spread even under 200 distinct values (three values `1, 2, 3` are the steps `1` and `3` on real, three steps here), by its own max-diff algorithm; step placement past 200 values diverges likewise.
+- **A cached plan's staleness check** — real recompiles a cached plan whose statistics went stale and so refreshes them; here the load runs only as a query parses, so a statement the plan cache replays refreshes nothing.
+- **Automatic statistics through a view** — a predicate on a view's column creates nothing on its base table here.
+- **An automatic statistic real creates despite the key's evaluation failing** — `CREATE STATISTICS` over a computed column whose expression overflows on some row is Msg 8115 on real *and* leaves the statistic created; here the statement leaves nothing.
+
+## `DBCC SHOW_STATISTICS(<table>, <stat>)`
+
+DacFx's `sqlpackage /Action:Export` runs one `dbcc show_statistics(N'[schema].[table]', N'<index-or-stat-name>') with histogram` per table (using the PK / clustered-index statistic name) before bulk-reading it, to chunk the table into extraction ranges.
 `TryParseShowStatistics` (`Simulation/Simulation.Dbcc.cs`) peeks past `DBCC`, restoring the cursor on any other subcommand.
-Both argument forms real accepts are handled: a `N'...'` string literal whose content is a 1- / 2-part bracketed name (DacFx's form, parsed with the same `ObjectId.TryParseObjectName` seam `OBJECT_ID` uses) and a bare dotted / bracketed identifier (`BatchContext.ParseObjectName`).
+Each argument is a string literal whose content is a 1- / 2-part bracketed name (DacFx's form, parsed with the same `ObjectId.TryParseObjectName` seam `OBJECT_ID` uses), a bare dotted / bracketed identifier, or a variable; a number is Msg 2560.
 The statement parses mid-batch (DacFx precedes it with a `SELECT TOP 1` probe in the same batch).
 
-The named statistic resolves against the table's index-backed stats via the canonical [`IndexIdentities()`](#index-id-allocation) allocator (a heap identity — null name — can't match); the leading key column is the first `KeyConstraint.StorageOrdinals` / `Index.KeyColumns` ordinal.
-The result set is the probe-confirmed 5 columns: `RANGE_HI_KEY` (typed as the **leading key column's own type** — `int` for an int PK, `datetime2` / `nvarchar` for those keys, reaching real SqlClient through the standard TDS codecs), `RANGE_ROWS` `real`, `EQ_ROWS` `real`, `DISTINCT_RANGE_ROWS` `bigint`, `AVG_RANGE_ROWS` `real`.
+The named statistic resolves through [`IndexIdentities()`](#index-id-allocation) and the standalone statistics, and the result sets come from its snapshot ([The statistics lifecycle](#the-statistics-lifecycle)): `STAT_HEADER` (one row, every value NULL but the name for a statistic never built), `DENSITY_VECTOR` and `HISTOGRAM`, in that fixed order, all three without a `WITH`.
+The histogram is the probe-confirmed 5 columns: `RANGE_HI_KEY` (typed as the **leading key column's own type** — `int` for an int PK, `datetime2` / `nvarchar` for those keys, reaching real SqlClient through the standard TDS codecs), `RANGE_ROWS` `real`, `EQ_ROWS` `real`, `DISTINCT_RANGE_ROWS` `bigint`, `AVG_RANGE_ROWS` `real`.
+Errors mirror real: unresolvable table → Msg 2501, unknown statistic → Msg 2767, NULL / unparseable argument → Msg 2560, an option it doesn't know → Msg 195 state 4 (all probe-confirmed class/state); one argument → Msg 2583 state 5, and a caller without `SELECT` on the table → Msg 229 then Msg 2557 state 7 naming the table as written, Msg 2528 closing each of these and the Msg 2767 (probed 2026-10-04 against SQL Server 2025).
+Msg 2528 follows the rows unless `NO_INFOMSGS` joins the options.
+`STATS_STREAM` (the serialized histogram blob SMO's `Statistic.Stream` reads) raises `NotSupportedException` — see [`backlog.md`](backlog.md).
 
-**Histogram content**: the simulator scans the heap once (`Heap.EnumerateRows` + the array-typed `RowDecoder.DecodeColumn` fast path over `StoredColumns`), groups by distinct non-null leading-key value, sorts, and emits one step per distinct value up to 200 steps — beyond that, 200 boundary steps evenly spaced over the sorted distinct values, with `RANGE_ROWS` / `DISTINCT_RANGE_ROWS` folded from the skipped values between adjacent boundaries and `AVG_RANGE_ROWS` = `RANGE_ROWS / DISTINCT_RANGE_ROWS` (**1** when there are no range rows, matching real's convention — probe-confirmed).
-The **MIN value is always the first step and MAX the last**, matching real's histogram envelope — load-bearing for DacFx, whose bacpac-export chunker interpolates boundary parameters between adjacent steps and overflows its arithmetic client-side (`Double` → `Int32` conversion failure) when the MIN anchor is missing.
-Step *placement* still diverges from real's sampled max-diff algorithm; the values are honest and self-consistent with `COUNT(*)` / `MIN` / `MAX`.
-An empty table yields a 0-row result set.
-Errors mirror real: unresolvable table → Msg 2501, unknown statistic → Msg 2767, NULL / unparseable argument → Msg 2560 (all probe-confirmed class/state); one argument → Msg 2583 state 5, and a caller without `SELECT` on the table → Msg 229 then Msg 2557 state 7 naming the table as written, Msg 2528 closing each of these and the Msg 2767 (probed 2026-10-04 against SQL Server 2025).
-Only `WITH HISTOGRAM` is modeled, Msg 2528 following the rows unless `NO_INFOMSGS` joins it — the no-`WITH` three-result-set form and every other option (`STAT_HEADER` / `DENSITY_VECTOR` / `STATS_STREAM`) raise `NotSupportedException` naming the option, after the checks above.
-`STATS_STREAM` (the serialized histogram blob SMO's `Statistic.Stream` reads) isn't modeled yet — see [`backlog.md`](backlog.md).
+## Index DMVs
+
+`sys.dm_db_index_physical_stats` (a row per index and partition, its argument refusals Msg 2591 / 2561 / 2521 as real's), `sys.dm_db_stats_properties`, `sys.dm_db_stats_histogram` and the compatibility views `sysindexes` / `sysindexkeys` project from the same identities and snapshots (`BuiltInResources.IndexDmvs.cs`, `Selection.IndexDmvs.cs`).
+`sys.dm_db_index_usage_stats`, the `sys.dm_db_missing_index_*` family, `sys.dm_db_index_operational_stats` and `sys.dm_db_incremental_stats_properties` exist with real's columns and no rows: the simulator keeps no usage counters or optimizer suggestions yet, where real's usage view counts every seek, scan and lookup.
+The physical figures (`page_count`, `avg_fragmentation_in_percent`, record sizes) are the simulator's own flat page list's, never byte-matching real's.
 
 ## EF Migrations integration
 
@@ -732,14 +750,14 @@ The option rules follow the target, so an `ALTER INDEX` resolves its index befor
 
 - **Columnstore residue**: the row-group DMVs (`sys.column_store_row_groups`, `sys.dm_db_column_store_row_group_physical_stats` …) and `sys.column_store_segments` (Msg 208 here; empty on real over a database without a columnstore index) aren't modeled (a `vector` or `json` column rides a clustered columnstore index as its other columns do, and is refused as a rowstore or statistics key — see [`vector.md`](vector.md), [`json-type.md`](json-type.md)).
 
-- **`filter_definition` edge cases**: the column is rendered (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)) and byte-matches SQL Server across the common filtered grammar, but two literal-typing corners diverge: an integer literal larger than `int` range renders `(5000000000)` where SQL Server types it as `numeric` and renders `(5000000000.)` (trailing dot), and a scale-0 decimal literal likewise omits the trailing dot.
-  Both are rare in filtered predicates.
-  A predicate the simulator accepts but can't render canonically (an `OR`, `NOT`, `BETWEEN`, or function call — all of which a real server *rejects* at CREATE for a filtered index) reports `filter_definition` NULL with `has_filter` still set.
+- **`filter_definition` edge cases**: a predicate the simulator accepts but can't render canonically reports `filter_definition` NULL with `has_filter` still set; the shapes real accepts render as real's (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)).
 - **CLUSTERED keyword drives allocation and scan order, not storage**: `CREATE CLUSTERED INDEX` (and a clustered PK / `UNIQUE CLUSTERED` constraint) correctly reports `index_id = 1` / `type_desc = CLUSTERED` and suppresses the HEAP row (see [Index-id allocation](#index-id-allocation)), and a scan follows its key (see [Clustered scan order](#clustered-scan-order)), but the heap underneath stays in write order.
   Real may instead scan a narrower nonclustered index that covers the query and so return that index's order (`SELECT a FROM t` over `UNIQUE (a)` on a heap), which isn't modeled.
+  A clustered index keyed on a non-persisted computed column leaves the scan in write order, where real follows the computed key, and dropping a clustered index leaves the heap in write order, where real's rebuilt heap keeps the key order the index left it in (probed 2026-10-05 against SQL Server 2025).
 - *(the one-clustered-per-table rule now covers every path — see [One clustered index per table](#grammar). The constraint paths raise **Msg 1902 State 3** naming the existing clustered index, except an all-inline CREATE TABLE pair, which real gives its own **Msg 8112** since neither entry exists yet to name; the multiple-PRIMARY-KEY check (Msg 8110) outranks both.)*
 - **Option names in a CREATE TABLE / CREATE TYPE / ALTER TABLE ADD column clause** — standalone `CREATE INDEX`, `ALTER INDEX … REBUILD` and `ALTER TABLE … ADD CONSTRAINT` refuse a name the statement doesn't take as real does (`IndexOptionStatement`), but the column-level parser those three statements share with table variables doesn't know which statement it serves, so a constraint or inline index there accepts any name — real refuses an unknown one naming `CREATE TABLE` / `CREATE TYPE` / `ALTER TABLE`, and `CREATE TABLE` refuses `SORT_IN_TEMPDB` / `ONLINE` / `MAXDOP` / `DROP_EXISTING` too (probed 2026-09-26).
 - **A filtered index whose predicate is a bare parenthesized column** (`WHERE (a)`) is Msg 102 near the statement's end on real and Msg 4145 here (probed 2026-10-03 against SQL Server 2025).
+- **`IGNORE_DUP_KEY` messages and `OUTPUT`** — an insert that ignores duplicates and returns `OUTPUT` rows sends Msg 3604 ahead of the rows, where real sends it after them.
 - **DROP INDEX comma list not atomic**: each entry resolves independently.
   Real SQL Server rolls back all on any failure.
 - **Indexed-view battery gate order**: each rejection below was probed in isolation, so real's precedence when one view violates several at once isn't pinned — a body with both DISTINCT and TOP may name the other one on real.

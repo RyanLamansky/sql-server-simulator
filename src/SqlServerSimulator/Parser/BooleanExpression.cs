@@ -79,6 +79,23 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     internal virtual bool FilterComparesToNullLiteral => false;
 
+    /// <summary>
+    /// Hands <paramref name="visitor"/> each column and the constant it is
+    /// compared against in a filtered index's predicate (one call per
+    /// <c>IN</c> candidate), for the checks that read their types.
+    /// </summary>
+    internal virtual void VisitFilterComparisons(Action<MultiPartName, Expression> visitor)
+    {
+    }
+
+    private static void VisitFilterComparison(Expression column, Expression constant, Action<MultiPartName, Expression> visitor)
+    {
+        while (column is Parenthesized paren)
+            column = paren.Wrapped;
+        if (column is Reference { ReferencedName.Count: 1 } reference && IsFilterConstant(constant))
+            visitor(reference.ReferencedName, constant);
+    }
+
     private static bool IsNullLiteral(Expression operand)
     {
         while (operand is Parenthesized paren)
@@ -112,6 +129,23 @@ internal abstract class BooleanExpression : ExpressionNode
         if (operand is Reference reference && reference.ReferencedName.Count == 1)
         {
             _ = sb.Append('[').Append(reference.ReferencedName.Leaf).Append(']');
+            return true;
+        }
+
+        // A conversion of a constant keeps its CONVERT, the target bracketed
+        // (probed 2026-10-05 against SQL Server 2025: CAST(1 AS decimal(5,1))
+        // is stored CONVERT([decimal](5,1),(1))).
+        if (operand.ConversionTarget is { } target && operand.PureConversionOperand is { } converted)
+        {
+            var targetName = target.ToString() ?? "";
+            var paren = targetName.IndexOf('(', StringComparison.Ordinal);
+            _ = sb.Append("CONVERT([").Append(paren < 0 ? targetName : targetName[..paren]).Append(']');
+            if (paren >= 0)
+                _ = sb.Append(targetName[paren..]);
+            _ = sb.Append(',');
+            if (!TryAppendFilterOperand(sb, converted, batch))
+                return false;
+            _ = sb.Append(')');
             return true;
         }
 
@@ -149,6 +183,13 @@ internal abstract class BooleanExpression : ExpressionNode
             return $"{prefix}'{value.AsString.Replace("'", "''", StringComparison.Ordinal)}'";
         }
 
+        // A binary constant is written as is; money carries its $ and four
+        // places (probed 2026-10-05 against SQL Server 2025).
+        if (type is VarbinarySqlType or BinarySqlType)
+            return "0x" + Convert.ToHexString(value.AsBytes);
+        if (type == SqlType.Money || type == SqlType.SmallMoney)
+            return "($" + value.AsMoneyDecimal38.ToString() + ")";
+
         var text = type switch
         {
             _ when type == SqlType.Int32 => value.AsInt32.ToString(CultureInfo.InvariantCulture),
@@ -157,7 +198,10 @@ internal abstract class BooleanExpression : ExpressionNode
             _ when type == SqlType.TinyInt => value.AsByte.ToString(CultureInfo.InvariantCulture),
             _ when type == SqlType.Bit => value.AsBoolean ? "1" : "0",
             _ when type == SqlType.Money || type == SqlType.SmallMoney => value.AsMoneyDecimal38.ToString(),
-            _ when type == SqlType.Float || type == SqlType.Real => value.FormatApproximateWithStyle(0),
+            _ when type == SqlType.Float || type == SqlType.Real => value.FormatApproximateWithStyle(3),
+            // A numeric literal without places keeps its point: 10. and an
+            // integer past int, which reads as numeric (probed 2026-10-05).
+            DecimalSqlType { scale: 0 } => value.AsDecimal38.ToString() + ".",
             DecimalSqlType => value.AsDecimal38.ToString(),
             _ => null,
         };
@@ -1788,6 +1832,12 @@ internal abstract class BooleanExpression : ExpressionNode
 
         internal override bool FilterComparesToNullLiteral => Array.Exists(operands, operand => operand.FilterComparesToNullLiteral);
 
+        internal override void VisitFilterComparisons(Action<MultiPartName, Expression> visitor)
+        {
+            foreach (var operand in operands)
+                operand.VisitFilterComparisons(visitor);
+        }
+
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
         {
             for (var i = 0; i < operands.Length; i++)
@@ -2140,6 +2190,12 @@ internal abstract class BooleanExpression : ExpressionNode
         internal override bool IsFilteredIndexShape => !negated && IsFilterColumn(source) && Array.TrueForAll(candidates, IsFilterConstant);
 
         internal override bool FilterComparesToNullLiteral => !negated && IsFilterColumn(source) && Array.Exists(candidates, IsNullLiteral);
+
+        internal override void VisitFilterComparisons(Action<MultiPartName, Expression> visitor)
+        {
+            foreach (var candidate in candidates)
+                VisitFilterComparison(source, candidate, visitor);
+        }
 
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
         {
@@ -2911,6 +2967,12 @@ internal abstract class BooleanExpression : ExpressionNode
         internal override bool IsFilteredIndexShape => this.FilterOperator is not null && IsFilterColumn(this.left) && IsFilterConstant(this.right);
 
         internal override bool FilterComparesToNullLiteral => this.FilterOperator is not null && IsFilterColumn(this.left) && IsNullLiteral(this.right);
+
+        internal override void VisitFilterComparisons(Action<MultiPartName, Expression> visitor)
+        {
+            if (this.FilterOperator is not null)
+                VisitFilterComparison(this.left, this.right, visitor);
+        }
 
         private protected override bool TryAppendFilterDefinition(StringBuilder sb, BatchContext batch)
         {

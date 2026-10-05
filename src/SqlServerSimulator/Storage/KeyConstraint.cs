@@ -173,6 +173,26 @@ internal sealed class KeyConstraint(KeyConstraintKind kind, string name, int[] s
     public bool OptimizeForSequentialKey = options.OptimizeForSequentialKey ?? false;
 
     /// <summary>
+    /// <c>sys.partitions.data_compression</c> / <c>xml_compression</c>: the
+    /// declaration's rowstore <c>DATA_COMPRESSION</c> (0 <c>NONE</c>, 1
+    /// <c>ROW</c>, 2 <c>PAGE</c>) and <c>XML_COMPRESSION</c>, which a rebuild
+    /// may change. Rows are stored the same either way.
+    /// </summary>
+    public byte DataCompression = options.DataCompression ?? 0;
+
+    /// <inheritdoc cref="DataCompression"/>
+    public bool XmlCompression = options.XmlCompression ?? false;
+
+    /// <summary>
+    /// Whether the key's declared width passes what the index can hold, so
+    /// each written row's key is measured against it (Msg 1946).
+    /// </summary>
+    public bool KeyMayExceedLimit;
+
+    /// <summary>The index's statistic: its last build and the options it was built under.</summary>
+    public readonly StatisticsState Statistics = new();
+
+    /// <summary>
     /// <c>sys.stats.no_recompute</c> of the index's statistic: <c>STATISTICS_NORECOMPUTE</c>
     /// declared, or set since by <c>ALTER INDEX</c>, <c>UPDATE STATISTICS</c> or <c>sp_autostats</c>.
     /// </summary>

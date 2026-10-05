@@ -736,6 +736,10 @@ internal abstract class Expression : ExpressionNode
         context.ColumnReferencesParsed--;
         if (ReferenceEquals(context.ScalarOnlyColumnReference, reference))
             context.ScalarOnlyColumnReference = null;
+        // Nor is it a column a FROM source's arguments read: `OBJECT_ID(…)` in
+        // a DMV whose own output has an object_id column is no sibling reference.
+        if (context.FromSourceColumnSink is { Count: > 0 } sink && ReferenceEquals(sink[^1], reference))
+            sink.RemoveAt(sink.Count - 1);
 
         context.NestingDepth += FunctionCallNestingCost;
         if (context.NestingDepth > MaxNestingDepth)

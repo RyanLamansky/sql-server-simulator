@@ -302,146 +302,161 @@ internal sealed partial class Selection
         int scopeStart,
         bool nested)
     {
-        while (TryParseJoinKeyword(context, out var kind))
+        while (TryParseJoinKeyword(context, out var kind, out var algorithm, out var remote))
         {
-            if (kind is JoinKind.CrossApply or JoinKind.OuterApply)
+            // The join this keyword introduces lands at this index whichever
+            // shape its right operand takes; the hint goes on it as the
+            // iteration ends, a continue or a return included.
+            var hintedJoin = joins.Count;
+            try
             {
-                if (NextSourceIsVectorSearch(context))
+                if (kind is JoinKind.CrossApply or JoinKind.OuterApply)
                 {
-                    AddAppliedVectorSearch(context, sources, joins, kind, scope);
-                }
-                else
-                {
-                    AddSource(context, sources, ParseLateralFromSource(context, scope, sources));
-                    joins.Add(new JoinSpec(kind, onPredicate: null));
-                }
-                if (context.Token is ReservedKeyword { Keyword: Keyword.On } onToken)
-                {
-                    if (nested)
-                        return;
-                    throw SimulatedSqlException.SyntaxErrorNearKeyword(onToken);
-                }
-                continue;
-            }
-
-            // A parenthesized join group as this join's right operand —
-            // `A LEFT JOIN (B JOIN C ON c1) ON c2` — changes associativity from
-            // the default left-deep fold: the interior join binds first, then
-            // this ON joins the accumulated left spine against the whole group
-            // (an outer-join miss NULL-fills every group slot). The interior
-            // sources / joins are spliced by ParseJoinGroup; the connecting
-            // JoinSpec (carrying GroupCount) is inserted at the group's leading
-            // slot, ahead of the interior joins ParseJoinGroup appended.
-            // A VECTOR_SEARCH is a two-member group of its own: the ON joins
-            // the spine against the distance rowset and the table together.
-            if (NextSourceIsVectorSearch(context))
-            {
-                var searchJoinIndex = joins.Count;
-                AddVectorSearch(context, sources, joins, scope.OuterTypeResolver);
-                BooleanExpression? searchOn = null;
-                if (kind == JoinKind.Cross)
-                {
-                    if (context.Token is ReservedKeyword { Keyword: Keyword.On } searchOnToken)
+                    if (NextSourceIsVectorSearch(context))
+                    {
+                        AddAppliedVectorSearch(context, sources, joins, kind, scope);
+                    }
+                    else
+                    {
+                        AddSource(context, sources, ParseLateralFromSource(context, scope, sources));
+                        joins.Add(new JoinSpec(kind, onPredicate: null));
+                    }
+                    if (context.Token is ReservedKeyword { Keyword: Keyword.On } onToken)
                     {
                         if (nested)
-                        {
-                            joins.Insert(searchJoinIndex, new JoinSpec(kind, null) { GroupCount = 2 });
                             return;
-                        }
-                        throw SimulatedSqlException.SyntaxErrorNearKeyword(searchOnToken);
+                        throw SimulatedSqlException.SyntaxErrorNearKeyword(onToken);
                     }
+                    continue;
                 }
-                else
-                {
-                    if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    searchOn = ParseJoinOn(context, scope, sources, scopeStart);
-                }
-                joins.Insert(searchJoinIndex, new JoinSpec(kind, searchOn) { GroupCount = 2, ScopeStart = scopeStart, ScopeEnd = sources.Count });
-                continue;
-            }
 
-            if (NextSourceIsJoinGroup(context))
-            {
-                var groupStart = sources.Count;
-                // The connecting join is inserted ahead of the interior joins
-                // ParseJoinGroup appends. Capture the insertion index now: the
-                // flat `joins.Count == sources.Count - 1` invariant doesn't hold
-                // mid-parse of an enclosing group (its own connecting join is
-                // inserted only after this nested group finishes), so
-                // `groupStart - 1` would misplace the join under nesting.
-                var groupJoinIndex = joins.Count;
-                ParseJoinGroup(context, scope, sources, joins, siblingCandidates);
-                var groupCount = sources.Count - groupStart;
-                BooleanExpression? groupOn = null;
+                // A parenthesized join group as this join's right operand —
+                // `A LEFT JOIN (B JOIN C ON c1) ON c2` — changes associativity from
+                // the default left-deep fold: the interior join binds first, then
+                // this ON joins the accumulated left spine against the whole group
+                // (an outer-join miss NULL-fills every group slot). The interior
+                // sources / joins are spliced by ParseJoinGroup; the connecting
+                // JoinSpec (carrying GroupCount) is inserted at the group's leading
+                // slot, ahead of the interior joins ParseJoinGroup appended.
+                // A VECTOR_SEARCH is a two-member group of its own: the ON joins
+                // the spine against the distance rowset and the table together.
+                if (NextSourceIsVectorSearch(context))
+                {
+                    var searchJoinIndex = joins.Count;
+                    AddVectorSearch(context, sources, joins, scope.OuterTypeResolver);
+                    BooleanExpression? searchOn = null;
+                    if (kind == JoinKind.Cross)
+                    {
+                        if (context.Token is ReservedKeyword { Keyword: Keyword.On } searchOnToken)
+                        {
+                            if (nested)
+                            {
+                                joins.Insert(searchJoinIndex, new JoinSpec(kind, null) { GroupCount = 2 });
+                                return;
+                            }
+                            throw SimulatedSqlException.SyntaxErrorNearKeyword(searchOnToken);
+                        }
+                    }
+                    else
+                    {
+                        if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        searchOn = ParseJoinOn(context, scope, sources, scopeStart);
+                    }
+                    joins.Insert(searchJoinIndex, new JoinSpec(kind, searchOn) { GroupCount = 2, ScopeStart = scopeStart, ScopeEnd = sources.Count });
+                    continue;
+                }
+
+                if (NextSourceIsJoinGroup(context))
+                {
+                    var groupStart = sources.Count;
+                    // The connecting join is inserted ahead of the interior joins
+                    // ParseJoinGroup appends. Capture the insertion index now: the
+                    // flat `joins.Count == sources.Count - 1` invariant doesn't hold
+                    // mid-parse of an enclosing group (its own connecting join is
+                    // inserted only after this nested group finishes), so
+                    // `groupStart - 1` would misplace the join under nesting.
+                    var groupJoinIndex = joins.Count;
+                    ParseJoinGroup(context, scope, sources, joins, siblingCandidates);
+                    var groupCount = sources.Count - groupStart;
+                    BooleanExpression? groupOn = null;
+                    if (kind == JoinKind.Cross)
+                    {
+                        if (context.Token is ReservedKeyword { Keyword: Keyword.On })
+                        {
+                            if (nested)
+                            {
+                                joins.Insert(groupJoinIndex, new JoinSpec(kind, null) { GroupCount = groupCount });
+                                return;
+                            }
+                            throw SimulatedSqlException.SyntaxErrorNearKeyword((ReservedKeyword)context.Token);
+                        }
+                    }
+                    else if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
+                    {
+                        // A group takes no alias: `(…) AS x` → Msg 156 near the AS
+                        // keyword, a bare-name alias → Msg 102, matching real.
+                        throw context.Token is ReservedKeyword aliasKeyword
+                            ? SimulatedSqlException.SyntaxErrorNearKeyword(aliasKeyword)
+                            : SimulatedSqlException.SyntaxErrorNear(context);
+                    }
+                    else
+                    {
+                        context.MoveNextRequired();
+                        groupOn = ParseOnPredicateWithScope(context, sources, scopeStart, scope.OuterTypeResolver);
+                    }
+                    joins.Insert(groupJoinIndex, new JoinSpec(kind, groupOn) { GroupCount = groupCount, ScopeStart = scopeStart, ScopeEnd = sources.Count });
+                    continue;
+                }
+
+                // Joined-source derived tables can also correlate, but the JoinDriver
+                // path for non-leftmost LateralPlan sources doesn't apply ON
+                // predicates or LEFT-fill. Keep the chained outer-type-resolver in
+                // play so a correlated derived table here is at least diagnosed
+                // (NotSupportedException at execute time) rather than silently
+                // resolving against a wrong scope.
+                var rightStart = sources.Count;
+                var joinIndex = joins.Count;
+                AddSource(context, sources, ParseSourceCollectingColumnReads(context, scope, sources, siblingCandidates));
+                BooleanExpression? on = null;
                 if (kind == JoinKind.Cross)
                 {
                     if (context.Token is ReservedKeyword { Keyword: Keyword.On })
                     {
                         if (nested)
                         {
-                            joins.Insert(groupJoinIndex, new JoinSpec(kind, null) { GroupCount = groupCount });
+                            joins.Add(new JoinSpec(kind, null));
                             return;
                         }
                         throw SimulatedSqlException.SyntaxErrorNearKeyword((ReservedKeyword)context.Token);
                     }
                 }
-                else if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
-                {
-                    // A group takes no alias: `(…) AS x` → Msg 156 near the AS
-                    // keyword, a bare-name alias → Msg 102, matching real.
-                    throw context.Token is ReservedKeyword aliasKeyword
-                        ? SimulatedSqlException.SyntaxErrorNearKeyword(aliasKeyword)
-                        : SimulatedSqlException.SyntaxErrorNear(context);
-                }
                 else
                 {
-                    context.MoveNextRequired();
-                    groupOn = ParseOnPredicateWithScope(context, sources, scopeStart, scope.OuterTypeResolver);
-                }
-                joins.Insert(groupJoinIndex, new JoinSpec(kind, groupOn) { GroupCount = groupCount, ScopeStart = scopeStart, ScopeEnd = sources.Count });
-                continue;
-            }
-
-            // Joined-source derived tables can also correlate, but the JoinDriver
-            // path for non-leftmost LateralPlan sources doesn't apply ON
-            // predicates or LEFT-fill. Keep the chained outer-type-resolver in
-            // play so a correlated derived table here is at least diagnosed
-            // (NotSupportedException at execute time) rather than silently
-            // resolving against a wrong scope.
-            var rightStart = sources.Count;
-            var joinIndex = joins.Count;
-            AddSource(context, sources, ParseSourceCollectingColumnReads(context, scope, sources, siblingCandidates));
-            BooleanExpression? on = null;
-            if (kind == JoinKind.Cross)
-            {
-                if (context.Token is ReservedKeyword { Keyword: Keyword.On })
-                {
-                    if (nested)
+                    if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
                     {
-                        joins.Add(new JoinSpec(kind, null));
-                        return;
+                        // Another join before this one's ON: `A LEFT JOIN B JOIN C
+                        // ON c1 ON c2` nests as `A LEFT JOIN (B JOIN C ON c1) ON c2`
+                        // does, the inner chain taking the first ON and this join
+                        // the next (probed 2026-09-24 against SQL Server 2025).
+                        ParseJoinClauses(context, scope, sources, joins, siblingCandidates, rightStart, nested: true);
+                        if (joins.Count == joinIndex || context.Token is not ReservedKeyword { Keyword: Keyword.On })
+                            throw SimulatedSqlException.SyntaxErrorNear(context);
+                        joins.Insert(joinIndex, new JoinSpec(kind, ParseJoinOn(context, scope, sources, scopeStart)) { GroupCount = sources.Count - rightStart, ScopeStart = scopeStart, ScopeEnd = sources.Count });
+                        continue;
                     }
-                    throw SimulatedSqlException.SyntaxErrorNearKeyword((ReservedKeyword)context.Token);
+                    on = ParseJoinOn(context, scope, sources, scopeStart);
                 }
+                joins.Add(new JoinSpec(kind, on) { ScopeStart = scopeStart, ScopeEnd = sources.Count });
             }
-            else
+            finally
             {
-                if (context.Token is not ReservedKeyword { Keyword: Keyword.On })
+                if (hintedJoin < joins.Count)
                 {
-                    // Another join before this one's ON: `A LEFT JOIN B JOIN C
-                    // ON c1 ON c2` nests as `A LEFT JOIN (B JOIN C ON c1) ON c2`
-                    // does, the inner chain taking the first ON and this join
-                    // the next (probed 2026-09-24 against SQL Server 2025).
-                    ParseJoinClauses(context, scope, sources, joins, siblingCandidates, rightStart, nested: true);
-                    if (joins.Count == joinIndex || context.Token is not ReservedKeyword { Keyword: Keyword.On })
-                        throw SimulatedSqlException.SyntaxErrorNear(context);
-                    joins.Insert(joinIndex, new JoinSpec(kind, ParseJoinOn(context, scope, sources, scopeStart)) { GroupCount = sources.Count - rightStart, ScopeStart = scopeStart, ScopeEnd = sources.Count });
-                    continue;
+                    joins[hintedJoin].Algorithm = algorithm;
+                    joins[hintedJoin].Remote = remote;
                 }
-                on = ParseJoinOn(context, scope, sources, scopeStart);
             }
-            joins.Add(new JoinSpec(kind, on) { ScopeStart = scopeStart, ScopeEnd = sources.Count });
         }
     }
 
@@ -1152,6 +1167,8 @@ internal sealed partial class Selection
                         return BuiltInRowsetSource(context, ParseFtsParser(context, objectName.ToString()));
                     if (BuiltInToken.Equals(objectName.Leaf, "dm_io_virtual_file_stats"))
                         return BuiltInRowsetSource(context, ParseVirtualFileStatsDmv(context, objectName.ToString()));
+                    if (ParseIndexDmv(context, objectName.Leaf, objectName.ToString()) is { } indexDmv)
+                        return BuiltInRowsetSource(context, indexDmv);
                 }
 
                 // Linked-server fork: four-part `server.db.schema.t` routes
@@ -1270,14 +1287,19 @@ internal sealed partial class Selection
                     }
 
                     var cteAlias = ConsumeOptionalAlias(context);
-                    // A CTE reference takes no hints, so a WITH after it is the
-                    // start of another CTE the statement ran into (Msg 336).
+                    // A WITH and a name after a CTE reference is the start of
+                    // another CTE the statement ran into (Msg 336); a WITH and
+                    // a hint list is taken and discarded, the hints reaching
+                    // no table (probed 2026-10-05 against SQL Server 2025).
                     if (context.Token is ReservedKeyword { Keyword: Keyword.With })
                     {
                         var afterWith = context.SaveCheckpoint();
                         if (context.GetNextOptional() is Name nextCte)
                             throw SimulatedSqlException.CteAfterUnterminatedStatement(nextCte.Value);
+                        var hintList = context.Token is Operator { Character: '(' };
                         context.RestoreCheckpoint(afterWith);
+                        if (hintList)
+                            _ = ParseOptionalTableHints(context);
                     }
                     // A parenthesized list after it is the legacy hint form
                     // once an alias is written, and an argument list (Msg 215)
@@ -1350,7 +1372,10 @@ internal sealed partial class Selection
                     // semantic effect, but the name-validation gate must still
                     // run (probe-confirmed against SQL Server 2025: Msg 321 on
                     // an unrecognized hint name applies to sys.* targets too).
-                    _ = ParseOptionalTableHints(context);
+                    // An index hint is ignored with real's view warning, Msg
+                    // 4430 (probed 2026-10-05 against SQL Server 2025).
+                    if (ParseOptionalTableHints(context).IndexArguments is not null && !context.Batch.IsSkipping)
+                        context.Connection.PendingMessages.Enqueue(SimulatedSqlException.ViewIndexHintsIgnoredMessage(context.Batch, objectName.ToString()));
                     return new FromSource(
                         qualifier: catalogAlias ?? catalogView.Name,
                         columnNames: catalogColumnNames,
@@ -1575,7 +1600,13 @@ internal sealed partial class Selection
                 // (probed 2026-10-04 against SQL Server 2025).
                 if (heapHints.NoExpand)
                     throw SimulatedSqlException.NoExpandHintInvalid(objectName.ToString(), state: 2).PinLine(objectNameLine + context.Batch.LineOffset);
-                ValidateIndexHintArguments(context.Batch.CurrentDatabase.Collation, heapHints, heapTable, $"{objectName.ImmediateQualifier ?? Database.DefaultSchemaName}.{heapTable.Name}");
+                if (heapHints.BulkLoadOnlyHint is { } bulkLoadHint)
+                    throw SimulatedSqlException.BulkTableHintInvalid(bulkLoadHint, objectName.ToString());
+                // A module body's hints are checked when it first runs, not at
+                // its CREATE (probed 2026-10-05 against SQL Server 2025).
+                if (!(context.Batch.CreateTimeBinding && !context.Batch.CompilingForRun) && context.DefiningModuleQuery == DefiningModuleQuery.None)
+                    ValidateIndexHintArguments(context.Batch.CurrentDatabase.Collation, heapHints, heapTable, IndexHintTableName(objectName, heapTable));
+                ValidateLockGranularityHints(context, heapHints, heapTable, objectName);
                 ValidateForceSeekColumns(context.Batch.CurrentDatabase.Collation, heapHints, heapTable);
                 // Phase 1b: acquire table-level IS/IX/S/X (based on hints +
                 // isolation level) and capture the per-row plan. Temporal
@@ -1606,7 +1637,8 @@ internal sealed partial class Selection
                     unaliasedName: heapAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null)
                 {
                     ForPath = forPath,
-                    ForcedAccessPath = heapHints.ForceSeek || (heapHints.ForceScan && heapHints.IndexArguments is { Count: > 0 }) ? heapHints : null,
+                    ForcedAccessPath = heapHints.ForceSeek || heapHints.IndexArguments is { Count: > 1 } || (heapHints.ForceScan && heapHints.IndexArguments is { Count: > 0 }) ? heapHints : null,
+                    WrittenHints = heapHints,
                 };
 
             // Table-variable source: <c>FROM @t [alias]</c>. Routes through
@@ -1845,7 +1877,7 @@ internal sealed partial class Selection
     private static bool IsSysRowsetFunction(MultiPartName name) =>
         name.Count == 2
         && BuiltInToken.Equals(name.ImmediateQualifier, "sys")
-        && BuiltInToken.EqualsAny(name.Leaf, "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_sql_text", "dm_fts_parser", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
+        && BuiltInToken.EqualsAny(name.Leaf, "dm_db_incremental_stats_properties", "dm_db_index_operational_stats", "dm_db_index_physical_stats", "dm_db_missing_index_columns", "dm_db_stats_histogram", "dm_db_stats_properties", "dm_exec_cursors", "dm_exec_describe_first_result_set", "dm_exec_input_buffer", "dm_exec_sql_text", "dm_fts_parser", "dm_sql_referenced_entities", "dm_sql_referencing_entities", "fn_virtualfilestats");
 
     /// <summary>
     /// Wraps a built-in rowset function's synthesized plan (OPENJSON /
@@ -2146,9 +2178,14 @@ internal sealed partial class Selection
     /// isn't a hint is Msg 155 rather than the generic syntax error, and a
     /// second hint is Msg 102 on the second one.
     /// </remarks>
-    private static void ConsumeOptionalJoinHint(ParserContext context)
+    /// <param name="context">Parser state, after the join type.</param>
+    /// <param name="outer">Whether the join is an outer one, which takes no <c>REMOTE</c> (Msg 1072).</param>
+    /// <param name="algorithm">The algorithm the hint names; <see cref="JoinAlgorithms.None"/> for none or <c>REMOTE</c>.</param>
+    /// <param name="remote">Whether the hint is <c>REMOTE</c>.</param>
+    private static void ConsumeOptionalJoinHint(ParserContext context, bool outer, out JoinAlgorithms algorithm, out bool remote)
     {
-        if (!IsJoinHint(context.Token))
+        algorithm = JoinHintAlgorithm(context.Token, out remote);
+        if (algorithm == JoinAlgorithms.None && !remote)
         {
             // Only a bare identifier reaches Msg 155; a reserved keyword here
             // is the ordinary "that isn't JOIN" syntax error the caller raises.
@@ -2156,23 +2193,36 @@ internal sealed partial class Selection
                 throw SimulatedSqlException.NotARecognizedJoinOption(word.Value);
             return;
         }
+        if (remote && outer)
+            throw SimulatedSqlException.RemoteHintOnOuterJoin();
         context.MoveNextRequired();
-        if (IsJoinHint(context.Token))
+        if (JoinHintAlgorithm(context.Token, out var again) != JoinAlgorithms.None || again)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         // A hint fixes the join order, which real reports with Msg 8625 as
-        // the statement compiles (probed 2026-10-01 against SQL Server 2025).
+        // the statement compiles (probed 2026-10-01 against SQL Server 2025);
+        // the statement's end sends it, an OPTION (FORCE ORDER) withholding it.
         if (!context.Batch.IsSkipping)
-            context.Batch.AppendInfoError(@class: 0, state: 0, SimulatedSqlException.JoinOrderEnforcedMessageNumber, SimulatedSqlException.JoinOrderEnforcedMessage);
+            context.JoinOrderEnforced = true;
     }
 
-    private static bool IsJoinHint(Token? token) => token switch
+    private static JoinAlgorithms JoinHintAlgorithm(Token? token, out bool remote)
     {
-        ReservedKeyword { Keyword: Keyword.Merge } => true,
-        UnquotedString word => BuiltInToken.Equals(word.Value, "HASH")
-            || BuiltInToken.Equals(word.Value, "LOOP")
-            || BuiltInToken.Equals(word.Value, "REMOTE"),
-        _ => false,
-    };
+        remote = false;
+        switch (token)
+        {
+            case ReservedKeyword { Keyword: Keyword.Merge }:
+                return JoinAlgorithms.Merge;
+            case UnquotedString word when BuiltInToken.Equals(word.Value, "HASH"):
+                return JoinAlgorithms.Hash;
+            case UnquotedString word when BuiltInToken.Equals(word.Value, "LOOP"):
+                return JoinAlgorithms.Loop;
+            case UnquotedString word when BuiltInToken.Equals(word.Value, "REMOTE"):
+                remote = true;
+                return JoinAlgorithms.None;
+            default:
+                return JoinAlgorithms.None;
+        }
+    }
 
     /// <summary>
     /// If <see cref="ParserContext.Token"/> is one of the JOIN-introducing
@@ -2182,9 +2232,11 @@ internal sealed partial class Selection
     /// and the required <c>JOIN</c> keyword) and returns the join kind.
     /// Returns false otherwise (no advancement).
     /// </summary>
-    private static bool TryParseJoinKeyword(ParserContext context, out JoinKind kind)
+    private static bool TryParseJoinKeyword(ParserContext context, out JoinKind kind, out JoinAlgorithms algorithm, out bool remote)
     {
         kind = JoinKind.Inner;
+        algorithm = JoinAlgorithms.None;
+        remote = false;
         if (context.Token is not ReservedKeyword keyword)
             return false;
 
@@ -2192,7 +2244,7 @@ internal sealed partial class Selection
         {
             case Keyword.Inner:
                 context.MoveNextRequired();
-                ConsumeOptionalJoinHint(context);
+                ConsumeOptionalJoinHint(context, outer: false, out algorithm, out remote);
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 kind = JoinKind.Inner;
@@ -2206,7 +2258,7 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
                 if (context.Token is ReservedKeyword { Keyword: Keyword.Outer })
                     context.MoveNextRequired();
-                ConsumeOptionalJoinHint(context);
+                ConsumeOptionalJoinHint(context, outer: true, out algorithm, out remote);
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.RecursiveBranchConstructs.OuterJoin = true;
@@ -2217,7 +2269,7 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
                 if (context.Token is ReservedKeyword { Keyword: Keyword.Outer })
                     context.MoveNextRequired();
-                ConsumeOptionalJoinHint(context);
+                ConsumeOptionalJoinHint(context, outer: true, out algorithm, out remote);
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.RecursiveBranchConstructs.OuterJoin = true;
@@ -2228,7 +2280,7 @@ internal sealed partial class Selection
                 context.MoveNextRequired();
                 if (context.Token is ReservedKeyword { Keyword: Keyword.Outer })
                     context.MoveNextRequired();
-                ConsumeOptionalJoinHint(context);
+                ConsumeOptionalJoinHint(context, outer: true, out algorithm, out remote);
                 if (context.Token is not ReservedKeyword { Keyword: Keyword.Join })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 context.RecursiveBranchConstructs.OuterJoin = true;

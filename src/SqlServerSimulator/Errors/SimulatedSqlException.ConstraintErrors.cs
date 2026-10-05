@@ -6,7 +6,7 @@ partial class SimulatedSqlException
     /// Mimics SQL Server's verbose truncation error (Msg 2628): a string value
     /// would not fit within the destination column's declared maximum length.
     /// The displayed "truncated value" is the prefix of the offending value
-    /// clipped to the column's max length. A non-null storage encoding clips
+    /// clipped to the column's max length, and to 100 characters. A non-null storage encoding clips
     /// that prefix to the byte budget on a character boundary, since a
     /// <c>varchar(N)</c> budget counts bytes: under a DBCS code page fewer
     /// characters fit than <c>N</c> (probe-confirmed real — five CP932 kana
@@ -25,6 +25,10 @@ partial class SimulatedSqlException
         var prefix = encoding is null
             ? (value.Length <= max ? value : value[..max])
             : Collation.ClipToByteBudget(value, max, encoding);
+        // Real quotes at most the first 100 characters (probed 2026-10-05
+        // against SQL Server 2025, varchar and nvarchar alike).
+        if (prefix.Length > 100)
+            prefix = prefix[..100];
         return new($"String or binary data would be truncated in table '{tableName}', column '{columnName}'. Truncated value: '{prefix}'.", 2628, 16, 1);
     }
 
