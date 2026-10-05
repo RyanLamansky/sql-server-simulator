@@ -75,7 +75,7 @@ partial class Simulation
             try
             {
                 PermissionEnforcement.CheckObject(outerBatch, procedure.Schema.Database, "EXECUTE", procedure.ObjectId, procedure.SchemaId,
-                    procedure.Name, procedure.Schema.Name, procedure: attributionName);
+                    procedure.Name, procedure.Schema.Name, procedure: attributionName, securable: procedure);
             }
             // A login with no user in the procedure's database is refused at
             // the calling statement instead, unattributed (probed 2026-09-28).

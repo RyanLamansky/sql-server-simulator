@@ -324,11 +324,12 @@ Those tests deliberately use plan-cache-declined shapes: a bare repeated SELECT 
 
 ## Performance impact
 
-Three measurement rules every figure below follows, each learned from a number that misled:
+Four measurement rules every figure below follows, each learned from a number that misled:
 
 - **One case per process.** Measuring several cases in one process made the results order-dependent by up to 2×, since whichever case ran first absorbed the tiered JIT's warm-up ("fixed text" read 28.3 µs first and 14.5 µs last).
 - **Warm by elapsed time, not by an iteration count.** A single-row `UPDATE` batch read ~100 µs after 3,000 iterations and 12 µs after 100,000.
 - **How a benchmark resets its table is part of what it measures.** `DELETE` leaves dead pages an insert's reuse walk visits and `TRUNCATE` doesn't, and a table that only grows makes any target scan grow with it — so measure the shape you mean, and say which.
+- **Run each case in several processes and compare their allocation counts too.** String hashing is randomized per process, so a cost that depends on a dictionary's enumeration order differs between two processes of one build: a non-`dbo` `SELECT` whose permission check walked `Database.Schemas` until it met `dbo` read 3.9 µs and 10.6 KB per execution in one process and 9.0 µs and 15.8 KB in the next, and a pair of single runs compared that way can show a change that isn't there.
 
 ### The plan cache
 
@@ -491,7 +492,40 @@ EF Core 10's update and identity-key insert texts with a masked column in the ta
 | `MERGE … OUTPUT`, 10 rows | `dbo` | 36.5 µs | 22.1 µs | −39% |
 
 `dbo` gains too, since one masked column anywhere in the simulation had declined every DML plan.
-The non-`dbo` update saves the same ~3 µs of parse as `dbo`'s and still runs about three times as long, a cost of the non-`dbo` execution path that isn't profiled yet; skipping its `UPDATE` permission check outright moved it within run-to-run noise, so the check is not the bulk of it.
+
+The non-`dbo` update still ran about three times as long as `dbo`'s, and the gap was the permission checks after all: making every check bypass (`PermissionEnforcement.Bypasses` answering true) put each non-`dbo` case below at `dbo`'s time.
+Each check walked every stored permission row — a user database starts with 235, nearly all `public`'s `SELECT` on the system objects — once per object and again per column the statement named, and found the object again by id in a walk of every schema's objects to ask for its owner.
+The sampling profiler attributed 29–45% of the non-`dbo` `SELECT` to `BeginQueryStoreCapture`'s `Stopwatch.GetTimestamp`, a safe point, rather than to the checks.
+
+Kept, each by its own A/B (alternating builds, one case per process) and documented on its declaration:
+
+- the checker reads the rows stored on each satisfier's securable from an index (`PermissionRows`) rather than walking them all — the non-`dbo` `SELECT` 19.4–22.3 → 3.9–6.2 µs, the masked `UPDATE` 17.9–23.4 → 7.3 µs;
+- a check holding the object asks it for its owner (`Ownership.RegisteredOwnerId`) — the object a column target, a recorded read (`ReferencedSecurable.Securable`), a procedure or a scalar function carries — so no check walks the schemas by id, which took the process-to-process spread out of every case (the `SELECT` 3.8–8.8 → 3.8 µs, a procedure call 10.4–11.8 → 10.0 µs);
+- the satisfiers a check builds are enumerated from the permission graph's links rather than collected into a list (−1.4 KB per `SELECT`);
+- an object with no column-level row answers every column as it answers itself (`PermissionChecker.HasColumnRows`), so a granted object skips the per-column checks (the `SELECT` 3.7 → 3.1 µs);
+- an `UPDATE` plan keeps the columns its statement reads and assigns (`UpdatePlan.ColumnTargets`) rather than visiting its expressions per execution (7.0 → 6.5 µs, −2 KB);
+- a database request falling through to the login's server permissions builds its server-principal closure once for the whole covering chain (`ServerLoginRights.Implies`), which every unmasked column's refused `UNMASK` reaches (the masked `SELECT` 4.9 → 4.45 µs).
+
+Not built: a memo of check answers per principal and securable.
+It would have to follow the permission rows, role membership — which `sp_addrolemember` changes without a schema-version bump — object, schema and role ownership, and the login's server permissions and roles, for the 0.3–0.6 µs a single-row statement's checks still cost; a closure cached per principal was passed over for the same reason.
+`PermissionChangeReplayTests` (Tests.Internal) holds a cached plan to a fresh parse's answers across a grant and revoke, a column deny, a role-membership change in both forms, `ALTER AUTHORIZATION` on an object and a schema, a rolled-back revoke, an ownership chain an owner change breaks, and `EXECUTE AS` / `REVERT`.
+
+The same texts in every shape the work touched, the target table 100 rows (the `INSERT` and `MERGE` target truncated every 1,000 and 100 executions by a `dbo` session), one case per process, 3 s warm-up then 3 s timed (median batch), the two builds alternating (measured 2026-10-05).
+A non-`dbo` login and an `EXECUTE AS USER` frame, before → after; an `email()` mask on the table's `nvarchar` column changed nothing for the statements that write around it (`UPDATE`, `INSERT`, `MERGE`), and a security policy on another table nothing for any case, so the masked rows below are the reads that return the column:
+
+| Case | `dbo` | Login | `EXECUTE AS USER` |
+|---|---|---|---|
+| `SELECT` one row by key | 2.7 µs | 17.1 → 3.1 µs | 22.2 → 3.0 µs |
+| … reading the masked column | 2.7 µs | 21.1 → 4.3 µs | 19.4 → 3.6 µs |
+| EF Core's `UPDATE … OUTPUT 1`, one row | 5.9 µs | 17.9 → 6.4 µs | 17.9 → 6.4 µs |
+| EF Core's identity `INSERT … OUTPUT` | 4.8 µs | 8.5 → 5.3 µs | 7.1 → 5.2 µs |
+| EF Core's `MERGE … OUTPUT`, 10 rows | 19.3 µs | 25.6 → 20.0 µs | 25.8 → 19.7 µs |
+| `SELECT` of 1,000 rows | 163 µs | 148 → 173 µs | 178 → 166 µs |
+| … reading the masked column | 162 µs | 264 → 260 µs | 257 → 217 µs |
+| `CommandType.StoredProcedure` call of a one-row `SELECT` | 9.5 µs | 12.2 → 10.1 µs | 14.4 → 10.1 µs |
+| … reading the masked column | 10.0 µs | 19.8 → 12.2 µs | 18.3 → 11.3 µs |
+
+The 1,000-row scan is within its run-to-run noise (±15%) for every principal before and after; with a masked column the remainder is masking 1,000 values, which `dbo` doesn't do.
 
 ### EF Core functional workload
 

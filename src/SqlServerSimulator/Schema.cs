@@ -209,6 +209,27 @@ internal sealed class Schema
     }
 
     /// <summary>
+    /// Whether <paramref name="obj"/> itself is one of this schema's objects —
+    /// a dictionary lookup under its own name, so it answers what a walk of
+    /// <see cref="SchemaObjects"/> for its id would without the walk; a table
+    /// variable, a temp table or a dropped object is held by none.
+    /// </summary>
+    public bool Holds(SchemaObject obj) => obj switch
+    {
+        HeapTable table => this.HeapTables.TryGetValue(table.Name, out var held) && ReferenceEquals(held, table),
+        View view => this.Views.TryGetValue(view.Name, out var held) && ReferenceEquals(held, view),
+        UserDefinedFunction function => this.Functions.TryGetValue(function.Name, out var held) && ReferenceEquals(held, function),
+        Procedure procedure => this.Procedures.TryGetValue(procedure.Name, out var held) && ReferenceEquals(held, procedure),
+        Sequence sequence => this.Sequences.TryGetValue(sequence.Name, out var held) && ReferenceEquals(held, sequence),
+        Trigger trigger => this.Triggers.TryGetValue(trigger.Name, out var held) && ReferenceEquals(held, trigger),
+        Synonym synonym => this.Synonyms.TryGetValue(synonym.Name, out var held) && ReferenceEquals(held, synonym),
+        DefaultObject @default => this.Defaults.TryGetValue(@default.Name, out var held) && ReferenceEquals(held, @default),
+        RuleObject rule => this.Rules.TryGetValue(rule.Name, out var held) && ReferenceEquals(held, rule),
+        SecurityPolicy policy => this.SecurityPolicies.TryGetValue(policy.Name, out var held) && ReferenceEquals(held, policy),
+        _ => false,
+    };
+
+    /// <summary>
     /// True when <paramref name="leaf"/> matches any existing name in
     /// this schema's object-name namespace (<see cref="SchemaObjects"/>).
     /// Used by every CREATE path to raise Msg 2714 before allocating an

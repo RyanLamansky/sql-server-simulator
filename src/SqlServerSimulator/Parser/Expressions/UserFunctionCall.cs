@@ -141,7 +141,7 @@ internal sealed class UserFunctionCall(ScalarFunction function, Expression?[] ar
         // statement execution via the securable sink (never per row). Calls in
         // non-query contexts (SET / IF operands) have no active sink and stay
         // unchecked — a documented gap.
-        context.SecurableSink?.Add(new ReferencedSecurable(function.Schema.Database, function.ObjectId, function.SchemaId, function.Name, function.Schema.Name, "EXECUTE"));
+        context.SecurableSink?.Add(new ReferencedSecurable(function.Schema.Database, function, function.Schema.Name, "EXECUTE"));
         InlinedScalarCalls.Note(context, function);
         context.IndexedViewShapeCollector?.CalledFunctions.Add(function);
         var simulation = context.Batch.Connection.Simulation;

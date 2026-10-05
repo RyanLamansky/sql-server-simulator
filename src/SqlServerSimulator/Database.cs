@@ -551,7 +551,7 @@ internal sealed partial class Database
     /// add and <c>REVOKE</c> drains; surfaced by <c>sys.database_permissions</c>
     /// and read by the permission checker.
     /// </summary>
-    public readonly List<DatabasePermission> Permissions = [];
+    public readonly PermissionRows Permissions = new();
 
     /// <summary>
     /// Role-membership records: each entry is a (role_principal_id,

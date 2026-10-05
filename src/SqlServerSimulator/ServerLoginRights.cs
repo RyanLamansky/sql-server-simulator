@@ -49,17 +49,22 @@ internal readonly struct ServerLoginRights(Simulation simulation, string login)
     /// </summary>
     public bool Implies(Permission permission, byte securableClass)
     {
-        if (this.simulation is null || permission == Permission.Other)
+        if (this.simulation is not { } server || permission == Permission.Other)
             return false;
+        // A sysadmin holds every server permission; anyone else is asked about
+        // each link over one server-principal closure.
+        if (server.IsLoginSysadmin(this.login!))
+            return true;
+        var closure = server.BuildServerPrincipalClosure(this.login!);
         if (permission == Permission.Select
             && securableClass is PermissionChecker.ClassObject or PermissionChecker.ClassSchema or PermissionChecker.ClassDatabase
-            && this.Holds(Permission.SelectAllUserSecurables))
+            && server.HoldsServerPermissionInClosure(closure, Permission.SelectAllUserSecurables))
         {
             return true;
         }
         foreach (var link in permission.CoveringChain(PermissionChecker.ClassDatabase))
         {
-            if (this.Holds(link.ServerParent))
+            if (server.HoldsServerPermissionInClosure(closure, link.ServerParent))
                 return true;
         }
         return false;

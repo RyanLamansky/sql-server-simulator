@@ -930,7 +930,7 @@ internal sealed partial class Selection
             // An unqualified name reports the schema it resolved into — the
             // principal's default one, not necessarily dbo.
             var schemaName = name.Count >= 2 && !name.SchemaOmitted ? name.ImmediateQualifier! : SchemaNameOf(database, securable.SchemaId);
-            sink.Add(new ReferencedSecurable(database, securable.ObjectId, securable.SchemaId, securable.Name, schemaName, module: moduleBody is null ? null : obj as Schemas.View, moduleBody: moduleBody));
+            sink.Add(new ReferencedSecurable(database, securable, schemaName, module: moduleBody is null ? null : obj as Schemas.View, moduleBody: moduleBody));
         }
         return synonym;
     }

@@ -30,7 +30,7 @@ The catalog surfaces per-enum lookups as extension members (`permission.Canonica
 
 Both live on `Database`:
 - `Database.Principals` — `ConcurrentDictionary<string, DatabasePrincipal>` keyed by name
-- `Database.Permissions` — `List<DatabasePermission>` for grants / denies
+- `Database.Permissions` — `PermissionRows`, the grants / denies in stored order with an index by securable the checker reads
 - `Database.RoleMembers` — `List<(int RoleId, int MemberId)>`
 
 **Pre-seeded fixed principals** at `Database` construction, matching real SQL Server's `sys.database_principals` ids (probe-confirmed):

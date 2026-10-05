@@ -440,7 +440,7 @@ internal sealed class AggregateExpression : Expression
     /// </summary>
     internal static AggregateExpression ParseClr(Schemas.ClrAggregateFunction function, MultiPartName written, ParserContext context)
     {
-        context.SecurableSink?.Add(new ReferencedSecurable(function.Schema.Database, function.ObjectId, function.SchemaId, function.Name, function.Schema.Name, "EXECUTE"));
+        context.SecurableSink?.Add(new ReferencedSecurable(function.Schema.Database, function, function.Schema.Name, "EXECUTE"));
         using var rejection = context.EnterNextValueForScope(NextValueForScope.Aggregate);
         var distinct = false;
         switch (context.Token)

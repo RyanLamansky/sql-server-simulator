@@ -28,6 +28,28 @@ internal static class Ownership
             ? EffectiveOwnerId(database, obj)
             : null;
 
+    /// <summary>
+    /// <see cref="EffectiveOwnerId(Database, int)"/> for an object already in
+    /// hand: the same answer — null when <paramref name="obj"/> isn't one of
+    /// <paramref name="database"/>'s schema objects, a table variable or a temp
+    /// table among them — without walking every schema's objects to find it by
+    /// id, a walk a restricted principal's checks otherwise repeat per object
+    /// and per column of each statement.
+    /// </summary>
+    internal static int? RegisteredOwnerId(Database database, SchemaObject obj)
+    {
+        foreach (var (_, schema) in database.Schemas)
+        {
+            if (schema.SchemaId == obj.SchemaId)
+            {
+                return !schema.Holds(obj) ? null
+                    : obj is Trigger ? EffectiveOwnerId(database, obj)
+                    : obj.OwnerPrincipalId ?? schema.PrincipalId;
+            }
+        }
+        return null;
+    }
+
     /// <summary>The principal that owns an alias type — its explicit owner, else its schema's.</summary>
     internal static int EffectiveOwnerId(AliasType type) =>
         type.OwnerPrincipalId ?? type.Schema.PrincipalId;

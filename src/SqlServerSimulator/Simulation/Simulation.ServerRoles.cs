@@ -246,12 +246,21 @@ partial class Simulation
     /// <c>DENY IMPERSONATE ON LOGIN::x</c> beats a server-wide
     /// <c>GRANT IMPERSONATE ANY LOGIN</c> (probe-confirmed).
     /// </summary>
-    internal bool HoldsServerPrincipalPermission(string loginName, int targetPrincipalId, Permission permission, Permission blanketEquivalent)
-    {
-        if (this.IsLoginSysadmin(loginName))
-            return true;
+    internal bool HoldsServerPrincipalPermission(string loginName, int targetPrincipalId, Permission permission, Permission blanketEquivalent) =>
+        this.IsLoginSysadmin(loginName)
+        || this.HoldsServerPrincipalPermission(this.BuildServerPrincipalClosure(loginName), targetPrincipalId, permission, blanketEquivalent);
 
-        var closure = this.BuildServerPrincipalClosure(loginName);
+    /// <summary>
+    /// <see cref="HoldsServerPermission(string, Permission)"/> for a login that
+    /// isn't <c>sysadmin</c>, over its <see cref="BuildServerPrincipalClosure">server-principal
+    /// closure</see> — the form a caller asking about several permissions in
+    /// turn uses, building the closure once.
+    /// </summary>
+    internal bool HoldsServerPermissionInClosure(HashSet<int> closure, Permission permission) =>
+        this.HoldsServerPrincipalPermission(closure, targetPrincipalId: 0, permission, blanketEquivalent: permission);
+
+    private bool HoldsServerPrincipalPermission(HashSet<int> closure, int targetPrincipalId, Permission permission, Permission blanketEquivalent)
+    {
         lock (this.ServerPermissions)
         {
             // DENY binds first, over both classes — CONTROL SERVER included

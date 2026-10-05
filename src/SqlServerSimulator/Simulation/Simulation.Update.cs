@@ -650,6 +650,13 @@ partial class Simulation
         public readonly bool SerializableHint = serializableHint;
         public readonly View? SourceView = sourceView;
 
+        /// <summary>
+        /// The columns the statement reads and assigns, which the permission
+        /// check of each execution asks about — collected from the parse once,
+        /// since which columns a statement names doesn't depend on who runs it.
+        /// </summary>
+        public (ColumnReadTarget Read, ColumnReadTarget Assigned)? ColumnTargets;
+
         public override SimulatedStatementOutcome Run(ParserContext context) => RunUpdate(context, this);
     }
 
@@ -662,7 +669,7 @@ partial class Simulation
     {
         var (targetName, table, rawAssignments, assignments, where) = (plan.TargetName, plan.Table, plan.RawAssignments, plan.Assignments, plan.Where);
         var (positionedCursor, output, top, serializableHint, sourceView) = (plan.PositionedCursor, plan.Output, plan.Top, plan.SerializableHint, plan.SourceView);
-        CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where);
+        CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where, plan);
         RowSecurity.NoteWrite(context.Batch, table);
         var setMasks = DataMasking.Applying(context.Batch, plan.SetMasks);
         if (positionedCursor is null)
@@ -825,7 +832,8 @@ partial class Simulation
         HeapTable table,
         View? sourceView,
         List<(string? ColumnName, Expression Expr)> rawAssignments,
-        BooleanExpression? where)
+        BooleanExpression? where,
+        UpdatePlan? plan = null)
     {
         var updateSecurable = context.Batch.IsSkipping
             ? null
@@ -861,18 +869,25 @@ partial class Simulation
         // wholly inaccessible for that permission). Through a view the
         // ordinals are the view's own, matching what
         // `GRANT UPDATE (col) ON <view>` stored.
+        var (read, assigned) = plan is null ? UpdateColumnTargets(table, sourceView, rawAssignments, where) : plan.ColumnTargets ??= UpdateColumnTargets(table, sourceView, rawAssignments, where);
+        var readDenied = PermissionEnforcement.ColumnsDenial(context.Batch, Permission.Select, read);
+        if (PermissionEnforcement.Combine(readDenied, PermissionEnforcement.ColumnsDenial(context.Batch, Permission.Update, assigned)) is { } refusal)
+            throw refusal;
+        CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments);
+    }
+
+    /// <summary>The columns an <c>UPDATE</c>'s WHERE and SET expressions read, and those its SET list assigns.</summary>
+    private static (ColumnReadTarget Read, ColumnReadTarget Assigned) UpdateColumnTargets(
+        HeapTable table, View? sourceView, List<(string? ColumnName, Expression Expr)> rawAssignments, BooleanExpression? where)
+    {
         var read = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
         where?.VisitOperandExpressions(op => op.VisitColumnReferences(read.Add));
         foreach (var (_, expr) in rawAssignments)
             expr.VisitColumnReferences(read.Add);
-        var readDenied = PermissionEnforcement.ColumnsDenial(context.Batch, Permission.Select, read);
-
         var assigned = sourceView is not null ? new ColumnReadTarget(sourceView) : new ColumnReadTarget(table);
         foreach (var columnName in SetColumnNames(rawAssignments))
             assigned.Add(columnName);
-        if (PermissionEnforcement.Combine(readDenied, PermissionEnforcement.ColumnsDenial(context.Batch, Permission.Update, assigned)) is { } refusal)
-            throw refusal;
-        CheckBrokenChainMutation(context.Batch, sourceView, TriggerActions.Update, where, rawAssignments);
+        return (read, assigned);
     }
 
     /// <summary>
