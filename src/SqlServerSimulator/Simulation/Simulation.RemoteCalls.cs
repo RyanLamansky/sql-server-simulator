@@ -26,6 +26,15 @@ partial class Simulation
         RequireRemoteCallOutsideTransaction(batch, server, insertExecSource);
 
         var (remoteText, placeholders) = BindPlaceholders(text);
+        // The provider refuses an empty text, and arguments that don't match
+        // the placeholders, before the server sees anything (probed
+        // 2026-10-05 against SQL Server 2025).
+        var providerRefusal = string.IsNullOrWhiteSpace(text) ? "Command text was not set for the command object."
+            : arguments.Count > placeholders ? "Multiple-step OLE DB operation generated errors. Check each OLE DB status value, if available. No work was done."
+            : arguments.Count < placeholders ? "No value given for one or more required parameters."
+            : null;
+        if (providerRefusal is not null)
+            throw SimulatedSqlException.AfterProviderMessage(batch, server, providerRefusal, SimulatedSqlException.RemoteStatementNotExecuted(server.Name));
         var parameters = new List<SimulatedDbParameter>();
         var outputs = new List<(SimulatedDbParameter Parameter, VariableSlot Slot)>();
         for (var i = 0; i < placeholders; i++)
@@ -141,7 +150,13 @@ partial class Simulation
     /// </summary>
     private static void RequireRemoteCallOutsideTransaction(BatchContext batch, LinkedServer server, bool insertExecSource)
     {
-        if (!server.RemoteProcTransactionPromotion || server.IsLoopback(batch.Connection.Simulation))
+        if (!server.RemoteProcTransactionPromotion)
+            return;
+        // Not even a loopback's call promotes a transaction holding a
+        // savepoint (probed 2026-10-05 against SQL Server 2025).
+        if (batch.Connection.CurrentTransaction is { HasSavepoint: true })
+            throw SimulatedSqlException.CannotPromoteWithSavepoint();
+        if (server.IsLoopback(batch.Connection.Simulation))
             return;
         if (batch.Connection.CurrentTransaction is null && !insertExecSource)
             return;
@@ -166,9 +181,10 @@ partial class Simulation
     /// client in its place among the results, relayed and attributed to
     /// <paramref name="procedure"/> when a procedure call raised it — outside
     /// the caller's control flow, which no <c>TRY</c> of the caller's catches
-    /// (probed 2026-09-28 against SQL Server 2025). A rowset with an
-    /// <c>xml</c> column stops the call at <paramref name="refusal"/>, which
-    /// the caller raises after the outcomes ahead of it.
+    /// (probed 2026-09-28 against SQL Server 2025) — save an error the call
+    /// ends with, which comes back as <paramref name="refusal"/>, as does a
+    /// rowset with an <c>xml</c> column, which stops the call; the caller
+    /// raises it after the outcomes ahead of it.
     /// </summary>
     [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "EXEC … AT sends the caller's own text by design; a procedure call's text is built from bracket-escaped identifiers. It runs against a sibling in-process Simulation.")]
     private static List<SimulatedStatementOutcome> RunRemoteCall(BatchContext batch, LinkedServer server, string text, List<SimulatedDbParameter> parameters, string? database, string? procedure, out SimulatedSqlException? refusal)
@@ -182,6 +198,9 @@ partial class Simulation
         // 2026-09-28 against SQL Server 2025).
         int? lastCount = null;
         using var connection = server.OpenSession(database);
+        // The provider's session is a MARS one, whose batch rolls back a
+        // transaction it leaves open (Msg 3997).
+        connection.ScopesTransactionsToBatch = true;
         using var command = connection.CreateCommand();
         command.CommandText = text;
         foreach (var parameter in parameters)
@@ -190,6 +209,10 @@ partial class Simulation
         {
             if (refusal is not null)
                 break;
+            // The parameterized batch a procedure call runs in repeats the
+            // procedure's Msg 266, which the call itself sends once.
+            if (procedure is not null && outcome is SimulatedErrorOutcome { Exception.Number: 266 } && outcomes is [.., SimulatedErrorOutcome { Exception.Number: 266 }])
+                continue;
             switch (outcome)
             {
                 case SimulatedErrorOutcome failure:
@@ -218,22 +241,52 @@ partial class Simulation
                     refusal = SimulatedSqlException.XmlInRemoteCallRowset();
                     break;
                 case SimulatedSqlResultSet result:
-                    byte[][] rows = [.. result.RowBytes];
-                    outcomes.Add(new SimulatedSqlResultSet(result.Schema, result.ColumnNames, rows, result.RecordsAffected)
+                    var (providerSchema, providerRows) = RemoteWrite.AsProviderRowset(result.Schema, result.RowBytes);
+                    byte[][] rows = [.. providerRows];
+                    outcomes.Add(new SimulatedSqlResultSet(providerSchema, result.ColumnNames, rows, result.RecordsAffected)
                     {
                         ColumnNullability = result.ColumnNullability,
                     });
                     lastCount = rows.Length;
                     break;
                 default:
+                    // A count the server's NOCOUNT withholds reaches the
+                    // provider as none (probed 2026-10-05 against SQL Server 2025).
                     if (outcome is SimulatedNonQuery { RecordsAffected: >= 0 } counted)
-                        lastCount = counted.RecordsAffected;
+                        lastCount = connection.NoCount ? 0 : counted.RecordsAffected;
                     outcomes.Add(outcome);
                     break;
             }
         }
         if (lastCount is int count)
             batch.Connection.LastStatementRowCount = count;
+        // The errors the call ends with arrive in reverse, as one error's
+        // entries do, and the last of them is the call's own failure: a TRY
+        // catches it, @@ERROR reads it and XACT_ABORT ends the batch on it,
+        // where an error the server's batch ran on past reaches the client
+        // outside the caller's control flow (probed 2026-10-05 against SQL
+        // Server 2025).
+        // The MARS session's own refusal of a transaction left open arrives
+        // ahead of the error the call ended with.
+        if (outcomes is [.., SimulatedErrorOutcome, SimulatedErrorOutcome { Exception.Number: 3997 } marsEnd])
+        {
+            outcomes.RemoveAt(outcomes.Count - 1);
+            outcomes.Insert(outcomes.Count - 1, marsEnd);
+        }
+        // An EXEC … AT's final error, or a procedure call's that no procedure
+        // ran to raise — the procedure not found, its arguments refused — is
+        // the call's own failure: a TRY catches it, @@ERROR reads it and
+        // XACT_ABORT ends the batch on it. Any other reaches the client
+        // outside the caller's control flow (probed 2026-10-05 against SQL
+        // Server 2025).
+        if (refusal is null && outcomes is [.., SimulatedErrorOutcome last]
+            && (procedure is null || (outcomes.Count == 1 && last.Exception.Number is 201 or 2812 or 8144 or 8145)))
+        {
+            refusal = last.Exception;
+            // Raised by the server's batch, which it ended, not the caller's.
+            refusal.EndedCalledBatch = true;
+            outcomes.RemoveAt(outcomes.Count - 1);
+        }
         return outcomes;
     }
 

@@ -1226,6 +1226,21 @@ internal sealed class Heap
     public int RowCount;
 
     /// <summary>
+    /// The rows a scan yields — the slots less tombstones and forward targets —
+    /// which is what <c>sys.partitions</c> and the other catalog row counts
+    /// report, where <see cref="RowCount"/> keeps counting a deleted row's
+    /// slot. Walks the slot directories, so it is for catalog readers, not
+    /// per-query planning.
+    /// </summary>
+    public long CountLiveRows()
+    {
+        long count = 0;
+        foreach (var page in this.Pages)
+            count += page.UntombstonedSlotCount;
+        return count - this.forwardTargetCount;
+    }
+
+    /// <summary>
     /// Re-derives <see cref="RowCount"/> from the pages. The two seams that
     /// replace <see cref="Pages"/> wholesale call it; the storage-internals
     /// tests call it to assert the maintained count against the walk.

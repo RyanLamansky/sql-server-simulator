@@ -83,8 +83,11 @@ partial class Selection
         {
             return [];
         }
-        List<byte[]> rows = [.. result.RowBytes];
-        return unfetched is not null || Array.Exists(result.Schema, static type => type is VectorSqlType) ? ExposeVectors(server, result.Schema, columns, rows) : rows;
+        var schema = result.Schema;
+        var retyped = unfetched is not null;
+        for (var i = 0; i < schema.Length && !retyped; i++)
+            retyped = schema[i] != columns[i].Type;
+        return retyped ? ExposeVectors(server, schema, columns, result.RowBytes) : result.RowBytes;
     }
 
     /// <summary>
@@ -178,14 +181,15 @@ partial class Selection
     }
 
     /// <summary>
-    /// The rows of a read whose <c>vector</c> columns the provider lists as
-    /// <c>varbinary</c> (<see cref="RemoteWrite.ProviderColumns"/>): a NULL one
-    /// reads as NULL, and the first row holding a value is Msg 7346, after the
-    /// rows ahead of it (probed 2026-09-28 against SQL Server 2025). A column
-    /// the query never names isn't fetched (<see cref="UnfetchedRemoteColumns"/>)
-    /// and reads as NULL.
+    /// The rows of a read whose columns the provider lists as other types
+    /// (<see cref="RemoteWrite.ProviderColumns"/>), each value converted to the
+    /// listed type — save a <c>vector</c>, listed as <c>varbinary</c>: a NULL
+    /// one reads as NULL, and the first row holding a value is Msg 7346, after
+    /// the rows ahead of it (probed 2026-09-28 against SQL Server 2025). A
+    /// column the query never names isn't fetched
+    /// (<see cref="UnfetchedRemoteColumns"/>) and reads as NULL.
     /// </summary>
-    private static IEnumerable<byte[]> ExposeVectors(LinkedServer server, SqlType[] fetched, HeapColumn[] columns, List<byte[]> rows)
+    private static IEnumerable<byte[]> ExposeVectors(LinkedServer server, SqlType[] fetched, HeapColumn[] columns, IEnumerable<byte[]> rows)
     {
         var exposed = Array.ConvertAll(columns, static column => column.Type);
         foreach (var bytes in rows)
@@ -196,8 +200,8 @@ partial class Selection
                 // An unfetched column arrives as a NULL of the literal's type.
                 if (fetched[i] is VectorSqlType)
                     values[i] = values[i].IsNull ? SqlValue.Null(exposed[i]) : throw SimulatedSqlException.RemoteRowDataNotConvertible(server);
-                else if (fetched[i] != exposed[i] && values[i].IsNull)
-                    values[i] = SqlValue.Null(exposed[i]);
+                else if (fetched[i] != exposed[i])
+                    values[i] = values[i].IsNull ? SqlValue.Null(exposed[i]) : values[i].CoerceTo(exposed[i]);
             }
             yield return RowEncoder.EncodeRow(exposed, values);
         }
@@ -306,8 +310,14 @@ partial class Selection
         if (!context.Batch.IsSkipping && context.Connection.CurrentTransaction is { IsDistributed: true })
             RemoteWrite.RequireNoTransaction(context.Batch, server);
 
-        var (schema, columnNames) = DiscoverOpenQuerySchema(server, queryText);
-        return ForOpenQuery(server, queryText, schema, columnNames);
+        var (schema, columnNames, nullability) = DiscoverOpenQuerySchema(context.Batch, server, queryText);
+        var plan = ForOpenQuery(server, queryText, schema, columnNames);
+        plan.ColumnNullability = nullability;
+        // The provider lists a decimal as numeric (probed 2026-10-05 against
+        // SQL Server 2025).
+        if (Array.Exists(schema, static type => type is DecimalSqlType))
+            plan.ColumnReportsNumeric = Array.ConvertAll(schema, static type => type is DecimalSqlType);
+        return plan;
     }
 
     /// <summary>
@@ -357,26 +367,49 @@ partial class Selection
     /// <summary>
     /// Runs the pass-through query on the remote and captures the first
     /// result set's schema + column names (OPENQUERY returns only the first
-    /// result set). A query that yields no result set (empty string, a
-    /// non-SELECT statement) raises <see cref="NotSupportedException"/> — the
-    /// exact real-server Msg for this case isn't probed, so the simulator
-    /// names the condition rather than fabricating a number.
+    /// result set), refusing what real's provider refuses describing it
+    /// (probed 2026-10-05 against SQL Server 2025): an empty query (Msg 7412,
+    /// 7399, 7321); a query that doesn't parse (Msg 11529 from
+    /// <c>sp_describe_first_result_set</c>) or names what doesn't bind (Msg
+    /// 7412, 8180 and the server's error); one returning no rowset — a
+    /// <c>DECLARE</c>, a <c>PRINT</c>, a <c>RAISERROR</c> alone — as an object
+    /// with no columns (Msg 7357, quoting the query); and two columns of one
+    /// name (Msg 492).
     /// </summary>
-    private static (SqlType[] Schema, string[] ColumnNames) DiscoverOpenQuerySchema(LinkedServer server, string queryText)
+    private static (SqlType[] Schema, string[] ColumnNames, bool[]? Nullability) DiscoverOpenQuerySchema(BatchContext batch, LinkedServer server, string queryText)
     {
-        // An all-whitespace / empty pass-through string reaches the remote
-        // command as an uninitialized CommandText (which raises its own
-        // InvalidOperationException); short-circuit to the uniform no-result
-        // message instead so every no-rowset payload surfaces the same way.
         if (string.IsNullOrWhiteSpace(queryText))
-            throw OpenQueryNoResultSet(server.Name);
-        return RemoteWrite.RunRemoteQuery(server, queryText, database: null, browse: false) is { } result
-            ? (RemoteWrite.RequireNoXmlColumn(result.Schema, "OPENQUERY"), result.ColumnNames)
-            : throw OpenQueryNoResultSet(server.Name);
+            throw SimulatedSqlException.OpenQueryNoCommandText(batch, server);
+        SimulatedSqlResultSet? result;
+        try
+        {
+            result = RemoteWrite.RunRemoteQuery(server, queryText, database: null, browse: false, describeOnly: true);
+        }
+        catch (SimulatedSqlException error) when (error.Number is 207 or 208 or 4104)
+        {
+            throw SimulatedSqlException.OpenQueryNotPrepared(batch, server, error);
+        }
+        catch (SimulatedSqlException error) when (error.Class == 15 || error.Number == 2812)
+        {
+            throw SimulatedSqlException.OpenQueryNotDescribed(error);
+        }
+        catch (SimulatedSqlException error) when (error.Class < 20)
+        {
+            result = null;
+        }
+        if (result is null)
+            throw SimulatedSqlException.RemoteObjectHasNoColumns(server, queryText);
+        var names = result.ColumnNames;
+        for (var i = 1; i < names.Length; i++)
+        {
+            for (var j = 0; j < i; j++)
+            {
+                if (names[i].Length > 0 && Collation.Baseline.Equals(names[i], names[j]))
+                    throw SimulatedSqlException.OpenQueryDuplicateColumn(names[i]);
+            }
+        }
+        return (Array.ConvertAll(RemoteWrite.RequireNoXmlColumn(result.Schema, "OPENQUERY"), RemoteWrite.ProviderRowsetType), names, result.ColumnNullability);
     }
-
-    private static NotSupportedException OpenQueryNoResultSet(string serverName) =>
-        new($"OPENQUERY pass-through query on linked server '{serverName}' returned no result set. Only queries that produce a result set are supported.");
 
     /// <summary>
     /// Re-runs the pass-through query on the remote and materializes the
@@ -384,8 +417,8 @@ partial class Selection
     /// connection disposes). Only the first result set is returned, matching
     /// OPENQUERY's semantics.
     /// </summary>
-    private static List<byte[]> StreamOpenQueryRows(LinkedServer server, string queryText) =>
+    private static IEnumerable<byte[]> StreamOpenQueryRows(LinkedServer server, string queryText) =>
         RemoteWrite.RunRemoteQuery(server, queryText, database: null, browse: false) is { } result
-            ? [.. result.RowBytes]
+            ? RemoteWrite.AsProviderRowset(result.Schema, result.RowBytes).Rows
             : [];
 }

@@ -830,5 +830,314 @@ public sealed class PartitioningTests
         AreEqual("ps", Text(simulation, "select ds.name from sys.indexes i join sys.data_spaces ds on ds.data_space_id = i.data_space_id where i.object_id = object_id('t') and i.name = 'cs'"));
         AreEqual("0,2,1,0", PartitionRows(simulation, "t", indexId: 2));
     }
-}
 
+    /// <summary>
+    /// sys.partitions counts the rows a scan reads: a deleted row, a rolled-back
+    /// insert and a row a SWITCH moved out don't count (probed 2026-10-05
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void RowCounts_CountLiveRows()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"""
+            {LeftFunctionAndScheme}
+            create table u (id int, a int); insert u values (1, 1), (2, 2), (3, 3); delete u where a = 2;
+            begin tran; insert u values (9, 9); rollback;
+            create table t (id int not null, a int not null) on ps(a);
+            create table s (id int not null, a int not null, check (a > 1 and a <= 10));
+            insert s values (1, 5);
+            alter table s switch to t partition 2;
+            """);
+        AreEqual("2", PartitionRows(sim, "u"));
+        AreEqual("0", PartitionRows(sim, "s"));
+        AreEqual("0,1,0,0", PartitionRows(sim, "t"));
+    }
+
+    /// <summary>
+    /// A varchar boundary keeps no trailing spaces and a varbinary one no
+    /// trailing zero bytes; past the parameter's length only trailing spaces or
+    /// zeros may run, which an nvarchar boundary loses (probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    [DataRow("varchar(5)", "'a  '", "[a]|1")]
+    [DataRow("nvarchar(5)", "N'a  '", "[a  ]|6")]
+    [DataRow("nvarchar(2)", "N'ab   '", "[ab]|4")]
+    [DataRow("char(2)", "'ab   '", "[ab]|2")]
+    [DataRow("varbinary(4)", "0x0100", "[0x01]|1")]
+    [DataRow("varbinary(2)", "0x010000", "[0x01]|1")]
+    [DataRow("sql_variant", "'a  '", "[a  ]|3")]
+    public void Boundaries_TrimTrailingPadding(string type, string value, string expected)
+        => AreEqual(expected, Text(new Simulation(), $"""
+            create partition function pf ({type}) as range left for values ({value});
+            select concat('[', case when cast(sql_variant_property(value, 'BaseType') as sysname) like '%binary' then convert(varchar(10), cast(value as varbinary(10)), 1) else cast(value as nvarchar(10)) end, ']|', datalength(value))
+            from sys.partition_range_values
+            """));
+
+    /// <summary>Msg 7705 is state 1 for a type pair an assignment can't convert, state 2 for a value that fails (probed 2026-10-05).</summary>
+    [TestMethod]
+    [DataRow("int", "getdate()", 1)]
+    [DataRow("date", "20200101", 1)]
+    [DataRow("int", "cast(1 as sql_variant)", 1)]
+    [DataRow("int", "'abc'", 2)]
+    [DataRow("tinyint", "256", 2)]
+    public void UnconvertibleBoundary_StateByCause(string type, string value, int state)
+        => AreEqual(state, new Simulation().AssertSqlError($"create partition function pf ({type}) as range left for values ({value})", 7705).State);
+
+    /// <summary>The type Msg 7704 names: an alias type as written, sysname among them, and vector as sys.vector (probed 2026-10-05).</summary>
+    [TestMethod]
+    [DataRow("sysname", "The type 'sysname' is not valid for this operation.", 3)]
+    [DataRow("dbo.myint", "The type 'dbo.myint' is not valid for this operation.", 3)]
+    [DataRow("vector(3)", "The type 'sys.vector' is not valid for this operation.", 1)]
+    public void InvalidParameterType_NamedAsReal(string type, string message, int state)
+    {
+        var error = new Simulation().AssertSqlError($"create type myint from int; create partition function pf ({type}) as range left for values (null)", 7704);
+        AreEqual(message, error.Errors[0].Message);
+        AreEqual(state, error.State);
+    }
+
+    /// <summary>The function statement refusals real raises compiling the batch (probed 2026-10-05).</summary>
+    [TestMethod]
+    [DataRow("create partition function pf () as range left for values (1)", 7702)]
+    [DataRow("create partition function pf (int) as range left for values ((select 1))", 1046)]
+    [DataRow("create partition function pf (varchar(5) collate nosuch) as range left for values ('a')", 448)]
+    [DataRow("create partition function pf (int) as range left for values (1) foo", 102)]
+    [DataRow("create partition function pf (int) as range left for values (1), (2)", 102)]
+    public void FunctionStatement_CompileRefusals(string sql, int number)
+        => _ = new Simulation().AssertSqlError($"select 1; {sql}; select 2", number);
+
+    /// <summary><c>ALTER PARTITION FUNCTION … DROP</c> is Msg 156 at the DROP, then Msg 343 for the word after it.</summary>
+    [TestMethod]
+    public void AlterFunction_Drop_Msg156ThenMsg343()
+    {
+        var error = new Simulation().AssertSqlError("create partition function pf (int) as range left for values (1); alter partition function pf () drop range (1)", 156);
+        CollectionAssert.AreEqual(new[] { 156, 343 }, error.Errors.Select(entry => entry.Number).ToArray());
+    }
+
+    /// <summary><c>[default]</c> in a scheme's filegroup list names the default filegroup (probed 2026-10-05).</summary>
+    [TestMethod]
+    public void Scheme_DefaultFilegroup()
+        => AreEqual("1,1,1,1,1", Text(new Simulation(), $"""
+            {LeftFunctionAndScheme.Replace("[PRIMARY]", "[default]", StringComparison.Ordinal)}
+            select string_agg(cast(data_space_id as varchar(10)), ',') within group (order by destination_id) from sys.destination_data_spaces
+            """));
+
+    /// <summary>
+    /// A partition number in <c>ALTER INDEX</c>, <c>ALTER TABLE … REBUILD</c> and
+    /// <c>SWITCH</c> is any integer-typed expression, refused first as Msg 4957
+    /// when not integer-typed and Msg 7722 outside 1 to 15,000 (probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter index ix on t rebuild partition = 1 + 1", 0)]
+    [DataRow("declare @p bigint = 2; alter index ix on t rebuild partition = @p", 0)]
+    [DataRow("alter index ix on t rebuild partition = $partition.pf(5)", 0)]
+    [DataRow("alter index ix on t rebuild partition = '2'", 4957)]
+    [DataRow("alter index ix on t rebuild partition = 2.0", 4957)]
+    [DataRow("alter index ix on t rebuild partition = 0", 7722)]
+    [DataRow("alter index ix on t rebuild partition = 15001", 7722)]
+    [DataRow("alter index ix on t reorganize partition = 9", 2586)]
+    [DataRow("alter index ix on t rebuild partition = 9", 7730)]
+    [DataRow("alter table t rebuild partition = 0", 7722)]
+    [DataRow("alter table t switch partition null to s", 4957)]
+    [DataRow("alter table t switch partition cast(2 as bit) to s", 4957)]
+    [DataRow("alter table t switch partition -1 to s", 7722)]
+    [DataRow("alter index ix on t rebuild partition = 2 with (fillfactor = 50)", 155)]
+    [DataRow("alter index ix on t disable; alter index ix on t rebuild partition = 2", 1973)]
+    public void PartitionNumberExpressions(string sql, int number)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"""
+            {LeftFunctionAndScheme}
+            create table t (id int not null, a int not null) on ps(a);
+            create index ix on t (id);
+            create table s (id int not null, a int not null);
+            """);
+        if (number == 0)
+            _ = sim.ExecuteNonQuery(sql);
+        else
+            _ = sim.AssertSqlError(sql, number);
+    }
+
+    /// <summary>
+    /// <c>ALTER INDEX ALL … PARTITION = n</c> over a table with an index that
+    /// isn't partitioned is Msg 7733, naming the first partitioned index and the
+    /// first that isn't (probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    public void AlterIndexAll_PartitionOverUnalignedIndex_Msg7733()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"""
+            {LeftFunctionAndScheme}
+            create table t (id int not null, a int not null, constraint pk primary key (a, id)) on ps(a);
+            create index ixu on t (id) on [primary];
+            """);
+        sim.AssertSqlError("alter index all on t rebuild partition = 2", 7733,
+            "'ALTER INDEX' statement failed. The index 'pk' is partitioned while index 'ixu' is not partitioned.");
+    }
+
+    /// <summary>
+    /// Each partition keeps its own <c>DATA_COMPRESSION</c>: set by a create's
+    /// <c>ON PARTITIONS</c> list, a one-partition rebuild or a rebuild of every
+    /// partition listing some, and followed through a split, whose new
+    /// partition takes the level of the one it split, and a merge (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DataCompression_PerPartition()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create partition function pf (int) as range left for values (10, 20, 30);
+            create partition scheme ps as partition pf all to ([primary]);
+            create table t (id int not null, a int not null) on ps(a) with (data_compression = page on partitions (2), data_compression = row on partitions (4));
+            create index ix on t (id) with (data_compression = row on partitions (1 to 2));
+            """);
+        string Levels(int indexId) => Text(sim, $"select string_agg(left(data_compression_desc, 1), '') within group (order by partition_number) from sys.partitions where object_id = object_id('t') and index_id = {indexId}")!;
+        AreEqual("NPNR", Levels(0));
+        AreEqual("RRNN", Levels(2));
+        _ = sim.ExecuteNonQuery("alter partition function pf () split range (15)");
+        AreEqual("NPPNR", Levels(0));
+        _ = sim.ExecuteNonQuery("alter partition function pf () merge range (10)");
+        AreEqual("PPNR", Levels(0));
+        _ = sim.ExecuteNonQuery("alter index ix on t rebuild partition = 2 with (data_compression = none)");
+        AreEqual("RNNN", Levels(2));
+        _ = sim.ExecuteNonQuery("alter table t rebuild partition = all with (data_compression = none on partitions (1 to 3), data_compression = row on partitions (4))");
+        AreEqual("NNNR", Levels(0));
+        _ = sim.AssertSqlError("alter table t rebuild with (data_compression = row on partitions (1))", 10737);
+        sim.AssertSqlError("alter table t rebuild partition = all with (data_compression = row on partitions (7))", 7722,
+            "Invalid partition number 7 specified for table 't', partition number can range from 1 to 4.");
+        _ = sim.AssertSqlError("alter index ix on t rebuild partition = all with (data_compression = row on partitions (1), data_compression = page)", 7711);
+        sim.AssertSqlError("create index ix2 on t (id) with (data_compression = row on partitions (9))", 7722,
+            "Invalid partition number 9 specified for index 'ix2', partition number can range from 1 to 4.");
+        sim.AssertSqlError("create table u (id int) with (data_compression = row on partitions (1))", 7729,
+            "Cannot specify partition number in the create table statement as the table 'u' is not partitioned.");
+    }
+
+    /// <summary>
+    /// SWITCH refuses what real refuses (probed 2026-10-05 against SQL Server
+    /// 2025): an index of a partitioned side not partitioned (ahead even of a
+    /// non-empty target), a column's persistence, sparse storage or
+    /// ROWGUIDCOL, partition columns that differ, compression, filegroups,
+    /// change tracking, an indexed view, a view as target.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (id int not null, a int not null, b int) on ps(a); create index ix on t (b) on [primary]; create table s (id int not null, a int not null, b int); insert s values (1, 1, 1)", "alter table t switch partition 2 to s", 7733)]
+    [DataRow("create table t (id int not null, a int not null, c as id + 1 persisted) on ps(a); create table s (id int not null, a int not null, c as id + 1)", "alter table t switch partition 2 to s", 4946)]
+    [DataRow("create table t (id int not null, a int not null, b int sparse null) on ps(a); create table s (id int not null, a int not null, b int null)", "alter table t switch partition 2 to s", 11412)]
+    [DataRow("create table t (id int not null, a int not null, g uniqueidentifier rowguidcol null) on ps(a); create table s (id int not null, a int not null, g uniqueidentifier null)", "alter table t switch partition 2 to s", 4958)]
+    [DataRow("create table t (id int not null, a int not null) on ps(a); create table s (id int not null, a int not null) on ps(id)", "alter table t switch partition 2 to s partition 2", 4953)]
+    [DataRow("create table t (id int not null, a int not null) on ps(a); create table s (id int not null, a int not null) with (data_compression = page)", "alter table t switch partition 2 to s", 11406)]
+    [DataRow("alter database current add filegroup fg1; create table t (id int not null, a int not null) on ps(a); create table s (id int not null, a int not null) on fg1", "alter table t switch partition 2 to s", 4939)]
+    [DataRow("create table t (id int not null, a int not null) on ps(a); create table s (id int not null, a int not null)", "alter table t switch partition 2 to v", 4949)]
+    [DataRow("create table t (id int not null, a int not null, b int) on ps(a); create index ix on t (b); create table s (id int not null, a int not null, b int); create index ix on s (b)", "alter table t switch partition 2 to s", 4947)]
+    public void Switch_Refusals(string setup, string sql, int number)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"{LeftFunctionAndScheme} {setup}");
+        _ = sim.ExecuteNonQuery("create view v as select 1 x");
+        _ = sim.AssertSqlError(sql, number);
+    }
+
+    /// <summary>
+    /// What SWITCH lets through (probed 2026-10-05): a target index that is
+    /// disabled, an aligned index matched by an unpartitioned one carrying the
+    /// partition column as an included column, and CHECK constraints read as
+    /// numbers, with <c>NOT</c>, a fractional bound and string constants for
+    /// a date — where an exclusive bound proves no inclusive one.
+    /// </summary>
+    [TestMethod]
+    [DataRow("create table t (id int not null, a int not null, b int) on ps(a); insert t values (1, 5, 1); create table s (id int not null, a int not null, b int); create index ix on s (b); alter index ix on s disable", "alter table t switch partition 2 to s", true)]
+    [DataRow("create table t (id int not null, a int not null, b int) on ps(a); create index ix on t (b); create table s (id int not null, a int not null, b int); create index ix9 on s (b) include (a)", "alter table t switch partition 2 to s", true)]
+    [DataRow("create table t (id int not null, a int not null) on ps(a); create table s (id int not null, a int not null, check (not (a <= 1 or a > 10)))", "alter table s switch to t partition 2", true)]
+    [DataRow("create table t (id int not null, a int not null) on ps(a); create table s (id int not null, a int not null, check (a > 1.5 and a <= 10))", "alter table s switch to t partition 2", true)]
+    [DataRow("create table t (id int not null, a int not null) on ps(a); create table s (id int not null, a int not null, check (a >= 2 and a <= 10))", "alter table s switch to t partition 2", true)]
+    [DataRow("create table t (id int not null, a int not null) on ps(a); create table s (id int not null, a int not null, check (a > 1 and a < 11))", "alter table s switch to t partition 2", false)]
+    [DataRow("create table t (id int not null, a int not null) on ps(a); create table s (id int not null, a int not null, check (a > 1 and a <= 10.5))", "alter table s switch to t partition 2", false)]
+    [DataRow("create partition function pd (datetime) as range right for values ('2020-01-01', '2021-01-01'); create partition scheme psd as partition pd all to ([primary]); create table t (id int not null, d datetime not null) on psd(d); create table s (id int not null, d datetime not null, check (d >= '2020-01-01' and d < '2021-01-01'))", "alter table s switch to t partition 2", true)]
+    public void Switch_Admitted(string setup, string sql, bool admitted)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"{LeftFunctionAndScheme} {setup}");
+        if (admitted)
+            _ = sim.ExecuteNonQuery(sql);
+        else
+            _ = sim.AssertSqlError(sql, 4972);
+    }
+
+    /// <summary>
+    /// SWITCH's option list takes WAIT_AT_LOW_PRIORITY alone, Msg 102 state 170
+    /// otherwise, and names a missing or self target as written (probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    public void Switch_OptionsAndNames()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"{LeftFunctionAndScheme} create table t (id int not null, a int not null) on ps(a); create table s (id int not null, a int not null)");
+        AreEqual(170, sim.AssertSqlError("alter table t switch partition 2 to s with (truncate_target = on)", 102).State);
+        _ = sim.AssertSqlError("alter table t switch partition 2 to s with (wait_at_low_priority (max_duration = 1, abort_after_wait = nosuch))", 102);
+        _ = sim.ExecuteNonQuery("alter table t switch partition 2 to s with (wait_at_low_priority (max_duration = 1 minutes, abort_after_wait = none))");
+        sim.AssertSqlError("alter table t switch partition 2 to dbo.nosuch", 1088, "Cannot find the object \"dbo.nosuch\" because it does not exist or you do not have permissions.");
+        sim.AssertSqlError("alter table t switch partition 2 to dbo.t", 4955, "ALTER TABLE SWITCH statement failed. The source table 't' and target table 'dbo.t' are same.");
+        _ = sim.AssertSqlError("alter table t switch partition 2 to s garbage", 102);
+    }
+
+    /// <summary>
+    /// A partition TRUNCATE names the table as written, and an index partitioned
+    /// on another column is Msg 4716 (probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    public void TruncatePartitions_NamesAndColumnSet()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"""
+            {LeftFunctionAndScheme}
+            create table t (id int not null, a int not null) on ps(a);
+            create table u (id int);
+            """);
+        sim.AssertSqlError("truncate table dbo.t with (partitions (5))", 7722, "Invalid partition number 5 specified for table 'dbo.t', partition number can range from 1 to 4.");
+        sim.AssertSqlError("truncate table dbo.u with (partitions (1))", 7729, "Cannot specify partition number in the truncate table statement as the table 'dbo.u' is not partitioned.");
+        _ = sim.ExecuteNonQuery("create index ix on t (id) on ps(id)");
+        sim.AssertSqlError("truncate table t with (partitions (1))", 4716, "TRUNCATE TABLE statement failed. The column set used to partition the table 't' is different from the column set used to partition index 'ix'");
+    }
+
+    /// <summary>
+    /// A partitioned table's statistics take <c>ON PARTITIONS</c>, and
+    /// <c>INCREMENTAL = ON</c> unless an index isn't partitioned (Msg 9108
+    /// state 3; probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    public void UpdateStatistics_OnPartitionedTable()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery($"""
+            {LeftFunctionAndScheme}
+            create table t (id int not null, a int not null) on ps(a);
+            create index ix on t (id);
+            update statistics t with resample on partitions (2);
+            update statistics t with fullscan, incremental = on;
+            create index ixu on t (id) on [primary];
+            """);
+        AreEqual(3, sim.AssertSqlError("update statistics t with fullscan, incremental = on", 9108).State);
+    }
+
+    /// <summary>
+    /// A sparse partition column is Msg 1978, a key's own placement refused is
+    /// followed by Msg 1750, and an XML index lands on the table's scheme
+    /// (probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    public void Placement_SparseKeyClauseAndXmlIndex()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(LeftFunctionAndScheme);
+        _ = sim.AssertSqlError("create table t (id int, a int sparse null) on ps(a)", 1978);
+        var error = sim.AssertSqlError("create table t (id int not null, b varchar(10) not null, primary key (b) on ps(b))", 7726);
+        AreEqual(1750, error.Errors[^1].Number);
+        AreEqual("ps", Text(sim, """
+            create table x (id int not null, a int not null, d xml, primary key (id, a)) on ps(a);
+            create primary xml index px on x (d);
+            select ds.name from sys.indexes i join sys.data_spaces ds on ds.data_space_id = i.data_space_id where i.object_id = object_id('x') and i.name = 'px'
+            """));
+    }
+}

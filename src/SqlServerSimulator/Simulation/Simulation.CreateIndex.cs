@@ -340,6 +340,11 @@ partial class Simulation
         // against SQL Server 2025).
         if (placement is null && indexOptions.CompressionOnPartitions)
             throw SimulatedSqlException.PartitionNumberOnUnpartitionedCreate(indexName);
+        if (placement is not null && indexOptions.PartitionCompressions is { } compressionClauses)
+        {
+            index.PartitionDataCompression = PartitionCompression.Apply(index.DataCompression, null, placement.Fanout, compressionClauses,
+                number => SimulatedSqlException.InvalidPartitionNumber(number, indexName, placement.Fanout, kind: "index"));
+        }
         if (placement is null && indexOptions.StatisticsIncremental)
             throw SimulatedSqlException.StatisticsCannotBeIncremental(state: 9);
         if (IndexCoversComputedColumn(table, index))

@@ -137,8 +137,10 @@ partial class Simulation
             if (!part.IsNull)
                 _ = text.Append(SqlType.IsStringCategory(part.Type) ? part.AsString : part.CoerceTo(maxText).AsString);
         }
-        if (text.Length == 0)
-            yield break; // dynamic SQL of NULL → no-op (matches real SQL Server's lenient handling)
+        // Dynamic SQL of NULL or nothing is a no-op (matches real SQL Server's
+        // lenient handling); a linked server's provider refuses it.
+        if (text.Length == 0 && linkedServerName is null)
+            yield break;
 
         var sqlText = text.ToString();
         var impersonationDepth = connection.Security.ImpersonationDepth;

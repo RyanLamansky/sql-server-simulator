@@ -207,6 +207,9 @@ internal sealed class Index(
     /// </summary>
     public byte DataCompression = options.DataCompression ?? 0;
 
+    /// <summary>Each partition's <c>DATA_COMPRESSION</c> once a partitioned rowset's partitions differ (<see cref="PartitionCompression"/>), else null.</summary>
+    public List<byte>? PartitionDataCompression;
+
     /// <inheritdoc cref="DataCompression"/>
     public bool XmlCompression = options.XmlCompression ?? false;
 

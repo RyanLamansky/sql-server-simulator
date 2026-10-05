@@ -734,8 +734,10 @@ internal static partial class BuiltInResources
                 // XML and spatial indexes follow at their own index-id ranges,
                 // with every option at its default (probed 2026-09-26 against
                 // SQL Server 2025).
+                // An XML index lands where the table's rows are, a partition
+                // scheme included (probed 2026-10-05 against SQL Server 2025).
                 foreach (var xmlIndex in table.XmlIndexes.OrderBy(index => index.IndexId))
-                    yield return AuxiliaryRow(tableObjectId, xmlIndex.Name, xmlIndex.IndexId, 3, xmlDesc);
+                    yield return AuxiliaryRow(tableObjectId, xmlIndex.Name, xmlIndex.IndexId, 3, xmlDesc, SqlValue.FromInt32(table.Partitioning?.Scheme.DataSpaceId ?? table.FilegroupId));
                 foreach (var spatialIndex in table.SpatialIndexes.OrderBy(index => index.IndexId))
                     yield return AuxiliaryRow(tableObjectId, spatialIndex.Name, spatialIndex.IndexId, 4, spatialDesc);
                 foreach (var jsonIndex in table.JsonIndexes.OrderBy(index => index.IndexId))
@@ -849,7 +851,7 @@ internal static partial class BuiltInResources
                 identity.Index is { IsHypothetical: true } ? trueBit : falseBit);
         }
 
-        SqlValue[] AuxiliaryRow(SqlValue objectId, string name, int indexId, byte type, SqlValue typeDesc) =>
+        SqlValue[] AuxiliaryRow(SqlValue objectId, string name, int indexId, byte type, SqlValue typeDesc, SqlValue? dataSpace = null) =>
             BuildIndexRow(
                 name: SqlValue.FromSystemName(name),
                 objectId: objectId,
@@ -857,7 +859,7 @@ internal static partial class BuiltInResources
                 type: SqlValue.FromByte(type),
                 typeDesc: typeDesc,
                 isUnique: falseBit,
-                dataSpaceId: primaryDataSpace,
+                dataSpaceId: dataSpace ?? primaryDataSpace,
                 isPrimaryKey: falseBit,
                 isUniqueConstraint: falseBit,
                 hasFilter: falseBit,
@@ -1018,13 +1020,19 @@ internal static partial class BuiltInResources
         var census = new PartitionCensus();
         foreach (var (table, indexId, _, _, index, placement) in EnumerateTableIndexIdentities(database, batch))
         {
-            var (level, xmlCompressed) = RowstoreCompressionOf(table, indexId, index);
-            var compression = index is { IsColumnstore: true } columnstore
+            var (level, xmlCompressed, perPartition) = RowstoreCompressionOf(table, indexId, index);
+            var fixedCompression = index is { IsColumnstore: true } columnstore
                 ? (columnstore.ColumnstoreArchive ? archiveCompression : columnstoreCompression)
                 : table.PageCompressed && indexId <= 1 ? pageCompression
-                : level switch { 1 => rowCompression, 2 => pageCompression, _ => noneCompression };
+                : null;
             foreach (var unit in census.Units(table, indexId, placement))
             {
+                var compression = fixedCompression ?? Storage.PartitionCompression.LevelOf(level, perPartition, unit.Number) switch
+                {
+                    1 => rowCompression,
+                    2 => pageCompression,
+                    _ => noneCompression,
+                };
                 var partitionIdValue = SqlValue.FromInt64(unit.PartitionId);
                 yield return
                 [
@@ -1045,21 +1053,22 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// The rowstore <c>DATA_COMPRESSION</c> level and <c>XML_COMPRESSION</c> of
-    /// one of <paramref name="table"/>'s rowsets: the heap's own for index 0,
-    /// else the index's or key constraint's.
+    /// one of <paramref name="table"/>'s rowsets — the heap's own for index 0,
+    /// else the index's or key constraint's — and its per-partition levels
+    /// when its partitions differ.
     /// </summary>
-    private static (byte Level, bool Xml) RowstoreCompressionOf(HeapTable table, int indexId, Storage.Index? index)
+    private static (byte Level, bool Xml, List<byte>? PerPartition) RowstoreCompressionOf(HeapTable table, int indexId, Storage.Index? index)
     {
         if (index is not null)
-            return (index.DataCompression, index.XmlCompression);
+            return (index.DataCompression, index.XmlCompression, index.PartitionDataCompression);
         if (indexId == 0)
-            return (table.HeapDataCompression, table.HeapXmlCompression);
+            return (table.HeapDataCompression, table.HeapXmlCompression, table.HeapPartitionDataCompression);
         foreach (var key in table.KeyConstraints)
         {
             if (key.IndexId == indexId)
-                return (key.DataCompression, key.XmlCompression);
+                return (key.DataCompression, key.XmlCompression, key.PartitionDataCompression);
         }
-        return (0, false);
+        return (0, false, null);
     }
 
     /// <summary>
@@ -2110,7 +2119,7 @@ internal sealed class PartitionCensus
         var baseId = UnpartitionedId(table, indexId);
         if (placement is null)
         {
-            yield return new Unit(baseId, 1, table.Heap.RowCount, table.Heap.Pages.Count);
+            yield return new Unit(baseId, 1, table.Heap.CountLiveRows(), table.Heap.Pages.Count);
             yield break;
         }
         if (!this.taken.TryGetValue((table, placement), out var counts))

@@ -366,6 +366,22 @@ public sealed class CollationCodePageTests
         AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
 
     /// <summary>
+    /// A varchar written into a UTF-8 column takes the column's byte budget,
+    /// not the literal's own: a varchar(1) 'é' stores whole in a varchar(10)
+    /// (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert t values (1, 'é')")]
+    [DataRow("insert t select 1, 'é'")]
+    [DataRow("insert t values (1, 'é'), (2, 'x')")]
+    public void ColumnWrite_ToUtf8_TakesTheColumnsBudget(string insert) =>
+        AreEqual("é|2", new Simulation().ExecuteScalar($"""
+            create table t (id int, c varchar(10) collate Latin1_General_100_CI_AS_SC_UTF8);
+            {insert};
+            select concat(c, '|', datalength(c)) from t where id = 1
+            """));
+
+    /// <summary>
     /// What real sizes a character count by under a supplementary-character
     /// or UTF-8 collation, read back as each result column's declared length
     /// (probed 2026-10-02 against SQL Server 2025).

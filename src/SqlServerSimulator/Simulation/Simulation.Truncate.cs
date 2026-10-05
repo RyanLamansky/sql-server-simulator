@@ -70,11 +70,11 @@ partial class Simulation
 
         // Msg 4701 carries only the leaf name (probe-confirmed against SQL
         // Server 2025), distinct from Msg 208 / 3701 which embed the qualifier.
-        // A view is Msg 4708 (probed 2026-10-01).
+        // A view is Msg 4708 naming it as written (probed 2026-10-05).
         if (destination is null || !destination.TryGetValue(name.Leaf, out var table))
         {
             throw batch.TryResolveView(name, out _)
-                ? SimulatedSqlException.CannotTruncateNonTable(name.Leaf)
+                ? SimulatedSqlException.CannotTruncateNonTable(name.Written)
                 : SimulatedSqlException.CannotTruncateObjectDoesNotExist(name.Leaf);
         }
 
@@ -127,7 +127,7 @@ partial class Simulation
         // WITH (PARTITIONS …) deletes the listed partitions' rows instead.
         if (partitions is not null)
         {
-            TruncatePartitions(batch, table, partitions);
+            TruncatePartitions(batch, table, partitions, name.Written);
             return;
         }
 

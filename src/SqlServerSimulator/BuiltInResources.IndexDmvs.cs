@@ -174,7 +174,7 @@ internal static partial class BuiltInResources
             foreach (var table in CatalogTables(schema, batch))
             {
                 var pages = table.Heap.Pages.Count;
-                var rows = table.Heap.RowCount;
+                var rows = table.Heap.CountLiveRows();
                 var statistics = Simulation.StatisticsOn(table);
                 foreach (var identity in table.IndexIdentities())
                 {

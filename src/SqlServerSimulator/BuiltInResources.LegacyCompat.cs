@@ -34,12 +34,13 @@ internal static partial class BuiltInResources
         "sp_addextendedproperty",
         "sp_updateextendedproperty",
         "sp_dropextendedproperty",
-        // Linked-server sprocs — add/drop carry semantic effect; the
-        // login/option variants parse-and-discard.
+        // Linked-server sprocs: the servers, their options and their login
+        // mappings.
         "sp_addlinkedserver",
         "sp_dropserver",
         "sp_addlinkedsrvlogin",
         "sp_droplinkedsrvlogin",
+        "sp_helplinkedsrvlogin",
         "sp_serveroption",
         "sp_set_session_context",
         "sp_getapplock",

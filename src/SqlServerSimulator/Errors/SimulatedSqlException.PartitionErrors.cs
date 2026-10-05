@@ -6,6 +6,10 @@ namespace SqlServerSimulator;
 // ending its batch whatever SET XACT_ABORT says.
 partial class SimulatedSqlException
 {
+    /// <summary>Msg 7702: a partition function declared with an empty parameter list, refused as the batch compiles (probed 2026-10-05 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException PartitionFunctionEmptyParameterList() =>
+        new("Empty Partition function type-parameter-list is not allowed when defining a partition function.", 7702, 16, 1);
+
     /// <summary>Msg 7703: a partition function declared with more than one parameter.</summary>
     internal static SimulatedSqlException PartitionFunctionMultipleParameters() =>
         new("Can not create RANGE partition function with multiple parameter types.", 7703, 16, 1) { AbortsAsUnderXactAbort = true };
@@ -18,9 +22,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException PartitionFunctionInvalidType(string typeName, byte state) =>
         new($"The type '{typeName}' is not valid for this operation.", 7704, 16, state) { AbortsAsUnderXactAbort = true };
 
-    /// <summary>Msg 7705: a boundary value that doesn't convert to the parameter type, by its 1-based written ordinal.</summary>
-    internal static SimulatedSqlException PartitionRangeValueNotConvertible(int ordinal) =>
-        new($"Could not implicitly convert range values type specified at ordinal {ordinal} to partition function parameter type.", 7705, 16, 2) { AbortsAsUnderXactAbort = true };
+    /// <summary>
+    /// Msg 7705: a boundary value that doesn't convert to the parameter type,
+    /// by its 1-based written ordinal — state 1 for a type pair an assignment
+    /// can't convert implicitly, state 2 for a value whose conversion fails
+    /// (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PartitionRangeValueNotConvertible(int ordinal, byte state) =>
+        new($"Could not implicitly convert range values type specified at ordinal {ordinal} to partition function parameter type.", 7705, 16, state) { AbortsAsUnderXactAbort = true };
 
     /// <summary>Msg 7720: a boundary value the parameter type would truncate.</summary>
     internal static SimulatedSqlException PartitionRangeValueTruncated(int ordinal) =>
@@ -167,9 +176,9 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException PartitionColumnNotInUniqueKey(string columnName, string indexName) =>
         new($"Column '{columnName}' is partitioning column of the index '{indexName}'. Partition columns for a unique index must be a subset of the index key.", 1908, 16, 1) { AbortsAsUnderXactAbort = true };
 
-    /// <summary>Msg 7722: a partition number outside the table's partitions.</summary>
-    internal static SimulatedSqlException InvalidPartitionNumber(long number, string tableName, int fanout) =>
-        new($"Invalid partition number {number} specified for table '{tableName}', partition number can range from 1 to {fanout}.", 7722, 16, 2) { AbortsAsUnderXactAbort = true };
+    /// <summary>Msg 7722 state 2: a partition number outside a table's or index's partitions (<paramref name="kind"/> names which).</summary>
+    internal static SimulatedSqlException InvalidPartitionNumber(long number, string name, int fanout, string kind = "table") =>
+        new($"Invalid partition number {number} specified for {kind} '{name}', partition number can range from 1 to {fanout}.", 7722, 16, 2) { AbortsAsUnderXactAbort = true };
 
     /// <summary>Msg 7728: a <c>PARTITIONS (n TO m)</c> range whose bounds are reversed.</summary>
     internal static SimulatedSqlException InvalidPartitionRange(long lower, long upper) =>
@@ -187,9 +196,43 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException TruncatePartitionUnalignedIndex(string indexName, string tableName, string functionName) =>
         new($"TRUNCATE TABLE statement failed. Index '{indexName}' is not partitioned, but table '{tableName}' uses partition function '{functionName}'. Index and table must use an equivalent partition function.", 3756, 16, 1) { AbortsAsUnderXactAbort = true };
 
+    /// <summary>Msg 4716: a partition truncate through a table with an index partitioned on another column (probed 2026-10-05 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException TruncatePartitionColumnSetDiffers(string tableName, string indexName) =>
+        new($"TRUNCATE TABLE statement failed. The column set used to partition the table '{tableName}' is different from the column set used to partition index '{indexName}'", 4716, 16, 1) { AbortsAsUnderXactAbort = true };
+
     /// <summary>Msg 7730: an <c>ALTER INDEX</c> / <c>ALTER TABLE … REBUILD</c> partition number the index doesn't have.</summary>
     internal static SimulatedSqlException AlterIndexPartitionNotFound(long number, string indexName) =>
         new($"Alter index statement failed because partition number {number} does not exist in index '{indexName}'.", 7730, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 4957: a partition number given by an expression not of an integer
+    /// type, worded for <paramref name="statement"/> (<c>ALTER INDEX</c> or
+    /// <c>ALTER TABLE</c>) and the <paramref name="kind"/> it names (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PartitionNumberNotInteger(string statement, string kind, string name) =>
+        new($"'{statement}' statement failed because the expression identifying partition number for the {kind} '{name}' is not of integer type.", 4957, 16, 3) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 7722 state 1: an <c>ALTER INDEX</c>, <c>ALTER TABLE … REBUILD</c> or
+    /// <c>SWITCH</c> partition number outside the 1 to 15,000 any partition
+    /// function allows, whatever the object's own count (probed 2026-10-05
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PartitionNumberOutOfRange(long number, string kind, string name) =>
+        new($"Invalid partition number {number} specified for {kind} '{name}', partition number can range from 1 to 15000.", 7722, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2586: <c>ALTER INDEX … REORGANIZE PARTITION = n</c> past the index's partitions (probed 2026-10-05 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException ReorganizePartitionNotFound(long number, string indexName, string tableName) =>
+        new($"Cannot find partition number {number} for index \"{indexName}\", table \"{tableName}\".", 2586, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 7733 state 2: <c>ALTER INDEX ALL … PARTITION = n</c> over a table
+    /// one of whose indexes isn't partitioned, naming the first partitioned
+    /// index and the first that isn't (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AlterIndexAllUnalignedIndex(string partitionedIndex, string unalignedIndex) =>
+        new($"'ALTER INDEX' statement failed. The index '{partitionedIndex}' is partitioned while index '{unalignedIndex}' is not partitioned.", 7733, 16, 2) { AbortsAsUnderXactAbort = true };
 
     // ALTER TABLE … SWITCH. Table names are three-part, database first.
 
@@ -257,6 +300,51 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SwitchNoIdenticalIndex(string source, string indexName, string target) =>
         new($"ALTER TABLE SWITCH statement failed. There is no identical index in source table '{source}' for the index '{indexName}' in target table '{target}' .", 4947, 16, 1) { AbortsAsUnderXactAbort = true };
 
+    // The SWITCH refusals below were probed 2026-10-05 against SQL Server 2025.
+
+    /// <summary>Msg 4949: a SWITCH target that is a view, named as written.</summary>
+    internal static SimulatedSqlException SwitchTargetNotATable(string writtenName) =>
+        new($"ALTER TABLE SWITCH statement failed because the object '{writtenName}' is not a user defined table.", 4949, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 4900: a SWITCH side with change tracking enabled — state 1 for the target, 2 for the source.</summary>
+    internal static SimulatedSqlException SwitchChangeTracked(string table, byte state) =>
+        new($"The ALTER TABLE SWITCH statement failed for table '{table}'. It is not possible to switch the partition of a table that has change tracking enabled. Disable change tracking before using ALTER TABLE SWITCH.", 4900, 16, state) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// A column attribute the two SWITCH sides differ on: Msg 4946 its
+    /// persistence, 11412 its sparse storage, 4958 its <c>ROWGUIDCOL</c>.
+    /// </summary>
+    internal static SimulatedSqlException SwitchColumnAttributeMismatch(int number, string attribute, string column, string source, string target) =>
+        new($"ALTER TABLE SWITCH statement failed because column '{column}' does not have {attribute} in tables '{source}' and '{target}'.", number, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 4953: two partitioned SWITCH sides partitioned on different columns.</summary>
+    internal static SimulatedSqlException SwitchPartitionColumnsDiffer(string source, string target) =>
+        new($"ALTER TABLE SWITCH statement failed. The columns set used to partition the table '{source}' is different from the column set used to partition the table '{target}'.", 4953, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 11406: the switched rowsets' <c>DATA_COMPRESSION</c> differ.</summary>
+    internal static SimulatedSqlException SwitchCompressionMismatch() =>
+        new("ALTER TABLE SWITCH statement failed. Source and target partitions have different values for the DATA_COMPRESSION option.", 11406, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 4938: two switched partitions on different filegroups.</summary>
+    internal static SimulatedSqlException SwitchPartitionFilegroupMismatch(int sourcePartition, string source, string sourceFilegroup, int targetPartition, string target, string targetFilegroup) =>
+        new($"ALTER TABLE SWITCH statement failed. Partition {sourcePartition} of table '{source}' is in filegroup '{sourceFilegroup}' and partition {targetPartition} of table '{target}' is in filegroup '{targetFilegroup}'.", 4938, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 4939: an unpartitioned SWITCH side on another filegroup than the partition, the unpartitioned table named first.</summary>
+    internal static SimulatedSqlException SwitchTableFilegroupMismatch(string table, string tableFilegroup, int partition, string partitioned, string partitionFilegroup) =>
+        new($"ALTER TABLE SWITCH statement failed. table '{table}' is in filegroup '{tableFilegroup}' and partition {partition} of table '{partitioned}' is in filegroup '{partitionFilegroup}'.", 4939, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 7733 state 4: a partitioned SWITCH side carrying an index that isn't partitioned.</summary>
+    internal static SimulatedSqlException SwitchUnalignedIndex(string table, string indexName) =>
+        new($"'ALTER TABLE SWITCH' statement failed. The table '{table}' is partitioned while index '{indexName}' is not partitioned.", 7733, 16, 4) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 11401: an indexed view over a partitioned SWITCH source whose index isn't partitioned.</summary>
+    internal static SimulatedSqlException SwitchIndexedViewUnpartitioned(string source, string indexName, string viewName) =>
+        new($"ALTER TABLE SWITCH statement failed. Table '{source}' is partitioned, but index '{indexName}' on indexed view '{viewName}' is not partitioned.", 11401, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 11402: a SWITCH target referenced by more indexed views than its source.</summary>
+    internal static SimulatedSqlException SwitchIndexedViewsMissing(string target, int targetViews, string source, int sourceViews) =>
+        new($"ALTER TABLE SWITCH statement failed. Target table '{target}' is referenced by {targetViews} indexed view(s), but source table '{source}' is only referenced by {sourceViews} indexed view(s). Every indexed view on the target table must have at least one matching indexed view on the source table.", 11402, 16, 1) { AbortsAsUnderXactAbort = true };
+
     /// <summary>Msg 4968: a target carrying a foreign key the source lacks.</summary>
     internal static SimulatedSqlException SwitchTargetForeignKey(string target, string constraintName, string source) =>
         new($"ALTER TABLE SWITCH statement failed. Target table '{target}' has foreign key for constraint '{constraintName}' but source table '{source}' does not have corresponding key.", 4968, 16, 1) { AbortsAsUnderXactAbort = true };
@@ -293,8 +381,8 @@ partial class SimulatedSqlException
         new($"Cannot DROP PARTITION FUNCTION '{functionName}' because it is being referenced by object '{moduleName}'.", 3729, 16, 3) { AbortsAsUnderXactAbort = true };
 
     /// <summary>Msg 1088 state 29: a SWITCH target that doesn't resolve.</summary>
-    internal static SimulatedSqlException SwitchTargetNotFound(string leafName) =>
-        new($"Cannot find the object \"{leafName}\" because it does not exist or you do not have permissions.", 1088, 16, 29) { AbortsAsUnderXactAbort = true };
+    internal static SimulatedSqlException SwitchTargetNotFound(string writtenName) =>
+        new($"Cannot find the object \"{writtenName}\" because it does not exist or you do not have permissions.", 1088, 16, 29) { AbortsAsUnderXactAbort = true };
 
     /// <summary>Msg 13546: a SWITCH out of a system-versioned table.</summary>
     internal static SimulatedSqlException SwitchSystemVersionedSource(string source) =>

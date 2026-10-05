@@ -165,6 +165,27 @@ internal static partial class BuiltInResources
             new("is_rda_server", SqlType.Bit, null, true),
         ], EnumerateSysServers);
 
+        // sys.linked_logins: each linked server's login mappings, which
+        // sp_addlinkedserver, sp_addlinkedsrvlogin and sp_droplinkedsrvlogin
+        // maintain (probed 2026-10-05 against SQL Server 2025); and
+        // sys.remote_logins, the old remote-server mappings, which nothing here
+        // creates.
+        Sys("linked_logins",
+        [
+            new("server_id", SqlType.Int32, null, false),
+            new("local_principal_id", SqlType.Int32, null, true),
+            new("uses_self_credential", SqlType.Bit, null, false),
+            new("remote_name", SqlType.SystemName, 128, true),
+            new("modify_date", SqlType.DateTime, null, false),
+        ], EnumerateSysLinkedLogins);
+        Sys("remote_logins",
+        [
+            new("server_id", SqlType.Int32, null, false),
+            new("remote_name", SqlType.SystemName, 128, true),
+            new("local_principal_id", SqlType.Int32, null, true),
+            new("modify_date", SqlType.DateTime, null, false),
+        ], static (_, _) => []);
+
         // sys.dm_os_host_info: single-row, server-scope DMV describing the
         // host operating system. SSMS selects host_platform from it on every
         // connect. The row reflects the actual .NET host process rather than a
@@ -1795,7 +1816,7 @@ internal static partial class BuiltInResources
         // against SQL Server 2025); sp_serveroption sets the linked server's
         // rpc out, data access and remote proc transaction promotion.
         SqlValue[] Row(int serverId, string name, string product, string provider, string? dataSource, string? location, string? providerString, string? catalog,
-            bool linked, bool remoteLogin, bool rpcOut, bool dataAccess, bool promotion, DateTime modifyDate) =>
+            bool linked, bool remoteLogin, bool rpcOut, bool dataAccess, bool promotion, DateTime modifyDate, LinkedServer? server = null) =>
         [
             SqlValue.FromInt32(serverId),
             SqlValue.FromSystemName(name),
@@ -1805,12 +1826,21 @@ internal static partial class BuiltInResources
             location is null ? nullNVarchar : SqlValue.FromNVarchar(location),
             providerString is null ? nullNVarchar : SqlValue.FromNVarchar(providerString),
             catalog is null ? nullSysName : SqlValue.FromSystemName(catalog),
-            zero, zero,
+            server is null ? zero : SqlValue.FromInt32(server.ConnectTimeout),
+            server is null ? zero : SqlValue.FromInt32(server.QueryTimeout),
             linked ? yes : no,
             remoteLogin ? yes : no,
             rpcOut ? yes : no,
             dataAccess ? yes : no,
-            no, yes, nullSysName, no, no, no, no, no, no,
+            server?.CollationCompatible == true ? yes : no,
+            server?.UseRemoteCollation == false ? no : yes,
+            server?.CollationName is { } collationName ? SqlValue.FromSystemName(collationName) : nullSysName,
+            server?.LazySchemaValidation == true ? yes : no,
+            server?.IsSystem == true ? yes : no,
+            server?.Publisher == true ? yes : no,
+            server?.Subscriber == true ? yes : no,
+            server?.Distributor == true ? yes : no,
+            no,
             promotion ? yes : no,
             SqlValue.FromDateTime(modifyDate),
             no,
@@ -1821,7 +1851,32 @@ internal static partial class BuiltInResources
         foreach (var ls in simulation.ActiveLinkedServers.EnumerateValues().OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
         {
             yield return Row(serverId++, ls.Name, ls.SrvProduct, ls.Provider, ls.DataSource, ls.Location, ls.ProviderString, ls.Catalog,
-                linked: true, remoteLogin: ls.IsSqlServerProduct, ls.RpcOut, ls.DataAccess, ls.RemoteProcTransactionPromotion, ls.CreateDate);
+                linked: true, remoteLogin: ls.RemoteLogin, ls.RpcOut, ls.DataAccess, ls.RemoteProcTransactionPromotion, ls.CreateDate, ls);
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sys.linked_logins</c>: each linked server's mappings, under
+    /// the <c>server_id</c> <see cref="EnumerateSysServers"/> gives it.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysLinkedLogins(Parser.BatchContext batch, Database database)
+    {
+        _ = database;
+        var serverId = 1;
+        foreach (var server in batch.Connection.Simulation.ActiveLinkedServers.EnumerateValues().OrderBy(static s => s.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            var id = SqlValue.FromInt32(serverId++);
+            foreach (var login in server.Logins.OrderBy(static login => login.LocalPrincipalId))
+            {
+                yield return
+                [
+                    id,
+                    SqlValue.FromInt32(login.LocalPrincipalId),
+                    SqlValue.FromBoolean(login.UsesSelf),
+                    login.RemoteName is null ? SqlValue.Null(SqlType.SystemName) : SqlValue.FromSystemName(login.RemoteName),
+                    SqlValue.FromDateTime(login.ModifyDate),
+                ];
+            }
         }
     }
 

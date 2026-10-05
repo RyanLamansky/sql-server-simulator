@@ -47,6 +47,7 @@ partial class Simulation
             return false;
         var name = ReadPartitionObjectName(context);
         context.MoveNextOptional();
+        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -105,7 +106,8 @@ partial class Simulation
         var name = ReadPartitionObjectName(context);
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        context.MoveNextRequired();
+        if (context.GetNextRequired() is Operator { Character: ')' })
+            throw SimulatedSqlException.PartitionFunctionEmptyParameterList();
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         context.MoveNextRequired();
         var (declaredMaxLength, declaredScale) = ReadPartitionTypeArguments(context, typeName);
@@ -115,6 +117,8 @@ partial class Simulation
             collationName = context.GetNextRequired() is Name collation
                 ? Parser.Expressions.CollateExpression.ResolvePseudoCollationName(collation.Value, context.Batch)
                 : throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (Collation.TryGet(collationName) is null)
+                throw SimulatedSqlException.InvalidCollation(collationName, state: 3);
             context.MoveNextRequired();
         }
         var multipleParameters = context.Token is Operator { Character: ',' };
@@ -150,11 +154,14 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var values = new List<Expression>();
+        var subqueries = context.SubqueriesParsed;
         if (context.GetNextRequired() is not Operator { Character: ')' })
         {
             while (true)
             {
                 values.Add(Expression.Parse(context));
+                if (context.SubqueriesParsed != subqueries)
+                    throw SimulatedSqlException.SubqueriesNotAllowedInThisContext();
                 if (context.Token is Operator { Character: ')' })
                     break;
                 if (context.Token is not Operator { Character: ',' })
@@ -163,6 +170,7 @@ partial class Simulation
             }
         }
         context.MoveNextOptional();
+        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -267,9 +275,15 @@ partial class Simulation
         {
             throw SimulatedSqlException.PartitionFunctionInvalidType(typeName.Value, state: 2);
         }
-        if (alias is not null || type is SpatialSqlType or HierarchyIdSqlType)
-            throw SimulatedSqlException.PartitionFunctionInvalidType(alias?.Name ?? type.SqlServerName, state: 3);
-        if (type is TextSqlType or XmlSqlType or JsonSqlType or VectorSqlType or RowVersionSqlType
+        // An alias type is named as written, sysname being one of them
+        // (probed 2026-10-05 against SQL Server 2025).
+        if (alias is not null)
+            throw SimulatedSqlException.PartitionFunctionInvalidType(qualifiedTypeName.ToString(), state: 3);
+        if (type is SpatialSqlType or HierarchyIdSqlType or SystemNameSqlType)
+            throw SimulatedSqlException.PartitionFunctionInvalidType(type.SqlServerName, state: 3);
+        if (type is VectorSqlType)
+            throw SimulatedSqlException.PartitionFunctionInvalidType("sys.vector", state: 1);
+        if (type is TextSqlType or XmlSqlType or JsonSqlType or RowVersionSqlType
             || type == SqlType.NText || type == SqlType.Image || maxLength == SqlType.MaxLengthSentinel)
         {
             throw SimulatedSqlException.PartitionFunctionInvalidType(type.ToString()!.Replace("(MAX)", "(max)", StringComparison.Ordinal), state: 1);
@@ -293,26 +307,51 @@ partial class Simulation
         var raw = expression.Run(new RuntimeContext(NoColumnResolver, batch));
         if (raw.IsNull)
             return SqlValue.Null(type);
+        // What a longer value carries past the parameter's length may only be
+        // trailing spaces, or trailing zero bytes of a binary value (probed
+        // 2026-10-05 against SQL Server 2025).
         if (maxLength is > 0 && raw.Type.Category == type.Category)
         {
             var length = type.Category switch
             {
-                SqlTypeCategory.String => raw.AsString.Length,
-                _ when raw.Type is VarbinarySqlType or BinarySqlType => raw.AsBytes.Length,
+                SqlTypeCategory.String => raw.AsString.AsSpan().TrimEnd(' ').Length,
+                _ when raw.Type is VarbinarySqlType or BinarySqlType => raw.AsBytes.AsSpan().TrimEnd((byte)0).Length,
                 _ => 0,
             };
             if (length > maxLength)
                 throw SimulatedSqlException.PartitionRangeValueTruncated(ordinal);
+            if (type.Category == SqlTypeCategory.String && raw.AsString.Length > maxLength)
+                raw = raw.Type is NVarcharSqlType or NCharSqlType ? SqlValue.FromNVarchar(raw.AsString[..maxLength.Value]) : SqlValue.FromVarchar(raw.AsString[..maxLength.Value]);
+            else if (type.Category != SqlTypeCategory.String && raw.AsBytes.Length > maxLength)
+                raw = SqlValue.FromVarbinary(raw.AsBytes[..maxLength.Value]);
         }
         try
         {
             AssignmentRules.RequireAssignable(expression, raw.Type, type);
-            return raw.CoerceTo(type);
+        }
+        catch (SimulatedSqlException)
+        {
+            throw SimulatedSqlException.PartitionRangeValueNotConvertible(ordinal, state: 1);
+        }
+        SqlValue converted;
+        try
+        {
+            converted = raw.CoerceTo(type);
         }
         catch (Exception error) when (error is SimulatedSqlException or OverflowException)
         {
-            throw SimulatedSqlException.PartitionRangeValueNotConvertible(ordinal);
+            throw SimulatedSqlException.PartitionRangeValueNotConvertible(ordinal, state: 2);
         }
+        // A varchar boundary keeps no trailing spaces and a varbinary one no
+        // trailing zero bytes, while an nvarchar one loses only what its
+        // length can't hold (probed 2026-10-05 against SQL Server 2025).
+        return converted switch
+        {
+            { IsNull: true } => converted,
+            _ when type is VarcharSqlType varchar => SqlValue.FromVarchar(varchar, converted.AsString.TrimEnd(' ')),
+            _ when type is VarbinarySqlType varbinary && converted.AsBytes is [.., 0] bytes => SqlValue.FromVarbinary(varbinary, bytes.AsSpan().TrimEnd((byte)0).ToArray()),
+            _ => converted,
+        };
     }
 
     /// <summary>
@@ -333,6 +372,10 @@ partial class Simulation
         {
             Name word when word.Value.Equals("SPLIT", StringComparison.OrdinalIgnoreCase) => true,
             ReservedKeyword { Keyword: Keyword.Merge } => false,
+            // Real refuses a DROP there and reads it on as a statement of its
+            // own naming an object type (probed 2026-10-05 against SQL Server 2025).
+            ReservedKeyword { Keyword: Keyword.Drop } drop when context.GetNextOptional() is { } dropped => throw SimulatedSqlException.Aggregate(
+                [SimulatedSqlException.SyntaxErrorNearKeyword(drop), SimulatedSqlException.UnknownObjectType(dropped.ErrorText)]),
             _ => throw SimulatedSqlException.SyntaxErrorNear(context),
         };
         if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Range })
@@ -340,10 +383,14 @@ partial class Simulation
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+        var subqueries = context.SubqueriesParsed;
         var value = Expression.Parse(context);
+        if (context.SubqueriesParsed != subqueries)
+            throw SimulatedSqlException.SubqueriesNotAllowedInThisContext();
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();
+        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -385,6 +432,7 @@ partial class Simulation
         // The partition holding the boundary value: the one it closes under
         // RANGE LEFT, the one it opens under RANGE RIGHT.
         var slot = function.BoundaryOnRight ? position + 1 : position;
+        ReshapePartitionCompression(database, function, split, slot, function.PartitionOf(boundary) - 1);
         if (split)
         {
             function.Boundaries = [.. boundaries[..position], boundary, .. boundaries[position..]];
@@ -403,6 +451,34 @@ partial class Simulation
         function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
         RecordDdlEvent(context, "ALTER_PARTITION_FUNCTION", null, function.Name, "PARTITION FUNCTION");
         return true;
+    }
+
+    /// <summary>
+    /// Follows a split or merge of <paramref name="function"/> through the
+    /// per-partition compression levels of every rowset placed on it
+    /// (<see cref="PartitionCompression.Reshape"/>).
+    /// </summary>
+    private static void ReshapePartitionCompression(Database database, PartitionFunction function, bool split, int slot, int splitPartition)
+    {
+        bool OnFunction(PartitionPlacement? placement) => ReferenceEquals(placement?.Scheme.Function, function);
+        foreach (var (_, schema) in database.Schemas)
+        {
+            foreach (var (_, table) in schema.HeapTables)
+            {
+                if (OnFunction(table.Partitioning))
+                    PartitionCompression.Reshape(table.HeapPartitionDataCompression, split, slot, splitPartition);
+                foreach (var key in table.KeyConstraints)
+                {
+                    if (OnFunction(key.IsClustered ? table.Partitioning : key.Partitioning))
+                        PartitionCompression.Reshape(key.PartitionDataCompression, split, slot, splitPartition);
+                }
+                foreach (var index in table.Indexes)
+                {
+                    if (OnFunction(index.IsClustered ? table.Partitioning : index.Partitioning))
+                        PartitionCompression.Reshape(index.PartitionDataCompression, split, slot, splitPartition);
+                }
+            }
+        }
     }
 
     /// <summary>Logs how to put a partition function and its schemes back as they stand, for a rollback.</summary>
@@ -459,6 +535,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
         context.MoveNextOptional();
+        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -476,8 +553,11 @@ partial class Simulation
         var dataSpaceId = database.AllocatePartitionSchemeId();
         if (all && filegroups.Count > 1)
             throw SimulatedSqlException.PartitionSchemeAllWithSeveral();
+        // [default] names the default filegroup (probed 2026-10-05 against SQL Server 2025).
         var filegroupIds = filegroups.ConvertAll(filegroup =>
-            database.Filegroups.TryGetValue(filegroup, out var id) ? id : throw SimulatedSqlException.PartitionInvalidObjectName(filegroup, state: 58));
+            BuiltInToken.Equals(filegroup, "default") ? database.DefaultFilegroupId
+            : database.Filegroups.TryGetValue(filegroup, out var id) ? id
+            : throw SimulatedSqlException.PartitionInvalidObjectName(filegroup, state: 58));
         if (database.Filegroups.ContainsKey(name))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(name, state: 58);
 
@@ -541,6 +621,7 @@ partial class Simulation
             filegroup = ReadFilegroupName(context);
             context.MoveNextOptional();
         }
+        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -553,8 +634,8 @@ partial class Simulation
         int? nextUsed = null;
         if (filegroup is not null)
         {
-            nextUsed = database.Filegroups.TryGetValue(filegroup, out var id)
-                ? id
+            nextUsed = BuiltInToken.Equals(filegroup, "default") ? database.DefaultFilegroupId
+                : database.Filegroups.TryGetValue(filegroup, out var id) ? id
                 : throw SimulatedSqlException.PartitionInvalidObjectName(filegroup, state: 61);
         }
         else if (scheme.NextUsed is null)

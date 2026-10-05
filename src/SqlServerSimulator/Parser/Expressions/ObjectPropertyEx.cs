@@ -28,7 +28,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// target's for a synonym.</description></item>
 /// <item><description><c>SchemaId</c> — owning schema's <see cref="Schema.SchemaId"/>.</description></item>
 /// <item><description><c>Cardinality</c> — table row count
-/// (<see cref="Heap.RowCount"/>), 0 for a multi-statement function's return
+/// (<see cref="Heap.CountLiveRows"/>), 0 for a multi-statement function's return
 /// table; NULL for other kinds.</description></item>
 /// <item><description>The whole <c>Table*</c> family, shared with
 /// <see cref="ObjectProperty"/>.</description></item>
@@ -118,7 +118,7 @@ internal sealed class ObjectPropertyEx : Expression
                 // multi-statement function's return table counts 0.
                 "CARDINALITY" => obj switch
                 {
-                    HeapTable table => SqlValue.FromVariant(SqlValue.FromInt64(table.Heap.RowCount)),
+                    HeapTable table => SqlValue.FromVariant(SqlValue.FromInt64(table.Heap.CountLiveRows())),
                     MultiStatementTableValuedFunction => SqlValue.FromVariant(SqlValue.FromInt64(0)),
                     _ => SqlValue.Null(SqlType.SqlVariant),
                 },

@@ -14,7 +14,7 @@ public class OpenQueryTests
         local.AddRemoteSimulation("RMT", remote);
         // The catalog is where the pass-through queries' unqualified names
         // bind; without one a session starts in master.
-        _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'RMT', 'SQL Server', @catalog = 'simulated'");
+        _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'RMT', '', 'MSOLEDBSQL', @catalog = 'simulated'");
         return local;
     }
 
@@ -114,24 +114,50 @@ public class OpenQueryTests
     }
 
     /// <summary>
-    /// A pass-through payload that produces no result set (empty string, a
-    /// non-SELECT statement) surfaces a clear <see cref="NotSupportedException"/>
-    /// naming the condition — the exact real-server Msg isn't probed.
+    /// What real's provider refuses describing a pass-through query: an empty
+    /// one, one that names what doesn't bind, one that doesn't parse, one
+    /// returning no rowset, and a rowset with two columns of one name.
     /// </summary>
     [TestMethod]
-    public void EmptyQuery_NoResultSet_NotSupported()
+    [DataRow("''", new[] { 7412, 7399, 7321 })]
+    [DataRow("'select * from simulated.dbo.nosuch'", new[] { 7412, 8180, 208 })]
+    [DataRow("'selec 1'", new[] { 11529, 2812 })]
+    [DataRow("'declare @x int = 5'", new[] { 7357 })]
+    [DataRow("'raiserror(''boom'', 16, 1)'", new[] { 7357 })]
+    [DataRow("'select 1 a, 2 a'", new[] { 492 })]
+    public void DescribingTheQuery_RealRefusals(string query, int[] numbers)
     {
         var local = LocalWithRemote(out _, "create table dbo.t (id int)");
-        var ex = Throws<NotSupportedException>(() => local.ExecuteScalar("select * from OPENQUERY(RMT, '')"));
-        Contains("no result set", ex.Message);
+        var error = Throws<SimulatedSqlException>(() => local.ExecuteScalar($"select * from openquery(RMT, {query})"));
+        CollectionAssert.AreEquivalent(numbers, error.Errors.Select(entry => entry.Number).ToArray());
     }
 
+    /// <summary>
+    /// An error the server raises reading the rows reaches the reader after the
+    /// rows ahead of it and ends the batch, where a TRY catches it.
+    /// </summary>
     [TestMethod]
-    public void NonSelectQuery_NoResultSet_NotSupported()
+    public void RuntimeErrorReadingRows_EndsTheBatch()
     {
-        var local = LocalWithRemote(out _, "create table dbo.t (id int)");
-        var ex = Throws<NotSupportedException>(() => local.ExecuteScalar("select * from OPENQUERY(RMT, 'declare @x int = 5')"));
-        Contains("no result set", ex.Message);
+        var local = LocalWithRemote(out _, "create table dbo.t (id int); insert t values (1), (2)");
+        var error = local.AssertSqlError("select * from openquery(RMT, 'select 1 / (id - 2) x from dbo.t'); select 'after'", 8134);
+        AreEqual(1, error.LineNumber);
+        AreEqual(8134, local.ExecuteScalar("declare @n int; begin try declare @x int; select @x = x from openquery(RMT, 'select 1 / (id - 2) x from dbo.t') end try begin catch set @n = error_number() end catch; select @n"));
+    }
+
+    /// <summary>
+    /// The provider reads a <c>smallmoney</c> as <c>money</c>, a <c>json</c> as
+    /// its text, and a key column as NOT NULL.
+    /// </summary>
+    [TestMethod]
+    public void ProviderTypesAndNullability()
+    {
+        var local = LocalWithRemote(out _, "create table dbo.t (id int primary key, m smallmoney, j json); insert t values (1, 1.5, '{\"a\":1}')");
+        AreEqual("int|0;money|1;varchar|1", local.ExecuteScalar("""
+            select * into #x from openquery(RMT, 'select id, m, j from dbo.t');
+            select string_agg(concat(type_name(system_type_id), '|', cast(is_nullable as int)), ';') within group (order by column_id)
+            from tempdb.sys.columns where object_id = object_id('tempdb..#x')
+            """));
     }
 
     [TestMethod]

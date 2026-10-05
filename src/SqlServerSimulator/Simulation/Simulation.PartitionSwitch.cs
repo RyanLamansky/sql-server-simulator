@@ -49,9 +49,10 @@ partial class Simulation
         {
             if (context.GetNextRequired() is not Operator { Character: '(' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
-            SkipBalancedParens(context);
+            ParseSwitchOptions(context);
             context.MoveNextOptional();
         }
+        context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
 
@@ -59,11 +60,17 @@ partial class Simulation
         if (!batch.TryResolveTable(sourceName, out var source))
             throw SimulatedSqlException.CannotFindObjectForAlterTable(sourceName.ToString());
         if (!batch.TryResolveTable(targetName, out var target))
-            throw SimulatedSqlException.SwitchTargetNotFound(targetName.Leaf);
+        {
+            // Real names a target view as written, and anything else missing
+            // by its written name too (probed 2026-10-05 against SQL Server 2025).
+            throw batch.TryResolveView(targetName, out _)
+                ? SimulatedSqlException.SwitchTargetNotATable(targetName.ToString())
+                : SimulatedSqlException.SwitchTargetNotFound(targetName.ToString());
+        }
         RejectOnMemoryOptimized(source, "The operation 'ALTER TABLE SWITCH'", 125);
         RejectOnMemoryOptimized(target, "The operation 'ALTER TABLE SWITCH'", 125);
         if (ReferenceEquals(source, target))
-            throw SimulatedSqlException.SwitchSameTable(source.Name, target.Name);
+            throw SimulatedSqlException.SwitchSameTable(source.Name, targetName.ToString());
         target.OwningDatabase?.RejectWriteWhenReadOnly();
         batch.AcquireTableRedefinitionLock(source);
         batch.AcquireTableRedefinitionLock(target);
@@ -76,8 +83,16 @@ partial class Simulation
             throw SimulatedSqlException.SwitchSystemVersionedSource(sourceText);
         if (target.PeriodColumns is not null && source.PeriodColumns is null)
             throw SimulatedSqlException.SwitchTargetHasPeriod(sourceText);
-        var sourceNumber = ReadSwitchPartition(batch, sourcePartition, source, sourceText, state: 1);
-        var targetNumber = ReadSwitchPartition(batch, targetPartition, target, targetText, state: 2);
+        // A partition number names the source by its table name and the
+        // target as the statement wrote it (probed 2026-10-05 against SQL
+        // Server 2025).
+        var sourceNumber = ReadSwitchPartition(batch, sourcePartition, source, sourceText, sourceName.Leaf, state: 1);
+        var targetNumber = ReadSwitchPartition(batch, targetPartition, target, targetText, targetName.ToString(), state: 2);
+
+        // A partitioned side's every index must be partitioned, ahead of
+        // even the target's emptiness (probed 2026-10-05 against SQL Server 2025).
+        RequireSwitchIndexesAligned(source, sourceText);
+        RequireSwitchIndexesAligned(target, targetText);
 
         // The target must be empty, or its partition — checked ahead of
         // every shape difference.
@@ -93,7 +108,14 @@ partial class Simulation
             throw SimulatedSqlException.SwitchTargetNotEmpty(targetText);
         }
 
-        RequireSwitchShapesMatch(batch.CurrentDatabase.Collation, source, sourceText, target, targetText);
+        // Change tracking on either side refuses the switch, the target's
+        // first (probed 2026-10-05 against SQL Server 2025).
+        if (target.ChangeTracking is not null)
+            throw SimulatedSqlException.SwitchChangeTracked(targetText, state: 1);
+        if (source.ChangeTracking is not null)
+            throw SimulatedSqlException.SwitchChangeTracked(sourceText, state: 2);
+
+        RequireSwitchShapesMatch(batch, source, sourceText, sourceNumber, target, targetText, targetNumber);
         RequireSwitchConstraintsFit(batch, source, sourceText, sourceNumber, target, targetText, targetNumber);
 
         VersionStore.NoteDefinitionChange(batch, source);
@@ -131,10 +153,12 @@ partial class Simulation
     /// The partition a SWITCH side names, 1 for an unpartitioned table. A
     /// partitioned side must name one (Msg 4911) that exists (Msg 4950); a
     /// number on an unpartitioned side is ignored with the class-0 Msg 4903.
+    /// Either side's number must first be an integer from 1 to 15,000
+    /// (<see cref="ReadPartitionNumber"/>, naming <paramref name="writtenName"/>).
     /// </summary>
-    private static int ReadSwitchPartition(BatchContext batch, Expression? written, HeapTable table, string tableText, byte state)
+    private static int ReadSwitchPartition(BatchContext batch, Expression? written, HeapTable table, string tableText, string writtenName, byte state)
     {
-        long? number = written is null ? null : EvaluatePartitionNumber(batch, written);
+        long? number = written is null ? null : ReadPartitionNumber(batch, written, "ALTER TABLE", "table", writtenName);
         if (table.Partitioning is not { } placement)
         {
             if (number is { } ignored)
@@ -143,14 +167,15 @@ partial class Simulation
         }
         if (number is not { } given)
             throw SimulatedSqlException.SwitchPartitionNumberRequired(tableText, state);
-        return given < 1 || given > placement.Fanout
+        return given > placement.Fanout
             ? throw SimulatedSqlException.SwitchPartitionNotFound(given, tableText)
             : (int)given;
     }
 
     /// <summary>
-    /// A partition-number expression's value as an integer, 0 for NULL or a
-    /// value that won't convert (where real reports a meaningless number).
+    /// A <c>TRUNCATE … WITH (PARTITIONS …)</c> bound's value as an integer, 0
+    /// for NULL or a value that won't convert (where real reports a
+    /// meaningless number).
     /// </summary>
     private static long EvaluatePartitionNumber(BatchContext batch, Expression written)
     {
@@ -170,13 +195,17 @@ partial class Simulation
     /// <summary>
     /// Refuses a SWITCH between tables whose columns or indexes differ: the
     /// column count (Msg 4943), then per column its name (4942), type (4944),
-    /// collation (4945), nullability (4985) and computed definition (4966);
-    /// then a clustered index on one side only (4913), a target index without
-    /// an identical source index (4947), and a target foreign key the source
-    /// lacks (4968).
+    /// collation (4945), nullability (4985), persistence (4946), computed
+    /// definition (4966), sparse storage (11412) and <c>ROWGUIDCOL</c> (4958);
+    /// two partitioned sides' partition columns (4953); the switched rowsets'
+    /// compression (11406) and filegroups (4938, 4939); then a clustered index
+    /// on one side only (4913), a target index without an identical source
+    /// index (4947), indexed views (11401, 11402), and a target foreign key the
+    /// source lacks (4968).
     /// </summary>
-    private static void RequireSwitchShapesMatch(Collation collation, HeapTable source, string sourceText, HeapTable target, string targetText)
+    private static void RequireSwitchShapesMatch(BatchContext batch, HeapTable source, string sourceText, int sourceNumber, HeapTable target, string targetText, int targetNumber)
     {
+        var collation = batch.CurrentDatabase.Collation;
         if (source.Columns.Length != target.Columns.Length)
             throw SimulatedSqlException.SwitchColumnCountMismatch(sourceText, source.Columns.Length, targetText, target.Columns.Length);
         for (var i = 0; i < source.Columns.Length; i++)
@@ -194,8 +223,40 @@ partial class Simulation
                 throw SimulatedSqlException.SwitchColumnCollationMismatch(left.Name, sourceText, targetText);
             if (left.Nullable != right.Nullable)
                 throw SimulatedSqlException.SwitchColumnNullabilityMismatch(left.Name, sourceText, targetText);
+            if (left.IsPersisted != right.IsPersisted)
+                throw SimulatedSqlException.SwitchColumnAttributeMismatch(4946, "the same persistent attribute", left.Name, sourceText, targetText);
             if (left.ComputedDefinition != right.ComputedDefinition)
                 throw SimulatedSqlException.SwitchComputedColumnMismatch(left.Name, left.ComputedDefinition ?? "", sourceText, right.ComputedDefinition ?? "", targetText);
+            if (left.IsSparse != right.IsSparse)
+                throw SimulatedSqlException.SwitchColumnAttributeMismatch(11412, "the same sparse storage attribute", left.Name, sourceText, targetText);
+            if (left.IsRowGuidCol != right.IsRowGuidCol)
+                throw SimulatedSqlException.SwitchColumnAttributeMismatch(4958, "the same ROWGUIDCOL property", left.Name, sourceText, targetText);
+        }
+
+        // Two partitioned sides partition on the same column.
+        if (source.Partitioning is { } sourceScheme && target.Partitioning is { } targetScheme
+            && !collation.Equals(sourceScheme.Column.Name, targetScheme.Column.Name))
+        {
+            throw SimulatedSqlException.SwitchPartitionColumnsDiffer(sourceText, targetText);
+        }
+
+        // The two rowsets' compression, then their filegroups, agree (probed
+        // 2026-10-05 against SQL Server 2025).
+        if (SwitchCompression(source, sourceNumber) != SwitchCompression(target, targetNumber))
+            throw SimulatedSqlException.SwitchCompressionMismatch();
+        var database = batch.CurrentDatabase;
+        var sourceFilegroup = SwitchFilegroup(source, sourceNumber);
+        var targetFilegroup = SwitchFilegroup(target, targetNumber);
+        if (sourceFilegroup != targetFilegroup)
+        {
+            var sourceGroup = FilegroupName(database, sourceFilegroup);
+            var targetGroup = FilegroupName(database, targetFilegroup);
+            if (source.Partitioning is not null && target.Partitioning is not null)
+                throw SimulatedSqlException.SwitchPartitionFilegroupMismatch(sourceNumber, sourceText, sourceGroup, targetNumber, targetText, targetGroup);
+            if (source.Partitioning is not null)
+                throw SimulatedSqlException.SwitchTableFilegroupMismatch(targetText, targetGroup, sourceNumber, sourceText, sourceGroup);
+            if (target.Partitioning is not null)
+                throw SimulatedSqlException.SwitchTableFilegroupMismatch(sourceText, sourceGroup, targetNumber, targetText, targetGroup);
         }
 
         var sourceIndexes = source.IndexIdentities().FindAll(static identity => !identity.IsHeap);
@@ -208,10 +269,22 @@ partial class Simulation
             throw SimulatedSqlException.SwitchClusteredMismatch(targetText, targetClustered.Name, sourceText, state: 2);
         foreach (var wanted in targetIndexes)
         {
+            // A disabled target index asks nothing of the source (probed
+            // 2026-10-05 against SQL Server 2025).
+            if (wanted.Index?.IsDisabled ?? wanted.Constraint?.IsDisabled ?? false)
+                continue;
             var shape = SwitchIndexShape(collation, target, wanted);
             if (!sourceIndexes.Exists(candidate => SwitchIndexShape(collation, source, candidate) == shape))
                 throw SimulatedSqlException.SwitchNoIdenticalIndex(sourceText, wanted.Name!, targetText);
         }
+
+        // An indexed view over a partitioned source must be partitioned, which
+        // no view index here is, and every one over the target needs one over
+        // the source (probed 2026-10-05 against SQL Server 2025).
+        if (source.Partitioning is not null && source.DependentIndexedViews.Find(view => view.Indexes.Count > 0) is { } sourceView)
+            throw SimulatedSqlException.SwitchIndexedViewUnpartitioned(sourceText, sourceView.Indexes[0].Name, sourceView.Name);
+        if (target.DependentIndexedViews.Count > source.DependentIndexedViews.Count)
+            throw SimulatedSqlException.SwitchIndexedViewsMissing(targetText, target.DependentIndexedViews.Count, sourceText, source.DependentIndexedViews.Count);
 
         if (source.IncomingForeignKeys.Find(key => !ReferenceEquals(key.ChildTable, source)) is { } referencing)
             throw SimulatedSqlException.SwitchSourceReferenced(sourceText, referencing.Name);
@@ -226,7 +299,14 @@ partial class Simulation
         }
     }
 
-    /// <summary>What makes two indexes identical for SWITCH: clustering, uniqueness, and the key and included columns by name, order and direction.</summary>
+    /// <summary>
+    /// What makes two indexes identical for SWITCH: clustering, uniqueness,
+    /// and the key and included columns by name, order and direction — a
+    /// partitioned nonclustered index carrying its partition column as one
+    /// more included column when its key leaves it out (probed 2026-10-05
+    /// against SQL Server 2025: an aligned <c>(b)</c> matches an unpartitioned
+    /// <c>(b) INCLUDE (a)</c>, not <c>(b)</c>).
+    /// </summary>
     private static string SwitchIndexShape(Collation collation, HeapTable table, IndexIdentity identity)
     {
         string ColumnName(int fullOrdinal) => collation.Name + ":" + table.Columns[fullOrdinal].Name.ToUpperInvariant();
@@ -236,7 +316,84 @@ partial class Simulation
             return $"{identity.IndexId == 1}|True|{string.Join(",", keys)}|";
         }
         var index = identity.Index!;
-        return $"{identity.IndexId == 1}|{index.IsUnique}|{string.Join(",", index.KeyColumns.Select(column => ColumnName(column.ColumnOrdinal) + (column.IsDescending ? "-" : "+")))}|{string.Join(",", index.IncludedColumnOrdinals.Select(ColumnName).Order())}|{index.FilterDefinition}";
+        var included = index.IncludedColumnOrdinals.ToList();
+        if (!index.IsClustered && PlacementOf(table, identity) is { } placement)
+        {
+            var partitionOrdinal = Array.IndexOf(table.Columns, placement.Column);
+            if (!Array.Exists(index.KeyColumns, column => column.ColumnOrdinal == partitionOrdinal) && !included.Contains(partitionOrdinal))
+                included.Add(partitionOrdinal);
+        }
+        return $"{identity.IndexId == 1}|{index.IsUnique}|{string.Join(",", index.KeyColumns.Select(column => ColumnName(column.ColumnOrdinal) + (column.IsDescending ? "-" : "+")))}|{string.Join(",", included.Select(ColumnName).Order())}|{index.FilterDefinition}";
+    }
+
+    /// <summary>Refuses a partitioned SWITCH side with an index not partitioned (Msg 7733).</summary>
+    private static void RequireSwitchIndexesAligned(HeapTable table, string tableText)
+    {
+        if (table.Partitioning is null)
+            return;
+        foreach (var identity in table.IndexIdentities())
+        {
+            if (!identity.IsHeap && PlacementOf(table, identity) is null)
+                throw SimulatedSqlException.SwitchUnalignedIndex(tableText, identity.Name!);
+        }
+    }
+
+    /// <summary>The <c>DATA_COMPRESSION</c> level of the rowset a SWITCH moves: the heap's or the clustered index's, for the partition named.</summary>
+    private static byte SwitchCompression(HeapTable table, int partition)
+    {
+        if (table.PageCompressed)
+            return 2;
+        foreach (var identity in table.IndexIdentities())
+        {
+            if (identity.IndexId > 1)
+                continue;
+            return identity switch
+            {
+                { Constraint: { } key } => PartitionCompression.LevelOf(key.DataCompression, key.PartitionDataCompression, partition),
+                { Index: { } index } => PartitionCompression.LevelOf(index.DataCompression, index.PartitionDataCompression, partition),
+                _ => PartitionCompression.LevelOf(table.HeapDataCompression, table.HeapPartitionDataCompression, partition),
+            };
+        }
+        return 0;
+    }
+
+    /// <summary>The filegroup the rowset a SWITCH moves sits on: the partition's, or the table's.</summary>
+    private static int SwitchFilegroup(HeapTable table, int partition) =>
+        table.Partitioning is { } placement ? placement.Scheme.Destinations[partition - 1] : table.FilegroupId;
+
+    /// <summary>
+    /// Reads <c>SWITCH</c>'s <c>WITH (WAIT_AT_LOW_PRIORITY (…))</c> option list,
+    /// the cursor on its opening parenthesis and left on its closing one: any
+    /// other option is Msg 102 state 170, and <c>ABORT_AFTER_WAIT</c> takes
+    /// <c>NONE</c>, <c>SELF</c> or <c>BLOCKERS</c> (probed 2026-10-05 against
+    /// SQL Server 2025).
+    /// </summary>
+    private static void ParseSwitchOptions(ParserContext context)
+    {
+        if (context.GetNextRequired() is not UnquotedString { Value: var option } || !BuiltInToken.Equals(option, "WAIT_AT_LOW_PRIORITY"))
+            throw SimulatedSqlException.SyntaxErrorNear(context.Token, state: 170);
+        var depth = 1;
+        while (depth > 0)
+        {
+            switch (context.GetNextRequired())
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    break;
+                case Operator { Character: ')' }:
+                    depth--;
+                    break;
+                case UnquotedString { Value: var word } when BuiltInToken.Equals(word, "ABORT_AFTER_WAIT"):
+                    if (context.GetNextRequired() is not Operator { Character: '=' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (context.GetNextRequired() is not UnquotedString { Value: var action }
+                        || !(BuiltInToken.Equals(action, "NONE") || BuiltInToken.Equals(action, "SELF") || BuiltInToken.Equals(action, "BLOCKERS")))
+                    {
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    }
+                    break;
+            }
+        }
     }
 
     /// <summary>
@@ -356,14 +513,16 @@ partial class Simulation
     /// <summary>
     /// Truncates the listed partitions of <paramref name="table"/>: Msg 7729
     /// state 3 when it isn't partitioned, 7722 for a number past its
-    /// partitions, 7728 for a reversed range, 7711 for a partition listed
-    /// twice, and 3756 when an index isn't aligned with it. The rows go as
-    /// ordinary deletes, so the identity high-water mark stays where it was.
+    /// partitions — both naming the table as written — 7728 for a reversed
+    /// range, 7711 for a partition listed twice, and 4716 when an index is
+    /// partitioned on another column or 3756 when it isn't aligned with the
+    /// table otherwise. The rows go as ordinary deletes, so the identity
+    /// high-water mark stays where it was.
     /// </summary>
-    private static void TruncatePartitions(BatchContext batch, HeapTable table, List<(Expression Low, Expression? High)> ranges)
+    private static void TruncatePartitions(BatchContext batch, HeapTable table, List<(Expression Low, Expression? High)> ranges, string writtenName)
     {
         if (table.Partitioning is not { } placement)
-            throw SimulatedSqlException.TruncatePartitionOnUnpartitioned(table.Name);
+            throw SimulatedSqlException.TruncatePartitionOnUnpartitioned(writtenName);
         var fanout = placement.Fanout;
         var chosen = new bool[fanout];
         foreach (var (lowExpression, highExpression) in ranges)
@@ -371,9 +530,9 @@ partial class Simulation
             var low = EvaluatePartitionNumber(batch, lowExpression);
             var high = highExpression is null ? low : EvaluatePartitionNumber(batch, highExpression);
             if (low < 1 || low > fanout)
-                throw SimulatedSqlException.InvalidPartitionNumber(low, table.Name, fanout);
+                throw SimulatedSqlException.InvalidPartitionNumber(low, writtenName, fanout);
             if (high < 1 || high > fanout)
-                throw SimulatedSqlException.InvalidPartitionNumber(high, table.Name, fanout);
+                throw SimulatedSqlException.InvalidPartitionNumber(high, writtenName, fanout);
             if (low > high)
                 throw SimulatedSqlException.InvalidPartitionRange(low, high);
             for (var number = low; number <= high; number++)
@@ -385,7 +544,10 @@ partial class Simulation
         }
         foreach (var identity in table.IndexIdentities())
         {
-            if (!ReferenceEquals(PlacementOf(table, identity)?.Scheme.Function, placement.Scheme.Function))
+            var indexPlacement = PlacementOf(table, identity);
+            if (indexPlacement is not null && !ReferenceEquals(indexPlacement.Column, placement.Column))
+                throw SimulatedSqlException.TruncatePartitionColumnSetDiffers(table.Name, identity.Name ?? table.Name);
+            if (!ReferenceEquals(indexPlacement?.Scheme.Function, placement.Scheme.Function))
                 throw SimulatedSqlException.TruncatePartitionUnalignedIndex(identity.Name ?? table.Name, table.Name, placement.Scheme.Function.Name);
         }
 
@@ -406,11 +568,11 @@ partial class Simulation
 /// <summary>
 /// The non-NULL values, and whether NULL, one column may hold as far as a
 /// partition's range and CHECK constraints tell — the reasoning real's
-/// <c>ALTER TABLE … SWITCH</c> does statically. Values are a set of
-/// intervals; an integer column's bounds read in <c>bigint</c> and close
-/// over the next integer, so <c>a &gt;= 11</c> and <c>a &gt; 10</c> agree.
-/// What the reasoning can't read — a <c>NOT</c>, a function, a constant that
-/// won't convert — admits every value, which is conservative.
+/// <c>ALTER TABLE … SWITCH</c> does statically, and a partitioned view's
+/// member analysis. Values are a set of intervals compared as numbers for
+/// SWITCH; a partitioned view's integer bounds read in <c>bigint</c> and close
+/// over the next integer. What the reasoning can't read — a function, a
+/// constant that won't convert — admits every value, which is conservative.
 /// </summary>
 internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull)
 {
@@ -434,32 +596,36 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
         if (upper is { IsNull: true })
             return new ValueDomain([], admitsNull);
         var interval = new ValueInterval(
-            lower is { IsNull: false } low ? DomainValue(low, column.Type) : null,
+            lower is { IsNull: false } low ? DomainValue(low, column.Type, asPartitionedView: false) : null,
             function.BoundaryOnRight,
-            upper is { } high ? DomainValue(high, column.Type) : null,
+            upper is { } high ? DomainValue(high, column.Type, asPartitionedView: false) : null,
             !function.BoundaryOnRight);
-        return new ValueDomain(Normalize([interval]), admitsNull);
+        return new ValueDomain(Normalize([interval], asPartitionedView: false), admitsNull);
     }
 
     /// <summary>
     /// The values for which <paramref name="predicate"/> isn't FALSE — what a
-    /// CHECK constraint lets through — and whether NULL gets through. With
+    /// CHECK constraint lets through — and whether NULL gets through. A
+    /// <c>NOT</c>, <c>&lt;&gt;</c>, <c>NOT BETWEEN</c> or <c>NOT IN</c> over a
+    /// shape the reasoning reads exactly is the complement. With
     /// <paramref name="asPartitionedView"/> it reads as real's partitioned-view
-    /// analysis does (probed 2026-10-01 against SQL Server 2025), where
-    /// <c>ALTER TABLE … SWITCH</c>'s admits every value: a <c>NOT</c>,
-    /// <c>&lt;&gt;</c>, <c>NOT BETWEEN</c> or <c>NOT IN</c> over a shape the
-    /// reasoning reads exactly is the complement, and an integer column's
-    /// range bound by a fraction (<c>k &lt; 10.5</c>) rounds to the integers
-    /// it admits.
+    /// analysis does (probed 2026-10-01 against SQL Server 2025): an integer
+    /// column's bounds close over the integers they admit, so <c>k &lt; 21</c>
+    /// is <c>k &lt;= 20</c> and <c>k &lt; 10.5</c> is <c>k &lt;= 10</c>.
+    /// <c>ALTER TABLE … SWITCH</c>'s reasoning compares the bounds as numbers
+    /// instead: <c>a &gt;= 11</c> fits <c>a &gt; 10</c>, but neither
+    /// <c>a &gt; 10</c> fits <c>a &gt;= 11</c> nor <c>a &lt;= 20.5</c> fits
+    /// <c>a &lt;= 20</c> (probed 2026-10-05).
     /// </summary>
     public static ValueDomain OfPredicate(BatchContext batch, BooleanExpression predicate, HeapColumn column, bool asPartitionedView = false)
     {
         var (values, nullOutcome, _) = Analyze(batch, predicate, column, asPartitionedView);
-        return new ValueDomain(Normalize(values), column.Nullable && nullOutcome != false);
+        return new ValueDomain(Normalize(values, asPartitionedView), column.Nullable && nullOutcome != false);
     }
 
+    /// <summary>The values both admit; a SWITCH-side reasoning, whose bounds don't close.</summary>
     public ValueDomain Intersect(ValueDomain other) =>
-        new(Normalize(IntersectIntervals(this.Intervals, other.Intervals)), this.AdmitsNull && other.AdmitsNull);
+        new(Normalize(IntersectIntervals(this.Intervals, other.Intervals), asPartitionedView: false), this.AdmitsNull && other.AdmitsNull);
 
     /// <summary>Whether no value — NULL included — is admitted by both this and <paramref name="other"/>.</summary>
     public bool IsDisjointFrom(ValueDomain other) =>
@@ -473,7 +639,7 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
     {
         if (value.IsNull)
             return this.AdmitsNull;
-        var point = DomainValue(value, columnType);
+        var point = DomainValue(value, columnType, asPartitionedView: true);
         var probe = new ValueInterval(point, true, point, true);
         return this.Intervals.Exists(interval => Contains(interval, probe));
     }
@@ -532,16 +698,16 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
             return (values, outcome, exact);
         }
 
-        if (asPartitionedView && predicate.TryGetComplement(out var positive))
+        if (predicate.TryGetComplement(out var positive))
         {
             var (values, nullOutcome, exact) = Analyze(batch, positive, column, asPartitionedView);
-            return exact ? (Complement(Normalize(values)), nullOutcome is { } verdict ? !verdict : null, true) : (all, null, false);
+            return exact ? (Complement(Normalize(values, asPartitionedView)), nullOutcome is { } verdict ? !verdict : null, true) : (all, null, false);
         }
         if (predicate.TryGetNullTest(out var tested, out var isNotNull) && IsColumn(batch, tested, column))
             return (isNotNull ? all : [], !isNotNull, true);
         if (predicate.TryGetEqualityOperands(out var left, out var right))
         {
-            var point = IsColumn(batch, left, column) ? Constant(batch, right, column) : IsColumn(batch, right, column) ? Constant(batch, left, column) : null;
+            var point = IsColumn(batch, left, column) ? Constant(batch, right, column, asPartitionedView) : IsColumn(batch, right, column) ? Constant(batch, left, column, asPartitionedView) : null;
             return point is { } value ? ([new ValueInterval(value, true, value, true)], null, true) : (all, null, false);
         }
         if (predicate.TryGetRangeOperands(out var rangeLeft, out var op, out var rangeRight))
@@ -549,7 +715,7 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
             var columnLeft = IsColumn(batch, rangeLeft, column);
             if (!columnLeft && !IsColumn(batch, rangeRight, column))
                 return (all, null, false);
-            var bound = Constant(batch, columnLeft ? rangeRight : rangeLeft, column);
+            var bound = Constant(batch, columnLeft ? rangeRight : rangeLeft, column, asPartitionedView);
             if (!columnLeft)
             {
                 op = op switch
@@ -575,7 +741,7 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
         }
         if (predicate.TryGetBetweenOperands(out var subject, out var lower, out var upper) && IsColumn(batch, subject, column))
         {
-            return Constant(batch, lower, column) is { } low && Constant(batch, upper, column) is { } high
+            return Constant(batch, lower, column, asPartitionedView) is { } low && Constant(batch, upper, column, asPartitionedView) is { } high
                 ? ([new ValueInterval(low, true, high, true)], null, true)
                 : (all, null, false);
         }
@@ -584,7 +750,7 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
             var points = new List<ValueInterval>();
             foreach (var (pairLeft, pairRight) in pairs)
             {
-                var point = IsColumn(batch, pairLeft, column) ? Constant(batch, pairRight, column) : IsColumn(batch, pairRight, column) ? Constant(batch, pairLeft, column) : null;
+                var point = IsColumn(batch, pairLeft, column) ? Constant(batch, pairRight, column, asPartitionedView) : IsColumn(batch, pairRight, column) ? Constant(batch, pairLeft, column, asPartitionedView) : null;
                 if (point is not { } value)
                     return (all, null, false);
                 points.Add(new ValueInterval(value, true, value, true));
@@ -651,9 +817,10 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
     /// <summary>
     /// A constant operand's value in the column's domain type, or null when it
     /// isn't a constant, is NULL (a comparison with NULL rules nothing out),
-    /// or doesn't convert exactly.
+    /// or doesn't convert exactly. SWITCH's reasoning keeps a number bounding
+    /// an integer column as the number it is.
     /// </summary>
-    private static SqlValue? Constant(BatchContext batch, Expression expression, HeapColumn column)
+    private static SqlValue? Constant(BatchContext batch, Expression expression, HeapColumn column, bool asPartitionedView)
     {
         var readsColumn = false;
         expression.VisitColumnReferences(_ => readsColumn = true);
@@ -664,10 +831,12 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
             var raw = expression.Run(new RuntimeContext(Simulation.NoColumnResolver, batch));
             if (raw.IsNull)
                 return null;
+            if (!asPartitionedView && SqlType.IsIntegerCategory(column.Type) && IsNumber(raw.Type))
+                return raw.CoerceTo(RealNumberDomain);
             var converted = raw.CoerceTo(column.Type);
-            if (raw.Type != column.Type && raw.Type.Category != column.Type.Category && converted.CoerceTo(raw.Type).CompareTo(raw) != 0)
+            if (raw.Type != column.Type && IsNumber(raw.Type) && IsNumber(column.Type) && converted.CoerceTo(raw.Type).CompareTo(raw) != 0)
                 return null;
-            return DomainValue(converted, column.Type);
+            return DomainValue(converted, column.Type, asPartitionedView);
         }
         catch (Exception error) when (error is SimulatedSqlException or OverflowException or FormatException or NotSupportedException or InvalidOperationException)
         {
@@ -675,17 +844,37 @@ internal sealed class ValueDomain(List<ValueInterval> intervals, bool admitsNull
         }
     }
 
-    /// <summary>A column value as the domain compares it: <c>bigint</c> for the integer types, else as it is.</summary>
-    private static SqlValue DomainValue(SqlValue value, SqlType columnType) =>
-        SqlType.IsIntegerCategory(columnType) ? value.CoerceTo(SqlType.BigInt) : value.Type == columnType ? value : value.CoerceTo(columnType);
+    /// <summary>The type SWITCH's reasoning compares an integer column's bounds in, holding a <c>bigint</c> and a fraction alike.</summary>
+    private static readonly SqlType RealNumberDomain = SqlType.GetDecimal(38, 10);
 
-    /// <summary>Drops empty intervals, closes integer bounds, sorts by lower bound and merges overlaps.</summary>
-    private static List<ValueInterval> Normalize(List<ValueInterval> intervals)
+    private static bool IsNumber(SqlType type) =>
+        type.Category is SqlTypeCategory.Integer or SqlTypeCategory.Decimal or SqlTypeCategory.Money or SqlTypeCategory.Approximate;
+
+    /// <summary>
+    /// A column value as the domain compares it: for the integer types a
+    /// <c>bigint</c> in a partitioned view's reasoning and a number in
+    /// SWITCH's, else as it is.
+    /// </summary>
+    private static SqlValue DomainValue(SqlValue value, SqlType columnType, bool asPartitionedView) =>
+        SqlType.IsIntegerCategory(columnType) ? value.CoerceTo(asPartitionedView ? SqlType.BigInt : RealNumberDomain)
+        : value.Type == columnType ? value : value.CoerceTo(columnType);
+
+    /// <summary>
+    /// Drops empty intervals, closes a partitioned view's integer bounds, sorts
+    /// by lower bound and merges overlaps.
+    /// </summary>
+    private static List<ValueInterval> Normalize(List<ValueInterval> intervals, bool asPartitionedView)
     {
         var closed = new List<ValueInterval>(intervals.Count);
         foreach (var interval in intervals)
         {
             var current = interval;
+            if (!asPartitionedView)
+            {
+                if (!IsEmpty(current))
+                    closed.Add(current);
+                continue;
+            }
             if (current.Low is { Type: BigIntSqlType } low && !current.LowInclusive)
                 current = low.AsInt64 == long.MaxValue ? current : new ValueInterval(SqlValue.FromInt64(low.AsInt64 + 1), true, current.High, current.HighInclusive);
             if (current.High is { Type: BigIntSqlType } high && !current.HighInclusive)

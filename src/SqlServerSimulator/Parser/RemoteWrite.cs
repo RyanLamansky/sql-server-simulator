@@ -299,6 +299,22 @@ internal sealed class RemoteWrite
     {
         if (batch.Connection.CurrentTransaction is null)
             return;
+        RefuseEnlistment(batch, server);
+    }
+
+    /// <summary>
+    /// The refusal of the distributed transaction enlisting
+    /// <paramref name="server"/> would need (<see cref="RequireNoTransaction"/>),
+    /// which an <c>INSERT … EXEC</c> into a remote table needs whether or not
+    /// the session has a transaction open (probed 2026-10-05 against SQL
+    /// Server 2025).
+    /// </summary>
+    public static void RefuseEnlistment(BatchContext batch, LinkedServer server)
+    {
+        // A transaction holding a savepoint can't be promoted at all (probed
+        // 2026-10-05 against SQL Server 2025).
+        if (batch.Connection.CurrentTransaction is { HasSavepoint: true })
+            throw SimulatedSqlException.CannotPromoteWithSavepoint();
         if (server.IsLoopback(batch.Connection.Simulation))
             throw SimulatedSqlException.TransactionContextInUse();
         batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.DistributedTransactionRefusedMessage(batch, server));
@@ -348,10 +364,17 @@ internal sealed class RemoteWrite
             this.SetColumns.Add(ordinal);
             if (this.RemoteColumns[ordinal] is not { } column)
             {
-                // An OPENQUERY column that reads an expression has no cursor
-                // position to write.
+                // An OPENQUERY column that reads an expression has no base
+                // column to write: a query reading no base column at all — an
+                // aggregate — opens no updatable cursor, and one that does
+                // refuses the column (probed 2026-10-05 against SQL Server 2025).
                 if (!batch.IsSkipping)
-                    throw CursorRefused(batch, this.Server);
+                {
+                    if (Array.TrueForAll(this.RemoteColumns, static remote => remote is null))
+                        throw CursorRefused(batch, this.Server);
+                    batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MultipleStepOperationMessage(batch, this.Server));
+                    throw SimulatedSqlException.RemoteColumnNotUpdatable(this.Server, name);
+                }
                 continue;
             }
             if (column.Identity is not null)
@@ -364,9 +387,11 @@ internal sealed class RemoteWrite
     }
 
     /// <summary>
-    /// Records an INSERT's column list, refusing the identity column as the
-    /// provider does — Msg 7344 after its Msg 7412 — since it writes rows
-    /// through a rowset whose identity column takes no value.
+    /// Records an INSERT's column list, refusing the identity column, a
+    /// computed one and a <c>rowversion</c> as the provider does — Msg 7344
+    /// after its Msg 7412 — since it writes rows through a rowset whose
+    /// columns of those kinds take no value (probed 2026-09-28 and 2026-10-05
+    /// against SQL Server 2025).
     /// </summary>
     public void CheckInsertColumns(BatchContext batch, List<string> names)
     {
@@ -377,11 +402,12 @@ internal sealed class RemoteWrite
             if (ordinal < 0)
                 continue;
             this.InsertColumns.Add(ordinal);
-            if (this.RemoteColumns[ordinal] is { Identity: not null } identity && !batch.IsSkipping)
+            if (this.RemoteColumns[ordinal] is { } unwritable && (unwritable.Identity is not null || unwritable.Computed is not null || unwritable.Type == SqlType.RowVersion)
+                && !batch.IsSkipping)
             {
                 batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MultipleStepOperationMessage(batch, this.Server));
                 var written = this.WrittenName is { } four ? $"[{four[0]}].[{four[1]}].[{four[2]}].[{four.Leaf}]" : this.TargetText;
-                throw SimulatedSqlException.RemoteColumnNotWritable(this.Server, written, identity.Name);
+                throw SimulatedSqlException.RemoteColumnNotWritable(this.Server, written, unwritable.Name);
             }
         }
     }
@@ -396,23 +422,101 @@ internal sealed class RemoteWrite
     /// table and appends the key columns a cursor finds rows by.
     /// </summary>
     [SuppressMessage("Security", "CA2100:Review SQL queries for security vulnerabilities", Justification = "The query is the caller's own pass-through text or a SELECT over identifiers the parser validated, bracket-escaped; it runs against a sibling in-process Simulation.")]
-    internal static SimulatedSqlResultSet? RunRemoteQuery(LinkedServer server, string query, string? database, bool browse)
+    internal static SimulatedSqlResultSet? RunRemoteQuery(LinkedServer server, string query, string? database, bool browse, bool describeOnly = false)
     {
         using var connection = server.OpenSession(database);
         connection.NoBrowseTable = browse;
+        // Describing a query, as the provider does before running it, reads
+        // its first rowset's shape without running a statement.
+        connection.FmtOnly = describeOnly;
         using var command = connection.CreateCommand();
         command.CommandText = query;
+        SimulatedSqlResultSet? first = null;
+        byte[][] rows = [];
         foreach (var outcome in server.Target.CreateResultSetsForCommand(command))
         {
             switch (outcome)
             {
-                case SimulatedSqlResultSet result:
-                    return result;
-                case SimulatedErrorOutcome error:
+                case SimulatedSqlResultSet result when first is null:
+                    // Buffered before the session closes.
+                    first = result;
+                    rows = [.. result.RowBytes];
+                    break;
+                case SimulatedSqlResultSet:
+                    return Buffered(first, rows, failure: null);
+                case SimulatedErrorOutcome error when first is null:
                     throw error.Exception;
+                case SimulatedErrorOutcome error:
+                    // An error the server raised reading the rows reaches the
+                    // reader after the rows ahead of it, relayed, and ends the
+                    // batch (probed 2026-10-05 against SQL Server 2025).
+                    return Buffered(first, rows, error.Exception);
             }
         }
-        return null;
+        return first is null ? null : Buffered(first, rows, failure: null);
+    }
+
+    /// <summary>
+    /// The type the provider gives a pass-through rowset's column —
+    /// <c>OPENQUERY</c>'s, <c>EXEC … AT</c>'s or a remote procedure call's: a
+    /// <c>smallmoney</c> reads as <c>money</c>, a <c>sysname</c> as
+    /// <c>nvarchar(128)</c>, and a <c>json</c> or
+    /// <c>vector</c> as its text in a <c>varchar(max)</c> under
+    /// <c>Latin1_General_100_BIN2_UTF8</c> (probed 2026-10-05 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SqlType ProviderRowsetType(SqlType type) => type switch
+    {
+        SmallMoneySqlType => SqlType.Money,
+        SystemNameSqlType => NVarcharSqlType.Get(128, type.Collation!, Coercibility.Implicit),
+        JsonSqlType or VectorSqlType => ProviderTextType,
+        _ => type,
+    };
+
+    private static readonly VarcharSqlType ProviderTextType =
+        VarcharSqlType.Get(SqlType.MaxLengthSentinel, Collation.TryGet("Latin1_General_100_BIN2_UTF8")!, Coercibility.Implicit);
+
+    /// <summary>
+    /// A pass-through rowset as the provider hands it over: its columns'
+    /// <see cref="ProviderRowsetType"/>, its rows re-encoded in them when one
+    /// differs.
+    /// </summary>
+    internal static (SqlType[] Schema, IEnumerable<byte[]> Rows) AsProviderRowset(SqlType[] schema, IEnumerable<byte[]> rows)
+    {
+        var exposed = Array.ConvertAll(schema, ProviderRowsetType);
+        if (exposed.AsSpan().SequenceEqual(schema))
+            return (schema, rows);
+        return (exposed, Reencode(schema, exposed, rows));
+
+        static IEnumerable<byte[]> Reencode(SqlType[] fetched, SqlType[] exposed, IEnumerable<byte[]> rows)
+        {
+            foreach (var bytes in rows)
+            {
+                var values = RowDecoder.DecodeRow(fetched, bytes);
+                for (var i = 0; i < values.Length; i++)
+                {
+                    if (fetched[i] != exposed[i])
+                        values[i] = values[i].IsNull ? SqlValue.Null(exposed[i]) : values[i].CoerceTo(exposed[i]);
+                }
+                yield return RowEncoder.EncodeRow(exposed, values);
+            }
+        }
+    }
+
+    /// <summary>A remote rowset's buffered rows, and the error the server ended them with, if any.</summary>
+    private static SimulatedSqlResultSet Buffered(SimulatedSqlResultSet result, byte[][] rows, SimulatedSqlException? failure) =>
+        new(result.Schema, result.ColumnNames, failure is null ? rows : RowsThenFailure(rows, failure), result.RecordsAffected)
+        {
+            ColumnNullability = result.ColumnNullability,
+            Browse = result.Browse,
+        };
+
+    private static IEnumerable<byte[]> RowsThenFailure(byte[][] rows, SimulatedSqlException failure)
+    {
+        foreach (var row in rows)
+            yield return row;
+        var (_, error) = SimulatedSqlException.RelayedRemoteEntries(failure, procedure: null, endsBatch: true);
+        throw error ?? failure;
     }
 
     private void Load(string query, string database)
@@ -462,11 +566,14 @@ internal sealed class RemoteWrite
         {
             var fetched = RowDecoder.DecodeRow(result.Schema, bytes);
             var full = fetched.AsSpan(0, width).ToArray();
-            // A vector stands in as the varbinary the provider lists it as.
+            // A vector stands in as the varbinary the provider lists it as,
+            // and any other value as the type the provider lists.
             for (var i = 0; i < width; i++)
             {
                 if (full[i].Type is VectorSqlType && proxy.Columns[i].Type is VarbinarySqlType exposedType)
                     full[i] = full[i].IsNull ? SqlValue.Null(exposedType) : SqlValue.FromVarbinary(exposedType, full[i].AsVectorBytes);
+                else if (result.Schema[i] is SmallMoneySqlType or SystemNameSqlType && result.Schema[i] != proxy.Columns[i].Type)
+                    full[i] = full[i].IsNull ? SqlValue.Null(proxy.Columns[i].Type) : full[i].CoerceTo(proxy.Columns[i].Type);
             }
             var image = RowEncoder.EncodeRow(proxy.StoredColumns, Simulation.ProjectStoredValues(proxy, full), proxy.Heap);
             var address = proxy.Heap.Insert(image);
@@ -486,7 +593,7 @@ internal sealed class RemoteWrite
     {
         var statements = this.Kind switch
         {
-            RemoteWriteKind.Insert => this.InsertStatements(),
+            RemoteWriteKind.Insert => this.InsertStatements(batch),
             RemoteWriteKind.Update => this.UpdateStatements(),
             _ => this.DeleteStatements(),
         };
@@ -526,7 +633,13 @@ internal sealed class RemoteWrite
         _ = command.ExecuteNonQuery();
     }
 
-    private List<(string Text, List<SqlValue> Parameters)> InsertStatements()
+    /// <summary>
+    /// The statements an INSERT sends, row by row. A NULL for a column the
+    /// server doesn't let hold one is refused by the provider before anything
+    /// is sent — Msg 7344 after its Msg 7412 (probed 2026-10-05 against SQL
+    /// Server 2025).
+    /// </summary>
+    private List<(string Text, List<SqlValue> Parameters)> InsertStatements(BatchContext batch)
     {
         var columns = this.InsertColumns;
         if (columns is null)
@@ -558,6 +671,12 @@ internal sealed class RemoteWrite
                 if (i > 0)
                     _ = text.Append(", ");
                 _ = text.Append(Bracket(this.WrittenColumnName(columns[i])));
+                if (row[columns[i]].IsNull && this.RemoteColumns[columns[i]] is { Nullable: false } notNull)
+                {
+                    batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MultipleStepOperationMessage(batch, this.Server));
+                    var written = this.WrittenName is { } four ? $"[{four[0]}].[{four[1]}].[{four[2]}].[{four.Leaf}]" : this.TargetText;
+                    throw SimulatedSqlException.RemoteColumnValueViolatesIntegrity(this.Server, written, notNull.Name);
+                }
                 parameters.Add(row[columns[i]]);
             }
             _ = text.Append(") VALUES (");
@@ -895,6 +1014,22 @@ internal sealed class RemoteWrite
                     var length = ((VectorSqlType)column.Type).ByteLength;
                     exposed.Add(new HeapColumn(column.Name, VarbinarySqlType.Get(length), length, column.Nullable));
                     continue;
+            }
+            // The provider lists a decimal as numeric, a smallmoney as money
+            // and an alias type — sysname among them — as its base type
+            // (probed 2026-10-05 against SQL Server 2025).
+            var providerColumn = column.Type switch
+            {
+                DecimalSqlType when !column.SpelledNumeric => new HeapColumn(column.Name, column.Type, column.MaxLength, column.Nullable, collation: column.Collation, spelledNumeric: true),
+                SmallMoneySqlType => new HeapColumn(column.Name, SqlType.Money, maxLength: null, column.Nullable),
+                SystemNameSqlType => new HeapColumn(column.Name, NVarcharSqlType.Get(128, column.Type.Collation!, Coercibility.Implicit), 128, column.Nullable, collation: column.Collation),
+                _ => null,
+            };
+            if (providerColumn is not null)
+            {
+                exposed ??= [.. columns.AsSpan(0, i)];
+                exposed.Add(providerColumn);
+                continue;
             }
             exposed?.Add(column);
         }

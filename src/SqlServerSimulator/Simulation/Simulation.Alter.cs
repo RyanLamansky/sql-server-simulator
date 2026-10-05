@@ -2218,8 +2218,13 @@ partial class Simulation
     private static bool TryParseAlterTableRebuild(ParserContext context, MultiPartName tableName)
     {
         context.MoveNextOptional();
-        var namedPartition = ParseOptionalIndexPartitionClause(context, out var partitionNumber);
-        var namedPartitionList = ParseOptionalRebuildOptions(context, out var compressionLevel, out var xmlCompression);
+        var partitionAll = IsPartitionAll(context);
+        var partitionNumber = ParseOptionalIndexPartitionClause(context);
+        var namedPartitionList = ParseOptionalRebuildOptions(context, out var compressionLevel, out var xmlCompression, out var partitionCompressions);
+        // A rebuild of every partition says so to list some (probed
+        // 2026-10-05 against SQL Server 2025).
+        if (namedPartitionList && !partitionAll && partitionNumber is null)
+            throw SimulatedSqlException.CompressionPartitionsWithoutPartitionAll();
 
         if (context.Batch.IsSkipping)
             return true;
@@ -2229,17 +2234,20 @@ partial class Simulation
         RejectOnMemoryOptimized(table, "The operation 'ALTER TABLE REBUILD'", 126);
         if (namedPartitionList && table.Partitioning is null)
             throw SimulatedSqlException.PartitionNumberOnUnpartitionedTable(table.Name);
-        if (namedPartition)
+        long? rebuiltPartition = null;
+        if (partitionNumber is not null)
         {
             // The rebuild is of the heap or the clustered index, which a
             // partition number is checked against by name.
+            var number = ReadPartitionNumber(context.Batch, partitionNumber, "ALTER TABLE", "table", table.Name);
+            rebuiltPartition = number;
             var clusteredName = table.KeyConstraints.Count > 0 ? table.KeyConstraints[0].Name : null;
             if (clusteredName is not null)
-                RejectPartitionNumber(partitionNumber, table.Partitioning, clusteredName);
+                RejectPartitionNumber(number, table.Partitioning, clusteredName, table.Name);
             else if (table.Partitioning is not { } heapPlacement)
                 throw SimulatedSqlException.RebuildPartitionOnUnpartitioned(alterIndex: false, indexName: null, table.Name);
-            else if (partitionNumber < 1 || partitionNumber > heapPlacement.Fanout)
-                throw SimulatedSqlException.AlterTablePartitionNotFound(partitionNumber, table.Name);
+            else if (number > heapPlacement.Fanout)
+                throw SimulatedSqlException.AlterTablePartitionNotFound(number, table.Name);
         }
 
         // Rebuilding a clustered columnstore table recompresses its index
@@ -2251,27 +2259,29 @@ partial class Simulation
             else if (compressionLevel.Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase))
                 columnstore.ColumnstoreArchive = false;
         }
-        else if (compressionLevel is not null || xmlCompression is not null)
+        else if (compressionLevel is not null || xmlCompression is not null || partitionCompressions is not null)
         {
             // A rowstore rebuild recompresses the rows: the heap's, or the
-            // clustered index's that holds them (probed 2026-10-05).
+            // clustered index's that holds them (probed 2026-10-05), a
+            // partition's alone when it names one.
             byte? level = compressionLevel is null ? null
                 : compressionLevel.Equals("ROW", StringComparison.OrdinalIgnoreCase) ? (byte)1
                 : compressionLevel.Equals("PAGE", StringComparison.OrdinalIgnoreCase) ? (byte)2
                 : (byte)0;
+            var options = new IndexOptions(false, null, null, dataCompression: level, partitionCompressions: partitionCompressions);
             if (table.KeyConstraints.Find(static key => key.IsClustered) is { } clusteredKey)
             {
-                clusteredKey.DataCompression = level ?? clusteredKey.DataCompression;
+                ApplyRebuildCompression(ref clusteredKey.DataCompression, ref clusteredKey.PartitionDataCompression, options, rebuiltPartition, table.Partitioning, table.Name, "table");
                 clusteredKey.XmlCompression = xmlCompression ?? clusteredKey.XmlCompression;
             }
             else if (table.Indexes.Find(static index => index.IsClustered) is { } clusteredIndex)
             {
-                clusteredIndex.DataCompression = level ?? clusteredIndex.DataCompression;
+                ApplyRebuildCompression(ref clusteredIndex.DataCompression, ref clusteredIndex.PartitionDataCompression, options, rebuiltPartition, table.Partitioning, table.Name, "table");
                 clusteredIndex.XmlCompression = xmlCompression ?? clusteredIndex.XmlCompression;
             }
             else
             {
-                table.HeapDataCompression = level ?? table.HeapDataCompression;
+                ApplyRebuildCompression(ref table.HeapDataCompression, ref table.HeapPartitionDataCompression, options, rebuiltPartition, table.Partitioning, table.Name, "table");
                 table.HeapXmlCompression = xmlCompression ?? table.HeapXmlCompression;
             }
         }
@@ -2286,10 +2296,11 @@ partial class Simulation
     /// caller raises real's refusal once the table has resolved. Cursor on
     /// entry: the token after the PARTITION clause. On exit: past the block.
     /// </summary>
-    private static bool ParseOptionalRebuildOptions(ParserContext context, out string? compressionLevel, out bool? xmlCompression)
+    private static bool ParseOptionalRebuildOptions(ParserContext context, out string? compressionLevel, out bool? xmlCompression, out List<PartitionCompressionClause>? partitionCompressions)
     {
         compressionLevel = null;
         xmlCompression = null;
+        partitionCompressions = null;
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             return false;
         if (context.GetNextRequired() is not Operator { Character: '(' })
@@ -2307,6 +2318,7 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNear(context);
 
             var value = context.GetNextRequired();
+            string? writtenLevel = null;
             if (!bareWordValue)
             {
                 if (value is not Numeric)
@@ -2316,7 +2328,7 @@ partial class Simulation
             {
                 if (!DataCompressionLevels.Contains(value.Source.ToString()))
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                compressionLevel = value.Source.ToString();
+                writtenLevel = value.Source.ToString();
             }
             else if (value is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } toggle)
             {
@@ -2338,8 +2350,26 @@ partial class Simulation
                 onPartitions = true;
                 if (context.GetNextRequired() is not Operator { Character: '(' })
                     throw SimulatedSqlException.SyntaxErrorNear(context);
-                SkipBalancedParens(context);
+                var ranges = ReadPartitionRanges(context);
+                if (writtenLevel is not null)
+                {
+                    // Named for the whole table and for partitions is Msg 7711
+                    // (probed 2026-10-05 against SQL Server 2025).
+                    if (compressionLevel is not null)
+                        throw SimulatedSqlException.DataCompressionSpecifiedTwice();
+                    var partitionLevel = writtenLevel.Equals("ROW", StringComparison.OrdinalIgnoreCase) ? (byte)1
+                        : writtenLevel.Equals("PAGE", StringComparison.OrdinalIgnoreCase) ? (byte)2
+                        : (byte)0;
+                    (partitionCompressions ??= []).Add(new PartitionCompressionClause(partitionLevel, ranges));
+                    writtenLevel = null;
+                }
                 context.MoveNextRequired();
+            }
+            if (writtenLevel is not null)
+            {
+                if (partitionCompressions is not null)
+                    throw SimulatedSqlException.DataCompressionSpecifiedTwice();
+                compressionLevel = writtenLevel;
             }
 
             if (context.Token is not Operator { Character: ',' })

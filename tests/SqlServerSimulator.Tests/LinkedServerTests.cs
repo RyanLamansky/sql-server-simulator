@@ -220,13 +220,13 @@ public class LinkedServerTests
         var local = new Simulation();
         local.AddRemoteSimulation("OTHER", remote);
         local.AddRemoteSimulation("THIRD", new Simulation());
-        _ = local.ExecuteNonQuery("exec sp_addlinkedserver @server = 'OTHER', @srvproduct = 'My Product', @provider = 'My Provider', @datasrc = 'My Source'");
+        _ = local.ExecuteNonQuery("exec sp_addlinkedserver @server = 'OTHER', @srvproduct = 'My Product', @provider = 'SQLNCLI11', @datasrc = 'My Source'");
         _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'THIRD', 'SQL Server'");
 
         AreEqual(3, local.ExecuteScalar("select count(*) from sys.servers"));
         AreEqual(2, local.ExecuteScalar("select count(*) from sys.servers where is_linked = 1"));
         AreEqual("My Product", local.ExecuteScalar("select product from sys.servers where name = 'OTHER'"));
-        AreEqual("My Provider", local.ExecuteScalar("select provider from sys.servers where name = 'OTHER'"));
+        AreEqual("SQLNCLI11", local.ExecuteScalar("select provider from sys.servers where name = 'OTHER'"));
         AreEqual("My Source", local.ExecuteScalar("select data_source from sys.servers where name = 'OTHER'"));
     }
 
@@ -280,7 +280,7 @@ public class LinkedServerTests
     /// on every import.
     /// </summary>
     [TestMethod]
-    public void SpAddLinkedServer_Idempotent()
+    public void SpAddLinkedServer_ExistingName_Msg15028_DropThenAddRebinds()
     {
         var remoteA = new Simulation();
         _ = remoteA.ExecuteNonQuery("create table dbo.t (id int); insert t values (1)");
@@ -293,7 +293,10 @@ public class LinkedServerTests
         AreEqual(1, local.ExecuteScalar("select count(*) from X.simulated.dbo.t"));
 
         local.AddRemoteSimulation("X", remoteB);
-        _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'X'");
+        var error = local.AssertSqlError("exec sp_addlinkedserver 'x'", 15028);
+        AreEqual("The server 'x' already exists.", error.Errors[0].Message);
+        AreEqual(102, error.LineNumber);
+        _ = local.ExecuteNonQuery("exec sp_dropserver 'X'; exec sp_addlinkedserver 'X'");
         AreEqual(2, local.ExecuteScalar("select count(*) from X.simulated.dbo.t"));
     }
 
@@ -345,5 +348,146 @@ public class LinkedServerTests
         AreEqual("SIMULATED||||SIMULATED|11011", local.ExecuteScalar($"select {Flags} from sys.servers where server_id = 0"));
         using var reader = local.ExecuteReader("select * from sys.servers");
         AreEqual(26, reader.FieldCount);
+    }
+
+    /// <summary>
+    /// sp_addlinkedserver's product and provider rules, its transaction and
+    /// duplicate refusals, and where it reports each (probed 2026-10-05 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_addlinkedserver 'X', 'SQL Server', @datasrc = 'h'", 15426, 24, "sp_addlinkedserver")]
+    [DataRow("exec sp_addlinkedserver 'X', ''", 15427, 31, "sp_addlinkedserver")]
+    [DataRow("exec sp_addlinkedserver 'X', 'SQL Server', 'MSOLEDBSQL'", 15428, 41, "sp_addlinkedserver")]
+    [DataRow("exec sp_addlinkedserver 'X', null, 'MSOLEDBSQL'", 15429, 46, "sp_addlinkedserver")]
+    [DataRow("exec sp_addlinkedserver 'X', '', 'MSDASQL'", 7222, 60, "sys.sp_MSaddserver_internal")]
+    [DataRow("exec sp_addlinkedserver 'X', '', 'MSOLEDBSQL', @linkedstyle = 0", 15663, 60, "sys.sp_MSaddserver_internal")]
+    [DataRow("begin tran; exec sp_addlinkedserver 'X'", 15002, 54, "sp_addlinkedserver")]
+    [DataRow("exec sp_addlinkedserver ''", 15004, 17, "sys.sp_validname")]
+    [DataRow("exec sp_addlinkedserver 'X', '', 'MSOLEDBSQL', @linkedstyle = 'x'", 8114, 0, "sp_addlinkedserver")]
+    public void SpAddLinkedServer_RealRefusals(string sql, int number, int line, string procedure)
+    {
+        var local = new Simulation();
+        local.AddRemoteSimulation("X", new Simulation());
+        var error = local.AssertSqlError(sql, number);
+        AreEqual(line, error.LineNumber);
+        AreEqual(procedure, error.Procedure);
+    }
+
+    /// <summary>
+    /// A product spelled 'sql server' is SQL Server's, SQLOLEDB is recorded as
+    /// SQLNCLI, and the nvarchar(4000) properties keep what fits (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SpAddLinkedServer_RecordsAsReal()
+    {
+        var local = new Simulation();
+        local.AddRemoteSimulation("X", new Simulation());
+        local.AddRemoteSimulation("Y", new Simulation());
+        _ = local.ExecuteNonQuery($"exec sp_addlinkedserver 'X', 'sql server'; exec sp_addlinkedserver 'Y', '', 'SQLOLEDB', '{new string('h', 5000)}'");
+        AreEqual("X|SQL Server|SQLNCLI|X", local.ExecuteScalar("select concat(name, '|', product, '|', provider, '|', data_source) from sys.servers where name = 'X'"));
+        AreEqual("SQLNCLI|4000", local.ExecuteScalar("select concat(provider, '|', len(data_source)) from sys.servers where name = 'Y'"));
+    }
+
+    /// <summary>
+    /// Every sp_serveroption setting reaches sys.servers; an on/off option takes
+    /// only true / on / false / off, system only the first two, a timeout a
+    /// whole number and collation name a collation (probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    public void SpServerOption_EveryOption()
+    {
+        var local = new Simulation();
+        local.AddRemoteSimulation("X", new Simulation());
+        _ = local.ExecuteNonQuery("""
+            exec sp_addlinkedserver 'X', '', 'MSOLEDBSQL';
+            exec sp_serveroption 'X', 'collation compatible', 'true';
+            exec sp_serveroption 'X', 'lazy schema validation', 'on';
+            exec sp_serveroption 'X', 'use remote collation', 'off';
+            exec sp_serveroption 'X', 'collation name', 'Latin1_General_BIN';
+            exec sp_serveroption 'X', 'rpc', 'true';
+            exec sp_serveroption 'X', 'pub', 'true';
+            exec sp_serveroption 'X', 'sub', 'true';
+            exec sp_serveroption 'X', 'dist', 'true';
+            exec sp_serveroption 'X', 'system', 'true';
+            exec sp_serveroption 'X', 'connect timeout', '10';
+            exec sp_serveroption 'X', 'query timeout', 30;
+            """);
+        AreEqual("1|1|0|Latin1_General_BIN|1|1|1|1|1|10|30", local.ExecuteScalar("""
+            select concat_ws('|', cast(is_collation_compatible as int), cast(lazy_schema_validation as int), cast(uses_remote_collation as int), collation_name,
+                cast(is_remote_login_enabled as int), cast(is_publisher as int), cast(is_subscriber as int), cast(is_distributor as int), cast(is_system as int), connect_timeout, query_timeout)
+            from sys.servers where name = 'X'
+            """));
+        foreach (var refused in (string[])["'system', 'off'", "'connect timeout', 'true'", "'query timeout', '-1'", "'collation name', 'bogus'", "'rpc', '1'"])
+            _ = local.AssertSqlError($"exec sp_serveroption 'X', {refused}", 15600);
+    }
+
+    /// <summary>
+    /// A linked server maps every login to itself until sp_addlinkedsrvlogin
+    /// replaces the mapping; sys.linked_logins and sp_helplinkedsrvlogin list
+    /// them, sp_dropserver keeps a server mapping one without 'droplogins'
+    /// (Msg 15190), and a server mapping none refuses access (Msg 7416) —
+    /// probed 2026-10-05 against SQL Server 2025.
+    /// </summary>
+    [TestMethod]
+    public void LinkedLogins()
+    {
+        var remote = new Simulation();
+        _ = remote.ExecuteNonQuery("create table t (id int)");
+        var local = new Simulation();
+        local.AddRemoteSimulation("X", remote);
+        _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'X', '', 'MSOLEDBSQL'");
+        const string Logins = "select string_agg(concat(local_principal_id, '|', cast(uses_self_credential as int), '|', remote_name), ';') from sys.linked_logins";
+        AreEqual("0|1|", local.ExecuteScalar(Logins));
+        _ = local.ExecuteNonQuery("exec sp_addlinkedsrvlogin 'X', 'false', null, 'r', 'p'");
+        AreEqual("0|0|r", local.ExecuteScalar(Logins));
+        AreEqual("X||0|r", local.ExecuteScalar("""
+            create table #h (s sysname, l sysname null, m smallint, r sysname null);
+            insert #h exec sp_helplinkedsrvlogin 'X';
+            select concat(s, '|', l, '|', m, '|', r) from #h
+            """));
+        AreEqual(15600, local.AssertSqlError("exec sp_addlinkedsrvlogin 'X', 'maybe'", 15600).Number);
+        AreEqual(80, local.AssertSqlError("exec sp_addlinkedsrvlogin 'X', 'false', 'nosuch'", 15007).LineNumber);
+        AreEqual(56, local.AssertSqlError("exec sp_dropserver 'X'", 15190).LineNumber);
+        _ = local.ExecuteNonQuery("exec sp_droplinkedsrvlogin 'X', null");
+        _ = local.AssertSqlError("select * from X.simulated.dbo.t", 7416);
+        _ = local.ExecuteNonQuery("exec sp_dropserver 'X'");
+        AreEqual(0, local.ExecuteScalar("select count(*) from sys.servers where name = 'X'"));
+        AreEqual(0, local.ExecuteScalar("select count(*) from sys.remote_logins"));
+    }
+
+    /// <summary>
+    /// A synonym over a four-part name reads the linked server's table, and a
+    /// four-part name called as a function is Msg 4122 (probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    public void SynonymOverFourPartName_AndRemoteFunctionCall()
+    {
+        var remote = new Simulation();
+        _ = remote.ExecuteNonQuery("create table t (id int); insert t values (1), (2)");
+        var local = new Simulation();
+        local.AddRemoteSimulation("X", remote);
+        _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'X'; create synonym s for X.simulated.dbo.t");
+        AreEqual(3, local.ExecuteScalar("select sum(s.id) from s"));
+        _ = local.AssertSqlError("select * from X.simulated.dbo.f()", 4122);
+    }
+
+    /// <summary>
+    /// The provider lists a decimal as numeric, a smallmoney as money and a
+    /// sysname as nvarchar (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void FourPartRead_ProviderTypes()
+    {
+        var remote = new Simulation();
+        _ = remote.ExecuteNonQuery("create table t (d decimal(5, 2), m smallmoney, n sysname); insert t values (1.25, 1.5, 'x')");
+        var local = new Simulation();
+        local.AddRemoteSimulation("X", remote);
+        _ = local.ExecuteNonQuery("exec sp_addlinkedserver 'X'");
+        AreEqual("numeric;money;nvarchar|1.50", local.ExecuteScalar("""
+            select * into #x from X.simulated.dbo.t;
+            select concat((select string_agg(type_name(user_type_id), ';') within group (order by column_id) from tempdb.sys.columns where object_id = object_id('tempdb..#x')), '|', (select m from #x))
+            """));
     }
 }

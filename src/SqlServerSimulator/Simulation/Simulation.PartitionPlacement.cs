@@ -97,6 +97,10 @@ partial class Simulation
             ?? throw SimulatedSqlException.PartitionColumnNotFound(columns[0]);
         if (column.Computed is not null && !column.IsPersisted)
             throw SimulatedSqlException.PartitionColumnNotPersisted(column.Name, table.Name);
+        // A sparse column keys nothing, a partition included (probed
+        // 2026-10-05 against SQL Server 2025).
+        if (column.IsSparse)
+            throw SimulatedSqlException.VectorKeyColumnInvalid(column.Name, table.Name, state: 2);
         var parameterType = function.ParameterType;
         var parameterColumn = new HeapColumn(string.Empty, parameterType, function.DeclaredMaxLength, nullable: true);
         if (column.Type.SystemTypeId != parameterType.SystemTypeId
@@ -153,7 +157,7 @@ partial class Simulation
         {
             if (!key.IsClustered)
                 continue;
-            table.Partitioning = key.WrittenDataSpace is { } clustered ? ResolveDataSpaceClause(batch, clustered, table) : rows;
+            table.Partitioning = key.WrittenDataSpace is { } clustered ? ResolveKeyDataSpaceClause(batch, clustered, table) : rows;
             table.FilegroupId = FilegroupFor(batch, table, key.WrittenDataSpace);
             RequirePartitionColumnInUniqueKey(table.Partitioning, table, key.FullOrdinals, key.Name, isConstraint: true);
         }
@@ -161,7 +165,7 @@ partial class Simulation
         {
             if (key.IsClustered)
                 continue;
-            key.Partitioning = PlacementFor(batch, table, key.WrittenDataSpace);
+            key.Partitioning = key.WrittenDataSpace is { } nonclustered ? ResolveKeyDataSpaceClause(batch, nonclustered, table) : table.Partitioning;
             key.FilegroupId = FilegroupFor(batch, table, key.WrittenDataSpace);
             RequirePartitionColumnInUniqueKey(key.Partitioning, table, key.FullOrdinals, key.Name, isConstraint: true);
         }
@@ -174,6 +178,22 @@ partial class Simulation
         }
         if (fileStreamOn)
             throw SimulatedSqlException.FileStreamOnWithoutFileStreamColumns();
+    }
+
+    /// <summary>
+    /// A key constraint's own placement clause, whose refusals real follows
+    /// with Msg 1750 (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    private static PartitionPlacement? ResolveKeyDataSpaceClause(BatchContext batch, DataSpaceClause clause, HeapTable table)
+    {
+        try
+        {
+            return ResolveDataSpaceClause(batch, clause, table);
+        }
+        catch (SimulatedSqlException error) when (error.Number != 1750)
+        {
+            throw SimulatedSqlException.FollowedByConstraintNotCreated(error);
+        }
     }
 
     /// <summary>The database a table's placement names filegroups of — its own, or <c>tempdb</c> for a temporary one.</summary>

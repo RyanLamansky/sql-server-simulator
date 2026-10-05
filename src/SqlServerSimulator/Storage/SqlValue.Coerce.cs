@@ -1517,7 +1517,11 @@ internal readonly partial struct SqlValue
         if (Ascii.IsValid(text))
             return FromString(target, text);
         var stored = RowEncoder.StorageForm(FromString(target, text), target);
-        var budget = sourceLength ?? (target is VarcharSqlType { length: > 0 } bounded ? bounded.length : (int?)null);
+        // A declared target length is the budget — a column written takes
+        // what fits it (probed 2026-10-05 against SQL Server 2025: a varchar(1)
+        // literal 'é' stores whole in a varchar(10) UTF-8 column) — else the
+        // source's own.
+        var budget = target is VarcharSqlType { length: > 0 } bounded ? bounded.length : sourceLength;
         return target is VarcharSqlType && budget is int bytes
             && Collation.ClipToByteBudget(stored.AsString, bytes, targetCollation.StorageEncoding) is var clipped
             && clipped.Length != stored.AsString.Length

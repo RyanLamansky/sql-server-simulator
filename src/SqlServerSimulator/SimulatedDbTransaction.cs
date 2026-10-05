@@ -180,6 +180,9 @@ public sealed class SimulatedDbTransaction : DbTransaction
         public readonly int VersionEntryCount = versionEntryCount;
     }
 
+    /// <summary>Whether a savepoint is set, which keeps the transaction from being promoted to a distributed one.</summary>
+    internal bool HasSavepoint => this.savepoints.Count > 0;
+
     /// <summary>Sets a savepoint named <paramref name="name"/> at the transaction's current position.</summary>
     internal void SetSavepoint(string name) =>
         this.savepoints.Add(new Savepoint(name, this.UndoLog.Position, this.PendingVersionEntries.Count));

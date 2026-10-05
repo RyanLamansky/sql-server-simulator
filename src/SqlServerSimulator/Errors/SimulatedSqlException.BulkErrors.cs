@@ -186,10 +186,11 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Msg 7222: an ad hoc rowset over a provider other than SQL Server's,
-    /// which the Linux server has none of.
+    /// which the Linux server has none of (state 255), or a linked server
+    /// declared over one (state 1, probed 2026-10-05 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException OnlySqlServerProviderAllowed() =>
-        new("Only a SQL Server provider is allowed on this instance.", 7222, 16, 255);
+    internal static SimulatedSqlException OnlySqlServerProviderAllowed(byte state = 255) =>
+        new("Only a SQL Server provider is allowed on this instance.", 7222, 16, state);
 
     /// <summary>
     /// Msg 7302: <c>OPENDATASOURCE</c>, whose data-link component the Linux

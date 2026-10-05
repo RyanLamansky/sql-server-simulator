@@ -71,6 +71,10 @@ internal sealed class LinkedServer(string name, Simulation target, string srvPro
     /// </summary>
     public SimulatedDbConnection OpenSession(string? database)
     {
+        // A server mapping no login lets no one in (probed 2026-10-05 against
+        // SQL Server 2025).
+        if (this.Logins.Count == 0)
+            throw SimulatedSqlException.NoLoginMapping();
         var connection = this.Target.CreateDbConnection();
         connection.Open();
         connection.ChangeDatabase(database ?? this.SessionDatabaseName);
@@ -114,6 +118,43 @@ internal sealed class LinkedServer(string name, Simulation target, string srvPro
     /// </summary>
     public bool RemoteProcTransactionPromotion = true;
 
+    /// <summary><c>sp_serveroption … 'rpc'</c>: <c>sys.servers.is_remote_login_enabled</c>, seeded on for a <c>SQL Server</c> product.</summary>
+    public bool RemoteLogin = srvProduct.Equals("SQL Server", StringComparison.OrdinalIgnoreCase);
+
+    // The sp_serveroption settings only the catalog reports (probed
+    // 2026-10-05 against SQL Server 2025): sys.servers' columns of the same
+    // meaning, at real's defaults.
+
+    /// <summary><c>collation compatible</c>.</summary>
+    public bool CollationCompatible;
+
+    /// <summary><c>use remote collation</c>, on by default.</summary>
+    public bool UseRemoteCollation = true;
+
+    /// <summary><c>collation name</c>, NULL until set.</summary>
+    public string? CollationName;
+
+    /// <summary><c>lazy schema validation</c>.</summary>
+    public bool LazySchemaValidation;
+
+    /// <summary><c>system</c>, which can be turned on but not off.</summary>
+    public bool IsSystem;
+
+    /// <summary><c>pub</c>, <c>sub</c> and <c>dist</c>: the replication roles.</summary>
+    public bool Publisher, Subscriber, Distributor;
+
+    /// <summary><c>connect timeout</c> and <c>query timeout</c> in seconds, 0 for the server's default.</summary>
+    public int ConnectTimeout, QueryTimeout;
+
+    /// <summary>
+    /// The login mappings <c>sys.linked_logins</c> lists: <c>sp_addlinkedserver</c>
+    /// adds the self-mapping for every login (principal 0), and
+    /// <c>sp_addlinkedsrvlogin</c> / <c>sp_droplinkedsrvlogin</c> replace and
+    /// remove entries. A server whose list is empty refuses every access with
+    /// Msg 7416.
+    /// </summary>
+    public readonly List<LinkedLogin> Logins = [new LinkedLogin(0, usesSelf: true, remoteName: null, createDate)];
+
     /// <summary>
     /// A loopback: the server names the <see cref="Simulation"/> that defines
     /// it. Real refuses a distributed transaction over a loopback with Msg 3910
@@ -131,4 +172,17 @@ internal sealed class LinkedServer(string name, Simulation target, string srvPro
         this.Provider.StartsWith("SQLNCLI", StringComparison.OrdinalIgnoreCase) || this.Provider.StartsWith("MSOLEDBSQL", StringComparison.OrdinalIgnoreCase)
             ? "MSOLEDBSQL19"
             : this.Provider;
+}
+
+/// <summary>
+/// One row of <c>sys.linked_logins</c>: the local login a mapping is for
+/// (principal 0 for every login), whether it connects as itself, else the
+/// remote login it connects as.
+/// </summary>
+internal sealed class LinkedLogin(int localPrincipalId, bool usesSelf, string? remoteName, DateTime modifyDate)
+{
+    public readonly int LocalPrincipalId = localPrincipalId;
+    public readonly bool UsesSelf = usesSelf;
+    public readonly string? RemoteName = remoteName;
+    public readonly DateTime ModifyDate = modifyDate;
 }

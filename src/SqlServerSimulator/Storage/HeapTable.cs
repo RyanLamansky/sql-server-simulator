@@ -361,6 +361,9 @@ internal sealed class HeapTable : SchemaObject
     /// </summary>
     public byte HeapDataCompression;
 
+    /// <summary>Each partition's <c>DATA_COMPRESSION</c> once a partitioned rowset's partitions differ (<see cref="PartitionCompression"/>), else null.</summary>
+    public List<byte>? HeapPartitionDataCompression;
+
     /// <summary>The heap's own <c>XML_COMPRESSION</c>, alongside <see cref="HeapDataCompression"/>.</summary>
     public bool HeapXmlCompression;
 

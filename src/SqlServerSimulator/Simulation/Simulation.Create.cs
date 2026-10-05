@@ -182,7 +182,7 @@ partial class Simulation
         }
         SystemVersioningOptions? systemVersioning = null;
         var memoryOptimization = default(MemoryOptimizationOptions);
-        (byte? Data, bool? Xml) tableCompression = default;
+        (byte? Data, bool? Xml, List<PartitionCompressionClause>? Partitions) tableCompression = default;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
             systemVersioning = ParseTableOptions(context, tableDataSpace is not null, out memoryOptimization, out tableCompression);
         var memoryOptimized = memoryOptimization.MemoryOptimized;
@@ -468,6 +468,8 @@ partial class Simulation
         }
         AttachGraphColumns(heapTable);
         PlaceNewTable(context.Batch, heapTable, tableDataSpace, textImageOn, fileStreamOn);
+        if (tableCompression.Partitions is { } compressionClauses)
+            ApplyTablePartitionCompression(heapTable, Array.Find(keyConstraints, static key => key.IsClustered), tableCompression.Data, compressionClauses);
         if (isGlobalTempTable)
             heapTable.OwnerSession = context.Batch.Connection.Session;
         if (isLocalTempTable)
@@ -681,7 +683,7 @@ partial class Simulation
     /// closing <c>)</c>. Returns the system-versioning options, or null when
     /// none were given.
     /// </summary>
-    private static SystemVersioningOptions? ParseTableOptions(ParserContext context, bool placed, out MemoryOptimizationOptions memoryOptimization, out (byte? Data, bool? Xml) compression)
+    private static SystemVersioningOptions? ParseTableOptions(ParserContext context, bool placed, out MemoryOptimizationOptions memoryOptimization, out (byte? Data, bool? Xml, List<PartitionCompressionClause>? Partitions) compression)
     {
         compression = default;
         if (context.GetNextRequired() is not Operator { Character: '(' })
@@ -715,10 +717,13 @@ partial class Simulation
                     {
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     }
-                    compression.Data = level.Span.Equals("ROW", StringComparison.OrdinalIgnoreCase) ? (byte)1
+                    var tableLevel = level.Span.Equals("ROW", StringComparison.OrdinalIgnoreCase) ? (byte)1
                         : level.Span.Equals("PAGE", StringComparison.OrdinalIgnoreCase) ? (byte)2
                         : (byte)0;
-                    RejectOnPartitions(context);
+                    if (FollowedByOnPartitions(context))
+                        (compression.Partitions ??= []).Add(new PartitionCompressionClause(tableLevel, ReadOnPartitionsList(context)));
+                    else
+                        compression.Data = tableLevel;
                     dataCompression = true;
                     break;
                 case StringToken name when name.Span.Equals("XML_COMPRESSION", StringComparison.OrdinalIgnoreCase):
@@ -772,6 +777,30 @@ partial class Simulation
     {
         public readonly bool MemoryOptimized = memoryOptimized;
         public readonly byte Durability = durability;
+    }
+
+    /// <summary>
+    /// A <c>CREATE TABLE</c>'s <c>DATA_COMPRESSION … ON PARTITIONS (…)</c>
+    /// clauses, applied to the rows' rowset — the heap, or the clustered key
+    /// declared with the table: an unpartitioned table refuses them with Msg
+    /// 7729 in the create table wording, or for a clustered key the create
+    /// index wording followed by Msg 1750, and a number past the partitions is
+    /// Msg 7722 (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    private static void ApplyTablePartitionCompression(HeapTable table, KeyConstraint? clusteredKey, byte? wholeLevel, List<PartitionCompressionClause> clauses)
+    {
+        if (table.Partitioning is not { } placement)
+        {
+            throw clusteredKey is null
+                ? SimulatedSqlException.PartitionNumberOnUnpartitionedCreateTable(table.Name)
+                : SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.PartitionNumberOnUnpartitionedCreate());
+        }
+        var levels = PartitionCompression.Apply(wholeLevel ?? 0, null, placement.Fanout, clauses,
+            number => SimulatedSqlException.InvalidPartitionNumber(number, table.Name, placement.Fanout));
+        if (clusteredKey is not null)
+            clusteredKey.PartitionDataCompression = levels;
+        else
+            table.HeapPartitionDataCompression = levels;
     }
 
     /// <summary>
@@ -1233,6 +1262,7 @@ partial class Simulation
         byte? dataCompression = null;
         bool? xmlCompression = null;
         var compressionOnPartitions = false;
+        List<PartitionCompressionClause>? partitionCompressions = null;
         var statisticsIncremental = false;
         var ignoreDupKeyWritten = false;
         var depth = 1;
@@ -1387,11 +1417,18 @@ partial class Simulation
                             : statement == IndexOptionStatement.Unchecked ? (byte)0
                             : throw SimulatedSqlException.SyntaxErrorNear(context);
                         var onPartitions = FollowedByOnPartitions(context);
-                        // Named twice for the whole object is Msg 7711 (probed
+                        // Named twice for the whole object, or for the whole
+                        // object and some partitions, is Msg 7711 (probed
                         // 2026-10-05 against SQL Server 2025).
-                        if (dataCompression is not null && !onPartitions && !compressionOnPartitions && statement != IndexOptionStatement.Unchecked)
+                        if (statement != IndexOptionStatement.Unchecked
+                            && (dataCompression is not null || (!onPartitions && partitionCompressions is not null)))
+                        {
                             throw SimulatedSqlException.DataCompressionSpecifiedTwice();
-                        dataCompression = compressionLevel;
+                        }
+                        if (onPartitions)
+                            (partitionCompressions ??= []).Add(new PartitionCompressionClause(compressionLevel, ReadOnPartitionsList(context)));
+                        else
+                            dataCompression = compressionLevel;
                         compressionOnPartitions |= onPartitions;
                     }
                     break;
@@ -1454,7 +1491,7 @@ partial class Simulation
         return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting, compressionDelay, columnstoreArchive, allowRowLocks, allowPageLocks, optimizeForSequentialKey,
             statisticsNoRecompute: statisticsNoRecompute, statisticsOnly: statisticsOnly, bucketCount: bucketCount,
             dataCompression: dataCompression, xmlCompression: xmlCompression, compressionOnPartitions: compressionOnPartitions, statisticsIncremental: statisticsIncremental,
-            ignoreDupKeyWritten: ignoreDupKeyWritten);
+            ignoreDupKeyWritten: ignoreDupKeyWritten, partitionCompressions: partitionCompressions);
     }
 
     /// <summary>
@@ -1735,9 +1772,43 @@ partial class Simulation
     };
 
     /// <summary>
-    /// Whether the token after a compression level is the <c>ON PARTITIONS</c>
-    /// suffix, leaving the cursor where it was.
+    /// Reads the <c>ON PARTITIONS ( n [ TO m ] [, …] )</c> list after a
+    /// compression level, the cursor on the level and left on the list's
+    /// closing parenthesis.
     /// </summary>
+    private static List<(long Low, long High)> ReadOnPartitionsList(ParserContext context)
+    {
+        context.MoveNextRequired();
+        context.MoveNextRequired();
+        if (context.GetNextRequired() is not Operator { Character: '(' })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        return ReadPartitionRanges(context);
+    }
+
+    /// <summary>
+    /// Reads a parenthesized list of partition numbers and <c>n TO m</c>
+    /// ranges, the cursor on its opening parenthesis and left on its closing one.
+    /// </summary>
+    internal static List<(long Low, long High)> ReadPartitionRanges(ParserContext context)
+    {
+        var ranges = new List<(long Low, long High)>();
+        while (true)
+        {
+            var low = context.GetNextRequired() is Numeric { Value: { IsNull: false } lowValue } ? lowValue.CoerceTo(SqlType.BigInt).AsInt64 : throw SimulatedSqlException.SyntaxErrorNear(context);
+            var high = low;
+            if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.To })
+            {
+                high = context.GetNextRequired() is Numeric { Value: { IsNull: false } highValue } ? highValue.CoerceTo(SqlType.BigInt).AsInt64 : throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextRequired();
+            }
+            ranges.Add((low, high));
+            if (context.Token is Operator { Character: ')' })
+                return ranges;
+            if (context.Token is not Operator { Character: ',' })
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+    }
+
     private static bool FollowedByOnPartitions(ParserContext context)
     {
         var checkpoint = context.SaveCheckpoint();

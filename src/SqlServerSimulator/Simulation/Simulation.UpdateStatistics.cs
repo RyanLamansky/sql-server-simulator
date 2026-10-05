@@ -89,11 +89,21 @@ partial class Simulation
             throw SimulatedSqlException.TableDoesNotExist(tableName.Leaf, state: 6);
         }
 
-        // Nothing here is partitioned, so no statistic is or can be incremental.
-        if (incremental)
-            throw SimulatedSqlException.StatisticsCannotBeIncremental();
-        if (onPartitions)
-            throw SimulatedSqlException.OnPartitionsNeedsIncrementalStatistics();
+        // An unpartitioned table's statistics can't be incremental; a
+        // partitioned table's can unless an index isn't partitioned, and takes
+        // ON PARTITIONS whatever its statistics are (probed 2026-10-05 against
+        // SQL Server 2025).
+        if (table?.Partitioning is null)
+        {
+            if (incremental)
+                throw SimulatedSqlException.StatisticsCannotBeIncremental();
+            if (onPartitions)
+                throw SimulatedSqlException.OnPartitionsNeedsIncrementalStatistics();
+        }
+        else if (incremental && indexes.Exists(identity => !identity.IsHeap && PlacementOf(table, identity) is null))
+        {
+            throw SimulatedSqlException.StatisticsCannotBeIncremental(state: 3);
+        }
 
         var collation = context.CurrentDatabase.Collation;
         foreach (var target in targets ?? [])

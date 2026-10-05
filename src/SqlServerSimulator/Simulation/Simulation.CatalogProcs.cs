@@ -886,7 +886,7 @@ partial class Simulation
         var owner = SqlValue.FromSystemName(schemaName);
         var tableNameValue = SqlValue.FromSystemName(table.Name);
         var indexQualifier = SqlValue.FromSystemName(table.Name);
-        var cardinality = SqlValue.FromInt32(table.Heap.RowCount);
+        var cardinality = SqlValue.FromInt32((int)table.Heap.CountLiveRows());
         var pages = SqlValue.FromInt32(table.Heap.Pages.Count);
         var nullShort = SqlValue.Null(SqlType.SmallInt);
         var nullName = SqlValue.Null(SqlType.SystemName);

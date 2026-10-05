@@ -19,7 +19,7 @@ public class LinkedServerWriteTests
             _ = remote.ExecuteNonQuery(remoteSetup);
         var local = new Simulation();
         local.AddRemoteSimulation("OTHER", remote);
-        _ = local.ExecuteNonQuery($"exec sp_addlinkedserver 'OTHER', '{product}'");
+        _ = local.ExecuteNonQuery(product == "SQL Server" ? "exec sp_addlinkedserver 'OTHER', 'SQL Server'" : $"exec sp_addlinkedserver 'OTHER', '{product}', 'MSOLEDBSQL'");
         return (local, remote);
     }
 
@@ -432,7 +432,7 @@ public class LinkedServerWriteTests
         _ = local.ExecuteNonQuery("exec sp_serveroption 'OTHER', 'rpc out', 'true'");
         AreEqual("master", local.ExecuteScalar("exec ('select db_name()') at OTHER"));
         AreEqual("master", local.ExecuteScalar("select d from openquery(OTHER, 'select db_name() d')"));
-        _ = local.ExecuteNonQuery("exec sp_dropserver 'OTHER'; exec sp_addlinkedserver 'OTHER', 'SQL Server', @catalog = 'cat'");
+        _ = local.ExecuteNonQuery("exec sp_dropserver 'OTHER'; exec sp_addlinkedserver 'OTHER', '', 'MSOLEDBSQL', @catalog = 'cat'");
         AreEqual("cat", local.ExecuteScalar("select d from openquery(OTHER, 'select db_name() d')"));
     }
 
@@ -545,4 +545,103 @@ public class LinkedServerWriteTests
         AreEqual(expected, local.ExecuteScalar(sql));
         _ = local.AssertSqlError("select id, v from OTHER.simulated.dbo.t", 7346);
     }
+
+    /// <summary>
+    /// An EXEC … AT whose last statement fails fails the call, which a TRY
+    /// catches, where an error the server's batch ran on past
+    /// reaches the client outside the caller's control flow (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ExecAt_FinalErrorFailsTheCall()
+    {
+        var (local, _) = Linked("");
+        _ = local.ExecuteNonQuery("exec sp_serveroption 'OTHER', 'rpc out', 'true'");
+        AreEqual(8134, local.ExecuteScalar("declare @n int; begin try exec ('select 1/0') at OTHER end try begin catch set @n = error_number() end catch; select @n"));
+        _ = local.ExecuteNonQuery("create table flag (n int)");
+        try
+        {
+            _ = local.ExecuteNonQuery("declare @n int = 0; begin try exec ('select 1/0; select 1') at OTHER; end try begin catch set @n = 1 end catch; insert flag values (@n)");
+        }
+        catch (SimulatedSqlException error) when (error.Number == 8134)
+        {
+        }
+        AreEqual(0, local.ExecuteScalar("select n from flag"));
+    }
+
+    /// <summary>
+    /// The provider refuses an EXEC … AT whose arguments don't match its
+    /// placeholders, or whose text is empty, with Msg 7215 after its own
+    /// account, and a count NOCOUNT withholds reads as none (probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    public void ExecAt_ProviderRefusalsAndNoCount()
+    {
+        var (local, _) = Linked("create table t (a int)");
+        _ = local.ExecuteNonQuery("exec sp_serveroption 'OTHER', 'rpc out', 'true'");
+        foreach (var call in (string[])["exec ('select ? a', 5, 6) at OTHER", "exec ('select ? a') at OTHER", "exec ('') at OTHER"])
+        {
+            var error = local.AssertSqlError(call, 7215);
+            CollectionAssert.AreEquivalent(new[] { 7215, 7412 }, error.Errors.Select(entry => entry.Number).ToArray());
+        }
+        AreEqual(0, local.ExecuteScalar("exec ('set nocount on; insert simulated.dbo.t values (1)') at OTHER; select @@rowcount"));
+    }
+
+    /// <summary>
+    /// A procedure call leaving a transaction open sends the provider's MARS
+    /// Msg 3997 ahead of its one Msg 266, and an error a procedure it ran
+    /// raises names that procedure by schema (probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    public void RemoteProcedure_OpenTransactionAndNestedErrors()
+    {
+        var (local, remote) = Linked("create table t (a int)");
+        _ = remote.ExecuteNonQuery("create procedure ptran as begin begin tran; insert t values (1); end");
+        _ = remote.ExecuteNonQuery("create procedure pinner as raiserror('inner', 16, 1)");
+        _ = remote.ExecuteNonQuery("create procedure pouter as exec pinner");
+        _ = local.ExecuteNonQuery("exec sp_serveroption 'OTHER', 'rpc out', 'true'");
+        var error = local.AssertSqlError("exec OTHER.simulated.dbo.ptran", 3997);
+        CollectionAssert.AreEqual(new[] { 3997, 266 }, error.Errors.Select(entry => entry.Number).ToArray());
+        AreEqual(0, remote.ExecuteScalar("select count(*) from t"));
+        AreEqual("dbo.pinner", local.AssertSqlError("exec OTHER.simulated.dbo.pouter", 50000).Procedure);
+    }
+
+    /// <summary>
+    /// An error the server raises reading a four-part name's rows reaches the
+    /// reader after the rows ahead of it and ends the batch (probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    public void FourPartRead_RemoteRuntimeErrorEndsTheBatch()
+    {
+        var (local, _) = Linked("create table t (id int); insert t values (1), (2); exec ('create view v as select id, 1 / (id - 2) d from t')");
+        var error = local.AssertSqlError("select * from OTHER.simulated.dbo.v; select 'after'", 8134);
+        AreEqual(1, error.LineNumber);
+    }
+
+    /// <summary>
+    /// The provider refuses an INSERT giving a NOT NULL column a NULL, or
+    /// listing a computed or rowversion column, with Msg 7344; an INSERT … EXEC
+    /// into a remote table needs a distributed transaction, and a transaction
+    /// holding a savepoint can't be promoted to one (probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    public void Writes_ProviderAndTransactionRefusals()
+    {
+        var (local, _) = Linked("create table t (id int primary key, v int)");
+        local.AssertSqlError("insert OTHER.simulated.dbo.t (id) values (null)", 7344,
+            "The OLE DB provider \"MSOLEDBSQL19\" for linked server \"OTHER\" could not INSERT INTO table \"[OTHER].[simulated].[dbo].[t]\" because of column \"id\". The data value violated the integrity constraints for the column.");
+        _ = local.AssertSqlError("insert OTHER.simulated.dbo.t exec ('select 1, 1')", 7391);
+        _ = local.AssertSqlError("begin tran; save tran s; insert OTHER.simulated.dbo.t values (1, 1)", 3933);
+    }
+
+    /// <summary>
+    /// An UPDATE through OPENQUERY setting a column its query computes is Msg
+    /// 7344, naming the provider in brackets, where a query reading no base
+    /// column opens no cursor (Msg 16955; probed 2026-10-05).
+    /// </summary>
+    [TestMethod]
+    public void OpenQueryUpdate_ComputedColumn_Msg7344()
+        => Linked("create table t (id int primary key, v int); insert t values (1, 1)").Local.AssertSqlError(
+            "update openquery(OTHER, 'select id, v + 1 c from simulated.dbo.t') set c = 1", 7344,
+            "The OLE DB provider \"MSOLEDBSQL19\" for linked server \"OTHER\" could not UPDATE table \"[MSOLEDBSQL19]\" because of column \"c\". The user did not have permission to write to the column.");
 }

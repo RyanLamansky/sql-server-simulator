@@ -3105,6 +3105,14 @@ partial class SimulatedSqlException
         new($"Cannot specify partition number in the create index statement as the index '{indexName}' is not partitioned.", 7729, 16, 3);
 
     /// <summary>
+    /// The <c>CREATE TABLE</c> wording of <see cref="PartitionNumberOnUnpartitionedCreate"/>,
+    /// which a heap's own <c>ON PARTITIONS</c> list earns (probed 2026-10-05
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException PartitionNumberOnUnpartitionedCreateTable(string tableName) =>
+        new($"Cannot specify partition number in the create table statement as the table '{tableName}' is not partitioned.", 7729, 16, 3);
+
+    /// <summary>
     /// Mimics SQL Server error 7735: the rebuild / reorganize flavour of the
     /// same refusal, which real raises where the statement named no single index
     /// — <c>ALTER INDEX ALL</c> and <c>ALTER TABLE … REBUILD</c>. The message

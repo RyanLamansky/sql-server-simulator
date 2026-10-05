@@ -105,6 +105,8 @@ partial class Simulation
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
             throw SimulatedSqlException.RemoteDmlTargetWithOutput();
         remoteWrite.InsertsDefaultValues = context.Token is ReservedKeyword { Keyword: Keyword.Default };
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } && !context.Batch.IsSkipping)
+            RemoteWrite.RefuseEnlistment(context.Batch, remoteWrite.Server);
         context.RestoreCheckpoint(checkpoint);
         return ProcessHeapInsert(remoteWrite.Proxy, context, top, destinationName);
     }

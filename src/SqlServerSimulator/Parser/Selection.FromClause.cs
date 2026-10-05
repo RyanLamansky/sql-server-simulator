@@ -1123,6 +1123,16 @@ internal sealed partial class Selection
                     }
                 }
 
+                // A synonym over a four-part name reads the linked server's
+                // table under the synonym's name (probed 2026-10-05 against
+                // SQL Server 2025).
+                string? linkedSynonymName = null;
+                if (objectName.Count < 4 && context.Batch.TryResolveSynonym(objectName, out var linkedSynonym) && linkedSynonym.BaseObject.Count == 4)
+                {
+                    linkedSynonymName = objectName.Leaf;
+                    objectName = linkedSynonym.BaseObject;
+                }
+
                 // fn_virtualfilestats: a 2-arg system TVF invoked bare or
                 // `sys.`-qualified. Handled after ParseObjectName (unlike the
                 // 1-part rowset functions above) precisely because it accepts
@@ -1183,6 +1193,13 @@ internal sealed partial class Selection
                 // lookups since those are 1- to 3-part forms).
                 if (objectName.Count == 4)
                 {
+                    // A four-part name called as a function is refused
+                    // outright (probed 2026-10-05 against SQL Server 2025).
+                    var callCheckpoint = context.SaveCheckpoint();
+                    var called = context.MoveNext() && context.Token is Operator { Character: '(' };
+                    context.RestoreCheckpoint(callCheckpoint);
+                    if (called)
+                        throw SimulatedSqlException.RemoteTableValuedFunctionCall();
                     context.Batch.BeginImplicitTransaction();
 
                     // The alias an UPDATE or DELETE named as its target makes
@@ -1208,7 +1225,7 @@ internal sealed partial class Selection
                         }
                         // Real checks the server's metadata compiling the
                         // batch, so a branch the batch never takes raises it.
-                        throw SimulatedSqlException.RemoteTableNotFound(RemoteWrite.ResolveServer(context.Batch, objectName[0]), RemoteWrite.QuotedName(objectName));
+                        throw SimulatedSqlException.RemoteTableNotFound(RemoteWrite.ResolveServer(context.Batch, objectName[0]), RemoteWrite.QuotedName(objectName), objectName[0]);
                     }
                     _ = RemoteWrite.ResolveServer(context.Batch, objectName[0]);
                     if (!context.Batch.IsSkipping && context.Connection.CurrentTransaction is { IsDistributed: true })
@@ -1220,7 +1237,7 @@ internal sealed partial class Selection
                     context.RemoteSourcesParsed++;
                     _ = ParseOptionalTableHints(context);
                     return new FromSource(
-                        qualifier: linkedAlias ?? remoteName,
+                        qualifier: linkedAlias ?? linkedSynonymName ?? remoteName,
                         columnNames: linkedColumnNames,
                         columns: remoteColumns,
                         storedSchema: remoteColumns,
@@ -1825,10 +1842,13 @@ internal sealed partial class Selection
                     // here so the columns keep coming from the remote result set
                     // rather than being silently renamed away.
                     if (context.Token is Operator { Character: '(' })
+                    {
+                        context.MoveNextRequired();
                         throw SimulatedSqlException.SyntaxErrorNear(context);
+                    }
                     var openQueryColumns = new HeapColumn[openQueryPlan.Schema.Length];
                     for (var ci = 0; ci < openQueryColumns.Length; ci++)
-                        openQueryColumns[ci] = new HeapColumn(openQueryPlan.ColumnNames[ci], openQueryPlan.Schema[ci], maxLength: null, nullable: true);
+                        openQueryColumns[ci] = new HeapColumn(openQueryPlan.ColumnNames[ci], openQueryPlan.Schema[ci], maxLength: null, nullable: openQueryPlan.ColumnNullability?[ci] ?? true, spelledNumeric: openQueryPlan.ColumnReportsNumeric?[ci] ?? false);
                     return new FromSource(
                         qualifier: openQueryAlias,
                         columnNames: openQueryPlan.ColumnNames,

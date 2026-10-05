@@ -13,10 +13,68 @@ partial class SimulatedSqlException
     /// <summary>
     /// Msg 7314: a four-part name, or the target of a write through one, names a
     /// table the server doesn't hold; <paramref name="quotedName"/> is each
-    /// written segment after the server's in double quotes.
+    /// written segment after the server's in double quotes, and a read names
+    /// the server as written. It ends the batch, even one that ran the
+    /// statement through dynamic SQL (probed 2026-10-05 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException RemoteTableNotFound(LinkedServer server, string quotedName) =>
-        new($"The OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\" does not contain the table \"{quotedName}\". The table either does not exist or the current user does not have permissions on that table.", 7314, 16, 1);
+    internal static SimulatedSqlException RemoteTableNotFound(LinkedServer server, string quotedName, string? writtenServer = null) =>
+        new($"The OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{writtenServer ?? server.Name}\" does not contain the table \"{quotedName}\". The table either does not exist or the current user does not have permissions on that table.", 7314, 16, 1) { TerminatesBatch = true };
+
+    // The linked-server procedures' refusals below were probed 2026-10-05
+    // against SQL Server 2025; the lines they report live in
+    // Simulation.SystemProcedureErrorSite.
+
+    /// <summary>Msg 15426: <c>sp_addlinkedserver</c> with properties and no provider.</summary>
+    internal static SimulatedSqlException LinkedServerNeedsProvider() =>
+        new("You must specify a provider name with this set of properties.", 15426, 16, 1);
+
+    /// <summary>Msg 15427: <c>sp_addlinkedserver</c> naming a product other than SQL Server and no provider.</summary>
+    internal static SimulatedSqlException LinkedServerUnknownProduct(string product) =>
+        new($"You must specify a provider name for unknown product '{product}'.", 15427, 16, 1);
+
+    /// <summary>Msg 15428: <c>sp_addlinkedserver</c> naming the <c>SQL Server</c> product and a provider.</summary>
+    internal static SimulatedSqlException LinkedServerSqlServerProductProperties() =>
+        new("You cannot specify a provider or any properties for product 'SQL Server'.", 15428, 16, 1);
+
+    /// <summary>Msg 15429: <c>sp_addlinkedserver</c> with a NULL product and a provider.</summary>
+    internal static SimulatedSqlException LinkedServerInvalidProduct(string product) =>
+        new($"'{product}' is an invalid product name.", 15429, 16, 1);
+
+    /// <summary>Msg 15663: <c>sp_addlinkedserver</c> with <c>@linkedstyle = 0</c>, the old remote-server form.</summary>
+    internal static SimulatedSqlException AddServerNoLongerSupported() =>
+        new("Feature \"sp_addserver\" is no longer supported. Replace remote servers by using linked servers.", 15663, 16, 1);
+
+    /// <summary>Msg 15028: <c>sp_addlinkedserver</c> naming a server that exists, as written.</summary>
+    internal static SimulatedSqlException LinkedServerAlreadyExists(string name) =>
+        new($"The server '{name}' already exists.", 15028, 16, 1);
+
+    /// <summary>Msg 15190: <c>sp_dropserver</c> without <c>'droplogins'</c> while the server maps a login.</summary>
+    internal static SimulatedSqlException LinkedServerHasLogins(string name) =>
+        new($"There are still remote logins or linked logins for the server '{name}'.", 15190, 16, 1);
+
+    /// <summary>
+    /// Msg 7215 at class 17: an <c>EXEC … AT</c> the provider refused before
+    /// sending — an empty text, or arguments that don't match its <c>?</c>
+    /// placeholders — after its own account as Msg 7412; it ends the batch.
+    /// </summary>
+    internal static SimulatedSqlException RemoteStatementNotExecuted(string serverName) =>
+        new($"Could not execute statement on remote server '{serverName}'.", 7215, 17, 1) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Msg 3933: work a linked server's enlistment would promote the session's
+    /// transaction for, while the transaction holds a savepoint; it aborts as
+    /// <see cref="DistributedTransactionUnavailable"/> does.
+    /// </summary>
+    internal static SimulatedSqlException CannotPromoteWithSavepoint() =>
+        new("Cannot promote the transaction to a distributed transaction because there is an active save point in this transaction.", 3933, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 4122: a four-part name called as a table-valued function in FROM.</summary>
+    internal static SimulatedSqlException RemoteTableValuedFunctionCall() =>
+        new("Remote table-valued function calls are not allowed.", 4122, 16, 1);
+
+    /// <summary>Msg 7416: a linked server reached by a login it maps no login for.</summary>
+    internal static SimulatedSqlException NoLoginMapping() =>
+        new("Access to the remote server is denied because no login-mapping exists.", 7416, 16, 1);
 
     /// <summary>Msg 7313: the target of a write through a four-part name omits its schema.</summary>
     internal static SimulatedSqlException RemoteSchemaOrCatalogInvalid(LinkedServer server) =>
@@ -26,10 +84,11 @@ partial class SimulatedSqlException
     /// Msg 7411: the server's <c>rpc out</c> option is off for <c>EXEC … AT</c>
     /// or a four-part procedure call (<paramref name="what"/> <c>RPC</c>), or
     /// its <c>data access</c> option is off for a four-part name or
-    /// <c>OPENQUERY</c> (<c>DATA ACCESS</c>).
+    /// <c>OPENQUERY</c> (<c>DATA ACCESS</c>). It ends the batch and rolls back
+    /// an open transaction (probed 2026-10-05 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException ServerNotConfiguredFor(string serverName, string what) =>
-        new($"Server '{serverName}' is not configured for {what}.", 7411, 16, 1);
+        new($"Server '{serverName}' is not configured for {what}.", 7411, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 7391: the work needs a distributed transaction the server's
@@ -74,6 +133,81 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException RemoteColumnNotWritable(LinkedServer server, string bracketedName, string columnName) =>
         new($"The OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\" could not INSERT INTO table \"{bracketedName}\" because of column \"{columnName}\". The user did not have permission to write to the column.", 7344, 16, 1);
+
+    /// <summary>
+    /// Msg 7344's account of a NULL an INSERT through a four-part name gives a
+    /// column the server keeps NOT NULL (probed 2026-10-05 against SQL Server
+    /// 2025); <paramref name="bracketedName"/> as <see cref="RemoteColumnNotWritable"/>'s.
+    /// </summary>
+    internal static SimulatedSqlException RemoteColumnValueViolatesIntegrity(LinkedServer server, string bracketedName, string columnName) =>
+        new($"The OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\" could not INSERT INTO table \"{bracketedName}\" because of column \"{columnName}\". The data value violated the integrity constraints for the column.", 7344, 16, 1);
+
+    /// <summary>
+    /// Msg 7344 state 2: an <c>UPDATE</c> through <c>OPENQUERY</c> setting a
+    /// column its query computes, which real names the table of as the
+    /// provider in brackets (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException RemoteColumnNotUpdatable(LinkedServer server, string columnName) =>
+        new($"The OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\" could not UPDATE table \"[{server.ProviderInMessages}]\" because of column \"{columnName}\". The user did not have permission to write to the column.", 7344, 16, 2);
+
+    /// <summary>
+    /// The refusals of an <c>OPENQUERY</c> whose query text is empty: the
+    /// provider's Msg 7412, then Msg 7399 and 7321 (probed 2026-10-05 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OpenQueryNoCommandText(BatchContext batch, LinkedServer server) =>
+        AfterProviderMessage(batch, server, "Command text was not set for the command object.", Aggregate(
+        [
+            new($"The OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\" reported an error. No command text was set.", 7399, 16, 1),
+            new($"An error occurred while preparing the query \"\" for execution against OLE DB provider \"{server.ProviderInMessages}\" for linked server \"{server.Name}\". ", 7321, 16, 2),
+        ]));
+
+    /// <summary>
+    /// <paramref name="error"/> carrying the provider's account of it, a
+    /// <see cref="ProviderMessage"/>, ahead of its own entries — for a refusal
+    /// raised before the statement runs, or one that ends the batch, which a
+    /// pending message wouldn't precede.
+    /// </summary>
+    internal static SimulatedSqlException AfterProviderMessage(BatchContext batch, LinkedServer server, string text, SimulatedSqlException error)
+    {
+        List<SimulatedError> entries = [ProviderMessage(batch, server, text), .. error.Errors];
+        return new(string.Join(Environment.NewLine, entries.Select(entry => entry.Message)), System.Runtime.InteropServices.CollectionsMarshal.AsSpan(entries))
+        {
+            diagnosticsResolved = error.diagnosticsResolved,
+            TerminatesBatch = error.TerminatesBatch,
+            AbortsAsUnderXactAbort = error.AbortsAsUnderXactAbort,
+        };
+    }
+
+    /// <summary>
+    /// The error a server raised preparing an <c>OPENQUERY</c>'s query — a
+    /// name that doesn't bind — after the provider's Msg 7412 and Msg 8180,
+    /// each at line 1, the query's (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OpenQueryNotPrepared(BatchContext batch, LinkedServer server, SimulatedSqlException compileError) =>
+        AfterProviderMessage(batch, server, "Deferred prepare could not be completed.", RemoteStatementNotPrepared(compileError));
+
+    /// <summary>
+    /// The error a server raised describing an <c>OPENQUERY</c>'s query that
+    /// doesn't parse, after its Msg 11529, both from
+    /// <c>sys.sp_describe_first_result_set</c> at line 1 (probed 2026-10-05
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OpenQueryNotDescribed(SimulatedSqlException syntaxError)
+    {
+        const string procedure = "sys.sp_describe_first_result_set";
+        var described = new SimulatedError(@class: 16, lineNumber: 1, "The metadata could not be determined because every code path results in an error; see previous errors for some of these.", 11529, procedure, SimulatedDbConnection.DataSourceName, SourceName, state: 1);
+        var cause = syntaxError.Errors[0];
+        var relayed = new SimulatedError(cause.Class, 1, cause.Message, cause.Number, procedure, cause.Server, cause.Source, cause.State);
+        return new SimulatedSqlException(described.Message + Environment.NewLine + relayed.Message, described, relayed) { diagnosticsResolved = true };
+    }
+
+    /// <summary>
+    /// Msg 492: an <c>OPENQUERY</c> or <c>OPENROWSET</c> rowset with two
+    /// columns of one name (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OpenQueryDuplicateColumn(string columnName) =>
+        new($"Duplicate column names are not allowed in result sets obtained through OPENQUERY and OPENROWSET. The column name \"{columnName}\" is a duplicate.", 492, 16, 1);
 
     /// <summary>
     /// Msg 405: a write whose target is remote carries an <c>OUTPUT</c> clause,
@@ -130,17 +264,24 @@ partial class SimulatedSqlException
     /// follow — each keeping its own number, line and server, and its state
     /// save 0, which arrives as 1. The class-0 entries come back as messages
     /// and the rest as one error, which names <paramref name="procedure"/> —
-    /// a remote procedure call's own spelling of it — when one is given, and
-    /// ends the batch when <paramref name="endsBatch"/> says so.
+    /// a remote procedure call's own spelling of it — when one is given and
+    /// the error is the called procedure's own, a procedure it ran by schema
+    /// and name, and ends the batch when <paramref name="endsBatch"/> says so.
     /// </summary>
     internal static (List<SimulatedError> Messages, SimulatedSqlException? Error) RelayedRemoteEntries(SimulatedSqlException remote, string? procedure, bool endsBatch)
     {
         var messages = new List<SimulatedError>();
         var errors = new List<SimulatedError>(remote.Errors.Count);
+        var calledLeaf = procedure?[(procedure.LastIndexOf('.') + 1)..];
         for (var i = remote.Errors.Count - 1; i >= 0; i--)
         {
             var entry = remote.Errors[i];
-            var procedureName = procedure ?? entry.Procedure;
+            // A procedure the called one runs is named with its schema
+            // (probed 2026-10-05 against SQL Server 2025).
+            var procedureName = procedure is null || entry.Number == 3997 ? entry.Procedure
+                : string.IsNullOrEmpty(entry.Procedure) || Collation.Baseline.Equals(entry.Procedure, calledLeaf) ? procedure
+                : entry.Procedure.Contains('.', StringComparison.Ordinal) ? entry.Procedure
+                : "dbo." + entry.Procedure;
             if (entry.Class == 0)
                 messages.Add(new SimulatedError(@class: 0, entry.LineNumber, entry.Message, entry.Number, procedureName, entry.Server, entry.Source, state: 1));
             else
@@ -156,25 +297,27 @@ partial class SimulatedSqlException
     /// provider can't carry — a four-part name's table or view that has one,
     /// named as written (<c>lb.db.dbo.t</c>) and reported at line 12 wherever
     /// the statement sits, or a rowset that returns one, which
-    /// <c>OPENQUERY</c> reports as <c>OPENQUERY</c> at its statement's line and
-    /// <c>EXEC … AT</c> or a remote procedure call as <c>IROWSET</c> at line 1,
-    /// ending the batch.
+    /// <c>OPENQUERY</c> reports as <c>OPENQUERY</c> and <c>EXEC … AT</c> or a
+    /// remote procedure call as <c>IROWSET</c>, each at its statement's line
+    /// (probed 2026-10-05 against SQL Server 2025), ending the batch.
     /// </summary>
     internal static SimulatedSqlException XmlInDistributedQuery(string remoteObject) =>
-        new($"Xml data type is not supported in distributed queries. Remote object '{remoteObject}' has xml column(s).", 9514, 16, 1);
+        new($"Xml data type is not supported in distributed queries. Remote object '{remoteObject}' has xml column(s).", 9514, 16, 1) { TerminatesBatch = true };
 
     /// <inheritdoc cref="XmlInDistributedQuery"/>
     internal static SimulatedSqlException XmlInRemoteCallRowset() =>
-        new SimulatedSqlException("Xml data type is not supported in distributed queries. Remote object 'IROWSET' has xml column(s).", 9514, 16, 1) { TerminatesBatch = true }.PinLine(1);
+        new("Xml data type is not supported in distributed queries. Remote object 'IROWSET' has xml column(s).", 9514, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Msg 7325: a four-part name's table or view has a CLR-typed column —
     /// <c>geography</c>, <c>geometry</c> or <c>hierarchyid</c> — which only a
     /// pass-through query reaches; <paramref name="quotedName"/> is each
-    /// written segment after the server's in double quotes.
+    /// written segment after the server's in double quotes. Like the xml
+    /// refusal it stops the batch at the first statement meeting it (probed
+    /// 2026-10-05 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException ClrTypeInDistributedQuery(string quotedName) =>
-        new($"Objects exposing columns with CLR types are not allowed in distributed queries. Please use a pass-through query to access remote object '{quotedName}'.", 7325, 16, 1);
+        new($"Objects exposing columns with CLR types are not allowed in distributed queries. Please use a pass-through query to access remote object '{quotedName}'.", 7325, 16, 1) { TerminatesBatch = true };
 
     /// <summary>
     /// Msg 7357: a four-part name's table or view exposes no column to the

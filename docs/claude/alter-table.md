@@ -243,7 +243,7 @@ Two refusals, both naming the table three-part (`db.schema.table`, unlike most o
 `ALTER TABLE t REBUILD [PARTITION = { ALL | <n> }] [WITH ( option = value [, …] )]` re-lays-out physical storage, which a flat page list has no notion of, so it validates and succeeds without touching a row.
 
 - The option block takes `DATA_COMPRESSION` (`NONE` / `ROW` / `PAGE` / `COLUMNSTORE` / `COLUMNSTORE_ARCHIVE`), `MAXDOP`, `ONLINE`, `SORT_IN_TEMPDB` and `XML_COMPRESSION`; anything else is **Msg 155** in its ALTER TABLE wording, a bad compression level or an empty list is Msg 102.
-- On an unpartitioned table a partition *number* splits three ways exactly as real's does: **Msg 7729** State 1 naming the table's key-backed index (in real's own "alter index statement" wording, whichever statement raised it), **Msg 7735** naming the table when it carries no index, and **Msg 7729** State 3 for the `ON PARTITIONS (…)` sub-clause.
+- On an unpartitioned table a partition *number* splits three ways exactly as real's does: **Msg 7729** State 1 naming the table's key-backed index (in real's own "alter index statement" wording, whichever statement raised it), **Msg 7735** naming the table when it carries no index, and **Msg 7729** State 3 for the `ON PARTITIONS (…)` sub-clause — written with `PARTITION = ALL`, which it needs first (Msg 10737; probed 2026-10-05).
   A partitioned table takes a number it has — see [`partitioning.md`](partitioning.md#rebuilding-one-partition).
 - A missing table is **Msg 4902**, as for every other ALTER TABLE shape.
 

@@ -478,6 +478,22 @@ internal sealed class HeapPage
             this.Bytes.AsSpan(offset + newPayload.Length, extent - newPayload.Length).Clear();
     }
 
+    /// <summary>The slots not tombstoned: live rows, forward pointers and forward targets alike.</summary>
+    public int UntombstonedSlotCount
+    {
+        get
+        {
+            var count = this.SlotCount;
+            var live = 0;
+            for (var i = 0; i < count; i++)
+            {
+                if (!this.IsSlotDeleted(i))
+                    live++;
+            }
+            return live;
+        }
+    }
+
     private bool IsSlotDeleted(int slotIndex) =>
         (BinaryPrimitives.ReadUInt16LittleEndian(this.Bytes.AsSpan(PageSize - (2 * (slotIndex + 1)), 2)) & SlotTombstoneBit) != 0;
 
