@@ -27,6 +27,9 @@ internal static partial class BuiltInResources
         "sys.default_constraints",
         "sys.foreign_key_columns",
         "sys.foreign_keys",
+        "sys.fulltext_index_catalog_usages",
+        "sys.fulltext_index_columns",
+        "sys.fulltext_indexes",
         "sys.identity_columns",
         "sys.index_columns",
         "sys.indexes",
@@ -93,6 +96,11 @@ internal static partial class BuiltInResources
             principals.MetadataKey = new MetadataVisibilityKey(OrdinalOf(principals, "principal_id"), -1, -1, kind: MetadataVisibilityKind.Principal);
         if (views.TryGetValue("sys.database_role_members", out var members))
             members.MetadataKey = new MetadataVisibilityKey(OrdinalOf(members, "role_principal_id"), OrdinalOf(members, "member_principal_id"), -1, kind: MetadataVisibilityKind.RoleMember);
+        // A full-text catalog shows to its owner and to a holder of any
+        // permission on it (probed 2026-10-05 against SQL Server 2025: SELECT
+        // on an indexed table reveals its index row, not its catalog's).
+        if (views.TryGetValue("sys.fulltext_catalogs", out var catalogs))
+            catalogs.MetadataKey = new MetadataVisibilityKey(OrdinalOf(catalogs, "fulltext_catalog_id"), -1, -1, kind: MetadataVisibilityKind.FullTextCatalog);
         foreach (var key in (string[])["sys.table_types", "sys.types"])
         {
             if (views.TryGetValue(key, out var view))
@@ -165,6 +173,7 @@ internal static partial class BuiltInResources
             : key.Kind switch
             {
                 MetadataVisibilityKind.Type => FilterByType(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
+                MetadataVisibilityKind.FullTextCatalog => FilterByFullTextCatalog(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
                 MetadataVisibilityKind.Definition => FilterByDefinition(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
                 _ => key.IsNameKeyed ? FilterByName(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection))
                     : FilterByObjectId(rows, key, targetDatabase, principalId, ServerLoginRights.For(batch.Connection)),
@@ -192,6 +201,21 @@ internal static partial class BuiltInResources
         {
             var id = row[key.ObjectIdOrdinal].AsInt32;
             if (visible.Contains(id) && definitions.Contains(id))
+                yield return row;
+        }
+    }
+
+    private static IEnumerable<SqlValue[]> FilterByFullTextCatalog(IEnumerable<SqlValue[]> rows, MetadataVisibilityKey key, Database database, int principalId, ServerLoginRights server)
+    {
+        var visible = new HashSet<int>();
+        foreach (var (_, catalog) in database.FullTextCatalogs)
+        {
+            if (PermissionChecker.CanViewFullTextCatalogMetadata(database, principalId, catalog.Id, catalog.PrincipalId, server))
+                _ = visible.Add(catalog.Id);
+        }
+        foreach (var row in rows)
+        {
+            if (visible.Contains(row[key.ObjectIdOrdinal].AsInt32))
                 yield return row;
         }
     }

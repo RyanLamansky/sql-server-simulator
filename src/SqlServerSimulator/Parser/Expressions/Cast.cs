@@ -943,7 +943,10 @@ internal sealed class Cast : Expression
     internal static bool TrySwallows(SimulatedSqlException ex, SqlValue source, SqlType target) =>
         IsConversionFailure(ex.Number) || IsVectorConversionFailure(ex.Number)
         || ex.Number is 6207 or 9801
-        || (ex.Number == 6522 && (target is ClrUdtSqlType || (source.Type is HierarchyIdSqlType && target is NCharSqlType or NVarcharSqlType)));
+        || (ex.Number == 6522 && (target is ClrUdtSqlType || (source.Type is HierarchyIdSqlType && target is NCharSqlType or NVarcharSqlType)
+            // Text that won't read as a spatial value, not bytes (probed
+            // 2026-10-05 against SQL Server 2025).
+            || (target is SpatialSqlType && SqlType.IsStringCategory(source.Type))));
 
     /// <summary>
     /// A <c>date</c> into a binary narrower than its three bytes, which

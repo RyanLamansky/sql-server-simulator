@@ -897,7 +897,9 @@ internal sealed partial class Selection
                 if (collation.Equals(table.Columns[k].Name, name.Leaf))
                     return ColumnTypeWithMaxLength(table.Columns[k]);
             }
-            throw SimulatedSqlException.InvalidColumnName(name);
+            return GraphColumns.FindPseudoColumn(table, name) is var pseudo and >= 0
+                ? ColumnTypeWithMaxLength(table.Columns[pseudo])
+                : throw SimulatedSqlException.InvalidColumnName(name);
         };
 
     /// <summary>

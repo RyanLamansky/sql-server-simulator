@@ -592,8 +592,10 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
+        // A graph pseudo-column is no column to name here: Msg 102 at it
+        // (probed 2026-10-05 against SQL Server 2025).
         var names = new List<string>();
-        if (context.Token is not Name firstName)
+        if (context.Token is not Name firstName || firstName is UnquotedString { Value: ['$', ..] })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         names.Add(firstName.Value);
 
@@ -694,6 +696,10 @@ partial class Simulation
         foreach (var ordinal in toDropOrdinals)
         {
             var col = table.Columns[ordinal];
+            // A full-text-indexed column refuses the drop on its own
+            // (probed 2026-10-05 against SQL Server 2025).
+            if (table.FullTextIndex?.Columns.Exists(column => column.ColumnId == ordinal + 1) == true)
+                throw SimulatedSqlException.FullTextColumnDropped(col.Name);
             var blockers = CollectColumnBlockers(context.Batch.CurrentDatabase, table, ordinal, col, includeCheckAndDefault: true, includeIndexes: true, includeStatistics: true, includeFilterIndexes: true);
             if (blockers.Count > 0)
                 throw SimulatedSqlException.ColumnHasDependencies("DROP COLUMN", col.Name, blockers);
@@ -862,7 +868,9 @@ partial class Simulation
         if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.Column })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        if (context.GetNextRequired() is not Name nameToken)
+        // A graph pseudo-column is no column to name here: Msg 102 at it
+        // (probed 2026-10-05 against SQL Server 2025).
+        if (context.GetNextRequired() is not Name nameToken || nameToken is UnquotedString { Value: ['$', ..] })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var columnName = nameToken.Value;
 
@@ -1266,11 +1274,21 @@ partial class Simulation
         // against SQL Server 2025), whatever the change.
         if (ReferenceEquals(table.Partitioning?.Column, col))
             blockers.Add((table.Name, objectKind, 4, int.MinValue));
+        // So does a full-text index's TYPE COLUMN (probed 2026-10-05).
+        if (table.FullTextIndex?.Columns.Exists(column => column.TypeColumnId == ordinal + 1) == true)
+            blockers.Add((table.Name, objectKind, 4, int.MinValue));
         foreach (var kc in table.KeyConstraints)
         {
             var keyCounts = kc.Kind == KeyConstraintKind.PrimaryKey ? includePrimaryKey : includeUniqueKeys;
             if ((keyCounts && storageOrdinal >= 0 && Array.IndexOf(kc.StorageOrdinals, storageOrdinal) >= 0) || ReferenceEquals(kc.Partitioning?.Column, col))
                 blockers.Add((kc.Name, objectKind, 4, kc.ObjectId));
+        }
+        // A spatial index depends on its column whatever the change (probed
+        // 2026-10-05 against SQL Server 2025).
+        foreach (var spatial in table.SpatialIndexes)
+        {
+            if (includeIndexes && spatial.ColumnOrdinal == ordinal + 1)
+                blockers.Add((spatial.Name, SimulatedSqlException.AlterColumnBlockerKind.Index, 5, spatial.ObjectId));
         }
         if (includeIndexes && storageOrdinal >= 0)
         {

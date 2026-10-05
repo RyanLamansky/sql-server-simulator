@@ -180,7 +180,7 @@ partial class Simulation
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.InvalidObjectName(tableName, state: 52);
         if (table.FullTextIndex is not { } index)
-            throw SimulatedSqlException.FullTextIndexMissing(tableName.Leaf, state: 2);
+            throw SimulatedSqlException.FullTextIndexMissing(tableName.ToString(), state: 2);
 
         var batch = context.Batch;
         var messages = context.Connection.PendingMessages;
@@ -354,10 +354,14 @@ partial class Simulation
 
         RejectFullTextDdlInTransaction(context, "ALTER FULLTEXT CATALOG");
         var database = context.CurrentDatabase;
-        if (!database.FullTextCatalogs.TryGetValue(name, out var catalog)
-            || !PermissionEnforcement.HasDatabasePermission(context.Batch, database, Permission.AlterAnyFullTextCatalog))
-        {
+        if (!database.FullTextCatalogs.TryGetValue(name, out var catalog))
             throw SimulatedSqlException.FullTextCatalogNotFoundOrDenied(name, database.Name, state: 2);
+        // A denial reads as a missing catalog at state 3 (probed 2026-10-05
+        // against SQL Server 2025).
+        if (!PermissionEnforcement.HasDatabasePermission(context.Batch, database, Permission.AlterAnyFullTextCatalog)
+            && !PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.Alter, PermissionChecker.ClassFulltextCatalog, catalog.Id, 0))
+        {
+            throw SimulatedSqlException.FullTextCatalogNotFoundOrDenied(name, database.Name, state: 3);
         }
 
         if (asDefault)

@@ -84,6 +84,28 @@ internal static partial class BuiltInResources
             new("statistical_semantics", SqlType.Int32, null, false),
         ], EnumerateSysFullTextIndexColumns);
 
+        // sys.fulltext_index_catalog_usages: one row per full-text index, the
+        // key index and the catalog it lives in (the shape probed 2026-10-05
+        // against SQL Server 2025).
+        Sys("fulltext_index_catalog_usages",
+        [
+            new("object_id", SqlType.Int32, null, false),
+            new("index_id", SqlType.Int32, null, true),
+            new("fulltext_catalog_id", SqlType.Int32, null, false),
+        ], static (batch, database) =>
+        {
+            List<SqlValue[]> rows = [];
+            foreach (var (_, schema) in database.Schemas)
+            {
+                foreach (var table in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
+                {
+                    if (table.FullTextIndex is { } index)
+                        rows.Add([SqlValue.FromInt32(table.ObjectId), SqlValue.FromInt32(index.UniqueIndexId), SqlValue.FromInt32(index.CatalogId)]);
+                }
+            }
+            return rows;
+        });
+
         // sys.fulltext_stoplists / sys.registered_search_property_lists:
         // full-text stoplists and search property lists aren't modeled, so both
         // are empty views with the documented SQL Server 2025 shape. SMO's
@@ -651,7 +673,7 @@ internal static partial class BuiltInResources
                         falseBit,
                         zeroByte,
                         falseBit,
-                        falseBit,
+                        ix.IsDisabled ? trueBit : falseBit,
                         falseBit,
                         falseBit,
                         trueBit,

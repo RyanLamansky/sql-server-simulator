@@ -1772,6 +1772,24 @@ internal static class PermissionChecker
     }
 
     /// <summary>
+    /// Whether a restricted principal sees a full-text catalog's
+    /// <c>sys.fulltext_catalogs</c> row: as its owner, with full metadata
+    /// visibility, or holding any permission on the catalog.
+    /// </summary>
+    internal static bool CanViewFullTextCatalogMetadata(Database database, int principalId, int catalogId, int ownerId, ServerLoginRights server)
+    {
+        var closure = BuildClosure(database, principalId);
+        if (closure.Contains(ownerId) || HasFullMetadataVisibility(database, closure, server))
+            return true;
+        foreach (var name in (string[])["ALTER", "CONTROL", "REFERENCES", "TAKE OWNERSHIP", "VIEW DEFINITION"])
+        {
+            if (IsGrantedInClosure(database, closure, name, ClassFulltextCatalog, catalogId, 0, server, Permission.Resolve(name)))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// Whether <c>sys.sql_modules.definition</c>, <c>OBJECT_DEFINITION</c> and
     /// <c>sp_helptext</c> show the definition of an object the principal can
     /// see: its owner, or a holder of <c>VIEW DEFINITION</c>, <c>ALTER</c>,

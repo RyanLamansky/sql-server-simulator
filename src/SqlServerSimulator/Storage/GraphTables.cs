@@ -95,6 +95,23 @@ internal static class GraphColumns
     }
 
     /// <summary>
+    /// The ordinal of the pseudo-column a single-table write's
+    /// <paramref name="name"/> spells — a bare <c>$node_id</c>, never a
+    /// delimited one — or -1.
+    /// </summary>
+    public static int FindPseudoColumn(HeapTable table, Parser.MultiPartName name)
+    {
+        if (name.LeafDelimited || !name.Leaf.StartsWith('$'))
+            return -1;
+        for (var i = 0; i < table.Columns.Length; i++)
+        {
+            if (IsPseudoColumnFor(table.Columns[i].Name, name.Leaf))
+                return i;
+        }
+        return -1;
+    }
+
+    /// <summary>
     /// Rewrites every pseudo-column reference under <paramref name="root"/>
     /// (<c>inserted.$node_id</c>) to name the internal column it reads, for the
     /// resolvers that match a single table's columns by name — an OUTPUT
@@ -112,6 +129,29 @@ internal static class GraphColumns
             }
             return true;
         });
+
+    /// <summary>
+    /// The ordinal of the hidden <c>graph_id</c> a written <c>$node_id</c> /
+    /// <c>$edge_id</c> keys an index or constraint by, or -1 when
+    /// <paramref name="columnName"/> is neither or the columns carry no graph id.
+    /// </summary>
+    public static int IdentifierKeyOrdinal(IReadOnlyList<HeapColumn?> columns, string columnName)
+    {
+        if (!columnName.Equals(NodeId, StringComparison.OrdinalIgnoreCase) && !columnName.Equals(EdgeId, StringComparison.OrdinalIgnoreCase))
+            return -1;
+        var identifier = -1;
+        var graphId = -1;
+        for (var i = 0; i < columns.Count; i++)
+        {
+            if (columns[i] is not { } column)
+                continue;
+            if (column.GraphKind == GraphColumnKind.GraphId)
+                graphId = i;
+            else if (IsPseudoColumnFor(column.Name, columnName))
+                identifier = i;
+        }
+        return identifier >= 0 ? graphId : -1;
+    }
 
     /// <summary>Whether <paramref name="leaf"/> spells one of the four pseudo-columns.</summary>
     public static bool IsPseudoName(string leaf) =>

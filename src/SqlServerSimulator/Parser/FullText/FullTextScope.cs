@@ -27,9 +27,16 @@ internal static class FullTextScope
             ? FindStarSource(sources, spec.StarQualifier, collation)
             : FindColumnSource(sources, spec.Columns[0], collation);
 
+        // Real names the object as FROM wrote it, never its alias; a source
+        // with no object of its own (a derived table, a CTE) reports the
+        // column instead (probed 2026-10-05 against SQL Server 2025).
+        var written = source.WrittenObjectName ?? source.Qualifier ?? string.Empty;
+        var notIndexedState = spec.AllColumns ? (byte)4 : (byte)2;
         return source.BackingTable is { } table
-            ? FullTextColumnSpec.Bind(spec, table, source.Qualifier ?? table.Name, context.Batch.CurrentDatabase, collation, source.Qualifier)
-            : throw SimulatedSqlException.FullTextTableNotIndexed(source.Qualifier ?? string.Empty);
+            ? FullTextColumnSpec.Bind(spec, table, written, context.Batch.CurrentDatabase, collation, source.Qualifier, notIndexedState)
+            : source.BackingView is not null || spec.AllColumns
+                ? throw SimulatedSqlException.FullTextTableNotIndexed(written, notIndexedState)
+                : throw SimulatedSqlException.FullTextColumnNotIndexed(spec.Columns[0].Leaf);
     }
 
     /// <summary>
@@ -46,7 +53,7 @@ internal static class FullTextScope
                 if (source.Qualifier is { } name && collation.Equals(name, qualifier))
                     return source;
             }
-            throw SimulatedSqlException.FullTextTableNotIndexed(qualifier);
+            throw SimulatedSqlException.FullTextTableNotIndexed(qualifier, state: 4);
         }
         foreach (var indexedSource in sources)
         {

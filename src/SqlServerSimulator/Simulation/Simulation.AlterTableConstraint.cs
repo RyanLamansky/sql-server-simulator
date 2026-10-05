@@ -960,6 +960,11 @@ partial class Simulation
             }
             if (action.Family == DropConstraintFamily.Key && IsKeyReferencedByForeignKey(table, action.Key!, out var refTable, out var refFkName))
                 throw SimulatedSqlException.ConstraintReferencedByForeignKey(action.Key!.Name, refTable, refFkName);
+            if (action.Key is { } keyedIndex && table.FullTextIndex is { } fullText
+                && context.Batch.CurrentDatabase.Collation.Equals(keyedIndex.Name, fullText.KeyIndexName))
+            {
+                throw SimulatedSqlException.FullTextKeyConstraintDropped(keyedIndex.Name, table.Name);
+            }
             if (action.Key is { Kind: KeyConstraintKind.PrimaryKey } && table.ChangeTracking is not null)
                 throw SimulatedSqlException.ChangeTrackedPrimaryKeyDrop(action.Key.Name, table.Name);
             if (action.Key is { Kind: KeyConstraintKind.PrimaryKey } && (table.XmlIndexes.Count > 0 || table.SpatialIndexes.Count > 0))

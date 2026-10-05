@@ -100,6 +100,15 @@ partial class SimulatedSqlException
         + "the following types: Point, LineString, Polygon, MultiPoint, MultiLineString, MultiPolygon, CircularString, "
         + "CompoundCurve, CurvePolygon or GeometryCollection.");
 
+    /// <summary>
+    /// The bare format failure, with no 24xxx code, that a UDT payload too
+    /// short for what its header promises raises (probed 2026-10-05 against
+    /// SQL Server 2025: <c>CAST(0x01 AS geometry)</c>, an empty payload, a
+    /// header alone, a point with half its coordinates).
+    /// </summary>
+    internal static SimulatedSqlException SpatialPayloadInvalid(bool isGeography) => SpatialFailure(
+        isGeography, SpatialFormat, 0, "One of the identified items was in an invalid format.");
+
     /// <summary>24209 — the input stopped mid-shape.</summary>
     internal static SimulatedSqlException SpatialUnexpectedEndOfInput(bool isGeography) => SpatialFailure(
         isGeography, SpatialFormat, 24209,
@@ -227,6 +236,11 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException SpatialInvalidSrid(bool isGeography) => SpatialFailure(
         isGeography, SpatialArgument, 24100,
         "The spatial reference identifier (SRID) is not valid. SRIDs must be between 0 and 999999.");
+
+    /// <summary>24204 — a <c>geography</c> SRID that isn't one of the supported reference systems.</summary>
+    internal static SimulatedSqlException SpatialUnsupportedGeographySrid() => SpatialFailure(
+        isGeography: true, SpatialArgument, 24204,
+        "The spatial reference identifier (SRID) is not valid. The specified SRID must match one of the supported SRIDs displayed in the sys.spatial_reference_systems catalog view.");
 
     /// <summary>
     /// 24105 — <c>InstanceOf</c> was handed a name outside the OGC type

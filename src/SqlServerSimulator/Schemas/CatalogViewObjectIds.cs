@@ -124,6 +124,7 @@ internal static class CatalogViewObjectIds
         ["sys.foreign_key_columns"] = -410,
         ["sys.foreign_keys"] = -409,
         ["sys.fulltext_catalogs"] = -440,
+        ["sys.fulltext_index_catalog_usages"] = -482,
         ["sys.fulltext_index_columns"] = -405,
         ["sys.fulltext_indexes"] = -404,
         ["sys.fulltext_languages"] = -242583247,

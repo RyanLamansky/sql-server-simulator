@@ -1109,7 +1109,7 @@ partial class Simulation
             return true;
         }
         context.RestoreCheckpoint(checkpoint);
-        return TryParseSetSpatialProperty(context, slot);
+        return TryParseSetSpatialProperty(context, slot, $"@{variableToken.Value}");
     }
 
     /// <summary>
@@ -1122,7 +1122,7 @@ partial class Simulation
     /// right-hand side surfaces as the bare .NET argument failure real emits
     /// with no 24xxx code, and an SRID outside 0..999999 as Msg 24100.
     /// </remarks>
-    private static bool TryParseSetSpatialProperty(ParserContext context, VariableSlot slot)
+    private static bool TryParseSetSpatialProperty(ParserContext context, VariableSlot slot, string variableName)
     {
         if (context.GetNextRequired() is not Name member)
             return false;
@@ -1142,12 +1142,15 @@ partial class Simulation
                 : SimulatedSqlException.ClrPropertyNotFound(member.Value, spatial.ClrTypeName);
         }
 
+        // A NULL receiver refuses the mutator outright, ending the batch
+        // (probed 2026-10-05 against SQL Server 2025).
+        if (slot.Value.IsNull)
+            throw SimulatedSqlException.ClrMutatorOnNull(member.Value, variableName);
         var assigned = rhs.Run(new RuntimeContext(NoColumnResolver, context.Batch));
         if (assigned.IsNull)
             throw SimulatedSqlException.SpatialSridCannotBeNull(spatial.IsGeography);
         var srid = SpatialGeometry.ValidateSrid(ScalarArguments.CoerceToInt(assigned), spatial.IsGeography);
-        if (!slot.Value.IsNull)
-            slot.Value = SqlValue.FromSpatial(slot.Value.AsSpatial.WithSrid(srid), spatial.IsGeography);
+        slot.Value = SqlValue.FromSpatial(slot.Value.AsSpatial.WithSrid(srid), spatial.IsGeography);
         return true;
     }
 

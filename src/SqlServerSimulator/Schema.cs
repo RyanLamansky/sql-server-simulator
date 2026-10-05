@@ -263,8 +263,8 @@ internal sealed class Schema
     public bool HoldsTypeNamed(string leaf) => this.TableTypes.ContainsKey(leaf) || this.AliasTypes.ContainsKey(leaf);
 
     /// <summary>
-    /// True when a key, check, foreign-key or default constraint on one of this
-    /// schema's tables is named <paramref name="leaf"/>.
+    /// True when a key, check, foreign-key, default or edge constraint on one
+    /// of this schema's tables is named <paramref name="leaf"/>.
     /// </summary>
     public bool HasConstraintNamed(string leaf)
     {
@@ -277,7 +277,7 @@ internal sealed class Schema
     }
 
     /// <summary>
-    /// True when a key, check, foreign-key or default constraint on
+    /// True when a key, check, foreign-key, default or edge constraint on
     /// <paramref name="table"/> is named <paramref name="leaf"/>.
     /// </summary>
     public static bool TableHasConstraintNamed(HeapTable table, string leaf, Collation collation)
@@ -300,6 +300,11 @@ internal sealed class Schema
         foreach (var column in table.Columns)
         {
             if (column.DefaultConstraint is { } def && collation.Equals(def.Name, leaf))
+                return true;
+        }
+        foreach (var edgeConstraint in table.EdgeConstraints)
+        {
+            if (collation.Equals(edgeConstraint.Name, leaf))
                 return true;
         }
         return false;

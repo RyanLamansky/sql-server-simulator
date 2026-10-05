@@ -514,7 +514,7 @@ public sealed class FullTextQueryTests
         var sim = Seeded();
         _ = sim.ExecuteNonQuery("create table dbo.noft (id int primary key, t nvarchar(100))");
         var ex = sim.AssertSqlError("select 1 from dbo.noft where contains(t, 'x')", 7601);
-        Assert.AreEqual("Cannot use a CONTAINS or FREETEXT predicate on table or indexed view 'noft' because it is not full-text indexed.", ex.Message);
+        Assert.AreEqual("Cannot use a CONTAINS or FREETEXT predicate on table or indexed view 'dbo.noft' because it is not full-text indexed.", ex.Message);
         Assert.AreEqual(2, ex.State);
         Assert.AreEqual(16, ex.Class);
     }
@@ -772,5 +772,149 @@ public sealed class FullTextQueryTests
         Assert.AreEqual("1|-|-|-|1|-|2|2|-|-|4|4|-|6|-|-|6|7|-|1", string.Join("|",
             new[] { "bomb", "zebra", "walrus", "h1", "café", "eacute", "apple", "tagged", "banana", "unicode", "mango", "koala", "cherry", "grape", "kiwi", "lemon", "melon", "pear", "plum", "lightmass" }.Select(Ids)));
         Assert.AreEqual(1, sim.ExecuteScalar("select count(*) from freetexttable(dbo.zft, doc, 'melon')"));
+    }
+
+    // ---- composition with writes, joins and APPLY (probed 2026-10-05) ----
+
+    [TestMethod]
+    public void Update_Where_Contains_Binds_The_Target()
+    {
+        var sim = Seeded();
+        Assert.AreEqual(1, sim.ExecuteNonQuery("update dbo.docs set plain = 'hit' where contains(body, 'mice')"));
+        Assert.AreEqual("5", Hits(sim, "plain = 'hit'"));
+    }
+
+    [TestMethod]
+    public void Delete_Where_Freetext_Binds_The_Target()
+    {
+        var sim = Seeded();
+        Assert.AreEqual(1, sim.ExecuteNonQuery("delete dbo.docs where freetext(body, 'mouse')"));
+        Assert.AreEqual(5, sim.ExecuteScalar("select count(*) from dbo.docs"));
+    }
+
+    [TestMethod]
+    public void Join_On_Contains_Binds_The_Joined_Source()
+        => Assert.AreEqual(1, Seeded().ExecuteScalar("select count(*) from dbo.docs a join dbo.docs b on a.id = b.id and contains(b.body, 'fox')"));
+
+    [TestMethod]
+    public void Cross_Apply_Takes_A_ContainsTable()
+        => Assert.AreEqual(5, Seeded().ExecuteScalar("select x.id from (values (1), (5)) x(id) cross apply containstable(dbo.docs, body, 'mice') k where k.[key] = x.id"));
+
+    // ---- permissions -------------------------------------------------------
+
+    [TestMethod]
+    [DataRow("grant select (id) on dbo.docs to u", "select id from dbo.docs where contains(body, 'fox')", 230, "The SELECT permission was denied on the column 'body' of the object 'docs', database 'simulated', schema 'dbo'.")]
+    [DataRow("grant select (id, body) on dbo.docs to u", "select id from dbo.docs where contains(*, 'fox')", 230, "The SELECT permission was denied on the column 'title' of the object 'docs', database 'simulated', schema 'dbo'.")]
+    [DataRow("select 1", "select [key] from containstable(dbo.docs, body, 'fox')", 229, "The SELECT permission was denied on the object 'docs', database 'simulated', schema 'dbo'.")]
+    [DataRow("grant select (id) on dbo.docs to u", "select [key] from containstable(dbo.docs, body, 'fox')", 230, "The SELECT permission was denied on the column 'body' of the object 'docs', database 'simulated', schema 'dbo'.")]
+    public void A_Search_Needs_Select_On_The_Columns_It_Reads(string grant, string query, int number, string message)
+    {
+        var sim = Seeded();
+        sim.ExecuteBatches("create user u without login", grant);
+        sim.AssertSqlError($"execute as user = 'u'; {query}", number, message);
+    }
+
+    // ---- condition grammar -------------------------------------------------
+
+    [TestMethod]
+    [DataRow("NEAR((one, two), 4294967296)", 9987, 1)]
+    [DataRow("NEAR((one, two), -1)", 9987, 1)]
+    [DataRow("NEAR((one, two), 1.5)", 9987, 1)]
+    [DataRow("NEAR((one), 2)", 7630, 2)]
+    [DataRow("NEAR(one)", 7630, 2)]
+    [DataRow("ISABOUT(one WEIGHT(1.5))", 7632, 5)]
+    [DataRow("ISABOUT(one WEIGHT(-1))", 7632, 5)]
+    [DataRow("ISABOUT(one WEIGHT(.5e1))", 7632, 5)]
+    public void Condition_Arguments_Out_Of_Range_Are_Refused(string condition, int number, int state)
+    {
+        var ex = Seeded().AssertSqlError($"select id from dbo.docs where contains(body, '{condition}')", number);
+        Assert.AreEqual(state, ex.State);
+    }
+
+    [TestMethod]
+    [DataRow("contains(body, 'NEAR((one, two), 4294967295)')", "6")]
+    [DataRow("contains(body, 'ISABOUT(one WEIGHT(1.0), two WEIGHT(0))')", "6")]
+    [DataRow("contains((*), 'mice')", "5")]
+    [DataRow("contains(body, 'running', LANGUAGE 'British English')", "2")]
+    [DataRow("contains(body, 'running', LANGUAGE 'Neutral')", "2")]
+    public void Condition_Edges_Real_Accepts(string predicate, string expected)
+        => Assert.AreEqual(expected, Hits(predicate));
+
+    [TestMethod]
+    [DataRow("contains(body, 'x', LANGUAGE 'Deutsch')", 7678)]
+    [DataRow("contains(body, 'x', LANGUAGE 'us_english')", 7678)]
+    [DataRow("contains(body, 'x', LANGUAGE 1033.0)", 102)]
+    [DataRow("contains(PROPERTY(body, 'Title'), 'x')", 31201)]
+    public void Language_And_Column_Spec_Refusals(string predicate, int number)
+        => _ = Seeded().AssertSqlError($"select id from dbo.docs where {predicate}", number);
+
+    [TestMethod]
+    [DataRow("containstable(dbo.docs, body, 'mice', -1)", 102)]
+    [DataRow("containstable(dbo.docs, body, 'mice', 'x')", 102)]
+    [DataRow("containstable(dbo.docs, body, 'mice', NULL)", 156)]
+    [DataRow("containstable(dbo.docs, docs.body, 'mice')", 102)]
+    public void Rowset_Arguments_Real_Refuses(string source, int number)
+        => _ = Seeded().AssertSqlError($"select [key] from {source}", number);
+
+    [TestMethod]
+    public void Rowset_Top_N_Past_Int_Keeps_Every_Row_And_Key_Is_Not_Null()
+    {
+        var sim = Seeded();
+        Assert.AreEqual(1, sim.ExecuteScalar("select count(*) from containstable(dbo.docs, body, 'mice', 2147483648)"));
+        Assert.IsFalse((bool)sim.ExecuteBatchesScalar(
+            "select * into #k from containstable(dbo.docs, body, 'mice')",
+            "select is_nullable from tempdb.sys.columns where object_id = object_id('tempdb..#k') and name = 'KEY'")!);
+    }
+
+    [TestMethod]
+    [DataRow("contains(title, 'red-and')", true)]
+    [DataRow("contains(body, '\"\"')", true)]
+    [DataRow("freetext(body, '!')", true)]
+    [DataRow("contains(body, '\"th*\"')", false)]
+    [DataRow("contains(body, 'quick')", false)]
+    public void Noise_Message_Reports_State_10_For_Noise_And_Empty_Terms(string predicate, bool noise)
+    {
+        var sim = Seeded();
+        using var connection = sim.CreateOpenConnection();
+        List<(int Number, byte State)> messages = [];
+        ((SimulatedDbConnection)connection).InfoMessage += (_, args) =>
+        {
+            foreach (var error in args.Errors.Cast<SimulatedError>())
+                messages.Add((error.Number, error.State));
+        };
+        using var command = connection.CreateCommand($"select id from dbo.docs where {predicate}");
+        using (var reader = command.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+            }
+        }
+        Assert.AreEqual(noise ? "9927:10" : "", string.Join(",", messages.Select(m => $"{m.Number}:{m.State}")));
+    }
+
+    [TestMethod]
+    [DataRow("select 1 from dbo.plain where contains(b, 'x')", 2, "dbo.plain")]
+    [DataRow("select 1 from dbo.plain p where freetext(*, 'x')", 4, "dbo.plain")]
+    [DataRow("select 1 from plain where contains(*, 'x')", 4, "plain")]
+    [DataRow("select 1 from (select id, body from dbo.docs) d where contains(body, 'x')", 3, null)]
+    public void Not_Indexed_Names_The_Object_As_Written(string query, int state, string? table)
+    {
+        var sim = Seeded();
+        _ = sim.ExecuteNonQuery("create table dbo.plain (id int primary key, b nvarchar(10))");
+        var ex = sim.AssertSqlError(query, 7601);
+        Assert.AreEqual(state, ex.State);
+        Assert.AreEqual(table is null
+            ? "Cannot use a CONTAINS or FREETEXT predicate on column 'body' because it is not full-text indexed."
+            : $"Cannot use a CONTAINS or FREETEXT predicate on table or indexed view '{table}' because it is not full-text indexed.", ex.Message);
+    }
+
+    [TestMethod]
+    public void Table_Crawl_Properties_Answer_For_An_Indexed_Table()
+    {
+        using var reader = Seeded().ExecuteBatchesReader(
+            "create table dbo.plain (id int)",
+            "select objectpropertyex(object_id('dbo.docs'), 'TableFulltextItemCount'), objectpropertyex(object_id('dbo.docs'), 'TableFulltextDocsProcessed'), objectproperty(object_id('dbo.docs'), 'TableFulltextFailCount'), objectproperty(object_id('dbo.docs'), 'TableFulltextPendingChanges'), isnull(cast(objectproperty(object_id('dbo.plain'), 'TableFulltextItemCount') as varchar(5)), '-')");
+        Assert.IsTrue(reader.Read());
+        Assert.AreEqual("6|0|0|0|-", string.Join("|", Enumerable.Range(0, 5).Select(i => Convert.ToString(reader.GetValue(i), System.Globalization.CultureInfo.InvariantCulture))));
     }
 }

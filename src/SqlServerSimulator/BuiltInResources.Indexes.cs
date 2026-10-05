@@ -739,7 +739,7 @@ internal static partial class BuiltInResources
                 foreach (var xmlIndex in table.XmlIndexes.OrderBy(index => index.IndexId))
                     yield return AuxiliaryRow(tableObjectId, xmlIndex.Name, xmlIndex.IndexId, 3, xmlDesc, SqlValue.FromInt32(table.Partitioning?.Scheme.DataSpaceId ?? table.FilegroupId));
                 foreach (var spatialIndex in table.SpatialIndexes.OrderBy(index => index.IndexId))
-                    yield return AuxiliaryRow(tableObjectId, spatialIndex.Name, spatialIndex.IndexId, 4, spatialDesc);
+                    yield return AuxiliaryRow(tableObjectId, spatialIndex.Name, spatialIndex.IndexId, 4, spatialDesc, disabled: spatialIndex.IsDisabled);
                 foreach (var jsonIndex in table.JsonIndexes.OrderBy(index => index.IndexId))
                     yield return JsonIndexRow(tableObjectId, jsonIndex, trueBit, falseBit);
                 foreach (var vectorIndex in table.VectorIndexes.OrderBy(index => index.IndexId))
@@ -851,7 +851,7 @@ internal static partial class BuiltInResources
                 identity.Index is { IsHypothetical: true } ? trueBit : falseBit);
         }
 
-        SqlValue[] AuxiliaryRow(SqlValue objectId, string name, int indexId, byte type, SqlValue typeDesc, SqlValue? dataSpace = null) =>
+        SqlValue[] AuxiliaryRow(SqlValue objectId, string name, int indexId, byte type, SqlValue typeDesc, SqlValue? dataSpace = null, bool disabled = false) =>
             BuildIndexRow(
                 name: SqlValue.FromSystemName(name),
                 objectId: objectId,
@@ -865,7 +865,7 @@ internal static partial class BuiltInResources
                 hasFilter: falseBit,
                 filterDefinition: nullFilter,
                 ignoreDupKey: falseBit,
-                isDisabled: falseBit,
+                isDisabled: disabled ? trueBit : falseBit,
                 falseBit, trueBit, trueBit, SqlValue.FromByte(0), nullCompressionDelay, falseBit, falseBit);
 
         SqlValue[] BuildIndexRow(

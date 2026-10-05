@@ -15,7 +15,8 @@ A node table needs a column list; an edge table may leave it out.
 The four pseudo-columns are non-persisted computed columns whose expression renders the identifier from the hidden columns when the row is read, so a renamed table's rows render the new name and a dropped endpoint table's edges render `$from_id` / `$to_id` as NULL.
 The catalog reports them as ordinary columns: `sys.columns.is_computed` 0 and `graph_type` / `graph_type_desc` set, `sys.computed_columns` leaving them out, `sp_describe_first_result_set` calling them updatable — while `COLUMNPROPERTY(…, 'IsComputed')` and `sp_help` say computed, as real's do.
 The hidden ones stay out of `SELECT *` like any hidden column; `SELECT … INTO` copies the pseudo-columns as plain `nvarchar(1000)` columns and makes no graph table.
-A unique nonclustered `GRAPH_UNIQUE_INDEX_<hex>` over `graph_id` is created with the table; it takes index id 2 ahead of the declaration's own nonclustered indexes, which is where its object id is allocated.
+A unique nonclustered `GRAPH_UNIQUE_INDEX_<hex>` over `graph_id` is created with the table; it takes index id 2 ahead of the declaration's own nonclustered indexes, which is where its object id is allocated, and on a table placed on a partition scheme it stays unaligned, on PRIMARY.
+A key or index naming `$node_id` / `$edge_id` keys the hidden `graph_id` it renders (`PRIMARY KEY ($node_id)` included), and a node or edge table can be neither memory-optimized (Msg 13910) nor temporal (Msg 13912); `ALTER TABLE … DROP | ALTER COLUMN $node_id` is Msg 102 at the name, and no `ALTER TABLE … AS` form exists (Msg 156) — all probed 2026-10-05 against SQL Server 2025.
 
 A pseudo-column is written `$node_id` (the tokenizer's `$`-word, like `$action`), any case, qualified or not, and resolves to the internal column whose name it prefixes — through a derived table, view or CTE that projects it too, which is why the match is on the name and not on the column's kind.
 A projection of one takes the internal column's full name as its own.
@@ -37,10 +38,12 @@ An INSERT without a column list fills an edge's `$from_id` and `$to_id` first, t
 `SettleGraphColumns` runs after the values are coerced: an explicit `$node_id` / `$edge_id` must name this table (else Msg 13921, NULL included), and a `$from_id` / `$to_id` that doesn't read as a node of an existing node table leaves its hidden pair NULL, so the ordinary NOT NULL check names `from_obj_id` / `to_obj_id` in its Msg 515 — the endpoint node needn't exist.
 MERGE's insert arm and a `SqlBulkCopy` into a node table settle the same way.
 UPDATE of a pseudo-column is the computed-column Msg 271, and naming a hidden column in an INSERT list or a SET is Msg 13908.
+A single-table `UPDATE` or `DELETE` reads a pseudo-column in its `WHERE` (`DELETE Knows WHERE $from_id = …`) through the same prefix match.
 
 ## Edge constraints
 
 `[CONSTRAINT name] CONNECTION (A TO B [, …]) [ON DELETE CASCADE | NO ACTION]`, in `CREATE TABLE` or `ALTER TABLE … ADD`, lists as an `EC` object with its clauses in `sys.edge_constraint_clauses`.
+Its name shares the schema's object namespace (Msg 2714 state 5 then 1750 for a taken one), and a clause resolves its target before its source, so `X TO Y` with neither existing names `Y` in its Msg 13931 (probed 2026-10-05 against SQL Server 2025).
 Each constraint must admit every edge — some clause names its pair of node tables, and both nodes exist — and the constraints on one table are checked independently.
 Deleting a node that a constrained edge still reaches is refused, or deletes those edges under `ON DELETE CASCADE`, which fires no trigger on the edge table (a foreign key's cascade does); an edge table with no constraint keeps its dangling edges.
 A node table a constraint names can't be dropped or truncated.
@@ -52,6 +55,7 @@ A disabled constraint checks no edge write and neither refuses nor cascades a no
 
 `MATCH` is recognized only inside a WHERE (and, to be refused, an ON); anywhere else `match(…)` parses as a call and the pattern's arrows are the syntax error.
 It binds while it parses, against the query scope's sources and the joins between them — `JoinSpec.IsComma` tells a comma apart from a written `CROSS JOIN`, which MATCH refuses like any other join.
+An identifier the query's own sources don't answer binds against an enclosing query's (`ParserContext.EnclosingScopes`), so a correlated subquery can match from an outer node, as real's does (probed 2026-10-05 against SQL Server 2025); its desugared equality then reads the outer row like any correlated reference.
 Each hop desugars into equalities: over two base tables `e.from_obj_id = <node table's object id>` and `e.from_id = n.graph_id`, which the comma-join rewrite hands to the hash join like any written equi-join; over a derived table, view or CTE, the rendered `$from_id = $node_id` text.
 The predicate object keeps its desugared conjuncts behind `CollectConjuncts`, which is all the planner sees.
 
@@ -77,5 +81,11 @@ A `SHORTEST_PATH` in a subquery is refused, as real refuses it; a derived table 
 
 ## Not modeled yet
 
+- **`MERGE … ON MATCH(…)`** — real binds a `MATCH` in a `MERGE`'s `ON` against the target edge and the `USING` source's joined nodes; the simulator doesn't recognize the predicate there, a syntax error where real answers (or, over a derived table, raises Msg 13940 twice).
+- **`MATCH` reaching across `APPLY`**: an identifier from an `APPLY`'s left side is real's Msg 13920 (`… used with a JOIN clause or APPLY operator`), the simulator's Msg 13900, since the left side isn't an enclosing query's scope.
+- **An index on `$from_id` / `$to_id`** keys the pseudo-column itself, so it warns Msg 1945 where real keys the hidden pair and doesn't.
+- **A view over a node table** lists the hidden `graph_id` and `obj_id` columns real reports in its `sys.columns` (`select $node_id nid, id from P` shows four rows there), where the simulator lists the two it projects.
+- **Msg 13930** for a `CONNECTION` constraint on a table that isn't an edge table stops the whole batch on real while it compiles; here it raises as the statement runs, so earlier statements of the batch have run.
+- Several refusals for one pattern come in a different order (`MATCH(k-(p1)->k2)` over two edges and a node reports the node first on real), and one Msg 13961 for a non-path aggregate over a `FOR PATH` column where real repeats it.
 - A `SHORTEST_PATH` repeating more than one hop (`n1(-(e1)->n2-(e2)->n3)+`), a second `SHORTEST_PATH` in one WHERE — and with it `LAST_NODE(x) = LAST_NODE(y)` over two paths — and one starting from anything but a node table → `NotSupportedException` or a syntax error.
 - **A column-level permission recorded against a pseudo-column read**: real asks for SELECT on the pseudo-column's own `$node_id_<guid>` column and names it in Msg 230 — under `GRANT SELECT (id)` alone `SELECT $node_id` and `SELECT $node_id, id` are both denied, `SELECT *` names `$node_id_<guid>` and then `name`, and under a table-level grant with `DENY SELECT (name)` the pseudo-column still reads — where the simulator names the hidden `graph_id_<hex>` it renders from, lets `SELECT $node_id, id` through and refuses the last shape on `name` (probed 2026-09-30 against SQL Server 2025; an ordinary computed column already checks itself the way real does).

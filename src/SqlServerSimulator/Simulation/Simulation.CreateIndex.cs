@@ -644,9 +644,11 @@ partial class Simulation
             if (collation.Equals(table.Columns[i].Name, columnName))
                 return i;
         }
-        // A graph pseudo-column keys an index as the column it names.
-        return columnName.StartsWith('$') && Array.FindIndex(table.Columns, c => GraphColumns.IsPseudoColumnFor(c.Name, columnName)) is var pseudo and >= 0
-            ? pseudo
+        // A node's or edge's identifier keys an index as the graph id it
+        // renders (probed 2026-10-05 against SQL Server 2025); the endpoint
+        // pseudo-columns key as the column they name.
+        return GraphColumns.IdentifierKeyOrdinal(table.Columns, columnName) is var graphId and >= 0 ? graphId
+            : columnName.StartsWith('$') && Array.FindIndex(table.Columns, c => GraphColumns.IsPseudoColumnFor(c.Name, columnName)) is var pseudo and >= 0 ? pseudo
             : throw SimulatedSqlException.IndexColumnMissing(columnName);
     }
 

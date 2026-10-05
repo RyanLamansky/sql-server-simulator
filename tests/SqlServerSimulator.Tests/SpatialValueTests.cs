@@ -647,4 +647,64 @@ public sealed class SpatialValueTests
         var relative = Math.Abs(actual - realValue) / realValue;
         Assert.IsLessThan(tolerance, relative, $"relative error {relative:E3} exceeds {tolerance:E0} (got {actual:R}, real {realValue:R})");
     }
+
+    // ---- argument and type checks, probed 2026-10-05 against SQL Server 2025 ----
+
+    [TestMethod]
+    [DataRow("select geography::Point(0, 0, 0)")]
+    [DataRow("select geography::STGeomFromText('POINT(0 0)', 999999)")]
+    [DataRow("select geography::STGeomFromText('POINT(0 0)', -1)")]
+    [DataRow("declare @g geography = 'POINT(1 2)'; set @g.STSrid = 1234")]
+    public void Geography_Srid_Must_Be_A_Listed_Reference_System(string statement)
+        => StartsWith(
+            "A .NET Framework error occurred during execution of user-defined routine or aggregate \"geography\": \r\nSystem.ArgumentException: 24204: The spatial reference identifier (SRID) is not valid.",
+            new Simulation().AssertSqlError(statement, 6522).Message);
+
+    [TestMethod]
+    public void Geography_Takes_The_Listed_Srids()
+        => AreEqual("4269|104001|4120", new Simulation().ExecuteScalar(
+            "select concat(geography::Point(0, 0, 4269).STSrid, '|', geography::Point(0, 0, 104001).STSrid, '|', geography::STGeomFromText('POINT(0 0)', 4120).STSrid)"));
+
+    [TestMethod]
+    [DataRow("select geography::Point(0, 0, null)", "'geography::Point' failed because parameter 3 is not allowed to be null.")]
+    [DataRow("select geometry::Point(1, null, 0)", "'geometry::Point' failed because parameter 2 is not allowed to be null.")]
+    [DataRow("select geography::STGeomFromText('POINT(0 0)', null)", "'geography::STGeomFromText' failed because parameter 2 is not allowed to be null.")]
+    public void Constructor_Numeric_Parameters_Refuse_Null(string statement, string message)
+        => new Simulation().AssertSqlError(statement, 6569, message);
+
+    [TestMethod]
+    [DataRow("select geography::Point(0, 0, 4326).STDistance(geometry::Point(1, 2, 0))", "Operand type clash: geometry is incompatible with geography")]
+    [DataRow("select geometry::Point(1, 2, 0).STIntersects(geography::Point(0, 0, 4326))", "Operand type clash: geography is incompatible with geometry")]
+    [DataRow("create table dbo.p (g geography); insert dbo.p values (geometry::Point(1, 1, 0))", "Operand type clash: geometry is incompatible with geography")]
+    [DataRow("create table dbo.p (g geometry); update dbo.p set g = geography::Point(1, 1, 4326)", "Operand type clash: geography is incompatible with geometry")]
+    public void The_Other_Spatial_Type_Clashes(string statement, string message)
+        => new Simulation().AssertSqlError(statement, 206, message);
+
+    [TestMethod]
+    [DataRow("select geometry::Parse('POINT(1 2)').STNoSuch()", 6506, "Could not find method 'STNoSuch' for type 'Microsoft.SqlServer.Types.SqlGeometry' in assembly 'Microsoft.SqlServer.Types'")]
+    [DataRow("select geometry::Bogus('POINT(1 2)')", 6506, "Could not find method 'Bogus' for type 'Microsoft.SqlServer.Types.SqlGeometry' in assembly 'Microsoft.SqlServer.Types'")]
+    [DataRow("declare @g geography = 'POINT(1 2)'; select @g.Nope", 6592, "Could not find property or field 'Nope' for type 'Microsoft.SqlServer.Types.SqlGeography' in assembly 'Microsoft.SqlServer.Types'.")]
+    [DataRow("declare @g geometry; set @g.STSrid = 1", 5302, "Mutator 'STSrid' on '@g' cannot be called on a null value.")]
+    [DataRow("select cast(0x01 as geometry)", 6522, "A .NET Framework error occurred during execution of user-defined routine or aggregate \"geometry\": \r\nSystem.FormatException: One of the identified items was in an invalid format.\r\nSystem.FormatException: \r\n.")]
+    [DataRow("select geometry::Point(1, 2, 0) for json path", 13605, "Column expressions and data sources without names or aliases cannot be formatted as JSON text using FOR JSON clause. Add alias to the unnamed column or table.")]
+    public void Member_And_Payload_Refusals(string statement, int number, string message)
+        => new Simulation().AssertSqlError(statement, number, message);
+
+    [TestMethod]
+    public void IsNull_ToString_And_TryCast_Answer_As_Real()
+    {
+        var sim = new Simulation();
+        IsFalse((bool)sim.ExecuteScalar("select geography::Point(1, 2, 4326).IsNull")!);
+        AreEqual("bigint", sim.ExecuteScalar("declare @a geometry = 'POINT(1 2)'; select sql_variant_property(len(@a.ToString()), 'BaseType')"));
+        AreEqual(1, sim.ExecuteScalar("select case when try_cast('nope' as geometry) is null and try_convert(geography, 'POINT(1 200)') is null then 1 else 0 end"));
+    }
+
+    [TestMethod]
+    public void Describe_Names_The_System_Clr_Types()
+        => AreEqual("130|simulated|sys|geography|Microsoft.SqlServer.Types.SqlHierarchyId, Microsoft.SqlServer.Types, Version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91", new Simulation().ExecuteScalar(
+            """
+            declare @d table (is_hidden bit, column_ordinal int, name sysname null, is_nullable bit, system_type_id int, system_type_name nvarchar(256), max_length smallint, precision tinyint, scale tinyint, collation_name sysname null, user_type_id int null, user_type_database sysname null, user_type_schema sysname null, user_type_name sysname null, assembly_qualified_type_name nvarchar(4000), xml_collection_id int, xml_collection_database sysname null, xml_collection_schema sysname null, xml_collection_name sysname null, is_xml_document bit, is_case_sensitive bit, is_fixed_length_clr_type bit, source_server sysname null, source_database sysname null, source_schema sysname null, source_table sysname null, source_column sysname null, is_identity_column bit null, is_part_of_unique_key bit null, is_updateable bit null, is_computed_column bit null, is_sparse_column_set bit null, ordinal_in_order_by_list smallint null, order_by_is_descending smallint null, order_by_list_length smallint null, tds_type_id int, tds_length int, tds_collation_id int null, tds_collation_sort_id tinyint null);
+            insert @d exec sp_describe_first_result_set N'select geography::Point(1, 2, 4326) g, cast(''/1/'' as hierarchyid) h';
+            select concat(min(case when name = 'g' then user_type_id end), '|', min(case when name = 'g' then user_type_database end), '|', min(case when name = 'g' then user_type_schema end), '|', min(case when name = 'g' then user_type_name end), '|', min(case when name = 'h' then assembly_qualified_type_name end)) from @d
+            """));
 }

@@ -81,6 +81,12 @@ internal sealed class SpatialStaticCall : Expression
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
         }
+        if (RequiredArgumentCount(methodName) is null && !methodName.Equals("GeomFromGml", StringComparison.OrdinalIgnoreCase))
+        {
+            // A name the type has no static method by is real's CLR
+            // method-not-found (probed 2026-10-05 against SQL Server 2025).
+            throw SimulatedSqlException.ClrMethodNotFound(methodName, type.ClrTypeName, "Microsoft.SqlServer.Types", state: 10);
+        }
         return RequiredArgumentCount(methodName) is { } required && args.Count != required
             ? throw SimulatedSqlException.FunctionRequiresNArguments(methodName, required)
             : new SpatialStaticCall(type, methodName, [.. args]);
@@ -122,11 +128,9 @@ internal sealed class SpatialStaticCall : Expression
             if (text.Value.Type.Category != SqlTypeCategory.String)
                 throw new NotSupportedException($"{this.type}::{this.method} expects a string argument; got {text.Value.Type}.");
             var srid = Srid(runtime, 1, isGeography);
-            return srid is null
-                ? SqlValue.Null(this.type)
-                : SqlValue.FromSpatial(
-                    SpatialWktReader.Read(text.Value.AsString, srid.Value, isGeography, RequiredKind(this.method)?.Label),
-                    isGeography);
+            return SqlValue.FromSpatial(
+                SpatialWktReader.Read(text.Value.AsString, srid, isGeography, RequiredKind(this.method)?.Label),
+                isGeography);
         }
 
         if (fromWkb)
@@ -135,28 +139,26 @@ internal sealed class SpatialStaticCall : Expression
             if (binary is null)
                 return SqlValue.Null(this.type);
             var srid = Srid(runtime, 1, isGeography);
-            return srid is null
-                ? SqlValue.Null(this.type)
-                : SqlValue.FromSpatial(
-                    SpatialWkb.Read(binary.Value.AsBytes, srid.Value, isGeography, RequiredKind(this.method)?.Type),
-                    isGeography);
+            return SqlValue.FromSpatial(
+                SpatialWkb.Read(binary.Value.AsBytes, srid, isGeography, RequiredKind(this.method)?.Type),
+                isGeography);
         }
 
         if (this.method.Equals("Point", StringComparison.Ordinal) && this.arguments.Length == 3)
         {
-            var first = Argument(runtime, 0);
-            var second = Argument(runtime, 1);
+            // Every parameter of Point is a plain number, which refuses NULL
+            // (probed 2026-10-05 against SQL Server 2025).
+            var first = Argument(runtime, 0) ?? throw SimulatedSqlException.SpatialParameterNotNull(isGeography, this.method, 1);
+            var second = Argument(runtime, 1) ?? throw SimulatedSqlException.SpatialParameterNotNull(isGeography, this.method, 2);
             var srid = Srid(runtime, 2, isGeography);
-            if (first is null || second is null || srid is null)
-                return SqlValue.Null(this.type);
-            var a = first.Value.CoerceTo(SqlType.Float).AsDouble;
-            var b = second.Value.CoerceTo(SqlType.Float).AsDouble;
+            var a = first.CoerceTo(SqlType.Float).AsDouble;
+            var b = second.CoerceTo(SqlType.Float).AsDouble;
             // geography::Point takes (latitude, longitude); geometry::Point takes (x, y).
             var (x, y) = isGeography ? (b, a) : (a, b);
             return isGeography && (y < -90 || y > 90)
                 ? throw SimulatedSqlException.SpatialLatitudeOutOfRange()
                 : SqlValue.FromSpatial(
-                    new SpatialGeometry(srid.Value, SpatialShape.Leaf(SpatialShapeType.Point, [[new SpatialCoordinate(x, y)]])),
+                    new SpatialGeometry(srid, SpatialShape.Leaf(SpatialShapeType.Point, [[new SpatialCoordinate(x, y)]])),
                     isGeography);
         }
 
@@ -172,13 +174,17 @@ internal sealed class SpatialStaticCall : Expression
         return value.IsNull ? null : value;
     }
 
-    /// <summary>The SRID argument, falling back to the type's default when the constructor takes none.</summary>
-    private int? Srid(RuntimeContext runtime, int index, bool isGeography) =>
+    /// <summary>
+    /// The SRID argument, falling back to the type's default when the
+    /// constructor takes none. The parameter is a plain <c>int</c>, so a NULL
+    /// is Msg 6569 (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    private int Srid(RuntimeContext runtime, int index, bool isGeography) =>
         index >= this.arguments.Length
             ? SpatialGeometry.DefaultSridFor(isGeography)
             : Argument(runtime, index) is { } value
                 ? SpatialGeometry.ValidateSrid(ScalarArguments.CoerceToInt(value), isGeography)
-                : null;
+                : throw SimulatedSqlException.SpatialParameterNotNull(isGeography, this.method, index + 1);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => this.type;
 

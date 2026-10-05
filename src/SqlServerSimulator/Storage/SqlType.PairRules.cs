@@ -281,6 +281,15 @@ partial class SqlType
         if ((leftType is ClrUdtSqlType || rightType is ClrUdtSqlType) && ClrUdtPairError(operation, left, right, operatorName) is { } udtError)
             return udtError;
 
+        // The two spatial types share a class but convert into each other
+        // nowhere: assigning one to the other is Msg 206 (probed 2026-10-05
+        // against SQL Server 2025).
+        if (operation == TypePairOperation.Assign
+            && leftType is SpatialSqlType && rightType is SpatialSqlType && leftType != rightType)
+        {
+            return SimulatedSqlException.OperandTypeClash(OperandName(left), OperandName(right));
+        }
+
         if ((operation is TypePairOperation.Unify or TypePairOperation.Compare
                 && (IsMaxLengthVariantPair(leftType, rightType) || IsMaxLengthVariantPair(rightType, leftType)))
             || (operation == TypePairOperation.Assign && IsMaxLengthVariantPair(leftType, rightType)))

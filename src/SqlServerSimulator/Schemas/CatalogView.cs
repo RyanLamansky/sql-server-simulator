@@ -351,6 +351,9 @@ internal enum MetadataVisibilityKind : byte
 
     /// <summary>A permission row, by grantee: the row shows when the reader is, or belongs to, the grantee.</summary>
     Grantee,
+
+    /// <summary>A full-text catalog, by id: the row shows to its owner and to a holder of any permission on it.</summary>
+    FullTextCatalog,
 }
 
 /// <summary>

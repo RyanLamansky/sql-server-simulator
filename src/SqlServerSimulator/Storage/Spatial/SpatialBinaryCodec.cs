@@ -66,7 +66,7 @@ internal static class SpatialBinaryCodec
     public static SpatialGeometry Decode(ReadOnlySpan<byte> bytes, bool isGeography)
     {
         if (bytes.Length < 6)
-            throw SimulatedSqlException.SpatialUnexpectedEndOfInput(isGeography);
+            throw SimulatedSqlException.SpatialPayloadInvalid(isGeography);
         var srid = BinaryPrimitives.ReadInt32LittleEndian(bytes[..4]);
         var version = bytes[4];
         if (version is not (1 or 2))
@@ -98,7 +98,7 @@ internal static class SpatialBinaryCodec
     private static SpatialCoordinate[] ReadInterleaved(ReadOnlySpan<byte> body, int count, int ordinates, bool hasZ, bool hasM, bool isGeography)
     {
         if (body.Length < count * ordinates * 8)
-            throw SimulatedSqlException.SpatialUnexpectedEndOfInput(isGeography);
+            throw SimulatedSqlException.SpatialPayloadInvalid(isGeography);
         var points = new SpatialCoordinate[count];
         for (var i = 0; i < count; i++)
         {
@@ -123,7 +123,7 @@ internal static class SpatialBinaryCodec
         var at = 6;
         var pointCount = ReadInt32(bytes, ref at);
         if (pointCount < 0)
-            throw SimulatedSqlException.SpatialUnexpectedEndOfInput(isGeography);
+            throw SimulatedSqlException.SpatialPayloadInvalid(isGeography);
         var coordinates = new (double First, double Second)[pointCount];
         for (var i = 0; i < pointCount; i++)
         {
@@ -139,7 +139,7 @@ internal static class SpatialBinaryCodec
 
         var figureCount = ReadInt32(bytes, ref at);
         if (figureCount < 0)
-            throw SimulatedSqlException.SpatialUnexpectedEndOfInput(isGeography);
+            throw SimulatedSqlException.SpatialPayloadInvalid(isGeography);
         var figureStart = new int[figureCount];
         var figureAttributes = new byte[figureCount];
         for (var i = 0; i < figureCount; i++)
@@ -152,7 +152,7 @@ internal static class SpatialBinaryCodec
 
         var shapeCount = ReadInt32(bytes, ref at);
         if (shapeCount <= 0)
-            throw SimulatedSqlException.SpatialUnexpectedEndOfInput(isGeography);
+            throw SimulatedSqlException.SpatialPayloadInvalid(isGeography);
         var shapes = new (int Parent, int Figure, byte Type)[shapeCount];
         for (var i = 0; i < shapeCount; i++)
         {

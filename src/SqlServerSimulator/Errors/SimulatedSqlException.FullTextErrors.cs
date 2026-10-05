@@ -10,12 +10,14 @@ namespace SqlServerSimulator;
 partial class SimulatedSqlException
 {
     /// <summary>
-    /// Mimics SQL Server's Msg 7601 state 2 — the table (or indexed view) named
-    /// by the predicate carries no full-text index at all.
+    /// Mimics SQL Server's Msg 7601 — the table (or view) named by the
+    /// predicate carries no full-text index at all, named as the FROM clause
+    /// wrote it: state 2 for a named column or a rowset, 4 for a predicate's
+    /// <c>*</c> (probed 2026-10-05 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException FullTextTableNotIndexed(string tableName) =>
+    internal static SimulatedSqlException FullTextTableNotIndexed(string tableName, byte state = 2) =>
         new($"Cannot use a CONTAINS or FREETEXT predicate on table or indexed view '{tableName}' because it is not full-text indexed.",
-            7601, 16, 2);
+            7601, 16, state);
 
     /// <summary>
     /// Mimics SQL Server's Msg 7601 state 3 — the table is indexed but the
@@ -92,6 +94,25 @@ partial class SimulatedSqlException
         new($"Syntax error near '{token}' in the full-text search condition '{condition}'.", 7630, 15, state);
 
     /// <summary>
+    /// Mimics SQL Server's Msg 9987 state 1 — a generic <c>NEAR</c>'s distance
+    /// that is neither <c>MAX</c> nor a whole number up to 4294967295.
+    /// </summary>
+    internal static SimulatedSqlException FullTextNearDistanceInvalid() =>
+        new("The max gap argument in NEAR clause must be either the word MAX or an integer greater than or equal to 0.", 9987, 15, 1);
+
+    /// <summary>
+    /// Mimics SQL Server's Msg 31201 — a <c>PROPERTY(column, 'name')</c>
+    /// search over an index with no search property list, which no index here
+    /// can have (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FullTextPropertySearchUnsupported() =>
+        new("Property-scoped full-text queries cannot be specified on the specified table because its full-text index is not configured for property searching. To support property-scoped searches, the full-text index must be associated with a search property list and repopulated. The Transact-SQL syntax for this is: ALTER FULLTEXT INDEX ON <table_name> SET SEARCH PROPERTY LIST <property_list_name>;.", 31201, 16, 1);
+
+    /// <summary>Mimics SQL Server's Msg 7632 state 5 — an <c>ISABOUT</c> weight outside 0.0 to 1.0.</summary>
+    internal static SimulatedSqlException FullTextWeightOutOfRange() =>
+        new("The value of the Weight argument must be between 0.0 and 1.0.", 7632, 15, 5);
+
+    /// <summary>
     /// Mimics SQL Server's Msg 1046 — real classifies a full-text predicate as
     /// a rowset construct, so writing one where only a scalar expression may
     /// stand (a CHECK constraint, a computed column) reports the
@@ -145,9 +166,48 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException FullTextIndexHasNoColumns(string tableName) =>
         new($"Cannot activate full-text search for table or indexed view '{tableName}' because no columns have been enabled for full-text search.", 7659, 16, 2);
 
-    /// <summary>Msg 7663: <c>WITH NO POPULATION</c> on an <c>ADD</c> / <c>DROP</c> while change tracking is on.</summary>
-    internal static SimulatedSqlException FullTextNoPopulationWithChangeTracking() =>
-        new("Option 'WITH NO POPULATION' should not be used when change tracking is enabled.", 7663, 16, 2);
+    /// <summary>Msg 7663: <c>WITH NO POPULATION</c> while change tracking is on — state 1 from <c>CREATE</c>, 2 from an <c>ALTER</c>'s <c>ADD</c> / <c>DROP</c>.</summary>
+    internal static SimulatedSqlException FullTextNoPopulationWithChangeTracking(byte state = 2) =>
+        new("Option 'WITH NO POPULATION' should not be used when change tracking is enabled.", 7663, 16, state);
+
+    // The CREATE / DROP refusals below were probed 2026-10-05 against SQL
+    // Server 2025.
+
+    /// <summary>Msg 7653: a <c>KEY INDEX</c> that can't key a full-text index — state 1 missing, 2 not unique, single-column, unfiltered and enabled, 3 nullable.</summary>
+    internal static SimulatedSqlException FullTextKeyIndexInvalid(string indexName, byte state) =>
+        new($"'{indexName}' is not a valid index to enforce a full-text search key. A full-text search key must be a unique, non-nullable, single-column index which is not offline, is not defined on a non-deterministic or imprecise nonpersisted computed column, does not have a filter, and has maximum size of 900 bytes. Choose another index for the full-text key.", 7653, 16, state);
+
+    /// <summary>Msg 9967: <c>CREATE FULLTEXT INDEX</c> naming no catalog in a database with no default one.</summary>
+    internal static SimulatedSqlException FullTextDefaultCatalogMissing(string databaseName) =>
+        new($"A default full-text catalog does not exist in database '{databaseName}' or user does not have permission to perform this action.", 9967, 16, 1);
+
+    /// <summary>Msg 9960: <c>CREATE FULLTEXT INDEX</c> on a view without a clustered index, named as written.</summary>
+    internal static SimulatedSqlException FullTextViewNotIndexed(string viewName) =>
+        new($"View '{viewName}' is not an indexed view. Full-text index is not allowed to be created on it.", 9960, 16, 1);
+
+    /// <summary>Msg 9938: <c>CREATE FULLTEXT CATALOG … AUTHORIZATION</c> naming no user or role.</summary>
+    internal static SimulatedSqlException FullTextOwnerNotFound(string ownerName) =>
+        new($"Cannot find the specified user or role '{ownerName}'.", 9938, 16, 1);
+
+    /// <summary>Msg 7668: <c>DROP FULLTEXT CATALOG</c> of a catalog an index still uses.</summary>
+    internal static SimulatedSqlException FullTextCatalogNotEmpty(string catalogName) =>
+        new($"Cannot drop full-text catalog '{catalogName}' because it contains a full-text index.", 7668, 16, 1);
+
+    /// <summary>Msg 7699: a <c>TYPE COLUMN</c> on a column that isn't <c>image</c> or <c>varbinary(max)</c>.</summary>
+    internal static SimulatedSqlException FullTextTypeColumnNotAllowed() =>
+        new("TYPE COLUMN option is not allowed for column types other than image or varbinary(max).", 7699, 16, 1);
+
+    /// <summary>Msg 7671: a <c>TYPE COLUMN</c> that isn't a character column of at most 260 characters.</summary>
+    internal static SimulatedSqlException FullTextTypeColumnInvalid(string columnName) =>
+        new($"Column '{columnName}' cannot be used as full-text type column for image column. It must be a character-based column with a size less or equal than 260 characters.", 7671, 16, 2);
+
+    /// <summary>Msg 7613: <c>DROP INDEX</c> (state 2, the table as written) or a constraint drop (state 1, its bare name) of the index keying a full-text index.</summary>
+    internal static SimulatedSqlException FullTextKeyIndexDropped(string indexName, string tableName, byte state) =>
+        new($"Cannot drop index '{indexName}' because it enforces the full-text key for table or indexed view '{tableName}'.", 7613, 16, state);
+
+    /// <summary>Msg 7614: <c>ALTER TABLE … DROP COLUMN</c> of a full-text-indexed column.</summary>
+    internal static SimulatedSqlException FullTextColumnDropped(string columnName) =>
+        new($"Cannot alter or drop column '{columnName}' because it is enabled for Full-Text Search.", 7614, 16, 1);
 
     /// <summary>Msg 7664: <c>START UPDATE POPULATION</c> with change tracking off.</summary>
     internal static SimulatedSqlException FullTextChangeTrackingNotStarted(string tableName) =>

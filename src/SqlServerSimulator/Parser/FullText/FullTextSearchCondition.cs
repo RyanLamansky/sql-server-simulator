@@ -97,6 +97,9 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
             if (seen.Add(term.Text))
                 alternatives.Add(FullTextTermNode.Word(term.Text, inflectional: language.EnglishMorphology));
         }
+        // A string with nothing to search at all (`'!'`) reports noise too
+        // (probed 2026-10-05 against SQL Server 2025).
+        sawStopword |= alternatives.Count == 0;
         var root = alternatives.Count switch
         {
             0 => FullTextNode.NeverMatches,
@@ -321,6 +324,7 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
                     firstPosition = position;
                 List<string> all = [];
                 List<string> searchable = [];
+                var noiseAtPosition = false;
                 for (; i < terms.Count && terms[i].Position == position; i++)
                 {
                     if (terms[i].Kind != FullTextTermKind.Word)
@@ -328,6 +332,8 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
                     all.Add(terms[i].Text);
                     if (stoplist is null || !stoplist.IsNoise(terms[i].Text))
                         searchable.Add(terms[i].Text);
+                    else
+                        noiseAtPosition = true;
                 }
                 var offset = position - firstPosition;
                 if (prefixPositions.Contains(position))
@@ -338,6 +344,10 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
                     elements.Add(new FullTextElement(offset, [.. all], prefix: true, wildcard: false));
                     continue;
                 }
+                // A noise part of a compound reports noise although the
+                // composite searches on (`well-known`, probed 2026-10-05
+                // against SQL Server 2025).
+                this.SawStopword |= noiseAtPosition;
                 if (searchable.Count > 0)
                 {
                     elements.Add(new FullTextElement(offset, [.. searchable], prefix: false, wildcard: false));
@@ -357,6 +367,9 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
                 }
                 elements.Add(new FullTextElement(offset, [], prefix: false, wildcard: true));
             }
+            // A term with no word in it at all (`'`, `""`) reports noise as
+            // a stopword does (probed 2026-10-05 against SQL Server 2025).
+            this.SawStopword |= firstPosition == 0;
             // A starred phrase holding a noise word matches nothing (probe:
             // `"word of mou*"` found no `word of mouth`, `"red-ho*"` found
             // `red-hot`).
@@ -471,6 +484,10 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
                 }
                 break;
             }
+            // A proximity needs two terms: `NEAR(apple)` and `NEAR((apple), 2)`
+            // are Msg 7630 at the list's closing parenthesis.
+            if (terms.Count < 2)
+                throw ErrorAtCurrentToken();
 
             int? maximumDistance = null;
             var ordered = false;
@@ -487,9 +504,17 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
                         throw ErrorAtCurrentToken();
                     if (!IsKeyword(distanceWord, "MAX"))
                     {
-                        if (!int.TryParse(distanceWord, out var parsed))
-                            throw SimulatedSqlException.FullTextSyntaxErrorNearWord(distanceWord, this.text);
-                        maximumDistance = parsed;
+                        // A distance is a whole number up to 4294967295;
+                        // anything else that reads as a number — a sign, a
+                        // fraction, a wider count — is Msg 9987 (probed
+                        // 2026-10-05 against SQL Server 2025).
+                        if (!uint.TryParse(distanceWord, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+                        {
+                            throw !distanceWord.All(static c => char.IsAsciiDigit(c) || c is '.' or '+' or '-')
+                                ? SimulatedSqlException.FullTextSyntaxErrorNearWord(distanceWord, this.text)
+                                : SimulatedSqlException.FullTextNearDistanceInvalid();
+                        }
+                        maximumDistance = (int)Math.Min(parsed, int.MaxValue);
                     }
                     SkipWhitespace();
                     if (this.index < this.text.Length && this.text[this.index] == ',')
@@ -548,11 +573,19 @@ internal sealed class FullTextSearchCondition(FullTextNode root, bool sawStopwor
         {
             SkipWhitespace();
             var start = this.index;
-            while (this.index < this.text.Length && (char.IsDigit(this.text[this.index]) || this.text[this.index] == '.'))
+            if (this.index < this.text.Length && this.text[this.index] is '-' or '+')
                 this.index++;
-            return this.index > start && double.TryParse(this.text[start..this.index], System.Globalization.CultureInfo.InvariantCulture, out var value)
-                ? value
-                : throw ErrorAtCurrentToken();
+            while (this.index < this.text.Length && (char.IsDigit(this.text[this.index]) || this.text[this.index] is '.' or 'e' or 'E'))
+                this.index++;
+            if (this.index == start || !double.TryParse(this.text[start..this.index], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var value))
+            {
+                this.index = start;
+                throw ErrorAtCurrentToken();
+            }
+            // A weight reads as any number, then must lie in [0, 1] (probed
+            // 2026-10-05 against SQL Server 2025: `1.5`, `-1` and `.5e1` are
+            // all Msg 7632).
+            return value is >= 0 and <= 1 ? value : throw SimulatedSqlException.FullTextWeightOutOfRange();
         }
 
         private void SkipWhitespace()

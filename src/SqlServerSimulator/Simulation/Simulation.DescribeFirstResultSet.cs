@@ -155,7 +155,7 @@ partial class Simulation
         if (first is not null)
         {
             for (var i = 0; i < first.Schema.Length; i++)
-                rows.Add(DescribeColumn(first, i));
+                rows.Add(DescribeColumn(first, i, batch.CurrentDatabase.Name));
         }
         return rows;
     }
@@ -176,7 +176,7 @@ partial class Simulation
         return System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(property);
     }
 
-    private static SqlValue[] DescribeColumn(SimulatedQueryResult result, int index)
+    private static SqlValue[] DescribeColumn(SimulatedQueryResult result, int index, string databaseName)
     {
         // An unsized string result describes as the width the wire reports
         // for it (COLMETADATA's 8000 bytes).
@@ -202,6 +202,12 @@ partial class Simulation
         var nullSmall = SqlValue.Null(SqlType.SmallInt);
         var nullInt = SqlValue.Null(SqlType.Int32);
         var alias = result.ColumnAliasTypes?[index];
+        // The system CLR types describe as user types of sys in the current
+        // database, naming their assembly (probed 2026-10-05 against SQL
+        // Server 2025).
+        var systemClrType = type == SqlType.HierarchyId ? "Microsoft.SqlServer.Types.SqlHierarchyId"
+            : type is SpatialSqlType spatial ? spatial.ClrTypeName
+            : null;
         return
         [
             SqlValue.FromBoolean(false),
@@ -214,11 +220,13 @@ partial class Simulation
             SqlValue.FromByte(precision),
             SqlValue.FromByte(scale),
             collation is null ? nullName : SqlValue.FromSystemName(collation.Name),
-            alias is not null ? SqlValue.FromInt32(alias.UserTypeId) : type is VectorSqlType ? SqlValue.FromInt32(type.UserTypeId) : nullInt,
-            alias is null ? nullName : SqlValue.FromSystemName(alias.Schema.Database.Name),
-            alias is null ? nullName : SqlValue.FromSystemName(alias.Schema.Name),
-            alias is null ? nullName : SqlValue.FromSystemName(alias.Name),
-            SqlValue.Null(NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit)),
+            alias is not null ? SqlValue.FromInt32(alias.UserTypeId) : type is VectorSqlType || systemClrType is not null ? SqlValue.FromInt32(type.UserTypeId) : nullInt,
+            alias is not null ? SqlValue.FromSystemName(alias.Schema.Database.Name) : systemClrType is not null ? SqlValue.FromSystemName(databaseName) : nullName,
+            alias is not null ? SqlValue.FromSystemName(alias.Schema.Name) : systemClrType is not null ? SqlValue.FromSystemName("sys") : nullName,
+            alias is not null ? SqlValue.FromSystemName(alias.Name) : systemClrType is not null ? SqlValue.FromSystemName(type.SqlServerName) : nullName,
+            systemClrType is not null
+                ? SqlValue.FromNVarchar($"{systemClrType}, Microsoft.SqlServer.Types, Version=11.0.0.0, Culture=neutral, PublicKeyToken=89845dcd8080cc91")
+                : SqlValue.Null(NVarcharSqlType.Get(4000, Collation.Baseline, Coercibility.Implicit)),
             nullInt, nullName, nullName, nullName,
             SqlValue.FromBoolean(false),
             SqlValue.FromBoolean(type is XmlSqlType || (collation is not null && (collation.Name.Contains("_CS", StringComparison.OrdinalIgnoreCase) || collation.Name.Contains("_BIN", StringComparison.OrdinalIgnoreCase)))),

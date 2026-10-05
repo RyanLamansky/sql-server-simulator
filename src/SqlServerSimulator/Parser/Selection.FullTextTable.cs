@@ -54,6 +54,10 @@ internal sealed partial class Selection
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
         var spec = FullTextColumnSpec.Parse(context);
+        // The rowsets take bare column names: `t.body` is a syntax error at
+        // its dot (probed 2026-10-05 against SQL Server 2025).
+        if (Array.Exists(spec.Columns, static column => column.Count > 1))
+            throw SimulatedSqlException.SyntaxErrorNear('.');
 
         if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -72,7 +76,16 @@ internal sealed partial class Selection
                 language = Expressions.FullTextPredicate.ParseLiteralOrVariable(context.MoveNextRequiredReturnSelf(), numberAllowed: true);
                 continue;
             }
-            topByRank = Expression.Parse(context);
+            // top_n_by_rank is an integer literal or a variable: a sign, a
+            // string, NULL or an expression is a syntax error at it (probed
+            // 2026-10-05 against SQL Server 2025).
+            if (context.Token is not (Numeric or AtPrefixedString))
+            {
+                throw context.Token is ReservedKeyword keyword
+                    ? SimulatedSqlException.SyntaxErrorNearKeyword(keyword)
+                    : SimulatedSqlException.SyntaxErrorNear(context);
+            }
+            topByRank = Expressions.FullTextPredicate.ParseLiteralOrVariable(context, numberAllowed: true);
         }
 
         if (context.Token is not Operator { Character: ')' })
@@ -80,7 +93,7 @@ internal sealed partial class Selection
         context.MoveNextOptional();
 
         var binding = FullTextColumnSpec.Bind(
-            spec, table, tableName.Leaf, context.Batch.CurrentDatabase, context.Batch.CurrentDatabase.Collation, qualifier: null);
+            spec, table, tableName.ToString(), context.Batch.CurrentDatabase, context.Batch.CurrentDatabase.Collation, qualifier: null);
         var keyStorageOrdinal = ResolveFullTextKeyOrdinal(table);
         var keyType = table.StoredColumns[keyStorageOrdinal].Type;
 
@@ -90,7 +103,12 @@ internal sealed partial class Selection
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             (batch, outerResolver) => EnumerateFullTextTableRows(
-                binding, condition, language, freeText, topByRank, keyStorageOrdinal, schema, batch, outerResolver));
+                binding, condition, language, freeText, topByRank, keyStorageOrdinal, schema, batch, outerResolver))
+        {
+            // KEY is NOT NULL, RANK nullable (probed 2026-10-05 against SQL
+            // Server 2025 through sp_describe_first_result_set and SELECT INTO).
+            ColumnNullability = [false, true],
+        };
     }
 
     /// <summary>
@@ -144,6 +162,19 @@ internal sealed partial class Selection
         BatchContext batch,
         Func<MultiPartName, SqlValue>? outerResolver)
     {
+        // The rowset reads the searched columns, so it needs SELECT on each:
+        // real refuses with Msg 229 when none of the table is readable and
+        // Msg 230 per denied column otherwise, `*` meaning every indexed
+        // column (probed 2026-10-05 against SQL Server 2025).
+        if (!batch.IsSkipping)
+        {
+            var reads = new ColumnReadTarget(binding.Table);
+            foreach (var ordinal in binding.ColumnOrdinals)
+                _ = reads.Ordinals.Add(ordinal + 1);
+            if (PermissionEnforcement.ColumnsDenial(batch, Permission.Select, reads) is { } denied)
+                throw denied;
+        }
+
         var resolver = outerResolver ?? (n => throw SimulatedSqlException.InvalidColumnName(n));
         var runtime = new RuntimeContext(resolver, batch);
 
@@ -230,15 +261,14 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Reads the optional <c>top_n_by_rank</c> argument. Real answers 0 with an
-    /// empty rowset and refuses a negative literal at the grammar level
-    /// (Msg 102 near the minus sign), which the expression parser already does.
+    /// empty rowset, and a count past <c>int</c>'s range keeps every row.
     /// </summary>
     private static int? ResolveTopByRank(Expression? topByRank, RuntimeContext runtime)
     {
         if (topByRank is null)
             return null;
         var value = topByRank.Run(runtime);
-        return value.IsNull ? null : (int)value.CoerceTo(SqlType.BigInt).AsInt64;
+        return value.IsNull ? null : (int)Math.Clamp(value.CoerceTo(SqlType.BigInt).AsInt64, 0, int.MaxValue);
     }
 
     /// <summary>

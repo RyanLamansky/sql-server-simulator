@@ -481,6 +481,11 @@ internal sealed class ObjectProperty : Expression
             "TABLEFULLTEXTBACKGROUNDUPDATEINDEXON" or "TABLEFULLTEXTCHANGETRACKINGON" => Flag(fullText is { ChangeTracking: FullTextChangeTracking.Auto }),
             "TABLEFULLTEXTCATALOGID" => fullText?.CatalogId ?? 0,
             "TABLEFULLTEXTKEYCOLUMN" => FullTextKeyColumnId(table, fullText),
+            // The crawl counters: every row indexed, none failed or pending,
+            // and NULL for a table without an index (probed 2026-10-05
+            // against SQL Server 2025).
+            "TABLEFULLTEXTDOCSPROCESSED" or "TABLEFULLTEXTFAILCOUNT" or "TABLEFULLTEXTPENDINGCHANGES" => fullText is null ? null : 0,
+            "TABLEFULLTEXTITEMCOUNT" => fullText is null ? null : table!.Heap.RowCount,
             // Off without a running merge, which is every table here; a
             // table-valued function answers it too (probed 2026-10-02).
             "TABLEFULLTEXTMERGESTATUS" => 0,

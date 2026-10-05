@@ -64,6 +64,9 @@ internal sealed class SpatialIndex(
     public readonly short? Level4Grid = level4Grid;
 
     public readonly int? CellsPerObject = cellsPerObject;
+
+    /// <summary>Set by <c>ALTER INDEX … DISABLE</c>, cleared by <c>REBUILD</c>.</summary>
+    public bool IsDisabled;
 }
 
 /// <summary>

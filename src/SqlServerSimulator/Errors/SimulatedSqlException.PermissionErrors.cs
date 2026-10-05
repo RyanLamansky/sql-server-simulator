@@ -313,8 +313,8 @@ public sealed partial class SimulatedSqlException
     /// probe-confirmed wording (the same sentence Msg 15247 carries, at a
     /// different number).
     /// </summary>
-    internal static SimulatedSqlException FullTextUserDoesNotHavePermission() =>
-        new("User does not have permission to perform this action.", 7666, 16, 2);
+    internal static SimulatedSqlException FullTextUserDoesNotHavePermission(byte state = 2) =>
+        new("User does not have permission to perform this action.", 7666, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 7641 for a <c>DROP FULLTEXT CATALOG</c> (state

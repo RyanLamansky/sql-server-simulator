@@ -99,7 +99,8 @@ internal sealed class HierarchyIdMethodCall : Expression
         // SpatialMethodCall produces.
         if (this.method == HierarchyIdMethod.ToStringMethod && receiver.Type is SpatialSqlType)
         {
-            return receiver.IsNull ? SqlValue.Null(NVarcharSqlType.Get(-1, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault)) : SqlValue.FromNVarchar(receiver.AsString);
+            var text = NVarcharSqlType.Get(-1, runtime.Batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+            return receiver.IsNull ? SqlValue.Null(text) : SqlValue.FromNVarchar(text, receiver.AsString);
         }
         if (receiver.IsNull)
             return SqlValue.Null(this.ResultType(runtime.Batch));
@@ -306,7 +307,11 @@ internal sealed class HierarchyIdMethodCall : Expression
         SqlType parameter = this.method == HierarchyIdMethod.GetAncestor ? SqlType.Int32 : SqlType.HierarchyId;
         foreach (var argument in this.arguments)
             _ = AssignmentRules.ArgumentType(argument, parameter, batch, resolveColumnType);
-        return this.ResultType(batch);
+        // A spatial receiver's ToString is nvarchar(max), as its STAsText is
+        // (probed 2026-10-05 against SQL Server 2025: LEN of it is bigint).
+        return this.method == HierarchyIdMethod.ToStringMethod && this.target.GetSqlType(batch, resolveColumnType) is SpatialSqlType
+            ? NVarcharSqlType.Get(-1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault)
+            : this.ResultType(batch);
     }
 
     private SqlType ResultType(BatchContext batch) => this.method switch

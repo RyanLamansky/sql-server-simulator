@@ -132,19 +132,21 @@ partial class Selection
 
     private static Selection WrapForJson(Selection inner, ForJsonOptions options)
     {
+        // Every column needs a name (Msg 13605), checked once at parse and
+        // ahead of the type check below (probed 2026-10-05 against SQL Server
+        // 2025: an unnamed spatial column is Msg 13605).
+        for (var i = 0; i < inner.ColumnNames.Length; i++)
+        {
+            if (inner.ColumnNames[i].Length == 0)
+                throw SimulatedSqlException.ForJsonColumnWithoutName();
+        }
+
         // The spatial and CLR user-defined types have no JSON form; hierarchyid
         // writes its string (probed 2026-10-02 against SQL Server 2025).
         foreach (var type in inner.Schema)
         {
             if (type is SpatialSqlType or ClrUdtSqlType)
                 throw SimulatedSqlException.ForJsonClrType();
-        }
-
-        // Every column needs a name (Msg 13605), checked once at parse.
-        for (var i = 0; i < inner.ColumnNames.Length; i++)
-        {
-            if (inner.ColumnNames[i].Length == 0)
-                throw SimulatedSqlException.ForJsonColumnWithoutName();
         }
 
         // Compile-time raw-embed detection per column (nested FOR JSON /

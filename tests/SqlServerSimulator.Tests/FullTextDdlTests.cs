@@ -82,8 +82,11 @@ public sealed class FullTextDdlTests
     }
 
     [TestMethod]
-    public void DropFullTextCatalog_Missing_Raises208()
-        => new Simulation().AssertSqlError("drop fulltext catalog missing_cat", 208);
+    public void DropFullTextCatalog_Missing_Raises7641State4()
+    {
+        var ex = new Simulation().AssertSqlError("drop fulltext catalog missing_cat", 7641);
+        AreEqual(4, ex.State);
+    }
 
     [TestMethod]
     public void CreateFullTextIndex_SingleColumn_Succeeds()
@@ -163,12 +166,13 @@ public sealed class FullTextDdlTests
     }
 
     [TestMethod]
-    public void CreateFullTextIndex_UnknownKeyIndex_Raises208()
+    public void CreateFullTextIndex_UnknownKeyIndex_Raises7653State1()
     {
         var sim = BuildSimWithDoc();
-        _ = sim.AssertSqlError(
+        var ex = sim.AssertSqlError(
             "create fulltext index on dbo.doc (body language 1033) key index no_such_index",
-            208);
+            7653);
+        AreEqual(1, ex.State);
     }
 
     [TestMethod]
@@ -305,4 +309,124 @@ public sealed class FullTextDdlTests
     [DataRow("DataTimeout", 0)]
     public void FullTextServiceProperty_AnswersTheServiceSettings(string property, int expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select fulltextserviceproperty('{property}')"));
+
+    // ---- CREATE / DROP refusals, probed 2026-10-05 against SQL Server 2025 ----
+
+    private const string KeyTable = """
+        create table dbo.k (
+            id int not null constraint pk_k primary key,
+            n int null,
+            i int not null,
+            a nvarchar(100) null,
+            d varbinary(max) null,
+            e nvarchar(10) null,
+            c int null
+        )
+        """;
+
+    [TestMethod]
+    [DataRow("create index ix on dbo.k (i)", "ix", 2)]
+    [DataRow("create unique index ux on dbo.k (n)", "ux", 3)]
+    [DataRow("create unique index ux on dbo.k (i, c)", "ux", 2)]
+    [DataRow("create unique index ux on dbo.k (i) where i > 0", "ux", 2)]
+    [DataRow("create unique index ux on dbo.k (i); alter index ux on dbo.k disable", "ux", 2)]
+    [DataRow("select 1", "nosuch", 1)]
+    public void Key_Index_Must_Be_Unique_Single_Column_Not_Null(string setup, string keyIndex, int state)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create fulltext catalog c as default", KeyTable, setup);
+        var ex = sim.AssertSqlError($"create fulltext index on dbo.k (a) key index {keyIndex}", 7653);
+        AreEqual(state, ex.State);
+        StartsWith($"'{keyIndex}' is not a valid index to enforce a full-text search key.", ex.Message);
+    }
+
+    [TestMethod]
+    [DataRow("select 1", "create fulltext index on dbo.k (a) key index pk_k", 9967)]
+    [DataRow("create fulltext catalog c as default", "create fulltext index on dbo.k (a) key index pk_k on nosuch", 7641)]
+    [DataRow("create fulltext catalog c as default", "create fulltext index on dbo.k (a)", 102)]
+    [DataRow("create fulltext catalog c as default", "create fulltext index on dbo.k (a type column e) key index pk_k", 7699)]
+    [DataRow("create fulltext catalog c as default", "create fulltext index on dbo.k (d type column c) key index pk_k", 7671)]
+    [DataRow("create fulltext catalog c as default", "create fulltext index on dbo.k (a language 9999) key index pk_k", 7696)]
+    [DataRow("create fulltext catalog c as default", "create fulltext index on dbo.k (a) key index pk_k with (change_tracking auto, no population)", 7663)]
+    [DataRow("create fulltext catalog c as default; exec('create view dbo.v as select id, a from dbo.k')", "create fulltext index on dbo.v (a) key index pk_k", 9960)]
+    public void Create_Index_Refusals(string setup, string statement, int number)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(KeyTable, setup);
+        _ = sim.AssertSqlError(statement, number);
+    }
+
+    [TestMethod]
+    public void Create_Index_Takes_A_Hex_Language_And_No_Column_List()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(KeyTable, "create fulltext catalog c as default", "create fulltext index on dbo.k (a language 0x0407) key index pk_k");
+        AreEqual(1031, sim.ExecuteScalar("select language_id from sys.fulltext_index_columns"));
+        sim.ExecuteBatches("drop fulltext index on dbo.k", "create fulltext index on dbo.k key index pk_k");
+        IsFalse((bool)sim.ExecuteScalar("select is_enabled from sys.fulltext_indexes")!);
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.fulltext_index_catalog_usages u join sys.fulltext_catalogs c on c.fulltext_catalog_id = u.fulltext_catalog_id where c.name = 'c' and u.index_id = 1"));
+    }
+
+    [TestMethod]
+    [DataRow("create fulltext catalog c1 authorization nosuch", 9938)]
+    [DataRow("create fulltext catalog [cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc]", 193)]
+    [DataRow("create fulltext catalog c1 as default with accent_sensitivity = off", 319)]
+    public void Create_Catalog_Refusals(string statement, int number)
+        => _ = new Simulation().AssertSqlError(statement, number);
+
+    [TestMethod]
+    public void Create_Catalog_Takes_In_Path()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("create fulltext catalog c1 in path '/tmp'");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.fulltext_catalogs"));
+    }
+
+    [TestMethod]
+    public void Drop_Catalog_Holding_An_Index_Is_Msg_7668_And_A_Default_Warns()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(KeyTable, "create fulltext catalog c as default", "create fulltext index on dbo.k (a) key index pk_k");
+        _ = sim.AssertSqlError("drop fulltext catalog c", 7668);
+        sim.ExecuteBatches("drop fulltext index on dbo.k");
+        using var connection = sim.CreateOpenConnection();
+        List<int> messages = [];
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.AddRange(e.Errors.Select(error => error.Number));
+        using var command = connection.CreateCommand("drop fulltext catalog c");
+        _ = command.ExecuteNonQuery();
+        AreEqual("7674", string.Join(",", messages));
+    }
+
+    [TestMethod]
+    [DataRow("create unique index ux on dbo.k (i)", "ux", "drop index ux on dbo.k", 7613, 2)]
+    [DataRow("select 1", "pk_k", "alter table dbo.k drop constraint pk_k", 7613, 1)]
+    [DataRow("select 1", "pk_k", "alter table dbo.k drop column a", 7614, 1)]
+    public void Index_Keyed_Or_Indexed_Columns_Refuse_Their_Drop(string setup, string keyIndex, string statement, int number, int state)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(KeyTable, "create fulltext catalog c as default", setup, $"create fulltext index on dbo.k (a) key index {keyIndex}");
+        var ex = sim.AssertSqlError(statement, number);
+        AreEqual(state, ex.State);
+    }
+
+    [TestMethod]
+    public void Dropping_A_Type_Column_Is_Msg_5074_Naming_The_Table()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(KeyTable, "create fulltext catalog c as default", "create fulltext index on dbo.k (d type column e) key index pk_k");
+        AreEqual("The object 'k' is dependent on column 'e'.", sim.AssertSqlError("alter table dbo.k drop column e", 5074).Errors[0].Message);
+    }
+
+    [TestMethod]
+    public void Restricted_Principals_Are_Refused_And_See_Only_Visible_Rows()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(KeyTable, "create fulltext catalog c as default", "create fulltext index on dbo.k (a) key index pk_k",
+            "create table dbo.x (id int not null constraint pk_x primary key, b nvarchar(10))",
+            "create user u without login", "grant select on dbo.k to u", "grant alter on dbo.x to u");
+        AreEqual(3, sim.AssertSqlError("execute as user = 'u'; drop fulltext index on dbo.k", 7658).State);
+        AreEqual(3, sim.AssertSqlError("execute as user = 'u'; alter fulltext catalog c reorganize", 7641).State);
+        AreEqual(7, sim.AssertSqlError("execute as user = 'u'; create fulltext index on dbo.x (b) key index pk_x on c", 7666).State);
+        AreEqual("0|1", sim.ExecuteScalar("execute as user = 'u'; select concat((select count(*) from sys.fulltext_catalogs), '|', (select count(*) from sys.fulltext_indexes))"));
+    }
 }

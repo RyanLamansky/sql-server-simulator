@@ -279,6 +279,19 @@ partial class Simulation
                 return true;
             }
 
+            // A spatial index takes DISABLE, REBUILD and REORGANIZE, the
+            // first two toggling its disabled flag (probed 2026-10-05 against
+            // SQL Server 2025).
+            if (table.SpatialIndexes.Find(spatial => collation.Equals(spatial.Name, indexName)) is { } spatialIndex)
+            {
+                if (form == AlterIndexForm.Reorganize && spatialIndex.IsDisabled)
+                    throw SimulatedSqlException.OperationOnDisabledIndex(spatialIndex.Name, tableName.ToString());
+                if (form is AlterIndexForm.Disable or AlterIndexForm.Rebuild)
+                    spatialIndex.IsDisabled = form == AlterIndexForm.Disable;
+                RecordDdlEvent(context, "ALTER_INDEX", EventSchemaName(tableName), indexName!, "INDEX", table.Name, "TABLE");
+                return true;
+            }
+
             // Real takes no ALTER INDEX form on a vector index (probed
             // 2026-09-29 against SQL Server 2025).
             if (table.VectorIndexes.Exists(vectorIndex => collation.Equals(vectorIndex.Name, indexName)))

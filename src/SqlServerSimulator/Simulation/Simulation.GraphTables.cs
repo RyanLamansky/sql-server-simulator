@@ -172,8 +172,11 @@ partial class Simulation
             var clauses = new (HeapTable From, HeapTable To)[declaration.Clauses.Count];
             for (var c = 0; c < clauses.Length; c++)
             {
+                // Real resolves a clause's target ahead of its source (probed
+                // 2026-10-05 against SQL Server 2025: `X TO Y` names Y).
                 var (from, to) = declaration.Clauses[c];
-                clauses[c] = (ResolveEdgeEndpoint(context, name, from), ResolveEdgeEndpoint(context, name, to));
+                var target = ResolveEdgeEndpoint(context, name, to);
+                clauses[c] = (ResolveEdgeEndpoint(context, name, from), target);
             }
             resolved.Add(new EdgeConstraint(name, context.CurrentDatabase.AllocateObjectId(), clauses, declaration.CascadeOnDelete, declaration.Name is null, context.Batch.CurrentStatement.UtcNow));
         }
@@ -206,7 +209,7 @@ partial class Simulation
     /// among the nonclustered ones and it takes index id 2 (probed 2026-09-27
     /// against SQL Server 2025).
     /// </summary>
-    private static PendingInlineIndex GraphUniqueIndex(HeapColumn graphId, int keysBefore) =>
+    private static PendingInlineIndex GraphUniqueIndex(HeapColumn graphId, int keysBefore, bool partitioned) =>
         new(
             "GRAPH_UNIQUE_INDEX_" + graphId.Name[(graphId.Name.LastIndexOf('_') + 1)..],
             isUnique: true,
@@ -215,7 +218,7 @@ partial class Simulation
             [],
             filter: null,
             filterDefinition: null,
-            new IndexOptions(ignoreDupKey: false, fillFactor: null, padIndex: null))
+            new IndexOptions(ignoreDupKey: false, fillFactor: null, padIndex: null, dataSpace: partitioned ? new Schemas.DataSpaceClause("PRIMARY", null) : null))
         {
             KeysBefore = keysBefore,
         };

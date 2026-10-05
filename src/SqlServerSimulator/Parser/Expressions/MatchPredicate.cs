@@ -244,8 +244,15 @@ internal sealed class MatchPredicate : BooleanExpression
     private static BooleanExpression Bind(ParserContext context, List<(Name From, Name Edge, Name To)> hops, (Name Start, Name Edge, Name Node, bool Forward, int? MaxHops)? path)
     {
         var scope = context.MatchScope!;
-        var sources = scope.Sources ?? context.ScopeSources ?? [];
+        var ownSources = scope.Sources ?? context.ScopeSources ?? [];
         var joins = scope.Sources is null ? context.ScopeJoins ?? [] : scope.Joins ?? [];
+        // An identifier the query's own sources don't answer binds against
+        // an enclosing query's, innermost first: a correlated subquery may
+        // match from an outer node (probed 2026-10-05 against SQL Server
+        // 2025). Those sit past the query's own in one combined list.
+        var sources = ownSources;
+        for (var enclosing = context.EnclosingScopes.Count - 1; enclosing >= 0; enclosing--)
+            sources = [.. sources, .. context.EnclosingScopes[enclosing]];
         var collation = context.Batch.CurrentDatabase.Collation;
 
         // Every identifier in written order: a name no source answers to, a
@@ -277,6 +284,8 @@ internal sealed class MatchPredicate : BooleanExpression
         // An edge used twice — in one pattern or across a WHERE's MATCHes.
         foreach (var (_, edge, _) in bound)
         {
+            if (edge >= ownSources.Length)
+                continue;
             if (scope.Edges.Contains(sources[edge]))
                 throw SimulatedSqlException.MatchEdgeUsedTwice(sources[edge].Qualifier!);
             scope.Edges.Add(sources[edge]);
@@ -292,9 +301,9 @@ internal sealed class MatchPredicate : BooleanExpression
         }
         foreach (var (from, _, to) in bound)
         {
-            if (!scope.Nodes.Contains(sources[from]))
+            if (from < ownSources.Length && !scope.Nodes.Contains(sources[from]))
                 scope.Nodes.Add(sources[from]);
-            if (!scope.Nodes.Contains(sources[to]))
+            if (to < ownSources.Length && !scope.Nodes.Contains(sources[to]))
                 scope.Nodes.Add(sources[to]);
         }
 
@@ -338,6 +347,8 @@ internal sealed class MatchPredicate : BooleanExpression
 
         void RejectJoined(int source)
         {
+            if (source >= ownSources.Length)
+                return;
             if (scope.AllJoined || (source > 0 && !joins[source - 1].IsComma) || (source < joins.Length && !joins[source].IsComma))
                 throw SimulatedSqlException.MatchIdentifierInJoin(sources[source].Qualifier!);
         }

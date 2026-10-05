@@ -56,6 +56,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException GraphPseudoColumnJsonMalformed(string pseudoColumn) =>
         new($"JSON data for INSERT/UPDATE of graph pseudocolumn '{pseudoColumn}' is malformed.", 13921, 16, 1);
 
+    /// <summary>Msg 13910: <c>AS NODE</c> / <c>AS EDGE</c> with <c>MEMORY_OPTIMIZED = ON</c> (probed 2026-10-05 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException GraphTableCannotBeMemoryOptimized() =>
+        new("Cannot create a node or edge table as memory optimized.", 13910, 16, 1);
+
+    /// <summary>Msg 13912: <c>AS NODE</c> / <c>AS EDGE</c> with <c>SYSTEM_VERSIONING = ON</c> (probed 2026-10-05 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException GraphTableCannotBeTemporal() =>
+        new("A node or edge table cannot be created as or altered to a temporal table.", 13912, 16, 1);
+
     /// <summary>Msg 13930: a <c>CONNECTION</c> constraint on a table that isn't an edge table.</summary>
     internal static SimulatedSqlException EdgeConstraintOnNonEdgeTable(string tableName) =>
         new($"Edge constraint cannot be created on table '{tableName}'.  The table is not an edge table.", 13930, 16, 1);

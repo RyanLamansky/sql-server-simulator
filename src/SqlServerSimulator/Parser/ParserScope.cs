@@ -98,6 +98,7 @@ internal readonly ref struct QueryBlockScope
     private readonly Func<MultiPartName, SqlType>? outerTypeResolver;
     private readonly Func<MultiPartName, DataMask?>? outerMaskResolver;
     private readonly FromSource[]? scopeSources;
+    private readonly bool pushedEnclosingScope;
     private readonly NextValueForScope nextValueForRejection;
     private readonly bool readsRowLocators;
 
@@ -116,6 +117,11 @@ internal readonly ref struct QueryBlockScope
         this.scopeSources = context.ScopeSources;
         this.nextValueForRejection = context.NextValueForRejection;
         this.readsRowLocators = context.ReadsRowLocators;
+        if (context.ScopeSources is { Length: > 0 } enclosing)
+        {
+            context.EnclosingScopes.Add(enclosing);
+            this.pushedEnclosingScope = true;
+        }
         context.EnclosingAggregateCollector = context.AggregateCollector;
         context.AggregateCollector = aggregates;
         context.WindowCollector = windows;
@@ -143,6 +149,8 @@ internal readonly ref struct QueryBlockScope
         context.OuterTypeResolver = this.outerTypeResolver;
         context.OuterMaskResolver = this.outerMaskResolver;
         context.ScopeSources = this.scopeSources;
+        if (this.pushedEnclosingScope)
+            context.EnclosingScopes.RemoveAt(context.EnclosingScopes.Count - 1);
         context.NextValueForRejection = this.nextValueForRejection;
         context.ReadsRowLocators |= this.readsRowLocators;
     }

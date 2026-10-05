@@ -1446,7 +1446,15 @@ partial class SimulatedSqlException
     /// 2025).
     /// </summary>
     internal static SimulatedSqlException TempTableNameTooLong(string name) =>
-        new($"The object or column name starting with '{name}' is too long. The maximum length is 116 characters.", 193, 15, 1);
+        NameTooLong(name, 116, state: 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 193 for a name past an object kind's own limit
+    /// — a full-text catalog's 120 characters at state 3 (probed 2026-10-05
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NameTooLong(string name, int maximum, byte state) =>
+        new($"The object or column name starting with '{name}' is too long. The maximum length is {maximum} characters.", 193, 15, state);
 
     /// <summary>
     /// Mimics SQL Server error 1702: a CREATE TABLE declaring more than 1024
@@ -2684,6 +2692,14 @@ partial class SimulatedSqlException
         FollowedByConstraintNotDropped(new($"Constraint '{name}' does not belong to table '{tableName}'.", 3733, 16, 2));
 
     /// <summary>
+    /// Mimics SQL Server error 7613 state 1: <c>ALTER TABLE … DROP
+    /// CONSTRAINT</c> of the key a full-text index uses, naming the bare table,
+    /// followed by Msg 3727 (probed 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException FullTextKeyConstraintDropped(string constraintName, string tableName) =>
+        FollowedByConstraintNotDropped(FullTextKeyIndexDropped(constraintName, tableName, state: 1));
+
+    /// <summary>
     /// Mimics SQL Server error 3734: <c>ALTER TABLE … DROP CONSTRAINT</c>
     /// targeted the primary key of a table that still has an XML or spatial
     /// index, followed by Msg 3727 (probed 2026-09-26 against SQL Server 2025).
@@ -3195,8 +3211,8 @@ partial class SimulatedSqlException
     /// or spatial index, which only the <c>index ON table</c> form may drop.
     /// Real's wording says "XML Index" for a spatial one too.
     /// </summary>
-    internal static SimulatedSqlException XmlIndexDropNeedsOnSyntax(string writtenName) =>
-        new($"Cannot drop XML Index '{writtenName}' using old 'Table.Index' syntax, use 'Index ON Table' syntax instead.", 3749, 16, 1);
+    internal static SimulatedSqlException XmlIndexDropNeedsOnSyntax(string writtenName, byte state = 1) =>
+        new($"Cannot drop XML Index '{writtenName}' using old 'Table.Index' syntax, use 'Index ON Table' syntax instead.", 3749, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 1088: <c>CREATE INDEX</c> (or any
@@ -3708,6 +3724,61 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException SpatialIndexRequiresSpatialColumn(string columnName, string tableName) =>
         new($"The requested spatial index on column '{columnName}' of table '{tableName}' could not be created because the column type is not geometry or geography . Specify a column name that refers to a column with a geometry or geography data type.", 12002, 16, 1);
+
+    // CREATE SPATIAL INDEX's refusals below were probed 2026-10-05 against SQL
+    // Server 2025; a table is named as the statement wrote it.
+
+    /// <summary>Msg 6334: an XML or spatial index on a view.</summary>
+    internal static SimulatedSqlException XmlOrSpatialIndexOnNonTable(string writtenName) =>
+        new($"Could not create the XML or spatial index on object '{writtenName}' because that object is not a table. Create the index on the base table column.", 6334, 16, 1);
+
+    /// <summary>Msg 6342 state 202: a spatial index on a non-persisted computed column.</summary>
+    internal static SimulatedSqlException XmlOrSpatialIndexOnComputedColumn(string indexName, string writtenTable, string columnName) =>
+        new($"Cannot create primary xml, selective xml or spatial index '{indexName}' on table '{writtenTable}', column '{columnName}', because the column is computed.", 6342, 16, 202);
+
+    /// <summary>Msg 12008: a spatial index on a table without a clustered primary key.</summary>
+    internal static SimulatedSqlException SpatialIndexNeedsClusteredPrimaryKey(string writtenTable) =>
+        new($"Table '{writtenTable}' does not have a clustered primary key as required by the spatial index. Make sure that the primary key column exists on the table before creating a spatial index.", 12008, 16, 1);
+
+    /// <summary>Msg 12016: a primary key past a spatial index's 31 columns or 895 bytes.</summary>
+    internal static SimulatedSqlException SpatialIndexPrimaryKeyTooWide(string writtenTable, int columns, int bytes) =>
+        new($" Creating a spatial index requires that the primary key in the base table satisfy the following restrictions. The maximum number of primary-key columns is 31.  The maximum combined per-row size of the primary-key columns is 895 bytes. The primary key on the base table '{writtenTable}' has {columns} columns, and contains {bytes} bytes. Alter the base table to satisfy the primary-key restrictions imposed by the spatial index.", 12016, 16, 1);
+
+    /// <summary>Msg 12003: a USING scheme that isn't one of the column type's two, quoted as written.</summary>
+    internal static SimulatedSqlException SpatialTessellationSchemeNotFound(string writtenScheme, string typeName) =>
+        new($"Could not find spatial tessellation scheme '{writtenScheme}' for column of type {typeName}. Specify a valid tessellation scheme name in your USING clause.", 12003, 16, 1);
+
+    /// <summary>Msg 12007: a geometry index without <c>BOUNDING_BOX</c>.</summary>
+    internal static SimulatedSqlException SpatialIndexBoundingBoxRequired() =>
+        new("The CREATE SPATIAL INDEX statement is missing the required parameter 'BOUNDING_BOX'. Validate the statement against the index-creation syntax.", 12007, 16, 1);
+
+    /// <summary>Msg 12005: a parameter the index can't take — a geography box or an AUTO scheme's grids (state 1, as written), numeric grids (29) or a fractional cell count (40).</summary>
+    internal static SimulatedSqlException SpatialIndexParametersIncorrect(string near, byte state) =>
+        new($"Incorrect parameters were passed to the CREATE SPATIAL INDEX statement near '{near}'. Validate the statement against the index-creation syntax.", 12005, 16, state);
+
+    /// <summary>Msg 12006: a spatial index parameter, or one of its parts, given twice.</summary>
+    internal static SimulatedSqlException SpatialIndexDuplicateParameter() =>
+        new("Duplicate parameters were passed to the create index statement. Validate the statement against the index-creation syntax.", 12006, 16, 1);
+
+    /// <summary>Msg 12014: a box or grid list missing parts — state 1 positional (as written), 4 for a named box.</summary>
+    internal static SimulatedSqlException SpatialIndexParameterIncomplete(string parameter, byte state) =>
+        new($"The '{parameter}' parameter of CREATE SPATIAL INDEX is incompletely defined. If the parameter has more than one part, all the parts must be defined.", 12014, 16, state);
+
+    /// <summary>Msg 12013: a bounding box whose maximum doesn't pass its minimum.</summary>
+    internal static SimulatedSqlException SpatialIndexBoundInverted(string maximum, string minimum) =>
+        new($"The value of parameter '{maximum}' of CREATE SPATIAL INDEX must be greater than the value of parameter '{minimum}'.", 12013, 16, 1);
+
+    /// <summary>Msg 12012: <c>CELLS_PER_OBJECT</c> below 1.</summary>
+    internal static SimulatedSqlException SpatialIndexCellsTooFew() =>
+        new("The value of parameter 'CELLS_PER_OBJECT' of CREATE SPATIAL INDEX must be greater than 0.", 12012, 16, 1);
+
+    /// <summary>Msg 12011: <c>CELLS_PER_OBJECT</c> above 8192.</summary>
+    internal static SimulatedSqlException SpatialIndexCellsTooMany() =>
+        new("The value of parameter 'CELLS_PER_OBJECT' of CREATE SPATIAL INDEX must be less than 8193.", 12011, 16, 2);
+
+    /// <summary>Msg 153: a relational option a spatial index refuses — state 2 for <c>IGNORE_DUP_KEY</c> as written, 3 for <c>ONLINE = ON</c> / <c>RESUMABLE = ON</c>.</summary>
+    internal static SimulatedSqlException InvalidSpatialIndexOptionUsage(string option, byte state) =>
+        new($"Invalid usage of the option {option} in the CREATE SPATIAL INDEX statement.", 153, 15, state);
 
     /// <summary>
     /// Mimics SQL Server error 6314: <c>XML_SCHEMA_NAMESPACE</c> named a

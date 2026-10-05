@@ -747,6 +747,15 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public FromSource[]? ScopeSources;
 
     /// <summary>
+    /// The <see cref="ScopeSources"/> of every query enclosing the one parsing,
+    /// outermost first, pushed as each query block opens and popped as it
+    /// closes — what a <c>MATCH</c> in a correlated subquery binds an outer
+    /// node or edge against. One list for the parse's lifetime, so opening a
+    /// block allocates nothing.
+    /// </summary>
+    public readonly List<FromSource[]> EnclosingScopes = [];
+
+    /// <summary>
     /// The columns a <c>CREATE TABLE</c> list has declared so far, by name,
     /// while the list parses and the host enabled CLR — how a computed column
     /// or a CHECK tells a CLR type column's member (<c>p.X</c>) from a

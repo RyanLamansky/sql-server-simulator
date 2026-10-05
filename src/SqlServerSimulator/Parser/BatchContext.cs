@@ -250,7 +250,7 @@ internal sealed partial class BatchContext
         if (this.CurrentStatement.ReportedNoiseWords)
             return;
         this.CurrentStatement.ReportedNoiseWords = true;
-        AppendInfoError(@class: 10, state: 1,
+        AppendInfoError(@class: 10, state: 10,
             SimulatedSqlException.FullTextNoiseWordMessageNumber,
             SimulatedSqlException.FullTextNoiseWordMessage);
     }

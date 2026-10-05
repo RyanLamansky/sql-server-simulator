@@ -56,10 +56,11 @@ DROP FULLTEXT INDEX ON table
 `ALTER FULLTEXT INDEX` lives in `Simulation/Simulation.AlterFullText.cs`.
 
 - Filesystem-placement trailers (`ON FILEGROUP` / `IN PATH`) parse-and-discard.
+- A catalog's clauses come in real's fixed order — placement, `WITH`, `AS DEFAULT`, `AUTHORIZATION` — and one out of order ends the statement, so `AS DEFAULT WITH …` is Msg 319 as on real.
 - `AS DEFAULT` demotes any prior default before promoting the new catalog.
 - `AUTHORIZATION owner` resolves against `Database.Principals` (default `dbo`).
 - Multi-column lists supported; the `TYPE COLUMN` nested reference handles AW's `[Production].[Document]` shape (varbinary doc + extension-column pairing).
-- `LANGUAGE` accepts an LCID or a language name (`'German'`), resolved as the predicates' argument is (see [Languages](#languages)); a column without one gets 1033.
+- `LANGUAGE` accepts an LCID, a binary or a language name (`'German'`), resolved as the predicates' argument is (see [Languages](#languages)), an unknown LCID Msg 7696; a column without one gets 1033.
 - Both paren and bare `ON catalog` forms work.
 - `WITH` takes `CHANGE_TRACKING [=] {MANUAL | AUTO | OFF [, NO POPULATION]}`, `STOPLIST [=] {OFF | SYSTEM | name}` and `SEARCH PROPERTY LIST [=] name`, parenthesized or bare.
   The tracking mode, `is_enabled` and the stoplist are kept on the `FullTextIndex` and reported by `sys.fulltext_indexes`; the tracking mode carries no search behavior — the simulator searches the live rows rather than a crawled index (see [the query pipeline](#no-index--the-rows-are-read-not-crawled)).
@@ -67,6 +68,12 @@ DROP FULLTEXT INDEX ON table
   The binding reads the stoplist setting when the search runs, so an `ALTER` reaches a cached plan; an accent-sensitivity change bumps the schema version instead, since the fold binds at compile.
 - Every full-text DDL statement refuses to run inside a user transaction (Msg 574, naming the statement), and a column list is checked column by column as real does — missing, not a text or document type, a document type without `TYPE COLUMN`, named twice, `STATISTICAL_SEMANTICS` — see `ResolveFullTextColumns` (probed 2026-09-26).
 - Only the system stoplist exists here, and no search property list, so naming one is Msg 30023 / 30025.
+- The column list may be left out, creating a disabled index with no columns; `KEY INDEX` may not.
+  The key index must be unique, single-column, unfiltered, enabled and over a NOT NULL column, each failure real's Msg 7653 at its own state (`ResolveFullTextKeyIndex`), and dropping it — by `DROP INDEX` or as a constraint — is Msg 7613.
+  A full-text-indexed column refuses `DROP COLUMN` with Msg 7614 alone, and a `TYPE COLUMN` blocks its own drop as the table's 5074 / 4922 pair.
+  A catalog that still holds an index refuses its drop (Msg 7668), and dropping the default one warns with Msg 7674.
+  The refusals' names follow real: an index's table as the statement wrote it, a missing catalog Msg 7641 (state 1 from `CREATE FULLTEXT INDEX`, 4 from `DROP`), no default catalog Msg 9967, a view without an index Msg 9960 — all probed 2026-10-05 against SQL Server 2025.
+- Dropping an index needs `ALTER` on the table, a denial reading as a missing index (Msg 7658 state 3); naming a catalog in `CREATE FULLTEXT INDEX` needs `REFERENCES` on it (Msg 7666 state 7); altering one needs `ALTER` on it or `ALTER ANY FULLTEXT CATALOG` (Msg 7641 state 3).
 
 ### `ALTER FULLTEXT INDEX` against a settled index
 
@@ -155,7 +162,8 @@ English's 154 hold the single letters and digits, which is why `CONTAINS(col, '7
 A noise word is never indexed — so `the` finds nothing even searched under a language whose stoplist lacks it — but it keeps its position.
 
 An ignored word doesn't merely fail to match — it collapses the clause holding it, matching real: `the AND quick` and `quick AND NOT the` both return nothing, while `the OR quick` returns `quick`'s rows.
-Any ignored word in the condition also raises real's severity-10 **Msg 9927** (`Informational: The full-text search condition contained noise word(s).`) through the `InfoMessage` surface, once per statement.
+Any ignored word in the condition also raises real's severity-10 **Msg 9927** (`Informational: The full-text search condition contained noise word(s).`, state 10) through the `InfoMessage` surface, once per statement.
+So does a compound with a noise part even though the composite searches on (`well-known`), and a term or `FREETEXT` string with no word in it at all (`'`, `""`, `!`) — but not a prefix term, whose noise words search as prefixes (all probed 2026-10-05 against SQL Server 2025).
 
 ### How a search reads the breaker's output
 
@@ -176,7 +184,8 @@ The rules below were fitted with a differential of 4,334 `CONTAINS` / `FREETEXT`
 ### Languages
 
 The column's `LANGUAGE` (1033 when the index names none, real's `default full-text language`) picks the stoplist its content is indexed under, and the condition is read in the first searched column's language unless the call names one.
-`LANGUAGE n` takes an LCID, a binary such as `0x407`, or a name or alias `sys.syslanguages` knows (`'German'`), and refuses an LCID without a full-text language (**Msg 7696**) and an unknown name (**Msg 7678**).
+`LANGUAGE n` takes an integer LCID, a binary such as `0x407`, or a name `sys.fulltext_languages` lists (`'German'`, `'Neutral'`, `'British English'`), and refuses an LCID without a full-text language (**Msg 7696**) and any other name (**Msg 7678**) — `sys.syslanguages` names such as `'Deutsch'` and `'us_english'` included, despite the message's wording (probed 2026-10-05 against SQL Server 2025).
+A number with a fraction (`1033.0`) is a syntax error.
 
 Only English morphology is modeled: under neutral, English and British English, inflectional searches expand through the stemmer below; under any other language they match the written form, as real's German `FREETEXT(s, 'run', LANGUAGE 1031)` fails to find `running`.
 Every language breaks words by the English rules; how far the real breakers differ is in [Divergences](#divergences).
@@ -218,6 +227,9 @@ An unquoted word ends at `!` as at the other operator marks, so `'lightweight!'`
 
 `, LANGUAGE n` works on all four members — see [Languages](#languages).
 
+Real's range checks, probed 2026-10-05 against SQL Server 2025: a `NEAR` distance is `MAX` or a whole number up to 4294967295 (anything else number-shaped is **Msg 9987**), a `NEAR` needs two terms (**Msg 7630** near the closing parenthesis otherwise), and an `ISABOUT` weight lies in 0.0 to 1.0 (**Msg 7632** state 5, `.5e1` included).
+The column specification takes `(*)` as `*`, and a `PROPERTY(column, 'name')` search is **Msg 31201**, since no index carries a search property list.
+
 ### `FREETEXT`
 
 The whole string word-breaks, stopwords drop out, and what survives is OR-ed together after inflectional expansion.
@@ -243,10 +255,12 @@ Populating a thesaurus means editing XML files in the server's install tree and 
 
 ### `CONTAINSTABLE` / `FREETEXTTABLE`
 
-`(table, column_spec, condition [, LANGUAGE n] [, top_n_by_rank])`, projecting `KEY` and `RANK`.
+`(table, column_spec, condition [, LANGUAGE n] [, top_n_by_rank])`, projecting `KEY` (NOT NULL) and `RANK` (nullable).
+The column specification takes bare names only — `t.body` is Msg 102 at its dot — and `top_n_by_rank` is an integer literal or a variable, a count past `int`'s range keeping every row (all probed 2026-10-05 against SQL Server 2025).
 `KEY` carries the type of the column the index's `KEY INDEX` names — `int` for the usual identity primary key, `varchar(20)` for a string key — and `RANK` is always `int`.
 Rows come back ordered by rank descending, and `top_n_by_rank` cuts the list there; `0` yields nothing and a negative literal is Msg 102 from the expression grammar, as on real.
-Both compose as ordinary FROM sources (alias, JOIN back to the base table on `[KEY]`, APPLY), because they ride the same synthesized-plan seam as `OPENJSON` and `STRING_SPLIT`.
+Both compose as ordinary FROM sources (alias, JOIN back to the base table on `[KEY]`, the right side of `APPLY`), because they ride the same synthesized-plan seam as `OPENJSON` and `STRING_SPLIT`.
+A rowset reads the searched columns, so it needs `SELECT` on each — Msg 229 when none of the table is readable, Msg 230 per denied column otherwise — checked as it runs.
 
 #### `RANK`
 
@@ -261,7 +275,8 @@ Consumers that order by `RANK` or filter `RANK > n` behave; consumers that asser
 
 | Case | Error |
 | --- | --- |
-| Table (or indexed view) carries no full-text index | **Msg 7601** sev 16 state 2, `Cannot use a CONTAINS or FREETEXT predicate on table or indexed view '<t>' because it is not full-text indexed.` |
+| Table (or view) carries no full-text index | **Msg 7601** sev 16 state 2 (state 4 for a predicate's `*`), `Cannot use a CONTAINS or FREETEXT predicate on table or indexed view '<t>' because it is not full-text indexed.`, naming the object as FROM wrote it, never its alias |
+| The column belongs to a derived table or CTE | **Msg 7601** state 3, naming the column |
 | Column isn't one of the indexed columns | **Msg 7601** sev 16 state 3, `… on column '<c>' because it is not full-text indexed.` |
 | Column doesn't exist | **Msg 207** |
 | NULL, empty or all-whitespace condition | **Msg 7645** sev 15 state 1, `Null or empty full-text predicate.` |
@@ -278,6 +293,8 @@ State 3 is what an operator keyword standing in *operand* position produces — 
 **When each error fires** follows real's split:
 
 - The **column and table gates** (7601 / 207) bind at parse time, so a `CREATE PROCEDURE` naming an unindexed table fails to create.
+  They bind against the query scope: a `SELECT`'s sources, a `JOIN`'s `ON`, and a single-table `UPDATE` / `DELETE` target, which the `WHERE` sees through `EnterTargetScope`.
+- The predicate's searched columns are its operands, so the column-level `SELECT` check reads them: `CONTAINS(body, …)` needs `SELECT` on `body`, and `CONTAINS(*, …)` on every indexed column (Msg 230 naming the first denied).
 - A **literal condition** parses at statement compile, so `IF 1 = 0 SELECT … CONTAINS(body, '(bad')` still raises 7630 — real rejects it too.
 - A **module body** is the one place real defers: `CREATE PROCEDURE … CONTAINS(body, '(bad')` creates happily and raises at `EXEC`.
   The simulator skips the condition parse while `BatchContext.CreateTimeBinding` is set to match.
@@ -305,6 +322,12 @@ State 3 is what an operator keyword standing in *operand* position produces — 
 `stoplist_id` and `data_space_id` are **non-NULL by design** (probe-confirmed against the reference's AW database): DacFx's `SqlFullTextIndex` reverse-engineering INNER JOINs `sys.data_spaces` on `data_space_id` (a NULL drops the parent index element, orphaning its column specifiers → client-side NRE in `SqlFullTextIndexColumnSpecifierPopulator`) and reads `stoplist_id` to choose `DoUseSystemStopList` (0 = system) vs `IsStopListOff` (NULL = disabled) — a NULL there scripts the wrong stoplist mode.
 
 **`sys.fulltext_index_columns`** (5-col, full row): `object_id` / `column_id` / `type_column_id` / `language_id` / `statistical_semantics` (always false).
+
+**`sys.fulltext_index_catalog_usages`** (3-col): one row per index, its key index's id and its catalog.
+
+A restricted principal sees an index's rows in these three views when it can see the table, and a catalog's `sys.fulltext_catalogs` row only as its owner or holding a permission on it — `SELECT` on an indexed table doesn't reveal the catalog (probed 2026-10-05 against SQL Server 2025).
+
+`OBJECTPROPERTY` / `OBJECTPROPERTYEX` answer the crawl counters of a settled index — `TableFulltextItemCount` the table's rows, `TableFulltextDocsProcessed`, `TableFulltextFailCount` and `TableFulltextPendingChanges` 0 — and NULL for a table without one.
 
 **`sys.fulltext_languages`** (2-col): `lcid` / `name` — the 59 languages a stock SQL Server 2025 instance ships (probed from the reference; static reference data).
 DacFx's full-text-index-column populator INNER JOINs it by `language_id`, so an empty view NREs the column-specifier build; AW's indexes use LCID 1033 (English).
@@ -344,6 +367,12 @@ An unknown catalog name or unrecognized property returns NULL; property names ar
   A thesaurus of one's own is XML edited into the server's install tree, which no statement reaches.
 - **Document filters beyond the plain-text, HTML and XML ones** — an Office or PDF document, which real on Windows filters through its installed iFilters, contributes nothing; the `sys.fulltext_document_types` view isn't modeled.
 - **Other languages' breakers and morphologies** — see [Divergences](#divergences).
+- **The deprecated `sp_help_fulltext_catalogs`, `sp_help_fulltext_tables`, `sp_help_fulltext_columns` and `sp_help_fulltext_system_components`** are Msg 2812; real's report the catalog view rows, and its catalog procedure raises Msg 15601 in a database whose full-text flag is off (probed 2026-10-05 against SQL Server 2025).
+- **Accented forms in the inflectional lexicon** — real's English lexicon lists `café` among `cafe`'s forms and `naïve` among `naive`'s, so `FREETEXT(b, 'cafe')` finds `café` on an accent-sensitive catalog, but not `résumé` for `resume` (probed 2026-10-05 against SQL Server 2025); the stemmer here folds no accents.
+- **`UniqueKeyCount`** reads one less than real's over the probe corpus's twelve rows (85 against 86), a term real keys that the breaker here doesn't separate.
+- **`sp_describe_first_result_set` over a rowset** calls `KEY` and `RANK` updatable, where real's `is_updateable` is 0.
+- **A predicate compared to a value** (`CONTAINS(body, 'x') = 1`) is Msg 102 near `1` here and near `=` on real.
+- **`ALTER TABLE … ALTER COLUMN` of the key index's column** names the key as `The object` in its Msg 5074, where real names it `The index` once a full-text index uses it.
 
 ## BACPAC round-trip
 

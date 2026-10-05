@@ -508,6 +508,9 @@ internal sealed partial class Selection
         // A MATCH in an ON binds too, against the ON's own sources, every one
         // of them joined (Msg 13920).
         using (ParserScope.Enter(ref context.MatchScope, new Expressions.MatchScope { Sources = scope, AllJoined = true }))
+        // A CONTAINS / FREETEXT and a spatial column's property form bind
+        // against the ON's sources as they do against a WHERE's.
+        using (ParserScope.Enter(ref context.ScopeSources, scope))
         using (ParserScope.Enter(ref context.AggregateCollector, onAggregates))
         {
             predicate = BooleanExpression.SimplifyForFilter(BooleanExpression.Parse(context), context);
@@ -732,13 +735,14 @@ internal sealed partial class Selection
         var checkpoint = context.SaveCheckpoint();
         var next = context.GetNextRequired();
 
-        // OPENQUERY and OPENXML are reserved keywords (not Names), so neither
-        // can ride the name-string dispatch below. Neither correlates to the
-        // left APPLY sources — OPENQUERY's arguments are a server identifier
-        // and a constant pass-through string, OPENXML's a session document
-        // handle and its patterns — so route them straight back through
-        // ParseSingleFromSource.
-        if (next is ReservedKeyword { Keyword: Keyword.OpenQuery or Keyword.OpenXml or Keyword.OpenRowSet or Keyword.OpenDataSource })
+        // OPENQUERY, OPENXML and the full-text rowsets are reserved keywords
+        // (not Names), so none can ride the name-string dispatch below. None
+        // correlates to the left APPLY sources — OPENQUERY's arguments are a
+        // server identifier and a constant pass-through string, OPENXML's a
+        // session document handle and its patterns, a CONTAINSTABLE's
+        // condition a literal or variable — so route them straight back
+        // through ParseSingleFromSource.
+        if (next is ReservedKeyword { Keyword: Keyword.OpenQuery or Keyword.OpenXml or Keyword.OpenRowSet or Keyword.OpenDataSource or Keyword.ContainsTable or Keyword.FreeTextTable })
         {
             context.RestoreCheckpoint(checkpoint);
             return ParseSingleFromSource(context, scope);

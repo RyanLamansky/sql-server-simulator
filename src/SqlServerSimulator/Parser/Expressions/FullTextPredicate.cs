@@ -40,6 +40,16 @@ internal sealed class FullTextPredicate : BooleanExpression
     private readonly bool freeText;
     private readonly FullTextSearchCondition? parsedCondition;
 
+    /// <summary>
+    /// The searched columns as column references, reported as this node's
+    /// operands so a walk over the statement — the column-level <c>SELECT</c>
+    /// check among them — sees the columns the search reads: real refuses
+    /// <c>CONTAINS(body, …)</c> without <c>SELECT</c> on <c>body</c>, and
+    /// <c>CONTAINS(*, …)</c> on the first indexed column denied (probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    private readonly Reference[] columnReads;
+
     private FullTextPredicate(FullTextBinding binding, Expression condition, Expression? language, bool freeText, FullTextSearchCondition? parsedCondition)
     {
         this.binding = binding;
@@ -47,6 +57,7 @@ internal sealed class FullTextPredicate : BooleanExpression
         this.language = language;
         this.freeText = freeText;
         this.parsedCondition = parsedCondition;
+        this.columnReads = Array.ConvertAll(binding.ColumnNames, static name => new Reference(name));
     }
 
     /// <summary>
@@ -101,7 +112,9 @@ internal sealed class FullTextPredicate : BooleanExpression
         var accepted = context.Token switch
         {
             Literal { Value.Type.Category: SqlTypeCategory.String } or AtPrefixedString => true,
-            Numeric or Literal { Value.Type: VarbinarySqlType } => numberAllowed,
+            // A number is an integer: `LANGUAGE 1033.0` is a syntax error.
+            Numeric number => numberAllowed && number.Source.IndexOfAny('.', 'e', 'E') < 0,
+            Literal { Value.Type: VarbinarySqlType } => numberAllowed,
             _ => false,
         };
         if (!accepted)
@@ -174,6 +187,8 @@ internal sealed class FullTextPredicate : BooleanExpression
         visitor(this.condition);
         if (this.language is not null)
             visitor(this.language);
+        foreach (var read in this.columnReads)
+            visitor(read);
     }
 
     internal override string DebugDisplay() =>
@@ -187,5 +202,7 @@ internal sealed class FullTextPredicate : BooleanExpression
         _ = shape.Child(this.condition);
         if (this.language is not null)
             _ = shape.Child(this.language);
+        foreach (var read in this.columnReads)
+            _ = shape.Child(read);
     }
 }

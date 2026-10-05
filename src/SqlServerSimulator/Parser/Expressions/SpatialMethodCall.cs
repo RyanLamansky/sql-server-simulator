@@ -101,6 +101,9 @@ internal sealed class SpatialMethodCall : Expression
         // Properties.
         ["HasM"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Boolean, Tolerant, AsWritten),
         ["HasZ"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Boolean, Tolerant, AsWritten),
+        // The CLR type's INullable property, false on every instance a member
+        // reaches (probed 2026-10-05 against SQL Server 2025).
+        ["IsNull"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Boolean, Tolerant, AsWritten),
         ["Lat"] = new(MemberForm.Property, MemberScope.GeographyOnly, ResultKind.Float, Tolerant, AsWritten),
         ["Long"] = new(MemberForm.Property, MemberScope.GeographyOnly, ResultKind.Float, Tolerant, AsWritten),
         ["M"] = new(MemberForm.Property, MemberScope.Both, ResultKind.Float, Tolerant, AsWritten),
@@ -206,6 +209,28 @@ internal sealed class SpatialMethodCall : Expression
     /// <see cref="Run"/> reports the latter as real does.
     /// </summary>
     public static bool IsKnownMemberName(string name) => Members.ContainsKey(name);
+
+    /// <summary>
+    /// The spatial type of a receiver whose type the parse already knows — a
+    /// <c>geography::</c> / <c>geometry::</c> constructor, a member returning
+    /// one, a spatial variable — or null for anything else, a column name
+    /// included.
+    /// </summary>
+    public static SpatialSqlType? KnownReceiverType(Expression receiver, ParserContext context)
+    {
+        if (receiver is VariableReference { DeclaredType: SpatialSqlType variableType })
+            return variableType;
+        if (receiver is not (SpatialStaticCall or SpatialMethodCall))
+            return null;
+        try
+        {
+            return receiver.GetSqlType(context.Batch, static name => throw SimulatedSqlException.InvalidColumnName(name)) as SpatialSqlType;
+        }
+        catch (SimulatedSqlException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     /// Decides whether <c>&lt;qualifier&gt;.&lt;member&gt;</c> written over a
@@ -344,6 +369,7 @@ internal sealed class SpatialMethodCall : Expression
             "HasM" => SqlValue.FromBoolean(root.AnyHasM),
             "HasZ" => SqlValue.FromBoolean(root.AnyHasZ),
             "InstanceOf" => EvaluateInstanceOf(runtime, root, geography),
+            "IsNull" => SqlValue.FromBoolean(false),
             // Real's report names the rule an invalid instance breaks; only the valid answer is modeled.
             "IsValidDetailed" => value.IsValidFor(geography)
                 ? Text(runtime, "24400: Valid")
@@ -1057,9 +1083,18 @@ internal sealed class SpatialMethodCall : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         var receiver = this.target.GetSqlType(batch, resolveColumnType);
-        return receiver is not SpatialSqlType spatial
-            ? NVarcharSqlType.Get(-1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault)
-            : ResultType(ValidateMember(spatial).Result, spatial, batch);
+        if (receiver is not SpatialSqlType spatial)
+            return NVarcharSqlType.Get(-1, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault);
+        var result = ResultType(ValidateMember(spatial).Result, spatial, batch);
+        // No member takes the other spatial type: an argument of it is
+        // Msg 206 while the statement compiles (probed 2026-10-05 against
+        // SQL Server 2025).
+        foreach (var argument in this.arguments)
+        {
+            if (argument.GetSqlType(batch, resolveColumnType) is SpatialSqlType argumentType && argumentType != spatial)
+                throw SimulatedSqlException.OperandTypeClash(argumentType, spatial);
+        }
+        return result;
     }
 
     private static SqlType ResultType(ResultKind kind, SpatialSqlType receiver, BatchContext batch) => kind switch

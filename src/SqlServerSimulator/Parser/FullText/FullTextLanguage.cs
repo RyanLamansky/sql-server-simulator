@@ -64,10 +64,12 @@ internal sealed class FullTextLanguage
 
     /// <summary>
     /// Resolves a <c>LANGUAGE</c> argument: an LCID (an integer, or a binary
-    /// such as <c>0x407</c>), or a name or alias from <c>sys.syslanguages</c>
-    /// (<c>'German'</c>, <c>'Deutsch'</c>). An LCID real ships no full-text
-    /// language for is Msg 7696 and an unknown name Msg 7678, both probed
-    /// 2026-09-29 against SQL Server 2025.
+    /// such as <c>0x407</c>), or a name <c>sys.fulltext_languages</c> lists
+    /// (<c>'German'</c>, <c>'Neutral'</c>, <c>'British English'</c>) — not a
+    /// <c>sys.syslanguages</c> name such as <c>'Deutsch'</c> or
+    /// <c>'us_english'</c>, despite the wording of the Msg 7678 those raise
+    /// (probed 2026-10-05 against SQL Server 2025). An LCID real ships no
+    /// full-text language for is Msg 7696.
     /// </summary>
     public static FullTextLanguage Resolve(SqlValue value) =>
         SqlType.IsStringCategory(value.Type)
@@ -81,8 +83,12 @@ internal sealed class FullTextLanguage
         var trimmed = name.Trim();
         if (int.TryParse(trimmed, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var lcid))
             return IsKnown(lcid) ? lcid : throw SimulatedSqlException.FullTextInvalidLocale();
-        var language = Language.Find(trimmed) ?? throw SimulatedSqlException.FullTextLanguageAliasUnknown(trimmed);
-        return IsKnown(language.Lcid) ? language.Lcid : throw SimulatedSqlException.FullTextInvalidLocale();
+        foreach (var (known, knownName) in BuiltInResources.FullTextLanguages)
+        {
+            if (string.Equals(knownName, trimmed, StringComparison.OrdinalIgnoreCase))
+                return known;
+        }
+        throw SimulatedSqlException.FullTextLanguageAliasUnknown(trimmed);
     }
 
     private static (int Lcid, string Stopword)[] LoadSystemStopwords()

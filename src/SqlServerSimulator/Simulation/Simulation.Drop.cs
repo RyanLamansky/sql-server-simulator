@@ -865,7 +865,7 @@ partial class Simulation
         if (removedTable.GraphKind == GraphTableKind.Node && schema is not null
             && EdgeConstraintsReferencing(schema.Database, removedTable).Exists(pair => !ReferenceEquals(pair.Edge, removedTable)))
         {
-            throw SimulatedSqlException.NodeTableReferencedByEdgeConstraint(name.Leaf);
+            throw SimulatedSqlException.NodeTableReferencedByEdgeConstraint(name.ToString());
         }
         // Schema-binding protection, which real applies after the FK gate
         // (probe-confirmed: a table that is both an FK parent and a
@@ -1144,7 +1144,11 @@ partial class Simulation
             if (oldSyntax && context.Batch.TryResolveTable(tableName, out var compiled))
             {
                 if (FindXmlOrSpatialIndex(context, compiled, indexName))
-                    throw SimulatedSqlException.XmlIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
+                {
+                    // A spatial index's refusal carries state 2 (probed 2026-10-05).
+                    var isXml = compiled.XmlIndexes.Exists(candidate => context.Batch.CurrentDatabase.Collation.Equals(candidate.Name, indexName));
+                    throw SimulatedSqlException.XmlIndexDropNeedsOnSyntax($"{tableName}.{indexName}", isXml ? (byte)1 : (byte)2);
+                }
                 if (FindJsonIndex(context, compiled, indexName) is not null)
                     throw SimulatedSqlException.JsonIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
                 if (FindVectorIndex(context, compiled, indexName) is not null)
@@ -1205,6 +1209,8 @@ partial class Simulation
                 var indexId = table.Indexes[i].IndexId;
                 if (table.IncomingForeignKeys.Exists(fk => BuiltInResources.ResolveForeignKeyIndexId(fk) == indexId))
                     throw SimulatedSqlException.ExplicitDropIndexNotAllowed(tableName.ToString(), indexName, "FOREIGN KEY", state: 6);
+                if (table.FullTextIndex is { } fullText && context.Batch.CurrentDatabase.Collation.Equals(indexName, fullText.KeyIndexName))
+                    throw SimulatedSqlException.FullTextKeyIndexDropped(table.Indexes[i].Name, tableName.ToString(), state: 2);
                 if (options.MoveTo is { } moveTo)
                     table.FilegroupId = FilegroupFor(context.Batch, table, new Schemas.DataSpaceClause(moveTo, null));
                 table.Indexes.RemoveAt(i);
@@ -1274,8 +1280,9 @@ partial class Simulation
             return false;
         var collation = context.Batch.CurrentDatabase.Collation;
         var xmlIndex = table.XmlIndexes.Find(candidate => collation.Equals(candidate.Name, indexName));
+        // A spatial index's refusal carries state 2 (probed 2026-10-05).
         if (oldSyntax)
-            throw SimulatedSqlException.XmlIndexDropNeedsOnSyntax($"{tableName}.{indexName}");
+            throw SimulatedSqlException.XmlIndexDropNeedsOnSyntax($"{tableName}.{indexName}", xmlIndex is null ? (byte)2 : (byte)1);
 
         table.OwningDatabase?.RejectWriteWhenReadOnly();
         if (xmlIndex is not null)

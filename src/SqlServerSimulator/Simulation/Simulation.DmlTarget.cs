@@ -447,11 +447,29 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Installs a single-table <c>UPDATE</c> / <c>DELETE</c>'s target as the
+    /// query scope of its <c>WHERE</c>, so a <c>CONTAINS</c> / <c>FREETEXT</c>
+    /// and a spatial column's property form bind there as they do in a
+    /// <c>SELECT</c>'s; the per-row resolver reads the names they bind by
+    /// leaf. A view target installs nothing.
+    /// </summary>
+    private static ParserScope<FromSource[]?> EnterTargetScope(ParserContext context, MultiPartName targetName, HeapTable table, View? view)
+    {
+        if (view is not null)
+            return ParserScope.Save(ref context.ScopeSources);
+        var columnNames = new string[table.Columns.Length];
+        for (var i = 0; i < columnNames.Length; i++)
+            columnNames[i] = table.Columns[i].Name;
+        FromSource target = new(targetName.Leaf, columnNames, table.Columns, table.StoredColumns, table.StorageOrdinals, table.Heap, [], backingTable: table);
+        return ParserScope.Enter(ref context.ScopeSources, [target]);
+    }
+
+    /// <summary>
     /// Reads column <paramref name="name"/> of a single-table <c>UPDATE</c> /
     /// <c>DELETE</c> target's row: through a view by the view's own column
     /// names — off <paramref name="viewRow"/> for a windowed or row-limited
     /// body, else off the base row, where a derived column is Msg 207 — and
-    /// otherwise by the table's.
+    /// otherwise by the table's, a graph pseudo-column included.
     /// </summary>
     private static SqlValue ReadTargetRowColumn(BatchContext batch, HeapTable table, View? view, SqlValue[] row, SqlValue[]? viewRow, (int Page, int Slot) address, MultiPartName name)
     {
@@ -476,8 +494,8 @@ partial class Simulation
             if (batch.CurrentDatabase.Collation.Equals(table.Columns[k].Name, name.Leaf))
                 return row[k];
         }
-        return RowLocator.IsLocatorName(name)
-            ? ReadTargetRowLocator(batch, table, row, address, name)
+        return RowLocator.IsLocatorName(name) ? ReadTargetRowLocator(batch, table, row, address, name)
+            : GraphColumns.FindPseudoColumn(table, name) is var pseudo and >= 0 ? row[pseudo]
             : throw SimulatedSqlException.InvalidColumnName(name);
     }
 

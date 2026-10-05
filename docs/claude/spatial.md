@@ -163,7 +163,13 @@ Semantics worth pinning, all probe-confirmed:
 - A **NULL receiver** yields NULL from every member rather than raising.
 
 **`STSrid` is settable**: `SET @g.STSrid = 4326` re-stamps the instance, parsed in `Simulation.Set.cs`.
-Assigning any other spatial property raises **Msg 6595** (`… because it is read only`); a NULL right-hand side raises the bare `System.ArgumentNullException` real emits *with no 24xxx code*; an SRID outside 0..999999 raises 24100.
+Assigning any other spatial property raises **Msg 6595** (`… because it is read only`); a NULL variable is **Msg 5302**, which ends the batch; a NULL right-hand side raises the bare `System.ArgumentNullException` real emits *with no 24xxx code*; an SRID real refuses raises as a constructor's does (below).
+
+**SRIDs**: a `geometry` takes any SRID in 0..999999 (24100 outside it), while a `geography` takes only the 393 reference systems `sys.spatial_reference_systems` lists on real (24204 for any other — 0, 1, 999999 and -1 included; probed 2026-10-05 against SQL Server 2025); `SpatialGeometry.ValidateSrid` holds the list.
+
+**Probed 2026-10-05 against SQL Server 2025**, a member name the receiver's type lacks is **Msg 6506** written as a method and **Msg 6592** as a property wherever the parse knows the receiver is spatial — a constructor, a member, a variable — including a static name `geography::` / `geometry::` doesn't have; `IsNull` (the CLR type's `INullable` property) reads 0.
+An argument of the other spatial type is **Msg 206** while the statement compiles, and so is assigning one spatial type to the other in an `INSERT`, `UPDATE` or `SET`.
+`ToString()` is `nvarchar(max)` as `STAsText()` is, so `LEN` of it is `bigint`.
 
 **`.ToString()` collision with hierarchyid**: `HierarchyIdMethodCall.Run` detects a spatial receiver at runtime and routes to the spatial path.
 
@@ -197,6 +203,8 @@ Everything through the `24nnn: ` message is reproduced verbatim.
 - `Point(x, y, srid)` — coordinates in the type's own order: `(x, y)` for geometry, `(latitude, longitude)` for geography, both spelled in WKT's (longitude, latitude) order on the way out.
 
 Argument counts are checked at parse time as real checks them — **Msg 174**, severity 15, naming the function with the *caller's* casing (unlike the built-in function path, which lowercases).
+The numeric parameters — `Point`'s three and every constructor's SRID — refuse NULL with **Msg 6569** (probed 2026-10-05 against SQL Server 2025), while a NULL text or binary argument yields NULL.
+A CAST from bytes too short for what their header promises raises real's bare `System.FormatException: One of the identified items was in an invalid format.` with no 24xxx code, and `TRY_CAST` / `TRY_CONVERT` answer NULL for text that doesn't read as a spatial value (but still raise for bytes).
 `UnionAggregate`, `EnvelopeAggregate`, `CollectionAggregate` and `ConvexHullAggregate` parse as [aggregates](#the-spatial-aggregates) instead.
 Every other static method raises `NotSupportedException` at Run.
 
@@ -204,22 +212,22 @@ Every other static method raises `NotSupportedException` at Run.
 
 ```
 CREATE SPATIAL INDEX name ON table(col)
-    [USING <scheme>]
+    [USING {GEOMETRY_GRID | GEOMETRY_AUTO_GRID | GEOGRAPHY_GRID | GEOGRAPHY_AUTO_GRID}]
     [WITH (
-        BOUNDING_BOX = (xmin, ymin, xmax, ymax)
-        | GRIDS = (level [, …])
+        BOUNDING_BOX = ( xmin, ymin, xmax, ymax ) | ( XMIN = v, … )
+        | GRIDS = ( level, level, level, level ) | ( LEVEL_n = level, … )
         | CELLS_PER_OBJECT = n
-        | <any other index option>
+        | <relational index option>
+        [, …]
     )]
+    [ON filegroup]
 ```
 
-- Parses fully, stores in `HeapTable.SpatialIndexes`.
-- Default tessellation scheme when no `USING` clause: `GEOMETRY_AUTO_GRID` (geometry col) / `GEOGRAPHY_AUTO_GRID` (geography col), matching probed real-server behavior.
-- `GRIDS` level arguments accept either numeric codes (1/2/3) or named levels (`LOW` / `MEDIUM` / `HIGH`).
-- Unknown options inside the `WITH` clause skip via balanced-paren consumption.
-- Non-spatial column → `NotSupportedException`; duplicate index name → Msg 2714.
-- `index_id` is one past the table's highest spatial id, from 384000 (probed 2026-09-26).
-- `DROP INDEX name ON table` drops one; the old `table.name` refusal and the primary-key lock-in are shared with XML indexes — see [`xml.md`](xml.md#catalog-views-in-builtinresourcescs).
+- Stored in `HeapTable.SpatialIndexes`; `index_id` is one past the table's highest spatial id, from 384000 (probed 2026-09-26).
+- Real's checks fall in tiers, which `TryParseCreateSpatial`'s remarks list in order (probed 2026-10-05 against SQL Server 2025): the option grammar while the batch compiles, then the table, column and clustered primary key, then the name and the session's SET options, and only then the tessellation parameters.
+- With no `USING`, `GRIDS` picks the plain GRID scheme and its absence the AUTO one; an AUTO scheme records no levels, a GRID one MEDIUM for every level left out, and `CELLS_PER_OBJECT` defaults to 8, 12 or 16 by scheme; the scheme is stored upper-cased.
+- `DROP_EXISTING = ON` replaces the index of the name, a rollback undoes the create, `ALTER INDEX … DISABLE | REBUILD | REORGANIZE` toggles `is_disabled`, and the index blocks its column's drop as an ordinary index does (Msg 5074).
+- `DROP INDEX name ON table` drops one; the old `table.name` refusal (Msg 3749, state 2 for a spatial index) and the primary-key lock-in are shared with XML indexes — see [`xml.md`](xml.md#catalog-views-in-builtinresourcescs).
 
 Statement dispatch: `Spatial` added to `ContextualKeyword` enum; CREATE SPATIAL routes via `UnquotedString { ContextualKeyword: ContextualKeyword.Spatial }`.
 `INDEX` is reserved, so the sub-keyword check uses `Keyword.Index`.
@@ -229,7 +237,7 @@ Statement dispatch: `Spatial` added to `ContextualKeyword` enum; CREATE SPATIAL 
 **`sys.spatial_indexes`** (23-col, probe-confirmed): `object_id` / `name` / `index_id` / `type` (=4) / `type_desc` (`SPATIAL`) / `is_unique` (false) / `data_space_id` (1) / `ignore_dup_key` / `is_primary_key` / `is_unique_constraint` / `fill_factor` / `is_padded` / `is_disabled` / `is_hypothetical` / `is_ignored_in_optimization` / `allow_row_locks` (true) / `allow_page_locks` (true) / `spatial_index_type` (3 geometry / 4 geography) / `spatial_index_type_desc` (`GEOMETRY` / `GEOGRAPHY`) / `tessellation_scheme` / `has_filter` / `filter_definition` / `auto_created`.
 
 **`sys.spatial_index_tessellations`** (16-col, probe-confirmed): `object_id` / `index_id` / `tessellation_scheme` / `bounding_box_xmin`/`ymin`/`xmax`/`ymax` / `level_1_grid` + `level_1_grid_desc` / … / `level_4_grid` + `level_4_grid_desc` / `cells_per_object`.
-Unspecified GRIDS levels surface as NULL; `level_*_grid_desc` translates 1/2/3 codes to `LOW` / `MEDIUM` / `HIGH`.
+An AUTO scheme's levels surface as NULL; `level_*_grid_desc` translates 1/2/3 codes to `LOW` / `MEDIUM` / `HIGH`.
 
 **`sys.spatial_reference_systems`** (6-col): empty by default (real SQL Server pre-seeds ~390 EPSG/ESRI SRID rows; the simulator surfaces the column shape but skips the WKT-laden seed payload).
 `spatial_reference_id` / `authority_name` / `authorized_spatial_reference_id` / `well_known_text` / `unit_of_measure` / `unit_conversion_factor`.
@@ -824,8 +832,8 @@ Nothing in the syntax separates that from an `alias.column` reference, so the pa
 A property written with parentheses (`Location.Lat()`) routes to the method form so it reports Msg 6506, matching real, and the four-part `dbo.t.Location.Lat` stays a column reference because real refuses it (Msg 4104).
 The method form (`Location.STAsText()`) has always worked everywhere, scope or no scope, since its argument list disambiguates it.
 
-**Not modeled yet**: the property form only reaches sites where a query scope is installed — a SELECT's projection, WHERE and ORDER BY.
-A scope-less site (an UPDATE's SET list, a CHECK constraint, a computed column) still reads the two-part name as a column.
+**Not modeled yet**: the property form only reaches sites where a query scope is installed — a SELECT's projection, WHERE and ORDER BY, a JOIN's ON, and a single-table UPDATE's or DELETE's WHERE.
+A scope-less site (an UPDATE's SET list, where real takes `SET loc.STSrid = 3857` as a mutator, a CHECK constraint, a computed column) still reads the two-part name as a column.
 A dotted name that binds neither way reports **Msg 207** where real reports **Msg 4104** for any unbindable multi-part name, which is a general column-resolution difference rather than a spatial one.
 
 ## Not modeled yet
@@ -843,8 +851,9 @@ A dotted name that binds neither way reports **Msg 207** where real reports **Ms
 - **SRID-aware operations** — the SRID is tracked per value, reported, and compared between two operands (a mismatch reads NULL, as on real), but nothing transforms between reference systems and every `geography` SRID measures on WGS 84.
   Real carries a per-SRID ellipsoid, so the same polygon under SRID 104001 (the unit sphere) measures in radians squared there and in metres squared here.
 - **Spatial-index query-planner integration** — the index parses cleanly but never accelerates anything.
-- **`sys.spatial_reference_systems` seed data** (~390 EPSG/ESRI rows).
-- **`ALTER SPATIAL INDEX`** (REORGANIZE / REBUILD).
+- **`sys.spatial_reference_systems` seed data** (~390 EPSG/ESRI rows) — the SRIDs are known for validation, the WKT payload isn't carried.
+- **A WKT number error's position** for a comma inside a point: real reports `POINT(1,2)` at position 9 with `,2` as the input, the simulator at 7 with `,` (probed 2026-10-05 against SQL Server 2025).
+- **A spatial aggregate over an untyped `NULL`** (`geometry::UnionAggregate(null)`) — real answers NULL, the simulator raises Msg 8117.
 
 ## Divergences
 

@@ -116,9 +116,14 @@ partial class Simulation
             context.Batch.BindErrors?.EnterClause(context.Token, BindClause.Where);
             context.MoveNextRequired();
             if (context.Token is ReservedKeyword { Keyword: Keyword.Current })
+            {
                 positionedCursor = ParseWhereCurrentOf(context, table, assignedColumns: null, sourceView);
+            }
             else
+            {
+                using var scope = EnterTargetScope(context, targetName, table, sourceView);
                 where = Selection.ParseAndBindPredicate(context, Selection.TargetColumnTypeResolver(context.Batch, targetName, table, sourceView));
+            }
         }
         Selection.ParseOptionalDmlOptionClause(context);
         if (sourceView is null)

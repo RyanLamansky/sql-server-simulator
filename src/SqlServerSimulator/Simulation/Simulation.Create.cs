@@ -148,11 +148,13 @@ partial class Simulation
             graphKind = ConsumeGraphTableClause(context, hasColumnList: false);
             heapColumns.AddRange(GraphColumns.Create(graphKind, tableName.Leaf, context.Batch.Connection.CurrentDatabase.Collation));
         }
+        var graphIndexPosition = -1;
         if (graphKind != GraphTableKind.None)
         {
             if (BatchContext.IsLocalTempName(tableName.Leaf) || BatchContext.IsGlobalTempName(tableName.Leaf))
                 throw SimulatedSqlException.GraphTableCannotBeTemporary();
-            pendingIndexes.Add(GraphUniqueIndex(heapColumns[0]!, pendingKeys.Count));
+            graphIndexPosition = pendingIndexes.Count;
+            pendingIndexes.Add(GraphUniqueIndex(heapColumns[0]!, pendingKeys.Count, partitioned: false));
         }
 
         // Optional trailing placement and option clauses, in any order:
@@ -169,6 +171,10 @@ partial class Simulation
         if (graphKind == GraphTableKind.None)
             context.MoveNextOptional();
         var tableDataSpace = ParseOptionalDataSpaceClause(context, out var textImageOn);
+        // On a partitioned graph table the graph-id index stays unaligned, on
+        // PRIMARY (probed 2026-10-05 against SQL Server 2025).
+        if (graphIndexPosition >= 0 && tableDataSpace is { Columns: not null })
+            pendingIndexes[graphIndexPosition] = GraphUniqueIndex(heapColumns[0]!, pendingIndexes[graphIndexPosition].KeysBefore, partitioned: true);
         // FILESTREAM_ON names where FILESTREAM data goes, which a table with no
         // FILESTREAM column has none of (Msg 1716); the column itself is refused
         // where it is written, so a clause here always lacks one.
@@ -188,6 +194,12 @@ partial class Simulation
         var memoryOptimized = memoryOptimization.MemoryOptimized;
         if (memoryOptimized && (BatchContext.IsLocalTempName(tableName.Leaf) || BatchContext.IsGlobalTempName(tableName.Leaf)))
             throw SimulatedSqlException.TemporaryMemoryOptimizedTable();
+        // A node or edge table is neither memory-optimized nor temporal
+        // (probed 2026-10-05 against SQL Server 2025).
+        if (graphKind != GraphTableKind.None && memoryOptimized)
+            throw SimulatedSqlException.GraphTableCannotBeMemoryOptimized();
+        if (graphKind != GraphTableKind.None && systemVersioning is { On: true })
+            throw SimulatedSqlException.GraphTableCannotBeTemporal();
 
         // Pass 2: resolve computed columns now that every column's name has
         // been seen. The resolver throws Msg 1759 for any reference to another
@@ -388,7 +400,7 @@ partial class Simulation
         // database object-name namespace.
         if (!isTempTable && schema!.HasNameInSharedNamespace(tableName.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(tableName.Leaf);
-        RejectTakenConstraintNames(isTempTable ? null : schema, tableName.Leaf, heapColumns!, pendingKeys, pendingChecks, pendingForeignKeys, isTempTable ? context.Connection : null);
+        RejectTakenConstraintNames(isTempTable ? null : schema, tableName.Leaf, heapColumns!, pendingKeys, pendingChecks, pendingForeignKeys, isTempTable ? context.Connection : null, pendingEdgeConstraints);
         ValidateTableDeclaration(createTargetDatabase, tableName.Leaf, memoryOptimization, heapColumns, pendingKeys, pendingIndexes);
 
         var (keyObjectIds, indexObjectIds) = AllocateDeclarationObjectIds(context.CurrentDatabase, pendingKeys, pendingIndexes);
@@ -3808,6 +3820,14 @@ partial class Simulation
             }
         }
 
+        // A node's or edge's identifier keys a constraint as the graph id it
+        // renders (probed 2026-10-05 against SQL Server 2025: PRIMARY KEY
+        // ($node_id) keys graph_id).
+        if (GraphColumns.IdentifierKeyOrdinal(heapColumns, columnName) is var graphId and >= 0)
+        {
+            declaredName = heapColumns[graphId]!.Name;
+            return graphId;
+        }
         declaredName = columnName;
         return -1;
     }
@@ -4222,9 +4242,17 @@ partial class Simulation
         List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys,
         List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)> pendingChecks,
         List<PendingForeignKey> pendingForeignKeys,
-        SimulatedDbConnection? tempSession)
+        SimulatedDbConnection? tempSession,
+        List<PendingEdgeConstraint> pendingEdgeConstraints)
     {
         List<string> names = [];
+        // An edge constraint's name shares the namespace too (probed
+        // 2026-10-05 against SQL Server 2025).
+        foreach (var edgeConstraint in pendingEdgeConstraints)
+        {
+            if (edgeConstraint.Name is { } name)
+                names.Add(name);
+        }
         foreach (var key in pendingKeys)
         {
             if (key.Name is { } name)

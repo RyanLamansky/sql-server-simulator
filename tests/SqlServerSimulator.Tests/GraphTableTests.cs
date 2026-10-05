@@ -483,4 +483,64 @@ public sealed class GraphTableTests
     [DataRow("select (select count(*) from N n1, E for path e, N for path n2 where match(shortest_path(n1(-(e)->n2)+)))", 13957)]
     [DataRow("select 1 from N n1, E for path e, N for path n2, N n3 where match(shortest_path(n1(-(e)->n2)+) and last_node(n2) = n3)", 102)]
     public void ShortestPath_Refusals(string query, int number) => _ = Seeded(Paths).AssertSqlError(query, number);
+
+    // ---- probed 2026-10-05 against SQL Server 2025 ----
+
+    [TestMethod]
+    [DataRow("select p.name from Person p where not exists (select 1 from Likes k, Person p2 where match(p-(k)->p2)) order by 1", "d")]
+    [DataRow("select p.name, (select count(*) from Likes k, Person p2 where match(p-(k)->p2)) from Person p order by 1", "a|1;b|1;c|1;d|0")]
+    public void Match_In_A_Subquery_Binds_An_Outer_Node(string query, string expected)
+        => AreEqual(expected, Rows(Seeded(), query));
+
+    [TestMethod]
+    public void Single_Table_Writes_Read_The_Pseudo_Columns()
+    {
+        var sim = Seeded();
+        AreEqual(1, sim.ExecuteNonQuery("delete Likes where $from_id = (select $node_id from Person where id = 3)"));
+        AreEqual(1, sim.ExecuteNonQuery("update Person set name = 'z' where $node_id = (select $node_id from Person where id = 4)"));
+        AreEqual("2|z", Rows(sim, "select (select count(*) from Likes), (select name from Person where id = 4)"));
+    }
+
+    [TestMethod]
+    [DataRow("create table E (constraint Person connection (Person to City)) as edge", 2714, 5)]
+    [DataRow("create table E (constraint ec connection (Person to City)) as edge; create table E2 (constraint ec connection (Person to City)) as edge", 2714, 5)]
+    [DataRow("create table P2 (id int primary key nonclustered) as node with (memory_optimized = on)", 13910, 1)]
+    [DataRow("create table P2 (id int primary key, vf datetime2 generated always as row start, vt datetime2 generated always as row end, period for system_time (vf, vt)) as node with (system_versioning = on)", 13912, 1)]
+    [DataRow("alter table Person drop column $node_id", 102, 1)]
+    [DataRow("alter table Person alter column $node_id nvarchar(10)", 102, 1)]
+    [DataRow("alter table Person as edge", 156, 1)]
+    public void Graph_Ddl_Refusals(string statement, int number, int state)
+        => AreEqual(state, Seeded().AssertSqlError(statement, number).State);
+
+    [TestMethod]
+    public void Edge_Constraint_Names_The_Target_First_And_A_Drop_Names_The_Table_As_Written()
+    {
+        var sim = Seeded();
+        AreEqual("Edge constraint 'ec' references invalid table 'Y'.  Table could not be found.", sim.AssertSqlError("create table E (constraint ec connection (X to Y)) as edge", 13931).Errors[0].Message);
+        sim.ExecuteBatches("create table E (constraint ec connection (Person to City)) as edge");
+        AreEqual("Could not drop node table 'dbo.City' because it is referenced by an edge constraint.", sim.AssertSqlError("drop table dbo.City", 13934).Message);
+    }
+
+    [TestMethod]
+    public void Node_Id_Keys_An_Index_Or_Key_As_The_Graph_Id()
+    {
+        var sim = Seeded(
+            "create table Q (id int, constraint pkq primary key ($node_id)) as node",
+            "create unique index ux on City ($node_id)");
+        AreEqual("graph_id_*;graph_id_*", System.Text.RegularExpressions.Regex.Replace(Rows(sim, """
+            select c.name from sys.index_columns ic join sys.columns c on c.object_id = ic.object_id and c.column_id = ic.column_id
+            join sys.indexes i on i.object_id = ic.object_id and i.index_id = ic.index_id
+            where i.name in ('pkq', 'ux') order by i.name
+            """), "_[0-9A-F]{32}", "_*"));
+    }
+
+    [TestMethod]
+    public void A_Partitioned_Node_Table_Keeps_Its_Graph_Index_On_Primary()
+    {
+        var sim = Seeded(
+            "create partition function pf (int) as range for values (10)",
+            "create partition scheme ps as partition pf all to ([primary])",
+            "create table P2 (id int) as node on ps(id)");
+        AreEqual("PRIMARY;ps", Rows(sim, "select ds.name from sys.indexes i join sys.data_spaces ds on ds.data_space_id = i.data_space_id where i.object_id = object_id('P2') order by i.index_id desc"));
+    }
 }

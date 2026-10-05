@@ -63,11 +63,28 @@ partial class Simulation
         var accentSensitive = true;
         var ownerName = "dbo";
 
-        // Optional trailers, in any order: ON FILEGROUP fg (parse-and-discard),
-        // IN PATH 'path' (parse-and-discard, legacy), WITH ACCENT_SENSITIVITY,
-        // AS DEFAULT, AUTHORIZATION owner.
+        // Optional trailers, in real's fixed order: ON FILEGROUP fg and
+        // IN PATH 'path' (both parse-and-discard), WITH ACCENT_SENSITIVITY,
+        // AS DEFAULT, AUTHORIZATION owner. A clause out of that order ends the
+        // statement, as on real, where `AS DEFAULT WITH …` reads the WITH as
+        // the next statement's start (probed 2026-10-05 against SQL Server
+        // 2025).
+        var phase = 0;
         while (context.Token is not (null or Operator { Character: ';' }))
         {
+            var clausePhase = context.Token switch
+            {
+                ReservedKeyword { Keyword: Keyword.On } => 1,
+                ReservedKeyword { Keyword: Keyword.In } => 2,
+                UnquotedString { Value: var inWord } when inWord.Equals("IN", StringComparison.OrdinalIgnoreCase) => 2,
+                ReservedKeyword { Keyword: Keyword.With } => 3,
+                ReservedKeyword { Keyword: Keyword.As } => 4,
+                ReservedKeyword { Keyword: Keyword.Authorization } => 5,
+                _ => 0,
+            };
+            if (clausePhase <= phase)
+                goto done;
+            phase = clausePhase;
             switch (context.Token)
             {
                 case ReservedKeyword { Keyword: Keyword.As }:
@@ -118,6 +135,7 @@ partial class Simulation
                         continue;
                     }
                     throw SimulatedSqlException.SyntaxErrorNear(context);
+                case ReservedKeyword { Keyword: Keyword.In }:
                 case UnquotedString { Value: var maybeIn } when maybeIn.Equals("IN", StringComparison.OrdinalIgnoreCase):
                     // IN PATH '…' — legacy. Skip the path literal too.
                     context.MoveNextRequired();
@@ -150,11 +168,16 @@ partial class Simulation
         if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.CreateFullTextCatalog))
             throw SimulatedSqlException.FullTextUserDoesNotHavePermission();
 
+        // A catalog name keeps to 120 characters (probed 2026-10-05 against
+        // SQL Server 2025).
+        if (name.Length > 120)
+            throw SimulatedSqlException.NameTooLong(name, 120, state: 3);
+
         if (context.CurrentDatabase.FullTextCatalogs.ContainsKey(name))
             throw SimulatedSqlException.FullTextCatalogAlreadyExists(name);
 
         if (!context.CurrentDatabase.Principals.TryGetValue(ownerName, out var owner))
-            throw SimulatedSqlException.CannotFindPrincipal(ownerName);
+            throw SimulatedSqlException.FullTextOwnerNotFound(ownerName);
 
         // AS DEFAULT semantics: demote any existing default before assigning.
         if (asDefault)
@@ -187,24 +210,21 @@ partial class Simulation
         var tableName = BatchContext.ParseObjectName(context);
         context.MoveNextRequired();
 
-        var columnSpecs = ParseFullTextColumnList(context);
+        // The column list may be left out, creating an index with no columns
+        // yet; KEY INDEX may not (both probed 2026-10-05 against SQL Server
+        // 2025).
+        var columnSpecs = context.Token is Operator { Character: '(' } ? ParseFullTextColumnList(context) : [];
 
-        // Optional KEY INDEX <name>. Real SQL Server requires this clause on
-        // CREATE FULLTEXT INDEX; AW's emit always includes it. The simulator
-        // permits omission for forward-compat with hypothetical loaders that
-        // emit without it.
-        string? keyIndexName = null;
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Key })
-        {
-            context.MoveNextRequired();
-            if (context.Token is not ReservedKeyword { Keyword: Keyword.Index })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextRequired();
-            if (context.Token is not Name keyToken)
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            keyIndexName = keyToken.Value;
-            context.MoveNextOptional();
-        }
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Key })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Index })
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        context.MoveNextRequired();
+        if (context.Token is not Name keyToken)
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        var keyIndexName = keyToken.Value;
+        context.MoveNextOptional();
 
         // Optional ON catalog_name [, FILEGROUP fg]
         string? catalogName = null;
@@ -262,62 +282,39 @@ partial class Simulation
         context.CurrentDatabase.RejectFullTextWriteWhenReadOnly(state: 103);
 
         // Real splits the refusal by state: 49 for a name that resolves to
-        // nothing, 48 for a temporary table (probed 2026-09-26).
+        // nothing, 48 for a temporary table (probed 2026-09-26). A view that
+        // isn't indexed is Msg 9960 (probed 2026-10-05).
         if (!context.Batch.TryResolveTable(tableName, out var table))
-            throw SimulatedSqlException.InvalidObjectName(tableName, state: 49);
+        {
+            throw context.Batch.TryResolveView(tableName, out _)
+                ? SimulatedSqlException.FullTextViewNotIndexed(tableName.ToString())
+                : SimulatedSqlException.InvalidObjectName(tableName, state: 49);
+        }
         if (table.IsTableVariable || BatchContext.IsLocalTempName(table.Name))
             throw SimulatedSqlException.InvalidObjectName(tableName, state: 48);
 
         if (table.FullTextIndex is not null)
             throw SimulatedSqlException.FullTextIndexAlreadyExists(tableName.ToString());
 
-        // Resolve the catalog. When no ON clause is present, use the default
-        // catalog (matches real SQL Server semantics — Msg 9967 if no default
-        // exists, abbreviated here as a generic "could not find" rejection).
+        // Resolve the catalog: the named one (Msg 7641 state 1 when missing),
+        // else the database's default (Msg 9967).
         FullTextCatalog catalog;
         if (catalogName is not null)
         {
             if (!context.CurrentDatabase.FullTextCatalogs.TryGetValue(catalogName, out catalog!))
-                throw SimulatedSqlException.InvalidObjectName(new MultiPartName(catalogName));
+                throw SimulatedSqlException.FullTextCatalogNotFoundOrDenied(catalogName, context.CurrentDatabase.Name, state: 1);
         }
         else
         {
             catalog = context.CurrentDatabase.FullTextCatalogs.EnumerateValues().FirstOrDefault(c => c.IsDefault)
-                ?? throw SimulatedSqlException.InvalidObjectName(new MultiPartName("<default fulltext catalog>"));
+                ?? throw SimulatedSqlException.FullTextDefaultCatalogMissing(context.CurrentDatabase.Name);
         }
+        // Naming a catalog in an index takes REFERENCES on it (probed
+        // 2026-10-05 against SQL Server 2025: Msg 7666 state 7 without).
+        if (!PermissionEnforcement.HoldsPermission(context.Batch, context.CurrentDatabase, Permission.References, PermissionChecker.ClassFulltextCatalog, catalog.Id, 0))
+            throw SimulatedSqlException.FullTextUserDoesNotHavePermission(state: 7);
 
-        // Resolve the key-index name to a unique-index id. PK is conventionally
-        // index_id=1 in real SQL Server; named unique constraints follow.
-        // The simulator's per-table key/index numbering mirrors sys.indexes
-        // emit order: KeyConstraints first, then Indexes.
-        var uniqueIndexId = 1;
-        if (keyIndexName is not null)
-        {
-            var found = false;
-            for (var ki = 0; ki < table.KeyConstraints.Count; ki++)
-            {
-                if (context.Batch.CurrentDatabase.Collation.Equals(table.KeyConstraints[ki].Name, keyIndexName))
-                {
-                    uniqueIndexId = ki + 1;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found)
-            {
-                for (var ii = 0; ii < table.Indexes.Count; ii++)
-                {
-                    if (context.Batch.CurrentDatabase.Collation.Equals(table.Indexes[ii].Name, keyIndexName))
-                    {
-                        uniqueIndexId = table.KeyConstraints.Count + ii + 1;
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if (!found)
-                throw SimulatedSqlException.InvalidObjectName(new MultiPartName(keyIndexName));
-        }
+        var uniqueIndexId = ResolveFullTextKeyIndex(context, table, keyIndexName);
 
         var columns = ResolveFullTextColumns(context, table, columnSpecs, [], missingState: 4);
         if (options.StoplistName is { } stoplistName)
@@ -325,13 +322,61 @@ partial class Simulation
         if (options.PropertyListName is { } propertyListName)
             throw SimulatedSqlException.SearchPropertyListNotFound(propertyListName, state: 1);
 
-        table.FullTextIndex = new FullTextIndex(catalog.Id, keyIndexName ?? string.Empty, uniqueIndexId, columns)
+        if (options.NoPopulation && options.ChangeTracking != FullTextChangeTracking.Off)
+            throw SimulatedSqlException.FullTextNoPopulationWithChangeTracking(state: 1);
+
+        table.FullTextIndex = new FullTextIndex(catalog.Id, keyIndexName, uniqueIndexId, columns)
         {
             ChangeTracking = options.ChangeTracking,
             StoplistOff = options.StoplistOff,
+            // An index created without columns starts disabled.
+            IsEnabled = columns.Count > 0,
         };
+        // Change tracking can't follow WRITETEXT / UPDATETEXT into a legacy
+        // LOB column, which real warns about as the index is created.
+        if (options.ChangeTracking != FullTextChangeTracking.Off
+            && columns.Exists(column => table.Columns[column.ColumnId - 1].Type is TextSqlType or NTextSqlType or ImageSqlType))
+        {
+            context.Connection.PendingMessages.Enqueue(SimulatedSqlException.FullTextLegacyLobTrackingMessage(context.Batch, tableName.ToString()));
+        }
         RecordDdlEvent(context, "CREATE_FULLTEXT_INDEX", EventSchemaName(tableName), tableName.Leaf, "TABLE");
         return true;
+    }
+
+    /// <summary>
+    /// Resolves a <c>KEY INDEX</c> name to its <c>sys.indexes</c> id, refusing
+    /// with real's Msg 7653 an index that can't key a full-text index: state 1
+    /// for a name the table has no index by, 2 for one that isn't unique, is
+    /// filtered, disabled or spans several columns, 3 for a nullable key column
+    /// (probed 2026-10-05 against SQL Server 2025). Key constraints number
+    /// first, then the table's indexes, as <c>sys.indexes</c> emits them.
+    /// </summary>
+    private static int ResolveFullTextKeyIndex(ParserContext context, HeapTable table, string keyIndexName)
+    {
+        var collation = context.Batch.CurrentDatabase.Collation;
+        for (var ki = 0; ki < table.KeyConstraints.Count; ki++)
+        {
+            var constraint = table.KeyConstraints[ki];
+            if (!collation.Equals(constraint.Name, keyIndexName))
+                continue;
+            if (constraint.FullOrdinals.Length != 1 || constraint.IsDisabled)
+                throw SimulatedSqlException.FullTextKeyIndexInvalid(keyIndexName, state: 2);
+            if (table.Columns[constraint.FullOrdinals[0]].Nullable)
+                throw SimulatedSqlException.FullTextKeyIndexInvalid(keyIndexName, state: 3);
+            return ki + 1;
+        }
+        for (var ii = 0; ii < table.Indexes.Count; ii++)
+        {
+            var index = table.Indexes[ii];
+            if (!collation.Equals(index.Name, keyIndexName))
+                continue;
+            if (!index.IsUnique || index.KeyColumns.Length != 1 || index.Filter is not null || index.IsDisabled)
+                throw SimulatedSqlException.FullTextKeyIndexInvalid(keyIndexName, state: 2);
+            if (table.Columns[index.KeyFullOrdinals[0]].Nullable)
+                throw SimulatedSqlException.FullTextKeyIndexInvalid(keyIndexName, state: 3);
+            return table.KeyConstraints.Count + ii + 1;
+        }
+        throw SimulatedSqlException.FullTextKeyIndexInvalid(keyIndexName, state: 1);
     }
 
     /// <summary>One entry of a full-text column list, as written.</summary>
@@ -388,10 +433,13 @@ partial class Simulation
                 // predicates' `LANGUAGE` argument does.
                 languageId = context.Token switch
                 {
-                    Numeric n => n.Value.AsInt32,
+                    Numeric n => n.Value.CoerceTo(SqlType.Int32).AsInt32,
+                    Literal { Value: { Type: VarbinarySqlType } binary } => binary.CoerceTo(SqlType.Int32).AsInt32,
                     Literal { Value: var languageName } => Parser.FullText.FullTextLanguage.ResolveName(languageName.AsString),
                     _ => throw SimulatedSqlException.SyntaxErrorNear(context),
                 };
+                if (!Parser.FullText.FullTextLanguage.IsKnown(languageId))
+                    throw SimulatedSqlException.FullTextInvalidLocale();
                 context.MoveNextRequired();
             }
 
@@ -440,11 +488,22 @@ partial class Simulation
                 throw SimulatedSqlException.FullTextColumnTypeInvalid(column.Name);
             if (isDocument && spec.TypeColumnName is null)
                 throw SimulatedSqlException.FullTextTypeColumnRequired();
+            if (!isDocument && spec.TypeColumnName is not null)
+                throw SimulatedSqlException.FullTextTypeColumnNotAllowed();
             if (columns.Exists(c => c.ColumnId == ordinal) || existing.Exists(c => c.ColumnId == ordinal))
                 throw SimulatedSqlException.FullTextDuplicateColumn(column.Name);
             if (spec.StatisticalSemantics)
                 throw SimulatedSqlException.SemanticDatabaseNotRegistered();
-            int? typeColumnId = spec.TypeColumnName is null ? null : ResolveColumnOrdinalForFullText(collation, table, spec.TypeColumnName, missingState);
+            // A type column names a document's extension: a character column
+            // of at most 260 characters (Msg 7671), its own name missing at the
+            // next state up (probed 2026-10-05 against SQL Server 2025).
+            int? typeColumnId = spec.TypeColumnName is null ? null : ResolveColumnOrdinalForFullText(collation, table, spec.TypeColumnName, (byte)(missingState + 1));
+            if (typeColumnId is int typeOrdinal
+                && table.Columns[typeOrdinal - 1] is var typeColumn
+                && (!SqlType.IsCollatedString(typeColumn.Type) || typeColumn.MaxLength is not (> 0 and <= 260)))
+            {
+                throw SimulatedSqlException.FullTextTypeColumnInvalid(typeColumn.Name);
+            }
             columns.Add(new FullTextIndexColumn(ordinal, spec.LanguageId, typeColumnId));
         }
         return columns;
@@ -464,6 +523,7 @@ partial class Simulation
     private struct FullTextIndexOptions
     {
         public FullTextChangeTracking ChangeTracking;
+        public bool NoPopulation;
         public bool StoplistOff;
         public string? StoplistName;
         public string? PropertyListName;
@@ -485,7 +545,7 @@ partial class Simulation
         {
             if (IsFullTextWord(context.Token, "CHANGE_TRACKING"))
             {
-                options.ChangeTracking = ParseChangeTrackingOption(context, allowNoPopulation: true);
+                (options.ChangeTracking, options.NoPopulation) = ParseChangeTrackingOptionWithPopulation(context);
             }
             else if (IsFullTextWord(context.Token, "STOPLIST"))
             {
@@ -519,8 +579,23 @@ partial class Simulation
     /// <c>OFF</c> may carry. Cursor enters on <c>CHANGE_TRACKING</c> and
     /// leaves on the token after the clause.
     /// </summary>
-    private static FullTextChangeTracking ParseChangeTrackingOption(ParserContext context, bool allowNoPopulation)
+    private static FullTextChangeTracking ParseChangeTrackingOption(ParserContext context, bool allowNoPopulation) =>
+        ParseChangeTrackingOption(context, allowNoPopulation, out _);
+
+    /// <summary>
+    /// <see cref="ParseChangeTrackingOption(ParserContext, bool)"/> for
+    /// <c>CREATE FULLTEXT INDEX</c>, also answering whether <c>NO
+    /// POPULATION</c> followed.
+    /// </summary>
+    private static (FullTextChangeTracking Mode, bool NoPopulation) ParseChangeTrackingOptionWithPopulation(ParserContext context)
     {
+        var mode = ParseChangeTrackingOption(context, allowNoPopulation: true, out var noPopulation);
+        return (mode, noPopulation);
+    }
+
+    private static FullTextChangeTracking ParseChangeTrackingOption(ParserContext context, bool allowNoPopulation, out bool noPopulation)
+    {
+        noPopulation = false;
         if (!IsFullTextWord(context.Token, "CHANGE_TRACKING"))
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (context.GetNextRequired() is Operator { Character: '=' })
@@ -544,6 +619,7 @@ partial class Simulation
             if (context.GetNextRequired() is not Name populationToken || !IsFullTextWord(populationToken, "POPULATION"))
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextOptional();
+            noPopulation = true;
             return mode;
         }
         context.RestoreCheckpoint(beforeComma);
@@ -615,12 +691,24 @@ partial class Simulation
         // catalog. Denial is Msg 7641 (probe-confirmed), and a db_ddladmin member
         // passes through the permission's DDL category.
         if (!context.CurrentDatabase.FullTextCatalogs.TryGetValue(name, out var existing))
-            throw SimulatedSqlException.InvalidObjectName(new MultiPartName(name));
+            throw SimulatedSqlException.FullTextCatalogNotFoundOrDenied(name, context.CurrentDatabase.Name, state: 4);
         if (!PermissionEnforcement.HasDatabasePermission(context.Batch, context.CurrentDatabase, Permission.AlterAnyFullTextCatalog)
             && !PermissionEnforcement.HoldsPermission(context.Batch, context.CurrentDatabase, Permission.Control, PermissionChecker.ClassFulltextCatalog, existing.Id, 0))
         {
             throw SimulatedSqlException.FullTextCatalogNotFoundOrDenied(name, context.CurrentDatabase.Name);
         }
+        // A catalog still holding an index can't go (Msg 7668); a default one
+        // goes with a warning (both probed 2026-10-05 against SQL Server 2025).
+        foreach (var (_, schema) in context.CurrentDatabase.Schemas)
+        {
+            foreach (var (_, indexed) in schema.HeapTables)
+            {
+                if (indexed.FullTextIndex?.CatalogId == existing.Id)
+                    throw SimulatedSqlException.FullTextCatalogNotEmpty(name);
+            }
+        }
+        if (existing.IsDefault)
+            context.Connection.PendingMessages.Enqueue(SimulatedSqlException.FullTextDefaultCatalogDroppedMessage(context.Batch, name));
         _ = context.CurrentDatabase.FullTextCatalogs.TryRemove(name, out _);
         DropSecurablePermissions(context, context.CurrentDatabase, PermissionChecker.ClassFulltextCatalog, existing.Id);
         RecordDdlEvent(context, "DROP_FULLTEXT_CATALOG", schemaName: null, name, "FULLTEXT CATALOG");
@@ -647,7 +735,12 @@ partial class Simulation
         if (!context.Batch.TryResolveTable(tableName, out var table))
             throw SimulatedSqlException.InvalidObjectName(tableName);
         if (table.FullTextIndex is null)
-            throw SimulatedSqlException.FullTextIndexMissing(tableName.Leaf, state: 5);
+            throw SimulatedSqlException.FullTextIndexMissing(tableName.ToString(), state: 5);
+        // Dropping the index takes ALTER on the table; real answers a denial
+        // as though the index were missing, at state 3 (probed 2026-10-05
+        // against SQL Server 2025).
+        if (PermissionEnforcement.SchemaObjectDenial(context.Batch, "ALTER", table) is not null)
+            throw SimulatedSqlException.FullTextIndexMissing(tableName.ToString(), state: 3);
         table.FullTextIndex = null;
         RecordDdlEvent(context, "DROP_FULLTEXT_INDEX", EventSchemaName(tableName), tableName.Leaf, "TABLE");
         return true;

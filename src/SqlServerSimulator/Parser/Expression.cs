@@ -522,6 +522,20 @@ internal abstract class Expression : ExpressionNode
                                 expression = SpatialMethodCall.Property(expression, name.Value);
                                 continue;
                             }
+                            // A spatial receiver whose type the parse already
+                            // knows — a constructor, a member, a variable —
+                            // has no member by this name: Msg 6506 for a
+                            // method, 6592 for a property (probed 2026-10-05
+                            // against SQL Server 2025).
+                            if (SpatialMethodCall.KnownReceiverType(expression, context) is { } unknownMemberReceiver)
+                            {
+                                var memberCheckpoint = context.SaveCheckpoint();
+                                var isMethod = context.GetNextOptional() is Operator { Character: '(' };
+                                context.RestoreCheckpoint(memberCheckpoint);
+                                throw isMethod
+                                    ? SimulatedSqlException.ClrMethodNotFound(name.Value, unknownMemberReceiver.ClrTypeName, "Microsoft.SqlServer.Types", state: 10)
+                                    : SimulatedSqlException.ClrPropertyNotFound(name.Value, unknownMemberReceiver.ClrTypeName);
+                            }
                             // A scalar variable of a type without members:
                             // real refuses the dot itself (probed 2026-09-24
                             // against SQL Server 2025).

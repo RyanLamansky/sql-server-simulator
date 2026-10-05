@@ -269,6 +269,26 @@ internal static class FullTextColumnSpec
     /// </summary>
     public static Spec Parse(ParserContext context)
     {
+        // `PROPERTY(column, 'name')` searches one document property, which
+        // needs a search property list no index here carries.
+        if (context.Token is UnquotedString propertyToken && propertyToken.Value.Equals("PROPERTY", StringComparison.OrdinalIgnoreCase))
+        {
+            var beforeProperty = context.SaveCheckpoint();
+            if (context.MoveNext() && context.Token is Operator { Character: '(' })
+            {
+                context.MoveNextRequired();
+                _ = BatchContext.ParseObjectName(context);
+                if (context.GetNextRequired() is not Operator { Character: ',' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Literal)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                if (context.GetNextRequired() is not Operator { Character: ')' })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                throw SimulatedSqlException.FullTextPropertySearchUnsupported();
+            }
+            context.RestoreCheckpoint(beforeProperty);
+        }
+
         switch (context.Token)
         {
             case Operator { Character: '*' }:
@@ -278,6 +298,14 @@ internal static class FullTextColumnSpec
             case Operator { Character: '(' }:
                 List<MultiPartName> columns = [];
                 context.MoveNextRequired();
+                // `(*)` is the star form too.
+                if (context.Token is Operator { Character: '*' })
+                {
+                    if (context.GetNextRequired() is not Operator { Character: ')' })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    context.MoveNextRequired();
+                    return new Spec(allColumns: true, [], starQualifier: null);
+                }
                 while (true)
                 {
                     columns.Add(BatchContext.ParseObjectName(context));
@@ -321,10 +349,10 @@ internal static class FullTextColumnSpec
     /// Msg 7601 when the table carries no full-text index (state 2) or a named
     /// column isn't one of the indexed ones (state 3).
     /// </summary>
-    public static FullTextBinding Bind(Spec spec, HeapTable table, string reportedTableName, Database database, Collation collation, string? qualifier)
+    public static FullTextBinding Bind(Spec spec, HeapTable table, string reportedTableName, Database database, Collation collation, string? qualifier, byte notIndexedState = 2)
     {
         if (table.FullTextIndex is not { } index)
-            throw SimulatedSqlException.FullTextTableNotIndexed(reportedTableName);
+            throw SimulatedSqlException.FullTextTableNotIndexed(reportedTableName, notIndexedState);
 
         var accentSensitive = true;
         foreach (var (_, catalog) in database.FullTextCatalogs)

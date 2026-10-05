@@ -185,6 +185,14 @@ partial class SimulatedSqlException
     // ALTER FULLTEXT INDEX's warnings, probed 2026-09-26 against SQL Server
     // 2025 on an index whose population had completed.
 
+    /// <summary>Msg 7657, a tracked full-text index over a <c>text</c>, <c>ntext</c> or <c>image</c> column, the table as written (probed 2026-10-05 against SQL Server 2025).</summary>
+    internal static SimulatedError FullTextLegacyLobTrackingMessage(BatchContext batch, string tableName) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 7657, $"Warning: Table or indexed view '{tableName}' has full-text indexed columns that are of type image, text, or ntext. Full-text change tracking cannot track WRITETEXT or UPDATETEXT operations performed on these columns.");
+
+    /// <summary>Msg 7674, dropping the default full-text catalog (probed 2026-10-05 against SQL Server 2025).</summary>
+    internal static SimulatedError FullTextDefaultCatalogDroppedMessage(BatchContext batch, string catalogName) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 7674, $"Warning: The fulltext catalog '{catalogName}' is being dropped and is currently set as default.");
+
     /// <summary>Msg 7638, turning change tracking off.</summary>
     internal static SimulatedError FullTextChangesDeletedMessage(BatchContext batch, string tableName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 7638, $"Warning: Request to stop change tracking has deleted all changes tracked on table or indexed view '{tableName}'.");

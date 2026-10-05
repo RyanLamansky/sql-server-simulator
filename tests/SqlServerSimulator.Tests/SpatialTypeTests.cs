@@ -274,9 +274,11 @@ public sealed class SpatialTypeTests
             "select cast(geometry::STGeomFromText(cast(null as nvarchar(max)), 0) as nvarchar(max))"));
 
     [TestMethod]
-    public void GeographyPoint_NullCoord_ReturnsNull()
-        => AreEqual(DBNull.Value, new Simulation().ExecuteScalar(
-            "select cast(geography::Point(cast(null as float), 1, 4326) as nvarchar(max))"));
+    public void GeographyPoint_NullCoord_RaisesMsg6569()
+        => new Simulation().AssertSqlError(
+            "select cast(geography::Point(cast(null as float), 1, 4326) as nvarchar(max))",
+            6569,
+            "'geography::Point' failed because parameter 1 is not allowed to be null.");
 
     [TestMethod]
     public void GeographyParse_NoArgs_RaisesArityError()
@@ -322,7 +324,7 @@ public sealed class SpatialTypeTests
         => new Simulation().AssertSqlError(
             "create table dbo.np (id int); create spatial index six on dbo.np(id)",
             12002,
-            "The requested spatial index on column 'id' of table 'np' could not be created because the column type is not geometry or geography . Specify a column name that refers to a column with a geometry or geography data type.");
+            "The requested spatial index on column 'id' of table 'dbo.np' could not be created because the column type is not geometry or geography . Specify a column name that refers to a column with a geometry or geography data type.");
 
     /// <summary>
     /// DATALENGTH over a spatial value measures the CLR-UDT serialization
@@ -343,5 +345,71 @@ public sealed class SpatialTypeTests
             """);
         AreEqual(22, sim.ExecuteScalar("select datalength(g) from dbo.dl"));
         AreEqual(22, sim.ExecuteScalar("select datalength(m) from dbo.dl"));
+    }
+
+    // ---- CREATE SPATIAL INDEX's checks, probed 2026-10-05 against SQL Server 2025 ----
+
+    private const string SpatialTable = "create table dbo.s (id int not null constraint pk_s primary key, g geometry, h geography, n int)";
+
+    [TestMethod]
+    [DataRow("create spatial index si on dbo.s (g)", 12007, 1)]
+    [DataRow("create spatial index si on dbo.s (h) with (bounding_box = (0, 0, 1, 1))", 12005, 1)]
+    [DataRow("create spatial index si on dbo.s (h) using geography_auto_grid with (grids = (low, low, low, low))", 12005, 1)]
+    [DataRow("create spatial index si on dbo.s (h) with (grids = (1, 2, 3, 2))", 12005, 29)]
+    [DataRow("create spatial index si on dbo.s (h) with (cells_per_object = 1.5)", 12005, 40)]
+    [DataRow("create spatial index si on dbo.s (h) using geometry_grid", 12003, 1)]
+    [DataRow("create spatial index si on dbo.s (h) with (grids = (huge))", 12014, 1)]
+    [DataRow("create spatial index si on dbo.s (g) with (bounding_box = (0, 0, 10))", 12014, 1)]
+    [DataRow("create spatial index si on dbo.s (g) with (bounding_box = (xmin = 0, ymin = 0, xmax = 10))", 12014, 4)]
+    [DataRow("create spatial index si on dbo.s (g) with (bounding_box = (10, 0, 0, 10))", 12013, 1)]
+    [DataRow("create spatial index si on dbo.s (g) with (bounding_box = (0, 10, 10, 5))", 12013, 1)]
+    [DataRow("create spatial index si on dbo.s (h) with (cells_per_object = 0)", 12012, 1)]
+    [DataRow("create spatial index si on dbo.s (h) with (cells_per_object = 8193)", 12011, 2)]
+    [DataRow("create spatial index si on dbo.s (g) with (bounding_box = (0, 0, 1, 1), bounding_box = (0, 0, 2, 2))", 12006, 1)]
+    [DataRow("create spatial index si on dbo.s (h) with (online = on)", 153, 3)]
+    [DataRow("create spatial index si on dbo.s (h) with (ignore_dup_key = on)", 153, 2)]
+    [DataRow("create spatial index si on dbo.s (h) with (nosuch = on)", 155, 1)]
+    [DataRow("create spatial index si on dbo.s (h) with (fillfactor = 101)", 129, 1)]
+    [DataRow("create spatial index si on dbo.s (zz)", 1911, 103)]
+    [DataRow("create table dbo.hp (id int, h geography); create spatial index si on dbo.hp (h)", 12008, 1)]
+    [DataRow("create table dbo.hp (a varchar(900) not null primary key, h geography); create spatial index si on dbo.hp (h)", 12016, 1)]
+    [DataRow("alter table dbo.s add c as h.STBuffer(1); create spatial index si on dbo.s (c)", 6342, 202)]
+    [DataRow("exec('create view dbo.v as select id, h from dbo.s'); create spatial index si on dbo.v (h)", 6334, 1)]
+    [DataRow("create index si on dbo.s (n); create spatial index si on dbo.s (h)", 1913, 211)]
+    [DataRow("create spatial index si on dbo.s (h) where n > 0", 156, 1)]
+    public void CreateSpatialIndex_RaisesRealsRefusals(string statement, int number, int state)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(SpatialTable);
+        AreEqual(state, sim.AssertSqlError(statement, number).State);
+    }
+
+    [TestMethod]
+    [DataRow("create spatial index si on dbo.s (h)", "GEOGRAPHY_AUTO_GRID|12|-|-")]
+    [DataRow("create spatial index si on dbo.s (g) with (bounding_box = (0, 0, 1, 1))", "GEOMETRY_AUTO_GRID|8|-|-")]
+    [DataRow("create spatial index si on dbo.s (h) using geography_grid", "GEOGRAPHY_GRID|16|MEDIUM|MEDIUM")]
+    [DataRow("create spatial index si on dbo.s (h) with (grids = (low, medium, high, high))", "GEOGRAPHY_GRID|16|LOW|HIGH")]
+    [DataRow("create spatial index si on dbo.s (g) using GEOMETRY_grid with (bounding_box = (ymin = 0, xmin = 0, ymax = 1, xmax = '1'), grids = (level_1 = low), cells_per_object = 20, online = off) on [primary]", "GEOMETRY_GRID|20|LOW|MEDIUM")]
+    public void CreateSpatialIndex_RecordsReals_Defaults(string statement, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(SpatialTable, statement);
+        AreEqual(expected, sim.ExecuteScalar("select concat(tessellation_scheme, '|', cells_per_object, '|', isnull(level_1_grid_desc, '-'), '|', isnull(level_4_grid_desc, '-')) from sys.spatial_index_tessellations"));
+    }
+
+    [TestMethod]
+    public void SpatialIndex_Rolls_Back_Disables_And_Blocks_Its_Column()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(SpatialTable, "begin tran; create spatial index si on dbo.s (h); rollback");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.spatial_indexes"));
+        sim.ExecuteBatches("create spatial index si on dbo.s (h)", "alter index si on dbo.s disable");
+        IsTrue((bool)sim.ExecuteScalar("select is_disabled from sys.spatial_indexes")!);
+        sim.ExecuteBatches("alter index si on dbo.s rebuild");
+        IsFalse((bool)sim.ExecuteScalar("select is_disabled from sys.indexes where name = 'si'")!);
+        AreEqual("The index 'si' is dependent on column 'h'.", sim.AssertSqlError("alter table dbo.s drop column h", 5074).Errors[0].Message);
+        AreEqual(2, sim.AssertSqlError("drop index dbo.s.si", 3749).State);
+        sim.ExecuteBatches("create spatial index si on dbo.s (h) using geography_grid with (drop_existing = on)");
+        AreEqual("GEOGRAPHY_GRID", sim.ExecuteScalar("select tessellation_scheme from sys.spatial_indexes"));
     }
 }
