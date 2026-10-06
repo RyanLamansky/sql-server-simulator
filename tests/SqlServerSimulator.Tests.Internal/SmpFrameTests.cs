@@ -61,7 +61,7 @@ public sealed class SmpFrameTests
             await this.Multiplexer.SendFinAsync(session, CancellationToken.None).ConfigureAwait(false);
         }
 
-        public void CancelConnectionExecution()
+        public void CancelConnectionExecution(SmpSession session)
         {
         }
     }

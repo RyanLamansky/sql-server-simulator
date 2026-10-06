@@ -23,6 +23,12 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     private SimulatedDbConnection? connection;
 
     /// <summary>
+    /// The connection's number for the request the non-MARS attention watcher
+    /// guards; replaced only once that watcher has settled.
+    /// </summary>
+    private long watchedRequest;
+
+    /// <summary>
     /// Serializes engine execution across all SMP logical sessions on a MARS
     /// connection: real MARS is cooperative multiplexing, never parallel
     /// execution, and the engine assumes one executor per connection
@@ -260,14 +266,15 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 Task<TdsMessage?>? watcher = null;
                 if (runsEngine)
                 {
+                    this.watchedRequest = this.connection!.BeginRequest();
                     watcher = transport.ReadMessageAsync(cancellationToken).AsTask();
                     _ = watcher.ContinueWith(
                         static (read, state) =>
                         {
                             if (read.IsCompletedSuccessfully)
                             {
-                                if (read.Result?.PacketType == Tds.PacketAttention)
-                                    ((TdsSession)state!).connection?.CancelExecution();
+                                if (read.Result?.PacketType == Tds.PacketAttention && state is TdsSession { connection: { } target } session)
+                                    target.CancelRequest(session.watchedRequest);
                             }
                             else
                             {
@@ -567,12 +574,12 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     }
 
     /// <summary>
-    /// Cancels whatever command currently holds the connection's execution
-    /// scope. Called by the multiplexer when a client attention targets the
-    /// session that is actively driving the engine; because execution is
-    /// serialized, the current scope belongs to that session.
+    /// Cancels the request <paramref name="session"/> is executing. Called by
+    /// the multiplexer when a client attention targets the session that is
+    /// actively driving the engine; a request that has since finished no longer
+    /// matches the connection's current one, so the cancel can't reach the next.
     /// </summary>
-    public void CancelConnectionExecution() => this.connection?.CancelExecution();
+    public void CancelConnectionExecution(SmpSession session) => this.connection?.CancelRequest(Volatile.Read(ref session.Request));
 
     /// <summary>
     /// Serves one request of a MARS logical session: runs it under the
@@ -583,6 +590,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     {
         bool cancelled;
         await this.engineExecutionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        Volatile.Write(ref session.Request, this.connection!.BeginRequest());
         session.Executing = true;
         try
         {

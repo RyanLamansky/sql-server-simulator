@@ -43,6 +43,13 @@ internal sealed class SmpSession(ushort sid, SmpMultiplexer multiplexer, uint pe
     /// </summary>
     public int AttentionState;
 
+    /// <summary>
+    /// The connection's number for the request this session is executing,
+    /// written before <see cref="Executing"/> is set so an attention that sees
+    /// the flag reads the request it targets.
+    /// </summary>
+    public long Request;
+
     /// <summary>Set while this session is actively driving the engine under the execution lock.</summary>
     public volatile bool Executing;
 

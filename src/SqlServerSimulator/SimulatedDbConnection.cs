@@ -608,8 +608,43 @@ public sealed class SimulatedDbConnection : DbConnection
         var previous = Interlocked.Exchange(ref this.executionCancellation, fresh);
         previous.Dispose();
         // A KILL landing after the command was counted in but before this
-        // scope existed cancelled the previous source; it ends this one.
-        if (this.Killed)
+        // scope existed cancelled the previous source; it ends this one. So
+        // does an attention that targeted the running wire request before its
+        // execution reached here — SqlClient sends one attention per cancel.
+        if (this.Killed || (this.requestSequence != 0 && Volatile.Read(ref this.attentionRequest) == Volatile.Read(ref this.requestSequence)))
+            this.CancelExecution();
+    }
+
+    /// <summary>
+    /// The latest wire request <see cref="BeginRequest"/> numbered; 0 for a
+    /// connection no TDS session drives.
+    /// </summary>
+    private long requestSequence;
+
+    /// <summary>The wire request the latest attention targeted.</summary>
+    private long attentionRequest;
+
+    /// <summary>
+    /// Numbers a TDS request before anything can cancel it. An attention can
+    /// arrive before the request's execution opens its scope in
+    /// <see cref="BeginExecutionScope"/>; naming the request lets that scope
+    /// honor it, where cancelling whatever source was current then hit the
+    /// previous execution's and lost it.
+    /// </summary>
+    internal long BeginRequest() => Interlocked.Increment(ref this.requestSequence);
+
+    /// <summary>
+    /// A client attention against wire request <paramref name="request"/>:
+    /// cancels its execution when it is still the current request, and is
+    /// remembered so a scope the request opens afterwards starts cancelled.
+    /// </summary>
+    internal void CancelRequest(long request)
+    {
+        // The exchange fences the write against the scope read below, pairing
+        // with BeginExecutionScope's exchange-then-read: one side always sees
+        // the other.
+        _ = Interlocked.Exchange(ref this.attentionRequest, request);
+        if (request == Volatile.Read(ref this.requestSequence))
             this.CancelExecution();
     }
 

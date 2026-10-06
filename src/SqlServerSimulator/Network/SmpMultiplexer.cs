@@ -13,7 +13,7 @@ internal interface ISmpHost
 {
     Task RunMarsSessionAsync(SmpSession session, CancellationToken cancellationToken);
 
-    void CancelConnectionExecution();
+    void CancelConnectionExecution(SmpSession session);
 }
 
 /// <summary>
@@ -145,7 +145,7 @@ internal sealed class SmpMultiplexer(Stream stream, ISmpHost owner) : IDisposabl
             _ = Interlocked.Exchange(ref session.AttentionState, 1);
             if (session.Executing)
             {
-                owner.CancelConnectionExecution();
+                owner.CancelConnectionExecution(session);
                 await this.SendControlFrameAsync(session, Tds.SmpFlagAck, cancellationToken).ConfigureAwait(false);
                 return;
             }
