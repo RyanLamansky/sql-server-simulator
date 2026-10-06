@@ -1129,8 +1129,8 @@ partial class Simulation
             }
             if (!insteadOfUpdate)
             {
-                foreach (var (_, _, oldValues, _, _) in pendingUpdates)
-                    WriteHistoryRow(destinationTable, historyTable, period, oldValues, context, undoLog);
+                foreach (var (_, _, oldValues, newValues, _) in pendingUpdates)
+                    WriteHistoryRow(destinationTable, historyTable, period, oldValues, context, undoLog, newValues);
             }
         }
 

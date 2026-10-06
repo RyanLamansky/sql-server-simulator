@@ -441,6 +441,24 @@ public sealed partial class SimulatedSqlException : DbException
     internal SimulatedSqlException BindingWithBatch() => new(this.Message, [.. this.Errors]) { BindsWithBatch = true };
 
     /// <summary>
+    /// This error as a linked server raised it evaluating a remote
+    /// <c>UPDATE</c>'s <c>SET</c> list and the provider relayed it: at line 1
+    /// of the server's statement, ending the caller's batch, behind the Msg
+    /// 3621 the server sent first when the error ended only its statement
+    /// there (probed 2026-10-05 and 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal SimulatedSqlException RelayedFromRemoteUpdate(Parser.BatchContext batch)
+    {
+        if (this.Number is 220 or 232 or 515 or 517 or 8115 or 8134)
+        {
+            var terminated = batch.InfoMessage(@class: 0, state: 1, number: 3621, "The statement has been terminated.");
+            terminated.LineNumber = 1;
+            batch.Connection.PendingMessages.Enqueue(terminated);
+        }
+        return new SimulatedSqlException(this.Message, [.. this.Errors]) { TerminatesBatch = true }.PinLine(1);
+    }
+
+    /// <summary>
     /// Set on an error a system procedure raised from its own body, which real
     /// reports as the procedure's <c>RAISERROR</c>: a DONEINPROC carrying the
     /// error, then the procedure returning 1 with no error on its DONEPROC

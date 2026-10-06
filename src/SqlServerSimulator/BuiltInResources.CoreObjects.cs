@@ -579,6 +579,10 @@ internal static partial class BuiltInResources
             {
                 GeneratedAlwaysAsRow.Start => "AS_ROW_START",
                 GeneratedAlwaysAsRow.End => "AS_ROW_END",
+                GeneratedAlwaysAsRow.TransactionIdStart => "AS_TRANSACTION_ID_START",
+                GeneratedAlwaysAsRow.TransactionIdEnd => "AS_TRANSACTION_ID_END",
+                GeneratedAlwaysAsRow.SequenceNumberStart => "AS_SEQUENCE_NUMBER_START",
+                GeneratedAlwaysAsRow.SequenceNumberEnd => "AS_SEQUENCE_NUMBER_END",
                 _ => "NOT_APPLICABLE",
             });
         // is_ansi_padded is 1 for char / varchar / nchar / nvarchar / binary /

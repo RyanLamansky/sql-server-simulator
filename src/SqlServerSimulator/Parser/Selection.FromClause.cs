@@ -1113,6 +1113,7 @@ internal sealed partial class Selection
                 var beforeObjectName = context.SaveCheckpoint();
                 var objectNameLine = context.Token?.LineNumber ?? 0;
                 var objectName = BatchContext.ParseObjectName(context);
+                objectName = BatchContext.TemporaryTableName(context, objectName);
 
                 // `FROM t.x.nodes('…') n(c)` in a subquery shreds a column of
                 // an enclosing query, as an APPLY's right side shreds one of
@@ -1231,7 +1232,12 @@ internal sealed partial class Selection
                         }
                         // Real checks the server's metadata compiling the
                         // batch, so a branch the batch never takes raises it.
-                        throw SimulatedSqlException.RemoteTableNotFound(RemoteWrite.ResolveServer(context.Batch, objectName[0]), RemoteWrite.QuotedName(objectName), objectName[0]);
+                        // The provider lists a synonym as an object without
+                        // columns (probed 2026-10-06 against SQL Server 2025).
+                        var unresolvedServer = RemoteWrite.ResolveServer(context.Batch, objectName[0]);
+                        if (RemoteWrite.NamesRemoteSynonym(unresolvedServer, objectName))
+                            throw SimulatedSqlException.RemoteObjectHasNoColumns(unresolvedServer, RemoteWrite.QuotedName(objectName));
+                        throw SimulatedSqlException.RemoteTableNotFound(unresolvedServer, RemoteWrite.QuotedName(objectName), objectName[0]);
                     }
                     _ = RemoteWrite.ResolveServer(context.Batch, objectName[0]);
                     if (!context.Batch.IsSkipping && context.Connection.CurrentTransaction is { IsDistributed: true })
@@ -1308,6 +1314,12 @@ internal sealed partial class Selection
                             DerivedMask = cteBinding.Plan.ColumnMasks?[ci],
                         };
                     }
+
+                    // A FOR SYSTEM_TIME after it is read and refused as the
+                    // batch compiles, naming the CTE (probed 2026-10-06 against
+                    // SQL Server 2025).
+                    if (ParseOptionalForSystemTimeClause(context) is not null)
+                        throw SimulatedSqlException.ForSystemTimeRequiresVersionedTable(cteBinding.Name, state: 1);
 
                     var cteAlias = ConsumeOptionalAlias(context);
                     // A WITH and a name after a CTE reference is the start of

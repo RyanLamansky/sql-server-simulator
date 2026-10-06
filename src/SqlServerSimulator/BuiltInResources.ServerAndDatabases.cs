@@ -166,6 +166,47 @@ internal static partial class BuiltInResources
             new("is_rda_server", SqlType.Bit, null, true),
         ], EnumerateSysServers);
 
+        // sysservers: the SQL Server 2000 compatibility view over sys.servers,
+        // its options packed into srvstatus as sp_serveroption's bits (probed
+        // 2026-10-06 against SQL Server 2025).
+        var nvarcharName = NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit);
+        var nvarcharText = NVarcharSqlType.Get(4000, Collation.Catalog, Coercibility.Implicit);
+        var sysservers = new CatalogView("sysservers",
+        [
+            new("srvid", SqlType.SmallInt, null, true),
+            new("srvstatus", SqlType.SmallInt, null, true),
+            new("srvname", nvarcharName, 128, false),
+            new("srvproduct", nvarcharName, 128, false),
+            new("providername", nvarcharName, 128, false),
+            new("datasource", nvarcharText, 4000, true),
+            new("location", nvarcharText, 4000, true),
+            new("providerstring", nvarcharText, 4000, true),
+            new("schemadate", SqlType.DateTime, null, false),
+            new("topologyx", SqlType.Int32, null, true),
+            new("topologyy", SqlType.Int32, null, true),
+            new("catalog", nvarcharName, 128, true),
+            new("srvcollation", nvarcharName, 128, true),
+            new("connecttimeout", SqlType.Int32, null, true),
+            new("querytimeout", SqlType.Int32, null, true),
+            new("srvnetname", CharSqlType.Get(30, Collation.Catalog, Coercibility.Implicit), 30, true),
+            new("isremote", SqlType.Bit, null, true),
+            new("rpc", SqlType.Bit, null, false),
+            new("pub", SqlType.Bit, null, false),
+            new("sub", SqlType.Bit, null, true),
+            new("dist", SqlType.Bit, null, true),
+            new("dpub", SqlType.Bit, null, true),
+            new("rpcout", SqlType.Bit, null, false),
+            new("dataaccess", SqlType.Bit, null, false),
+            new("collationcompatible", SqlType.Bit, null, false),
+            new("system", SqlType.Bit, null, false),
+            new("useremotecollation", SqlType.Bit, null, false),
+            new("lazyschemavalidation", SqlType.Bit, null, false),
+            new("collation", nvarcharName, 128, true),
+            new("nonsqlsub", SqlType.Bit, null, true),
+        ], EnumerateSysservers);
+        views["sysservers"] = sysservers;
+        views["sys.sysservers"] = sysservers;
+
         // sys.linked_logins: each linked server's login mappings, which
         // sp_addlinkedserver, sp_addlinkedsrvlogin and sp_droplinkedsrvlogin
         // maintain (probed 2026-10-05 against SQL Server 2025); and
@@ -1935,6 +1976,55 @@ internal static partial class BuiltInResources
         {
             yield return Row(serverId++, ls.Name, ls.SrvProduct, ls.Provider, ls.DataSource, ls.Location, ls.ProviderString, ls.Catalog,
                 linked: true, remoteLogin: ls.RemoteLogin, ls.RpcOut, ls.DataAccess, ls.RemoteProcTransactionPromotion, ls.CreateDate, ls);
+        }
+    }
+
+    /// <summary>
+    /// Rows for <c>sysservers</c>, one per <c>sys.servers</c> row: the options
+    /// as <c>srvstatus</c> bits — rpc 1, pub 2, sub 4, dist 8, a linked server
+    /// 32, rpc out 64, data access 128, collation compatible 256, system 512,
+    /// use remote collation 1024, lazy schema validation 2048 — and as one
+    /// column each, <c>srvnetname</c> the instance's own name padded, and an
+    /// <c>SQLNCLI</c> provider named <c>SQLOLEDB</c>.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysservers(Parser.BatchContext batch, Database database)
+    {
+        var zero = SqlValue.FromInt32(0);
+        var no = SqlValue.FromBoolean(false);
+        var nullName = SqlValue.Null(NVarcharSqlType.Get(128, Collation.Catalog, Coercibility.Implicit));
+        var netNameType = CharSqlType.Get(30, Collation.Catalog, Coercibility.Implicit);
+        foreach (var row in EnumerateSysServers(batch, database))
+        {
+            var linked = row[10].AsBoolean;
+            var flags = new[] { row[11], row[19], row[20], row[21], no, row[12], row[13], row[14], row[18], row[15], row[17] };
+            var status = (linked ? 32 : 0)
+                | (row[11].AsBoolean ? 1 : 0) | (row[19].AsBoolean ? 2 : 0) | (!row[20].IsNull && row[20].AsBoolean ? 4 : 0) | (!row[21].IsNull && row[21].AsBoolean ? 8 : 0)
+                | (row[12].AsBoolean ? 64 : 0) | (row[13].AsBoolean ? 128 : 0) | (row[14].AsBoolean ? 256 : 0) | (row[18].AsBoolean ? 512 : 0)
+                | (row[15].AsBoolean ? 1024 : 0) | (row[17].AsBoolean ? 2048 : 0);
+            var provider = row[3].AsString;
+            yield return
+            [
+                SqlValue.FromInt16((short)row[0].AsInt32),
+                SqlValue.FromInt16((short)status),
+                row[1],
+                row[2],
+                provider.StartsWith("SQLNCLI", StringComparison.OrdinalIgnoreCase) ? SqlValue.FromNVarchar("SQLOLEDB") : row[3],
+                row[4],
+                row[5],
+                row[6],
+                row[24],
+                zero,
+                zero,
+                row[7],
+                row[16],
+                row[8],
+                row[9],
+                linked ? SqlValue.Null(netNameType) : SqlValue.FromString(netNameType, row[1].AsString),
+                SqlValue.FromBoolean(!linked),
+                .. flags,
+                row[16].IsNull ? nullName : row[16],
+                no,
+            ];
         }
     }
 

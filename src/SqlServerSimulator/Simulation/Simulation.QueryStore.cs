@@ -129,8 +129,10 @@ partial class Simulation
             parameterizationType = prefix is not null && (batch.ProcFrame is { IsDynamicSql: true } || (connection.NestingLevel == 0 && batch.Parser.Command.Parameters.Count > 0))
                 ? (byte)1
                 : (byte)0;
-            offsetStart = 2L * start;
-            offsetEnd = 2L * (end - 1);
+            // A module's statements are placed in its CREATE text.
+            var moduleOffset = isModule ? batch.ModuleBodyOffset() : 0;
+            offsetStart = 2L * (start + moduleOffset);
+            offsetEnd = 2L * (end - 1 + moduleOffset);
         }
 
         var context = new QueryStoreContextKey(
@@ -694,7 +696,6 @@ internal sealed class QueryStoreShape
         var selects = 0;
         var intoSeen = false;
         var usesDefaultSchema = false;
-        var variables = new List<string>();
         var hash = new QueryHashBuilder();
         for (var i = 0; i < tokens.Count; i++)
         {
@@ -715,11 +716,6 @@ internal sealed class QueryStoreShape
                     break;
                 case ReservedKeyword { Keyword: Keyword.Into }:
                     intoSeen = true;
-                    break;
-                case AtPrefixedString variable:
-                    var name = variable.Span.ToString();
-                    if (!variables.Exists(existing => BatchContext.VariableNameComparer.Equals(existing, name)))
-                        variables.Add(name);
                     break;
             }
             if (!usesDefaultSchema
@@ -778,12 +774,129 @@ internal sealed class QueryStoreShape
             captured,
             capturedWhenCallingFunction: !captured && lead is ReservedKeyword { Keyword: Keyword.Select },
             parameterized,
-            [.. variables],
+            VariablesInBinderOrder(tokens),
             isCondition,
             usesDefaultSchema,
             isTrivial: (captured && !joinsOrGroups && selects <= 1 && !writes) || parameterized is not null,
             statementType,
             hash.ToBytes());
+    }
+
+    /// <summary>
+    /// Every <c>@name</c> <paramref name="tokens"/> read, in the order real's
+    /// binder meets them, which its declaration prefix lists them in (probed
+    /// 2026-10-06 against SQL Server 2025). A query binds its FROM clause (the
+    /// joins' ON included), WHERE, GROUP BY and HAVING, then its select list,
+    /// ORDER BY, TOP or FETCH and OFFSET, and last the variables its select
+    /// list assigns; each branch of a set operation in turn. An UPDATE binds
+    /// its FROM clause, WHERE and TOP ahead of its SET list, a DELETE likewise,
+    /// and a SET or DECLARE its expression ahead of the variable it assigns.
+    /// Anything else — VALUES, MERGE, a condition — and whatever sits inside
+    /// parentheses read in written order, a subquery in its clause's place.
+    /// </summary>
+    private static string[] VariablesInBinderOrder(List<Token> tokens)
+    {
+        const int From = 0, Where = 1, GroupBy = 2, Having = 3, SelectList = 4, OrderBy = 5, Top = 6, Offset = 7, Assigned = 8;
+        // An UPDATE's or DELETE's TOP binds after its WHERE, its SET list next.
+        const int WriteTop = 2, SetList = 3, Output = 4;
+        var lead = tokens.Count > 0 ? tokens[0] : null;
+        var isWrite = lead is ReservedKeyword { Keyword: Keyword.Update or Keyword.Delete };
+        var isAssignment = lead is ReservedKeyword { Keyword: Keyword.Set or Keyword.Declare };
+        var ranksClauses = isWrite || isAssignment || lead is ReservedKeyword { Keyword: Keyword.Select or Keyword.With or Keyword.Insert } or Operator { Character: '(' };
+        var found = new List<(string Name, int Branch, int Rank, int Position)>();
+        var depth = 0;
+        var branch = 0;
+        var rank = isWrite ? SetList : From;
+        var rankAfterTop = -1;
+        var inSelectList = false;
+        for (var i = 0; i < tokens.Count; i++)
+        {
+            var token = tokens[i];
+            switch (token)
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    continue;
+                case Operator { Character: ')' }:
+                    depth--;
+                    if (depth == 0 && rankAfterTop >= 0)
+                    {
+                        rank = rankAfterTop;
+                        rankAfterTop = -1;
+                    }
+                    continue;
+                case AtPrefixedString variable:
+                    // The variable a select list item or a SET / DECLARE
+                    // assigns binds after everything the statement reads.
+                    var assigned = depth == 0 && (isAssignment
+                        ? i == 1
+                        : inSelectList && i + 1 < tokens.Count && tokens[i + 1] is Operator { Character: '=' }
+                            && tokens[i - 1] is ReservedKeyword { Keyword: Keyword.Select or Keyword.Distinct } or Operator { Character: ',' or ')' });
+                    found.Add((variable.Span.ToString(), branch, !ranksClauses ? 0 : assigned ? Assigned : isAssignment ? From : rank, i));
+                    continue;
+            }
+            if (depth != 0 || !ranksClauses || isAssignment)
+                continue;
+            switch (token)
+            {
+                case ReservedKeyword { Keyword: Keyword.Except or Keyword.Intersect or Keyword.Union }:
+                    branch++;
+                    inSelectList = false;
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Fetch }:
+                    rank = Top;
+                    break;
+                case ReservedKeyword { Keyword: Keyword.From }:
+                    inSelectList = false;
+                    rank = From;
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Group }:
+                    rank = GroupBy;
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Having }:
+                    rank = Having;
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Into }:
+                    inSelectList = false;
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Order }:
+                    rank = OrderBy;
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Select }:
+                    inSelectList = true;
+                    rank = SelectList;
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Set } when isWrite:
+                    rank = SetList;
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Top }:
+                    // Only the parenthesized count is TOP's; a bare one is a literal.
+                    if (i + 1 < tokens.Count && tokens[i + 1] is Operator { Character: '(' })
+                    {
+                        rankAfterTop = rank;
+                        rank = isWrite ? WriteTop : Top;
+                    }
+                    break;
+                case ReservedKeyword { Keyword: Keyword.Where }:
+                    inSelectList = false;
+                    rank = Where;
+                    break;
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Offset }:
+                    rank = Offset;
+                    break;
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Output } when isWrite:
+                    rank = Output;
+                    break;
+            }
+        }
+        found.Sort(static (a, b) => a.Branch != b.Branch ? a.Branch.CompareTo(b.Branch) : a.Rank != b.Rank ? a.Rank.CompareTo(b.Rank) : a.Position.CompareTo(b.Position));
+        var ordered = new List<string>(found.Count);
+        foreach (var (name, _, _, _) in found)
+        {
+            if (!ordered.Exists(existing => BatchContext.VariableNameComparer.Equals(existing, name)))
+                ordered.Add(name);
+        }
+        return [.. ordered];
     }
 
     /// <summary>

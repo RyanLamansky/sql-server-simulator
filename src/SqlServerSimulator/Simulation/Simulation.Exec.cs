@@ -312,6 +312,9 @@ partial class Simulation
             "sp_grantdbaccess" => this.InvokeSpGrantDbAccess(batch, calledAs),
             "sp_helplanguage" => InvokeSpHelpLanguage(batch, calledAs),
             "sp_helpserver" => Uncounted(InvokeSpHelpServer(batch, calledAs)),
+            "sp_linkedservers" => InvokeSpLinkedServers(batch, calledAs),
+            "sp_testlinkedserver" => InvokeSpTestLinkedServer(batch, calledAs),
+            "sp_catalogs" => InvokeSpCatalogs(batch, calledAs),
             "sp_helpsort" => Uncounted(InvokeSpHelpSort(batch, calledAs)),
             "sp_lock" => Uncounted(InvokeSpLock(batch, calledAs)),
             "sp_monitor" => Uncounted(InvokeSpMonitor(batch, calledAs)),
@@ -792,8 +795,23 @@ partial class Simulation
             // sp_rename's new-name argument this way (`EXEC sp_rename
             // 'books.title', headline, 'COLUMN'`). Probe-confirmed 2026-07-23.
             case Name identifier when !negate:
-                literalValue = SqlValue.FromVarchar(
-                    VarcharSqlType.Get(identifier.Value.Length, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault),
+                // NEXT VALUE FOR reads as one word to real's lexer, which no
+                // argument begins with: Msg 102 at `next` (probed 2026-10-06
+                // against SQL Server 2025).
+                if (identifier is UnquotedString { ContextualKeyword: ContextualKeyword.Next })
+                {
+                    var checkpoint = context.SaveCheckpoint();
+                    var valueToken = context.GetNextOptional();
+                    var forToken = context.GetNextOptional();
+                    var opensNextValueFor = valueToken is UnquotedString { ContextualKeyword: ContextualKeyword.Value } && forToken is ReservedKeyword { Keyword: Keyword.For };
+                    context.RestoreCheckpoint(checkpoint);
+                    if (opensNextValueFor)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                }
+                // The constant is Unicode (probed 2026-10-06 against SQL Server
+                // 2025: a sql_variant parameter reads nvarchar).
+                literalValue = SqlValue.FromNVarchar(
+                    NVarcharSqlType.Get(identifier.Value.Length, batch.CurrentDatabase.Collation, Coercibility.CoercibleDefault),
                     identifier.Value);
                 break;
             default:

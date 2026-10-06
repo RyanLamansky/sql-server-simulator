@@ -150,6 +150,14 @@ public sealed partial class SimulatedSqlException
         new("User does not have permission to perform this action.", 15247, 16, state);
 
     /// <summary>
+    /// Msg 6004 state 2: partition function or scheme DDL by a principal
+    /// without <c>ALTER ANY DATASPACE</c>, which ends the batch (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DataspacePermissionDenied() =>
+        new("User does not have permission to perform this action.", 6004, 16, 2) { TerminatesBatch = true };
+
+    /// <summary>
     /// Mimics SQL Server error 5812: <c>RECONFIGURE</c> by a session without
     /// <c>ALTER SETTINGS</c> (probed 2026-09-29 against SQL Server 2025).
     /// </summary>

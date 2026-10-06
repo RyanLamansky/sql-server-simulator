@@ -314,18 +314,40 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Returns the name of any object currently residing in
-    /// <paramref name="schema"/> — used by the non-empty-schema rejection
-    /// path. Walks the shared-namespace objects via
-    /// <see cref="Schema.SchemaObjects"/> first (so DML-targetable objects
-    /// surface preferentially); falls through to <see cref="Schema.TableTypes"/>
-    /// which occupies the parallel type namespace. Returns <c>null</c> when
-    /// the schema is completely empty.
+    /// The object the non-empty-schema rejection names: the first in name
+    /// order of everything <paramref name="schema"/> holds in the shared
+    /// namespace, its tables' constraints included — so a primary key's
+    /// <c>PK__…</c> name comes ahead of its own table's (probed 2026-10-06
+    /// against SQL Server 2025) — else a table type of the parallel type
+    /// namespace. Null when the schema is completely empty.
     /// </summary>
     private static string? FirstSchemaResident(Schema schema)
     {
+        var collation = schema.Database.Collation;
+        string? first = null;
+        void Consider(string? name)
+        {
+            if (name is not null && (first is null || collation.Compare(name, first) < 0))
+                first = name;
+        }
         foreach (var obj in schema.SchemaObjects())
-            return obj.Name;
+        {
+            Consider(obj.Name);
+            if (obj is not HeapTable table)
+                continue;
+            foreach (var key in table.KeyConstraints)
+                Consider(key.Name);
+            foreach (var check in table.CheckConstraints)
+                Consider(check.Name);
+            foreach (var foreignKey in table.OutgoingForeignKeys)
+                Consider(foreignKey.Name);
+            foreach (var column in table.Columns)
+                Consider(column.DefaultConstraint?.Name);
+            foreach (var edgeConstraint in table.EdgeConstraints)
+                Consider(edgeConstraint.Name);
+        }
+        if (first is not null)
+            return first;
         foreach (var (_, tt) in schema.TableTypes)
             return tt.Name;
         return null;

@@ -14,6 +14,7 @@ Its id comes from a per-database counter starting at 65536; **every** `CREATE PA
 
 - **Types.** Refused (Msg 7704): the LOB and MAX types, `timestamp`, `json`, `xml` at state 1, and `vector`, named `sys.vector`; a name that isn't a type at state 2; the CLR types and every alias type at state 3, `sysname` among them, an alias named as written (probed 2026-10-05).
   `bit`, `float`, `money`, `sql_variant`, `smalldatetime` and `time` are accepted.
+  A parameter declared `numeric` keeps the spelling (`PartitionFunction.SpelledNumeric`): `sys.partition_parameters` reports type 108, and only a column spelled `numeric` partitions on it, a `decimal` one being Msg 7726, as the reverse is (probed 2026-10-05 against SQL Server 2025).
   A string type keeps a written `COLLATE`, else the database's; a collation that doesn't exist is Msg 448 state 3, and an empty parameter list `pf ()` Msg 7702, both while the batch compiles.
 - **Boundaries** are any constant expressions (`1+1` works, a variable is Msg 137, a subquery Msg 1046 while compiling), converted to the parameter type as an assignment converts: a decimal rounds to the parameter's scale, a decimal into `int` truncates.
   A refused conversion is Msg 7705 at the written ordinal — state 1 for a pair an assignment can't convert implicitly (`getdate()` into `int`, `20200101` into `date`), state 2 for a value whose conversion fails or overflows.
@@ -34,7 +35,7 @@ A split needs every scheme on the function to have a `NEXT USED` filegroup (Msg 
 The new partition — the one holding the new boundary value: the left half under `RANGE LEFT`, the right half under `RANGE RIGHT` — takes each scheme's next-used filegroup, which is then cleared; a merge drops the partition holding the merged value, along with its filegroup slot.
 Both bump `modify_date`, and both carry each rowset's per-partition compression along (see [Data compression per partition](#data-compression-per-partition)).
 Any other word after `pf ()` is a syntax error; a `DROP` there is Msg 156 followed by Msg 343 for the word after it, real reading it on as a statement of its own.
-Every function and scheme statement rejects a token left after it (Msg 102), as `… VALUES (1), (2)` meets at the comma.
+Every function and scheme statement rejects a token left after it (Msg 102), as `… VALUES (1), (2)` meets at the comma, and needs `ALTER ANY DATASPACE` — `db_ddladmin`'s, granted or denied like any database permission — without which it is Msg 6004 state 2, ending the batch (probed 2026-10-06 against SQL Server 2025).
 
 ## Partition schemes
 
@@ -79,6 +80,7 @@ Every row count these and `OBJECTPROPERTYEX`'s `Cardinality`, `sp_statistics` an
 
 Off a scheme, the rows — the heap, or the clustered index — sit on a filegroup (`HeapTable.FilegroupId`), as does each nonclustered index or key (`Index.FilegroupId`, `KeyConstraint.FilegroupId`) and the LOB data (`HeapTable.LobFilegroupId`); all probed 2026-09-28 against SQL Server 2025.
 - A `CREATE TABLE` without `ON` lands on the database's **default** filegroup, as does `SELECT … INTO`; `ON [default]` names it too.
+  `SELECT … INTO t ON fg` places the new table on a filegroup, named or as a string; an unknown one is Msg 1921, and a scheme — with a column list or without — Msg 2726, as the statement runs (probed 2026-09-30 against SQL Server 2025).
 - A clustered key or index moves the rows onto its own `ON`, and dropping it leaves the heap there.
 - A nonclustered index or key without its own `ON` lands where the rows are when it is created.
 - The LOB data lands on `TEXTIMAGE_ON`'s filegroup, else where the rows were at creation, and stays there when a clustered index moves them.
@@ -89,6 +91,7 @@ Off a scheme, the rows — the heap, or the clustered index — sit on a filegro
 A filegroup constrains what lands on it:
 - an unknown one is **Msg 1921**, and one that is read-only takes no new table or index (**Msg 1924** state 2);
 - one without files takes a table but not its rows: an `INSERT` into it, or an index built on it over a table with rows, is **Msg 622** state 3 — the index build ending its statement;
+  so does a `TEXTIMAGE_ON` filegroup without files, row by row, for a value the LOB unit takes — any `text`, `ntext` or `image` value, or a `(max)` or `xml` one past 8,000 bytes — while a shorter one stays in the row and is written (`RowDecoder.HoldsLobUnitValue`); the error ends the batch and rolls the transaction back, and a `TRY` catches it (probed 2026-10-06 against SQL Server 2025);
 - a read-only one refuses a write reaching a rowset on it with **Msg 652**, naming the heap as `""` — an `UPDATE` reaching a nonclustered index only when it changes a column the index keys or includes;
 - `REMOVE FILEGROUP` refuses one holding a table, index or LOB data (**Msg 5042** state 8), and `REMOVE FILE` a non-primary file whose filegroup holds a table with rows or with the pages deleted rows left (**Msg 5042** state 1).
 
@@ -97,6 +100,7 @@ Msg 652's `RowsetId` is the simulator's synthetic `sys.partitions.partition_id`,
 
 ## `TRUNCATE TABLE … WITH (PARTITIONS (…))`
 
+The option list takes `PARTITIONS` alone: any other word is refused at itself when a list follows it and at the token after it otherwise, so `WITH (MAXDOP = 1)` is Msg 102 at `=` (probed 2026-10-06 against SQL Server 2025).
 Each bound is any expression — a variable, `$PARTITION.pf(x)`, `1.9` (partition 1), `'3'` — and `n TO m` a range.
 An unpartitioned table is Msg 7729 state 3 whatever the number; then per bound Msg 7722 for a number out of range, Msg 7728 for a reversed range, and Msg 7711 for a partition listed twice (ranges included); 7729 and 7722 name the table as written (`'dbo.t'`), as does Msg 4708 for a view.
 Every index must be aligned on the table's function: one partitioned on another column is Msg 4716, any other Msg 3756 naming the first that isn't (probed 2026-10-05).
@@ -104,9 +108,9 @@ The rows go as ordinary deletes — rolled back with a transaction — and, unli
 
 ## `ALTER TABLE … SWITCH`
 
-`ALTER TABLE source SWITCH [PARTITION n] TO target [PARTITION m] [WITH (WAIT_AT_LOW_PRIORITY (…))]`; a partition number is an integer-typed expression (see [Partition numbers](#partition-numbers)), and the option list takes `WAIT_AT_LOW_PRIORITY` alone (Msg 102 state 170 otherwise), whose `ABORT_AFTER_WAIT` takes `NONE`, `SELF` or `BLOCKERS`.
+`ALTER TABLE source SWITCH [PARTITION n] TO target [PARTITION m] [WITH (WAIT_AT_LOW_PRIORITY (…))]` — a word straight after the target is read on and the token past it refused, so `… TO t garbage;` is Msg 102 at `;` (probed 2026-10-05 against SQL Server 2025); a partition number is an integer-typed expression (see [Partition numbers](#partition-numbers)), and the option list takes `WAIT_AT_LOW_PRIORITY` alone (Msg 102 state 170 otherwise), whose `ABORT_AFTER_WAIT` takes `NONE`, `SELF` or `BLOCKERS`.
 Checks, in real's order (probed 2026-09-27 and 2026-10-05): the target resolves — Msg 1088 state 29, or Msg 4949 for a view, both naming it as written; the two differ (Msg 4955, the source by its name and the target as written); a system-versioned source is Msg 13546 and a period-less source into a target with a period Msg 13577; a number on an unpartitioned side is ignored with the class-0 Msg 4903 (state 1 source, 2 target), a partitioned side needs one (Msg 4911) in range (Msg 4950); an index of a partitioned side that isn't partitioned is Msg 7733 state 4; then the target — or its partition — must be empty (Msg 4905 / 4904), **ahead of every shape check**, and change tracking on either side is Msg 4900 (the target's first, state 1).
-Then the shapes: column count, and per column name, type, collation, nullability, persistence (Msg 4946), computed definition, sparse storage (Msg 11412) and `ROWGUIDCOL` (Msg 4958); two partitioned sides' partition columns (Msg 4953); the switched rowsets' `DATA_COMPRESSION` (Msg 11406, per partition) and filegroups (Msg 4938 between partitions, 4939 naming the unpartitioned table first); a clustered index on one side only; every enabled target index needs an identical source index (a source may carry extra ones, a disabled target index asks nothing), a partitioned nonclustered index carrying its partition column as one more included column when its key leaves it out, so an aligned `(b)` matches an unpartitioned `(b) INCLUDE (a)`; an indexed view over a partitioned source is Msg 11401 (no view index here is partitioned), and one over the target the source lacks Msg 11402; a target foreign key needs a matching source one; a source other tables' foreign keys reference is Msg 4967.
+Then the shapes: column count, and per column name, type, collation, nullability, persistence (Msg 4946), computed definition, sparse storage (Msg 11412) and `ROWGUIDCOL` (Msg 4958); two partitioned sides' partition columns (Msg 4953); the switched rowsets' `DATA_COMPRESSION` (Msg 11406, per partition) and filegroups (Msg 4938 between partitions, 4939 naming the unpartitioned table first, 4940 between two unpartitioned tables, probed 2026-10-06); a clustered index on one side only; every enabled target index needs an identical source index (a source may carry extra ones, a disabled target index asks nothing), a partitioned nonclustered index carrying its partition column as one more included column when its key leaves it out, so an aligned `(b)` matches an unpartitioned `(b) INCLUDE (a)`; an indexed view over a partitioned source is Msg 11401 (no view index here is partitioned), and one over the target the source lacks Msg 11402; a target foreign key needs a matching source one; a source other tables' foreign keys reference is Msg 4967.
 
 The last check is static reasoning over CHECK constraints (`ValueDomain` in `Simulation.PartitionSwitch.cs`), and it is where real is most particular:
 
@@ -160,19 +164,14 @@ The loader creates the functions and schemes and places tables, indexes and key 
   The page-count divergence unpartitioned tables already carry ([`catalog-views.md`](catalog-views.md)) applies too.
 - **`sys.partitions` of a filtered index** counts every row, as it does unpartitioned.
 - **Boundary variants.** A `decimal` boundary's `SQL_VARIANT_PROPERTY` reports `numeric` and the simulator's decimal width, and a `varbinary(n)` one its actual length rather than `n` — the variant surface's own limits.
-- **`numeric` parameters.** A function declared `numeric(p, s)` reports `decimal`'s type id 106 in `sys.partition_parameters` where real reports 108, and a `numeric` column on a `decimal` function (or the reverse) is accepted where real refuses it with Msg 7726 (probed 2026-10-05): a function's parameter type doesn't carry the `numeric` spelling the column model does.
-- **A `$PARTITION` call a view can no longer bind** reports its Msg 208 one line past the call's line in the view, and the Msg 4413 that follows at line 12, where real reports the call's own line and the reading statement's (probed 2026-10-05).
-- **A stray word after a SWITCH** (`… TO s garbage`) is Msg 102 near the word, where real reads it on and reports the `;` after it.
+- **A `$PARTITION` call a view can no longer bind** reports its Msg 208 at the reading statement's line, where real reports the call's own line in the view; the Msg 4413 after it matches (probed 2026-10-06).
 - **A partition number that won't convert** (`PARTITIONS ('x')`, `NULL`) is reported as 0 where real prints an arbitrary number.
-- **Permissions.** The DDL is gated on `db_owner` / `db_ddladmin` membership, where real checks `ALTER ANY DATASPACE`.
+  **Settled — don't re-pitch**: real's number is whatever its uninitialized variable held, which no deterministic model can reproduce.
 
 ## Not modeled yet
 
 - **A `FILESTREAM` column** is a syntax error here, where real raises Msg 5508 for a string `(max)` type, Msg 1969 for `varbinary(max)` with no FILESTREAM filegroup to default to, Msg 1921 state 3 for a `FILESTREAM_ON` naming no filegroup and Msg 1724 for one naming a filegroup that isn't a FILESTREAM one (probed 2026-09-30); `FILESTREAM_ON` on a table without one is Msg 1716.
-- **LOB data spilling onto a filegroup without files** is written, where real refuses it with Msg 622 once a value leaves the row.
-- **An indexed view's index on a scheme** reports `data_space_id` 1 and no `sys.partitions` rows at all, where real reports the scheme and one row per partition counting the view's rows (probed 2026-09-30): the simulator never materializes the view, so it has no row counts to place.
-- **`SELECT … INTO … ON filegroup`** is a syntax error here, where real places the table on the filegroup (`data_space_id` 1 for `[primary]` and `[default]`), refuses an unknown one with Msg 1921 and a scheme name, written with or without a column list, with Msg 2726 (probed 2026-09-30).
-- **Partition-level lock escalation** — `LOCK_ESCALATION = AUTO` still escalates to the table.
-- **SWITCH's remaining checks**: two unpartitioned tables on different filegroups, reasoning beyond the readable shapes above (functions), and a switch into a `#temp` table, which real meets with an internal Msg 608.
-- **Per-partition XML compression**, which `ON PARTITIONS` after `XML_COMPRESSION` still refuses as on an unpartitioned table.
-- **A partition TRUNCATE's option list** names the word after `WITH (` in its syntax error where real names the token after it (`WITH (MAXDOP = 1)` is near `=` there).
+- **An indexed view's index on a scheme** reports `data_space_id` 1 and no `sys.partitions` rows at all, where real reports the scheme and one row per partition counting the view's rows (probed 2026-09-30): the simulator never materializes the view, so it has no row counts to place — storage the simulator doesn't keep, not chased.
+- **Partition-level lock escalation** — `LOCK_ESCALATION = AUTO` still escalates to the table; which lock real escalates to rides its storage engine's per-partition lock counts, not chased.
+- **SWITCH's remaining checks**: reasoning beyond the readable shapes above (functions), and a switch into a `#temp` table, which real meets with an internal Msg 608 naming its own partition and database ids.
+- **Per-partition XML compression**, which `ON PARTITIONS` after `XML_COMPRESSION` still refuses as on an unpartitioned table, where real keeps a level per partition as it does `DATA_COMPRESSION`'s (probed 2026-10-06: `REBUILD PARTITION = ALL WITH (XML_COMPRESSION = ON ON PARTITIONS (1))` leaves partition 2 `OFF`, and `CREATE TABLE … WITH (XML_COMPRESSION = ON ON PARTITIONS (2))` is accepted).

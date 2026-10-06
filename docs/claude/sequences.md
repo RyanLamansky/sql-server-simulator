@@ -71,6 +71,8 @@ Like a draw, a reserved range isn't handed back by a rollback.
 - `DROP SEQUENCE` of a sequence a column default draws from is **Msg 3729** naming the default constraint, and `sys.sql_expression_dependencies` lists the default as referencing the sequence (probed 2026-10-04 against SQL Server 2025).
 - `NEXT VALUE FOR` on a totally missing name → **Msg 208** (the standard "invalid object name"), at state 1 where real raises state 211 (probed 2026-10-04 against SQL Server 2025).
 - A principal other than `dbo` needs `UPDATE` on the sequence (Msg 229), except in a column `DEFAULT`, which ownership chaining covers.
+- A `#temp` table's default resolves the name in tempdb, its schema defaulting to `dbo`, so a sequence of the user database is **Msg 208** at state 211 there (probed 2026-10-06 against SQL Server 2025); a table variable's default resolves in the current database.
+- `EXEC p NEXT VALUE FOR s` is **Msg 102** at `next`, which no argument begins with.
 
 ## `sys.sequences` catalog view
 
@@ -97,7 +99,8 @@ Probe-confirmed against SQL Server 2025: `INSERT INTO d (v) VALUES (NEXT VALUE F
 
 The two references are evaluated in different phases — the VALUES tuple in `EvaluateParsedTuples`, the DEFAULT in the row-encode loop — so the encode loop **restores** the stamp its tuple was evaluated under rather than bumping to a fresh one, letting the DEFAULT hit `BatchContext.SequenceRowCache`.
 (Bumping there drew a second value and silently stored `(2, 1)`.)
-SELECT / EXEC row sources carry no per-tuple stamp and keep the fresh per-row bump.
+A `SELECT` source shares its draws the same way: a row's default takes the value its select list drew from the same sequence, and draws afresh from any other (probed 2026-10-06 against SQL Server 2025), so the INSERT records the stamp each source row was projected under and re-enters it.
+A source that buffers its rows before the first is read carries no per-row stamps and keeps the fresh bump; an `EXEC` source has none either.
 
 **Msg 11731** gates the shape real declines to define: a **multi-row** `VALUES` constructor referencing a sequence that an *unlisted* target column also defaults from raises `A column that uses a sequence object in the default constraint must be present in the target columns list, if the same sequence object appears in a row constructor.` at bind time.
 The single-row form is accepted (it shares one value, above); only the row-constructor form rejects — probe-confirmed both ways.
@@ -201,6 +204,7 @@ The bake declines whenever the parsing batch is skipping — an un-taken branch 
 ## `NEXT VALUE FOR … OVER (ORDER BY …)`
 
 The values follow the `OVER` ordering, not the order rows are projected in: the reference registers a `ROW_NUMBER()` over the ordering with its query block (`NextValueFor.OverRank`), and the row ranked k takes the statement's k-th draw from the sequence (`StatementContext.OrderedSequenceDraws`) — so `INSERT … SELECT NEXT VALUE FOR s OVER (ORDER BY k DESC), …` numbers the rows by descending `k` (probed 2026-10-04 against SQL Server 2025).
+A named window, `OVER w`, orders the draws as its `WINDOW` clause defines it, resolved once the clause has parsed (probed 2026-10-06 against SQL Server 2025).
 A `VALUES` row has no query block to rank it and draws as it would without the clause.
 `PARTITION BY` is **Msg 11716**, an empty `OVER ()` **Msg 11718**, and an `OVER` in a default, an `UPDATE` or a `MERGE` **Msg 11717**.
 
@@ -209,11 +213,3 @@ A `VALUES` row has no query block to rank it and draws as it would without the c
 - Multi-name `DROP SEQUENCE a, b, c` — the comma-separated form works (inherited from the shared DROP parser); each name is dropped independently with `IF EXISTS` applied uniformly.
 - `INFORMATION_SCHEMA.SEQUENCES` — ISO-standard surface, not shipped.
   Apps that query catalogs typically use `sys.sequences` instead.
-
-## Not modeled yet
-
-- **An `INSERT … SELECT`'s draw shared with a defaulted column**: real gives a row's `DEFAULT NEXT VALUE FOR s` the value its select list drew from `s`, where the simulator draws the default afresh (probed 2026-10-04).
-- **A table variable whose column defaults to a draw** is refused by real without a message, the whole batch included; the simulator accepts it.
-- **A `#temp` table's default naming a sequence** resolves the name in `tempdb` on real (Msg 208 at state 211 for a sequence of the user database), here in the current database.
-- **`EXEC p NEXT VALUE FOR s`** is Msg 102 at `next` on real, at `value` here.
-- **A named window**, `NEXT VALUE FOR s OVER w`, is accepted, but its ordering isn't applied to the draws.

@@ -340,6 +340,7 @@ partial class Simulation
                     ContinueOnError = ContinuesCalledBatch(outerBatch),
                     OwnershipChainOwnerId = Ownership.EffectiveOwnerId(procedure.Schema.Database, procedure),
                     ModuleObjectId = procedure.ObjectId,
+                    ModuleDefinitionText = procedure.DefinitionText,
                     ModuleSchema = procedure.Schema,
                 };
                 // Seed cursor parameters as unallocated cursor variables in the

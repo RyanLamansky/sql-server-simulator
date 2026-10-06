@@ -2394,11 +2394,13 @@ internal abstract class Expression : ExpressionNode
         }
         if (nvf.Deferred is { } deferred)
             deferred.Windowed = true;
-        // A named window (`OVER w`) is accepted as real accepts it (probed
-        // 2026-09-24); the ordering it names isn't applied to the draws.
+        // A named window (`OVER w`) orders the draws as its definition does
+        // (probed 2026-10-06 against SQL Server 2025).
         if (context.GetNextRequired() is Name windowName)
         {
             RequireSameOverDefinition(context, nvf, "@" + windowName.Value.ToUpperInvariant());
+            if (!context.InDefaultClause && !context.InUpdateOrMerge)
+                nvf.OverRank = WindowExpression.RegisterNamedSequenceRank(context, windowName.Value);
             return nvf;
         }
         if (context.Token is not Operator { Character: '(' })

@@ -391,25 +391,32 @@ internal sealed class RemoteWrite
     /// computed one and a <c>rowversion</c> as the provider does — Msg 7344
     /// after its Msg 7412 — since it writes rows through a rowset whose
     /// columns of those kinds take no value (probed 2026-09-28 and 2026-10-05
-    /// against SQL Server 2025).
+    /// against SQL Server 2025). The refusal is the provider's, met as the
+    /// statement runs; compiling, the method answers whether a listed column
+    /// is one, for the statement's compile to stop short of the stand-in's
+    /// own refusals.
     /// </summary>
-    public void CheckInsertColumns(BatchContext batch, List<string> names)
+    public bool CheckInsertColumns(BatchContext batch, List<string> names)
     {
         this.InsertColumns = [];
+        var listsUnwritable = false;
         foreach (var name in names)
         {
             var ordinal = this.ProxyOrdinal(name);
             if (ordinal < 0)
                 continue;
             this.InsertColumns.Add(ordinal);
-            if (this.RemoteColumns[ordinal] is { } unwritable && (unwritable.Identity is not null || unwritable.Computed is not null || unwritable.Type == SqlType.RowVersion)
-                && !batch.IsSkipping)
+            if (this.RemoteColumns[ordinal] is { } unwritable && (unwritable.Identity is not null || unwritable.Computed is not null || unwritable.Type == SqlType.RowVersion))
             {
+                listsUnwritable = true;
+                if (batch.IsSkipping)
+                    continue;
                 batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MultipleStepOperationMessage(batch, this.Server));
                 var written = this.WrittenName is { } four ? $"[{four[0]}].[{four[1]}].[{four[2]}].[{four.Leaf}]" : this.TargetText;
                 throw SimulatedSqlException.RemoteColumnNotWritable(this.Server, written, unwritable.Name);
             }
         }
+        return listsUnwritable;
     }
 
     /// <summary>
@@ -1025,6 +1032,14 @@ internal sealed class RemoteWrite
                 SystemNameSqlType => new HeapColumn(column.Name, NVarcharSqlType.Get(128, column.Type.Collation!, Coercibility.Implicit), 128, column.Nullable, collation: column.Collation),
                 _ => null,
             };
+            // A supplementary-character collation is listed without its _SC,
+            // so a surrogate pair reads as two characters there (probed
+            // 2026-10-06 against SQL Server 2025); a UTF-8 one keeps it.
+            if (providerColumn is null && column.Type.Collation is { } collation && collation.Name.EndsWith("_SC", StringComparison.OrdinalIgnoreCase)
+                && Collation.TryGet(collation.Name[..^3]) is { } withoutSupplementary)
+            {
+                providerColumn = new HeapColumn(column.Name, column.Type.WithCollation(withoutSupplementary, Coercibility.Implicit), column.MaxLength, column.Nullable, collation: withoutSupplementary.Name);
+            }
             if (providerColumn is not null)
             {
                 exposed ??= [.. columns.AsSpan(0, i)];
@@ -1065,9 +1080,19 @@ internal sealed class RemoteWrite
 
     internal static string Bracket(string identifier) => "[" + identifier.Replace("]", "]]", StringComparison.Ordinal) + "]";
 
+    /// <summary>Whether the four-part <paramref name="name"/> names a synonym on <paramref name="server"/>.</summary>
+    internal static bool NamesRemoteSynonym(LinkedServer server, MultiPartName name) =>
+        server.Target.Databases.TryGetValue(name[1].Length == 0 ? server.SessionDatabaseName : name[1], out var database)
+        && database.Schemas.TryGetValue(name[2].Length == 0 ? Database.DefaultSchemaName : name[2], out var schema)
+        && schema.Synonyms.ContainsKey(name.Leaf);
+
     // Msg 7314's name: every written segment past the server's, each in double quotes.
     internal static string QuotedName(MultiPartName name)
     {
+        // A name whose database and schema are both left empty is the bare
+        // object name (probed 2026-10-06 against SQL Server 2025).
+        if (name.Count == 4 && name[1].Length == 0 && name[2].Length == 0)
+            return name.Leaf;
         var text = new StringBuilder();
         for (var i = 1; i < name.Count; i++)
         {

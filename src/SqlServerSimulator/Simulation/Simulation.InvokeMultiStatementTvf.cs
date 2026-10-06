@@ -129,6 +129,7 @@ partial class Simulation
             SuppressDiagnosticsResolution = true,
             CalledFunctionBody = true,
             ModuleObjectId = function.ObjectId,
+            ModuleDefinitionText = function.DefinitionText,
             ModuleSchema = function.Schema,
             CapturesQueryStore = true,
             MultiStatementTvfBody = true,

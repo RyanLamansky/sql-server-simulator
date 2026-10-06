@@ -49,6 +49,13 @@ partial class SimulatedSqlException
     internal static SimulatedError MaximumRowSizeExceededMessage(BatchContext batch, string tableName, byte state) =>
         batch.InfoMessage(@class: 0, state: state, number: 1708, $"Warning: The table \"{tableName}\" has been created, but its maximum row size exceeds the allowed maximum of 8060 bytes. INSERT or UPDATE to this table will fail if the resulting row exceeds the size limit.");
 
+    /// <summary>
+    /// Msg 2701 at state 99: a temporary table named with a database, which
+    /// real reads in tempdb whatever database (or server) the name gives.
+    /// </summary>
+    internal static SimulatedError TempdbDatabaseNameIgnoredMessage(BatchContext batch, string database) =>
+        batch.InfoMessage(@class: 0, state: 99, number: 2701, $"Database name '{database}' ignored, referencing object in tempdb.");
+
     /// <summary>Msg 4430, an index hint on a view read without <c>NOEXPAND</c>.</summary>
     internal static SimulatedError ViewIndexHintsIgnoredMessage(BatchContext batch, string viewName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 4430, $"Warning: Index hints supplied for view '{viewName}' will be ignored.");

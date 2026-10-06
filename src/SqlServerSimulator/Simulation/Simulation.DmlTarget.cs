@@ -115,7 +115,7 @@ partial class Simulation
             case ReservedKeyword { Keyword: Keyword.OpenDataSource } when remoteKind is not null:
                 throw Selection.ParseOpenDataSource(context);
         }
-        var name = BatchContext.ParseObjectName(context, acceptTableVariable: true);
+        var name = BatchContext.TemporaryTableName(context, BatchContext.ParseObjectName(context, acceptTableVariable: true));
         if (remoteKind is { } writeKind)
             remote = RemoteWrite.ForTarget(context.Batch, name, writeKind);
         else if (context.Batch.ExpandSynonym(name).Count >= 4)
@@ -384,6 +384,17 @@ partial class Simulation
             throw ConstructedRowsTargetError(context.Batch, target, alias, verb);
         if (target.UnwritableFunctionName is { } function)
             throw SimulatedSqlException.ObjectCannotBeModified(function);
+        // A source read FOR SYSTEM_TIME is the union of the table and its
+        // history, which the write refuses by its alias as the batch compiles
+        // (probed 2026-10-06 against SQL Server 2025).
+        if (target is { Rows: TemporalRowSource, Qualifier: { } temporalAlias })
+        {
+            var refusal = verb == "DELETE"
+                ? SimulatedSqlException.ViewWithUnionNotUpdatable(temporalAlias, derivedTable: true)
+                : SimulatedSqlException.ViewDmlTouchesDerivedField(temporalAlias, derivedTable: true);
+            refusal.BindsWithBatch = true;
+            throw refusal;
+        }
         var table = target.BackingTable
             ?? throw new NotSupportedException("A joined UPDATE / DELETE whose target is an APPLY's derived table, a table value constructor or a rowset function isn't modeled, nor one whose OUTPUT clause bound a table its alias names.");
         FunctionBodyShape.NoteTableWrite(context.Batch, verb, table);

@@ -907,4 +907,49 @@ public sealed class SequenceTests
         // Nothing was reserved.
         AreEqual(1, simulation.ExecuteScalar<int>("select next value for s"));
     }
+
+    [TestMethod]
+    public void InsertSelect_DefaultSharesTheSelectListDraw()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create sequence s start with 1;
+            create sequence s2 start with 100;
+            create table t (a int, b int default next value for s, c int default next value for s2);
+            insert t (a) select next value for s2 from (values (1), (2)) v(x);
+            insert t (a, c) select next value for s, next value for s from (values (1), (2)) v(x)
+            """);
+        AreEqual("100:1:100,101:2:101,3:3:3,4:4:4", simulation.ExecuteScalar("select string_agg(concat(a, ':', b, ':', c), ',') from t"));
+    }
+
+    [TestMethod]
+    public void TempTableDefault_ResolvesTheSequenceInTempdb()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s start with 1");
+        simulation.AssertSqlError("create table #t (a int default next value for s)", 208, "Invalid object name 's'.");
+        simulation.AssertSqlError("create table #t (a int default next value for dbo.s)", 208, "Invalid object name 'dbo.s'.");
+        AreEqual(211, simulation.AssertSqlError("create table #t (a int default next value for s)", 208).State);
+        _ = simulation.ExecuteNonQuery("use tempdb; create sequence dbo.s start with 50; use simulated");
+        AreEqual(50, simulation.ExecuteScalar("create table #t (a int default next value for s); insert #t default values; select a from #t"));
+    }
+
+    [TestMethod]
+    public void ExecArgument_NextValueFor_Msg102AtNext()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s; exec ('create proc p @a int as select @a')");
+        simulation.ValidateSyntaxError("exec p next value for s", "next");
+    }
+
+    [TestMethod]
+    public void NamedWindow_OrdersTheDraws()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create sequence s start with 1; create table t (a int); insert t values (3), (1), (2)");
+        AreEqual("1:1,2:2,3:3", simulation.ExecuteScalar("""
+            select a, next value for s over w n into #r from t window w as (order by a);
+            select string_agg(concat(a, ':', n), ',') within group (order by a) from #r
+            """));
+    }
 }

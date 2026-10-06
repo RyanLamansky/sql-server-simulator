@@ -48,6 +48,10 @@ public sealed class SimulatedDbParameter : DbParameter
     /// </summary>
     internal SqlValue? OutputSqlValue;
 
+    // A decimal value the linked-server provider sends as numeric, which the
+    // remote parameter reports (EXEC ... AT).
+    internal bool SpelledNumeric;
+
     /// <inheritdoc/>
     public override DbType DbType
     {

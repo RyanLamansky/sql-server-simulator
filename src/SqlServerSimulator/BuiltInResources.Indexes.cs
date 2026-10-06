@@ -633,17 +633,18 @@ internal static partial class BuiltInResources
         foreach (var function in database.PartitionFunctions.EnumerateValues().OrderBy(function => function.FunctionId))
         {
             var type = function.ParameterType;
-            var (maxLength, precision, scale) = GetSysColumnMetadata(new HeapColumn(string.Empty, type, function.DeclaredMaxLength, nullable: true));
+            var column = function.ParameterColumn;
+            var (maxLength, precision, scale) = GetSysColumnMetadata(column);
             yield return
             [
                 SqlValue.FromInt32(function.FunctionId),
                 parameterId,
-                SqlValue.FromByte(type.SystemTypeId),
+                SqlValue.FromByte(column.SystemTypeId),
                 SqlValue.FromInt16(maxLength),
                 SqlValue.FromByte(precision),
                 SqlValue.FromByte(scale),
                 SqlType.IsCollatedString(type) && type.Collation is { } collation ? SqlValue.FromSystemName(collation.Name) : nullCollation,
-                SqlValue.FromInt32(type.UserTypeId),
+                SqlValue.FromInt32(column.UserTypeId),
             ];
         }
     }

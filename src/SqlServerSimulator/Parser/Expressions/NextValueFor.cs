@@ -100,6 +100,12 @@ internal sealed class NextValueFor : Expression
             this.Sequence = new Sequence(context.Batch.Parser.CurrentDatabase.Schemas[Database.DefaultSchemaName], sequenceName.Leaf, 0, default, SqlType.BigInt, 1, 1, long.MinValue, long.MaxValue, cycle: false);
             return;
         }
+        if (context.DefaultResolvesInTempdb && context.InDefaultClause)
+        {
+            this.Sequence = ResolveInTempdb(context.Batch, sequenceName);
+            this.inDefault = true;
+            return;
+        }
         if (!context.Batch.TryResolveSequence(sequenceName, out var resolved))
         {
             // Real SQL Server distinguishes "object name doesn't resolve" (Msg 208)
@@ -122,6 +128,22 @@ internal sealed class NextValueFor : Expression
         // Record the reference for any collector in scope (INSERT's Msg 11731
         // gate); collecting here catches a reference at any nesting depth.
         context.SequenceCollector?.Add(resolved);
+    }
+
+    /// <summary>
+    /// The sequence a <c>#temp</c> table's default names, which real looks
+    /// up in tempdb, its schema defaulting to <c>dbo</c>: Msg 208 at state 211
+    /// for one that only the current database holds (probed 2026-10-06
+    /// against SQL Server 2025).
+    /// </summary>
+    private static Sequence ResolveInTempdb(BatchContext batch, MultiPartName sequenceName)
+    {
+        var tempdb = batch.Connection.Simulation.Databases[Simulation.TempdbDatabaseName];
+        var schemaName = sequenceName.ImmediateQualifier is { Length: > 0 } qualifier ? qualifier : Database.DefaultSchemaName;
+        if (!tempdb.Schemas.TryGetValue(schemaName, out var schema) || !schema.Sequences.TryGetValue(sequenceName.Leaf, out var sequence))
+            throw SimulatedSqlException.InvalidObjectName(sequenceName, 211);
+        batch.AcquireStatementLock(sequence.SchemaLock, LockMode.SchemaStability);
+        return sequence;
     }
 
     /// <summary>

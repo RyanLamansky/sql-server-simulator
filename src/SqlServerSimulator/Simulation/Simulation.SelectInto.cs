@@ -1,10 +1,30 @@
 using SqlServerSimulator.Parser;
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator;
 
 partial class Simulation
 {
+    /// <summary>
+    /// The filegroup a <c>SELECT … INTO … ON</c> names: one the database holds,
+    /// or <c>default</c>; an unknown name is Msg 1921, and a partition scheme,
+    /// which the new table can't be partitioned by with or without a column
+    /// list, Msg 2726 (probed 2026-09-30 against SQL Server 2025).
+    /// </summary>
+    internal static int ResolveIntoDataSpace(Database database, DataSpaceClause clause)
+    {
+        if (database.PartitionSchemes.TryGetValue(clause.Name, out var scheme))
+            throw SimulatedSqlException.PartitionColumnCountMismatch(scheme.Function.Name);
+        if (clause.Columns is not null)
+            throw SimulatedSqlException.InvalidDataSpace(scheme: true, clause.Name);
+        if (database.Filegroups.TryGetValue(clause.Name, out var filegroupId))
+            return filegroupId;
+        return BuiltInToken.Equals(clause.Name, "default")
+            ? database.DefaultFilegroupId
+            : throw SimulatedSqlException.InvalidDataSpace(scheme: false, clause.Name);
+    }
+
     /// <summary>
     /// Executes a <c>SELECT … INTO target [FROM …]</c> statement: creates
     /// the destination heap table from the parse-time-derived schema (see
@@ -90,14 +110,15 @@ partial class Simulation
             }
         }
         var destinationDatabase = owningDatabase ?? batch.Connection.Simulation.Databases[TempdbDatabaseName];
+        var filegroupId = selection.IntoDataSpace is { } dataSpace ? ResolveIntoDataSpace(destinationDatabase, dataSpace) : destinationDatabase.DefaultFilegroupId;
         var destTable = new HeapTable(leaf, destColumns, destinationDatabase.AllocateObjectId(), schemaId: schema?.SchemaId ?? Database.DboSchemaId)
         {
             OwningDatabase = owningDatabase,
             UsesAnsiNulls = batch.Connection.AnsiNulls,
-            // The rows land on the default filegroup, as a CREATE TABLE's
-            // without an ON clause do.
-            FilegroupId = destinationDatabase.DefaultFilegroupId,
-            LobFilegroupId = destinationDatabase.DefaultFilegroupId,
+            // The rows land on the ON clause's filegroup, else on the default
+            // one, as a CREATE TABLE's without an ON clause do.
+            FilegroupId = filegroupId,
+            LobFilegroupId = filegroupId,
         };
         if (isGlobalTemp)
             destTable.OwnerSession = batch.Connection.Session;

@@ -10,7 +10,7 @@ namespace SqlServerSimulator.Schemas;
 /// never shows in <c>sys.objects</c>; its id comes from the per-database
 /// counter <see cref="Database.AllocatePartitionFunctionId"/>.
 /// </summary>
-internal sealed class PartitionFunction(string name, int functionId, SqlType parameterType, int? declaredMaxLength, bool boundaryOnRight, SqlValue[] boundaries, DateTime createDate)
+internal sealed class PartitionFunction(string name, int functionId, SqlType parameterType, int? declaredMaxLength, bool boundaryOnRight, SqlValue[] boundaries, DateTime createDate, bool spelledNumeric = false)
 {
     public readonly string Name = name;
 
@@ -18,6 +18,16 @@ internal sealed class PartitionFunction(string name, int functionId, SqlType par
 
     /// <summary>The parameter type, a string one carrying its collation.</summary>
     public readonly SqlType ParameterType = parameterType;
+
+    /// <summary>
+    /// A <c>decimal</c> parameter declared <c>numeric</c>, which reports type
+    /// 108 and matches only a column spelled the same way (Msg 7726; probed
+    /// 2026-10-05 against SQL Server 2025).
+    /// </summary>
+    public readonly bool SpelledNumeric = spelledNumeric;
+
+    /// <summary>The parameter as a column describes it, for the comparisons and the catalog.</summary>
+    public HeapColumn ParameterColumn => new(string.Empty, this.ParameterType, this.DeclaredMaxLength, nullable: true, spelledNumeric: this.SpelledNumeric);
 
     /// <summary>The declared width, the <c>max_length</c> <c>sys.partition_parameters</c> reports alongside the type.</summary>
     public readonly int? DeclaredMaxLength = declaredMaxLength;

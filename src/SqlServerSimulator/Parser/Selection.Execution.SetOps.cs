@@ -368,6 +368,7 @@ internal sealed partial class Selection
             return kind == SetOpKind.UnionAll ? rows : AheadOfRowProjection(rows);
         }, intoTarget: left.IntoTarget, destColumnSchema: combinedDestSchema, updatabilityRejection: SetOperationRejection(kind, left, right))
         {
+            IntoDataSpace = left.IntoDataSpace,
             IsBareConstantRow = isBareConstantRows,
             ReadsStorage = readsStorage,
             // A set operation reads its branches' rows as a whole, so a branch
@@ -837,6 +838,7 @@ internal sealed partial class Selection
             return ApplyOffsetTake(ordered, offsetCount, fetchCount);
         }, intoTarget: inner.IntoTarget, destColumnSchema: inner.DestColumnSchema)
         {
+            IntoDataSpace = inner.IntoDataSpace,
             // The sort reorders rows without touching the projection, so the
             // AUTO serializers keep reading the same level binding.
             AutoSourceNames = inner.AutoSourceNames,

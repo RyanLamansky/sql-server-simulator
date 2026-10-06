@@ -52,6 +52,16 @@ partial class Simulation
             ParseSwitchOptions(context);
             context.MoveNextOptional();
         }
+        // A stray word is read on, and the token after it refused (probed
+        // 2026-10-05 against SQL Server 2025: `… TO t garbage;` is Msg 102
+        // near `;`).
+        if (targetPartition is null && context.Token is UnquotedString)
+        {
+            var atWord = context.SaveCheckpoint();
+            if (context.GetNextOptional() is null)
+                context.RestoreCheckpoint(atWord);
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
         context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
@@ -217,7 +227,7 @@ partial class Simulation
             if (left.Type.SystemTypeId != right.Type.SystemTypeId
                 || BuiltInResources.GetSysColumnMetadata(left) != BuiltInResources.GetSysColumnMetadata(right))
             {
-                throw SimulatedSqlException.SwitchColumnTypeMismatch(left.Name, PartitionTypeText(left.Type), sourceText, PartitionTypeText(right.Type), targetText);
+                throw SimulatedSqlException.SwitchColumnTypeMismatch(left.Name, PartitionTypeText(left), sourceText, PartitionTypeText(right), targetText);
             }
             if (SqlType.IsCollatedString(left.Type) && !string.Equals(left.Type.Collation?.Name, right.Type.Collation?.Name, StringComparison.OrdinalIgnoreCase))
                 throw SimulatedSqlException.SwitchColumnCollationMismatch(left.Name, sourceText, targetText);
@@ -257,6 +267,7 @@ partial class Simulation
                 throw SimulatedSqlException.SwitchTableFilegroupMismatch(targetText, targetGroup, sourceNumber, sourceText, sourceGroup);
             if (target.Partitioning is not null)
                 throw SimulatedSqlException.SwitchTableFilegroupMismatch(sourceText, sourceGroup, targetNumber, targetText, targetGroup);
+            throw SimulatedSqlException.SwitchTablesFilegroupMismatch(sourceText, sourceGroup, targetText, targetGroup);
         }
 
         var sourceIndexes = source.IndexIdentities().FindAll(static identity => !identity.IsHeap);
@@ -484,9 +495,20 @@ partial class Simulation
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not UnquotedString { Value: var word } || !BuiltInToken.Equals(word, "PARTITIONS"))
+        if (context.GetNextRequired() is not UnquotedString { Value: var word })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        if (context.GetNextRequired() is not Operator { Character: '(' })
+        // A word other than PARTITIONS is refused at itself when a list
+        // follows it, and otherwise at the token after it (probed 2026-10-06
+        // against SQL Server 2025: `WITH (MAXDOP = 1)` is Msg 102 near `=`).
+        var atWord = context.SaveCheckpoint();
+        var opensList = context.GetNextRequired() is Operator { Character: '(' };
+        if (!BuiltInToken.Equals(word, "PARTITIONS"))
+        {
+            if (opensList)
+                context.RestoreCheckpoint(atWord);
+            throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+        if (!opensList)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var ranges = new List<(Expression Low, Expression? High)>();
         do

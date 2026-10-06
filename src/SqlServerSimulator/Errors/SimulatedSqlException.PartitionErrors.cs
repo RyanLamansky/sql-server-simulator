@@ -150,10 +150,12 @@ partial class SimulatedSqlException
     /// <summary>
     /// Msg 622 state 3: rows written to a filegroup without files — an
     /// <c>INSERT</c> into a table on one, or an index built on one over a table
-    /// with rows (probed 2026-09-28 against SQL Server 2025).
+    /// with rows (probed 2026-09-28 against SQL Server 2025). Uncaught, it
+    /// ends the batch and rolls the transaction back; a <c>TRY</c> frame
+    /// catches it (probed 2026-10-06).
     /// </summary>
     internal static SimulatedSqlException FilegroupHasNoFiles(string name) =>
-        new($"The filegroup \"{name}\" has no files assigned to it. Tables, indexes, text columns, ntext columns, and image columns cannot be populated on this filegroup until a file is added.", 622, 16, 3);
+        new($"The filegroup \"{name}\" has no files assigned to it. Tables, indexes, text columns, ntext columns, and image columns cannot be populated on this filegroup until a file is added.", 622, 16, 3) { AbortsAsUnderXactAbort = true };
 
     /// <summary>
     /// Msg 652: a write reaching a rowset on a read-only filegroup — the heap
@@ -332,6 +334,10 @@ partial class SimulatedSqlException
     /// <summary>Msg 4939: an unpartitioned SWITCH side on another filegroup than the partition, the unpartitioned table named first.</summary>
     internal static SimulatedSqlException SwitchTableFilegroupMismatch(string table, string tableFilegroup, int partition, string partitioned, string partitionFilegroup) =>
         new($"ALTER TABLE SWITCH statement failed. table '{table}' is in filegroup '{tableFilegroup}' and partition {partition} of table '{partitioned}' is in filegroup '{partitionFilegroup}'.", 4939, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 4940: two unpartitioned SWITCH sides on different filegroups (probed 2026-10-06 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException SwitchTablesFilegroupMismatch(string source, string sourceFilegroup, string target, string targetFilegroup) =>
+        new($"ALTER TABLE SWITCH statement failed. table '{source}' is in filegroup '{sourceFilegroup}' and table '{target}' is in filegroup '{targetFilegroup}'.", 4940, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>Msg 7733 state 4: a partitioned SWITCH side carrying an index that isn't partitioned.</summary>
     internal static SimulatedSqlException SwitchUnalignedIndex(string table, string indexName) =>

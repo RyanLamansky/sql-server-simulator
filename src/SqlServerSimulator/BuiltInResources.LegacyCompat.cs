@@ -42,6 +42,11 @@ internal static partial class BuiltInResources
         "sp_droplinkedsrvlogin",
         "sp_helplinkedsrvlogin",
         "sp_serveroption",
+        // The linked-server catalog: the server list, a connection test and a
+        // server's databases.
+        "sp_linkedservers",
+        "sp_testlinkedserver",
+        "sp_catalogs",
         "sp_set_session_context",
         "sp_getapplock",
         "sp_releaseapplock",
@@ -894,7 +899,7 @@ internal static partial class BuiltInResources
             // sp_ (probed 2026-09-24).
             var isExtended = proc.StartsWith("xp_", StringComparison.OrdinalIgnoreCase)
                 || proc.StartsWith("sp_query_store_", StringComparison.Ordinal)
-                || proc is "sp_bindsession" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_executesql" or "sp_getbindtoken" or "sp_set_session_context" or "sp_xml_preparedocument" or "sp_xml_removedocument";
+                || proc is "sp_bindsession" or "sp_describe_first_result_set" or "sp_describe_undeclared_parameters" or "sp_executesql" or "sp_getbindtoken" or "sp_set_session_context" or "sp_testlinkedserver" or "sp_xml_preparedocument" or "sp_xml_removedocument";
             objects.Add(new SystemObject(
                 Schemas.CatalogViewObjectIds.ByProcedureName.TryGetValue(proc, out var realId) ? realId : SystemObjectId(proc), proc, Database.SysSchemaId,
                 isExtended ? "X " : "P ", isExtended ? "EXTENDED_STORED_PROCEDURE" : "SQL_STORED_PROCEDURE"));

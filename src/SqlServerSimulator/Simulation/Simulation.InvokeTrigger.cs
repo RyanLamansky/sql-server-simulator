@@ -439,6 +439,7 @@ partial class Simulation
                     ContinueOnError = ContinuesCalledBatch(outerBatch),
                     OwnershipChainOwnerId = chainOwner,
                     ModuleObjectId = objectId,
+                    ModuleDefinitionText = frame.Trigger?.DefinitionText,
                     // A DDL trigger has no schema of its own.
                     ModuleSchema = frame.Trigger?.Schema,
                     // The body writes inside the firing statement's

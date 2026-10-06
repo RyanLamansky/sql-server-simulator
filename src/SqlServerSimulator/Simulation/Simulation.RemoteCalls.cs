@@ -43,6 +43,9 @@ partial class Simulation
             if (value.Type.Category == SqlTypeCategory.String && value.Type is not NVarcharSqlType)
                 value = value.CoerceTo(SqlType.NVarchar);
             var parameter = RemoteParameter("@P" + (i + 1).ToString(CultureInfo.InvariantCulture), value, i < arguments.Count && arguments[i].OutputSlot is not null);
+            // A decimal the call computed, rather than wrote as a literal,
+            // arrives as numeric (probed 2026-10-06 against SQL Server 2025).
+            parameter.SpelledNumeric = value.Type is DecimalSqlType && i < arguments.Count && !arguments[i].IsNumericLiteral;
             parameters.Add(parameter);
             if (i < arguments.Count && arguments[i].OutputSlot is { } slot)
                 outputs.Add((parameter, slot));
@@ -68,18 +71,22 @@ partial class Simulation
         var server = ResolveRpcServer(batch, procName[0]);
         RequireRemoteCallOutsideTransaction(batch, server, insertExecSource);
 
+        // A name leaving the database and schema both empty is the bare
+        // procedure name on the server (probed 2026-10-06 against SQL Server
+        // 2025: Msg 2812 naming it alone).
+        var first = procName.Count == 4 && procName[1].Length == 0 && procName[2].Length == 0 ? 3 : 1;
         var written = new StringBuilder();
-        for (var i = 1; i < procName.Count; i++)
+        for (var i = first; i < procName.Count; i++)
         {
-            if (i > 1)
+            if (i > first)
                 _ = written.Append('.');
             if (!(i == 2 && procName.SchemaOmitted))
                 _ = written.Append(procName[i]);
         }
         var text = new StringBuilder("EXEC @RETURN_VALUE = ");
-        for (var i = 1; i < procName.Count; i++)
+        for (var i = first; i < procName.Count; i++)
         {
-            if (i > 1)
+            if (i > first)
                 _ = text.Append('.');
             if (!(i == 2 && procName.SchemaOmitted))
                 _ = text.Append(RemoteWrite.Bracket(procName[i]));

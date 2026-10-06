@@ -358,6 +358,7 @@ partial class Simulation
         // The period declaration is checked as the batch compiles: a refusal
         // stops the whole batch, an un-taken branch's included (probed
         // 2026-10-04 against SQL Server 2025).
+        RejectRepeatedLedgerColumns(heapColumns!);
         var resolvedPeriod = ResolvePeriodColumns(context.Batch.CurrentDatabase.Collation, heapColumns!, pendingPeriod);
         if (systemVersioning is { On: false })
             systemVersioning = null;
@@ -1085,7 +1086,7 @@ partial class Simulation
             // A period column's counterpart has its own refusal for being
             // nullable, and a sparse column must stay sparse (probed 2026-10-04
             // against SQL Server 2025).
-            if (baseColumn.GeneratedAs != GeneratedAlwaysAsRow.None && historyColumn.Nullable)
+            if (baseColumn.GeneratedAs.IsPeriod() && historyColumn.Nullable)
                 throw SimulatedSqlException.HistoryPeriodColumnNullable(historyColumn.Name, qualifiedHistory, qualifiedBase);
             if (baseColumn.Nullable != historyColumn.Nullable)
                 throw SimulatedSqlException.HistoryTableColumnNullabilityMismatch(baseColumn.Name, qualifiedBase, qualifiedHistory);
@@ -2470,7 +2471,17 @@ partial class Simulation
                     // The period clause comes ahead of any NULL / NOT NULL:
                     // `datetime2 NOT NULL GENERATED …` is Msg 102 at GENERATED
                     // (probed 2026-09-25 against SQL Server 2025).
-                    if (isTableVariable)
+                    // A table variable takes the ledger kinds (probed 2026-10-06
+                    // against SQL Server 2025), only a period being refused.
+                    var generatedCheckpoint = context.SaveCheckpoint();
+                    var alwaysToken = context.GetNextOptional();
+                    var asToken = context.GetNextOptional();
+                    var kindToken = context.GetNextOptional();
+                    var declaresLedger = alwaysToken is UnquotedString { ContextualKeyword: ContextualKeyword.Always }
+                        && asToken is ReservedKeyword { Keyword: Keyword.As }
+                        && kindToken is UnquotedString { ContextualKeyword: ContextualKeyword.Transaction_Id or ContextualKeyword.Sequence_Number };
+                    context.RestoreCheckpoint(generatedCheckpoint);
+                    if (isTableVariable && !declaresLedger)
                         throw SimulatedSqlException.TableVariableWithPeriod();
                     if (isTableType || nullable.HasValue)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -2483,18 +2494,27 @@ partial class Simulation
                     // form SQL Server doesn't accept) errors on that keyword —
                     // Msg 156 near IDENTITY, matching real, which parses through
                     // AS before rejecting.
-                    if (context.GetNextRequired() is not UnquotedString { ContextualKeyword: ContextualKeyword.Row })
+                    // TRANSACTION_ID and SEQUENCE_NUMBER take any table, an
+                    // ALTER TABLE … ADD included (probed 2026-10-06 against
+                    // SQL Server 2025).
+                    var ledgerKind = context.GetNextRequired() switch
+                    {
+                        UnquotedString { ContextualKeyword: ContextualKeyword.Transaction_Id } => GeneratedAlwaysAsRow.TransactionIdStart,
+                        UnquotedString { ContextualKeyword: ContextualKeyword.Sequence_Number } => GeneratedAlwaysAsRow.SequenceNumberStart,
+                        _ => GeneratedAlwaysAsRow.None,
+                    };
+                    if (ledgerKind == GeneratedAlwaysAsRow.None && context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Row })
                     {
                         throw context.Token is ReservedKeyword notRow
                             ? SimulatedSqlException.SyntaxErrorNearKeyword(notRow)
                             : SimulatedSqlException.SyntaxErrorNear(context);
                     }
-                    if (pendingPeriod is null)
+                    if (pendingPeriod is null && ledgerKind == GeneratedAlwaysAsRow.None)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     generatedAs = context.GetNextRequired() switch
                     {
-                        UnquotedString { ContextualKeyword: ContextualKeyword.Start } => GeneratedAlwaysAsRow.Start,
-                        ReservedKeyword { Keyword: Keyword.End } => GeneratedAlwaysAsRow.End,
+                        UnquotedString { ContextualKeyword: ContextualKeyword.Start } => ledgerKind == GeneratedAlwaysAsRow.None ? GeneratedAlwaysAsRow.Start : ledgerKind,
+                        ReservedKeyword { Keyword: Keyword.End } => ledgerKind == GeneratedAlwaysAsRow.None ? GeneratedAlwaysAsRow.End : ledgerKind + 1,
                         _ => throw SimulatedSqlException.SyntaxErrorNear(context),
                     };
                     context.MoveNextRequired();
@@ -2585,7 +2605,7 @@ partial class Simulation
                     }
                     else
                     {
-                        defaultExpression = ParseDefaultClauseExpression(context);
+                        defaultExpression = ParseDefaultClauseExpression(context, tempTable: !isTableVariable && tableName.StartsWith('#'));
                     }
                     defaultDefinition = context.CanonicalDefinitionFrom(defaultStart, predicate: false) ?? $"({context.SourceTextFrom(defaultStart)})";
                     continue;
@@ -2719,8 +2739,24 @@ partial class Simulation
         // when the column declaration omits an explicit NULL / NOT NULL. A
         // period column defaults to NOT NULL instead (probed 2026-09-25 against
         // SQL Server 2025); only a NULL written after it is Msg 13587.
-        if (generatedAs != GeneratedAlwaysAsRow.None)
+        if (generatedAs.IsLedger())
+        {
+            // A ledger column is a bigint, its START never NULL and its END
+            // nullable whatever the declaration omits (probed 2026-10-06
+            // against SQL Server 2025).
+            if (resolvedType is not BigIntSqlType || aliasType is not null)
+                throw SimulatedSqlException.LedgerColumnInvalidType(generatedAs.Spelling(), columnName.Value, (byte)(generatedAs - GeneratedAlwaysAsRow.TransactionIdStart + 1));
+            var isStart = generatedAs is GeneratedAlwaysAsRow.TransactionIdStart or GeneratedAlwaysAsRow.SequenceNumberStart;
+            if (isStart && nullable == true)
+                throw SimulatedSqlException.LedgerStartColumnNullable(generatedAs.Spelling(), columnName.Value);
+            if (!isStart && nullable == false)
+                throw SimulatedSqlException.LedgerEndColumnNotNullable(generatedAs.Spelling(), columnName.Value);
+            nullable ??= !isStart;
+        }
+        else if (generatedAs != GeneratedAlwaysAsRow.None)
+        {
             nullable ??= false;
+        }
         nullable ??= aliasIsNullable;
         var actualNullable = nullable ?? (identitySpec is null
             && (isTableVariable || isTableType || withValuesColumns is not null || DefaultsColumnsToNull(context, tableName)));
@@ -3209,6 +3245,26 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Refuses a second column of one <c>TRANSACTION_ID</c> /
+    /// <c>SEQUENCE_NUMBER</c> kind (Msg 37345, its state the kind's place in
+    /// <c>TRANSACTION_ID START</c>, <c>END</c>, <c>SEQUENCE_NUMBER START</c>,
+    /// <c>END</c>; probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    private static void RejectRepeatedLedgerColumns(IEnumerable<HeapColumn?> columns)
+    {
+        var seen = 0;
+        foreach (var column in columns)
+        {
+            if (column is null || !column.GeneratedAs.IsLedger())
+                continue;
+            var bit = 1 << (column.GeneratedAs - GeneratedAlwaysAsRow.TransactionIdStart);
+            if ((seen & bit) != 0)
+                throw SimulatedSqlException.LedgerColumnRepeated(column.GeneratedAs.Spelling(), (byte)(column.GeneratedAs - GeneratedAlwaysAsRow.TransactionIdStart + 1));
+            seen |= bit;
+        }
+    }
+
+    /// <summary>
     /// Validates the temporal DDL: every <c>GENERATED ALWAYS AS ROW START/END</c>
     /// column must be <c>datetime2</c> NOT NULL (Msg 13501 / 13587); if any
     /// generated column is present the table must declare <c>PERIOD FOR
@@ -3232,7 +3288,7 @@ partial class Simulation
         var generatedEndOrdinal = -1;
         for (var i = 0; i < heapColumns.Count; i++)
         {
-            if (heapColumns[i] is not { } column || column.GeneratedAs == GeneratedAlwaysAsRow.None)
+            if (heapColumns[i] is not { } column || !column.GeneratedAs.IsPeriod())
                 continue;
             var start = column.GeneratedAs == GeneratedAlwaysAsRow.Start;
             if (column.Type is not DateTime2SqlType)
@@ -5022,9 +5078,10 @@ partial class Simulation
     /// named-constraint <c>… DEFAULT (v) FOR w</c>).
     /// </para>
     /// </remarks>
-    private static Expression ParseDefaultClauseExpression(ParserContext context)
+    private static Expression ParseDefaultClauseExpression(ParserContext context, bool tempTable = false)
     {
         using var defaultClause = ParserScope.Enter(ref context.InDefaultClause, true);
+        using var inTempdb = ParserScope.Enter(ref context.DefaultResolvesInTempdb, tempTable);
         using var scalarOnly = context.EnterScalarOnlyOperand();
         var expression = Expression.Parse(context);
         return context.ScalarOnlyColumnReference is null

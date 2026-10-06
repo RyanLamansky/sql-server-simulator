@@ -920,6 +920,49 @@ internal sealed partial class BatchContext
     }
 
     /// <summary>
+    /// <paramref name="name"/>, just parsed with the cursor on its last token,
+    /// as a temporary table's name reads: whatever server it names is dropped,
+    /// the session's own table being the one meant, and a database it names is
+    /// ignored with the class-0 Msg 2701 as the batch compiles, at the line of
+    /// the token after the name (probed 2026-10-06 against SQL Server 2025).
+    /// Any other name passes through.
+    /// </summary>
+    public static MultiPartName TemporaryTableName(ParserContext context, MultiPartName name)
+    {
+        if (name.Count < 3 || !(IsLocalTempName(name.Leaf) || IsGlobalTempName(name.Leaf)))
+            return name;
+        if (context.Batch.CompilingForRun && name[name.Count - 3] is { Length: > 0 } ignoredDatabase)
+        {
+            var note = SimulatedSqlException.TempdbDatabaseNameIgnoredMessage(context.Batch, ignoredDatabase);
+            var nameLine = context.Token?.LineNumber ?? 0;
+            var atName = context.SaveCheckpoint();
+            var nextLine = context.GetNextOptional()?.LineNumber;
+            context.RestoreCheckpoint(atName);
+            note.LineNumber = (nextLine ?? nameLine) + context.Batch.LineOffset;
+            (context.Batch.CompileMessages ??= []).Add(note);
+        }
+        return name.Count == 4 ? new MultiPartName(name[1]).WithAddedPart(name[2]).WithAddedPart(name.Leaf) : name;
+    }
+
+    /// <summary>
+    /// Whether the cursor, on the second dot of <c>a...b</c>, opens a third
+    /// dot and a name, leaving it on that name when so and where it was
+    /// otherwise.
+    /// </summary>
+    private static bool LeavesTwoSegmentsEmpty(ParserContext context, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? leaf)
+    {
+        var checkpoint = context.SaveCheckpoint();
+        if (context.MoveNext() && context.Token is Operator { Character: '.' } && context.MoveNext() && context.Token is Name name)
+        {
+            leaf = name.Value;
+            return true;
+        }
+        context.RestoreCheckpoint(checkpoint);
+        leaf = null;
+        return false;
+    }
+
+    /// <summary>
     /// Parses an object name (1–4 dotted segments) at the current token,
     /// leaving the cursor on the <em>last</em> consumed name segment (matching
     /// the standard parser-context contract that every parser leaves Token on
@@ -995,7 +1038,19 @@ internal sealed partial class BatchContext
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             if (context.Token is Name next)
             {
+                // A fifth part is Msg 117, naming the whole name (probed
+                // 2026-10-06 against SQL Server 2025).
+                if (name.Count == 4)
+                    throw SimulatedSqlException.TooManyNamePrefixes($"{name}.{next.Value}", 3);
                 name = name.WithAddedPart(next.Value);
+                continue;
+            }
+            // Two empty segments after the first, `server...object`, leave a
+            // linked server's database and schema to its defaults (probed
+            // 2026-10-06 against SQL Server 2025).
+            if (name.Count == 1 && context.Token is Operator { Character: '.' } && LeavesTwoSegmentsEmpty(context, out var afterTwoEmpty))
+            {
+                name = name.WithAddedPart(string.Empty).WithAddedPart(string.Empty).WithAddedPart(afterTwoEmpty);
                 continue;
             }
             if (context.Token is Operator { Character: '.' } && context.MoveNext() && context.Token is Name afterEmpty)

@@ -195,6 +195,25 @@ internal sealed class HeapTable : SchemaObject
     /// </summary>
     public HeapColumn[] Columns;
 
+    // The Columns array HasLedgerColumns last read, and what it found.
+    private (HeapColumn[]? Read, bool Found) ledgerColumns;
+
+    /// <summary>
+    /// Whether a column is <c>GENERATED ALWAYS AS TRANSACTION_ID</c> or
+    /// <c>SEQUENCE_NUMBER</c>, which every write stamps; read once per shape
+    /// of <see cref="Columns"/>, which an <c>ALTER TABLE</c> replaces.
+    /// </summary>
+    public bool HasLedgerColumns()
+    {
+        var columns = this.Columns;
+        var (read, found) = this.ledgerColumns;
+        if (ReferenceEquals(columns, read))
+            return found;
+        found = Array.Exists(columns, static column => column.GeneratedAs.IsLedger());
+        this.ledgerColumns = (columns, found);
+        return found;
+    }
+
     /// <summary>
     /// Subset of <see cref="Columns"/> that participates in row storage —
     /// regular columns plus persisted computed columns. The schema passed

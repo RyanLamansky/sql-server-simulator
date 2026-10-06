@@ -102,11 +102,11 @@ partial class Simulation
         if (column.IsSparse)
             throw SimulatedSqlException.VectorKeyColumnInvalid(column.Name, table.Name, state: 2);
         var parameterType = function.ParameterType;
-        var parameterColumn = new HeapColumn(string.Empty, parameterType, function.DeclaredMaxLength, nullable: true);
-        if (column.Type.SystemTypeId != parameterType.SystemTypeId
+        var parameterColumn = function.ParameterColumn;
+        if (column.SystemTypeId != parameterColumn.SystemTypeId
             || BuiltInResources.GetSysColumnMetadata(column) != BuiltInResources.GetSysColumnMetadata(parameterColumn))
         {
-            throw SimulatedSqlException.PartitionColumnTypeMismatch(column.Name, PartitionTypeText(column.Type), function.Name, PartitionTypeText(parameterType));
+            throw SimulatedSqlException.PartitionColumnTypeMismatch(column.Name, PartitionTypeText(column), function.Name, PartitionTypeText(parameterColumn));
         }
         if (SqlType.IsCollatedString(parameterType) && !string.Equals(column.Type.Collation?.Name, parameterType.Collation?.Name, StringComparison.OrdinalIgnoreCase))
             throw SimulatedSqlException.PartitionColumnCollationMismatch(column.Name, function.Name);
@@ -114,7 +114,11 @@ partial class Simulation
     }
 
     /// <summary>How the partition errors write a type: <c>int</c>, <c>varchar(10)</c>.</summary>
-    private static string PartitionTypeText(SqlType type) => type.ToString()!.Replace("(MAX)", "(max)", StringComparison.Ordinal);
+    private static string PartitionTypeText(HeapColumn column)
+    {
+        var text = column.Type.ToString()!.Replace("(MAX)", "(max)", StringComparison.Ordinal);
+        return column.SpelledNumeric && text.StartsWith("decimal", StringComparison.Ordinal) ? string.Concat("numeric", text.AsSpan("decimal".Length)) : text;
+    }
 
     /// <summary>
     /// Where an index or key constraint of <paramref name="table"/> lands: its
@@ -272,6 +276,22 @@ partial class Simulation
             if (inserting && FileCount(database, filegroup) == 0)
                 throw SimulatedSqlException.FilegroupHasNoFiles(FilegroupName(database, filegroup));
         }
+    }
+
+    /// <summary>
+    /// Refuses a row of <paramref name="table"/> whose <paramref name="image"/>
+    /// puts a value in the LOB allocation unit while the table's
+    /// <c>TEXTIMAGE_ON</c> filegroup has no files (Msg 622) — settled per row,
+    /// since a value short enough stays in the row and is written (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static void RejectLobOnEmptyFilegroup(BatchContext batch, HeapTable table, ReadOnlySpan<byte> image)
+    {
+        if (table.LobFilegroupId == Database.PrimaryFilegroupId || table.Partitioning is not null || table.IsTableVariable)
+            return;
+        var database = DatabaseOf(batch, table);
+        if (FileCount(database, table.LobFilegroupId) == 0 && RowDecoder.HoldsLobUnitValue(table.StoredColumns, image))
+            throw SimulatedSqlException.FilegroupHasNoFiles(FilegroupName(database, table.LobFilegroupId));
     }
 
     /// <summary>Whether the nonclustered index or key <paramref name="identity"/> keys or includes one of <paramref name="columns"/>.</summary>

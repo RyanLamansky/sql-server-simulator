@@ -283,6 +283,40 @@ internal static class RowDecoder
         }
     }
 
+    /// <summary>
+    /// Whether the row holds a value real keeps in the LOB allocation unit
+    /// rather than in the row: any <c>text</c>, <c>ntext</c> or <c>image</c>
+    /// value, or a <c>(max)</c> or <c>xml</c> one longer than 8,000 bytes. The
+    /// encoder moves every LOB column's value off-row whatever its length, so
+    /// the length the pointer records is what tells them apart.
+    /// </summary>
+    public static bool HoldsLobUnitValue(ReadOnlySpan<HeapColumn> schema, ReadOnlySpan<byte> bytes)
+    {
+        var header = ValidateHeader(schema, bytes);
+        var varIndex = 0;
+        var prevVarEnd = header.VarDataStart;
+        for (var i = 0; i < schema.Length; i++)
+        {
+            var type = schema[i].Type;
+            if (type == SqlType.Bit || type.IsFixedLength)
+                continue;
+
+            var end = ReadVarOffset(header, bytes, varIndex);
+            if (schema[i].IsLob && !IsNullColumn(bytes, header.BitmapStart, i))
+            {
+                var payload = bytes[prevVarEnd..end];
+                var length = payload.Length > 0 && payload[0] == RowEncoder.VarPointerMarker
+                    ? BinaryPrimitives.ReadInt32LittleEndian(payload.Slice(5, 4))
+                    : payload.Length - 1;
+                if (type is TextSqlType or NTextSqlType or ImageSqlType || length > 8000)
+                    return true;
+            }
+            prevVarEnd = end;
+            varIndex++;
+        }
+        return false;
+    }
+
     private static SqlValue DecodeVarValue(HeapColumn column, ReadOnlySpan<byte> payload, Heap? lobStore)
     {
         if (payload.Length == 0)

@@ -514,4 +514,47 @@ public sealed class QueryStoreCaptureTests
         _ = sim.ExecuteScalar("select dbo.f3(1)");
         AreEqual("f3", Module("return (select max(a) from t where a = @x)"));
     }
+
+    /// <summary>
+    /// A statement's declaration prefix lists its variables in the order real's
+    /// binder meets them, and a module statement's offsets point into the
+    /// module's CREATE text (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ModuleStatements_PrefixInBinderOrder_OffsetsIntoTheDefinition()
+    {
+        var sim = CapturingAll();
+        _ = sim.ExecuteNonQuery("create table u (a int, b int)");
+        _ = sim.ExecuteNonQuery("""
+            create proc qp @x int, @y int, @z int, @w int, @h int, @n int as
+            begin
+            declare @m int;
+            select @m = max(a) from t where a <= @x;
+            select @m = t.a from t join u on t.a = @y where t.b = @w group by t.a having count(*) > @h;
+            update t set b = @x from t join u on u.a = @z where t.b = @y;
+            select top (@n) @m = a + @x from t where a = @w order by a + @y;
+            select a + @x from t where a = @w order by a offset @n rows fetch next @y rows only;
+            update top (@n) t set b = @x where b = @z;
+            select a + @x from t where a = @w union all select @z from u where b = @y;
+            end
+            """);
+        _ = sim.ExecuteNonQuery("exec qp 1, 2, 3, 4, 5, 6");
+        using var reader = sim.ExecuteReader("""
+            select t.query_sql_text, substring(m.definition, q.last_compile_batch_offset_start / 2 + 1, (q.last_compile_batch_offset_end - q.last_compile_batch_offset_start) / 2 + 1)
+            from sys.query_store_query q join sys.query_store_query_text t on t.query_text_id = q.query_text_id
+            join sys.sql_modules m on m.object_id = q.object_id
+            order by q.last_compile_batch_offset_start
+            """);
+        var prefixes = new List<string>();
+        while (reader.Read())
+        {
+            var text = reader.GetString(0);
+            var prefixEnd = text.IndexOf(')', StringComparison.Ordinal) + 1;
+            AreEqual(text[prefixEnd..], reader.GetString(1));
+            prefixes.Add(text[..prefixEnd]);
+        }
+        AreEqual(
+            "(@x int,@m int)|(@y int,@w int,@h int,@m int)|(@z int,@y int,@x int)|(@w int,@x int,@y int,@n int,@m int)|(@w int,@x int,@y int,@n int)|(@z int,@n int,@x int)|(@w int,@x int,@y int,@z int)",
+            string.Join("|", prefixes));
+    }
 }

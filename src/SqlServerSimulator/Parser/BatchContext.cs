@@ -1141,6 +1141,28 @@ internal sealed partial class BatchContext
     public int ModuleObjectId;
 
     /// <summary>
+    /// The <c>CREATE</c> text of the module whose body this batch runs, whose
+    /// statements Query Store places by their offsets into it rather than
+    /// into the body (probed 2026-10-06 against SQL Server 2025); null
+    /// elsewhere.
+    /// </summary>
+    public string? ModuleDefinitionText;
+
+    // Where this batch's text starts in ModuleDefinitionText, -1 until read.
+    private int moduleBodyOffset = -1;
+
+    /// <summary>Where this batch's text, a module body, starts in its <see cref="ModuleDefinitionText"/>; 0 when it doesn't sit there.</summary>
+    internal int ModuleBodyOffset()
+    {
+        if (this.moduleBodyOffset < 0)
+        {
+            var at = this.ModuleDefinitionText?.IndexOf(this.Parser.Command.CommandText, StringComparison.Ordinal) ?? -1;
+            this.moduleBodyOffset = Math.Max(at, 0);
+        }
+        return this.moduleBodyOffset;
+    }
+
+    /// <summary>
     /// True in the body of a function the optimizer doesn't inline — a
     /// multi-statement table-valued function, or a scalar one it can't or won't
     /// inline — whose statements a Query Store records under the function's
@@ -1352,6 +1374,14 @@ internal sealed partial class BatchContext
 
     /// <summary>The connection executing this batch.</summary>
     public SimulatedDbConnection Connection => this.Parser.Connection;
+
+    /// <summary>
+    /// What a row operation stamps into a table's <c>GENERATED ALWAYS AS
+    /// TRANSACTION_ID</c> / <c>SEQUENCE_NUMBER</c> columns: the writing
+    /// transaction's id and the operation's number within it.
+    /// </summary>
+    internal (long TransactionId, long Sequence) NextLedgerStamp() =>
+        (this.CurrentTransactionId(), this.CurrentUndoLog is { } log ? log.LedgerSequence++ : 0);
 
     /// <summary>
     /// The id of the transaction the running statement is in: the session's
@@ -1693,7 +1723,10 @@ internal sealed partial class BatchContext
             // decodes straight to a typed SqlValue that no DbType can express.
             if (parameter.Value is SqlValue preBuilt)
             {
-                dict[name] = new VariableSlot(preBuilt.Type, declaredMaxLength: null, preBuilt, parameter);
+                dict[name] = new VariableSlot(preBuilt.Type, declaredMaxLength: null, preBuilt, parameter)
+                {
+                    SpelledNumeric = parameter is SimulatedDbParameter { SpelledNumeric: true },
+                };
                 continue;
             }
 

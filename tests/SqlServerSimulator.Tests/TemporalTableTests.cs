@@ -264,7 +264,7 @@ public sealed class TemporalTableTests
         => new Simulation().AssertSqlError(
             $"{CreateTemporalCustomers}; select * from Customers for system_time between 42 and 99",
             206,
-            "Operand type clash: datetime2 is incompatible with int");
+            "Operand type clash: datetime2 is incompatible with tinyint");
 
     [TestMethod]
     public void ForSystemTimeRange_TimeArgument_RaisesMsg402()
@@ -1794,5 +1794,155 @@ public sealed class TemporalTableTests
         while (reader.Read())
             parts.Add($"{reader["name"]}:{((bool)reader["is_updateable"] ? 1 : 0)}");
         return string.Join(",", parts);
+    }
+
+    [TestMethod]
+    public void ForSystemTime_AfterCte_Msg13544NamingTheCte()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(CreateTemporalCustomers);
+        simulation.AssertSqlError(
+            "with c as (select * from Customers) select * from c for system_time all",
+            13544,
+            "Temporal FOR SYSTEM_TIME clause can only be used with system-versioned tables. 'c' is not a system-versioned table.");
+    }
+
+    [TestMethod]
+    [DataRow("update a set Name = 'x' from Customers for system_time all a", 4421)]
+    [DataRow("update a set Name = 'x' from Customers for system_time as of '2020-01-01' a", 4421)]
+    [DataRow("delete a from Customers for system_time all a", 4417)]
+    [DataRow("delete a from Customers for system_time contained in ('2020-01-01', '2021-01-01') a", 4417)]
+    public void WriteThroughTemporalAlias_RefusedAsTheBatchCompiles(string sql, int error)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"{CreateTemporalCustomers}; insert Customers (Id, Name) values (1, 'a')");
+        _ = simulation.AssertSqlError($"select 1; {sql}", error);
+        AreEqual("a", simulation.ExecuteScalar("select Name from Customers"));
+    }
+
+    [TestMethod]
+    public void UpdateNamingTheTable_BesideItsTemporalAlias_Writes()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery($"{CreateTemporalCustomers}; insert Customers (Id, Name) values (1, 'a')");
+        _ = simulation.ExecuteNonQuery("update Customers set Name = 'b' from Customers for system_time all a where a.Id = 1");
+        AreEqual("b", simulation.ExecuteScalar("select Name from Customers"));
+    }
+
+    [TestMethod]
+    [DataRow("select * from Customers for system_time latest;", ";")]
+    [DataRow("select * from Customers for system_time latest x", "x")]
+    [DataRow("select * from Customers for system_time latest", "latest")]
+    public void ForSystemTime_UnknownForm_RefusedAtTheTokenAfter(string sql, string near)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(CreateTemporalCustomers);
+        simulation.ValidateSyntaxError(sql, near);
+    }
+
+    [TestMethod]
+    [DataRow("1", "tinyint")]
+    [DataRow("1000", "smallint")]
+    [DataRow("100000", "int")]
+    [DataRow("10000000000", "numeric")]
+    [DataRow("1.5", "numeric")]
+    public void ForSystemTime_NumberArgument_Msg206NamesItsLiteralType(string literal, string type)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(CreateTemporalCustomers);
+        simulation.AssertSqlError($"select * from Customers for system_time as of {literal}", 206, $"Operand type clash: datetime2 is incompatible with {type}");
+    }
+
+    [TestMethod]
+    public void LedgerColumns_CatalogAndValues()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table lt (
+                id int primary key, v int,
+                ts bigint generated always as transaction_id start hidden not null,
+                te bigint generated always as transaction_id end hidden null,
+                ss bigint generated always as sequence_number start hidden not null,
+                se bigint generated always as sequence_number end hidden null,
+                vs datetime2 generated always as row start, ve datetime2 generated always as row end,
+                period for system_time (vs, ve))
+            with (system_versioning = on (history_table = dbo.lth))
+            """);
+        AreEqual(
+            "id:0:NOT_APPLICABLE:0:0,v:0:NOT_APPLICABLE:0:1,ts:7:AS_TRANSACTION_ID_START:1:0,te:8:AS_TRANSACTION_ID_END:1:1,ss:9:AS_SEQUENCE_NUMBER_START:1:0,se:10:AS_SEQUENCE_NUMBER_END:1:1,vs:1:AS_ROW_START:0:0,ve:2:AS_ROW_END:0:0",
+            simulation.ExecuteScalar("""
+                select string_agg(concat(name, ':', generated_always_type, ':', generated_always_type_desc, ':', cast(is_hidden as int), ':', cast(is_nullable as int)) collate database_default, ',') within group (order by column_id)
+                from sys.columns where object_id = object_id('lt')
+                """));
+        AreEqual(
+            "id:0:0,v:0:1,ts:0:0,te:0:1,ss:0:0,se:0:1,vs:0:0,ve:0:0",
+            simulation.ExecuteScalar("""
+                select string_agg(concat(name, ':', generated_always_type, ':', cast(is_nullable as int)) collate database_default, ',') within group (order by column_id)
+                from sys.columns where object_id = object_id('lth')
+                """));
+        // Each transaction numbers its row operations from 0; an UPDATE gives
+        // the new version one number and the old version's end the next.
+        AreEqual("1:1:3:-:1|3:2:8:-:1;1:0:0:4:1|2:0:1:7:1|3:0:2:6:1|3:1:5:9:1", simulation.ExecuteScalar("""
+            begin tran;
+            insert lt (id, v) values (1, 0), (2, 0), (3, 0);
+            update lt set v = 1 where id in (1, 3);
+            delete lt where id = 2;
+            update lt set v = 2 where id = 3;
+            declare @first bigint = (select min(ts) from lt);
+            declare @current varchar(100) = (select string_agg(concat(id, ':', v, ':', ss, ':', isnull(cast(se as varchar), '-'), ':', iif(ts = @first, 1, 0)), '|') within group (order by id) from lt);
+            declare @history varchar(100) = (select string_agg(concat(id, ':', v, ':', ss, ':', se, ':', iif(te = ts, 1, 0)), '|') within group (order by ss) from lth);
+            commit;
+            select concat(@current, ';', @history)
+            """));
+        AreEqual("0|0:1", simulation.ExecuteScalar("""
+            insert lt (id, v) values (5, 0);
+            update lt set v = 9 where id = 5;
+            select concat((select ss from lt where id = 5), '|', (select concat(ss, ':', se) from lth where id = 5))
+            """));
+        _ = simulation.AssertSqlError("insert lt (id, v, ts) values (7, 0, 1)", 13536);
+        _ = simulation.AssertSqlError("update lt set ss = 1", 13537);
+    }
+
+    [TestMethod]
+    [DataRow("create table l (id int, ts int generated always as transaction_id start)", 37346, "'GENERATED ALWAYS AS TRANSACTION_ID START' column 'ts' has invalid data type.")]
+    [DataRow("create table l (id int, ts bigint generated always as transaction_id start null)", 37347, "'GENERATED ALWAYS AS TRANSACTION_ID START' column 'ts' cannot be nullable.")]
+    [DataRow("create table l (id int, ts bigint generated always as transaction_id end not null)", 37348, "'GENERATED ALWAYS AS TRANSACTION_ID END' column 'ts' can only be nullable.")]
+    [DataRow("create table l (id int, a bigint generated always as sequence_number start, b bigint generated always as sequence_number start)", 37345, "Table cannot have more than one 'GENERATED ALWAYS AS SEQUENCE_NUMBER START' column.")]
+    public void LedgerColumns_Refusals(string sql, int error, string message)
+        => new Simulation().AssertSqlError(sql, error, message);
+
+    [TestMethod]
+    public void LedgerColumns_WithoutPeriod_AddedAndDefaulted()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create table ly (id int, ts bigint generated always as transaction_id start);
+            alter table ly add se bigint generated always as sequence_number end hidden;
+            alter table ly add ss bigint generated always as sequence_number start hidden;
+            insert ly (id) values (1), (2)
+            """);
+        AreEqual("ts:0,se:1,ss:0", simulation.ExecuteScalar("select string_agg(concat(name, ':', cast(is_nullable as int)) collate database_default, ',') within group (order by column_id) from sys.columns where object_id = object_id('ly') and name <> 'id'"));
+        AreEqual("0,1", simulation.ExecuteScalar("select string_agg(cast(ss as varchar), ',') within group (order by id) from ly"));
+        _ = simulation.ExecuteNonQuery("declare @t table (id int, ts bigint generated always as transaction_id start)");
+        // Without a history only new versions take a number.
+        AreEqual("3:2,4:3", simulation.ExecuteScalar("""
+            create table lq (id int, ss bigint generated always as sequence_number start, se bigint generated always as sequence_number end);
+            begin tran;
+            insert lq (id) values (1); delete lq where id = 1; insert lq (id) values (2); update lq set id = 3; insert lq (id) values (4);
+            commit;
+            select string_agg(concat(id, ':', ss), ',') within group (order by id) from lq
+            """));
+    }
+
+    [TestMethod]
+    public void DropSchema_NamesTheFirstObjectByName_ConstraintsIncluded()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create schema zs");
+        _ = simulation.ExecuteNonQuery("create table zs.t (id int primary key, vs datetime2 generated always as row start, ve datetime2 generated always as row end, period for system_time (vs, ve)) with (system_versioning = on (history_table = zs.th))");
+        var error = simulation.AssertSqlError("drop schema zs", 3729);
+        StartsWith("Cannot drop schema 'zs' because it is being referenced by object 'PK__t__", error.Errors[0].Message);
+        _ = simulation.ExecuteNonQuery("create view zs.b as select 1 x");
+        simulation.AssertSqlError("drop schema zs", 3729, "Cannot drop schema 'zs' because it is being referenced by object 'b'.");
     }
 }

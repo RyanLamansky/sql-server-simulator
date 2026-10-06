@@ -217,6 +217,15 @@ internal sealed class WindowExpression : Expression
             ? Register(context, new WindowExpression(WindowKind.RowNumber, [], orderBy, aggregateInfo: null))
             : null;
 
+    /// <summary>
+    /// <see cref="RegisterSequenceRank"/> for a reference written <c>OVER w</c>,
+    /// whose ordering the <c>WINDOW</c> clause supplies once it has parsed.
+    /// </summary>
+    internal static WindowExpression? RegisterNamedSequenceRank(ParserContext context, string windowName) =>
+        context.AllowsWindowExpressions && context.WindowCollector is not null
+            ? RegisterNamedWindowReference(context, new WindowExpression(WindowKind.RowNumber, [], [], aggregateInfo: null), new WindowBody([], [], null, windowName))
+            : null;
+
     private static WindowExpression Register(ParserContext context, WindowExpression expression)
     {
         // Outside any query block — an UPDATE's SET list, say — no select

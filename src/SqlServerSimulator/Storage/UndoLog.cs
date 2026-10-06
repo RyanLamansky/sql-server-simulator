@@ -65,6 +65,13 @@ internal sealed class UndoLog(LobReclamation? reclamation)
 {
     private readonly List<UndoEntry> entries = [];
 
+    /// <summary>
+    /// The next row operation's number for a <c>GENERATED ALWAYS AS
+    /// SEQUENCE_NUMBER</c> column, counted from 0 per transaction — this log's
+    /// lifetime (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public long LedgerSequence;
+
     // Set by the first change tracking entry, so a commit that recorded none
     // skips the versioning pass.
     private bool recordsChangeTracking;

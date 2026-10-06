@@ -24,6 +24,7 @@ A `sys` or `INFORMATION_SCHEMA` name reads the remote's catalog view, its column
 Execution opens a fresh `SimulatedDbConnection` on the remote, in the named database, and issues `SELECT <the columns the query names> FROM [db].[schema].[t]` through the remote's full pipeline: parser, planner, lock manager, exception factories, session state.
 An error the remote raises compiling the query comes back as the remote raised it; one it raises reading the rows (a view's `1 / 0`, a failed conversion) reaches the reader after the rows ahead of it, relayed at the remote's line, and ends the batch — a `TRY` catches it (probed 2026-10-05 against SQL Server 2025).
 A synonym over a four-part name reads the server's table under the synonym's name, and a four-part name called as a function is Msg 4122.
+Names past the four-part grammar, probed 2026-10-06 against SQL Server 2025: `srv...t` leaves the database and schema to the server's defaults, so a missing table's Msg 7314 names it bare (`"t"`), and `EXEC srv...p` calls `p` there; a fifth part is Msg 117 naming the whole name; a four-part name over the server's own synonym is Msg 7357, the provider listing no columns for it; a four-part scalar function call is Msg 344 (`Remote function reference … is not allowed …`); and a `#temp` name reads the session's own table whatever server and database it names — the server needn't exist — with the class-0 Msg 2701 state 99 (`Database name 'db' ignored, referencing object in tempdb.`) for its database, sent as the batch compiles at the line of the token after the name, as it is for a three-part `tempdb..#t`.
 A missing table's Msg 7314 names the server as the query wrote it (`LB`), and like the provider's other metadata refusals (Msg 7325, 7357, 9514) stops the batch at the first statement meeting it — one run through dynamic SQL ending its caller's too.
 The remote materializes the projection via `RowEncoder.EncodeRow(SqlType[], SqlValue[])` (no LOB store), so the byte rows are self-contained and cross-`Simulation`-portable — the local plan reads them via the same `RowDecoder` path as any other `FromSource`.
 `RemoteWrite.RunRemoteQuery` buffers the rows before the remote connection disposes, which drops remote locks promptly; matches the "fresh remote session per remote query" semantic of real SQL Server.
@@ -79,10 +80,11 @@ A `text`, `ntext`, `image` or `vector` column, which `=` can't compare, matches 
 
 What real reports, all modeled:
 - `@@ROWCOUNT` counts the write's rows; `SCOPE_IDENTITY()` and `@@IDENTITY` read NULL after it, whatever identity the server drew — even after a remote INSERT of no rows, and over an earlier local identity.
+- **A failing expression in a four-part `UPDATE`'s SET list** is the server's, which evaluates it row by row: it arrives relayed at line 1, ending the batch, behind the server's Msg 3621 when the error ended only its statement there — `SET b = 1 / 0` over no row raises nothing (probed 2026-10-05 and 2026-10-06 against SQL Server 2025).
 - **An error the server raises** arrives relayed: every entry in reverse order, so the Msg 3621 the server follows a failed write with, and a trigger's Msg 3609, come ahead of the error; each at the remote statement's line (1) with its own state, save a state of 0, which arrives as 1.
   It **ends the batch** where the same error on a local table ends only the statement, and a `TRY` catches it.
 - A value too long for a remote column is the provider's legacy **Msg 8152 at state 14**, raised locally and ending only the statement — where a local column raises Msg 2628.
-- An INSERT listing the remote **identity column** is Msg 7344 after the provider's Msg 7412, as is one giving a NOT NULL column a NULL, in its `The data value violated the integrity constraints for the column.` wording (probed 2026-10-05); an UPDATE setting an identity, computed or `rowversion` column is **Msg 8180** ahead of the server's own Msg 8102 / 271 / 272.
+- An INSERT listing the remote **identity column**, a **computed** one or a **`rowversion`** is Msg 7344 after the provider's Msg 7412, as the statement runs, as is one giving a NOT NULL column a NULL, in its `The data value violated the integrity constraints for the column.` wording (probed 2026-10-05); an UPDATE setting an identity, computed or `rowversion` column is **Msg 8180** ahead of the server's own Msg 8102 / 271 / 272.
 - An `INSERT … EXEC` into a remote table needs a distributed transaction whether or not one is open — Msg 3910 for a loopback, Msg 7391 otherwise — and a transaction holding a savepoint can't be promoted at all (Msg 3933, for a remote call too; probed 2026-10-05).
 - An `OUTPUT` clause on a remote target, or a nested DML source feeding one, is **Msg 405**; a remote `MERGE` target is **Msg 5315** (a remote `USING` source reads as any four-part source does).
 - `srv.db..t` as a target is **Msg 7313**; a missing database, schema or table **Msg 7314** naming the written segments in double quotes, as a read's miss is; an unknown server **Msg 7202**.
@@ -92,7 +94,7 @@ What real reports, all modeled:
 ## Remote calls
 
 `EXEC ('text' [, argument [OUTPUT]] …) AT server` and `EXEC [@rc =] server.db.schema.proc …` run in a fresh session of the server ([`Simulation.RemoteCalls.cs`](../../src/SqlServerSimulator/Simulation/Simulation.RemoteCalls.cs)), and hand their result sets, messages, counts, `@@ROWCOUNT`, `OUTPUT` values and return code back.
-- Each `?` in `EXEC … AT`'s text outside a string, comment or bracketed name binds the next argument, a character one sent as `nvarchar`; an `OUTPUT` constant is Msg 179, and arguments without `AT` are Msg 102 at state 3.
+- Each `?` in `EXEC … AT`'s text outside a string, comment or bracketed name binds the next argument, a character one sent as `nvarchar` and a `decimal` the call computed — a variable — as `numeric`, where a literal arrives as `decimal` (probed 2026-10-06 against SQL Server 2025); an `OUTPUT` constant is Msg 179, and arguments without `AT` are Msg 102 at state 3.
 - The server's batch runs on past an error, as a batch of its own does, and the error reaches the client in its place among the results, relayed in reverse as a write's is — but **outside the caller's control flow**: no `TRY` of the caller's catches it, and the caller's batch carries on.
   An `EXEC … AT` whose **last** statement fails is the exception: that error is the call's own failure, which a `TRY` catches, `@@ERROR` reads and `XACT_ABORT` ends the batch on; a procedure call's is only an error no procedure ran to raise — the procedure not found, its arguments refused (probed 2026-10-05).
   A procedure call's errors name the procedure as the call spelled it, without the server (`ep0.dbo.p`), and a procedure it ran by schema and name (`dbo.inner`).
@@ -111,6 +113,7 @@ What the provider exposes of a four-part name's table or view (`RemoteWrite.Prov
 - A **CLR-typed** column — `geography`, `geometry`, `hierarchyid` — refuses the object with Msg 7325, which a pass-through query avoids: `OPENQUERY` and `EXEC … AT` return those values.
 - A **`json`** column isn't listed: `SELECT *` leaves it out, naming it is Msg 207, and an object whose only columns are `json` is Msg 7357.
 - A **`decimal`** column is listed as `numeric`, a **`smallmoney`** as `money` and a **`sysname`** as `nvarchar(128)` (probed 2026-10-05), which a `SELECT … INTO` keeps.
+- A column under a **supplementary-character collation** is listed under the collation without its `_SC`, so `LEN` counts a surrogate pair as two characters through it; a UTF-8 collation keeps its `_SC` (probed 2026-10-06 against SQL Server 2025).
 
 A pass-through rowset — `OPENQUERY`'s, `EXEC … AT`'s, a remote procedure call's — reads a `smallmoney` as `money`, a `sysname` as `nvarchar(128)`, and a `json` or `vector` as its text in a `varchar(max)` under `Latin1_General_100_BIN2_UTF8` (`RemoteWrite.ProviderRowsetType`, probed 2026-10-05).
 - A **`vector(n)`** column is listed as `varbinary(8 + 4n)`, its storage form's length; a NULL reads as NULL and a value is Msg 7346, raised as its row is reached and ending the batch, while a read whose query never names the column, and a write whose statement doesn't set it, work.
@@ -127,6 +130,9 @@ What the linked-server procedures check and report, probed 2026-10-05 against SQ
   `sp_droplinkedsrvlogin (@rmtsrvname, @locallogin)` needs both (Msg 201) and removes a mapping, doing nothing when there is none; `sp_helplinkedsrvlogin` lists them.
   A server mapping no login refuses every access with Msg 7416.
 - **`sp_dropserver`**: Msg 15002 inside a transaction, Msg 15015 for an unknown server, and Msg 15190 while it maps a login other than its default self-mapping, unless `@droplogins` is `'droplogins'`.
+- **`sp_linkedservers`** lists every server `sys.servers` holds, the instance's own row included, as `SRV_NAME`, `SRV_PROVIDERNAME`, `SRV_PRODUCT`, `SRV_DATASOURCE`, `SRV_PROVIDERSTRING`, `SRV_LOCATION` and `SRV_CAT` (probed 2026-10-06).
+- **`sp_testlinkedserver @servername`**, an extended procedure reporting everything at line 1, opens a session and returns 0 quietly; its parameter takes only a Unicode string — a bare word, an `N''` literal, an `nvarchar` or `sysname` variable — so a `'…'` literal or NULL is Msg 214, and an unknown server is Msg 7202 with return code 1, ending only the call.
+- **`sp_catalogs @server_name`** lists the server's databases in its collation's order, `DESCRIPTION` NULL; an unknown server is Msg 7202 at line 7.
 
 ## Server options
 
@@ -150,6 +156,7 @@ Committing across two `Simulation`s would need a coordinator that real's default
 
 - **Sprocs**: `sp_addlinkedserver` (activate), `sp_dropserver`, `sp_serveroption` (above), `sp_addlinkedsrvlogin` / `sp_droplinkedsrvlogin` / `sp_helplinkedsrvlogin` — see [Procedures](#procedures).
 - **`sys.linked_logins`** lists each server's login mappings under its `server_id`; `sys.remote_logins` is empty.
+- **`sysservers`** (`sys.sysservers`, `master.dbo.sysservers`, object id -212), the compatibility view over `sys.servers`: its options packed into `srvstatus` as `sp_serveroption`'s bits — rpc 1, pub 2, sub 4, dist 8, a linked server 32, rpc out 64, data access 128, collation compatible 256, system 512, use remote collation 1024, lazy schema validation 2048 — and repeated a column each, `srvnetname` the instance's own name as `char(30)`, `isremote` 1 for the instance alone, and a `SQLNCLI` provider named `SQLOLEDB` (probed 2026-10-06 against SQL Server 2025).
 - **`sys.servers`**: local instance as row 0 (`is_linked = 0`, name `"SIMULATED"`), one row per active linked server carrying `sp_addlinkedserver`'s arguments and the three options — see [sys.servers shape](#sysservers-shape).
 - **Provider name in messages**: every SQL Server provider name (`SQLNCLI`, `SQLNCLI11`, `MSOLEDBSQL`, `MSOLEDBSQL19`) reports as `MSOLEDBSQL19`, the driver SQL Server 2025 loads for it.
 
@@ -159,8 +166,8 @@ Committing across two `Simulation`s would need a coordinator that real's default
 - **A `vector` column a query names in anything but its output** is fetched, and a row holding a value is Msg 7346, where real remotes what it can and reads: `WHERE v IS NOT NULL`, `COUNT(v)`, `DATALENGTH(v)` and `CAST(v AS varchar(…))` (which answers the vector's text form) all run on the server there, and a query projecting `v` whose `WHERE` excludes every non-NULL row (`WHERE id = 2`) never fetches one (probed 2026-09-30 against SQL Server 2025).
   A column named only inside a derived table's `SELECT *` is fetched too, where real's optimizer drops it.
 - **A `varbinary` value written into a remote `vector` column** is refused by the server's own conversion, which is Msg 206 here and Msg 13609 on real, whose provider sends it differently.
-- **A remote UPDATE's failing expression** (`SET b = 1 / 0`) raises locally at the statement's line, where real's server evaluates it and relays Msg 3621 and the error at line 1 (probed 2026-10-05), and a conversion a four-part read's query applies (`CAST(a AS int)`) fails locally too, where real remotes it.
-- **An INSERT listing a computed or `rowversion` column** is refused locally with Msg 271 / 273 as it compiles, where real's provider refuses it with Msg 7344 after its Msg 7412 (probed 2026-10-05).
+- **A conversion a four-part read's query applies** (`CAST(a AS int)`) fails locally at the statement's line, where real remotes it and relays the error at line 1 (probed 2026-10-06 against SQL Server 2025); which expressions real sends to the server is its optimizer's choice — not chased.
+- **The `#temp` note's second copy**: real recompiles a statement reading a temporary table the batch itself created and sends its Msg 2701 again as the statement runs, where the simulator sends it once, as the batch compiles.
 
 ## Not modeled yet
 
@@ -171,11 +178,9 @@ Committing across two `Simulation`s would need a coordinator that real's default
 - **`@@SERVERNAME`** isn't routed — the local-server row in `sys.servers` uses the constant `"SIMULATED"` for `name` regardless of any host-configured value.
 - **`EXEC … AT DATA_SOURCE`**.
   The ad hoc `OPENROWSET` over a provider rides this machinery with a transient server named `(null)` — see [`bulk-and-adhoc.md`](bulk-and-adhoc.md#ad-hoc-provider-rowsets).
-- **A loopback's remote call inside a transaction** runs in the caller's transaction on real — `@@TRANCOUNT` reads 1 inside it and a `ROLLBACK` undoes its writes, for a procedure call and `EXEC … AT` alike (probed 2026-10-05) — where here it runs outside it; `OPENQUERY`'s query reads `@@TRANCOUNT` 1 on real too.
-- **The catalog procedures over a linked server** — `sp_linkedservers`, `sp_testlinkedserver` (which refuses a non-`sysname` argument with Msg 214), `sp_tables_ex`, `sp_columns_ex`, `sp_catalogs` — and the compatibility views `sys.sysservers` / `master.dbo.sysservers` (probed 2026-10-05).
-- **Names real reads past the four-part grammar**: `srv...t` and `EXEC srv...p` (a name with two empty middle segments, Msg 7314 / 2812 on real), five-part names (Msg 117), a remote scalar function `srv.db.dbo.f(1)` (Msg 344), a four-part name over the server's own synonym (Msg 7357) and over a `#temp` table (Msg 2701), all of which fail differently here.
-- **A parameter's type through `EXEC … AT`**: a `decimal` argument arrives as `numeric` on real.
-- **A supplementary-character collation's column** through a four-part name: real's provider lists it under the collation without `_SC`, so `LEN` counts a surrogate pair as two there (probed 2026-10-05).
+- **A loopback's remote call inside a transaction** runs in the caller's transaction on real, as a session bound to it — `@@TRANCOUNT` reads 1 inside it, it reads the caller's uncommitted rows without waiting on their locks, and a `ROLLBACK` undoes its writes, for a procedure call and `EXEC … AT` alike (probed 2026-10-05 and 2026-10-06) — where here it runs outside it; `OPENQUERY`'s query reads `@@TRANCOUNT` 1 on real too.
+  Modeling it means a remote session sharing the caller's transaction, undo log and lock ownership, which the session model has no binding for yet.
+- **`sp_tables_ex` and `sp_columns_ex`**, the provider's schema rowsets: real lists the remote's system tables and views beside its own, and describes columns in OLE DB's terms — a `bigint` as `DATA_TYPE` 2 with `SS_DATA_TYPE` 108, a `datetime2` as -9 (probed 2026-10-06).
 
 ## sys.servers shape
 

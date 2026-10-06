@@ -126,6 +126,12 @@ internal sealed partial class Selection
     public readonly MultiPartName? IntoTarget;
 
     /// <summary>
+    /// The <c>ON</c> clause after a <c>SELECT … INTO</c> target, placing the
+    /// new table, or null without one.
+    /// </summary>
+    public DataSpaceClause? IntoDataSpace;
+
+    /// <summary>
     /// Real tables / views / TVFs this query reads (including those in nested
     /// subqueries and derived tables), recorded at parse time so the
     /// execution-time SELECT permission check runs against the current
@@ -1930,6 +1936,7 @@ internal sealed partial class Selection
         List<Expression> expressions = [];
         var fromClause = new FromClause();
         MultiPartName? intoTarget = null;
+        DataSpaceClause? intoDataSpace = null;
 
         // Bind the FROM clause before the select list, the way SQL Server's
         // binder does. The select list is written first but *resolves* against
@@ -2370,6 +2377,7 @@ internal sealed partial class Selection
                         context.Batch, plan, [.. sources], joinArray, expressions, fromClause,
                         distinct, topExpression, aggregates, windows, scope.OuterTypeResolver);
                     context.Batch.InlinedCalls?.SettleBlock(context.InliningBlock, distinct && fromClause.OrderBy.Count > 0);
+                    plan.IntoDataSpace = intoDataSpace;
                     return plan;
 
                 // SELECT projection INTO target [FROM ...] — captures the
@@ -2383,6 +2391,7 @@ internal sealed partial class Selection
                         throw SimulatedSqlException.SyntaxErrorNear(context);
                     context.MoveNextRequired();
                     intoTarget = BatchContext.ParseObjectName(context);
+                    intoDataSpace = ParseOptionalIntoDataSpace(context);
                     continue;
 
                 // WHERE / GROUP BY / HAVING with no FROM clause. All three are
@@ -2487,10 +2496,10 @@ internal sealed partial class Selection
         // an aggregate's value isn't a property of the expression alone.
         if (aggregates.Count > 0 || windows.Count > 0 || fromClause.GroupingSets.Count > 0 || fromClause.Having is not null)
         {
-            return BuildSqlProjection(context.Batch, [], [], expressions, fromClause, distinct,
+            return Placed(intoDataSpace, BuildSqlProjection(context.Batch, [], [], expressions, fromClause, distinct,
                 topExpression, topPercent, topWithTies, aggregates, windows,
                 scope.WithOuter(context.OuterTypeResolver ?? scope.OuterTypeResolver), ResolveAssignmentMode(expressions),
-                intoTarget, context.ReadColumnSink);
+                intoTarget, context.ReadColumnSink));
         }
 
         // A set operator one token past this branch refuses the whole statement
@@ -2519,14 +2528,14 @@ internal sealed partial class Selection
             && fromClause.OffsetExpression is null
             && fromClause.FetchExpression is null;
 
-        return BuildSynthesizedSqlRow(context.Batch, expressions, fromClause.Excluders, fromClause.OrderBy,
+        return Placed(intoDataSpace, BuildSynthesizedSqlRow(context.Batch, expressions, fromClause.Excluders, fromClause.OrderBy,
             topPercent
                 ? (topExpression is not null && ResolveTopPercentValue(topExpression, context.Batch) > 0 ? 1 : 0)
                 : ResolveRowCountLimit(topExpression, RowLimitKind.Top, context.Batch),
             ResolveRowCountLimit(fromClause.OffsetExpression, RowLimitKind.Offset, context.Batch),
             ResolveRowCountLimit(fromClause.FetchExpression, RowLimitKind.Fetch, context.Batch),
             ResolveAssignmentMode(expressions), intoTarget, scope.WithOuter(context.OuterTypeResolver ?? scope.OuterTypeResolver),
-            containsSubquery);
+            containsSubquery));
     }
 
     /// <summary>
@@ -2668,6 +2677,55 @@ internal sealed partial class Selection
         context.Token is ReservedKeyword { Keyword: Keyword.Identity } && scope.AcceptsIdentityFunction
             ? new IdentityFunction(context)
             : Expression.Parse(context);
+
+    /// <summary>
+    /// Reads the <c>ON</c> clause a <c>SELECT … INTO</c> target may carry: a
+    /// filegroup by name or as a string, or a partition scheme, which only the
+    /// statement's run refuses (<see cref="Simulation.ResolveIntoDataSpace"/>).
+    /// </summary>
+    private static DataSpaceClause? ParseOptionalIntoDataSpace(ParserContext context)
+    {
+        // The cursor is on the target's last token and stays on the clause's
+        // last one, as the select-list loop expects.
+        var checkpoint = context.SaveCheckpoint();
+        if (context.GetNextOptional() is not ReservedKeyword { Keyword: Keyword.On })
+        {
+            context.RestoreCheckpoint(checkpoint);
+            return null;
+        }
+        switch (context.GetNextRequired())
+        {
+            case Literal { Value.Type: VarcharSqlType or NVarcharSqlType } quoted:
+                return new DataSpaceClause(quoted.Value.AsString, columns: null);
+            case Name name:
+                var afterName = context.SaveCheckpoint();
+                if (context.GetNextOptional() is not Operator { Character: '(' })
+                {
+                    context.RestoreCheckpoint(afterName);
+                    return new DataSpaceClause(name.Value, columns: null);
+                }
+                List<string> columns = [];
+                do
+                {
+                    if (context.GetNextRequired() is not Name column)
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    columns.Add(column.Value);
+                    context.MoveNextRequired();
+                } while (context.Token is Operator { Character: ',' });
+                return context.Token is Operator { Character: ')' }
+                    ? new DataSpaceClause(name.Value, columns)
+                    : throw SimulatedSqlException.SyntaxErrorNear(context);
+            default:
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
+    }
+
+    /// <summary>Attaches a <c>SELECT … INTO</c>'s <c>ON</c> clause to its finished plan.</summary>
+    private static Selection Placed(DataSpaceClause? intoDataSpace, Selection plan)
+    {
+        plan.IntoDataSpace = intoDataSpace;
+        return plan;
+    }
 
     /// <summary>
     /// Refuses <c>SELECT … INTO</c>'s <c>IDENTITY()</c> function in a query
@@ -4119,6 +4177,13 @@ internal sealed partial class Selection
                 context.MoveNextOptional();
                 kind = TemporalQueryKind.ContainedIn;
                 break;
+            // Any other word is read as the form's name, so the token after it
+            // is the one refused (probed 2026-10-06 against SQL Server 2025).
+            case UnquotedString:
+                var unknownForm = context.SaveCheckpoint();
+                if (context.GetNextOptional() is null)
+                    context.RestoreCheckpoint(unknownForm);
+                throw TemporalSyntaxError(context);
             default:
                 throw TemporalSyntaxError(context);
         }
@@ -4138,9 +4203,28 @@ internal sealed partial class Selection
     /// </summary>
     private static Expression ParseTemporalTimeArgument(ParserContext context)
     {
+        // A number is typed as the narrowest of tinyint / smallint / int it
+        // fits, numeric past them or with a fraction, and clashes with the
+        // period's datetime2 as the statement compiles (probed 2026-10-06
+        // against SQL Server 2025).
+        if (context.Token is Numeric clashing)
+        {
+            var literalType = clashing.Value.Type switch
+            {
+                DecimalSqlType => "numeric",
+                _ when clashing.Value.IsNull => "int",
+                BigIntSqlType => "numeric",
+                _ => clashing.Value.AsInt32 switch
+                {
+                    <= byte.MaxValue => "tinyint",
+                    <= short.MaxValue => "smallint",
+                    _ => "int",
+                },
+            };
+            throw SimulatedSqlException.OperandTypeClash("datetime2", literalType);
+        }
         var argument = context.Token switch
         {
-            Numeric number => new Value(number.Value, number.IntegerLiteralDigitCount),
             Literal literal => new Value(literal.Value),
             AtPrefixedString atPrefixed => new VariableReference(atPrefixed, context),
             ReservedKeyword { Keyword: Keyword.Null } => new Value(),

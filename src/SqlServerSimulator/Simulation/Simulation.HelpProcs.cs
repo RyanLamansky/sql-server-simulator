@@ -615,7 +615,7 @@ partial class Simulation
         ("sp_describe_first_result_set" or "sp_describe_undeclared_parameters", 201 or 214 or 11552) => (1, null),
         // The extended procedures report every error at line 1 (probed
         // 2026-10-04 against SQL Server 2025).
-        ("sp_bindsession" or "sp_getbindtoken", _) => (1, null),
+        ("sp_bindsession" or "sp_getbindtoken" or "sp_testlinkedserver", _) => (1, null),
         (_, 201) => (0, null),
         ("sp_datatype_info" or "sp_datatype_info_100" or "sp_server_info", 8114) => (0, null),
         (_, 8144 or 8145 or 8146) when exception.SystemProcedureBindingError => (0, null),
@@ -660,6 +660,7 @@ partial class Simulation
         ("sp_bindrule", 15106) => (81, null),
         ("sp_bindrule", 15107) => (162, null),
         ("sp_bindrule", 15148) => (225, null),
+        ("sp_catalogs", 7202) => (7, null),
         ("sp_configure", 15123) => (62, null),
         ("sp_configure", 15247) => (105, null),
         ("sp_describe_first_result_set", 11515) => (1, null),

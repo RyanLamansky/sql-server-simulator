@@ -99,7 +99,12 @@ partial class Simulation
             if (context.Token is Operator { Character: ')' })
             {
                 context.MoveNextOptional();
-                remoteWrite.CheckInsertColumns(context.Batch, names);
+                if (remoteWrite.CheckInsertColumns(context.Batch, names))
+                {
+                    context.RestoreCheckpoint(checkpoint);
+                    ParseMissingInsertTail(context);
+                    return new SimulatedNonQuery(0);
+                }
             }
         }
         if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Output })
@@ -442,45 +447,81 @@ partial class Simulation
 
         List<SqlValue[]> sourceRows;
         SimulatedSqlException? endedBody = null;
-        if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
+        // A row's default drawing from a sequence its select list drew from
+        // takes the value the select list drew (probed 2026-10-06 against SQL
+        // Server 2025), so a SELECT source's draws are retained by row, as a
+        // VALUES list's are.
+        var batch = context.Batch;
+        var sourceStamps = context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' } && batch.SequenceValuesByRow is null
+            ? new List<long>()
+            : null;
+        if (sourceStamps is not null)
+            batch.SequenceValuesByRow = [];
+        try
         {
-            // `INSERT INTO t DEFAULT VALUES` — one row with every column
-            // defaulted. Clearing the destination list routes every column
-            // through the default / identity-allocation / implicit-NULL path
-            // below, so a NOT NULL column with no default hits the same
-            // constraint error an explicit all-defaults insert would.
-            context.MoveNextRequired();
-            if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
-                throw SimulatedSqlException.SyntaxErrorNear(context);
-            context.MoveNextOptional();
-            destinationColumns = [];
-            sourceRows = [[]];
-        }
-        else
-        {
-            RowSecurity.NoteWrite(context.Batch, destinationTable);
-            sourceRows = context.Token switch
+            if (context.Token is ReservedKeyword { Keyword: Keyword.Default })
             {
-                ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, rowLimit: SourceRowLimit(top, context.Batch)),
-                ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns, out endedBody),
-                Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, SourceRowLimit(top, context.Batch)),
-                _ => throw SimulatedSqlException.SyntaxErrorNear(context),
-            };
-        }
+                // `INSERT INTO t DEFAULT VALUES` — one row with every column
+                // defaulted. Clearing the destination list routes every column
+                // through the default / identity-allocation / implicit-NULL path
+                // below, so a NOT NULL column with no default hits the same
+                // constraint error an explicit all-defaults insert would.
+                context.MoveNextRequired();
+                if (context.Token is not ReservedKeyword { Keyword: Keyword.Values })
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
+                context.MoveNextOptional();
+                destinationColumns = [];
+                sourceRows = [[]];
+            }
+            else
+            {
+                RowSecurity.NoteWrite(context.Batch, destinationTable);
+                sourceRows = context.Token switch
+                {
+                    ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, rowLimit: SourceRowLimit(top, context.Batch), rowStamps: sourceStamps),
+                    ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns, out endedBody),
+                    Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, SourceRowLimit(top, context.Batch), sourceStamps),
+                    _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                };
+            }
 
-        var written = InsertRows(
-            context,
-            new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples: null),
-            sourceRows,
-            valueTupleStamps: null);
-        // The error that ended an executed body is the statement's, though it
-        // wrote the rows the body returned before it.
-        if (endedBody is not null)
-        {
-            context.Batch.CurrentStatement.SuppressErrorReset = true;
-            context.Connection.LastErrorNumber = endedBody.Number;
+            var written = InsertRows(
+                context,
+                new InsertPlan(destinationTable, destinationView, joinViewPlan, destinationColumns, output, top, valueTuples: null),
+                sourceRows,
+                valueTupleStamps: StampsByRow(sourceStamps));
+            // The error that ended an executed body is the statement's, though it
+            // wrote the rows the body returned before it.
+            if (endedBody is not null)
+            {
+                context.Batch.CurrentStatement.SuppressErrorReset = true;
+                context.Connection.LastErrorNumber = endedBody.Number;
+            }
+            return written;
         }
-        return written;
+        finally
+        {
+            if (sourceStamps is not null)
+                batch.SequenceValuesByRow = null;
+        }
+    }
+
+    /// <summary>
+    /// The stamps a SELECT source's rows were projected under, for their
+    /// defaults to re-enter, or null when the rows weren't streamed one stamp
+    /// apart — a buffered source projected every row before the first was
+    /// read, so the stamps read alongside them aren't theirs.
+    /// </summary>
+    private static long[]? StampsByRow(List<long>? stamps)
+    {
+        if (stamps is null || stamps.Count == 0)
+            return null;
+        for (var i = 1; i < stamps.Count; i++)
+        {
+            if (stamps[i] <= stamps[i - 1])
+                return null;
+        }
+        return [.. stamps];
     }
 
     /// <summary>
@@ -964,6 +1005,8 @@ partial class Simulation
     /// </summary>
     private static void StampInsertedPeriod(HeapTable table, SqlValue[] rowValues, BatchContext batch)
     {
+        if (table.HasLedgerColumns())
+            StampLedgerStart(table, rowValues, batch, reserveEnd: false);
         if (table.PeriodColumns is { } pc && table.Columns[pc.StartOrdinal].GeneratedAs != GeneratedAlwaysAsRow.None)
         {
             rowValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, batch.SystemTimeUtc);
@@ -996,7 +1039,65 @@ partial class Simulation
         }
         if (table.PeriodColumns is { } pc && table.Columns[pc.StartOrdinal].GeneratedAs != GeneratedAlwaysAsRow.None)
             newValues[pc.StartOrdinal] = SqlValue.FromDateTime2(table.Columns[pc.StartOrdinal].Type, batch.SystemTimeUtc);
+        if (table.HasLedgerColumns())
+            StampLedgerStart(table, newValues, batch, reserveEnd: table.SystemVersioning is not null);
         EvaluateComputedColumns(table, newValues, batch);
+    }
+
+    /// <summary>
+    /// Fills a written row's <c>TRANSACTION_ID START</c> and
+    /// <c>SEQUENCE_NUMBER START</c> columns with the operation's stamp. A
+    /// rewritten row of a system-versioned table takes the next number and
+    /// leaves the one after it to the version it replaces, whose <c>END</c>
+    /// columns <see cref="StampLedgerEnd"/> fills — so an UPDATE of two rows
+    /// numbers them new, old, new, old — where a table keeping no history
+    /// numbers only the new version, and none of its deletes (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    private static void StampLedgerStart(HeapTable table, SqlValue[] values, BatchContext batch, bool reserveEnd)
+    {
+        var (transactionId, sequence) = batch.NextLedgerStamp();
+        if (reserveEnd)
+            _ = batch.NextLedgerStamp();
+        for (var i = 0; i < table.Columns.Length; i++)
+        {
+            switch (table.Columns[i].GeneratedAs)
+            {
+                case GeneratedAlwaysAsRow.TransactionIdStart:
+                    values[i] = SqlValue.FromInt64(transactionId);
+                    break;
+                case GeneratedAlwaysAsRow.SequenceNumberStart:
+                    values[i] = SqlValue.FromInt64(sequence);
+                    break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Fills the <c>TRANSACTION_ID END</c> and <c>SEQUENCE_NUMBER END</c>
+    /// columns of <paramref name="historyRow"/>, a version of
+    /// <paramref name="parent"/> leaving it: the number its replacement
+    /// reserved when <paramref name="replacement"/> holds one, else the next.
+    /// </summary>
+    private static void StampLedgerEnd(HeapTable parent, SqlValue[] historyRow, SqlValue[]? replacement, BatchContext batch)
+    {
+        var startOrdinal = Array.FindIndex(parent.Columns, static column => column.GeneratedAs == GeneratedAlwaysAsRow.SequenceNumberStart);
+        var sequence = replacement is not null && startOrdinal >= 0 && replacement[startOrdinal] is { IsNull: false } replacementStart
+            ? replacementStart.AsInt64 + 1
+            : batch.NextLedgerStamp().Sequence;
+        var transactionId = batch.CurrentTransactionId();
+        for (var i = 0; i < parent.Columns.Length; i++)
+        {
+            switch (parent.Columns[i].GeneratedAs)
+            {
+                case GeneratedAlwaysAsRow.TransactionIdEnd:
+                    historyRow[i] = SqlValue.FromInt64(transactionId);
+                    break;
+                case GeneratedAlwaysAsRow.SequenceNumberEnd:
+                    historyRow[i] = SqlValue.FromInt64(sequence);
+                    break;
+            }
+        }
     }
 
     /// <summary>
@@ -1474,7 +1575,8 @@ partial class Simulation
         bool hasExplicitColumnList,
         HeapColumn? identityColumn = null,
         HeapTable? destinationTable = null,
-        int? rowLimit = null)
+        int? rowLimit = null,
+        List<long>? rowStamps = null)
     {
         // Only the parentheses wrapping the whole source are the source's own:
         // in `(SELECT 1) UNION ALL (SELECT 2)` they open the first branch.
@@ -1488,7 +1590,7 @@ partial class Simulation
         // closing `)` as its terminator rather than as a stray token, and what
         // refuses the source query's own ORDER BY / FOR clause (Msg 156) while
         // anything nested inside it keeps the ordinary rules.
-        var rows = ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, depth > 0 ? QueryPosition.ParenthesizedInsertSource : QueryPosition.InsertSource, rowLimit);
+        var rows = ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, depth > 0 ? QueryPosition.ParenthesizedInsertSource : QueryPosition.InsertSource, rowLimit, rowStamps);
 
         while (depth > 0)
         {
@@ -1516,7 +1618,8 @@ partial class Simulation
         HeapColumn? identityColumn = null,
         HeapTable? destinationTable = null,
         QueryPosition position = QueryPosition.InsertSource,
-        int? rowLimit = null)
+        int? rowLimit = null,
+        List<long>? rowStamps = null)
     {
         var selection = Selection.Parse(context, new QueryScope(position, null));
 
@@ -1605,7 +1708,7 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         try
         {
-            return ReadSelectSourceRows(context, selection, destinationColumns, rows, rowLimit);
+            return ReadSelectSourceRows(context, selection, destinationColumns, rows, rowLimit, rowStamps);
         }
         catch (SimulatedSqlException sourceError) when (destinationTable is not null)
         {
@@ -1636,7 +1739,7 @@ partial class Simulation
     /// holds what it produced if it fails partway, reading at most
     /// <paramref name="rowLimit"/> rows (<see cref="SourceRowLimit"/>).
     /// </summary>
-    private static List<SqlValue[]> ReadSelectSourceRows(ParserContext context, Selection selection, HeapColumn[] destinationColumns, List<SqlValue[]> rows, int? rowLimit)
+    private static List<SqlValue[]> ReadSelectSourceRows(ParserContext context, Selection selection, HeapColumn[] destinationColumns, List<SqlValue[]> rows, int? rowLimit, List<long>? rowStamps)
     {
         var expectedColumnCount = destinationColumns.Length;
         var resultSet = selection.Execute(context.Batch);
@@ -1658,6 +1761,7 @@ partial class Simulation
                     row[i] = SqlValue.NameVariantBase(row[i], SqlValue.FromVariant(row[i]), resultSet.ColumnReportsNumeric is { } numeric && numeric[i]);
             }
             rows.Add(row);
+            rowStamps?.Add(context.Batch.CurrentRowStamp);
             // Stopping before the next row is pulled keeps its projection
             // from running.
             if (rows.Count == rowLimit)

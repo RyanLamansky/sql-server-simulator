@@ -675,6 +675,7 @@ partial class Simulation
     /// </summary>
     internal static void RewriteRowAt(ParserContext context, HeapTable table, int pageIndex, int slotIndex, byte[] rewritten, UndoLog? undoLog)
     {
+        RejectLobOnEmptyFilegroup(context.Batch, table, rewritten);
         if (IsLockableTable(table))
         {
             context.Batch.AcquireRowLockTxScoped(table, pageIndex, slotIndex, LockMode.Exclusive, RowLockPurpose.UpdatePreImage);

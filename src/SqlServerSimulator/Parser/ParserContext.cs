@@ -308,6 +308,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool InDefaultClause;
 
     /// <summary>
+    /// True while a <c>#temp</c> table's <c>DEFAULT</c> clause parses: a
+    /// sequence it names resolves in tempdb, where real stores the default,
+    /// rather than in the current database (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    public bool DefaultResolvesInTempdb;
+
+    /// <summary>
     /// True while a filtered index's or statistic's <c>WHERE</c> predicate
     /// parses. Its grammar takes only comparisons, so a value standing where a
     /// condition belongs (<c>WHERE (a)</c>) is the plain syntax error at the

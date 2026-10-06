@@ -56,10 +56,14 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
   Probe-confirmed on both an engine-produced row (two UPDATEs in one transaction) and a hand-written one.
   Inside one transaction the simulator reaches the same state, every write stamping the transaction's begin time; two autocommit statements reach it only when they land on the same clock tick — which is why the tests separate them by a `WAITFOR` / sleep.
 - **Time arguments are a literal, an ODBC escape (`{ts '…'}`) or a variable**, which is all real's grammar admits: a function call (`AS OF SYSUTCDATETIME()`), a parenthesized subquery, or a column reference is **Msg 102** (or **Msg 156** when the offending token is a reserved keyword, e.g. `BETWEEN 't' TO 't'`).
+  A number is typed as the narrowest of `tinyint`, `smallint` and `int` it fits, `numeric` past them or with a fraction, and clashes as the statement compiles, so `AS OF 1` is Msg 206 naming `tinyint` (probed 2026-10-06 against SQL Server 2025).
+  A word in the form's place is read as one real doesn't know, and the token after it refused — `FOR SYSTEM_TIME latest;` is Msg 102 at `;`.
   They're evaluated once on iteration start — no per-row re-evaluation, matching SQL Server's "constant per query" contract.
   ISO 8601 string literals with a trailing `Z` (UTC marker — EF Core 10 emits this) are accepted by datetime2 coercion; an unparseable string raises **Msg 241**.
   The argument's type is gated the way real gates it, as a comparison against the period columns: strings, the date/time family and a `sql_variant` holding either convert, `time` and binary raise **Msg 402** (`… incompatible in the greater than operator.`, or `less than or equal to` for `AS OF`), and everything else — integer, decimal, money, float, bit, uniqueidentifier — raises **Msg 206** (`Operand type clash: datetime2 is incompatible with int`), a variable's declared type as the statement compiles, so a module body is refused at `CREATE` (probed 2026-10-04 against SQL Server 2025).
 - **`FOR SYSTEM_TIME` after a view's name** applies to every system-versioned table the body reads, a nested view's included (`BatchContext.InheritedSystemTime`); one of them carrying its own clause is Msg 13590 followed by Msg 4413, a body reading none is Msg 13544 naming the view at state 1, and the clause after an alias or a hint — or after any other source — is Msg 102 at `for` (probed 2026-10-04 against SQL Server 2025).
+- **`FOR SYSTEM_TIME` after a CTE's name** is Msg 13544 naming the CTE at state 1, refusing the batch as it compiles (probed 2026-10-06 against SQL Server 2025).
+- **A write through a `FOR SYSTEM_TIME` source's alias** — `UPDATE a … FROM t FOR SYSTEM_TIME ALL a` — is refused as the batch compiles, the source being the union of the table and its history: an `UPDATE` is Msg 4421 and a `DELETE` Msg 4417, every form alike; naming the table itself beside such a source writes it as one more source of the statement (probed 2026-10-06 against SQL Server 2025).
 - **Row order**: a `FOR SYSTEM_TIME` source reads the current rows in their clustered key's order, then the history's in its own, and its columns describe as not updatable, as does a period column read from the table (probed 2026-10-04 against SQL Server 2025).
 - **DROP TABLE** on a system-versioned parent or its history sibling raises Msg 13552; caller must `ALTER TABLE ... SET (SYSTEM_VERSIONING = OFF)` first.
 - **`ALTER TABLE [schema.]name SET (SYSTEM_VERSIONING = OFF)`** flips the parent's `HeapTable.SystemVersioning` to `null` and the history sibling's `HeapTable.IsHistoryTable` to `false` — both tables revert to plain regular status, and `DROP TABLE` on either now succeeds.
@@ -125,6 +129,10 @@ Read this when working on `PERIOD FOR SYSTEM_TIME`, `GENERATED ALWAYS AS ROW STA
   Row shape: `name` = `SYSTEM_TIME`, `period_type` = 1 / `period_type_desc` = `SYSTEM_TIME_PERIOD`, `object_id`, `start_column_id` / `end_column_id` = the 1-based ordinals of the ROW START / ROW END columns.
   `sys.columns.generated_always_type` reports 1 (`AS_ROW_START`) / 2 (`AS_ROW_END`) for the period columns.
   See [`catalog-views.md`](catalog-views.md).
+- **`GENERATED ALWAYS AS TRANSACTION_ID | SEQUENCE_NUMBER START | END [HIDDEN]`** columns, the ledger kinds, sit on any table — a system-versioned one, one without a period, a table variable — added by `CREATE` or `ALTER TABLE … ADD`, and report `generated_always_type` 7 to 10 (`AS_TRANSACTION_ID_START` …) while their history counterparts are plain (probed 2026-10-06 against SQL Server 2025).
+  A `START` is `NOT NULL` whatever the declaration omits and an `END` nullable: a non-`bigint` one is Msg 37346, a nullable `START` Msg 37347, a `NOT NULL` `END` Msg 37348, and a second column of one kind Msg 37345, each state the kind's place in that order.
+  A write stamps the `START` columns with its transaction's id (`BatchContext.CurrentTransactionId`) and its row operation's number in the transaction, counted from 0 on the transaction's undo log; a rewritten row of a system-versioned table takes the next number for its new version and leaves the one after to the version it replaces, whose history row's `END` columns take it — so an `UPDATE` of two rows numbers them new, old, new, old — and a deleted row's history takes the next, while a table keeping no history numbers only its new versions.
+  Explicit values are Msg 13536 and Msg 13537, as for the period columns.
 
 ## The history cleanup index
 
@@ -179,15 +187,10 @@ INSERT emits `INSERT INTO [tbl] ([cols-without-period]) OUTPUT INSERTED.[PeriodE
   The collision suffix is deterministic where real's is random, and the cleanup index's `ix_`-prefixed name inherits both.
 - **The clock**: real's `SYSUTCDATETIME` advances in steps of about 4 ms on the Linux reference (26 distinct values across 20,000 calls in 100 ms, probed 2026-10-04), so two autocommit writes a few milliseconds apart share a time there and leave a zero-duration version every form hides, where the simulator's clock is the host's and keeps them apart.
   A differential probe of history counts has to separate its writes by more than that step.
+- **A ledger column's transaction id** is real's internal log transaction id, which nothing else reports; the simulator stamps `CURRENT_TRANSACTION_ID()`'s, so the values differ while equality within a transaction and order across them hold.
 - **Msg 13544 qualified-name format**: real SQL Server pads temp-table names with their internal allocation suffix (`#x____...___…000000000148`); the simulator emits the bare `tempdb.dbo.#x` form.
   Same Msg number / framing, less verbose name.
 
 ## Not modeled yet
 
-- **`GENERATED ALWAYS AS TRANSACTION_ID | SEQUENCE_NUMBER START | END`** columns, which real accepts beside a period (`sys.columns.generated_always_type_desc` `AS_TRANSACTION_ID_START` and so on), are a syntax error here.
-- **`FOR SYSTEM_TIME` after a CTE's name** is Msg 13544 naming the CTE as the statement runs on real, a syntax error here.
-- **`UPDATE t … FROM t FOR SYSTEM_TIME ALL a`**, which names the target only through an aliased temporal source, updates on real and is Msg 4104 here, as is the `DELETE` form.
 - **Msg 13590's line** is a line of the view's definition on real; here it is the referencing statement's.
-- **`FOR SYSTEM_TIME latest`** is read by real as a clause and an alias, Msg 102 at the token after; here it is Msg 102 at `latest`.
-- **A literal's type in Msg 206**: real auto-parameterizes `AS OF 1` and names `tinyint`, where the simulator names `int`.
-- **`DROP SCHEMA` over a temporal pair** names the base's primary key constraint as the referencing object on real, the table here.

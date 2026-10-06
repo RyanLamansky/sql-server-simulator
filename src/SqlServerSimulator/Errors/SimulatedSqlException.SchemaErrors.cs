@@ -229,7 +229,10 @@ partial class SimulatedSqlException
     /// the statement allows — a four-part (server-qualified) name where at
     /// most <c>database.schema</c> is legal.
     /// </summary>
-    internal static SimulatedSqlException TooManyNamePrefixes(MultiPartName name, int maximum) =>
+    internal static SimulatedSqlException TooManyNamePrefixes(MultiPartName name, int maximum) => TooManyNamePrefixes(name.ToString(), maximum);
+
+    /// <inheritdoc cref="TooManyNamePrefixes(MultiPartName, int)"/>
+    internal static SimulatedSqlException TooManyNamePrefixes(string name, int maximum) =>
         new($"The object name '{name}' contains more than the maximum number of prefixes. The maximum is {maximum}.", 117, 15, 1);
 
     /// <summary>
@@ -2122,9 +2125,25 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException AddPeriodColumnDoesNotExist(string columnName, string tableName, byte state) =>
         new($"ADD PERIOD FOR SYSTEM_TIME failed because column '{columnName}' does not exist in table '{tableName}'.", 4924, 16, state);
 
+    /// <summary>Msg 37345: a second <c>TRANSACTION_ID</c> / <c>SEQUENCE_NUMBER</c> column of one kind, <paramref name="spelling"/> as <c>GENERATED ALWAYS AS …</c>.</summary>
+    internal static SimulatedSqlException LedgerColumnRepeated(string spelling, byte state) =>
+        new($"Table cannot have more than one '{spelling}' column.", 37345, 16, state);
+
+    /// <summary>Msg 37346: a <c>TRANSACTION_ID</c> / <c>SEQUENCE_NUMBER</c> column that isn't a <c>bigint</c>, its state the kind's as <see cref="LedgerColumnRepeated"/>'s.</summary>
+    internal static SimulatedSqlException LedgerColumnInvalidType(string spelling, string columnName, byte state) =>
+        new($"'{spelling}' column '{columnName}' has invalid data type.", 37346, 16, state);
+
+    /// <summary>Msg 37347: a <c>TRANSACTION_ID START</c> / <c>SEQUENCE_NUMBER START</c> column declared <c>NULL</c>.</summary>
+    internal static SimulatedSqlException LedgerStartColumnNullable(string spelling, string columnName) =>
+        new($"'{spelling}' column '{columnName}' cannot be nullable.", 37347, 16, 1);
+
+    /// <summary>Msg 37348: a <c>TRANSACTION_ID END</c> / <c>SEQUENCE_NUMBER END</c> column declared <c>NOT NULL</c>.</summary>
+    internal static SimulatedSqlException LedgerEndColumnNotNullable(string spelling, string columnName) =>
+        new($"'{spelling}' column '{columnName}' can only be nullable.", 37348, 16, 1);
+
     /// <summary>
     /// Mimics SQL Server error 13536: <c>INSERT</c> supplied an explicit
-    /// value for a column declared <c>GENERATED ALWAYS AS ROW START / END</c>.
+    /// value for a column declared <c>GENERATED ALWAYS AS ROW START / END</c>, or a ledger kind.
     /// Period columns are engine-populated and not user-writable. Probe-
     /// confirmed wording against SQL Server 2025.
     /// </summary>

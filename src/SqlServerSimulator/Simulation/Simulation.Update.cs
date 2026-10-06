@@ -1493,10 +1493,10 @@ partial class Simulation
         ParserContext context,
         UndoLog? undoLog)
     {
-        foreach (var (_, _, _, oldFull) in affected)
+        foreach (var (_, _, newFull, oldFull) in affected)
         {
             if (oldFull is not null)
-                WriteHistoryRow(parent, historyTable, period, oldFull, context, undoLog);
+                WriteHistoryRow(parent, historyTable, period, oldFull, context, undoLog, newFull);
         }
     }
 
@@ -1511,9 +1511,11 @@ partial class Simulation
     /// against SQL Server 2025, for an UPDATE, a DELETE and a MERGE).
     /// </summary>
     internal static void WriteHistoryRow(
-        HeapTable parent, HeapTable historyTable, (int StartOrdinal, int EndOrdinal) period, SqlValue[] oldFull, ParserContext context, UndoLog? undoLog)
+        HeapTable parent, HeapTable historyTable, (int StartOrdinal, int EndOrdinal) period, SqlValue[] oldFull, ParserContext context, UndoLog? undoLog, SqlValue[]? replacement = null)
     {
         var historyRow = (SqlValue[])oldFull.Clone();
+        if (parent.HasLedgerColumns())
+            StampLedgerEnd(parent, historyRow, replacement, context.Batch);
         var end = SqlValue.FromDateTime2(parent.Columns[period.EndOrdinal].Type, context.Batch.SystemTimeUtc);
         if (oldFull[period.StartOrdinal] is { IsNull: false } start && start.AsDateTime2 > end.AsDateTime2)
             throw SimulatedSqlException.SystemTimeBeforePeriodStart(QualifyTableName(parent, context.Batch.DatabaseFor(parent)));
@@ -1547,6 +1549,7 @@ partial class Simulation
     internal static (int PageIndex, int SlotIndex) InsertRow(
         BatchContext batch, HeapTable table, ReadOnlySpan<byte> image, UndoLog? undoLog, bool captureVersion = true, UniqueKeyWriteGuard? guard = null, SqlValue[]? storedValues = null)
     {
+        RejectLobOnEmptyFilegroup(batch, table, image);
         if (!IsLockableTable(table))
             return table.Heap.Insert(image, undoLog);
         batch.ProbeKeyLocksForInsert(table, image);
@@ -1594,6 +1597,7 @@ partial class Simulation
         UniqueKeyWriteGuard? guard)
     {
         var (pageIndex, slotIndex, _, _) = affected[row];
+        RejectLobOnEmptyFilegroup(batch, table, newImage);
         if (guard is null)
         {
             table.Heap.UpdateAt(pageIndex, slotIndex, newImage, undoLog, reclaimSuperseded);
@@ -2206,6 +2210,11 @@ partial class Simulation
         foreach (var predicate in predicates)
             ConstantFolding.CollectStartupConstants(predicate, context, constants);
         var startupValues = new List<(HeapColumn Column, Expression Value)>();
+        // A four-part target's SET list is evaluated by the server, row by
+        // row, so nothing of it runs ahead of the rows here (probed 2026-10-06
+        // against SQL Server 2025: `SET b = 1 / 0` over no row raises nothing).
+        if (context.Batch.CurrentStatement.RemoteWrite is { Kind: RemoteWriteKind.Update, WrittenName: not null } remote && ReferenceEquals(remote.Proxy, table))
+            assignments = [];
         foreach (var (ordinal, expr) in assignments)
         {
             if (ordinal >= 0 && expr is not AssignmentExpression && ConstantFolding.IsStartupValue(expr))
@@ -2311,13 +2320,31 @@ partial class Simulation
             var (ordinal, expr) = assignments[i];
             if (ordinal < 0)
                 continue;
-            var raw = expr is AssignmentExpression { Slot: var assigned } ? assigned.Value : expr.Run(runtime);
+            SqlValue raw;
+            try
+            {
+                raw = expr is AssignmentExpression { Slot: var assigned } ? assigned.Value : expr.Run(runtime);
+            }
+            catch (SimulatedSqlException error) when (context.Batch.CurrentStatement.RemoteWrite is { Kind: RemoteWriteKind.Update, WrittenName: not null } remote && ReferenceEquals(remote.Proxy, table))
+            {
+                // A four-part target's SET list is the server's to evaluate.
+                throw error.RelayedFromRemoteUpdate(context.Batch);
+            }
             // The mask takes the target column's type: `SET plain = LEFT(masked, 2)`
             // stores xxxx into a varchar(20) (probed 2026-09-27 against SQL Server 2025).
             if (setMasks?[i] is { } mask)
                 raw = DataMasking.ForStorage(mask.Apply(raw, table.Columns[ordinal].Type));
             raw = EnforceMaxLength(raw, table.Columns[ordinal], table, context.Connection);
-            newValues[ordinal] = SqlValue.NameVariantBase(raw, CoerceForWrite(raw, table.Columns[ordinal], context.Batch), expr.ResultReportsNumeric);
+            SqlValue converted;
+            try
+            {
+                converted = CoerceForWrite(raw, table.Columns[ordinal], context.Batch);
+            }
+            catch (SimulatedSqlException error) when (context.Batch.CurrentStatement.RemoteWrite is { Kind: RemoteWriteKind.Update, WrittenName: not null } remote && ReferenceEquals(remote.Proxy, table))
+            {
+                throw error.RelayedFromRemoteUpdate(context.Batch);
+            }
+            newValues[ordinal] = SqlValue.NameVariantBase(raw, converted, expr.ResultReportsNumeric);
             EnforceRule(table, newValues, ordinal, context.Batch);
         }
         WriteAssignedColumnSet(table, assignments, newValues);
@@ -2359,11 +2386,13 @@ partial class Simulation
         {
             // A table the FROM clause reads twice, under aliases neither of
             // which the target names, is Msg 8154 (probed 2026-10-01 against
-            // SQL Server 2025).
+            // SQL Server 2025). A source read FOR SYSTEM_TIME is no instance
+            // of the table, which the write then reads as one more source
+            // (probed 2026-10-06).
             var found = -1;
             for (var s = 0; s < sources.Count; s++)
             {
-                if (ReferenceEquals(sources[s].BackingTable, leadingTable))
+                if (ReferenceEquals(sources[s].BackingTable, leadingTable) && sources[s].Rows is not TemporalRowSource)
                 {
                     if (found >= 0)
                         throw SimulatedSqlException.AmbiguousTable(leadingIdent);

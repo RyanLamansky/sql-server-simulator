@@ -609,7 +609,7 @@ partial class Simulation
         if (parenthesized)
             context.MoveNextRequired();
         var expressionStart = context.Token!.StartIndex;
-        var expression = ParseDefaultClauseExpression(context);
+        var expression = ParseDefaultClauseExpression(context, tempTable: tableName.Leaf.StartsWith('#'));
         string definition;
         if (parenthesized)
         {
@@ -1396,7 +1396,8 @@ partial class Simulation
     private static void ApplyAddedPeriod(ParserContext context, AddedColumns columns)
     {
         var table = columns.Table;
-        if (columns.PendingPeriod.Count == 0 && !Array.Exists(table.Columns, static column => column.GeneratedAs != GeneratedAlwaysAsRow.None))
+        RejectRepeatedLedgerColumns(table.Columns);
+        if (columns.PendingPeriod.Count == 0 && !Array.Exists(table.Columns, static column => column.GeneratedAs.IsPeriod()))
             return;
         if (table.PeriodColumns is not null && columns.PendingPeriod.Count > 0)
             throw SimulatedSqlException.TemporalPeriodAlreadyDefined(QualifyTableName(table, context.CurrentDatabase));

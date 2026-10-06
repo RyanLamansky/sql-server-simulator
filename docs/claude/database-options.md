@@ -160,7 +160,8 @@ Probed 2026-09-29 against SQL Server 2025, with `sp_query_store_flush_db` and a 
   READ_ONLY and OFF record nothing and keep what is held, which the views still read.
 - **The stored text** is the statement as written, from its first token to its last — no separator or trailing comment, except that a `MERGE` keeps its terminating `;`.
   A statement real simply parameterizes is stored in real's parameterized form, `(@1 tinyint)SELECT * FROM [t] WHERE [a]=@1`, whose rendering rules sit on `Parser/SimpleParameterization.cs`; `<>`, `!=`, `NOT`, `TOP` and a catalog view keep a statement as written.
-  A statement reading variables or parameters is prefixed with their declarations in the order it names them, spelled as declared — `(@X int,@s varchar(10))select …` — except a condition or `RETURN`, stored bare.
+  A statement reading variables or parameters is prefixed with their declarations, spelled as declared — `(@X int,@s varchar(10))select …` — except a condition or `RETURN`, stored bare.
+  They come in the order real's binder meets them (`QueryStoreShape.VariablesInBinderOrder`): a query's FROM clause and joins, WHERE, GROUP BY and HAVING, then its select list, ORDER BY, TOP or FETCH, OFFSET, and last the variables its select list assigns, each set-operation branch in turn; an `UPDATE` or `DELETE`'s FROM, WHERE and TOP ahead of its SET list; a `SET` or `DECLARE`'s expression ahead of its target; anything else, and whatever a parenthesis holds, as written (probed 2026-10-06 against SQL Server 2025).
   `query_parameterization_type` is 2 for the parameterized form, 1 for a parameterized command or `sp_executesql` whose text declares its parameters (only those it reads), 0 otherwise; a module body is never parameterized.
 - **What makes a query distinct**: its stored text, context settings, containing module (`object_id`) and parameterization type, and for a statement reading a table variable its batch — such a query carries a `batch_sql_handle`.
 - **Context settings.**
@@ -203,15 +204,16 @@ Forced plans and hints are recorded, not applied: the simulator has one plan per
 - **Hashes and batch handles are the simulator's own.** `query_hash` and `query_plan_hash` share real's property that texts differing only in literals, case or spacing hash alike, but not its bytes; `last_compile_batch_sql_handle` and `batch_sql_handle` are the simulator's `sql_handle` shape ([`catalog-views.md`](catalog-views.md)).
 - **Compile figures are 0** and `count_compiles` 1: the simulator compiles a statement as it runs it.
 - **Figures the simulator doesn't have** read constant: DOP 1, no memory grant, no physical, CLR, log or tempdb use, no logical writes.
-- **A module statement's offsets** are into the module's body rather than its `CREATE` text, and its context settings are the session's, where real gave some functions and procedures a context-settings row of their own.
+- **A module statement's context settings** are the session's, where real gave some functions and procedures a context-settings row of their own; its offsets are into the module's `CREATE` text, as real's (`BatchContext.ModuleBodyOffset`).
 - **`sp_query_store_reset_exec_stats`' Msg 12403** names the plan and database asked about, where real's prints uninitialized numbers.
 - **A `DECLARE CURSOR`** records no rows, where real counts the rows its cursor fetched.
 
 ### Not modeled yet
 
-- Size-based and stale-query cleanup, and `MAX_PLANS_PER_QUERY` (real enforced a `MAX_STORAGE_SIZE_MB` of 0 neither immediately nor by turning read-only in probes).
-- A variable prefix lists its declarations in the order the statement names them, where real's follows its binder — a `WHERE` reference ahead of a select-list assignment's own variable, so `select @m = max(a) from t where a <= @x` inside a function is `(@x int,@m int)` on real and `(@m int,@x int)` here (probed 2026-09-30).
+- Size-based and stale-query cleanup, and `MAX_PLANS_PER_QUERY` (real enforced a `MAX_STORAGE_SIZE_MB` of 0 neither immediately nor by turning read-only in probes) — not chased: cleanup follows real's store size and clock, and the simulator keeps one plan per query for the cap to bite on.
 - The AUTO / CUSTOM compile-CPU threshold, forced parameterization, plan feedback and query variants, the internal statistics queries real records, and an operator tree in `query_plan`.
+- Applying a query's hints: real compiles the next execution under them, so a `sp_query_store_set_hints … N'OPTION (MAXRECURSION 10)'` makes the following run of a 50-deep recursive CTE Msg 530 (probed 2026-10-06 against SQL Server 2025), where the simulator records the hints and runs the query as written.
+  A forced plan steers real's optimizer, which the simulator doesn't have — not chased.
 
 ## Read-only databases
 

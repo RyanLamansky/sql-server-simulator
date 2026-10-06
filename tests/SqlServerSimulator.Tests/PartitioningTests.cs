@@ -1140,4 +1140,99 @@ public sealed class PartitioningTests
             select ds.name from sys.indexes i join sys.data_spaces ds on ds.data_space_id = i.data_space_id where i.object_id = object_id('x') and i.name = 'px'
             """));
     }
+
+    [TestMethod]
+    [DataRow("[primary]")]
+    [DataRow("[default]")]
+    [DataRow("'primary'")]
+    public void SelectInto_On_PlacesTheTable(string dataSpace)
+    {
+        var simulation = new Simulation();
+        AreEqual(1, simulation.ExecuteScalar($"select 1 a into t on {dataSpace}; select data_space_id from sys.indexes where object_id = object_id('t')"));
+    }
+
+    [TestMethod]
+    public void SelectInto_On_UnknownFilegroupOrScheme_Refused()
+    {
+        var simulation = new Simulation();
+        simulation.AssertSqlError("select 1 a into t on nofg", 1921, "Invalid filegroup 'nofg' specified.");
+        _ = simulation.ExecuteNonQuery(LeftFunctionAndScheme);
+        _ = simulation.AssertSqlError("select 1 a into t on ps", 2726);
+        _ = simulation.AssertSqlError("select 1 a into t on ps(a)", 2726);
+        AreEqual(0, simulation.ExecuteScalar("select count(*) from sys.tables where name = 't'"));
+    }
+
+    [TestMethod]
+    public void NumericParameter_ReportsType108_AndMatchesOnlyNumeric()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create partition function pfn (numeric(10, 2)) as range for values (10);
+            create partition scheme psn as partition pfn all to ([primary]);
+            create partition function pfd (decimal(10, 2)) as range for values (10);
+            create partition scheme psd as partition pfd all to ([primary])
+            """);
+        AreEqual("108,106", simulation.ExecuteScalar("select string_agg(cast(p.system_type_id as varchar), ',') within group (order by f.name desc) from sys.partition_parameters p join sys.partition_functions f on f.function_id = p.function_id"));
+        simulation.AssertSqlError("create table t (a decimal(10, 2)) on psn(a)", 7726, "Partition column 'a' has data type decimal(10,2) which is different from the partition function 'pfn' parameter data type numeric(10,2).");
+        simulation.AssertSqlError("create table t (a numeric(10, 2)) on psd(a)", 7726, "Partition column 'a' has data type numeric(10,2) which is different from the partition function 'pfd' parameter data type decimal(10,2).");
+        _ = simulation.ExecuteNonQuery("create table t1 (a numeric(10, 2)) on psn(a); create table t2 (a decimal(10, 2)) on psd(a)");
+    }
+
+    [TestMethod]
+    public void LobValueOnAFilegroupWithoutFiles_Msg622EndsTheBatch()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("alter database simulated add filegroup fgx");
+        _ = simulation.ExecuteNonQuery("create table f (a int, b varchar(max)) on [primary] textimage_on fgx; insert f values (1, replicate(cast('x' as varchar(max)), 7000))");
+        using var connection = simulation.CreateOpenConnection();
+        var error = Throws<SimulatedSqlException>(() => connection.CreateCommand("begin tran; insert f values (2, 'y'); update f set b = replicate(cast('x' as varchar(max)), 9000) where a = 2; select 1").ExecuteNonQuery());
+        AreEqual(622, error.Number);
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+        AreEqual(1, connection.CreateCommand("select count(*) from f").ExecuteScalar());
+        AreEqual("caught 622", connection.CreateCommand("begin try insert f values (3, replicate(cast('x' as varchar(max)), 9000)) end try begin catch select concat('caught ', error_number()) end catch").ExecuteScalar());
+    }
+
+    [TestMethod]
+    [DataRow("truncate table t with (maxdop = 1)", "=")]
+    [DataRow("truncate table t with (maxdop)", ")")]
+    [DataRow("truncate table t with (foo (1))", "foo")]
+    public void TruncateOptionList_RefusedWhereRealRefusesIt(string sql, string near)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table t (a int)");
+        simulation.ValidateSyntaxError(sql, near);
+    }
+
+    [TestMethod]
+    [DataRow("alter table s switch to t garbage;", ";")]
+    [DataRow("alter table s switch to t garbage", "garbage")]
+    public void Switch_StrayWord_RefusedAtTheTokenAfter(string sql, string near)
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("create table s (a int); create table t (a int)");
+        simulation.ValidateSyntaxError(sql, near);
+    }
+
+    [TestMethod]
+    public void Switch_TablesOnDifferentFilegroups_Msg4940()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("alter database simulated add filegroup fgy; alter database simulated add file (name = 'fgyf', filename = '/fgyf.ndf') to filegroup fgy");
+        _ = simulation.ExecuteNonQuery("create table s (a int) on [primary]; create table t (a int) on fgy; insert s values (1)");
+        simulation.AssertSqlError("alter table s switch to t", 4940, "ALTER TABLE SWITCH statement failed. table 'simulated.dbo.s' is in filegroup 'PRIMARY' and table 'simulated.dbo.t' is in filegroup 'fgy'.");
+    }
+
+    [TestMethod]
+    public void Ddl_GatedOnAlterAnyDataspace()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery("""
+            create user u without login; create user d without login; alter role db_ddladmin add member d;
+            grant alter any dataspace to u; deny alter any dataspace to d
+            """);
+        _ = simulation.ExecuteNonQuery("execute as user = 'u'; create partition function pf1 (int) as range for values (1); revert");
+        var error = simulation.AssertSqlError("execute as user = 'd'; create partition function pf2 (int) as range for values (1)", 6004);
+        AreEqual(2, error.State);
+        AreEqual("pf1", simulation.ExecuteScalar("select string_agg(name, ',') from sys.partition_functions"));
+    }
 }

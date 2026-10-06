@@ -53,8 +53,8 @@ partial class Simulation
 
         var database = context.CurrentDatabase;
         database.RejectWriteWhenReadOnly();
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, database))
-            throw SimulatedSqlException.UserDoesNotHavePermission();
+        if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, database, "ALTER ANY DATASPACE"))
+            throw SimulatedSqlException.DataspacePermissionDenied();
         if (isFunction.Value)
         {
             if (!database.PartitionFunctions.TryGetValue(name, out var function))
@@ -176,8 +176,8 @@ partial class Simulation
 
         var database = context.CurrentDatabase;
         database.RejectWriteWhenReadOnly();
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, database))
-            throw SimulatedSqlException.UserDoesNotHavePermission();
+        if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, database, "ALTER ANY DATASPACE"))
+            throw SimulatedSqlException.DataspacePermissionDenied();
 
         // Every attempt past the parse spends an id, whatever fails next.
         var functionId = database.AllocatePartitionFunctionId();
@@ -212,7 +212,8 @@ partial class Simulation
 
         var function = new PartitionFunction(
             name, functionId, parameterType, maxLength, boundaryOnRight,
-            Array.ConvertAll(order, index => converted[index]), context.Batch.CurrentStatement.UtcNow);
+            Array.ConvertAll(order, index => converted[index]), context.Batch.CurrentStatement.UtcNow,
+            spelledNumeric: parameterType is DecimalSqlType && SqlType.IsNumericSpelling(qualifiedTypeName, null));
         if (!database.PartitionFunctions.TryAdd(name, function))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(name, state: 58);
         RecordSlotUndo<PartitionFunction>(context, database.PartitionFunctions, name, null);
@@ -396,8 +397,8 @@ partial class Simulation
 
         var database = context.CurrentDatabase;
         database.RejectWriteWhenReadOnly();
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, database))
-            throw SimulatedSqlException.UserDoesNotHavePermission();
+        if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, database, "ALTER ANY DATASPACE"))
+            throw SimulatedSqlException.DataspacePermissionDenied();
         if (!database.PartitionFunctions.TryGetValue(name, out var function))
             throw SimulatedSqlException.PartitionObjectNotFound("alter", "function", name);
         var boundary = ConvertPartitionBoundary(context.Batch, value, function.ParameterType, function.DeclaredMaxLength, 1);
@@ -541,8 +542,8 @@ partial class Simulation
 
         var database = context.CurrentDatabase;
         database.RejectWriteWhenReadOnly();
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, database))
-            throw SimulatedSqlException.UserDoesNotHavePermission();
+        if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, database, "ALTER ANY DATASPACE"))
+            throw SimulatedSqlException.DataspacePermissionDenied();
         if (!database.PartitionFunctions.TryGetValue(functionName, out var function))
             throw SimulatedSqlException.PartitionInvalidObjectName(functionName, state: 58);
         if (database.PartitionSchemes.ContainsKey(name))
@@ -627,8 +628,8 @@ partial class Simulation
 
         var database = context.CurrentDatabase;
         database.RejectWriteWhenReadOnly();
-        if (!PermissionEnforcement.HasDdlAdminCapability(context.Batch, database))
-            throw SimulatedSqlException.UserDoesNotHavePermission();
+        if (!PermissionEnforcement.HoldsDatabasePermission(context.Batch, database, "ALTER ANY DATASPACE"))
+            throw SimulatedSqlException.DataspacePermissionDenied();
         if (!database.PartitionSchemes.TryGetValue(name, out var scheme))
             throw SimulatedSqlException.PartitionObjectNotFound("alter", "scheme", name);
         int? nextUsed = null;
