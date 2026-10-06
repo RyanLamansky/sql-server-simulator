@@ -114,9 +114,13 @@ public sealed class SessionContextTests
     public void CurrentTransactionId_IsBigint()
         => IsInstanceOfType<long>(ExecuteScalar("select current_transaction_id()"));
 
+    /// <summary>
+    /// The in-process connection is a MARS one, whose first request real
+    /// numbers 2 (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void CurrentRequestId_IsZero()
-        => AreEqual(0, ExecuteScalar("select current_request_id()"));
+    public void CurrentRequestId_IsTheMarsRequestsOwn()
+        => AreEqual(2, ExecuteScalar("select current_request_id()"));
 
     /// <summary>A string property carries its sys.dm_exec_connections column's declared type (probed 2026-09-26 against SQL Server 2025).</summary>
     [TestMethod]

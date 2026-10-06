@@ -5,19 +5,28 @@ namespace SqlServerSimulator;
 /// <summary>
 /// The session state a MARS request works on a copy of: its <c>SET</c>
 /// options, <c>CONTEXT_INFO</c>, database context, <c>@@IDENTITY</c> /
-/// <c>SCOPE_IDENTITY()</c> and <c>SESSION_CONTEXT</c>. A request copies the
+/// <c>SCOPE_IDENTITY()</c>, <c>@@ROWCOUNT</c>, <c>@@ERROR</c> and
+/// <c>SESSION_CONTEXT</c>. A request copies the
 /// session's published settings as it begins executing and publishes its copy
 /// once its response has gone out, so a request never sees what another one
 /// still running changed, and the last to finish wins — a reader finishing
 /// after a second request's <c>SET DATEFORMAT</c> puts the session's format
 /// back. <c>SESSION_CONTEXT</c> alone merges: a request publishes only the
 /// keys it set (all probed 2026-10-06 against SQL Server 2025). Temp tables,
-/// cursors and the transaction stay shared. Instances are never changed once
-/// built, so a published one can be read from another session.
+/// cursors and the transaction stay shared. An instance is never changed once
+/// another request or session can see it, so a published one can be read
+/// from another session.
 /// </summary>
 internal sealed class SessionSettings
 {
-    private SessionSettings(SimulatedDbConnection connection)
+    private SessionSettings(SimulatedDbConnection connection) => this.Refill(connection);
+
+    /// <summary>
+    /// Takes <paramref name="connection"/>'s settings again, into an instance
+    /// nothing else holds: what lets an in-process reader's start settings,
+    /// which no other command needed, serve the next reader's.
+    /// </summary>
+    public void Refill(SimulatedDbConnection connection)
     {
         this.Options = new SimulatedDbConnection.SessionOptionScope(connection);
         this.QuotedIdentifiers = connection.QuotedIdentifiers;
@@ -28,10 +37,12 @@ internal sealed class SessionSettings
         this.Database = connection.CurrentDatabase;
         this.LastIdentity = connection.LastIdentity;
         this.ScopeIdentity = connection.ScopeIdentity;
-        this.SessionContext = new(connection.SessionContext, SessionContextKeyComparer.Instance);
+        this.RowCount = connection.LastStatementRowCount;
+        this.ErrorNumber = connection.LastErrorNumber;
+        this.SessionContext = connection.SessionContext.Count == 0 ? null : new(connection.SessionContext, SessionContextKeyComparer.Instance);
     }
 
-    private SessionSettings(SessionSettings settings, Dictionary<string, (SqlValue Value, bool ReadOnly)> sessionContext)
+    private SessionSettings(SessionSettings settings, Dictionary<string, (SqlValue Value, bool ReadOnly)>? sessionContext)
     {
         this.Options = settings.Options;
         this.QuotedIdentifiers = settings.QuotedIdentifiers;
@@ -42,19 +53,27 @@ internal sealed class SessionSettings
         this.Database = settings.Database;
         this.LastIdentity = settings.LastIdentity;
         this.ScopeIdentity = settings.ScopeIdentity;
+        this.RowCount = settings.RowCount;
+        this.ErrorNumber = settings.ErrorNumber;
         this.SessionContext = sessionContext;
     }
 
-    public readonly SimulatedDbConnection.SessionOptionScope Options;
-    public readonly bool QuotedIdentifiers;
-    public readonly bool ParseOnly;
-    public readonly bool NoCount;
-    public readonly int TextSize;
-    public readonly byte[]? ContextInfo;
-    public readonly Database Database;
-    public readonly Int128? LastIdentity;
-    public readonly Int128? ScopeIdentity;
-    public readonly Dictionary<string, (SqlValue Value, bool ReadOnly)> SessionContext;
+    // Assigned only as an instance is built or refilled, never once another
+    // request or session may read it.
+    public SimulatedDbConnection.SessionOptionScope Options;
+    public bool QuotedIdentifiers;
+    public bool ParseOnly;
+    public bool NoCount;
+    public int TextSize;
+    public byte[]? ContextInfo;
+    public Database Database = null!;
+    public Int128? LastIdentity;
+    public Int128? ScopeIdentity;
+    public int RowCount;
+    public int ErrorNumber;
+
+    /// <summary>The keys <c>SESSION_CONTEXT</c> reads, null for none.</summary>
+    public Dictionary<string, (SqlValue Value, bool ReadOnly)>? SessionContext;
 
     /// <summary>The settings <paramref name="connection"/> is working with now.</summary>
     public static SessionSettings Capture(SimulatedDbConnection connection) => new(connection);
@@ -73,9 +92,14 @@ internal sealed class SessionSettings
         connection.ContextInfo = this.ContextInfo;
         connection.LastIdentity = this.LastIdentity;
         connection.ScopeIdentity = this.ScopeIdentity;
+        connection.LastStatementRowCount = this.RowCount;
+        connection.LastErrorNumber = this.ErrorNumber;
         connection.SessionContext.Clear();
-        foreach (var (key, entry) in this.SessionContext)
-            connection.SessionContext[key] = entry;
+        if (this.SessionContext is { } keys)
+        {
+            foreach (var (key, entry) in keys)
+                connection.SessionContext[key] = entry;
+        }
 
         var database = this.Database;
         if (ReferenceEquals(connection.CurrentDatabase, database)
@@ -98,12 +122,15 @@ internal sealed class SessionSettings
     public SessionSettings PublishOver(SessionSettings published, SessionSettings start)
     {
         Dictionary<string, (SqlValue Value, bool ReadOnly)>? merged = null;
-        foreach (var (key, entry) in this.SessionContext)
+        if (this.SessionContext is { } keys)
         {
-            if (start.SessionContext.TryGetValue(key, out var before) && before.Equals(entry))
-                continue;
-            merged ??= new(published.SessionContext, SessionContextKeyComparer.Instance);
-            merged[key] = entry;
+            foreach (var (key, entry) in keys)
+            {
+                if (start.SessionContext is { } started && started.TryGetValue(key, out var before) && before.Equals(entry))
+                    continue;
+                merged ??= published.SessionContext is { } shared ? new(shared, SessionContextKeyComparer.Instance) : new(SessionContextKeyComparer.Instance);
+                merged[key] = entry;
+            }
         }
         return new(this, merged ?? published.SessionContext);
     }

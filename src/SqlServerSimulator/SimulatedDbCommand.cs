@@ -49,6 +49,14 @@ public sealed class SimulatedDbCommand : DbCommand
     /// <summary>The in-process request the command's latest execution opened, if any.</summary>
     internal SessionRequest? Request;
 
+    /// <summary>
+    /// Set by the TDS endpoint on a MARS request's batch: its outcome stream
+    /// marks each boundary between the batch's statements
+    /// (<see cref="SimulatedStatementBoundary"/>), where the endpoint lets the
+    /// session's other requests run.
+    /// </summary>
+    internal bool YieldsBetweenStatements;
+
     internal SimulatedDbCommand(Simulation simulation, SimulatedDbConnection connection)
     {
         this.simulation = simulation;
@@ -150,7 +158,18 @@ public sealed class SimulatedDbCommand : DbCommand
     /// command rather than returning a truncated result as a successful
     /// one.</para>
     /// </summary>
-    public override void Cancel() => this.Connection?.CancelExecution();
+    public override void Cancel()
+    {
+        // A command that opened a request of its own cancels that request,
+        // even while another command's runs between its statements.
+        if (this.Request is { } request)
+        {
+            if (!request.Finished)
+                request.Cancel();
+            return;
+        }
+        this.Connection?.CancelExecution();
+    }
 
     /// <summary>
     /// Drains the whole batch (all statements execute, all side effects
@@ -361,7 +380,7 @@ public sealed class SimulatedDbCommand : DbCommand
         var connection = this.Connection;
         if (connection is { Killed: true })
             return SimulatedSqlException.SessionKilled();
-        var cancelled = connection?.ExecutionTimedOut == true
+        var cancelled = connection?.ExecutionTimedOut == true && this.Request is not { CancelledByUser: true }
             ? SimulatedSqlException.ExecutionTimeoutExpired()
             : SimulatedSqlException.CommandCancelled();
         if (connection is not { AttentionEndedWrite: true })

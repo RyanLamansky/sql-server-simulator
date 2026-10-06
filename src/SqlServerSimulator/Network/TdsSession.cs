@@ -33,9 +33,11 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// connection: real MARS is cooperative multiplexing, never parallel
     /// execution, and the engine assumes one executor per connection
     /// (<c>CurrentExecutingThreadId</c>, transaction machinery). A session
-    /// acquires this before driving the engine and buffers its whole response
-    /// before releasing, so overlap happens only during the window-controlled
-    /// send, not inside the engine. Unused by non-MARS sessions.
+    /// holds it while its request runs, buffering what each statement
+    /// produces, and steps out between two statements only while what it
+    /// buffered waits on the client's window, so the session's other
+    /// requests run there and never inside a statement. Unused by non-MARS
+    /// sessions.
     /// </summary>
     private readonly SemaphoreSlim engineExecutionGate = new(1, 1);
 
@@ -575,27 +577,37 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     }
 
     /// <summary>
-    /// Cancels the request <paramref name="session"/> is executing. Called by
-    /// the multiplexer when a client attention targets the session that is
-    /// actively driving the engine; a request that has since finished no longer
-    /// matches the connection's current one, so the cancel can't reach the next.
+    /// Cancels the request <paramref name="session"/> is serving. Called by
+    /// the multiplexer when a client attention targets a session serving one,
+    /// running or parked between its statements; the request object is that
+    /// request's alone, so the cancel can't reach the next.
     /// </summary>
-    public void CancelConnectionExecution(SmpSession session) => this.connection?.CancelRequest(Volatile.Read(ref session.Request));
+    public void CancelConnectionExecution(SmpSession session) => Volatile.Read(ref session.Request)?.Cancel();
 
     /// <summary>
     /// Serves one request of a MARS logical session: runs it under the
-    /// connection's execution gate into the session's deferred-flush writer,
-    /// then acknowledges any attention and sends the whole response.
+    /// connection's execution gate into the session's deferred-flush writer —
+    /// stepping out between statements while what it produced waits on the
+    /// client (see <see cref="BetweenStatementsAsync"/>) — then acknowledges
+    /// any attention and sends the rest of the response.
     /// </summary>
     private async Task ServeMarsRequestAsync(SmpSession session, SessionRequest request, TdsMessage message, string? batchText, bool isBulkInsertBegin, TdsTokenWriter writer, CancellationToken cancellationToken)
     {
         bool cancelled;
-        await this.engineExecutionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        Volatile.Write(ref session.Request, this.connection!.BeginRequest());
-        session.Executing = true;
         if (message.PacketType is Tds.PacketSqlBatch or Tds.PacketRpc or Tds.PacketTransactionManager)
             request.OutstandingRequestCount = ReadOutstandingRequestCount(message.Payload);
-        this.connection.EnterRequest(request);
+        Volatile.Write(ref session.Request, request);
+        session.Executing = true;
+        try
+        {
+            await this.engineExecutionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            session.Executing = false;
+            throw;
+        }
+        this.connection!.ResumeRequest(request);
         try
         {
             // Another request still pending can refuse this one outright.
@@ -635,11 +647,11 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
             // Read under the lock: the engine settled a cancelled batch (its
             // XACT_ABORT rollback included) as it unwound here.
-            cancelled = this.connection!.ExecutionCancellationToken.IsCancellationRequested;
+            cancelled = this.connection!.ExecutionCancellationRequested;
         }
         finally
         {
-            this.connection!.LeaveRequest(request);
+            this.connection!.SuspendRequest(request, finished: true);
             session.Executing = false;
             _ = this.engineExecutionGate.Release();
         }
@@ -661,9 +673,9 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// Runs the TDS batch loop for one SMP logical session. Mirrors the
     /// non-MARS loop but over a per-session transport riding the session's
     /// demuxed stream, guards engine execution with the per-connection
-    /// execution gate, and buffers the whole response (deferred flush) so the
-    /// window-controlled send happens outside the lock. All logical sessions
-    /// share this session's <see cref="SimulatedDbConnection"/>.
+    /// execution gate, and buffers each statement's output (deferred flush)
+    /// so a window-blocked send happens outside the gate. All logical
+    /// sessions share this session's <see cref="SimulatedDbConnection"/>.
     /// </summary>
     public async Task RunMarsSessionAsync(SmpSession session, CancellationToken cancellationToken)
     {
@@ -675,7 +687,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             Spid = unchecked((ushort)this.connection!.Spid),
             Counters = this.connection.Transport,
         };
-        var writer = new TdsTokenWriter(transport) { DeferFlush = true, NativeJson = this.jsonSupportVersion > 0, NativeVector = this.vectorSupportVersion > 0 };
+        var writer = new TdsTokenWriter(transport) { DeferFlush = true, MarsSession = session, NativeJson = this.jsonSupportVersion > 0, NativeVector = this.vectorSupportVersion > 0 };
         try
         {
             while (true)
@@ -709,6 +721,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
                 var serving = this.connection!;
                 var request = serving.BeginSessionRequest(inProcess: false);
+                request.RequestId = session.Sid + 1;
                 // The request is done once its whole response has gone out,
                 // which for a large result waits on the client: it ends as its
                 // last packet goes, or on the way out if no packet does. A
@@ -793,6 +806,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 #pragma warning disable CA2100 // This IS a SQL endpoint: the batch text is the client's query by design.
             command.CommandText = ExtractBatchText(message.Payload);
 #pragma warning restore CA2100
+            command.YieldsBetweenStatements = this.multiplexer is not null;
             // A cancelled batch (return value true) leaves the DONE_ATTN
             // acknowledgment to the session loop; nothing more to emit here.
             _ = await this.StreamOutcomesAsync(command, writer, Tds.TokenDone, trailingTokensFollow: false, cancellationToken).ConfigureAwait(false);
@@ -1062,6 +1076,20 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             var outcome = rendered.Outcome;
             var effectiveDoneToken = rendered.InProc ? Tds.TokenDoneInProc : doneToken;
 
+            // Between two of a MARS request's statements: what the ones before
+            // went out, the request stepping aside while it waits on the
+            // client.
+            if (outcome is SimulatedStatementBoundary)
+            {
+                if (this.FlushInfoMessages(writer))
+                    closed = false;
+                await this.BetweenStatementsAsync(writer, cancellationToken).ConfigureAwait(false);
+                if (this.connection.ExecutionCancellationRequested)
+                    return true;
+                hasOutcome = Advance();
+                continue;
+            }
+
             // An informational message is an INFO token ahead of whatever the
             // next outcome writes, and carries no DONE of its own. A USE's
             // Msg 5701 follows the database ENVCHANGE and precedes the new
@@ -1288,8 +1316,54 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             this.WriteSessionEnvChangesIfAny(writer);
             writer.WriteDoneToken(doneToken, unclosedError ? Tds.DoneError : Tds.DoneFinal, 0, StatementDoneKind.Batch);
         }
+        // A statement's DONE went out expecting the next statement to send
+        // something, which it didn't: that DONE ends the response.
+        else if (!trailingTokensFollow)
+        {
+            _ = writer.TryCloseFinalDone(this.WriteSessionEnvChangesIfAny);
+        }
 
         return false;
+    }
+
+    /// <summary>
+    /// Between two statements of a MARS request: the packets its statements
+    /// filled go out — all but its last DONE, whose more bit the next
+    /// statement settles. When the client's window can't take them yet, the
+    /// request steps out of the execution gate until it has, so the session's
+    /// other requests run meanwhile, and only then runs its next statement:
+    /// real runs a batch's statement once its client has read all but about
+    /// 32 KB of what the batch sent before it (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    private async ValueTask BetweenStatementsAsync(TdsTokenWriter writer, CancellationToken cancellationToken)
+    {
+        if (writer is not { MarsSession: { } session, Request: { } request })
+            return;
+        var packets = writer.CompletePacketsPending();
+        if (packets == 0)
+            return;
+        if (packets <= session.SendWindowRemaining())
+        {
+            await writer.FlushCompletePacketsAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        var connection = this.connection!;
+        var database = this.databaseAtMessageStart;
+        connection.SuspendRequest(request);
+        _ = this.engineExecutionGate.Release();
+        try
+        {
+            await writer.FlushCompletePacketsAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // The batch's own unwinding, an error's included, runs on its
+            // state under the gate.
+            await this.engineExecutionGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            connection.ResumeRequest(request);
+            this.databaseAtMessageStart = database;
+        }
     }
 
     /// <summary>

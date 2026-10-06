@@ -94,17 +94,25 @@ partial class Selection
 
         foreach (var connection in batch.Connection.Simulation.SnapshotConnections())
         {
-            if (connection.Session.BatchText is not { } text
-                || !BuiltInResources.SqlHandleOf(text).AsSpan().SequenceEqual(handle.AsSpan(0, BuiltInResources.SqlHandleLength)))
+            if (Matches(connection.Session.BatchText, handle))
+                return SqlTextRow(connection.Session.BatchText!);
+            // A MARS request parked between its statements is running too.
+            foreach (var parked in connection.ParkedRequests())
             {
-                continue;
+                if (Matches(parked.BatchText, handle))
+                    return SqlTextRow(parked.BatchText!);
             }
-            return [RowEncoder.EncodeRow(SqlTextSchema, [
+        }
+        return [];
+
+        static bool Matches(string? text, byte[] handle) =>
+            text is not null && BuiltInResources.SqlHandleOf(text).AsSpan().SequenceEqual(handle.AsSpan(0, BuiltInResources.SqlHandleLength));
+
+        static List<byte[]> SqlTextRow(string text) =>
+            [RowEncoder.EncodeRow(SqlTextSchema, [
                 SqlValue.Null(SqlType.SmallInt), SqlValue.Null(SqlType.Int32), SqlValue.Null(SqlType.SmallInt),
                 SqlValue.FromBoolean(false), SqlValue.FromNVarchar(text),
             ])];
-        }
-        return [];
     }
 
     /// <summary>

@@ -621,15 +621,16 @@ Probed frame flow:
 - **FIN.**
   On the client's FIN (or connection close) the server **echoes a FIN per session**, SEQNUM = last DATA sequence sent on that session, WNDW = `received + 4`.
 
-**Concurrency model — interleaved on real, whole requests here.**
+**Concurrency model — interleaved by packet on real, by statement here.**
 Real interleaves a connection's requests at packet granularity, one executing at a time: a SELECT runs about 32 KB ahead of its client and then yields mid-statement until the client reads on, and another request runs meanwhile (probed 2026-10-05 against SQL Server 2025).
 A DML statement can't yield, so while its `OUTPUT` rows are still going out every other request is refused (Msg 3980, below).
-The simulator serializes whole requests instead.
+The simulator interleaves at the boundaries between a batch's top-level statements instead.
 All logical sessions share the **one** backing `SimulatedDbConnection`; a per-connection `SemaphoreSlim(1,1)` (`engineExecutionGate`) serializes engine execution.
-A session acquires the gate, drives the engine, and **buffers its whole response** (the session's `TdsTokenWriter` runs in `DeferFlush` mode — intermediate per-row flushes accumulate rather than send), then releases the gate and does the single window-controlled flush.
-Buffering-under-lock is what avoids the deadlock a naive "stream row-by-row while holding the lock" would hit (session A blocked on its send window while holding the gate B needs): A's engine work finishes and the gate frees before A's window-blocked send begins.
-It maps cleanly onto the one-executor assumption because A's outcome enumerator is fully drained and disposed before the gate releases — no suspended-mid-iteration engine state, no two live enumerators on the engine.
-The cost is a fully-materialized response per session (bounded by the largest un-drained response), matching the existing "materialize in one step" residual.
+A session holds the gate while its request runs a statement, buffering what the statement sends (the session's `TdsTokenWriter` runs in `DeferFlush` mode — intermediate per-row flushes accumulate rather than send).
+Between two statements — a `SimulatedStatementBoundary` in the outcome stream of a batch the endpoint marks (`SimulatedDbCommand.YieldsBetweenStatements`) — the whole packets buffered go out, all but the last DONE, whose more bit the next statement settles; when the client's SMP window can't take them yet, the request steps out of the gate until it has (`TdsSession.BetweenStatementsAsync`), and the session's other requests run there.
+So a statement after a large result set runs once the client has read all but the window's four packets of what came before, seeing what other requests did meanwhile, as on real; after a small one it runs at once (probed 2026-10-06 against SQL Server 2025).
+Stepping out only while the window is shut is what avoids the deadlock a session waiting on its client while holding the gate would hit, and keeps a request whose output fits running uninterrupted, as real's does.
+No engine enumeration is ever parked mid-statement — each statement's outcomes are produced whole before the boundary — and a session's buffered response is bounded by one statement's output.
 
 **A request's two lifetimes (probed 2026-10-06 against SQL Server 2025).**
 Real tracks a request two ways, and each refusal reads one of them (`SessionRequest`).
@@ -649,48 +650,53 @@ Real tracks a request two ways, and each refusal reads one of them (`SessionRequ
   Rows that fit what the response gets ahead of its client hold nothing, and a DML statement later in a batch holds nothing while the reader is still in an earlier `SELECT`.
   The writer marks each such statement's stretch of the response (`TdsTokenWriter.HoldSession`), and the request holds the session while a packet carrying any of it is going out.
 
-**Transactions a MARS batch begins (probed 2026-09-30 against SQL Server 2025).**
+**Transactions a MARS batch begins (probed 2026-09-30 and 2026-10-06 against SQL Server 2025).**
 A transaction a batch begins by SQL text — `BEGIN TRANSACTION`, or an `IMPLICIT_TRANSACTIONS` statement — is scoped to that batch: one still open when the batch ends rolls back with **Msg 3997** at line 1, whether or not another request was active, after the batch's own errors (an unbalanced procedure's Msg 266 included); after an `sp_executesql` RPC it rolls back without the message.
 A transaction the API began, or an earlier batch, is not the batch's to end, so a nested `BEGIN TRANSACTION` inside one doesn't trip it (`Simulation.EndBatchScopedTransaction`, keyed on `SimulatedDbConnection.TransactionIdAtExecutionStart`).
-Another request doesn't see such a transaction: `@@TRANCOUNT` reads 0 there, and a `COMMIT` there is Msg 3902.
+Another request doesn't see such a transaction, even one running between that batch's statements: `@@TRANCOUNT` reads 0 there, a `COMMIT` there is Msg 3902, and its writes commit on their own; the batch carries on in it afterwards.
 Neither 8628 nor 8651 is a MARS error: the first is an optimizer timeout, the second a memory-grant failure (their `sys.messages` text, read 2026-09-30).
 
-**Per-request session settings (probed 2026-10-06 against SQL Server 2025).**
+**Per-request state (probed 2026-10-06 against SQL Server 2025).**
 Each request works on a copy of the session's settings, taken from the published ones as it begins executing and published when its response has gone out, so the last request to finish wins: a reader finishing after another request's `SET DATEFORMAT dmy` puts `mdy` back, and a request never sees what one still running changed.
-The copy (`SessionSettings`) holds every `SET` option a module body reverts (`SimulatedDbConnection.SessionOptionScope`) plus `QUOTED_IDENTIFIER`, `PARSEONLY`, `NOCOUNT`, `TEXTSIZE`, `CONTEXT_INFO`, the database context, `@@IDENTITY` and `SCOPE_IDENTITY()`.
+The copy (`SessionSettings`) holds every `SET` option a module body reverts (`SimulatedDbConnection.SessionOptionScope`) plus `QUOTED_IDENTIFIER`, `PARSEONLY`, `NOCOUNT`, `TEXTSIZE`, `CONTEXT_INFO`, the database context, `@@IDENTITY`, `SCOPE_IDENTITY()`, `@@ROWCOUNT` and `@@ERROR` — so a reader's later statement reads its own `@@ROWCOUNT` and `@@ERROR` whatever ran between, and a request starting meanwhile reads the last finished one's.
 `SESSION_CONTEXT` is copied too, but publishing merges it: a request publishes only the keys it set.
-Temp tables, cursors and the transaction stay shared.
+A request's cancellation scope, its `sys.dm_exec_requests` row and a transaction its batch began are its own as well; temp tables, cursors and every other transaction stay shared.
 `sys.dm_exec_sessions` reports the published settings — even to the request that just changed its own, so a `SET DATEFORMAT dmy` followed by a read of the session's row in one batch still reads `mdy` — while `sys.dm_exec_requests` reports the request's own.
-The engine reads and writes the connection's own fields: `SimulatedDbConnection.EnterRequest` applies the published settings as a request begins executing, `LeaveRequest` keeps what it leaves as its own, and `EndSessionRequest` publishes them as its response ends.
+The engine reads and writes the connection's own fields: `SimulatedDbConnection.ResumeRequest` hands them to a request as it starts or carries on, parking the state of the one that ran last in its `SessionRequest` only then, so requests that never overlap swap nothing; `EndSessionRequest` publishes a request's settings as its response ends.
+
+**Request ids (probed 2026-10-06 against SQL Server 2025).**
+A request's id — `CURRENT_REQUEST_ID()`, `sys.dm_exec_requests.request_id` — is its SMP session's id plus 1, so SqlClient's first command, on session 1, is 2, and SqlClient reuses a closed reader's session; a session without MARS runs request 0.
+`sys.dm_exec_requests` lists a request parked between its statements while its client reads as `suspended` on `ASYNC_NETWORK_IO`, with its own command, text and options.
 
 **Shared session state (probed identical on real).**
 One `@@SPID` across all sessions; temp tables, cursors and the connection-level transaction shared.
 A `SqlTransaction` spanning two overlapping commands commits/rolls back both.
 A command that **omits its `Transaction` property while a `SqlTransaction` is open is rejected by SqlClient client-side** (`InvalidOperationException` "requires the command to have a transaction when the connection … is in a pending local transaction") — **not** a server Msg 3997/3988, so there is nothing for the endpoint to enforce.
 
-**Not modeled yet** — all follow from running each request whole, ahead of the client (probed 2026-10-05 against SQL Server 2025):
+**Not modeled yet** (probed 2026-10-05 and 2026-10-06 against SQL Server 2025):
 - *Visibility within a statement*: a SELECT a reader is still draining sees a second request's writes to the rows it hasn't reached — a `DELETE` of half the table left its reader with half the rows, an `UPDATE` showed its new values — where the simulator's reader keeps the rows as they were when it ran.
 - *Blocking within the session*: a second request's write can block on the locks the suspended reader holds (real's `REPEATABLE READ` / `SERIALIZABLE` reader, or a key lock under locking `READ COMMITTED`), until its timeout or a Msg 1205 deadlock against its own session; here the reader's statement has finished and released them.
-  `ALTER TABLE` and `TRUNCATE TABLE` likewise wait out the reader's schema-stability lock on real.
-- *A later statement runs early*: the statements after a large SELECT in one batch run before a second request does here, where real runs them only once the client has read the SELECT — so on real they see that request's writes and settings and it doesn't see theirs, and here it's the other way round.
+  `ALTER TABLE` and `TRUNCATE TABLE` likewise wait out the reader's schema-stability lock on real, and a read of a row another request's batch-begun transaction wrote waits on its lock (Msg 1222 under a `LOCK_TIMEOUT`), where here the session's requests never wait on each other.
+- *Inside a compound statement or a module call*: a request steps aside only between its batch's top-level statements, where real interleaves inside `IF`, `WHILE`, `BEGIN … END` and `TRY` blocks and procedure bodies too — the statements after a large SELECT inside one run before another request does here.
 - *A cancelled `UPDATE … OUTPUT` commits here*: real cancels it mid-statement and rolls it back; here it finished before its rows went out.
 - Real waits a few seconds before refusing with Msg 3980, so a short `CommandTimeout` expires first; the simulator refuses at once.
 - Real refuses a request whose transaction descriptor doesn't match the session's open transaction with Msg 3989 — as SqlClient's sends after a commit refused with Msg 3980 — where the simulator reads no descriptor.
-- A `sp_set_session_context` key another request published as read-only refuses a later write in a reader's batch on real; here that write ran before the other request did.
+- A `sp_set_session_context` key another request published as read-only refuses a later write in a reader's batch on real; here that write lands in the batch's own copy of the session context, and publishing it replaces the key.
 
-**Deferred until requested**: suspending a SELECT mid-statement to run another request, which every item above needs.
+**Deferred until requested**: suspending a statement mid-way to run another request, which the first two items above and the cancelled `UPDATE … OUTPUT` need.
 Similar effects appear on real without MARS too, when a very large result set is read very slowly: the statement holds its locks and its unsent rows until the client catches up.
 
 **Attention interplay (per session).**
 A client attention (cancel/timeout) arrives as a type-6 TDS packet in a DATA frame on **one** session.
-The multiplexer routes it: if that session is mid-execution (`Executing`), it fires `CancelExecution()` on the shared connection (only the executing session holds the gate, so the current scope is that session's) and leaves an atomic `AttentionState` flag; if the session is idle, it feeds the attention through the pipe so the parked read wakes.
+The multiplexer routes it: if that session is serving a request (`Executing` — waiting for the gate, running, or sending between statements), it cancels that request (`SessionRequest.Cancel`), whose cancellation scope stays its own while another request runs, and leaves an atomic `AttentionState` flag; if the session is idle, it feeds the attention through the pipe so the parked read wakes.
+A request cancelled while its client reads a SELECT so runs none of the statements after it, as on real (probed 2026-10-06 against SQL Server 2025).
 The session loop consumes the flag with an `Interlocked.Exchange` **after** clearing `Executing`, de-duping against the pipe-delivered copy so exactly one site emits the single `DONE_ATTN` — closing the race where an attention lands just as execution completes and the cancel no-ops.
 A cancel on one session never disturbs another session's reader.
 
 **In-process contract.**
 The in-process `SimulatedDbConnection` is a MARS connection: overlapping readers and a second command mid-reader work, and the rules above apply with an open reader as a request, outstanding until it has read past its end — see [`data-reader.md`](data-reader.md#in-process-mars-overlapping-readers).
 
-**Divergences (all frame-shape-safe — spec-consistent frames native SNI accepts):** a session's response fully materializes under the gate (memory-bound for very large results); the mid-message ACK fires once **per** EOM-clear packet whereas the real server ACKs roughly every two (both advance a monotonic `received + 4` window, so the extra ACKs are harmless); a cancel's DONE_ATTN rides one DATA packet where the real server split it across two; and the attention-during-execution ACK can trail its DATA response by a thread-scheduling race (its SEQNUM still equals the last-sent DATA sequence, so it stays spec-valid).
+**Divergences (all frame-shape-safe — spec-consistent frames native SNI accepts):** a statement's output fully materializes under the gate (memory-bound for a very large result); the mid-message ACK fires once **per** EOM-clear packet whereas the real server ACKs roughly every two (both advance a monotonic `received + 4` window, so the extra ACKs are harmless); a cancel's DONE_ATTN rides one DATA packet where the real server split it across two; and the attention-during-execution ACK can trail its DATA response by a thread-scheduling race (its SEQNUM still equals the last-sent DATA sequence, so it stays spec-valid).
 **Not verified on native SNI from this environment** (Linux has only managed SNI): the frame-shape corrections above are derived from the real cleartext trace — the shape native SNI provably accepts — but a Windows re-test is the final confirmation.
 
 ## Testing

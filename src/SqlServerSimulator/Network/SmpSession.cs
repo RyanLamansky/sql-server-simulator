@@ -44,14 +44,25 @@ internal sealed class SmpSession(ushort sid, SmpMultiplexer multiplexer, uint pe
     public int AttentionState;
 
     /// <summary>
-    /// The connection's number for the request this session is executing,
-    /// written before <see cref="Executing"/> is set so an attention that sees
-    /// the flag reads the request it targets.
+    /// The request this session is serving, written before
+    /// <see cref="Executing"/> is set so an attention that sees the flag
+    /// reaches the request it targets.
     /// </summary>
-    public long Request;
+    public SessionRequest? Request;
 
-    /// <summary>Set while this session is actively driving the engine under the execution lock.</summary>
+    /// <summary>
+    /// Set while this session serves a request — waiting for the execution
+    /// gate, running under it, or sending between its statements — when an
+    /// attention cancels the request rather than waiting in the pipe.
+    /// </summary>
     public volatile bool Executing;
+
+    /// <summary>How many more DATA frames the client's window lets this session send without waiting.</summary>
+    public long SendWindowRemaining()
+    {
+        lock (this.windowGate)
+            return (long)this.peerWindow - this.SendSequence;
+    }
 
     /// <summary>The receive window advertised to the client (received count plus slack).</summary>
     public uint ReceiveWindow => this.ReceivedSequence + Tds.SmpWindow;

@@ -176,9 +176,11 @@ internal sealed class CurrentTransactionId : Expression
 }
 
 /// <summary>
-/// SQL <c>CURRENT_REQUEST_ID()</c>: returns the <c>int</c> request id within
-/// the session. The simulator doesn't multiplex requests per session, so it
-/// reports <c>0</c> (probe-confirmed value for a single-request session).
+/// SQL <c>CURRENT_REQUEST_ID()</c>: the <c>int</c> id of the running request
+/// within the session — 0 on a connection without MARS, and on a MARS one,
+/// which the in-process connection is, the request's own
+/// (<see cref="SessionRequest.RequestId"/>; probed 2026-10-06 against SQL
+/// Server 2025).
 /// </summary>
 internal sealed class CurrentRequestId : Expression
 {
@@ -188,7 +190,7 @@ internal sealed class CurrentRequestId : Expression
             throw SimulatedSqlException.FunctionRequiresNArguments("current_request_id", 0);
     }
 
-    public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromInt32(0);
+    public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromInt32(runtime.Batch.Connection.ExecutingRequest?.RequestId ?? 0);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 

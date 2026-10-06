@@ -302,4 +302,113 @@ public sealed class InProcessMarsTests
             AreEqual(2, reader.GetInt32(0));
         }
     }
+
+    /// <summary>
+    /// Each command works on its own copy of the session's settings,
+    /// <c>@@ROWCOUNT</c>, <c>@@ERROR</c> and identity values: a reader's
+    /// later statements read its own whatever another command did meanwhile,
+    /// that command starts from what the last finished one left, and the
+    /// last to finish publishes its own (probed 2026-10-06 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    public void SettingsRowCountErrorAndIdentity_AreEachCommandsOwn()
+    {
+        using var connection = Seeded();
+        using (var seed = connection.CreateCommand("create table ident (id int identity, x int)"))
+            _ = seed.ExecuteNonQuery();
+        const string Read = "select concat(@@rowcount, ',', @@error, ',', scope_identity(), ',', @@identity, ',', isdate('13/01/2020'), ',', @@options & 512)";
+
+        using (var command = connection.CreateCommand("set nocount on; insert ident (x) values (1); select id, pad from big order by id; " + Read))
+        using (var reader = command.ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            AreEqual(8134, Refused(() => Scalar(connection, "set dateformat dmy; insert ident (x) values (2), (3); select 1/0")).Number);
+            AreEqual("8134,3,3,1,0", Scalar(connection, "select concat(@@error, ',', scope_identity(), ',', @@identity, ',', isdate('13/01/2020'), ',', @@options & 512)"));
+            while (reader.Read())
+            {
+            }
+            IsTrue(reader.NextResult());
+            IsTrue(reader.Read());
+            AreEqual("200,0,1,1,0,512", reader.GetString(0));
+        }
+
+        AreEqual("1,0,1,1,0,512", Scalar(connection, Read));
+    }
+
+    /// <summary>
+    /// A transaction a reader's batch began is that batch's own: other
+    /// commands see no transaction and can't commit it while the reader is
+    /// still reading, and the batch commits it once it carries on (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void TransactionAReadersBatchBegan_IsInvisibleToOtherCommands()
+    {
+        using var connection = Seeded();
+        using (var command = connection.CreateCommand("begin tran; update big set v = 1 where id = 1; select id, pad from big order by id; select @@trancount; commit"))
+        using (var reader = command.ExecuteReader())
+        {
+            IsTrue(reader.Read());
+            AreEqual(0, Scalar(connection, "select @@trancount"));
+            AreEqual(3902, Refused(() => Scalar(connection, "commit")).Number);
+            while (reader.Read())
+            {
+            }
+            IsTrue(reader.NextResult());
+            IsTrue(reader.Read());
+            AreEqual(1, reader.GetInt32(0));
+            IsNull(Drain(reader));
+        }
+
+        AreEqual("0,1", Scalar(connection, "select concat(@@trancount, ',', (select v from big where id = 1))"));
+    }
+
+    /// <summary>
+    /// A cancel while a reader is still reading a <c>SELECT</c> ends its batch
+    /// there: the statements after it never run (probed 2026-10-06 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CancelWhileReadingASelect_TheStatementsAfterItNeverRun()
+    {
+        using var connection = Seeded();
+        using (var command = connection.CreateCommand("select id, pad from big order by id; update big set v = 9 where id = 1"))
+        {
+            var reader = command.ExecuteReader();
+            IsTrue(reader.Read());
+            AreEqual(0, Scalar(connection, "select v from big where id = 1"));
+            command.Cancel();
+            reader.Dispose();
+        }
+
+        AreEqual(0, Scalar(connection, "select v from big where id = 1"));
+    }
+
+    /// <summary>
+    /// A command takes the lowest request id no unread reader holds, from 2,
+    /// as SqlClient's MARS logical sessions number them, and
+    /// <c>sys.dm_exec_requests</c> lists a reader whose batch is still
+    /// running as suspended on <c>ASYNC_NETWORK_IO</c>, with its own text
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Requests_AreNumbered_AndARunningReaderIsListedSuspended()
+    {
+        using var connection = Seeded();
+        const string List = "select string_agg(concat(r.request_id, ':', r.status, ':', r.command, ':', isnull(r.wait_type, '-'), ':', left(t.text, 5)), ',') within group (order by r.request_id) from sys.dm_exec_requests r cross apply sys.dm_exec_sql_text(r.sql_handle) t where r.session_id = @@spid";
+
+        AreEqual(2, Scalar(connection, "select current_request_id()"));
+        using var first = connection.CreateCommand("/*A*/select id, pad from big order by id");
+        using var firstReader = first.ExecuteReader();
+        IsTrue(firstReader.Read());
+        using (var second = connection.CreateCommand("/*B*/select id, pad from big order by id"))
+        using (var secondReader = second.ExecuteReader())
+        {
+            IsTrue(secondReader.Read());
+            AreEqual("2:suspended:SELECT:ASYNC_NETWORK_IO:/*A*/,3:suspended:SELECT:ASYNC_NETWORK_IO:/*B*/,4:running:SELECT:-:selec", Scalar(connection, List));
+        }
+        AreEqual("2:suspended:SELECT:ASYNC_NETWORK_IO:/*A*/,3:running:SELECT:-:selec", Scalar(connection, List));
+        IsNull(Drain(firstReader));
+    }
 }

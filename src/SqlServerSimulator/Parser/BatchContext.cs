@@ -636,6 +636,14 @@ internal sealed partial class BatchContext
     public bool ContinueOnError;
 
     /// <summary>
+    /// Whether the top-level dispatch puts a <see cref="SimulatedStatementBoundary"/>
+    /// ahead of each statement but the first, for the TDS endpoint to let the
+    /// session's other MARS requests run there (see
+    /// <see cref="SimulatedDbCommand.YieldsBetweenStatements"/>).
+    /// </summary>
+    public bool YieldsBetweenStatements;
+
+    /// <summary>
     /// Set <see langword="true"/> when a batch-aborting error (a compile /
     /// bind-class name-resolution failure — see
     /// <c>Simulation.IsBatchAbortingNameResolution</c>) fires under

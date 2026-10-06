@@ -80,14 +80,85 @@ internal sealed class SessionRequest(bool inProcess, bool consumed)
     /// <summary>
     /// The session's published settings the request began executing from
     /// (see <see cref="SimulatedDbConnection.PublishedSettings"/>); null for
-    /// a request that hasn't executed, and in process.
+    /// a request that hasn't executed, and for an in-process command that
+    /// can't overlap another.
     /// </summary>
     public SessionSettings? StartSettings;
 
     /// <summary>
-    /// The settings the request's execution left, its own copy of the
-    /// session's, published over the session's once its response has gone
-    /// out; null until then, and in process.
+    /// The request's own copy of the session's settings as it last left the
+    /// connection to another request, or as it finished, which it resumes
+    /// from and publishes over the session's once its response has gone out;
+    /// null until it first leaves.
     /// </summary>
     public SessionSettings? Settings;
+
+    /// <summary>
+    /// The number real reports for the request — <c>CURRENT_REQUEST_ID()</c>,
+    /// <c>sys.dm_exec_requests.request_id</c>: its MARS logical session's id
+    /// plus 1 — 2 for SqlClient's first command — and SqlClient reuses a
+    /// logical session once its reader is closed, so an in-process request
+    /// takes the lowest number from 2 no outstanding one holds (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public int RequestId = 2;
+
+    /// <summary>
+    /// Whether the request's execution state is parked in the fields below
+    /// and <see cref="Settings"/> rather than held by the connection's own
+    /// fields — it has left the connection to another request, or finished
+    /// (see <see cref="SimulatedDbConnection.ResumeRequest"/>).
+    /// </summary>
+    public bool Parked;
+
+    /// <summary>
+    /// The cancellation scope the request's latest execution opened, which a
+    /// cancel targeting the request reaches wherever it is parked; null until
+    /// one opens.
+    /// </summary>
+    public CancellationTokenSource? Cancellation;
+
+    /// <summary>Set once a cancel or a client attention has targeted the request, so a scope it opens afterwards starts cancelled.</summary>
+    public volatile bool AttentionReceived;
+
+    /// <summary>Whether a cancel rather than a <c>CommandTimeout</c> ended the request's execution.</summary>
+    public volatile bool CancelledByUser;
+
+    // The connection's per-execution state while the request is parked:
+    // SimulatedDbConnection's fields of the same names.
+    public long TransactionIdAtExecutionStart;
+    public bool AttentionEndedWrite;
+    public List<Cursor>? CursorsDeclaredInExecution;
+    public string? BatchText;
+    public int StatementStartIndex;
+    public DateTime RequestStartUtc;
+    public string? CurrentCommand;
+
+    /// <summary>
+    /// A transaction the request's batch began by SQL text, while it is
+    /// parked: real scopes it to the batch, so no other request sees it
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public SimulatedDbTransaction? Transaction;
+
+    /// <summary>The transaction another request left open that <see cref="Transaction"/> stands in front of while this one runs.</summary>
+    public SimulatedDbTransaction? DisplacedTransaction;
+
+    /// <summary>
+    /// Cancels the request's execution, wherever it is: one not yet started
+    /// starts cancelled.
+    /// </summary>
+    public void Cancel()
+    {
+        this.CancelledByUser = true;
+        this.AttentionReceived = true;
+        try
+        {
+            Volatile.Read(ref this.Cancellation)?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The execution it targeted has finished.
+        }
+    }
 }

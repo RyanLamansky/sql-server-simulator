@@ -204,6 +204,7 @@ internal sealed partial class TdsSession
         // sp_executesql) leaks temp tables across calls and a re-run
         // `create table #t` collides with Msg 2714.
         command.ScopeTempTablesToBatch = true;
+        command.YieldsBetweenStatements = this.multiplexer is not null;
 
         var outputs = new List<(int Ordinal, TdsRpcParameter Wire, SimulatedDbParameter Bound)>();
         for (var i = 0; i < boundParameters.Count; i++)

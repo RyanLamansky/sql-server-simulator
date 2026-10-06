@@ -1174,10 +1174,6 @@ public sealed partial class Simulation
         SimulatedDbTransaction? carriedOnDoomed = null;
         if (command.Connection is { } requester)
         {
-            var session = requester.Session;
-            session.RequestStartUtc = DateTime.UtcNow;
-            session.BatchText = command.CommandText;
-            session.StatementStartIndex = 0;
             requester.BeginCommand();
             // An in-process command is a request of its own from here until
             // its reader passes the batch's end, and runs only between the
@@ -1194,9 +1190,19 @@ public sealed partial class Simulation
         try
         {
             if (request is not null)
+                command.Connection!.ResumeRequest(request);
+            // What sys.dm_exec_requests reports, the running request's own once
+            // it has taken the connection from any other.
+            if (command.Connection is { } running)
             {
-                command.Connection!.ExecutingRequest = request;
-                if (command.Connection.RefuseNewRequest() is { } refused)
+                var session = running.Session;
+                session.RequestStartUtc = DateTime.UtcNow;
+                session.BatchText = command.CommandText;
+                session.StatementStartIndex = 0;
+            }
+            if (request is not null)
+            {
+                if (command.Connection!.RefuseNewRequest() is { } refused)
                 {
                     refused.ResolveDiagnostics(1, 0, "");
                     command.Connection.ExecutingRequest = null;
@@ -1222,17 +1228,22 @@ public sealed partial class Simulation
                     if (request is not null)
                     {
                         request.HoldsSession = false;
-                        command.Connection!.ExecutingRequest = request;
-                        // Another request ended the transaction this one works
-                        // on: real carries on in it doomed, where reads run,
-                        // a write is Msg 3930 and the batch's end rolls back
-                        // with Msg 3998 (probed 2026-10-06 against SQL Server
-                        // 2025).
-                        if (request.TransactionEndedUnder && carriedOnDoomed is null && command.Connection.CurrentTransaction is null)
-                        {
-                            carriedOnDoomed = command.Connection.StartTransaction(IsolationLevel.Unspecified);
-                            carriedOnDoomed.Doomed = true;
-                        }
+                        // Other commands may have run while the consumer held
+                        // the outcome, each on its own copy of the session's
+                        // state.
+                        command.Connection!.ResumeRequest(request);
+                    }
+                    // Another request ended the transaction this one works on:
+                    // real carries on in it doomed, where reads run, a write
+                    // is Msg 3930 and the batch's end rolls back with
+                    // Msg 3998 (probed 2026-10-06 against SQL Server 2025). A
+                    // TDS request learns of it as it resumes between
+                    // statements.
+                    if ((request ?? command.Connection?.ExecutingRequest) is { TransactionEndedUnder: true }
+                        && carriedOnDoomed is null && command.Connection!.CurrentTransaction is null)
+                    {
+                        carriedOnDoomed = command.Connection.StartUnannouncedTransaction();
+                        carriedOnDoomed.Doomed = true;
                     }
                 }
             }
@@ -1269,6 +1280,15 @@ public sealed partial class Simulation
         }
         finally
         {
+            // A consumer disposing the stream mid-batch runs what follows on
+            // this request's own state.
+            if (request is { Finished: false })
+                command.Connection!.ResumeRequest(request);
+            // A cancelled execution has unwound by here, whichever safe point
+            // saw the cancellation; what it leaves behind is the same for
+            // every front door.
+            if (command.Connection is { ExecutionCancellationRequested: true } cancelled)
+                cancelled.SettleCancelledExecution();
             if (request is not null)
             {
                 command.Connection!.ExecutingRequest = null;
@@ -1277,11 +1297,6 @@ public sealed partial class Simulation
             _ = Interlocked.Decrement(ref this.statementsInFlight);
             if (command.Connection is { } finished)
                 finished.EndCommand();
-            // A cancelled execution has unwound by here, whichever safe point
-            // saw the cancellation; what it leaves behind is the same for
-            // every front door.
-            if (command.Connection is { ExecutionCancellationRequested: true } cancelled)
-                cancelled.SettleCancelledExecution();
             // An error that ends the session closes the connection once the
             // command has delivered it.
             if (command.Connection is { SessionEnding: true } ended)
@@ -1386,6 +1401,7 @@ public sealed partial class Simulation
             ContinueOnError = continueOnError,
             ForceTempTableScope = command.ScopeTempTablesToBatch,
             ApiServerCursor = command.ApiServerCursor,
+            YieldsBetweenStatements = command.YieldsBetweenStatements,
         };
         // Stash the prepared cache-key components on the batch so the SELECT
         // arm can promote inline (the iterator's post-foreach code is
@@ -1980,6 +1996,14 @@ public sealed partial class Simulation
                 var statementStartIndex = statementToken.StartIndex;
                 if (!nestedBlock && batch.Connection.StatisticsTime)
                     batch.LastTopLevelStatementLine = IsBeginTry(context) ? -1 : statementToken.LineNumber;
+                if (!nestedBlock && batch.YieldsBetweenStatements && batch.HasDispatchedStatement && !batch.IsSkipping)
+                {
+                    yield return new SimulatedStatementBoundary();
+                    // The request may have been cancelled while it waited on
+                    // its client there.
+                    if (batch.CancelledAtStatementBoundary())
+                        yield break;
+                }
                 foreach (var outcome in DispatchOneStatement(batch, requireSemicolonBeforeCte, atBatchStart))
                     yield return outcome;
                 requireSemicolonBeforeCte = true;

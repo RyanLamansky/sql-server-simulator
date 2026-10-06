@@ -38,11 +38,19 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
 
     /// <summary>
     /// When set, non-final flushes accumulate rather than send — the MARS path
-    /// buffers a session's whole response under the connection's execution lock
-    /// and sends it only on the final flush, once the lock is released, so a
+    /// buffers what a request's statement produces under the connection's
+    /// execution gate and sends it between statements
+    /// (<see cref="FlushCompletePacketsAsync"/>) or on the final flush, so a
     /// window-blocked send never stalls another session's execution.
     /// </summary>
     public bool DeferFlush;
+
+    /// <summary>
+    /// The MARS logical session this writer's packets ride, whose send window
+    /// says whether what is buffered can go out without waiting on the
+    /// client; null outside MARS.
+    /// </summary>
+    public SmpSession? MarsSession;
 
     /// <summary>
     /// The client negotiated vector support at login, so a float32
@@ -126,13 +134,85 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
                 request.HoldsSession = false;
         }
 
-        if (offset > 0)
+        this.Compact(offset);
+    }
+
+    /// <summary>
+    /// How many whole packets are buffered ahead of the response's last DONE,
+    /// which stays unsent while it may yet be reopened or taken back.
+    /// </summary>
+    public int CompletePacketsPending()
+    {
+        var capacity = this.transport.PacketSize - Tds.HeaderSize;
+        var holdFrom = this.FinalDoneBuffered ? this.finalDoneAt : this.length;
+        // The response's end needs at least one byte for its last packet.
+        return Math.Min(holdFrom, this.length - 1) / capacity;
+    }
+
+    /// <summary>
+    /// Sends the whole packets buffered ahead of the response's last DONE
+    /// (see <see cref="CompletePacketsPending"/>), waiting on the client's
+    /// window as each goes: what a MARS request's finished statements
+    /// produced, sent before its next statement runs.
+    /// </summary>
+    public async ValueTask FlushCompletePacketsAsync(CancellationToken cancellationToken)
+    {
+        var capacity = this.transport.PacketSize - Tds.HeaderSize;
+        var offset = 0;
+        for (var packets = this.CompletePacketsPending(); packets > 0; packets--)
+            offset = await this.SendPacketAsync(offset, capacity, cancellationToken).ConfigureAwait(false);
+        this.Compact(offset);
+        // What still holds the session is what hasn't gone yet.
+        if (this.Request is { } request)
+            request.HoldsSession = this.sessionHolds.Count > 0;
+    }
+
+    /// <summary>Drops the <paramref name="sent"/> bytes from the front of the buffer, moving every position kept into it.</summary>
+    private void Compact(int sent)
+    {
+        if (sent == 0)
+            return;
+        Buffer.BlockCopy(this.buffer, sent, this.buffer, 0, this.length - sent);
+        this.length -= sent;
+        this.trailingDoneAt -= sent;
+        this.finalDoneAt -= sent;
+        this.resultStart -= sent;
+        for (var i = this.sessionHolds.Count - 1; i >= 0; i--)
         {
-            Buffer.BlockCopy(this.buffer, offset, this.buffer, 0, this.length - offset);
-            this.length -= offset;
-            this.trailingDoneAt -= offset;
-            this.finalDoneAt -= offset;
+            var (start, end) = this.sessionHolds[i];
+            if (end <= sent)
+                this.sessionHolds.RemoveAt(i);
+            else
+                this.sessionHolds[i] = (Math.Max(start - sent, 0), end - sent);
         }
+    }
+
+    /// <summary>
+    /// Clears the more bit of the response's last DONE while it is still the
+    /// last thing buffered — a DONE written while another statement was still
+    /// to run, which produced nothing — first writing the
+    /// <paramref name="ahead"/> tokens a final DONE follows; false when the
+    /// buffer doesn't end in a DONE carrying the bit.
+    /// </summary>
+    public bool TryCloseFinalDone(Action<TdsTokenWriter> ahead)
+    {
+        if (!this.FinalDoneBuffered)
+            return false;
+        var at = this.finalDoneAt;
+        var status = BinaryPrimitives.ReadUInt16LittleEndian(this.buffer.AsSpan(at + 1));
+        if ((status & Tds.DoneMore) == 0)
+            return false;
+        var done = this.buffer.AsSpan(at, DoneTokenLength).ToArray();
+        var trailing = this.trailingDoneAt == at;
+        this.length = at;
+        this.finalDoneAt = this.trailingDoneAt = -1;
+        ahead(this);
+        BinaryPrimitives.WriteUInt16LittleEndian(done.AsSpan(1), (ushort)(status & ~Tds.DoneMore));
+        if (trailing)
+            this.trailingDoneAt = this.length;
+        this.finalDoneAt = this.length;
+        this.WriteBytes(done);
+        return true;
     }
 
     /// <summary>

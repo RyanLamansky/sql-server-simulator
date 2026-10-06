@@ -137,9 +137,13 @@ Real's MARS rules apply, with each command a request (`SessionRequest`) that rea
 
 A transaction-manager stand-in — `BeginTransaction`, an API `Commit` or `Save` — reports its refusal at line 1, as real reports a transaction-manager request's.
 
+Each command works on its own copy of the session's per-request state, as a wire request does — its settings, `@@ROWCOUNT`, `@@ERROR`, identity values, cancellation scope and a transaction its batch began — so a reader's later statements read their own whatever another command did between, and a command run meanwhile starts from what the last finished one left (`SimulatedDbConnection.ResumeRequest`, swapping only once commands overlap).
+A command takes the lowest request id from 2 that no unread reader holds, as SqlClient numbers its MARS sessions, and `sys.dm_exec_requests` lists a reader whose batch is still running as suspended on `ASYNC_NETWORK_IO`.
+`Cancel` targets the command's own request, so a reader cancelled while it reads a SELECT runs none of the statements after it, however many commands ran meanwhile.
+
 **Not modeled yet** (beside the wire's, which apply here too):
-- Requests share the session's settings rather than each working on a copy: a reader's later statements see another command's `SET`, `USE` or `CONTEXT_INFO`, and `@@ERROR` reads its error.
-- A transaction a reader's batch began is visible to other commands, and Msg 3997 rolls it back only when another reader was outstanding as its batch ended, where a MARS batch's always rolls back.
+- A transaction a batch began and left open is rolled back with Msg 3997 only when another reader was outstanding as its batch ended, where a MARS batch's always rolls back.
+- `ChangeDatabase` changes the database of a reader whose batch is still running, where SqlClient sends it as a request of its own, which leaves the reader's copy alone.
 
 ## Divergence
 

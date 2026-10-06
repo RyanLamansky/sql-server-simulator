@@ -1441,7 +1441,8 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// Rows for <c>sys.dm_exec_requests</c> — the querying session's, then each
-    /// other session mid-statement or blocked, in session order.
+    /// other session mid-statement or blocked, in session order, each with its
+    /// MARS requests parked between statements beside it in request order.
     /// </summary>
     private static IEnumerable<SqlValue[]> EnumerateSysDmExecRequests(Parser.BatchContext batch, Database database)
     {
@@ -1450,90 +1451,141 @@ internal static partial class BuiltInResources
         var connections = simulation.SnapshotConnections();
         Array.Sort(connections, static (a, b) => a.Spid.CompareTo(b.Spid));
         var now = DateTime.UtcNow;
-        var zero = SqlValue.FromInt32(0);
-        var zeroBig = SqlValue.FromInt64(0);
-        var bitOn = SqlValue.FromBoolean(true);
-        var bitOff = SqlValue.FromBoolean(false);
-        var nullBinary = SqlValue.Null(SqlType.Varbinary);
-        var nullInt = SqlValue.Null(SqlType.Int32);
-        var nullGuid = SqlValue.Null(SqlType.UniqueIdentifier);
-        var emptyName = SqlValue.FromNVarchar(string.Empty);
         foreach (var connection in connections)
         {
             var session = connection.Session;
             var isSelf = ReferenceEquals(connection, batch.Connection);
             var lockWait = connection.WaitingOnResource is { } resource && connection.WaitingForMode is { } mode ? (resource, mode) : ((LockResource, LockMode)?)null;
             var inWaitFor = session.InWaitFor;
-            if (!isSelf && session.CurrentExecutingThreadId is null && lockWait is null)
-                continue;
-
-            var waitType = lockWait is var (_, waitMode) ? LockDmvs.WaitType(waitMode)
-                : inWaitFor ? "WAITFOR"
-                : null;
-            var blocker = lockWait is var (waitResource, _) ? LockDmvs.FindFirstBlocker(waitResource, connection) ?? 0 : 0;
-            var waitMillis = waitType is null ? 0 : (int)Math.Min(int.MaxValue, Math.Max(0, Environment.TickCount64 - session.WaitStartedTicks));
-            var start = session.RequestStartUtc == default ? connection.LoginTimeUtc : session.RequestStartUtc;
-            yield return [
-                SqlValue.FromInt16((short)connection.Spid),
-                zero,
-                SqlValue.FromDateTime(start),
-                SqlValue.FromNVarchar(isSelf ? "running" : waitType is not null ? "suspended" : "runnable"),
-                SqlValue.FromNVarchar(session.CurrentCommand),
-                SqlHandleValue(session.BatchText),
-                session.BatchText is null ? nullInt : SqlValue.FromInt32(session.StatementStartIndex * 2),
-                session.BatchText is null ? nullInt : SqlValue.FromInt32(-1),
-                nullBinary,
-                SqlValue.FromInt16(SessionDatabaseId(simulation, connection)),
-                SqlValue.FromInt32(connection.Security.Effective.DatabasePrincipalId),
-                SqlValue.FromGuid(connection.Transport.ConnectionId),
-                SqlValue.FromInt16((short)blocker),
-                waitType is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(waitType),
-                SqlValue.FromInt32(waitMillis),
-                waitType is null ? emptyName : SqlValue.FromNVarchar(waitType),
-                lockWait is var (describedResource, _) ? SqlValue.FromNVarchar(LockDmvs.DescribeResource(simulation, describedResource)) : emptyName,
-                SqlValue.FromInt32(connection.CurrentTransaction?.TranCount ?? 0),
-                SqlValue.FromInt32(1),
-                zeroBig,
-                SqlValue.FromVarbinary(connection.ContextInfo ?? []),
-                SqlValue.FromSingle(0),
-                zeroBig,
-                zero,
-                SqlValue.FromInt32((int)Math.Min(int.MaxValue, Math.Max(0, (now - start).TotalMilliseconds))),
-                SqlValue.FromInt32(1),
-                nullBinary,
-                zeroBig, zeroBig, zeroBig,
-                SqlValue.FromInt32(connection.TextSize),
-                SqlValue.FromNVarchar(connection.Language.Name),
-                SqlValue.FromNVarchar(connection.DateFormat.Name),
-                SqlValue.FromInt16(connection.DateFirst),
-                connection.QuotedIdentifiers ? bitOn : bitOff,
-                connection.Arithabort ? bitOn : bitOff,
-                connection.AnsiNullDefaultOn ? bitOn : bitOff,
-                AnsiDefaultsAllOn(new SimulatedDbConnection.SessionOptionScope(connection), connection.QuotedIdentifiers) ? bitOn : bitOff,
-                connection.AnsiWarnings ? bitOn : bitOff,
-                connection.AnsiPadding ? bitOn : bitOff,
-                connection.AnsiNulls ? bitOn : bitOff,
-                connection.ConcatNullYieldsNull ? bitOn : bitOff,
-                SqlValue.FromInt16(SessionIsolationLevelId(connection.SessionIsolationLevel)),
-                SqlValue.FromInt32(connection.LockTimeoutMillis),
-                SqlValue.FromInt32(connection.DeadlockPriority),
-                SqlValue.FromInt64(connection.LastStatementRowCount),
-                SqlValue.FromInt32(connection.LastErrorNumber),
-                SqlValue.FromInt32(connection.NestingLevel),
-                zero,
-                bitOff,
-                SqlValue.FromInt32(2),
-                SqlValue.Null(SqlType.GetBinary(8)), SqlValue.Null(SqlType.GetBinary(8)), nullBinary, SqlValue.Null(SqlType.BigInt),
-                SqlValue.FromInt32(1),
-                nullInt,
-                nullGuid,
-                bitOff,
-                nullBinary,
-                zeroBig,
-                SqlValue.FromGuid(Guid.Empty),
-                SqlValue.Null(SqlType.NVarchar),
-            ];
+            // A MARS request parked between its statements while another runs
+            // waits on its client to read what it sent (probed 2026-10-06
+            // against SQL Server 2025).
+            var parked = connection.ParkedRequests();
+            Array.Sort(parked, static (a, b) => a.RequestId.CompareTo(b.RequestId));
+            var running = isSelf || session.CurrentExecutingThreadId is not null || lockWait is not null;
+            var runningId = connection.ExecutingRequest?.RequestId ?? 0;
+            var next = 0;
+            foreach (var request in parked)
+            {
+                if (running && request.RequestId > runningId)
+                    break;
+                yield return RequestRow(simulation, connection, now, request);
+                next++;
+            }
+            if (running)
+            {
+                var waitType = lockWait is var (_, waitMode) ? LockDmvs.WaitType(waitMode)
+                    : inWaitFor ? "WAITFOR"
+                    : null;
+                var blocker = lockWait is var (waitResource, _) ? LockDmvs.FindFirstBlocker(waitResource, connection) ?? 0 : 0;
+                var waitMillis = waitType is null ? 0 : (int)Math.Min(int.MaxValue, Math.Max(0, Environment.TickCount64 - session.WaitStartedTicks));
+                var start = session.RequestStartUtc == default ? connection.LoginTimeUtc : session.RequestStartUtc;
+                yield return RequestRow(
+                    simulation, connection, now, runningId, start,
+                    isSelf ? "running" : waitType is not null ? "suspended" : "runnable",
+                    session.CurrentCommand, session.BatchText, session.StatementStartIndex,
+                    waitType, waitMillis, blocker,
+                    lockWait is var (describedResource, _) ? LockDmvs.DescribeResource(simulation, describedResource) : "",
+                    SessionSettings.Capture(connection), connection.CurrentTransaction?.TranCount ?? 0, connection.NestingLevel);
+            }
+            for (; next < parked.Length; next++)
+                yield return RequestRow(simulation, connection, now, parked[next]);
         }
+    }
+
+    /// <summary>The <c>sys.dm_exec_requests</c> row of a MARS request parked between its statements.</summary>
+    private static SqlValue[] RequestRow(Simulation simulation, SimulatedDbConnection connection, DateTime now, SessionRequest request) =>
+        RequestRow(
+            simulation, connection, now, request.RequestId, request.RequestStartUtc == default ? connection.LoginTimeUtc : request.RequestStartUtc,
+            "suspended", request.CurrentCommand ?? "SELECT", request.BatchText, request.StatementStartIndex,
+            "ASYNC_NETWORK_IO", 0, 0, "", request.Settings ?? SessionSettings.Capture(connection), request.Transaction?.TranCount ?? 0, 0);
+
+    /// <summary>One <c>sys.dm_exec_requests</c> row, the request's options read from <paramref name="settings"/>.</summary>
+    private static SqlValue[] RequestRow(
+        Simulation simulation,
+        SimulatedDbConnection connection,
+        DateTime now,
+        int requestId,
+        DateTime start,
+        string status,
+        string command,
+        string? batchText,
+        int statementStart,
+        string? waitType,
+        int waitMillis,
+        int blocker,
+        string waitResource,
+        SessionSettings settings,
+        int tranCount,
+        int nestingLevel)
+    {
+        var zero = SqlValue.FromInt32(0);
+        var zeroBig = SqlValue.FromInt64(0);
+        var bitOn = SqlValue.FromBoolean(true);
+        var bitOff = SqlValue.FromBoolean(false);
+        var nullBinary = SqlValue.Null(SqlType.Varbinary);
+        var nullInt = SqlValue.Null(SqlType.Int32);
+        var options = settings.Options;
+        return [
+            SqlValue.FromInt16((short)connection.Spid),
+            SqlValue.FromInt32(requestId),
+            SqlValue.FromDateTime(start),
+            SqlValue.FromNVarchar(status),
+            SqlValue.FromNVarchar(command),
+            SqlHandleValue(batchText),
+            batchText is null ? nullInt : SqlValue.FromInt32(statementStart * 2),
+            batchText is null ? nullInt : SqlValue.FromInt32(-1),
+            nullBinary,
+            SqlValue.FromInt16(SessionDatabaseId(simulation, settings.Database)),
+            SqlValue.FromInt32(connection.Security.Effective.DatabasePrincipalId),
+            SqlValue.FromGuid(connection.Transport.ConnectionId),
+            SqlValue.FromInt16((short)blocker),
+            waitType is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(waitType),
+            SqlValue.FromInt32(waitMillis),
+            SqlValue.FromNVarchar(waitType ?? ""),
+            SqlValue.FromNVarchar(waitResource),
+            SqlValue.FromInt32(tranCount),
+            SqlValue.FromInt32(1),
+            zeroBig,
+            SqlValue.FromVarbinary(settings.ContextInfo ?? []),
+            SqlValue.FromSingle(0),
+            zeroBig,
+            zero,
+            SqlValue.FromInt32((int)Math.Min(int.MaxValue, Math.Max(0, (now - start).TotalMilliseconds))),
+            SqlValue.FromInt32(1),
+            nullBinary,
+            zeroBig, zeroBig, zeroBig,
+            SqlValue.FromInt32(settings.TextSize),
+            SqlValue.FromNVarchar(options.Language.Name),
+            SqlValue.FromNVarchar(options.DateFormat.Name),
+            SqlValue.FromInt16(options.DateFirst),
+            settings.QuotedIdentifiers ? bitOn : bitOff,
+            options.Arithabort ? bitOn : bitOff,
+            options.AnsiNullDefaultOn ? bitOn : bitOff,
+            AnsiDefaultsAllOn(options, settings.QuotedIdentifiers) ? bitOn : bitOff,
+            options.AnsiWarnings ? bitOn : bitOff,
+            options.AnsiPadding ? bitOn : bitOff,
+            options.AnsiNulls ? bitOn : bitOff,
+            options.ConcatNullYieldsNull ? bitOn : bitOff,
+            SqlValue.FromInt16(SessionIsolationLevelId(options.IsolationLevel)),
+            SqlValue.FromInt32(options.LockTimeoutMillis),
+            SqlValue.FromInt32(options.DeadlockPriority),
+            SqlValue.FromInt64(settings.RowCount),
+            SqlValue.FromInt32(settings.ErrorNumber),
+            SqlValue.FromInt32(nestingLevel),
+            zero,
+            bitOff,
+            SqlValue.FromInt32(2),
+            SqlValue.Null(SqlType.GetBinary(8)), SqlValue.Null(SqlType.GetBinary(8)), nullBinary, SqlValue.Null(SqlType.BigInt),
+            SqlValue.FromInt32(1),
+            nullInt,
+            SqlValue.Null(SqlType.UniqueIdentifier),
+            bitOff,
+            nullBinary,
+            zeroBig,
+            SqlValue.FromGuid(Guid.Empty),
+            SqlValue.Null(SqlType.NVarchar),
+        ];
     }
 
     /// <summary>The <c>database_id</c> of the database a session is pointed at.</summary>

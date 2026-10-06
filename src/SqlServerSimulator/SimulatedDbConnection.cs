@@ -336,13 +336,31 @@ public sealed class SimulatedDbConnection : DbConnection
     private long abandonedTransactionId;
 
     /// <summary>
-    /// The session's settings as its last finished MARS request left them,
-    /// which the next request to execute starts from and
-    /// <c>sys.dm_exec_sessions</c> reports — even while a request has changed
-    /// its own copy (probed 2026-10-06 against SQL Server 2025). Null outside
-    /// MARS, where requests never overlap and work on the session's own.
+    /// The session's settings as its last finished request left them, which
+    /// the next request to execute starts from and <c>sys.dm_exec_sessions</c>
+    /// reports — even while a request has changed its own copy (probed
+    /// 2026-10-06 against SQL Server 2025). Null while the connection's own
+    /// fields are the published settings: outside MARS, and in process until
+    /// a request starts while another is unfinished.
     /// </summary>
     internal SessionSettings? PublishedSettings;
+
+    /// <summary>
+    /// The request whose execution state the connection's own fields hold —
+    /// the last to run — or null when they hold the session's published
+    /// state. A request leaves its state there when it stops running, and
+    /// only parks it once another needs the fields
+    /// (<see cref="ResumeRequest"/>), so requests that never overlap pay
+    /// nothing.
+    /// </summary>
+    private SessionRequest? occupant;
+
+    /// <summary>
+    /// The cancellation scope the connection holds while its occupant's is
+    /// parked with the occupant: never cancelled, and never disposed by the
+    /// scope replacing it.
+    /// </summary>
+    private static readonly CancellationTokenSource ParkedScope = new();
 
     /// <summary>
     /// Counts a request in: a TDS MARS request as it arrives, an in-process
@@ -356,13 +374,34 @@ public sealed class SimulatedDbConnection : DbConnection
         if (inProcess)
             request.EnlistedTransactionId = this.CurrentTransaction?.TransactionId ?? 0;
         lock (this.requestsGate)
+        {
+            // An in-process request takes the lowest number no outstanding one
+            // holds, as SqlClient reuses a closed reader's logical session.
+            if (inProcess && this.pendingRequests.Count != 0)
+            {
+                for (var taken = true; taken;)
+                {
+                    taken = false;
+                    foreach (var pending in this.pendingRequests)
+                    {
+                        if (pending.RequestId == request.RequestId && !pending.Consumed)
+                        {
+                            request.RequestId++;
+                            taken = true;
+                        }
+                    }
+                }
+            }
             this.pendingRequests.Add(request);
+        }
         return request;
     }
 
     /// <summary>
     /// Ends a request's run on the server, its response all gone out,
-    /// publishing a MARS request's settings over the session's.
+    /// publishing its settings over the session's when other requests have
+    /// overlapped it. An in-process request ends while it is running, leaving
+    /// the connection's fields the published settings.
     /// </summary>
     internal void EndSessionRequest(SessionRequest request)
     {
@@ -371,8 +410,36 @@ public sealed class SimulatedDbConnection : DbConnection
             if (request.Finished || !(request.Consumed ? this.pendingRequests.Remove(request) : this.pendingRequests.Contains(request)))
                 return;
             request.Finished = true;
-            if (request is { Settings: { } settings, StartSettings: { } start } && this.PublishedSettings is { } published)
-                this.PublishedSettings = settings.PublishOver(published, start);
+            if (this.PublishedSettings is not { } published)
+            {
+                if (ReferenceEquals(this.occupant, request))
+                    this.occupant = null;
+                // Nothing overlapped the request, so nothing else holds what
+                // it started from.
+                if (request.StartSettings is { } unshared)
+                {
+                    request.StartSettings = null;
+                    this.spareStartSettings = unshared;
+                }
+                return;
+            }
+            var running = ReferenceEquals(this.occupant, request) && !request.Parked;
+            if ((running ? SessionSettings.Capture(this) : request.Settings) is { } settings)
+                this.PublishedSettings = published = settings.PublishOver(published, request.StartSettings ?? published);
+            if (!running)
+                return;
+            published.ApplyTo(this);
+            this.occupant = null;
+            if (!request.InProcess)
+                return;
+            foreach (var pending in this.pendingRequests)
+            {
+                if (!pending.Finished)
+                    return;
+            }
+            // Nothing else is unfinished: the connection's fields are the
+            // published settings again.
+            this.PublishedSettings = null;
         }
     }
 
@@ -388,17 +455,66 @@ public sealed class SimulatedDbConnection : DbConnection
     }
 
     /// <summary>
-    /// Begins executing a TDS MARS request: it works on a copy of the
-    /// session's published settings and enlists in the open transaction.
+    /// An in-process reader's start settings that no other command came to
+    /// need, kept for the next reader to refill rather than allocate.
     /// </summary>
-    internal void EnterRequest(SessionRequest request)
+    private SessionSettings? spareStartSettings;
+
+    /// <summary>The connection's settings now, in the spare instance when there is one.</summary>
+    private SessionSettings TakeStartSettings()
+    {
+        if (this.spareStartSettings is not { } spare)
+            return SessionSettings.Capture(this);
+        this.spareStartSettings = null;
+        spare.Refill(this);
+        return spare;
+    }
+
+    /// <summary>
+    /// Makes <paramref name="request"/> the one executing: the request that
+    /// last ran parks its state, and this one takes the connection's fields
+    /// back from where it parked its own, or, executing for the first time,
+    /// starts from the session's published settings and enlists in the open
+    /// transaction. Each request so works on its own copy of the session's
+    /// settings, <c>@@ROWCOUNT</c>, <c>@@ERROR</c>, cancellation scope and
+    /// the transaction its batch began, between its statements as another
+    /// runs (probed 2026-10-06 against SQL Server 2025). Called before each
+    /// stretch of a request's execution — under the TDS endpoint's execution
+    /// gate, or as an in-process command's outcome stream advances.
+    /// </summary>
+    internal void ResumeRequest(SessionRequest request)
     {
         this.ExecutingRequest = request;
-        if (Volatile.Read(ref this.PublishedSettings) is { } published)
+        if (ReferenceEquals(this.occupant, request))
         {
-            request.StartSettings = published;
-            published.ApplyTo(this);
+            // Parked with nothing run since: its settings are still the
+            // connection's.
+            if (request.Parked)
+            {
+                request.Parked = false;
+                this.RestoreExecution(request);
+            }
+            return;
         }
+        var prior = this.occupant;
+        if (prior is { Parked: false, Finished: false })
+            this.ParkRequest(prior);
+        this.occupant = request;
+        // The first overlap in process: the request that was running began
+        // from the published settings, which the connection's fields held.
+        var published = this.PublishedSettings ??= prior?.StartSettings;
+        if (request.Parked)
+        {
+            request.Parked = false;
+            (request.Settings ?? published)?.ApplyTo(this);
+            this.RestoreExecution(request);
+            return;
+        }
+        if (prior is not null)
+            published?.ApplyTo(this);
+        // An in-process reader may still be running when another command
+        // starts, which then starts from what this one started from.
+        request.StartSettings = published ?? (request.Consumed ? null : this.TakeStartSettings());
         request.EnlistedTransactionId = this.CurrentTransaction?.TransactionId ?? 0;
     }
 
@@ -412,16 +528,97 @@ public sealed class SimulatedDbConnection : DbConnection
         lock (this.requestsGate)
             this.pendingRequests.Add(request);
         this.ExecutingRequest = request;
+        this.occupant = request;
         request.StartSettings = this.PublishedSettings;
         request.EnlistedTransactionId = 0;
     }
 
-    /// <summary>Ends an <see cref="EnterRequest"/>, keeping the settings the request leaves as its own.</summary>
-    internal void LeaveRequest(SessionRequest request)
+    /// <summary>
+    /// Stops executing <paramref name="request"/> for another to run, parking
+    /// its state at once: the TDS endpoint's request stepping out of the
+    /// execution gate, whose state no other thread may read off the
+    /// connection's fields later.
+    /// </summary>
+    internal void SuspendRequest(SessionRequest request, bool finished = false)
     {
-        if (request.StartSettings is not null)
-            request.Settings = SessionSettings.Capture(this);
+        if (ReferenceEquals(this.occupant, request) && !request.Parked)
+            this.ParkRequest(request, finished);
         this.ExecutingRequest = null;
+    }
+
+    /// <summary>
+    /// Moves the connection's per-request state into <paramref name="request"/>.
+    /// A request that has <paramref name="finished"/> leaves the session any
+    /// transaction its batch left open, as a cancelled one does.
+    /// </summary>
+    private void ParkRequest(SessionRequest request, bool finished = false)
+    {
+        request.Settings = SessionSettings.Capture(this);
+        request.CancelledByUser |= this.executionCancelledByUser;
+        request.TransactionIdAtExecutionStart = this.TransactionIdAtExecutionStart;
+        request.AttentionEndedWrite = this.AttentionEndedWrite;
+        request.CursorsDeclaredInExecution = this.CursorsDeclaredInExecution;
+        var session = this.Session;
+        request.BatchText = session.BatchText;
+        request.StatementStartIndex = session.StatementStartIndex;
+        request.RequestStartUtc = session.RequestStartUtc;
+        request.CurrentCommand = session.CurrentCommand;
+        // A transaction the request's batch began goes with it; a
+        // transaction-manager request runs no batch.
+        if (!finished && request.Cancellation is not null && this.CurrentTransaction is { } open && open.TransactionId > this.TransactionIdAtExecutionStart)
+        {
+            request.Transaction = open;
+            this.CurrentTransaction = request.DisplacedTransaction;
+        }
+        else
+        {
+            request.Transaction = null;
+        }
+        request.DisplacedTransaction = null;
+        Volatile.Write(ref this.executionCancellation, ParkedScope);
+        request.Parked = true;
+    }
+
+    /// <summary>Gives the connection back the per-request state <see cref="ParkRequest"/> took.</summary>
+    private void RestoreExecution(SessionRequest request)
+    {
+        this.executionCancelledByUser = request.CancelledByUser;
+        this.TransactionIdAtExecutionStart = request.TransactionIdAtExecutionStart;
+        this.AttentionEndedWrite = request.AttentionEndedWrite;
+        this.CursorsDeclaredInExecution = request.CursorsDeclaredInExecution;
+        var session = this.Session;
+        session.BatchText = request.BatchText;
+        session.StatementStartIndex = request.StatementStartIndex;
+        session.RequestStartUtc = request.RequestStartUtc;
+        session.CurrentCommand = request.CurrentCommand ?? session.CurrentCommand;
+        if (request.Transaction is { Ended: false } own)
+        {
+            request.DisplacedTransaction = this.CurrentTransaction;
+            this.CurrentTransaction = own;
+        }
+        request.Transaction = null;
+        Volatile.Write(ref this.executionCancellation, request.Cancellation ?? ParkedScope);
+    }
+
+    /// <summary>
+    /// The requests of this session that are running on the server but parked
+    /// while another runs, with the state <c>sys.dm_exec_requests</c> reports
+    /// for each.
+    /// </summary>
+    internal SessionRequest[] ParkedRequests()
+    {
+        if (this.pendingRequests.Count == 0)
+            return [];
+        lock (this.requestsGate)
+        {
+            List<SessionRequest>? parked = null;
+            foreach (var request in this.pendingRequests)
+            {
+                if (request is { Finished: false, Parked: true } && request != this.ExecutingRequest)
+                    (parked ??= []).Add(request);
+            }
+            return parked is null ? [] : [.. parked];
+        }
     }
 
     /// <summary>
@@ -549,9 +746,28 @@ public sealed class SimulatedDbConnection : DbConnection
         return error;
     }
 
+    /// <summary>
+    /// Rolls back the session's open transaction and each one a parked
+    /// request's batch began, as ending the session does.
+    /// </summary>
+    private void RollBackTransactions()
+    {
+        this.CurrentTransaction?.EndRollback();
+        SessionRequest[] pending;
+        lock (this.requestsGate)
+            pending = [.. this.pendingRequests];
+        foreach (var request in pending)
+        {
+            if (request.Transaction is { Ended: false } own)
+                own.EndRollback();
+            request.Transaction = null;
+        }
+    }
+
     /// <summary>Forgets every pending request, as closing the session does.</summary>
     private void ForgetRequests()
     {
+        this.RollBackTransactions();
         lock (this.requestsGate)
             this.pendingRequests.Clear();
         this.ExecutingRequest = null;
@@ -779,8 +995,9 @@ public sealed class SimulatedDbConnection : DbConnection
     /// trigger it. Connection-scoped rather than command-scoped so a proc /
     /// UDF / dynamic-SQL body (which shares the connection but wraps a fresh
     /// body command) inherits the same cancellation signal. Only one command
-    /// executes at a time per connection — MARS requests take turns — so a
-    /// single source suffices.
+    /// executes at a time per connection; MARS requests take turns, each
+    /// parking its own source while another runs
+    /// (<see cref="SessionRequest.Cancellation"/>).
     /// </summary>
     private CancellationTokenSource executionCancellation = new();
 
@@ -810,13 +1027,21 @@ public sealed class SimulatedDbConnection : DbConnection
         this.AttentionEndedWrite = false;
         this.CursorsDeclaredInExecution = null;
         var previous = Interlocked.Exchange(ref this.executionCancellation, fresh);
-        previous.Dispose();
+        // A request's scope stays its own, for a cancel to reach it while it
+        // is parked.
+        var request = this.ExecutingRequest;
+        if (request is not null)
+            Volatile.Write(ref request.Cancellation, fresh);
+        if (!ReferenceEquals(previous, ParkedScope))
+            previous.Dispose();
         // A KILL landing after the command was counted in but before this
         // scope existed cancelled the previous source; it ends this one. So
         // does an attention that targeted the running wire request before its
         // execution reached here — SqlClient sends one attention per cancel.
         if (this.Killed || (this.requestSequence != 0 && Volatile.Read(ref this.attentionRequest) == Volatile.Read(ref this.requestSequence)))
             this.CancelExecution();
+        else if (request is { AttentionReceived: true })
+            request.Cancel();
     }
 
     /// <summary>
@@ -829,8 +1054,9 @@ public sealed class SimulatedDbConnection : DbConnection
     private long attentionRequest;
 
     /// <summary>
-    /// Numbers a TDS request before anything can cancel it. An attention can
-    /// arrive before the request's execution opens its scope in
+    /// Numbers a non-MARS TDS request before anything can cancel it; a MARS
+    /// request is cancelled through its own <see cref="SessionRequest"/>. An
+    /// attention can arrive before the request's execution opens its scope in
     /// <see cref="BeginExecutionScope"/>; naming the request lets that scope
     /// honor it, where cancelling whatever source was current then hit the
     /// previous execution's and lost it.
@@ -865,7 +1091,7 @@ public sealed class SimulatedDbConnection : DbConnection
     /// between the Msg -2 and Msg 0 surfaces.
     /// </summary>
     internal bool ExecutionTimedOut =>
-        Volatile.Read(ref this.executionCancellation).IsCancellationRequested && !this.executionCancelledByUser;
+        Volatile.Read(ref this.executionCancellation).IsCancellationRequested && !this.executionCancelledByUser && this.ExecutingRequest is not { CancelledByUser: true };
 
     /// <summary>The current execution's cancellation token; the engine's safe-point poll target.</summary>
     internal CancellationToken ExecutionCancellationToken => Volatile.Read(ref this.executionCancellation).Token;
@@ -956,8 +1182,11 @@ public sealed class SimulatedDbConnection : DbConnection
     {
         try
         {
+            var current = Volatile.Read(ref this.executionCancellation);
+            if (ReferenceEquals(current, ParkedScope))
+                return;
             this.executionCancelledByUser = true;
-            Volatile.Read(ref this.executionCancellation).Cancel();
+            current.Cancel();
         }
         catch (ObjectDisposedException)
         {
@@ -1047,9 +1276,14 @@ public sealed class SimulatedDbConnection : DbConnection
             {
                 this.SessionEnding = true;
                 this.CancelExecution();
+                lock (this.requestsGate)
+                {
+                    foreach (var request in this.pendingRequests)
+                        request.Cancel();
+                }
                 return;
             }
-            this.CurrentTransaction?.EndRollback();
+            this.RollBackTransactions();
             this.ReleaseSessionAppLocks();
         }
         this.AbortTransport?.Invoke();
@@ -1319,8 +1553,11 @@ public sealed class SimulatedDbConnection : DbConnection
     internal int TransactionEventsRecorded;
 
     /// <summary>Records a transaction event for the TDS endpoint to announce; a no-op in process.</summary>
-    internal void RecordTransactionEvent(TransactionEvent transactionEvent, SimulatedDbTransaction transaction) =>
-        this.TransactionEvents?.Add((transactionEvent, transaction, this.TransactionEventsRecorded++));
+    internal void RecordTransactionEvent(TransactionEvent transactionEvent, SimulatedDbTransaction transaction)
+    {
+        if (!transaction.Unannounced)
+            this.TransactionEvents?.Add((transactionEvent, transaction, this.TransactionEventsRecorded++));
+    }
 
     /// <summary>
     /// Backs <c>@@ROWCOUNT</c>. Updated after each statement in
@@ -1886,7 +2123,6 @@ public sealed class SimulatedDbConnection : DbConnection
         lock (this.sessionGate)
         {
             this.ForgetRequests();
-            this.CurrentTransaction?.EndRollback();
             this.ReleaseSessionAppLocks();
             this.state = ConnectionState.Closed;
         }
@@ -1919,10 +2155,11 @@ public sealed class SimulatedDbConnection : DbConnection
             this.Session.Reclaimed = true;
             lock (this.sessionGate)
             {
-                this.CurrentTransaction?.EndRollback();
+                this.RollBackTransactions();
                 this.ReleaseSessionAppLocks();
             }
-            this.executionCancellation.Dispose();
+            if (!ReferenceEquals(this.executionCancellation, ParkedScope))
+                this.executionCancellation.Dispose();
             // Local temp tables auto-drop at session close. Clearing the dict
             // releases each table's Heap and LOB pages for GC; nothing else
             // holds long-lived references to them after the connection ends.
@@ -2062,6 +2299,28 @@ public sealed class SimulatedDbConnection : DbConnection
         if (isolationLevel != IsolationLevel.Unspecified)
             this.SessionIsolationLevel = isolationLevel;
         return this.CurrentTransaction = new SimulatedDbTransaction(this.Simulation, this, isolationLevel);
+    }
+
+    /// <summary>
+    /// Opens the transaction a request carries on in, doomed, after another
+    /// request ended the one it worked in: the client was told of that
+    /// ending, so neither this transaction's beginning nor its end is
+    /// announced.
+    /// </summary>
+    internal SimulatedDbTransaction StartUnannouncedTransaction()
+    {
+        var events = this.TransactionEvents;
+        this.TransactionEvents = null;
+        try
+        {
+            var transaction = this.StartTransaction(IsolationLevel.Unspecified);
+            transaction.Unannounced = true;
+            return transaction;
+        }
+        finally
+        {
+            this.TransactionEvents = events;
+        }
     }
 
     /// <inheritdoc/>

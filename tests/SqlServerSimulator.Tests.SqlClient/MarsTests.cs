@@ -647,4 +647,214 @@ public sealed class MarsTests
             IsNull(await this.DrainAsync(reader));
         }
     }
+
+    /// <summary>
+    /// A request steps aside between its batch's statements while its client
+    /// has yet to read what it sent, so another request runs before the
+    /// statement after a large <c>SELECT</c> — in a plain batch and in a
+    /// parameterized one alike — and that statement sees what the other
+    /// request wrote and created (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task LaterStatement_RunsOnceTheClientHasReadTheSelectBeforeIt(bool parameterized)
+    {
+        var simulation = WideRows();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+
+        const string Later = "; update big set v = 7 where id = 1; select concat((select v from big where id = 2), ',', case when object_id('tempdb..#made') is null then 'none' else 'made' end)";
+        await using var batch = parameterized
+            ? new SqlCommand("select id, pad from big where id > @from order by id" + Later, connection)
+            : new SqlCommand("select id, pad from big order by id" + Later, connection);
+        if (parameterized)
+            _ = batch.Parameters.AddWithValue("@from", 0);
+        await using var reader = await batch.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+
+        await using (var look = new SqlCommand("select v from big where id = 1", connection))
+            AreEqual(0, await look.ExecuteScalarAsync(TestContext.CancellationToken));
+        await using (var write = new SqlCommand("update big set v = 5 where id = 2; create table #made (x int)", connection))
+            _ = await write.ExecuteNonQueryAsync(TestContext.CancellationToken);
+
+        while (await reader.ReadAsync(TestContext.CancellationToken))
+        {
+        }
+        IsTrue(await reader.NextResultAsync(TestContext.CancellationToken));
+        IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+        AreEqual("5,made", reader.GetString(0));
+        IsNull(await this.DrainAsync(reader));
+
+        await using var after = new SqlCommand("select v from big where id = 1", connection);
+        AreEqual(7, await after.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
+    /// A cancel while the client is still reading a <c>SELECT</c> ends its
+    /// batch there: the statements after it never run (probed 2026-10-06
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task CancelWhileReadingASelect_TheStatementsAfterItNeverRun()
+    {
+        var simulation = WideRows();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+
+        await using (var batch = new SqlCommand("select id, pad from big order by id; update big set v = 9 where id = 1", connection))
+        {
+            var reader = await batch.ExecuteReaderAsync(TestContext.CancellationToken);
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            batch.Cancel();
+            try
+            {
+                await reader.DisposeAsync();
+            }
+            catch (SqlException)
+            {
+                // SqlClient may surface its own cancellation as it drains.
+            }
+        }
+
+        await using var after = new SqlCommand("select v from big where id = 1", connection);
+        AreEqual(0, await after.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
+    /// A rollback another request makes of the transaction a reader works in
+    /// leaves that reader's later statements running doomed: they read
+    /// <c>XACT_STATE()</c> -1, and a write is Msg 3930 (probed 2026-10-06
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task RollbackUnderAPendingReader_ItsLaterStatementsRunDoomed()
+    {
+        var simulation = WideRows();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+
+        var transaction = connection.BeginTransaction();
+        await using (var batch = new SqlCommand("select id, pad from big order by id; select concat(xact_state(), ',', @@trancount); update big set v = 1 where id = 1", connection, transaction))
+        await using (var reader = await batch.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            transaction.Rollback();
+            while (await reader.ReadAsync(TestContext.CancellationToken))
+            {
+            }
+            IsTrue(await reader.NextResultAsync(TestContext.CancellationToken));
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            AreEqual("-1,1", reader.GetString(0));
+            var refused = await this.DrainAsync(reader);
+            IsNotNull(refused);
+            AreEqual(3930, refused.Number);
+        }
+
+        await using var after = new SqlCommand("select concat(@@trancount, ',', (select v from big where id = 1))", connection);
+        AreEqual("0,0", await after.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
+    /// <c>@@ROWCOUNT</c>, <c>@@ERROR</c> and the identity functions are each
+    /// request's own, published when it finishes like its settings: a reader's
+    /// later statement reads its own, a request beginning meanwhile reads the
+    /// last finished request's, and once the reader finishes last the session
+    /// reads the reader's (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task RowCountErrorAndIdentity_AreEachRequestsOwn()
+    {
+        var simulation = WideRows();
+        Wire.ExecInProc(simulation, "create table ident (id int identity, x int)");
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+        const string Read = "select concat(@@rowcount, ',', @@error, ',', scope_identity(), ',', @@identity)";
+
+        await using (var batch = new SqlCommand("insert ident (x) values (1); select id, pad from big order by id; " + Read, connection))
+        await using (var reader = await batch.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            await using (var other = new SqlCommand("insert ident (x) values (2), (3); select 1/0", connection))
+                AreEqual(8134, (await ThrowsExactlyAsync<SqlException>(async () => await other.ExecuteNonQueryAsync(TestContext.CancellationToken))).Number);
+            await using (var meanwhile = new SqlCommand("select concat(@@error, ',', scope_identity(), ',', @@identity)", connection))
+                AreEqual("8134,3,3", await meanwhile.ExecuteScalarAsync(TestContext.CancellationToken));
+            while (await reader.ReadAsync(TestContext.CancellationToken))
+            {
+            }
+            IsTrue(await reader.NextResultAsync(TestContext.CancellationToken));
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            AreEqual("200,0,1,1", reader.GetString(0));
+            IsNull(await this.DrainAsync(reader));
+        }
+
+        await using var after = new SqlCommand(Read, connection);
+        AreEqual("1,0,1,1", await after.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
+    /// A transaction a reader's batch began is that batch's own: while the
+    /// reader is still reading, the session's other requests see no
+    /// transaction and can't commit it, and the batch commits it once it
+    /// carries on (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task TransactionAReadersBatchBegan_IsInvisibleToOtherRequests()
+    {
+        var simulation = WideRows();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+
+        await using (var batch = new SqlCommand("begin tran; update big set v = 1 where id = 1; select id, pad from big order by id; select @@trancount; commit", connection))
+        await using (var reader = await batch.ExecuteReaderAsync(TestContext.CancellationToken))
+        {
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            await using (var look = new SqlCommand("select @@trancount", connection))
+                AreEqual(0, await look.ExecuteScalarAsync(TestContext.CancellationToken));
+            await using (var commit = new SqlCommand("commit", connection))
+                AreEqual(3902, (await ThrowsExactlyAsync<SqlException>(async () => await commit.ExecuteNonQueryAsync(TestContext.CancellationToken))).Number);
+            while (await reader.ReadAsync(TestContext.CancellationToken))
+            {
+            }
+            IsTrue(await reader.NextResultAsync(TestContext.CancellationToken));
+            IsTrue(await reader.ReadAsync(TestContext.CancellationToken));
+            AreEqual(1, reader.GetInt32(0));
+            IsNull(await this.DrainAsync(reader));
+        }
+
+        await using var after = new SqlCommand("select concat(@@trancount, ',', (select v from big where id = 1))", connection);
+        AreEqual("0,1", await after.ExecuteScalarAsync(TestContext.CancellationToken));
+    }
+
+    /// <summary>
+    /// A request's id is its logical session's, which SqlClient reuses once a
+    /// reader on it closes, and <c>sys.dm_exec_requests</c> lists a request
+    /// parked while its client reads as suspended on
+    /// <c>ASYNC_NETWORK_IO</c>, with its own text (probed 2026-10-06 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public async Task Requests_AreNumberedPerLogicalSession_AndAParkedOneIsListedSuspended()
+    {
+        var simulation = WideRows();
+        await using var listener = await simulation.ListenLocalAsync(0, TestContext.CancellationToken);
+        await using var connection = await Wire.OpenAsync(listener, TestContext.CancellationToken, MarsExtra);
+        const string List = "select string_agg(concat(r.request_id, ':', r.status, ':', r.command, ':', isnull(r.wait_type, '-'), ':', left(t.text, 5)), ',') within group (order by r.request_id) from sys.dm_exec_requests r cross apply sys.dm_exec_sql_text(r.sql_handle) t where r.session_id = @@spid";
+
+        await using (var plain = new SqlCommand("select current_request_id()", connection))
+            AreEqual(2, await plain.ExecuteScalarAsync(TestContext.CancellationToken));
+        await using var first = new SqlCommand("/*A*/select id, pad from big order by id", connection);
+        await using var firstReader = await first.ExecuteReaderAsync(TestContext.CancellationToken);
+        IsTrue(await firstReader.ReadAsync(TestContext.CancellationToken));
+        await using (var second = new SqlCommand("/*B*/select id, pad from big order by id", connection))
+        {
+            await using var secondReader = await second.ExecuteReaderAsync(TestContext.CancellationToken);
+            IsTrue(await secondReader.ReadAsync(TestContext.CancellationToken));
+            await using var list = new SqlCommand(List, connection);
+            AreEqual("2:suspended:SELECT:ASYNC_NETWORK_IO:/*A*/,3:suspended:SELECT:ASYNC_NETWORK_IO:/*B*/,4:running:SELECT:-:selec", await list.ExecuteScalarAsync(TestContext.CancellationToken));
+        }
+        await using (var list = new SqlCommand(List, connection))
+            AreEqual("2:suspended:SELECT:ASYNC_NETWORK_IO:/*A*/,3:running:SELECT:-:selec", await list.ExecuteScalarAsync(TestContext.CancellationToken));
+        IsNull(await this.DrainAsync(firstReader));
+    }
 }

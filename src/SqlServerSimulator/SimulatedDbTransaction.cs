@@ -313,6 +313,13 @@ public sealed class SimulatedDbTransaction : DbTransaction
     internal bool Ended;
 
     /// <summary>
+    /// Set on the transaction a request carries on in after another ended its
+    /// own, whose beginning and end the TDS endpoint doesn't announce (see
+    /// <see cref="SimulatedDbConnection.StartUnannouncedTransaction"/>).
+    /// </summary>
+    internal bool Unannounced;
+
+    /// <summary>
     /// True once the API's <see cref="Commit"/>, <see cref="Rollback()"/> or
     /// dispose has run on this object, after which SqlClient's transaction is
     /// a zombie: <see cref="Connection"/> reads null and a second commit or

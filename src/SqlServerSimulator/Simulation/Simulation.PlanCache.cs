@@ -350,6 +350,8 @@ public sealed partial class Simulation
             var connection = batch.Connection;
             for (var statement = 0; statement < entry.Plans.Length; statement++)
             {
+                if (statement > 0 && command.YieldsBetweenStatements)
+                    yield return new SimulatedStatementBoundary();
                 var selection = entry.Plans[statement];
                 // Replay bypasses the dispatch loop, so each statement stamps
                 // the per-statement frame the loop's top-of-iteration would.

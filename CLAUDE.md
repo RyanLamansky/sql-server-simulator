@@ -164,6 +164,7 @@ Field rosters live in the source XML docs; this captures only identity + load-be
   Holds the `@@`-state (`SCOPE_IDENTITY` / `@@ROWCOUNT` / `@@ERROR`), `CurrentDatabase` / `CurrentTransaction`, per-session `TempTables`, `NestingLevel`, isolation and lock-timeout settings, and two contracts:
   - `Session`: the one-way `SessionToken` every shared structure names the session by, so an abandoned connection can be reclaimed → [`locking.md`](docs/claude/locking.md#abandoned-session-reclamation).
   - `Security`: the login, database principal and impersonation stack; the default is dbo everywhere, and dbo bypasses same-database checks → [`permissions.md`](docs/claude/permissions.md).
+  - `ResumeRequest`: MARS requests (`SessionRequest`, in-process commands included) take turns on these fields between statements, each parking its own copy while another runs, so state real keeps per request joins `SessionSettings` (published as the request ends) or the parked execution state → [`tds-endpoint.md`](docs/claude/tds-endpoint.md#mars-multiple-active-result-sets).
   Full roster in the source XML docs.
 - **`BatchContext`** (internal, `Parser/`) = one command execution.
   Owns the `ParserContext` (parse-time scratch) + batch-lifetime runtime state: `Variables`, `TableVariables` (`@t`), `CurrentUndoLog`, `CurrentTableVarUndoLog` (statement-only, disjoint from the tx-scoped log so `ROLLBACK TRAN` skips `@t`), `UdfFrame` / `ProcFrame` (non-null in a UDF/proc body — gates value-form `RETURN`).
