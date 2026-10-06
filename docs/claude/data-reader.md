@@ -123,10 +123,23 @@ Row-level pull *inside* the statement the reader was parked on stays abandoned (
 
 ## In-process MARS (overlapping readers)
 
-The in-process `SimulatedDbConnection` has no wire and no "one open reader" enforcement: a second command — or a second open reader — while a reader is live **just works**, the permissive superset EF Core's lazy loading needs (iterate a parent query, touch a navigation per row).
-Probe-confirmed safe: a nested reader-per-row loop and two interleaved readers both return correct results, because a query result materializes before it streams, so overlapping enumeration never races shared session state (no two live engine iterations, no transaction/identity/plan-cache stomp).
-This mirrors a MARS-enabled wire connection (`MultipleActiveResultSets=True`), where the endpoint negotiates MARS and serializes execution — see [`tds-endpoint.md`](tds-endpoint.md#mars-multiple-active-result-sets).
-A non-MARS wire connection still rejects the overlap client-side in SqlClient, so the in-process surface is deliberately more permissive than a bare `SqlConnection`.
+The in-process `SimulatedDbConnection` is a MARS connection: a second command — or a second open reader — while a reader is live works, as EF Core's lazy loading needs (iterate a parent query, touch a navigation per row), and its connection string says so until one is set (`MultipleActiveResultSets=True`), which is what tells EF Core to take no savepoint in a user transaction.
+A query result materializes before it streams, so overlapping enumeration never races shared session state.
+
+Real's MARS rules apply, with each command a request (`SessionRequest`) that real tracks two ways — see [`tds-endpoint.md`](tds-endpoint.md#mars-multiple-active-result-sets) for the probed rules:
+- **Running** until its batch's outcome stream has ended.
+  A reader's batch runs ahead of it as real's does ahead of its client, as far as its output fits about 32 KB (`SessionRequest.BytesAheadOfClient`, `SimulatedDbDataReader.RunAhead`): past a small result set as soon as the reader is positioned on it, past a large one once the reader has read its last row, and past a statement's error once the reader has raised it.
+  What a statement run ahead reports still waits for the advance onto it — its count reaches `RecordsAffected`, its error throws and its messages fire there.
+  A rollback of the transaction a running reader works in leaves its batch doomed — `XACT_STATE()` -1, a write Msg 3930 — ending with Msg 3998, and every command until then is Msg 3989; a reader parked on a DML statement's `OUTPUT` rows larger than that is Msg 3980 for every other command.
+- **Outstanding** until the reader has read past its end — `Read` false on the batch's last result set, `NextResult` false, or `Close` — however small the result.
+  `BeginTransaction` with another reader outstanding is Msg 3988; a commit or save point, through the API or by SQL text, with one outstanding in the transaction is Msg 3981; and a transaction a batch begins and leaves open while another is outstanding rolls back with Msg 3997.
+  `ExecuteNonQuery` and `ExecuteScalar` read their batch whole, so never stay outstanding.
+
+A transaction-manager stand-in — `BeginTransaction`, an API `Commit` or `Save` — reports its refusal at line 1, as real reports a transaction-manager request's.
+
+**Not modeled yet** (beside the wire's, which apply here too):
+- Requests share the session's settings rather than each working on a copy: a reader's later statements see another command's `SET`, `USE` or `CONTEXT_INFO`, and `@@ERROR` reads its error.
+- A transaction a reader's batch began is visible to other commands, and Msg 3997 rolls it back only when another reader was outstanding as its batch ended, where a MARS batch's always rolls back.
 
 ## Divergence
 

@@ -211,6 +211,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
             if (marsRequested)
             {
                 this.connection.ScopesTransactionsToBatch = true;
+                this.connection.PublishedSettings = SessionSettings.Capture(this.connection);
                 this.marsPacketSize = transport.PacketSize;
                 this.multiplexer = new SmpMultiplexer(transportStream, this);
                 await this.multiplexer.RunAsync(cancellationToken).ConfigureAwait(false);
@@ -586,19 +587,21 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     /// connection's execution gate into the session's deferred-flush writer,
     /// then acknowledges any attention and sends the whole response.
     /// </summary>
-    private async Task ServeMarsRequestAsync(SmpSession session, TdsMessage message, string? batchText, bool isBulkInsertBegin, TdsTokenWriter writer, CancellationToken cancellationToken)
+    private async Task ServeMarsRequestAsync(SmpSession session, SessionRequest request, TdsMessage message, string? batchText, bool isBulkInsertBegin, TdsTokenWriter writer, CancellationToken cancellationToken)
     {
         bool cancelled;
         await this.engineExecutionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         Volatile.Write(ref session.Request, this.connection!.BeginRequest());
         session.Executing = true;
+        if (message.PacketType is Tds.PacketSqlBatch or Tds.PacketRpc or Tds.PacketTransactionManager)
+            request.OutstandingRequestCount = ReadOutstandingRequestCount(message.Payload);
+        this.connection.EnterRequest(request);
         try
         {
-            // A request arriving while one a Msg 3981 abort left running is
-            // still sending its results is refused.
-            if (this.connection!.RefusesRequestAfterAbort)
+            // Another request still pending can refuse this one outright.
+            if (this.connection.RefuseNewRequest() is { } refused)
             {
-                WriteErrors(writer, AtLineOne(SimulatedSqlException.RequestWithoutValidTransactionDescriptor()));
+                WriteErrors(writer, AtLineOne(refused));
                 writer.WriteDone(Tds.DoneError, 0);
             }
             else
@@ -636,6 +639,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         }
         finally
         {
+            this.connection!.LeaveRequest(request);
             session.Executing = false;
             _ = this.engineExecutionGate.Release();
         }
@@ -704,28 +708,43 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 }
 
                 var serving = this.connection!;
-                serving.BeginMarsRequest();
+                var request = serving.BeginSessionRequest(inProcess: false);
                 // The request is done once its whole response has gone out,
-                // which for a large result waits on the client: it ends as the
-                // last packet goes, or on the way out if no packet does.
+                // which for a large result waits on the client: it ends as its
+                // last packet goes, or on the way out if no packet does. A
+                // rollback another request made of the transaction it works on
+                // meanwhile ends its response with Msg 3998.
                 var ended = false;
-                writer.BeforeEndOfMessage = () =>
+                void End()
                 {
-                    if (!ended)
+                    if (ended)
+                        return;
+                    ended = true;
+                    if (request.TransactionEndedUnder && writer.ReopenFinalDone())
                     {
-                        ended = true;
-                        serving.EndMarsRequest();
+                        var uncommittable = AtLineOne(SimulatedSqlException.UncommittableTransactionAtEndOfBatch());
+                        WriteErrors(writer, uncommittable);
+                        writer.WriteDoneToken(Tds.TokenDone, ErrorDoneStatus(uncommittable), 0, StatementDoneKind.Batch);
                     }
-                };
+                    EndRequest();
+                }
+                // A reset moves the request to the fresh connection.
+                void EndRequest() => (this.connection ?? serving).EndSessionRequest(request);
+                writer.BeforeEndOfMessage = End;
+                writer.Request = request;
                 try
                 {
-                    await this.ServeMarsRequestAsync(session, message, batchText, isBulkInsertBegin, writer, cancellationToken).ConfigureAwait(false);
+                    await this.ServeMarsRequestAsync(session, request, message, batchText, isBulkInsertBegin, writer, cancellationToken).ConfigureAwait(false);
                 }
                 finally
                 {
                     writer.BeforeEndOfMessage = null;
+                    writer.Request = null;
                     if (!ended)
-                        serving.EndMarsRequest();
+                    {
+                        ended = true;
+                        EndRequest();
+                    }
                 }
             }
         }
@@ -1117,6 +1136,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
             if (outcome is SimulatedQueryResult query)
             {
+                writer.MarkResultStart();
                 TdsTypeCodec.WriteColMetadata(writer, query.Schema, query.ColumnNames, query.ColumnNullability, query.ColumnReportsNumeric, query.HiddenColumnCount, query.ColumnWireFlags, this.connection!.CurrentDatabase.Name, query.Browse);
                 long rows = 0;
                 using (var cursor = query.CreateClientCursor())
@@ -1177,6 +1197,10 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // or rows affected. A DML statement's OUTPUT clause makes the
                 // statement tabular without making its count a SELECT's.
                 writer.WriteDoneToken(effectiveDoneToken, queryStatus, rows, DoneKindOf(query));
+                // A DML statement's OUTPUT rows hold a MARS session while
+                // they go out.
+                if (!query.CountsRowsReturned)
+                    writer.HoldSession();
                 closed = true;
                 unclosedError = false;
             }
@@ -1397,6 +1421,12 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
 
         fresh.FramesEveryStatement = true;
         fresh.ScopesTransactionsToBatch = this.multiplexer is not null;
+        if (this.multiplexer is not null)
+        {
+            fresh.PublishedSettings = SessionSettings.Capture(fresh);
+            if (previous.ExecutingRequest is { } resetting)
+                fresh.AdoptRequest(resetting);
+        }
         fresh.AbortTransport = this.CloseGracefully;
         this.connection = fresh;
     }
@@ -1459,6 +1489,28 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// The <c>OutstandingRequestCount</c> of a request's transaction-descriptor
+    /// header (ALL_HEADERS type 2): how many requests the client has
+    /// outstanding on the connection, this one included, a reader counting
+    /// until it has read past its response's end. 1 when the header is absent.
+    /// </summary>
+    internal static int ReadOutstandingRequestCount(byte[] payload)
+    {
+        var end = SkipAllHeaders(payload);
+        var offset = 4;
+        while (offset + 6 <= end)
+        {
+            var length = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(payload.AsSpan(offset));
+            if (length < 6 || offset + length > end)
+                break;
+            if (System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(payload.AsSpan(offset + 4)) == 2 && length >= 18)
+                return System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(payload.AsSpan(offset + 14));
+            offset += length;
+        }
+        return 1;
     }
 
     private static byte ParsePreloginEncryption(ReadOnlySpan<byte> payload)

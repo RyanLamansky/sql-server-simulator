@@ -67,9 +67,40 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
     public Action? BeforeEndOfMessage;
 
     /// <summary>
+    /// The MARS request whose response this writer is sending, which a DML
+    /// statement's <c>OUTPUT</c> rows hold the session for while they go out
+    /// (see <see cref="HoldSession"/>); null outside MARS.
+    /// </summary>
+    public SessionRequest? Request;
+
+    /// <summary>The buffered stretches, start and end, that hold <see cref="Request"/>'s session.</summary>
+    private readonly List<(int Start, int End)> sessionHolds = [];
+
+    /// <summary>Where the result set being written started (see <see cref="MarkResultStart"/>).</summary>
+    private int resultStart;
+
+    /// <summary>Notes where the result set about to be written starts, for <see cref="HoldSession"/>.</summary>
+    public void MarkResultStart() => this.resultStart = this.length;
+
+    /// <summary>
+    /// Marks the result set written since <see cref="MarkResultStart"/> — a
+    /// DML statement's <c>OUTPUT</c> rows, which real can't suspend to run
+    /// another request — as holding the session while any of it is going
+    /// out: the statement is running once everything ahead of it has gone,
+    /// and done once it has gone too.
+    /// </summary>
+    public void HoldSession()
+    {
+        if (this.Request is not null)
+            this.sessionHolds.Add((this.resultStart, this.length));
+    }
+
+    /// <summary>
     /// Sends every full packet's worth of buffered bytes; when
     /// <paramref name="final"/>, sends the remainder with the end-of-message
-    /// bit, completing the response.
+    /// bit, completing the response. The response's last DONE stays unsent
+    /// until <see cref="BeforeEndOfMessage"/> has run, so it can still
+    /// <see cref="ReopenFinalDone">reopen</see> it.
     /// </summary>
     public async ValueTask FlushAsync(bool final, CancellationToken cancellationToken)
     {
@@ -78,17 +109,21 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
 
         var capacity = this.transport.PacketSize - Tds.HeaderSize;
         var offset = 0;
-        while (this.length - offset > capacity)
-        {
-            await this.transport.WritePacketAsync(Tds.PacketTabularResult, this.buffer.AsMemory(offset, capacity), endOfMessage: false, cancellationToken).ConfigureAwait(false);
-            offset += capacity;
-        }
+        var holdFrom = final && this.BeforeEndOfMessage is not null && this.FinalDoneBuffered ? this.finalDoneAt : this.length;
+        while (this.length - offset > capacity && offset + capacity <= holdFrom)
+            offset = await this.SendPacketAsync(offset, capacity, cancellationToken).ConfigureAwait(false);
 
         if (final)
         {
             this.BeforeEndOfMessage?.Invoke();
+            while (this.length - offset > capacity)
+                offset = await this.SendPacketAsync(offset, capacity, cancellationToken).ConfigureAwait(false);
+            this.NoteSending(offset, this.length - offset);
             await this.transport.WritePacketAsync(Tds.PacketTabularResult, this.buffer.AsMemory(offset, this.length - offset), endOfMessage: true, cancellationToken).ConfigureAwait(false);
             offset = this.length;
+            this.sessionHolds.Clear();
+            if (this.Request is { } request)
+                request.HoldsSession = false;
         }
 
         if (offset > 0)
@@ -96,7 +131,57 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
             Buffer.BlockCopy(this.buffer, offset, this.buffer, 0, this.length - offset);
             this.length -= offset;
             this.trailingDoneAt -= offset;
+            this.finalDoneAt -= offset;
         }
+    }
+
+    /// <summary>
+    /// Sends one full packet from <paramref name="offset"/>, releasing the
+    /// session a DML statement's rows held once they are all out, and returns
+    /// where the next packet starts.
+    /// </summary>
+    private async ValueTask<int> SendPacketAsync(int offset, int capacity, CancellationToken cancellationToken)
+    {
+        this.NoteSending(offset, capacity);
+        await this.transport.WritePacketAsync(Tds.PacketTabularResult, this.buffer.AsMemory(offset, capacity), endOfMessage: false, cancellationToken).ConfigureAwait(false);
+        return offset + capacity;
+    }
+
+    /// <summary>
+    /// Whether the packet about to go out — <paramref name="count"/> bytes from
+    /// <paramref name="offset"/>, which may wait on the client — carries a
+    /// stretch that holds the session.
+    /// </summary>
+    private void NoteSending(int offset, int count)
+    {
+        if (this.Request is not { } request)
+            return;
+        var holds = false;
+        foreach (var (start, end) in this.sessionHolds)
+            holds |= offset < end && offset + count > start;
+        request.HoldsSession = holds;
+    }
+
+    /// <summary>
+    /// Where the last DONE, DONEPROC or DONEINPROC written starts, while it
+    /// may still be the buffer's final token (see <see cref="ReopenFinalDone"/>).
+    /// </summary>
+    private int finalDoneAt = -1;
+
+    private bool FinalDoneBuffered => this.finalDoneAt >= 0 && this.finalDoneAt + DoneTokenLength == this.length;
+
+    /// <summary>
+    /// Sets the more bit on the response's closing DONE token while it is
+    /// still the last thing buffered and unsent, so tokens can follow it;
+    /// false when there is no such token.
+    /// </summary>
+    public bool ReopenFinalDone()
+    {
+        if (!this.FinalDoneBuffered)
+            return false;
+        var status = this.buffer.AsSpan(this.finalDoneAt + 1, 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(status, (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(status) | Tds.DoneMore));
+        return true;
     }
 
     /// <summary>
@@ -317,6 +402,7 @@ internal sealed class TdsTokenWriter(TdsPacketTransport transport)
         }
         if (token == Tds.TokenDone)
             this.trailingDoneAt = this.length;
+        this.finalDoneAt = this.length;
         this.WriteByte(token);
         this.WriteUInt16(status);
         this.WriteUInt16(curCmd);

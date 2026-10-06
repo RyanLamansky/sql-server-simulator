@@ -1509,12 +1509,12 @@ internal static partial class BuiltInResources
                 connection.QuotedIdentifiers ? bitOn : bitOff,
                 connection.Arithabort ? bitOn : bitOff,
                 connection.AnsiNullDefaultOn ? bitOn : bitOff,
-                AnsiDefaultsAllOn(connection) ? bitOn : bitOff,
+                AnsiDefaultsAllOn(new SimulatedDbConnection.SessionOptionScope(connection), connection.QuotedIdentifiers) ? bitOn : bitOff,
                 connection.AnsiWarnings ? bitOn : bitOff,
                 connection.AnsiPadding ? bitOn : bitOff,
                 connection.AnsiNulls ? bitOn : bitOff,
                 connection.ConcatNullYieldsNull ? bitOn : bitOff,
-                SqlValue.FromInt16(SessionIsolationLevelId(connection)),
+                SqlValue.FromInt16(SessionIsolationLevelId(connection.SessionIsolationLevel)),
                 SqlValue.FromInt32(connection.LockTimeoutMillis),
                 SqlValue.FromInt32(connection.DeadlockPriority),
                 SqlValue.FromInt64(connection.LastStatementRowCount),
@@ -1537,18 +1537,22 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>The <c>database_id</c> of the database a session is pointed at.</summary>
-    private static short SessionDatabaseId(Simulation simulation, SimulatedDbConnection connection)
+    private static short SessionDatabaseId(Simulation simulation, SimulatedDbConnection connection) =>
+        SessionDatabaseId(simulation, connection.CurrentDatabase);
+
+    /// <summary>The <c>database_id</c> of <paramref name="database"/>, 1 when it's gone.</summary>
+    private static short SessionDatabaseId(Simulation simulation, Database database)
     {
         foreach (var (db, id) in Parser.Expressions.DbId.DatabasesWithIds(simulation))
         {
-            if (ReferenceEquals(db, connection.CurrentDatabase))
+            if (ReferenceEquals(db, database))
                 return id;
         }
         return 1;
     }
 
     /// <summary>A session's isolation level as the DMVs number it: 1–5 for read uncommitted through snapshot.</summary>
-    private static short SessionIsolationLevelId(SimulatedDbConnection connection) => connection.SessionIsolationLevel switch
+    private static short SessionIsolationLevelId(System.Data.IsolationLevel isolationLevel) => isolationLevel switch
     {
         System.Data.IsolationLevel.ReadUncommitted => 1,
         System.Data.IsolationLevel.RepeatableRead => 3,
@@ -1562,9 +1566,9 @@ internal static partial class BuiltInResources
     /// <c>SET ANSI_DEFAULTS</c> sets are on — it reads 0 again once any one of
     /// them is turned off (probed 2026-09-28 against SQL Server 2025).
     /// </summary>
-    private static bool AnsiDefaultsAllOn(SimulatedDbConnection connection) =>
-        connection.AnsiNulls && connection.AnsiNullDefaultOn && connection.AnsiPadding && connection.AnsiWarnings
-        && connection.CursorCloseOnCommit && connection.ImplicitTransactions && connection.QuotedIdentifiers;
+    private static bool AnsiDefaultsAllOn(SimulatedDbConnection.SessionOptionScope options, bool quotedIdentifiers) =>
+        options.AnsiNulls && options.AnsiNullDefaultOn && options.AnsiPadding && options.AnsiWarnings
+        && options.CursorCloseOnCommit && options.ImplicitTransactions && quotedIdentifiers;
 
     /// <summary>
     /// Rows for <c>sys.dm_exec_sessions</c> — one per live connection on the
@@ -1589,9 +1593,14 @@ internal static partial class BuiltInResources
 
         foreach (var connection in connections)
         {
+            // A MARS session reports the settings its last finished request
+            // left, not those a running one is changing.
+            var published = connection.PublishedSettings;
+            var options = published?.Options ?? new SimulatedDbConnection.SessionOptionScope(connection);
+            var quotedIdentifiers = published?.QuotedIdentifiers ?? connection.QuotedIdentifiers;
             var loginTime = SqlValue.FromDateTime(connection.LoginTimeUtc);
-            var databaseId = SessionDatabaseId(simulation, connection);
-            var isolation = SessionIsolationLevelId(connection);
+            var databaseId = SessionDatabaseId(simulation, published?.Database ?? connection.CurrentDatabase);
+            var isolation = SessionIsolationLevelId(options.IsolationLevel);
             var effectiveLogin = connection.Security.Effective.LoginName;
             var originalLogin = connection.Security.OriginalLoginName;
             yield return [
@@ -1607,7 +1616,7 @@ internal static partial class BuiltInResources
                 nullName,
                 nullName,
                 SqlValue.FromString(NVarcharSqlType.Get(30, Collation.Catalog, Coercibility.Implicit), connection.RunningLogonTriggers ? "preconnect" : ReferenceEquals(connection, batch.Connection) ? "running" : "sleeping"),
-                SqlValue.FromVarbinary(connection.ReportedContextInfo ?? []),
+                SqlValue.FromVarbinary((published is null ? connection.ReportedContextInfo : published.ContextInfo) ?? []),
                 zero,
                 zero,
                 zero,
@@ -1619,21 +1628,21 @@ internal static partial class BuiltInResources
                 zeroBig,
                 zeroBig,
                 bitOn, // is_user_process
-                SqlValue.FromInt32(connection.TextSize),
-                SqlValue.FromNVarchar(connection.Language.Name),
-                SqlValue.FromNVarchar(connection.DateFormat.Name),
-                SqlValue.FromInt16(connection.DateFirst),
-                connection.QuotedIdentifiers ? bitOn : bitOff,
-                connection.Arithabort ? bitOn : bitOff,
-                connection.AnsiNullDefaultOn ? bitOn : bitOff,
-                AnsiDefaultsAllOn(connection) ? bitOn : bitOff,
-                connection.AnsiWarnings ? bitOn : bitOff,
-                connection.AnsiPadding ? bitOn : bitOff,
-                connection.AnsiNulls ? bitOn : bitOff,
-                connection.ConcatNullYieldsNull ? bitOn : bitOff,
+                SqlValue.FromInt32(published?.TextSize ?? connection.TextSize),
+                SqlValue.FromNVarchar(options.Language.Name),
+                SqlValue.FromNVarchar(options.DateFormat.Name),
+                SqlValue.FromInt16(options.DateFirst),
+                quotedIdentifiers ? bitOn : bitOff,
+                options.Arithabort ? bitOn : bitOff,
+                options.AnsiNullDefaultOn ? bitOn : bitOff,
+                AnsiDefaultsAllOn(options, quotedIdentifiers) ? bitOn : bitOff,
+                options.AnsiWarnings ? bitOn : bitOff,
+                options.AnsiPadding ? bitOn : bitOff,
+                options.AnsiNulls ? bitOn : bitOff,
+                options.ConcatNullYieldsNull ? bitOn : bitOff,
                 SqlValue.FromInt16(isolation),
-                SqlValue.FromInt32(connection.LockTimeoutMillis),
-                SqlValue.FromInt32(connection.DeadlockPriority),
+                SqlValue.FromInt32(options.LockTimeoutMillis),
+                SqlValue.FromInt32(options.DeadlockPriority),
                 SqlValue.FromInt64(connection.LastStatementRowCount),
                 SqlValue.FromInt32(connection.LastErrorNumber),
                 SqlValue.FromVarbinary(DeriveLoginSid(originalLogin)),

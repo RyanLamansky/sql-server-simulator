@@ -82,7 +82,7 @@ internal sealed partial class TdsSession
                         // sent (probed 2026-09-28 against SQL Server 2025). The
                         // parallel-transaction refusal is SqlClient's own
                         // client-side rule, not the server's.
-                        if (this.connection!.OtherMarsRequestsInFlight)
+                        if (this.connection!.OtherRequestsOutstanding())
                             throw AtLineOne(SimulatedSqlException.NewTransactionWhileRequestsRunning());
                         var isolationLevel = MapIsolationLevel(this.lastTmIsolation);
                         if (this.connection!.CurrentTransaction is { } open)

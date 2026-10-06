@@ -161,6 +161,49 @@ internal sealed class SimulatedSqlResultSet : SimulatedQueryResult
     /// </summary>
     public int ReportedRowCount = -1;
 
+    /// <inheritdoc/>
+    internal override long ClientBytes(long cap)
+    {
+        // Fixed-width rows bound the total by their count alone.
+        long rowWidth = 0;
+        foreach (var type in this.schema)
+        {
+            if (!type.IsFixedLength)
+            {
+                rowWidth = -1;
+                break;
+            }
+            rowWidth += 1 + type.FixedLength;
+        }
+        long total = 0;
+        switch (this.rowBytes, this.rowValues)
+        {
+            case (List<byte[]> bytes, _) when rowWidth >= 0:
+                return bytes.Count * rowWidth;
+            case (_, List<SqlValue[]> values) when rowWidth >= 0:
+                return values.Count * rowWidth;
+            case (List<byte[]> bytes, _):
+                foreach (var row in bytes)
+                {
+                    if ((total += row.Length) > cap)
+                        break;
+                }
+                break;
+            case (_, List<SqlValue[]> values):
+                foreach (var row in values)
+                {
+                    foreach (var value in row)
+                        total += value.ClientSizeEstimate;
+                    if (total > cap)
+                        break;
+                }
+                break;
+            default:
+                return long.MaxValue;
+        }
+        return total;
+    }
+
     public override RowCursor CreateCursor() => this.rowValues is { } values
         ? new ValueArrayCursor(this.schema, values.GetEnumerator())
         : new SqlValueCursor(this.schema, this.rowBytes!.GetEnumerator());

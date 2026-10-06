@@ -380,11 +380,15 @@ public sealed class SimulatedDbTransaction : DbTransaction
     {
         using var culture = CultureScope.Engine();
         this.ZombieCheck();
+        this.Owner.RefuseApiRequest();
         this.apiCompleted = true;
         if (this.target.TranCount > 1)
+        {
             this.target.TranCount--;
-        else
-            this.target.EndCommit();
+            return;
+        }
+        this.Owner.RefuseApiTransactionOperation(this.target, state: 1);
+        this.target.EndCommit();
     }
 
     /// <inheritdoc/>
@@ -417,6 +421,8 @@ public sealed class SimulatedDbTransaction : DbTransaction
         using var culture = CultureScope.Engine();
         this.ZombieCheck();
         RejectEmptyName(savepointName);
+        this.Owner.RefuseApiRequest();
+        this.Owner.RefuseApiTransactionOperation(this.target, state: 2);
         this.target.SetSavepointByName(savepointName);
     }
 
@@ -524,6 +530,7 @@ public sealed class SimulatedDbTransaction : DbTransaction
         this.Owner.CurrentTransaction = null;
         this.Ended = true;
         this.Owner.RecordTransactionEvent(cause, this);
+        this.Owner.NoteTransactionRolledBack(this);
     }
 
     /// <summary>

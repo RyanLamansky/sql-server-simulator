@@ -148,6 +148,15 @@ internal abstract class SimulatedQueryResult : SimulatedStatementOutcome
     public abstract RowCursor CreateCursor();
 
     /// <summary>
+    /// Roughly how many bytes the rows take on their way to a client, counted
+    /// no further than <paramref name="cap"/>: what decides whether a response
+    /// has all gone out ahead of a client still reading it (see
+    /// <see cref="SessionRequest.BytesAheadOfClient"/>). A result whose rows
+    /// aren't materialized counts as more than any cap.
+    /// </summary>
+    internal virtual long ClientBytes(long cap) => long.MaxValue;
+
+    /// <summary>
     /// A cursor for a client-boundary consumer (the in-process data reader /
     /// <c>ExecuteScalar</c>, the TDS row writer): applies the
     /// <see cref="ClientTextSize"/> truncation real SQL Server performs at

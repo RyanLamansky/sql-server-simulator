@@ -38,6 +38,17 @@ public sealed class SimulatedDbCommand : DbCommand
     /// </summary>
     internal bool ApiServerCursor;
 
+    /// <summary>
+    /// Set while <c>ExecuteReader</c> starts the command: its request stays
+    /// outstanding until the reader has read past its end, where a command
+    /// whose results are drained at once never is (see
+    /// <see cref="SessionRequest.Consumed"/>).
+    /// </summary>
+    internal bool ReadByReader;
+
+    /// <summary>The in-process request the command's latest execution opened, if any.</summary>
+    internal SessionRequest? Request;
+
     internal SimulatedDbCommand(Simulation simulation, SimulatedDbConnection connection)
     {
         this.simulation = simulation;
@@ -280,15 +291,24 @@ public sealed class SimulatedDbCommand : DbCommand
         if (browse)
             this.Connection!.NoBrowseTable = true;
         SimulatedDbDataReader reader;
+        this.Request = null;
+        this.ReadByReader = true;
         try
         {
-            reader = new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this), this.Connection);
+            reader = new SimulatedDbDataReader(this.simulation.CreateResultSetsForCommand(this), this.Connection, this);
         }
         catch
         {
             if (browse)
                 this.Connection!.NoBrowseTable = false;
+            // The batch was read whole for the error it raised.
+            if (this.Request is { } failed)
+                this.Connection!.ConsumeRequest(failed);
             throw;
+        }
+        finally
+        {
+            this.ReadByReader = false;
         }
         if (browse)
         {

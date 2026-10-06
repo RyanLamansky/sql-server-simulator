@@ -1170,6 +1170,8 @@ public sealed partial class Simulation
         // still in flight. Child batches (proc / UDF / dynamic-SQL bodies)
         // don't re-enter here, so one execution counts once.
         _ = Interlocked.Increment(ref this.statementsInFlight);
+        SessionRequest? request = null;
+        SimulatedDbTransaction? carriedOnDoomed = null;
         if (command.Connection is { } requester)
         {
             var session = requester.Session;
@@ -1177,16 +1179,101 @@ public sealed partial class Simulation
             session.BatchText = command.CommandText;
             session.StatementStartIndex = 0;
             requester.BeginCommand();
+            // An in-process command is a request of its own from here until
+            // its reader passes the batch's end, and runs only between the
+            // outcomes of the others a reader holds open: the MARS rules real
+            // applies to the requests of one session apply to it. A TDS
+            // session counts its requests itself, and a command run inside a
+            // request is part of it.
+            if (requester is { FramesEveryStatement: false, ExecutingRequest: null })
+            {
+                request = requester.BeginSessionRequest(inProcess: true, consumed: !command.ReadByReader);
+                command.Request = request;
+            }
         }
         try
         {
-            foreach (var outcome in this.CreateResultSetsForCommandCore(command, continueOnError))
-                yield return outcome;
-            if (command.Connection is { ScopesTransactionsToBatch: true } mars && EndBatchScopedTransaction(command, mars) is { } stillActive)
+            if (request is not null)
+            {
+                command.Connection!.ExecutingRequest = request;
+                if (command.Connection.RefuseNewRequest() is { } refused)
+                {
+                    refused.ResolveDiagnostics(1, 0, "");
+                    command.Connection.ExecutingRequest = null;
+                    yield return new SimulatedErrorOutcome(refused);
+                    yield break;
+                }
+            }
+            using (var outcomes = this.CreateResultSetsForCommandCore(command, continueOnError).GetEnumerator())
+            {
+                while (outcomes.MoveNext())
+                {
+                    var outcome = outcomes.Current;
+                    if (request is not null)
+                    {
+                        // A DML statement's OUTPUT rows hold the session until
+                        // the reader moves off them, unless they all fit in
+                        // what real gets ahead of its client.
+                        request.HoldsSession = outcome is SimulatedQueryResult { CountsRowsReturned: false } output
+                            && output.ClientBytes(SessionRequest.BytesAheadOfClient) > SessionRequest.BytesAheadOfClient;
+                        command.Connection!.ExecutingRequest = null;
+                    }
+                    yield return outcome;
+                    if (request is not null)
+                    {
+                        request.HoldsSession = false;
+                        command.Connection!.ExecutingRequest = request;
+                        // Another request ended the transaction this one works
+                        // on: real carries on in it doomed, where reads run,
+                        // a write is Msg 3930 and the batch's end rolls back
+                        // with Msg 3998 (probed 2026-10-06 against SQL Server
+                        // 2025).
+                        if (request.TransactionEndedUnder && carriedOnDoomed is null && command.Connection.CurrentTransaction is null)
+                        {
+                            carriedOnDoomed = command.Connection.StartTransaction(IsolationLevel.Unspecified);
+                            carriedOnDoomed.Doomed = true;
+                        }
+                    }
+                }
+            }
+            // Another request ended the transaction this one works on, and the
+            // batch's end hasn't already rolled back what it carried on in.
+            SimulatedErrorOutcome? abandoned = null;
+            var stillDoomed = carriedOnDoomed is not null && ReferenceEquals(command.Connection!.CurrentTransaction, carriedOnDoomed);
+            if (stillDoomed)
+                carriedOnDoomed!.EndRollback();
+            if (request is { TransactionEndedUnder: true } && (carriedOnDoomed is null || stillDoomed))
+            {
+                var uncommittable = SimulatedSqlException.UncommittableTransactionAtEndOfBatch();
+                uncommittable.ResolveDiagnostics(1, 0, "");
+                command.Connection!.LastErrorNumber = uncommittable.Number;
+                abandoned = new SimulatedErrorOutcome(uncommittable);
+            }
+            // A MARS batch's transaction ends with it — in process, when the
+            // batch overlapped another request.
+            var stillActive = command.Connection is { CurrentTransaction: not null } ending
+                && (ending.ScopesTransactionsToBatch || (request is not null && ending.OtherRequestsOutstanding()))
+                    ? EndBatchScopedTransaction(command, ending)
+                    : null;
+            // The request is over once these go out, as a wire request is once
+            // its response's last packet has.
+            if (request is not null)
+            {
+                command.Connection!.ExecutingRequest = null;
+                command.Connection.EndSessionRequest(request);
+            }
+            if (stillActive is not null)
                 yield return stillActive;
+            if (abandoned is not null)
+                yield return abandoned;
         }
         finally
         {
+            if (request is not null)
+            {
+                command.Connection!.ExecutingRequest = null;
+                command.Connection.EndSessionRequest(request);
+            }
             _ = Interlocked.Decrement(ref this.statementsInFlight);
             if (command.Connection is { } finished)
                 finished.EndCommand();
@@ -1208,7 +1295,8 @@ public sealed partial class Simulation
     private int statementsInFlight;
 
     /// <summary>
-    /// Rolls back a transaction a MARS batch began by SQL text and left open,
+    /// Rolls back a transaction a MARS batch began by SQL text and left open —
+    /// in process, a batch that ended while another reader was outstanding —
     /// answering Msg 3997 after a SQL batch; an RPC's — <c>sp_executesql</c>
     /// or a procedure call — goes silently, its Msg 266 having already said
     /// so (probed 2026-09-30 against SQL Server 2025). A transaction begun
@@ -1383,10 +1471,12 @@ public sealed partial class Simulation
             // results (probed 2026-09-30 against SQL Server 2025); a plain
             // batch is judged by nothing, a batch an error aborted (Msg 3609
             // from a trigger's rollback) says no more, and
-            // IMPLICIT_TRANSACTIONS exempts.
+            // IMPLICIT_TRANSACTIONS exempts, as does a transaction another
+            // request ended, which the scope reports with Msg 3998 instead.
             if (adHocScope
                 && !batchAborted
                 && !batch.Connection.ImplicitTransactions
+                && batch.Connection.ExecutingRequest is not { TransactionEndedUnder: true }
                 && !batch.Connection.ExecutionCancellationRequested
                 && (batch.Connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount
                 && exitTranCount != enteredTranCount)

@@ -32,11 +32,29 @@ public sealed class SimulatedDbDataReader : DbDataReader
     private CompileErrorCount compileError;
     private bool closed;
 
-    internal SimulatedDbDataReader(IEnumerable<SimulatedStatementOutcome> outcomes, SimulatedDbConnection? connection)
+    internal SimulatedDbDataReader(IEnumerable<SimulatedStatementOutcome> outcomes, SimulatedDbConnection? connection, SimulatedDbCommand? command = null)
     {
         this.outcomes = outcomes.GetEnumerator();
         this.connection = connection;
+        this.command = command;
         _ = this.AdvanceToNextResult(initial: true);
+    }
+
+    /// <summary>The command whose request this reader keeps outstanding until it has read past its end.</summary>
+    private readonly SimulatedDbCommand? command;
+
+    /// <summary>Whether the batch's outcome stream has ended.</summary>
+    private bool streamEnded;
+
+    /// <summary>
+    /// Records that the reader has read past the end of its batch, after which
+    /// its request no longer counts as outstanding (see
+    /// <see cref="SessionRequest.Consumed"/>).
+    /// </summary>
+    private void Consume()
+    {
+        if (this.command?.Request is { Consumed: false } request)
+            this.connection?.ConsumeRequest(request);
     }
 
     /// <summary>
@@ -51,15 +69,26 @@ public sealed class SimulatedDbDataReader : DbDataReader
             outcome = pending;
             return true;
         }
+        if (this.ranAhead is { Count: > 0 } ahead)
+        {
+            outcome = ahead.Dequeue();
+            return true;
+        }
+        if (this.pendingFault is { } fault)
+        {
+            this.pendingFault = null;
+            fault.Throw();
+        }
         // The outcome stream runs the batch's statements as it advances, so
         // each advance is an entry into the engine; the rows a result set
         // serves were produced before it was yielded.
         using var culture = CultureScope.Engine();
-        if (this.outcomes.MoveNext())
+        if (!this.streamEnded && this.outcomes.MoveNext())
         {
             outcome = this.outcomes.Current;
             return true;
         }
+        this.streamEnded = true;
         outcome = null!;
         return false;
     }
@@ -94,6 +123,11 @@ public sealed class SimulatedDbDataReader : DbDataReader
                 case SimulatedQueryResult query:
                     this.currentResult = query;
                     this.cursor = query.CreateClientCursor();
+                    // Rows that fit what a response gets ahead of its client
+                    // have all gone out before it reads the first.
+                    var unsent = query.ClientBytes(SessionRequest.BytesAheadOfClient);
+                    if (unsent <= SessionRequest.BytesAheadOfClient)
+                        this.RunAhead(SessionRequest.BytesAheadOfClient - unsent);
                     return true;
                 case SimulatedErrorOutcome error:
                     // A statement that failed before sending a result-set
@@ -111,12 +145,16 @@ public sealed class SimulatedDbDataReader : DbDataReader
                     // it closed.
                     this.currentResult = null;
                     this.cursor = EmptyCursor.Instance;
-                    throw initial ? this.GatherRestOfBatch(error.Exception) : error.Exception;
+                    if (initial)
+                        throw this.GatherRestOfBatch(error.Exception);
+                    this.RunAhead(SessionRequest.BytesAheadOfClient);
+                    throw error.Exception;
             }
         }
 
         this.currentResult = null;
         this.cursor = EmptyCursor.Instance;
+        this.Consume();
         return false;
     }
 
@@ -519,8 +557,59 @@ public sealed class SimulatedDbDataReader : DbDataReader
             }
             this.pendingOutcome = next;
         }
+        else
+        {
+            this.RunAhead(SessionRequest.BytesAheadOfClient);
+            // Past the last row of the batch's last result set, the client
+            // has read the whole response.
+            if (this.streamEnded && this.ranAhead is not { Count: > 0 })
+                this.Consume();
+        }
         return false;
     }
+
+    /// <summary>
+    /// Runs the batch on as real does while what it sends fits what a
+    /// response gets ahead of its client — <paramref name="budget"/> bytes
+    /// more — once the client has read the current result set's last row,
+    /// the error ending a statement, or a result set small enough to have
+    /// gone out whole: the statements after it run, and a batch whose output
+    /// fits is finished, so it no longer counts against the session's other
+    /// requests (see <see cref="SimulatedDbConnection.RefuseNewRequest"/>).
+    /// What it ran is reported on the advances after, an error the batch
+    /// raised included.
+    /// </summary>
+    private void RunAhead(long budget)
+    {
+        if (this.pendingOutcome is not null || this.ranAhead is { Count: > 0 } || this.pendingFault is not null || this.closed)
+            return;
+        using var culture = CultureScope.Engine();
+        try
+        {
+            while (budget >= 0 && !this.streamEnded)
+            {
+                if (!this.outcomes.MoveNext())
+                {
+                    this.streamEnded = true;
+                    break;
+                }
+                var outcome = this.outcomes.Current;
+                (this.ranAhead ??= new()).Enqueue(outcome);
+                if (outcome is SimulatedQueryResult query)
+                    budget -= query.ClientBytes(budget + 1);
+            }
+        }
+        catch (Exception ex) when (ex is SimulatedSqlException or NotSupportedException)
+        {
+            this.pendingFault = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex);
+        }
+    }
+
+    /// <summary>The outcomes <see cref="RunAhead"/> ran, in order, which the advances after hand on.</summary>
+    private Queue<SimulatedStatementOutcome>? ranAhead;
+
+    /// <summary>An error <see cref="RunAhead"/> met, raised by the next advance.</summary>
+    private System.Runtime.ExceptionServices.ExceptionDispatchInfo? pendingFault;
 
     /// <summary>
     /// Folds one pulled outcome into <see cref="RecordsAffected"/>. Called for
@@ -601,6 +690,7 @@ public sealed class SimulatedDbDataReader : DbDataReader
         }
 
         this.outcomes.Dispose();
+        this.Consume();
         this.AfterClose?.Invoke();
     }
 

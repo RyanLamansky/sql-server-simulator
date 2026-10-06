@@ -23,6 +23,8 @@ That holds for `ANSI_PADDING`, `ANSI_WARNINGS`, `ARITHABORT`, `ARITHIGNORE`, `CO
 A function body may `SET` those two — and nothing else, Msg 443 refusing the rest — and ignores them the same way (probed 2026-10-04).
 `PARSEONLY` in a procedure, trigger or function body refuses the `CREATE` with Msg 1059, at line 0 wherever the `SET` sits (probed 2026-09-28).
 
+On a MARS connection each request works on its own copy of every one of these, published as its response ends, so the last request to finish wins, and `sys.dm_exec_sessions` reports the published values — see [`tds-endpoint.md`](tds-endpoint.md#mars-multiple-active-result-sets).
+
 ## Lists and refused forms
 
 A comma list of on/off options (`SET NOCOUNT, XACT_ABORT ON`) applies every one as it would alone, `NOEXEC` last so the options beside it still take effect, and `SET STATISTICS IO, TIME ON` takes a list too (probed 2026-10-04 against SQL Server 2025).

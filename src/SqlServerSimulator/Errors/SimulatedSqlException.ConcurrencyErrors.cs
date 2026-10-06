@@ -73,18 +73,22 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Msg 3988: a transaction-manager begin arriving on a MARS connection
-    /// while another of its requests is still producing results (probed
-    /// 2026-09-30 against SQL Server 2025).
+    /// while another of its requests is outstanding — one whose response the
+    /// client hasn't read past the end of, however small — whatever
+    /// transaction that one works in (probed 2026-09-30 and 2026-10-06
+    /// against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException NewTransactionWhileRequestsRunning() =>
         new("New transaction is not allowed because there are other threads running in the session.", 3988, 16, 1);
 
     /// <summary>
-    /// Msg 3981: a transaction-manager commit (state 1) or save (state 2)
-    /// arriving on a MARS connection while another request is still producing
-    /// results in the transaction. It is transaction-aborting: the
+    /// Msg 3981: a commit ending the transaction (state 1) or a save point
+    /// (state 2), by SQL text or a transaction-manager request, arriving on a
+    /// MARS connection while another request working on that transaction is
+    /// outstanding — one that began outside it doesn't count (probed
+    /// 2026-10-06 against SQL Server 2025). It is transaction-aborting: the
     /// transaction rolls back and the rest of the batch doesn't run (probed
-    /// 2026-09-30 against SQL Server 2025).
+    /// 2026-09-30).
     /// </summary>
     internal static SimulatedSqlException TransactionOperationWithPendingRequests(byte state) =>
         new("The transaction operation cannot be performed because there are pending requests working on this transaction.", 3981, 16, state)
@@ -93,12 +97,25 @@ partial class SimulatedSqlException
         };
 
     /// <summary>
-    /// Msg 3989: a request arriving on a MARS connection while a request the
-    /// transaction's Msg 3981 abort left running is still producing results
-    /// (probed 2026-09-30 against SQL Server 2025).
+    /// Msg 3989: a request arriving on a MARS connection while a request
+    /// working on a transaction another request ended — by a Msg 3981 abort
+    /// or a rollback — is still producing results (probed 2026-09-30 and
+    /// 2026-10-06 against SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException RequestWithoutValidTransactionDescriptor() =>
         new("New request is not allowed to start because it should come with valid transaction descriptor.", 3989, 16, 1);
+
+    /// <summary>
+    /// Msg 3980: a request arriving on a MARS connection while a DML
+    /// statement's <c>OUTPUT</c> rows — an <c>INSERT</c>, <c>UPDATE</c>,
+    /// <c>DELETE</c> or <c>MERGE</c>, directly or in a procedure — are still
+    /// on their way to the client, which real can't interleave; a
+    /// transaction-manager request is refused too, ahead of its own checks
+    /// (probed 2026-10-06 against SQL Server 2025, which waits a few seconds
+    /// before refusing, so a short <c>CommandTimeout</c> expires first there).
+    /// </summary>
+    internal static SimulatedSqlException RequestWhileSessionBusy() =>
+        new("The request failed to run because the batch is aborted, this can be caused by abort signal sent from client, or another request is running in the same session, which makes the session busy.", 3980, 16, 1);
 
     /// <summary>
     /// Msg 1222 — fired when a lock acquisition exceeds the session's

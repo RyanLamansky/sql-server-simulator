@@ -147,7 +147,7 @@ Column-count mismatch raises **Msg 500** ("Trying to pass a table-valued paramet
 Identity columns receive auto-generated values; supplying a non-null value for an identity column raises **Msg 1077** ("INSERT into an identity column not allowed on table variables.") — probe-confirmed F8.
 
 `IDataReader` is the System.Data interface (not `DbDataReader` specifically) so any implementation works; `Microsoft.Data.SqlClient`'s `SqlDataReader` (the documented TVP source) flows through naturally.
-Reading the parameter source requires a separate connection from the consuming command (MARS) — the simulator doesn't model multi-active result sets on one connection, so the same connection limitation applies in practice.
+Over SqlClient, reading the parameter source on the consuming command's own connection needs MARS.
 
 Not modeled **in-process**: `IEnumerable<SqlDataRecord>` (the third documented TVP value type).
 `SqlDataRecord` lives in `Microsoft.Data.SqlClient.Server`; adding it in-process would require either a SqlClient dependency (load-bearing-no) or a reflection-based duck-typed path.

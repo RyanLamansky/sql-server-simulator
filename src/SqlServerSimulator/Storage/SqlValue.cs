@@ -53,6 +53,19 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
     /// </summary>
     internal SqlValue WithType(SqlType type) => new(type, this.primitive, this.reference, this.IsNull);
 
+    /// <summary>
+    /// Roughly how many bytes the value takes on its way to a client: a
+    /// string's UTF-16 or a binary value's bytes, else eight. What a response
+    /// gets ahead of its client is measured with it (see
+    /// <see cref="SimulatedQueryResult.ClientBytes"/>).
+    /// </summary>
+    internal int ClientSizeEstimate => this.IsNull ? 1 : this.reference switch
+    {
+        string text => 2 + (text.Length * 2),
+        byte[] bytes => 2 + bytes.Length,
+        _ => 8,
+    };
+
     /// <summary>Non-NULL <see cref="int"/> value.</summary>
     public static SqlValue FromInt32(int value) => new(SqlType.Int32, value, null, isNull: false);
 

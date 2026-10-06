@@ -310,51 +310,252 @@ public sealed class SimulatedDbConnection : DbConnection
     internal bool ScopesTransactionsToBatch;
 
     /// <summary>
-    /// MARS requests received and not yet fully answered — executing, waiting
-    /// for the execution gate, or still sending a response the client hasn't
-    /// read. Real counts a request as running until its results have gone
-    /// out, which is what its transaction refusals (Msg 3988, 3981) turn on.
-    /// Zero outside MARS.
+    /// The requests this session is serving (see <see cref="SessionRequest"/>)
+    /// that are still running or still outstanding: over TDS, the MARS
+    /// requests received and not yet fully answered — executing, waiting for
+    /// the execution gate, or still sending a response — and in process, the
+    /// commands still running or whose readers haven't read past their
+    /// batch's end. Guarded by <see cref="requestsGate"/>.
     /// </summary>
-    private int marsRequestsInFlight;
+    private readonly List<SessionRequest> pendingRequests = [];
 
-    /// <summary>Whether a MARS request other than the one asking is in flight.</summary>
-    internal bool OtherMarsRequestsInFlight => Volatile.Read(ref this.marsRequestsInFlight) > 1;
+    private readonly Lock requestsGate = new();
 
     /// <summary>
-    /// Set when a Msg 3981 rolled the transaction back under a request still
-    /// sending its results; every request arriving before the last in-flight
-    /// one finishes is Msg 3989 (probed 2026-09-30 against SQL Server 2025).
+    /// The request whose statements are running now, if any; MARS rules weigh
+    /// the rest of <see cref="pendingRequests"/> against it.
     /// </summary>
-    private volatile bool transactionAbortedWithRequestsPending;
+    internal SessionRequest? ExecutingRequest;
 
-    /// <summary>Whether a request arriving now is Msg 3989 (see <see cref="transactionAbortedWithRequestsPending"/>).</summary>
-    internal bool RefusesRequestAfterAbort => this.transactionAbortedWithRequestsPending && this.OtherMarsRequestsInFlight;
+    /// <summary>
+    /// A transaction another request ended — a Msg 3981 abort or a rollback —
+    /// while requests working on it were running; every request arriving until
+    /// they have finished is Msg 3989 (probed 2026-10-06 against SQL Server
+    /// 2025). 0 for none.
+    /// </summary>
+    private long abandonedTransactionId;
 
-    /// <summary>Counts a MARS request in flight, from its arrival until its response has gone out.</summary>
-    internal void BeginMarsRequest() => Interlocked.Increment(ref this.marsRequestsInFlight);
+    /// <summary>
+    /// The session's settings as its last finished MARS request left them,
+    /// which the next request to execute starts from and
+    /// <c>sys.dm_exec_sessions</c> reports — even while a request has changed
+    /// its own copy (probed 2026-10-06 against SQL Server 2025). Null outside
+    /// MARS, where requests never overlap and work on the session's own.
+    /// </summary>
+    internal SessionSettings? PublishedSettings;
 
-    /// <summary>Ends a <see cref="BeginMarsRequest"/>; the last one out clears a Msg 3981 abort's refusal.</summary>
-    internal void EndMarsRequest()
+    /// <summary>
+    /// Counts a request in: a TDS MARS request as it arrives, an in-process
+    /// command as it starts, which also enlists it in the open transaction.
+    /// <paramref name="consumed"/> is false for an in-process reader, which
+    /// stays outstanding until it has read past its end.
+    /// </summary>
+    internal SessionRequest BeginSessionRequest(bool inProcess, bool consumed = true)
     {
-        if (Interlocked.Decrement(ref this.marsRequestsInFlight) == 0)
-            this.transactionAbortedWithRequestsPending = false;
+        var request = new SessionRequest(inProcess, consumed);
+        if (inProcess)
+            request.EnlistedTransactionId = this.CurrentTransaction?.TransactionId ?? 0;
+        lock (this.requestsGate)
+            this.pendingRequests.Add(request);
+        return request;
+    }
+
+    /// <summary>
+    /// Ends a request's run on the server, its response all gone out,
+    /// publishing a MARS request's settings over the session's.
+    /// </summary>
+    internal void EndSessionRequest(SessionRequest request)
+    {
+        lock (this.requestsGate)
+        {
+            if (request.Finished || !(request.Consumed ? this.pendingRequests.Remove(request) : this.pendingRequests.Contains(request)))
+                return;
+            request.Finished = true;
+            if (request is { Settings: { } settings, StartSettings: { } start } && this.PublishedSettings is { } published)
+                this.PublishedSettings = settings.PublishOver(published, start);
+        }
+    }
+
+    /// <summary>Records that the client has read past the end of a request's response.</summary>
+    internal void ConsumeRequest(SessionRequest request)
+    {
+        lock (this.requestsGate)
+        {
+            request.Consumed = true;
+            if (request.Finished)
+                _ = this.pendingRequests.Remove(request);
+        }
+    }
+
+    /// <summary>
+    /// Begins executing a TDS MARS request: it works on a copy of the
+    /// session's published settings and enlists in the open transaction.
+    /// </summary>
+    internal void EnterRequest(SessionRequest request)
+    {
+        this.ExecutingRequest = request;
+        if (Volatile.Read(ref this.PublishedSettings) is { } published)
+        {
+            request.StartSettings = published;
+            published.ApplyTo(this);
+        }
+        request.EnlistedTransactionId = this.CurrentTransaction?.TransactionId ?? 0;
+    }
+
+    /// <summary>
+    /// Takes over the request a pooled connection's reset is executing on a
+    /// MARS session: the request goes on as this fresh session's, from its
+    /// settings.
+    /// </summary>
+    internal void AdoptRequest(SessionRequest request)
+    {
+        lock (this.requestsGate)
+            this.pendingRequests.Add(request);
+        this.ExecutingRequest = request;
+        request.StartSettings = this.PublishedSettings;
+        request.EnlistedTransactionId = 0;
+    }
+
+    /// <summary>Ends an <see cref="EnterRequest"/>, keeping the settings the request leaves as its own.</summary>
+    internal void LeaveRequest(SessionRequest request)
+    {
+        if (request.StartSettings is not null)
+            request.Settings = SessionSettings.Capture(this);
+        this.ExecutingRequest = null;
+    }
+
+    /// <summary>
+    /// Whether the client has another request outstanding — in
+    /// <paramref name="transactionId"/>, when given — beside the executing
+    /// one: over TDS what the client counted in the executing request's
+    /// header, which only counts toward a transaction the request itself
+    /// works in; in process, a reader that hasn't read past its end.
+    /// </summary>
+    internal bool OtherRequestsOutstanding(long transactionId = 0)
+    {
+        if (this.ExecutingRequest is { InProcess: false } wire)
+            return wire.OutstandingRequestCount > 1 && (transactionId == 0 || wire.EnlistedTransactionId == transactionId);
+        if (this.pendingRequests.Count <= (this.ExecutingRequest is null ? 0 : 1))
+            return false;
+        lock (this.requestsGate)
+        {
+            foreach (var request in this.pendingRequests)
+            {
+                if (request != this.ExecutingRequest && !request.Consumed && (transactionId == 0 || request.EnlistedTransactionId == transactionId))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// The error a request starting now meets because of another still
+    /// running, or null: Msg 3980 while one is sending a DML statement's
+    /// <c>OUTPUT</c> rows, Msg 3989 while one works on a transaction another
+    /// request ended under it.
+    /// </summary>
+    internal SimulatedSqlException? RefuseNewRequest()
+    {
+        // The common case, nothing beside the asking request, takes no lock:
+        // one counted in meanwhile hasn't run, so can refuse nothing.
+        if (this.pendingRequests.Count <= (this.ExecutingRequest is null ? 0 : 1))
+            return null;
+        lock (this.requestsGate)
+        {
+            var abandoned = false;
+            foreach (var request in this.pendingRequests)
+            {
+                if (request == this.ExecutingRequest || request.Finished)
+                    continue;
+                if (request.HoldsSession)
+                    return SimulatedSqlException.RequestWhileSessionBusy();
+                abandoned |= this.abandonedTransactionId != 0 && request.EnlistedTransactionId == this.abandonedTransactionId;
+            }
+            if (abandoned)
+                return SimulatedSqlException.RequestWithoutValidTransactionDescriptor();
+            this.abandonedTransactionId = 0;
+        }
+        return null;
     }
 
     /// <summary>
     /// A commit ending <paramref name="transaction"/> (state 1) or a save
     /// point in it (state 2), by SQL text or through the API, while another
-    /// MARS request is still sending results: real refuses it with Msg 3981
+    /// request working on it is outstanding: real refuses it with Msg 3981
     /// and rolls the transaction back, while a rollback goes ahead (probed
-    /// 2026-09-30 against SQL Server 2025).
+    /// 2026-09-30 and 2026-10-06 against SQL Server 2025).
     /// </summary>
     internal void RefuseTransactionOperationWithRequestsPending(SimulatedDbTransaction transaction, byte state)
     {
-        if (!this.OtherMarsRequestsInFlight)
+        if (!this.OtherRequestsOutstanding(transaction.TransactionId))
             return;
         transaction.EndRollback();
-        this.transactionAbortedWithRequestsPending = true;
         throw SimulatedSqlException.TransactionOperationWithPendingRequests(state);
+    }
+
+    /// <summary>
+    /// A transaction rolled back while other requests working on it are still
+    /// running: each ends with Msg 3998, and until they have every request
+    /// arriving is Msg 3989 (probed 2026-10-06 against SQL Server 2025). One
+    /// whose response has all gone out is untouched, however much of it the
+    /// client has yet to read.
+    /// </summary>
+    internal void NoteTransactionRolledBack(SimulatedDbTransaction transaction)
+    {
+        lock (this.requestsGate)
+        {
+            foreach (var request in this.pendingRequests)
+            {
+                if (request == this.ExecutingRequest || request.Finished || request.EnlistedTransactionId != transaction.TransactionId)
+                    continue;
+                request.TransactionEndedUnder = true;
+                this.abandonedTransactionId = transaction.TransactionId;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The MARS refusals a transaction-manager request meets on real, for the
+    /// in-process API calls that stand in for one: an open reader is a
+    /// pending request, and the error is reported at line 1 as real reports
+    /// a transaction-manager request's.
+    /// </summary>
+    internal void RefuseApiRequest()
+    {
+        if (this.RefuseNewRequest() is { } refused)
+            throw AtLineOne(refused);
+    }
+
+    /// <summary>
+    /// <see cref="RefuseTransactionOperationWithRequestsPending"/> for an
+    /// in-process API commit or save, reported at line 1 (see
+    /// <see cref="RefuseApiRequest"/>).
+    /// </summary>
+    internal void RefuseApiTransactionOperation(SimulatedDbTransaction transaction, byte state)
+    {
+        try
+        {
+            this.RefuseTransactionOperationWithRequestsPending(transaction, state);
+        }
+        catch (SimulatedSqlException refused)
+        {
+            throw AtLineOne(refused);
+        }
+    }
+
+    private static SimulatedSqlException AtLineOne(SimulatedSqlException error)
+    {
+        error.ResolveDiagnostics(1, 0, "");
+        return error;
+    }
+
+    /// <summary>Forgets every pending request, as closing the session does.</summary>
+    private void ForgetRequests()
+    {
+        lock (this.requestsGate)
+            this.pendingRequests.Clear();
+        this.ExecutingRequest = null;
+        this.abandonedTransactionId = 0;
     }
 
     /// <summary>
@@ -482,66 +683,69 @@ public sealed class SimulatedDbConnection : DbConnection
     /// restores the caller's value when the body returns (probed against SQL
     /// Server 2025 for each). <c>ANSI_NULLS</c> joins them for dynamic SQL,
     /// a procedure or trigger body ignoring its own <c>SET</c> of it. Captured
-    /// on entry to a body and written back in the body's <c>finally</c>.
+    /// on entry to a body and written back in the body's <c>finally</c>; a
+    /// MARS request's own copy of the session's settings carries one too
+    /// (<see cref="SessionSettings"/>), so an option added here is each
+    /// request's own as well.
     /// </summary>
     internal readonly struct SessionOptionScope(SimulatedDbConnection connection)
     {
-        private readonly bool xactAbort = connection.XactAbort;
-        private readonly long rowCountLimit = connection.RowCountLimit;
-        private readonly byte dateFirst = connection.DateFirst;
-        private readonly DateOrder dateFormat = connection.DateFormat;
-        private readonly bool ansiNulls = connection.AnsiNulls;
-        private readonly bool ansiPadding = connection.AnsiPadding;
-        private readonly bool ansiWarnings = connection.AnsiWarnings;
-        private readonly bool arithabort = connection.Arithabort;
-        private readonly bool arithIgnore = connection.ArithIgnore;
-        private readonly bool concatNullYieldsNull = connection.ConcatNullYieldsNull;
-        private readonly bool numericRoundabort = connection.NumericRoundabort;
-        private readonly bool implicitTransactions = connection.ImplicitTransactions;
-        private readonly bool cursorCloseOnCommit = connection.CursorCloseOnCommit;
-        private readonly bool ansiNullDefaultOn = connection.AnsiNullDefaultOn;
-        private readonly bool ansiNullDefaultOff = connection.AnsiNullDefaultOff;
-        private readonly bool noExec = connection.NoExec;
-        private readonly int deadlockPriority = connection.DeadlockPriority;
-        private readonly bool statisticsIo = connection.StatisticsIo;
-        private readonly bool statisticsTime = connection.StatisticsTime;
-        private readonly Language language = connection.Language;
-        private readonly int lockTimeoutMillis = connection.LockTimeoutMillis;
-        private readonly IsolationLevel isolationLevel = connection.SessionIsolationLevel;
-        private readonly bool fmtOnly = connection.FmtOnly;
-        private readonly string? identityInsertTable = connection.IdentityInsertTable;
-        private readonly string? identityInsertQualifiedName = connection.IdentityInsertQualifiedName;
+        public readonly bool XactAbort = connection.XactAbort;
+        public readonly long RowCountLimit = connection.RowCountLimit;
+        public readonly byte DateFirst = connection.DateFirst;
+        public readonly DateOrder DateFormat = connection.DateFormat;
+        public readonly bool AnsiNulls = connection.AnsiNulls;
+        public readonly bool AnsiPadding = connection.AnsiPadding;
+        public readonly bool AnsiWarnings = connection.AnsiWarnings;
+        public readonly bool Arithabort = connection.Arithabort;
+        public readonly bool ArithIgnore = connection.ArithIgnore;
+        public readonly bool ConcatNullYieldsNull = connection.ConcatNullYieldsNull;
+        public readonly bool NumericRoundabort = connection.NumericRoundabort;
+        public readonly bool ImplicitTransactions = connection.ImplicitTransactions;
+        public readonly bool CursorCloseOnCommit = connection.CursorCloseOnCommit;
+        public readonly bool AnsiNullDefaultOn = connection.AnsiNullDefaultOn;
+        public readonly bool AnsiNullDefaultOff = connection.AnsiNullDefaultOff;
+        public readonly bool NoExec = connection.NoExec;
+        public readonly int DeadlockPriority = connection.DeadlockPriority;
+        public readonly bool StatisticsIo = connection.StatisticsIo;
+        public readonly bool StatisticsTime = connection.StatisticsTime;
+        public readonly Language Language = connection.Language;
+        public readonly int LockTimeoutMillis = connection.LockTimeoutMillis;
+        public readonly IsolationLevel IsolationLevel = connection.SessionIsolationLevel;
+        public readonly bool FmtOnly = connection.FmtOnly;
+        public readonly string? IdentityInsertTable = connection.IdentityInsertTable;
+        public readonly string? IdentityInsertQualifiedName = connection.IdentityInsertQualifiedName;
 
         public void Restore(SimulatedDbConnection connection)
         {
             // LANGUAGE, LOCK_TIMEOUT, the isolation level, FMTONLY and
             // IDENTITY_INSERT revert with the rest (probed 2026-10-04 against
             // SQL Server 2025).
-            connection.Language = this.language;
-            connection.LockTimeoutMillis = this.lockTimeoutMillis;
-            connection.SessionIsolationLevel = this.isolationLevel;
-            connection.FmtOnly = this.fmtOnly;
-            connection.IdentityInsertTable = this.identityInsertTable;
-            connection.IdentityInsertQualifiedName = this.identityInsertQualifiedName;
-            connection.XactAbort = this.xactAbort;
-            connection.RowCountLimit = this.rowCountLimit;
-            connection.DateFirst = this.dateFirst;
-            connection.DateFormat = this.dateFormat;
-            connection.AnsiNulls = this.ansiNulls;
-            connection.AnsiPadding = this.ansiPadding;
-            connection.AnsiWarnings = this.ansiWarnings;
-            connection.Arithabort = this.arithabort;
-            connection.ArithIgnore = this.arithIgnore;
-            connection.ConcatNullYieldsNull = this.concatNullYieldsNull;
-            connection.NumericRoundabort = this.numericRoundabort;
-            connection.ImplicitTransactions = this.implicitTransactions;
-            connection.CursorCloseOnCommit = this.cursorCloseOnCommit;
-            connection.AnsiNullDefaultOn = this.ansiNullDefaultOn;
-            connection.AnsiNullDefaultOff = this.ansiNullDefaultOff;
-            connection.NoExec = this.noExec;
-            connection.DeadlockPriority = this.deadlockPriority;
-            connection.StatisticsIo = this.statisticsIo;
-            connection.StatisticsTime = this.statisticsTime;
+            connection.Language = this.Language;
+            connection.LockTimeoutMillis = this.LockTimeoutMillis;
+            connection.SessionIsolationLevel = this.IsolationLevel;
+            connection.FmtOnly = this.FmtOnly;
+            connection.IdentityInsertTable = this.IdentityInsertTable;
+            connection.IdentityInsertQualifiedName = this.IdentityInsertQualifiedName;
+            connection.XactAbort = this.XactAbort;
+            connection.RowCountLimit = this.RowCountLimit;
+            connection.DateFirst = this.DateFirst;
+            connection.DateFormat = this.DateFormat;
+            connection.AnsiNulls = this.AnsiNulls;
+            connection.AnsiPadding = this.AnsiPadding;
+            connection.AnsiWarnings = this.AnsiWarnings;
+            connection.Arithabort = this.Arithabort;
+            connection.ArithIgnore = this.ArithIgnore;
+            connection.ConcatNullYieldsNull = this.ConcatNullYieldsNull;
+            connection.NumericRoundabort = this.NumericRoundabort;
+            connection.ImplicitTransactions = this.ImplicitTransactions;
+            connection.CursorCloseOnCommit = this.CursorCloseOnCommit;
+            connection.AnsiNullDefaultOn = this.AnsiNullDefaultOn;
+            connection.AnsiNullDefaultOff = this.AnsiNullDefaultOff;
+            connection.NoExec = this.NoExec;
+            connection.DeadlockPriority = this.DeadlockPriority;
+            connection.StatisticsIo = this.StatisticsIo;
+            connection.StatisticsTime = this.StatisticsTime;
         }
     }
 
@@ -575,8 +779,8 @@ public sealed class SimulatedDbConnection : DbConnection
     /// trigger it. Connection-scoped rather than command-scoped so a proc /
     /// UDF / dynamic-SQL body (which shares the connection but wraps a fresh
     /// body command) inherits the same cancellation signal. Only one command
-    /// runs at a time per connection (the simulator has no MARS), so a single
-    /// source suffices.
+    /// executes at a time per connection — MARS requests take turns — so a
+    /// single source suffices.
     /// </summary>
     private CancellationTokenSource executionCancellation = new();
 
@@ -1526,7 +1730,15 @@ public sealed class SimulatedDbConnection : DbConnection
         handlers(this, new SimulatedInfoMessageEventArgs(new SimulatedErrorCollection([message])));
     }
 
-    private string connectionString = "";
+    /// <summary>
+    /// Until one is set, the connection string announces what the connection
+    /// is: a MARS one, whose overlapping readers it allows and whose rules it
+    /// applies (see <see cref="RefuseNewRequest"/>). EF Core reads the keyword
+    /// to decide whether a user transaction's <c>SaveChanges</c> may take a
+    /// savepoint, which real refuses with Msg 3981 while a reader in the
+    /// transaction is open.
+    /// </summary>
+    private string connectionString = "MultipleActiveResultSets=True";
     private string? pendingUserId;
     private string? pendingPassword;
     private string? pendingInitialCatalog;
@@ -1673,6 +1885,7 @@ public sealed class SimulatedDbConnection : DbConnection
         // disposing the transaction first.
         lock (this.sessionGate)
         {
+            this.ForgetRequests();
             this.CurrentTransaction?.EndRollback();
             this.ReleaseSessionAppLocks();
             this.state = ConnectionState.Closed;
@@ -1825,6 +2038,9 @@ public sealed class SimulatedDbConnection : DbConnection
             throw new InvalidOperationException("SqlConnection does not support parallel transactions.");
         if (isolationLevel == IsolationLevel.Unspecified)
             isolationLevel = IsolationLevel.ReadCommitted;
+        this.RefuseApiRequest();
+        if (this.OtherRequestsOutstanding())
+            throw AtLineOne(SimulatedSqlException.NewTransactionWhileRequestsRunning());
         if (this.CurrentTransaction is { } open)
         {
             this.SessionIsolationLevel = isolationLevel;
