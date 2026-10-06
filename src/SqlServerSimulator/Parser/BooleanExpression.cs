@@ -1239,6 +1239,25 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </remarks>
     internal virtual bool IsWrittenConstant => false;
 
+    /// <summary>
+    /// The part a predicate plays when real folds an enclosing query's filter
+    /// into a constant <c>UNION</c>'s branches (see
+    /// <c>Selection.FoldOuterFilterIntoConstantUnions</c>): each operand of an
+    /// <c>AND</c> folds on its own, another junction folds when its operands
+    /// do, a comparison when its operands are bare columns and written
+    /// constants, and anything else never.
+    /// </summary>
+    internal virtual FoldRole ConstantFoldRole => FoldRole.None;
+
+    /// <summary>The kinds of <see cref="ConstantFoldRole"/>.</summary>
+    internal enum FoldRole
+    {
+        None,
+        Conjunction,
+        Junction,
+        Comparison,
+    }
+
     /// <summary>Whether every element opts into <see cref="IsWrittenConstant"/>.</summary>
     private static bool AllWrittenConstant(BooleanExpression[] operands)
     {
@@ -1665,6 +1684,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class ConstantFoldedPredicate(bool? value, BooleanExpression folded) : BooleanExpression
     {
+        internal override FoldRole ConstantFoldRole => FoldRole.Junction;
+
         internal override bool IsWrittenConstant => true;
 
         internal override bool IsNeverTrue => value != true;
@@ -1745,6 +1766,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class AndExpression(BooleanExpression[] operands) : BooleanExpression
     {
+        internal override FoldRole ConstantFoldRole => FoldRole.Conjunction;
+
         internal override bool ParallelSafe => AllParallelSafe(operands);
 
         internal override bool IsWrittenConstant => AllWrittenConstant(operands);
@@ -1859,6 +1882,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class OrExpression(BooleanExpression[] operands) : BooleanExpression
     {
+        internal override FoldRole ConstantFoldRole => FoldRole.Junction;
+
         internal override bool ParallelSafe => AllParallelSafe(operands);
 
         internal override bool IsWrittenConstant => AllWrittenConstant(operands);
@@ -1983,6 +2008,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     internal sealed class IsNullExpression(Expression source, bool negated) : BooleanExpression
     {
+        internal override FoldRole ConstantFoldRole => FoldRole.Comparison;
+
         internal override bool ParallelSafe => source.ParallelSafe;
 
         internal override bool OffersSeek(Selection.ForceSeekProbe probe, bool negated) => probe.IsSeekColumn(source);
@@ -2098,6 +2125,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class InExpression(Expression source, Expression[] candidates, bool negated, bool selfReferenced) : BooleanExpression
     {
+        internal override FoldRole ConstantFoldRole => FoldRole.Comparison;
+
         internal override bool TryGetComplement([NotNullWhen(true)] out BooleanExpression? complement)
         {
             complement = negated ? new InExpression(source, candidates, negated: false, selfReferenced) : null;
@@ -2294,6 +2323,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class BetweenExpression(Expression value, Expression lower, Expression upper, bool negated) : BooleanExpression
     {
+        internal override FoldRole ConstantFoldRole => FoldRole.Comparison;
+
         internal override bool TryGetComplement([NotNullWhen(true)] out BooleanExpression? complement)
         {
             complement = negated ? new BetweenExpression(value, lower, upper, negated: false) : null;
@@ -2840,6 +2871,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class NotExpression(BooleanExpression inner) : BooleanExpression
     {
+        internal override FoldRole ConstantFoldRole => FoldRole.Junction;
+
         internal override bool TryGetComplement([NotNullWhen(true)] out BooleanExpression? complement)
         {
             complement = inner;
@@ -2893,6 +2926,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private abstract class CompareExpression : BooleanExpression
     {
+        internal override FoldRole ConstantFoldRole => FoldRole.Comparison;
+
         internal override bool ParallelSafe => this.OperandExpressionsParallelSafe;
 
         protected readonly Expression left, right;
@@ -3275,6 +3310,8 @@ internal abstract class BooleanExpression : ExpressionNode
     /// </summary>
     private sealed class LikeExpression(Expression left, Expression right, Expression? escape, bool negated) : CompareExpression(left, right)
     {
+        internal override FoldRole ConstantFoldRole => FoldRole.None;
+
         private readonly LikeMatcher.Cache patterns = new(forPatIndex: false);
         private readonly Expression? escape = escape;
         private readonly bool negated = negated;
@@ -3350,7 +3387,8 @@ internal abstract class BooleanExpression : ExpressionNode
             // pair (probe-confirmed both ways, and through a char / nchar
             // column's own ANSI padding).
             var slack = !SqlType.IsNationalStringCategory(l.Type) && !SqlType.IsNationalStringCategory(r.Type);
-            var matched = this.patterns.Get(r.AsString, escapeChar, resolved.Collation).IsMatch(l.AsString, slack);
+            var matched = this.patterns.Get(Expressions.StringScalars.TextUnder(r, resolved.Collation), escapeChar, resolved.Collation)
+                .IsMatch(Expressions.StringScalars.TextUnder(l, resolved.Collation), slack);
             return matched ^ this.negated;
         }
 

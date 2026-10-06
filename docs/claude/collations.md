@@ -761,6 +761,7 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
 - **A standalone combining mark matches any other standalone mark on real.**
   `TRANSLATE(NCHAR(0x0308) + …, NCHAR(0x0301), N'd')` substitutes on real and doesn't here, and the same equivalence shows up in `TRIM`'s character set, in `REPLACE`'s pattern and in a `STRING_SPLIT` separator — real appears to compare the marks at a weight level `CompareInfo` doesn't expose, since a mark attached to a base letter stays distinct in both engines.
   A differential fuzz of the five scalars against live (3,000 random cases per seed over an alphabet holding three bare marks) puts the whole class at ~1% of cases; with the marks removed from the alphabet the same fuzz is 0.2%, and every remaining case is the ligature or zero-weight entry above.
+  A mark searched for on its own reaches past other marks too: real's `CHARINDEX(NCHAR(0x0301), x)` is 1 for `NCHAR(0x0308)`, `N'x' + NCHAR(0x0308)` and `N' ' + NCHAR(0x0308)` alike, `REPLACE(N'x' + NCHAR(0x0308), NCHAR(0x0301), N'Z')` is `ZZ` while `REPLACE(NCHAR(0x0308) + N'x', …)` is `Zx`, and `NCHAR(0x0308) = NCHAR(0x0301)` is false — no rule covering all of them was found (probed 2026-10-06 against SQL Server 2025).
 - **An unresolved collation reaching a consumer the marker model doesn't cover.**
   The catalog under [Msg 4191](#msg-4191--the-consuming-operation-reports) is what probing established; a value with no collation that reaches full-text, spatial, XML or the JSON builders isn't gated, and a conflict that survives to execution falls back to the left operand's collation rather than raising.
 - **An operator that converts an unresolved string doesn't refuse it.**
@@ -782,9 +783,6 @@ A `CAST` does **not** resolve a conflict — the cast result inherits the source
   The Latin1-General tables reproduce both (the unversioned table weighs no surrogate); every other pre-v100 name routes through `CompareInfo`, which compares by code point and so behaves like v100.
 - **Non-`_SC` `TRANSLATE` over surrogate halves.**
   Here each half maps by its own position; real reads the halves as weightless riders on one character, by a rule not yet explained: `TRANSLATE(N'x' + <pair>, <pair>, N'ZQ')` is `xZZ`, `TRANSLATE(N'a😀', N'😀', N'xy')` is `axx` (`axy` here), `TRANSLATE(N'😀😁', N'😁', N'xy')` is `xxxx`, a lone low surrogate looked up in a list holding only the high one translates (`TRANSLATE(N'a' + NCHAR(56832), NCHAR(55357), N'x')` is `ax`), yet `TRANSLATE(N'😀', N'x😀', N'abc')` leaves the input unchanged (probed 2026-09-29 and 2026-10-01, re-checked 2026-10-03 against SQL Server 2025).
-- **A string operand moved into a `_UTF8` collation by `LIKE` or `CHARINDEX` keeps its characters**, where real converts it within its declared byte budget as a comparison already does here: `CHARINDEX('ä', CAST('ä' AS varchar(10)) COLLATE Latin1_General_100_CI_AI_SC_UTF8)`, whose `varchar(1)` needle can't hold the two-byte `ä`, is 0 on real and 1 here (probed 2026-10-03 against SQL Server 2025).
-- **`STRING_AGG(a, b)` over two columns of conflicting collations** is Msg 468 on real, which settles the collation before the separator check, and Msg 8733 here (probed 2026-10-03 against SQL Server 2025).
-- **`TERTIARY_WEIGHTS`** is Msg 195 here; real accepts a `varchar` argument under a SQL collation and refuses an `nvarchar` one with Msg 8116 (probed 2026-10-02 against SQL Server 2025).
 
 ## Cross-references
 

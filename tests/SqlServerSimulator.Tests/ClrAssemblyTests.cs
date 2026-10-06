@@ -383,6 +383,22 @@ public class ClrAssemblyTests
                 "create function dbo.cul() returns nvarchar(200) as external name simclr.Funcs.Culture")
             .ExecuteScalar("set language german; select dbo.cul()"));
 
+    /// <summary>
+    /// A base-library exception reads in .NET Framework's words: a number or
+    /// date that won't parse isn't quoted back, a Base64 refusal ends in a
+    /// space, and a failed unboxing is the bare cast message (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("ParseInt", "int", "N'x'", "System.FormatException: Input string was not in a correct format.\r\n")]
+    [DataRow("Unbox", "int", "N'a'", "System.InvalidCastException: Specified cast is not valid.\r\n")]
+    [DataRow("ParseDate", "datetime", "N'notadate'", "System.FormatException: The string was not recognized as a valid DateTime. There is an unknown word starting at index 0.\r\n")]
+    [DataRow("ParseDateExact", "datetime", "N'2020/01/01'", "System.FormatException: String was not recognized as a valid DateTime.\r\n")]
+    [DataRow("Base64", "varbinary(100)", "N'%%%'", "illegal character among the padding characters. \r\n")]
+    public void FrameworkAssembly_BaseLibraryException_ReadsInFrameworksWords(string method, string returns, string argument, string expected)
+        => Contains(expected, ClrFrameworkFixture.Simulation($"create function dbo.bcl(@s nvarchar(30)) returns {returns} as external name simclr.Bcl.{method}")
+            .AssertSqlError($"select dbo.bcl({argument})", 6522).Message);
+
     [TestMethod]
     [Description("An nvarchar(n) return value longer than n is the server's TruncationException, not a silent cut.")]
     public void FrameworkAssembly_ScalarReturnTooLong_RaisesTruncation()

@@ -2696,7 +2696,16 @@ public sealed partial class Simulation
             if (requireSemicolonBeforeCte)
                 throw SimulatedSqlException.CteRequiresPrecedingSemicolon();
             var withToken = context.Token;
+            var beforeCtes = context.SaveCheckpoint();
             ParseCteBindings(context);
+            // A SELECT under SET NO_BROWSETABLE is a browse statement, which
+            // reads its CTEs flattened: their bodies parse again knowing it.
+            if (connection.NoBrowseTable && context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' })
+            {
+                context.RestoreCheckpoint(beforeCtes);
+                using var flattenCtes = ParserScope.Enter(ref context.BrowseFlattenCtes, true);
+                ParseCteBindings(context);
+            }
             batch.BindErrors?.AddCtePrefix(withToken, context.Token);
             context.CtePrefixLeadsSelectStatement = context.Token is ReservedKeyword { Keyword: Keyword.Select } or Operator { Character: '(' };
         }

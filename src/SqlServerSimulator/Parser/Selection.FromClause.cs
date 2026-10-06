@@ -1314,9 +1314,10 @@ internal sealed partial class Selection
                     _ = RejectRepeatedColumnName(cteBinding.ColumnNames, cteBinding.Name);
 
                     var cteColumns = new HeapColumn[cteBinding.Plan.Schema.Length];
+                    var cteHidden = cteBinding.Plan.BrowseFlattened ? cteBinding.Plan.HiddenColumnCount : 0;
                     for (var ci = 0; ci < cteColumns.Length; ci++)
                     {
-                        cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: cteBinding.Plan.ColumnNullability?[ci] ?? true, spelledNumeric: cteBinding.Plan.ColumnReportsNumeric is { } cteNumeric && cteNumeric[ci])
+                        cteColumns[ci] = new HeapColumn(string.Empty, cteBinding.Plan.Schema[ci], maxLength: null, nullable: cteBinding.Plan.ColumnNullability?[ci] ?? true, isHidden: ci >= cteColumns.Length - cteHidden, spelledNumeric: cteBinding.Plan.ColumnReportsNumeric is { } cteNumeric && cteNumeric[ci])
                         {
                             IsUntypedNull = cteBinding.Plan.ColumnIsUntypedNull is { } cteNulls && cteNulls[ci],
                             AliasType = cteBinding.Plan.ColumnAliasTypes?[ci],
@@ -1372,7 +1373,10 @@ internal sealed partial class Selection
                         // reference wrote — `FROM c AS q` names `c` (probed
                         // 2026-08-08, GROUP BY containment and XQuery alike).
                         writtenObjectName: cteBinding.Name,
-                        cte: cteBinding);
+                        cte: cteBinding)
+                    {
+                        BrowseBody = context.BrowseFlattenFrom ? cteBinding.Plan : null,
+                    };
                 }
 
                 // Past a CTE the name is an object — a table, view, table
@@ -1453,7 +1457,17 @@ internal sealed partial class Selection
                     // FOR SYSTEM_TIME after a view's name applies to the tables
                     // its body reads (probed 2026-10-04 against SQL Server 2025).
                     var viewSystemTime = ParseOptionalForSystemTimeClause(context);
-                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out var viewBody, viewSystemTime);
+                    var viewFlattens = context.BrowseFlattenFrom;
+                    var viewColumns = context.Batch.Connection.Simulation.BindViewColumns(context.Batch, resolvedView, objectName, out var viewBody, viewSystemTime, viewFlattens);
+                    // A body a browse statement flattens trails the view's own
+                    // columns with its base tables' hidden ones.
+                    if (viewFlattens && viewBody is { BrowseFlattened: true, HiddenColumnCount: > 0 and var viewHidden } && viewBody.Schema.Length - viewHidden == viewColumns.Length)
+                    {
+                        viewColumns = [
+                            .. viewColumns,
+                            .. Enumerable.Range(viewColumns.Length, viewHidden).Select(i => new HeapColumn(BrowseHiddenName(i), viewBody.Schema[i], maxLength: null, nullable: true, isHidden: true)),
+                        ];
+                    }
                     var viewColumnNames = new string[viewColumns.Length];
                     for (var ci = 0; ci < viewColumnNames.Length; ci++)
                         viewColumnNames[ci] = viewColumns[ci].Name;
@@ -1477,7 +1491,7 @@ internal sealed partial class Selection
                     }
                     ValidateViewIndexHints(context, resolvedView, viewHints, objectName.ToString(), objectNameLine);
                     var viewSynonym = RecordSecurableRead(context, resolvedView, objectName, viewBody);
-                    var viewPlan = Selection.ForView(resolvedView, viewColumns, systemTime: viewSystemTime);
+                    var viewPlan = Selection.ForView(resolvedView, viewColumns, systemTime: viewSystemTime, browseFlatten: viewFlattens);
                     viewPlan.OutputKeys = viewBody?.OutputKeys;
                     return new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,
@@ -1492,7 +1506,10 @@ internal sealed partial class Selection
                         viaSynonym: viewSynonym,
                         autoElementName: viewAlias ?? objectName.ToString(),
                         writtenObjectName: objectName.ToString(),
-                        unaliasedName: viewAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null);
+                        unaliasedName: viewAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null)
+                    {
+                        BrowseBody = viewFlattens ? viewBody : null,
+                    };
                 }
 
                 // TVF call from FROM clause: `FROM schema.fn(args) [alias]`.
@@ -1774,8 +1791,14 @@ internal sealed partial class Selection
                 // Selection) and the explicit <paramref name="scope"/> resolver
                 // chain (set when this FROM source is itself nested inside
                 // a subquery) are honored.
-                var derivedSelection = ParseNestedQueryRejectingNextValueFor(context,
-                    QueryScope.Nested(QueryPosition.Derived, context.OuterTypeResolver ?? scope.OuterTypeResolver));
+                Selection derivedSelection;
+                var derivedFlattens = context.BrowseFlattenFrom;
+                using (ParserScope.Enter(ref context.BrowseFlatten, derivedFlattens))
+                {
+                    derivedSelection = ParseNestedQueryRejectingNextValueFor(context,
+                        QueryScope.Nested(QueryPosition.Derived, context.OuterTypeResolver ?? scope.OuterTypeResolver));
+                }
+                var derivedHidden = derivedSelection.BrowseFlattened ? derivedSelection.HiddenColumnCount : 0;
 
                 // Inner SELECT result rows are LOB-inline (projections never
                 // emit LOB pointers because they have no destination Heap),
@@ -1785,7 +1808,7 @@ internal sealed partial class Selection
                 var derivedColumns = new HeapColumn[derivedSelection.Schema.Length];
                 for (var ci = 0; ci < derivedColumns.Length; ci++)
                 {
-                    derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: derivedSelection.ColumnNullability?[ci] ?? true, spelledNumeric: derivedSelection.ColumnReportsNumeric is { } derivedNumeric && derivedNumeric[ci])
+                    derivedColumns[ci] = new HeapColumn(string.Empty, derivedSelection.Schema[ci], maxLength: null, nullable: derivedSelection.ColumnNullability?[ci] ?? true, isHidden: ci >= derivedColumns.Length - derivedHidden, spelledNumeric: derivedSelection.ColumnReportsNumeric is { } derivedNumeric && derivedNumeric[ci])
                     {
                         IsUntypedNull = derivedSelection.ColumnIsUntypedNull is { } derivedNulls && derivedNulls[ci],
                         AliasType = derivedSelection.ColumnAliasTypes?[ci],
@@ -1819,7 +1842,9 @@ internal sealed partial class Selection
                 // A FOR JSON / FOR XML document's column name belongs to the
                 // client result; read as a derived table it is unnamed
                 // (Msg 8155, probed 2026-10-02 against SQL Server 2025).
-                var derivedNames = ResolveDerivedTableColumnNames(context, derivedSelection.IsForClauseDocument ? [""] : derivedSelection.ColumnNames, derivedQualifier);
+                var derivedNames = ResolveDerivedTableColumnNames(context, derivedSelection.IsForClauseDocument ? [""] : derivedSelection.ColumnNames[..^derivedHidden], derivedQualifier);
+                if (derivedHidden > 0)
+                    derivedNames = [.. derivedNames, .. Enumerable.Range(derivedNames.Length, derivedHidden).Select(BrowseHiddenName)];
                 // A derived table takes no TABLESAMPLE; real stops at the
                 // keyword itself (Msg 156, probed 2026-09-24).
                 if (context.Token is ReservedKeyword { Keyword: Keyword.TableSample } tableSample)
@@ -1835,7 +1860,10 @@ internal sealed partial class Selection
                     rows: [],
                     lateralPlan: derivedSelection,
                     lateralIsQueryBody: true,
-                    derivedTable: new DerivedTableBinding(derivedSelection, derivedQualifier, derivedNames, context.CurrentDatabase));
+                    derivedTable: new DerivedTableBinding(derivedSelection, derivedQualifier, derivedNames, context.CurrentDatabase))
+                {
+                    BrowseBody = derivedFlattens ? derivedSelection : null,
+                };
 
             case ReservedKeyword { Keyword: Keyword.OpenXml }:
                 // OPENXML dispatch: the pre-OPENJSON XML rowset, read over a

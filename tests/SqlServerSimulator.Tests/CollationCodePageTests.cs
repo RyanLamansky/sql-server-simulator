@@ -366,6 +366,24 @@ public sealed class CollationCodePageTests
         AreEqual(expected, new Simulation().ExecuteScalar($"select {expression}"));
 
     /// <summary>
+    /// A search operand a <c>_UTF8</c> collation takes over converts within its
+    /// own byte budget, as a comparison's does: a varchar(1) <c>'ä'</c> reads
+    /// empty, so it finds and matches nothing (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("charindex('ä', cast('ä' as varchar(10)) collate Latin1_General_100_CI_AI_SC_UTF8)", "0")]
+    [DataRow("charindex(cast('ä' as varchar(10)), cast('ä' as varchar(10)) collate Latin1_General_100_CI_AI_SC_UTF8)", "1")]
+    [DataRow("charindex(cast('ä' as varchar(2)), cast('xä' as varchar(10)) collate Latin1_General_100_CI_AI_SC_UTF8)", "2")]
+    [DataRow("case when cast('ä' as varchar(10)) collate Latin1_General_100_CI_AI_SC_UTF8 like 'ä' then 1 else 0 end", "0")]
+    [DataRow("case when cast('ä' as varchar(10)) collate Latin1_General_100_CI_AI_SC_UTF8 like 'ä%' then 1 else 0 end", "1")]
+    [DataRow("case when 'ä' like cast('ä' as varchar(10)) collate Latin1_General_100_CI_AI_SC_UTF8 then 1 else 0 end", "0")]
+    [DataRow("patindex('%ä%', cast('ä' as varchar(10)) collate Latin1_General_100_CI_AI_SC_UTF8)", "1")]
+    [DataRow("replace(cast('aä' as varchar(10)) collate Latin1_General_100_CI_AI_SC_UTF8, 'ä', 'z')", "aä")]
+    public void SearchOperand_MovedToUtf8_KeepsItsByteBudget(string expression, string expected) =>
+        AreEqual(expected, Convert.ToString(new Simulation().ExecuteScalar($"select {expression}"), System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
     /// A varchar written into a UTF-8 column takes the column's byte budget,
     /// not the literal's own: a varchar(1) 'é' stores whole in a varchar(10)
     /// (probed 2026-10-05 against SQL Server 2025).

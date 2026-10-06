@@ -484,7 +484,8 @@ A grouped or DISTINCT query is described without hidden columns, a set operation
 A plan parsed under the option is never cached, since what it projects depends on it.
 A trailing `FOR BROWSE` puts its one statement in browse mode without the option — the clause arrives after the projection it decides, so the SELECT dispatch reads the statement again as a browse statement when `ParserContext.ForBrowseSeen` says it met one — and over a set operation it is Msg 198.
 
-**Not modeled yet**: real flattens a derived table (and presumably a view) into its base tables — `SELECT name FROM (SELECT name, id FROM w1) d` names `w1.name` and still appends `id` and `rv` — where the simulator reports such a column with no base table and appends nothing for it.
+A derived table, view or CTE the statement reads is flattened into the base tables under it, at any depth: its columns name their base columns (`SELECT name FROM (SELECT name, id FROM w1) d` names `w1.name`), TABNAME lists those tables, and their keys and rowversions ride as hidden columns carrying real values — unless the body groups or is DISTINCT, which keeps the names but carries no keys, or is a set operation, whose columns read as expressions (probed 2026-10-06 against SQL Server 2025).
+A body flattens by appending its own base tables' hidden columns behind its visible ones (`Selection.BrowseFlattened`), under names no identifier can spell so `*` and name lookup never meet them; a FROM source of a browse statement arms its body's parse through `ParserContext.BrowseFlatten`, a view re-parses its body armed when it runs, and a browse `SELECT`'s `WITH` prefix re-parses its CTE bodies armed.
 The in-process reader's `GetSchemaTable` reads the same `BrowseInfo` (see [`data-reader.md`](data-reader.md#getschematable-answers-sqlclients-table)).
 
 ## Legacy text / ntext / image wire forms

@@ -599,6 +599,15 @@ internal sealed class AggregateExpression : Expression
             throw SimulatedSqlException.InvalidArgumentDataType(SqlType.OperandName(separatorType, separator), 2, "string_agg");
         }
 
+        // The two settle one collation before the separator's form is judged,
+        // the separator's named first (probed 2026-10-06 against SQL Server
+        // 2025: a column separator of another collation is Msg 468, not 8733).
+        if (operandType.Category == SqlTypeCategory.String && separatorType.Collation is { } separatorCollation
+            && operandType.Collation is { } operandCollation && Collation.Resolve(separatorType, operandType) is null)
+        {
+            throw SimulatedSqlException.CollationConflict(separatorCollation.Name, operandCollation.Name, "string_agg");
+        }
+
         var bare = separator;
         while (bare is Parenthesized parenthesized)
             bare = parenthesized.Wrapped;

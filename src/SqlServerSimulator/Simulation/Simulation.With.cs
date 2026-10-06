@@ -110,6 +110,10 @@ partial class Simulation
     /// </remarks>
     private static void ParseCteBindings(ParserContext context)
     {
+        // A browse statement, or a view body it flattens, flattens its CTEs'
+        // bodies too; the arming is the query's after them, not theirs to consume.
+        var flattensBodies = context.BrowseFlatten || context.BrowseFlattenCtes;
+        using var disarmed = ParserScope.Enter(ref context.BrowseFlatten, false);
         var bindings = new Dictionary<string, CteBinding>(StringComparer.OrdinalIgnoreCase);
         context.CteBindings = bindings;
 
@@ -193,7 +197,10 @@ partial class Simulation
             var binding = new CteBinding(cteName.Value, [], context.CurrentDatabase);
             bindings[cteName.Value] = binding;
 
-            var body = ParseCteBodyRecordingReads(context, binding, renameList);
+            Selection body;
+            using (ParserScope.Enter(ref context.BrowseFlatten, flattensBodies))
+                body = ParseCteBodyRecordingReads(context, binding, renameList);
+            var browseHidden = body.BrowseFlattened ? body.HiddenColumnCount : 0;
 
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -204,16 +211,18 @@ partial class Simulation
             string[] columnNames;
             if (renameList is not null)
             {
-                if (renameList.Length < body.Schema.Length)
+                if (renameList.Length < body.Schema.Length - browseHidden)
                     throw SimulatedSqlException.HasMoreColumnsThanColumnList(cteName.Value);
-                if (renameList.Length > body.Schema.Length)
+                if (renameList.Length > body.Schema.Length - browseHidden)
                     throw SimulatedSqlException.HasFewerColumnsThanColumnList(cteName.Value);
                 columnNames = renameList;
             }
             else
             {
-                columnNames = body.ColumnNames;
+                columnNames = body.ColumnNames[..^browseHidden];
             }
+            if (browseHidden > 0)
+                columnNames = [.. columnNames, .. Enumerable.Range(columnNames.Length, browseHidden).Select(Selection.BrowseHiddenName)];
 
             // The same binding instance stays in the dictionary so
             // self-reference FromSources built during the recursive parse

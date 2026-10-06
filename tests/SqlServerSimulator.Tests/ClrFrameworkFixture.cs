@@ -568,6 +568,24 @@ internal static class ClrFrameworkFixture
             public static SqlBoolean FuncTrig() { return new SqlBoolean(SqlContext.TriggerContext != null); }
         }
 
+        public static class Bcl
+        {
+            [SqlFunction]
+            public static SqlInt32 ParseInt(SqlString s) { return int.Parse(s.Value); }
+
+            [SqlFunction]
+            public static SqlInt32 Unbox(SqlString s) { object o = s.Value; return (int)o; }
+
+            [SqlFunction]
+            public static SqlDateTime ParseDate(SqlString s) { return DateTime.Parse(s.Value, CultureInfo.InvariantCulture); }
+
+            [SqlFunction]
+            public static SqlDateTime ParseDateExact(SqlString s) { return DateTime.ParseExact(s.Value, "yyyy-MM-dd", CultureInfo.InvariantCulture); }
+
+            [SqlFunction]
+            public static SqlBinary Base64(SqlString s) { return Convert.FromBase64String(s.Value); }
+        }
+
         public static class Ctx
         {
             static SqlConnection Open() { SqlConnection c = new SqlConnection("context connection=true"); c.Open(); return c; }
@@ -639,6 +657,18 @@ internal static class ClrFrameworkFixture
                     s.Direction = ParameterDirection.Output;
                     Send(Show(cmd.ExecuteScalar()) + " " + Show(o.Value) + " " + Show(o.SqlValue) + " " + Show(s.Value));
                     b = (SqlInt32)o.SqlValue;
+                }
+            }
+
+            [SqlProcedure]
+            public static void DecimalParams()
+            {
+                using (SqlConnection c = Open())
+                {
+                    SqlCommand cmd = new SqlCommand("select concat(cast(sql_variant_property(@p, 'BaseType') as nvarchar(20)), N' ', cast(sql_variant_property(@q, 'BaseType') as nvarchar(20)), N' ', cast(sql_variant_property(@q, 'Scale') as int))", c);
+                    cmd.Parameters.AddWithValue("@p", 12.345m);
+                    cmd.Parameters.Add("@q", SqlDbType.Decimal).Value = 12.345m;
+                    Send(Show(cmd.ExecuteScalar()));
                 }
             }
 

@@ -1607,8 +1607,14 @@ internal sealed partial class Selection
         var orderBy = fromClause.OrderBy;
         if (topWithTies && orderBy.Count == 0)
             throw SimulatedSqlException.TopWithTiesRequiresOrderBy();
+        FoldOuterFilterIntoConstantUnions(parseBatch, sources, [
+            .. fromClause.Excluders,
+            .. joins.Where(static join => join.Kind == JoinKind.Inner && join.OnPredicate is not null).Select(static join => join.OnPredicate!),
+        ]);
         var browse = TakeBrowseStatement(parseBatch, scope, intoTarget, isAssignmentOnly);
-        var browseHidden = browse && !distinct && aggregates.Count == 0 && fromClause.GroupingSets.Count == 0 && fromClause.Having is null
+        var browseFlattened = !browse && FlattensForBrowse(parseBatch.Parser, intoTarget, isAssignmentOnly);
+        var browsePassesRows = !distinct && aggregates.Count == 0 && fromClause.GroupingSets.Count == 0 && fromClause.Having is null;
+        var browseHidden = (browse || browseFlattened) && browsePassesRows
             ? AppendBrowseHiddenColumns(sources, expressions)
             : 0;
         var outputSchema = new SqlType[expressions.Count];
@@ -2250,6 +2256,12 @@ internal sealed partial class Selection
             selection.Browse = BrowseInfoFor(sources, expressions, outputColumnNames, browseHidden);
             selection.HiddenColumnCount = browseHidden;
         }
+        else if (browseFlattened)
+        {
+            selection.BrowseFlattened = true;
+            selection.BrowsePassesRows = browsePassesRows;
+            selection.HiddenColumnCount = browseHidden;
+        }
         if (parseBatch.Parser.CursorStatement && scope.Position == QueryPosition.Statement)
         {
             parseBatch.Parser.CursorStatement = false;
@@ -2591,6 +2603,14 @@ internal sealed partial class Selection
         // not their computed flag (probed 2026-09-26 against SQL Server 2025).
         if (from.LateralPlan is { ColumnWireFlags: { } inner } && ordinal < inner.Length)
             return from.LateralIsQueryBody ? (byte)(inner[ordinal] & ~0x20) : inner[ordinal];
+        // A view's hidden browse column reads as the base column it carries.
+        if (from is { BackingView: not null, BrowseBody: { BranchFromSources: { } bodySources, ProjectionExpressions: { } projections } } && from.Columns[ordinal].IsHidden)
+        {
+            return ordinal < projections.Length
+                && BrowseBaseColumn(bodySources, projections[ordinal]) is { Table: { } baseSource, Ordinal: var baseColumn }
+                ? SourceColumnWireFlags(baseSource, baseColumn)
+                : (byte)0x00;
+        }
         // An updatable view's column traces to the base column behind it, and
         // one of its expressions is computed.
         if (from.BackingView is { BaseTable: not null } expressionView && expressionView.BaseColumnOrdinals[ordinal] < 0)

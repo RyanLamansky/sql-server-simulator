@@ -117,36 +117,184 @@ partial class Selection
     }
 
     /// <summary>
-    /// Whether <paramref name="sets"/> is a ROLLUP's chain — each set the one
-    /// before it less its last key, the first carrying every key — which real
-    /// computes as one Stream Aggregate over the first set's sort, emitting each
-    /// subtotal after the groups it totals and the grand total last (probed
-    /// 2026-09-29 against SQL Server 2025, for <c>ROLLUP(a, b)</c>,
-    /// <c>a, ROLLUP(b)</c> and the equivalent <c>GROUPING SETS</c> alike).
+    /// The order real emits a query's groups in when it has several grouping
+    /// sets — <c>ROLLUP</c>, <c>CUBE</c> or <c>GROUPING SETS</c> — as a
+    /// concatenation of rollup chains, each a sort feeding one Stream Aggregate
+    /// (probed 2026-10-06 against SQL Server 2025, every shape below stable
+    /// across data distributions, a clustered key and 3,000 rows):
+    /// <list type="bullet">
+    /// <item><description>Each grouping column takes a bit by its first
+    /// appearance across the sets, the first the lowest, so a set is a
+    /// mask.</description></item>
+    /// <item><description>The sets are taken by mask, highest first, and each
+    /// joins the first chain whose smallest set strictly contains it, else
+    /// starts a chain of its own — so a repeated set runs again in a chain of
+    /// its own. The chains emit in the order they started.</description></item>
+    /// <item><description>A chain of several sets sorts by its smallest set's
+    /// columns and then each larger set's added ones, by bit within a step, and
+    /// emits each subtotal after the groups it totals. A chain of one set sorts
+    /// as a lone GROUP BY over those columns in bit order does (see
+    /// <see cref="ImplicitKeyOrder"/>), so two keys under an aggregate sort the
+    /// other way round and a set covering a unique key keeps the scan's
+    /// order.</description></item>
+    /// </list>
+    /// So <c>CUBE(a, b)</c> emits <c>(a, b)</c> by <c>b, a</c> with each
+    /// <c>(b)</c> subtotal and the grand total, then <c>(a)</c>; and
+    /// <c>GROUPING SETS ((a), (b))</c> emits <c>(b)</c> first.
     /// </summary>
-    private static bool IsRollupChain(FromSource[] sources, List<Expression[]> sets)
+    private sealed class GroupingSetsOrder
     {
-        if (sets.Count < 2)
-            return false;
-        var full = sets[0];
-        for (var s = 1; s < sets.Count; s++)
+        /// <summary>Per grouping set, the chain it runs in.</summary>
+        private readonly int[] chainOfSet;
+
+        /// <summary>
+        /// Per grouping set, per sort key of its chain, the set's own key
+        /// position holding that key, or -1 where the set grouped it away.
+        /// </summary>
+        private readonly int[][] keyPositions;
+
+        /// <summary>Per chain, each sort key's direction; null where the scan's order stands.</summary>
+        private readonly bool[]?[] descending;
+
+        private GroupingSetsOrder(int[] chainOfSet, int[][] keyPositions, bool[]?[] descending)
         {
-            var set = sets[s];
-            if (set.Length != full.Length - s)
-                return false;
-            for (var i = 0; i < set.Length; i++)
-            {
-                if (!ReferenceEquals(set[i], full[i]) && !GroupingKey(sources, Peel(set[i])).Equals(GroupingKey(sources, Peel(full[i]))))
-                    return false;
-            }
+            this.chainOfSet = chainOfSet;
+            this.keyPositions = keyPositions;
+            this.descending = descending;
         }
-        return true;
+
+        /// <summary>
+        /// The chains <paramref name="sets"/> run as, or null past the 64
+        /// distinct grouping columns a mask holds.
+        /// </summary>
+        public static GroupingSetsOrder? Of(FromSource[] sources, JoinSpec[] joins, List<Expression[]> sets, bool aggregates)
+        {
+            var keys = new List<ShapeKey>();
+            var firstSpelling = new List<Expression>();
+            var setKeys = new int[sets.Count][];
+            var masks = new ulong[sets.Count];
+            for (var s = 0; s < sets.Count; s++)
+            {
+                setKeys[s] = new int[sets[s].Length];
+                for (var i = 0; i < sets[s].Length; i++)
+                {
+                    var key = GroupingKey(sources, Peel(sets[s][i]));
+                    var index = keys.IndexOf(key);
+                    if (index < 0)
+                    {
+                        if (keys.Count == 64)
+                            return null;
+                        index = keys.Count;
+                        keys.Add(key);
+                        firstSpelling.Add(sets[s][i]);
+                    }
+                    setKeys[s][i] = index;
+                    masks[s] |= 1UL << index;
+                }
+            }
+
+            var byMask = new int[sets.Count];
+            for (var s = 0; s < byMask.Length; s++)
+                byMask[s] = s;
+            Array.Sort(byMask, (x, y) => masks[x] != masks[y] ? masks[y].CompareTo(masks[x]) : x.CompareTo(y));
+
+            var chains = new List<List<int>>();
+            foreach (var s in byMask)
+            {
+                var chain = chains.Find(candidate => masks[candidate[^1]] != masks[s] && (masks[s] & ~masks[candidate[^1]]) == 0);
+                if (chain is null)
+                    chains.Add([s]);
+                else
+                    chain.Add(s);
+            }
+
+            var chainOfSet = new int[sets.Count];
+            var chainKeys = new int[chains.Count][];
+            var descending = new bool[]?[chains.Count];
+            for (var c = 0; c < chains.Count; c++)
+            {
+                var chain = chains[c];
+                foreach (var s in chain)
+                    chainOfSet[s] = c;
+
+                var order = new List<int>();
+                for (var level = chain.Count - 1; level >= 0; level--)
+                {
+                    for (var bit = 0; bit < keys.Count; bit++)
+                    {
+                        if ((masks[chain[level]] & (1UL << bit)) != 0 && !order.Contains(bit))
+                            order.Add(bit);
+                    }
+                }
+
+                if (chain.Count > 1)
+                {
+                    chainKeys[c] = [.. order];
+                    descending[c] = new bool[order.Count];
+                }
+                else if (ImplicitKeyOrder(sources, joins, [.. order.Select(bit => firstSpelling[bit])], aggregates) is var (positions, directions))
+                {
+                    chainKeys[c] = Array.ConvertAll(positions, position => order[position]);
+                    descending[c] = directions;
+                }
+                else
+                {
+                    chainKeys[c] = [];
+                }
+            }
+
+            var keyPositions = new int[sets.Count][];
+            for (var s = 0; s < sets.Count; s++)
+                keyPositions[s] = Array.ConvertAll(chainKeys[chainOfSet[s]], bit => Array.IndexOf(setKeys[s], bit));
+            return new(chainOfSet, keyPositions, descending);
+        }
+
+        /// <summary>
+        /// A group's sort entry: its set's index, its arrival, then its key tuple.
+        /// </summary>
+        public static SqlValue[] Entry(int set, int arrival, SqlValue[] keys) =>
+            [SqlValue.FromInt32(set), SqlValue.FromInt32(arrival), .. keys];
+
+        /// <summary>
+        /// Compares two <see cref="Entry"/>s by their sets' chains, then within
+        /// a chain by its sort keys — a group whose set grouped a key away after
+        /// every group that kept it — and then by arrival.
+        /// </summary>
+        public int Compare(SqlValue[] x, SqlValue[] y)
+        {
+            var (setX, setY) = (x[0].AsInt32, y[0].AsInt32);
+            var chain = chainOfSet[setX];
+            var c = chain.CompareTo(chainOfSet[setY]);
+            if (c != 0)
+                return c;
+            if (descending[chain] is { } directions)
+            {
+                var positionsX = keyPositions[setX];
+                var positionsY = keyPositions[setY];
+                for (var i = 0; i < directions.Length; i++)
+                {
+                    var (a, b) = (positionsX[i], positionsY[i]);
+                    if (a >= 0 && b >= 0)
+                    {
+                        c = CompareSortValues(x[a + 2], y[b + 2]);
+                        if (directions[i])
+                            c = -c;
+                    }
+                    else
+                    {
+                        c = (a >= 0 ? 0 : 1) - (b >= 0 ? 0 : 1);
+                    }
+                    if (c != 0)
+                        return c;
+                }
+            }
+            return x[1].AsInt32.CompareTo(y[1].AsInt32);
+        }
     }
 
     /// <summary>
     /// Compares two groups' key tuples at <paramref name="positions"/>. A tuple
-    /// shorter than a position — a ROLLUP subtotal that grouped that key away —
-    /// sorts after every tuple that kept it.
+    /// shorter than a position sorts after every tuple that kept it.
     /// </summary>
     private static int CompareGroupKeys(SqlValue[] a, SqlValue[] b, int[] positions, bool[] descending)
     {

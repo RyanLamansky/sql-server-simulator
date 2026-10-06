@@ -529,7 +529,8 @@ A DML statement through a windowed view or CTE runs its body with `BatchContext.
 A small input takes a Sort + Stream Aggregate (or a Distinct Sort), so groups leave in key order:
 - The keys sort in written order — except that a GROUP BY of exactly **two** keys that computes an aggregate sorts them the other way round: `SELECT COUNT(*) … GROUP BY a, b` sorts by `b, a`, while three, four and five keys, a GROUP BY with no aggregate (real runs it as a DISTINCT) and every DISTINCT keep the written order.
 - Over one table, a key set equal to an index's leading columns reads in that index's order (the clustered index first), and a key set covering a unique key isn't aggregated at all, so the scan's order stands.
-- `ROLLUP` — and the `GROUPING SETS` chain spelling the same thing — sorts in written order and emits each subtotal after the groups it totals, the grand total last.
+- Several grouping sets — `ROLLUP`, `CUBE`, `GROUPING SETS` — run as a concatenation of rollup chains built from the sets' column masks, each a sort feeding one Stream Aggregate that emits each subtotal after the groups it totals; `GroupingSetsOrder` holds the rule.
+  So `CUBE(a, b)` emits `(a, b)` by `b, a` with each `(b)` subtotal and the grand total, then `(a)`, and `GROUPING SETS ((a), (b))` emits `(b)` first (probed 2026-10-06 against SQL Server 2025, stable across data, a clustered key and 3,000 rows).
 - `DISTINCT` over a grouped query sorts the distinct rows again.
 
 Real hashes a large input instead, in an order nothing reproduces: in a sweep of `x % G` over an `int` heap, 100 and 300 rows always streamed, 1,000 rows streamed only at 500 or more groups, 3,000 rows only when every row was its own group, and 10,000 and 50,000 rows always hashed.
@@ -538,7 +539,9 @@ Because a sort costs nothing in fidelity where real hashes, the rule sorts up to
 **Set operations.**
 `UNION`, `INTERSECT` and `EXCEPT` over a small input sort — the UNION's concatenation, or the INTERSECT / EXCEPT's left input — so their rows leave with every column ascending in select-list order; `UNION ALL` concatenates, and a `UNION ALL` after a `UNION` appends to the sorted part.
 Real hashes the same shapes from about a thousand rows, and the sort stops at the same cap.
-Over constants alone real proves the rows distinct and concatenates (`SELECT 2 UNION SELECT 1` is 2, 1), so a chain that reads no storage keeps arrival order.
+Over constants alone the order follows the plan's shape rather than a size (`ConstantSetOpRows`, probed 2026-10-06 against SQL Server 2025 with each showplan beside its rows).
+Real plans a chain of `UNION`s as one union over all their inputs, a `UNION ALL` holding a `UNION` being one input that isn't a single constant scan: three or more inputs, or two of which one isn't a constant scan, merge and sort (`SELECT 3 UNION SELECT 1 UNION SELECT 2` is 1, 2, 3), as does a union of two constant scans that a `UNION ALL` combines with something else (`SELECT 5 UNION SELECT 4 UNION ALL SELECT 3` is 4, 5, 3), while two constant scans alone concatenate (`SELECT 2 UNION SELECT 1` is 2, 1) unless a row repeats.
+An enclosing `WHERE` or inner join's `ON` that rejects a constant branch outright is folded in first, and the inputs left decide: `SELECT x FROM (SELECT 3 x UNION SELECT 1 UNION SELECT 2) d WHERE x > 1` is 3, 2, and `SELECT x FROM (SELECT 4 x UNION SELECT 1 UNION ALL SELECT 2 UNION SELECT 3) d WHERE x <> 1` is 2, 3, 4 — the `UNION ALL` still joins two inputs, so it isn't one constant scan — where a set operation left with a single input collapses to it (`FoldOuterFilterIntoConstantUnions` holds which predicate shapes fold).
 
 **TOP, OFFSET and a derived table's ORDER BY.**
 These already follow real: a bare `TOP` reads the scan's order (key order over a clustered table), a derived table's `TOP … ORDER BY` or `OFFSET` leaves its rows in that order, and `TOP 100 PERCENT … ORDER BY` in a derived table is dropped as real drops it.
@@ -548,8 +551,8 @@ A `TOP` over a grouped, distinct or set-operation query picks from the sorted ro
 
 **Not modeled yet.**
 - The order among rows a sort ties: real's sort isn't stable, and its tie order matched no textbook quicksort, heapsort or insertion variant tried against it; here ties keep the earlier sorts' order and then arrival, which is what an index already supplying the order gives on real too.
-- `CUBE` and `GROUPING SETS` other than a rollup chain, which real runs as a concatenation of stream aggregates in an order of its choosing.
-- A constant-only set operation real sorts anyway: a chain of three or more `UNION`s over literals is a merge (`SELECT 3 UNION SELECT 1 UNION SELECT 2` is 1, 2, 3), as is one whose constants repeat.
+- A filter folded into a union that also reads a table: `SELECT x FROM (SELECT 3 x UNION SELECT 1 UNION SELECT a FROM t WHERE a = 2) d WHERE x > 1` is 3, 2 on real, where a set operation reading storage sorts here (probed 2026-10-06 against SQL Server 2025).
+- Which of two equal values a merged constant `UNION` keeps: real's merge keeps the later one (`SELECT 'b' UNION SELECT 'a' UNION SELECT 'B'` is a, B), here the earlier.
 
 ## Aggregates
 `COUNT(*)` / `COUNT(expr)` / `COUNT(DISTINCT)` / `COUNT_BIG`, `SUM` / `AVG`, `MAX` / `MIN`, statistical (`STDEV` / `STDEVP` / `VAR` / `VARP`), `STRING_AGG`, `CHECKSUM_AGG`, `APPROX_COUNT_DISTINCT`, and SQL Server 2025's `PRODUCT` (SUM's result types, save a fractional decimal multiplying at scale 6; `ProductAggregator`).

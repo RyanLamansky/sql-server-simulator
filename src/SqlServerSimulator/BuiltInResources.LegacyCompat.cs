@@ -42,11 +42,13 @@ internal static partial class BuiltInResources
         "sp_droplinkedsrvlogin",
         "sp_helplinkedsrvlogin",
         "sp_serveroption",
-        // The linked-server catalog: the server list, a connection test and a
-        // server's databases.
+        // The linked-server catalog: the server list, a connection test, a
+        // server's databases and its tables' and columns' schema rowsets.
         "sp_linkedservers",
         "sp_testlinkedserver",
         "sp_catalogs",
+        "sp_tables_ex",
+        "sp_columns_ex",
         "sp_set_session_context",
         "sp_getapplock",
         "sp_releaseapplock",

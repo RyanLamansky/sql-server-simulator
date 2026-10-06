@@ -1812,6 +1812,13 @@ internal sealed partial class Selection
         using var windowScope = ParserScope.Enter(ref context.NamedWindowScope, (context.PendingNamedWindows.Count, context.NamedWindowDefinitions.Count));
         using var allowsWindows = ParserScope.Enter(ref context.AllowsWindowExpressions, true);
         using var inWhere = ParserScope.Enter(ref context.InWhereClause, false);
+        // A body a browse statement flattens takes the arming its FROM source
+        // left, which the first block to begin consumes; anything nested in it
+        // starts disarmed.
+        var flattensForBrowse = context.BrowseFlatten && scope.Position is QueryPosition.Derived or QueryPosition.Inlined;
+        context.BrowseFlatten = false;
+        using var browseFromScope = ParserScope.Enter(ref context.BrowseFlattenFrom, false);
+        using var browseBody = ParserScope.Enter(ref context.BrowseFlattenBody, flattensForBrowse);
         return ParseQueryBlock(context, scope, aggregates, windows, allowOrderBy);
     }
 
@@ -1950,6 +1957,7 @@ internal sealed partial class Selection
         // re-parsing. A FROM-less SELECT skips all of this.
         List<FromSource>? preParsedSources = null;
         List<JoinSpec>? preParsedJoins = null;
+        var browseFrom = context.BrowseFlattenBody || (scope.Position == QueryPosition.Statement && context.BrowseStatement);
         ParserContext.Checkpoint afterSources = default;
         context.Batch.BindErrors?.EnterClause(context.Token, BindClause.SelectList);
         if (FindOwnFromClause(context) is { } fromCheckpoint)
@@ -1962,7 +1970,8 @@ internal sealed partial class Selection
             try
             {
                 var remoteSourcesBefore = context.RemoteSourcesParsed;
-                ParseSourcesAndJoins(context, scope, candidateSources, candidateJoins);
+                using (ParserScope.Enter(ref context.BrowseFlattenFrom, browseFrom))
+                    ParseSourcesAndJoins(context, scope, candidateSources, candidateJoins);
                 afterSources = context.SaveCheckpoint();
                 preParsedSources = candidateSources;
                 preParsedJoins = candidateJoins;
@@ -2342,7 +2351,8 @@ internal sealed partial class Selection
                     {
                         sources = [];
                         joins = [];
-                        ParseFromSourceAndJoins(context, scope, sources, joins, fromClause, allowOrderBy);
+                        using (ParserScope.Enter(ref context.BrowseFlattenFrom, browseFrom))
+                            ParseFromSourceAndJoins(context, scope, sources, joins, fromClause, allowOrderBy);
                     }
 
                     if (topExpression is not null && fromClause.OffsetExpression is not null)

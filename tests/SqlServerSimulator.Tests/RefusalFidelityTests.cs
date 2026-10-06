@@ -425,6 +425,21 @@ public sealed class RefusalFidelityTests
     public void StringAgg_SeparatorNeitherConstantNorVariable_RaisesMsg8733(string call)
         => new Simulation().AssertSqlError($"{AggRows} select {call} from sa where 1 = 0", 8733, "Separator parameter for STRING_AGG must be a string literal or variable.");
 
+    /// <summary>
+    /// The value and separator settle one collation before the separator's
+    /// form is judged, the separator's named first (probed 2026-10-06 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("string_agg(a, b)", "Latin1_General_CS_AS", "Latin1_General_CI_AS")]
+    [DataRow("string_agg(c, a)", "Latin1_General_CI_AS", "French_CI_AS")]
+    [DataRow("string_agg(a collate Latin1_General_BIN, b collate Latin1_General_CS_AS)", "Latin1_General_CS_AS", "Latin1_General_BIN")]
+    public void StringAgg_ConflictingCollations_RaisesMsg468(string call, string separator, string value)
+        => new Simulation().AssertSqlError(
+            $"create table sc (a varchar(10) collate Latin1_General_CI_AS, b varchar(10) collate Latin1_General_CS_AS, c nvarchar(10) collate French_CI_AS); select {call} from sc",
+            468,
+            $"Cannot resolve the collation conflict between \"{separator}\" and \"{value}\" in the string_agg operation.");
+
     [TestMethod]
     [DataRow("string_agg(s, ',' + ',')", "a,,b")]
     [DataRow("string_agg(s, char(44))", "a,b")]

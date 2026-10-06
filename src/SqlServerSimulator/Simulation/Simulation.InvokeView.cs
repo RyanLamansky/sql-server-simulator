@@ -41,13 +41,18 @@ partial class Simulation
     /// The body binds and runs in the view's own database, one row at a time,
     /// since the referencing statement consumes it lazily.
     /// </remarks>
+    /// <param name="browseFlatten">
+    /// Whether a browse statement flattens the body, which then carries its
+    /// base tables' hidden browse columns after the recorded ones (see
+    /// <see cref="ParserContext.BrowseFlatten"/>), counted in <paramref name="columnCount"/>.
+    /// </param>
     internal IEnumerable<byte[]> InvokeView(
-        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates = null, InheritedSystemTime? systemTime = null)
+        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates = null, InheritedSystemTime? systemTime = null, bool browseFlatten = false)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
             throw SimulatedSqlException.MaximumNestingLevelExceeded();
-        var rows = InvokeViewCore(outerBatch, view, columnCount, pushedPredicates, systemTime ?? outerBatch.InheritedSystemTime);
+        var rows = InvokeViewCore(outerBatch, view, columnCount, pushedPredicates, systemTime ?? outerBatch.InheritedSystemTime, browseFlatten);
         return ReferenceEquals(view.Schema.Database, connection.CurrentDatabase)
             ? rows
             : ModuleDatabaseScope.Enumerate(connection, view.Schema.Database, rows);
@@ -73,8 +78,13 @@ partial class Simulation
     /// is off — is that error followed by Msg 4413, while the referencing
     /// statement compiles; any other failure returns the recorded columns
     /// unchanged, so the body's own error surfaces at execution.
+    /// <para>
+    /// When a browse statement flattens the body (<c>browseFlatten</c>), the
+    /// body comes back carrying its base tables' hidden browse columns, which
+    /// the returned columns don't include.
+    /// </para>
     /// </remarks>
-    internal HeapColumn[] BindViewColumns(BatchContext outerBatch, View view, MultiPartName writtenName, out Selection? body, ForSystemTimeClause? systemTime = null)
+    internal HeapColumn[] BindViewColumns(BatchContext outerBatch, View view, MultiPartName writtenName, out Selection? body, ForSystemTimeClause? systemTime = null, bool browseFlatten = false)
     {
         body = null;
         Selection plan;
@@ -92,7 +102,7 @@ partial class Simulation
             // again as the executing principal.
             using var principalIndependent = PlanCacheCaptureAudit.SuspendPrincipalWatch();
 #endif
-            plan = ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: true, inherited);
+            plan = ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: true, inherited, browseFlatten);
         }
         catch (SimulatedSqlException error) when (error.Number is 207 or 208 or 4104 or 15281 or 13590)
         {
@@ -175,7 +185,7 @@ partial class Simulation
     internal Selection ParseViewBodyPlan(BatchContext outerBatch, View view) =>
         view.UnstoredBody ?? ParseViewBodyPlan(outerBatch, view, releaseStatementSchemaLocks: false);
 
-    private Selection ParseViewBodyPlan(BatchContext outerBatch, View view, bool releaseStatementSchemaLocks, InheritedSystemTime? systemTime = null)
+    private Selection ParseViewBodyPlan(BatchContext outerBatch, View view, bool releaseStatementSchemaLocks, InheritedSystemTime? systemTime = null, bool browseFlatten = false)
     {
         var connection = outerBatch.Connection;
         if (connection.NestingLevel >= SimulatedDbConnection.MaxNestingLevel)
@@ -203,6 +213,7 @@ partial class Simulation
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
+            parser.BrowseFlatten = browseFlatten;
             var body = ParseBodyQuery(parser, position: QueryPosition.Inlined);
             // A join hint in the body warns as the referencing statement compiles.
             outerBatch.Parser.JoinOrderEnforced |= parser.JoinOrderEnforced;
@@ -226,7 +237,7 @@ partial class Simulation
     }
 
     private IEnumerable<byte[]> InvokeViewCore(
-        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates, InheritedSystemTime? systemTime)
+        BatchContext outerBatch, View view, int columnCount, List<BooleanExpression>? pushedPredicates, InheritedSystemTime? systemTime, bool browseFlatten)
     {
         var connection = outerBatch.Connection;
         using var bodyCommand = new SimulatedDbCommand(this, connection);
@@ -263,6 +274,7 @@ partial class Simulation
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
+            parser.BrowseFlatten = browseFlatten;
             var bodySelection = ParseBodyQuery(parser, position: QueryPosition.Inlined);
             // A view body is inlined into the referencing statement, so its
             // reads reach no ordinary check site — and a same-database one

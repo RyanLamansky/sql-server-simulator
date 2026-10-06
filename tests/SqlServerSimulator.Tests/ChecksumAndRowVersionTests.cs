@@ -96,6 +96,13 @@ public sealed class ChecksumAndRowVersionTests
     [DataRow("'  x'", 8869)]
     [DataRow("1, 2", 18)]
     [DataRow("cast('2020-01-01' as date)", 43829)]
+    [DataRow("'ß'", 7072)]
+    [DataRow("'aß'", 38304)]
+    [DataRow("'ßa'", 113294)]
+    [DataRow("'Straße'", -1434035566)]
+    [DataRow("'ßß'", 1817504)]
+    [DataRow("'a' + char(198)", 38770)]
+    [DataRow("'a' + char(230)", 38770)]
     public void Checksum_MatchesRealsFold(string arguments, int expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"select checksum({arguments})"));
 

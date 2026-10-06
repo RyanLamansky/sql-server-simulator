@@ -59,7 +59,11 @@ partial class Selection
     /// referencing batch each time the body runs; null for an ordinary
     /// reference.
     /// </param>
-    internal static Selection ForView(View view, HeapColumn[]? columns = null, List<BooleanExpression>? pushedPredicates = null, ForSystemTimeClause? systemTime = null)
+    /// <param name="browseFlatten">
+    /// Whether a browse statement flattens the body, whose hidden browse
+    /// columns then trail the view's own in <paramref name="columns"/>.
+    /// </param>
+    internal static Selection ForView(View view, HeapColumn[]? columns = null, List<BooleanExpression>? pushedPredicates = null, ForSystemTimeClause? systemTime = null, bool browseFlatten = false)
     {
         columns ??= view.OutputColumns;
         var schema = new SqlType[columns.Length];
@@ -75,10 +79,10 @@ partial class Selection
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: false,
             rowSource: (outerBatch, _) => RowSecurity.FilterViewRows(
-                view, columns, outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates, InheritedFor(systemTime, outerBatch)), outerBatch))
+                view, columns, outerBatch.Connection.Simulation.InvokeView(outerBatch, view, columns.Length, pushedPredicates, InheritedFor(systemTime, outerBatch), browseFlatten), outerBatch))
         {
             PredicatePushdown = templates => ForView(
-                view, columns, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates], systemTime),
+                view, columns, pushedPredicates is null ? templates : [.. pushedPredicates, .. templates], systemTime, browseFlatten),
             // Whether the body groups can't be known here — it isn't parsed
             // until the reference executes — but CREATE VIEW already classified
             // it: the updatability rejection names the aggregate / GROUP BY

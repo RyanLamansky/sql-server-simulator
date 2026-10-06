@@ -315,6 +315,8 @@ partial class Simulation
             "sp_linkedservers" => InvokeSpLinkedServers(batch, calledAs),
             "sp_testlinkedserver" => InvokeSpTestLinkedServer(batch, calledAs),
             "sp_catalogs" => InvokeSpCatalogs(batch, calledAs),
+            "sp_tables_ex" => InvokeSpTablesEx(batch, calledAs),
+            "sp_columns_ex" => InvokeSpColumnsEx(batch, calledAs),
             "sp_helpsort" => Uncounted(InvokeSpHelpSort(batch, calledAs)),
             "sp_lock" => Uncounted(InvokeSpLock(batch, calledAs)),
             "sp_monitor" => Uncounted(InvokeSpMonitor(batch, calledAs)),

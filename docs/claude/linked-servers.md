@@ -133,6 +133,9 @@ What the linked-server procedures check and report, probed 2026-10-05 against SQ
 - **`sp_linkedservers`** lists every server `sys.servers` holds, the instance's own row included, as `SRV_NAME`, `SRV_PROVIDERNAME`, `SRV_PRODUCT`, `SRV_DATASOURCE`, `SRV_PROVIDERSTRING`, `SRV_LOCATION` and `SRV_CAT` (probed 2026-10-06).
 - **`sp_testlinkedserver @servername`**, an extended procedure reporting everything at line 1, opens a session and returns 0 quietly; its parameter takes only a Unicode string — a bare word, an `N''` literal, an `nvarchar` or `sysname` variable — so a `'…'` literal or NULL is Msg 214, and an unknown server is Msg 7202 with return code 1, ending only the call.
 - **`sp_catalogs @server_name`** lists the server's databases in its collation's order, `DESCRIPTION` NULL; an unknown server is Msg 7202 at line 7.
+- **`sp_tables_ex` and `sp_columns_ex`**, the provider's schema rowsets, read the server's own catalog in the named database — the one its sessions start in when none is named, nothing for one it lacks — by type, schema and name (probed 2026-10-06).
+  `sp_tables_ex` lists tables, views and synonyms, a shipped object as `SYSTEM TABLE` / `SYSTEM VIEW`; `sp_columns_ex` describes the columns of tables and views in the provider's down-level terms, leaving out a `hierarchyid`, spatial, `json` or CLR type's column (`Simulation.ProviderColumnRow` holds the mapping).
+  An unknown server is Msg 7202 leaving the batch running — after `sp_tables_ex`'s empty listing at line 41, and before `sp_columns_ex`'s Msg 3621 and empty listing at line 177.
 
 ## Server options
 
@@ -167,6 +170,7 @@ Committing across two `Simulation`s would need a coordinator that real's default
   A column named only inside a derived table's `SELECT *` is fetched too, where real's optimizer drops it.
 - **A `varbinary` value written into a remote `vector` column** is refused by the server's own conversion, which is Msg 206 here and Msg 13609 on real, whose provider sends it differently.
 - **A conversion a four-part read's query applies** (`CAST(a AS int)`) fails locally at the statement's line, where real remotes it and relays the error at line 1 (probed 2026-10-06 against SQL Server 2025); which expressions real sends to the server is its optimizer's choice — not chased.
+- **The system objects a schema rowset lists are the simulator's own**: real's `sp_tables_ex` lists 74 system tables and 628 system views in a user database, and `master`'s `spt_*` objects, which `sys.all_objects` here doesn't carry (see [`catalog-views.md`](catalog-views.md)).
 - **The `#temp` note's second copy**: real recompiles a statement reading a temporary table the batch itself created and sends its Msg 2701 again as the statement runs, where the simulator sends it once, as the batch compiles.
 
 ## Not modeled yet
@@ -180,7 +184,6 @@ Committing across two `Simulation`s would need a coordinator that real's default
   The ad hoc `OPENROWSET` over a provider rides this machinery with a transient server named `(null)` — see [`bulk-and-adhoc.md`](bulk-and-adhoc.md#ad-hoc-provider-rowsets).
 - **A loopback's remote call inside a transaction** runs in the caller's transaction on real, as a session bound to it — `@@TRANCOUNT` reads 1 inside it, it reads the caller's uncommitted rows without waiting on their locks, and a `ROLLBACK` undoes its writes, for a procedure call and `EXEC … AT` alike (probed 2026-10-05 and 2026-10-06) — where here it runs outside it; `OPENQUERY`'s query reads `@@TRANCOUNT` 1 on real too.
   Modeling it means a remote session sharing the caller's transaction, undo log and lock ownership, which the session model has no binding for yet.
-- **`sp_tables_ex` and `sp_columns_ex`**, the provider's schema rowsets: real lists the remote's system tables and views beside its own, and describes columns in OLE DB's terms — a `bigint` as `DATA_TYPE` 2 with `SS_DATA_TYPE` 108, a `datetime2` as -9 (probed 2026-10-06).
 
 ## sys.servers shape
 

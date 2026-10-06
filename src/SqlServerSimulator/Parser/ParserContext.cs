@@ -170,6 +170,37 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool BrowseStatement;
 
     /// <summary>
+    /// Whether the FROM clause parsing now belongs to a browse statement's own
+    /// query or to a body it flattens: real describes a column read through a
+    /// derived table, a view or a CTE by the base table under it, and carries
+    /// that table's key and rowversion columns as hidden ones (probed
+    /// 2026-10-06 against SQL Server 2025). Each query block parses its own
+    /// FROM under its own value and everything else under false.
+    /// </summary>
+    public bool BrowseFlattenFrom;
+
+    /// <summary>
+    /// Armed by a FROM source of a <see cref="BrowseFlattenFrom"/> clause just
+    /// before it parses its body, and consumed by the first query block that
+    /// body begins — which then flattens (<see cref="BrowseFlattenBody"/>)
+    /// unless a set operator follows it.
+    /// </summary>
+    public bool BrowseFlatten;
+
+    /// <summary>
+    /// Set while a browse statement's <c>WITH</c> prefix parses, whose CTE
+    /// bodies the statement then reads flattened.
+    /// </summary>
+    public bool BrowseFlattenCtes;
+
+    /// <summary>
+    /// Whether the query block parsing now is a body a browse statement
+    /// flattens, which then appends its own base tables' hidden browse columns
+    /// for the statement to read through it.
+    /// </summary>
+    public bool BrowseFlattenBody;
+
+    /// <summary>
     /// Set while a cursor declaration parses its query, whose statement-level
     /// query specification then records the base-column metadata a
     /// <c>FETCH</c> sends (<see cref="Selection.CursorBrowse"/>).

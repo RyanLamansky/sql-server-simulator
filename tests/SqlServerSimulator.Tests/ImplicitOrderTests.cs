@@ -22,6 +22,8 @@ public sealed class ImplicitOrderTests
         insert h2 values (4,1,400),(2,3,200),(9,1,900),(1,2,100),(7,2,700);
         create table c2 (id int not null primary key, g int not null, y int not null);
         insert c2 select * from h2;
+        create table gs (a int, b int, c int, x int);
+        insert gs values (2,1,1,5),(1,2,2,6),(2,2,1,7),(1,1,2,8),(3,1,1,9),(1,1,1,1),(3,2,2,2);
         """;
 
     private static string Rows(string query)
@@ -68,6 +70,27 @@ public sealed class ImplicitOrderTests
     [DataRow("select g, x % 20, count(*) from h group by grouping sets ((g, x % 20), (g), ())", "1|0|1 / 1|10|2 / 1|NULL|3 / 2|10|3 / 2|NULL|3 / 3|0|3 / 3|NULL|3 / NULL|NULL|9")]
     public void GroupBy_GroupsFollowTheStreamAggregateSort(string query, string expected) => AreEqual(expected, Rows(query));
 
+    /// <summary>
+    /// Several grouping sets run as a concatenation of rollup chains, built from
+    /// the sets' column masks highest first and emitted in the order they
+    /// started (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select a, b, count(*) from gs group by cube(a, b)", "1|1|2 / 2|1|1 / 3|1|1 / NULL|1|4 / 1|2|1 / 2|2|1 / 3|2|1 / NULL|2|3 / NULL|NULL|7 / 1|NULL|3 / 2|NULL|2 / 3|NULL|2")]
+    [DataRow("select a, b, c, count(*) from gs group by cube(a, b, c)", "1|1|1|1 / 2|1|1|1 / 3|1|1|1 / NULL|1|1|3 / 2|2|1|1 / NULL|2|1|1 / NULL|NULL|1|4 / 1|1|2|1 / NULL|1|2|1 / 1|2|2|1 / 3|2|2|1 / NULL|2|2|2 / NULL|NULL|2|3 / NULL|NULL|NULL|7 / 1|NULL|1|1 / 1|NULL|2|2 / 1|NULL|NULL|3 / 2|NULL|1|2 / 2|NULL|NULL|2 / 3|NULL|1|1 / 3|NULL|2|1 / 3|NULL|NULL|2 / 1|1|NULL|2 / 2|1|NULL|1 / 3|1|NULL|1 / NULL|1|NULL|4 / 1|2|NULL|1 / 2|2|NULL|1 / 3|2|NULL|1 / NULL|2|NULL|3")]
+    [DataRow("select a, b, count(*) from gs group by grouping sets ((a), (b))", "NULL|1|4 / NULL|2|3 / 1|NULL|3 / 2|NULL|2 / 3|NULL|2")]
+    [DataRow("select a, b, count(*) from gs group by grouping sets ((b), (a))", "1|NULL|3 / 2|NULL|2 / 3|NULL|2 / NULL|1|4 / NULL|2|3")]
+    [DataRow("select a, b, count(*) from gs group by grouping sets ((a), (b), ())", "NULL|1|4 / NULL|2|3 / NULL|NULL|7 / 1|NULL|3 / 2|NULL|2 / 3|NULL|2")]
+    [DataRow("select a, b, c, count(*) from gs group by grouping sets ((a, b), (c, a))", "1|NULL|1|1 / 2|NULL|1|2 / 3|NULL|1|1 / 1|NULL|2|2 / 3|NULL|2|1 / 1|1|NULL|2 / 2|1|NULL|1 / 3|1|NULL|1 / 1|2|NULL|1 / 2|2|NULL|1 / 3|2|NULL|1")]
+    [DataRow("select a, b, c, count(*) from gs group by grouping sets ((b, a, c), (a, b))", "1|1|1|1 / 1|1|2|1 / 1|1|NULL|2 / 2|1|1|1 / 2|1|NULL|1 / 3|1|1|1 / 3|1|NULL|1 / 1|2|2|1 / 1|2|NULL|1 / 2|2|1|1 / 2|2|NULL|1 / 3|2|2|1 / 3|2|NULL|1")]
+    [DataRow("select a, b, count(*) from gs group by grouping sets ((a), (b), (a))", "NULL|1|4 / NULL|2|3 / 1|NULL|3 / 2|NULL|2 / 3|NULL|2 / 1|NULL|3 / 2|NULL|2 / 3|NULL|2")]
+    [DataRow("select a, b, c, count(*) from gs group by a, cube(b, c)", "1|1|1|1 / 1|NULL|1|1 / 1|1|2|1 / 1|2|2|1 / 1|NULL|2|2 / 1|NULL|NULL|3 / 2|1|1|1 / 2|2|1|1 / 2|NULL|1|2 / 2|NULL|NULL|2 / 3|1|1|1 / 3|NULL|1|1 / 3|2|2|1 / 3|NULL|2|1 / 3|NULL|NULL|2 / 1|1|NULL|2 / 2|1|NULL|1 / 3|1|NULL|1 / 1|2|NULL|1 / 2|2|NULL|1 / 3|2|NULL|1")]
+    [DataRow("select a, b, count(*) from gs group by rollup(a), rollup(b)", "1|1|2 / 2|1|1 / 3|1|1 / NULL|1|4 / 1|2|1 / 2|2|1 / 3|2|1 / NULL|2|3 / NULL|NULL|7 / 1|NULL|3 / 2|NULL|2 / 3|NULL|2")]
+    [DataRow("select a, b from gs group by cube(a, b)", "1|1 / 2|1 / 3|1 / NULL|1 / 1|2 / 2|2 / 3|2 / NULL|2 / NULL|NULL / 1|NULL / 2|NULL / 3|NULL")]
+    [DataRow("select a, b, count(*) from gs group by grouping sets ((a, b), ())", "1|1|2 / 1|2|1 / 2|1|1 / 2|2|1 / 3|1|1 / 3|2|1 / NULL|NULL|7")]
+    [DataRow("select a, b, count(*), row_number() over (order by (select null)) from gs group by cube(a, b)", "1|1|2|1 / 2|1|1|2 / 3|1|1|3 / NULL|1|4|4 / 1|2|1|5 / 2|2|1|6 / 3|2|1|7 / NULL|2|3|8 / NULL|NULL|7|9 / 1|NULL|3|10 / 2|NULL|2|11 / 3|NULL|2|12")]
+    public void GroupingSets_RollupChainsInMaskOrder(string query, string expected) => AreEqual(expected, Rows(query));
+
     [TestMethod]
     [DataRow("select distinct g from h", "1 / 2 / 3")]
     [DataRow("select distinct x, g from h", "10|2 / 20|3 / 30|1 / 40|1 / 50|2 / 60|3 / 70|2 / 80|3 / 90|1")]
@@ -85,6 +108,85 @@ public sealed class ImplicitOrderTests
     [DataRow("select top 2 id from h union select id from h2", "1 / 2 / 3 / 4 / 5 / 7 / 9")]
     [DataRow("select 2 union select 1", "2 / 1")]
     public void SetOperations_DedupSorts(string query, string expected) => AreEqual(expected, Rows(query));
+
+    /// <summary>
+    /// Over constants alone a union over a union, or one another set operator
+    /// reads, merges; a lone union of two constant scans concatenates them,
+    /// sorting only an input that repeats a row, or the whole when they share
+    /// one (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 3 union select 1 union select 2", "1 / 2 / 3")]
+    [DataRow("select 2 union select 1 union select 2", "1 / 2")]
+    [DataRow("select 5 union select 4 union all select 3", "4 / 5 / 3")]
+    [DataRow("select 3 union all select 1 union all select 3 union select 0", "1 / 3 / 0")]
+    [DataRow("select 3 union all select 1 union select 3", "1 / 3")]
+    [DataRow("select 5 union (select 3 union all select 1 union all select 3)", "5 / 1 / 3")]
+    [DataRow("select 2 union (select 9 union all select 1)", "2 / 9 / 1")]
+    [DataRow("select 3 union all (select 2 union select 1)", "3 / 1 / 2")]
+    [DataRow("select 3 union select 1 union all select 2 union select 0", "0 / 1 / 2 / 3")]
+    [DataRow("(select 3 union all select 1 union all select 3) except (select 2)", "1 / 3")]
+    [DataRow("(select 3 union all select 1) intersect (select 1 union all select 3)", "3 / 1")]
+    [DataRow("(select 3 union all select 1 union all select 3) intersect (select 1 union all select 3)", "1 / 3")]
+    [DataRow("select 2, 'b' union select 1, 'a' union select 1, 'c'", "1|a / 1|c / 2|b")]
+    public void ConstantSetOperations_FollowRealsPlan(string query, string expected) => AreEqual(expected, Rows(query));
+
+    /// <summary>
+    /// An enclosing filter that rejects a constant branch outright folds it
+    /// away before the union is planned, so only the branches left count: a
+    /// filter reading a column bare in comparisons, <c>IN</c>, <c>BETWEEN</c>,
+    /// <c>IS NULL</c> and their junctions folds, a column in arithmetic or a
+    /// function, a <c>LIKE</c> or a variable doesn't, and a CTE read twice keeps
+    /// a branch only both readings prune (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select x from (select 3 x union select 1 union select 2) d where x > 1", "3 / 2")]
+    [DataRow("select x from (select 1 x union select 3 union select 2) d where x > 1", "3 / 2")]
+    [DataRow("select x from (select 3 x union select 1 union select 2) d where x > 0", "1 / 2 / 3")]
+    [DataRow("select x from (select 3 x union select 1 union select 2) d where x > 2", "3")]
+    [DataRow("select x from (select 3 x union select 1 union select 2 union select 5) d where x > 1", "2 / 3 / 5")]
+    [DataRow("select x from (select 3 x union select 1 union all select 2) d where x > 1", "3 / 2")]
+    [DataRow("select x from (select 3 x union select 1 union all select 2) d where x <> 3", "1 / 2")]
+    [DataRow("select x from (select 3 x union select 1 union all select 2) d where x <> 2", "3 / 1")]
+    [DataRow("select x from (select 3 x union select 1 union all select 2 union all select 0) d where x <> 2", "1 / 3 / 0")]
+    [DataRow("select x from (select 3 x union select 1 union select 2 union all select 0) d where x > 1", "3 / 2")]
+    [DataRow("select x from (select 3 x union all select 1 union all select 1 union select 2) d where x <> 2", "1 / 3")]
+    [DataRow("select x from (select 3 x union select 1 union select 2) d where x in (2, 3)", "3 / 2")]
+    [DataRow("select x from (select 3 x union select 1 union select 2) d where not (x = 1)", "3 / 2")]
+    [DataRow("select x from (select 3 x union select 1 union select 2) d where x = 2 or x = 3", "3 / 2")]
+    [DataRow("select x from (select 3 x union select 1 union select 2) d where (select 1) = 1 and x > 1", "3 / 2")]
+    [DataRow("select x from (select 3 x union select 1 union select 2) d where x > 1 and abs(x) > 0", "3 / 2")]
+    [DataRow("select x from (select 3 x union select 1 union select 2) d where x + 0 > 1", "2 / 3")]
+    [DataRow("select x from (select 3 x union select 1 union select 2) d where x like '%3%' or x = 2", "2 / 3")]
+    [DataRow("declare @v int = 1; select x from (select 3 x union select @v union select 2) d where x > 1", "2 / 3")]
+    [DataRow("declare @v int = 1; select x from (select 3 x union select 1 union select 2) d where x > @v", "2 / 3")]
+    [DataRow("select x, k from (select 3 x, 9 k union select 1, 8 union select 2, 7) d where k > 7", "3|9 / 1|8")]
+    [DataRow("select x from (select 3 x union select 1 union select 2) d join (select 1 y) e on d.x > 1 where e.y = 1", "3 / 2")]
+    [DataRow("with c as (select 3 x union select 1 union select 2) select x from c where x > 1", "3 / 2")]
+    [DataRow("with c as (select 3 x union select 1 union select 2) select x from c where x > 1 union all select x from c where x <> 2", "2 / 3 / 1 / 3")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2 union select 3) d where x <> 1", "2 / 3 / 4")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2 union select 3) d where x <> 4", "1 / 2 / 3")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2 union select 3) d where x <> 2", "1 / 3 / 4")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2 union select 3) d where x <> 3", "1 / 4 / 2")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2 union select 3) d where x > 0", "1 / 2 / 3 / 4")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2 union select 3) d where x > 3", "4")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2 union select 3) d where x in (4, 3)", "4 / 3")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2 union select 3) d where x in (2, 3)", "2 / 3")]
+    [DataRow("select x from (select 4 x union all select 1 union select 2 union all select 3) d where x <> 1", "2 / 4 / 3")]
+    [DataRow("select x from (select 4 x union all select 1 union select 2 union all select 3) d where x <> 2", "4 / 1 / 3")]
+    [DataRow("select x from (select 4 x union all select 1 union select 2 union all select 3) d where x > 0", "1 / 2 / 4 / 3")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2) d where x <> 1", "4 / 2")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2) d where x > 0", "1 / 4 / 2")]
+    [DataRow("select x from (select 4 x union all (select 2 union select 1)) d where x <> 1", "4 / 2")]
+    [DataRow("select x from (select 4 x union all (select 2 union select 1)) d where x > 0", "4 / 1 / 2")]
+    [DataRow("select x from (select 4 x union (select 2 union all select 1)) d where x <> 1", "4 / 2")]
+    [DataRow("select x from (select 4 x union (select 5 union select 1)) d where x <> 1", "4 / 5")]
+    [DataRow("select x from (select 4 x union (select 5 union select 1) union all select 0) d where x <> 1", "4 / 5 / 0")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2 union all select 0 union select 3) d where x <> 1", "0 / 2 / 3 / 4")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2 union select 3) d where x <> 1 and x <> 2", "4 / 3")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2 union select 3) d where x in (4, 2)", "4 / 2")]
+    [DataRow("select x from (select 4 x union select 1 union all select 2 union select 3 union select 9) d where x <> 1", "2 / 3 / 4 / 9")]
+    public void ConstantSetOperations_FoldTheEnclosingFilter(string query, string expected) => AreEqual(expected, Rows(query));
 
     /// <summary>
     /// A write through a windowed CTE still reaches the rows the body yields,

@@ -26,6 +26,35 @@ internal sealed partial class Selection
     /// </summary>
     internal Selection[]? UnionAllBranches;
 
+    /// <summary>
+    /// The set operation that reads this plan as an operand, set as that
+    /// operator parses — before any of them runs; null for every other plan.
+    /// </summary>
+    internal Selection? SetOperationParent;
+
+    /// <summary>A set operation's two operands and its kind; null on every other plan.</summary>
+    internal (Selection Left, Selection Right, SetOpKind Kind)? SetOperands;
+
+    /// <summary>
+    /// Set on a constant branch of a <c>UNION</c> / <c>UNION ALL</c> chain that
+    /// an enclosing query's filter rejects outright, which real folds away
+    /// before planning the union (see <see cref="FoldOuterFilterIntoConstantUnions"/>).
+    /// </summary>
+    internal bool PrunedByOuterFilter;
+
+    /// <summary>
+    /// Whether an enclosing query has folded its filter into this set
+    /// operation's branches — a CTE's body is read by every reference, so a
+    /// later reference keeps a branch pruned only where it prunes it too.
+    /// </summary>
+    internal bool OuterFilterFolded;
+
+    /// <summary>
+    /// Whether real reads this plan as one Constant Scan: a row of constants,
+    /// or a <c>UNION ALL</c> over nothing else.
+    /// </summary>
+    private bool IsConstantScan => IsSingleConstantRow || (UnionAllBranches is { } branches && Array.TrueForAll(branches, static branch => branch.IsSingleConstantRow));
+
     /// <summary>Whether the query aggregates or groups, so its columns name no base row.</summary>
     internal bool IsGrouped;
 
@@ -335,7 +364,8 @@ internal sealed partial class Selection
 
         var isBareConstantRows = left.IsBareConstantRow && right.IsBareConstantRow;
         var readsStorage = left.ReadsStorage || right.ReadsStorage;
-        var combined = new Selection(combinedSchema, combinedNames,
+        Selection combined = null!;
+        combined = new Selection(combinedSchema, combinedNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: left.HasTopOrOffsetOrFetch || right.HasTopOrOffsetOrFetch,
             (batch, outerResolver) =>
@@ -344,12 +374,14 @@ internal sealed partial class Selection
             {
                 SetOpKind.UnionAll => ConcatBranchRows(left, right, combinedSchema, batch, outerResolver),
                 SetOpKind.Union => DedupeUnionRows(left, right, combinedSchema, batch, outerResolver),
-                SetOpKind.Intersect => IntersectRows(left, right, combinedSchema, batch, outerResolver),
-                SetOpKind.Except => ExceptRows(left, right, combinedSchema, batch, outerResolver),
+                SetOpKind.Intersect => IntersectRows(CoerceBranchRows(left, combinedSchema, batch, outerResolver), right, combinedSchema, batch, outerResolver),
+                SetOpKind.Except => ExceptRows(CoerceBranchRows(left, combinedSchema, batch, outerResolver), right, combinedSchema, batch, outerResolver),
                 _ => throw new InvalidOperationException($"Unknown SetOpKind {kind}."),
             };
             if (kind != SetOpKind.UnionAll && readsStorage)
                 rows = SortSetOpRows(rows, combinedSchema);
+            else if (kind != SetOpKind.UnionAll)
+                rows = ConstantSetOpRows(combined, rows, combinedSchema, batch, outerResolver);
             // Computed whole before the first row goes out; see IsBareConstantRow.
             // A constant scan and a deduplication both read every row ahead of
             // the first out, so neither raises past an INSERT's identity draw.
@@ -385,6 +417,7 @@ internal sealed partial class Selection
             BranchFromSources = left.BranchFromSources,
             UnionAllBranches = kind == SetOpKind.UnionAll ? [.. left.UnionAllBranches ?? [left], .. right.UnionAllBranches ?? [right]] : null,
             IsSetOperationResult = true,
+            SetOperands = (left, right, kind),
             // AUTO over a set-op result flattens to a single level named after
             // the first branch's first FROM source — its alias when it has one
             // — whatever either branch's join topology is, and every column
@@ -406,6 +439,7 @@ internal sealed partial class Selection
             ColumnWireFlags = new byte[combinedSchema.Length],
         };
         combined.OutputKeys = ConstantBranchKeys(combined.UnionAllBranches, combinedSchema.Length);
+        left.SetOperationParent = right.SetOperationParent = combined;
         return combined;
     }
 
@@ -632,14 +666,341 @@ internal sealed partial class Selection
             yield return row;
     }
 
-    private static IEnumerable<byte[]> IntersectRows(Selection left, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
+    /// <summary>
+    /// A deduplicating set operation's rows over constants alone, in the order
+    /// real's plan leaves them (probed 2026-10-06 against SQL Server 2025, each
+    /// shape's showplan beside its rows); <paramref name="rows"/> is the
+    /// operation's own result in arrival order.
+    /// <para>
+    /// Real plans a chain of <c>UNION</c>s as one union over all their inputs
+    /// (<see cref="UnionInputs"/>), so a <c>UNION</c> another <c>UNION</c>
+    /// reads leaves the order to it. Over three or more inputs, or two of which
+    /// one isn't a single Constant Scan (a <c>UNION ALL</c> holding a
+    /// <c>UNION</c>), the union is a merge, which sorts; so is one over two
+    /// Constant Scans that a <c>UNION ALL</c> or another set operator combines
+    /// with something else. Otherwise two Constant Scans concatenate,
+    /// deduplicating one that repeats a row with a sort of its own and sorting
+    /// the whole when they share a row, and a lone one sorts only to
+    /// deduplicate. So <c>SELECT 3 UNION SELECT 1 UNION SELECT 2</c> is 1, 2,
+    /// 3, <c>SELECT 5 UNION SELECT 4 UNION ALL SELECT 3</c> is 4, 5, 3, and
+    /// <c>SELECT 2 UNION SELECT 1</c> is 2, 1. A branch an enclosing filter
+    /// folds away (<see cref="PrunedByOuterFilter"/>) is no input, and its rows
+    /// fail that filter wherever they go.
+    /// </para>
+    /// <para>
+    /// An <c>INTERSECT</c> or <c>EXCEPT</c> whose left Constant Scan repeats a
+    /// row sorts it to deduplicate, and otherwise reads it in order.
+    /// </para>
+    /// </summary>
+    private static IEnumerable<byte[]> ConstantSetOpRows(Selection combined, IEnumerable<byte[]> rows, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
+    {
+        var (left, right, kind) = combined.SetOperands!.Value;
+
+        static bool Repeats(List<byte[]> scan, SqlType[] schema, HashSet<SqlValue[]> seen)
+        {
+            var repeats = false;
+            foreach (var row in scan)
+                repeats |= !seen.Add(DecodeRowToValues(row, schema));
+            return repeats;
+        }
+
+        static IEnumerable<byte[]> Distinct(IEnumerable<byte[]> scan, SqlType[] schema)
+        {
+            var seen = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
+            foreach (var row in scan)
+            {
+                if (seen.Add(DecodeRowToValues(row, schema)))
+                    yield return row;
+            }
+        }
+
+        if (kind != SetOpKind.Union)
+        {
+            if (!left.IsConstantScan)
+                return rows;
+            // The right input is read first, as the streaming path does.
+            var leftRows = new List<byte[]>();
+            var scan = CoerceBranchRows(left, schema, batch, outer).Select(row =>
+            {
+                leftRows.Add(row);
+                return row;
+            });
+            var filtered = (kind == SetOpKind.Intersect ? IntersectRows(scan, right, schema, batch, outer) : ExceptRows(scan, right, schema, batch, outer)).ToList();
+            return Repeats(leftRows, schema, new(RowEqualityComparer.Instance)) ? SortSetOpRows(filtered, schema) : filtered;
+        }
+
+        // A union another union reads is one of that union's inputs.
+        if (combined.SetOperationParent is { SetOperands.Kind: SetOpKind.Union })
+            return rows;
+
+        var inputs = UnionInputs(combined);
+        if (inputs.Count >= 3 || (inputs.Count == 2 && (inputs[0].Leaves is null || inputs[1].Leaves is null || ReadByAnotherSetOperation(combined))))
+            return SortSetOpRows(rows, schema);
+        if (inputs.Count == 0 || inputs[0].Leaves is null)
+            return rows;
+
+        batch.Connection.StatementIo?.UseWorktable();
+        var first = Scan(inputs[0].Leaves!, schema, batch, outer);
+        var firstSeen = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
+        var firstRepeats = Repeats(first, schema, firstSeen);
+        if (inputs.Count == 1)
+            return firstRepeats ? [.. SortSetOpRows(Distinct(first, schema), schema)] : first;
+
+        var second = Scan(inputs[1].Leaves!, schema, batch, outer);
+        var secondSeen = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
+        var secondRepeats = Repeats(second, schema, secondSeen);
+        if (firstSeen.Overlaps(secondSeen))
+            return [.. SortSetOpRows(Distinct(first.Concat(second), schema), schema)];
+        return [
+            .. firstRepeats ? SortSetOpRows(Distinct(first, schema), schema) : first,
+            .. secondRepeats ? SortSetOpRows(Distinct(second, schema), schema) : second,
+        ];
+
+        static List<byte[]> Scan(List<Selection> leaves, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
+        {
+            var scanned = new List<byte[]>();
+            foreach (var leaf in leaves)
+                scanned.AddRange(CoerceBranchRows(leaf, schema, batch, outer));
+            return scanned;
+        }
+    }
+
+    /// <summary>
+    /// One input of a union as real plans it: a Constant Scan — its surviving
+    /// constant branches as <see cref="Leaves"/> — or anything else (null).
+    /// </summary>
+    private readonly struct UnionInput(List<Selection>? leaves)
+    {
+        public readonly List<Selection>? Leaves = leaves;
+    }
+
+    /// <summary>
+    /// The inputs of the one union real plans for <paramref name="union"/> and
+    /// every <c>UNION</c> it reads, flattened through them, the branches an
+    /// enclosing filter folded away left out.
+    /// </summary>
+    private static List<UnionInput> UnionInputs(Selection union)
+    {
+        var inputs = new List<UnionInput>();
+        var (left, right, _) = union.SetOperands!.Value;
+        foreach (var operand in (ReadOnlySpan<Selection>)[left, right])
+        {
+            if (operand.SetOperands is { Kind: SetOpKind.Union })
+                inputs.AddRange(UnionInputs(operand));
+            else
+                inputs.AddRange(OperandInputs(operand));
+        }
+        return inputs;
+    }
+
+    /// <summary>
+    /// What <paramref name="plan"/> amounts to as an operand once the branches
+    /// an enclosing filter folded away are gone: nothing, one Constant Scan, or
+    /// one other input — a set operation left with a single input collapsing
+    /// to it.
+    /// </summary>
+    private static List<UnionInput> OperandInputs(Selection plan)
+    {
+        switch (plan.SetOperands)
+        {
+            case null:
+                return plan.PrunedByOuterFilter ? [] : [new UnionInput(plan.IsSingleConstantRow ? [plan] : null)];
+            case { Kind: SetOpKind.UnionAll } when plan.IsConstantScan:
+                var live = Array.FindAll(plan.UnionAllBranches!, static branch => !branch.PrunedByOuterFilter);
+                return live.Length == 0 ? [] : [new UnionInput([.. live])];
+            case var (left, right, kind) when kind is SetOpKind.Union or SetOpKind.UnionAll:
+                var inputs = kind == SetOpKind.Union ? UnionInputs(plan) : [.. OperandInputs(left), .. OperandInputs(right)];
+                return inputs.Count <= 1 ? inputs : [new UnionInput(null)];
+            default:
+                return [new UnionInput(null)];
+        }
+    }
+
+    /// <summary>
+    /// Whether a <c>UNION ALL</c> or another set operator reading
+    /// <paramref name="plan"/> combines it with an operand that survives.
+    /// </summary>
+    private static bool ReadByAnotherSetOperation(Selection plan)
+    {
+        for (var node = plan; node.SetOperationParent is { SetOperands: var (left, right, kind) } parent; node = parent)
+        {
+            if (kind != SetOpKind.UnionAll || OperandInputs(ReferenceEquals(left, node) ? right : left).Count > 0)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Folds an enclosing query's filter into the constant branches of the
+    /// <c>UNION</c> / <c>UNION ALL</c> chains its derived tables and CTEs read,
+    /// as real does before it plans the union, so a branch the filter rejects
+    /// no longer counts toward the union's shape (probed 2026-10-06 against
+    /// SQL Server 2025): <c>SELECT x FROM (SELECT 3 x UNION SELECT 1 UNION
+    /// SELECT 2) d WHERE x &gt; 1</c> is 3, 2 — the two branches left
+    /// concatenate — where the unfiltered three-branch union merges into 1, 2, 3.
+    /// <para>
+    /// A <c>WHERE</c> conjunct, or an inner join's <c>ON</c> one, folds when it reads the source's columns only
+    /// bare, as operands of comparisons, <c>IN</c> lists, <c>BETWEEN</c> and
+    /// <c>IS NULL</c> under <c>AND</c>, <c>OR</c> and <c>NOT</c>, beside
+    /// written constants; a column inside arithmetic or a function, a
+    /// <c>LIKE</c>, or a variable leaves it unfolded, and so does a branch
+    /// projecting a variable. A branch is pruned when a folding conjunct isn't
+    /// true of its constants.
+    /// </para>
+    /// </summary>
+    private static void FoldOuterFilterIntoConstantUnions(BatchContext batch, FromSource[] sources, List<BooleanExpression> conjuncts)
+    {
+        if (conjuncts.Count == 0)
+            return;
+        for (var s = 0; s < sources.Length; s++)
+        {
+            var source = sources[s];
+            if (!source.LateralIsQueryBody || source.LateralPlan is not { SetOperands: not null, ReadsStorage: false } body)
+                continue;
+
+            var folding = new List<BooleanExpression>();
+            foreach (var conjunct in conjuncts)
+                AddFoldingConjuncts(conjunct, sources, s, folding);
+            var leaves = new List<Selection>();
+            CollectConstantBranches(body, leaves);
+            var first = !body.OuterFilterFolded;
+            body.OuterFilterFolded = true;
+            foreach (var leaf in leaves)
+            {
+                var pruned = folding.Count > 0 && RejectsBranch(batch, sources, s, leaf, folding);
+                leaf.PrunedByOuterFilter = first ? pruned : leaf.PrunedByOuterFilter && pruned;
+            }
+        }
+
+        static void AddFoldingConjuncts(BooleanExpression conjunct, FromSource[] sources, int sourceIndex, List<BooleanExpression> folding)
+        {
+            if (conjunct.ConstantFoldRole == BooleanExpression.FoldRole.Conjunction)
+            {
+                var shape = new NodeShape();
+                conjunct.Describe(shape);
+                foreach (var child in shape.ChildNodes)
+                {
+                    if (child is BooleanExpression operand)
+                        AddFoldingConjuncts(operand, sources, sourceIndex, folding);
+                }
+            }
+            else if (FoldsIntoBranches(conjunct, sources, sourceIndex))
+            {
+                folding.Add(conjunct);
+            }
+        }
+
+        static void CollectConstantBranches(Selection plan, List<Selection> leaves)
+        {
+            if (plan.SetOperands is var (left, right, kind))
+            {
+                if (kind is SetOpKind.Union or SetOpKind.UnionAll)
+                {
+                    CollectConstantBranches(left, leaves);
+                    CollectConstantBranches(right, leaves);
+                }
+            }
+            else if (plan is { IsSingleConstantRow: true, ProjectionExpressions: { } projections }
+                && Array.TrueForAll(projections, static projection => Unaliased(projection).IsWrittenConstant))
+            {
+                leaves.Add(plan);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="conjunct"/>, a <c>WHERE</c> conjunct, is a shape
+    /// real folds into the constant branches of source
+    /// <paramref name="sourceIndex"/>, reading at least one of its columns.
+    /// </summary>
+    private static bool FoldsIntoBranches(BooleanExpression conjunct, FromSource[] sources, int sourceIndex)
+    {
+        var readsSource = false;
+        return Folds(conjunct) && readsSource;
+
+        bool Folds(BooleanExpression predicate)
+        {
+            var shape = new NodeShape();
+            predicate.Describe(shape);
+            switch (predicate.ConstantFoldRole)
+            {
+                case BooleanExpression.FoldRole.Conjunction or BooleanExpression.FoldRole.Junction:
+                    foreach (var child in shape.ChildNodes)
+                    {
+                        if (child is BooleanExpression inner ? !Folds(inner) : child is not null)
+                            return false;
+                    }
+                    return true;
+                case BooleanExpression.FoldRole.Comparison:
+                    foreach (var child in shape.ChildNodes)
+                    {
+                        switch (child is Expression operand ? Peel(operand) : child)
+                        {
+                            case null:
+                                continue;
+                            case Expressions.Reference reference:
+                                if (!ReadsSource(reference.ReferencedName))
+                                    return false;
+                                readsSource = true;
+                                continue;
+                            case Expression constant when constant.IsWrittenConstant:
+                                continue;
+                            default:
+                                return false;
+                        }
+                    }
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        bool ReadsSource(MultiPartName name)
+        {
+            try
+            {
+                return FindSourceColumn(sources, name).SourceIndex == sourceIndex;
+            }
+            catch (SimulatedSqlException)
+            {
+                return false;
+            }
+        }
+    }
+
+    /// <summary>Whether a folding conjunct isn't true of <paramref name="branch"/>'s constants.</summary>
+    private static bool RejectsBranch(BatchContext batch, FromSource[] sources, int sourceIndex, Selection branch, List<BooleanExpression> folding)
+    {
+        try
+        {
+            var constants = new RuntimeContext(static name => throw SimulatedSqlException.InvalidColumnName(name), batch);
+            var projections = branch.ProjectionExpressions!;
+            var columns = sources[sourceIndex].Columns;
+            var values = new SqlValue[projections.Length];
+            for (var i = 0; i < values.Length; i++)
+            {
+                var value = projections[i].Run(constants);
+                values[i] = i >= columns.Length || value.IsNull ? SqlValue.Null(i < columns.Length ? columns[i].Type : value.Type) : value.CoerceTo(columns[i].Type);
+            }
+            var row = new RuntimeContext(name => FindSourceColumn(sources, name) is (var s, var c) && s == sourceIndex && c < values.Length
+                ? values[c]
+                : throw SimulatedSqlException.InvalidColumnName(name), batch);
+            return folding.Exists(conjunct => conjunct.Run(row) != true);
+        }
+        catch (SimulatedSqlException)
+        {
+            return false;
+        }
+    }
+
+    private static IEnumerable<byte[]> IntersectRows(IEnumerable<byte[]> leftRows, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
     {
         var rightSet = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
         foreach (var rb in CoerceBranchRows(right, schema, batch, outer))
             _ = rightSet.Add(DecodeRowToValues(rb, schema));
 
         var emitted = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
-        foreach (var rowBytes in CoerceBranchRows(left, schema, batch, outer))
+        foreach (var rowBytes in leftRows)
         {
             var values = DecodeRowToValues(rowBytes, schema);
             if (rightSet.Contains(values) && emitted.Add(values))
@@ -648,14 +1009,14 @@ internal sealed partial class Selection
         batch.Connection.StatementIo?.UseWorktable();
     }
 
-    private static IEnumerable<byte[]> ExceptRows(Selection left, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
+    private static IEnumerable<byte[]> ExceptRows(IEnumerable<byte[]> leftRows, Selection right, SqlType[] schema, BatchContext batch, Func<MultiPartName, SqlValue>? outer)
     {
         var rightSet = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
         foreach (var rb in CoerceBranchRows(right, schema, batch, outer))
             _ = rightSet.Add(DecodeRowToValues(rb, schema));
 
         var emitted = new HashSet<SqlValue[]>(RowEqualityComparer.Instance);
-        foreach (var rowBytes in CoerceBranchRows(left, schema, batch, outer))
+        foreach (var rowBytes in leftRows)
         {
             var values = DecodeRowToValues(rowBytes, schema);
             if (!rightSet.Contains(values) && emitted.Add(values))

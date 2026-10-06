@@ -48,8 +48,9 @@ internal sealed class CharIndex : Expression
         if (!SqlType.IsStringCategory(n.Type) || n.Type == SqlType.Text || n.Type == SqlType.NText)
             throw SimulatedSqlException.InvalidArgumentDataType(n.Type.SqlServerName, argumentIndex: 1, "charindex");
 
-        var needleStr = n.AsString;
-        var haystackStr = h.AsString;
+        var collation = StringScalars.CollationFor(runtime.Batch, h.Type, n.Type);
+        var needleStr = StringScalars.TextUnder(n, collation);
+        var haystackStr = StringScalars.TextUnder(h, collation);
         // CHARINDEX indexes in code units under non-SC collations and in
         // codepoints under _SC_. Probe-confirmed against SQL Server 2025:
         // CHARINDEX(N'X', N'😀X') = 3 under non-SC (surrogate pair occupies
@@ -69,7 +70,7 @@ internal sealed class CharIndex : Expression
             : startUnits;
         var foundCu = startCu >= haystackStr.Length
             ? -1
-            : StringScalars.CollationFor(runtime.Batch, h.Type, n.Type).IndexOf(haystackStr, needleStr, startCu, out _);
+            : collation.IndexOf(haystackStr, needleStr, startCu, out _);
         var position = foundCu < 0
             ? 0
             : isSc

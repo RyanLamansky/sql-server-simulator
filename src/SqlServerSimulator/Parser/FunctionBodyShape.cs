@@ -131,7 +131,11 @@ internal sealed class FunctionBodyShape
             state = ContextConnectionState;
         }
 
-        shape.Violations.Add((line, SimulatedSqlException.SideEffectingOperatorInFunction(operatorName, state)));
+        var violation = SimulatedSqlException.SideEffectingOperatorInFunction(operatorName, state);
+        if (!shape.RaisesOnSight)
+            shape.Violations.Add((line, violation));
+        else if (!batch.IsSkipping)
+            throw violation.EndingBatch();
     }
 
     /// <summary>
@@ -154,6 +158,15 @@ internal sealed class FunctionBodyShape
     /// applies there, at <see cref="ContextConnectionState"/>.
     /// </summary>
     public bool ContextConnection;
+
+    /// <summary>
+    /// Set while a SQLCLR function's context-connection command runs, which
+    /// meets a side-effecting operator only as it reaches the statement: that
+    /// statement's Msg 443 ends the command's batch then, after the statements
+    /// ahead of it ran (probed 2026-10-06 against SQL Server 2025:
+    /// <c>SELECT 7; INSERT …; SELECT 8</c> reads 7, then the error).
+    /// </summary>
+    public bool RaisesOnSight;
 
     /// <summary>
     /// Records a DML statement's write. A write to a <em>table variable</em> is

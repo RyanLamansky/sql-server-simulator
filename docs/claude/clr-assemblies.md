@@ -239,7 +239,7 @@ The keyword and its value are case-insensitive; any other keyword but `Type Syst
 Who may open it:
 
 - A procedure or trigger always; a function or a table-valued function's init method only when its `SqlFunction` attribute sets `DataAccess` or `SystemDataAccess` to `Read` — otherwise `Open` throws the no-data-access refusal — and `FillRow`, an aggregate and a type's members never.
-- A function marked so reads `SqlContext.Pipe` and `TriggerContext` as null; one marked `SystemDataAccessKind.Read` alone reads the catalog but no user table, view or function (**Msg 589** state 3), and a function's command that writes — DML to a table, `SELECT … INTO`, `CREATE TABLE`, the transaction statements, `PRINT` — is **Msg 443** at state 2.
+- A function marked so reads `SqlContext.Pipe` and `TriggerContext` as null; one marked `SystemDataAccessKind.Read` alone reads the catalog but no user table, view or function (**Msg 589** state 3), and a function's command that writes — DML to a table, `SELECT … INTO`, `CREATE TABLE`, the transaction statements, `PRINT` — is **Msg 443** at state 2, raised as the command reaches that statement and ending its batch there, so `SELECT 7; INSERT …; SELECT 8` reads 7 and then the error (probed 2026-10-06 against SQL Server 2025).
 - One per routine at a time ("The context connection is already in use."), one reader at a time on it, and a command on a connection holding a `SqlTransaction` must name it; `PacketSize` and `WorkstationId` refuse, and an open connection reports the session's database, an empty data source and the server version.
 
 A command's outcomes follow the provider:
@@ -249,7 +249,7 @@ A command's outcomes follow the provider:
 - `ExecuteReader` walks the result sets; the error cutting one short surfaces from the `Read` that runs out of rows, one between result sets from `NextResult`, and the batch's later result sets stay readable after either.
   Each value's provider-specific form is its `SqlTypes` struct — a character string carrying its collation's locale — or its plain form for `date`, `time`, `datetime2` and `datetimeoffset`, and a `sql_variant` its base value's; a typed getter reads only its own column type (`InvalidCastException` otherwise), a NULL throws `SqlNullValueException`, and a read off a row "Invalid attempt to read when no data is present.".
 - What a command prints reaches only the connection's `InfoMessage` handlers, as one event per command; a CLR procedure a command calls sends its pipe output there too.
-- Parameters bind by name with or without their `@`; an untyped one takes its value's type (a string as `nvarchar` of its own length, a `decimal` at its own precision and scale), a sized one cuts a longer string or binary value, and output, input-output and return-value parameters come back in both forms.
+- Parameters bind by name with or without their `@`; an untyped one takes its value's type (a string as `nvarchar` of its own length, a `decimal` at its own precision and scale, declared `numeric` as a typed one is too), a sized one cuts a longer string or binary value, and output, input-output and return-value parameters come back in both forms.
   `CommandType.StoredProcedure` runs `EXEC` of the named procedure.
 
 `SqlPipe.ExecuteAndSend` runs a command with everything it produces — result sets, row counts, messages, and its error ahead of the routine's own Msg 6522 — going to the client, and `SqlPipe.Send(SqlDataReader)` sends what a reader has left: the rows after the one it is on, then every later result set.
@@ -299,16 +299,16 @@ The strong-named case is unprobed.
 - **`PERMISSION_SET` is recorded, not enforced at run time.** It selects which static checks run at registration; it cannot confine a loaded assembly (see above).
 - **A reported stack holds only the frames the simulator can see as the author's.**
   Real also shows its own internal frames — `SqlMetaData.Construct`, `System.Data.SqlServer.Internal.ClrLevelContext` — which have no counterpart, and the shim's public frames are named after its own members, which match Framework's only where the member is the one that throws.
-- **A CLR routine's own exceptions match real's; ones .NET's base library raises carry .NET's wording and frames.**
-  A `FormatException` from `int.Parse` reads `The input string 'x' was not in a correct format.` where Framework's reads `Input string was not in a correct format.`, and a stack real reports through `System.Number` shows only the author's frames here; real's own marshalling frames (`SqlBytes.Write`, `XmlSerializer` internals) never show.
+- **An exception .NET's base library raises shows only the author's frames, and some carry .NET's wording.**
+  Real reports Framework's frames beneath the author's — `System.Number.StringToNumber` and `ParseInt32` under `int.Parse`, `System.String.Substring(Int32 startIndex, Int32 length)`, `System.DateTimeParse.Parse`, `System.Convert.FromBase64String` and its two helpers — and which ones depends on Framework's inlining (`Convert.ToInt32` adds none, `Convert.ToInt64` one of its own, `DateTime.ParseExact` none at all); .NET's own stack names only a shared throw helper, so the API the author called can't be recovered from it (probed 2026-10-06 against SQL Server 2025).
+  The parse, Base64 and unboxing messages read in Framework's words (`ClrExceptionReport`); `Guid.Parse`'s, which Framework words by the input's shape, and an `ArgumentNullException`'s parameter name inside `int.Parse` (`String` there, `s` here) don't.
+  Real's own marshalling frames (`SqlBytes.Write`, `XmlSerializer` internals) never show.
 - **A routine may set its thread's culture.**
-  Real's `SAFE` host refuses both `CultureInfo.CurrentCulture` and `Thread.CurrentThread.CurrentCulture` assignments with a `SecurityException` (probed 2026-10-04 against SQL Server 2025); here the assignment succeeds and lasts until the call returns.
+  Real's `SAFE` host refuses both `CultureInfo.CurrentCulture` and `Thread.CurrentThread.CurrentCulture` assignments with a `SecurityException` (`Request for the permission of type 'System.Security.Permissions.SecurityPermission, mscorlib, …' failed.` at `System.Threading.Thread.set_CurrentCulture`, probed 2026-10-04 and 2026-10-06 against SQL Server 2025); here the assignment succeeds and lasts until the call returns, since .NET's setter offers no point to refuse it at.
 - **An aggregate's state never leaves memory.**
   One instance accumulates each whole group, so `Merge` is never called and a `Format.UserDefined` aggregate's `Read` / `Write` never run; real may serialize state between rows, which an aggregate that loses a field in `Write` would show.
 - **A context-connection error's report shows the provider's public frames only.**
   Real's names `SqlConnection.OnError`, `SqlInternalConnectionSmi` and the rest of the in-process plumbing, which has no counterpart here.
-- **A function's context-connection command that writes is refused whole before any of it runs**, where real refuses the statement when it runs — which shows only through `ExecuteScalar`, which reads no further than its first result set.
-- **An untyped `decimal` parameter reports base type `decimal`** through `SQL_VARIANT_PROPERTY`, where real's reports `numeric`.
 - **A command's result sets are read to the end when it runs**, so a routine that writes between two `Read` calls can't change what the reader returns, as it could on real.
 - **`sp_describe_first_result_set`'s Msg 11515 comes from the metadata-only mode**, so a plain `SET FMTONLY ON` followed by `EXEC` of a CLR procedure raises it too; that shape is unprobed.
 - Auto-generated `assembly_id` values start at 65536 and increment, which is what a fresh database showed (probed 2026-09-28); a server that has seen other assemblies hands out later ids.

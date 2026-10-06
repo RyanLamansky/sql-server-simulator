@@ -460,6 +460,20 @@ internal static class StringScalars
         Expression.IntegerLiteralValue(expression) is < 0;
 
     /// <summary>
+    /// The text <paramref name="value"/> carries into <paramref name="collation"/>:
+    /// a <c>char</c> / <c>varchar</c> value under another code page's collation
+    /// converts there as a comparison converts it — best fit or <c>?</c>,
+    /// within its own declared byte budget — so a <c>varchar(1)</c>
+    /// <c>'ä'</c> searched for under a <c>_UTF8</c> collation reads empty
+    /// (probed 2026-10-06 against SQL Server 2025 over <c>CHARINDEX</c>,
+    /// <c>PATINDEX</c>, <c>REPLACE</c> and <c>LIKE</c>, either operand).
+    /// </summary>
+    public static string TextUnder(SqlValue value, Collation collation) =>
+        value.Type is VarcharSqlType or CharSqlType && value.Type.Collation is { } own && own.StorageEncoding != collation.StorageEncoding
+            ? value.CoerceTo(value.Type.WithCollation(collation, value.Type.Coercibility)).AsString
+            : value.AsString;
+
+    /// <summary>
     /// The collation a character-matching scalar (<see cref="CharIndex"/>,
     /// <see cref="Replace"/>, <see cref="Translate"/>, the <c>TRIM</c> family,
     /// <c>STRING_SPLIT</c>) searches under, given its operands. SQL Server

@@ -133,7 +133,12 @@ partial class Simulation
                     var value = parameter.Direction is ParameterDirection.Output or ParameterDirection.ReturnValue
                         ? SqlValue.Null(type)
                         : ClrTypeMarshaller.ContextParameterValue(parameter.Value, type, parameter.Size);
-                    variables[VariableKey(parameter.Name)] = new VariableSlot(type, DeclaredLength(type), value, parameter: null);
+                    // The in-process provider declares a decimal value, typed or
+                    // not, as numeric, which SQL_VARIANT_PROPERTY then names.
+                    variables[VariableKey(parameter.Name)] = new VariableSlot(type, DeclaredLength(type), value, parameter: null)
+                    {
+                        SpelledNumeric = type is DecimalSqlType,
+                    };
                 }
             }
             catch (SimulatedSqlException bindError)
@@ -229,6 +234,8 @@ partial class Simulation
             if (this.tempTableScopeId == 0)
                 this.tempTableScopeId = ++connection.LastTempTableScopeId;
             var batch = new BatchContext(command, variables, this.triggerFrame) { ContinueOnError = true, RestrictsUserData = this.restrictsUserData };
+            if (this.isFunction)
+                batch.FunctionBodyShape = new FunctionBodyShape { ContextConnection = true, RaisesOnSight = true };
             batch.JoinTempTableScope(this.tempTableScopeId, this.tempTables);
 
             var outcomes = new List<SimulatedStatementOutcome>();
@@ -301,26 +308,15 @@ partial class Simulation
 
         /// <summary>
         /// Compiles the command's text as the server does before running any
-        /// of it, answering what stops it. A function's command is also walked
-        /// for a statement that writes, which is Msg 443 there.
+        /// of it, answering what stops it. A function's statement that writes
+        /// is refused only as it runs (see <see cref="FunctionBodyShape.RaisesOnSight"/>).
         /// </summary>
         private SimulatedSqlException? Compile(SimulatedDbCommand command, Dictionary<string, VariableSlot> variables)
         {
             var compile = new BatchContext(command, new Dictionary<string, VariableSlot>(variables, BatchContext.VariableNameComparer), this.triggerFrame);
             if (this.isFunction)
                 compile.FunctionBodyShape = new FunctionBodyShape { ContextConnection = true };
-            if (this.simulation.CompileBatch(compile, key: null, out _) is { } compileError)
-                return compileError;
-            if (compile.FunctionBodyShape is { } shape)
-            {
-                foreach (var (_, violation) in shape.Violations)
-                {
-                    if (violation.Number == 443)
-                        return violation;
-                }
-            }
-
-            return null;
+            return this.simulation.CompileBatch(compile, key: null, out _);
         }
 
         /// <summary>The width a sized parameter holds a value to, as a declared variable does.</summary>

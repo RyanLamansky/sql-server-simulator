@@ -255,7 +255,14 @@ internal sealed class Checksum : Expression
         if (!national && (isBinary || collation is Collation.Latin1GeneralTableCollation { UsesSortOrder52: true }))
         {
             foreach (var b in collation.StorageEncoding.GetBytes(text))
-                hash = BitOperations.RotateLeft(hash, 4) ^ (isBinary ? (uint)(sbyte)b : Cp1252CiAsChecksumWeight[b]);
+            {
+                // Æ, æ and ß sort as the pairs they expand to, so each takes
+                // two places in the fold, its weight the pair's own: 'aß' is
+                // 38304 and 'Straße' -1434035566 (probed 2026-10-06 against
+                // SQL Server 2025, every other byte taking one place).
+                var places = !isBinary && (b is 0xC6 or 0xDF or 0xE6) ? 8 : 4;
+                hash = BitOperations.RotateLeft(hash, places) ^ (isBinary ? (uint)(sbyte)b : Cp1252CiAsChecksumWeight[b]);
+            }
             return hash;
         }
         // Data a Latin1-General table compares folds its primary weights —

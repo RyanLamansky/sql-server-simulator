@@ -495,6 +495,7 @@ internal readonly struct BuiltInArity(int min, int max, BuiltInArity.Refusal bel
             "SYSDATETIMEOFFSET" => Exactly("sysdatetimeoffset", 0),
             "SYSUTCDATETIME" => Exactly("sysutcdatetime", 0),
             "TAN" => Exactly("tan", 1),
+            "TERTIARY_WEIGHTS" => Exactly("tertiary_weights", 1),
             "TEXTPTR" => Exactly("textptr", 1),
             "TEXTVALID" => Exactly("textvalid", 2),
             "TIMEFROMPARTS" => Exactly("timefromparts", 5),

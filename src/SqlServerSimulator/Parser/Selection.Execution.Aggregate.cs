@@ -506,27 +506,22 @@ internal sealed partial class Selection
         }
 
         // With no ORDER BY, the groups leave in the order real's sort-fed Stream
-        // Aggregate produces them — see ImplicitKeyOrder and IsRollupChain. The
-        // key tuples ride in each output entry's otherwise empty order-key slot.
+        // Aggregates produce them — see ImplicitKeyOrder and GroupingSetsOrder.
+        // The key tuples ride in each output entry's otherwise empty order-key
+        // slot, behind the set's index and the group's arrival under several sets.
         (int[] Positions, bool[] Descending)? groupOrder = null;
+        GroupingSetsOrder? setsOrder = null;
         if (orderByItems.Count == 0)
         {
             if (fromClause.GroupingSets.Count == 1)
-            {
                 groupOrder = ImplicitKeyOrder(sources, joins, fromClause.GroupingSets[0], aggregates: aggregates.Count > 0);
-            }
-            else if (IsRollupChain(sources, fromClause.GroupingSets))
-            {
-                var width = fromClause.GroupingSets[0].Length;
-                var positions = new int[width];
-                for (var i = 0; i < width; i++)
-                    positions[i] = i;
-                groupOrder = (positions, new bool[width]);
-            }
+            else if (fromClause.GroupingSets.Count > 1)
+                setsOrder = GroupingSetsOrder.Of(sources, joins, fromClause.GroupingSets, aggregates: aggregates.Count > 0);
         }
 
-        foreach (var groupingSet in effectiveSets)
+        for (var setIndex = 0; setIndex < effectiveSets.Count; setIndex++)
         {
+            var groupingSet = effectiveSets[setIndex];
             currentGroupingSet = groupingSet;
             if (projectionGroupingKeys is not null)
                 currentSetKeys = Array.ConvertAll(groupingSet, grouping => GroupingKey(sources, Peel(grouping)));
@@ -648,7 +643,11 @@ internal sealed partial class Selection
 
                     if (topNGroups is null)
                     {
-                        output.Add((groupOrder is null ? orderKeys : currentState.KeyValues, projected));
+                        output.Add((
+                            setsOrder is not null ? GroupingSetsOrder.Entry(setIndex, output.Count, currentState.KeyValues)
+                            : groupOrder is null ? orderKeys
+                            : currentState.KeyValues,
+                            projected));
                     }
                     else
                     {
@@ -692,7 +691,16 @@ internal sealed partial class Selection
                 }
 
                 if (groupOrder is var (groupPositions, groupDescending) && windowSurvivors.Count is > 1 and <= ImplicitOrderSortCap)
+                {
                     windowSurvivors.Sort((a, b) => CompareGroupKeys(a.State.KeyValues, b.State.KeyValues, groupPositions, groupDescending));
+                }
+                else if (setsOrder is not null && windowSurvivors.Count is > 1 and <= ImplicitOrderSortCap)
+                {
+                    var survivors = windowSurvivors.Select((survivor, arrival) => (Entry: GroupingSetsOrder.Entry(effectiveSets.IndexOf(survivor.GroupingSet), arrival, survivor.State.KeyValues), Survivor: survivor)).ToList();
+                    survivors.Sort((a, b) => setsOrder.Compare(a.Entry, b.Entry));
+                    windowSurvivors.Clear();
+                    windowSurvivors.AddRange(survivors.Select(static entry => entry.Survivor));
+                }
 
                 var perWindowKeys = new List<(SqlValue[] PartitionKeys, SqlValue[] OrderKeys)[]>(windowSurvivors.Count);
                 for (var g = 0; g < windowSurvivors.Count; g++)
@@ -773,8 +781,17 @@ internal sealed partial class Selection
         // pubdate` collapses one row per group to one row per distinct year
         // (probe-confirmed). Grouping alone doesn't imply distinct output —
         // the projection can be narrower than the grouping key.
-        if (windowSurvivors is null && groupOrder is var (outputPositions, outputDescending) && output.Count is > 1 and <= ImplicitOrderSortCap)
-            output.Sort((a, b) => CompareGroupKeys(a.OrderKeys, b.OrderKeys, outputPositions, outputDescending));
+        if (windowSurvivors is null && output.Count is > 1 and <= ImplicitOrderSortCap)
+        {
+            if (groupOrder is var (outputPositions, outputDescending))
+            {
+                output.Sort((a, b) => CompareGroupKeys(a.OrderKeys, b.OrderKeys, outputPositions, outputDescending));
+            }
+            else if (setsOrder is not null)
+            {
+                output.Sort((a, b) => setsOrder.Compare(a.OrderKeys, b.OrderKeys));
+            }
+        }
 
         if (distinct && output.Count > 1)
         {

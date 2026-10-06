@@ -2265,6 +2265,7 @@ internal abstract class Expression : ExpressionNode
                 "JSON_PATH_EXISTS" => new JsonPathExists(context),
                 "OBJECTPROPERTYEX" => new ObjectPropertyEx(context),
                 "ORIGINAL_DB_NAME" => new OriginalDbName(context),
+                "TERTIARY_WEIGHTS" => new TertiaryWeights(context),
                 "TODATETIMEOFFSET" => new ToDateTimeOffset(context),
                 "VECTOR_NORMALIZE" => new VectorNorm(context, normalize: true),
                 _ => null

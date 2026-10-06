@@ -125,6 +125,14 @@ public class ClrContextConnectionTests
     }
 
     [TestMethod]
+    [Description("The in-process provider declares a decimal parameter, typed or not, as numeric (probed 2026-10-06 against SQL Server 2025).")]
+    public void DecimalParameters_ReportNumeric()
+    {
+        var sim = Sim("create procedure dbo.dp as external name simclr.Ctx.DecimalParams");
+        CollectionAssert.AreEqual(new[] { "String:numeric numeric 3" }, Messages(sim, "exec dbo.dp"));
+    }
+
+    [TestMethod]
     [Description("CommandType.StoredProcedure executes the named procedure with its output and return-value parameters.")]
     public void StoredProcedureCommand_ReadsOutputAndReturnValue()
         => CollectionAssert.AreEqual(
@@ -238,6 +246,11 @@ public class ClrContextConnectionTests
         IsGreaterThan(0, (int)sim.ExecuteScalar("select dbo.fs(N'select count(*) from sys.objects')")!);
         Contains("System.Data.SqlClient.SqlException: This statement has attempted to access data whose access is restricted by the assembly.", sim.AssertSqlError("select dbo.fs(N'select count(*) from t')", 6522).Message);
         Contains("Invalid use of a side-effecting operator 'INSERT' within a function.", sim.AssertSqlError("select dbo.fw(N'insert log values (1)')", 6522).Message);
+        AreEqual(0, sim.ExecuteScalar("select count(*) from log"));
+        // The write is refused as it is reached, after the statements ahead of
+        // it ran, which ExecuteScalar reads past (probed 2026-10-06 against SQL
+        // Server 2025).
+        AreEqual(7, sim.ExecuteScalar("select dbo.fr(N'select 7; insert log values (1); select 8')"));
         AreEqual(0, sim.ExecuteScalar("select count(*) from log"));
     }
 

@@ -42,15 +42,16 @@ internal sealed class Replace : Expression
         var i = StringScalars.CoerceToVarchar(rawInput, runtime.Batch, "replace", argumentIndex: 1);
         var o = StringScalars.CoerceToVarchar(rawOld, runtime.Batch, "replace", argumentIndex: 2);
         var n = StringScalars.CoerceToVarchar(rawNew, runtime.Batch, "replace", argumentIndex: 3);
-        var oldString = o.AsString;
+        var collation = StringScalars.CollationFor(runtime.Batch, rawInput.Type, rawOld.Type, rawNew.Type);
+        var oldString = StringScalars.TextUnder(o, collation);
         // SQL Server returns the input unchanged for an empty search string.
         var replaced = oldString.Length == 0
             ? i.AsString
             : ReplaceUnderCollation(
-                i.AsString,
+                StringScalars.TextUnder(i, collation),
                 oldString,
                 n.AsString,
-                StringScalars.CollationFor(runtime.Batch, rawInput.Type, rawOld.Type, rawNew.Type));
+                collation);
         // REPLACE can grow the input (a longer replacement per match), so the
         // result type is the family container (varchar(8000) / nvarchar(4000))
         // regardless of the input's declared width — probe-confirmed against

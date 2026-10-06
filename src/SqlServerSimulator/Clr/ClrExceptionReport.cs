@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace SqlServerSimulator.Clr;
 
@@ -22,7 +23,7 @@ namespace SqlServerSimulator.Clr;
 /// restores that last frame from the method the simulator invoked; a frame a
 /// tail call took from between the two can't be recovered.
 /// </remarks>
-internal static class ClrExceptionReport
+internal static partial class ClrExceptionReport
 {
     [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage(
         "Trimming",
@@ -32,10 +33,15 @@ internal static class ClrExceptionReport
     {
         var type = exception.GetType().FullName;
         var kept = new List<MethodBase>();
+        var unboxing = false;
         foreach (var frame in new StackTrace(exception, fNeedFileInfo: false).GetFrames())
         {
-            if (frame.GetMethod() is { } method && IsAuthorVisible(method))
+            if (frame.GetMethod() is not { } method)
+                continue;
+            if (IsAuthorVisible(method))
                 kept.Add(method);
+            else
+                unboxing |= method.Name.StartsWith("Unbox", StringComparison.Ordinal);
         }
 
         if (invoked is not null && (kept.Count == 0 || kept[^1] != invoked))
@@ -43,7 +49,7 @@ internal static class ClrExceptionReport
         var frames = new StringBuilder();
         foreach (var method in kept)
             _ = frames.Append("   at ").Append(Render(method)).Append("\r\n");
-        return Describe(type!, MessageOf(exception), frames.ToString());
+        return Describe(type!, MessageOf(exception, unboxing), frames.ToString());
     }
 
     /// <summary>
@@ -66,10 +72,20 @@ internal static class ClrExceptionReport
     /// <summary>
     /// The message as .NET Framework words it: an argument exception names its
     /// parameter on a line of its own rather than in .NET's parenthesized
-    /// suffix.
+    /// suffix, a number or date that doesn't parse isn't quoted back, a
+    /// Base64 refusal ends in a space, and an unboxing to the wrong value type
+    /// is the bare <c>Specified cast is not valid.</c> (probed 2026-10-06
+    /// against SQL Server 2025 through <c>int.Parse</c>, <c>long.Parse</c>,
+    /// <c>decimal.Parse</c>, <c>double.Parse</c>, <c>Convert.ToInt64</c>,
+    /// <c>DateTime.Parse</c>, <c>DateTime.ParseExact</c>,
+    /// <c>Convert.FromBase64String</c> and an <c>(int)</c> unboxing).
     /// </summary>
-    private static string MessageOf(Exception exception)
+    private static string MessageOf(Exception exception, bool unboxing)
     {
+        if (exception is InvalidCastException)
+            return unboxing ? "Specified cast is not valid." : exception.Message;
+        if (exception is FormatException)
+            return FrameworkWording(exception.Message);
         if (exception is not ArgumentException { ParamName: { Length: > 0 } parameter } argument)
             return exception.Message;
         var suffix = $" (Parameter '{parameter}')";
@@ -78,6 +94,21 @@ internal static class ClrExceptionReport
             : argument.Message;
         return $"{head}\r\nParameter name: {parameter}";
     }
+
+    private static string FrameworkWording(string message)
+    {
+        if (message.StartsWith("The input string '", StringComparison.Ordinal) && message.EndsWith("' was not in a correct format.", StringComparison.Ordinal))
+            return "Input string was not in a correct format.";
+        if (message.StartsWith("The input is not a valid Base-64 string", StringComparison.Ordinal))
+            return message + " ";
+        return QuotedDateTime().Replace(UnquotedIndex().Replace(message, "index $1"), "$1 was not recognized as a valid DateTime.");
+    }
+
+    [GeneratedRegex(@"^(The string|String) '.*' was not recognized as a valid DateTime\.", RegexOptions.CultureInvariant | RegexOptions.Singleline)]
+    private static partial Regex QuotedDateTime();
+
+    [GeneratedRegex(@"index '(\d+)'", RegexOptions.CultureInvariant)]
+    private static partial Regex UnquotedIndex();
 
     private static bool IsAuthorVisible(MethodBase method)
     {

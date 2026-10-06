@@ -57,6 +57,13 @@ internal sealed class FromSource(
     public readonly string? Qualifier = qualifier;
 
     /// <summary>
+    /// The body of a derived table, view or CTE a browse statement reads
+    /// through, whose columns it describes by the base tables under them
+    /// (see <see cref="Selection.BrowseFlattened"/>); null for every other source.
+    /// </summary>
+    public Selection? BrowseBody;
+
+    /// <summary>
     /// Written <c>FOR PATH</c>: a node or edge table a <c>SHORTEST_PATH</c>
     /// recurses over, whose columns only graph path aggregates may read.
     /// </summary>
@@ -440,7 +447,10 @@ internal sealed class FromSource(
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
             lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
+        {
+            BrowseBody = this.BrowseBody,
+        };
 
     /// <summary>
     /// Returns a copy of this source reading <paramref name="rows"/> — the same
@@ -458,7 +468,10 @@ internal sealed class FromSource(
             backingCatalogView: this.BackingCatalogView, backingCatalogDatabase: this.BackingCatalogDatabase,
             viaSynonym: this.ViaSynonym, autoElementName: this.AutoElementName,
             lateralIsQueryBody: this.LateralIsQueryBody, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogSeek: this.CatalogSeek, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
+        {
+            BrowseBody = this.BrowseBody,
+        };
 
     /// <summary>
     /// Returns a copy of this source with its deferred <see cref="LateralPlan"/>
@@ -475,7 +488,10 @@ internal sealed class FromSource(
             lateralPlan: null, backingTable: this.BackingTable, backingView: this.BackingView,
             heapPlan: this.HeapPlan, materializeOnce: false, viaSynonym: this.ViaSynonym,
             autoElementName: this.AutoElementName, writtenObjectName: this.WrittenObjectName,
-            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogRows: catalogRows, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable);
+            xmlReceiverName: this.XmlReceiverName, unaliasedName: this.UnaliasedName, catalogRows: catalogRows, volatileRefresh: this.VolatileRefresh, cte: this.Cte, derivedTable: this.DerivedTable)
+        {
+            BrowseBody = this.BrowseBody,
+        };
 }
 
 /// <summary>

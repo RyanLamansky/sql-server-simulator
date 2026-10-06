@@ -71,6 +71,8 @@ internal sealed class PatIndex : Expression
         // `PATINDEX(N'x', N'x  ')` is 0.
         var slack = !SqlType.IsNationalStringCategory(s.Type) && !SqlType.IsNationalStringCategory(p.Type);
         var subjectStr = s.AsString;
+        if (SqlType.IsStringCategory(p.Type))
+            patternString = StringScalars.TextUnder(p, collation);
         var index = this.patterns.Get(patternString, escapeChar: null, collation).Find(subjectStr, slack);
         // Result position is code-unit-based under non-SC, codepoint-based
         // under _SC_ — matches CHARINDEX dispatch on the subject's collation.
