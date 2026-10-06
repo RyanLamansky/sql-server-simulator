@@ -56,6 +56,8 @@ partial class Simulation
                 return TryParseDropServerRole(context);
             case Name appWord when appWord.Value.Equals("APPLICATION", StringComparison.OrdinalIgnoreCase):
                 return TryParseDropApplicationRole(context);
+            case Name credentialWord when credentialWord.Value.Equals("CREDENTIAL", StringComparison.OrdinalIgnoreCase):
+                return TryParseDropCredential(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseDropFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:
@@ -272,7 +274,7 @@ partial class Simulation
         // IF EXISTS (probed 2026-09-25 against SQL Server 2025).
         context.CurrentDatabase.RejectWriteWhenReadOnly();
         var schemaName = name.Leaf;
-        if (IsReservedSchemaName(context.CurrentDatabase.Collation, schemaName))
+        if (IsReservedSchemaName(context.CurrentDatabase.Collation, schemaName) || context.CurrentDatabase.Collation.Equals(schemaName, "guest"))
             throw SimulatedSqlException.CannotDropProtectedSchema(schemaName);
         if (!context.CurrentDatabase.Schemas.TryGetValue(schemaName, out var schema))
         {

@@ -422,6 +422,25 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool EndsSession;
 
     /// <summary>
+    /// Set on an error whose only entry is the class-11 Msg 0 SqlClient raises
+    /// on its own side when a request's DONE carries <c>DONE_ERROR</c> with no
+    /// error ahead of it: on the wire real sends that DONE alone (probed
+    /// 2026-10-06 against SQL Server 2025, a refused <c>SHUTDOWN</c>).
+    /// </summary>
+    internal bool RaisedByClient;
+
+    /// <summary>
+    /// Set on a non-schema-bound security predicate's binding failure met
+    /// while the batch compiles: its leading Msg 208 doesn't defer with its
+    /// statement as a missing object's does, and it ends the compile's report
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal bool BindsWithBatch;
+
+    /// <summary>A copy of this error as the batch's compile meets it, marked <see cref="BindsWithBatch"/> and ending no batch of its own.</summary>
+    internal SimulatedSqlException BindingWithBatch() => new(this.Message, [.. this.Errors]) { BindsWithBatch = true };
+
+    /// <summary>
     /// Set on an error a system procedure raised from its own body, which real
     /// reports as the procedure's <c>RAISERROR</c>: a DONEINPROC carrying the
     /// error, then the procedure returning 1 with no error on its DONEPROC

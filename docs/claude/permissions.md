@@ -497,7 +497,7 @@ The hash uses the legacy `0x0200` single-pass-SHA-512 format (`PasswordHash.Encr
 `PasswordHash.Verify` dispatches on the version tag, so both forms verify; the T-SQL `PWDENCRYPT` keeps emitting `0x0300`.
 In-process connections never authenticate — login DDL through one is how the registry is seeded.
 
-- `CREATE LOGIN name WITH PASSWORD = '…' [MUST_CHANGE] [, option …]` — only the SQL-auth clear-text form is modeled; the option tail (CHECK_POLICY / CHECK_EXPIRATION / DEFAULT_DATABASE / DEFAULT_LANGUAGE / SID / CREDENTIAL) parses-and-discards.
+- `CREATE LOGIN name WITH PASSWORD = '…' [MUST_CHANGE] [, option …]` — only the SQL-auth clear-text form is modeled; `CREDENTIAL` maps the login to a credential (see [Credentials](#credentials)), and the rest of the option tail (CHECK_POLICY / CHECK_EXPIRATION / DEFAULT_DATABASE / DEFAULT_LANGUAGE / SID) is kept as the login's catalog rows show it or read without effect.
   `FROM WINDOWS` / certificate / asymmetric-key / external-provider forms and `PASSWORD = 0x… HASHED` raise `NotSupportedException`.
   A password over SQL Server's documented **128-character cap** raises Msg 6607 (CREATE and ALTER alike) — **approximate**: 6607 is the password-machinery error probe-confirmed on the `PWDENCRYPT` cap, but real's CREATE LOGIN rejection shape is unverifiable from the reference instance (its login hits the Msg 15247 permission wall before password validation).
 - `ALTER LOGIN name WITH PASSWORD = '…'` re-hashes and stamps `PasswordLastSetTime` (readable via `LOGINPROPERTY`).
@@ -514,6 +514,17 @@ In-process connections never authenticate — login DDL through one is how the r
 |---|---|---|
 | 15025 | Duplicate `CREATE LOGIN` name: `The server principal 'x' already exists.` | Docs-derived — the reference login lacks the server permission to reach the duplicate check (Msg 15247 fires first). |
 | 15151 | `ALTER LOGIN` / `DROP LOGIN` on a missing login: `Cannot {alter\|drop} the login 'x', because it does not exist or you do not have permission.` | Probe-confirmed — distinct wording from the database-principal 15151 (`CannotFindPrincipal`). |
+
+### Credentials
+
+`CREATE` / `ALTER` / `DROP CREDENTIAL` (`Simulation/Simulation.Credentials.cs`) keep the server's credentials in `Simulation.Credentials`, projected by `sys.credentials`, and roll back with a transaction as login DDL does (probed 2026-10-06 against SQL Server 2025).
+Ids count from 65536 server-wide and are never reused — a refused duplicate spends one — so a credential's id is environmental against a long-lived server.
+The secret is checked for shape and dropped; nothing reads it back.
+Every statement needs `ALTER ANY CREDENTIAL`, and `sys.credentials` shows its rows under `VIEW ANY DEFINITION`, or under `ALTER ANY CREDENTIAL` while `VIEW ANY DEFINITION` isn't denied.
+A login's `CREDENTIAL = name` / `NO CREDENTIAL` sets the `credential_id` `sys.server_principals` and `sys.sql_logins` show, and a credential a login is mapped to can't be dropped.
+The error factories (`SimulatedSqlException.CredentialErrors.cs`) carry the refusals; the grammar's own are syntax errors raised while the batch compiles, an empty identity among them.
+
+**Not modeled yet**: `FOR CRYPTOGRAPHIC PROVIDER` (no provider exists, so it is always real's Msg 15151), `ALTER LOGIN … ADD | DROP CREDENTIAL`, database-scoped credentials, the `CREATE_CREDENTIAL` / `ALTER_CREDENTIAL` / `DROP_CREDENTIAL` server DDL trigger events, and the `DONE` token kinds a credential statement sends over TDS.
 
 ### Server roles + server-scope permissions (`Simulation/Simulation.ServerRoles.cs`)
 
@@ -708,6 +719,8 @@ A `DENY` binds even a login that also holds `ALTER ANY DATABASE`.
 | `ALTER SERVER ROLE <custom> ADD` / `DROP MEMBER`, `DROP SERVER ROLE` | `ALTER ANY SERVER ROLE` | **Msg 15151**, the missing-role wording |
 | `ALTER SERVER ROLE <fixed> ADD` / `DROP MEMBER` | `sysadmin`, or a member of that same role — `CONTROL SERVER`, `ALTER ANY SERVER ROLE` and `securityadmin` are all refused | **Msg 15151** |
 | `CREATE LOGIN`, `ALTER` / `DROP LOGIN` | see [Login DDL gating](#login-ddl-gating) | |
+| `CREATE` / `ALTER` / `DROP CREDENTIAL` | `ALTER ANY CREDENTIAL` | **Msg 15247** for `CREATE`, the missing-credential **Msg 15151** for `ALTER` / `DROP` |
+| `SHUTDOWN [WITH NOWAIT]` | `SHUTDOWN` (`sysadmin`, `serveradmin`) | informational **Msg 6004**, then the batch ends and the transaction rolls back, uncaught, with the client's own class-11 severe error — or silently inside a `TRY` with no transaction open (probed 2026-10-06 against SQL Server 2025, as a refused login); a permitted `SHUTDOWN` is `NotSupportedException`, the simulation having no server process to stop |
 | `CREATE` / `DROP DATABASE` | see [DDL statement gates](#ddl-statement-gates) | |
 | `EXECUTE AS LOGIN` | see [`ON LOGIN::` securables](#on-login-securables) | |
 
@@ -730,7 +743,7 @@ A `DENY` binds even a login that also holds `ALTER ANY DATABASE`.
 
 #### Not modeled yet
 
-- The permissions whose statements the simulator doesn't have stay catalog truth: `SHUTDOWN`, `ALTER ANY CREDENTIAL`, the endpoint, event-session, event-notification, audit and availability-group families, `ALTER TRACE` past `RAISERROR … WITH LOG`, `ALTER RESOURCES` and `VIEW ANY ERROR LOG`.
+- The permissions whose statements the simulator doesn't have stay catalog truth: the endpoint, event-session, event-notification, audit and availability-group families, `ALTER TRACE` past `RAISERROR … WITH LOG`, `ALTER RESOURCES` and `VIEW ANY ERROR LOG`.
 - `UNSAFE ASSEMBLY` / `EXTERNAL ACCESS ASSEMBLY` for `CREATE ASSEMBLY`, which waits on `clr strict security` itself (see [`backlog.md`](backlog.md)).
 - `HAS_PERMS_BY_NAME`'s `SERVER ROLE` class answers only for a `dbo` session.
 - `ALTER LOGIN [sa] DISABLE` is discarded, since `sa` isn't in the registry, and `ALTER LOGIN [sa] WITH PASSWORD` (or `sp_password` on it) meets real's policy check (Msg 33062 for a too-short password, probed 2026-09-30 against SQL Server 2025) and then `NotSupportedException`: recording a password for `sa` would switch the TDS endpoint from accepting any credentials to enforcing them, and real's own answer to a wrong `OLD_PASSWORD` is Msg 15151.
@@ -882,6 +895,8 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 - `HAS_PERMS_BY_NAME(securable, securable_class, permission [, …])` returns NULL for a NULL `permission`, `1` for a dbo session on whatever exists (preserving the DacFx bacpac-export gate `HAS_PERMS_BY_NAME(NULL, N'DATABASE', N'VIEW DEFINITION')` = 1), and otherwise the real checker result (1/0) for a `DATABASE` / `OBJECT` / `SCHEMA` securable_class; the server forms — a NULL class, `SERVER` and `LOGIN` — are in [Scalars and functions](#scalars-and-functions).
   Even for dbo, real answers 0 for an object, schema or column that isn't there and NULL for a class it doesn't know or a NULL object (probed 2026-09-26 against SQL Server 2025); an unknown permission name is NULL on real but still 1 here, since the permission catalog covers only the modeled names.
   An unresolvable OBJECT / SCHEMA securable or an unrecognized class returns NULL.
+- `PERMISSIONS([object_id [, 'column']])` — dbo's masks are fixed per kind of object; anyone else's are built bit by bit from the checker, every bit grantable under `CONTROL`, NULL for an object it can't see (probed 2026-10-06 against SQL Server 2025).
+  The bit layout is on the `Permissions` expression; its two quirks short of dbo are a view column's `0x80`, shown only in the grantable half, and a multi-statement function's write bits, never held.
 - `IS_MEMBER(group_or_role)` — `public` → 1; the effective principal's transitive membership (nested roles + fixed roles via the checker's role closure) → 1/0; the dbo user → 1 for every fixed role but `db_denydatareader` / `db_denydatawriter`, with no membership row, where a `db_owner` member belongs to `db_owner` alone (probed 2026-09-30 against SQL Server 2025); any non-role / unknown name → NULL.
 - `IS_ROLEMEMBER(role [, principal])` — same shape as `IS_MEMBER`; a named principal is resolved first (a missing one is NULL even for `public`), counts as a member of itself, and follows nested roles (probed 2026-09-25).
 - `IS_SRVROLEMEMBER(role [, login])` — `public` → 1; real membership from `Simulation.ServerRoleMembers` (1/0); a sysadmin-member login → 1 for **every fixed** server role; a non-role name → NULL; NULL → NULL. The 1-arg form checks the session's effective login; the 2-arg form looks up the named login (an unknown named login → NULL).
@@ -889,7 +904,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 ## Known gaps
 
 - **Column-level grants** ship for SELECT / UPDATE / REFERENCES reads and writes, on tables and views alike — see [Column-level grants](#column-level-grants). Residual gaps: **column-level INSERT** grants (INSERT stays object-grain) and the structural-visitor coverage gap for columns buried in some non-arithmetic function containers.
-- **Server permissions whose statements aren't built** — `SHUTDOWN`, credentials, endpoints, event sessions, audits, traces, the error log, and `CREATE ASSEMBLY`'s `UNSAFE ASSEMBLY`; every modeled server-scope statement is gated — see [Server permissions and the fixed server roles](#not-modeled-yet).
+- **Server permissions whose statements aren't built** — endpoints, event sessions, audits, traces, the error log, and `CREATE ASSEMBLY`'s `UNSAFE ASSEMBLY`; every modeled server-scope statement is gated — see [Server permissions and the fixed server roles](#not-modeled-yet).
 - **`master`'s and `msdb`'s own seeded grants** — `EXECUTE` on the system procedures and the grants to principals the simulator doesn't carry; a grant naming a system procedure is refused in a user database on real and unresolved here.
 - **`sys.server_permissions` endpoint rows** — real seeds `public` with per-endpoint `CONNECT` (class 105) alongside the class-100 rows the simulator seeds; the simulator models no endpoint class.
 - **Application-role edges** — a pooled TDS reset clears the role instead of killing the session (real's Msg 596), `sp_setapprole` under `EXECUTE AS` leaves the impersonated identity on top, and the ODBC `{Encrypt}` password escape doesn't parse.
@@ -897,16 +912,7 @@ The current-principal / id scalars read the session's effective principal; `HAS_
 - **DDL statement gates** cover every modeled CREATE / ALTER / DROP — see [DDL statement gates](#ddl-statement-gates).
   `CREATE ASSEMBLY` covers through `CONTROL` rather than real's `ALTER ANY ASSEMBLY`, which isn't in the catalog.
   Real pairs the ALTER DATABASE refusal with a terminating Msg 5069 and the CREATE INDEX / TRUNCATE family with no second record; the simulator raises the single leading error, matching how the DMV 300 / 262 pair is modeled.
-- **`PERMISSIONS()`** answers `dbo`'s full bitmap for every caller rather than real's per-permission bits for a restricted one.
-- **The user option list** takes `NAME` in a `CREATE USER`'s `WITH` list, which real refuses (Msg 102 near `name`), and reports `DEFAULT_SCHEMA = NULL` as Msg 156 near `null` where real's is Msg 102 near `default_schema` (probed 2026-10-04 against SQL Server 2025).
-- **Residue from the differential sweep** (probed 2026-10-04 against SQL Server 2025):
-  - a schema `DENY ALTER` doesn't stop `db_ddladmin`'s `CREATE TABLE` there on real, and a database `CONTROL` holder under it gets Msg 3701 for `DROP TABLE`; the simulator refuses the first and admits the second;
-  - a `CREATE VIEW … WITH SCHEMABINDING` lacking both `CREATE VIEW` and `REFERENCES` raises real's REFERENCES Msg 229 first, Msg 262 here;
-  - `ALTER AUTHORIZATION` with a missing new owner and an unpermitted securable reports the owner first on real, the securable here;
-  - `CREATE FULLTEXT CATALOG` makes the creator the owner on real (it can then drop it) and a later reference by a non-owner is Msg 7641 state 4, where the simulator records `dbo` and answers state 5 or Msg 208;
-  - a database-scope `DENY VIEW DEFINITION` narrows `sys.database_permissions` further on real than the grantee rule here;
-  - unbracketed `ALTER ROLE public …` is Msg 102 on real;
-  - `DROP SYNONYM` names the synonym as written in Msg 3701 on real, the leaf here.
+- **`PERMISSIONS()`** over a system object (`sys.objects`, say) is NULL where real answers its bitmap.
 - **`ALTER TABLE ADD`-column SET-reads detection** on the joined form isn't distinguished — a joined UPDATE / DELETE SELECT-checks all backing-table sources unconditionally.
 - **Guest enable/disable**, **`CREATE USER … FROM EXTERNAL PROVIDER`** + the `WITH` option tail — parse-and-discard.
 - **Grammar residue** — the `APPLICATION ROLE::` securable class isn't parsed (probed 2026-09-28 against SQL Server 2025).

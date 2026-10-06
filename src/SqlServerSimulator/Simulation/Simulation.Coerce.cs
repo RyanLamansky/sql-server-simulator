@@ -282,9 +282,8 @@ partial class Simulation
         EnforceCheckConstraints(destination, fullRowValues, batch);
         var storedValues = ProjectStoredValues(destination, fullRowValues);
         // The table-variable grammar exposes no constraint WITH clause, so no
-        // key here can carry IGNORE_DUP_KEY and neither call can ask to skip.
-        _ = EnforceKeyConstraints(destination, fullRowValues, storedValues, batch);
-        _ = EnforceUniqueIndexes(destination, fullRowValues, storedValues, batch);
+        // key here can carry IGNORE_DUP_KEY and the check can't ask to skip.
+        _ = EnforceRowKeys(destination, fullRowValues, storedValues, batch);
         _ = destination.Heap.Insert(RowEncoder.EncodeRow(destination.StoredColumns, storedValues, destination.Heap));
     }
 
@@ -796,6 +795,87 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Checks a row an INSERT writes against every PRIMARY KEY / UNIQUE
+    /// constraint and unique index of <paramref name="table"/>, reporting what
+    /// real reports for a row breaking several: a duplicate on any
+    /// <c>IGNORE_DUP_KEY</c> key drops the row with Msg 3604 whatever else it
+    /// breaks, and otherwise the key with the lowest <c>index_id</c> raises —
+    /// the clustered one first, then the rest as <c>sys.indexes</c> numbers
+    /// them, which is not declaration order (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static RowKeyVerdict EnforceRowKeys(HeapTable table, SqlValue[] rowValues, SqlValue[] storedValues, BatchContext batch)
+    {
+        var checks = new RowKeyChecks();
+        EnforceKeyConstraints(table, rowValues, storedValues, batch, ref checks);
+        EnforceUniqueIndexes(table, rowValues, storedValues, batch, ref checks);
+        return checks.Ignored ? ReportIgnoredDuplicate(batch)
+            : checks.Hard is { } error ? throw error
+            : RowKeyVerdict.Unique;
+    }
+
+    /// <summary>
+    /// The duplicates <see cref="EnforceRowKeys"/> has found so far for one
+    /// row: whether one was on an <c>IGNORE_DUP_KEY</c> key, and the error of
+    /// the lowest-<c>index_id</c> key that raises. Index ids are settled only
+    /// once a duplicate is found, keeping the check of a unique row free of it.
+    /// </summary>
+    private struct RowKeyChecks
+    {
+        public bool Ignored;
+        public SimulatedSqlException? Hard;
+        private int hardIndexId;
+
+        /// <summary>
+        /// Whether the row's outcome no longer depends on the key numbered
+        /// <paramref name="indexId"/>: it is dropped already, or a key
+        /// outranking this one raises and this one can't drop it.
+        /// </summary>
+        public readonly bool Settles(int indexId, bool ignoreDupKey) =>
+            this.Ignored || (this.Hard is not null && !ignoreDupKey && indexId > this.hardIndexId);
+
+        /// <summary>
+        /// Records a duplicate on <paramref name="key"/>: <paramref name="error"/>
+        /// is null for an <c>IGNORE_DUP_KEY</c> one.
+        /// </summary>
+        public void Note(HeapTable table, KeyConstraint key, SimulatedSqlException? error)
+        {
+            if (this.SettlesIdsFor(table, error))
+                this.Rank(key.IndexId, error!);
+        }
+
+        /// <inheritdoc cref="Note(HeapTable, KeyConstraint, SimulatedSqlException?)"/>
+        public void Note(HeapTable table, Storage.Index key, SimulatedSqlException? error)
+        {
+            if (this.SettlesIdsFor(table, error))
+                this.Rank(key.IndexId, error!);
+        }
+
+        // An ignored duplicate needs no rank; the first raising one settles
+        // the table's index ids so its own can be read.
+        private bool SettlesIdsFor(HeapTable table, SimulatedSqlException? error)
+        {
+            if (error is null)
+            {
+                this.Ignored = true;
+                return false;
+            }
+            if (this.Hard is null)
+                table.SettleIndexIds();
+            return true;
+        }
+
+        private void Rank(int indexId, SimulatedSqlException error)
+        {
+            if (this.Hard is null || indexId < this.hardIndexId)
+            {
+                this.Hard = error;
+                this.hardIndexId = indexId;
+            }
+        }
+    }
+
+    /// <summary>
     /// Prepares a key-uniqueness seek of <paramref name="table"/>'s heap for the
     /// key tuple <paramref name="storageOrdinals"/> names in
     /// <paramref name="storedRowValues"/>: resolves the per-component promoted
@@ -932,9 +1012,10 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Finds a row whose key tuple equals the new row's, raising Msg 2627 with
-    /// the offending constraint's name. Skips when the table has no PK/UNIQUE
-    /// constraints. Each constraint either seeks the shared per-<c>Heap</c>
+    /// The key-constraint half of <see cref="EnforceRowKeys"/>: finds a row
+    /// whose key tuple equals the new row's, noting Msg 2627 with the
+    /// offending constraint's name in <paramref name="checks"/>. Skips when
+    /// the table has no PK/UNIQUE constraints. Each constraint either seeks the shared per-<c>Heap</c>
     /// cache — whose candidates come back verified against live bytes, so a hit
     /// <i>is</i> the duplicate — or, when <see cref="TryPrepareKeySeek"/>
     /// declines, joins the scan pass below.
@@ -951,19 +1032,19 @@ partial class Simulation
     /// the cost of materializing whole rows for tables that have just a small
     /// composite key.
     /// </summary>
-    private static RowKeyVerdict EnforceKeyConstraints(HeapTable destinationTable, SqlValue[] rowValues, SqlValue[] storedRowValues, BatchContext batch)
+    private static void EnforceKeyConstraints(HeapTable destinationTable, SqlValue[] rowValues, SqlValue[] storedRowValues, BatchContext batch, ref RowKeyChecks checks)
     {
         if (destinationTable.KeysMayExceedLimit)
             EnforceIndexKeyLength(destinationTable, rowValues);
         if (destinationTable.KeyConstraints.Count == 0)
-            return RowKeyVerdict.Unique;
+            return;
 
         List<KeyConstraint>? scanned = null;
         foreach (var constraint in destinationTable.KeyConstraints)
         {
             // ALTER INDEX … DISABLE takes the backing index out of service, and
             // while it's out the constraint isn't enforced (probe-confirmed).
-            if (constraint.IsDisabled)
+            if (constraint.IsDisabled || checks.Settles(constraint.IndexId, constraint.IgnoreDupKey))
                 continue;
             // A UNIQUE constraint over a non-persisted computed column probes
             // the statement's key set — see the unique-index path for why.
@@ -971,11 +1052,7 @@ partial class Simulation
             {
                 var keys = ComputedKeySetFor(destinationTable, constraint, constraint.FullOrdinals, filter: null, batch);
                 if (!keys.Add(new SqlValueKey(ReadKeyByFullOrdinals(constraint.FullOrdinals, rowValues))))
-                {
-                    return constraint.IgnoreDupKey
-                        ? ReportIgnoredDuplicate(batch)
-                        : throw KeyConstraintViolationOnComputedKey(destinationTable, constraint, rowValues);
-                }
+                    checks.Note(destinationTable, constraint, constraint.IgnoreDupKey ? null : KeyConstraintViolationOnComputedKey(destinationTable, constraint, rowValues));
                 continue;
             }
             if (!TryPrepareKeySeek(destinationTable, constraint.StorageOrdinals, storedRowValues, out var commons, out var probe))
@@ -990,19 +1067,25 @@ partial class Simulation
             if (HeapSeekCache.For(destinationTable.Heap).AnyRowMatches(
                     destinationTable.Heap, destinationTable.StoredColumns, constraint.StorageOrdinals, commons, probe))
             {
-                return constraint.IgnoreDupKey
-                    ? ReportIgnoredDuplicate(batch)
-                    : throw KeyConstraintViolation(destinationTable, constraint, storedRowValues);
+                checks.Note(destinationTable, constraint, constraint.IgnoreDupKey ? null : KeyConstraintViolation(destinationTable, constraint, storedRowValues));
             }
         }
 
-        if (scanned is null)
-            return RowKeyVerdict.Unique;
-        return ScanForDuplicateKey(destinationTable, scanned, storedRowValues, batch) is not { } violated
-            ? RowKeyVerdict.Unique
-            : violated.IgnoreDupKey
-                ? ReportIgnoredDuplicate(batch)
-                : throw KeyConstraintViolation(destinationTable, violated, storedRowValues);
+        // The scan reports the first constraint it meets a duplicate for; each
+        // one it reports is set aside and the scan repeats for the rest, since
+        // a later one may outrank it.
+        while (scanned is { Count: > 0 })
+        {
+            for (var i = scanned.Count - 1; i >= 0; i--)
+            {
+                if (checks.Settles(scanned[i].IndexId, scanned[i].IgnoreDupKey))
+                    scanned.RemoveAt(i);
+            }
+            if (scanned.Count == 0 || ScanForDuplicateKey(destinationTable, scanned, storedRowValues, batch) is not { } violated)
+                break;
+            checks.Note(destinationTable, violated, violated.IgnoreDupKey ? null : KeyConstraintViolation(destinationTable, violated, storedRowValues));
+            _ = scanned.Remove(violated);
+        }
     }
 
     /// <summary>
@@ -1089,11 +1172,8 @@ partial class Simulation
         {
             _ = guard!.Restart();
             ForgetComputedKeySets(batch, table);
-            if (EnforceKeyConstraints(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate
-                || EnforceUniqueIndexes(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate)
-            {
+            if (EnforceRowKeys(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate)
                 return false;
-            }
         }
         return true;
     }
@@ -1221,9 +1301,10 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Walks <see cref="HeapTable.Indexes"/> for every UNIQUE entry and
-    /// raises Msg 2601 on the first key-tuple collision against existing
-    /// rows. When an index has a <c>Index.Filter</c>, only rows for
+    /// The unique-index half of <see cref="EnforceRowKeys"/>: walks
+    /// <see cref="HeapTable.Indexes"/> for every UNIQUE entry and notes
+    /// Msg 2601 in <paramref name="checks"/> for a key-tuple collision against
+    /// existing rows. When an index has a <c>Index.Filter</c>, only rows for
     /// which the filter evaluates true on both sides participate in the
     /// uniqueness check (filtered-unique-index semantic) — the seek narrows the
     /// candidates by key and the filter is then evaluated on each candidate's
@@ -1231,10 +1312,10 @@ partial class Simulation
     /// <see cref="EnforceKeyConstraints"/>'s seek-or-scan shape; called
     /// alongside it after a successful row build.
     /// </summary>
-    private static RowKeyVerdict EnforceUniqueIndexes(HeapTable destinationTable, SqlValue[] rowValues, SqlValue[] storedRowValues, BatchContext batch)
+    private static void EnforceUniqueIndexes(HeapTable destinationTable, SqlValue[] rowValues, SqlValue[] storedRowValues, BatchContext batch, ref RowKeyChecks checks)
     {
         if (destinationTable.Indexes.Count == 0)
-            return RowKeyVerdict.Unique;
+            return;
 
         var hasUnique = false;
         foreach (var ix in destinationTable.Indexes)
@@ -1246,7 +1327,7 @@ partial class Simulation
             }
         }
         if (!hasUnique)
-            return RowKeyVerdict.Unique;
+            return;
 
         var storedColumns = destinationTable.StoredColumns;
         var lobStore = destinationTable.Heap;
@@ -1255,7 +1336,7 @@ partial class Simulation
 
         foreach (var index in destinationTable.Indexes)
         {
-            if (!index.IsUnique || index.IsDisabled)
+            if (!index.IsUnique || index.IsDisabled || checks.Settles(index.IndexId, index.IgnoreDupKey))
                 continue;
             if (index.Filter is not null && Simulation.EvaluateIndexFilter(index.Filter, destinationTable, rowValues, batch) != true)
                 continue;
@@ -1269,11 +1350,7 @@ partial class Simulation
                 var keys = ComputedKeySetFor(destinationTable, index, fullOrdinals, index.Filter, batch);
                 var candidate = new SqlValueKey(ReadKeyByFullOrdinals(fullOrdinals, rowValues));
                 if (!keys.Add(candidate))
-                {
-                    return index.IgnoreDupKey
-                        ? ReportIgnoredDuplicate(batch)
-                        : throw UniqueIndexViolationOnComputedKey(index, qualifiedTableName, rowValues);
-                }
+                    checks.Note(destinationTable, index, index.IgnoreDupKey ? null : UniqueIndexViolationOnComputedKey(index, qualifiedTableName, rowValues));
                 continue;
             }
 
@@ -1291,22 +1368,17 @@ partial class Simulation
                         continue;
                     }
 
-                    return index.IgnoreDupKey
-                        ? ReportIgnoredDuplicate(batch)
-                        : throw UniqueIndexViolation(index, qualifiedTableName, storedRowValues);
+                    checks.Note(destinationTable, index, index.IgnoreDupKey ? null : UniqueIndexViolation(index, qualifiedTableName, storedRowValues));
+                    break;
                 }
                 continue;
             }
 
             if (ScanFindsKey(destinationTable, index.KeyStorageOrdinals, storedRowValues, index.Filter, excluded: null, batch))
             {
-                return index.IgnoreDupKey
-                    ? ReportIgnoredDuplicate(batch)
-                    : throw UniqueIndexViolation(index, qualifiedTableName, storedRowValues);
+                checks.Note(destinationTable, index, index.IgnoreDupKey ? null : UniqueIndexViolation(index, qualifiedTableName, storedRowValues));
             }
         }
-
-        return RowKeyVerdict.Unique;
     }
 
     /// <summary>

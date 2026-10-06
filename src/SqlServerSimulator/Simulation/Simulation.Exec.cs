@@ -7,6 +7,26 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
+    /// The kind real names in Msg 2809 for an <c>EXEC</c> whose name the
+    /// caller's search finds an object of another kind under, or null for none
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    private static string? NonProcedureKind(BatchContext batch, MultiPartName name)
+    {
+        if (!batch.TryResolveCallerSchema(name, out var schema))
+            return null;
+        var leaf = name.Leaf;
+        return schema.HeapTables.ContainsKey(leaf) ? "table"
+            : schema.Views.ContainsKey(leaf) ? "view"
+            : schema.Sequences.ContainsKey(leaf) ? "sequence"
+            : schema.Triggers.ContainsKey(leaf) ? "trigger"
+            : schema.Rules.ContainsKey(leaf) ? "rule"
+            : schema.Defaults.ContainsKey(leaf) ? "default"
+            : schema.HasConstraintNamed(leaf) ? "constraint"
+            : null;
+    }
+
+    /// <summary>
     /// Whether a system procedure opens the <c>IMPLICIT_TRANSACTIONS</c>
     /// transaction as it starts: those real writes in T-SQL over the catalog
     /// do, their first query opening it — the <c>sp_help</c> family, the ODBC
@@ -466,7 +486,9 @@ partial class Simulation
             {
                 Schemas.ClrAggregateFunction => SimulatedSqlException.ExecOfFunctionObject(function.Name, "aggregate"),
                 Schemas.InlineTableValuedFunction or Schemas.MultiStatementTableValuedFunction or Schemas.ClrTableValuedFunction => SimulatedSqlException.ExecOfFunctionObject(function.Name, "table valued"),
-                _ => SimulatedSqlException.CouldNotFindStoredProcedure(procName.WithoutOmittedLeading().Written),
+                _ => NonProcedureKind(batch, procName) is { } kind
+                    ? SimulatedSqlException.ExecOfNonProcedureObject(procName.Leaf, kind)
+                    : SimulatedSqlException.CouldNotFindStoredProcedure(procName.WithoutOmittedLeading().Written),
             };
         }
         if (groupNumber > 1 && procedure.ClrEntry is null)

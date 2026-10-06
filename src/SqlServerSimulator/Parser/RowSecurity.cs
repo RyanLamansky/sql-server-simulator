@@ -100,6 +100,37 @@ internal sealed class RowSecurity
     }
 
     /// <summary>
+    /// Binds the predicates of a policy that isn't schema bound on a table a
+    /// query reads, as the batch compiles: real binds them with the batch, so
+    /// one whose function no longer binds stops the batch before any of it
+    /// runs, a statement in a branch never taken included (probed 2026-10-06
+    /// against SQL Server 2025). A batch whose walk met DDL compiles each
+    /// statement as it runs, where the run's own binding reports it.
+    /// </summary>
+    public static void BindAtCompile(BatchContext batch, HeapTable table)
+    {
+        if (!batch.CompilingForRun || batch.WalkMetDdl || For(batch, table) is not { } security)
+            return;
+        try
+        {
+            var version = Volatile.Read(ref batch.Connection.Simulation.SchemaVersion);
+            if (security.Filter is { IsSchemaBound: false } filter)
+                _ = batch.Connection.Simulation.CompileSecurityPredicate(batch, filter, version);
+            if (security.blocks is null)
+                return;
+            foreach (var block in security.blocks)
+            {
+                if (block is { IsSchemaBound: false })
+                    _ = batch.Connection.Simulation.CompileSecurityPredicate(batch, block, version);
+            }
+        }
+        catch (SimulatedSqlException failure) when (failure.Number != 33512 && failure.Errors[^1].Number == 33512)
+        {
+            throw failure.BindingWithBatch();
+        }
+    }
+
+    /// <summary>
     /// <paramref name="rows"/>, a scan or seek of <paramref name="table"/>'s
     /// heap for a statement's read, past the table's filter predicate. The
     /// predicate is compiled before the first row is asked for, so its
@@ -156,8 +187,20 @@ internal sealed class RowSecurity
     /// </summary>
     public static void NoteWrite(BatchContext batch, HeapTable table)
     {
-        if (!batch.IsSkipping && For(batch, table) is not null)
-            batch.Connection.RowSecurityMarks++;
+        if (batch.IsSkipping || For(batch, table) is not { } security)
+            return;
+        batch.Connection.RowSecurityMarks++;
+        // A write binds every predicate of a policy that isn't schema bound,
+        // whichever operations they guard — a filter-only policy's function
+        // that no longer binds refuses an INSERT too (probed 2026-10-06
+        // against SQL Server 2025).
+        if (security.Filter is { IsSchemaBound: false } filter)
+            _ = SecurityPredicateRunner.Bind(batch, filter);
+        foreach (var block in security.blocks ?? [])
+        {
+            if (block is { IsSchemaBound: false })
+                _ = SecurityPredicateRunner.Bind(batch, block);
+        }
     }
 
     /// <summary>
@@ -269,10 +312,7 @@ internal sealed class SecurityPredicateRunner
     public static SecurityPredicateRunner For(BatchContext batch, SecurityPredicate predicate)
     {
         batch.Connection.RowSecurityMarks++;
-        var version = Volatile.Read(ref batch.Connection.Simulation.SchemaVersion);
-        var runners = batch.RowSecurityRunners ??= [];
-        if (!runners.TryGetValue(predicate, out var runner) || runner.SchemaVersion != version)
-            runners[predicate] = runner = batch.Connection.Simulation.CompileSecurityPredicate(batch, predicate, version);
+        var runner = Bind(batch, predicate);
         // Under a policy that isn't schema bound the reading principal needs
         // SELECT on the function, checked again for each principal the batch
         // runs as.
@@ -281,6 +321,19 @@ internal sealed class SecurityPredicateRunner
             PermissionEnforcement.CheckSchemaObject(batch, "SELECT", runner.function);
             runner.checkedPrincipal = principal;
         }
+        return runner;
+    }
+
+    /// <summary>
+    /// The runner for <paramref name="predicate"/> in <paramref name="batch"/>,
+    /// compiled on first use under the current schema version.
+    /// </summary>
+    public static SecurityPredicateRunner Bind(BatchContext batch, SecurityPredicate predicate)
+    {
+        var version = Volatile.Read(ref batch.Connection.Simulation.SchemaVersion);
+        var runners = batch.RowSecurityRunners ??= [];
+        if (!runners.TryGetValue(predicate, out var runner) || runner.SchemaVersion != version)
+            runners[predicate] = runner = batch.Connection.Simulation.CompileSecurityPredicate(batch, predicate, version);
         return runner;
     }
 

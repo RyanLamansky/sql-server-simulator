@@ -53,7 +53,7 @@ partial class Simulation
         {
             if (!PermissionEnforcement.HasDatabasePermission(context.Batch, schema.Database, Permission.CreateType))
                 throw SimulatedSqlException.DatabasePermissionDenied("CREATE TYPE", schema.Database.Name);
-            if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema))
+            if (!PermissionEnforcement.HasSchemaAlterForCreate(context.Batch, schema))
                 throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
         }
 

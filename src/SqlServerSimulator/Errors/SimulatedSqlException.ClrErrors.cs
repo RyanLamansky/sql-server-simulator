@@ -336,6 +336,15 @@ partial class SimulatedSqlException
         new($"The request for procedure '{name}' failed because '{name}' is a {kind} function object.", 2809, 16, 1);
 
     /// <summary>
+    /// Mimics SQL Server error 2809 for an <c>EXEC</c> naming an object that
+    /// is no module — <paramref name="kind"/> is <c>table</c>, <c>view</c>,
+    /// <c>sequence</c>, <c>trigger</c>, <c>rule</c>, <c>default</c> or
+    /// <c>constraint</c> (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ExecOfNonProcedureObject(string name, string kind) =>
+        new($"The request for procedure '{name}' failed because '{name}' is a {kind} object.", 2809, 16, 1);
+
+    /// <summary>
     /// Mimics SQL Server error 11515: <c>sp_describe_first_result_set</c> met
     /// a CLR procedure, whose result sets only its code knows.
     /// </summary>

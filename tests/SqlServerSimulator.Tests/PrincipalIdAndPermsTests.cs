@@ -133,9 +133,9 @@ public sealed class PrincipalIdAndPermsTests
     public void IsSrvRoleMember_DatabaseRole_ReturnsNull()
         => AreEqual(DBNull.Value, new Simulation().ExecuteScalar("select is_srvrolemember('db_owner')"));
 
-    // permissions() — the legacy deprecated bitmap. The simulator's session
-    // principal is always the database-owning dbo, so these return the fixed
-    // privileged (owner) masks probed against SQL Server 2025.
+    // permissions() — the legacy deprecated bitmap, dbo's masks fixed per
+    // kind of object and a restricted principal's built from what it holds,
+    // probed against SQL Server 2025.
 
     [TestMethod]
     public void Permissions_Niladic_ReturnsDbOwnerStatementMask()
@@ -144,9 +144,7 @@ public sealed class PrincipalIdAndPermsTests
     [TestMethod]
     public void Permissions_Niladic_UnaffectedByCreateUserAndGrant()
     {
-        // The simulator has no EXECUTE AS principal switching; the session is
-        // always dbo, so granting a statement permission to another user does
-        // not change dbo's privileged mask.
+        // Granting a statement permission to another user leaves dbo's mask.
         var simulation = new Simulation();
         using var connection = simulation.CreateOpenConnection();
         _ = connection.CreateCommand("create user app_user without login").ExecuteNonQuery();
@@ -208,5 +206,53 @@ public sealed class PrincipalIdAndPermsTests
         AreEqual("dbo", new Simulation().ExecuteScalar(
             "select user_name(), @@MAX_PRECISION, is_member('db_owner'), permissions(), "
             + "DatabasePropertyEx(db_name(), N'collation'), SERVERPROPERTY('IsFullTextInstalled'), schema_name()"));
+    }
+
+    [TestMethod]
+    public void Permissions_Dbo_PerObjectKind()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int)",
+            "create procedure p as select 1",
+            "create function f() returns int as begin return 1 end",
+            "create sequence sq",
+            "create synonym sy for t",
+            "create view v as select a from t");
+        AreEqual("2097184|2359332|0|3866683|1082605703", simulation.ExecuteScalar(
+            "select concat_ws('|', permissions(object_id('p')), permissions(object_id('f')), permissions(object_id('sq')), permissions(object_id('sy')), permissions(object_id('v'), 'a'))"));
+        AreEqual(50266879, simulation.ExecuteScalar("use master; select permissions()"));
+    }
+
+    [TestMethod]
+    public void Permissions_RestrictedPrincipal_ReflectsItsGrants()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int, b int)",
+            "create view v as select a from t",
+            "create user u without login",
+            "grant select on t to u with grant option",
+            "grant update on t to u",
+            "grant references (a) on t to u with grant option",
+            "grant create view to u with grant option",
+            "grant create table to u",
+            "create user none without login");
+        AreEqual("524298|1409380355|344071|81923|", simulation.ExecuteScalar(
+            "execute as user = 'u'; select concat_ws('|', permissions(), permissions(object_id('t')), permissions(object_id('t'), 'a'), permissions(object_id('t'), 'b'), isnull(cast(permissions(object_id('v')) as varchar), ''))"));
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("execute as user = 'none'; select permissions(object_id('t'))"));
+    }
+
+    [TestMethod]
+    public void Permissions_DbOwnerMember_ViewColumnShowsControlOnlyAsGrantable()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int)",
+            "create view v as select a from t",
+            "create user u without login",
+            "alter role db_owner add member u");
+        AreEqual("1082605703|1082605575|50201342", simulation.ExecuteScalar(
+            "execute as user = 'u'; select concat_ws('|', permissions(object_id('t'), 'a'), permissions(object_id('v'), 'a'), permissions())"));
     }
 }

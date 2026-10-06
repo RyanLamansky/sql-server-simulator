@@ -84,6 +84,9 @@ internal sealed partial class Database
     /// </summary>
     public const int DboSchemaId = 1;
 
+    /// <summary>Conventional schema-id for <c>guest</c> (matches real SQL Server).</summary>
+    public const int GuestSchemaId = 2;
+
     /// <summary>Conventional schema-id for <c>INFORMATION_SCHEMA</c> (matches real SQL Server).</summary>
     public const int InformationSchemaId = 3;
 
@@ -110,6 +113,10 @@ internal sealed partial class Database
         this.PartitionFunctions = new(collation);
         this.PartitionSchemes = new(collation);
         this.Schemas[DefaultSchemaName] = new Schema(this, DefaultSchemaName, DboSchemaId);
+        // guest's schema hosts objects like any other: a user defaulting to it
+        // reads SCHEMA_NAME() 'guest' and creates there, and dbo can create in
+        // it (probed 2026-10-06 against SQL Server 2025).
+        this.Schemas["guest"] = new Schema(this, "guest", GuestSchemaId) { PrincipalId = GuestPrincipalId };
         this.Schemas["INFORMATION_SCHEMA"] = new Schema(this, "INFORMATION_SCHEMA", InformationSchemaId) { PrincipalId = InformationSchemaPrincipalId };
         this.Schemas["sys"] = new Schema(this, "sys", SysSchemaId) { PrincipalId = SysPrincipalId };
         // Pre-seed the fixed database principals so AW's GRANT … TO public

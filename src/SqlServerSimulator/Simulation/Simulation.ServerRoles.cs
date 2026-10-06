@@ -259,6 +259,30 @@ partial class Simulation
     internal bool HoldsServerPermissionInClosure(HashSet<int> closure, Permission permission) =>
         this.HoldsServerPrincipalPermission(closure, targetPrincipalId: 0, permission, blanketEquivalent: permission);
 
+    /// <summary>
+    /// Whether a server-scope <c>DENY</c> covering <paramref name="permission"/>
+    /// binds <paramref name="loginName"/> — a refusal some checks make apart
+    /// from whether the permission is held. A <c>sysadmin</c> is never denied.
+    /// </summary>
+    internal bool ServerPermissionDenied(string loginName, Permission permission)
+    {
+        if (this.IsLoginSysadmin(loginName))
+            return false;
+        var closure = this.BuildServerPrincipalClosure(loginName);
+        lock (this.ServerPermissions)
+        {
+            foreach (var row in this.ServerPermissions)
+            {
+                if (row.State == PermissionState.Deny && closure.Contains(row.GranteeId)
+                    && Satisfies(row, targetPrincipalId: 0, permission, permission))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private bool HoldsServerPrincipalPermission(HashSet<int> closure, int targetPrincipalId, Permission permission, Permission blanketEquivalent)
     {
         lock (this.ServerPermissions)

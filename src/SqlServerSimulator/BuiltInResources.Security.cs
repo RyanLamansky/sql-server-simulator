@@ -185,8 +185,7 @@ internal static partial class BuiltInResources
         // Server 2025 (2026-07-15), projected over the per-Simulation login
         // registry (Simulation.Logins) plus two synthetic fixed rows: sa
         // (principal_id 1) and public (principal_id 2). Columns the simulator
-        // doesn't track (credential_id, disabled flag) surface as their real
-        // low-privilege defaults.
+        // doesn't track surface as their real low-privilege defaults.
         Sys("server_principals",
         [
             new("name", SqlType.SystemName, 128, false),
@@ -260,16 +259,15 @@ internal static partial class BuiltInResources
             new("member_principal_id", SqlType.Int32, null, false),
         ], EnumerateSysServerRoleMembers);
 
-        // sys.asymmetric_keys / sys.certificates / sys.credentials: encryption
-        // key objects aren't modeled, so all three are always empty. The full
-        // probe-confirmed shapes (SQL Server 2025) ship so a direct SELECT sees
-        // an authentic (empty) result, and — more load-bearing — SMO's Login
-        // and User property-bag queries LEFT JOIN sys.certificates /
-        // sys.asymmetric_keys ON sid, and its Login bag LEFT JOINs
-        // sys.credentials ON credential_id (also reached as
-        // master.sys.certificates / master.sys.asymmetric_keys). Without the
-        // views those bag queries fail Msg 208 and every Login / User property
-        // errors. cryptographic_provider_algid is a first-class sql_variant
+        // sys.asymmetric_keys / sys.certificates: encryption key objects aren't
+        // modeled, so both are always empty. The full probe-confirmed shapes
+        // (SQL Server 2025) ship so a direct SELECT sees an authentic (empty)
+        // result, and — more load-bearing — SMO's Login and User property-bag
+        // queries LEFT JOIN sys.certificates / sys.asymmetric_keys ON sid, and
+        // its Login bag LEFT JOINs sys.credentials ON credential_id (also
+        // reached as master.sys.certificates / master.sys.asymmetric_keys).
+        // Without the views those bag queries fail Msg 208 and every Login /
+        // User property errors. cryptographic_provider_algid is a first-class sql_variant
         // matching real SQL Server (the view is always empty, so only the
         // column type carries).
         Sys("asymmetric_keys",
@@ -322,7 +320,7 @@ internal static partial class BuiltInResources
             new("modify_date", SqlType.DateTime, null, false),
             new("target_type", nvarchar60Catalog, 60, true),
             new("target_id", SqlType.Int32, null, true),
-        ], static (_, _) => EmptyCatalogRows);
+        ], EnumerateSysCredentials);
 
         // Encryption / key-management / audit / row-level-security catalog
         // views for features the simulator doesn't model (symmetric &
@@ -806,6 +804,28 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
+    /// Projects <c>sys.credentials</c> from <see cref="Simulation.Credentials"/>
+    /// in <c>credential_id</c> order, to a session that may see them
+    /// (<see cref="Simulation.SessionSeesCredentials"/>). No credential the
+    /// simulator holds names a provider, so <c>target_type</c> and
+    /// <c>target_id</c> are NULL.
+    /// </summary>
+    private static IEnumerable<SqlValue[]> EnumerateSysCredentials(Parser.BatchContext batch, Database database)
+    {
+        var simulation = batch.Connection.Simulation;
+        if (!simulation.SessionSeesCredentials(batch.Connection))
+            yield break;
+        foreach (var (_, credential) in simulation.Credentials.ToArray().OrderBy(entry => entry.Value.Id))
+        {
+            yield return [
+                SqlValue.FromInt32(credential.Id), SqlValue.FromSystemName(credential.Name), SqlValue.FromNVarchar(credential.Identity),
+                SqlValue.FromDateTime(credential.CreateDate), SqlValue.FromDateTime(credential.ModifyDate),
+                SqlValue.Null(SqlType.NVarchar), SqlValue.Null(SqlType.Int32),
+            ];
+        }
+    }
+
+    /// <summary>
     /// Projects <c>sys.server_principals</c> over the synthetic fixed rows
     /// (<c>sa</c> = 1, <c>public</c> = 2, the fixed server roles 3–20) plus the
     /// per-Simulation login registry and custom server roles. Rows emit in
@@ -837,7 +857,7 @@ internal static partial class BuiltInResources
         rows.Add((1, [
             SqlValue.FromSystemName("sa"), SqlValue.FromInt32(1), SqlValue.FromVarbinary([0x01]),
             loginType, sqlLogin, falseBit, seedDate, seedDate, master, usEnglish,
-            nullCredentialId, nullOwningId, falseBit, nullTenant,
+            simulation.CredentialIdOf(1), nullOwningId, falseBit, nullTenant,
         ]));
 
         // public + the 18 fixed server roles (type R, owning_principal_id 1).
@@ -861,7 +881,7 @@ internal static partial class BuiltInResources
             rows.Add((login.PrincipalId, [
                 SqlValue.FromSystemName(login.Name), SqlValue.FromInt32(login.PrincipalId), SqlValue.FromVarbinary(DeriveLoginSid(login.Name)),
                 loginType, sqlLogin, login.IsDisabled ? trueBit : falseBit, SqlValue.FromDateTime(login.CreateDate), SqlValue.FromDateTime(login.PasswordLastSetTime),
-                SqlValue.FromSystemName(login.DefaultDatabase), SqlValue.FromSystemName(login.DefaultLanguage), nullCredentialId, nullOwningId, falseBit, zeroTenant,
+                SqlValue.FromSystemName(login.DefaultDatabase), SqlValue.FromSystemName(login.DefaultLanguage), simulation.CredentialIdOf(login.PrincipalId), nullOwningId, falseBit, zeroTenant,
             ]));
         }
 
@@ -1009,7 +1029,6 @@ internal static partial class BuiltInResources
         var falseBit = SqlValue.FromBoolean(false);
         var sqlLogin = SqlValue.FromNVarchar("SQL_LOGIN");
         var loginType = SqlValue.FromChar(charOne, "S");
-        var nullCredentialId = SqlValue.Null(SqlType.Int32);
         var master = SqlValue.FromSystemName("master");
         var usEnglish = SqlValue.FromSystemName("us_english");
         var nullPasswordHash = SqlValue.Null(SqlType.Varbinary);
@@ -1026,7 +1045,7 @@ internal static partial class BuiltInResources
             seedDate,
             master,
             usEnglish,
-            nullCredentialId,
+            simulation.CredentialIdOf(1),
             trueBit,
             falseBit,
             nullPasswordHash,
@@ -1048,7 +1067,7 @@ internal static partial class BuiltInResources
                 SqlValue.FromDateTime(login.PasswordLastSetTime),
                 SqlValue.FromSystemName(login.DefaultDatabase),
                 SqlValue.FromSystemName(login.DefaultLanguage),
-                nullCredentialId,
+                simulation.CredentialIdOf(login.PrincipalId),
                 login.IsPolicyChecked ? trueBit : falseBit,
                 login.IsExpirationChecked ? trueBit : falseBit,
                 nullPasswordHash,

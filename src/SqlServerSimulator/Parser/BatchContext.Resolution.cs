@@ -703,7 +703,8 @@ internal sealed partial class BatchContext
 
     /// <summary>
     /// The error a reference to <paramref name="name"/> raises when nothing
-    /// resolved: Msg 208 for an unknown name, or Msg 5313 when the name is a
+    /// resolved: Msg 208 for an unknown name (state 224 when it names an
+    /// object of a kind the reference can't use), or Msg 5313 when the name is a
     /// synonym (whose base binds lazily, so the failure belongs to the base,
     /// not the synonym). Real distinguishes the two 5313 states — 1 when the
     /// base names nothing, 224 when it names an object the reference can't use
@@ -718,7 +719,13 @@ internal sealed partial class BatchContext
     {
         if (this.TryResolveSynonym(name, out var synonym))
             return SimulatedSqlException.SynonymRefersToInvalidObject(name.ToString(), this.TryResolveSynonymBase(synonym, out _) ? (byte)224 : (byte)1);
-        var error = SimulatedSqlException.InvalidObjectName(name);
+        // A name the search finds an object of another kind under — a
+        // procedure, a sequence, a scalar function, a constraint — is one the
+        // reference can't use, state 224 (probed 2026-10-06 against SQL Server
+        // 2025); a default schema's object shadows dbo's here too.
+        var error = this.TryResolveSchema(name, out var holder) && (holder.HoldsObjectNamed(name.Leaf) || holder.HasConstraintNamed(name.Leaf))
+            ? SimulatedSqlException.InvalidObjectName(name, state: 224)
+            : SimulatedSqlException.InvalidObjectName(name);
         if (!this.CreateTimeBinding && !this.Parser.BindingViewDefinition && !this.BindsModuleDefinition)
             return error;
         if (name.Count >= 2)

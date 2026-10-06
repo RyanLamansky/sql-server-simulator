@@ -322,4 +322,34 @@ public sealed class DefaultSchemaTests
     [TestMethod]
     public void TriggerBody_BindsThroughItsSchema()
         => CollectionAssert.AreEqual(new[] { "s s2.t2" }, As(WithModules(), "u_s", "insert s2.t2 values ('new');"));
+
+    [TestMethod]
+    public void ObjectOfAnotherKind_IsMsg208State224()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create procedure p as select 1", "create schema s3", "create procedure s3.q as select 2", "create table dbo.q (a int)",
+            "create user u3 without login with default_schema = s3", "grant select to u3");
+        AreEqual((byte)224, sim.AssertSqlError("select * from p", 208).State);
+        AreEqual((byte)224, sim.AssertSqlError("execute as user = 'u3'; select * from q", 208).State);
+        AreEqual((byte)1, sim.AssertSqlError("select * from nosuch", 208).State);
+    }
+
+    [TestMethod]
+    public void ExecOfANonProcedure_IsMsg2809NamingItsKind()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int constraint ck check (a > 0))", "create sequence sq");
+        sim.AssertSqlError("exec dbo.t", 2809, "The request for procedure 't' failed because 't' is a table object.");
+        sim.AssertSqlError("exec sq", 2809, "The request for procedure 'sq' failed because 'sq' is a sequence object.");
+        sim.AssertSqlError("exec ck", 2809, "The request for procedure 'ck' failed because 'ck' is a constraint object.");
+    }
+
+    [TestMethod]
+    public void GuestSchema_HostsObjects()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create user ug without login with default_schema = guest", "grant create table to ug", "grant alter on schema::guest to ug");
+        AreEqual("guest|2|guest", sim.ExecuteScalar("execute as user = 'ug'; create table tg (a int); select concat_ws('|', schema_name(), schema_id(), (select schema_name(schema_id) from sys.tables where name = 'tg'))"));
+        sim.AssertSqlError("drop schema guest", 15150, "Cannot drop the schema 'guest'.");
+    }
 }

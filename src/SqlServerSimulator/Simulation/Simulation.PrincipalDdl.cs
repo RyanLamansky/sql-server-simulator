@@ -34,7 +34,7 @@ partial class Simulation
         var (loginLink, withoutLogin) = ParseCreateUserSource(context);
         if (bare)
             loginLink = name;
-        var (defaultSchema, _) = ParsePrincipalWithOptions(context);
+        var (defaultSchema, _) = ParsePrincipalWithOptions(context, acceptsName: false);
         ConsumeToStatementBoundary(context);
         if (context.Batch.IsSkipping)
             return true;
@@ -146,20 +146,42 @@ partial class Simulation
     /// is read and discarded. No-op when the cursor isn't on <c>WITH</c>;
     /// otherwise the cursor ends on the first token past the list.
     /// </summary>
-    private static (string? DefaultSchema, string? NewName) ParsePrincipalWithOptions(ParserContext context)
+    private static (string? DefaultSchema, string? NewName) ParsePrincipalWithOptions(ParserContext context, bool acceptsName = true) =>
+        ParsePrincipalWithOptions(context, acceptsName, acceptsNullSchema: false, out _);
+
+    /// <summary>
+    /// <see cref="ParsePrincipalWithOptions(ParserContext, bool)"/>, setting
+    /// <paramref name="nullSchemaOption"/> to the <c>DEFAULT_SCHEMA</c> word as
+    /// written when its value is <c>NULL</c> and <paramref name="acceptsNullSchema"/>
+    /// — <c>ALTER USER</c>'s, which refuses it only as it runs; elsewhere it is
+    /// a syntax error near <c>NULL</c>.
+    /// </summary>
+    private static (string? DefaultSchema, string? NewName) ParsePrincipalWithOptions(ParserContext context, bool acceptsName, bool acceptsNullSchema, out string? nullSchemaOption)
     {
+        nullSchemaOption = null;
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             return (null, null);
         string? defaultSchema = null, newName = null;
         do
         {
-            if (context.GetNextRequired() is not StringToken option || context.GetNextRequired() is not Operator { Character: '=' })
+            // CREATE USER takes no NAME option: Msg 102 near it (probed
+            // 2026-10-06 against SQL Server 2025).
+            if (context.GetNextRequired() is StringToken { Span: var named } && !acceptsName && named.Equals("NAME", StringComparison.OrdinalIgnoreCase))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            if (context.Token is not StringToken option || context.GetNextRequired() is not Operator { Character: '=' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
             var value = context.GetNextRequired();
             if (option.Span.Equals("DEFAULT_SCHEMA", StringComparison.OrdinalIgnoreCase))
-                defaultSchema = value is Name schemaName ? schemaName.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
+            {
+                if (value is ReservedKeyword { Keyword: Keyword.Null } && acceptsNullSchema)
+                    nullSchemaOption = option.Source.ToString();
+                else
+                    defaultSchema = value is Name schemaName ? schemaName.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
             else if (option.Span.Equals("NAME", StringComparison.OrdinalIgnoreCase))
+            {
                 newName = value is Name nameValue ? nameValue.Value : throw SimulatedSqlException.SyntaxErrorNear(context);
+            }
         }
         while (context.GetNextOptional() is Operator { Character: ',' });
         return (defaultSchema, newName);
@@ -180,7 +202,7 @@ partial class Simulation
         context.MoveNextRequired();
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             throw SimulatedSqlException.SyntaxErrorNear(context);
-        var (defaultSchema, newName) = ParsePrincipalWithOptions(context);
+        var (defaultSchema, newName) = ParsePrincipalWithOptions(context, acceptsName: true, acceptsNullSchema: true, out var nullSchemaOption);
         context.RejectTrailingToken();
         if (context.Batch.IsSkipping)
             return true;
@@ -197,6 +219,11 @@ partial class Simulation
         // schema (probed 2026-10-06 against SQL Server 2025).
         if (user.PrincipalId is Database.DboPrincipalId or Database.GuestPrincipalId)
             throw SimulatedSqlException.CannotAlterDatabaseOwnerUser(user.Name);
+        // DEFAULT_SCHEMA = NULL parses, and is refused as the statement runs
+        // with a severity-16 Msg 102 naming the option (probed 2026-10-06
+        // against SQL Server 2025).
+        if (nullSchemaOption is not null)
+            throw SimulatedSqlException.NullDefaultSchemaRefused(nullSchemaOption);
         RecordSecurityUndo(context, database);
         if (newName is not null)
             RenamePrincipal(database, user, newName);
@@ -418,6 +445,17 @@ partial class Simulation
     {
         // Cursor on ROLE (caller has already matched ALTER + ROLE).
         context.MoveNextRequired();
+        // PUBLIC is a reserved word the role name takes only bracketed; real's
+        // parser recovers past it and reports the MEMBER after ADD / DROP too
+        // (probed 2026-10-06 against SQL Server 2025).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Public } publicWord)
+        {
+            var nearPublic = SimulatedSqlException.SyntaxErrorNearKeyword(publicWord);
+            throw context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.Add or Keyword.Drop }
+                && context.GetNextOptional() is UnquotedString { Span: var member } memberWord && member.Equals("MEMBER", StringComparison.OrdinalIgnoreCase)
+                ? SimulatedSqlException.Aggregate([nearPublic, SimulatedSqlException.SyntaxErrorNear(memberWord)])
+                : nearPublic;
+        }
         if (context.Token is not Name roleNameToken)
             throw SimulatedSqlException.SyntaxErrorNear(context);
         var roleName = roleNameToken.Value;

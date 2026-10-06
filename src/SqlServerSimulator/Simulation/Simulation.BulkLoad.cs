@@ -256,8 +256,7 @@ partial class Simulation
             var storedValues = ProjectStoredValues(table, rowValues);
             if (keyGuard?.Restart() == true)
                 ForgetComputedKeySets(batch, table);
-            if (EnforceKeyConstraints(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate
-                || EnforceUniqueIndexes(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate)
+            if (EnforceRowKeys(table, rowValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate)
             {
                 continue;
             }

@@ -869,8 +869,7 @@ partial class Simulation
                     // Real does emit the identity value it burned on the way (the
                     // sequence is consumed whether or not the row lands), which is
                     // why lastIdentityValue is already assigned above.
-                    if (EnforceKeyConstraints(destinationTable, rowValues, storedValues, context.Batch) == RowKeyVerdict.SkipDuplicate
-                        || EnforceUniqueIndexes(destinationTable, rowValues, storedValues, context.Batch) == RowKeyVerdict.SkipDuplicate)
+                    if (EnforceRowKeys(destinationTable, rowValues, storedValues, context.Batch) == RowKeyVerdict.SkipDuplicate)
                     {
                         continue;
                     }

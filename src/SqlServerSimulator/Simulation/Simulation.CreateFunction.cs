@@ -325,7 +325,8 @@ partial class Simulation
         // (Msg 3701 state 20).
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
-            schema.Functions.GetValueOrDefault(functionName.Leaf));
+            schema.Functions.GetValueOrDefault(functionName.Leaf),
+            isSchemaBound ? () => SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf)) : null);
 
         if (isSchemaBound)
             SchemaBinding.EnforceNoAliasTypes(context.Batch, parameters, returnsAliasScalar: false, outputColumns, bodyText, CountNewlines(commandText, 0, bodyStart), endLine);
@@ -493,7 +494,8 @@ partial class Simulation
         // (Msg 3701 state 20).
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
-            schema.Functions.GetValueOrDefault(functionName.Leaf));
+            schema.Functions.GetValueOrDefault(functionName.Leaf),
+            isSchemaBound ? () => SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf)) : null);
 
         if (isSchemaBound)
             SchemaBinding.EnforceNoAliasTypes(context.Batch, parameters, returnsAliasScalar: returnAliasType is not null, null, bodyText, CountNewlines(commandText, 0, bodyStart), endLine);
@@ -634,7 +636,8 @@ partial class Simulation
         // (Msg 3701 state 20).
         CheckModuleDdlPermission(
             context, "CREATE FUNCTION", functionName, schema, isAlter, createOrAlter,
-            schema.Functions.GetValueOrDefault(functionName.Leaf));
+            schema.Functions.GetValueOrDefault(functionName.Leaf),
+            isSchemaBound ? () => SchemaBinding.EnforceBody(context.CurrentDatabase, "function", $"{schema.Name}.{functionName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, functionName.Leaf)) : null);
 
         if (isSchemaBound)
             SchemaBinding.EnforceNoAliasTypes(context.Batch, parameters, returnsAliasScalar: false, null, "", 0, 0);

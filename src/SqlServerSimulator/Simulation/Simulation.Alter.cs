@@ -52,6 +52,8 @@ partial class Simulation
                 return TryParseAlterServerRole(context);
             case Name appWord when appWord.Value.Equals("APPLICATION", StringComparison.OrdinalIgnoreCase):
                 return TryParseAlterApplicationRole(context);
+            case Name credentialWord when credentialWord.Value.Equals("CREDENTIAL", StringComparison.OrdinalIgnoreCase):
+                return TryParseAlterCredential(context);
             case Name securityWord when securityWord.Value.Equals("SECURITY", StringComparison.OrdinalIgnoreCase):
                 return TryParseAlterSecurityPolicy(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:

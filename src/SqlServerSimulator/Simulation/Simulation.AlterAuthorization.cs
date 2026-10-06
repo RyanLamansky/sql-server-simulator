@@ -147,6 +147,17 @@ partial class Simulation
         return owner.PrincipalId;
     }
 
+    /// <summary>
+    /// Msg 15151 for a new owner no principal answers to, which real reports
+    /// once the securable resolves and ahead of the caller's missing
+    /// <c>TAKE OWNERSHIP</c> on it (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    private static void RejectUnknownNewOwner(Database database, string? ownerName)
+    {
+        if (ownerName is not null && !database.Principals.ContainsKey(ownerName))
+            throw SimulatedSqlException.CannotFindUser(ownerName);
+    }
+
     /// <summary>Drops every permission row on the securable a completed ownership change moved to a new owner.</summary>
     private static void DropSecurablePermissions(ParserContext context, Database database, byte securableClass, int majorId)
     {
@@ -177,6 +188,7 @@ partial class Simulation
         }
         if (target is Trigger)
             throw SimulatedSqlException.OwnerFollowsParentObject();
+        RejectUnknownNewOwner(database, ownerName);
         if (!PermissionEnforcement.HoldsPermission(batch, database, Permission.TakeOwnership, PermissionChecker.ClassObject, target.ObjectId, target.SchemaId))
             throw SimulatedSqlException.CannotFindObject(name.Leaf);
         database.RejectWriteWhenReadOnly();
@@ -220,12 +232,13 @@ partial class Simulation
         Schema? schema = null;
         if (fixedRoleSchemaId == 0)
         {
-            if (!database.Schemas.TryGetValue(schemaName, out schema) && !BuiltInToken.Equals(schemaName, "guest"))
+            if (!database.Schemas.TryGetValue(schemaName, out schema))
                 throw SimulatedSqlException.CannotFindSecurable("schema", schemaName);
-            if (schema is null || schema.SchemaId is Database.DboSchemaId or Database.InformationSchemaId or Database.SysSchemaId)
-                throw SimulatedSqlException.CannotAlterFixedSchema(schema?.Name ?? schemaName);
+            if (schema.SchemaId is Database.DboSchemaId or Database.GuestSchemaId or Database.InformationSchemaId or Database.SysSchemaId)
+                throw SimulatedSqlException.CannotAlterFixedSchema(schema.Name);
         }
         var schemaId = schema?.SchemaId ?? fixedRoleSchemaId;
+        RejectUnknownNewOwner(database, ownerName);
         if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassSchema, schemaId, 0))
             throw SimulatedSqlException.CannotFindSecurable("schema", schemaName);
         database.RejectWriteWhenReadOnly();
@@ -266,6 +279,7 @@ partial class Simulation
         if (tableType is null && aliasType is null)
             throw SimulatedSqlException.CannotFindType(name.Leaf);
         var typeId = tableType?.UserTypeId ?? aliasType!.UserTypeId;
+        RejectUnknownNewOwner(database, ownerName);
         if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassType, typeId, schema.SchemaId))
             throw SimulatedSqlException.CannotFindType(name.Leaf);
         database.RejectWriteWhenReadOnly();
@@ -307,11 +321,13 @@ partial class Simulation
     {
         var database = context.CurrentDatabase;
         if (name.Count > 2 || !context.Batch.TryResolveXmlSchemaCollectionSchema(name, out var schema)
-            || !schema.XmlSchemaCollections.TryGetValue(name.Leaf, out var collection)
-            || !PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassXmlSchemaCollection, collection.Id, schema.SchemaId))
+            || !schema.XmlSchemaCollections.TryGetValue(name.Leaf, out var collection))
         {
             throw SimulatedSqlException.CannotFindXmlSchemaCollection(name.Leaf);
         }
+        RejectUnknownNewOwner(database, ownerName);
+        if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassXmlSchemaCollection, collection.Id, schema.SchemaId))
+            throw SimulatedSqlException.CannotFindXmlSchemaCollection(name.Leaf);
         database.RejectWriteWhenReadOnly();
         var newOwner = ResolveNewOwner(context, database, ownerName, acceptsSchemaOwner: true);
         var previous = collection.PrincipalId;
@@ -327,11 +343,11 @@ partial class Simulation
     private static void ChangeRoleOwner(ParserContext context, string roleName, string? ownerName)
     {
         var database = context.CurrentDatabase;
-        if (!database.Principals.TryGetValue(roleName, out var role) || role.TypeCode != "R"
-            || !PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassDatabasePrincipal, role.PrincipalId, 0))
-        {
+        if (!database.Principals.TryGetValue(roleName, out var role) || role.TypeCode != "R")
             throw SimulatedSqlException.CannotFindSecurable("role", roleName);
-        }
+        RejectUnknownNewOwner(database, ownerName);
+        if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassDatabasePrincipal, role.PrincipalId, 0))
+            throw SimulatedSqlException.CannotFindSecurable("role", roleName);
         database.RejectWriteWhenReadOnly();
         var newOwner = ResolveNewOwner(context, database, ownerName, acceptsSchemaOwner: false)!.Value;
         var previous = role.OwningPrincipalId;
@@ -345,11 +361,11 @@ partial class Simulation
     private static void ChangeFullTextCatalogOwner(ParserContext context, string catalogName, string? ownerName)
     {
         var database = context.CurrentDatabase;
-        if (!database.FullTextCatalogs.TryGetValue(catalogName, out var catalog)
-            || !PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassFulltextCatalog, catalog.Id, 0))
-        {
+        if (!database.FullTextCatalogs.TryGetValue(catalogName, out var catalog))
             throw SimulatedSqlException.CannotFindSecurable("fulltext catalog", catalogName);
-        }
+        RejectUnknownNewOwner(database, ownerName);
+        if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassFulltextCatalog, catalog.Id, 0))
+            throw SimulatedSqlException.CannotFindSecurable("fulltext catalog", catalogName);
         database.RejectWriteWhenReadOnly();
         var newOwner = ResolveNewOwner(context, database, ownerName, acceptsSchemaOwner: false)!.Value;
         var previous = catalog.PrincipalId;
@@ -363,11 +379,11 @@ partial class Simulation
     private static void ChangeAssemblyOwner(ParserContext context, string assemblyName, string? ownerName)
     {
         var database = context.CurrentDatabase;
-        if (!database.Assemblies.TryGetValue(assemblyName, out var assembly)
-            || !PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassDatabase, 0, 0))
-        {
+        if (!database.Assemblies.TryGetValue(assemblyName, out var assembly))
             throw SimulatedSqlException.CannotFindSecurable("assembly", assemblyName);
-        }
+        RejectUnknownNewOwner(database, ownerName);
+        if (!PermissionEnforcement.HoldsPermission(context.Batch, database, Permission.TakeOwnership, PermissionChecker.ClassDatabase, 0, 0))
+            throw SimulatedSqlException.CannotFindSecurable("assembly", assemblyName);
         database.RejectWriteWhenReadOnly();
         var newOwner = ResolveNewOwner(context, database, ownerName, acceptsSchemaOwner: false)!.Value;
         var previous = assembly.PrincipalId;

@@ -80,7 +80,10 @@ public sealed partial class Simulation
     /// <strong>Msg 3701</strong> sev 14 state 20 naming its kind and leaf when it
     /// is missing; the create permission alone does not admit it (probe-confirmed
     /// against SQL Server 2025). A bare <c>ALTER</c> of a name nothing holds is
-    /// left to the Msg 208 the resolver raises.
+    /// left to the Msg 208 the resolver raises. A schema-bound module's
+    /// REFERENCES refusal, which <paramref name="schemaBoundBind"/> meets,
+    /// outranks a missing CREATE permission (probed 2026-10-06 against SQL
+    /// Server 2025: Msg 229 and Msg 1088 rather than Msg 262).
     /// </summary>
     private static void CheckModuleDdlPermission(
         ParserContext context,
@@ -89,12 +92,23 @@ public sealed partial class Simulation
         Schema schema,
         bool isAlter,
         bool createOrAlter,
-        SchemaObject? existing)
+        SchemaObject? existing,
+        Action? schemaBoundBind = null)
     {
         if (existing is null)
         {
-            if (!isAlter)
+            if (isAlter)
+                return;
+            try
+            {
                 PermissionEnforcement.CheckCreateModule(context.Batch, createPermission, name.Leaf, schema);
+            }
+            catch (SimulatedSqlException denied) when (denied.Number == 262 && schemaBoundBind is not null)
+            {
+                if (ReferencesDenial(schemaBoundBind) is { } references)
+                    throw references;
+                throw;
+            }
             return;
         }
         if ((isAlter || createOrAlter)
@@ -120,6 +134,27 @@ public sealed partial class Simulation
                 throw SimulatedSqlException.SchemaBoundReferencesDenied(bound.Name, database.Name, PermissionEnforcement.SchemaNameFor(database, bound.SchemaId), moduleLeaf);
             }
         };
+
+    /// <summary>
+    /// The REFERENCES refusal a schema-bound module's body bind raises, or
+    /// null when it raises none — any other bind error waits behind the
+    /// permission refusal the caller holds.
+    /// </summary>
+    private static SimulatedSqlException? ReferencesDenial(Action schemaBoundBind)
+    {
+        try
+        {
+            schemaBoundBind();
+        }
+        catch (SimulatedSqlException references) when (references.Number == 229)
+        {
+            return references;
+        }
+        catch (SimulatedSqlException)
+        {
+        }
+        return null;
+    }
 
     /// <summary>The noun real spells inside <c>Cannot alter the &lt;kind&gt; '…'</c> for a module being replaced.</summary>
     private static string ModuleKindNoun(SchemaObject module) => module switch

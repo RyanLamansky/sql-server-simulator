@@ -213,7 +213,8 @@ partial class Simulation
         // state 20).
         CheckModuleDdlPermission(
             context, "CREATE VIEW", viewName, schema, isAlter, createOrAlter,
-            schema.Views.GetValueOrDefault(viewName.Leaf));
+            schema.Views.GetValueOrDefault(viewName.Leaf),
+            isSchemaBound ? () => SchemaBinding.EnforceBody(context.CurrentDatabase, "view", $"{schema.Name}.{viewName.Leaf}", bodyText, SchemaBoundReferenceCheck(context.Batch, viewName.Leaf)) : null);
 
         // Cross-kind collisions (Msg 2714 on create, Msg 2010 on either ALTER
         // leg) and the ALTER-on-missing Msg 208 all live in the shared helper.

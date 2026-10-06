@@ -618,7 +618,7 @@ partial class Simulation
                 // (Msg 13544) ends it the same way (probed 2026-10-04), as
                 // does a linked server's provider refusing an object's
                 // metadata — Msg 7314, 7325, 7357, 9514 (probed 2026-10-05).
-                if (ex.Number is 529 or 1090 or 5324 or 7314 or 7325 or 7357 or 8622 or 9514 or 13544)
+                if (ex.Number is 529 or 1090 or 5324 or 7314 or 7325 or 7357 or 8622 or 9514 or 13544 || ex.BindsWithBatch)
                     batch.BatchAborted = true;
             }
             else if (CaughtByTryFrame(batch, ex))

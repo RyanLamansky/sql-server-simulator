@@ -192,8 +192,9 @@ It resolves the per-component promoted types the seek entry keys on — each key
 A seek hit *is* the duplicate: `HeapSeekCache.AnyRowMatches` / `MatchingRows` verify every candidate against live bytes and skip tombstoned slots, so unlike the query path there's no residual WHERE to lean on.
 Correctness rests on `SqlValueKey`'s per-component equality being the same comparison the scan made — `SqlValue.Equals`, including its collation-aware ANSI-padded string path — and on `SqlValue.GetHashCode` folding case and trailing spaces to agree with it, so a case-insensitive or trailing-space duplicate lands in the bucket its collision needs.
 
-**Not modeled yet**: which key a row breaking several reports.
-Real checks the clustered index first and the rest in `index_id` order, so a row duplicating both a `UNIQUE` and a later `PRIMARY KEY` reports the primary key's Msg 2627, and one duplicating a unique index created before a `UNIQUE` constraint reports the index's Msg 2601 (probed 2026-10-06 against SQL Server 2025); the simulator checks the key constraints in declaration order and then the unique indexes.
+A row breaking several keys reports real's choice (probed 2026-10-06 against SQL Server 2025): any `IGNORE_DUP_KEY` key it duplicates drops it with Msg 3604 whatever else it breaks, and otherwise the clustered key raises first, then the rest in `index_id` order — which is `sys.indexes`' numbering, not declaration order (`CREATE TABLE` numbers a nonclustered primary key ahead of a `UNIQUE` declared before it).
+`EnforceRowKeys` / `EnforceKeysForUpdate` keep checking past the first duplicate only to find an outranking one, and settle the table's index ids only then, so a unique row pays nothing for the ranking.
+Which row of a multi-row `UPDATE` reports is the first in the simulator's row order, where real's depends on its narrow-or-wide update plan.
 
 Two conditions decline the seek and fall back to the full scan, which stays the oracle:
 

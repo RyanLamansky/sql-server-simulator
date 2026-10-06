@@ -1,3 +1,4 @@
+using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
 
 namespace SqlServerSimulator.Parser.Expressions;
@@ -103,33 +104,41 @@ internal enum PrincipalIdKind
 
 /// <summary>
 /// Legacy SQL <c>permissions([object_id [, 'column']])</c>: a bitmap of the
-/// current principal's permissions. Deprecated but still evaluated by real
-/// SQL Server (SSMS's Table Designer pre-open probe batch calls the niladic
-/// form), so no deprecation warning is raised. The simulator's session
-/// principal is always the database-owning <c>dbo</c> (consistent with
-/// <see cref="HasPermsByName"/> always returning 1 and the current-principal
-/// placeholders resolving to <c>dbo</c>), so the returned masks are the fixed
-/// privileged (owner) defaults probed against SQL Server 2025 rather than a
-/// per-grant computation:
+/// current principal's permissions, the low half what it holds and the high
+/// half what it may grant on (probed 2026-10-06 against SQL Server 2025).
+/// Deprecated but still evaluated by real SQL Server (SSMS's Table Designer
+/// pre-open probe batch calls the niladic form), so no deprecation warning is
+/// raised.
 /// <list type="bullet">
-/// <item>niladic → <c>50201342</c> — the statement-permission mask a db_owner
-/// carries (CREATE TABLE/PROCEDURE/VIEW/RULE/DEFAULT/FUNCTION + BACKUP
-/// DATABASE/LOG, each mirrored into the with-grant-option high half; the
-/// server-scope CREATE DATABASE bit is absent in a user database).</item>
-/// <item><c>permissions(object_id)</c> → <c>1948217375</c> for an object that
-/// resolves in the current database (the owner mask for a user table/view);
-/// NULL argument or an id that resolves to no object → NULL.</item>
-/// <item><c>permissions(object_id, 'column')</c> → <c>1082605703</c> when the
-/// id resolves to a table carrying the named column; NULL argument, an
-/// unresolved id, or an unknown column → NULL.</item>
+/// <item>niladic — the statement permissions: <c>CREATE DATABASE</c> 1 (only
+/// in <c>master</c>), <c>CREATE TABLE</c> 2, <c>PROCEDURE</c> 4, <c>VIEW</c> 8,
+/// <c>RULE</c> 16, <c>DEFAULT</c> 32, <c>BACKUP DATABASE</c> 64,
+/// <c>BACKUP LOG</c> 128, <c>CREATE FUNCTION</c> 512.</item>
+/// <item><c>permissions(object_id)</c> — for a rowset, <c>SELECT</c> /
+/// <c>UPDATE</c> / <c>REFERENCES</c> on every column 1 / 2 / 4 and on any
+/// column 0x1000 / 0x2000 / 0x4000, <c>INSERT</c> 8, <c>DELETE</c> 16, and
+/// 0x4000000 alongside any of them; <c>EXECUTE</c> 32 for a procedure, with
+/// <c>REFERENCES</c> 4 for a scalar function; NULL for an object the
+/// principal can't see, 0 for one it sees and holds nothing on.</item>
+/// <item><c>permissions(object_id, 'column')</c> — <c>SELECT</c> 1 (with
+/// 0x4000), <c>UPDATE</c> 2, <c>REFERENCES</c> 4, and 0x80 under
+/// <c>CONTROL</c>; NULL for an unknown column.</item>
 /// </list>
-/// Result type is <see cref="SqlType.Int32"/>.
+/// <c>CONTROL</c> — <c>dbo</c>'s and <c>db_owner</c>'s included — makes every
+/// bit grantable. Result type is <see cref="SqlType.Int32"/>.
 /// </summary>
 internal sealed class Permissions : Expression
 {
     private const int StatementMask = 50201342;
     private const int ObjectMask = 1948217375;
     private const int ColumnMask = 1082605703;
+
+    // The statement permissions in bit order, from 2 (CREATE DATABASE's 1 is master's alone).
+    private static readonly (int Bit, string Name)[] StatementBits =
+    [
+        (2, "CREATE TABLE"), (4, "CREATE PROCEDURE"), (8, "CREATE VIEW"), (16, "CREATE RULE"),
+        (32, "CREATE DEFAULT"), (64, "BACKUP DATABASE"), (128, "BACKUP LOG"), (512, "CREATE FUNCTION"),
+    ];
 
     private readonly Expression? objectIdArg;
     private readonly Expression? columnArg;
@@ -147,47 +156,165 @@ internal sealed class Permissions : Expression
 
     public override SqlValue Run(RuntimeContext runtime)
     {
+        var batch = runtime.Batch;
+        var database = batch.CurrentDatabase;
+        var connection = batch.Connection;
+        var isDbo = PermissionEnforcement.Bypasses(connection, database);
+        var principalId = connection.Security.Effective.DatabasePrincipalId;
         if (this.objectIdArg is null)
-            return SqlValue.FromInt32(StatementMask);
+        {
+            return SqlValue.FromInt32(isDbo
+                ? ReferenceEquals(database, connection.Simulation.Databases.GetValueOrDefault(Simulation.MasterDatabaseName)) ? StatementMask | 0x10001 : StatementMask
+                : StatementBitmap(database, principalId, ServerLoginRights.For(connection)));
+        }
 
         var idValue = this.objectIdArg.Run(runtime);
         if (idValue.IsNull)
             return SqlValue.Null(SqlType.Int32);
         var id = ScalarArguments.CoerceToInt(idValue);
+        if (FindObject(database, id) is not { } target)
+            return SqlValue.Null(SqlType.Int32);
+        var server = ServerLoginRights.For(connection);
+        if (!isDbo && !PermissionChecker.CanViewMetadata(database, principalId, target.ObjectId, target.SchemaId, server))
+            return SqlValue.Null(SqlType.Int32);
 
         if (this.columnArg is null)
-        {
-            return ObjectExists(runtime.Batch.CurrentDatabase, id)
-                ? SqlValue.FromInt32(ObjectMask)
-                : SqlValue.Null(SqlType.Int32);
-        }
+            return SqlValue.FromInt32(isDbo ? DboObjectMask(target) : ObjectBitmap(database, PermissionChecker.BuildPrincipalClosure(database, principalId), target, server));
 
         var columnValue = this.columnArg.Run(runtime);
-        if (columnValue.IsNull)
+        if (columnValue.IsNull || ColumnsOf(target) is not { } columns)
             return SqlValue.Null(SqlType.Int32);
         var columnName = columnValue.CoerceTo(SqlType.NVarchar).AsString;
-        return TableColumnExists(runtime.Batch.CurrentDatabase, id, columnName)
-            ? SqlValue.FromInt32(ColumnMask)
-            : SqlValue.Null(SqlType.Int32);
+        var ordinal = Array.FindIndex(columns, column => database.Collation.Equals(column.Name, columnName)) + 1;
+        if (ordinal == 0)
+            return SqlValue.Null(SqlType.Int32);
+        return SqlValue.FromInt32(isDbo ? ColumnMask : ColumnBitmap(database, PermissionChecker.BuildPrincipalClosure(database, principalId), target, ordinal, server));
     }
 
-    private static bool ObjectExists(Database database, int objectId)
+    private static int StatementBitmap(Database database, int principalId, ServerLoginRights server)
+    {
+        var closure = PermissionChecker.BuildPrincipalClosure(database, principalId);
+        var control = PermissionChecker.IsGrantedInClosure(database, closure, Permission.Control, PermissionChecker.ClassDatabase, 0, 0, server);
+        var bitmap = 0;
+        foreach (var (bit, name) in StatementBits)
+        {
+            if (!PermissionChecker.IsGrantedByName(database, principalId, name, PermissionChecker.ClassDatabase, 0, 0, server))
+                continue;
+            bitmap |= bit;
+            if (control || PermissionChecker.IsGrantable(database, closure, name, PermissionChecker.ClassDatabase, 0, 0))
+                bitmap |= bit << 16;
+        }
+        return bitmap;
+    }
+
+    // dbo's bitmap per kind of object: a rowset's every bit, a procedure's
+    // EXECUTE, a scalar function's EXECUTE and REFERENCES, a synonym's SELECT /
+    // UPDATE / INSERT / DELETE / EXECUTE, a sequence's nothing.
+    private static int DboObjectMask(SchemaObject target) => target switch
+    {
+        Procedure => 0x200020,
+        ScalarFunction or ClrScalarFunction => 0x240024,
+        Sequence => 0,
+        Synonym => 0x3B003B,
+        _ => ObjectMask,
+    };
+
+    private static int ObjectBitmap(Database database, HashSet<int> closure, SchemaObject target, ServerLoginRights server)
+    {
+        var (objectId, schemaId) = (target.ObjectId, target.SchemaId);
+        var control = PermissionChecker.IsGrantedInClosure(database, closure, Permission.Control, PermissionChecker.ClassObject, objectId, schemaId, server, target);
+        int Bits(Permission permission, int bit)
+        {
+            if (!PermissionChecker.IsGrantedInClosure(database, closure, permission, PermissionChecker.ClassObject, objectId, schemaId, server, target))
+                return 0;
+            return control || PermissionChecker.IsGrantable(database, closure, permission.CanonicalName, PermissionChecker.ClassObject, objectId, schemaId) ? bit | (bit << 16) : bit;
+        }
+        switch (target)
+        {
+            case Procedure:
+                return Bits(Permission.Execute, 32);
+            case ScalarFunction or ClrScalarFunction:
+                return Bits(Permission.Execute, 32) | Bits(Permission.References, 4);
+            case Sequence:
+                return 0;
+            case Synonym:
+                return Bits(Permission.Select, 1) | Bits(Permission.Update, 2) | Bits(Permission.Insert, 8) | Bits(Permission.Delete, 16) | Bits(Permission.Execute, 32);
+        }
+        if (ColumnsOf(target) is not { } columns)
+            return 0;
+        var bitmap = Bits(Permission.Insert, 8) | Bits(Permission.Delete, 16);
+        foreach (var (permission, all, any) in (ReadOnlySpan<(Permission, int, int)>)[(Permission.Select, 1, 0x1000), (Permission.Update, 2, 0x2000), (Permission.References, 4, 0x4000)])
+        {
+            int held = 0, grantable = 0;
+            for (var ordinal = 1; ordinal <= columns.Length; ordinal++)
+            {
+                if (!PermissionChecker.IsColumnGranted(database, closure, permission, objectId, schemaId, ordinal, server, target))
+                    continue;
+                held++;
+                if (control || PermissionChecker.IsGrantable(database, closure, permission.CanonicalName, PermissionChecker.ClassObject, objectId, schemaId, ordinal))
+                    grantable++;
+            }
+            var heldBits = (held == columns.Length && held > 0 ? all : 0) | (held > 0 ? any : 0);
+            var grantableBits = (grantable == columns.Length && grantable > 0 ? all : 0) | (grantable > 0 ? any : 0);
+            bitmap |= heldBits | (grantableBits << 16);
+        }
+        // A multi-statement function's rows are read-only to a principal
+        // short of dbo, CONTROL notwithstanding.
+        if (target is MultiStatementTableValuedFunction)
+            bitmap &= ~(2 | 8 | 16 | 0x2000);
+        return (bitmap & 0xFFFF) != 0 ? bitmap | 0x4000000 : bitmap;
+    }
+
+    private static int ColumnBitmap(Database database, HashSet<int> closure, SchemaObject target, int ordinal, ServerLoginRights server)
+    {
+        var (objectId, schemaId) = (target.ObjectId, target.SchemaId);
+        var control = PermissionChecker.IsGrantedInClosure(database, closure, Permission.Control, PermissionChecker.ClassObject, objectId, schemaId, server, target);
+        var bitmap = 0;
+        foreach (var (permission, bit) in (ReadOnlySpan<(Permission, int)>)[(Permission.Select, 1), (Permission.Update, 2), (Permission.References, 4)])
+        {
+            if (!PermissionChecker.IsColumnGranted(database, closure, permission, objectId, schemaId, ordinal, server, target))
+                continue;
+            bitmap |= bit;
+            if (control || PermissionChecker.IsGrantable(database, closure, permission.CanonicalName, PermissionChecker.ClassObject, objectId, schemaId, ordinal))
+                bitmap |= bit << 16;
+        }
+        if ((bitmap & 1) != 0)
+            bitmap |= 0x4000;
+        // CONTROL adds 0x80, which a view's column shows only in the grantable
+        // half short of dbo.
+        if (control)
+            bitmap |= (target is HeapTable ? 0x80 : 0) | 0x40800000;
+        return bitmap;
+    }
+
+    private static SchemaObject? FindObject(Database database, int objectId)
     {
         foreach (var (_, schema) in database.Schemas)
         {
             foreach (var obj in schema.SchemaObjects())
             {
                 if (obj.ObjectId == objectId)
-                    return true;
+                    return obj;
             }
             foreach (var (_, tableType) in schema.TableTypes)
             {
                 if (tableType.ObjectId == objectId)
-                    return true;
+                    return tableType;
             }
         }
-        return false;
+        return null;
     }
+
+    // The columns a column-grain bitmap names, or null for an object without them.
+    private static HeapColumn[]? ColumnsOf(SchemaObject target) => target switch
+    {
+        HeapTable table => table.Columns,
+        View view => view.OutputColumns,
+        InlineTableValuedFunction inline => inline.OutputColumns,
+        MultiStatementTableValuedFunction multi => multi.OutputColumns,
+        ClrTableValuedFunction clr => clr.OutputColumns,
+        _ => null,
+    };
 
     internal static bool TableColumnExists(Database database, int objectId, string columnName)
     {

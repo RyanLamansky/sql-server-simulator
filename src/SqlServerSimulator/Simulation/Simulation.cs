@@ -2321,7 +2321,7 @@ public sealed partial class Simulation
     /// (<see cref="IsBatchAbortingNameResolution"/>).
     /// </remarks>
     private static bool IsDeferrableNameResolutionError(SimulatedSqlException ex)
-        => ex.Number is 208 or 4902;
+        => ex.Number is 208 or 4902 && !ex.BindsWithBatch;
 
     /// <summary>
     /// Whether <paramref name="ex"/>, raised as a statement parses without
@@ -3034,6 +3034,9 @@ public sealed partial class Simulation
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Kill } when ParseKill(context, batch):
+                break;
+
+            case ReservedKeyword { Keyword: Keyword.Shutdown } when ParseShutdown(context, batch):
                 break;
 
             case ReservedKeyword { Keyword: Keyword.Create } when TryParseCreate(context):

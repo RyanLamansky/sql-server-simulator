@@ -61,7 +61,7 @@ partial class Simulation
 
         var asDefault = false;
         var accentSensitive = true;
-        var ownerName = "dbo";
+        string? ownerName = null;
 
         // Optional trailers, in real's fixed order: ON FILEGROUP fg and
         // IN PATH 'path' (both parse-and-discard), WITH ACCENT_SENSITIVITY,
@@ -176,8 +176,16 @@ partial class Simulation
         if (context.CurrentDatabase.FullTextCatalogs.ContainsKey(name))
             throw SimulatedSqlException.FullTextCatalogAlreadyExists(name);
 
-        if (!context.CurrentDatabase.Principals.TryGetValue(ownerName, out var owner))
-            throw SimulatedSqlException.FullTextOwnerNotFound(ownerName);
+        // The catalog belongs to its creator unless AUTHORIZATION names
+        // another (probed 2026-10-06 against SQL Server 2025: a user granted
+        // CREATE FULLTEXT CATALOG owns, and so may drop, what it creates).
+        var ownerId = context.Connection.Security.Effective.DatabasePrincipalId;
+        if (ownerName is not null)
+        {
+            if (!context.CurrentDatabase.Principals.TryGetValue(ownerName, out var owner))
+                throw SimulatedSqlException.FullTextOwnerNotFound(ownerName);
+            ownerId = owner.PrincipalId;
+        }
 
         // AS DEFAULT semantics: demote any existing default before assigning.
         if (asDefault)
@@ -188,7 +196,7 @@ partial class Simulation
 
         var id = context.CurrentDatabase.AllocateFullTextCatalogId();
         context.CurrentDatabase.FullTextCatalogs[name] = new FullTextCatalog(
-            id, name, asDefault, accentSensitive, owner.PrincipalId,
+            id, name, asDefault, accentSensitive, ownerId,
             context.Batch.CurrentStatement.UtcNow);
         RecordDdlEvent(context, "CREATE_FULLTEXT_CATALOG", schemaName: null, name, "FULLTEXT CATALOG");
         return true;

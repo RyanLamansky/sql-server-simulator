@@ -612,8 +612,7 @@ partial class Simulation
             var guard = BeginUniqueKeyGuard(batch, target);
             if (guard is not null)
                 ForgetComputedKeySets(batch, target);
-            if (EnforceKeyConstraints(target, targetValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate
-                || EnforceUniqueIndexes(target, targetValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate
+            if (EnforceRowKeys(target, targetValues, storedValues, batch) == RowKeyVerdict.SkipDuplicate
                 || !InsertCheckedRow(batch, target, targetValues, storedValues, RowEncoder.EncodeRow(target.StoredColumns, storedValues, target.Heap), undoLog, guard))
             {
                 return;

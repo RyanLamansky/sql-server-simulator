@@ -532,8 +532,7 @@ partial class Simulation
             EnforceCheckConstraints(childTable, newRow, context.Batch, "UPDATE", reportedVerb: verb);
             rewrites.Add((pageIndex, slotIndex, newRow, (SqlValue[])full.Clone()));
         }
-        EnforceKeyConstraintsForUpdate(childTable, rewrites, context.Batch);
-        EnforceUniqueIndexesForUpdate(childTable, rewrites, context.Batch);
+        EnforceKeysForUpdate(childTable, rewrites, context.Batch);
 
         var newPairs = new List<(SqlValue[] OldFull, SqlValue[] NewFull)>(rewrites.Count);
         foreach (var (pageIndex, slotIndex, newRow, fullOld) in rewrites)

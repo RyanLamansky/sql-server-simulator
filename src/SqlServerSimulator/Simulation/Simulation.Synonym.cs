@@ -42,7 +42,7 @@ partial class Simulation
         // does; probed 2026-10-06 against SQL Server 2025).
         if (!PermissionEnforcement.HasDatabasePermission(context.Batch, schema.Database, Permission.CreateSynonym))
             throw SimulatedSqlException.DatabasePermissionDenied("CREATE SYNONYM", schema.Database.Name);
-        if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema))
+        if (!PermissionEnforcement.HasSchemaAlterForCreate(context.Batch, schema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name, terminatesBatch: false);
 
         var leaf = synonymName.Leaf;
@@ -81,8 +81,12 @@ partial class Simulation
             return true;
 
         var leaf = synonymName.Leaf;
+        // A missing synonym's Msg 3701 names it as written, its schema
+        // included, where a refused drop names the leaf (probed 2026-10-06
+        // against SQL Server 2025).
+        var written = synonymName.ImmediateQualifier is { } writtenSchema ? $"{writtenSchema}.{leaf}" : leaf;
         if (!context.Batch.TryResolveSchema(synonymName, out var schema))
-            return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(leaf);
+            return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(written);
         RejectDropOfOtherKind(schema, synonymName, "SYNONYM");
         if (schema.Synonyms.TryGetValue(leaf, out var target)
             && !PermissionEnforcement.HasDropAuthority(context.Batch, schema, target.ObjectId))
@@ -90,7 +94,7 @@ partial class Simulation
             throw SimulatedSqlException.DropObjectPermissionDenied("synonym", leaf);
         }
         if (!schema.Synonyms.TryRemove(leaf, out var dropped))
-            return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(leaf);
+            return ifExists ? true : throw SimulatedSqlException.CannotDropSynonymDoesNotExist(written);
         RecordSlotUndo(context, schema.Synonyms, leaf, dropped);
         RecordDdlEvent(context, "DROP_SYNONYM", schema.Name, leaf, "SYNONYM", dropped.BaseObject.Leaf);
         return true;

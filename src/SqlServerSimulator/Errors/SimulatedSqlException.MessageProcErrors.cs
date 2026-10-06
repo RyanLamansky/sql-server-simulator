@@ -171,6 +171,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CannotAlterDatabaseOwnerUser(string user) =>
         new($"Cannot alter the user '{user}'.", 15150, 16, 1);
 
+    /// <summary>
+    /// Msg 102 at severity 16, naming the option as written: <c>ALTER USER …
+    /// WITH DEFAULT_SCHEMA = NULL</c>, refused as it runs rather than as it
+    /// parses, and ending the batch (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException NullDefaultSchemaRefused(string optionAsWritten) =>
+        new SimulatedSqlException($"Incorrect syntax near '{optionAsWritten}'.", 102, 16, 1).EndingBatch();
+
     /// <summary>Msg 15150: <c>sp_droprole</c> of <c>public</c> or a fixed role.</summary>
     internal static SimulatedSqlException CannotDropFixedRole(string role) =>
         new($"Cannot drop the role '{role}'.", 15150, 16, 1);

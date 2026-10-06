@@ -12,6 +12,19 @@ namespace SqlServerSimulator;
 partial class Simulation
 {
     /// <summary>
+    /// The refusal of a <c>CREATE OR ALTER</c> of a kind that has none, the
+    /// cursor on the kind's word: Msg 102 near it, followed for a security
+    /// policy by the second Msg 102 real's parser recovers to.
+    /// </summary>
+    private static SimulatedSqlException RefusedCreateOrAlter(ParserContext context)
+    {
+        var refused = SimulatedSqlException.SyntaxErrorNear(context);
+        return RecoveredOrAlterPolicyError(context) is { } recovered
+            ? SimulatedSqlException.Aggregate([refused, recovered])
+            : refused;
+    }
+
+    /// <summary>
     /// Parses <c>CREATE TABLE</c>. Returns false if the leading <c>CREATE</c>
     /// isn't followed by <c>TABLE</c> (so the caller can route to the syntax
     /// error). Other malformed forms throw <see cref="SimulatedSqlException"/>
@@ -53,6 +66,8 @@ partial class Simulation
                 return TryParseCreateServerRole(context);
             case Name appWord when appWord.Value.Equals("APPLICATION", StringComparison.OrdinalIgnoreCase):
                 return TryParseCreateApplicationRole(context);
+            case Name credentialWord when credentialWord.Value.Equals("CREDENTIAL", StringComparison.OrdinalIgnoreCase):
+                return TryParseCreateCredential(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.FullText }:
                 return Simulation.TryParseCreateFullText(context);
             case UnquotedString { ContextualKeyword: ContextualKeyword.Xml }:
@@ -86,7 +101,7 @@ partial class Simulation
                     ReservedKeyword { Keyword: Keyword.Procedure or Keyword.Proc } => Simulation.TryParseCreateProcedure(context, isAlter: false, createOrAlter: true),
                     ReservedKeyword { Keyword: Keyword.Trigger } => Simulation.TryParseCreateTrigger(context, isAlter: false, createOrAlter: true),
                     ReservedKeyword { Keyword: Keyword.View } => Simulation.TryParseCreateView(context, isAlter: false, createOrAlter: true),
-                    _ => throw SimulatedSqlException.SyntaxErrorNear(context),
+                    _ => throw RefusedCreateOrAlter(context),
                 };
             case ReservedKeyword { Keyword: Keyword.Default }:
                 return TryParseCreateDefaultOrRule(context, isRule: false);
@@ -399,7 +414,7 @@ partial class Simulation
             // CREATE TABLE also needs ALTER on the target schema — with the
             // db-scope CREATE TABLE permission granted but no schema ALTER, real
             // raises Msg 2760 (probe M4).
-            if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema))
+            if (!PermissionEnforcement.HasSchemaAlterForCreate(context.Batch, schema))
                 throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
             destination = schema.HeapTables;
             schemaId = schema.SchemaId;

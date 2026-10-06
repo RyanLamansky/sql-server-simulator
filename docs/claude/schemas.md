@@ -54,9 +54,10 @@ Probed 2026-10-04 against SQL Server 2025 (677 differential cases, users without
 **Outside a module**, an unqualified name searches the effective principal's default schema, then `dbo` — for tables, views, table-valued functions, procedures, sequences, synonyms, triggers, table and alias types, XML schema collections, `db..name`, the DDL targets (`DROP`, `ALTER TABLE`, `TRUNCATE`, `CREATE INDEX`, `sp_rename`) and the catalog functions (`OBJECT_ID`, `TYPE_ID`, `TYPEPROPERTY`, `COL_LENGTH`, `HAS_PERMS_BY_NAME`).
 A scalar function still needs two parts at a call site (Msg 195).
 - An object of **any kind** in the default schema shadows `dbo`'s: a procedure `s.x` makes `SELECT * FROM x` Msg 208 though `dbo.x` is a table, and `EXEC x` naming a table `s.x` is real's Msg 2809.
+  A reference whose search meets an object of a kind it can't use — a procedure, sequence, scalar function or constraint in a FROM clause, wherever it lives — is Msg 208 at state 224 rather than 1, and an `EXEC` of one is Msg 2809 naming its kind (probed 2026-10-06 against SQL Server 2025).
   Types are a namespace of their own, as are XML schema collections.
 - A **permission** refusal on the default schema's object doesn't fall back to `dbo`'s: `DENY SELECT ON s.t` makes `SELECT * FROM t` Msg 229 naming schema `s`.
-- The default schema is `dbo` for `dbo` (Msg 15150 refuses any `ALTER USER dbo`), `guest` for `guest`, the declared one for a user or application role (stored as written, so `[S]` resolves `s`), and `dbo` when none was declared — a `db_owner` member keeps its own.
+- The default schema is `dbo` for `dbo` (Msg 15150 refuses any `ALTER USER dbo`), `guest` for `guest` — a schema that hosts objects like any other, and can't be dropped (Msg 15150) or given away — the declared one for a user or application role (stored as written, so `[S]` resolves `s`), and `dbo` when none was declared — a `db_owner` member keeps its own.
   `SessionSecurityContext.EffectiveDefaultSchemaName` is the one derivation.
 - A default schema that **doesn't exist** (declared so, or dropped since) makes `SCHEMA_NAME()` / `SCHEMA_ID()` NULL and leaves references searching `dbo` alone, while an unqualified `CREATE` or `SELECT … INTO` is Msg 2797 — ending the batch for a table, type, sequence or XML schema collection (state 2 for the last), only the statement for a module or synonym, a module's attributed to the module.
   A `sys` or `INFORMATION_SCHEMA` default reads back from `SCHEMA_NAME()` and resolves user objects through `dbo`.
@@ -75,12 +76,6 @@ Everything else resolves as the caller does: the procedure an `EXEC` names, the 
 - A query's types follow the batch compile (`OPENJSON … WITH (a al)` after an `EXECUTE AS` binds `al` through the default schema the batch began with), where real recompiles the statement and binds through the switched one.
 - `sp_setapprole` doesn't make real recompile a statement it has a plan for, so an unqualified name real had bound to `dbo` before the role was set stays bound there while the simulator resolves it through the role's default schema.
 - `REVERT` inside dynamic SQL pops an `EXECUTE AS` frame the enclosing batch pushed, where real leaves it.
-
-### Not modeled yet
-
-- The six dependency surfaces resolve a module body's one-part names through `dbo`, not the module's schema.
-- `guest`'s schema isn't materialized (only its `sys.schemas` row is), so a `guest` default reads `SCHEMA_NAME()` NULL and its `CREATE` is Msg 2797; `EXECUTE AS USER = 'guest'` is refused besides.
-- `EXEC` of a non-procedure in the default schema is Msg 2812, where real's is Msg 2809 naming the kind, and a reference meeting an object of the wrong kind there reports Msg 208 at state 1, real's at state 224.
 
 ## `USE <db>`
 `USE <name>` (bare or bracketed) switches the connection's `CurrentDatabase` to the named database.

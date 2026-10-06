@@ -1070,8 +1070,7 @@ partial class Simulation
             if (pseudoAffected.Count > 0)
             {
                 keyGuard = BeginUniqueKeyGuard(context.Batch, destinationTable);
-                EnforceKeyConstraintsForUpdate(destinationTable, pseudoAffected, context.Batch);
-                EnforceUniqueIndexesForUpdate(destinationTable, pseudoAffected, context.Batch);
+                EnforceKeysForUpdate(destinationTable, pseudoAffected, context.Batch);
             }
         }
 

@@ -112,7 +112,7 @@ partial class Simulation
     /// <summary>
     /// <see cref="RecordSecurityUndo(BatchContext, Database)"/> one scope out,
     /// for a statement about to change the server's logins, server roles, their
-    /// memberships or server permissions — real rolls a <c>CREATE LOGIN</c>
+    /// memberships, server permissions or credentials — real rolls a <c>CREATE LOGIN</c>
     /// back with the transaction too (probed 2026-09-25).
     /// </summary>
     internal static void RecordServerSecurityUndo(BatchContext batch)
@@ -122,6 +122,8 @@ partial class Simulation
         var simulation = batch.Connection.Simulation;
         var logins = simulation.Logins.ToArray();
         var roles = simulation.ServerRoles.ToArray();
+        var credentials = simulation.Credentials.ToArray();
+        var loginCredentials = simulation.LoginCredentials.ToArray();
         (int RoleId, int MemberId)[] members;
         lock (simulation.ServerRoleMembers)
             members = [.. simulation.ServerRoleMembers];
@@ -136,6 +138,12 @@ partial class Simulation
             simulation.ServerRoles.Clear();
             foreach (var (name, role) in roles)
                 simulation.ServerRoles[name] = role;
+            simulation.Credentials.Clear();
+            foreach (var (name, credential) in credentials)
+                simulation.Credentials[name] = credential;
+            simulation.LoginCredentials.Clear();
+            foreach (var (principalId, credentialId) in loginCredentials)
+                simulation.LoginCredentials[principalId] = credentialId;
             lock (simulation.ServerRoleMembers)
             {
                 simulation.ServerRoleMembers.Clear();

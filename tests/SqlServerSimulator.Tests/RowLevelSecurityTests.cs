@@ -411,4 +411,34 @@ public sealed class RowLevelSecurityTests
             rollback;
             """).Split(',')[1]);
     }
+
+    [TestMethod]
+    public void InsteadOfUpdateTrigger_SparesTheReplacedStatementItsChecks()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int not null constraint ck check (a > 0))",
+            "insert t values (1)",
+            "create function dbo.fn(@a int) returns table with schemabinding as return select 1 ok where @a > 0",
+            "create security policy p add block predicate dbo.fn(a) on dbo.t after update",
+            "create trigger tr on t instead of update as select a from inserted");
+        AreEqual(-5, simulation.ExecuteScalar("update t set a = -5"));
+        AreEqual(DBNull.Value, simulation.ExecuteScalar("update t set a = null"));
+    }
+
+    [TestMethod]
+    public void NonSchemaBoundPredicate_ThatNoLongerBinds_StopsTheBatchBeforeItRuns()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (a int)",
+            "create table helper (x int)",
+            "create function dbo.fn(@a int) returns table as return select 1 ok from dbo.helper where @a > 0",
+            "create security policy p add filter predicate dbo.fn(a) on dbo.t with (schemabinding = off)",
+            "drop table helper");
+        // Nothing runs: the PRINT's message would follow the errors.
+        var ex = simulation.AssertSqlError("print 'ran'; if 1 = 0 select * from t", 208);
+        AreEqual("208,4413,33512", string.Join(",", ex.Errors.Select(static e => e.Number)));
+        _ = simulation.AssertSqlError("insert t values (1)", 208);
+    }
 }

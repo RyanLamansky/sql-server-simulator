@@ -422,6 +422,10 @@ partial class Simulation
                 throw SimulatedSqlException.GrantToSpecialRole();
             if (grantee.PrincipalId == securableOwnerId)
             {
+                // A user granted a permission on itself is a silent no-op
+                // (probed 2026-10-06 against SQL Server 2025).
+                if (permClass == PermissionChecker.ClassDatabasePrincipal && securablePrincipal is { TypeCode: not "R" })
+                    return true;
                 context.Batch.AppendInfoError(@class: 0, state: 3, number: 4624,
                     message: "Cannot grant, deny, or revoke permissions to sa, dbo, entity owner, information_schema, sys, or yourself.");
                 return true;

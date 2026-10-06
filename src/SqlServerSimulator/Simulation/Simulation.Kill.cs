@@ -14,6 +14,37 @@ partial class Simulation
     private const int MaxSystemSessionId = 50;
 
     /// <summary>
+    /// <c>SHUTDOWN [WITH NOWAIT]</c>, entered with the cursor on
+    /// <c>SHUTDOWN</c>. A session without the <c>SHUTDOWN</c> permission
+    /// (<c>sysadmin</c> and <c>serveradmin</c> carry it) gets the
+    /// informational Msg 6004, and the batch ends: silently inside a
+    /// <c>TRY</c> with no transaction open, otherwise rolling the transaction
+    /// back with the client's own severe error, uncaught (probed 2026-10-06
+    /// against SQL Server 2025 as a login real refuses). A permitted one
+    /// would stop the server, which the simulation has no process to do.
+    /// </summary>
+    private static bool ParseShutdown(ParserContext context, BatchContext batch)
+    {
+        if (context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.With })
+        {
+            if (context.GetNextRequired() is not UnquotedString { Span: var word } || !word.Equals("NOWAIT", StringComparison.OrdinalIgnoreCase))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+            context.MoveNextOptional();
+        }
+        if (batch.IsSkipping)
+            return true;
+        if (batch.Connection.Simulation.SessionHoldsServerPermission(batch.Connection, Permission.Shutdown))
+            throw new NotSupportedException("SHUTDOWN isn't modeled: the simulation has no server process to stop.");
+        batch.AppendInfoError(@class: 0, state: 1, number: 6004, message: "User does not have permission to perform this action.");
+        if (batch.Connection.OpenTryFrames > 0 && batch.Connection.CurrentTransaction is null)
+        {
+            batch.ReturnSignaled = true;
+            return true;
+        }
+        throw SimulatedSqlException.ShutdownRefused();
+    }
+
+    /// <summary>
     /// <c>KILL { session_id | 'UOW' } [WITH STATUSONLY]</c>, entered with the
     /// cursor on <c>KILL</c>. The target is a literal — a variable, a
     /// parenthesized value or a bare <c>NULL</c> is a syntax error — an

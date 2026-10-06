@@ -63,7 +63,7 @@ partial class Simulation
         if (context.Batch.IsSkipping)
             return true;
 
-        if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema))
+        if (!PermissionEnforcement.HasSchemaAlterForCreate(context.Batch, schema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
         if (schema.HasNameInSharedNamespace(name.Leaf))
             throw SimulatedSqlException.ThereIsAlreadyAnObject(name.Leaf, state: 3);

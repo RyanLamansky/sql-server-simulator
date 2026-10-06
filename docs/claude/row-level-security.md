@@ -51,7 +51,9 @@ What it doesn't reach: `TRUNCATE TABLE`, `CHANGETABLE` (every changed key shows)
 The predicate runs **ahead of anything the statement evaluates over the row**, as real's plan applies it at the scan: `WHERE id = 4 AND 1 / a = 1` raises nothing for a principal the row is hidden from, where a visible row's divide by zero does.
 The function's body reads its own tables — the predicate's target included — without row-level security.
 
-A policy with `SCHEMABINDING = OFF` binds its predicates afresh at each statement: the reading principal needs `SELECT` on the function (Msg 229 state 5, checked again for each principal a batch runs as), and a dropped function, a changed parameter list or a dropped column is that binding error followed by Msg 33512, ending the batch.
+A policy with `SCHEMABINDING = OFF` binds its predicates afresh at each statement: the reading principal needs `SELECT` on the function (Msg 229 state 5, checked again for each principal a batch runs as), and a dropped function, a changed parameter list, a dropped column or a body that no longer binds is that binding error followed by Msg 33512, ending the batch.
+A query reading the table meets it as the batch compiles (`RowSecurity.BindAtCompile`), so nothing in the batch runs — one never taken by an `IF` included — unless the batch also runs DDL; a write binds every predicate on its target as it runs, a filter-only policy's included (probed 2026-10-06 against SQL Server 2025).
+An `INSTEAD OF UPDATE` trigger spares the statement it replaces its block predicates, NOT NULL and CHECK constraints alike: only the body's own write is judged.
 
 **A statement that applies a predicate redacts its conversion and truncation errors** — Msg 245, 220, 232, 248 and 2628 read `******` for every value, type and name, whichever row raised them.
 "Applies" is a read of a table carrying a filter predicate, or a write to a table carrying any enabled predicate: a `SELECT` over a block-only table keeps its error text.
@@ -88,12 +90,10 @@ A predicate function's own reads lock as any read at the statement's isolation d
 ## Divergences
 
 - The lock DMVs show no `PAGE` or `METADATA` rows, the simulator's lock model taking neither, and a SERIALIZABLE predicate's equality lookup into a keyed table takes the range locks a scan would where real takes one key `S`.
-- A non-schema-bound predicate's binding failure is raised as the statement runs; real raises it while the batch compiles, at each statement reading the table, before any runs.
-- `CREATE OR ALTER SECURITY POLICY` and a server-qualified policy name send their first error alone, where real follows each with a second Msg 102.
-- An `INSTEAD OF UPDATE` trigger on the table doesn't spare the replaced statement its block predicates here (nor its CHECK constraints, a pre-existing gap); real judges only the trigger body's own write.
+- A write meeting a non-schema-bound predicate that no longer binds reports the body's Msg 4413 at line 12, where real's is at the writing statement's line (probed 2026-10-06 against SQL Server 2025).
 - `CONTAINSTABLE` ranks follow the simulator's ranking, not real's (see [`full-text.md`](full-text.md#not-modeled-yet)).
 
 ## Not modeled yet
 
 - Block predicates on a memory-optimized table's natively compiled writes, and the replication behavior `NOT FOR REPLICATION` names.
-- A filter predicate reaching a graph `SHORTEST_PATH` walk, which reads node and edge tables directly.
+- A filter predicate over a graph table (probed 2026-10-06 against SQL Server 2025): real refuses a `SHORTEST_PATH` walk over a filtered node or edge table with Msg 4104 state 3 naming the `FOR PATH` node alias a graph path aggregate reads, and a plain `MATCH` whose node row the filter hides keeps the edge, its node's columns NULL — the walk here reads the tables unfiltered, and a hidden node drops the match.

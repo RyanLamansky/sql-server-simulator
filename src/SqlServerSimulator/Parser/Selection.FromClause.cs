@@ -1011,6 +1011,8 @@ internal sealed partial class Selection
     private static FromSource ParseSingleFromSource(ParserContext context, QueryScope scope)
     {
         var source = ParseSingleFromSourceCore(context, scope);
+        if (source.BackingTable is { } readTable && context.Batch.Connection.Simulation.DeclaresSecurityPolicies)
+            RowSecurity.BindAtCompile(context.Batch, readTable);
         // FOR SYSTEM_TIME belongs straight after a table's or view's name, so
         // one past an alias or hints — or after any other source — is a syntax
         // error at FOR (probed 2026-10-04 against SQL Server 2025).

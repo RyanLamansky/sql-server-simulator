@@ -256,6 +256,35 @@ partial class Simulation
             ? throw SimulatedSqlException.UnknownObjectType(word)
             : false;
 
+    /// <summary>
+    /// The second Msg 102 real's parser reports after recovering from a
+    /// refused policy name or a <c>CREATE OR ALTER SECURITY POLICY</c>: near
+    /// the word after the predicate clause's <c>ADD</c> (probed 2026-10-06
+    /// against SQL Server 2025). The cursor is on the token after the policy
+    /// name; null when no <c>ADD</c> follows.
+    /// </summary>
+    internal static SimulatedSqlException? RecoveredPredicateClauseError(ParserContext context) =>
+        context.Token is ReservedKeyword { Keyword: Keyword.Add } && context.GetNextOptional() is { } afterAdd
+            ? SimulatedSqlException.SyntaxErrorNear(afterAdd)
+            : null;
+
+    /// <summary>
+    /// <see cref="RecoveredPredicateClauseError"/> for a <c>CREATE OR ALTER</c>
+    /// whose cursor is on the <c>SECURITY</c> word, or null when the statement
+    /// isn't a security policy's.
+    /// </summary>
+    internal static SimulatedSqlException? RecoveredOrAlterPolicyError(ParserContext context)
+    {
+        if (context.Token is not Name { Value: var security } || !BuiltInToken.Equals(security, "SECURITY") || !AtPolicyWord(context)
+            || context.GetNextOptional() is not Name)
+        {
+            return null;
+        }
+        _ = BatchContext.ParseObjectName(context);
+        context.MoveNextOptional();
+        return RecoveredPredicateClauseError(context);
+    }
+
     private static bool AtPolicyWord(ParserContext context)
     {
         var checkpoint = context.SaveCheckpoint();
@@ -273,7 +302,13 @@ partial class Simulation
     {
         var name = BatchContext.ParseObjectName(context);
         if (name.Count > 3)
-            throw SimulatedSqlException.TooManyNamePrefixes(name, 2);
+        {
+            var tooMany = SimulatedSqlException.TooManyNamePrefixes(name, 2);
+            context.MoveNextOptional();
+            throw RecoveredPredicateClauseError(context) is { } recovered
+                ? SimulatedSqlException.Aggregate([tooMany, recovered])
+                : tooMany;
+        }
         if (name.Count == 3)
             throw SimulatedSqlException.SecurityPolicyNameDatabaseQualified(statement).PinLine(12);
         return name;
@@ -746,6 +781,13 @@ partial class Simulation
             var parser = inner.Parser;
             parser.MoveNextRequired();
             body = ParseInlineTvfBody(parser, function, new MultiPartName(function.Schema.Name).WithAddedPart(function.Name));
+        }
+        catch (SimulatedSqlException bindingError) when (!predicate.IsSchemaBound)
+        {
+            // A body that no longer binds — a table it reads dropped — is the
+            // same failure, its errors then Msg 33512 (probed 2026-10-06
+            // against SQL Server 2025).
+            throw SimulatedSqlException.FollowedByPredicateBindingFailure(bindingError, target.Name, state: 0);
         }
         finally
         {

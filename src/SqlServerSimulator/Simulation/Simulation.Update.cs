@@ -681,6 +681,7 @@ partial class Simulation
         CheckUpdatePermissions(context, targetName, table, sourceView, rawAssignments, where, plan);
         RowSecurity.NoteWrite(context.Batch, table);
         var setMasks = DataMasking.Applying(context.Batch, plan.SetMasks);
+        var enforceConstraints = !ReplacedByInsteadOfTrigger(context.Batch, table, sourceView);
         if (positionedCursor is null)
             Selection.SettleSerializableWriteFence(table, where, serializableHint, context.Batch);
 
@@ -813,7 +814,7 @@ partial class Simulation
 
             // Per-row stamp bump for NEXT VALUE FOR in the SET-list expressions.
             context.Batch.BumpRowStamp();
-            var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveOriginal, setMasks);
+            var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, ResolveOriginal, setMasks, enforceConstraints);
 
             // WITH CHECK OPTION: the post-update row must satisfy every
             // CHECK OPTION-bearing WHERE in the chain. Fires before
@@ -998,6 +999,7 @@ partial class Simulation
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, bindErrors: context.Batch.BindErrors);
         RejectColumnSetBesideSparse(table, assignments);
         var setMasks = DataMasking.Applying(context.Batch, UpdateSetMasks(context.Batch, assignments, name => Selection.SourceColumnMask(sources, name)));
+        var enforceConstraints = !ReplacedByInsteadOfTrigger(context.Batch, table, sourceView: null);
 
         // Compile-time bind of the predicate and the SET values — see
         // ExecuteUpdateAgainstTable for why.
@@ -1108,7 +1110,7 @@ partial class Simulation
 
             // Per-row stamp bump for NEXT VALUE FOR in the SET-list.
             context.Batch.BumpRowStamp();
-            var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, resolveTuple, setMasks);
+            var newValues = ComputeUpdatedRow(context, table, fullValues, assignments, resolveTuple, setMasks, enforceConstraints);
             return (newValues, oldSnapshotNeeded ? fullValues : null);
         }
 
@@ -1368,8 +1370,7 @@ partial class Simulation
         }
 
         var keyGuard = BeginUniqueKeyGuard(context.Batch, table);
-        EnforceKeyConstraintsForUpdate(table, affected, context.Batch);
-        EnforceUniqueIndexesForUpdate(table, affected, context.Batch);
+        EnforceKeysForUpdate(table, affected, context.Batch);
 
         // Outgoing FK check on the post-update rows (UPDATE may have rewritten
         // the child's FK columns to point at a parent that doesn't exist).
@@ -1615,8 +1616,7 @@ partial class Simulation
         BatchContext batch, HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, int row)
     {
         var guard = UniqueKeyWriteGuard.Begin(table)!;
-        EnforceKeyConstraintsForUpdate(table, affected, batch, row);
-        EnforceUniqueIndexesForUpdate(table, affected, batch, row);
+        EnforceKeysForUpdate(table, affected, batch, row);
         return guard;
     }
 
@@ -2263,6 +2263,15 @@ partial class Simulation
     }
 
     /// <summary>
+    /// Whether an <c>INSTEAD OF UPDATE</c> trigger on the target replaces the
+    /// statement, which then never writes: its rows meet no NOT NULL, CHECK or
+    /// block predicate, only the trigger body's own write does (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    private static bool ReplacedByInsteadOfTrigger(BatchContext batch, HeapTable table, View? sourceView) =>
+        HasInsteadOfTrigger(batch, (SchemaObject?)sourceView ?? table, TriggerActions.Update);
+
+    /// <summary>
     /// Computes the post-SET row from the pre-update <paramref name="fullValues"/>
     /// snapshot: every SET RHS evaluates against the same snapshot (matching
     /// SQL Server: <c>UPDATE t SET a = 100, b = a + 1</c> over a row with
@@ -2502,7 +2511,63 @@ partial class Simulation
     }
 
     /// <summary>
-    /// PK / UNIQUE validation for UPDATE: each affected row's new stored-key
+    /// PK / UNIQUE validation for the rows an UPDATE (or a MERGE, or a
+    /// cascade) rewrites, across the table's key constraints and unique
+    /// indexes alike: the first row breaking any key raises, for the key with
+    /// the lowest <c>index_id</c> it breaks — real's order, which
+    /// <see cref="EnforceRowKeys"/> describes. <c>IGNORE_DUP_KEY</c> has no
+    /// say here; real keeps raising for an update. <paramref name="onlyRow"/>,
+    /// when set, checks that one row against the heap again — the second
+    /// check a <see cref="UniqueKeyWriteGuard"/> refusal asks for, the
+    /// comparison among the affected rows already made.
+    /// </summary>
+    private static void EnforceKeysForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, BatchContext batch, int onlyRow = -1)
+    {
+        UpdateKeyViolations? violations = null;
+        EnforceKeyConstraintsForUpdate(table, affected, batch, onlyRow, ref violations);
+        EnforceUniqueIndexesForUpdate(table, affected, batch, onlyRow, ref violations);
+        if (violations is not null)
+            throw violations.First;
+    }
+
+    /// <summary>
+    /// The duplicates <see cref="EnforceKeysForUpdate"/> has found so far: per
+    /// affected row the lowest-ranked key it breaks, and the first row
+    /// breaking any. Allocated with the first duplicate, so an update that
+    /// breaks no key never builds one.
+    /// </summary>
+    private sealed class UpdateKeyViolations(int rowCount)
+    {
+        private readonly RowKeyChecks[] rows = new RowKeyChecks[rowCount];
+        private int firstRow = int.MaxValue;
+
+        /// <summary>The error of the first row breaking a key.</summary>
+        public SimulatedSqlException First => this.rows[this.firstRow].Hard!;
+
+        /// <summary>
+        /// Whether row <paramref name="row"/>'s check of the key numbered
+        /// <paramref name="indexId"/> can no longer change what raises.
+        /// </summary>
+        public bool Settles(int row, int indexId) => row > this.firstRow || this.rows[row].Settles(indexId, ignoreDupKey: false);
+
+        public static void Note(ref UpdateKeyViolations? violations, HeapTable table, int rowCount, int row, KeyConstraint key, SimulatedSqlException error)
+        {
+            violations ??= new(rowCount);
+            violations.rows[row].Note(table, key, error);
+            violations.firstRow = Math.Min(violations.firstRow, row);
+        }
+
+        /// <inheritdoc cref="Note(ref UpdateKeyViolations?, HeapTable, int, int, KeyConstraint, SimulatedSqlException)"/>
+        public static void Note(ref UpdateKeyViolations? violations, HeapTable table, int rowCount, int row, Storage.Index key, SimulatedSqlException error)
+        {
+            violations ??= new(rowCount);
+            violations.rows[row].Note(table, key, error);
+            violations.firstRow = Math.Min(violations.firstRow, row);
+        }
+    }
+
+    /// <summary>
+    /// The key-constraint half of <see cref="EnforceKeysForUpdate"/>: each affected row's new stored-key
     /// tuple is checked against (a) every other affected row's new key and
     /// (b) every non-affected heap row's existing key. Self-collision (a row
     /// matching its own pre-update self) is impossible because affected
@@ -2511,11 +2576,10 @@ partial class Simulation
     /// compares new-vs-new among affected rows — overlap with the pre-shift
     /// snapshot via (b) only fires when a non-affected row's existing key
     /// genuinely collides with the new value (a true violation).
-    /// <paramref name="onlyRow"/>, when set, checks that one row against the
-    /// heap again — the second check a <see cref="UniqueKeyWriteGuard"/>
-    /// refusal asks for, the comparison among the affected rows already made.
+    /// <paramref name="onlyRow"/> is <see cref="EnforceKeysForUpdate"/>'s, and
+    /// a duplicate is noted in <paramref name="violations"/> rather than raised.
     /// </summary>
-    private static void EnforceKeyConstraintsForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, BatchContext batch, int onlyRow = -1)
+    private static void EnforceKeyConstraintsForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, BatchContext batch, int onlyRow, ref UpdateKeyViolations? violations)
     {
         if (table.KeysMayExceedLimit)
         {
@@ -2544,7 +2608,7 @@ partial class Simulation
             for (var c = 0; c < table.KeyConstraints.Count; c++)
             {
                 var constraint = table.KeyConstraints[c];
-                if (constraint.IsDisabled)
+                if (constraint.IsDisabled || violations?.Settles(i, constraint.IndexId) == true)
                     continue;
 
                 // A UNIQUE constraint over a non-persisted computed column
@@ -2553,11 +2617,12 @@ partial class Simulation
                 {
                     if (!ComputedKeyMoved(constraint.FullOrdinals, affected[i], table, batch))
                         continue;
-                    if (onlyRow < 0 && ComputedKeySharedByAnotherAffectedRow(affected, i, constraint.FullOrdinals, table, filter: null, batch))
-                        throw KeyConstraintViolationOnComputedKey(table, constraint, affected[i].FullNew);
-                    var unaffected = existingComputedKeys[c] ??= BuildComputedKeySet(table, constraint.FullOrdinals, filter: null, batch, affectedAddrs);
-                    if (unaffected.Contains(new SqlValueKey(ReadKeyByFullOrdinals(constraint.FullOrdinals, affected[i].FullNew))))
-                        throw KeyConstraintViolationOnComputedKey(table, constraint, affected[i].FullNew);
+                    if ((onlyRow < 0 && ComputedKeySharedByAnotherAffectedRow(affected, i, constraint.FullOrdinals, table, filter: null, batch))
+                        || (existingComputedKeys[c] ??= BuildComputedKeySet(table, constraint.FullOrdinals, filter: null, batch, affectedAddrs))
+                            .Contains(new SqlValueKey(ReadKeyByFullOrdinals(constraint.FullOrdinals, affected[i].FullNew))))
+                    {
+                        UpdateKeyViolations.Note(ref violations, table, affected.Count, i, constraint, KeyConstraintViolationOnComputedKey(table, constraint, affected[i].FullNew));
+                    }
                     continue;
                 }
 
@@ -2565,7 +2630,10 @@ partial class Simulation
                     continue;
 
                 if (onlyRow < 0 && (affectedKeys[c] ??= AffectedKeyIndex.Build(storedSnapshots, constraint.StorageOrdinals, participates: null)).SharedByAnotherRow(i))
-                    throw KeyConstraintViolation(table, constraint, myStored);
+                {
+                    UpdateKeyViolations.Note(ref violations, table, affected.Count, i, constraint, KeyConstraintViolation(table, constraint, myStored));
+                    continue;
+                }
 
                 if (TryPrepareKeySeek(table, constraint.StorageOrdinals, myStored, out var commons, out var probe))
                 {
@@ -2574,27 +2642,30 @@ partial class Simulation
                         .MatchingRows(table.Heap, storedColumns, constraint.StorageOrdinals, commons, probe))
                     {
                         if (!affectedAddrs.Contains((p, s)))
-                            throw KeyConstraintViolation(table, constraint, myStored);
+                        {
+                            UpdateKeyViolations.Note(ref violations, table, affected.Count, i, constraint, KeyConstraintViolation(table, constraint, myStored));
+                            break;
+                        }
                     }
                     continue;
                 }
 
                 if (ScanFindsKey(table, constraint.StorageOrdinals, myStored, filter: null, affectedAddrs, batch))
-                    throw KeyConstraintViolation(table, constraint, myStored);
+                    UpdateKeyViolations.Note(ref violations, table, affected.Count, i, constraint, KeyConstraintViolation(table, constraint, myStored));
             }
         }
     }
 
     /// <summary>
     /// UPDATE-time counterpart to <see cref="EnforceUniqueIndexes"/>:
-    /// walks each <see cref="HeapTable.Indexes"/> UNIQUE entry and raises
-    /// Msg 2601 on the first key collision among updated rows or against
+    /// walks each <see cref="HeapTable.Indexes"/> UNIQUE entry and notes
+    /// Msg 2601 for each key collision among updated rows or against
     /// other (non-affected) heap rows. Filter-aware in the same shape as
     /// the INSERT path — rows excluded by an index's <c>Index.Filter</c>
     /// are skipped on both sides of the comparison. <paramref name="onlyRow"/>
     /// is <see cref="EnforceKeyConstraintsForUpdate"/>'s.
     /// </summary>
-    private static void EnforceUniqueIndexesForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, BatchContext batch, int onlyRow = -1)
+    private static void EnforceUniqueIndexesForUpdate(HeapTable table, List<(int PageIndex, int SlotIndex, SqlValue[] FullNew, SqlValue[]? FullOld)> affected, BatchContext batch, int onlyRow, ref UpdateKeyViolations? violations)
     {
         if (table.Indexes.Count == 0)
             return;
@@ -2633,7 +2704,7 @@ partial class Simulation
             for (var x = 0; x < table.Indexes.Count; x++)
             {
                 var index = table.Indexes[x];
-                if (!index.IsUnique || index.IsDisabled)
+                if (!index.IsUnique || index.IsDisabled || violations?.Settles(i, index.IndexId) == true)
                     continue;
                 if (index.Filter is { } rowFilter)
                 {
@@ -2662,11 +2733,12 @@ partial class Simulation
                 // the unaffected rows out of a set built once for the statement.
                 if (!index.KeysAreStored)
                 {
-                    if (onlyRow < 0 && ComputedKeySharedByAnotherAffectedRow(affected, i, index.KeyFullOrdinals, table, index.Filter, batch))
-                        throw UniqueIndexViolationOnComputedKey(index, qualifiedTableName, myFull);
-                    var unaffected = existingComputedKeys[x] ??= BuildComputedKeySet(table, index.KeyFullOrdinals, index.Filter, batch, affectedAddrs);
-                    if (unaffected.Contains(new SqlValueKey(ReadKeyByFullOrdinals(index.KeyFullOrdinals, myFull))))
-                        throw UniqueIndexViolationOnComputedKey(index, qualifiedTableName, myFull);
+                    if ((onlyRow < 0 && ComputedKeySharedByAnotherAffectedRow(affected, i, index.KeyFullOrdinals, table, index.Filter, batch))
+                        || (existingComputedKeys[x] ??= BuildComputedKeySet(table, index.KeyFullOrdinals, index.Filter, batch, affectedAddrs))
+                            .Contains(new SqlValueKey(ReadKeyByFullOrdinals(index.KeyFullOrdinals, myFull))))
+                    {
+                        UpdateKeyViolations.Note(ref violations, table, affected.Count, i, index, UniqueIndexViolationOnComputedKey(index, qualifiedTableName, myFull));
+                    }
                     continue;
                 }
 
@@ -2678,7 +2750,8 @@ partial class Simulation
                             ? null
                             : FilterMembership(table, setFilter, affected, batch))).SharedByAnotherRow(i))
                 {
-                    throw UniqueIndexViolation(index, qualifiedTableName, myStored);
+                    UpdateKeyViolations.Note(ref violations, table, affected.Count, i, index, UniqueIndexViolation(index, qualifiedTableName, myStored));
+                    continue;
                 }
 
                 if (TryPrepareKeySeek(table, index.KeyStorageOrdinals, myStored, out var commons, out var probe))
@@ -2695,13 +2768,14 @@ partial class Simulation
                             continue;
                         }
 
-                        throw UniqueIndexViolation(index, qualifiedTableName, myStored);
+                        UpdateKeyViolations.Note(ref violations, table, affected.Count, i, index, UniqueIndexViolation(index, qualifiedTableName, myStored));
+                        break;
                     }
                     continue;
                 }
 
                 if (ScanFindsKey(table, index.KeyStorageOrdinals, myStored, index.Filter, affectedAddrs, batch))
-                    throw UniqueIndexViolation(index, qualifiedTableName, myStored);
+                    UpdateKeyViolations.Note(ref violations, table, affected.Count, i, index, UniqueIndexViolation(index, qualifiedTableName, myStored));
             }
         }
     }

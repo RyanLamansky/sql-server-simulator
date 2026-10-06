@@ -12,9 +12,9 @@ partial class Simulation
     /// [, option …]</c>. Only the SQL-authentication clear-text-password form
     /// is modeled: the name and the PWDENCRYPT-format hash of the password
     /// land in <see cref="Logins"/>, which the TDS endpoint enforces once
-    /// non-empty. The option tail (MUST_CHANGE / CHECK_POLICY /
-    /// CHECK_EXPIRATION / DEFAULT_DATABASE / DEFAULT_LANGUAGE / SID /
-    /// CREDENTIAL) parses-and-discards; the <c>FROM</c> forms (WINDOWS /
+    /// non-empty. The option tail is read by <see cref="ConsumeLoginOptions"/>
+    /// (<c>CREDENTIAL</c> maps the login to a credential, Msg 15151 for a
+    /// missing one); the <c>FROM</c> forms (WINDOWS /
     /// CERTIFICATE / ASYMMETRIC KEY / EXTERNAL PROVIDER) and the hashed-
     /// password form (<c>PASSWORD = 0x… HASHED</c>) raise
     /// <see cref="NotSupportedException"/>.
@@ -57,12 +57,14 @@ partial class Simulation
             throw SimulatedSqlException.CheckExpirationNeedsPolicy();
         if (checkPolicy)
             ValidateLoginPassword(name, password);
+        int? credentialId = options.Credential is { } credential ? simulation.ResolveCredentialId(credential) : null;
         var utcNow = context.Batch.CurrentStatement.UtcNow;
         var login = new ServerLogin(simulation.AllocatePrincipalId(), name, PasswordHash.EncryptLegacy(password), utcNow, utcNow,
             defaultDatabase: options.DefaultDatabase ?? "master", defaultLanguage: options.DefaultLanguage ?? "us_english",
             isPolicyChecked: checkPolicy, isExpirationChecked: options.CheckExpiration ?? false);
         if (!simulation.Logins.TryAdd(name, login))
             throw SimulatedSqlException.ServerPrincipalAlreadyExists(name);
+        simulation.MapLoginCredential(login.PrincipalId, credentialId);
         // CREATE LOGIN auto-seeds a server-scope CONNECT SQL grant (class 100,
         // grantor sa) — probe6 N4b.
         lock (simulation.ServerPermissions)
@@ -130,6 +132,7 @@ partial class Simulation
                     + "would mean adding it to the login registry, which switches the TDS endpoint "
                     + "from accepting any credentials to enforcing them.");
             }
+            AlterLoginCredential(simulation, principalId: 1, options);
             RecordServerDdlEvent(context, "ALTER_LOGIN", databaseName: null, name, passwordStart, passwordEnd);
             return true;
         }
@@ -144,6 +147,7 @@ partial class Simulation
             throw SimulatedSqlException.PasswordEncryptionInvalidValue();
         if (password is not null && policyChecked)
             ValidateLoginPassword(name, password);
+        AlterLoginCredential(simulation, existing.PrincipalId, options);
         simulation.Logins[name] = existing.With(
             passwordHash: password is null ? null : PasswordHash.EncryptLegacy(password),
             passwordLastSetTime: password is null ? null : context.Batch.CurrentStatement.UtcNow,
@@ -186,8 +190,9 @@ partial class Simulation
             }
         }
         RecordServerSecurityUndo(context.Batch);
-        if (!context.Batch.Connection.Simulation.Logins.TryRemove(name, out _))
+        if (!context.Batch.Connection.Simulation.Logins.TryRemove(name, out var dropped))
             throw SimulatedSqlException.CannotAlterOrDropLogin("drop", name);
+        simulation.MapLoginCredential(dropped.PrincipalId, credentialId: null);
         RecordServerDdlEvent(context, "DROP_LOGIN", databaseName: null, name);
         // Real's DROP LOGIN runs two internal procedures whose return statuses
         // reach the client on their own, and sends no DONE of its own (probed
@@ -198,8 +203,14 @@ partial class Simulation
     }
 
     /// <summary>The options of a <c>CREATE LOGIN</c> / <c>ALTER LOGIN</c> the simulator keeps, null for one not written.</summary>
-    private readonly struct LoginOptions(string? defaultDatabase, string? defaultLanguage, bool? checkPolicy, bool? checkExpiration, string? oldPassword)
+    private readonly struct LoginOptions(string? defaultDatabase, string? defaultLanguage, bool? checkPolicy, bool? checkExpiration, string? oldPassword, string? credential, bool noCredential)
     {
+        /// <summary>The credential a <c>CREDENTIAL = name</c> maps the login to.</summary>
+        public readonly string? Credential = credential;
+
+        /// <summary><c>NO CREDENTIAL</c>, which clears the login's mapping.</summary>
+        public readonly bool NoCredential = noCredential;
+
         public readonly string? OldPassword = oldPassword;
         public readonly string? DefaultDatabase = defaultDatabase;
         public readonly string? DefaultLanguage = defaultLanguage;
@@ -209,17 +220,37 @@ partial class Simulation
 
     /// <summary>
     /// Reads the rest of a <c>CREATE LOGIN</c> / <c>ALTER LOGIN</c> statement, keeping
-    /// the <c>DEFAULT_DATABASE</c> and <c>DEFAULT_LANGUAGE</c> values as written and the
-    /// <c>CHECK_POLICY</c> / <c>CHECK_EXPIRATION</c> switches, and discarding every other option.
+    /// the <c>DEFAULT_DATABASE</c> and <c>DEFAULT_LANGUAGE</c> values as written, the
+    /// <c>CHECK_POLICY</c> / <c>CHECK_EXPIRATION</c> switches and the <c>CREDENTIAL</c> /
+    /// <c>NO CREDENTIAL</c> mapping, and discarding every other option.
     /// </summary>
     private static LoginOptions ConsumeLoginOptions(ParserContext context)
     {
-        string? database = null, language = null, oldPassword = null;
+        string? database = null, language = null, oldPassword = null, credential = null;
         bool? checkPolicy = null, checkExpiration = null;
+        var noCredential = false;
         while (!IsStatementBoundary(context.Token))
         {
             if (context.Token is UnquotedString { Value: var option })
             {
+                if (option.Equals("CREDENTIAL", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (context.GetNextOptional() is not Operator { Character: '=' })
+                        continue;
+                    if (context.GetNextOptional() is Name credentialName)
+                    {
+                        credential = credentialName.Value;
+                        context.MoveNextOptional();
+                    }
+                    continue;
+                }
+                if (option.Equals("NO", StringComparison.OrdinalIgnoreCase)
+                    && context.GetNextOptional() is UnquotedString { Span: var noWhat } && noWhat.Equals("CREDENTIAL", StringComparison.OrdinalIgnoreCase))
+                {
+                    noCredential = true;
+                    context.MoveNextOptional();
+                    continue;
+                }
                 var isDatabase = option.Equals("DEFAULT_DATABASE", StringComparison.OrdinalIgnoreCase);
                 var isLanguage = option.Equals("DEFAULT_LANGUAGE", StringComparison.OrdinalIgnoreCase);
                 var isPolicy = option.Equals("CHECK_POLICY", StringComparison.OrdinalIgnoreCase);
@@ -249,7 +280,20 @@ partial class Simulation
             }
             context.MoveNextOptional();
         }
-        return new LoginOptions(database, language, checkPolicy, checkExpiration, oldPassword);
+        return new LoginOptions(database, language, checkPolicy, checkExpiration, oldPassword, credential, noCredential);
+    }
+
+    /// <summary>
+    /// Applies an <c>ALTER LOGIN</c>'s <c>CREDENTIAL = name</c> or <c>NO
+    /// CREDENTIAL</c> to the login <paramref name="principalId"/>; a name that
+    /// is no credential is Msg 15151 (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    private static void AlterLoginCredential(Simulation simulation, int principalId, LoginOptions options)
+    {
+        if (options.Credential is { } credential)
+            simulation.MapLoginCredential(principalId, simulation.ResolveCredentialId(credential));
+        else if (options.NoCredential)
+            simulation.MapLoginCredential(principalId, credentialId: null);
     }
 
     /// <summary>

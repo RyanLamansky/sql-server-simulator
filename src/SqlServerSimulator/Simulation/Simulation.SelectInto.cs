@@ -71,7 +71,7 @@ partial class Simulation
         {
             if (!PermissionEnforcement.HasDatabasePermission(batch, schema.Database, "CREATE TABLE"))
                 throw SimulatedSqlException.DatabasePermissionDenied("CREATE TABLE", schema.Database.Name);
-            if (!PermissionEnforcement.HasSchemaAlter(batch, schema))
+            if (!PermissionEnforcement.HasSchemaAlterForCreate(batch, schema))
                 throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
         }
         // SELECT INTO creates the destination, so a read-only database refuses

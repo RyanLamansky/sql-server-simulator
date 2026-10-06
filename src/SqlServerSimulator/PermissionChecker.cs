@@ -1113,11 +1113,28 @@ internal static class PermissionEnforcement
     /// <paramref name="schema"/>: ALTER on the schema <strong>or</strong> CONTROL
     /// on the object itself — probe-confirmed as the pair real accepts for every
     /// object kind (a plain object-scope ALTER is not enough, which is what
-    /// separates a DROP from an ALTER TABLE). True for dbo / module bodies.
+    /// separates a DROP from an ALTER TABLE). A <c>DENY ALTER</c> on the schema
+    /// refuses it whatever covers the object's CONTROL — a database
+    /// <c>CONTROL</c> grantee included (probed 2026-10-06 against SQL Server
+    /// 2025). True for dbo / module bodies.
     /// </summary>
     internal static bool HasDropAuthority(BatchContext batch, Schema schema, int objectId) =>
-        HasSchemaAlter(batch, schema)
-        || HasObjectControl(batch, schema.Database, objectId, schema.SchemaId);
+        !TryResolveScope(batch, schema.Database, out var principalId)
+        || (!PermissionChecker.IsDenied(schema.Database, principalId, "ALTER", PermissionChecker.ClassSchema, schema.SchemaId, 0)
+            && (HasSchemaAlter(batch, schema) || HasObjectControl(batch, schema.Database, objectId, schema.SchemaId)));
+
+    /// <summary>
+    /// The schema half of a <c>CREATE</c>: <see cref="HasSchemaAlter"/>, or
+    /// membership of <c>db_ddladmin</c> / <c>db_owner</c>, which a <c>DENY
+    /// ALTER</c> on the schema doesn't take away here as it does from a
+    /// granted permission (probed 2026-10-06 against SQL Server 2025: a
+    /// <c>db_ddladmin</c> member creates a table in a schema it is denied ALTER
+    /// on, and can't drop it).
+    /// </summary>
+    internal static bool HasSchemaAlterForCreate(BatchContext batch, Schema schema) =>
+        !TryResolveScope(batch, schema.Database, out var principalId)
+        || PermissionChecker.IsDdlAdminOrOwner(schema.Database, principalId)
+        || HasSchemaAlter(batch, schema);
 
     /// <summary>Whether the effective principal holds CONTROL on the given object (the DROP alternative and the <c>ALTER SCHEMA … TRANSFER</c> source gate). True for dbo / module bodies.</summary>
     internal static bool HasObjectControl(BatchContext batch, Database database, int objectId, int schemaId) =>
@@ -1196,7 +1213,7 @@ internal static class PermissionEnforcement
             return;
         if (!HasDatabasePermission(batch, schema.Database, permission))
             throw SimulatedSqlException.CreateModulePermissionDenied(permission, schema.Database.Name, moduleName);
-        if (!HasSchemaAlter(batch, schema))
+        if (!HasSchemaAlterForCreate(batch, schema))
             throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
     }
 }
@@ -1383,7 +1400,8 @@ internal static class PermissionChecker
     /// <summary>
     /// Whether the principal closure <paramref name="closure"/> owns the
     /// securable — an object through its effective owner or its schema's
-    /// owner, a schema through its owner, a role through its owner. An owner
+    /// owner, a schema through its owner, a role or a full-text catalog
+    /// through its owner. An owner
     /// holds <c>CONTROL</c> that no <c>DENY</c> can take away, and a role's
     /// members share its ownership (probed 2026-09-27 against SQL Server 2025:
     /// a member of the role that owns a table reads it with no grant).
@@ -1416,6 +1434,13 @@ internal static class PermissionChecker
                             ? closure.Contains(principal.OwningPrincipalId)
                             : principal.TypeCode != "A" && majorId > Database.SysPrincipalId && closure.Contains(majorId);
                     }
+                }
+                return false;
+            case ClassFulltextCatalog:
+                foreach (var (_, catalog) in database.FullTextCatalogs)
+                {
+                    if (catalog.Id == majorId)
+                        return closure.Contains(catalog.PrincipalId);
                 }
                 return false;
             default:
@@ -1706,6 +1731,15 @@ internal static class PermissionChecker
         var closure = BuildClosure(database, principalId);
         if (IsGrantedInClosure(database, closure, "VIEW DEFINITION", ClassDatabase, 0, 0, server, Permission.ViewDefinition))
             return null;
+        if (DeniedDefinitionClosure(database, closure, principalId) is { } narrowed)
+        {
+            foreach (var (_, principal) in database.Principals)
+            {
+                if (principal.PrincipalId <= Database.SysPrincipalId || principal.IsFixedRole)
+                    _ = narrowed.Add(principal.PrincipalId);
+            }
+            return narrowed;
+        }
         // The ALTER ANY permission of each principal kind reveals that kind:
         // db_accessadmin sees every user, db_securityadmin every role.
         var users = IsGrantedInClosure(database, closure, "ALTER ANY USER", ClassDatabase, 0, 0, server, Permission.Other);
@@ -1743,6 +1777,8 @@ internal static class PermissionChecker
         var closure = BuildClosure(database, principalId);
         if (IsGrantedInClosure(database, closure, "VIEW DEFINITION", ClassDatabase, 0, 0, server, Permission.ViewDefinition))
             return null;
+        if (DeniedDefinitionClosure(database, closure, principalId) is { } narrowed)
+            return narrowed;
         var users = IsGrantedInClosure(database, closure, "ALTER ANY USER", ClassDatabase, 0, 0, server, Permission.Other);
         var roles = IsGrantedInClosure(database, closure, "ALTER ANY ROLE", ClassDatabase, 0, 0, server, Permission.Other);
         var applicationRoles = IsGrantedInClosure(database, closure, "ALTER ANY APPLICATION ROLE", ClassDatabase, 0, 0, server, Permission.Other);
@@ -1755,6 +1791,22 @@ internal static class PermissionChecker
             }
         }
         return closure;
+    }
+
+    /// <summary>
+    /// Under a database-scope <c>DENY VIEW DEFINITION</c> reaching the
+    /// principal, the principals it sees: its roles but not itself, and no
+    /// kind its <c>ALTER ANY</c> permissions would reveal (probed 2026-10-06
+    /// against SQL Server 2025, whether the deny names the user or a role it
+    /// belongs to); null when no such deny binds.
+    /// </summary>
+    private static HashSet<int>? DeniedDefinitionClosure(Database database, HashSet<int> closure, int principalId)
+    {
+        if (!IsDenied(database, closure, "VIEW DEFINITION", ClassDatabase, 0, 0))
+            return null;
+        var narrowed = new HashSet<int>(closure);
+        _ = narrowed.Remove(principalId);
+        return narrowed;
     }
 
     /// <summary>Whether a restricted principal sees a user-defined type: its owner, or a holder of any permission on it.</summary>
@@ -1811,6 +1863,29 @@ internal static class PermissionChecker
     }
 
     private static readonly Permission[] DefinitionPermissions = [Permission.ViewDefinition, Permission.Alter, Permission.TakeOwnership];
+
+    /// <summary>
+    /// Whether the closure holds <paramref name="permissionName"/> on the
+    /// securable <c>WITH GRANT OPTION</c> — a <c>W</c> row on it or on a scope
+    /// covering it, for column <paramref name="columnOrdinal"/> when non-zero.
+    /// </summary>
+    internal static bool IsGrantable(Database database, HashSet<int> closure, string permissionName, byte securableClass, int majorId, int schemaId, int columnOrdinal = 0)
+    {
+        var satisfiers = BuildSatisfiers(database, permissionName, securableClass, majorId, schemaId, columnOrdinal);
+        foreach (var s in satisfiers)
+        {
+            foreach (var row in database.Permissions.On(s.Class, s.MajorId))
+            {
+                if (row.State == PermissionState.GrantWithGrantOption && Matches(row, s) && closure.Contains(row.GranteePrincipalId))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary><see cref="IsDenied(Database, HashSet{int}, string, byte, int, int)"/> for a principal whose closure isn't built yet.</summary>
+    internal static bool IsDenied(Database database, int principalId, string permissionName, byte securableClass, int majorId, int schemaId) =>
+        IsDenied(database, BuildClosure(database, principalId), permissionName, securableClass, majorId, schemaId);
 
     /// <summary>Whether a <c>DENY</c> reaches <paramref name="permissionName"/> on the securable — an explicit row or a deny role.</summary>
     private static bool IsDenied(Database database, HashSet<int> closure, string permissionName, byte securableClass, int majorId, int schemaId)

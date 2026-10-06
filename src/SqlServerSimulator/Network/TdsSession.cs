@@ -1547,7 +1547,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
     {
         foreach (var error in exception.Errors)
         {
-            if (exception.EndsSession && error.Number == 0)
+            if ((exception.EndsSession || exception.RaisedByClient) && error.Number == 0)
                 continue;
             var sessionKilled = exception.EndsSession && error.Number == 596;
             // An informational entry riding with the errors (Msg 2724 after a
