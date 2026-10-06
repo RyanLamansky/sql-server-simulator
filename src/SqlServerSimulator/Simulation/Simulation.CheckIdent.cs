@@ -171,7 +171,7 @@ partial class Simulation
         }
 
         if (informational)
-            batch.AppendInfoError(@class: 0, state: 1, number: 2528, message: "DBCC execution completed. If DBCC printed error messages, contact your system administrator.");
+            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.DbccExecutionCompletedMessage(batch));
         return true;
 
         void Reseed(Int128 value)

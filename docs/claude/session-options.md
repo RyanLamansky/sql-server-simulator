@@ -45,6 +45,7 @@ The value-taking options refuse a value their grammar has no slot for (probed 20
 `NOEXEC`, `PARSEONLY` and `DEADLOCK_PRIORITY` have no bit.
 `SESSIONPROPERTY` answers only its documented seven and NULL for the rest — `IMPLICIT_TRANSACTIONS`, `CURSOR_CLOSE_ON_COMMIT` and `ANSI_NULL_DFLT_ON` included (probed 2026-09-28).
 `sys.dm_exec_sessions` / `sys.dm_exec_requests` report `ansi_null_dflt_on`, `deadlock_priority`, and `ansi_defaults`, which reads 1 only while all seven options the bundle sets are on, so a SqlClient session — whose login turns `IMPLICIT_TRANSACTIONS` and `CURSOR_CLOSE_ON_COMMIT` back off — reads 0.
+For the session reading it, `sys.dm_exec_sessions`' `quoted_identifier` — and the `QUOTED_IDENTIFIER` part of `ansi_defaults` — is the value its batch began with, a `SET` inside the batch reaching only the next one (probed 2026-10-06 against SQL Server 2025).
 
 ## `ARITHIGNORE` and `ARITHABORT`
 
@@ -68,6 +69,16 @@ Sets `ANSI_NULLS`, `ANSI_NULL_DFLT_ON`, `ANSI_PADDING`, `ANSI_WARNINGS`, `CURSOR
 What a `CREATE TABLE` column stating neither `NULL` nor `NOT NULL` gets (`Simulation.DefaultsColumnsToNull`): nullable under `ANSI_NULL_DFLT_ON`, `NOT NULL` under `ANSI_NULL_DFLT_OFF`, and with both off the database's `ANSI_NULL_DEFAULT` — tempdb's, off, for a `#temp` table.
 Setting either on turns the other off; setting one off leaves the other alone, so `SET ANSI_NULL_DFLT_ON OFF` alone already makes columns `NOT NULL` under a database whose option is off.
 An alias type's own nullability wins, a computed column's follows its expression, and the rule reaches no other column source: a table variable, a table type, `ALTER TABLE … ADD`, `ALTER COLUMN` and `SELECT … INTO` keep their own (all probed 2026-09-28).
+The database's `ANSI_NULL_DEFAULT` is read as the batch compiled: one an `ALTER DATABASE` changes in the same batch reaches only later batches (`BatchContext.CompiledAnsiNullDefaults`, probed 2026-09-28).
+
+## `ANSI_PADDING OFF` at `CREATE TABLE`
+
+A table, `#temp` table, `ALTER TABLE … ADD` column or `SELECT … INTO` created under `SET ANSI_PADDING OFF` keeps it per column (`HeapColumn.IsAnsiPaddingOff`), all probed 2026-10-06 against SQL Server 2025:
+
+- `sys.columns.is_ansi_padded` reads 0 for every column but the Unicode ones, and `COLUMNPROPERTY(…, 'UsesAnsiTrim')` 0 for the single-byte string and binary ones (`sql_variant` keeps 1).
+- A bounded `varchar` / `varbinary` stores a written value without its trailing spaces / zero bytes, down to one, so `''` stays empty and `'  '` keeps one space; `max` types and the Unicode ones store as written.
+- A nullable `char` / `binary` stores as its variable-length twin under the same trimming, `''` becoming one space, and reads back unpadded while every surface still names it `char(n)` (`CharSqlType.PaddingOffForm`); a `NOT NULL` one pads as usual.
+- `SELECT … INTO` copies a `varchar` value untrimmed but stores a `char` value trimmed, and a column copied from a trimming `char` keeps trimming whatever the session says; `ALTER COLUMN` pads again; a table variable always pads.
 
 ## `NOEXEC`
 
@@ -124,15 +135,11 @@ While either option is on the session skips the plan cache and the compiled-batc
 ## Not modeled yet
 
 - `FIPS_FLAGGER`'s warnings: real sends Msg 1021 (`FIPS Warning: Line 1 has the non-ANSI statement 'SET'.`) for each statement outside the level, where the simulator sends none.
-- `SET ROWCOUNT` doesn't cap a static cursor's population, where real's `@@CURSOR_ROWS` reads the capped count (1 under `ROWCOUNT 1`, probed 2026-10-04).
-- `sys.dm_exec_sessions.ansi_defaults` reads the session's `QUOTED_IDENTIFIER`, where real reads the batch's parse-time value, so a batch that ends with `SET ANSI_DEFAULTS OFF` reads 0 for its earlier `ON` on real.
-- `sys.dm_exec_cached_plans` and `sys.dm_exec_plan_attributes`, through which real reports a plan's `set_options`, `language_id`, `date_format` and `date_first` cache keys.
+- `sys.dm_exec_cached_plans` and `sys.dm_exec_plan_attributes`, through which real reports a plan's `set_options`, `language_id`, `date_format` and `date_first` cache keys; the rows themselves (use counts, sizes, which statements cache at all) follow real's caching policy.
 - `STATISTICS XML` / `PROFILE` and the `SHOWPLAN_*` family return plans; they parse and are discarded, so no result set arrives and a `SHOWPLAN` batch runs where real only describes it.
+  Not chased: the plan rows are the optimizer's (`|--Table Scan(OBJECT:(…), WHERE:(… = CONVERT_IMPLICIT(int,[@1],0)))`, costs and estimates in `SHOWPLAN_ALL` / `_XML`); only the statement-text rows — one per statement holding a query, the statements without one gathered in one result set — and `SHOWPLAN_ALL`'s `SELECT WITHOUT QUERY` rows are deterministic, which leaves the plan result sets real interleaves with them out (probed 2026-10-06 against SQL Server 2025).
 - `STATISTICS IO` lists nothing for a catalog view, where real lists the system base tables it read (`sysschobjs` …), and a system procedure's statements report nothing, where real's report each of its own (`sp_help`'s compile and a Msg 3612 per statement).
-- `STATISTICS IO` orders a hash join's, an `EXCEPT`'s and a foreign-key check's tables by the simulator's own read order, which is not always real's (a hash join's build side first, a referenced table ahead of the written one), and lists no `Worktable` for an `UPDATE` of a key column, where real's split-sort lists one.
-- `SET ANSI_PADDING OFF` at `CREATE TABLE` is discarded: real records `is_ansi_padded = 0` on every column and stores `varchar` without trailing spaces, `varbinary` without trailing zeros and a nullable `char` as `varchar` (probed 2026-10-01, re-checked 2026-10-03 against SQL Server 2025).
-- `FORCEPLAN`, `QUERY_GOVERNOR_COST_LIMIT`, `REMOTE_PROC_TRANSACTIONS` and `DISABLE_DEF_CNST_CHK` have no effect; `FORCEPLAN`, `REMOTE_PROC_TRANSACTIONS` and the `STATISTICS XML` / `PROFILE` switches are kept only for `DBCC USEROPTIONS` to list ([`dbcc.md`](dbcc.md#useroptions)), and not reverted when a module body that set them returns.
-
-## Divergences
-
-- `ANSI_NULL_DEFAULT` changed by `ALTER DATABASE` in the same batch as the `CREATE TABLE` it should govern: real had already settled the column's nullability as the batch compiled, under the old value, where the simulator reads the new one (probed 2026-09-28).
+- `STATISTICS IO` orders a hash join's, an `EXCEPT`'s and a foreign-key check's tables by the simulator's own read order, which is not always real's (a hash join's build side first, a referenced table ahead of the written one), lists no `Worktable` for an `UPDATE` of a key column, where real's split-sort lists one, and lists one ahead of a `FAST_FORWARD` cursor's live read, where real lists the table alone.
+  These follow real's plan: not chased.
+- `FORCEPLAN`, `QUERY_GOVERNOR_COST_LIMIT`, `REMOTE_PROC_TRANSACTIONS` and `DISABLE_DEF_CNST_CHK` have no effect; `FORCEPLAN`, `REMOTE_PROC_TRANSACTIONS` and the `STATISTICS XML` / `PROFILE` switches are kept only for `DBCC USEROPTIONS` to list ([`dbcc.md`](dbcc.md#useroptions)) and for a cursor's declared options (`FORCEPLAN`, [`cursors.md`](cursors.md#set-options-and-set-rowcount)), and not reverted when a module body that set them returns.
+  `FORCEPLAN`'s join order is the optimizer's to honor and shows only in a plan or in the order of rows no `ORDER BY` fixes: not chased.

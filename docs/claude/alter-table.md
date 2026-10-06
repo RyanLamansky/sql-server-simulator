@@ -170,7 +170,18 @@ Two elements naming one constraint alike are Msg 8168 before anything is added (
 `ALTER COLUMN col { ADD | DROP } { ROWGUIDCOL | SPARSE }` toggles a marker.
 Both are metadata here: the `$ROWGUID` pseudo-column isn't modeled, and the row encoder already omits a NULL from the row, so `SPARSE`'s storage bargain has nothing to buy.
 `sys.columns.is_rowguidcol` / `is_sparse` and `COLUMNPROPERTY(…, 'IsSparse')` are what observe the toggle.
-A column definition takes `SPARSE` too (`CREATE TABLE`, `ADD`), nullable by default, with the same refusals below plus **Msg 1919** state 3 (and Msg 1750) for a key over it and **Msg 1791** (and Msg 1750) for a DEFAULT on it (probed 2026-09-25); a sparse column set (`COLUMN_SET FOR ALL_SPARSE_COLUMNS`) raises `NotSupportedException`.
+A column definition takes `SPARSE` too (`CREATE TABLE`, `ADD`), nullable by default, with the same refusals below plus **Msg 1919** state 3 (and Msg 1750) for a key over it and **Msg 1791** (and Msg 1750) for a DEFAULT on it (probed 2026-09-25).
+
+### Sparse column sets
+
+`xml COLUMN_SET FOR ALL_SPARSE_COLUMNS` declares the table's sparse column set (all probed 2026-10-06 against SQL Server 2025):
+
+- It stores nothing: a read renders an element per non-NULL sparse column in column order, each value as `FOR XML` writes it (`<b />` for an empty string), and NULL when every sparse column is.
+  The column is a non-persisted computed column underneath (`ColumnSetValue`), yet `sys.columns` reports it `is_computed` 0 and `is_column_set` 1, and `sys.computed_columns` leaves it out.
+- It stands in for the sparse columns in `SELECT *`, an INSERT's implicit column list and `sp_columns`; naming a sparse column still reads it.
+- Writing it — INSERT, UPDATE, MERGE — sets each named sparse column, matching element names without regard to case, and every other sparse column to NULL.
+  A write naming both it and a sparse column is **Msg 360** as the statement compiles; content other than attribute-free elements holding text is **Msg 9524**, an attribute **Msg 9530**, a column named twice **Msg 9525**, an unknown one **Msg 1911** state 201, and text that won't convert **Msg 9532**.
+- A second one is **Msg 1732**, a type other than nullable `xml` **Msg 1733** (`NOT NULL` ahead of `COLUMN_SET` is the syntax error at it), and adding one to a table already holding sparse columns **Msg 1734**; a sparse column added after it joins it.
 
 Probed refusals:
 
@@ -314,7 +325,7 @@ A table type's `CREATE TYPE … AS TABLE` accepts one.
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named.
   Custom names matching the prefix would report `is_system_named = true` incorrectly.
   Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.
-- **Sparse column sets** (`cs xml COLUMN_SET FOR ALL_SPARSE_COLUMNS`) raise `NotSupportedException` at `CREATE TABLE`; real projects the set in `SELECT *` (`<a>5</a>` for one sparse column holding 5) and writes the sparse columns through it (probed 2026-10-03 against SQL Server 2025).
+- **A sparse column set's client metadata**: SqlClient's `GetSchemaTable` reports `IsColumnSet` false, where real's COLMETADATA flags the column, and `OUTPUT … INTO`, `BULK INSERT` and a bulk load don't write through one (Msg 271 as a computed column).
 
 ## EF Core integration
 

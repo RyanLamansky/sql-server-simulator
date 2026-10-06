@@ -419,4 +419,41 @@ public sealed class ModuleDeterminismTests
         AreEqual(1, sim.ExecuteScalar("select cast(objectpropertyex(object_id('dbo.fn_bound'), 'IsDeterministic') as int)"));
         AreEqual(0, sim.ExecuteScalar("select cast(objectpropertyex(object_id('dbo.fn_plain'), 'IsDeterministic') as int)"));
     }
+
+    /// <summary>
+    /// A derived table's or CTE's column carries the family of the select
+    /// item behind it, plain column, function result or declared column list
+    /// alike (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("(select dtcol as dt from dbo.t) d", 0)]
+    [DataRow("(select dtcol dt from dbo.t) d", 0)]
+    [DataRow("(select dt = dtcol from dbo.t) d", 0)]
+    [DataRow("(select dateadd(day, 1, dtcol) as dt from dbo.t) d", 0)]
+    [DataRow("(select isnull(dtcol, 0) as dt from dbo.t) d", 0)]
+    [DataRow("(select max(dtcol) as dt from dbo.t) d", 0)]
+    [DataRow("(select n as dt from dbo.t) d", 1)]
+    [DataRow("(select year(dtcol) as dt from dbo.t) d", 1)]
+    public void DerivedTableColumn_CarriesItsItemsFamily(string source, int expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int, dtcol datetime, n int)",
+            $"create view dbo.v with schemabinding as select convert(varchar(20), d.dt) c from {source}");
+        AreEqual(expected, sim.ExecuteScalar("select objectproperty(object_id('dbo.v'), 'IsDeterministic')"));
+    }
+
+    [TestMethod]
+    [DataRow("with c as (select dtcol as dt from dbo.t) select convert(varchar(20), dt) x from c", 0)]
+    [DataRow("with c (dt) as (select dtcol from dbo.t) select convert(varchar(20), dt) x from c", 0)]
+    [DataRow("with c (dt, k) as (select n, dtcol from dbo.t) select convert(varchar(20), k) x from c", 0)]
+    [DataRow("with c (dt, k) as (select n, dtcol from dbo.t) select convert(varchar(20), dt) x from c", 1)]
+    public void CteColumn_CarriesItsItemsFamily(string body, int expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.t (id int, dtcol datetime, n int)",
+            $"create view dbo.v with schemabinding as {body}");
+        AreEqual(expected, sim.ExecuteScalar("select objectproperty(object_id('dbo.v'), 'IsDeterministic')"));
+    }
 }

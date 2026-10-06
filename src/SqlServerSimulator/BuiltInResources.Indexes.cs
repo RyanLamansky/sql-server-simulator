@@ -438,6 +438,62 @@ internal static partial class BuiltInResources
             new("parent_object_id", SqlType.Int32, null, false),
         ], static (_, _) => EmptyCatalogRows);
 
+        // The columnstore storage views: a columnstore index's rows sit on the
+        // ordinary heap here, never in row groups, segments or dictionaries,
+        // so each ships its probe-confirmed shape empty — what real returns
+        // over a database holding no compressed row group (SQL Server 2025,
+        // 2026-10-06). Real's rows describe its own compression (sizes,
+        // encodings, hobt ids), which nothing here could match.
+        Sys("column_store_dictionaries",
+        [
+            new("partition_id", SqlType.BigInt, null, true),
+            new("hobt_id", SqlType.BigInt, null, true),
+            new("column_id", SqlType.Int32, null, true),
+            new("dictionary_id", SqlType.Int32, null, true),
+            new("version", SqlType.Int32, null, true),
+            new("type", SqlType.Int32, null, true),
+            new("last_id", SqlType.Int32, null, true),
+            new("entry_count", SqlType.BigInt, null, true),
+            new("on_disk_size", SqlType.BigInt, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("column_store_row_groups",
+        [
+            new("object_id", SqlType.Int32, null, true),
+            new("index_id", SqlType.Int32, null, true),
+            new("partition_number", SqlType.Int32, null, true),
+            new("row_group_id", SqlType.Int32, null, true),
+            new("delta_store_hobt_id", SqlType.BigInt, null, true),
+            new("state", SqlType.TinyInt, null, true),
+            new("state_description", nvarchar60Catalog, 60, false),
+            new("total_rows", SqlType.BigInt, null, true),
+            new("deleted_rows", SqlType.BigInt, null, true),
+            new("size_in_bytes", SqlType.BigInt, null, true),
+        ], static (_, _) => EmptyCatalogRows);
+        Sys("column_store_segments",
+        [
+            new("partition_id", SqlType.BigInt, null, true),
+            new("hobt_id", SqlType.BigInt, null, true),
+            new("column_id", SqlType.Int32, null, true),
+            new("segment_id", SqlType.Int32, null, true),
+            new("version", SqlType.Int32, null, true),
+            new("encoding_type", SqlType.Int32, null, true),
+            new("row_count", SqlType.Int32, null, true),
+            new("has_nulls", SqlType.Int32, null, true),
+            new("base_id", SqlType.BigInt, null, true),
+            new("magnitude", SqlType.Float, null, true),
+            new("primary_dictionary_id", SqlType.Int32, null, true),
+            new("secondary_dictionary_id", SqlType.Int32, null, true),
+            new("min_data_id", SqlType.BigInt, null, true),
+            new("max_data_id", SqlType.BigInt, null, true),
+            new("null_value", SqlType.BigInt, null, true),
+            new("on_disk_size", SqlType.BigInt, null, true),
+            new("collation_id", SqlType.Int32, null, true),
+            new("min_deep_data", SqlType.Varbinary, 18, true),
+            new("max_deep_data", SqlType.Varbinary, 18, true),
+        ], static (_, _) => EmptyCatalogRows);
+        views["sys.column_store_row_groups"].EnforcesJoinOrder = true;
+        views["sys.dm_db_xtp_table_memory_stats"].EnforcesJoinOrder = true;
+
         // sys.json_index_paths lists each JSON index's paths as written; its
         // siblings sys.selective_xml_index_namespaces and sys.vector_indexes
         // are index-feature views for capabilities the simulator doesn't

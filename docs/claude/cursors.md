@@ -381,6 +381,17 @@ The request the keywords **imply** counts as much as one spelled out, probe-conf
 It surfaces through the standard `InfoMessage` pipeline.
 A deferred body the cursor *can* follow warns about nothing, matching real: `DECLARE … DYNAMIC TYPE_WARNING` over a plain view is silent on both, and over a DISTINCT or TOP view fires on both (probe-confirmed).
 
+## SET options and `SET ROWCOUNT`
+
+A cursor keeps the SET options it was declared under (`CursorSetOptions`): an `OPEN`, or a `FETCH` from a KEYSET, DYNAMIC or FAST_FORWARD cursor, under any other values of `ANSI_NULLS`, `ANSI_PADDING`, `ANSI_WARNINGS`, `CONCAT_NULL_YIELDS_NULL`, `NUMERIC_ROUNDABORT`, `ANSI_NULL_DFLT_ON` / `_OFF`, `FORCEPLAN`, `NO_BROWSETABLE`, `DATEFORMAT`, `DATEFIRST`, `LANGUAGE` or `ROWCOUNT` is **Msg 16958** state 3, checked ahead of whether the cursor is open; a STATIC cursor fetches on, and an option changed and changed back leaves the cursor usable (all probed 2026-10-06 against SQL Server 2025).
+`ARITHABORT`, `QUOTED_IDENTIFIER`, `NOCOUNT`, `XACT_ABORT`, `TEXTSIZE`, `LOCK_TIMEOUT`, the isolation level, `CURSOR_CLOSE_ON_COMMIT`, `DEADLOCK_PRIORITY` and `STATISTICS IO` aren't among them.
+
+So the `SET ROWCOUNT` a cursor opens under is the one it was declared under, and it caps a STATIC or KEYSET cursor's population as it caps a query — `@@CURSOR_ROWS` reads the cap — while a DYNAMIC cursor fetches past it.
+
+## Per-row projection
+
+A KEYSET, DYNAMIC or FAST_FORWARD cursor evaluates its select list only as a fetch lands on a row (`Selection.CursorRow.ProjectionError`), so `SELECT 1 / (id - 2)` fetches row 1 and fails on row 2, the failed fetch leaving the cursor where it was — a second `FETCH NEXT` meets row 2 again — and `@@FETCH_STATUS` at -1; a STATIC cursor, which projects as it populates, fails its `OPEN` (probed 2026-10-02 and 2026-10-06 against SQL Server 2025).
+
 ## `SET CURSOR_CLOSE_ON_COMMIT`
 
 With the option on, a `COMMIT` or `ROLLBACK` that ends a transaction closes every cursor opened inside it — static and cursor-variable cursors included — so a later `FETCH` is Msg 16917 and `CURSOR_STATUS` reads -1 (probed 2026-09-28 against SQL Server 2025).
@@ -407,14 +418,15 @@ A session without `VIEW SERVER STATE` sees only its own, and the wrong argument 
 - **`sql_handle`** is the declaring batch's handle, and **`statement_start_offset`** / **`statement_end_offset`** the byte offsets of the `DECLARE`'s first and last characters in it, so `sys.dm_exec_sql_text` and a substring recover the declaration.
 - **`statement_sql_handle`** / **`statement_context_id`** are the `DECLARE` text's Query Store statement handle (real's MD5 derivation, so the bytes match) and the store's context settings id for the session's settings — the declaration adds that row as real's does — while the database's store is READ_WRITE, and NULL with it off.
 - **`fetch_status`** is the cursor's own last fetch status: -9 before any, kept through `CLOSE` and a re-`OPEN`.
-- **`fetch_buffer_size`** is 1 while the last `FETCH` since `OPEN` landed on a row, else 0.
+- **`fetch_buffer_size`** is 1 while the last `FETCH` since `OPEN` landed on a row, else 0; an API server cursor's is the rows its last fetch buffered, `fetch_buffer_start` the first one's position (-1 when it buffered none, and for a DYNAMIC or FAST_FORWARD cursor) and `fetch_status` 0 once it has fetched (probed 2026-10-06).
+- **`name`** is NULL for an API server cursor, whose `properties` lead with `API` where a T-SQL cursor's lead with `TSQL` (probed 2026-10-06).
 - **`fetch_buffer_start`** is 0 before a `FETCH` since `OPEN`, before the first row and while closed, -1 past the last row, and on a row its 1-based position for a STATIC or KEYSET cursor and -1 for a DYNAMIC or FAST_FORWARD one.
 - **`is_open`** follows `OPEN` / `CLOSE`; `is_async_population` and `is_close_on_commit` read 0 — the latter for a cursor declared under `SET CURSOR_CLOSE_ON_COMMIT ON` too, as real reports one before its `OPEN` — and `ansi_position` 1.
 
 ## Divergences from SQL Server (documented, not byte-identical)
 
 - **`sys.dm_exec_cursors`' cost and plan columns** — `worker_time`, `reads`, `writes` and `dormant_duration` read 0 and `plan_generation_num` 1, where real's count work done and recompiles (a cursor declared in the batch that created its table reports its statement's recompile count there); `cursor_id` is the simulator's own handle numbering, and `statement_context_id` the simulator's own store's id.
-- **`sys.dm_exec_cursors` for another session** lists only its global cursors: its local cursors and cursor variables live on the batch it is running, which only the querying session reaches.
+- **`sys.dm_exec_cursors` for another session** lists only its global cursors: its local cursors and cursor variables live on the batch it is running, which only the querying session reaches — they exist only while that session is mid-batch, a blocked one for instance.
 - **A cursor declared in a module body** reports offsets into the body's text and a handle of it, where real's are into the module's whole definition.
 
 - **A cursor over a generator source is forced STATIC** — a TVF, a catalog view, `VALUES`, `OPENJSON`, PIVOT, `.nodes()`, a linked server.
@@ -441,6 +453,7 @@ A session without `VIEW SERVER STATE` sees only its own, and the wrong argument 
   The common small-value case is exact.
 - **DECLARE CURSOR inside an un-taken `IF` branch** still parses (and resolves names in) its SELECT — the same eager-resolution quirk all statements share.
 - **FAST_FORWARD settles a DISTINCT at OPEN even when a key makes it redundant** — real's optimizer drops `DISTINCT` over a projection holding the table's key and then reads live, as it does a plain query.
+  An optimizer rewrite: not chased.
 - **Msg 1049's line** varies between runs on real (0 in most placements, a small number in others); the simulator reports 0.
 - **A cursor parameter missing `VARYING OUTPUT`** is Msg 1051 alone, where real goes on to report the body's uses of the parameter as undeclared variables (Msg 137).
 - **`sp_describe_cursor_tables`' server name** is the simulator's `@@SERVERNAME`, and object ids are the simulator's own.
@@ -448,5 +461,4 @@ A session without `VIEW SERVER STATE` sees only its own, and the wrong argument 
 ## Not modeled yet
 
 - **Asynchronous keyset population** under a non-default `cursor threshold` server option, where real reports a negative `@@CURSOR_ROWS` while it populates; the default (-1) populates synchronously, which is what the simulator always does.
-- **`sys.dm_exec_cursors` rows for API server cursors** — an `sp_cursoropen` cursor lives on the TDS session rather than the connection, so the DMV doesn't list it, where real does as `API | <type> | …`.
-- **A projection error per fetch.** Real evaluates a dynamic or keyset cursor's select list row by row as it fetches, so `SELECT 1 / (id - 2)` fetches row 1 and raises on row 2; here the plan projects every row at the first fetch (`Selection.EnumerateForCursor`), which raises before row 1 arrives (probed 2026-10-02 against SQL Server 2025).
+  How far population has got when a statement reads it is a matter of timing, so the simulator would match real only by populating synchronously anyway.

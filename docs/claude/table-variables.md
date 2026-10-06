@@ -122,8 +122,8 @@ The defaulted value is coerced into the target column's type via the same `Coerc
 
 - A table type's backing table lists none of its indexes in `sys.indexes` — not its PRIMARY KEY's, nor an inline `INDEX` — where real lists both under `sys.table_types.type_table_object_id`.
 - A table variable carries a name inside `tempdb` — `#` and eight hex digits of a negative object id, a fresh one per declaration, typed or not (`Simulation.AllocateTableVariableInternalName`) — which real's messages and system-named constraints use (probed 2026-09-28 against SQL Server 2025): Msg 2628 names the table `tempdb.dbo.#B1B3DE12`, a CHECK or DEFAULT keeps all nine characters (`CK__#B678932F__a__…`), a PRIMARY KEY or UNIQUE the first eight (`PK__#BA49241__…`), and Msg 547 names the table `@t` with no column, while Msg 515 and Msg 2627 keep `@t`.
-  Real draws the id from `tempdb`'s allocator, whose values carry the instance's history, so the digits match its shape, not its value; the constraint names' own hash suffixes follow the simulator's general constraint-name quirk.
-- `tempdb.sys.tables` doesn't list a table variable, where real lists it under that `#`-and-hex name.
+  Real draws the id from `tempdb`'s allocator, whose values carry the instance's history, so the digits match its shape, not its value; the hex is the table variable's object id, which spends no id of the current database's; the constraint names' own hash suffixes follow the simulator's general constraint-name quirk.
+- `tempdb`'s catalog lists only the running batch's table variables, where real lists every session's, under the `#`-and-hex name that is also its object id ([`temp-tables.md`](temp-tables.md#tempdbs-catalog-lists-them)).
 - A multi-statement TVF's return table is named `tempdb.dbo.@r` in Msg 2628 and its Msg 547 names `tempdb`, where real names the function (`db.dbo.f`) and its database (probed 2026-09-28).
 
 ## Architecture notes

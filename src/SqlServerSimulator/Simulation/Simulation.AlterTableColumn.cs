@@ -174,6 +174,8 @@ partial class Simulation
                 throw new InvalidOperationException($"Computed-column resolution left index {i} unresolved.");
             newColumns[i] = heapColumns[i]!;
         }
+        if (!context.Batch.Connection.AnsiPadding)
+            newColumns = UnderSessionAnsiPadding(newColumns, context.Batch.Connection);
 
         // A table holds one ROWGUIDCOL; adding a second is Msg 8196 state 16.
         if (Array.Exists(newColumns, column => column.IsRowGuidCol) && Array.Exists(table.Columns, column => column.IsRowGuidCol))
@@ -246,6 +248,7 @@ partial class Simulation
         RejectOversizedMinimumRow(combined, table.Name);
         table.Columns = combined;
         table.RecomputeStorageProjections();
+        table.AdoptColumnSet();
         // Each added column takes the next id past the watermark, so it never
         // reuses the id of a previously dropped column (probe-confirmed).
         table.AssignColumnIds();

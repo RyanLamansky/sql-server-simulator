@@ -337,6 +337,13 @@ partial class Simulation
 
         var rows = new List<SqlValue[]>();
         var visible = PermissionEnforcement.ObjectVisibility(batch, database);
+        // In tempdb a #temp name finds the session's table, listed under its
+        // name inside tempdb (probed 2026-10-06 against SQL Server 2025).
+        if (database.Name == TempdbDatabaseName && tableName is ['#', ..] && !tableName.StartsWith("##", StringComparison.Ordinal)
+            && batch.TryResolveTable(new MultiPartName(tableName), out var tempTable) && Matches(ownerPattern, Database.DefaultSchemaName))
+        {
+            AppendColumnRows(rows, qualifier, SqlValue.FromSystemName(Database.DefaultSchemaName), tempTable.CatalogName, tempTable.Columns, byName, columnPattern, classic);
+        }
         if (tableQualifier is null || batch.CurrentDatabase.Collation.Equals(tableQualifier, database.Name))
         {
             foreach (var schema in database.Schemas.EnumerateValues().OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase))
@@ -376,13 +383,15 @@ partial class Simulation
         HeapColumn[] columns, FrozenDictionary<string, object?[]> byName, LikeMatcher? columnPattern, bool classic)
     {
         var tableNameValue = SqlValue.FromSystemName(tableName);
+        var hasColumnSet = Array.Exists(columns, static column => column.IsColumnSet);
         for (var i = 0; i < columns.Length; i++)
         {
             var col = columns[i];
             // Real lists no row for a vector or json column: sp_datatype_info
             // has no entry for either for the join to find (probed 2026-09-26
-            // against SQL Server 2025).
-            if (!Matches(columnPattern, col.Name) || col.Type is VectorSqlType or JsonSqlType)
+            // against SQL Server 2025). A sparse column set stands in for its
+            // sparse columns (probed 2026-10-06).
+            if (!Matches(columnPattern, col.Name) || col.Type is VectorSqlType or JsonSqlType || (hasColumnSet && col.IsSparse))
                 continue;
             var row = BuildSpColumnsRow(qualifier, owner, tableNameValue, col, i + 1, byName);
             rows.Add(classic ? ClassicSpColumnsRow(row, col) : row);
@@ -467,7 +476,7 @@ partial class Simulation
         // Server 2025). An exact-numeric identity spells its type with empty
         // parentheses, `decimal() identity` (probed 2026-10-02).
         var isIdentity = (col.Identity ?? col.IdentitySource) is not null;
-        var isComputed = col.Computed is not null;
+        var isComputed = col.Computed is not null && !col.IsColumnSet;
         var shownName = col.AliasType?.Name ?? (isIdentity && col.Type is DecimalSqlType ? baseName + "()" : baseName);
 
         SqlValue Smallint(object? cell) =>
@@ -496,8 +505,8 @@ partial class Simulation
             NullableInt(charOctetLength),                                        // CHAR_OCTET_LENGTH
             SqlValue.FromInt32(ordinal),                                         // ORDINAL_POSITION
             SqlValue.FromString(CatalogVarchar254, col.Nullable ? "YES" : "NO"), // IS_NULLABLE
-            Flag(false),                                                         // SS_IS_SPARSE
-            Flag(false),                                                         // SS_IS_COLUMN_SET
+            Flag(col.IsSparse),                                                  // SS_IS_SPARSE
+            Flag(col.IsColumnSet),                                               // SS_IS_COLUMN_SET
             Flag(isComputed),                                                    // SS_IS_COMPUTED
             Flag(isIdentity),                                                    // SS_IS_IDENTITY
             clrAssemblyName is null ? SqlValue.Null(SqlType.SystemName) : qualifier,              // SS_UDT_CATALOG_NAME

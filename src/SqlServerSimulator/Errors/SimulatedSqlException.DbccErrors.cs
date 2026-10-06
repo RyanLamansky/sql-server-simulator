@@ -37,7 +37,19 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException DbccObjectPermissionDenied(string userName, string command, string objectName, byte state) =>
         new($"User '{userName}' does not have permission to run DBCC {command} for object '{objectName}'.", 2557, 14, state);
 
-    /// <summary>Msg 229 state 1: <c>DBCC CLEANTABLE</c> / <c>INDEXDEFRAG</c> without <c>ALTER</c> on the table.</summary>
+    /// <summary>
+    /// Msg 8968: a <c>DBCC PAGE</c> address past the end of its file, or in a
+    /// file the database doesn't have. It doesn't stop the statement, whose
+    /// Msg 2528 still follows (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException DbccPageOutOfRange(int fileId, long pageId) =>
+        new($"Table error: DBCC PAGE page ({fileId}:{pageId}) (object ID 0, index ID 0, partition ID 0, alloc unit ID 0 (type Unknown)) is out of the range of this database.", 8968, 16, 1);
+
+    /// <summary>Msg 2514 state 9: a <c>DBCC PAGE</c> of a log file's page other than its header, page 0.</summary>
+    internal static SimulatedSqlException DbccPageLogHeaderOnly() =>
+        new("A DBCC PAGE error has occurred: only supported for log file header page.", 2514, 16, 9);
+
+    /// <summary>Msg 229 state 1: <c>DBCC CLEANTABLE</c> / <c>INDEXDEFRAG</c> / <c>SHOWCONTIG</c> without <c>ALTER</c> on the table.</summary>
     internal static SimulatedSqlException DbccPermissionDeniedOnObject(string objectName, string databaseName, string schemaName) =>
         new($"The DBCC permission was denied on the object '{objectName}', database '{databaseName}', schema '{schemaName}'.", 229, 14, 1);
 
@@ -97,10 +109,10 @@ partial class SimulatedSqlException
     /// closes the statement with: <c>SHOW_STATISTICS</c>' missing statistic or
     /// argument (probed 2026-10-04 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException FollowedByDbccCompleted(SimulatedSqlException error)
+    internal static SimulatedSqlException FollowedByDbccCompleted(SimulatedSqlException error, Language language)
     {
-        const string Completed = "DBCC execution completed. If DBCC printed error messages, contact your system administrator.";
-        return FollowedBy(error, new(Completed, new SimulatedError(@class: 0, lineNumber: 0, Completed, 2528, procedure: "", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 1)));
+        var completed = language.DbccCompletedMessage;
+        return FollowedBy(error, new(completed, new SimulatedError(@class: 0, lineNumber: 0, completed, 2528, procedure: "", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 1)));
     }
 
     /// <summary>
@@ -132,7 +144,7 @@ partial class SimulatedSqlException
 
     /// <summary>Msg 2528, closing every <c>DBCC</c> run that <c>WITH NO_INFOMSGS</c> doesn't silence.</summary>
     internal static SimulatedError DbccExecutionCompletedMessage(BatchContext batch) =>
-        batch.InfoMessage(@class: 0, state: 1, number: 2528, "DBCC execution completed. If DBCC printed error messages, contact your system administrator.");
+        batch.InfoMessage(@class: 0, state: 1, number: 2528, batch.Connection.Language.DbccCompletedMessage);
 
     /// <summary>Msg 7969: <c>DBCC OPENTRAN</c> found no transaction that has written to the database.</summary>
     internal static SimulatedError NoActiveOpenTransactionsMessage(BatchContext batch) =>
@@ -195,6 +207,13 @@ partial class SimulatedSqlException
         "Service Broker Msg 9670, State 1: Remote Service Bindings analyzed: 0.",
         "Service Broker Msg 9605, State 1: Conversation Priorities analyzed: 0.",
     ];
+
+    /// <summary>Msg 5232's text: <c>DBCC CHECKDB WITH TABLOCK</c> skipping the catalog and Service Broker checks.</summary>
+    internal const string CatalogChecksSkippedText = "DBCC CHECKDB will not check SQL Server catalog or Service Broker consistency because a database snapshot could not be created or because WITH TABLOCK was specified.";
+
+    /// <summary>Msg 5232, severity 10: <see cref="CatalogChecksSkippedText"/>.</summary>
+    internal static SimulatedError CatalogChecksSkippedMessage(BatchContext batch) =>
+        batch.InfoMessage(@class: 0, state: 1, number: 5232, CatalogChecksSkippedText);
 
     /// <summary>Msg 8997, one line of <see cref="ServiceBrokerCheckTexts"/>.</summary>
     internal static SimulatedError ServiceBrokerCheckMessage(BatchContext batch, string text) =>

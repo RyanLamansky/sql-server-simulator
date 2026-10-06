@@ -1249,4 +1249,17 @@ public sealed class CreateIndexTests
     [TestMethod]
     public void FilteredIndex_Clustered_IsASyntaxError()
         => new Simulation().AssertSqlError($"{FilterTable} create clustered index ix on fx (a) where a > 1", 102, "Incorrect syntax near 'WHERE'.");
+
+    /// <summary>
+    /// A filter's grammar takes only comparisons: a bare column is the plain
+    /// syntax error at the token after it (probed 2026-10-06 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create index ix on dbo.f (b) where (a);", 102)]
+    [DataRow("create index ix on dbo.f (b) where a;", 102)]
+    [DataRow("create index ix on dbo.f (b) where (a) and b = 1;", 156)]
+    [DataRow("create statistics st on dbo.f (b) where (a);", 102)]
+    public void FilterOfABareColumn_IsASyntaxError(string statement, int number)
+        => _ = new Simulation().AssertSqlError($"create table dbo.f (a bit, b int); {statement}", number);
 }

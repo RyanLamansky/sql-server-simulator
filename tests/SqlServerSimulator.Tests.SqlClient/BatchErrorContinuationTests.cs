@@ -162,13 +162,13 @@ public sealed class BatchErrorContinuationTests
         // No SimulatedSqlException factory short of ending the session produces
         // a class >= 17 (batch / connection-terminating) severity, and deadlock
         // (class 13) needs concurrent sessions to provoke; NotSupportedException
-        // is the reachable batch-aborting case here (DBCC PAGE), surfacing as a
+        // is the reachable batch-aborting case here (DBCC PAGE's page dump), surfacing as a
         // Msg 50000 error token that ends the batch. The insert after it must
         // NOT run — the contrast with continued errors above.
         var ex = await Assert.ThrowsAsync<SqlException>(async () =>
         {
             await using var command = new SqlCommand(
-                "create table #t (a int); dbcc page (0, 1, 0, 0); insert #t values (1)",
+                "create table #t (a int); dbcc page (0, 1, 0, 0) with tableresults; insert #t values (1)",
                 connection);
             _ = await command.ExecuteNonQueryAsync(TestContext.CancellationToken);
         });

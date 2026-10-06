@@ -108,6 +108,7 @@ partial class Simulation
             "INDEXDEFRAG" => RunDbccIndexDefrag(batch, dbcc),
             "LOGINFO" => RunDbccLogInfo(batch, dbcc),
             "OPENTRAN" => RunDbccOpenTran(batch, dbcc),
+            "PAGE" => RunDbccPage(batch, dbcc),
             "PINTABLE" => RunDbccPinTable(batch, dbcc, "pintable"),
             "SQLPERF" => RunDbccSqlPerf(batch, dbcc),
             "TRACEOFF" => RunDbccTraceOnOff(batch, dbcc, on: false),
@@ -117,7 +118,7 @@ partial class Simulation
             "UPDATEUSAGE" => RunDbccUpdateUsage(batch, dbcc),
             "USEROPTIONS" => RunDbccUserOptions(batch, dbcc),
             _ => IsUnbuiltDbccCommand(upper)
-                ? throw UnbuiltDbccCommand(batch, upper)
+                ? throw UnbuiltDbccCommand(batch, dbcc, upper)
                 : throw SimulatedSqlException.DbccStatementIncorrect(),
         };
     }
@@ -128,8 +129,15 @@ partial class Simulation
     /// <c>PROCCACHE</c> (db_owner) — and otherwise <see cref="NotSupportedException"/>
     /// (probed 2026-10-04 against SQL Server 2025).
     /// </summary>
-    private static Exception UnbuiltDbccCommand(BatchContext batch, ReadOnlySpan<char> upper)
+    private static Exception UnbuiltDbccCommand(BatchContext batch, DbccInvocation dbcc, ReadOnlySpan<char> upper)
     {
+        // SHOWCONTIG over one table asks ALTER on it before anything else
+        // (probed 2026-10-06 against SQL Server 2025).
+        if (upper is "SHOWCONTIG" && dbcc.Arguments.Count > 0)
+        {
+            var (table, _, database) = ResolveDbccTable(batch, dbcc, 0, allowTemporary: true);
+            RequireDbccTableAlter(batch, database, table);
+        }
         if (!IsSysadminSession(batch))
         {
             switch (upper)
@@ -142,8 +150,6 @@ partial class Simulation
                     return DbccPermissionDenied(batch, "memorystatus", 1);
                 case "OUTPUTBUFFER":
                     return DbccPermissionDenied(batch, "outputbuffer", 1);
-                case "PAGE":
-                    return DbccPermissionDenied(batch, "page", 1);
                 case "PROCCACHE" when !PermissionEnforcement.IsOwner(batch, batch.CurrentDatabase):
                     return SimulatedSqlException.DbccDatabasePermissionDenied(batch.Connection.Security.Effective.DatabasePrincipalName, "proccache", batch.CurrentDatabase.Name);
                 default:
@@ -162,7 +168,7 @@ partial class Simulation
     private static bool IsUnbuiltDbccCommand(ReadOnlySpan<char> upper) => upper switch
     {
         "BUFFER" or "CLONEDATABASE" or "DBINFO" or "DBTABLE" or "EXTENTINFO" or "FILEHEADER" or "IND" or "LOG"
-            or "MEMORYSTATUS" or "OUTPUTBUFFER" or "PAGE" or "PROCCACHE" or "SHOWCONTIG" or "SHOWFILESTATS" or "SQLMGRSTATS"
+            or "MEMORYSTATUS" or "OUTPUTBUFFER" or "PROCCACHE" or "SHOWCONTIG" or "SHOWFILESTATS" or "SQLMGRSTATS"
             or "STACKDUMP" or "TUPLEMOVER" or "WRITEPAGE" => true,
         _ => false,
     };
@@ -734,6 +740,48 @@ partial class Simulation
     /// <c>DBCC OPENTRAN</c> prints. The simulator keeps no log to number.
     /// </summary>
     private const int ActiveLogSequence = 34;
+
+    /// <summary>
+    /// <c>DBCC PAGE ( database, file, page [, printopt] ) [WITH …]</c>,
+    /// <c>sysadmin</c> only. Without trace flag 3604 real prints no dump, so a
+    /// page in range completes with Msg 2528 alone; an address past its file,
+    /// or in a file the database lacks, is Msg 8968 and the statement still
+    /// completes; a log file's page other than its header is Msg 2514. The
+    /// arguments check in order — the database (Msg 2520 / 2521), each other
+    /// argument's type (Msg 2560 state 9) — then the address, then the print
+    /// option's range (Msg 2560 state 102 past 3). The dump itself — under
+    /// trace flag 3604 or <c>WITH TABLERESULTS</c> — is real's page image,
+    /// which the simulator's storage doesn't have (probed 2026-10-06 against
+    /// SQL Server 2025).
+    /// </summary>
+    private static List<SimulatedStatementOutcome> RunDbccPage(BatchContext batch, DbccInvocation dbcc)
+    {
+        RequireDbccSysadmin(batch, "page", 1);
+        dbcc.RequireArgumentCount(3, 4);
+        var database = ResolveDbccDatabase(batch, dbcc.Arguments[0], 1);
+        var fileId = dbcc.IntegerArgument(batch, 1);
+        var pageId = dbcc.IntegerArgument(batch, 2);
+        var printOption = dbcc.Arguments.Count == 4 ? dbcc.IntegerArgument(batch, 3) : 0;
+        if (fileId is < int.MinValue or > int.MaxValue)
+            throw SimulatedSqlException.DbccParameterIsIncorrect(2);
+        var file = database.Files.Find(candidate => candidate.FileId == fileId);
+        if (file is { IsLog: true } && pageId != 0)
+            throw SimulatedSqlException.DbccPageLogHeaderOnly();
+        if (file is null || pageId < 0 || pageId >= file.SizePages)
+        {
+            var outOfRange = SimulatedSqlException.DbccPageOutOfRange((int)fileId, pageId);
+            outOfRange.ResolveDiagnostics(batch.CurrentStatement.StartLine, batch.LineOffset, batch.ErrorProcedureName);
+            batch.Connection.LastErrorNumber = outOfRange.Number;
+            batch.CurrentStatement.SuppressErrorReset = true;
+            batch.Connection.LastStatementRowCount = 0;
+            return DbccCompleted(batch, dbcc, [new SimulatedErrorOutcome(outOfRange) { DoneKind = batch.CurrentStatement.DoneKind }]);
+        }
+        if (printOption > 3)
+            throw SimulatedSqlException.DbccParameterIsIncorrect(4, 102);
+        if (dbcc.Has(DbccOptions.TableResults) || batch.Connection.TraceFlags.Contains(3604) || batch.Connection.Simulation.IsGlobalTraceFlagOn(3604))
+            throw new NotSupportedException("DBCC PAGE's page dump isn't modeled.");
+        return DbccCompleted(batch, dbcc, []);
+    }
 
     /// <summary>
     /// <c>DBCC LOGINFO [( database )] [WITH NO_INFOMSGS]</c>: the log file cut

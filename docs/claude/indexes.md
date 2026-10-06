@@ -32,6 +32,7 @@ It fires ahead of every name-resolution error (a missing table and a missing INC
 
 **The filter's grammar is a restricted one**: an `AND` of `column <op> constant`, `column IN (constants)` and `column IS [NOT] NULL`, the column on the left and each constant a literal, a negated one or a CAST of one.
 Real refuses the other connectives where its parser meets them — **Msg 156** at `OR`, `LIKE`, `BETWEEN`, `EXISTS` or a leading `NOT`, **Msg 102** near `'NOT'` for `NOT IN` — and any other comparison (`a = b`, `1 = a`, `a + 1 = 2`, `a = ABS(1)`, `a = @@SPID`) is **Msg 10735** (probed 2026-09-24).
+A bare column, parenthesized or not, is the plain syntax error at the token after it — Msg 102, or Msg 156 for a keyword — where a condition elsewhere would be Msg 4145 (`ParserContext.InFilterPredicate`; probed 2026-10-06), for a filtered statistic as for an index.
 One rendering divergence remains: real stores a CAST constant as `CONVERT([int],(1))` in `filter_definition`, where the simulator stores the folded `(1)`.
 
 The simulator has no B-tree storage, so an index never constrains inserts (UNIQUE aside) and isn't a stored ordered structure.
@@ -751,7 +752,10 @@ The option rules follow the target, so an `ALTER INDEX` resolves its index befor
 
 ## Fidelity gaps
 
-- **Columnstore residue**: the row-group DMVs (`sys.column_store_row_groups`, `sys.dm_db_column_store_row_group_physical_stats` …) and `sys.column_store_segments` (Msg 208 here; empty on real over a database without a columnstore index) aren't modeled (a `vector` or `json` column rides a clustered columnstore index as its other columns do, and is refused as a rowstore or statistics key — see [`vector.md`](vector.md), [`json-type.md`](json-type.md)).
+- **Columnstore storage views**: `sys.column_store_segments`, `sys.column_store_dictionaries` and `sys.column_store_row_groups` carry real's shapes and no rows — what real returns over a database holding no compressed row group — and reading `column_store_row_groups` sends the Msg 8625 real's join-hinted definition earns (probed 2026-10-06 against SQL Server 2025).
+  Over a columnstore index real's rows describe its own compression (`size_in_bytes`, encodings, dictionary ids, hobt ids — a two-row index already reports one segment per column, `state_description` `COMPRESSED`), which a heap of ordinary rows has no counterpart for: not chased.
+  `sys.dm_db_column_store_row_group_physical_stats` isn't registered (Msg 208).
+  A `vector` or `json` column rides a clustered columnstore index as its other columns do, and is refused as a rowstore or statistics key — see [`vector.md`](vector.md), [`json-type.md`](json-type.md).
 
 - **`filter_definition` edge cases**: a predicate the simulator accepts but can't render canonically reports `filter_definition` NULL with `has_filter` still set; the shapes real accepts render as real's (see [Filtered-index `filter_definition`](#filtered-index-filter_definition)).
 - **CLUSTERED keyword drives allocation and scan order, not storage**: `CREATE CLUSTERED INDEX` (and a clustered PK / `UNIQUE CLUSTERED` constraint) correctly reports `index_id = 1` / `type_desc = CLUSTERED` and suppresses the HEAP row (see [Index-id allocation](#index-id-allocation)), and a scan follows its key (see [Clustered scan order](#clustered-scan-order)), but the heap underneath stays in write order.
@@ -759,7 +763,6 @@ The option rules follow the target, so an `ALTER INDEX` resolves its index befor
   A clustered index keyed on a non-persisted computed column leaves the scan in write order, where real follows the computed key, and dropping a clustered index leaves the heap in write order, where real's rebuilt heap keeps the key order the index left it in (probed 2026-10-05 against SQL Server 2025).
 - *(the one-clustered-per-table rule now covers every path — see [One clustered index per table](#grammar). The constraint paths raise **Msg 1902 State 3** naming the existing clustered index, except an all-inline CREATE TABLE pair, which real gives its own **Msg 8112** since neither entry exists yet to name; the multiple-PRIMARY-KEY check (Msg 8110) outranks both.)*
 - **Option names in a CREATE TABLE / CREATE TYPE / ALTER TABLE ADD column clause** — standalone `CREATE INDEX`, `ALTER INDEX … REBUILD` and `ALTER TABLE … ADD CONSTRAINT` refuse a name the statement doesn't take as real does (`IndexOptionStatement`), but the column-level parser those three statements share with table variables doesn't know which statement it serves, so a constraint or inline index there accepts any name — real refuses an unknown one naming `CREATE TABLE` / `CREATE TYPE` / `ALTER TABLE`, and `CREATE TABLE` refuses `SORT_IN_TEMPDB` / `ONLINE` / `MAXDOP` / `DROP_EXISTING` too (probed 2026-09-26).
-- **A filtered index whose predicate is a bare parenthesized column** (`WHERE (a)`) is Msg 102 near the statement's end on real and Msg 4145 here (probed 2026-10-03 against SQL Server 2025).
 - **`IGNORE_DUP_KEY` messages and `OUTPUT`** — an insert that ignores duplicates and returns `OUTPUT` rows sends Msg 3604 ahead of the rows, where real sends it after them.
 - **DROP INDEX comma list not atomic**: each entry resolves independently.
   Real SQL Server rolls back all on any failure.

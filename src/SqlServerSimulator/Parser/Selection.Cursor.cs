@@ -659,9 +659,18 @@ internal sealed partial class Selection
     /// address alone), its <see cref="Heap.Uniquifiers"/> entry, and its
     /// stable address (null on a NULL-extended outer-join side).
     /// </summary>
-    internal sealed class CursorRow(SqlValue[] values, SqlValue[] orderKey, SqlValue[]?[] identityKeys, long[] uniquifiers, (int Page, int Slot)?[] rids)
+    internal sealed class CursorRow(SqlValue[] values, SqlValue[] orderKey, SqlValue[]?[] identityKeys, long[] uniquifiers, (int Page, int Slot)?[] rids, SimulatedSqlException? projectionError = null)
     {
         public readonly SqlValue[] Values = values;
+
+        /// <summary>
+        /// The error the row's select list raised, which real raises only when
+        /// a fetch lands on the row: a keyset or dynamic cursor projects row by
+        /// row as it fetches, so <c>SELECT 1 / (id - 2)</c> fetches row 1 and
+        /// fails on row 2 (probed 2026-10-06 against SQL Server 2025). The
+        /// <see cref="Values"/> it left unprojected are NULL.
+        /// </summary>
+        public readonly SimulatedSqlException? ProjectionError = projectionError;
         public readonly SqlValue[] OrderKey = orderKey;
         public readonly SqlValue[]?[] IdentityKeys = identityKeys;
         public readonly long[] Uniquifiers = uniquifiers;
@@ -869,14 +878,30 @@ internal sealed partial class Selection
                 continue;
 
             var values = new SqlValue[plan.Projections.Length];
+            SimulatedSqlException? projectionError = null;
             for (var i = 0; i < values.Length; i++)
-                values[i] = plan.Projections[i].Run(runtime);
+            {
+                if (projectionError is not null)
+                {
+                    values[i] = SqlValue.Null(SqlType.Int32);
+                    continue;
+                }
+                try
+                {
+                    values[i] = plan.Projections[i].Run(runtime);
+                }
+                catch (SimulatedSqlException error)
+                {
+                    projectionError = error;
+                    values[i] = SqlValue.Null(SqlType.Int32);
+                }
+            }
 
             var orderKey = orderBy.Count == 0
                 ? []
                 : ComputeOrderKeys(orderBy, values, plan.ColumnNames, projectionSources: null, distinct: false, batch, resolve);
 
-            rows.Add(new CursorRow(values, orderKey, identityKeys, uniquifiers, rids));
+            rows.Add(new CursorRow(values, orderKey, identityKeys, uniquifiers, rids, projectionError));
         }
 
         rows.Sort((a, b) => CompareCursorRows(plan, a, b));
@@ -975,6 +1000,8 @@ internal sealed partial class Selection
         var storedSchema = plan.Sources[index].StoredSchema;
         foreach (var row in EnumerateCursorRows(deferred.Nested!, batch, outerResolver, applyRowLimit || deferred.ThroughView is not null))
         {
+            if (row.ProjectionError is { } error)
+                throw error;
             var values = row.Values;
             for (var c = 0; c < values.Length; c++)
             {

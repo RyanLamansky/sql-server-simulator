@@ -271,7 +271,32 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         ArgumentNullException.ThrowIfNull(value);
         return type is not CharSqlType c
             ? throw new ArgumentException($"{type} is not a char(N) type.", nameof(type))
-            : new(type, 0, NormalizeFixedLengthStringToByteCount(value, c.length, c.Collation.StorageEncoding), isNull: false);
+            : new(type, 0, c.trimsTrailingSpaces
+                ? TrimmedForPaddingOff(NormalizeFixedLengthStringToByteCount(value, c.length, c.Collation.StorageEncoding))
+                : NormalizeFixedLengthStringToByteCount(value, c.length, c.Collation.StorageEncoding), isNull: false);
+    }
+
+    /// <summary>
+    /// <paramref name="value"/> without its trailing spaces, down to one — what
+    /// a column created under <c>SET ANSI_PADDING OFF</c> stores, so an empty
+    /// string stays empty while a blank one keeps a single space (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static string TrimmedForPaddingOff(string value)
+    {
+        var end = value.Length;
+        while (end > 1 && value[end - 1] == ' ')
+            end--;
+        return end == value.Length ? value : value[..end];
+    }
+
+    /// <summary>The binary twin of <see cref="TrimmedForPaddingOff(string)"/>: trailing zero bytes, down to one.</summary>
+    internal static byte[] TrimmedForPaddingOff(byte[] value)
+    {
+        var end = value.Length;
+        while (end > 1 && value[end - 1] == 0)
+            end--;
+        return end == value.Length ? value : value[..end];
     }
 
     /// <summary>Non-NULL SQL <c>nchar(N)</c> value. Same padding/truncation rule as <see cref="FromChar"/>; declared length is in code units.</summary>
@@ -294,7 +319,7 @@ internal readonly partial struct SqlValue : IEquatable<SqlValue>, IComparable<Sq
         ArgumentNullException.ThrowIfNull(value);
         return type is not BinarySqlType b
             ? throw new ArgumentException($"{type} is not a binary(N) type.", nameof(type))
-            : new(type, 0, NormalizeFixedLengthBytes(value, b.length), isNull: false);
+            : new(type, 0, b.trimsTrailingZeros ? TrimmedForPaddingOff(NormalizeFixedLengthBytes(value, b.length)) : NormalizeFixedLengthBytes(value, b.length), isNull: false);
     }
 
     /// <summary>

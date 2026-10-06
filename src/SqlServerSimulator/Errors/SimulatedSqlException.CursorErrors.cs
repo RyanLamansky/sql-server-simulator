@@ -44,6 +44,15 @@ partial class SimulatedSqlException
         new("Cursor is not open.", 16917, 16, state);
 
     /// <summary>
+    /// Msg 16958 state 3: an OPEN, or a FETCH from a KEYSET, DYNAMIC or
+    /// FAST_FORWARD cursor, under SET options other than those the cursor was
+    /// declared under (probed 2026-10-06 against SQL Server 2025; a STATIC
+    /// cursor fetches on).
+    /// </summary>
+    internal static SimulatedSqlException CursorSetOptionsChanged() =>
+        new("Could not complete cursor operation because the set options have changed since the cursor was declared.", 16958, 16, 3);
+
+    /// <summary>
     /// Msg 16943: a FETCH from a KEYSET, DYNAMIC or FAST_FORWARD cursor whose
     /// table a definition change — an <c>ALTER TABLE</c>, an index created —
     /// reached since the cursor opened (probed 2026-10-03 against SQL Server

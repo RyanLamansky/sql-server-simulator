@@ -117,6 +117,41 @@ internal static class ModuleDependencies
         public bool IsAmbiguous;
 
         /// <summary>
+        /// True for an <c>EXEC</c> target, which real never counts as a gap in
+        /// the report: a missing procedure leaves its row complete and raises
+        /// no Msg 2020 (probed 2026-10-06 against SQL Server 2025).
+        /// </summary>
+        public bool IsProcedureCall;
+
+        /// <summary>
+        /// True for a synonym whose base names nothing: real reports the
+        /// synonym's id but marks the row incomplete, with no use flags.
+        /// </summary>
+        public bool SynonymBaseMissing;
+
+        /// <summary>
+        /// The object a three-part name binds to in another database of the
+        /// simulation, which <c>sys.dm_sql_referenced_entities</c> resolves —
+        /// id, columns and all — where the catalog view and the legacy pair
+        /// report no id (probed 2026-10-06 against SQL Server 2025).
+        /// </summary>
+        public SchemaObject? CrossDatabaseResolved;
+
+        /// <summary>
+        /// A statement read the object without reaching any of its columns
+        /// (<c>SELECT 1 FROM t</c>), which the legacy pair reports as a
+        /// <c>referenced_minor_id = 0</c> row beside any column rows.
+        /// </summary>
+        public bool WholeSelected;
+
+        /// <summary>
+        /// A statement wrote the object without naming a column it writes — a
+        /// <c>DELETE</c>, a <c>MERGE</c>'s insert — which the legacy pair
+        /// reports as a <c>referenced_minor_id = 0</c> row beside any column rows.
+        /// </summary>
+        public bool WholeUpdated;
+
+        /// <summary>
         /// True when the definition names this entity as an object — a FROM
         /// source, a DML target, an <c>EXEC</c>, a function call — rather than
         /// reaching it only through a column. Drives whether the
@@ -141,6 +176,23 @@ internal static class ModuleDependencies
 
         /// <summary>The table type this reference resolves to, for a <see cref="TypeClass"/> row.</summary>
         public TableType? ResolvedType;
+
+        /// <summary>
+        /// True when the reference names something real can't find — a table,
+        /// view, function or sequence that doesn't exist, another database's
+        /// missing object, a synonym over nothing — which marks its rows
+        /// <c>is_incomplete</c> and makes the DMV raise Msg 2020. An
+        /// <c>EXEC</c> target, a caller-dependent name and an ambiguous method
+        /// call never are (probed 2026-10-06 against SQL Server 2025).
+        /// </summary>
+        public bool IsIncomplete =>
+            this.ReferencedClass == ObjectOrColumnClass
+            && !this.IsProcedureCall && !this.IsAmbiguous && !this.IsCallerDependent
+            && (this.ServerName is not null
+                || (this.DatabaseName is not null ? this.CrossDatabaseResolved is null : this.Resolved is null || this.SynonymBaseMissing));
+
+        /// <summary>The object whose columns the reference reaches: this database's, or another's for a three-part name.</summary>
+        public SchemaObject? Bound => this.SynonymBaseMissing ? null : this.Resolved ?? this.CrossDatabaseResolved;
 
         /// <summary><c>referenced_id</c> — NULL for a cross-database, caller-dependent, ambiguous or missing reference.</summary>
         public int? ReferencedId =>
@@ -185,28 +237,28 @@ internal static class ModuleDependencies
     /// views, the referencing-entities DMVs and <c>sp_depends</c> don't list
     /// it (probed 2026-09-26 against SQL Server 2025).
     /// </summary>
-    internal static List<Entity> Enumerate(Database database, bool includeIndexes = false)
+    internal static List<Entity> Enumerate(Database database, bool includeIndexes = false, Func<string, Database?>? otherDatabases = null)
     {
         List<Entity> entities = [];
         foreach (var (_, schema) in database.Schemas)
         {
             foreach (var (_, view) in schema.Views)
-                AddModule(database, entities, view, schema.Name, view.BodyText, view.IsSchemaBound);
+                AddModule(database, entities, view, schema.Name, view.BodyText, view.IsSchemaBound, otherDatabases);
             foreach (var (_, procedure) in schema.Procedures)
             {
-                var references = AnalyzeBody(database, procedure.BodyText, isSchemaBound: false);
+                var references = AnalyzeBody(database, procedure.BodyText, isSchemaBound: false, otherDatabases);
                 AddTableTypeParameters(database, procedure, references);
                 Add(entities, procedure, ObjectOrColumnClass, schema.Name, references);
             }
             foreach (var (_, function) in schema.Functions)
             {
-                var references = AnalyzeBody(database, function.BodyText, function.IsSchemaBound);
+                var references = AnalyzeBody(database, function.BodyText, function.IsSchemaBound, otherDatabases);
                 foreach (var parameter in function.Parameters)
                     AddTableTypeParameter(database, parameter.TableType, references);
                 Add(entities, function, ObjectOrColumnClass, schema.Name, references);
             }
             foreach (var (_, trigger) in schema.Triggers)
-                AddModule(database, entities, trigger, schema.Name, trigger.BodyText, isSchemaBound: false);
+                AddModule(database, entities, trigger, schema.Name, trigger.BodyText, isSchemaBound: false, otherDatabases);
             foreach (var (_, table) in schema.HeapTables)
             {
                 AddTableExpressions(database, entities, schema, table);
@@ -219,7 +271,7 @@ internal static class ModuleDependencies
 
         foreach (var (_, ddlTrigger) in database.DdlTriggers)
         {
-            var references = AnalyzeBody(database, ddlTrigger.BodyText, isSchemaBound: false);
+            var references = AnalyzeBody(database, ddlTrigger.BodyText, isSchemaBound: false, otherDatabases);
             if (references.Count > 0)
             {
                 entities.Add(new Entity(
@@ -240,8 +292,8 @@ internal static class ModuleDependencies
     /// computed column — empty when it carries no dependency-bearing
     /// definition.
     /// </summary>
-    internal static List<Entity> ForObject(Database database, int objectId) =>
-        Enumerate(database).FindAll(entity => entity.ReferencingId == objectId && entity.ReferencingClass == ObjectOrColumnClass);
+    internal static List<Entity> ForObject(Database database, int objectId, Func<string, Database?>? otherDatabases = null) =>
+        Enumerate(database, otherDatabases: otherDatabases).FindAll(entity => entity.ReferencingId == objectId && entity.ReferencingClass == ObjectOrColumnClass);
 
     /// <summary>
     /// The object id of the CHECK or DEFAULT constraint named
@@ -347,8 +399,8 @@ internal static class ModuleDependencies
 
     private static void AddModule(
         Database database, List<Entity> entities, SchemaObject module,
-        string schemaName, string bodyText, bool isSchemaBound) =>
-        Add(entities, module, ObjectOrColumnClass, schemaName, AnalyzeBody(database, bodyText, isSchemaBound));
+        string schemaName, string bodyText, bool isSchemaBound, Func<string, Database?>? otherDatabases) =>
+        Add(entities, module, ObjectOrColumnClass, schemaName, AnalyzeBody(database, bodyText, isSchemaBound, otherDatabases));
 
     private static void Add(
         List<Entity> entities, SchemaObject module, byte referencingClass, string schemaName, List<Reference> references)
@@ -455,6 +507,7 @@ internal static class ModuleDependencies
     {
         Dictionary<string, Reference> byKey = new(StringComparer.OrdinalIgnoreCase);
         List<Reference> ordered = [];
+        var analysis = new Analysis(database, isSchemaBound: true, otherDatabases: null);
         var tokens = Tokenize(definition);
         for (var i = 0; i < tokens.Count; i++)
         {
@@ -468,7 +521,7 @@ internal static class ModuleDependencies
                 && tokens[i + 2] is ReservedKeyword { Keyword: Keyword.For } && tokens[i + 3] is Name)
             {
                 i += 3;
-                if (BuildObjectReference(database, ReadName(tokens, ref i)) is { } sequenceReference)
+                if (BuildObjectReference(analysis, ReadName(tokens, ref i)) is { } sequenceReference)
                 {
                     var recorded = Remember(byKey, ordered, sequenceReference);
                     recorded.HasObjectReference = true;
@@ -479,7 +532,7 @@ internal static class ModuleDependencies
             var name = ReadName(tokens, ref i);
             if (name.SegmentCount >= 2)
             {
-                if (name.IsCall && BuildCallReference(database, name) is { } call)
+                if (name.IsCall && BuildCallReference(analysis, name) is { } call)
                 {
                     var recorded = Remember(byKey, ordered, call);
                     recorded.HasObjectReference = true;
@@ -509,16 +562,15 @@ internal static class ModuleDependencies
     /// objects that frame names, and so an UPDATE's SET list stays
     /// distinguishable from its WHERE.
     /// </summary>
-    private static List<Reference> AnalyzeBody(Database database, string bodyText, bool isSchemaBound)
+    private static List<Reference> AnalyzeBody(Database database, string bodyText, bool isSchemaBound, Func<string, Database?>? otherDatabases = null)
     {
-        Dictionary<string, Reference> byKey = new(StringComparer.OrdinalIgnoreCase);
-        List<Reference> ordered = [];
+        var analysis = new Analysis(database, isSchemaBound, otherDatabases);
         if (string.IsNullOrEmpty(bodyText))
-            return ordered;
+            return analysis.Ordered;
 
         var tokens = Tokenize(bodyText);
         var cteNames = DeclaredCteNames(tokens);
-        var frame = new Frame();
+        var frame = new Frame(analysis);
         for (var i = 0; i < tokens.Count; i++)
         {
             switch (tokens[i])
@@ -534,6 +586,7 @@ internal static class ModuleDependencies
                     {
                         frame.InInsertColumnList = false;
                         frame.InsertColumnListQualifier = null;
+                        frame.InMergeInsertColumnList = false;
                     }
                     continue;
                 case Operator { Character: ',' } when frame.FromListDepths.TryPeek(out var listDepth) && listDepth == frame.Depth:
@@ -567,22 +620,67 @@ internal static class ModuleDependencies
             switch (role)
             {
                 case SourceRole.Procedure:
-                    RecordProcedure(database, name, byKey, ordered, isSchemaBound);
+                    RecordProcedure(analysis, name);
                     continue;
                 case SourceRole.None when name.IsCall:
-                    RecordCall(database, name, byKey, ordered, isSchemaBound);
+                    RecordCall(analysis, name, frame);
                     continue;
                 case SourceRole.None:
                     frame.NoteColumn(name.SegmentCount >= 2 ? name.Qualifier : null, name.Leaf);
                     continue;
                 default:
-                    RecordSource(database, name, role, frame, byKey, ordered, isSchemaBound, cteNames, tokens, i);
+                    RecordSource(analysis, name, role, frame, cteNames, tokens, i);
+                    // The alias names the source, not a column.
+                    if (i + 2 < tokens.Count && tokens[i + 1] is ReservedKeyword { Keyword: Keyword.As } && tokens[i + 2] is Name)
+                        i += 2;
+                    else if (i + 1 < tokens.Count && IsBareAlias(tokens[i + 1]))
+                        i++;
                     continue;
             }
         }
 
         _ = CloseFrame(frame);
-        return ordered;
+        return analysis.Ordered;
+    }
+
+    /// <summary>
+    /// The state one body's walk shares across its statement frames: the
+    /// database names resolve in, the references recorded so far (deduplicated
+    /// by name as written, kept in first-mention order), and how a name in
+    /// another database resolves.
+    /// </summary>
+    private sealed class Analysis(Database database, bool isSchemaBound, Func<string, Database?>? otherDatabases)
+    {
+        public readonly Database Database = database;
+
+        public readonly bool IsSchemaBound = isSchemaBound;
+
+        public readonly Func<string, Database?>? OtherDatabases = otherDatabases;
+
+        public readonly Dictionary<string, Reference> ByKey = new(StringComparer.OrdinalIgnoreCase);
+
+        public readonly List<Reference> Ordered = [];
+
+        public Reference Remember(Reference candidate)
+        {
+            var reference = ModuleDependencies.Remember(this.ByKey, this.Ordered, candidate);
+            reference.HasObjectReference = true;
+            if (this.IsSchemaBound)
+                reference.IsSchemaBound = true;
+            return reference;
+        }
+    }
+
+    /// <summary>One object a statement frame names: the reference, the alias it was introduced under, its role, and the paren depth it sits at.</summary>
+    private struct FrameSource(Reference reference, string alias, SourceRole role, int depth)
+    {
+        public readonly Reference Reference = reference;
+
+        public readonly string Alias = alias;
+
+        public SourceRole Role = role;
+
+        public readonly int Depth = depth;
     }
 
     /// <summary>What the keyword before a name says the name is.</summary>
@@ -611,9 +709,25 @@ internal static class ModuleDependencies
     /// mentions, and the cursor state (paren depth, SET-list position, pending
     /// source role) the walk needs while it runs.
     /// </summary>
-    private sealed class Frame
+    private sealed class Frame(Analysis analysis)
     {
+        public readonly Analysis Analysis = analysis;
+
         public int Depth;
+
+        /// <summary>
+        /// True inside a <c>MERGE</c>'s <c>WHEN NOT MATCHED THEN INSERT (…)</c>
+        /// column list, whose names real records nothing for: the insert is a
+        /// whole-object write (probed 2026-10-06 against SQL Server 2025).
+        /// </summary>
+        public bool InMergeInsertColumnList;
+
+        /// <summary>
+        /// A one-part UPDATE / DELETE target no object carries — an alias the
+        /// statement's FROM introduces (<c>UPDATE x … FROM dbo.t x</c>), else a
+        /// missing object — settled once the frame's sources are known.
+        /// </summary>
+        public string? PendingTargetName;
 
         /// <summary>
         /// The <c>CASE</c> expressions open in the frame, whose <c>END</c>
@@ -636,8 +750,7 @@ internal static class ModuleDependencies
         /// <summary>
         /// The INSERT target's alias, stamped on every mention the column list
         /// yields so the written columns land on that target rather than on
-        /// every source the frame reads (which is what a MERGE's
-        /// <c>WHEN NOT MATCHED THEN INSERT (cols)</c> would otherwise do).
+        /// every source the frame reads.
         /// </summary>
         public string? InsertColumnListQualifier;
 
@@ -667,8 +780,8 @@ internal static class ModuleDependencies
         /// <summary>The most recent mention, so an <c>=</c> can mark it written.</summary>
         public Mention? LastMention;
 
-        /// <summary>Objects this frame names, paired with the alias each was introduced under.</summary>
-        public readonly List<(Reference Reference, string Alias)> Sources = [];
+        /// <summary>Objects this frame names, with the alias, role and depth each was introduced under.</summary>
+        public readonly List<FrameSource> Sources = [];
 
         /// <summary>Identifiers this frame mentions that could be columns.</summary>
         public readonly List<Mention> Mentions = [];
@@ -685,9 +798,12 @@ internal static class ModuleDependencies
 
         public void NoteColumn(string? qualifier, string name)
         {
+            if (this.InMergeInsertColumnList)
+                return;
             var mention = new Mention(
                 this.InInsertColumnList ? qualifier ?? this.InsertColumnListQualifier : qualifier,
-                name)
+                name,
+                this.Depth)
             {
                 Updated = this.InInsertColumnList,
             };
@@ -704,11 +820,14 @@ internal static class ModuleDependencies
     /// written under — an alias or a table name — and is what keeps
     /// <c>a.id</c> off a joined <c>b</c> that also has an <c>id</c>.
     /// </summary>
-    private sealed class Mention(string? qualifier, string name)
+    private sealed class Mention(string? qualifier, string name, int depth)
     {
         public readonly string? Qualifier = qualifier;
 
         public readonly string Name = name;
+
+        /// <summary>The paren depth the mention sits at, which bounds the sources it can see.</summary>
+        public readonly int Depth = depth;
 
         /// <summary>True for an UPDATE SET-list target or an INSERT column-list entry.</summary>
         public bool Updated;
@@ -758,10 +877,9 @@ internal static class ModuleDependencies
                 return frame;
             case Keyword.Insert when frame.IsMergeFrame:
                 // WHEN NOT MATCHED THEN INSERT (cols) — the column list opens
-                // immediately, writes the merge target, and its closing paren
-                // ends it.
-                frame.InInsertColumnList = true;
-                frame.InsertColumnListQualifier = frame.Sources.Count > 0 ? frame.Sources[0].Alias : null;
+                // immediately and its closing paren ends it; real records
+                // nothing for its names.
+                frame.InMergeInsertColumnList = true;
                 return frame;
             case Keyword.Delete when frame.IsMergeFrame:
                 return frame;
@@ -842,48 +960,143 @@ internal static class ModuleDependencies
     /// frame mentioned that the source actually has — or every column it has,
     /// when a <c>*</c> covering it was written, which is how real reports a
     /// <c>SELECT *</c> (all columns <c>is_select_all</c>, none
-    /// <c>is_selected</c>, even one the WHERE names separately).
+    /// <c>is_selected</c>, even one the WHERE names separately). A reference
+    /// real can't find carries no use flags at all (probed 2026-10-06 against
+    /// SQL Server 2025).
     /// </summary>
     private static Frame CloseFrame(Frame frame)
     {
-        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (_, alias) in frame.Sources)
-            _ = aliases.Add(alias);
-
-        foreach (var (reference, alias) in frame.Sources)
+        var sources = frame.Sources;
+        if (frame.PendingTargetName is { } target)
         {
-            if (ColumnsOf(reference.Resolved) is not { } columns)
-                continue;
-            if (frame.StarQualifiers.Contains("") || frame.StarQualifiers.Contains(alias))
+            var aliased = sources.FindIndex(source => string.Equals(source.Alias, target, StringComparison.OrdinalIgnoreCase));
+            if (aliased >= 0)
             {
-                reference.IsSelectAll = true;
-                reference.IsSelected = false;
-                foreach (var column in columns)
-                {
-                    var use = ColumnFor(reference, column.Name);
-                    use.SelectAll = true;
-                    use.Selected = false;
-                }
+                var source = sources[aliased];
+                source.Role = SourceRole.Updated;
+                sources[aliased] = source;
+            }
+            else
+            {
+                _ = frame.Analysis.Remember(new Reference(null, null, null, target, ObjectOrColumnClass));
+            }
+        }
+
+        var aliases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var source in sources)
+            _ = aliases.Add(source.Alias);
+
+        var starred = new bool[sources.Count];
+        var read = new bool[sources.Count];
+        var written = new bool[sources.Count];
+        for (var i = 0; i < sources.Count; i++)
+        {
+            var (reference, role) = (sources[i].Reference, sources[i].Role);
+            if (reference.Bound is null)
+                continue;
+            switch (role)
+            {
+                case SourceRole.Selected:
+                    reference.IsSelected = true;
+                    break;
+                case SourceRole.Updated or SourceRole.InsertTarget:
+                    reference.IsUpdated = true;
+                    break;
+            }
+            if (ColumnsOf(reference.Bound) is not { } columns
+                || !(frame.StarQualifiers.Contains("") || frame.StarQualifiers.Contains(sources[i].Alias)))
+            {
                 continue;
             }
+            starred[i] = true;
+            read[i] = true;
+            reference.IsSelectAll = true;
+            reference.IsSelected = false;
             foreach (var column in columns)
             {
-                foreach (var mention in frame.Mentions)
+                var use = ColumnFor(reference, column.Name);
+                use.SelectAll = true;
+                use.Selected = false;
+            }
+        }
+
+        var reached = new List<int>();
+        foreach (var mention in frame.Mentions)
+        {
+            reached.Clear();
+            for (var i = 0; i < sources.Count; i++)
+            {
+                if (!starred[i]
+                    && sources[i].Depth <= mention.Depth
+                    && FindColumnOf(sources[i].Reference.Bound, mention.Name) is not null
+                    && MentionReaches(mention, sources[i].Alias, aliases))
                 {
-                    if (!string.Equals(mention.Name, column.Name, StringComparison.OrdinalIgnoreCase)
-                        || !MentionReaches(mention, alias, aliases))
-                    {
-                        continue;
-                    }
-                    var use = ColumnFor(reference, column.Name);
-                    if (mention.Updated)
-                        use.Updated = true;
-                    else
-                        use.Selected = true;
+                    reached.Add(i);
+                }
+            }
+            if (mention.Qualifier is null && reached.Count > 1)
+            {
+                // An unqualified SET-list target binds the statement's target;
+                // any other unqualified name binds the innermost scope that has
+                // the column, as the binder resolves it.
+                if (mention.Updated && reached.Exists(i => sources[i].Role is SourceRole.Updated or SourceRole.InsertTarget))
+                {
+                    _ = reached.RemoveAll(i => sources[i].Role is not (SourceRole.Updated or SourceRole.InsertTarget));
+                }
+                else
+                {
+                    var innermost = reached.Max(i => sources[i].Depth);
+                    _ = reached.RemoveAll(i => sources[i].Depth != innermost);
+                }
+            }
+            foreach (var i in reached)
+            {
+                var use = ColumnFor(sources[i].Reference, FindColumnOf(sources[i].Reference.Bound, mention.Name)!);
+                if (mention.Updated)
+                {
+                    use.Updated = true;
+                    written[i] = true;
+                }
+                else
+                {
+                    use.Selected = true;
+                    read[i] = true;
                 }
             }
         }
-        return new Frame();
+
+        // A statement that reads or writes an object without reaching one of
+        // its columns uses the whole object, which the legacy pair records
+        // as an object row even beside the columns other statements reach.
+        for (var i = 0; i < sources.Count; i++)
+        {
+            var reference = sources[i].Reference;
+            if (ColumnsOf(reference.Bound) is null)
+                continue;
+            switch (sources[i].Role)
+            {
+                case SourceRole.Selected when !read[i]:
+                    reference.WholeSelected = true;
+                    break;
+                case SourceRole.Updated or SourceRole.InsertTarget when !written[i]:
+                    reference.WholeUpdated = true;
+                    break;
+            }
+        }
+        return new Frame(frame.Analysis);
+    }
+
+    /// <summary>The column of <paramref name="bound"/> named <paramref name="name"/>, spelled as the object spells it, or null.</summary>
+    private static string? FindColumnOf(SchemaObject? bound, string name)
+    {
+        if (ColumnsOf(bound) is not { } columns)
+            return null;
+        foreach (var column in columns)
+        {
+            if (string.Equals(column.Name, name, StringComparison.OrdinalIgnoreCase))
+                return column.Name;
+        }
+        return null;
     }
 
     /// <summary>
@@ -902,50 +1115,48 @@ internal static class ModuleDependencies
     /// Records a FROM / JOIN / DML-target name. A CTE name, a temp table, a
     /// table variable and a trigger pseudo-table all name something that is not
     /// a schema object, so none produces a row — matching real, which records
-    /// none of them either.
+    /// none of them either. A one-part name no object carries is a missing
+    /// object, which real lists with a NULL schema — unless it is an UPDATE or
+    /// DELETE target, which may be an alias the statement's FROM introduces.
     /// </summary>
     private static void RecordSource(
-        Database database, BodyName name, SourceRole role, Frame frame,
-        Dictionary<string, Reference> byKey, List<Reference> ordered, bool isSchemaBound,
+        Analysis analysis, BodyName name, SourceRole role, Frame frame,
         HashSet<string> cteNames, List<Token> tokens, int leafIndex)
     {
         if (IsNonSchemaName(name) || (name.SegmentCount == 1 && cteNames.Contains(name.Leaf)))
             return;
-        if (BuildObjectReference(database, name) is not { } candidate)
-            return;
-
-        var reference = Remember(byKey, ordered, candidate);
-        reference.HasObjectReference = true;
-        if (isSchemaBound)
-            reference.IsSchemaBound = true;
-
-        switch (role)
+        var candidate = BuildObjectReference(analysis, name);
+        if (candidate is null)
         {
-            case SourceRole.Updated:
-                reference.IsUpdated = true;
-                break;
-            case SourceRole.InsertTarget:
-                reference.IsUpdated = true;
-                // A target with no column list is real's is_insert_all: the
-                // statement writes every column without naming one, so no
-                // column rows accompany it.
-                if (leafIndex + 1 < tokens.Count && tokens[leafIndex + 1] is Operator { Character: '(' })
-                {
-                    frame.InInsertColumnList = true;
-                    frame.InsertColumnListQualifier = AliasOf(tokens, leafIndex) ?? name.Leaf;
-                }
-                else
-                {
-                    reference.IsInsertAll = true;
-                }
-
-                break;
-            case SourceRole.Selected:
-                reference.IsSelected = true;
-                break;
+            // A one-part call is a built-in rowset (STRING_SPLIT, OPENJSON …).
+            if (name.SegmentCount != 1 || name.IsCall)
+                return;
+            if (role == SourceRole.Updated)
+            {
+                frame.PendingTargetName ??= name.Leaf;
+                return;
+            }
+            candidate = new Reference(null, null, null, name.Leaf, ObjectOrColumnClass);
         }
 
-        frame.Sources.Add((reference, AliasOf(tokens, leafIndex) ?? name.Leaf));
+        var reference = analysis.Remember(candidate);
+        if (role == SourceRole.InsertTarget)
+        {
+            // A target with no column list is real's is_insert_all: the
+            // statement writes every column without naming one, so no column
+            // rows accompany it.
+            if (leafIndex + 1 < tokens.Count && tokens[leafIndex + 1] is Operator { Character: '(' })
+            {
+                frame.InInsertColumnList = true;
+                frame.InsertColumnListQualifier = AliasOf(tokens, leafIndex) ?? name.Leaf;
+            }
+            else if (reference.Bound is not null)
+            {
+                reference.IsInsertAll = true;
+            }
+        }
+
+        frame.Sources.Add(new FrameSource(reference, AliasOf(tokens, leafIndex) ?? name.Leaf, role, frame.Depth));
     }
 
     /// <summary>
@@ -954,44 +1165,40 @@ internal static class ModuleDependencies
     /// so the row carries a NULL schema and a NULL id even when a procedure of
     /// that name exists (probe-confirmed).
     /// </summary>
-    private static void RecordProcedure(
-        Database database, BodyName name,
-        Dictionary<string, Reference> byKey, List<Reference> ordered, bool isSchemaBound)
+    private static void RecordProcedure(Analysis analysis, BodyName name)
     {
         if (IsNonSchemaName(name))
             return;
         var candidate = name.SegmentCount == 1
             ? new Reference(null, null, null, name.Leaf, ObjectOrColumnClass) { IsCallerDependent = true }
-            : BuildObjectReference(database, name);
+            : BuildObjectReference(analysis, name);
         if (candidate is null)
             return;
-        var reference = Remember(byKey, ordered, candidate);
-        reference.HasObjectReference = true;
-        if (isSchemaBound)
-            reference.IsSchemaBound = true;
+        analysis.Remember(candidate).IsProcedureCall = true;
     }
 
     /// <summary>
     /// Records a qualified call: a function when the qualifier names a schema,
-    /// and otherwise real's <c>is_ambiguous</c> row — the two-part
-    /// <c>q.m(…)</c> that could still turn out to be an XML or UDT method on a
-    /// column named <c>q</c>. Probe-confirmed in both directions: an
-    /// unresolvable <c>mystery.value('…')</c> and a genuine
-    /// <c>doc.value('…')</c> over an <c>xml</c> column both report
-    /// <c>is_ambiguous = 1</c> with the qualifier as the schema name.
+    /// and otherwise real's <c>is_ambiguous</c> row — the <c>q.m(…)</c> that
+    /// could still turn out to be an XML or UDT method on a column named
+    /// <c>q</c>, which the frame also notes as a mention of that column, so a
+    /// genuine <c>doc.value('…')</c> over an <c>xml</c> column reports the
+    /// column read too. Probe-confirmed in both directions: an unresolvable
+    /// <c>mystery.value('…')</c> and a genuine one both report
+    /// <c>is_ambiguous = 1</c> with the qualifier as the schema name; a
+    /// three-part <c>t.doc.value('…')</c> whose first part names no database
+    /// keeps it as the database name (probed 2026-10-06 against SQL Server
+    /// 2025).
     /// </summary>
-    private static void RecordCall(
-        Database database, BodyName name,
-        Dictionary<string, Reference> byKey, List<Reference> ordered, bool isSchemaBound)
+    private static void RecordCall(Analysis analysis, BodyName name, Frame frame)
     {
         if (name.SegmentCount < 2 || IsNonSchemaName(name))
             return;
-        if (BuildCallReference(database, name) is not { } candidate)
+        if (BuildCallReference(analysis, name) is not { } candidate)
             return;
-        var reference = Remember(byKey, ordered, candidate);
-        reference.HasObjectReference = true;
-        if (isSchemaBound)
-            reference.IsSchemaBound = true;
+        _ = analysis.Remember(candidate);
+        if (candidate.IsAmbiguous)
+            frame.NoteColumn(name.SegmentCount == 3 ? name[0] : null, name.Qualifier!);
     }
 
     /// <summary>
@@ -999,8 +1206,9 @@ internal static class ModuleDependencies
     /// schema, an ambiguous method call under anything else, or null for a
     /// chain too long to be either.
     /// </summary>
-    private static Reference? BuildCallReference(Database database, BodyName name)
+    private static Reference? BuildCallReference(Analysis analysis, BodyName name)
     {
+        var database = analysis.Database;
         if (name.SegmentCount >= 4)
             return null;
         if (!TryResolveTargetSchema(database, name, out var databaseName, out var schema))
@@ -1011,8 +1219,17 @@ internal static class ModuleDependencies
         }
         if (databaseName is not null)
         {
-            return IsSystemSchema(name.Qualifier!) ? null
-                : new Reference(null, databaseName, name.Qualifier, name.Leaf, ObjectOrColumnClass);
+            if (IsSystemSchema(name.Qualifier!))
+                return null;
+            // A first part that names no database is a column's qualifier.
+            if (analysis.OtherDatabases is { } others && others(databaseName) is not { } other)
+                return new Reference(null, databaseName, name.Qualifier, name.Leaf, ObjectOrColumnClass) { IsAmbiguous = true };
+            return new Reference(null, databaseName, name.Qualifier, name.Leaf, ObjectOrColumnClass)
+            {
+                CrossDatabaseResolved = analysis.OtherDatabases?.Invoke(databaseName) is { } target && target.Schemas.TryGetValue(name.Qualifier!, out var targetSchema)
+                    ? targetSchema.Functions.GetValueOrDefault(name.Leaf)
+                    : null,
+            };
         }
         var resolved = schema is null ? null
             : schema.Functions.TryGetValue(name.Leaf, out var function) ? (SchemaObject)function
@@ -1020,19 +1237,25 @@ internal static class ModuleDependencies
             : null;
         return schema is not null && resolved is null && IsSystemSchema(schema.Name)
             ? null
-            : new Reference(null, null, name.Qualifier, name.Leaf, ObjectOrColumnClass) { Resolved = resolved };
+            : new Reference(null, null, name.Qualifier, name.Leaf, ObjectOrColumnClass)
+            {
+                Resolved = resolved,
+                SynonymBaseMissing = resolved is Synonym named && !SynonymBaseExists(analysis, named),
+            };
     }
 
     /// <summary>
     /// The reference an object name written in a source or DML-target position
-    /// denotes. Cross-server and cross-database names keep their leading
-    /// segments and resolve to no id, which is what real reports. A one-part
-    /// name that resolves to nothing yields null — far more likely an alias
-    /// than a deferred object — while a two-part one under a real schema keeps
-    /// its row with a NULL id, which is real's deferred reference.
+    /// denotes. Cross-server names keep their leading segments and resolve to
+    /// no id; a cross-database one resolves in that database when the
+    /// simulation holds it, for the DMV that reports it. A one-part name that
+    /// resolves to nothing yields null, for the caller to settle, while a
+    /// two-part one under a real schema keeps its row with a NULL id, which is
+    /// real's deferred reference.
     /// </summary>
-    private static Reference? BuildObjectReference(Database database, BodyName name)
+    private static Reference? BuildObjectReference(Analysis analysis, BodyName name)
     {
+        var database = analysis.Database;
         if (name.SegmentCount >= 4)
             return new Reference(name[0], name[1], name.Qualifier, name.Leaf, ObjectOrColumnClass);
         if (!TryResolveTargetSchema(database, name, out var databaseName, out var schema))
@@ -1042,7 +1265,12 @@ internal static class ModuleDependencies
             // A catalog view is not a user object; real records no dependency on
             // one, in this database or another.
             return IsSystemSchema(name.Qualifier!) ? null
-                : new Reference(null, databaseName, name.Qualifier, name.Leaf, ObjectOrColumnClass);
+                : new Reference(null, databaseName, name.Qualifier, name.Leaf, ObjectOrColumnClass)
+                {
+                    CrossDatabaseResolved = analysis.OtherDatabases?.Invoke(databaseName) is { } target && target.Schemas.TryGetValue(name.Qualifier!, out var targetSchema)
+                        ? ResolveInSchema(targetSchema, name.Leaf)
+                        : null,
+                };
         }
 
         var resolved = schema is null ? null : ResolveInSchema(schema, name.Leaf);
@@ -1051,7 +1279,30 @@ internal static class ModuleDependencies
             : new Reference(null, null, name.SegmentCount >= 2 ? name.Qualifier : null, name.Leaf, ObjectOrColumnClass)
             {
                 Resolved = resolved,
+                SynonymBaseMissing = resolved is Synonym synonym && !SynonymBaseExists(analysis, synonym),
             };
+    }
+
+    /// <summary>
+    /// Whether a synonym's base names an object — in this database, or in
+    /// another the simulation holds; a base in a database the walk can't see
+    /// counts as present.
+    /// </summary>
+    private static bool SynonymBaseExists(Analysis analysis, Synonym synonym)
+    {
+        var baseName = synonym.BaseObject;
+        var database = analysis.Database;
+        if (baseName.Count >= 4)
+            return true;
+        if (baseName.Count == 3 && !database.Collation.Equals(baseName[0], database.Name))
+        {
+            if (analysis.OtherDatabases?.Invoke(baseName[0]) is not { } other)
+                return analysis.OtherDatabases is null;
+            database = other;
+        }
+        var schemaName = baseName.Count >= 2 ? baseName.ImmediateQualifier! : synonym.Schema.Name;
+        return database.Schemas.TryGetValue(schemaName, out var schema)
+            && (ResolveInSchema(schema, baseName.Leaf) is not null || schema.TableTypes.ContainsKey(baseName.Leaf));
     }
 
     /// <summary>
@@ -1232,8 +1483,20 @@ internal static class ModuleDependencies
         leafIndex + 1 >= tokens.Count ? null
         : tokens[leafIndex + 1] is ReservedKeyword { Keyword: Keyword.As }
             ? leafIndex + 2 < tokens.Count && tokens[leafIndex + 2] is Name aliased ? aliased.Value : null
-        : tokens[leafIndex + 1] is Name bare ? bare.Value
+        : IsBareAlias(tokens[leafIndex + 1]) ? ((Name)tokens[leafIndex + 1]).Value
         : null;
+
+    /// <summary>
+    /// True for a name following a source that is its alias, rather than the
+    /// word of a clause that follows it (<c>USING</c>, <c>CROSS APPLY</c>'s
+    /// <c>APPLY</c>, a table hint's <c>TABLESAMPLE</c> …).
+    /// </summary>
+    private static bool IsBareAlias(Token token) => token switch
+    {
+        UnquotedString word => word.ContextualKeyword == ContextualKeyword.NotAKeyword,
+        Name => true,
+        _ => false,
+    };
 
     /// <summary>One name chain lifted out of a definition's token stream.</summary>
     private readonly struct BodyName(string[] segments, bool isCall)
@@ -1284,32 +1547,31 @@ internal static class ModuleDependencies
     }
 
     /// <summary>
-    /// The names a leading <c>WITH cte [(col, …)] AS (…) [, …]</c> prefix
-    /// declares. A one-part source reference matching one of these is the CTE,
-    /// not a table of that name in the default schema.
+    /// The names every <c>WITH cte [(col, …)] AS (…) [, …]</c> prefix in the
+    /// body declares, wherever its statement sits. A one-part source reference
+    /// matching one of these is the CTE, not a missing table of that name.
     /// </summary>
     private static HashSet<string> DeclaredCteNames(List<Token> tokens)
     {
-        if (tokens.Count == 0 || tokens[0] is not ReservedKeyword { Keyword: Keyword.With })
-            return [];
-
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var i = 1;
-        while (i < tokens.Count && tokens[i] is Name cteName)
+        for (var start = 0; start < tokens.Count; start++)
         {
-            _ = names.Add(cteName.Value);
-            i++;
-            if (i < tokens.Count && tokens[i] is Operator { Character: '(' })
-                i = PastParenGroup(tokens, i);
-            if (i >= tokens.Count || tokens[i] is not ReservedKeyword { Keyword: Keyword.As })
-                break;
-            i++;
-            if (i >= tokens.Count || tokens[i] is not Operator { Character: '(' })
-                break;
-            i = PastParenGroup(tokens, i);
-            if (i >= tokens.Count || tokens[i] is not Operator { Character: ',' })
-                break;
-            i++;
+            if (tokens[start] is not ReservedKeyword { Keyword: Keyword.With })
+                continue;
+            var i = start + 1;
+            while (i < tokens.Count && tokens[i] is Name cteName)
+            {
+                var at = i + 1;
+                if (at < tokens.Count && tokens[at] is Operator { Character: '(' })
+                    at = PastParenGroup(tokens, at);
+                if (at + 1 >= tokens.Count || tokens[at] is not ReservedKeyword { Keyword: Keyword.As } || tokens[at + 1] is not Operator { Character: '(' })
+                    break;
+                _ = names.Add(cteName.Value);
+                i = PastParenGroup(tokens, at + 1);
+                if (i >= tokens.Count || tokens[i] is not Operator { Character: ',' })
+                    break;
+                i++;
+            }
         }
         return names;
     }

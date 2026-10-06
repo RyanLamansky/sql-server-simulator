@@ -181,7 +181,8 @@ partial class Selection
         {
             yield break;
         }
-        var entities = ModuleDependencies.ForObject(database, targetId);
+        var databases = batch.Connection.Simulation.Databases;
+        var entities = ModuleDependencies.ForObject(database, targetId, name => databases.TryGetValue(name, out var other) ? other : null);
         if (entities.Count == 0)
             yield break;
 
@@ -201,9 +202,14 @@ partial class Selection
         foreach (var (entity, reference) in pairs)
         {
             var isType = reference.ReferencedClass == ModuleDependencies.TypeClass;
-            var resolved = reference.ReferencedId is not null;
-            incomplete |= !resolved;
-            var columns = ModuleDependencies.ColumnsOf(reference.Resolved);
+            // The DMV resolves another database's object, which the catalog
+            // view leaves without an id (probed 2026-10-06 against SQL Server 2025).
+            var referencedId = reference.ReferencedId
+                ?? (reference is { ServerName: null, DatabaseName: not null } ? reference.CrossDatabaseResolved?.ObjectId : null);
+            var gap = reference.IsIncomplete;
+            var resolved = referencedId is not null && !gap;
+            incomplete |= gap;
+            var columns = ModuleDependencies.ColumnsOf(reference.Bound);
 
             SqlValue[] Row(int minorId, string? minorName, bool selected, bool updated, bool selectAll) =>
             [
@@ -213,7 +219,7 @@ partial class Selection
                 reference.SchemaName is { } schema ? SqlValue.FromSystemName(schema) : nullName,
                 SqlValue.FromSystemName(reference.EntityName),
                 minorName is null ? nullName : SqlValue.FromSystemName(minorName),
-                resolved ? SqlValue.FromInt32(reference.ReferencedId!.Value) : SqlValue.Null(SqlType.Int32),
+                referencedId is { } id ? SqlValue.FromInt32(id) : SqlValue.Null(SqlType.Int32),
                 SqlValue.FromInt32(minorId),
                 SqlValue.FromByte(isType ? ModuleDependencies.TypeClass : ModuleDependencies.ObjectOrColumnClass),
                 isType ? typeClassDesc : objectClassDesc,
@@ -224,7 +230,7 @@ partial class Selection
                 SqlValue.FromBoolean(selectAll),
                 SqlValue.FromBoolean(resolved),
                 SqlValue.FromBoolean(reference.IsInsertAll),
-                SqlValue.FromBoolean(!resolved),
+                SqlValue.FromBoolean(gap),
             ];
 
             // A computed column, CHECK or DEFAULT reaches its own table's
@@ -245,7 +251,7 @@ partial class Selection
                 var use = reference.Columns.Find(c => string.Equals(c.Name, column.Name, StringComparison.OrdinalIgnoreCase));
                 if (use is null)
                     continue;
-                var columnId = ModuleDependencies.ColumnIdOf(reference.Resolved, use.Name);
+                var columnId = ModuleDependencies.ColumnIdOf(reference.Bound, use.Name);
                 if (columnId != 0)
                 {
                     yield return RowEncoder.EncodeRow(ReferencedEntitiesSchema,

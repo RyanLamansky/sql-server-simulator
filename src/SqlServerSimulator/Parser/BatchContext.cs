@@ -578,6 +578,14 @@ internal sealed partial class BatchContext
     public bool? QuotedIdentifiersAfterParse;
 
     /// <summary>
+    /// Each database's <c>ANSI_NULL_DEFAULT</c> as this batch began, recorded
+    /// when an <c>ALTER DATABASE</c> in it changes the option: real settled the
+    /// nullability of the batch's <c>CREATE TABLE</c> columns as it compiled,
+    /// so they keep the old value (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    public Dictionary<Database, bool>? CompiledAnsiNullDefaults;
+
+    /// <summary>
     /// Opens the transaction <c>SET IMPLICIT_TRANSACTIONS ON</c> gives a
     /// statement that reads or writes an object when none is open — called by
     /// the sites that meet one: a FROM source naming a table, view, table

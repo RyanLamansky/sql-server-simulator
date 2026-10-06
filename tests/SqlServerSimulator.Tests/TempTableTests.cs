@@ -527,12 +527,15 @@ public sealed class TempTableTests
         AreEqual(1, CountRows(conn, "#t"));
     }
 
-    // ---- tempdb's catalog (probed 2026-09-24) ----
+    // ---- tempdb's catalog (probed 2026-09-24; padded names 2026-10-06) ----
 
     [TestMethod]
     [DataRow("select count(*) from tempdb.sys.columns where object_id = object_id('tempdb..#t')", 2)]
-    [DataRow("select count(*) from tempdb.sys.tables where name = '#t' and object_id = object_id('tempdb..#t')", 1)]
-    [DataRow("select count(*) from tempdb.information_schema.columns where table_name = '#t'", 2)]
+    [DataRow("select count(*) from tempdb.sys.tables where name like '#t[_]%' and len(name) = 128 and object_id = object_id('tempdb..#t')", 1)]
+    [DataRow("select count(*) from tempdb.sys.tables where name = '#t'", 0)]
+    [DataRow("select count(*) from tempdb.information_schema.columns where table_name like '#t[_]%'", 2)]
+    [DataRow("select count(*) from tempdb.sys.objects where parent_object_id = object_id('tempdb..#t') and type = 'PK'", 1)]
+    [DataRow("select count(*) from tempdb.sys.objects where object_id = object_id('tempdb..#t') and type = 'U'", 1)]
     [DataRow("select count(*) from tempdb.sys.indexes where object_id = object_id('tempdb..#t') and is_primary_key = 1", 1)]
     [DataRow("select col_length('tempdb..#t', 'y')", 3)]
     [DataRow("select count(*) from sys.tables where name like '#t%'", 0)]
@@ -541,9 +544,21 @@ public sealed class TempTableTests
 
     [TestMethod]
     public void TempdbCatalog_NamesATempTableById()
-        => AreEqual("#t|dbo", new Simulation().ExecuteScalar("""
+        => AreEqual("#t_|128|dbo", new Simulation().ExecuteScalar("""
             create table #t (x int);
-            select concat(object_name(object_id('tempdb..#t'), db_id('tempdb')), '|', object_schema_name(object_id('tempdb..#t'), db_id('tempdb')))
+            select concat(left(object_name(object_id('tempdb..#t'), db_id('tempdb')), 3), '|', len(object_name(object_id('tempdb..#t'), db_id('tempdb'))), '|', object_schema_name(object_id('tempdb..#t'), db_id('tempdb')))
+            """));
+
+    /// <summary>
+    /// A table variable is listed in <c>tempdb</c> under its <c>#</c>-and-hex
+    /// name and object id (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void TempdbCatalog_ListsTheBatchsTableVariables()
+        => AreEqual(1, new Simulation().ExecuteScalar("""
+            declare @t table (a int);
+            select count(*) from tempdb.sys.tables
+            where name like '#[0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]' and object_id < 0
             """));
 
     [TestMethod]
@@ -586,5 +601,25 @@ public sealed class TempTableTests
         var simulation = new Simulation();
         simulation.ExecuteBatches("create table t (a int)", "create view v as select a from t");
         _ = simulation.AssertSqlError("truncate table v", 4708);
+    }
+
+    /// <summary>OBJECT_ID finds a temp table by its name inside tempdb (probed 2026-10-06 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void ObjectId_FindsATempTableByItsInternalName()
+        => AreEqual(0, new Simulation().ExecuteScalar("""
+            create table #t (a int);
+            select object_id('tempdb..' + (select name from tempdb.sys.tables where object_id = object_id('tempdb..#t'))) - object_id('tempdb..#t')
+            """));
+
+    /// <summary>tempdb's sp_columns lists the session's #temp table under its name inside tempdb (probed 2026-10-06 against SQL Server 2025).</summary>
+    [TestMethod]
+    public void TempdbSpColumns_ListsTheSessionsTempTable()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        _ = connection.CreateCommand("create table #t (a int)").ExecuteNonQuery();
+        using var reader = connection.CreateCommand("exec tempdb..sp_columns '#t'").ExecuteReader();
+        IsTrue(reader.Read());
+        AreEqual(128, reader.GetString(2).Length);
+        AreEqual("a", reader.GetString(3));
     }
 }

@@ -1263,7 +1263,7 @@ internal static partial class BuiltInResources
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var table in CatalogTables(schema, batch))
             {
-                var tableName = SqlValue.FromSystemName(table.Name);
+                var tableName = SqlValue.FromSystemName(table.CatalogName);
                 SqlValue[] Row(string constraintName, SqlValue constraintType) =>
                 [
                     catalog,
@@ -1326,7 +1326,7 @@ internal static partial class BuiltInResources
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var table in CatalogTables(schema, batch))
             {
-                var tableName = SqlValue.FromSystemName(table.Name);
+                var tableName = SqlValue.FromSystemName(table.CatalogName);
                 SqlValue[] Row(string constraintName, string columnName, int ordinal) =>
                 [
                     catalog,
@@ -1378,7 +1378,7 @@ internal static partial class BuiltInResources
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var table in CatalogTables(schema, batch))
             {
-                var tableName = SqlValue.FromSystemName(table.Name);
+                var tableName = SqlValue.FromSystemName(table.CatalogName);
                 SqlValue[] Row(string constraintName, string columnName) =>
                 [
                     catalog,
@@ -1474,7 +1474,7 @@ internal static partial class BuiltInResources
             var schemaName = SqlValue.FromSystemName(schema.Name);
             foreach (var table in CatalogTables(schema, batch))
             {
-                var tableName = SqlValue.FromSystemName(table.Name);
+                var tableName = SqlValue.FromSystemName(table.CatalogName);
                 SqlValue[] Row(string constraintName) =>
                 [
                     catalog,

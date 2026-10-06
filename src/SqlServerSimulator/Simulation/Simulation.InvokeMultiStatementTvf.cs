@@ -182,7 +182,7 @@ partial class Simulation
                 yield return ReturnTableRowAsSelected(returnTable, rowBytes, outerBatch);
             yield break;
         }
-        returnTable.InternalName = connection.Simulation.AllocateTableVariableInternalName();
+        returnTable.InternalName = connection.Simulation.AllocateTableVariableIdentity().InternalName;
         var counts = callerIo.Touch(returnTable);
         _ = counts?.ScanCount += 1;
         var lastPage = -1;

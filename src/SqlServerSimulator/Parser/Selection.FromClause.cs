@@ -1397,6 +1397,8 @@ internal sealed partial class Selection
                     // 4430 (probed 2026-10-05 against SQL Server 2025).
                     if (ParseOptionalTableHints(context).IndexArguments is not null && !context.Batch.IsSkipping)
                         context.Connection.PendingMessages.Enqueue(SimulatedSqlException.ViewIndexHintsIgnoredMessage(context.Batch, objectName.ToString()));
+                    if (catalogView.EnforcesJoinOrder && !context.Batch.IsSkipping)
+                        context.JoinOrderEnforced = true;
                     return new FromSource(
                         qualifier: catalogAlias ?? catalogView.Name,
                         columnNames: catalogColumnNames,

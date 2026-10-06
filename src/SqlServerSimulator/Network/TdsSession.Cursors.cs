@@ -219,6 +219,21 @@ internal sealed partial class TdsSession
             return;
         }
 
+        // PARAMETERIZED_STMT (0x1000) on an sp_cursoropen carrying no parameter
+        // definition is Msg 16902 state 22: no handle, the options echoed and
+        // the row count as sent (probed 2026-10-06 against SQL Server 2025).
+        if ((scrollopt & 0x1000) != 0 && cursorOrdinal == 0 && parameters.Count <= boundStart)
+        {
+            writer.WriteErrorOrInfo(Tds.TokenError, 16902, 22, 16, "sp_cursoropen: The value of the parameter 'scrollopt' is invalid.", TdsSession.ServerName, "sp_cursoropen", 1);
+            writer.WriteReturnStatus(1);
+            TdsTypeCodec.WriteReturnValue(writer, (ushort)cursorOrdinal, parameters[cursorOrdinal].Name, DbType.Int32, 0);
+            TdsTypeCodec.WriteReturnValue(writer, (ushort)scrollOrdinal, parameters[scrollOrdinal].Name, DbType.Int32, scrollopt);
+            TdsTypeCodec.WriteReturnValue(writer, (ushort)ccOrdinal, parameters[ccOrdinal].Name, DbType.Int32, ccopt);
+            TdsTypeCodec.WriteReturnValue(writer, (ushort)rowcountOrdinal, parameters[rowcountOrdinal].Name, DbType.Int32, parameters[rowcountOrdinal].Value);
+            this.CompleteCursorRpc(writer, moreRequests, error: true);
+            return;
+        }
+
         var connection = this.connection!;
         var name = "sss_apicursor_" + this.nextApiCursorHandle.ToString(CultureInfo.InvariantCulture);
         var declareOpen = $"DECLARE {name} CURSOR {CursorOptionKeywords(scrollopt, ccopt)} FOR {statement};\nOPEN {name};";
@@ -259,12 +274,55 @@ internal sealed partial class TdsSession
             return;
         }
 
-        var handle = this.nextApiCursorHandle++;
-        this.apiCursors[handle] = new ApiCursor(handle, name, cursor, boundParameters);
-
         var (effScroll, effCc, rowcount) = ResolveEffectiveOptions(cursor, scrollopt, ccopt, connection.LastCursorRows);
 
-        WriteCursorMetadata(writer, cursor, rows: null);
+        // CHECK_ACCEPTED_TYPES (0x8000): the type the cursor settled on must be
+        // one of the *_ACCEPTABLE bits (KEYSET 0x10000 … FAST_FORWARD
+        // 0x100000, each its type's bit shifted 16), else the open is Msg 16955
+        // and Msg 16945, returning 16955 with no handle, the options echoed and
+        // a zero row count (probed 2026-10-06 against SQL Server 2025).
+        if ((scrollopt & 0x8000) != 0 && (scrollopt & ((effScroll & 0x1F) << 16)) == 0)
+        {
+            using (var drop = connection.CreateCommand())
+            {
+#pragma warning disable CA2100 // The name is the endpoint's own synthesized cursor name.
+                drop.CommandText = $"DEALLOCATE {name};";
+#pragma warning restore CA2100
+                _ = drop.ExecuteNonQuery();
+            }
+            writer.WriteErrorOrInfo(Tds.TokenError, 16955, 2, 16, "Could not create an acceptable cursor.", TdsSession.ServerName, "sp_cursoropen", 1);
+            writer.WriteErrorOrInfo(Tds.TokenError, 16945, 2, 16, "The cursor was not declared.", TdsSession.ServerName, "sp_cursoropen", 1);
+            writer.WriteReturnStatus(16955);
+            if (extraReturns is not null)
+            {
+                foreach (var (ordinal, pname, value) in extraReturns)
+                    TdsTypeCodec.WriteReturnValue(writer, ordinal, pname, DbType.Int32, value);
+            }
+            TdsTypeCodec.WriteReturnValue(writer, (ushort)cursorOrdinal, parameters[cursorOrdinal].Name, DbType.Int32, 0);
+            TdsTypeCodec.WriteReturnValue(writer, (ushort)scrollOrdinal, parameters[scrollOrdinal].Name, DbType.Int32, scrollopt);
+            TdsTypeCodec.WriteReturnValue(writer, (ushort)ccOrdinal, parameters[ccOrdinal].Name, DbType.Int32, ccopt);
+            TdsTypeCodec.WriteReturnValue(writer, (ushort)rowcountOrdinal, parameters[rowcountOrdinal].Name, DbType.Int32, 0);
+            this.CompleteCursorRpc(writer, moreRequests, error: true);
+            return;
+        }
+
+        var handle = this.nextApiCursorHandle++;
+        var api = new ApiCursor(handle, name, cursor, boundParameters);
+        this.apiCursors[handle] = api;
+
+        // AUTO_FETCH (0x2000) fetches the first rows with the open — as many as
+        // the row count sent, else 20 — and reports how many it fetched as the
+        // row count, whatever the cursor's type (probed 2026-10-06 against SQL
+        // Server 2025).
+        List<SqlValue[]>? fetched = null;
+        if ((scrollopt & 0x2000) != 0)
+        {
+            var wanted = AsInt(parameters, rowcountOrdinal);
+            fetched = this.FetchIntoBuffer(api, FetchDirection.Next, 0, wanted > 0 ? wanted : 20);
+            rowcount = fetched.Count;
+        }
+
+        WriteCursorMetadata(writer, cursor, fetched);
 
         writer.WriteReturnStatus(0);
         if (extraReturns is not null)
@@ -307,41 +365,54 @@ internal sealed partial class TdsSession
         }
 
         var (firstDirection, offset) = MapFetchType(fetchType, rownum);
-        api.Buffer.Clear();
-        var rows = new List<SqlValue[]>();
-        using (var fetchCommand = this.connection!.CreateCommand())
-        {
-            fetchCommand.CommandText = " ";
-            foreach (var wire in api.BoundParameters)
-                _ = AddParameter(fetchCommand, wire);
-            var batch = new BatchContext(fetchCommand);
-            for (var i = 0; i < nrows; i++)
-            {
-                var direction = i == 0 ? firstDirection : FetchDirection.Next;
-                var (status, values) = api.Cursor.Fetch(batch, direction, offset);
-                if (status == -2)
-                {
-                    // A keyset member deleted out from under the cursor still
-                    // fills its buffer row, marked ROWSTAT 2, and the fetch
-                    // carries on past it (probed 2026-09-29 against SQL Server
-                    // 2025).
-                    rows.Add(Cursor.WithRowStat(api.Cursor.DeletedMemberValues(), 2));
-                    api.Buffer.Add(new (int Page, int Slot)?[api.Cursor.BaseTables.Length]);
-                    api.CurrentRowNumber += 1;
-                    continue;
-                }
-                if (status != 0 || values is null)
-                    break;
-                rows.Add(Cursor.WithRowStat(values, 1));
-                if (api.Cursor.CurrentRids is { } rids)
-                    api.Buffer.Add(rids);
-                api.CurrentRowNumber += 1;
-            }
-        }
+        var rows = this.FetchIntoBuffer(api, firstDirection, offset, nrows);
 
         WriteCursorMetadata(writer, api.Cursor, rows);
         writer.WriteReturnStatus(0);
         this.CompleteCursorRpc(writer, moreRequests, error: false);
+    }
+
+    /// <summary>
+    /// Fetches up to <paramref name="nrows"/> rows into <paramref name="api"/>'s
+    /// buffer, the first in <paramref name="firstDirection"/> and the rest
+    /// NEXT, each carrying its ROWSTAT.
+    /// </summary>
+    private List<SqlValue[]> FetchIntoBuffer(ApiCursor api, FetchDirection firstDirection, long offset, int nrows)
+    {
+        api.Buffer.Clear();
+        var rows = new List<SqlValue[]>();
+        using var fetchCommand = this.connection!.CreateCommand();
+        fetchCommand.CommandText = " ";
+        foreach (var wire in api.BoundParameters)
+            _ = AddParameter(fetchCommand, wire);
+        var batch = new BatchContext(fetchCommand);
+        var start = -1;
+        for (var i = 0; i < nrows; i++)
+        {
+            var direction = i == 0 ? firstDirection : FetchDirection.Next;
+            var (status, values) = api.Cursor.Fetch(batch, direction, offset);
+            if (i == 0 && status is 0 or -2)
+                start = api.Cursor.FetchBufferStart;
+            if (status == -2)
+            {
+                // A keyset member deleted out from under the cursor still
+                // fills its buffer row, marked ROWSTAT 2, and the fetch
+                // carries on past it (probed 2026-09-29 against SQL Server
+                // 2025).
+                rows.Add(Cursor.WithRowStat(api.Cursor.DeletedMemberValues(), 2));
+                api.Buffer.Add(new (int Page, int Slot)?[api.Cursor.BaseTables.Length]);
+                api.CurrentRowNumber += 1;
+                continue;
+            }
+            if (status != 0 || values is null)
+                break;
+            rows.Add(Cursor.WithRowStat(values, 1));
+            if (api.Cursor.CurrentRids is { } rids)
+                api.Buffer.Add(rids);
+            api.CurrentRowNumber += 1;
+        }
+        api.Cursor.ApiFetchBuffer = (rows.Count, rows.Count == 0 ? -1 : start);
+        return rows;
     }
 
     // ---- sp_cursor (positioned UPDATE / DELETE / SETPOSITION) -------------

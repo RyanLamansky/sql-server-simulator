@@ -76,7 +76,8 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNearKeyword(whereKeyword);
             context.MoveNextRequired();
             RejectFilterPredicateKeywords(context);
-            filter = BooleanExpression.Parse(context);
+            using (ParserScope.Enter(ref context.InFilterPredicate, true))
+                filter = BooleanExpression.Parse(context);
             CheckFilterPredicate(filter, statistics: true, statisticsName, targetTableName.ToString());
             filterDefinition = filter.RenderFilterDefinition(context.Batch);
             options = ParseStatisticsOptions(context).Or(options);

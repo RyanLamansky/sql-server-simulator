@@ -126,7 +126,7 @@ partial class Simulation
             var databaseId = SmallDatabaseId(simulation, target);
             batch.AppendInfoError(@class: 0, state: 1, number: 5201, message: SimulatedSqlException.ShrinkSkippedFileText(1, databaseId));
             batch.AppendInfoError(@class: 0, state: 2, number: 5201, message: SimulatedSqlException.ShrinkSkippedFileText(2, databaseId));
-            batch.AppendInfoError(@class: 0, state: 1, number: 2528, message: "DBCC execution completed. If DBCC printed error messages, contact your system administrator.");
+            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.DbccExecutionCompletedMessage(batch));
         }
         else
         {
@@ -191,7 +191,7 @@ partial class Simulation
         {
             if (batch.IsSkipping)
                 return true;
-            throw SimulatedSqlException.FollowedByDbccCompleted(SimulatedSqlException.DbccWrongParameterCount(state: 5));
+            throw SimulatedSqlException.FollowedByDbccCompleted(SimulatedSqlException.DbccWrongParameterCount(state: 5), batch.Connection.Language);
         }
         if (context.Token is not Operator { Character: ',' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -251,7 +251,7 @@ partial class Simulation
             && !PermissionEnforcement.HoldsPermission(batch, database, Permission.Select, PermissionChecker.ClassObject, table.ObjectId, table.SchemaId))
         {
             throw SimulatedSqlException.FollowedByDbccCompleted(SimulatedSqlException.ShowStatisticsPermissionDenied(
-                batch.Connection.Security.Effective.DatabasePrincipalName, table.Name, database.Name, SchemaNameOf(database, table), tableText));
+                batch.Connection.Security.Effective.DatabasePrincipalName, table.Name, database.Name, SchemaNameOf(database, table), tableText), batch.Connection.Language);
         }
 
         var collation = batch.CurrentDatabase.Collation;
@@ -267,7 +267,7 @@ partial class Simulation
         if (found is not { } statistic)
         {
             var missing = SimulatedSqlException.CouldNotLocateStatistics(statName.Leaf);
-            throw informational ? SimulatedSqlException.FollowedByDbccCompleted(missing) : missing;
+            throw informational ? SimulatedSqlException.FollowedByDbccCompleted(missing, batch.Connection.Language) : missing;
         }
         if (statsStream)
             throw new NotSupportedException("DBCC SHOW_STATISTICS WITH STATS_STREAM (the serialized statistic) isn't modeled.");
@@ -613,7 +613,7 @@ partial class Simulation
             SqlValue.FromNVarchar(eventType), row[1], eventInfo is null ? SqlValue.Null(schema[2]) : SqlValue.FromNVarchar(eventInfo),
         ])]);
         if (informational)
-            completion = batch.InfoMessage(@class: 0, state: 1, number: 2528, message: "DBCC execution completed. If DBCC printed error messages, contact your system administrator.");
+            completion = SimulatedSqlException.DbccExecutionCompletedMessage(batch);
         return true;
 
         static int DbccIntegerArgument(SqlValue value, int position) =>

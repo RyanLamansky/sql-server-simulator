@@ -50,13 +50,16 @@ Lifecycle, cross-conn isolation, and Msg 208 from other sessions all probe-confi
 
 ## `tempdb`'s catalog lists them
 
-`tempdb`'s catalog views and metadata scalars list the session's `#temp` tables and every `##` table under `dbo`, as real does, so the common probes work: `tempdb.sys.columns WHERE object_id = OBJECT_ID('tempdb..#t')`, `tempdb.INFORMATION_SCHEMA.COLUMNS`, `COL_LENGTH('tempdb..#t', 'c')`, `OBJECT_NAME(id, DB_ID('tempdb'))` (probed 2026-09-24 against SQL Server 2025).
-The views read them through `BuiltInResources.CatalogTables`, which appends them to `tempdb.dbo`'s own tables, and a temp table's id comes from `tempdb`'s counter so the two can't collide there.
+`tempdb`'s catalog views and metadata scalars list every session's `#temp` tables, every `##` table and the running batch's table variables under `dbo`, each by its name inside `tempdb` (`HeapTable.CatalogName`), as real does: `tempdb.sys.tables`, `sys.objects` (with the tables' constraints), `INFORMATION_SCHEMA.TABLES` / `COLUMNS`, `OBJECT_NAME(id, DB_ID('tempdb'))` (probed 2026-09-24 and 2026-10-06 against SQL Server 2025).
+So `WHERE name = '#t'` finds nothing on either — `name LIKE '#t[_]%'` or `object_id = OBJECT_ID('tempdb..#t')` is the working spelling — and `OBJECT_ID('tempdb..<padded name>')` finds the table whichever session made it.
+The views read them through `BuiltInResources.TempCatalogTables`, which `CatalogTables` appends to `tempdb.dbo`'s own tables; a temp table's id comes from `tempdb`'s counter so the two can't collide there.
 
 A `#temp` table's messages — Msg 515, Msg 2628 — name it as real does, by its name inside `tempdb`: the written name padded with underscores to 116 characters and twelve hex digits of a server-wide counter each local temp table's creation advances (`HeapTable.InternalName`, probed 2026-09-28), real's counter carrying its instance's history where this one starts at 1; a constraint conflict (Msg 547) names it bare, `table "#t"`.
-A table variable's internal name is `#` and eight hex digits of a negative object id — see [`table-variables.md`](table-variables.md#fidelity-gaps-remaining).
+A table variable's internal name is `#` and eight hex digits of its negative object id — see [`table-variables.md`](table-variables.md#fidelity-gaps-remaining).
 
-**Divergences**: the catalog views and `OBJECT_NAME` list a `#temp` by its written name, where real lists that padded name; real also lists other sessions' `#temp` tables, every table variable and a `#temp` table's constraints (under their padded names), which don't appear here; and `EXEC tempdb..sp_help '#t'` is Msg 15009 here where real describes the table.
+`EXEC tempdb..sp_help '#t'` describes the table under that name, and `tempdb..sp_columns '#t'` lists its columns (probed 2026-10-06).
+
+**Divergences**: real lists every session's table variables, where the simulator lists the running batch's alone (another batch's live on it, out of reach).
 
 ## Global temp tables (`##foo`)
 Instance-wide `ConcurrentDictionary<string, HeapTable> GlobalTempTables` on `Simulation`; routed by `BatchContext.TryResolveTable` via `IsGlobalTempName` (leading `##`, length ≥ 2 — bare `##` is a valid name, probe-confirmed).

@@ -184,6 +184,13 @@ internal sealed class Cursor(
     public DateTime CreationTime;
 
     /// <summary>
+    /// The SET options the cursor was declared under, which an OPEN and a
+    /// non-STATIC FETCH must find unchanged (Msg 16958); null for a cursor no
+    /// declaration made.
+    /// </summary>
+    public CursorSetOptions? DeclaredOptions;
+
+    /// <summary>
     /// The text of the batch (or module body) that declared the cursor, and
     /// the declaring statement's first and last characters in it — what
     /// <c>sys.dm_exec_cursors</c> reports as <c>sql_handle</c> and, doubled
@@ -236,8 +243,26 @@ internal sealed class Cursor(
     }
 
     /// <summary>
+    /// True for an API server cursor (<c>sp_cursoropen</c> and the prepared
+    /// family), which <c>sys.dm_exec_cursors</c> lists with no name and an
+    /// <c>API</c> source (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public bool IsApiCursor;
+
+    /// <summary>
+    /// An API server cursor's last fetch buffer as <c>sys.dm_exec_cursors</c>
+    /// reports it in place of <see cref="FetchBufferSize"/> /
+    /// <see cref="FetchBufferStart"/>: the rows it holds and the 1-based
+    /// position of its first (-1 when empty, and always for a DYNAMIC or
+    /// FAST_FORWARD cursor), with <c>fetch_status</c> 0 (probed 2026-10-06
+    /// against SQL Server 2025). Null until the first fetch.
+    /// </summary>
+    public (int Size, int Start)? ApiFetchBuffer;
+
+    /// <summary>
     /// <c>sys.dm_exec_cursors.properties</c>: <c>TSQL | type | concurrency |
-    /// scope (0)</c>, the type and concurrency the cursor resolved to.
+    /// scope (0)</c>, the type and concurrency the cursor resolved to, with
+    /// <c>API</c> leading an API server cursor's.
     /// </summary>
     public string DmvProperties
     {
@@ -250,7 +275,7 @@ internal sealed class Cursor(
                 _ => "Dynamic",
             };
             var concurrency = this.ReadOnly ? "Read Only" : this.Concurrency == CursorConcurrency.ScrollLocks ? "Scroll Locks" : "Optimistic";
-            return $"TSQL | {type} | {concurrency} | {(this.DeclaredLocal ? "Local" : "Global")} (0)";
+            return $"{(this.IsApiCursor ? "API" : "TSQL")} | {type} | {concurrency} | {(this.DeclaredLocal ? "Local" : "Global")} (0)";
         }
     }
 
@@ -340,12 +365,16 @@ internal sealed class Cursor(
     {
         if (this.IsOpen)
             throw SimulatedSqlException.CursorAlreadyOpen();
+        if (this.DeclaredOptions is { } declared && !declared.Equals(new CursorSetOptions(batch.Connection)))
+            throw SimulatedSqlException.CursorSetOptionsChanged();
         this.openedDefinitions = Array.ConvertAll(this.BaseTables, static table => Volatile.Read(ref table.DefinitionVersion));
 
         switch (this.Sensitivity)
         {
             case CursorSensitivity.Static:
-                this.staticRows = [.. this.Selection.Execute(batch).RowBytes.Select(b => RowDecoder.DecodeRow(this.Selection.Schema, b))];
+                // SET ROWCOUNT caps the population as it caps a SELECT (probed
+                // 2026-10-06 against SQL Server 2025: @@CURSOR_ROWS reads the cap).
+                this.staticRows = [.. this.Selection.Execute(batch).WithRowCountLimit(batch.Connection.RowCountLimit).RowBytes.Select(b => RowDecoder.DecodeRow(this.Selection.Schema, b))];
                 this.position = -1;
                 batch.Connection.LastCursorRows = this.FastForward ? -1 : this.staticRows.Count;
                 break;
@@ -353,6 +382,8 @@ internal sealed class Cursor(
                 // OPEN is where a TOP / OFFSET / FETCH limit picks membership;
                 // later FETCHes re-read the frozen key set without it.
                 this.keysetIdentities = this.ReadKeyset(batch);
+                if (batch.Connection.RowCountLimit is > 0 and var cap && cap < this.keysetIdentities.Count)
+                    this.keysetIdentities.RemoveRange((int)cap, this.keysetIdentities.Count - (int)cap);
                 this.position = -1;
                 batch.Connection.LastCursorRows = this.keysetIdentities.Count;
                 break;
@@ -666,6 +697,10 @@ internal sealed class Cursor(
     /// </summary>
     public (int Status, SqlValue[]? Values) Fetch(BatchContext batch, FetchDirection direction, long offset)
     {
+        // Checked ahead of the open state, so a cursor whose OPEN failed on it
+        // fails the FETCH the same way.
+        if (this.Sensitivity != CursorSensitivity.Static && this.DeclaredOptions is { } declared && !declared.Equals(new CursorSetOptions(batch.Connection)))
+            throw SimulatedSqlException.CursorSetOptionsChanged();
         if (!this.IsOpen)
             throw SimulatedSqlException.CursorNotOpen(state: 2);
         this.EnsureDirectionAllowed(direction);
@@ -843,6 +878,7 @@ internal sealed class Cursor(
     private (int, SqlValue[]?) FetchKeyset(BatchContext batch, FetchDirection direction, long offset)
     {
         var count = this.keysetIdentities!.Count;
+        var from = this.position;
         if (!this.TryMoveIndex(direction, offset, count))
         {
             this.CurrentRids = null;
@@ -854,6 +890,13 @@ internal sealed class Cursor(
         {
             if (Selection.CursorIdentityMatches(this.Plan!, row, member))
             {
+                // A row whose select list raises fails the fetch and leaves
+                // the cursor where it was, so a NEXT meets the row again.
+                if (row.ProjectionError is { } error)
+                {
+                    this.position = from;
+                    throw error;
+                }
                 this.CurrentRids = row.Rids;
                 return (0, row.Values);
             }
@@ -914,6 +957,8 @@ internal sealed class Cursor(
             this.CurrentRids = null;
             return (-1, null);
         }
+        if (target.ProjectionError is { } error)
+            throw error;
 
         this.dynamicLast = target;
         this.dynamicBeforeFirst = false;
@@ -995,4 +1040,50 @@ internal sealed class Cursor(
         this.dynamicBeforeFirst = true;
         return null;
     }
+}
+
+/// <summary>
+/// The SET options a cursor's plan depends on, captured as it is declared:
+/// changing any of them before an OPEN, or before a FETCH from a cursor that
+/// reads live rows, is Msg 16958 (probed 2026-10-06 against SQL Server 2025,
+/// one option at a time; <c>ARITHABORT</c>, <c>QUOTED_IDENTIFIER</c>,
+/// <c>NOCOUNT</c>, <c>XACT_ABORT</c>, <c>TEXTSIZE</c>, <c>LOCK_TIMEOUT</c>,
+/// the isolation level, <c>CURSOR_CLOSE_ON_COMMIT</c>,
+/// <c>DEADLOCK_PRIORITY</c> and <c>STATISTICS IO</c> aren't among them). An
+/// option changed and changed back leaves the cursor usable.
+/// </summary>
+internal readonly struct CursorSetOptions(SimulatedDbConnection connection) : IEquatable<CursorSetOptions>
+{
+    private readonly bool ansiNulls = connection.AnsiNulls;
+    private readonly bool ansiPadding = connection.AnsiPadding;
+    private readonly bool ansiWarnings = connection.AnsiWarnings;
+    private readonly bool concatNullYieldsNull = connection.ConcatNullYieldsNull;
+    private readonly bool numericRoundabort = connection.NumericRoundabort;
+    private readonly bool ansiNullDefaultOn = connection.AnsiNullDefaultOn;
+    private readonly bool ansiNullDefaultOff = connection.AnsiNullDefaultOff;
+    private readonly bool forcePlan = (connection.ListedOnlyOptions & ListedOnlyOptions.ForcePlan) != 0;
+    private readonly bool noBrowseTable = connection.NoBrowseTable;
+    private readonly DateOrder dateFormat = connection.DateFormat;
+    private readonly byte dateFirst = connection.DateFirst;
+    private readonly Language language = connection.Language;
+    private readonly long rowCountLimit = connection.RowCountLimit;
+
+    public bool Equals(CursorSetOptions other) =>
+        this.ansiNulls == other.ansiNulls
+        && this.ansiPadding == other.ansiPadding
+        && this.ansiWarnings == other.ansiWarnings
+        && this.concatNullYieldsNull == other.concatNullYieldsNull
+        && this.numericRoundabort == other.numericRoundabort
+        && this.ansiNullDefaultOn == other.ansiNullDefaultOn
+        && this.ansiNullDefaultOff == other.ansiNullDefaultOff
+        && this.forcePlan == other.forcePlan
+        && this.noBrowseTable == other.noBrowseTable
+        && this.dateFormat == other.dateFormat
+        && this.dateFirst == other.dateFirst
+        && ReferenceEquals(this.language, other.language)
+        && this.rowCountLimit == other.rowCountLimit;
+
+    public override bool Equals(object? obj) => obj is CursorSetOptions other && this.Equals(other);
+
+    public override int GetHashCode() => HashCode.Combine(this.ansiNulls, this.ansiPadding, this.ansiWarnings, this.dateFormat, this.dateFirst, this.language, this.rowCountLimit);
 }

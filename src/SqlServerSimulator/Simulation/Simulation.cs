@@ -764,13 +764,15 @@ public sealed partial class Simulation
     /// digits of its negative object id (<c>#B9CBEB0A</c>), a fresh one for
     /// each declaration (probed 2026-09-28 against SQL Server 2025). Real
     /// draws the id from <c>tempdb</c>'s allocator, whose values carry the
-    /// instance's history, so the digits match its shape, not its value.
+    /// instance's history, so the digits match its shape, not its value. The
+    /// id is the table variable's object id, which <c>tempdb</c>'s catalog
+    /// lists it under, and which no user database's allocator spends.
     /// </summary>
-    internal string AllocateTableVariableInternalName()
+    internal (int ObjectId, string InternalName) AllocateTableVariableIdentity()
     {
         var sequence = (uint)Interlocked.Increment(ref this.tableVariableCounter);
         var objectId = 0x8000_0000u | ((0x2100_0000u + (sequence * 999_983u)) & 0x7FFF_FFFFu);
-        return $"#{objectId:X8}";
+        return (unchecked((int)objectId), $"#{objectId:X8}");
     }
 
     /// <summary>

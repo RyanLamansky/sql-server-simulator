@@ -1100,7 +1100,7 @@ partial class Simulation
                     report.Record(missing, colTok.StartIndex, BindClause.MergeInsertColumns);
                     col = new HeapColumn(colTok.Value, SqlType.Int32, null, nullable: true);
                 }
-                if (col.Computed is not null && col.GraphKind == GraphColumnKind.None)
+                if (col.Computed is not null && col.GraphKind == GraphColumnKind.None && !col.IsColumnSet)
                     throw SimulatedSqlException.ColumnCannotBeModified(col.Name);
                 if (GraphColumns.IsInternal(col.GraphKind))
                     throw SimulatedSqlException.InternalGraphColumnAccess(col.Name, state: 1);
@@ -1281,7 +1281,7 @@ partial class Simulation
                     var targetColumn = destinationTable.Columns[ordinal];
                     if (targetColumn.Identity is not null)
                         throw SimulatedSqlException.CannotUpdateIdentityColumn(targetColumn.Name);
-                    if (targetColumn.Computed is not null)
+                    if (targetColumn.Computed is not null && !targetColumn.IsColumnSet)
                         throw SimulatedSqlException.ColumnCannotBeModified(targetColumn.Name);
                     if (targetColumn.Type == SqlType.RowVersion)
                         throw SimulatedSqlException.CannotUpdateTimestampColumn();
@@ -1300,6 +1300,7 @@ partial class Simulation
             }
         }
 
+        RejectColumnSetBesideSparse(destinationTable, assignments);
         return new WhenClause(kind, MergeActionKind.Update, searchCondition, assignments: assignments, insertColumns: null, insertValues: null);
     }
 

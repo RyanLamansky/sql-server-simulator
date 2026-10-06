@@ -569,4 +569,98 @@ public sealed class CursorRpcTests
         AreEqual(0x1, cc);
         AreEqual(-1, rowcount);
     }
+
+    private static async Task<(int Handle, int Scroll, int Cc, object RowCount, int Status, int Rows, int? Error)> OpenRawAsync(
+        SqlConnection connection, string stmt, int scrollopt, int ccopt, object? rowcount, CancellationToken token)
+    {
+        await using var cmd = Proc("sp_cursoropen", connection);
+        var ret = new SqlParameter("@RETURN_VALUE", SqlDbType.Int) { Direction = ParameterDirection.ReturnValue };
+        var handle = Out("@cursor");
+        var scroll = InOut("@scrollopt", scrollopt);
+        var cc = InOut("@ccopt", ccopt);
+        var count = new SqlParameter("@rowcount", SqlDbType.Int) { Direction = ParameterDirection.InputOutput, Value = rowcount ?? DBNull.Value };
+        _ = cmd.Parameters.Add(ret);
+        _ = cmd.Parameters.Add(handle);
+        _ = cmd.Parameters.Add(new SqlParameter("@stmt", SqlDbType.NVarChar, 4000) { Value = stmt });
+        _ = cmd.Parameters.Add(scroll);
+        _ = cmd.Parameters.Add(cc);
+        _ = cmd.Parameters.Add(count);
+        var rows = 0;
+        int? error = null;
+        try
+        {
+            await using var reader = await cmd.ExecuteReaderAsync(token);
+            do
+            {
+                while (await reader.ReadAsync(token))
+                    rows++;
+            }
+            while (await reader.NextResultAsync(token));
+        }
+        catch (SqlException e)
+        {
+            error = e.Number;
+        }
+        return ((int)handle.Value, (int)scroll.Value, (int)cc.Value, count.Value, (int)ret.Value, rows, error);
+    }
+
+    /// <summary>
+    /// The scrollopt flags past the cursor type (probed 2026-10-06 against SQL
+    /// Server 2025): PARAMETERIZED_STMT without a parameter definition is Msg
+    /// 16902; AUTO_FETCH returns the first rows with the open and reports how
+    /// many; CHECK_ACCEPTED_TYPES refuses a cursor whose type no *_ACCEPTABLE
+    /// bit names, with Msg 16955.
+    /// </summary>
+    [TestMethod]
+    public async Task OpenFlags_ParameterizedAutoFetchAndAcceptedTypes()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
+        await using var connection = await OpenWithTableAsync(listener, Token);
+
+        var (handle, scroll, cc, rowCount, status, _, error) = await OpenRawAsync(connection, "SELECT id FROM dbo.curp", 0x1001, 1, 7, Token);
+        AreEqual(0, handle);
+        AreEqual(0x1001, scroll);
+        AreEqual(1, cc);
+        AreEqual(7, rowCount);
+        AreEqual(1, status);
+        AreEqual(16902, error);
+
+        (_, scroll, _, rowCount, _, var rows, _) = await OpenRawAsync(connection, "SELECT id FROM dbo.curp", 0x2002, 1, 3, Token);
+        AreEqual(0x2, scroll);
+        AreEqual(3, rowCount);
+        AreEqual(3, rows);
+        (_, scroll, _, rowCount, _, rows, _) = await OpenRawAsync(connection, "SELECT id FROM dbo.curp", 0x2004, 1, null, Token);
+        AreEqual(0x4, scroll);
+        AreEqual(5, rowCount);
+        AreEqual(5, rows);
+
+        (handle, scroll, _, rowCount, status, _, error) = await OpenRawAsync(connection, "SELECT id FROM dbo.curp", 0x28001, 1, null, Token);
+        AreEqual(0, handle);
+        AreEqual(0x28001, scroll);
+        AreEqual(0, rowCount);
+        AreEqual(16955, status);
+        AreEqual(16955, error);
+        (_, scroll, _, _, status, _, _) = await OpenRawAsync(connection, "SELECT DISTINCT qty FROM dbo.curp", 0x98001, 1, null, Token);
+        AreEqual(0x8, scroll);
+        AreEqual(0, status);
+    }
+
+    /// <summary>An API cursor is listed with no name and an <c>API</c> source (probed 2026-10-06 against SQL Server 2025).</summary>
+    [TestMethod]
+    public async Task ExecCursors_ListsAnApiCursor()
+    {
+        var simulation = new Simulation();
+        await using var listener = await simulation.ListenLocalAsync(0, Token);
+        await using var connection = await OpenWithTableAsync(listener, Token);
+        _ = await OpenRawAsync(connection, "SELECT id FROM dbo.curp", 0x2001, 1, 2, Token);
+        await using var cmd = new SqlCommand("SELECT name, properties, fetch_status, fetch_buffer_size, fetch_buffer_start FROM sys.dm_exec_cursors(@@SPID)", connection);
+        await using var reader = await cmd.ExecuteReaderAsync(Token);
+        IsTrue(await reader.ReadAsync(Token));
+        IsTrue(reader.IsDBNull(0));
+        AreEqual("API | Keyset | Read Only | Global (0)", reader.GetString(1));
+        AreEqual(0, reader.GetInt32(2));
+        AreEqual(2, reader.GetInt32(3));
+        AreEqual(1, reader.GetInt32(4));
+    }
 }

@@ -131,14 +131,16 @@ public sealed class CatalogRowCacheTests
     }
 
     [TestMethod]
-    public void TempdbRead_ListsOnlyTheReadersOwnTempTables()
+    public void TempdbRead_ListsEverySessionsTempTables()
     {
         var sim = new Simulation();
         var first = sim.CreateOpenConnection();
         var second = sim.CreateOpenConnection();
         _ = first.CreateCommand("create table #mine (a int)").ExecuteNonQuery();
-        AreEqual(1, first.CreateCommand("select count(*) from tempdb.sys.tables where name = '#mine'").ExecuteScalar());
-        AreEqual(0, second.CreateCommand("select count(*) from tempdb.sys.tables where name = '#mine'").ExecuteScalar());
+        AreEqual(1, first.CreateCommand("select count(*) from tempdb.sys.tables where name like '#mine[_]%'").ExecuteScalar());
+        AreEqual(1, second.CreateCommand("select count(*) from tempdb.sys.tables where name like '#mine[_]%'").ExecuteScalar());
+        AreEqual(1, first.CreateCommand("select count(*) from tempdb.sys.tables where object_id = object_id('tempdb..#mine')").ExecuteScalar());
+        AreEqual(0, second.CreateCommand("select count(*) from tempdb.sys.tables where object_id = object_id('tempdb..#mine')").ExecuteScalar());
     }
 
     [TestMethod]

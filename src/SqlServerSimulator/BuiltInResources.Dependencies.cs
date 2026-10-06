@@ -35,7 +35,7 @@ internal static partial class BuiltInResources
             new("referenced_minor_id", SqlType.Int32, null, false),
             new("is_caller_dependent", SqlType.Bit, null, false),
             new("is_ambiguous", SqlType.Bit, null, false),
-        ], (batch, database) => EnumerateExpressionDependencies(database));
+        ], (batch, database) => EnumerateExpressionDependencies(database, batch.Connection.Simulation.Databases));
 
     /// <summary>
     /// One row per (referencing entity, referenced entity) pair, plus — for a
@@ -46,7 +46,7 @@ internal static partial class BuiltInResources
     /// and a computed column / CHECK / DEFAULT expression reports only its
     /// column rows, since it reaches its own table without naming it.
     /// </summary>
-    private static IEnumerable<SqlValue[]> EnumerateExpressionDependencies(Database database)
+    private static IEnumerable<SqlValue[]> EnumerateExpressionDependencies(Database database, System.Collections.Concurrent.ConcurrentDictionary<string, Database> databases)
     {
         var objectClass = SqlValue.FromByte(ModuleDependencies.ObjectOrColumnClass);
         var objectClassDesc = SqlValue.FromNVarchar(nvarchar60Catalog, "OBJECT_OR_COLUMN");
@@ -58,7 +58,7 @@ internal static partial class BuiltInResources
         var indexClass = SqlValue.FromByte(ModuleDependencies.IndexClass);
         var indexClassDesc = SqlValue.FromNVarchar(nvarchar60Catalog, "INDEX");
 
-        foreach (var entity in ModuleDependencies.Enumerate(database, includeIndexes: true))
+        foreach (var entity in ModuleDependencies.Enumerate(database, includeIndexes: true, name => databases.TryGetValue(name, out var other) ? other : null))
         {
             var referencingId = SqlValue.FromInt32(entity.ReferencingId);
             var referencingMinor = SqlValue.FromInt32(entity.ReferencingMinorId);
@@ -232,10 +232,11 @@ internal static partial class BuiltInResources
     /// <para>
     /// The <c>referenced_minor_id = 0</c> row is <em>narrower</em> than
     /// <c>sys.sql_expression_dependencies</c>': real records the object itself
-    /// only where the reference doesn't land on one of its columns — a
+    /// only where a statement doesn't land on one of its columns — a
     /// whole-object read or write (<c>SELECT 1 FROM t</c>, <c>DELETE</c>, an
-    /// <c>INSERT</c> carrying no column list), an <c>EXEC</c> or a function
-    /// call — plus every schema-bound reference, which binds the object as well
+    /// <c>INSERT</c> carrying no column list, a <c>MERGE</c>'s insert), an
+    /// <c>EXEC</c> or a function call — beside the column rows other statements
+    /// reach, plus every schema-bound reference, which binds the object as well
     /// as its columns. A plain <c>SELECT a FROM t</c> reports column <c>a</c>
     /// and nothing else.
     /// </para>
@@ -279,6 +280,8 @@ internal static partial class BuiltInResources
                 var referencedId = resolvedObject.ObjectId;
                 if (reference.HasObjectReference && (columnRows.Count == 0 || reference.IsSchemaBound))
                     yield return (entity, reference, referencedId, 0, reference.IsSelected, reference.IsUpdated, reference.IsSelectAll, resolvedObject);
+                else if (reference.WholeSelected || reference.WholeUpdated)
+                    yield return (entity, reference, referencedId, 0, reference.WholeSelected, reference.WholeUpdated, false, resolvedObject);
                 foreach (var (columnId, use) in columnRows)
                     yield return (entity, reference, referencedId, columnId, use.Selected, use.Updated, use.SelectAll, resolvedObject);
             }

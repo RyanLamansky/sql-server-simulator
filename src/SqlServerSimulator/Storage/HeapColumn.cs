@@ -137,6 +137,27 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     public bool IsSparse;
 
     /// <summary>
+    /// True when the column was created under <c>SET ANSI_PADDING OFF</c>
+    /// (<c>sys.columns.is_ansi_padded</c> = 0): a bounded <c>varchar</c> or
+    /// <c>varbinary</c> drops trailing spaces or zero bytes, down to one, as a
+    /// write stores a value, and a nullable <c>char</c> or <c>binary</c> takes
+    /// its type's trimming form (<see cref="CharSqlType.PaddingOffForm"/>). Real
+    /// leaves a <c>max</c> type, a <c>NOT NULL</c> <c>char</c> or <c>binary</c>
+    /// and the Unicode types alone (probed 2026-10-06 against SQL Server
+    /// 2025).
+    /// </summary>
+    public bool IsAnsiPaddingOff;
+
+    /// <summary>
+    /// True for the table's sparse column set, <c>xml COLUMN_SET FOR
+    /// ALL_SPARSE_COLUMNS</c>: computed from the sparse columns
+    /// (<see cref="Parser.Expressions.ColumnSetValue"/>) yet writable, writing
+    /// them, and standing in for them in <c>SELECT *</c> and an INSERT's
+    /// implicit column list.
+    /// </summary>
+    public bool IsColumnSet;
+
+    /// <summary>
     /// True for columns whose values flow through LOB-chain storage rather
     /// than the row's variable section: <c>text</c>, <c>ntext</c>, <c>image</c>
     /// (always-LOB types) plus <c>varchar(MAX)</c>, <c>nvarchar(MAX)</c>,
@@ -338,13 +359,22 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     internal HeapColumn WithFreshIdentity() =>
         this.Identity is { } identity ? this.With(this.IsPersisted, this.Nullable, this.IsHidden, new IdentityState(identity.Seed, identity.Increment, identity.NotForReplication)) : this;
 
-    private HeapColumn With(bool persisted, bool nullable, bool hidden, IdentityState? identity = null) =>
-        new(this.Name, this.Type, this.MaxLength, nullable, identity ?? this.Identity, this.Default, this.Computed, persisted,
+    /// <summary>
+    /// This column with <see cref="Type"/> replaced by <paramref name="type"/>,
+    /// every other attribute carried over — a padded type's trimming form
+    /// under <c>SET ANSI_PADDING OFF</c>, or back.
+    /// </summary>
+    internal HeapColumn WithType(SqlType type) => this.With(this.IsPersisted, this.Nullable, this.IsHidden, type: type);
+
+    private HeapColumn With(bool persisted, bool nullable, bool hidden, IdentityState? identity = null, SqlType? type = null) =>
+        new(this.Name, type ?? this.Type, this.MaxLength, nullable, identity ?? this.Identity, this.Default, this.Computed, persisted,
             this.GeneratedAs, hidden, this.Collation, this.ComputedDefinition, this.IsRowGuidCol, this.SpelledNumeric)
         {
             ColumnId = this.ColumnId,
             IsUntypedNull = this.IsUntypedNull,
             IsSparse = this.IsSparse,
+            IsAnsiPaddingOff = this.IsAnsiPaddingOff,
+            IsColumnSet = this.IsColumnSet,
             DefaultConstraint = this.DefaultConstraint,
             XmlSchemaCollection = this.XmlSchemaCollection,
             AliasType = this.AliasType,

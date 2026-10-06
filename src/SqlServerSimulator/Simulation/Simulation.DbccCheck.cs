@@ -66,11 +66,18 @@ partial class Simulation
             return [];
 
         var physicalOnly = dbcc.Has(DbccOptions.PhysicalOnly);
+        // CHECKDB WITH TABLOCK skips the catalog and Service Broker checks and
+        // says so (probed 2026-10-06 against SQL Server 2025).
+        var tabLock = dbcc.Has(DbccOptions.TabLock) && command == "CHECKDB";
         var databaseId = DatabaseIdOf(batch.Connection.Simulation, database);
         if (dbcc.Has(DbccOptions.TableResults))
         {
             var rows = new List<SqlValue[]>();
-            if (isDatabase && !physicalOnly)
+            if (isDatabase && tabLock)
+            {
+                rows.Add(CheckResultRow(5232, SimulatedSqlException.CatalogChecksSkippedText, databaseId, objectId: 0, indexId: -1, locatesRow: true));
+            }
+            else if (isDatabase && !physicalOnly)
             {
                 foreach (var text in SimulatedSqlException.ServiceBrokerCheckTexts)
                     rows.Add(CheckResultRow(8997, text, databaseId, objectId: 0, indexId: -1, locatesRow: true));
@@ -89,9 +96,11 @@ partial class Simulation
         Info(batch, SimulatedSqlException.DbccResultsForMessage(batch, database.Name));
         if (isDatabase && dbcc.Arguments.Count > 1)
             Info(batch, SimulatedSqlException.NoIndexCheckWarningMessage(batch));
+        if (isDatabase && tabLock)
+            Info(batch, SimulatedSqlException.CatalogChecksSkippedMessage(batch));
         if (!physicalOnly)
         {
-            if (isDatabase)
+            if (isDatabase && !tabLock)
             {
                 foreach (var text in SimulatedSqlException.ServiceBrokerCheckTexts)
                     Info(batch, SimulatedSqlException.ServiceBrokerCheckMessage(batch, text));

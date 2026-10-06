@@ -161,7 +161,7 @@ internal static class RowEncoder
             || (valueType is VarcharSqlType && columnType is VarcharSqlType)
             || (valueType is NVarcharSqlType && columnType is NVarcharSqlType)
             || (valueType is VarbinarySqlType && columnType is VarbinarySqlType)
-            || (valueType is CharSqlType vCh && columnType is CharSqlType cCh && vCh.length == cCh.length)
+            || (valueType is CharSqlType vCh && columnType is CharSqlType cCh && vCh.length == cCh.length && vCh.trimsTrailingSpaces == cCh.trimsTrailingSpaces)
             || (valueType is NCharSqlType vNCh && columnType is NCharSqlType cNCh && vNCh.length == cNCh.length);
 
         var n = schema.Length;

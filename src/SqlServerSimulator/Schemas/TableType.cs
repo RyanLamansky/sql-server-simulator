@@ -137,11 +137,11 @@ internal sealed class TableType(
         // Real names a typed table variable's constraints, and the table in
         // Msg 2628, by its name inside tempdb, as for DECLARE @t TABLE
         // (probed 2026-09-28 against SQL Server 2025).
-        var internalName = batch.Connection.Simulation.AllocateTableVariableInternalName();
+        var (objectId, internalName) = batch.Connection.Simulation.AllocateTableVariableIdentity();
         var table = new HeapTable(
             fullName,
             this.Columns,
-            batch.CurrentDatabase.AllocateObjectId(),
+            objectId,
             schemaId: Database.DboSchemaId,
             createDate: batch.CurrentStatement.UtcNow,
             keyConstraints: Simulation.ResolveKeyConstraints(internalName, this.Columns, this.PendingKeys, batch.CurrentDatabase, batch.CurrentStatement.UtcNow),

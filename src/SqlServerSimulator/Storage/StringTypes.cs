@@ -361,7 +361,20 @@ internal sealed class CharSqlType : SqlType
 
     private readonly Coercibility coercibility;
 
-    private CharSqlType(short length, Collation collation, Coercibility coercibility)
+    /// <summary>
+    /// True for the form a nullable <c>char(N)</c> column declared under
+    /// <c>SET ANSI_PADDING OFF</c> takes: real stores it as a <c>varchar</c>,
+    /// trailing spaces trimmed down to one, while every surface still names
+    /// it <c>char(N)</c> (probed 2026-10-06 against SQL Server 2025). Values
+    /// of this form are trimmed as they are made
+    /// (<see cref="SqlValue.FromChar"/>), and the row encoder stores them
+    /// variable-length.
+    /// </summary>
+    public readonly bool trimsTrailingSpaces;
+
+    private CharSqlType? paddingOff;
+
+    private CharSqlType(short length, Collation collation, Coercibility coercibility, bool trimsTrailingSpaces = false)
         : base(SqlTypeCategory.String, TypePairClass.AnsiString)
     {
         // Interned per triple, so the Msg 459 gate runs once per pairing.
@@ -369,21 +382,38 @@ internal sealed class CharSqlType : SqlType
         this.length = length;
         this.collation = collation;
         this.coercibility = coercibility;
+        this.trimsTrailingSpaces = trimsTrailingSpaces;
+    }
+
+    /// <summary>This type's <see cref="trimsTrailingSpaces"/> form, interned per instance.</summary>
+    public CharSqlType PaddingOffForm()
+    {
+        if (this.trimsTrailingSpaces)
+            return this;
+        if (this.paddingOff is null)
+            _ = Interlocked.CompareExchange(ref this.paddingOff, new CharSqlType(this.length, this.collation, this.coercibility, trimsTrailingSpaces: true), null);
+        return this.paddingOff;
     }
 
     public override Type ClrType => typeof(string);
 
     public override string SqlServerName => "char";
 
-    public override bool IsFixedLength => true;
+    public override bool IsFixedLength => !this.trimsTrailingSpaces;
 
     public override int FixedLength => this.length;
+
+    public override int GetVariableByteCount(SqlValue value) => this.collation.StorageEncoding.GetByteCount(value.AsString);
 
     public override Collation Collation => this.collation;
 
     public override Coercibility Coercibility => this.coercibility;
 
-    public override SqlType WithCollation(Collation collation, Coercibility coercibility) => Get(this.length, collation.ForVarcharStorage(), coercibility);
+    public override SqlType WithCollation(Collation collation, Coercibility coercibility)
+    {
+        var collated = Get(this.length, collation.ForVarcharStorage(), coercibility);
+        return this.trimsTrailingSpaces ? collated.PaddingOffForm() : collated;
+    }
 
     public override int Encode(SqlValue value, Span<byte> destination) => this.collation.StorageEncoding.GetBytes(value.AsString, destination);
 
@@ -471,19 +501,42 @@ internal sealed class NCharSqlType : SqlType
 /// 1-8000. Each declared length is a distinct singleton. Stored payloads are
 /// right-padded with <c>0x00</c> to the declared length.
 /// </summary>
-internal sealed class BinarySqlType(short length) : SqlType(SqlTypeCategory.Other, TypePairClass.Binary)
+internal sealed class BinarySqlType(short length, bool trimsTrailingZeros = false) : SqlType(SqlTypeCategory.Other, TypePairClass.Binary)
 {
     public override int Precedence => 1;
 
     public readonly short length = length;
 
+    /// <summary>
+    /// True for the form a nullable <c>binary(N)</c> column declared under
+    /// <c>SET ANSI_PADDING OFF</c> takes: stored as a <c>varbinary</c>,
+    /// trailing zero bytes trimmed down to one, while every surface still
+    /// names it <c>binary(N)</c> — the binary twin of
+    /// <see cref="CharSqlType.trimsTrailingSpaces"/>.
+    /// </summary>
+    public readonly bool trimsTrailingZeros = trimsTrailingZeros;
+
+    private BinarySqlType? paddingOff;
+
+    /// <summary>This type's <see cref="trimsTrailingZeros"/> form, interned per instance.</summary>
+    public BinarySqlType PaddingOffForm()
+    {
+        if (this.trimsTrailingZeros)
+            return this;
+        if (this.paddingOff is null)
+            _ = Interlocked.CompareExchange(ref this.paddingOff, new BinarySqlType(this.length, trimsTrailingZeros: true), null);
+        return this.paddingOff;
+    }
+
     public override Type ClrType => typeof(byte[]);
 
     public override string SqlServerName => "binary";
 
-    public override bool IsFixedLength => true;
+    public override bool IsFixedLength => !this.trimsTrailingZeros;
 
     public override int FixedLength => this.length;
+
+    public override int GetVariableByteCount(SqlValue value) => value.AsBytes.Length;
 
     public override int Encode(SqlValue value, Span<byte> destination)
     {

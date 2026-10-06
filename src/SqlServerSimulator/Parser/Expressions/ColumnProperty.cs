@@ -221,8 +221,9 @@ internal sealed class ColumnProperty : Expression
             "FULLTEXTTYPECOLUMN" => isColumn ? FullTextTypeColumn(found) : null,
             "GENERATEDALWAYSTYPE" => isColumn ? (int)column.GeneratedAs : null,
             // Column sets aren't modeled, so no column is one.
-            "ISCOLUMNSET" or "STATISTICALSEMANTICS" => isColumn ? 0 : null,
-            "ISCOMPUTED" => isColumn ? Flag(column.Computed is not null) : null,
+            "ISCOLUMNSET" => isColumn ? Flag(column.IsColumnSet) : null,
+            "STATISTICALSEMANTICS" => isColumn ? 0 : null,
+            "ISCOMPUTED" => isColumn ? Flag(column.Computed is not null && !column.IsColumnSet) : null,
             "ISCURSORTYPE" => Flag(found.IsCursor),
             "ISDETERMINISTIC" or "ISPRECISE" or "ISSYSTEMVERIFIED" or "SYSTEMDATAACCESS" or "USERDATAACCESS" => ExpressionProperty(database, found, upper[..property.Length]),
             "ISFULLTEXTINDEXED" => isColumn ? Flag(found.Table?.FullTextIndex?.Columns.Exists(entry => entry.ColumnId == column.ColumnId) is true) : null,
@@ -244,7 +245,14 @@ internal sealed class ColumnProperty : Expression
             "SCALE" => Scale(column.Type),
             // The types ANSI_PADDING governs: the single-byte strings, the
             // binary pair and sql_variant.
-            "USESANSITRIM" => column.Type is CharSqlType or VarcharSqlType or BinarySqlType or VarbinarySqlType or SqlVariantSqlType or VectorSqlType ? 1 : null,
+            // A column created under SET ANSI_PADDING OFF reads 0, sql_variant
+            // aside (probed 2026-10-06 against SQL Server 2025).
+            "USESANSITRIM" => column.Type switch
+            {
+                CharSqlType or VarcharSqlType or BinarySqlType or VarbinarySqlType => Flag(!column.IsAnsiPaddingOff),
+                SqlVariantSqlType or VectorSqlType => 1,
+                _ => null,
+            },
             _ => null,
         };
     }

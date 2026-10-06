@@ -840,7 +840,8 @@ partial class Simulation
                 throw SimulatedSqlException.SyntaxErrorNearText("WHERE");
             context.MoveNextRequired();
             RejectFilterPredicateKeywords(context);
-            filter = BooleanExpression.Parse(context);
+            using (ParserScope.Enter(ref context.InFilterPredicate, true))
+                filter = BooleanExpression.Parse(context);
             CheckFilterPredicate(filter, statistics: false, indexName, tableLeaf);
             // Render the parsed predicate into SQL Server's normalized
             // filter_definition form ([col]=(1) AND …) for sys.indexes. Null

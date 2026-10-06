@@ -74,7 +74,7 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 
 ### Not modeled yet
 
-- **Every diagnostic but Msg 5703 is English whatever the language**; real words its errors and messages in the session's language after `SET LANGUAGE` (`Fehler beim Konvertieren des varchar-Werts "x" in den int-Datentyp.` for Msg 245 under Deutsch, probed 2026-10-04 against SQL Server 2025).
+- **Every diagnostic but Msg 5703 and DBCC's Msg 2528 is English whatever the language**; real words its errors and messages in the session's language after `SET LANGUAGE` (`Fehler beim Konvertieren des varchar-Werts "x" in den int-Datentyp.` for Msg 245 under Deutsch, probed 2026-10-04 against SQL Server 2025).
 - **A table variable's second Msg 1708 inside a `WHILE`** reports line -1 on real; here both report the `DECLARE`'s line (probed 2026-10-06 against SQL Server 2025).
 
 ## A statement's whole binder report

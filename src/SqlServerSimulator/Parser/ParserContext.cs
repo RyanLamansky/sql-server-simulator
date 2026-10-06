@@ -103,6 +103,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool QuotedIdentifiers = command.Connection!.QuotedIdentifiers;
 
     /// <summary>
+    /// <c>QUOTED_IDENTIFIER</c> as the batch began, before any <c>SET</c> it
+    /// holds took effect while it parsed — what <c>sys.dm_exec_sessions</c>
+    /// reports for the session running it (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    public readonly bool QuotedIdentifiersAtBatchStart = command.Connection.QuotedIdentifiers;
+
+    /// <summary>
     /// Live weighted nesting budget shared by grouped-expression parens,
     /// scalar subqueries, and function-call argument lists — the constructs
     /// SQL Server pools into one "nested too deeply" limit (probe-confirmed
@@ -298,6 +306,15 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// isn't set.
     /// </summary>
     public bool InDefaultClause;
+
+    /// <summary>
+    /// True while a filtered index's or statistic's <c>WHERE</c> predicate
+    /// parses. Its grammar takes only comparisons, so a value standing where a
+    /// condition belongs (<c>WHERE (a)</c>) is the plain syntax error at the
+    /// token after it rather than Msg 4145 (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    public bool InFilterPredicate;
 
     /// <summary>
     /// Set while <c>CREATE VIEW</c> / <c>ALTER VIEW</c> parses its body on the

@@ -1669,7 +1669,9 @@ internal static partial class BuiltInResources
             // left, not those a running one is changing.
             var published = connection.PublishedSettings;
             var options = published?.Options ?? new SimulatedDbConnection.SessionOptionScope(connection);
-            var quotedIdentifiers = published?.QuotedIdentifiers ?? connection.QuotedIdentifiers;
+            var quotedIdentifiers = ReferenceEquals(connection, batch.Connection)
+                ? batch.Parser.QuotedIdentifiersAtBatchStart
+                : published?.QuotedIdentifiers ?? connection.QuotedIdentifiers;
             var loginTime = SqlValue.FromDateTime(connection.LoginTimeUtc);
             var databaseId = SessionDatabaseId(simulation, published?.Database ?? connection.CurrentDatabase);
             var isolation = SessionIsolationLevelId(options.IsolationLevel);

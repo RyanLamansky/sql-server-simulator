@@ -145,10 +145,19 @@ partial class Simulation
                     continue;
                 var name = SqlValue.FromSystemName($"{reference.SchemaName ?? Database.DefaultSchemaName}.{reference.EntityName}");
                 var type = SpDependsTypeLabel(resolved.ObjectTypeCode);
-                if (reference.Columns.Count == 0)
+                // A statement using the whole object — a DELETE, SELECT 1 FROM t
+                // — lists it with no column, beside the columns others reach.
+                if (reference.Columns.Count == 0 || reference.WholeSelected || reference.WholeUpdated)
                 {
-                    rows.Add([name, type, SpDependsNo, SpDependsNotSelected, SqlValue.Null(SqlType.SystemName)]);
-                    continue;
+                    rows.Add([
+                        name,
+                        type,
+                        reference.WholeUpdated ? SpDependsYes : SpDependsNo,
+                        reference.WholeSelected ? SpDependsSelected : SpDependsNotSelected,
+                        SqlValue.Null(SqlType.SystemName),
+                    ]);
+                    if (reference.Columns.Count == 0)
+                        continue;
                 }
                 // In the referenced object's own column order, whatever order
                 // the definition names them in.

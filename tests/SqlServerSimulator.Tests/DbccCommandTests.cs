@@ -151,7 +151,7 @@ public sealed class DbccCommandTests
 
     [TestMethod]
     public void UnbuiltSubcommand_IsNotSupported()
-        => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery("dbcc page (0, 1, 0, 0)"));
+        => Throws<NotSupportedException>(() => new Simulation().ExecuteNonQuery("dbcc page (0, 1, 0, 0) with tableresults"));
 
     [TestMethod]
     public void UnrecognizedWithOption_StopsTheBatchBeforeItRuns()
@@ -796,7 +796,7 @@ public sealed class DbccCommandTests
         AreEqual("User 'lo' does not have permission to run DBCC page.", sim.AssertSqlError("execute as user = 'lo'; dbcc page(0, 1, 1, 0)", 2571).Errors[0].Message);
         AreEqual(14, sim.AssertSqlError("execute as user = 'lo'; dbcc dbinfo", 2571).Errors[0].State);
         _ = sim.AssertSqlError("execute as user = 'lo'; dbcc proccache", 7983);
-        _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("dbcc page(0, 1, 1, 0)"));
+        _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("dbcc showcontig"));
         var opentran = sim.AssertSqlError("execute as user = 'lo'; dbcc opentran", 7983);
         AreEqual(2528, opentran.Errors[^1].Number);
     }

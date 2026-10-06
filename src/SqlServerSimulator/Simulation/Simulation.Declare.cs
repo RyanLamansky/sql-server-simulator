@@ -490,13 +490,13 @@ partial class Simulation
             for (var i = context.Batch.CompilingForRun ? 2 : 1; i > 0; i--)
                 (context.Batch.CompileMessages ??= []).Add(SimulatedSqlException.MaximumRowSizeExceededMessage(context.Batch, fullName, state: 2));
         }
-        var internalName = context.Connection.Simulation.AllocateTableVariableInternalName();
+        var (objectId, internalName) = context.Connection.Simulation.AllocateTableVariableIdentity();
         RenameAutoNamedConstraints(internalName, fullName, columns, keyConstraints, checkConstraints, tempNamePadding: internalName.Length);
 
         var heapTable = new HeapTable(
             fullName,
             columns,
-            context.CurrentDatabase.AllocateObjectId(),
+            objectId,
             schemaId: Database.DboSchemaId,
             createDate: context.Batch.CurrentStatement.UtcNow,
             keyConstraints: keyConstraints,

@@ -333,6 +333,8 @@ partial class Simulation
         {
             Handle = batch.Connection.LastCursorHandle += 2,
             CreationTime = batch.CurrentStatement.UtcNow,
+            DeclaredOptions = new CursorSetOptions(batch.Connection),
+            IsApiCursor = batch.ApiServerCursor,
             DeclaringText = batch.Parser.Command.CommandText,
             DeclaringStart = batch.CurrentStatement.StartIndex,
             DeclaringEnd = Math.Max(batch.CurrentStatement.StartIndex, batch.Parser.PreviousTokenEnd - 1),

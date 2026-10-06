@@ -1384,7 +1384,7 @@ internal static partial class BuiltInResources
                 yield return [
                     catalog,
                     schemaName,
-                    SqlValue.FromSystemName(t.Name),
+                    SqlValue.FromSystemName(t.CatalogName),
                     baseTable,
                 ];
             }
@@ -1483,7 +1483,7 @@ internal static partial class BuiltInResources
             }
             foreach (var t in CatalogTables(schema, batch).OrderBy(t => t.ObjectId))
             {
-                var tableName = SqlValue.FromSystemName(t.Name);
+                var tableName = SqlValue.FromSystemName(t.CatalogName);
                 for (var i = 0; i < t.Columns.Length; i++)
                     yield return Row(schemaName, tableName, t.Columns[i], i + 1);
             }

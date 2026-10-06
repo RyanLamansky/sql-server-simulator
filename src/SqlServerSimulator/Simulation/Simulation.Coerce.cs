@@ -158,6 +158,40 @@ partial class Simulation
     }
 
     /// <summary>
+    /// <paramref name="columns"/> as a table created under the session's
+    /// <c>ANSI_PADDING</c> holds them: with it off, every column reports
+    /// <c>is_ansi_padded</c> 0 and a nullable <c>char</c> or <c>binary</c>
+    /// takes its trimming form. A column whose type already is that form — a
+    /// <c>SELECT … INTO</c> copying such a column — keeps it, and is reported
+    /// unpadded, whatever the session says (probed 2026-10-06 against SQL
+    /// Server 2025). Returns the array itself when nothing changes. Columns a
+    /// statement built for itself are marked in place; <paramref name="shared"/>
+    /// columns — a cached plan's — are copied first.
+    /// </summary>
+    internal static HeapColumn[] UnderSessionAnsiPadding(HeapColumn[] columns, SimulatedDbConnection connection, bool shared = false)
+    {
+        var padding = connection.AnsiPadding;
+        HeapColumn[]? adjusted = null;
+        for (var i = 0; i < columns.Length; i++)
+        {
+            var column = columns[i];
+            var type = column.Type switch
+            {
+                CharSqlType c when !padding && column.Nullable => c.PaddingOffForm(),
+                BinarySqlType b when !padding && column.Nullable => b.PaddingOffForm(),
+                _ => column.Type,
+            };
+            var trimming = type is CharSqlType { trimsTrailingSpaces: true } or BinarySqlType { trimsTrailingZeros: true };
+            if (padding && !trimming)
+                continue;
+            var replaced = type == column.Type && !shared ? column : column.WithType(type);
+            replaced.IsAnsiPaddingOff = true;
+            (adjusted ??= [.. columns])[i] = replaced;
+        }
+        return adjusted ?? columns;
+    }
+
+    /// <summary>
     /// <see cref="CoerceForInsert(SqlValue, HeapColumn)"/> for a value an
     /// INSERT, UPDATE or MERGE writes, where a conversion the session lets
     /// overflow (<see cref="BatchContext.AbsorbsArithmeticFault"/>) stores
@@ -193,6 +227,15 @@ partial class Simulation
     private static SqlValue CoerceForInsert(SqlValue source, HeapColumn column)
     {
         var coerced = CoerceForInsert(source, column.Type);
+        if (column.IsAnsiPaddingOff && !coerced.IsNull && !column.IsLob)
+        {
+            coerced = coerced.Type switch
+            {
+                VarcharSqlType type when SqlValue.TrimmedForPaddingOff(coerced.AsString) is var trimmed && trimmed.Length != coerced.AsString.Length => SqlValue.FromVarchar(type, trimmed),
+                VarbinarySqlType type when SqlValue.TrimmedForPaddingOff(coerced.AsBytes) is var trimmed && trimmed.Length != coerced.AsBytes.Length => SqlValue.FromVarbinary(type, trimmed),
+                _ => coerced,
+            };
+        }
         if (column.XmlSchemaCollection is not { } collection || coerced.IsNull)
             return coerced;
         var canonical = XmlSchemaValidation.ValidateAndNormalize(collection, coerced.AsString);

@@ -754,6 +754,39 @@ public sealed class DependencyTrackingTests
             2020,
             "The dependencies reported for entity \"dbo.p_missing\" might not include references to all columns. This is either because the entity references an object that does not exist or because of an error in one or more statements in the entity.  Before rerunning the query, ensure that there are no errors in the entity and that all objects referenced by the entity exist.");
 
+    /// <summary>
+    /// The rows the analysis found arrive ahead of Msg 2020, so a reader walks
+    /// them before the error surfaces (probed 2026-10-06 against SQL Server
+    /// 2025), and a missing <c>EXEC</c> target is no gap in the report.
+    /// </summary>
+    [TestMethod]
+    public void ReferencedEntities_Msg2020FollowsTheRowsFound()
+    {
+        var sim = Fixture();
+        sim.ExecuteBatches(
+            "create procedure p_part as begin select a from dbo.t; select * from dbo.nosuchtable; end",
+            "create procedure p_exec_missing as begin select a from dbo.t; exec dbo.nosuchproc; end");
+        using var connection = sim.CreateDbConnection();
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "select referenced_entity_name, referenced_minor_name from sys.dm_sql_referenced_entities('dbo.p_part', 'OBJECT')";
+        using var reader = command.ExecuteReader();
+        var names = new List<string>();
+        var error = Throws<SimulatedSqlException>(() =>
+        {
+            while (reader.Read())
+                names.Add(reader.GetString(0));
+        });
+        AreEqual(2020, error.Number);
+        CollectionAssert.AreEqual(new[] { "t", "t", "nosuchtable" }, names);
+
+        var rows = sim.ExecuteReader("select referenced_entity_name from sys.dm_sql_referenced_entities('dbo.p_exec_missing', 'OBJECT')");
+        var count = 0;
+        while (rows.Read())
+            count++;
+        AreEqual(3, count);
+    }
+
     // ---- sp_depends ----
 
     [TestMethod]
@@ -1312,5 +1345,112 @@ public sealed class DependencyTrackingTests
             string.Join(",", rows.ConvertAll(r => $"{r["referenced_entity_name"]}.{r["mn"]}").Order(StringComparer.Ordinal));
         AreEqual("at.-,at.x,mt.-,zt.-,zt.a,zt.b", Summary(Referenced(sim, "dbo.p1")));
         AreEqual("at.-,at.x,at.y,mt.-,mt.m,zt.-,zt.a,zt.b", Summary(Referenced(sim, "dbo.p2")));
+    }
+
+    // ---- probed 2026-10-06 against SQL Server 2025 ----
+
+    private static string Flags(List<Dictionary<string, object?>> rows) =>
+        string.Join(",", rows.ConvertAll(r => $"{r["referenced_entity_name"]}.{r["mn"]}:{(Flag(r, "is_selected") ? "s" : "")}{(Flag(r, "is_updated") ? "u" : "")}{(Flag(r, "is_incomplete") ? "!" : "")}").Order(StringComparer.Ordinal));
+
+    /// <summary>A MERGE's insert column list records nothing; its write is the whole object's.</summary>
+    [TestMethod]
+    public void Merge_InsertColumnList_IsAWholeObjectWrite()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.mt (id int, v int); create table dbo.ms (id int, v int)",
+            "create procedure dbo.pm as merge dbo.mt as tg using dbo.ms as sr on tg.id = sr.id when matched then update set v = sr.v when not matched then insert (id, v) values (sr.id, sr.v);");
+        AreEqual("ms.-:s,ms.id:s,ms.v:s,mt.-:u,mt.id:s,mt.v:u", Flags(Referenced(sim, "dbo.pm")));
+    }
+
+    /// <summary>The legacy pair lists a whole-object use beside the column rows other statements reach.</summary>
+    [TestMethod]
+    public void SqlDependencies_WholeObjectUseBesideColumns()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.wt (a int, b int)",
+            "create procedure dbo.pw as begin delete from dbo.wt where a = 1; insert dbo.wt (b) values (1); end");
+        var rows = LegacyDeps(sim, "pw");
+        AreEqual("0:False:True,1:True:False,2:False:True", string.Join(",", rows.ConvertAll(r => $"{r["referenced_minor_id"]}:{r["is_selected"]}:{r["is_updated"]}")));
+    }
+
+    /// <summary>
+    /// What makes the report incomplete: a missing table, one-part or two-part,
+    /// another database's missing object, a synonym over nothing — but never an
+    /// EXEC target or an ambiguous method call.
+    /// </summary>
+    [TestMethod]
+    public void ReferencedEntities_IncompleteReferences()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.it (x xml, a int); create synonym dbo.isy for dbo.nothere",
+            "create procedure dbo.pexec as begin exec dbo.nosuchproc; exec nosuchproc2; select x.value('1', 'int') from dbo.it; end",
+            "create procedure dbo.pone as select * from nothere1",
+            "create procedure dbo.psyn as select a from dbo.isy");
+        AreEqual("it.-:s,it.x:s,nosuchproc.-:,nosuchproc2.-:,value.-:", Flags(Referenced(sim, "dbo.pexec")));
+        _ = sim.AssertSqlError("select * from sys.dm_sql_referenced_entities('dbo.pone', 'OBJECT')", 2020);
+        _ = sim.AssertSqlError("select * from sys.dm_sql_referenced_entities('dbo.psyn', 'OBJECT')", 2020);
+        var listed = new List<string>();
+        using var reader = sim.ExecuteReader("select referenced_schema_name, referenced_entity_name, is_selected from sys.dm_sql_referenced_entities('dbo.pone', 'OBJECT')");
+        _ = Throws<SimulatedSqlException>(() =>
+        {
+            while (reader.Read())
+                listed.Add($"{(reader.IsDBNull(0) ? "null" : reader.GetString(0))}.{reader.GetString(1)}:{reader.GetBoolean(2)}");
+        });
+        AreEqual("null.nothere1:False", string.Join(",", listed));
+    }
+
+    /// <summary>An UPDATE or DELETE target written as the FROM clause's alias writes the aliased table.</summary>
+    [TestMethod]
+    public void ReferencedEntities_AliasedDmlTarget()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.at2 (a int)",
+            "create procedure dbo.palias as begin update x set a = 1 from dbo.at2 x; delete y from dbo.at2 y; end");
+        AreEqual("at2.-:u,at2.a:u", Flags(Referenced(sim, "dbo.palias")));
+    }
+
+    /// <summary>The DMV resolves another database's object, columns and all; the catalog view reports no id.</summary>
+    [TestMethod]
+    public void ReferencedEntities_ResolvesAnotherDatabase()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create database other",
+            "create table other.dbo.rt (a int, b int)",
+            "create procedure dbo.pxdb as select a from other.dbo.rt");
+        AreEqual("rt.-:s,rt.a:s", Flags(Referenced(sim, "dbo.pxdb")));
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.sql_expression_dependencies where referencing_id = object_id('dbo.pxdb') and referenced_id is null"));
+    }
+
+    /// <summary>
+    /// An unqualified name binds the innermost scope holding the column — a
+    /// subquery's source never claims a name its outer query reads — and an
+    /// alias is no column.
+    /// </summary>
+    [TestMethod]
+    public void ReferencedEntities_ScopesAndAliases()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.sa (id int, x int); create table dbo.sb (aid int, id int); create table dbo.sz (a int)",
+            "create view dbo.vscope as select x from dbo.sa where id in (select aid from dbo.sb)",
+            "create view dbo.valias as select 1 c from dbo.sz a, dbo.sb");
+        AreEqual("sa.-:s,sa.id:s,sa.x:s,sb.-:s,sb.aid:s", Flags(Referenced(sim, "dbo.vscope")));
+        AreEqual("sb.-:s,sz.-:s", Flags(Referenced(sim, "dbo.valias")));
+    }
+
+    /// <summary>A CTE declared mid-body and a built-in rowset are no missing objects.</summary>
+    [TestMethod]
+    public void ReferencedEntities_CtesAndBuiltInRowsets_AreNotMissing()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table dbo.ct (a int)",
+            "create procedure dbo.pcte as begin set nocount on; with c as (select a from dbo.ct) select a from c; select value from string_split('a,b', ','); end");
+        AreEqual("ct.-:s,ct.a:s", Flags(Referenced(sim, "dbo.pcte")));
     }
 }

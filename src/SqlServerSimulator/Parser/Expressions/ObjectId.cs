@@ -135,6 +135,20 @@ internal sealed class ObjectId : Expression
         {
             return SqlValue.Null(SqlType.Int32);
         }
+        // A temp table's or table variable's name inside tempdb finds it as
+        // tempdb's catalog lists it, whichever session made it (probed
+        // 2026-10-06 against SQL Server 2025).
+        if (parsed.Leaf.StartsWith('#') && filter is ObjectTypeFilter.Any or ObjectTypeFilter.Table
+            && runtime.Batch.Connection.Simulation.Databases.TryGetValue(Simulation.TempdbDatabaseName, out var tempdb)
+            && (parsed.Count < 3 || tempdb.Collation.Equals(parsed[0], tempdb.Name))
+            && tempdb.Schemas.TryGetValue(Database.DefaultSchemaName, out var tempdbSchema))
+        {
+            foreach (var tempTable in BuiltInResources.TempCatalogTables(tempdbSchema, runtime.Batch))
+            {
+                if (tempTable.InternalName is { } internalName && tempdb.Collation.Equals(internalName, parsed.Leaf))
+                    return SqlValue.FromInt32(tempTable.ObjectId);
+            }
+        }
 
         // A restricted principal gets NULL for an object it can't view metadata
         // for (probe-confirmed: OBJECT_ID('dbo.tab_none') = NULL for a user

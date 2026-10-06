@@ -618,7 +618,11 @@ partial class SimulatedSqlException
     {
         var token = TokenAfterOpenBooleanGroups(context, out var balanced, out var stray);
         if (balanced)
-            return NonBooleanInConditionContext(token?.ErrorText);
+        {
+            return !context.InFilterPredicate ? NonBooleanInConditionContext(token?.ErrorText)
+                : token is ReservedKeyword keyword ? SyntaxErrorNearKeyword(keyword)
+                : SyntaxErrorNear(token);
+        }
 
         // A group the batch ends inside is a syntax error, which real reports
         // ahead of the type check (probed 2026-08-05: `IF ((1)` is Msg 102

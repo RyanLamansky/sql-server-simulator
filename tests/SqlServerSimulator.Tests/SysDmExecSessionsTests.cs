@@ -176,4 +176,23 @@ public sealed class SysDmExecSessionsTests
             AreEqual(1, reader.GetInt32(4));
         }
     }
+
+    /// <summary>
+    /// The reading session's <c>quoted_identifier</c> — and so its
+    /// <c>ansi_defaults</c> — is the value its batch began with, a <c>SET</c>
+    /// inside the batch taking effect only for the next one (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void QuotedIdentifier_ReadsTheBatchStartValue()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        AreEqual("1|1|0", connection.CreateCommand("""
+            set ansi_defaults on;
+            declare @on varchar(10) = (select concat(cast(quoted_identifier as int), '|', cast(ansi_defaults as int)) from sys.dm_exec_sessions where session_id = @@spid);
+            set ansi_defaults off;
+            select concat(@on, '|', (select cast(ansi_defaults as int) from sys.dm_exec_sessions where session_id = @@spid))
+            """).ExecuteScalar());
+        AreEqual(0, connection.CreateCommand("select cast(quoted_identifier as int) from sys.dm_exec_sessions where session_id = @@spid").ExecuteScalar());
+    }
 }

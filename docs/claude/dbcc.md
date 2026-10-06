@@ -84,6 +84,7 @@ A simulated database is always consistent, so each check reports a healthy one:
 - `CHECKDB [( database [, NOINDEX] )]`: Msg 2536 heading the database, Msg 7966 when `NOINDEX` is given, the eight Service Broker lines (Msg 8997) for the metadata every database carries, Msg 2536 and 2593 for each user table (`schema.table` outside `dbo`), and Msg 8989.
   `PHYSICAL_ONLY` keeps only the heading and summary, and with `DATA_PURITY` is Msg 2532 state 2, with `EXTENDED_LOGICAL_CHECKS` state 5 (probed 2026-10-04).
   `TABLERESULTS` returns the Msg 8997, 2593 and 8989 lines as rows of real's 23-column shape.
+  `WITH TABLOCK` skips the catalog and Service Broker checks: Msg 5232 follows the heading (and the `NOINDEX` warning) in place of the Msg 8997 lines, as a row under `TABLERESULTS` (probed 2026-10-06).
 - `CHECKFILEGROUP [( filegroup )]`: `CHECKDB` over the tables on one filegroup, without the Service Broker lines; an unknown filegroup name is Msg 3027 and an unknown id Msg 8932 state 0 (probed 2026-10-04).
 - `CHECKTABLE ( table [, NOINDEX | index_id] )`: Msg 2536 and 2593 for the table, a `#temp` table by its padded internal name; an index id the table has no index under is Msg 7999 state 7 naming the number (probed 2026-10-04).
   Under a database-scoped identity — `EXECUTE AS USER`, `dbo` included — it is Msg 916 state 2 after the permission check, naming the server principal as a refused `USE` does (a login, or a `WITHOUT LOGIN` user's `S-1-9-3-…` SID string), and the batch ends unless a `TRY` catches it: real's check reads an internal snapshot of the database, which that identity can't reach, while `WITH TABLOCK` takes locks instead and runs.
@@ -92,6 +93,13 @@ A simulated database is always consistent, so each check reports a healthy one:
 - `CHECKCATALOG`: Msg 2528 alone.
 - `ESTIMATEONLY` answers Msg 5281 instead of checking, `NO_INFOMSGS` or not.
 - A `REPAIR_*` argument is `NotSupportedException`: real refuses it outside single-user mode, and probing it against a live server is off limits.
+
+## `PAGE`
+
+`DBCC PAGE ( database, file, page [, printopt] )` is `sysadmin`'s (Msg 2571), and without trace flag 3604 real prints no dump: a page inside its file completes with Msg 2528 alone (probed 2026-10-06 against SQL Server 2025).
+The arguments check in order — three or four of them (Msg 2583 state 3), the database (Msg 2520 / 2521, a negative id Msg 2560), then each other's type, an integer (Msg 2560 state 9) — then the address: a page past its file's size, a negative one or a file the database lacks is **Msg 8968**, which doesn't end the statement — Msg 2528 still follows and `@@ERROR` reads 8968 — and a log file's page other than its header (page 0) is **Msg 2514** state 9.
+Only then is a print option past 3 Msg 2560 state 102.
+The dump itself — under trace flag 3604 or `WITH TABLERESULTS` — is real's page image, which the simulator's pages don't carry: `NotSupportedException`.
 
 ## Table maintenance
 
@@ -104,11 +112,10 @@ A simulated database is always consistent, so each check reports a healthy one:
 - `CHECKDB`, `CHECKFILEGROUP` and `CHECKALLOC` list no system base tables and no per-allocation-unit lines, which real prints for its catalog (over a hundred objects in a fresh database).
 - Real leaves `@@ROWCOUNT` after the consistency checks at a count its internal queries leave behind; the simulator leaves 0.
 - Real's Query Store opens a transaction of its own in each user database, which `OPENTRAN` reports as the oldest (`QDS batch nested transaction`) — and as written to a user transaction that has only read, where the simulator, keeping no such transaction, reports none (probed 2026-10-04 against SQL Server 2025).
-- Messages stay in English under `SET LANGUAGE`, as the engine's other messages do.
+- Messages other than Msg 2528, which follows `SET LANGUAGE` (`Language.DbccCompletedMessage`, the texts real's `sys.messages` holds), stay in English, as the engine's other messages do.
 
 ## Not modeled yet
 
-- `SHOWCONTIG`'s permission refusal: real refuses a caller without the table's `ALTER` with Msg 229 naming the `DBCC` permission on the table before anything else.
-- Message language: real words Msg 2528 in the session language (`Die DBCC-Ausführung wurde abgeschlossen. …` under Deutsch), where the simulator's stays English.
-- `DBCC PAGE` (without trace flag 3604 real prints only the completion message, and `WITH TABLERESULTS` returns an empty `ParentObject` / `Object` / `Field` / `VALUE` set; a page past the database is Msg 8968), `IND`, `SHOWCONTIG`, `OUTPUTBUFFER`, `PROCCACHE`, `MEMORYSTATUS`, `TUPLEMOVER`, `CLONEDATABASE` and the other undocumented commands, the repair options, and `CHECKALLOC … WITH TABLERESULTS`.
-- `CHECKDB … WITH TABLOCK`'s Msg 5232 noting that the catalog and Service Broker checks were skipped.
+- `IND`, `SHOWCONTIG`, `OUTPUTBUFFER`, `PROCCACHE`, `MEMORYSTATUS`, `TUPLEMOVER`, `CLONEDATABASE` and the other undocumented commands, the repair options, and `CHECKALLOC … WITH TABLERESULTS`.
+  `SHOWCONTIG` over one table first asks `ALTER` on it (Msg 229 naming the `DBCC` permission), as real does, and then is `NotSupportedException`.
+  What these report is real's storage — `IND`'s page list (none over an empty table), `SHOWCONTIG`'s fragmentation, `CHECKALLOC`'s per-allocation-unit rows, `PAGE`'s dump — or the server process's own state, which a flat page list doesn't reproduce: not chased (probed 2026-10-06 against SQL Server 2025).

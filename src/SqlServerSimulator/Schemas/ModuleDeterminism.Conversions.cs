@@ -515,7 +515,141 @@ internal static partial class ModuleDeterminism
             if (aliasAt < tokens.Count && tokens[aliasAt] is Name alias && !families.ContainsKey(alias.Value))
                 families[alias.Value] = site.Target;
         }
+
+        // Any other select item a derived table or CTE names — `dtcol AS dt`,
+        // `dt = DATEADD(…)`, a CTE's declared column list taking its items in
+        // order — carries the family its expression reaches, so reading it back
+        // converts as the expression would (probed 2026-10-06 against SQL
+        // Server 2025: `CONVERT(varchar(20), d.dt)` over `(SELECT dtcol AS dt
+        // FROM t) d` is nondeterministic, over `YEAR(dtcol) AS dt` it is not).
+        for (var i = 0; i < tokens.Count; i++)
+        {
+            if (tokens[i] is not ReservedKeyword { Keyword: Keyword.Select })
+                continue;
+            foreach (var (from, to) in SelectItems(tokens, i))
+            {
+                if (ItemAlias(tokens, from, to, out var expressionFrom, out var expressionTo) is { } alias && !families.ContainsKey(alias))
+                    NoteFamily(families, alias, tokens, expressionFrom, expressionTo);
+            }
+        }
+        for (var i = 0; i + 1 < tokens.Count; i++)
+        {
+            if (tokens[i] is not Name || tokens[i + 1] is not Operator { Character: '(' } || (i > 0 && tokens[i - 1] is Operator { Character: '.' }))
+                continue;
+            var declared = new List<string>();
+            var at = i + 2;
+            while (at + 1 < tokens.Count && tokens[at] is Name column && tokens[at + 1] is Operator { Character: ',' or ')' } separator)
+            {
+                declared.Add(column.Value);
+                at += 2;
+                if (separator.Character == ')')
+                    break;
+            }
+            if (declared.Count == 0 || tokens[at - 1] is not Operator { Character: ')' }
+                || at + 2 >= tokens.Count || tokens[at] is not ReservedKeyword { Keyword: Keyword.As }
+                || tokens[at + 1] is not Operator { Character: '(' } || tokens[at + 2] is not ReservedKeyword { Keyword: Keyword.Select })
+            {
+                continue;
+            }
+            var items = SelectItems(tokens, at + 2);
+            for (var k = 0; k < declared.Count && k < items.Count; k++)
+            {
+                var (from, to) = items[k];
+                if (ItemAlias(tokens, from, to, out var expressionFrom, out var expressionTo) is not null)
+                    (from, to) = (expressionFrom, expressionTo);
+                if (!families.ContainsKey(declared[k]))
+                    NoteFamily(families, declared[k], tokens, from, to);
+            }
+        }
         return families;
+    }
+
+    /// <summary>Files <paramref name="name"/> under the family the expression spanning <c>[from, to)</c> reaches, if any.</summary>
+    private static void NoteFamily(Dictionary<string, ConversionFamily> families, string name, List<Token> tokens, int from, int to)
+    {
+        if (ExtentReaches(tokens, from, to, ConversionFamily.DateTimeValue, families))
+            families[name] = ConversionFamily.DateTimeValue;
+        else if (ExtentReaches(tokens, from, to, ConversionFamily.CharacterString, families))
+            families[name] = ConversionFamily.CharacterString;
+    }
+
+    /// <summary>
+    /// The extents of the select items of the <c>SELECT</c> at
+    /// <paramref name="selectIndex"/>, each <c>[from, to)</c>, past any
+    /// <c>DISTINCT</c> / <c>ALL</c> / <c>TOP</c> prefix and up to the clause or
+    /// closing parenthesis that ends the list.
+    /// </summary>
+    private static List<(int From, int To)> SelectItems(List<Token> tokens, int selectIndex)
+    {
+        var items = new List<(int, int)>();
+        var i = selectIndex + 1;
+        while (i < tokens.Count && tokens[i] is ReservedKeyword { Keyword: Keyword.Distinct or Keyword.All })
+            i++;
+        if (i < tokens.Count && tokens[i] is ReservedKeyword { Keyword: Keyword.Top })
+        {
+            i++;
+            i = i < tokens.Count && tokens[i] is Operator { Character: '(' } ? SkipCall(tokens, i, tokens.Count) + 1 : i + 1;
+            if (i < tokens.Count && tokens[i] is ReservedKeyword { Keyword: Keyword.Percent })
+                i++;
+        }
+        var depth = 0;
+        var start = i;
+        for (; i < tokens.Count; i++)
+        {
+            switch (tokens[i])
+            {
+                case Operator { Character: '(' }:
+                    depth++;
+                    continue;
+                case Operator { Character: ')' } when depth == 0:
+                case Operator { Character: ';' }:
+                case ReservedKeyword { Keyword: var keyword } when depth == 0 && EndsSelectList(keyword):
+                    if (i > start)
+                        items.Add((start, i));
+                    return items;
+                case Operator { Character: ')' }:
+                    depth--;
+                    continue;
+                case Operator { Character: ',' } when depth == 0:
+                    if (i > start)
+                        items.Add((start, i));
+                    start = i + 1;
+                    continue;
+            }
+        }
+        if (i > start)
+            items.Add((start, i));
+        return items;
+    }
+
+    private static bool EndsSelectList(Keyword keyword) => keyword is Keyword.From or Keyword.Where or Keyword.Group or Keyword.Order
+        or Keyword.Having or Keyword.Union or Keyword.Except or Keyword.Intersect or Keyword.Into or Keyword.Option or Keyword.For;
+
+    /// <summary>
+    /// The alias a select item spanning <c>[from, to)</c> names its column by —
+    /// <c>expr AS alias</c>, <c>expr alias</c> or <c>alias = expr</c> — with the
+    /// aliased expression's own extent, or null for an item without one.
+    /// </summary>
+    private static string? ItemAlias(List<Token> tokens, int from, int to, out int expressionFrom, out int expressionTo)
+    {
+        (expressionFrom, expressionTo) = (from, to);
+        if (to - from >= 3 && tokens[from] is Name assigned && tokens[from + 1] is Operator { Character: '=' })
+        {
+            expressionFrom = from + 2;
+            return assigned.Value;
+        }
+        if (to - from >= 3 && tokens[to - 1] is Name asAlias && tokens[to - 2] is ReservedKeyword { Keyword: Keyword.As })
+        {
+            expressionTo = to - 2;
+            return asAlias.Value;
+        }
+        if (to - from >= 2 && tokens[to - 1] is Name bareAlias && tokens[to - 2] is not Operator { Character: '.' }
+            && tokens[to - 2] is Name or Operator { Character: ')' } or Literal or Numeric)
+        {
+            expressionTo = to - 1;
+            return bareAlias.Value;
+        }
+        return null;
     }
 
     private static void AddColumns(Dictionary<string, ConversionFamily> families, HeapColumn[] columns)

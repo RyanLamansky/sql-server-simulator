@@ -300,6 +300,14 @@ partial class Simulation
                 spelledNumeric: resolvedType is DecimalSqlType && pending.Expression.ResultReportsNumeric);
         }
 
+        // Created under SET ANSI_PADDING OFF, the columns trim what they store.
+        if (!context.Batch.Connection.AnsiPadding)
+        {
+            var padded = UnderSessionAnsiPadding([.. heapColumns!], context.Batch.Connection);
+            for (var i = 0; i < padded.Length; i++)
+                heapColumns[i] = padded[i];
+        }
+
         RejectOversizedMinimumRow([.. heapColumns!], tableName.Leaf);
 
         // A CHECK predicate — inline or table-level — may not read a
@@ -2239,9 +2247,12 @@ partial class Simulation
     private static bool DefaultsColumnsToNull(ParserContext context, string tableName)
     {
         var connection = context.Connection;
+        var database = context.Batch.CurrentDatabase;
         return connection.AnsiNullDefaultOn
             || (!connection.AnsiNullDefaultOff && !tableName.StartsWith('#')
-                && (context.Batch.CurrentDatabase.Switches & DatabaseSwitches.AnsiNullDefault) != 0);
+                && (context.Batch.CompiledAnsiNullDefaults is { } compiled && compiled.TryGetValue(database, out var asCompiled)
+                    ? asCompiled
+                    : (database.Switches & DatabaseSwitches.AnsiNullDefault) != 0));
     }
 
     /// <summary>
@@ -2388,6 +2399,7 @@ partial class Simulation
         var isHidden = false;
         var isRowGuidCol = false;
         var isSparse = false;
+        var isColumnSet = false;
         string? columnCollation = null;
         var inlineKeyKind = (KeyConstraintKind?)null;
         var inlineKeyClustered = (bool?)null;
@@ -2519,10 +2531,19 @@ partial class Simulation
                     isSparse = true;
                     context.MoveNextOptional();
                     continue;
-                // A sparse column set changes what SELECT * returns, which
-                // isn't built.
-                case StringToken columnSet when columnSet.Span.Equals("COLUMN_SET", StringComparison.OrdinalIgnoreCase):
-                    throw new NotSupportedException("Sparse column sets (COLUMN_SET FOR ALL_SPARSE_COLUMNS) aren't modeled.");
+                // COLUMN_SET FOR ALL_SPARSE_COLUMNS: the table's sparse column
+                // set. A NOT NULL ahead of it is the plain syntax error at it
+                // (probed 2026-10-06 against SQL Server 2025).
+                case StringToken columnSet when columnSet.Span.Equals("COLUMN_SET", StringComparison.OrdinalIgnoreCase) && !isColumnSet && !isTableType && !context.RefusesSparseColumns:
+                    if (nullable == false)
+                        throw SimulatedSqlException.SyntaxErrorNear(columnSet);
+                    if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.For })
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    if (context.GetNextRequired() is not StringToken allSparse || !allSparse.Span.Equals("ALL_SPARSE_COLUMNS", StringComparison.OrdinalIgnoreCase))
+                        throw SimulatedSqlException.SyntaxErrorNear(context);
+                    isColumnSet = true;
+                    context.MoveNextOptional();
+                    continue;
                 case ReservedKeyword { Keyword: Keyword.RowGuidCol } when !isRowGuidCol:
                     // ROWGUIDCOL: uniqueidentifier-only metadata marker. Type and
                     // duplicate validation run after the type resolves below.
@@ -2714,6 +2735,8 @@ partial class Simulation
             throw SimulatedSqlException.CannotCreateSparseColumn(columnName.Value, tableName);
         if (isSparse && defaultExpression is not null)
             throw SimulatedSqlException.SparseColumnWithDefault(columnName.Value, tableName);
+        if (isColumnSet && (resolvedType is not XmlSqlType || writtenNotNull))
+            throw SimulatedSqlException.ColumnSetNotNullableXml(columnName.Value, tableName);
 
         if (isRowGuidCol)
         {
@@ -2777,8 +2800,24 @@ partial class Simulation
             AssignmentRules.RequireAssignable(defaultExpression, defaultExpression.GetSqlType(context.Batch, NoColumnTypeResolver), resolvedType);
         }
         var maskingFunction = maskingFunctionText is null ? null : MaskingFunction.Parse(maskingFunctionText, columnName.Value, resolvedType);
-        var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, actualNullable, identity, defaultExpression, generatedAs: generatedAs, isHidden: isHidden, collation: columnCollation, isRowGuidCol: isRowGuidCol,
-            spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, context.Batch.TryResolveAliasType(qualifiedTypeName, out var spellingAlias) ? spellingAlias : null));
+        var newColumn = new HeapColumn(columnName.Value, resolvedType, maxLength, isColumnSet || actualNullable, identity, defaultExpression, isColumnSet ? new Parser.Expressions.ColumnSetValue() : null, generatedAs: generatedAs, isHidden: isHidden, collation: columnCollation, isRowGuidCol: isRowGuidCol,
+            spelledNumeric: SqlType.IsNumericSpelling(qualifiedTypeName, context.Batch.TryResolveAliasType(qualifiedTypeName, out var spellingAlias) ? spellingAlias : null))
+        {
+            IsColumnSet = isColumnSet,
+        };
+        if (isColumnSet)
+        {
+            // One column set per table (Msg 1732, naming the second).
+            foreach (var existing in heapColumns)
+            {
+                if (existing is { IsColumnSet: true })
+                    throw SimulatedSqlException.SecondColumnSet(columnName.Value, tableName);
+            }
+            if (existingColumns is not null && Array.Exists(existingColumns, static column => column.IsColumnSet))
+                throw SimulatedSqlException.SecondColumnSet(columnName.Value, tableName);
+            if (existingColumns is not null && Array.Exists(existingColumns, static column => column.IsSparse))
+                throw SimulatedSqlException.ColumnSetOverExistingSparseColumns(columnName.Value, tableName);
+        }
         if (xmlSchemaCollection is not null)
             newColumn.XmlSchemaCollection = xmlSchemaCollection;
         newColumn.AliasType = aliasType;

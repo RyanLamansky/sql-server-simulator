@@ -38,7 +38,10 @@ partial class Simulation
     private static SimulatedNonQuery ExecuteSelectInto(Selection selection, BatchContext batch)
     {
         var targetName = selection.IntoTarget!.Value;
-        var destColumns = selection.DestColumnSchema!;
+        // Under SET ANSI_PADDING OFF the new columns trim what they store; a
+        // column whose type changes form takes each value through it.
+        var parsedColumns = selection.DestColumnSchema!;
+        var destColumns = UnderSessionAnsiPadding(parsedColumns, batch.Connection, shared: true);
         var leaf = targetName.Leaf;
         batch.NoteTempTableCreation(leaf);
 
@@ -149,6 +152,18 @@ partial class Simulation
         foreach (var row in resultSet.RowValues)
         {
             var sourceValues = masking is null ? row : DataMasking.MaskRowForStorage(row, masking, resultSet.Schema);
+            if (destColumns != parsedColumns)
+            {
+                for (var i = 0; i < destColumns.Length; i++)
+                {
+                    if (destColumns[i].Type != parsedColumns[i].Type && !sourceValues[i].IsNull)
+                    {
+                        if (ReferenceEquals(sourceValues, row))
+                            sourceValues = [.. sourceValues];
+                        sourceValues[i] = sourceValues[i].CoerceTo(destColumns[i].Type);
+                    }
+                }
+            }
             for (var i = 0; i < destColumns.Length; i++)
             {
                 if (destColumns[i].Identity is not { } identity)

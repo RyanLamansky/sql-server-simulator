@@ -487,7 +487,7 @@ public sealed class ModuleBodyBindingTests
         var sim = WithFixture();
         // DBCC PAGE is the unmodeled shape here; it binds cleanly and only the
         // execution finds the gap.
-        sim.ExecuteBatches("create procedure dbo.punmodeled as dbcc page (0, 1, 0, 0)");
+        sim.ExecuteBatches("create procedure dbo.punmodeled as dbcc page (0, 1, 0, 0) with tableresults");
         AreEqual(1, ObjectCount(sim, "punmodeled"));
         _ = Throws<NotSupportedException>(() => sim.ExecuteNonQuery("exec dbo.punmodeled"));
     }

@@ -823,6 +823,7 @@ partial class Simulation
             newValues[ord] = SqlValue.NameVariantBase(raw, CoerceForWrite(raw, destinationTable.Columns[ord], context.Batch), expr.ResultReportsNumeric);
             EnforceRule(destinationTable, newValues, ord, context.Batch);
         }
+        WriteAssignedColumnSet(destinationTable, clause.Assignments!, newValues);
 
         StampUpdatedRow(destinationTable, newValues, context.Batch);
         EnforceNotNull(destinationTable, newValues, "UPDATE");
@@ -921,6 +922,12 @@ partial class Simulation
             source = EnforceMaxLength(source, targetColumn, destinationTable, context.Connection);
             var coerced = SqlValue.NameVariantBase(source, CoerceForWrite(source, targetColumn, context.Batch), clause.InsertValues[i].ResultReportsNumeric);
             rowValues[ordinal] = coerced;
+            if (targetColumn.IsColumnSet)
+            {
+                if (Array.Exists(clause.InsertColumns, static column => column.IsSparse))
+                    throw SimulatedSqlException.ColumnSetAndSparseColumnWritten();
+                Parser.Expressions.ColumnSetValue.Write(destinationTable, targetColumn, rowValues, coerced);
+            }
 
             if (ReferenceEquals(targetColumn, identityColumn))
             {

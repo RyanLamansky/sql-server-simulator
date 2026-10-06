@@ -97,7 +97,7 @@ internal sealed class ObjectName : Expression
             foreach (var table in BuiltInResources.CatalogTables(targetDb.Schemas[Database.DefaultSchemaName], runtime.Batch))
             {
                 if (table.ObjectId == id)
-                    return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), table.Name);
+                    return SqlValue.FromNVarchar(MetadataNameType(runtime.Batch), table.CatalogName);
             }
         }
         // A system object's negative id names it in every database.

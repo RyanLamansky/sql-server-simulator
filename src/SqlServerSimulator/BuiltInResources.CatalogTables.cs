@@ -8,22 +8,43 @@ partial class BuiltInResources
 {
     /// <summary>
     /// The tables a catalog view lists under <paramref name="schema"/>: its
-    /// own, and for <c>tempdb</c>'s <c>dbo</c> also the session's <c>#temp</c>
-    /// tables and every <c>##</c> table, which real lists there — so
-    /// <c>tempdb.sys.columns WHERE object_id = OBJECT_ID('tempdb..#t')</c>
-    /// finds a temp table's columns (probed 2026-09-24 against SQL Server
-    /// 2025). A <c>#temp</c> keeps its written name here, where real pads it
-    /// with underscores to 128 characters around a per-table suffix, and
-    /// another session's <c>#temp</c> tables, which real lists too, don't
-    /// appear. Without a <paramref name="batch"/> — space accounting, which
-    /// has no session — only the schema's own tables are listed.
+    /// own, and for <c>tempdb</c>'s <c>dbo</c> also <see cref="TempCatalogTables"/>.
+    /// Without a <paramref name="batch"/> — space accounting, which has no
+    /// session — only the schema's own tables are listed.
     /// </summary>
     internal static IEnumerable<HeapTable> CatalogTables(Schema schema, BatchContext? batch) =>
-        batch is not null && schema.Name == Database.DefaultSchemaName && schema.Database.Name == Simulation.TempdbDatabaseName
-            ? schema.HeapTables.EnumerateValues()
-                .Concat(batch.Connection.TempTables.EnumerateValues())
-                .Concat(batch.Connection.Simulation.GlobalTempTables.EnumerateValues())
-            : schema.HeapTables.EnumerateValues();
+        schema.HeapTables.EnumerateValues().Concat(TempCatalogTables(schema, batch));
+
+    /// <summary>
+    /// What <c>tempdb</c>'s <c>dbo</c> lists beside its own tables, each under
+    /// its name inside <c>tempdb</c> (<see cref="HeapTable.CatalogName"/>):
+    /// every session's <c>#temp</c> tables, every <c>##</c> table, and the
+    /// running batch's table variables — real lists every session's, which
+    /// live on batches the reading session can't reach (probed 2026-10-06
+    /// against SQL Server 2025). Empty for any other schema.
+    /// </summary>
+    internal static List<HeapTable> TempCatalogTables(Schema schema, BatchContext? batch)
+    {
+        var tables = new List<HeapTable>();
+        if (batch is null || schema.Name != Database.DefaultSchemaName || schema.Database.Name != Simulation.TempdbDatabaseName)
+            return tables;
+        var simulation = batch.Connection.Simulation;
+        SessionToken[] sessions;
+        lock (simulation.Sessions)
+            sessions = [.. simulation.Sessions];
+        foreach (var session in sessions)
+        {
+            if (session.Owner is { } owner && owner.TryGetTarget(out var connection))
+                tables.AddRange(connection.TempTables.EnumerateValues());
+        }
+        tables.AddRange(simulation.GlobalTempTables.EnumerateValues());
+        foreach (var (_, variable) in batch.TableVariables)
+        {
+            if (variable.InternalName is not null)
+                tables.Add(variable);
+        }
+        return tables;
+    }
 
     /// <summary>
     /// The tables whose constraints and indexes a catalog view lists under

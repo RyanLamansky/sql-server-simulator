@@ -80,4 +80,19 @@ public sealed class AnsiNullDefaultTests
     [TestMethod]
     public void AnsiDefaultsOff_TurnsDfltOnOff()
         => AreEqual("a=0", new Simulation().ExecuteScalar($"set ansi_defaults off; create table t (a int); {Nullability}"));
+
+    /// <summary>
+    /// An <c>ALTER DATABASE … ANSI_NULL_DEFAULT</c> doesn't reach a <c>CREATE
+    /// TABLE</c> later in its own batch, which compiled under the old value;
+    /// the next batch sees it (probed 2026-09-28 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DatabaseOption_ChangedInTheBatch_ReachesOnlyLaterBatches()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateOpenConnection();
+        _ = connection.CreateCommand("set ansi_null_dflt_on off; alter database current set ansi_null_default on; create table t1 (a int)").ExecuteNonQuery();
+        _ = connection.CreateCommand("create table t2 (a int)").ExecuteNonQuery();
+        AreEqual("t1=0,t2=1", connection.CreateCommand("select string_agg(concat(object_name(object_id), '=', cast(is_nullable as int)), ',') within group (order by object_name(object_id)) from sys.columns where object_id in (object_id('t1'), object_id('t2'))").ExecuteScalar());
+    }
 }

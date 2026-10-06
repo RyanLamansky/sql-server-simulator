@@ -642,7 +642,14 @@ partial class Simulation
                     }
                 }
                 if (!context.Batch.IsSkipping)
+                {
+                    // The batch compiled its CREATE TABLEs' nullability under
+                    // the value it began with (probed 2026-09-28 against SQL
+                    // Server 2025).
+                    if (BuiltInToken.Equals(name, "ANSI_NULL_DEFAULT"))
+                        _ = (context.Batch.CompiledAnsiNullDefaults ??= []).TryAdd(target, (target.Switches & DatabaseSwitches.AnsiNullDefault) != 0);
                     RecordDatabaseSwitch(target, name, toggle.Keyword == Keyword.On, incremental);
+                }
                 return true;
             case AlterDatabaseOptionKind.EqualsOnOff:
                 return ConsumeEqualsOnOff(context);

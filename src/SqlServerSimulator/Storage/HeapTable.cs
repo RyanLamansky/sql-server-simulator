@@ -59,6 +59,23 @@ internal sealed class HeapTable : SchemaObject
         return false;
     }
 
+    /// <summary>
+    /// Points this table's sparse column set, if it has one, at the table whose
+    /// sparse columns it reads — the first table to hold the column, so a
+    /// trigger's pseudo-table sharing it leaves it reading its base.
+    /// </summary>
+    internal void AdoptColumnSet()
+    {
+        foreach (var column in this.Columns)
+        {
+            if (column.Computed is Parser.Expressions.ColumnSetValue { Table: null } columnSet)
+                columnSet.Table = this;
+        }
+    }
+
+    /// <summary>The table's sparse column set (<c>COLUMN_SET FOR ALL_SPARSE_COLUMNS</c>), or null.</summary>
+    public HeapColumn? ColumnSet => Array.Find(this.Columns, static column => column.IsColumnSet);
+
     public HeapTable(string name, HeapColumn[] columns, int objectId, int schemaId = Database.DboSchemaId, DateTime createDate = default, KeyConstraint[]? keyConstraints = null, CheckConstraint[]? checkConstraints = null, bool isTableVariable = false, bool isTableValuedParameter = false, (int StartOrdinal, int EndOrdinal)? periodColumns = null)
         : base(name, objectId, schemaId, createDate == default ? DateTime.UtcNow : createDate)
     {
@@ -69,6 +86,7 @@ internal sealed class HeapTable : SchemaObject
         this.IsTableValuedParameter = isTableValuedParameter;
         this.PeriodColumns = periodColumns;
         this.TableDataLock.OwningTable = this;
+        this.AdoptColumnSet();
 
         var storedCount = 0;
         for (var i = 0; i < columns.Length; i++)
@@ -470,10 +488,17 @@ internal sealed class HeapTable : SchemaObject
     /// For a local temp table, its padded name inside <c>tempdb</c>
     /// (<see cref="Simulation.AllocateTempTableInternalName"/>); for a table
     /// variable, its <c>#</c>-and-hex name there
-    /// (<see cref="Simulation.AllocateTableVariableInternalName"/>); null
+    /// (<see cref="Simulation.AllocateTableVariableIdentity"/>); null
     /// otherwise.
     /// </summary>
     public string? InternalName;
+
+    /// <summary>
+    /// The name <c>tempdb</c>'s catalog lists the table under: a temp table's
+    /// or table variable's <see cref="InternalName"/>, any other table's own
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public string CatalogName => this.InternalName ?? this.Name;
 
     /// <summary>
     /// For a multi-statement table-valued function's return table, the

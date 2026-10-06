@@ -588,6 +588,7 @@ partial class Simulation
         // than waiting for a row to reach the per-row resolver (so an empty
         // table and a module body at CREATE report them too).
         var targetTypeResolver = Selection.TargetColumnTypeResolver(context.Batch, targetName, table, sourceView);
+        RejectColumnSetBesideSparse(table, assignments);
         BindSetValues(context.Batch, table, assignments, targetTypeResolver, name =>
             sourceView is null
             && Array.FindIndex(table.Columns, column => context.Batch.CurrentDatabase.Collation.Equals(column.Name, name.Leaf)) is var n and >= 0
@@ -995,6 +996,7 @@ partial class Simulation
 
         BindDeferredXmlMutators(context, table, rawAssignments, WrittenNameOf(sources[targetIndex], table));
         var assignments = ResolveSetAssignments(rawAssignments, table, context.CurrentDatabase, bindErrors: context.Batch.BindErrors);
+        RejectColumnSetBesideSparse(table, assignments);
         var setMasks = DataMasking.Applying(context.Batch, UpdateSetMasks(context.Batch, assignments, name => Selection.SourceColumnMask(sources, name)));
 
         // Compile-time bind of the predicate and the SET values — see
@@ -2037,12 +2039,36 @@ partial class Simulation
             throw SimulatedSqlException.InternalGraphColumnAccess(column.Name, state: 3);
         if (column.Identity is not null)
             throw SimulatedSqlException.CannotUpdateIdentityColumn(column.Name);
-        if (column.Computed is not null)
+        if (column.Computed is not null && !column.IsColumnSet)
             throw SimulatedSqlException.ColumnCannotBeModified(column.Name);
         if (column.Type == SqlType.RowVersion)
             throw SimulatedSqlException.CannotUpdateTimestampColumn();
         if (column.GeneratedAs != GeneratedAlwaysAsRow.None)
             throw SimulatedSqlException.CannotUpdateGeneratedAlways(QualifyTableName(table, database));
+    }
+
+    /// <summary>
+    /// Msg 360, as the statement compiles: a SET list naming the table's
+    /// sparse column set beside a sparse column it covers (probed 2026-10-06
+    /// against SQL Server 2025).
+    /// </summary>
+    private static void RejectColumnSetBesideSparse(HeapTable table, List<(int Ordinal, Expression Expr)> assignments)
+    {
+        if (assignments.Exists(assignment => assignment.Ordinal >= 0 && table.Columns[assignment.Ordinal].IsColumnSet)
+            && assignments.Exists(assignment => assignment.Ordinal >= 0 && table.Columns[assignment.Ordinal].IsSparse))
+        {
+            throw SimulatedSqlException.ColumnSetAndSparseColumnWritten();
+        }
+    }
+
+    /// <summary>A SET of the table's sparse column set writes its sparse columns.</summary>
+    private static void WriteAssignedColumnSet(HeapTable table, List<(int Ordinal, Expression Expr)> assignments, SqlValue[] newValues)
+    {
+        foreach (var (ordinal, _) in assignments)
+        {
+            if (ordinal >= 0 && table.Columns[ordinal].IsColumnSet)
+                Parser.Expressions.ColumnSetValue.Write(table, table.Columns[ordinal], newValues, newValues[ordinal]);
+        }
     }
 
     /// <summary>
@@ -2285,6 +2311,7 @@ partial class Simulation
             newValues[ordinal] = SqlValue.NameVariantBase(raw, CoerceForWrite(raw, table.Columns[ordinal], context.Batch), expr.ResultReportsNumeric);
             EnforceRule(table, newValues, ordinal, context.Batch);
         }
+        WriteAssignedColumnSet(table, assignments, newValues);
 
         // The pre-update ROW START surfaces in `fullValues` for the
         // history-row copy that CommitUpdate writes.

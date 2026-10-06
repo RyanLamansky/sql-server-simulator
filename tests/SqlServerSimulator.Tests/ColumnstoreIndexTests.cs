@@ -162,4 +162,31 @@ public sealed class ColumnstoreIndexTests
         AreEqual(153, errors[1].Number);
         _ = new Simulation().AssertSqlError("create table t (a int); create index ix on t (a) with (resumable = on)", 11438);
     }
+
+    /// <summary>
+    /// The columnstore storage views answer with real's shape and no rows, and
+    /// the row-group view sends the join-order warning real's definition earns
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void StorageViews_HaveTheirShapeAndNoRows()
+    {
+        var sim = new Simulation();
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.column_store_segments"));
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.column_store_dictionaries"));
+        using var reader = sim.ExecuteReader("select * from sys.column_store_row_groups");
+        AreEqual(10, reader.FieldCount);
+        AreEqual("state_description", reader.GetName(6));
+        AreEqual(-518, sim.ExecuteScalar("select object_id('sys.column_store_segments')"));
+    }
+
+    [TestMethod]
+    public void RowGroupView_SendsMsg8625()
+    {
+        using var connection = new Simulation().CreateOpenConnection();
+        var messages = new List<string>();
+        ((SimulatedDbConnection)connection).InfoMessage += (_, e) => messages.Add(e.Message);
+        _ = connection.CreateCommand("select * from sys.column_store_row_groups").ExecuteNonQuery();
+        AreEqual("Warning: The join order has been enforced because a local join hint is used.", messages.Single());
+    }
 }

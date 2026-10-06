@@ -202,7 +202,7 @@ internal static partial class BuiltInResources
                     return new SqlValue[]
                     {
                         SqlValue.FromInt32(t.ObjectId),
-                        SqlValue.FromSystemName(t.Name),
+                        SqlValue.FromSystemName(t.CatalogName),
                         SqlValue.FromInt32(t.SchemaId),
                         Ownership.PrincipalIdValue(t.OwnerPrincipalId),
                         tableType,
@@ -372,9 +372,9 @@ internal static partial class BuiltInResources
             new("is_sparse", SqlType.Bit, null, true),
             // Probe-confirmed constants (SQL Server 2025, 2026-07-15) that SMO's
             // SSMS Object-Explorer column / index / key sub-node queries read
-            // off sys.all_columns: no XML documents, column sets, dropped ledger
-            // columns are modeled, so is_xml_document / is_column_set /
-            // is_dropped_ledger_column are 0; the vector_* columns describe a
+            // off sys.all_columns: no XML documents or dropped ledger columns
+            // are modeled, so is_xml_document / is_dropped_ledger_column are
+            // 0; is_column_set marks a sparse column set; the vector_* columns describe a
             // vector column and are NULL for any other. xml_collection_id carries the bound schema
             // collection's id for a typed-xml column (0 when untyped / non-xml).
             new("is_xml_document", SqlType.Bit, null, false),
@@ -488,7 +488,7 @@ internal static partial class BuiltInResources
             new("is_persisted", SqlType.Bit, null, false),
             new("is_index_column_expression", SqlType.Bit, null, true)), "is_sparse", "is_column_set"),
             (batch, database) => UserColumnRows(batch, database)
-                .Where(static entry => entry.Host is ColumnHost.Table or ColumnHost.ReturnTable && entry.Column is { Computed: not null, GraphKind: GraphColumnKind.None })
+                .Where(static entry => entry.Host is ColumnHost.Table or ColumnHost.ReturnTable && entry.Column is { Computed: not null, GraphKind: GraphColumnKind.None, IsColumnSet: false })
                 .Select(entry => (SqlValue[])[
                     .. familyOrdinals.Select(i => entry.Row[i]),
                     entry.Host == ColumnHost.Table && entry.Column.ComputedDefinition is { } definition ? SqlValue.FromNVarchar(definition) : SqlValue.Null(SqlType.NVarchar),
@@ -582,12 +582,17 @@ internal static partial class BuiltInResources
                 _ => "NOT_APPLICABLE",
             });
         // is_ansi_padded is 1 for char / varchar / nchar / nvarchar / binary /
-        // varbinary (all simulator tables are created under ANSI_PADDING ON);
-        // 0 for every other type, including the deprecated LOB types
-        // text / ntext / image (probe-confirmed against SQL Server 2025). SMO's
-        // CREATE-scripting column query reads it as [AnsiPaddingStatus].
-        SqlValue AnsiPaddedFor(HeapColumn c) =>
-            c.Type.SystemTypeId is 165 or 167 or 173 or 175 or 231 or 239 ? trueBit : falseBit;
+        // varbinary, the single-byte four only when created under
+        // ANSI_PADDING ON; 0 for every other type, including the deprecated
+        // LOB types text / ntext / image (probe-confirmed against SQL Server
+        // 2025). SMO's CREATE-scripting column query reads it as
+        // [AnsiPaddingStatus].
+        SqlValue AnsiPaddedFor(HeapColumn c) => c.Type.SystemTypeId switch
+        {
+            165 or 167 or 173 or 175 => c.IsAnsiPaddingOff ? falseBit : trueBit,
+            231 or 239 => trueBit,
+            _ => falseBit,
+        };
         // A column's default is its DEFAULT constraint or the CREATE DEFAULT
         // object bound to it; the two exclude each other.
         SqlValue DefaultObjectIdFor(HeapColumn c) =>
@@ -633,12 +638,13 @@ internal static partial class BuiltInResources
                 SqlValue.FromBoolean(declared ? col.Identity is not null : col.IdentitySource is not null),
                 // A graph pseudo-column computes its value but reads as an
                 // ordinary column here (probed 2026-09-27 against SQL Server 2025).
-                declared ? SqlValue.FromBoolean(col.Computed is not null && col.GraphKind == GraphColumnKind.None) : falseBit,
+                // So does a sparse column set (probed 2026-10-06).
+                declared ? SqlValue.FromBoolean(col.Computed is not null && col.GraphKind == GraphColumnKind.None && !col.IsColumnSet) : falseBit,
                 CollationFor(col),
                 SqlValue.FromBoolean(col.IsSparse),
                 falseBit,
                 declared ? XmlCollectionIdFor(col) : zeroInt,
-                falseBit,
+                SqlValue.FromBoolean(declared && col.IsColumnSet),
                 falseBit,
                 col.Type is VectorSqlType dimensioned ? SqlValue.FromInt32(dimensioned.dimensions) : nullInt,
                 col.Type is VectorSqlType { IsFloat16: true } ? float16Desc : col.Type is VectorSqlType ? float32Desc : nullVectorBaseType,
@@ -962,14 +968,14 @@ internal static partial class BuiltInResources
             // so adding a new schema-object kind (e.g. surfacing Sequences /
             // TableTypes in sys.objects later) only requires implementing the
             // two abstract members on that type.
-            foreach (var obj in schema.SchemaObjects().OrderBy(o => o.ObjectId))
+            foreach (var obj in schema.SchemaObjects().Concat(TempCatalogTables(schema, batch)).OrderBy(o => o.ObjectId))
             {
                 var parent = obj is Trigger trigger
                     ? SqlValue.FromInt32(trigger.Parent.ObjectId)
                     : zeroParent;
                 yield return [
                     SqlValue.FromInt32(obj.ObjectId),
-                    SqlValue.FromSystemName(obj.Name),
+                    SqlValue.FromSystemName(obj is HeapTable heapTable ? heapTable.CatalogName : obj.Name),
                     SqlValue.FromInt32(obj.SchemaId),
                     parent,
                     Ownership.PrincipalIdValue(obj.OwnerPrincipalId),

@@ -33,7 +33,7 @@ partial class Simulation
         }
         catch (SimulatedSqlException refused) when (!dbcc.Has(DbccOptions.NoInfoMessages))
         {
-            throw SimulatedSqlException.FollowedByDbccCompleted(refused);
+            throw SimulatedSqlException.FollowedByDbccCompleted(refused, batch.Connection.Language);
         }
         var informational = !dbcc.Has(DbccOptions.NoInfoMessages);
         if (OldestWritingTransaction(batch.Connection.Simulation, database) is not var (connection, transaction))
@@ -190,7 +190,7 @@ partial class Simulation
         }
         Span<char> upper = stackalloc char[statement.Length];
         _ = statement.AsSpan().ToUpperInvariant(upper);
-        throw SimulatedSqlException.DbccNoHelpAvailable(statement, IsUnbuiltDbccCommand(upper) || upper is "LOGINFO" ? (byte)1 : (byte)2);
+        throw SimulatedSqlException.DbccNoHelpAvailable(statement, IsUnbuiltDbccCommand(upper) || upper is "LOGINFO" or "PAGE" ? (byte)1 : (byte)2);
 
         static SimulatedError HelpLine(BatchContext batch, string text)
         {

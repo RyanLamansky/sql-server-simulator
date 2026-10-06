@@ -128,6 +128,37 @@ internal sealed class Language(short langId, string name, string alias, string d
     };
 
     /// <summary>
+    /// Msg 2528, the line every DBCC command closes with, in this language's
+    /// words where SQL Server installs its messages and in English elsewhere
+    /// (read 2026-10-06 from SQL Server 2025's <c>sys.messages</c>).
+    /// </summary>
+    public string DbccCompletedMessage => this.MsgLangId switch
+    {
+        1028 => "DBCC 的執行已經完成。如果 DBCC 印出錯誤訊息，請連絡您的系統管理員。",
+        1029 => "Příkaz DBCC byl dokončen. Pokud příkaz DBCC vytiskl chybové zprávy, obraťte se na správce systému.",
+        1030 => "DBCC-udførelsen blev afsluttet. Hvis DBCC udskrev fejlmeddelelser, skal du kontakte systemadministratoren.",
+        1031 => "Die DBCC-Ausführung wurde abgeschlossen. Falls DBCC Fehlermeldungen ausgegeben hat, wenden Sie sich an den Systemadministrator.",
+        1032 => "Η εκτέλεση DBCC ολοκληρώθηκε. Αν η DBCC εκτύπωσε μηνύματα σφάλματος, επικοινωνήστε με το διαχειριστή του συστήματος.",
+        1035 => "DBCC-toiminto on suoritettu. Jos DBCC tulosti virhesanomia, ota yhteyttä järjestelmänvalvojaan.",
+        1036 => "Exécution de DBCC terminée. Si DBCC vous a adressé des messages d'erreur, contactez l'administrateur système.",
+        1038 => "A DBCC-utasítás végrehajtása befejeződött. Ha a DBCC hibaüzeneteket írt ki, forduljon a rendszergazdához.",
+        1040 => "Esecuzione DBCC completata. Se sono stati visualizzati messaggi di errore DBCC, rivolgersi all'amministratore di sistema.",
+        1041 => "DBCC の実行が完了しました。DBCC がエラー メッセージを出力した場合は、システム管理者に相談してください。",
+        1042 => "DBCC 실행이 완료되었습니다. DBCC에서 오류 메시지를 출력하면 시스템 관리자에게 문의하십시오.",
+        1043 => "De DBCC-uitvoering is voltooid. Neem contact op met de systeembeheerder als DBCC foutberichten heeft afgedrukt.",
+        1044 => "DBCC-utførelse er fullført. Kontakt systemansvarlig hvis DBCC skrev ut feilmeldinger.",
+        1045 => "Wykonywanie polecenia DBCC zostało ukończone. Jeśli program DBCC wygenerował komunikaty o błędach, skontaktuj się z administratorem systemu.",
+        1046 => "A execução do DBCC foi concluída. Se o DBCC imprimiu mensagens de erro, entre em contato com o administrador do sistema.",
+        1049 => "Выполнение DBCC завершено. Если DBCC выдает сообщения об ошибках, обратитесь к системному администратору.",
+        1053 => "DBCC-körningen slutfördes. Om DBCC returnerade felmeddelanden kontaktar du systemadministratören.",
+        1055 => "DBCC yürütme tamamlandı. DBCC hata iletileri çıkarırsa, sistem yöneticinize başvurun.",
+        2052 => "DBCC 执行完毕。如果 DBCC 输出了错误信息，请与系统管理员联系。",
+        2070 => "Execução de DBCC concluída. Se o DBCC imprimir mensagens de erro, contacte o administrador de sistema.",
+        3082 => "Ejecución de DBCC completada. Si hay mensajes de error, consulte al administrador del sistema.",
+        _ => "DBCC execution completed. If DBCC printed error messages, contact your system administrator.",
+    };
+
+    /// <summary>
     /// Msg 5703 as a <c>SET LANGUAGE</c> to this language sends it, in the
     /// language's own words where SQL Server installs its messages (captured
     /// 2026-10-04 from SQL Server 2025).

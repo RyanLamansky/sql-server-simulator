@@ -49,6 +49,15 @@ internal sealed class CatalogView(
     public readonly bool MasterScoped = masterScoped;
 
     /// <summary>
+    /// True for a view whose definition on real carries a join hint, so a
+    /// statement reading it earns Msg 8625 as an inline join hint does —
+    /// <c>sys.column_store_row_groups</c> and
+    /// <c>sys.dm_db_xtp_table_memory_stats</c> among the views modeled here
+    /// (a sweep of every <c>sys</c> view, 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public bool EnforcesJoinOrder;
+
+    /// <summary>
     /// The <c>object_id</c> <c>OBJECT_ID('sys.&lt;view&gt;')</c> surfaces: real's
     /// fixed id from <see cref="CatalogViewObjectIds"/>, assigned by key once the
     /// registry is built (<c>OBJECT_ID('sys.objects')</c> is −385). A view real

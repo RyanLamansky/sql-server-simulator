@@ -3972,13 +3972,16 @@ internal sealed partial class Selection
 
         static void AppendSourceColumns(List<Expression> destination, FromSource source)
         {
+            // A sparse column set stands in for its sparse columns (probed
+            // 2026-10-06 against SQL Server 2025).
+            var hasColumnSet = Array.Exists(source.Columns, static column => column.IsColumnSet);
             for (var i = 0; i < source.ColumnNames.Length; i++)
             {
                 // SELECT * excludes hidden columns (the period columns on a
                 // system-versioned temporal table). Probe-confirmed against
                 // SQL Server 2025: `select * from <temporal>` returns the
                 // non-hidden columns; explicit references continue to bind.
-                if (source.Columns[i].IsHidden)
+                if (source.Columns[i].IsHidden || (hasColumnSet && source.Columns[i].IsSparse))
                     continue;
                 var col = source.ColumnNames[i];
                 Expression reference = source.Qualifier is { } q
