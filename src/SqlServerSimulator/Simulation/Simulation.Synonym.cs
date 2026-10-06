@@ -32,17 +32,18 @@ partial class Simulation
             return true;
 
         if (!context.Batch.TryResolveCreateSchema(synonymName, out var schema, statementOnly: true))
-            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(synonymName.ImmediateQualifier ?? Database.DefaultSchemaName);
+            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(synonymName.ImmediateQualifier ?? Database.DefaultSchemaName, terminatesBatch: false);
 
         schema.Database.RejectWriteWhenReadOnly();
 
         // Dual DDL gate, in real's probed order: the database-scope CREATE
         // SYNONYM permission (Msg 262 state 1), then ALTER on the target schema
-        // (Msg 2760).
+        // (Msg 2760, which ends only the statement, as a missing schema's
+        // does; probed 2026-10-06 against SQL Server 2025).
         if (!PermissionEnforcement.HasDatabasePermission(context.Batch, schema.Database, Permission.CreateSynonym))
             throw SimulatedSqlException.DatabasePermissionDenied("CREATE SYNONYM", schema.Database.Name);
         if (!PermissionEnforcement.HasSchemaAlter(context.Batch, schema))
-            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name);
+            throw SimulatedSqlException.SpecifiedSchemaNameDoesNotExist(schema.Name, terminatesBatch: false);
 
         var leaf = synonymName.Leaf;
         var synonym = new Synonym(schema, leaf, context.CurrentDatabase.AllocateObjectId(), context.Batch.CurrentStatement.UtcNow, baseObject);

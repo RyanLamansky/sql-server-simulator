@@ -256,23 +256,29 @@ partial class Simulation
 
     /// <summary>
     /// A view, CTE or derived table written through whose single source is a
-    /// view carrying an <c>INSTEAD OF</c> trigger for the action: real hands
-    /// that trigger the view's rows the level shows, its filter applied, as a
-    /// write naming the view would (probed 2026-10-01 against SQL Server
-    /// 2025, <c>UPDATE d … FROM (SELECT * FROM vi WHERE id = 1) d</c>,
+    /// view carrying an <c>INSTEAD OF</c> trigger for the action — directly,
+    /// or through further such levels: real hands that trigger the view's
+    /// rows the level shows, every filter on the way applied, as a write
+    /// naming the view would (probed 2026-10-01 against SQL Server 2025,
+    /// <c>UPDATE d … FROM (SELECT * FROM vi WHERE id = 1) d</c>,
     /// <c>WITH c AS (SELECT * FROM vi) DELETE c</c>, an <c>INSERT</c> through
-    /// such a CTE and an <c>UPDATE</c> through a stored view over <c>vi</c>).
+    /// such a CTE and an <c>UPDATE</c> through a stored view over <c>vi</c>;
+    /// probed 2026-10-06 two stored views above it).
     /// </summary>
-    private sealed class InsteadOfLevelView(HeapColumn[] columns, HeapColumn[] viewColumns, Expression[] projections, BooleanExpression[] excluders, string writtenName, bool isDerivedTable)
+    private sealed class InsteadOfLevelView(HeapColumn[] columns, HeapColumn[] sourceColumns, Expression[] projections, BooleanExpression[] excluders, string writtenName, bool isDerivedTable, InsteadOfLevelView? below)
     {
         /// <summary>The level's columns, which the statement's <c>WHERE</c>, <c>SET</c> list and <c>INSERT</c> column list name.</summary>
         public readonly HeapColumn[] Columns = columns;
 
-        private readonly HeapColumn[] viewColumns = viewColumns;
+        /// <summary>The columns of what the level reads: the level below's, or the trigger view's.</summary>
+        private readonly HeapColumn[] sourceColumns = sourceColumns;
         private readonly Expression[] projections = projections;
         private readonly BooleanExpression[] excluders = excluders;
         private readonly string writtenName = writtenName;
         private readonly bool isDerivedTable = isDerivedTable;
+
+        /// <summary>The level this one reads, null when it reads the trigger view.</summary>
+        private readonly InsteadOfLevelView? below = below;
 
         /// <summary>
         /// The trigger view's column a level column passes through bare; -1
@@ -284,20 +290,29 @@ partial class Simulation
             var i = Array.FindIndex(this.Columns, column => collation.Equals(column.Name, levelColumn));
             if (i < 0)
                 return -1;
-            return UnwrapDirectRef(this.projections[i]) is { ReferencedName: var name }
-                && Array.FindIndex(this.viewColumns, column => collation.Equals(column.Name, name.Leaf)) is var ordinal and >= 0
-                ? ordinal
-                : throw SimulatedSqlException.ViewDmlTouchesDerivedField(this.writtenName, this.isDerivedTable);
+            if (UnwrapDirectRef(this.projections[i]) is not { ReferencedName: var name }
+                || Array.FindIndex(this.sourceColumns, column => collation.Equals(column.Name, name.Leaf)) is not (var ordinal and >= 0))
+            {
+                throw SimulatedSqlException.ViewDmlTouchesDerivedField(this.writtenName, this.isDerivedTable);
+            }
+            return this.below is { } lower ? lower.ViewOrdinalOf(collation, this.sourceColumns[ordinal].Name) : ordinal;
         }
 
-        /// <summary>The level's row over a trigger view row, or null when its filter hides it.</summary>
+        /// <summary>The level's row over a trigger view row, or null when a filter on the way hides it.</summary>
         public SqlValue[]? RowOver(SqlValue[] viewRow, BatchContext batch)
         {
+            var sourceRow = viewRow;
+            if (this.below is { } lower)
+            {
+                if (lower.RowOver(viewRow, batch) is not { } lowerRow)
+                    return null;
+                sourceRow = lowerRow;
+            }
             var collation = batch.CurrentDatabase.Collation;
-            var columns = this.viewColumns;
+            var columns = this.sourceColumns;
             var runtime = new RuntimeContext(name =>
                 Array.FindIndex(columns, column => collation.Equals(column.Name, name.Leaf)) is var ordinal and >= 0
-                    ? viewRow[ordinal]
+                    ? sourceRow[ordinal]
                     : throw SimulatedSqlException.InvalidColumnName(name), batch);
             foreach (var excluder in this.excluders)
             {
@@ -312,15 +327,26 @@ partial class Simulation
     }
 
     /// <summary>
-    /// The view carrying an <c>INSTEAD OF</c> trigger for
-    /// <paramref name="action"/> that <paramref name="level"/> — a view, CTE
-    /// or derived table — reads as its single source, or null.
+    /// The view a level — a view, CTE or derived table — reads as its single
+    /// source, or null.
     /// </summary>
-    private static View? InsteadOfTriggerViewUnder(BatchContext batch, View level, TriggerActions action) =>
-        (level.UnstoredBody is { UpdatabilityProfile.Sources: [var source] } ? source.UpdatableView() : level.UpstreamView) is { UnstoredBody: null } inner
-        && HasInsteadOfTrigger(batch, inner, action)
-            ? inner
-            : null;
+    private static View? LevelSourceView(View level) =>
+        level.UnstoredBody is { UpdatabilityProfile.Sources: [var source] } ? source.UpdatableView() : level.UpstreamView;
+
+    /// <summary>
+    /// The stored view carrying an <c>INSTEAD OF</c> trigger for
+    /// <paramref name="action"/> that <paramref name="level"/> reads through
+    /// its chain of single sources, or null.
+    /// </summary>
+    private static View? InsteadOfTriggerViewUnder(BatchContext batch, View level, TriggerActions action)
+    {
+        for (var (current, depth) = (level, 0); depth < SimulatedDbConnection.MaxNestingLevel && LevelSourceView(current) is { } next; (current, depth) = (next, depth + 1))
+        {
+            if (next.UnstoredBody is null && HasInsteadOfTrigger(batch, next, action))
+                return next;
+        }
+        return null;
+    }
 
     /// <summary>
     /// When <paramref name="view"/> is a level <see cref="InsteadOfTriggerViewUnder"/>
@@ -332,12 +358,22 @@ partial class Simulation
     {
         if (InsteadOfTriggerViewUnder(batch, view, action) is not { } triggerView)
             return null;
-        var profile = (view.UnstoredBody ?? batch.Connection.Simulation.ParseViewBodyPlan(batch, view)).UpdatabilityProfile!;
+        var levels = new List<View>();
+        for (var level = view; !ReferenceEquals(level, triggerView); level = LevelSourceView(level)!)
+            levels.Add(level);
         var written = view.UnstoredBody is null ? targetName.ToString() : view.Name;
         targetName = new MultiPartName(triggerView.Schema.Name).WithAddedPart(triggerView.Name);
-        var level = new InsteadOfLevelView(view.OutputColumns, ViewColumnsFor(batch, triggerView, targetName), profile.Projections, profile.Excluders, written, view.IsDerivedTable);
+        InsteadOfLevelView? built = null;
+        var sourceColumns = ViewColumnsFor(batch, triggerView, targetName);
+        for (var i = levels.Count - 1; i >= 0; i--)
+        {
+            var level = levels[i];
+            var profile = (level.UnstoredBody ?? batch.Connection.Simulation.ParseViewBodyPlan(batch, level)).UpdatabilityProfile!;
+            built = new InsteadOfLevelView(level.OutputColumns, sourceColumns, profile.Projections, profile.Excluders, i == 0 ? written : level.Name, level.IsDerivedTable, built);
+            sourceColumns = level.OutputColumns;
+        }
         view = triggerView;
-        return level;
+        return built;
     }
 
     /// <summary>

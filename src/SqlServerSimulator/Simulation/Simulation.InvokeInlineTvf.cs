@@ -151,7 +151,9 @@ partial class Simulation
         // Inlined into the referencing statement — same current-time freeze,
         // so a per-row APPLY reads one constant value (matching real).
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
+        innerBatch.InheritCallerTriggerFrame(outerBatch);
         connection.NestingLevel++;
+        connection.InlinedBodyDepth++;
         try
         {
             var parser = innerBatch.Parser;
@@ -168,6 +170,7 @@ partial class Simulation
         finally
         {
             connection.NestingLevel--;
+            connection.InlinedBodyDepth--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.AnsiNulls = savedAnsiNulls;
             // As in the view body: the Sch-S / IS the body took are recorded
@@ -200,7 +203,19 @@ partial class Simulation
             throw SimulatedSqlException.ObjectCannotBeModified(name.ToString());
         context.MoveNextRequired();
         var arguments = Parser.Expressions.UserFunctionCall.ParseFunctionArguments(inline, context);
-        var batch = context.Batch;
+        view = FunctionDmlView(context.Batch, inline, arguments, name);
+        return true;
+    }
+
+    /// <summary>
+    /// The unstored view a write through a call of <paramref name="inline"/>
+    /// passes through: its body parsed with <paramref name="arguments"/>
+    /// evaluated as the parameters' values — for a statement naming the call
+    /// as its target, or a joined one aliasing it in its <c>FROM</c> clause
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static View FunctionDmlView(BatchContext batch, InlineTableValuedFunction inline, Expression?[] arguments, MultiPartName name)
+    {
         var (argValues, isDefault, _) = EvaluateFunctionArguments(
             inline, arguments, new RuntimeContext(written => throw SimulatedSqlException.InvalidColumnName(written), batch));
 
@@ -236,13 +251,13 @@ partial class Simulation
             ModuleSchema = inline.Schema,
         };
         innerBatch.AdoptStatementFreezeFrom(batch);
+        innerBatch.InheritCallerTriggerFrame(batch);
         try
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
             var body = ParseInlineTvfBody(parser, inline, name);
-            view = UnstoredDmlView(body, inline.Schema.Database, name.ToString(), body.ColumnNames, isDerivedTable: false);
-            return true;
+            return UnstoredDmlView(body, inline.Schema.Database, name.ToString(), body.ColumnNames, isDerivedTable: false);
         }
         finally
         {

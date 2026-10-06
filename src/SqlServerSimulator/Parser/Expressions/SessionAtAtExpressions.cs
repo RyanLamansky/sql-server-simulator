@@ -32,12 +32,14 @@ internal sealed class ConnectionsExpression : Expression
 /// <see cref="SimulatedDbConnection.NestingLevel"/> tracks this directly;
 /// it's <c>0</c> in an ad-hoc batch and increments on entry into each
 /// procedure/UDF/trigger body (capped at 32 per
-/// <see cref="SimulatedDbConnection.MaxNestingLevel"/>).
+/// <see cref="SimulatedDbConnection.MaxNestingLevel"/>), a view or inline
+/// function body leaving it as its caller's
+/// (<see cref="SimulatedDbConnection.InlinedBodyDepth"/>).
 /// </summary>
 internal sealed class NestLevelExpression : Expression
 {
     public override SqlValue Run(RuntimeContext runtime) =>
-        SqlValue.FromInt32(runtime.Batch.Connection.NestingLevel);
+        SqlValue.FromInt32(runtime.Batch.Connection.NestingLevel - runtime.Batch.Connection.InlinedBodyDepth);
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 

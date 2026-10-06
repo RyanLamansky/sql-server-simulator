@@ -679,7 +679,7 @@ partial class Simulation
 
         if (trigger.Timing == TriggerTiming.After)
         {
-            if (!batch.Connection.Simulation.NestedTriggersEnabled)
+            if (!batch.Connection.NestedTriggersThisRequest)
             {
                 foreach (var (_, isAfter, _) in stack)
                 {

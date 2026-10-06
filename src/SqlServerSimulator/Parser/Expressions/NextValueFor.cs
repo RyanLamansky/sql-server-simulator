@@ -56,6 +56,7 @@ internal sealed class NextValueFor : Expression
     public NextValueFor(ParserContext context, MultiPartName sequenceName)
     {
         var scope = context.NextValueForRejection;
+        SimulatedSqlException? pendingRefusal = null;
         if (context.DeferNextValueRefusals
             && scope is NextValueForScope.Allowed or NextValueForScope.Clause or NextValueForScope.RowLimited or NextValueForScope.Conditional)
         {
@@ -65,12 +66,40 @@ internal sealed class NextValueFor : Expression
             this.Deferred = new DeferredNextValueRef(scope) { OverBody = context.InOverBody, InTop = context.InTopCount };
             (context.DeferredNextValueRefs ??= []).Add(this.Deferred);
         }
+        else if (scope == NextValueForScope.Nested && context.Batch.IsSkipping)
+        {
+            // A nested query reading what the batch has yet to create defers
+            // with its statement (see StatementContext.PendingCompileRefusal);
+            // skipped as the batch runs, the statement is one the compile
+            // deferred, which nothing compiles now.
+            if (context.Batch.CreateTimeBinding)
+            {
+                pendingRefusal = RefusalFor(scope);
+                pendingRefusal.ResolveDiagnostics(context.Token?.LineNumber ?? context.Batch.CurrentStatement.StartLine, context.Batch.LineOffset, context.Batch.ErrorProcedureName);
+                context.Batch.CurrentStatement.PendingCompileRefusal ??= pendingRefusal;
+            }
+        }
+        else if (scope == NextValueForScope.Nested)
+        {
+            // Met running, the statement is one the compile deferred.
+            var refused = RefusalFor(scope);
+            refused.RefusedRecompilingDeferred = true;
+            throw refused;
+        }
         else
         {
             ThrowIfRejectedHere(scope);
         }
         if (context.InDefaultClause && sequenceName.Count >= 3 && sequenceName[sequenceName.Count - 3] is { Length: > 0 })
             throw SimulatedSqlException.SequenceDatabaseNameInDefault();
+        if (pendingRefusal is not null && !context.Batch.TryResolveSequence(sequenceName, out _))
+        {
+            // The sequence's own absence defers nothing of the refusal, which
+            // waits only on the statement's sources (probed 2026-10-06 against
+            // SQL Server 2025), so the walk reads on over a stand-in.
+            this.Sequence = new Sequence(context.Batch.Parser.CurrentDatabase.Schemas[Database.DefaultSchemaName], sequenceName.Leaf, 0, default, SqlType.BigInt, 1, 1, long.MinValue, long.MaxValue, cycle: false);
+            return;
+        }
         if (!context.Batch.TryResolveSequence(sequenceName, out var resolved))
         {
             // Real SQL Server distinguishes "object name doesn't resolve" (Msg 208)

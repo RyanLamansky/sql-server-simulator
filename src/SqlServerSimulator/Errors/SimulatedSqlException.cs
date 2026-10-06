@@ -351,6 +351,27 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool EndedTriggerBody;
 
     /// <summary>
+    /// Set with <see cref="RaisingScopeRecorded"/>: whether the statement that
+    /// raised this error is a <c>SELECT</c> sending rows to the client and
+    /// writing none. An error escaping a trigger body from one is followed by
+    /// a Msg 3621 at that statement's line and module; from any other — a
+    /// write, an assignment, <c>SET</c>, <c>DECLARE</c>'s initializer, an
+    /// <c>IF</c> condition — at line 1 outside any (probed 2026-10-06 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal bool RaisedByClientSelect;
+
+    /// <summary>
+    /// Set on a refusal real settles compiling a statement — a DML
+    /// <c>TOP</c>'s of its written constant, a nested <c>NEXT VALUE FOR</c> —
+    /// raised as a statement the batch's compile deferred runs: it ends the
+    /// batch uncaught by a TRY in its scope, and with no Msg 3621 where a
+    /// <c>TOP</c> value read while running sends it (probed 2026-10-06 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal bool RefusedRecompilingDeferred;
+
+    /// <summary>
     /// Set on a conversion error raised while <c>ALTER TABLE … ALTER COLUMN</c>
     /// rewrites the column's values, which real follows with Msg 3621 though
     /// the error ends the batch, where the same error from an INSERT or UPDATE
@@ -410,9 +431,11 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool RaisedBySystemProcedure;
 
     /// <summary>
-    /// The return code a system procedure gives the <c>EXEC @rc = …</c> caller
-    /// when this error ends it: 1 for most, the error number itself for the
-    /// <c>sys.sp_*</c> option procedures (probed 2026-09-30 against SQL Server 2025).
+    /// The return code a system procedure gives the <c>EXEC @rc = …</c> caller,
+    /// and sends as its RETURNSTATUS, when this error ends it: 1 for most, the
+    /// error number itself for the <c>sys.sp_*</c> option procedures and
+    /// <c>sp_recompile</c> (probed 2026-09-30 and 2026-10-06 against SQL
+    /// Server 2025).
     /// </summary>
     internal int SystemProcedureReturnCode = 1;
 

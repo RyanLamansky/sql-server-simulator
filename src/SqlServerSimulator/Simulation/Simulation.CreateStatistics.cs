@@ -89,8 +89,14 @@ partial class Simulation
         {
             // A view takes statistics only once schema bound (Msg 1939, probed
             // 2026-10-05 against SQL Server 2025).
-            if (context.Batch.TryResolveView(targetTableName, out var view) && !view.IsSchemaBound)
-                throw SimulatedSqlException.StatisticsOnViewNotSchemaBound(view.Name);
+            if (context.Batch.TryResolveView(targetTableName, out var view))
+            {
+                if (!view.IsSchemaBound)
+                    throw SimulatedSqlException.StatisticsOnViewNotSchemaBound(view.Name);
+                if (!view.Indexes.Exists(static index => index is { IsUnique: true, IsClustered: true }))
+                    throw SimulatedSqlException.ViewWithoutUniqueClusteredIndex(targetTableName.ToString(), statistics: true);
+                throw new NotSupportedException("Statistics on an indexed view aren't modeled.");
+            }
             throw filter is not null
                 ? SimulatedSqlException.InvalidObjectName(targetTableName, state: 101)
                 : SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());

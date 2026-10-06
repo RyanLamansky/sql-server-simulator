@@ -53,6 +53,7 @@ partial class Simulation
         var source = profile.Sources[0];
         HeapTable? baseTable = null;
         View? partitionedBase = null;
+        View? upstreamLevel = null;
         int[] sourceColumnToBaseOrdinal;
         Func<SqlValue[], BatchContext, bool>? upstreamVisibility = null;
         Func<SqlValue[], BatchContext, bool>? upstreamCheckOption = null;
@@ -67,6 +68,7 @@ partial class Simulation
         else if (source.UpdatableView() is { BaseTable: { } upstreamBaseTable } upstreamView)
         {
             baseTable = upstreamBaseTable;
+            upstreamLevel = upstreamView;
             sourceColumnToBaseOrdinal = upstreamView.BaseColumnOrdinals;
             upstreamVisibility = upstreamView.VisibilityCheck;
             upstreamCheckOption = upstreamView.CheckOptionCheck;
@@ -78,6 +80,7 @@ partial class Simulation
             // through it to the members (probed 2026-10-01 against SQL Server
             // 2025, through a view, a CTE and a derived table).
             partitionedBase = partitioned;
+            upstreamLevel = partitionedLevel;
             sourceColumnToBaseOrdinal = partitionedLevel.BaseColumnOrdinals;
             upstreamVisibility = partitionedLevel.VisibilityCheck;
             upstreamCheckOption = partitionedLevel.CheckOptionCheck;
@@ -144,6 +147,14 @@ partial class Simulation
         // current row as the join runs them, so its WHERE is no check a base
         // row can be put to on its own.
         var excluders = correlated ? [] : profile.Excluders;
+        // A WHERE reading a column the view below derives judges each base
+        // row by that view's projection — or, below a windowed or row-limited
+        // view, is left to the body's own run, which picks the rows the write
+        // reaches (probed 2026-10-06 against SQL Server 2025).
+        var derivedReader = upstreamLevel is { IsWindowed: false, IsRowLimited: false, BaseTable: { } readTable }
+            ? DerivedColumnReader(upstreamLevel, readTable, source.ColumnNames, collation)
+            : null;
+        List<BooleanExpression>? checkedExcluders = null;
         foreach (var excluder in excluders)
         {
             var unmappable = false;
@@ -152,11 +163,16 @@ partial class Simulation
                 if (!nameToBaseOrdinal.TryGetValue(name.Leaf, out var ord) || ord < 0)
                     unmappable = true;
             }));
-            if (unmappable)
+            if (!unmappable || derivedReader is not null)
+            {
+                (checkedExcluders ??= []).Add(excluder);
+                continue;
+            }
+            if (upstreamLevel is null || withCheckOption || upstreamLevel is { BaseTable: null, IsWindowed: false, IsRowLimited: false })
                 return (null, [], ViewUpdatabilityRejection.UnsupportedShape, null, null, false, null);
         }
 
-        var thisLevelCheck = MakeWhereCheck(excluders, nameToBaseOrdinal);
+        var thisLevelCheck = MakeWhereCheck(checkedExcluders is null ? [] : [.. checkedExcluders], nameToBaseOrdinal, derivedReader);
 
         var combinedVisibility = ComposeAnd(thisLevelCheck, upstreamVisibility);
 
@@ -284,13 +300,14 @@ partial class Simulation
     /// </summary>
     private static Func<SqlValue[], BatchContext, bool>? MakeWhereCheck(
         BooleanExpression[] excluders,
-        Dictionary<string, int> nameToBaseOrdinal) => excluders.Length == 0
+        Dictionary<string, int> nameToBaseOrdinal,
+        Func<SqlValue[], string, BatchContext, SqlValue?>? derivedReader = null) => excluders.Length == 0
             ? null
             : (row, batch) =>
             {
                 SqlValue Resolve(MultiPartName name) => nameToBaseOrdinal.TryGetValue(name.Leaf, out var ord) && ord >= 0
                     ? row[ord]
-                    : throw SimulatedSqlException.InvalidColumnName(name);
+                    : derivedReader?.Invoke(row, name.Leaf, batch) ?? throw SimulatedSqlException.InvalidColumnName(name);
                 var runtime = new RuntimeContext(Resolve, batch);
                 foreach (var excluder in excluders)
                 {
@@ -299,6 +316,23 @@ partial class Simulation
                 }
                 return true;
             };
+
+    /// <summary>
+    /// Reads a column <paramref name="upstream"/> derives off a row of its
+    /// base table, by name among <paramref name="sourceColumnNames"/>, through
+    /// the view's projections (<see cref="SingleBaseViewReader"/>); null for a
+    /// name it doesn't carry.
+    /// </summary>
+    private static Func<SqlValue[], string, BatchContext, SqlValue?> DerivedColumnReader(View upstream, HeapTable table, string[] sourceColumnNames, Collation collation) =>
+        (row, name, batch) =>
+        {
+            for (var j = 0; j < sourceColumnNames.Length; j++)
+            {
+                if (collation.Equals(sourceColumnNames[j], name))
+                    return SingleBaseViewReader(batch, upstream, table)(row, j);
+            }
+            return null;
+        };
 
     /// <summary>
     /// Composes two boolean closures into an AND. Either argument may be

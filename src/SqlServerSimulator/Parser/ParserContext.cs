@@ -147,6 +147,14 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public string? VariablesRefusedIn;
 
     /// <summary>
+    /// Set while a multi-statement function's return table parses, whose
+    /// grammar, like a table type's, has no <c>SPARSE</c> (Msg 102 at it,
+    /// probed 2026-10-06 against SQL Server 2025) where a table variable's
+    /// accepts it.
+    /// </summary>
+    public bool RefusesSparseColumns;
+
+    /// <summary>
     /// Set by the SELECT statement's dispatch while <c>SET NO_BROWSETABLE</c>
     /// is on, and consumed by the statement's own query specification, which
     /// then takes on its browse-mode hidden columns and metadata.

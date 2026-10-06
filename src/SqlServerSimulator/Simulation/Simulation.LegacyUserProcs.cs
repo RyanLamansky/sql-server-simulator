@@ -70,7 +70,7 @@ partial class Simulation
     private static DatabasePrincipal? FindDatabasePrincipal(BatchContext batch, string name) =>
         batch.CurrentDatabase.Principals.TryGetValue(name, out var principal) ? principal : null;
 
-    /// <summary>Runs each statement as a batch of its own, the way real's procedures <c>EXEC</c> them one at a time.</summary>
+    /// <summary>Runs each statement as a batch of its own (<see cref="RunProcedureStatement"/>), stopping at the first that fails.</summary>
     private IEnumerable<SimulatedStatementOutcome> RunStatements(BatchContext batch, IEnumerable<string> statements)
     {
         foreach (var statement in statements)
@@ -78,13 +78,28 @@ partial class Simulation
             if (statement.Length == 0)
                 continue;
             var failed = false;
-            foreach (var outcome in this.ExecuteDynamicBatch(batch, statement, preDeclaredVariables: null))
+            foreach (var outcome in this.RunProcedureStatement(batch, statement))
             {
                 failed |= outcome is SimulatedErrorOutcome;
                 yield return outcome;
             }
             if (failed)
                 yield break;
+        }
+    }
+
+    /// <summary>
+    /// Runs one statement a legacy security or type procedure is made of, as
+    /// a batch of its own but as the procedure's own statement, so no
+    /// dynamic-SQL scope frames it on the wire (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    private IEnumerable<SimulatedStatementOutcome> RunProcedureStatement(BatchContext batch, string statement)
+    {
+        foreach (var outcome in this.ExecuteDynamicBatch(batch, statement, preDeclaredVariables: null))
+        {
+            if (outcome is not SimulatedProcScopeBoundary)
+                yield return outcome;
         }
     }
 
@@ -139,7 +154,7 @@ partial class Simulation
 
         if (viaAddUser && BuiltInToken.Comparer.Equals(login, "guest"))
         {
-            foreach (var outcome in this.ExecuteDynamicBatch(batch, "grant connect to guest", preDeclaredVariables: null))
+            foreach (var outcome in this.RunProcedureStatement(batch, "grant connect to guest"))
                 yield return outcome;
             yield break;
         }
@@ -198,7 +213,7 @@ partial class Simulation
             throw AtProcedureLine(SimulatedSqlException.CannotDropDatabaseOwnerUser(name), viaDropUser ? "sys.sp_revokedbaccess" : calledAs, 51);
         if (principal.PrincipalId == Database.GuestPrincipalId)
         {
-            foreach (var outcome in this.ExecuteDynamicBatch(batch, "revoke connect from guest", preDeclaredVariables: null))
+            foreach (var outcome in this.RunProcedureStatement(batch, "revoke connect from guest"))
                 yield return outcome;
             yield break;
         }
@@ -261,7 +276,7 @@ partial class Simulation
         if (!batch.Connection.Simulation.TryResolveServerPrincipalId(login, out _))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(login), 33);
         var statement = "alter server role " + QuoteIdentifier(role) + " add member " + QuoteIdentifier(login);
-        foreach (var outcome in this.ExecuteDynamicBatch(batch, statement, preDeclaredVariables: null))
+        foreach (var outcome in this.RunProcedureStatement(batch, statement))
             yield return outcome;
     }
 
@@ -276,7 +291,7 @@ partial class Simulation
         var login = RequireValidName(values[0]);
         var role = RequireValidName(values[1]);
         var statement = "alter server role " + QuoteIdentifier(role) + " drop member " + QuoteIdentifier(login);
-        foreach (var outcome in this.ExecuteDynamicBatch(batch, statement, preDeclaredVariables: null))
+        foreach (var outcome in this.RunProcedureStatement(batch, statement))
             yield return outcome;
     }
 
@@ -371,7 +386,7 @@ partial class Simulation
                                 throw AtSystemProcedureLine(calledAs, invalid, 239);
                             yield return ProcedureMessage(batch, calledAs, 253, 15293,
                                 $"Barring a conflict, the row for user '{target.Name}' will be fixed by updating its link to a new login.");
-                            foreach (var outcome in this.ExecuteDynamicBatch(batch, "create login " + QuoteIdentifier(target.Name) + " with password = " + QuoteText(values[3].AsString), preDeclaredVariables: null))
+                            foreach (var outcome in this.RunProcedureStatement(batch, "create login " + QuoteIdentifier(target.Name) + " with password = " + QuoteText(values[3].AsString)))
                                 yield return outcome;
                             target.LoginName = target.Name;
                             target.LoginPrincipalId = simulation.TryResolveServerPrincipalId(target.Name, out var createdId) ? createdId : 0;

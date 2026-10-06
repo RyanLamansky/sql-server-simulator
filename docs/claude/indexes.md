@@ -58,7 +58,9 @@ The parser collects each into a `PendingInlineIndex` through `ParseInlineIndexBo
 After the `HeapTable` is built, `AddInlineIndexes` (`Simulation.CreateIndex.cs`) resolves the columns and appends the same `Index` a standalone CREATE INDEX would (catalog metadata + seek acceleration, uniqueness and the filter enforced).
 An index naming one column twice is **Msg 1909** — state 1 within the key list, state 2 when the `INCLUDE` list repeats a key or itself, naming the repeat as written — standalone or inline (inline adds Msg 1750).
 Column resolution, name-collision (Msg 1913 via `IndexAlreadyExists`, naming the table as the statement wrote it) and a missing column (Msg 1911 via `IndexColumnMissing`), and one-clustered-per-table (Msg 1902) run inside the CREATE TABLE atomic block, so a bad inline index rolls the table back.
-Table variables and table types take inline indexes too (a table type builds them per instance); a multi-statement function's return table raises `NotSupportedException` for one.
+A missing column is followed by the declaration's Msg 1750 state 0, and two inline indexes of one declaration named alike are **Msg 8168** state 1 (probed 2026-10-06 against SQL Server 2025).
+An inline `CLUSTERED` index takes the clustering a PRIMARY KEY would by default, leaving the key nonclustered, and a key written `CLUSTERED` beside it is **Msg 8112** state 0 (`YieldClusteringToInlineIndex`, probed 2026-10-06).
+Table variables and table types take inline indexes too (a table type builds them per instance), and a multi-statement function's return table catalogues them under the function ([`programmable.md`](programmable.md#multi-statement-table-valued-functions)).
 
 ## Hypothetical indexes
 
@@ -687,6 +689,7 @@ The simulator matches that placement — `Simulation.IndexedViews.cs`'s `Enforce
 | `APPLY` | 10142 | 1 |
 | `*` inside a function (`BINARY_CHECKSUM(*)`) | 10117 | 1 |
 | Grouping by a `float` / `real` column | 1962 | 1 |
+| A `float` / `real` constant in a `WHERE`, join or `GROUP BY` (not a select-list one) | 1964 | 1 |
 | An expression over an aggregate | 8668 | 0 |
 | A grouping column the select list leaves out | 8660 | 0 |
 
@@ -762,8 +765,8 @@ The option rules follow the target, so an `ALTER INDEX` resolves its index befor
   Real SQL Server rolls back all on any failure.
 - **Indexed-view battery gate order**: each rejection below was probed in isolation, so real's precedence when one view violates several at once isn't pinned — a body with both DISTINCT and TOP may name the other one on real.
   The simulator's order is fixed and documented in `Simulation.IndexedViews.cs`.
-- **Columnstore and statistics on an indexed view**: `CREATE COLUMNSTORE INDEX` and `CREATE STATISTICS` on a view raise Msg 1088 here, where real builds them over a view with a unique clustered index and otherwise refuses with Msg 1940 (probed 2026-10-04 against SQL Server 2025).
-- **`IsPrecise` of a view grouping by a `float` expression** reads 1 here and 0 on real (probed 2026-10-04 against SQL Server 2025).
+- **Columnstore and statistics on an indexed view**: real builds a nonclustered columnstore index or a statistic over a view with a unique clustered index, which raises `NotSupportedException` here (probed 2026-10-04 against SQL Server 2025).
+  Without one both are refused with **Msg 1940** naming the view as written — state 1 `Cannot create statistics on view …`, state 2 `Cannot create index on view …`, schema bound or not — and a clustered columnstore index on any view is **Msg 35305** (probed 2026-10-06).
 - **Indexed-view `sys.partitions` row**: real reports a `sys.partitions` / `sys.dm_db_partition_stats` row for a view index carrying the materialized row count; the simulator (which never materializes) omits view indexes from those page-count views.
   `sys.indexes` / `sys.index_columns` / `sys.stats` are populated.
 - **Index hints (`SELECT … WITH (INDEX = name)`)** choose no access path — the read seeks or scans as it would unhinted, and the hint only settles which `FORCESEEK` / `FORCESCAN` plans real would refuse (see [`query-hints.md`](query-hints.md#enforced-rejections)).

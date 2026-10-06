@@ -86,6 +86,10 @@ partial class Simulation
             if (connection.FramesEveryStatement)
                 yield return StatementDone(batch, StatementDoneKind.Condition);
         }
+        else if (batch.FramesUnderNoExec)
+        {
+            yield return StatementDone(batch, StatementDoneKind.Condition);
+        }
         var thenSkip = !condResult;
 
         var hadElse = false;
@@ -307,6 +311,8 @@ partial class Simulation
             {
                 // WHILE itself in skip mode — never iterate. Skip-dispatch the
                 // body once to advance the cursor.
+                if (batch.FramesUnderNoExec)
+                    yield return StatementDone(batch, StatementDoneKind.Condition);
                 batch.SkipModeFlag = true;
                 foreach (var o in DispatchOneStatement(batch, requireSemicolonBeforeCte: false, atBatchStart: false))
                     yield return o;
@@ -476,6 +482,40 @@ partial class Simulation
     /// <returns>Whether the statement carried a value.</returns>
     private static bool ParseReturnStatement(BatchContext batch)
     {
+        // Real's parser reads the value before its grammar action refuses it,
+        // so the value's own parse errors (Msg 102, 137, 195) come first,
+        // while its binder errors never do (probed 2026-10-06 against SQL
+        // Server 2025).
+        static SimulatedSqlException RefusedReturnValue(ParserContext context)
+        {
+            var start = context.SaveCheckpoint();
+            try
+            {
+                using (context.EnterNextValueForScope(NextValueForScope.Nested))
+                    _ = Expression.Parse(context);
+            }
+            catch (SimulatedSqlException bindError) when (bindError.Class != 15)
+            {
+                // Past the value, where real's refusal leaves its parser.
+                context.RestoreCheckpoint(start);
+                var depth = 0;
+                while (depth > 0 || !IsStatementBoundary(context.Token))
+                {
+                    switch (context.Token)
+                    {
+                        case Operator { Character: '(' }:
+                            depth++;
+                            break;
+                        case Operator { Character: ')' }:
+                            depth--;
+                            break;
+                    }
+                    context.MoveNextOptional();
+                }
+            }
+            return SimulatedSqlException.ReturnWithValueNotAllowed();
+        }
+
         var context = batch.Parser;
         context.MoveNextOptional(); // consume RETURN
 
@@ -488,7 +528,7 @@ partial class Simulation
             // Dynamic SQL runs under a procedure frame but refuses the value
             // form as a batch does (probed 2026-09-24).
             if (batch.UdfFrame is null && batch.ProcFrame is null or { IsDynamicSql: true })
-                throw SimulatedSqlException.ReturnWithValueNotAllowed();
+                throw RefusedReturnValue(context);
 
             // A RETURN's value is one of the places real refuses a sequence
             // draw as nested (probed 2026-10-04 against SQL Server 2025).

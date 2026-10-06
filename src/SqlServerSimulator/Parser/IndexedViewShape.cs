@@ -79,6 +79,21 @@ internal sealed class IndexedViewShape
     /// </summary>
     public string? ImpreciseFilterColumn;
 
+    /// <summary>
+    /// A <c>float</c> or <c>real</c> computation — a column, a literal, any
+    /// expression of either type — in a <c>WHERE</c>, a join's <c>ON</c> or a
+    /// <c>GROUP BY</c>, which makes the view imprecise to
+    /// <c>OBJECTPROPERTY(…, 'IsPrecise')</c>; one only projected doesn't
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public bool FiltersOrGroupsImprecisely;
+
+    /// <summary>
+    /// Of <see cref="FiltersOrGroupsImprecisely"/>, a <c>float</c> or
+    /// <c>real</c> constant → Msg 1964.
+    /// </summary>
+    public bool ImpreciseFilterConstant;
+
     /// <summary>The first table-valued function the body reads, as <c>schema.name</c> → Msg 10129.</summary>
     public string? TableValuedFunction;
 

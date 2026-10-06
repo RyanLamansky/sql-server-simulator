@@ -457,6 +457,8 @@ partial class Simulation
             throw SimulatedSqlException.IndexedViewUsesStarOperator(qualified);
         if (shape.ImpreciseFilterColumn is { } imprecise)
             throw SimulatedSqlException.IndexedViewFiltersOnImpreciseColumn(qualified, imprecise);
+        if (shape.ImpreciseFilterConstant)
+            throw SimulatedSqlException.IndexedViewHasImpreciseConstant(qualified);
 
         foreach (var aggregate in shape.Aggregates)
         {
@@ -535,7 +537,7 @@ partial class Simulation
     /// <c>InvokeViewCore</c>'s child-batch setup but stops at parse — nothing
     /// is executed, so the body's side-effect-free shape is all that's read.
     /// </summary>
-    private IndexedViewShape AnalyzeIndexedViewShape(BatchContext outerBatch, View view)
+    internal IndexedViewShape AnalyzeIndexedViewShape(BatchContext outerBatch, View view)
     {
         using var bodyCommand = new SimulatedDbCommand(this, outerBatch.Connection);
 #pragma warning disable CA2100 // view.BodyText is the view's pre-validated stored body, not external input

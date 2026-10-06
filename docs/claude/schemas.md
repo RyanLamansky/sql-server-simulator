@@ -56,7 +56,7 @@ A scalar function still needs two parts at a call site (Msg 195).
 - An object of **any kind** in the default schema shadows `dbo`'s: a procedure `s.x` makes `SELECT * FROM x` Msg 208 though `dbo.x` is a table, and `EXEC x` naming a table `s.x` is real's Msg 2809.
   Types are a namespace of their own, as are XML schema collections.
 - A **permission** refusal on the default schema's object doesn't fall back to `dbo`'s: `DENY SELECT ON s.t` makes `SELECT * FROM t` Msg 229 naming schema `s`.
-- The default schema is `dbo` for `dbo` (Msg 15150 refuses `ALTER USER dbo WITH DEFAULT_SCHEMA`), `guest` for `guest`, the declared one for a user or application role (stored as written, so `[S]` resolves `s`), and `dbo` when none was declared — a `db_owner` member keeps its own.
+- The default schema is `dbo` for `dbo` (Msg 15150 refuses any `ALTER USER dbo`), `guest` for `guest`, the declared one for a user or application role (stored as written, so `[S]` resolves `s`), and `dbo` when none was declared — a `db_owner` member keeps its own.
   `SessionSecurityContext.EffectiveDefaultSchemaName` is the one derivation.
 - A default schema that **doesn't exist** (declared so, or dropped since) makes `SCHEMA_NAME()` / `SCHEMA_ID()` NULL and leaves references searching `dbo` alone, while an unqualified `CREATE` or `SELECT … INTO` is Msg 2797 — ending the batch for a table, type, sequence or XML schema collection (state 2 for the last), only the statement for a module or synonym, a module's attributed to the module.
   A `sys` or `INFORMATION_SCHEMA` default reads back from `SCHEMA_NAME()` and resolves user objects through `dbo`.
@@ -161,6 +161,7 @@ Routes through `Simulation.Drop.cs` alongside DROP TABLE / VIEW / FUNCTION / PRO
 `CREATE SYNONYM [schema.]name FOR base_object` (`Simulation.Synonym.cs`) stores a name indirection in the schema's `Synonyms` dict (a `Synonym` = a `SchemaObject` carrying the base `MultiPartName` as written).
 `SYNONYM` isn't a reserved keyword — the CREATE / DROP dispatchers match it as an identifier (`Name … Equals("SYNONYM")`), like `CREATE SERVER ROLE`.
 The base object is **not** resolved at creation: real binds it lazily, so a synonym over a missing — or cross-database, or not-yet-created — base creates successfully and fails at first use.
+A missing schema, or one the principal can't alter, is Msg 2760 ending only the statement, where a `CREATE TABLE`'s ends the batch (probed 2026-10-06 against SQL Server 2025).
 
 ### Resolution
 

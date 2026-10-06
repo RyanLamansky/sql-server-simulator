@@ -155,6 +155,30 @@ internal sealed partial class Selection
             VisitAll(excluder, NoteImpreciseColumn);
         foreach (var grouping in fromClause.AllGroupingExpressions)
             VisitAll(grouping, NoteImpreciseColumn);
+        void NoteImpreciseComputation(Expression expression)
+        {
+            if (shape.ImpreciseFilterConstant)
+                return;
+            try
+            {
+                if (expression.GetSqlType(parseBatch, typeOf) is not (FloatSqlType or RealSqlType))
+                    return;
+                shape.FiltersOrGroupsImprecisely = true;
+                shape.ImpreciseFilterConstant = expression is Value;
+            }
+            catch (SimulatedSqlException)
+            {
+            }
+        }
+        foreach (var excluder in fromClause.Excluders)
+            VisitAll(excluder, NoteImpreciseComputation);
+        foreach (var grouping in fromClause.AllGroupingExpressions)
+            VisitAll(grouping, NoteImpreciseComputation);
+        foreach (var join in joins)
+        {
+            if (join.OnPredicate is { } on)
+                VisitAll(on, NoteImpreciseComputation);
+        }
         // A grouped view projects each GROUP BY expression (Msg 8660), and a
         // projection over an aggregate's result is Msg 8668.
         if (fromClause.AllGroupingExpressions.Count > 0)
@@ -883,12 +907,10 @@ internal sealed partial class Selection
                     if (collation.Equals(sourceView.OutputColumns[v].Name, name.Leaf))
                     {
                         var baseOrdinal = sourceView.BaseColumnOrdinals[v];
-                        // A windowed or row-limited view's write reads its
-                        // derived columns (a ROW_NUMBER's rn) off the body's
-                        // own rows.
-                        return baseOrdinal >= 0 ? ColumnTypeWithMaxLength(table.Columns[baseOrdinal])
-                            : sourceView is { IsWindowed: true } or { IsRowLimited: true } ? ColumnTypeWithMaxLength(sourceView.OutputColumns[v])
-                            : throw SimulatedSqlException.InvalidColumnName(name);
+                        // A derived column reads as the view computes it — a
+                        // windowed or row-limited view's (a ROW_NUMBER's rn)
+                        // off the body's own rows.
+                        return ColumnTypeWithMaxLength(baseOrdinal >= 0 ? table.Columns[baseOrdinal] : sourceView.OutputColumns[v]);
                     }
                 }
                 throw SimulatedSqlException.InvalidColumnName(name);
@@ -1747,8 +1769,8 @@ internal sealed partial class Selection
         }
 
         // Nor does an EXISTS body's aggregate report a NULL it skipped
-        // (probed 2026-09-23).
-        if (scope.ProjectionUnread)
+        // (probed 2026-09-23), nor one over groups that each hold one row.
+        if (scope.ProjectionUnread || (aggregates.Count > 0 && GroupsHoldOneRow(sources, joins, fromClause)))
         {
             foreach (var aggregate in aggregates)
                 aggregate.WarnsOnNullInput = false;
@@ -2202,6 +2224,7 @@ internal sealed partial class Selection
         if (selection.CursorShape is not null)
             selection.CursorOrderBy = orderBy;
         self = selection;
+        selection.OutputKeys = DeriveOutputKeys(sources, joins, fromClause, expressions, distinct, aggregates.Count > 0);
         selection.InstallsRowAddresses = installsRowAddresses;
         selection.CarriesRowAddresses = updatabilityProfile is { Sources.Length: 1 };
         selection.ColumnNullability = columnNullability;

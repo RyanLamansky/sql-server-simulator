@@ -604,6 +604,7 @@ partial class Simulation
                     adopted.IsHistoryTable = false;
             });
         }
+        WarnOfOversizedMaximumRow(context.Batch, heapTable.Columns, tableName.Leaf, state: 2);
         foreach (var key in keyConstraints)
         {
             key.KeyMayExceedLimit = WarnOfWideIndexKey(context.Batch, heapTable.Columns, key.FullOrdinals, key.Name, key.IsClustered);
@@ -2018,11 +2019,44 @@ partial class Simulation
         // A computed column or CHECK reading a CLR type column's member
         // (`x AS p.X`, `CHECK (p.Y > 0)`) binds the member off the column's
         // declared type, which only the list parsed so far knows.
+        bool parsed;
         if (!context.Simulation.EnableClr)
-            return ParseColumnListBody(context, tableName, isTableVariable, isTableType, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints);
-        var collation = context.CurrentDatabase.Collation;
-        using var declaredColumns = ParserScope.Enter(ref context.DeclaredColumnTypes, name => name.Count == 1 ? heapColumns.Find(column => column is not null && collation.Equals(column.Name, name.Leaf))?.Type : null);
-        return ParseColumnListBody(context, tableName, isTableVariable, isTableType, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints);
+        {
+            parsed = ParseColumnListBody(context, tableName, isTableVariable, isTableType, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints);
+        }
+        else
+        {
+            var collation = context.CurrentDatabase.Collation;
+            using var declaredColumns = ParserScope.Enter(ref context.DeclaredColumnTypes, name => name.Count == 1 ? heapColumns.Find(column => column is not null && collation.Equals(column.Name, name.Leaf))?.Type : null);
+            parsed = ParseColumnListBody(context, tableName, isTableVariable, isTableType, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints);
+        }
+        if (parsed && pendingIndexes is not null && pendingIndexes.Exists(static index => index.IsClustered))
+            YieldClusteringToInlineIndex(tableName, pendingKeys);
+        return parsed;
+    }
+
+    /// <summary>
+    /// An inline <c>CLUSTERED</c> index takes the clustering a PRIMARY KEY
+    /// would by default, leaving the key nonclustered, while a key written
+    /// <c>CLUSTERED</c> beside it is Msg 8112 state 0 (probed 2026-10-06
+    /// against SQL Server 2025, for a table, a table variable and a
+    /// multi-statement function's return table).
+    /// </summary>
+    private static void YieldClusteringToInlineIndex(
+        string tableName,
+        List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)> pendingKeys)
+    {
+        for (var i = 0; i < pendingKeys.Count; i++)
+        {
+            switch (pendingKeys[i].Clustered)
+            {
+                case true:
+                    throw SimulatedSqlException.MultipleClusteredConstraints(tableName, state: 0);
+                case null when pendingKeys[i].Kind == KeyConstraintKind.PrimaryKey:
+                    pendingKeys[i] = pendingKeys[i] with { Clustered = false };
+                    break;
+            }
+        }
     }
 
     private static bool ParseColumnListBody(
@@ -2481,7 +2515,7 @@ partial class Simulation
                 // SPARSE: a storage marker the row encoder has nothing to buy
                 // from (it already omits a NULL), validated once the type
                 // resolves. After IDENTITY it's Msg 102, as on real.
-                case UnquotedString { ContextualKeyword: ContextualKeyword.Sparse } when !isSparse && identitySpec is null && maskingFunctionText is null:
+                case UnquotedString { ContextualKeyword: ContextualKeyword.Sparse } when !isSparse && identitySpec is null && maskingFunctionText is null && !isTableType && !context.RefusesSparseColumns:
                     isSparse = true;
                     context.MoveNextOptional();
                     continue;
@@ -4335,6 +4369,51 @@ partial class Simulation
         var minimum = fixedWidth + ((bits + 7) / 8) + overhead;
         if (minimum > Heap.MaxRowSize)
             throw SimulatedSqlException.RowSizeExceedsMaximum(tableName, minimum, overhead, Heap.MaxRowSize);
+    }
+
+    /// <summary>
+    /// Sends Msg 1708 when a table's largest row can pass the 8060-byte in-row
+    /// limit — <paramref name="state"/> 2 creating it or adding columns, 1
+    /// altering one. The largest row is the smallest
+    /// (<see cref="RejectOversizedMinimumRow"/>) plus, once it has any
+    /// variable-length column, 2 bytes for their count, 2 for each one's
+    /// offset and each one's own largest value — at most 24 bytes, the
+    /// pointer a value pushed off the row leaves behind, and 24 for a
+    /// <c>max</c> or LOB type; a sparse column adds nothing (probed 2026-10-06
+    /// against SQL Server 2025: <c>char(8000), char(40), varchar(10)</c> warns
+    /// at 8061 bytes, while two <c>varchar(8000)</c> columns don't).
+    /// </summary>
+    internal static void WarnOfOversizedMaximumRow(BatchContext batch, HeapColumn[] columns, string tableName, byte state)
+    {
+        if (!batch.IsSkipping && MaximumRowExceedsLimit(columns))
+            batch.Connection.PendingMessages.Enqueue(SimulatedSqlException.MaximumRowSizeExceededMessage(batch, tableName, state));
+    }
+
+    /// <summary>Whether the largest row <paramref name="columns"/> can hold passes the in-row limit (see <see cref="WarnOfOversizedMaximumRow"/>).</summary>
+    internal static bool MaximumRowExceedsLimit(HeapColumn[] columns)
+    {
+        int fixedWidth = 0, bits = 0, stored = 0, variable = 0, variableBytes = 0;
+        foreach (var column in columns)
+        {
+            if (!column.IsStored)
+                continue;
+            stored++;
+            if (column.IsSparse)
+                continue;
+            if (column.Type.IsFixedLength)
+            {
+                if (column.Type is BitSqlType)
+                    bits++;
+                else
+                    fixedWidth += column.Type.FixedLength;
+                continue;
+            }
+            variable++;
+            var maxLength = BuiltInResources.GetSysColumnMetadata(column).MaxLength;
+            variableBytes += maxLength < 0 ? 24 : Math.Min((int)maxLength, 24);
+        }
+        var maximum = fixedWidth + ((bits + 7) / 8) + 6 + ((stored + 7) / 8) + (variable > 0 ? 2 + (2 * variable) + variableBytes : 0);
+        return maximum > Heap.MaxRowSize;
     }
 
     /// <summary>

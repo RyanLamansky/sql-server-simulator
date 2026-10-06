@@ -146,6 +146,15 @@ partial class Simulation
         private bool opensConditional;
         private bool resumedAtStatementEnd;
 
+        /// <summary>The statement is walked without running under <c>SET NOEXEC ON</c> (<see cref="BatchContext.FramesUnderNoExec"/>).</summary>
+        private readonly bool walksUnderNoExec;
+
+        /// <summary>The statement's error closes with a DONE of its own (<see cref="StatementDoneKind.SecurityDdlFailed"/>).</summary>
+        private readonly bool isSecurityDdl;
+
+        /// <summary>A bind or compile walk deferred the statement partway through it, so its resume needs checking.</summary>
+        private bool deferredMidStatement;
+
         /// <summary>
         /// The session's <see cref="SimulatedDbConnection.RowSecurityMarks"/> as
         /// the statement began: a count past it when an error settles means the
@@ -204,8 +213,10 @@ partial class Simulation
             batch.CurrentStatement.BeginDispatch();
             batch.Parser.JoinHintSites = null;
             batch.CurrentStatement.ChangesTableStructure = ChangesTableStructure(batch.Parser);
-            this.FramesStatement = batch.Connection.FramesEveryStatement && !batch.IsSkipping;
+            this.FramesStatement = batch.Connection.FramesEveryStatement && (!batch.IsSkipping || batch.FramesUnderNoExec);
+            this.walksUnderNoExec = this.FramesStatement && batch.FramesUnderNoExec;
             this.StartDoneKind = this.FramesStatement ? StatementDoneKindOf(batch.Parser) : null;
+            this.isSecurityDdl = (this.StartDoneKind is null or StatementDoneKind.NoDone) && IsSecurityDdl(batch.Parser);
             this.IsCall = this.FramesStatement && IsProcedureCall(batch.Parser, atBatchStart);
             this.compound = batch.Parser.Token is ReservedKeyword { Keyword: Keyword.If or Keyword.While }
                 || (batch.Parser.Token is ReservedKeyword { Keyword: Keyword.Begin } && StatementDoneKindOf(batch.Parser) is null);
@@ -406,6 +417,8 @@ partial class Simulation
                         batch.BeginImplicitTransaction();
                     foreach (var outcome in simulation.DispatchOneStatementCore(batch, requireSemicolonBeforeCte, atBatchStart))
                         outcomes.Add(outcome);
+                    if (batch.CurrentStatement.PendingCompileRefusal is { } heldRefusal && !batch.CurrentStatement.BindsDeferredSource)
+                        throw heldRefusal;
                     // Database-scope DDL triggers fire after the statement's own
                     // work completed but inside its error handling, so a body-side
                     // error surfaces as the statement's (and reaches an enclosing
@@ -414,6 +427,11 @@ partial class Simulation
                 }
                 catch (SimulatedSqlException thrown)
                 {
+                    // A refusal the walk held back for the statement's sources
+                    // was raised ahead of whatever the statement met after it,
+                    // which wins unless it defers the statement.
+                    if (batch.CurrentStatement.PendingCompileRefusal is { } pending && batch.IsSkipping && !DefersWithItsStatement(batch, thrown))
+                        thrown = pending;
                     this.RouteError(batch, this.SettleError(simulation, batch, thrown, requireSemicolonBeforeCte, atBatchStart));
                 }
             }
@@ -483,6 +501,7 @@ partial class Simulation
                 if (!ex.RaisingScopeRecorded)
                 {
                     ex.RaisingScopeRecorded = true;
+                    ex.RaisedByClientSelect = batch.CurrentStatement.SendsRows && !batch.CurrentStatement.WritesRows && !ex.EndedFunctionWrite;
                     // A call of a procedure that doesn't exist (Msg 2812) is
                     // a called procedure's error as far as the status goes,
                     // and counts for nothing (probed 2026-10-02 against SQL
@@ -567,11 +586,12 @@ partial class Simulation
                 // doesn't defer, so the walk goes on past a write to a missing
                 // target, which the compile pass reads to its end. Any other
                 // deferral is raised mid-statement, where EndSkipped's
-                // recovery scan can stop on a token still inside it (a
-                // subquery's SELECT), and walking on from there would report
-                // errors against fragments, so the walk stops there.
-                if (batch.CreateTimeBinding && !batch.CurrentStatement.DeferredReadToEnd)
-                    batch.BatchAborted = true;
+                // recovery scan may only guess at the statement's end; the
+                // walk goes on from a resume it can trust — the statement's
+                // separator or the end of the text — and stops on a guess,
+                // since walking on from inside the statement would report
+                // errors against fragments.
+                this.deferredMidStatement = batch.CreateTimeBinding && !batch.CurrentStatement.DeferredReadToEnd;
             }
             else if (batch.CreateTimeBindErrors is { } bindErrors && IsBinderError(ex))
             {
@@ -800,8 +820,11 @@ partial class Simulation
             // where a statement really begins; one that stopped on a keyword
             // guessed, and the bind reads a later severity-15 error from a
             // guessed position as recovery noise.
+            var resumedCleanly = this.resumedAtStatementEnd || parser.Token is null or Operator { Character: ';' };
             if (this.Ending == StatementEnding.GatheredBindError)
-                batch.BindResumedCleanly = this.resumedAtStatementEnd || parser.Token is null or Operator { Character: ';' };
+                batch.BindResumedCleanly = resumedCleanly;
+            else if (this.deferredMidStatement && !resumedCleanly)
+                batch.BatchAborted = true;
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
         }
@@ -850,7 +873,7 @@ partial class Simulation
                 else if (this.IsCall && continuedError.RaisedBySystemProcedure && OpenProcScopes(outcomes) == 1)
                 {
                     errorOutcome.DoneKind = StatementDoneKind.RaisError;
-                    closedScopes = [ScopeExit(batch, 1)];
+                    closedScopes = [ScopeExit(batch, continuedError.SystemProcedureReturnCode)];
                 }
                 else if (this.IsCall || OpenProcScopes(outcomes) > 0)
                 {
@@ -860,7 +883,9 @@ partial class Simulation
                 }
                 else
                 {
-                    errorOutcome.DoneKind = batch.CurrentStatement.DoneKind is StatementDoneKind.NoDone ? StatementDoneKind.Batch : batch.CurrentStatement.DoneKind;
+                    errorOutcome.DoneKind = batch.CurrentStatement.DoneKind is not StatementDoneKind.NoDone ? batch.CurrentStatement.DoneKind
+                        : this.isSecurityDdl ? StatementDoneKind.SecurityDdlFailed
+                        : StatementDoneKind.Batch;
                 }
                 errorOutcome.InModule = batch.ProcFrame is not null || batch.TriggerFrame is not null;
                 errorOutcome.TransactionEventMark = connection.TransactionEventsRecorded;
@@ -975,6 +1000,12 @@ partial class Simulation
                     _ = FrameStatement(batch, outcomes, standInForNone: caughtCount is null);
                 }
             }
+            // The statement's NOCOUNT governs its own count, as a completed
+            // statement's does — a trigger body's, though the body's SET reverts
+            // before the firing statement sends what it buffered (probed
+            // 2026-10-06 against SQL Server 2025).
+            foreach (var outcome in outcomes)
+                outcome.CountSuppressed ??= connection.NoCount;
             foreach (var outcome in ProducedOutcomes(batch, outcomes))
                 yield return outcome;
             if (caughtCount is not null)
@@ -1008,7 +1039,9 @@ partial class Simulation
             // enclosing procedure, which a downstream projection (EXEC … WITH
             // RESULT SETS) attributes its errors to. Already-stamped results pass
             // through untouched so the innermost producing frame wins.
-            if (this.StartDoneKind is not null)
+            if (this.walksUnderNoExec)
+                FrameUnranStatement(batch, outcomes, this.StatementStart, this.IsCall);
+            else if (this.StartDoneKind is not null)
                 _ = FrameStatement(batch, outcomes, standInForNone: true);
             foreach (var o in outcomes)
             {

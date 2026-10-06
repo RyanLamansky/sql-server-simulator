@@ -77,7 +77,7 @@ partial class Simulation
         var name = values[0].AsString;
         var statement = new StringBuilder("create type [dbo].[").Append(name.Replace("]", "]]", StringComparison.Ordinal)).Append("] from ").Append(physical)
             .Append(nullType == "NULL" ? " null" : " not null").ToString();
-        foreach (var outcome in this.ExecuteDynamicBatch(batch, statement, preDeclaredVariables: null))
+        foreach (var outcome in this.RunProcedureStatement(batch, statement))
             yield return outcome;
     }
 
@@ -130,7 +130,7 @@ partial class Simulation
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.DataTypeDoesNotExist(name ?? "(null)"), 14);
 
         var statement = "drop type [dbo].[" + name.Replace("]", "]]", StringComparison.Ordinal) + "]";
-        foreach (var outcome in this.ExecuteDynamicBatch(batch, statement, preDeclaredVariables: null))
+        foreach (var outcome in this.RunProcedureStatement(batch, statement))
             yield return outcome;
     }
 }

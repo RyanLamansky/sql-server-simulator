@@ -196,7 +196,9 @@ partial class Simulation
         connection.AnsiNulls = view.UsesAnsiNulls;
         var innerBatch = new BatchContext(bodyCommand, variables, new UdfFrame(SqlType.Int32)) { SuppressDiagnosticsResolution = true, BindsModuleDefinition = true, InlinedCalls = outerBatch.InlinedCalls, InheritedSystemTime = systemTime, ModuleSchema = view.Schema };
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
+        innerBatch.InheritCallerTriggerFrame(outerBatch);
         connection.NestingLevel++;
+        connection.InlinedBodyDepth++;
         try
         {
             var parser = innerBatch.Parser;
@@ -206,6 +208,7 @@ partial class Simulation
         finally
         {
             connection.NestingLevel--;
+            connection.InlinedBodyDepth--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.AnsiNulls = savedAnsiNulls;
             // The body's batch is never dispatched, so nothing else releases
@@ -250,7 +253,9 @@ partial class Simulation
         // The body is part of the referencing statement, not a statement of its
         // own, so its current-time calls read that statement's freeze.
         innerBatch.AdoptStatementFreezeFrom(outerBatch);
+        innerBatch.InheritCallerTriggerFrame(outerBatch);
         connection.NestingLevel++;
+        connection.InlinedBodyDepth++;
         try
         {
             var parser = innerBatch.Parser;
@@ -331,6 +336,7 @@ partial class Simulation
         finally
         {
             connection.NestingLevel--;
+            connection.InlinedBodyDepth--;
             connection.QuotedIdentifiers = savedQuotedIdentifiers;
             connection.AnsiNulls = savedAnsiNulls;
             // The body's Sch-S / IS holds are recorded against this inner

@@ -382,6 +382,8 @@ partial class Simulation
         var target = sources[targetIndex];
         if (target is { ConstructsRows: true, Qualifier: { } alias })
             throw ConstructedRowsTargetError(context.Batch, target, alias, verb);
+        if (target.UnwritableFunctionName is { } function)
+            throw SimulatedSqlException.ObjectCannotBeModified(function);
         var table = target.BackingTable
             ?? throw new NotSupportedException("A joined UPDATE / DELETE whose target is an APPLY's derived table, a table value constructor or a rowset function isn't modeled, nor one whose OUTPUT clause bound a table its alias names.");
         FunctionBodyShape.NoteTableWrite(context.Batch, verb, table);
@@ -468,7 +470,8 @@ partial class Simulation
     /// Reads column <paramref name="name"/> of a single-table <c>UPDATE</c> /
     /// <c>DELETE</c> target's row: through a view by the view's own column
     /// names — off <paramref name="viewRow"/> for a windowed or row-limited
-    /// body, else off the base row, where a derived column is Msg 207 — and
+    /// body, else off the base row, a derived column through the view's
+    /// projections (probed 2026-10-06 against SQL Server 2025) — and
     /// otherwise by the table's, a graph pseudo-column included.
     /// </summary>
     private static SqlValue ReadTargetRowColumn(BatchContext batch, HeapTable table, View? view, SqlValue[] row, SqlValue[]? viewRow, (int Page, int Slot) address, MultiPartName name)
@@ -481,7 +484,7 @@ partial class Simulation
                 {
                     var baseOrd = view.BaseColumnOrdinals[v];
                     return viewRow is not null ? viewRow[v]
-                        : baseOrd < 0 ? throw SimulatedSqlException.InvalidColumnName(name)
+                        : baseOrd < 0 ? SingleBaseViewReader(batch, view, table)(row, v)
                         : row[baseOrd];
                 }
             }

@@ -56,9 +56,15 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 - **Msg 3621** (`The statement has been terminated.`, class 0, state 0) follows an execution error that ends a row-writing statement — `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `SELECT … INTO`, and `ALTER TABLE … ALTER COLUMN`'s rewrite — but not a compilation error (Msg 206 / 213 / 544), a `SELECT`'s own error, a batch-ending one (a conversion failure, anything under `XACT_ABORT ON`) or one a `TRY` / `CATCH` handles.
   Which numbers count is an explicit list (`Simulation.IsStatementTerminationNoticed`); on the wire it goes out ahead of the failing statement's DONE, where real sends it (captured 2026-09-28 against SQL Server 2025).
   A write in a function body — a multi-statement function filling its return table — ends the calling statement the same way, and earns the calling statement its Msg 3621 (`SimulatedSqlException.EndedFunctionWrite`).
+  Inside a trigger body every statement runs within the firing one, so any statement's error earns it, a `SELECT`'s included — see [`triggers.md`](triggers.md#errors-in-a-trigger-body) for where it then points.
   An identity overflow takes **Msg 3606** (`Arithmetic overflow occurred.`, class 0, state 0) in its place (probed 2026-09-25 against SQL Server 2025); uncaught, the overflow ends the batch, and its 3606 then reports line 1 and no procedure (probed 2026-09-28).
 - **Msg 8153** (`Warning: Null value is eliminated by an aggregate or other SET operation.`) goes out once per statement whose aggregate skipped a NULL with `ANSI_WARNINGS` on, after the rows and before the statement's DONE — ahead of the body for an `IF` / `WHILE` condition.
   Every aggregate warns but `COUNT(*)`, `STRING_AGG` and the JSON aggregates, window aggregates and a scalar subquery's included; an `EXISTS` body's and a `PIVOT`'s don't.
+  Nor does one over groups that each provably hold a single row, which real reduces to the row's own values: a lone plain grouping set whose columns — closed over the `ON` and `WHERE` equalities to them or to constants — determine a key of every source, a table's primary key, unique constraint or enabled unfiltered unique index, a view's or derived table's key passed through, a `VALUES` list's or one-row-constant `UNION ALL`'s distinct constants (`Selection.GroupsHoldOneRow`, probed 2026-10-06 against SQL Server 2025).
+  A grouping expression, `ROLLUP` and its kin, a filtered unique index, a join to a column no key covers and `VALUES` constants a collation might fold together leave the warning standing; a key equated across an outer join, a full one included, suppresses it, which is real's own reading even where a NULL-extended group holds several rows.
+- **Msg 1708**, the warning a table whose largest row can pass 8060 bytes draws, goes out as `CREATE TABLE` (a `#temp` one included), `CREATE TYPE … AS TABLE` and `ALTER TABLE … ADD` complete, at state 2, and as `ALTER COLUMN` does at state 1, naming the table as written (probed 2026-10-06 against SQL Server 2025).
+  The largest row is the smallest (Msg 1701's) plus, once there is a variable-length column, 2 bytes for their count, 2 per column and each one's largest value capped at 24 bytes — the pointer a value pushed off the row leaves, which a `max` or LOB type counts too — so two `varchar(8000)` columns draw nothing while `char(8000), char(50), varchar(10)` does; a sparse column adds nothing (`Simulation.MaximumRowExceedsLimit`).
+  A table variable's goes out as its batch compiles, twice, ahead of anything the batch runs — once at a procedure's `CREATE` and twice as its first call compiles it, never from a plan it reuses (`BatchContext.CompileMessages`).
 - **Msg 3607** (`Division by zero occurred.`) and **Msg 3606** (`Arithmetic overflow occurred.`), class 0 state 0, go out once each after the rows of a statement whose divide by zero or overflow answered NULL under `ARITHABORT OFF` with `ANSI_WARNINGS OFF` — a fresh session's `ARITHABORT` is off, so `SET ANSI_WARNINGS OFF` alone does it (probed 2026-09-25 against SQL Server 2025) — 3606 first whichever fault came first (probed 2026-09-26).
   The operators, `CAST` / `CONVERT` (a `real` target reads 0 rather than NULL) and the value an `INSERT` / `UPDATE` / `MERGE` writes take part; a conversion failure and an identity overflow still raise.
   So do `SUM` and `AVG`: an overflowing total NULLs only its own group, and a sliding window frame answers again once the overflowing row has left it.
@@ -69,8 +75,7 @@ Probed through SqlClient 7 against SQL Server 2025 (2026-09-23):
 ### Not modeled yet
 
 - **Every diagnostic but Msg 5703 is English whatever the language**; real words its errors and messages in the session's language after `SET LANGUAGE` (`Fehler beim Konvertieren des varchar-Werts "x" in den int-Datentyp.` for Msg 245 under Deutsch, probed 2026-10-04 against SQL Server 2025).
-- **Msg 8153 over a constant `VALUES` source grouped into single-row groups** isn't sent by real (`SELECT x, SUM(y) FROM (VALUES (1, NULL), (2, 3)) v(x, y) GROUP BY x`), which evaluates those groups while compiling; the same data in a table warns on both.
-- **Msg 1708**, the warning a `CREATE TABLE` whose largest row can pass 8060 bytes sends, isn't sent; its rule isn't settled — two `varchar(8000)` columns draw none while `char(8000), char(50), varchar(10)` does (probed 2026-10-01 against SQL Server 2025).
+- **A table variable's second Msg 1708 inside a `WHILE`** reports line -1 on real; here both report the `DECLARE`'s line (probed 2026-10-06 against SQL Server 2025).
 
 ## A statement's whole binder report
 
@@ -177,6 +182,7 @@ The static exception factories (`SimulatedSqlException.*Errors.cs`) can't reach 
 ## Divergences / residuals
 
 - **Syntax-error recovery where the simulator's parser restarts differently from real's grammar** (probed 2026-09-28 against SQL Server 2025): `begin try end try begin catch select 1 end catch` on one line adds a Msg 102 near the last `catch` on real and nothing here, and the Msg 178 a misplaced `CREATE PROCEDURE`'s valued `RETURN` raises names the procedure on real and nothing here.
+  Past a `CREATE FUNCTION`'s Msg 181 (an `OUTPUT` parameter), a `WITH SCHEMABINDING` after the return type is real's Msg 319 and Msg 156 near the body's `BEGIN` here (probed 2026-10-06).
 - **`THROW; re-raise inside a proc body`** preserves the original line but not a body-relative offset re-application; top-level re-raise is exact.
 
 Database-scope DDL trigger bodies run through the same child-batch dispatch DML trigger bodies do, so the `LineOffset` / `ErrorProcedureName` threading above covers them too — a body-side `THROW` reports its CREATE-relative line and the trigger's unqualified name (see [`triggers.md`](triggers.md)).

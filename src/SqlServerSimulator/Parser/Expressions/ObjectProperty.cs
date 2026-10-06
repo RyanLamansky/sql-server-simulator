@@ -37,8 +37,8 @@ internal sealed class ObjectProperty : Expression
         var prop = propValue.CoerceTo(SqlType.NVarchar).AsString;
         var database = runtime.Batch.CurrentDatabase;
         var result = FindObject(database, id) is { } obj
-            ? obj is View view && prop.Equals("IsIndexable", StringComparison.OrdinalIgnoreCase)
-                ? Flag(runtime.Batch.Connection.Simulation.IsViewIndexable(runtime.Batch, view))
+            ? obj is View view && EvaluateViewBodyProperty(runtime.Batch, view, prop) is { } bodyAnswer
+                ? bodyAnswer
                 : EvaluateProperty(database, obj, prop)
             : TryFindConstraint(database, id, out var constraint)
                 ? EvaluateConstraintProperty(constraint, prop)
@@ -206,6 +206,29 @@ internal sealed class ObjectProperty : Expression
                 return schema;
         }
         return null;
+    }
+
+    /// <summary>
+    /// The view properties answered by reading the view's body:
+    /// <c>IsIndexable</c>, and a schema-bound view's <c>IsPrecise</c>, false
+    /// once a <c>WHERE</c>, join or <c>GROUP BY</c> computes in <c>float</c> or
+    /// <c>real</c> (probed 2026-10-06 against SQL Server 2025); null for the
+    /// rest.
+    /// </summary>
+    internal static int? EvaluateViewBodyProperty(BatchContext batch, View view, string property)
+    {
+        if (property.Equals("IsIndexable", StringComparison.OrdinalIgnoreCase))
+            return Flag(batch.Connection.Simulation.IsViewIndexable(batch, view));
+        if (!view.IsSchemaBound || !property.Equals("IsPrecise", StringComparison.OrdinalIgnoreCase))
+            return null;
+        try
+        {
+            return Flag(!batch.Connection.Simulation.AnalyzeIndexedViewShape(batch, view).FiltersOrGroupsImprecisely);
+        }
+        catch (SimulatedSqlException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

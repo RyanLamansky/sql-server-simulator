@@ -1032,7 +1032,10 @@ partial class Simulation
             yield return outcome;
         if (batchError is not null)
             ExceptionDispatchInfo.Throw(batchError);
-        yield return ScopeExit(outerBatch, procFrame.StatusWithoutReturnValue);
+        // sp_executesql returns its last statement's @@ERROR instead (probed
+        // 2026-10-06 against SQL Server 2025: 8134 after `SELECT 1/0`, 0 when
+        // a statement after it succeeded, 50000 after a RAISERROR).
+        yield return ScopeExit(outerBatch, viaSystemProcedure ? connection.LastErrorNumber : procFrame.StatusWithoutReturnValue);
         if ((connection.CurrentTransaction?.TranCount ?? 0) is var exitTranCount && exitTranCount != enteredTranCount && !endedUnderImplicitTransactions)
             throw SimulatedSqlException.TransactionCountMismatch(enteredTranCount, exitTranCount, procedure: "");
     }

@@ -813,7 +813,8 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         }
         catch (SimulatedSqlException ex)
         {
-            _ = this.FlushInfoMessages(writer);
+            if (!this.FlushInfoMessages(writer))
+                TakeBackDoneAheadOfKill(writer, ex);
             WriteErrors(writer, ex);
             this.WriteSessionEnvChangesIfAny(writer);
             writer.WriteDoneToken(Tds.TokenDone, ErrorDoneStatus(ex), 0, StatementDoneKind.Batch);
@@ -1248,6 +1249,7 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
                 // DONE carrying DONE_ERROR — or none, when the procedure scope
                 // it ended closes with a DONEPROC carrying the bit, and the
                 // batch's closing DONE when it ended the batch.
+                TakeBackDoneAheadOfKill(writer, errorOutcome.Exception);
                 WriteErrors(writer, errorOutcome.Exception);
                 var errorEvents = this.EventsBefore(errorOutcome, this.PendingTransactionEventCount);
                 hasOutcome = AdvancePastClosingMessages();
@@ -1526,6 +1528,19 @@ internal sealed partial class TdsSession(Simulation simulation, Socket socket, X
         }
 
         return any;
+    }
+
+    /// <summary>
+    /// A statement ending the session with nothing ahead of its Msg 596 takes
+    /// the DONE before it down unsent: real holds a statement's DONE until the
+    /// next token says whether more follows (probed 2026-10-06 against SQL
+    /// Server 2025, where a <c>RAISERROR</c>'s own messages ahead of its 596
+    /// send it).
+    /// </summary>
+    private static void TakeBackDoneAheadOfKill(TdsTokenWriter writer, SimulatedSqlException exception)
+    {
+        if (exception is { EndsSession: true, Number: 596 })
+            _ = writer.TryTakeTrailingDone(out _);
     }
 
     private static void WriteErrors(TdsTokenWriter writer, SimulatedSqlException exception)

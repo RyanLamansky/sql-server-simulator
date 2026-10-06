@@ -131,4 +131,92 @@ public sealed class StatementDoneTokenTests
             new[] { "INFO 0", "DONEINPROC F7 MORE 0", "ENV8", "DONEINPROC D4 MORE 0", "ENV9", "DONEINPROC D5 MORE 0", "RET 0", "DONEPROC E0 FINAL 0" },
             Batch(fixture, "exec p"));
     }
+
+    /// <summary>
+    /// Under NOEXEC each statement still closes with its kind — a count of 0
+    /// where it would count rows, both IF branches walked, a TRY's block
+    /// closed and its CATCH opened, a call's scope closed with no status —
+    /// save one real compiles through simple parameterization (probed
+    /// 2026-10-06 against SQL Server 2025 with a raw TDS client).
+    /// </summary>
+    [TestMethod]
+    public void NoExec_ClosesEachStatementWithItsKind()
+    {
+        using var fixture = new TdsSessionFixture();
+        _ = fixture.RunBatch("create table t (a int)");
+        CollectionAssert.AreEqual(
+            new[] { "DONE B9 MORE 0", "DONE C4 MORE|COUNT 0", "DONE C1 MORE 0", "DONE C0 MORE 0", "DONE C1 MORE 0", "DONE C1 MORE 0", "DONE C1 MORE|COUNT 0", "DONE C1 MORE|COUNT 0", "DONEPROC E0 MORE 0", "DONE BA FINAL 0" },
+            Batch(fixture, "set noexec on; delete t; select a from t; if 1 = 0 select 1 else select 2; declare @x int = 1; select @x = 2; exec sp_who; set noexec off"));
+        CollectionAssert.AreEqual(
+            new[] { "DONE B9 MORE 0", "DONE 15D MORE 0", "DONE C1 MORE 0", "DONE 15F MORE 0", "DONE 15E MORE 0", "DONE C1 MORE 0", "DONE 15F MORE 0", "DONE DB MORE 0", "DONE BA FINAL 0" },
+            Batch(fixture, "set noexec on; begin try select 1 end try begin catch select 2 end catch; return; set noexec off"));
+        CollectionAssert.AreEqual(
+            new[] { "DONE B9 MORE 0", "DONE BA FINAL 0" },
+            Batch(fixture, "set noexec on; insert t values (1); update t set a = 2; select a from t where a = 1; set noexec off"));
+    }
+
+    /// <summary>
+    /// A security or schema statement sending no DONE when it succeeds closes
+    /// its error with one of its own (probed 2026-10-06 against SQL Server
+    /// 2025); a schema's or type's creation doesn't.
+    /// </summary>
+    [TestMethod]
+    [DataRow("alter schema dbo transfer dbo.nosuch; select 1", "ERR 15151", "DONE AA MORE|ERROR 0")]
+    [DataRow("grant select on nosuch to public; select 1", "ERR 15151", "DONE AA MORE|ERROR 0")]
+    [DataRow("drop user nosuchuser; select 1", "ERR 15151", "DONE AA MORE|ERROR 0")]
+    [DataRow("alter role nosuchrole add member nosuchuser; select 1", "ERR 15151", "DONE AA MORE|ERROR 0")]
+    [DataRow("create synonym nosch.s for dbo.x; select 1", "ERR 2760", "DONE AA MORE|ERROR 0")]
+    [DataRow("drop type nosuchtype; select 1", "ERR 218", "DONE FD MORE|ERROR 0")]
+    public void SecurityDdlError_ClosesWithItsOwnDone(string sql, string error, string done)
+        => AssertBatch(sql, error, done, "ROWS", "DONE C1 COUNT 1");
+
+    [TestMethod]
+    public void EnableTriggerAtBatchStart_IsNoProcedureCall()
+        => AssertBatch("disable trigger nosuchtrg on database", "ERR 1088", "DONE FD ERROR 0");
+
+    /// <summary>
+    /// A system procedure's return status: the error's number for
+    /// <c>sp_recompile</c>, 1 after a statement it runs fails, and
+    /// <c>sp_executesql</c>'s last statement's <c>@@ERROR</c> (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec sp_recompile 'nosuch'", "ERR 15165 / DONEINPROC F6 MORE|ERROR 0 / RET 15165 / DONEPROC E0 FINAL 0")]
+    [DataRow("exec sp_addrole 'db_owner'", "ERR 15023 / DONEINPROC AA MORE|ERROR 0 / RET 1 / DONEPROC E0 FINAL 0")]
+    [DataRow("exec sp_executesql N'raiserror(''x'', 16, 1)'", "ERR 50000 / DONEINPROC F6 MORE|ERROR 0 / RET 50000 / DONEPROC E0 FINAL 0")]
+    [DataRow("exec sp_executesql N'select 1/0; declare @x int'", "ROWS / ERR 8134 / DONEINPROC C1 MORE|ERROR 0 / RET 8134 / DONEPROC E0 FINAL 0")]
+    public void SystemProcedure_ReturnStatus(string sql, string expected)
+        => AssertBatch(sql, expected.Split(" / "));
+
+    /// <summary>
+    /// A positioned write ending the session sends nothing ahead of its Msg
+    /// 596, so the DONE of the statement before it, held until the next token,
+    /// goes down unsent (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SessionEndingWrite_TakesThePriorDoneDown()
+    {
+        using var fixture = new TdsSessionFixture();
+        _ = fixture.RunBatch("create table a1 (k int primary key check (k < 10), v int); create table a2 (k int primary key check (k >= 10), v int)");
+        _ = fixture.RunBatch("create view pv as select k, v from a1 union all select k, v from a2");
+        _ = fixture.RunBatch("insert pv values (1, 1), (11, 2)");
+        var tokens = Batch(fixture, "declare c cursor for select k, v from pv; open c; fetch next from c; select 1 m; update pv set v = 5 where current of c");
+        CollectionAssert.AreEqual(new[] { "ROWS", "ERR 596", "DONE FD ERROR 0" }, tokens.Skip(tokens.Count - 3).ToArray(), string.Join(" / ", tokens));
+    }
+
+    /// <summary>
+    /// A trigger body's caught SELECT closes under the body's own NOCOUNT,
+    /// though the body's SET reverts before the firing statement sends what it
+    /// buffered (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void TriggerBodysCaughtSelect_KeepsTheBodysNoCount()
+    {
+        using var fixture = new TdsSessionFixture();
+        _ = fixture.RunBatch("create table t (a int); create table l (a int)");
+        _ = fixture.RunBatch("create trigger tr on t after insert as set nocount on; begin try select 1 / 0; end try begin catch insert l values (1); end catch;");
+        CollectionAssert.AreEqual(
+            new[] { "ROWS", "DONEINPROC C1 MORE 0", "ERR 3930", "INFO 3621", "DONE FD ERROR 0" },
+            Batch(fixture, "insert t values (1)"));
+    }
 }

@@ -273,6 +273,13 @@ internal sealed class StatementContext
     public (SqlType[] Schema, string[] Names)? ClientOutputShape;
 
     /// <summary>
+    /// Whether this is a <c>SELECT</c> sending its rows to the client — neither
+    /// assigning variables nor directing them <c>INTO</c> a table — set as it
+    /// starts executing.
+    /// </summary>
+    public bool SendsRows;
+
+    /// <summary>
     /// Set while a statement writing a table (not a table variable) runs,
     /// inside the transaction real opens for it: <c>@@TRANCOUNT</c> read
     /// there counts that one too, so an auto-commit <c>INSERT … VALUES
@@ -434,6 +441,26 @@ internal sealed class StatementContext
     public List<DdlEventInfo>? PendingDdlEvents;
 
     /// <summary>
+    /// How to reverse what this statement's DDL changed, recorded outside a
+    /// transaction while a DDL trigger could fire for it
+    /// (<c>Simulation.RecordDdlUndo</c>). The triggers' auto-commit unit takes
+    /// them first, so a body's error or <c>ROLLBACK</c> undoes the DDL with
+    /// the body's own writes, as real's does (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    public List<Action>? AutocommitDdlUndo;
+
+    /// <summary>
+    /// A refusal real settles as it compiles the statement — a DML
+    /// <c>TOP</c>'s of its written constant, a <c>NEXT VALUE FOR</c>'s in a
+    /// nested query — met in skip mode and raised once the statement has
+    /// parsed, unless the statement binds with a source the batch has yet to
+    /// create (<see cref="BindsDeferredSource"/>) and so compiles only as it
+    /// runs (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public SimulatedSqlException? PendingCompileRefusal;
+
+    /// <summary>
     /// Object id of a database-scope DDL trigger this statement <em>created</em>,
     /// excluded from its own statement's fire set: real doesn't run a brand-new
     /// trigger for the <c>CREATE TRIGGER</c> that made it, though a sibling
@@ -481,6 +508,7 @@ internal sealed class StatementContext
         this.OwesOverflowNotice = this.OwesDivideByZeroNotice = false;
         this.WritesRows = false;
         this.ClientOutputShape = null;
+        this.SendsRows = false;
         this.TransactedWrite = false;
         this.BindsDeferredSource = false;
         this.DeferredReadToEnd = false;
@@ -493,6 +521,8 @@ internal sealed class StatementContext
         this.CallsUserFunction = false;
         this.TransactionMark = null;
         this.PendingDdlEvents = null;
+        this.AutocommitDdlUndo = null;
+        this.PendingCompileRefusal = null;
         this.DdlTriggerCreatedThisStatement = null;
     }
 

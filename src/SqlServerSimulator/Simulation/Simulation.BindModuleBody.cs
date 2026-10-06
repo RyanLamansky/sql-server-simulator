@@ -194,6 +194,8 @@ partial class Simulation
         // against SQL Server 2025).
         if (!outerContext.Batch.IsSkipping)
         {
+            foreach (var message in bindBatch.CompileMessages ?? [])
+                connection.PendingMessages.Enqueue(message);
             foreach (var missing in bindBatch.MissingProcedureReferences)
                 connection.PendingMessages.Enqueue(SimulatedSqlException.ModuleDependsOnMissingObjectMessage(outerContext.Batch, moduleName, missing));
         }

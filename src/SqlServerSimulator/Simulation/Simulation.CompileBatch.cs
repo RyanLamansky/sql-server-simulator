@@ -126,6 +126,8 @@ partial class Simulation
                 inliningFailures.Add(failure);
         }
 
+        foreach (var message in compileBatch.CompileMessages ?? [])
+            connection.PendingMessages.Enqueue(message);
         if (key is { } compiled && !compileBatch.ResolvedTempTable && !inlined.RecompilesEveryRun)
         {
             if (this.compiledBatches.ContainsKey(compiled))
@@ -163,7 +165,7 @@ partial class Simulation
     }
 
     /// <summary>The parse-phase errors real's parser recovers from and parses on past.</summary>
-    private static bool IsRecoverableSyntaxError(SimulatedSqlException error) => error.Number is 102 or 111 or 137 or 156 or 178 or 319 or 1054 or 4145;
+    private static bool IsRecoverableSyntaxError(SimulatedSqlException error) => error.Number is 102 or 111 or 137 or 156 or 178 or 181 or 319 or 1054 or 4145;
 
     /// <summary>
     /// Whether <paramref name="error"/> is one the grammar's own actions raise

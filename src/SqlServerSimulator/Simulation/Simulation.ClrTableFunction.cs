@@ -42,7 +42,7 @@ partial class Simulation
         bool createOrAlter)
     {
         var hasResolvedColumns = TryParseTableVariableColumnsAndConstraints(
-            context, functionName.Leaf, out var outputColumns, out var keyConstraints, out var checkConstraints);
+            context, functionName.Leaf, out var outputColumns, out var keyConstraints, out var checkConstraints, out _);
 
         if (context.Token is ReservedKeyword { Keyword: Keyword.Order })
             SkipOrderClause(context);

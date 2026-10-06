@@ -68,7 +68,7 @@ internal sealed class ObjectPropertyEx : Expression
         // answering BaseType with its own type code.
         if (obj is not null)
         {
-            return ObjectProperty.EvaluateProperty(database, obj, prop) is int booleanResult
+            return ((obj is View view ? ObjectProperty.EvaluateViewBodyProperty(runtime.Batch, view, prop) : null) ?? ObjectProperty.EvaluateProperty(database, obj, prop)) is int booleanResult
                 ? SqlValue.FromVariant(SqlValue.FromInt32(booleanResult))
                 : EvaluateExtendedProperty(obj, prop, runtime.Batch);
         }

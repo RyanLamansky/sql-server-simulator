@@ -1360,6 +1360,8 @@ public sealed partial class Simulation
         // its left (Selection.ThrowIfExecutionCancelled).
         command.Connection?.BeginExecutionScope(
             command.CommandTimeout > 0 ? TimeSpan.FromSeconds(command.CommandTimeout) : null);
+        if (command.Connection is { } requestConnection)
+            requestConnection.NestedTriggersThisRequest = this.NestedTriggersEnabled;
 
         // CommandType.StoredProcedure: CommandText is the procedure name and
         // Parameters maps by name to the proc's declared parameters. Bypass
@@ -2275,14 +2277,18 @@ public sealed partial class Simulation
     /// lock's 56; probed 2026-10-03), and a trigger body's write refused in the
     /// unit a caught error doomed (Msg 3930; probed 2026-10-04), and a block
     /// predicate refusing a row (Msg 33504; probed 2026-10-04).
+    /// Inside a trigger body, or a procedure it calls, a statement writing
+    /// nothing earns it too, all of it running within the firing statement,
+    /// while a function's Msg 208 ending the body earns none (probed
+    /// 2026-10-06).
     /// </summary>
     private static bool IsStatementTerminationNoticed(BatchContext batch, SimulatedSqlException error) =>
         error.Number is 1505 or 4457
         || error.EndedColumnRewrite
-        || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127)
-            && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite)
+        || ((!batch.BatchAborted || error.EndedTriggerBody || error.Number == 127) && !error.RefusedRecompilingDeferred
+            && (batch.CurrentStatement.WritesRows || error.EndedFunctionWrite || batch.Connection.FiringTriggers.Count > 0)
             && ((error.Number == 1222 && error.State != 56) || error.Number is 127 or 220 or 232 or 242 or 244 or 248 or 512 or 513 or 515 or 517 or 547 or 550 or 2601 or 2627 or 2628 or 3991 or 3992 or 6522 or 6549 or 8115 or 8134 or 4457 or 8152 or 8705 or 13921 or 16929 or 16931 or 16932 or 16933 or 16947 or 33504
-                || (error.Number == 208 && error.RaisedRunningFunctionBody)
+                || (error.Number == 208 && error.RaisedRunningFunctionBody && !error.EndedTriggerBody)
                 || (error.Number == 3930 && error.EndedTriggerBody)));
 
     /// <summary>
@@ -2529,11 +2535,13 @@ public sealed partial class Simulation
     /// (probed 2026-09-26 against SQL Server 2025, each after a CREATE TABLE
     /// deferred its statement; Msg 8124 2026-09-28, Msg 10709 2026-10-01). The bulk loads' refusals
     /// of their permission and files — Msg 4834, 4860, 4861 — end the batch
-    /// the same way wherever they are raised (probed 2026-09-29). An error not
-    /// listed keeps a run-time error's handling.
+    /// the same way wherever they are raised (probed 2026-09-29), as does a
+    /// refusal real settles compiling a statement it deferred — a DML
+    /// <c>TOP</c>'s written constant, a nested <c>NEXT VALUE FOR</c> (probed
+    /// 2026-10-06). An error not listed keeps a run-time error's handling.
     /// </summary>
     internal static bool IsDeferredCompileError(SimulatedSqlException ex)
-        => IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex) || ex.Number is 4902 or 2705
+        => IsBatchAbortingNameResolution(ex) || IsBulkRefusal(ex) || ex.RefusedRecompilingDeferred || ex.Number is 4902 or 2705
             || ex.Number is 107 or 108 or 130 or 145 or 147 or 157 or 164 or 174 or 205 or 206 or 213 or 243 or 264 or 321 or 330 or 331 or 332 or 333 or 425 or 426 or 447 or 448 or 529
                 or 1011 or 1012 or 1013 or 4108 or 4115 or 4187 or 5318 or 5324 or 8117 or 8120 or 8121 or 8124 or 8155 or 8622 or 10709;
 
@@ -3319,6 +3327,7 @@ public sealed partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         if (!batch.IsSkipping)
             PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
+        batch.CurrentStatement.SendsRows = selection.IntoTarget is null && !selection.IsAssignmentOnly;
         // Inside a function body real splits the SELECT three ways:
         // an assignment-only SELECT is legal, SELECT … INTO is a
         // side-effecting operator of its own, and anything else
@@ -3356,7 +3365,13 @@ public sealed partial class Simulation
             return null;
         }
         if (batch.IsSkipping)
+        {
+            // An assignment counts the rows it reads, which a walk under
+            // NOEXEC frames as 0 (probed 2026-10-06 against SQL Server 2025).
+            if (selection.IsAssignmentOnly)
+                batch.CurrentStatement.DoneCount = 0;
             return null;
+        }
         if (connection.InsertExecTargetTypes is { } insertExecTargets && !selection.IsAssignmentOnly)
             RequireInsertExecAssignable(selection, insertExecTargets, batch);
         // Materialize rows up-front so @@ROWCOUNT reflects the

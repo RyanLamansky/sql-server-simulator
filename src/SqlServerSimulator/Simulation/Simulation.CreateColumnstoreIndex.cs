@@ -61,7 +61,20 @@ partial class Simulation
             return true;
 
         if (!context.Batch.TryResolveTable(targetTableName, out var table))
+        {
+            // A view refuses a clustered one outright, and a nonclustered one
+            // until a unique clustered index stands, schema bound or not
+            // (probed 2026-10-06 against SQL Server 2025).
+            if (context.Batch.TryResolveView(targetTableName, out var view))
+            {
+                if (isClustered)
+                    throw SimulatedSqlException.ClusteredColumnstoreOnView();
+                if (!view.Indexes.Exists(static index => index is { IsUnique: true, IsClustered: true }))
+                    throw SimulatedSqlException.ViewWithoutUniqueClusteredIndex(targetTableName.ToString(), statistics: false);
+                throw new NotSupportedException("A columnstore index on an indexed view isn't modeled.");
+            }
             throw SimulatedSqlException.CannotFindObjectForCreateIndex(targetTableName.ToString());
+        }
 
         RejectOnMemoryOptimized(table, "The operation 'CREATE INDEX'", 7);
         RecordTableDdlUndo(context, table);

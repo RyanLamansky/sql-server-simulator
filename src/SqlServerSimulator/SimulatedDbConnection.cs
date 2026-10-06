@@ -1631,15 +1631,30 @@ public sealed class SimulatedDbConnection : DbConnection
     internal readonly Parser.Expressions.RandGenerator Rand = new();
 
     /// <summary>
-    /// Current nesting depth of in-flight scalar UDF / stored-proc / trigger
-    /// / view calls on this connection. Incremented when
-    /// <c>Simulation.InvokeScalarFunction</c> enters a body, decremented when
-    /// it exits. Real SQL Server caps this combined depth at 32 — exceeding
-    /// raises <c>Msg 217</c> (probe-confirmed verbatim against SQL Server
-    /// 2025). Today only scalar UDFs contribute; stored procs / triggers /
-    /// views will share the same counter when added.
+    /// Current nesting depth of in-flight function / procedure / trigger /
+    /// view bodies on this connection, incremented as each body is entered
+    /// and decremented as it exits. Real SQL Server caps this combined depth
+    /// at 32 — exceeding raises <c>Msg 217</c> (probe-confirmed verbatim
+    /// against SQL Server 2025).
     /// </summary>
     internal int NestingLevel;
+
+    /// <summary>
+    /// How many of <see cref="NestingLevel"/>'s frames are view or inline
+    /// function bodies, which count toward the cap but which real inlines
+    /// into the referencing statement, so <c>@@NESTLEVEL</c> leaves them out
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal int InlinedBodyDepth;
+
+    /// <summary>
+    /// The server's installed <c>nested triggers</c> option as the request
+    /// running on this session began: real reads it as the batch compiles,
+    /// so a <c>RECONFIGURE</c> takes effect from the next request, dynamic
+    /// SQL and procedures the request runs included (probed 2026-10-06
+    /// against SQL Server 2025).
+    /// </summary>
+    internal bool NestedTriggersThisRequest = true;
 
     /// <summary>
     /// Counts each time a statement on this session applies a row-level

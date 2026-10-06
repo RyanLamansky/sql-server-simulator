@@ -345,4 +345,23 @@ public sealed class TriggerNestingOptionTests
         AreEqual("io1:1", FiredTrace(simulation));
         AreEqual(1, simulation.ExecuteScalar("select count(*) from t1"));
     }
+
+    /// <summary>
+    /// The option is read as a request begins: a <c>RECONFIGURE</c> in the
+    /// firing batch leaves that batch's chain nesting, and turning nesting
+    /// back on mid-batch leaves the rest of that batch unnested — dynamic SQL
+    /// and procedures included.
+    /// </summary>
+    [TestMethod]
+    public void NestedTriggers_IsReadAsTheRequestBegins()
+    {
+        var simulation = Seeded();
+        simulation.ExecuteBatches(ChainTrigger1, ChainTrigger2, "create procedure p as insert t1 (v) values (1)");
+        simulation.ExecuteBatches("exec sp_configure 'nested triggers', 0; reconfigure; insert t1 (v) values (1)");
+        AreEqual("tr1:1,tr2:2", FiredTrace(simulation));
+        simulation.ExecuteBatches("exec ('insert t1 (v) values (1)'); exec sp_configure 'nested triggers', 1; reconfigure; exec p");
+        AreEqual("tr1:1,tr2:2,tr1:1,tr1:1", FiredTrace(simulation));
+        simulation.ExecuteBatches("exec p");
+        AreEqual("tr1:1,tr2:2,tr1:1,tr1:1,tr1:1,tr2:2", FiredTrace(simulation));
+    }
 }

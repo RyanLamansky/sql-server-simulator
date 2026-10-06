@@ -82,7 +82,11 @@ partial class Simulation
         // error in flight, not the (possibly different) outer pre-state.
         // BEGIN TRY, a CATCH entered and END CATCH each close with a DONE of
         // their own (probed 2026-09-28 against SQL Server 2025).
-        var frames = batch.Connection.FramesEveryStatement && !batch.IsSkipping;
+        // Walked under NOEXEC, the construct closes its TRY block with an END
+        // CATCH's DONE and opens its CATCH block whether anything was caught
+        // or not (probed 2026-10-06 against SQL Server 2025).
+        var unran = batch.FramesUnderNoExec;
+        var frames = batch.Connection.FramesEveryStatement && (!batch.IsSkipping || unran);
         if (frames)
             yield return StatementDone(batch, StatementDoneKind.BeginTry);
         if (StructuralExecutionTimes(batch) is { } beginTryTimes)
@@ -129,6 +133,8 @@ partial class Simulation
         if (context.Token is not UnquotedString { ContextualKeyword: ContextualKeyword.Try })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
+        if (unran)
+            yield return StatementDone(batch, StatementDoneKind.EndCatch);
         // A function body refuses every delimiter, each where it stands.
         FunctionBodyShape.NoteSideEffect(batch, "END TRY", FunctionBodyShape.ControlOperatorState, endTry.LineNumber);
 
@@ -178,6 +184,8 @@ partial class Simulation
             // compile-time structural rule that must accept a THROW inside a
             // skipped CATCH body — SSMS's Select-Top-1000 server-properties
             // batch has exactly that shape once its TRY body succeeds.
+            if (unran)
+                yield return StatementDone(batch, StatementDoneKind.BeginCatch);
             var wasSkipModeFlag = batch.SkipModeFlag;
             batch.SkipModeFlag = true;
             batch.CatchDepth++;

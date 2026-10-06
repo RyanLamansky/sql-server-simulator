@@ -228,23 +228,23 @@ partial class Simulation
         HeapColumn[] outputColumns;
         KeyConstraint[] keyConstraints;
         CheckConstraint[] checkConstraints;
+        int[] indexObjectIds;
         try
         {
+            using var refusesSparse = ParserScope.Enter(ref context.RefusesSparseColumns, true);
             hasResolvedColumns = TryParseTableVariableColumnsAndConstraints(
                 context,
                 "@" + returnVariableName,
                 out outputColumns,
                 out keyConstraints,
                 out checkConstraints,
+                out indexObjectIds,
                 returnTableIndexes);
         }
         finally
         {
             context.Batch.FunctionBodyShape = enclosingShape;
         }
-        // An inline INDEX shapes nothing a read returns, so it is accepted and
-        // kept out of the catalog (real lists it in sys.indexes under the
-        // function).
         RenameAutoNamedConstraints(functionName.Leaf, "@" + returnVariableName, outputColumns, keyConstraints, checkConstraints);
 
         // Optional WITH-clause (SCHEMABINDING is captured for
@@ -373,6 +373,9 @@ partial class Simulation
         };
         if (replaced is not null)
             function.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        // An inline INDEX shapes nothing a read returns, so only the catalog
+        // carries it, under the function as real lists it.
+        AddInlineIndexes(context.Batch, function.CatalogShape(), "@" + returnVariableName, returnTableIndexes, indexObjectIds);
         schema.Functions[functionName.Leaf] = function;
         RecordSlotUndo(context, schema.Functions, functionName.Leaf, replaced);
         if (replaced is not null)

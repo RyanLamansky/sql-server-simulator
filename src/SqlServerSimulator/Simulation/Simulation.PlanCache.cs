@@ -393,6 +393,7 @@ public sealed partial class Simulation
                 // SELECT permission check against the replaying session's
                 // current principal.
                 PermissionEnforcement.CheckReadSources(batch, selection.ReferencedSecurables, selection.ReadColumnsByObject);
+                batch.CurrentStatement.SendsRows = selection.IntoTarget is null && !selection.IsAssignmentOnly;
                 // As in the dispatch loop, rows before a failing one go out
                 // ahead of its error (see EndedByError).
                 SimulatedSqlResultSet? executed = null;

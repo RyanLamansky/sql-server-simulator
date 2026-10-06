@@ -193,7 +193,9 @@ partial class Simulation
         {
             throw SimulatedSqlException.CannotAlterUser(userName);
         }
-        if (defaultSchema is not null && user.PrincipalId == Database.DboPrincipalId)
+        // dbo and guest refuse every option — a new name, a login, a default
+        // schema (probed 2026-10-06 against SQL Server 2025).
+        if (user.PrincipalId is Database.DboPrincipalId or Database.GuestPrincipalId)
             throw SimulatedSqlException.CannotAlterDatabaseOwnerUser(user.Name);
         RecordSecurityUndo(context, database);
         if (newName is not null)

@@ -63,10 +63,11 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 8168: one <c>CREATE TABLE</c> names two of its
-    /// constraints alike (probed 2026-09-24 against SQL Server 2025).
+    /// constraints alike (probed 2026-09-24 against SQL Server 2025), state 0;
+    /// two of its inline indexes alike are state 1 (probed 2026-10-06).
     /// </summary>
-    internal static SimulatedSqlException DuplicateNameInStatement(string name) =>
-        new($"Cannot create, drop, enable, or disable more than one constraint, column, index, or trigger named '{name}' in this context. Duplicate names are not allowed.", 8168, 16, 0);
+    internal static SimulatedSqlException DuplicateNameInStatement(string name, byte state = 0) =>
+        new($"Cannot create, drop, enable, or disable more than one constraint, column, index, or trigger named '{name}' in this context. Duplicate names are not allowed.", 8168, 16, state);
 
     /// <summary>
     /// Pairs <paramref name="error"/> with the Msg 1750 real sends after every
@@ -528,10 +529,11 @@ partial class SimulatedSqlException
     /// <c>CREATE TABLE missingschema.t</c>, <c>CREATE SCHEMA dbo</c> (when
     /// targeting a built-in / reserved schema), and a few other lookups.
     /// A TRY catches it, and uncaught it ends the batch (probed 2026-10-04
-    /// against SQL Server 2025 for <c>CREATE TABLE</c>).
+    /// against SQL Server 2025 for <c>CREATE TABLE</c>) — but only the
+    /// statement for <c>CREATE SYNONYM</c> (probed 2026-10-06).
     /// </summary>
-    internal static SimulatedSqlException SpecifiedSchemaNameDoesNotExist(string schemaName) =>
-        new($"The specified schema name \"{schemaName}\" either does not exist or you do not have permission to use it.", 2760, 16, 1) { TerminatesBatch = true };
+    internal static SimulatedSqlException SpecifiedSchemaNameDoesNotExist(string schemaName, bool terminatesBatch = true) =>
+        new($"The specified schema name \"{schemaName}\" either does not exist or you do not have permission to use it.", 2760, 16, 1) { TerminatesBatch = terminatesBatch };
 
     /// <summary>
     /// Msg 2797: an unqualified <c>CREATE</c> (or <c>SELECT … INTO</c>) by a
@@ -2408,9 +2410,11 @@ partial class SimulatedSqlException
     /// the inline-pair case has its own message, distinct from the Msg 1902 the
     /// CREATE INDEX and ALTER TABLE ADD CONSTRAINT paths raise (which names the
     /// existing clustered index; this one can't, since neither exists yet).
+    /// State 1 for two clustered keys, 0 for a clustered key beside an inline
+    /// clustered index (probed 2026-10-06).
     /// </summary>
-    internal static SimulatedSqlException MultipleClusteredConstraints(string tableName) =>
-        new($"Cannot add more than one clustered index for constraints on table '{tableName}'.", 8112, 16, 1);
+    internal static SimulatedSqlException MultipleClusteredConstraints(string tableName, byte state = 1) =>
+        new($"Cannot add more than one clustered index for constraints on table '{tableName}'.", 8112, 16, state);
 
     /// <summary>
     /// Mimics SQL Server error 1776: a FOREIGN KEY's referenced column list
@@ -3079,6 +3083,19 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException StatisticsStreamCorrupt() =>
         new("The provided statistics stream is corrupt.", 9105, 16, 1);
 
+    /// <summary>
+    /// Mimics SQL Server error 1940 for what a view without a unique clustered
+    /// index can't take, naming the view as written: statistics (state 1) and
+    /// a nonclustered columnstore index (state 2), schema bound or not
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException ViewWithoutUniqueClusteredIndex(string writtenViewName, bool statistics) =>
+        new($"Cannot create {(statistics ? "statistics" : "index")} on view '{writtenViewName}'. It does not have a unique clustered index.", 1940, 16, statistics ? (byte)1 : (byte)2);
+
+    /// <summary>Mimics SQL Server error 35305: a clustered columnstore index on a view (probed 2026-10-06 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException ClusteredColumnstoreOnView() =>
+        new("The statement failed because a clustered columnstore index cannot be created on a view. Consider creating a nonclustered columnstore index on the view, creating a clustered columnstore index on the base table or creating an index without the COLUMNSTORE keyword on the view.", 35305, 16, 1);
+
     /// <summary>Mimics SQL Server error 1939: statistics on a view that isn't schema bound, named bare (probed 2026-10-05).</summary>
     internal static SimulatedSqlException StatisticsOnViewNotSchemaBound(string viewName) =>
         new($"Cannot create statistics on view '{viewName}' because the view is not schema bound.", 1939, 16, 1);
@@ -3352,6 +3369,15 @@ partial class SimulatedSqlException
     /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
     internal static SimulatedSqlException IndexedViewUsesNondeterministicFunction(string qualifiedViewName, string functionName) =>
         new($"Cannot create index on the '{qualifiedViewName}' view because it uses the nondeterministic user-defined function '{functionName}'. Remove the reference to the function, or make it deterministic.", 1956, 16, 1);
+
+    /// <summary>
+    /// Mimics SQL Server error 1964: an indexed view's <c>WHERE</c>, join or
+    /// <c>GROUP BY</c> holds a <c>float</c> or <c>real</c> constant (probed
+    /// 2026-10-06 against SQL Server 2025: <c>WHERE d &gt; 1.5e0</c>), where
+    /// one only projected passes.
+    /// </summary>
+    internal static SimulatedSqlException IndexedViewHasImpreciseConstant(string qualifiedViewName) =>
+        new($"Cannot create index on view \"{qualifiedViewName}\". The view contains an imprecise constant.", 1964, 16, 1);
 
     /// <inheritdoc cref="IndexedViewReferencesDerivedTable"/>
     internal static SimulatedSqlException IndexedViewFiltersOnImpreciseColumn(string qualifiedViewName, string columnName) =>

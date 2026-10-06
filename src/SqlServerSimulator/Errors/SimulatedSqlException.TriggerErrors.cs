@@ -51,11 +51,20 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Mimics SQL Server error 1088 state 119: <c>ENABLE</c> / <c>DISABLE
-    /// TRIGGER … ON { DATABASE | ALL SERVER }</c> naming a trigger the scope
-    /// doesn't hold.
+    /// TRIGGER</c> naming a trigger its table, view, database or server
+    /// doesn't hold; uncaught, it ends the batch (probed 2026-10-06 against
+    /// SQL Server 2025).
     /// </summary>
     internal static SimulatedSqlException CannotFindScopedTrigger(string name) =>
-        new($"Cannot find the object \"{name}\" because it does not exist or you do not have permissions.", 1088, 16, 119);
+        new($"Cannot find the object \"{name}\" because it does not exist or you do not have permissions.", 1088, 16, 119) { TerminatesBatch = true };
+
+    /// <summary>
+    /// Mimics SQL Server error 1088 at state 21: <c>ENABLE</c> / <c>DISABLE
+    /// TRIGGER … ON</c> a table or view that doesn't exist, named as written;
+    /// uncaught, it ends the batch (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException CannotFindTriggerParent(string writtenName) =>
+        new($"Cannot find the object \"{writtenName}\" because it does not exist or you do not have permissions.", 1088, 16, 21) { TerminatesBatch = true };
 
     /// <summary>
     /// Mimics SQL Server error 311: an <c>AFTER</c> trigger's body reading a

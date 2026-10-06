@@ -19,7 +19,7 @@ Server-scope triggers (`CREATE TRIGGER … ON ALL SERVER`) — logon triggers an
 - **DROP TRIGGER [IF EXISTS] name [, ...]** — comma-list form supported via the shared DROP parser.
 - **DISABLE / ENABLE TRIGGER { name [, …] | ALL } ON parent** — toggles `Trigger.IsDisabled`.
   Disabled triggers stay in the schema and surface in `sys.triggers.is_disabled` but don't fire.
-  A name the parent lacks is **Msg 1088** state 119 naming it as written, and toggles none of the list; the toggle rolls back with an enclosing transaction, and an `ALTER TRIGGER` keeps a disabled trigger disabled (probed 2026-10-04 against SQL Server 2025).
+  A name the parent lacks is **Msg 1088** state 119 naming it as written, and toggles none of the list; a parent that doesn't exist is Msg 1088 state 21 naming it; either ends the batch unless a `TRY` catches it (probed 2026-10-06 against SQL Server 2025); the toggle rolls back with an enclosing transaction, and an `ALTER TRIGGER` keeps a disabled trigger disabled (probed 2026-10-04 against SQL Server 2025).
   `ALTER TABLE t { DISABLE | ENABLE } TRIGGER { ALL | name [, …] }` is the table-scoped form; a name the table lacks is Msg 4920 and toggles none of the list (probed 2026-09-25).
   Works on both table and view parents.
 - **AFTER INSERT / UPDATE / DELETE** plus the **FOR-synonym-for-AFTER** spelling — table parents only.
@@ -125,6 +125,7 @@ Consequences worth stating separately, each probed:
   The server option wins.
 
 The staged / installed split matters here: a `sp_configure` write alone changes nothing, because the dispatcher reads the *installed* value (`value_in_use`) that only `RECONFIGURE` moves.
+And it reads it as the request begins (`SimulatedDbConnection.NestedTriggersThisRequest`): a `RECONFIGURE` takes effect from the next request, whatever the rest of its own batch, dynamic SQL and procedures included, fires (probed 2026-10-06 against SQL Server 2025).
 The sibling option `server trigger recursion` (id 116) round-trips through the catalog like any other but carries no behavior: a server-scope trigger takes the same innermost-frame rule a database-scope DDL trigger does.
 See [`catalog-views.md`](catalog-views.md) for the `sp_configure` surface itself.
 
@@ -252,19 +253,15 @@ An AFTER trigger's body reading a `text` / `ntext` / `image` column of either is
 
 A body starts under `SET XACT_ABORT ON` whatever the session says — `@@OPTIONS & 16384` reads 16384 inside it — so its errors follow that option's rules (probed 2026-09-24 against SQL Server 2025; [`transactions.md`](transactions.md#set-xact_abort)):
 - An error the body leaves unhandled ends the firing batch and rolls the transaction back, and so does one from a procedure or dynamic SQL the body calls, which inherit the option.
-  The firing statement still sends Msg 3621 after it, at line 1 and unattributed, which an error ending the batch from the statement itself doesn't (`SimulatedSqlException.EndedTriggerBody`; probed 2026-10-04 against SQL Server 2025).
+  The firing statement still sends Msg 3621 after it, which an error ending the batch from the statement itself doesn't (`SimulatedSqlException.EndedTriggerBody`; probed 2026-10-04 against SQL Server 2025): at that statement's line in its module — the trigger, an inner trigger of a chain, a procedure the body called — when the failing statement is a `SELECT` sending rows to the client, and at line 1 and unattributed from anything else: a write, a variable-assigning `SELECT`, `SET`, `DECLARE`'s initializer, an `IF` condition (`RaisedByClientSelect`, probed 2026-10-06).
+  A Msg 208 a function the body calls raises as it runs sends none.
+- Everything a body runs runs within the firing statement, so a statement there writing nothing earns Msg 3621 too where its error ends only the statement — after the body's own `SET XACT_ABORT OFF` (probed 2026-10-06 against SQL Server 2025).
 - Caught by a `TRY` in the firing batch, it dooms the transaction.
   A `TRY` catches the body's binder errors too — those of the compile as the trigger first fires and a missing object the body names when it runs — which otherwise end the batch the same way (probed 2026-10-01 against SQL Server 2025).
 - `RAISERROR`, which the option exempts, lets the body run on the way a procedure body does ([`control-flow.md`](control-flow.md#procedure-and-dynamic-sql-bodies)): the error reaches the client among the body's output, and the firing statement keeps its rows.
   So does any error after the body's own `SET XACT_ABORT OFF`.
 
-### Not modeled yet
-
-- **Msg 3621 after a non-writing statement's error in a body that turned `XACT_ABORT` off** — real sends it for the firing statement; here only an error escaping the body earns it.
-- **Msg 3621 after an error escaping the body** carries the trigger as its `Procedure` and the failing statement's line on real when that statement writes nothing (Msg 8134 from `SELECT 1/0`), and isn't sent at all after a Msg 208 a function the body calls raises as it runs; here it follows at line 1 unattributed in both (probed 2026-10-04 against SQL Server 2025).
-  A nested trigger's error ending a chain of two is the same: real attributes the 3621 to the inner trigger.
-- **A `SELECT` the body began before a caught error** — real sends nothing for it; here its empty result set reaches the client ahead of Msg 3930.
-- **`COLUMNS_UPDATED()` in a function a trigger body calls** reads the trigger's mask on real; here it reads NULL, as outside any trigger (probed 2026-10-04 against SQL Server 2025).
+A caught error's statement closes under the body's own `NOCOUNT`, which the body's `SET` had in force though it reverts before the firing statement sends what the body buffered — so a body that set it sends a caught `SELECT`'s empty result with no count, which SqlClient then shows no result set for (probed 2026-10-06 against SQL Server 2025).
 
 ## Change-detection intrinsics
 
@@ -281,6 +278,8 @@ For MERGE the mask is the union of every `WHEN MATCHED THEN UPDATE` clause's tar
 
 **Bitmask layout.** Column_id *N* occupies bit `(N-1) % 8` of byte `(N-1) / 8`, least-significant bit first, over `ceil(MaxColumnIdUsed / 8)` bytes.
 The mask is keyed on the **stable `column_id`**, so a dropped column keeps its bit position and the length doesn't shrink — see [stable column ids](catalog-views.md#stable-column-ids).
+
+**Who reads them.** A scalar, inline or multi-statement function and a view the body reads see the firing statement's `COLUMNS_UPDATED()` (`BatchContext.CallerTriggerFrame`); a procedure or dynamic SQL the body calls reads NULL (probed 2026-10-06 against SQL Server 2025).
 
 **Where they live.** `COLUMNS_UPDATED()` is a value expression and resolves through `ResolveBuiltIn` ([`ColumnsUpdated.cs`](../../src/SqlServerSimulator/Parser/Expressions/ColumnsUpdated.cs)); `UPDATE(col)` is a **`BooleanExpression`** ([`UpdatePredicate.cs`](../../src/SqlServerSimulator/Parser/Expressions/UpdatePredicate.cs)) dispatched from `BooleanExpression.ParseAtom`, because real raises **Msg 156** for `SELECT UPDATE(c1)` — modeling it as a bit-returning built-in would accept a shape real rejects.
 The per-fire mask rides on `TriggerFrame.ColumnsUpdatedMask`, built by `Simulation.BuildColumnsUpdatedMask` at fire time.
@@ -336,6 +335,7 @@ A trigger doesn't re-fire itself for DDL its own body issues — `Simulation.Can
 The 32-level nesting cap applies (Msg 217), and DDL frames push `IsAfter = false` so they don't count toward the AFTER-DML `nested triggers` rule.
 
 **Atomic scope.** The bodies run inside one `RunMutation` scope, so everything they wrote rolls back together when a later body throws — the same firing-statement-atomic unit DML triggers get.
+The DDL they fire for joins that unit: outside a transaction, while a DDL trigger exists, a statement logs how to reverse its change (`StatementContext.AutocommitDdlUndo`), and the unit takes it over, so a body's error or `ROLLBACK` undoes the `CREATE`, `DROP` (the table's rows included) or `ALTER` as real's does — the `ROLLBACK` raising **Msg 3609** and ending the batch — and a server-scope trigger's undoes a `CREATE LOGIN` (probed 2026-10-06 against SQL Server 2025).
 
 `Simulation.ImportBacpac` suppresses firing wholesale via `SimulatedDbConnection.SuppressDdlTriggers`: a bacpac can carry a DDL trigger of its own, and running an audit body against half-built schema would fail the load (real's import path disables DDL triggers for the same reason).
 
@@ -374,9 +374,6 @@ Three kinds carry elements of their own after the common ones (probed 2026-09-28
   The common header plus `TSQLCommand` is what an audit body reads.
 - **`ALTER SCHEMA … TRANSFER`'s `ObjectType`** reports `OBJECT` / `TYPE` — the transfer's own name class — where real reports the moved object's actual kind (`SYNONYM`, `TABLE`, …).
 - **A binding procedure's rows-affected count** — an `EXEC sp_bindefault` a DDL trigger fires for reports the body's writes as its own count, where real reports its internal statements' (probed 2026-09-28 against SQL Server 2025).
-- **A body `ROLLBACK` vetoing the DDL** — real undoes the DDL and raises **Msg 3609** (`The transaction ended in the trigger. The batch has been aborted.`), leaving `@@TRANCOUNT` 0 and skipping the rest of the batch.
-  An auto-commit DDL statement runs with no transaction open here, so nothing logs it for undo: a body error rolls back what the bodies wrote but leaves the DDL in place, and `@@TRANCOUNT` in a body reads 0 where real reads 1.
-  A server-scope trigger's is the same — Msg 3609 is raised, but a `CREATE LOGIN` it vetoed stays (probed 2026-09-28 against SQL Server 2025).
 
 ## Server-scope triggers — `ON ALL SERVER`
 
@@ -438,10 +435,6 @@ Unpinned triggers of one scope fire in creation order.
 - **A logon trigger's `COMMIT`** is Msg 3902 here and refuses the login; real lets the login stand.
 - **A login's default database** — `ALTER LOGIN … DEFAULT_DATABASE` is discarded, so a login lands where the connection asks or on the simulator's default.
 - **Login-event `CommandText`** — real keeps the statement's `;` and the newline after it; the simulator trims them.
-
-## Not modeled yet
-
-- **The `nested triggers` option read per batch** — real reads it as a batch compiles, so a `RECONFIGURE` in the same batch takes effect from the next batch; here the firing statement reads the live value (probed 2026-10-04 against SQL Server 2025).
 
 ## EF Core reach
 

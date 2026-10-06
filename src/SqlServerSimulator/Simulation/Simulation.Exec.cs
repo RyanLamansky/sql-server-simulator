@@ -406,8 +406,10 @@ partial class Simulation
                 if (!batch.IsSkipping && !LeavesCatalogUnchanged(systemProcName!))
                     this.CatalogRows.Invalidate();
             }
+            // One whose statement failed returns 1 (probed 2026-10-06 against
+            // SQL Server 2025: sp_addrole of a fixed role's name).
             if (framesScope)
-                yield return ScopeExit(batch, 0);
+                yield return ScopeExit(batch, procedureResult.Failed ? 1 : 0);
             // A system procedure that finishes answers 0 to `EXEC @rc = …`
             // (probed 2026-09-25 across sp_help, sp_who, sp_rename and the
             // extended-property procedures); the few with codes of their own
@@ -457,11 +459,15 @@ partial class Simulation
                 }
                 yield break;
             }
-            // An aggregate is the one function kind EXEC names by kind
-            // (probed 2026-09-28 against SQL Server 2025).
-            throw batch.TryResolveFunctionName(procName, out var function) && function is Schemas.ClrAggregateFunction
-                ? SimulatedSqlException.ExecOfAggregate(function.Name)
-                : SimulatedSqlException.CouldNotFindStoredProcedure(procName.WithoutOmittedLeading().Written);
+            // An aggregate and a table-valued function are named by kind
+            // (probed 2026-09-28 and 2026-10-06 against SQL Server 2025).
+            _ = batch.TryResolveFunctionName(procName, out var function);
+            throw function switch
+            {
+                Schemas.ClrAggregateFunction => SimulatedSqlException.ExecOfFunctionObject(function.Name, "aggregate"),
+                Schemas.InlineTableValuedFunction or Schemas.MultiStatementTableValuedFunction or Schemas.ClrTableValuedFunction => SimulatedSqlException.ExecOfFunctionObject(function.Name, "table valued"),
+                _ => SimulatedSqlException.CouldNotFindStoredProcedure(procName.WithoutOmittedLeading().Written),
+            };
         }
         if (groupNumber > 1 && procedure.ClrEntry is null)
         {

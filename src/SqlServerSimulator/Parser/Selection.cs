@@ -1725,9 +1725,29 @@ internal sealed partial class Selection
         var limit = new DmlTopLimit(expression, percent);
         // A written constant is judged while compiling, so its error ends the
         // batch with no Msg 3621 (probed 2026-09-28 against SQL Server 2025:
-        // `TOP (-1)`, `TOP (1.5)`, `TOP (101) PERCENT`).
+        // `TOP (-1)`, `TOP (1.5)`, `TOP (101) PERCENT`) — unless the statement
+        // waits to bind with an object the batch creates, which the walk
+        // learns only once it has read the target, for any statement but an
+        // INSERT (probed 2026-10-06). Raised as the deferred statement runs,
+        // it takes the statement's first line and ends the batch with no Msg
+        // 3621, uncaught by a TRY around it.
         if (expression.IsWrittenConstant)
-            _ = ResolveDmlTopCap(limit, int.MaxValue, context.Batch);
+        {
+            try
+            {
+                _ = ResolveDmlTopCap(limit, int.MaxValue, context.Batch);
+            }
+            catch (SimulatedSqlException refused) when (context.Batch.IsSkipping && context.Batch.CurrentStatement.StatementVerb != "INSERT")
+            {
+                // Skipped as the batch runs — an untaken branch — the statement
+                // is one the compile deferred, which nothing compiles now.
+                if (context.Batch.CreateTimeBinding)
+                {
+                    refused.ResolveDiagnostics(context.Token?.LineNumber ?? context.Batch.CurrentStatement.StartLine, context.Batch.LineOffset, context.Batch.ErrorProcedureName);
+                    context.Batch.CurrentStatement.PendingCompileRefusal = refused;
+                }
+            }
+        }
         return limit;
     }
 
@@ -1747,12 +1767,13 @@ internal sealed partial class Selection
         {
             return ResolveDmlTopCapCore(limit, candidateCount, batch);
         }
-        catch (SimulatedSqlException ex) when (!limit.Expression.IsWrittenConstant)
+        catch (SimulatedSqlException ex) when (!limit.Expression.IsWrittenConstant || !batch.IsSkipping)
         {
             // A value read while running reports at the statement's first line,
             // where a class-15 error otherwise takes the parser's current one.
             foreach (var error in ex.Errors)
                 error.LineNumber = batch.CurrentStatement.StartLine;
+            ex.RefusedRecompilingDeferred = limit.Expression.IsWrittenConstant;
             throw;
         }
     }

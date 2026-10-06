@@ -902,21 +902,32 @@ internal static partial class BuiltInResources
     }
 
     /// <summary>
-    /// A table type's own indexes, which real's <c>sys.stats</c> /
-    /// <c>sys.stats_columns</c> list under its type table though no partition
-    /// view does (probed 2026-09-26 against SQL Server 2025).
+    /// A multi-statement function's return-table indexes and a table type's
+    /// own, which real's <c>sys.stats</c> / <c>sys.stats_columns</c> list under
+    /// the function or type table though no partition view does (probed
+    /// 2026-09-26 and 2026-10-06 against SQL Server 2025).
     /// </summary>
-    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index, PartitionPlacement? Placement)> TypeTableIndexIdentities(Database database)
+    private static IEnumerable<(HeapTable Table, int IndexId, string? Name, bool IsHeap, Storage.Index? Index, PartitionPlacement? Placement)> DeclaredShapeIndexIdentities(Database database)
     {
         foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var tableType in schema.TableTypes.EnumerateValues().OrderBy(t => t.ObjectId))
+            foreach (var shape in DeclaredShapes(schema))
             {
-                foreach (var identity in tableType.CatalogShape.IndexIdentities())
-                    yield return (tableType.CatalogShape, identity.IndexId, identity.Name, identity.IsHeap, identity.Index, null);
+                foreach (var identity in shape.IndexIdentities())
+                    yield return (shape, identity.IndexId, identity.Name, identity.IsHeap, identity.Index, null);
             }
         }
     }
+
+    /// <summary>
+    /// The return tables of <paramref name="schema"/>'s multi-statement
+    /// functions, then its table types' backing tables, whose indexes and keys
+    /// real lists statistics for as a table's (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    private static IEnumerable<HeapTable> DeclaredShapes(Schema schema) =>
+        schema.Functions.EnumerateValues().OfType<MultiStatementTableValuedFunction>().OrderBy(f => f.ObjectId).Select(f => f.CatalogShape())
+            .Concat(schema.TableTypes.EnumerateValues().OrderBy(t => t.ObjectId).Select(t => t.CatalogShape));
 
     /// <summary>
     /// False for a disabled nonclustered index, whose storage real deallocates:
@@ -1351,7 +1362,7 @@ internal static partial class BuiltInResources
         var primaryRoleDesc = SqlValue.FromString(NVarcharSqlType.Get(60, Collation.Catalog, Coercibility.Implicit), "PRIMARY");
         var nullName = SqlValue.Null(SqlType.SystemName);
         var trueBit = SqlValue.FromBoolean(true);
-        foreach (var (table, indexId, name, isHeap, index, _) in EnumerateTableIndexIdentities(database, batch, storageOnly: false).Concat(TypeTableIndexIdentities(database)))
+        foreach (var (table, indexId, name, isHeap, index, _) in EnumerateTableIndexIdentities(database, batch, storageOnly: false).Concat(DeclaredShapeIndexIdentities(database)))
         {
             if (isHeap)
                 continue;
@@ -1531,7 +1542,7 @@ internal static partial class BuiltInResources
         _ = batch;
         foreach (var (_, schema) in database.Schemas)
         {
-            foreach (var table in CatalogTables(schema, batch).Concat(schema.TableTypes.EnumerateValues().OrderBy(t => t.ObjectId).Select(t => t.CatalogShape)))
+            foreach (var table in CatalogTables(schema, batch).Concat(DeclaredShapes(schema)))
             {
                 var tableObjectId = SqlValue.FromInt32(table.ObjectId);
                 foreach (var identity in table.IndexIdentities())

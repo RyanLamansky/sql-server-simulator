@@ -456,8 +456,25 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Builds the indexes declared inline in a CREATE TABLE, a table variable
-    /// or a table type's instance (the table-level <c>INDEX ix (cols)</c> and
+    /// An inline index's column, whose absence (Msg 1911) real follows with
+    /// the declaration's Msg 1750 (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    private static int ResolveInlineIndexColumn(Collation collation, HeapTable table, string columnName)
+    {
+        try
+        {
+            return ResolveColumnOrdinal(collation, table, columnName);
+        }
+        catch (SimulatedSqlException missing) when (missing.Number == 1911)
+        {
+            throw SimulatedSqlException.FollowedByConstraintNotCreated(missing, state: 0);
+        }
+    }
+
+    /// <summary>
+    /// Builds the indexes declared inline in a CREATE TABLE, a table variable,
+    /// a multi-statement function's return table or a table type's instance
+    /// (the table-level <c>INDEX ix (cols)</c> and
     /// column-level <c>col type INDEX ix</c> forms) against the freshly-created
     /// <paramref name="table"/>. Each maps to the
     /// same <see cref="StoredIndex"/> the standalone CREATE INDEX builds
@@ -471,6 +488,13 @@ partial class Simulation
         for (var position = 0; position < pendingIndexes.Count; position++)
         {
             var pending = pendingIndexes[position];
+            // Two inline indexes of one declaration named alike are the
+            // statement's own clash (probed 2026-10-06 against SQL Server 2025).
+            for (var earlier = 0; earlier < position; earlier++)
+            {
+                if (collation.Equals(pendingIndexes[earlier].Name, pending.Name))
+                    throw SimulatedSqlException.DuplicateNameInStatement(pending.Name, state: 1);
+            }
             foreach (var existing in table.Indexes)
             {
                 if (collation.Equals(existing.Name, pending.Name))
@@ -514,14 +538,14 @@ partial class Simulation
             var keyColumns = new IndexKeyColumn[pending.Columns.Length];
             for (var i = 0; i < pending.Columns.Length; i++)
             {
-                var fullOrdinal = ResolveColumnOrdinal(collation, table, pending.Columns[i].ColumnName);
+                var fullOrdinal = ResolveInlineIndexColumn(collation, table, pending.Columns[i].ColumnName);
                 keyColumns[i] = new IndexKeyColumn(table.StorageOrdinals[fullOrdinal], fullOrdinal, pending.Columns[i].IsDescending);
             }
             var includeColumns = new int[pending.IncludeColumnNames.Count];
             var includeOrdinals = new int[pending.IncludeColumnNames.Count];
             for (var i = 0; i < includeColumns.Length; i++)
             {
-                var fullOrdinal = ResolveColumnOrdinal(collation, table, pending.IncludeColumnNames[i]);
+                var fullOrdinal = ResolveInlineIndexColumn(collation, table, pending.IncludeColumnNames[i]);
                 includeColumns[i] = table.StorageOrdinals[fullOrdinal];
                 includeOrdinals[i] = fullOrdinal;
             }

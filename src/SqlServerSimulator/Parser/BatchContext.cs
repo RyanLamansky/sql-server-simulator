@@ -286,6 +286,15 @@ internal sealed partial class BatchContext
     public bool CreateTimeBinding;
 
     /// <summary>
+    /// Informational messages a bind or compile walk raises — a table
+    /// variable's oversized row — held apart from
+    /// <see cref="SimulatedDbConnection.PendingMessages"/>, which the walk's own
+    /// statements would drain into outcomes it discards; the walk's owner
+    /// sends them once it succeeds.
+    /// </summary>
+    public List<SimulatedError>? CompileMessages;
+
+    /// <summary>
     /// The procedures a module body binding at <c>CREATE</c> calls that don't
     /// exist, as each <c>EXEC</c> wrote them, for the Msg 2007 notes the
     /// <c>CREATE</c> sends; null for every other batch.
@@ -1045,6 +1054,19 @@ internal sealed partial class BatchContext
     public TriggerFrame? TriggerFrame;
 
     /// <summary>
+    /// The trigger frame a function or view body runs under: its caller's
+    /// <see cref="TriggerFrame"/>, or the one its caller inherited. A body's
+    /// <c>COLUMNS_UPDATED()</c> reads the firing statement's mask through it,
+    /// where a procedure or dynamic SQL a trigger calls reads NULL (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public TriggerFrame? CallerTriggerFrame;
+
+    /// <summary>Sets <see cref="CallerTriggerFrame"/> for a function or view body <paramref name="caller"/> runs.</summary>
+    public void InheritCallerTriggerFrame(BatchContext caller) =>
+        this.CallerTriggerFrame = caller.TriggerFrame ?? caller.CallerTriggerFrame;
+
+    /// <summary>
     /// The result sets, messages and continued-past errors trigger bodies
     /// produced while the current statement ran, in the order they ran,
     /// waiting to be handed to the client ahead of that statement's own
@@ -1310,6 +1332,15 @@ internal sealed partial class BatchContext
     /// running while the option is on.
     /// </summary>
     public bool NoExecActive;
+
+    /// <summary>
+    /// Whether a statement walked without running under <c>SET NOEXEC ON</c>
+    /// still sends the DONE naming its kind: real closes each statement so —
+    /// a branch control flow wouldn't reach included, since nothing runs to
+    /// choose one — on a TDS session, where the engine frames every statement
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public bool FramesUnderNoExec => this.NoExecActive && this.Connection.FramesEveryStatement && !this.CompilingForRun;
 
     /// <summary>The connection executing this batch.</summary>
     public SimulatedDbConnection Connection => this.Parser.Connection;

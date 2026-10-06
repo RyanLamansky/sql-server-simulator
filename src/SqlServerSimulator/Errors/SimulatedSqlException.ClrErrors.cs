@@ -327,10 +327,13 @@ partial class SimulatedSqlException
         new("User defined aggregates do not support default parameters.", 10726, 15, 1);
 
     /// <summary>
-    /// Mimics SQL Server error 2809: <c>EXEC</c> named a CLR aggregate.
+    /// Mimics SQL Server error 2809: <c>EXEC</c> named a function it can't
+    /// run — <paramref name="kind"/> is <c>aggregate</c> for a CLR aggregate
+    /// and <c>table valued</c> for a table-valued function, T-SQL or CLR
+    /// (probed 2026-10-06 against SQL Server 2025).
     /// </summary>
-    internal static SimulatedSqlException ExecOfAggregate(string name) =>
-        new($"The request for procedure '{name}' failed because '{name}' is a aggregate function object.", 2809, 16, 1);
+    internal static SimulatedSqlException ExecOfFunctionObject(string name, string kind) =>
+        new($"The request for procedure '{name}' failed because '{name}' is a {kind} function object.", 2809, 16, 1);
 
     /// <summary>
     /// Mimics SQL Server error 11515: <c>sp_describe_first_result_set</c> met

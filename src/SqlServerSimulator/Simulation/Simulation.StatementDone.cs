@@ -66,6 +66,37 @@ partial class Simulation
         _ => null,
     };
 
+    /// <summary>
+    /// Whether the statement at the cursor is one whose error closes with
+    /// <see cref="StatementDoneKind.SecurityDdlFailed"/>.
+    /// </summary>
+    private static bool IsSecurityDdl(ParserContext context)
+    {
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Grant or Keyword.Deny or Keyword.Revoke })
+            return true;
+        if (context.Token is not ReservedKeyword { Keyword: Keyword.Alter or Keyword.Create or Keyword.Drop } lead)
+            return false;
+        var checkpoint = context.SaveCheckpoint();
+        try
+        {
+            return context.GetNextOptional() switch
+            {
+                ReservedKeyword { Keyword: Keyword.User } => true,
+                ReservedKeyword { Keyword: Keyword.Schema } => lead.Keyword != Keyword.Create,
+                ReservedKeyword { Keyword: Keyword.Authorization } => lead.Keyword == Keyword.Alter,
+                UnquotedString { ContextualKeyword: ContextualKeyword.Login or ContextualKeyword.Role } => true,
+                UnquotedString { Span: var word } when word.Equals("APPLICATION", StringComparison.OrdinalIgnoreCase) => true,
+                UnquotedString { Span: var word } when word.Equals("SYNONYM", StringComparison.OrdinalIgnoreCase) => lead.Keyword == Keyword.Create,
+                UnquotedString { Span: var word } when word.Equals("SERVER", StringComparison.OrdinalIgnoreCase) => context.GetNextOptional() is UnquotedString { ContextualKeyword: ContextualKeyword.Role },
+                _ => false,
+            };
+        }
+        finally
+        {
+            context.RestoreCheckpoint(checkpoint);
+        }
+    }
+
     private static Token? PeekAfterLead(ParserContext context)
     {
         var checkpoint = context.SaveCheckpoint();
@@ -208,6 +239,9 @@ partial class Simulation
     private static bool IsProcedureCall(ParserContext context, bool atBatchStart) => context.Token switch
     {
         ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => PeekAfterLead(context) is not ReservedKeyword { Keyword: Keyword.As },
+        // ENABLE / DISABLE TRIGGER is a statement, not a call of a procedure
+        // by that name.
+        UnquotedString { ContextualKeyword: ContextualKeyword.Enable or ContextualKeyword.Disable } when PeekAfterLead(context) is ReservedKeyword { Keyword: Keyword.Trigger } => false,
         Name or AtPrefixedString => atBatchStart,
         _ => false,
     };
@@ -237,6 +271,32 @@ partial class Simulation
         if (!own && standInForNone && kind != StatementDoneKind.NoDone)
             outcomes.Add(StatementDone(batch, kind, batch.CurrentStatement.DoneCount));
         return own;
+    }
+
+    /// <summary>
+    /// Frames a statement walked without running under <c>SET NOEXEC ON</c>,
+    /// as real closes one (probed 2026-10-06 against SQL Server 2025): with its
+    /// kind and a count of 0 where it would count rows — a write, an
+    /// assignment — and no count otherwise; and not at all when real compiles
+    /// it through simple parameterization, whose parameterized form is what
+    /// runs. A procedure call, dynamic SQL's included, sends the DONEPROC of
+    /// the scope it would have opened.
+    /// </summary>
+    private static void FrameUnranStatement(BatchContext batch, List<SimulatedStatementOutcome> outcomes, ParserContext.Checkpoint start, bool isCall)
+    {
+        // A procedure call closes the scope it would have opened, with no
+        // return status.
+        if (isCall)
+        {
+            CloseAbandonedProcScopes(batch, [.. outcomes], outcomes, isCall: true, endedByError: false);
+            return;
+        }
+        if (CompilesParameterized(batch, start))
+            return;
+        var statement = batch.CurrentStatement;
+        if (statement.DoneCount >= 0 || statement.DoneKind is StatementDoneKind.Insert or StatementDoneKind.Update or StatementDoneKind.Delete or StatementDoneKind.Merge or StatementDoneKind.SelectInto)
+            statement.DoneCount = 0;
+        _ = FrameStatement(batch, outcomes, standInForNone: true);
     }
 
     /// <summary>

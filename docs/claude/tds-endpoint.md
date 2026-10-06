@@ -126,6 +126,8 @@ The rules the capture showed:
 - **Which statements send one.**
   `DECLARE` without an initializer, the security, schema, type, synonym and sequence DDL (bar `DROP SEQUENCE` / `DROP SYNONYM`), `SET QUOTED_IDENTIFIER`, `SET PARSEONLY`, `ENABLE` / `DISABLE TRIGGER`, `EXECUTE AS` / `REVERT` and a label send none.
   A response whose last statement sent none — or that an error ended outside any statement — closes with the batch's own DONE, `CurCmd` `0x00FD`, carrying `DONE_ERROR` after an error.
+  The security and schema statements among them — a user's, role's, application role's, login's or server role's `CREATE` / `ALTER` / `DROP`, `GRANT` / `DENY` / `REVOKE`, `ALTER AUTHORIZATION`, `ALTER` / `DROP SCHEMA`, `CREATE SYNONYM` — close an error they end with a DONE of their own, `0x00AA`, which a schema's or type's creation and the sequence DDL don't (`StatementDoneKind.SecurityDdlFailed`, captured 2026-10-06 against SQL Server 2025).
+- **Under `SET NOEXEC ON`** each statement walked still closes with its kind — a write, an assignment or an initializing `DECLARE` with `DONE_COUNT` and 0, a `SELECT` with no count, both branches of an `IF`, a `WHILE`'s condition and body once, a `TRY` block closed `0x015F` before its `CATCH` opens `0x015E`, a `RETURN` that stops nothing, a procedure call or dynamic SQL a DONEPROC with no status — save one real compiles through simple parameterization, which sends nothing (`BatchContext.FramesUnderNoExec`, captured 2026-10-06 against SQL Server 2025).
 - **SELECT-kind statements count a row.**
   `SET @v = …`, a `DECLARE` that initializes (one DONE for the whole statement) and a procedure's valued `RETURN` are `0x00C1` with a count of 1; `SELECT @v = …` counts the rows it read; a cursor `DECLARE`, a `SET @c = CURSOR …` and a `FETCH … INTO` are `0x00C1` with no count.
 - **Control flow.**
@@ -135,6 +137,7 @@ The rules the capture showed:
   A caught error's statement still sends its DONE, the bit clear — a `THROW` or `RAISERROR` as `0x00F6`.
   An error a compile sends without ending anything — a scalar function call it couldn't inline — has no DONE of its own: the next DONE written, whatever statement sends it (a `SET`, a `BEGIN TRY`), carries `DONE_ERROR` and drops `DONE_COUNT`, keeping the count (`TdsTokenWriter.CarryErrorToNextDone`; captured 2026-09-30 against SQL Server 2025, see [`programmable.md`](programmable.md#inlining-a-call-as-the-query-compiles)).
   A `RAISERROR … WITH LOG` at severity 20 sends Msg 2745 and Msg 596 (line 0, no procedure) after its own, then a DONE carrying `DONE_ERROR | DONE_SRVERROR`; the severity-20 Msg 0 SqlClient reports is SqlClient's own and never goes on the wire (`SimulatedSqlException.EndsSession`).
+  A statement ending the session with nothing ahead of its Msg 596 — a positioned write through a partitioned view — takes the DONE of the statement before it down unsent, since real holds a DONE until the next token says whether more follows (captured 2026-10-06 against SQL Server 2025).
 - **`INSERT … EXEC`.**
   The executed body's statements send DONEINPROCs with no count — its rows went to the table — and no RETURNSTATUS or DONEPROC, ahead of the `INSERT`'s own DONE.
 - **RPC.**
@@ -147,7 +150,10 @@ The rules the capture showed:
 - **A DBCC command's rows** close with a counted DONE of their own, Msg 2528 after it, then the statement's DONE; `CHECKCONSTRAINTS` sends Msg 2528 ahead of its rows' uncounted DONE instead (probed 2026-09-28 through SqlClient's `StatementCompleted` / `InfoMessage` order) → [`dbcc.md`](dbcc.md#the-statements-shape).
 - **`DROP LOGIN`** sends two RETURNSTATUS 0 tokens, from the procedures real runs inside it, and no DONE of its own.
 
-**Not modeled yet**: under `SET NOEXEC ON` real still sends each statement's DONE with its kind — the simulator sends none; `ALTER SCHEMA … TRANSFER`'s error DONE carries `0x00AA` where the statement otherwise sends none, and the simulator closes it with the batch's; a system procedure's own `RAISERROR` other than `sp_help`'s is assumed to return status 1.
+- **A system procedure's return status**: 1 after an error of its own or a statement it runs failing, the error's number for `sp_recompile` and the `sys.sp_*` option procedures, and its last statement's `@@ERROR` for `sp_executesql` (8134 after `SELECT 1/0`, 50000 after a `RAISERROR`, 0 when a statement after the error succeeded), where dynamic SQL run by `EXEC` returns a procedure's status (captured 2026-10-06 against SQL Server 2025).
+  The statements a legacy security procedure runs are its own, closing in DONEINPROCs of their kind with no dynamic-SQL scope around them.
+
+**Not modeled yet**: the DONEINPROCs of the statements real's system procedures run internally ahead of their result (`sp_columns`, `sp_droptype`, `sp_autostats` …) and the transaction ENVCHANGEs a legacy security procedure wraps its work in; the error DONE a security procedure's internal statement sends where the simulator raises the procedure's own (`sp_droprole`, `sp_revokedbaccess`, `sp_droprolemember`, `sp_grantdbaccess`); `sp_getapplock`'s and `sp_releaseapplock`'s status -999 after a refused mode or a lock not held; and `sp_set_session_context`'s refusal, which real closes in a DONEPROC carrying `DONE_ERROR` (captured 2026-10-06 against SQL Server 2025).
 
 ## Unexpected-fault handling
 

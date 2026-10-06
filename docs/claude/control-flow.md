@@ -249,6 +249,10 @@ Two statements creating one `#` / `##` table — `CREATE TABLE` or `SELECT … I
 
 The walk runs nothing, so whatever a statement checks against session state or live rows waits for the run: `IDENTITY_INSERT`, a cursor's existence and position, a DML `TOP (@n)`, `NEXT VALUE FOR`, and data locks (`AcquireDataLockIfApplicable` bypasses in skip mode, since a transaction-scoped lock would outlive the statement it was taken for).
 
+A refusal real settles compiling a statement waits with it when the statement reads what the batch has yet to create: a DML `TOP`'s written constant (Msg 127, 1031, 1060) on an `UPDATE`, `DELETE` or `MERGE` — never an `INSERT`'s — and a `NEXT VALUE FOR` in a derived table or subquery (Msg 11719), whose sequence's own absence defers nothing (probed 2026-10-06 against SQL Server 2025).
+The walk holds the refusal on `StatementContext.PendingCompileRefusal` until the statement has parsed, and raises it then unless the statement read a placeholder source; an error the statement meets after it wins only by deferring the statement.
+Met as the deferred statement runs, the refusal takes the statement's first line and ends the batch uncaught by a `TRY` in its scope, with no Msg 3621 (`RefusedRecompilingDeferred`); an untaken branch, which nothing compiles as the batch runs, raises nothing.
+
 A batch that compiled is remembered under its `PlanCacheKey` with the `SchemaVersion` it compiled under (`compiledBatches`), so a repeated text — every EF Core modification batch — skips the walk until DDL bumps the version.
 One that resolved a `#temp` isn't remembered, since what it bound to was the session's.
 The three per-simulation caches keep their own entry counts: `ConcurrentDictionary.Count` takes every lock the dictionary has, and reading it on each fresh text cost more than the walk itself.
@@ -263,13 +267,13 @@ A procedure's is the `EXEC`'s own error, as dynamic SQL's is: the caller goes on
 A trigger's ends the firing statement as its body's errors do under the body's `XACT_ABORT ON`, so the batch ends and the write rolls back unless a `TRY` around the statement catches it — as it also catches a missing object the body names when it runs.
 A body that doesn't compile keeps no plan, so the next call compiles and reports it again; one that compiles keeps its plan until an object it reads changes (see `ModulePlan`).
 
+A deferral raised partway through a statement — a binder error in one reading a table the batch creates, `CREATE TABLE t …; SELECT a FROM t WHERE a = CAST(1 AS xml);`, whose Msg 529 real defers — leaves the walk going on from the statement's end when the recovery scan finds it for certain, at its `;` or the end of the text, so a later statement's binder error refuses the batch before anything runs, as on real (probed 2026-10-06 against SQL Server 2025).
+
 ### Not modeled yet
 
-- **The walk still stops at a deferral raised mid-statement**, since the recovery scan can't tell where that statement ends: an `ALTER TABLE` of a table the batch creates (Msg 4902), and a binder error in a statement reading one (`CREATE TABLE t …; SELECT a FROM t WHERE a = CAST(1 AS xml)`, whose Msg 529 real defers).
-  Real keeps compiling the statements after it, so an error past one surfaces here only when its statement runs — after the statements ahead of it have run (probed 2026-10-01 against SQL Server 2025).
+- **The walk still stops at a deferral raised mid-statement that no `;` ends**, since the recovery scan can only guess where that statement stops, and resuming from a guess — tried — reports errors against the tail of the deferred statement (`ALTER TABLE … ADD … WITH VALUES`).
+  Real keeps compiling the statements after it, so an error past one surfaces here only when its statement runs — after the statements ahead of it have run (probed 2026-10-01 and 2026-10-06 against SQL Server 2025).
   A syntax error (Msg 102 / 156) surfacing that way at least ends the batch (`EndsBatch`), as real's refusal would have, rather than the dispatch resuming inside the broken statement's tail.
-- **A refusal the walk raises that real defers with the statement's table or sequence.**
-  A DML `TOP` over a table the batch creates — a negative count's Msg 127, a percent over 100's Msg 1031, a fractional count's Msg 1060 — and a `NEXT VALUE FOR` in a derived table over a sequence the batch creates (Msg 11719) end the batch as it compiles here, where real defers the statement and runs the ones before it first (probed 2026-10-01 and 2026-10-03 against SQL Server 2025); the `SET` list's Msg 157 / 4108 defer already.
 
 ## Statement-terminating vs batch-aborting errors (unified continue-on-error)
 

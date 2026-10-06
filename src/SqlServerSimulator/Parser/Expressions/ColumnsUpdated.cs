@@ -17,7 +17,7 @@ namespace SqlServerSimulator.Parser.Expressions;
 /// A DELETE trigger sees a zero-length value, not a run of zero bytes:
 /// <c>DATALENGTH(COLUMNS_UPDATED())</c> is 0 there.
 /// A database-scope DDL trigger body has no firing columns, so it reads NULL
-/// as well.
+/// as well. A function or view body reads its calling trigger's mask.
 /// </remarks>
 internal sealed class ColumnsUpdatedFunction : Expression
 {
@@ -26,7 +26,7 @@ internal sealed class ColumnsUpdatedFunction : Expression
     public ColumnsUpdatedFunction(ParserContext context) => ErrorFunctionCtor.EnsureNoArgs(context, "columns_updated");
 
     public override SqlValue Run(RuntimeContext runtime) =>
-        runtime.Batch.TriggerFrame is { Trigger: not null } frame
+        (runtime.Batch.TriggerFrame ?? runtime.Batch.CallerTriggerFrame) is { Trigger: not null } frame
             ? SqlValue.FromVarbinary(ResultType, frame.ColumnsUpdatedMask)
             : SqlValue.Null(ResultType);
 

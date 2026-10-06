@@ -74,6 +74,7 @@ An alias type's own nullability wins, a computed column's follows its expression
 While on, each statement compiles — the batch's compile still raises what compiling raises, Msg 207 on a known table's missing column — but nothing runs: no rows, no messages, no `PRINT` / `RAISERROR`, no DDL, no variable assignment, no `USE`, and a deferred missing object raises nothing.
 `SET NOEXEC OFF` is the one statement that still runs, so `SET NOEXEC ON; SELECT 1; SET NOEXEC OFF; SELECT 2` returns only 2 (probed 2026-09-28).
 The batch walks its statements in skip mode (`BatchContext.NoExecActive`, part of `IsSkipping`); `SET NOEXEC OFF` consults `SkipsForControlFlow`, the skip mode short of it, so one in an un-taken branch still doesn't run.
+Over TDS each statement walked still sends the DONE naming its kind, a write's with a count of 0 — see [`tds-endpoint.md`](tds-endpoint.md#per-statement-done-tokens).
 
 ## `PARSEONLY`
 

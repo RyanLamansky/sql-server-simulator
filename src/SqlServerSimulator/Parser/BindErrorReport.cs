@@ -698,7 +698,8 @@ internal sealed class BindErrorReport(string command)
     /// literal it can parameterize — one in a <c>SELECT</c>'s or
     /// <c>DELETE</c>'s <c>WHERE</c>, an <c>UPDATE</c>'s <c>SET</c> or
     /// <c>WHERE</c>, or an <c>INSERT</c>'s <c>VALUES</c> or FROM-less
-    /// <c>SELECT</c> — an <c>INSERT … SELECT … FROM</c> isn't. A select-list literal
+    /// <c>SELECT</c> — an <c>INSERT … SELECT … FROM</c> isn't, nor is a
+    /// <c>SELECT</c> with no <c>FROM</c>. A select-list literal
     /// doesn't count (probed 2026-09-27 against SQL Server 2025; a module body
     /// is never parameterized, which the caller settles).
     /// </summary>
@@ -763,6 +764,8 @@ internal sealed class BindErrorReport(string command)
                     break;
             }
         }
-        return literalSeen;
+        // A SELECT reading no table isn't parameterized (probed 2026-10-06
+        // against SQL Server 2025: `SELECT 1 WHERE 1 = 1` compiles as written).
+        return literalSeen && (lead.Keyword != Keyword.Select || froms == 1);
     }
 }

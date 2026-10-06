@@ -35,7 +35,11 @@ partial class Simulation
             || !batch.TryResolveSchema(name, out var schema)
             || !schema.TryFindInSharedNamespace(name.Leaf, out var marked))
         {
-            throw SimulatedSqlException.CouldNotFindObjectOrNoPermission(objectName);
+            // The procedure returns the error's number (probed 2026-10-06
+            // against SQL Server 2025).
+            var missing = SimulatedSqlException.CouldNotFindObjectOrNoPermission(objectName);
+            missing.SystemProcedureReturnCode = missing.Number;
+            throw missing;
         }
         switch (marked)
         {

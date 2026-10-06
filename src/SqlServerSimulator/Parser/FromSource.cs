@@ -247,14 +247,33 @@ internal sealed class FromSource(
 
     /// <summary>
     /// The view a write through this source passes down: a stored view
-    /// (<see cref="BackingView"/>), or a CTE or derived table analyzed as the
-    /// unstored view real writes through it as. Null for every other source.
+    /// (<see cref="BackingView"/>), an inline function's call
+    /// (<see cref="FunctionWriteView"/>), or a CTE or derived table analyzed as
+    /// the unstored view real writes through it as. Null for every other
+    /// source.
     /// </summary>
     public View? UpdatableView() =>
         this.BackingView
+        ?? this.FunctionWriteView
         ?? (this.Cte is { Plan: not null } binding ? Simulation.CteDmlView(binding)
             : this.DerivedTable is { Correlated: false } derived ? Simulation.DerivedTableDmlView(derived)
             : null);
+
+    /// <summary>
+    /// For an inline function's call in a writing statement's <c>FROM</c>
+    /// clause, arguments reading no column, the unstored view a joined write
+    /// aliasing it passes through (<c>Simulation.FunctionDmlView</c>); null
+    /// for every other source.
+    /// </summary>
+    public View? FunctionWriteView;
+
+    /// <summary>
+    /// For a multi-statement or CLR function's call in a writing statement's
+    /// <c>FROM</c> clause, the function's name as written, which a joined write
+    /// aliasing it refuses with Msg 270 (probed 2026-10-06 against SQL Server
+    /// 2025); null for every other source.
+    /// </summary>
+    public string? UnwritableFunctionName;
 
     /// <summary>
     /// The view a joined <c>UPDATE</c> / <c>DELETE</c> naming this source as

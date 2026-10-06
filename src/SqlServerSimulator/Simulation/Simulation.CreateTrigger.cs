@@ -477,7 +477,8 @@ partial class Simulation
         // ON DATABASE toggles a database-scope DDL trigger instead of a DML
         // one, and ON ALL SERVER a server-scope trigger; the ALL form covers
         // every trigger of that scope. A name the scope doesn't hold is
-        // Msg 1088 state 119 (probed 2026-09-28 against SQL Server 2025).
+        // Msg 1088 state 119 (probed 2026-09-28 against SQL Server 2025), which
+        // ends the batch (probed 2026-10-06).
         var serverScope = IsAllServer(context);
         if (serverScope || context.Token is ReservedKeyword { Keyword: Keyword.Database })
         {
@@ -519,7 +520,7 @@ partial class Simulation
             ? parentView
             : context.Batch.TryResolveTable(parentName, out var parentTable)
                 ? parentTable
-                : throw SimulatedSqlException.InvalidObjectName(parentName);
+                : throw SimulatedSqlException.CannotFindTriggerParent(parentName.ToString());
 
         if (allTriggers)
         {

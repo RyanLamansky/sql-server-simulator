@@ -135,6 +135,7 @@ partial class Simulation
             OwnershipChainOwnerId = Ownership.EffectiveOwnerId(function.Schema.Database, function),
         };
         SeedTableValuedParameters(innerBatch, outerBatch, function.Parameters, tableArguments);
+        innerBatch.InheritCallerTriggerFrame(outerBatch);
         innerBatch.TableVariables[function.ReturnVariableName] = returnTable;
         connection.NestingLevel++;
         var identityScope = IdentityScope.Enter(connection);

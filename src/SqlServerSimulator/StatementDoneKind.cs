@@ -16,6 +16,17 @@ internal static class StatementDoneKind
     public const ushort NoDone = 0;
 
     public const ushort OpenCursor = 0x20;
+
+    /// <summary>
+    /// The error ending a security or schema statement that sends no DONE
+    /// when it succeeds — <c>CREATE</c> / <c>ALTER</c> / <c>DROP</c> of a user,
+    /// role, application role, login or server role, <c>GRANT</c> /
+    /// <c>DENY</c> / <c>REVOKE</c>, <c>ALTER AUTHORIZATION</c>,
+    /// <c>ALTER</c> / <c>DROP SCHEMA</c> and <c>CREATE SYNONYM</c>, where
+    /// <c>CREATE SCHEMA</c>, a type's or a sequence's DDL closes it with the
+    /// batch's (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public const ushort SecurityDdlFailed = 0xAA;
     public const ushort CloseCursor = 0x2B;
     public const ushort DeallocateCursor = 0x2C;
     public const ushort DropFunction = 0xB3;

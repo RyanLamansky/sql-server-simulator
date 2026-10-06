@@ -315,6 +315,7 @@ partial class Simulation
             throw;
         }
 
+        WarnOfOversizedMaximumRow(context.Batch, table.Columns, table.Name, state: 2);
         return undo;
     }
 
@@ -1218,6 +1219,7 @@ partial class Simulation
             throw;
         }
 
+        WarnOfOversizedMaximumRow(context.Batch, table.Columns, table.Name, state: 1);
         return true;
     }
 

@@ -335,7 +335,7 @@ internal sealed partial class Selection
 
         var isBareConstantRows = left.IsBareConstantRow && right.IsBareConstantRow;
         var readsStorage = left.ReadsStorage || right.ReadsStorage;
-        return new Selection(combinedSchema, combinedNames,
+        var combined = new Selection(combinedSchema, combinedNames,
             hasOrderBy: false,
             hasTopOrOffsetOrFetch: left.HasTopOrOffsetOrFetch || right.HasTopOrOffsetOrFetch,
             (batch, outerResolver) =>
@@ -404,6 +404,26 @@ internal sealed partial class Selection
             // (captured 2026-09-26).
             ColumnWireFlags = new byte[combinedSchema.Length],
         };
+        combined.OutputKeys = ConstantBranchKeys(combined.UnionAllBranches, combinedSchema.Length);
+        return combined;
+    }
+
+    /// <summary>
+    /// <see cref="OutputKeys"/> for a <c>UNION ALL</c> of one-row constant
+    /// selects, as for the <c>VALUES</c> list it amounts to.
+    /// </summary>
+    private static int[][]? ConstantBranchKeys(Selection[]? branches, int width)
+    {
+        if (branches is null)
+            return null;
+        var tuples = new List<Expression[]>(branches.Length);
+        foreach (var branch in branches)
+        {
+            if (branch is not { IsSingleConstantRow: true, ProjectionExpressions: { } projections } || projections.Length != width)
+                return null;
+            tuples.Add(Array.ConvertAll(projections, Unwrapped));
+        }
+        return ConstantRowKeys(tuples, width, batch: null);
     }
 
     /// <summary>

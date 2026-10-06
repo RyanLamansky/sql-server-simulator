@@ -224,6 +224,13 @@ partial class Simulation
             var outerTriggerVersionEntries = connection.TriggerStatementVersionEntries;
             connection.TriggerStatementUndoLog = batch.CurrentUndoLog;
             connection.TriggerStatementVersionEntries = batch.CurrentStatementVersionEntries;
+            // The DDL the triggers fire for joins their auto-commit unit, so
+            // a body's error or ROLLBACK reverses it too.
+            if (connection.CurrentTransaction is null && statement.AutocommitDdlUndo is { } ddlUndo && batch.CurrentUndoLog is { } unit)
+            {
+                foreach (var undo in ddlUndo)
+                    unit.RecordSchemaChange(this, undo);
+            }
             try
             {
                 foreach (var (trigger, eventData, eventType) in fires)

@@ -242,7 +242,9 @@ Probed against SQL Server 2025.
 
 A call leaves the caller's `@@ROWCOUNT` as it was, whatever the body's statements counted (probed 2026-10-04 against SQL Server 2025).
 
-**Not modeled yet**: an `EXEC` naming a table-valued function, or a scalar function returning a table variable's value, raises its own errors here where real raises Msg 206 and its parse errors, and a function refused for an `OUTPUT` parameter (Msg 181) is followed on real by a Msg 178 for its `RETURN` (probed 2026-10-04 against SQL Server 2025).
+An `EXEC` naming a table-valued function, inline or not, is **Msg 2809** naming the function bare (`… because 'f' is a table valued function object.`), as it names an aggregate (probed 2026-10-06 against SQL Server 2025).
+A function refused for an `OUTPUT` parameter (Msg 181) goes on to a **Msg 178** for each valued `RETURN` in its body, which real's parser reads as a batch's once it has recovered past the refusal; an inline function's body has none.
+A valued `RETURN` outside a module reads its value before refusing it, so the value's own parse errors — Msg 102, 137, 195 — come first, while a binder error in it never does (probed 2026-10-06).
 
 ### Inlining a call as the query compiles
 
@@ -298,7 +300,8 @@ Probed against SQL Server 2025.
   A table-valued function in expression position → **Msg 4121** through the existing factory, before its arguments bind.
   Too few arguments in FROM is Msg 313 state 3, at line 12 inside a module's binding.
 - **Writes through the function**: `INSERT` / `UPDATE` / `DELETE` name an inline function as they name a view — its body's single table takes the write, the parameters bound per statement (`Simulation.TryResolveFunctionWriteTarget`); a multi-statement function there is **Msg 270** (probed 2026-10-04 against SQL Server 2025).
-  **Not modeled yet**: the joined form whose alias names the function (`DELETE f FROM dbo.f(1) f JOIN …`) raises `NotSupportedException`.
+  The joined form whose alias names the call (`DELETE f FROM dbo.f(1) f JOIN …`) writes through it the same way, a derived column refused with Msg 4406 naming the function, a multi-statement function Msg 270 (`FromSource.FunctionWriteView`, probed 2026-10-06 against SQL Server 2025).
+  **Not modeled yet**: that form over a call whose arguments read a column raises `NotSupportedException`.
 - **CROSS APPLY / OUTER APPLY**: the right side is a parenthesized derived table, a TVF, or a plain table or view, which joins with nothing to correlate (probed 2026-10-02 against SQL Server 2025; EF Core emits `OUTER APPLY [t] AS [x]` for a nested `SelectMany`).
   `ParseLateralFromSource` peeks; a missing table there is Msg 208.
 - **Catalog surface**: `sys.objects` `type='IF'` / `type_desc='SQL_INLINE_TABLE_VALUED_FUNCTION'`.
@@ -350,7 +353,7 @@ Probed against SQL Server 2025.
   Real SQL Server's probe-observed behavior is more forgiving in some cases — for shared-key collisions it returns an empty result set rather than raising.
   Stricter behavior is defensible since apps that hit it are buggy.
   Its PRIMARY KEY / UNIQUE / CHECK / DEFAULT constraints and their indexes are listed the same way, in `sys.objects`, `sys.key_constraints`, `sys.check_constraints`, `sys.indexes` and `sys.index_columns` (a heap row where no key is clustered), through `MultiStatementTableValuedFunction.CatalogShape`.
-- **Not modeled yet**: the Msg 1750 real adds after a return-table column CHECK's Msg 8141; `SPARSE` on a return-table column, which real's grammar refuses (Msg 102); an inline `INDEX` catalogued in `sys.indexes`; and `@@NESTLEVEL` in the body, which reads 0 on real (probed 2026-10-04 against SQL Server 2025).
+- A return-table column's `SPARSE` is a syntax error at it (Msg 102), as a table type's is, where a table variable takes it; an inline `INDEX` is catalogued under the function in `sys.indexes`, `sys.index_columns` and `sys.stats`, the clustered one first and the rest in reverse declaration order, as a table's are; and the body reads `@@NESTLEVEL` as a level of its own, where a view's or an inline function's body reads its caller's (probed 2026-10-06 against SQL Server 2025).
 
 ## Views
 `CREATE VIEW schema.name [(col_list)] [WITH SCHEMABINDING | ENCRYPTION | VIEW_METADATA] AS <SELECT> [WITH CHECK OPTION]`, referenced from FROM as `FROM schema.view [alias]` (or unqualified `FROM view`).
@@ -530,10 +533,10 @@ Under an `INSTEAD OF` trigger the rows are the trigger's pseudo-table rows — s
 The row lands in the base; the view's WHERE only filters reads.
 The simulator preserves this — `VisibilityCheck` gates UPDATE/DELETE *row selection* (which rows to mutate), not INSERT acceptance.
 
-**Fidelity gaps**:
-- **A derived view column read in an `UPDATE … SET` value** — `UPDATE v SET o = s2` where `s2` is `s + ''` in the view — is Msg 207 here; real reads it (probed 2026-09-27 against SQL Server 2025).
-- **WHERE referencing a derived upstream column** (a chained view's WHERE that references an expression-projected column from the level below) marks the view as not-updatable with `ViewUpdatabilityRejection.UnsupportedShape`, refused at DML.
-  Real writes through it: probed 2026-10-01 against SQL Server 2025, `UPDATE ww SET v = rn` through `SELECT k, v, rn FROM w WHERE c > 0`, `c` a `COUNT(*) OVER ()` of the view below over a partitioned view, updates every row, where the simulator raises Msg 4406.
+**Derived columns a write reads.** An `UPDATE`'s `SET` values and a write's `WHERE` read a view's derived column as the view computes it, through every level of a chain (`SingleBaseViewReader`; probed 2026-10-06 against SQL Server 2025: `UPDATE v SET o = s2` where `s2` is `s + 'x'`), an error the computation raises ending the write.
+A chained view's own `WHERE` over a column the level below derives filters the write the same way, under `WITH CHECK OPTION` too; below a windowed or row-limited level the body's run picks the rows instead, which over a partitioned view is each member's run (probed 2026-10-01 and 2026-10-06: `UPDATE ww SET v = rn` through `SELECT k, v, rn FROM w WHERE c > 0`, `c` a `COUNT(*) OVER ()`).
+
+**Not modeled yet**: that `WHERE` over a partitioned view's level deriving a column by a scalar expression is Msg 4406 here, where real filters the members' rows by it (probed 2026-10-06 against SQL Server 2025).
 
 ## A joined write through a view
 
@@ -566,7 +569,7 @@ Its rows depend on the left row, so they can't be read once up front: the walk i
 Its `WHERE` reads the left side, so the analysis reads no visibility check off it (`View.IsCorrelated`).
 
 A view, CTE or derived table whose single source is a view carrying an `INSTEAD OF` trigger for the action hands that trigger the view's rows it shows — its filter applied, the statement's `WHERE`, `SET` and `INSERT` column list naming its columns — as a write naming the triggered view would, for the joined form naming it alone and the forms with no `FROM` clause; a derived column it adds is Msg 4406 (4421 for a derived table), and nothing reaches the base table (`InsteadOfLevelView`, probed 2026-10-01 against SQL Server 2025 for `UPDATE`, `DELETE` and `INSERT`).
-Only the level directly over the triggered view is looked through.
+Further levels over that one are looked through too, every filter on the way applied and a derived column refused naming the level the statement wrote (probed 2026-10-06 against SQL Server 2025, two stored views over the triggered one and a CTE over one).
 
 ## DML through a join view
 
@@ -678,7 +681,7 @@ Naming the partitioned view itself while the cursor reads it — directly, throu
 **`BULK INSERT`** into a partitioned view or a view over one is Msg 4437 state 4 naming the partitioned view, once its members qualify; real settles it while the batch compiles when the file can be read, so an untaken branch holding it ends the batch, and a missing file is Msg 4860 first (probed 2026-10-01).
 Into a union that is no partitioned view the load meets the refusal an `INSERT` naming every column does — Msg 4406, naming the view as written.
 
-**Divergences**: real's session-ending answer to a positioned write drops the row count of the statement before it, which the simulator still sends.
+Real's session-ending answer sends nothing ahead of its Msg 596, so the DONE of the statement before it, which real holds until the next token, goes down unsent — the row count a client was owed included (probed 2026-10-06 against SQL Server 2025); the TDS endpoint takes that DONE back (`TdsSession.TakeBackDoneAheadOfKill`).
 
 **Not modeled yet**: distributed members over a linked server.
 

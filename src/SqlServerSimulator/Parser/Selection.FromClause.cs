@@ -1451,6 +1451,8 @@ internal sealed partial class Selection
                     }
                     ValidateViewIndexHints(context, resolvedView, viewHints, objectName.ToString(), objectNameLine);
                     var viewSynonym = RecordSecurableRead(context, resolvedView, objectName, viewBody);
+                    var viewPlan = Selection.ForView(resolvedView, viewColumns, systemTime: viewSystemTime);
+                    viewPlan.OutputKeys = viewBody?.OutputKeys;
                     return new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,
                         columnNames: viewColumnNames,
@@ -1459,7 +1461,7 @@ internal sealed partial class Selection
                         storageOrdinals: null,
                         lobStore: null,
                         rows: [],
-                        lateralPlan: Selection.ForView(resolvedView, viewColumns, systemTime: viewSystemTime),
+                        lateralPlan: viewPlan,
                         backingView: resolvedView,
                         viaSynonym: viewSynonym,
                         autoElementName: viewAlias ?? objectName.ToString(),
@@ -1530,7 +1532,20 @@ internal sealed partial class Selection
                             lobStore: null,
                             rows: [],
                             lateralPlan: lateralPlan,
-                            unaliasedName: tvfAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null);
+                            unaliasedName: tvfAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null)
+                        {
+                            // A joined write may name the call by its alias,
+                            // writing through it as through a view (probed
+                            // 2026-10-06 against SQL Server 2025).
+                            FunctionWriteView = function is InlineTableValuedFunction writable
+                                && context.Batch.CurrentStatement.StatementVerb is "UPDATE" or "DELETE"
+                                && Array.TrueForAll(tvfArgs, static argument => argument is null || (argument is not Expressions.TableValuedArgument && !argument.ReadsAnyColumn()))
+                                ? Simulation.FunctionDmlView(context.Batch, writable, tvfArgs, objectName)
+                                : null,
+                            UnwritableFunctionName = function is not InlineTableValuedFunction && context.Batch.CurrentStatement.StatementVerb is "UPDATE" or "DELETE"
+                                ? objectName.ToString()
+                                : null,
+                        };
                     }
                     context.RestoreCheckpoint(checkpoint);
                 }
@@ -2079,6 +2094,8 @@ internal sealed partial class Selection
             };
         }
 
+        var constructor = ForValuesConstructor(schema, columnNames, tuples);
+        constructor.OutputKeys = ConstantRowKeys(tuples, arity, context.Batch);
         return new FromSource(
             qualifier: alias,
             columnNames: columnNames,
@@ -2087,7 +2104,7 @@ internal sealed partial class Selection
             storageOrdinals: null,
             lobStore: null,
             rows: [],
-            lateralPlan: ForValuesConstructor(schema, columnNames, tuples))
+            lateralPlan: constructor)
         {
             ConstructsRows = true,
             ConstructorReadsOuterRow = tuples.Exists(static tuple => Array.Exists(tuple, static cell => cell.ReadsAnyColumn())),

@@ -103,6 +103,7 @@ partial class Simulation
         // procedure) — so this frame leaves the exception unresolved.
         var functionOwner = Ownership.EffectiveOwnerId(function.Schema.Database, function);
         var innerBatch = new BatchContext(bodyCommand, variables, udfFrame) { SuppressDiagnosticsResolution = true, CalledFunctionBody = true, OwnershipChainOwnerId = functionOwner, ModuleObjectId = function.ObjectId, CapturesQueryStore = BodyStatementsCaptured(function), ModuleSchema = function.Schema };
+        innerBatch.InheritCallerTriggerFrame(outerBatch);
         SeedTableValuedParameters(innerBatch, outerBatch, function.Parameters, tableArguments);
         connection.NestingLevel++;
         // Module WITH EXECUTE AS: push the impersonation frame around the body

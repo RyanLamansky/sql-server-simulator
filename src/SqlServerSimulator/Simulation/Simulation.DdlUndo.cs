@@ -13,13 +13,26 @@ partial class Simulation
     /// <c>CREATE TABLE</c>, view, procedure, <c>ALTER TABLE … ADD</c> or
     /// <c>CREATE INDEX</c> leaves no trace, and a rolled-back <c>DROP TABLE</c>
     /// restores the table with its rows). Outside a transaction the statement
-    /// commits as it runs, so there is nothing to log.
+    /// commits as it runs, so there is nothing to log unless a DDL trigger
+    /// may veto it (<see cref="LogsDdlUndo"/>).
     /// </summary>
     internal static void RecordDdlUndo(BatchContext batch, Action undo)
     {
         if (batch.Connection.CurrentTransaction is { } transaction)
             transaction.UndoLog.RecordSchemaChange(batch.Connection.Simulation, undo);
+        else if (LogsDdlUndo(batch))
+            (batch.CurrentStatement.AutocommitDdlUndo ??= []).Add(undo);
     }
+
+    /// <summary>
+    /// Whether a DDL change <paramref name="batch"/> makes is logged for undo:
+    /// inside a transaction, or outside one while a database or server DDL
+    /// trigger exists that could roll it back
+    /// (<see cref="Parser.StatementContext.AutocommitDdlUndo"/>).
+    /// </summary>
+    private static bool LogsDdlUndo(BatchContext batch) =>
+        batch.Connection.CurrentTransaction is not null
+        || (!batch.IsSkipping && (!batch.CurrentDatabase.DdlTriggers.IsEmptyLockFree() || batch.Connection.Simulation.ServerTriggers.All.Length != 0));
 
     internal static void RecordDdlUndo(ParserContext context, Action undo) => RecordDdlUndo(context.Batch, undo);
 
@@ -49,7 +62,7 @@ partial class Simulation
     internal static void RecordTableDdlUndo(BatchContext batch, HeapTable table)
     {
         VersionStore.NoteDefinitionChange(batch, table);
-        if (batch.Connection.CurrentTransaction is null || table.IsTableVariable)
+        if (!LogsDdlUndo(batch) || table.IsTableVariable)
             return;
         var snapshot = new HeapTableSnapshot(table, table.OwningDatabase ?? batch.CurrentDatabase);
         RecordDdlUndo(batch, snapshot.Restore);
@@ -67,7 +80,7 @@ partial class Simulation
     /// </summary>
     internal static void RecordSecurityUndo(BatchContext batch, Database database)
     {
-        if (batch.Connection.CurrentTransaction is null)
+        if (!LogsDdlUndo(batch))
             return;
         var principals = database.Principals.ToArray();
         var principalState = Array.ConvertAll(principals, entry => (entry.Value.Name, entry.Value.DefaultSchemaName, entry.Value.PasswordHash));
@@ -104,7 +117,7 @@ partial class Simulation
     /// </summary>
     internal static void RecordServerSecurityUndo(BatchContext batch)
     {
-        if (batch.Connection.CurrentTransaction is null)
+        if (!LogsDdlUndo(batch))
             return;
         var simulation = batch.Connection.Simulation;
         var logins = simulation.Logins.ToArray();

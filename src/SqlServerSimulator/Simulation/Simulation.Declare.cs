@@ -469,9 +469,10 @@ partial class Simulation
         HeapColumn[] columns;
         KeyConstraint[] keyConstraints;
         CheckConstraint[] checkConstraints;
+        int[] indexObjectIds;
         try
         {
-            _ = TryParseTableVariableColumnsAndConstraints(context, fullName, out columns, out keyConstraints, out checkConstraints, pendingIndexes);
+            _ = TryParseTableVariableColumnsAndConstraints(context, fullName, out columns, out keyConstraints, out checkConstraints, out indexObjectIds, pendingIndexes);
         }
         catch (SimulatedSqlException missingType) when (missingType.Number == 2715)
         {
@@ -481,6 +482,14 @@ partial class Simulation
         }
         if (Array.Exists(columns, static column => column.Type == SqlType.RowVersion))
             FunctionBodyShape.NoteSideEffect(context.Batch, "TIMESTAMP", FunctionBodyShape.TimestampColumnState);
+        // A table variable's oversized row is reported as the batch compiles,
+        // twice, and once more as a module body binds at CREATE — never as the
+        // DECLARE runs (probed 2026-10-06 against SQL Server 2025).
+        if (context.Batch.CreateTimeBinding && MaximumRowExceedsLimit(columns))
+        {
+            for (var i = context.Batch.CompilingForRun ? 2 : 1; i > 0; i--)
+                (context.Batch.CompileMessages ??= []).Add(SimulatedSqlException.MaximumRowSizeExceededMessage(context.Batch, fullName, state: 2));
+        }
         var internalName = context.Connection.Simulation.AllocateTableVariableInternalName();
         RenameAutoNamedConstraints(internalName, fullName, columns, keyConstraints, checkConstraints, tempNamePadding: internalName.Length);
 
@@ -496,7 +505,7 @@ partial class Simulation
         {
             InternalName = internalName,
         };
-        AddInlineIndexes(context.Batch, heapTable, fullName, pendingIndexes);
+        AddInlineIndexes(context.Batch, heapTable, fullName, pendingIndexes, indexObjectIds);
         // A re-executed DECLARE does not empty the table: real accumulates
         // across the loop's passes (probe-confirmed — three inserts in a
         // three-pass loop leave three rows). The column list is still parsed,
@@ -524,11 +533,13 @@ partial class Simulation
         out HeapColumn[] resolvedColumns,
         out KeyConstraint[] keyConstraints,
         out CheckConstraint[] checkConstraints,
+        out int[] indexObjectIds,
         List<PendingInlineIndex>? pendingIndexes = null)
     {
         resolvedColumns = [];
         keyConstraints = [];
         checkConstraints = [];
+        indexObjectIds = [];
 
         context.MoveNextRequired(); // consume TABLE
         if (context.Token is not Operator { Character: '(' })
@@ -617,7 +628,9 @@ partial class Simulation
         }
 
         resolvedColumns = [.. heapColumns!];
-        keyConstraints = ResolveKeyConstraints(fullName, heapColumns!, pendingKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
+        var (keyObjectIds, inlineIndexObjectIds) = AllocateDeclarationObjectIds(context.CurrentDatabase, pendingKeys, pendingIndexes ?? []);
+        indexObjectIds = inlineIndexObjectIds;
+        keyConstraints = ResolveKeyConstraints(fullName, heapColumns!, pendingKeys, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow, keyObjectIds);
         checkConstraints = ResolveCheckConstraints(fullName, pendingChecks, context.CurrentDatabase, context.Batch.CurrentStatement.UtcNow);
         return !context.Batch.IsSkipping;
     }

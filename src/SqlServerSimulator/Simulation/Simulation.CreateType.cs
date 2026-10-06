@@ -203,6 +203,7 @@ partial class Simulation
         };
         AddInlineIndexes(context.Batch, shape, backingName, tableType.PendingIndexes, indexObjectIds);
         tableType.CatalogShape = shape;
+        WarnOfOversizedMaximumRow(context.Batch, tableType.Columns, typeName.Leaf, state: 2);
         schema.TableTypes[typeName.Leaf] = tableType;
         RecordSlotUndo<TableType>(context, schema.TableTypes, typeName.Leaf, null);
         RecordDdlEvent(context, "CREATE_TYPE", schema.Name, typeName.Leaf, "TYPE");

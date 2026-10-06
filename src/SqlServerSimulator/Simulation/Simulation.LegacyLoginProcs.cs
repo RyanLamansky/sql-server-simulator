@@ -89,7 +89,7 @@ partial class Simulation
             .Append(QuoteText(values[1].IsNull ? "" : values[1].AsString))
             .Append(", default_database = ").Append(QuoteIdentifier(values[2].IsNull ? "master" : values[2].AsString))
             .Append(", default_language = ").Append(QuoteIdentifier(values[3].IsNull ? "us_english" : values[3].AsString)).ToString();
-        foreach (var outcome in this.ExecuteDynamicBatch(batch, statement, preDeclaredVariables: null))
+        foreach (var outcome in this.RunProcedureStatement(batch, statement))
             yield return outcome;
     }
 
@@ -108,7 +108,7 @@ partial class Simulation
         var name = RequireValidName(values[0]);
         if (!IsRegisteredLogin(batch, name))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(name), 26);
-        foreach (var outcome in this.ExecuteDynamicBatch(batch, "drop login " + QuoteIdentifier(name), preDeclaredVariables: null))
+        foreach (var outcome in this.RunProcedureStatement(batch, "drop login " + QuoteIdentifier(name)))
             yield return outcome;
     }
 
@@ -130,7 +130,7 @@ partial class Simulation
         if (!batch.Connection.Simulation.TryResolveServerPrincipalId(name, out _))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(name), 41);
         var statement = "alter login " + QuoteIdentifier(name) + " with default_database = " + QuoteIdentifier(values[1].AsString);
-        foreach (var outcome in this.ExecuteDynamicBatch(batch, statement, preDeclaredVariables: null))
+        foreach (var outcome in this.RunProcedureStatement(batch, statement))
             yield return outcome;
     }
 
@@ -149,7 +149,7 @@ partial class Simulation
         if (!batch.Connection.Simulation.TryResolveServerPrincipalId(name, out _))
             throw AtSystemProcedureLine(calledAs, SimulatedSqlException.NotAValidLogin(name), 34);
         var statement = "alter login " + QuoteIdentifier(name) + " with default_language = " + QuoteIdentifier(values[1].IsNull ? "us_english" : values[1].AsString);
-        foreach (var outcome in this.ExecuteDynamicBatch(batch, statement, preDeclaredVariables: null))
+        foreach (var outcome in this.RunProcedureStatement(batch, statement))
             yield return outcome;
     }
 
@@ -173,7 +173,7 @@ partial class Simulation
             .Append(QuoteText(values[1].IsNull ? "" : values[1].AsString));
         if (!values[0].IsNull)
             _ = statement.Append(" old_password = ").Append(QuoteText(values[0].AsString));
-        foreach (var outcome in this.ExecuteDynamicBatch(batch, statement.ToString(), preDeclaredVariables: null))
+        foreach (var outcome in this.RunProcedureStatement(batch, statement.ToString()))
             yield return outcome;
     }
 }

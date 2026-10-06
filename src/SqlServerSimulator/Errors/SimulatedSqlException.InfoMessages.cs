@@ -42,6 +42,13 @@ partial class SimulatedSqlException
     internal static SimulatedError WideIndexKeyMessage(BatchContext batch, bool clustered, int limit, string indexName, int length) =>
         batch.InfoMessage(@class: 0, state: 1, number: 1945, $"Warning! The maximum key length for a {(clustered ? "clustered" : "nonclustered")} index is {limit} bytes. The index '{indexName}' has maximum length of {length} bytes. For some combination of large values, the insert/update operation will fail.");
 
+    /// <summary>
+    /// Msg 1708: a table created, or altered, whose largest row can pass the
+    /// in-row limit; named as written.
+    /// </summary>
+    internal static SimulatedError MaximumRowSizeExceededMessage(BatchContext batch, string tableName, byte state) =>
+        batch.InfoMessage(@class: 0, state: state, number: 1708, $"Warning: The table \"{tableName}\" has been created, but its maximum row size exceeds the allowed maximum of 8060 bytes. INSERT or UPDATE to this table will fail if the resulting row exceeds the size limit.");
+
     /// <summary>Msg 4430, an index hint on a view read without <c>NOEXPAND</c>.</summary>
     internal static SimulatedError ViewIndexHintsIgnoredMessage(BatchContext batch, string viewName) =>
         batch.InfoMessage(@class: 0, state: 1, number: 4430, $"Warning: Index hints supplied for view '{viewName}' will be ignored.");
@@ -54,12 +61,22 @@ partial class SimulatedSqlException
         // column rewrite a value it can't convert, the notice reports line 1,
         // whatever line the statement was on (probed 2026-09-26 against SQL
         // Server 2025).
-        // So does any error that ended a trigger body, T-SQL or CLR, and its
-        // context connection ending the firing statement's transaction (probed
-        // 2026-10-01 and 2026-10-04), and a partitioned view's write a row
-        // fits no member of (probed 2026-10-01).
-        if (error is { Number: 1505 or 4457 } or { EndedColumnRewrite: true } or { EndedTriggerBody: true })
+        // So does any error that ended a trigger body from a statement writing
+        // rows, T-SQL or CLR, and its context connection ending the firing
+        // statement's transaction (probed 2026-10-01 and 2026-10-04), and a
+        // partitioned view's write a row fits no member of (probed
+        // 2026-10-01). From a body SELECT sending rows to the client, the
+        // notice is that statement's, in the module that ran it — the trigger, or a
+        // procedure it called (probed 2026-10-06).
+        if (error is { EndedTriggerBody: true, RaisingScopeRecorded: true, RaisedByClientSelect: true })
+        {
+            message.LineNumber = error.LineNumber;
+            message.Procedure = error.Procedure;
+        }
+        else if (error is { Number: 1505 or 4457 } or { EndedColumnRewrite: true } or { EndedTriggerBody: true })
+        {
             message.LineNumber = 1;
+        }
         return message;
     }
 
