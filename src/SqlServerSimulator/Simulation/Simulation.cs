@@ -3342,6 +3342,10 @@ public sealed partial class Simulation
             // transactional CREATE+INSERT can roll back. In
             // skip mode, ExecuteSelectInto returns SimulatedNonQuery(0)
             // without touching the heap.
+            // The statement's DONE names it as a SELECT INTO, the one a caught
+            // failure closes it with too — counting 0 (probed 2026-10-06
+            // against SQL Server 2025).
+            batch.CurrentStatement.DoneKind = StatementDoneKind.SelectInto;
             outcome = RunMutation(context, _ => ExecuteSelectInto(selection, batch));
             outcome.DoneKind = StatementDoneKind.SelectInto;
             if (!batch.IsSkipping)

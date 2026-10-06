@@ -619,6 +619,9 @@ internal abstract partial class Collation
         /// <summary>Whether this is varchar data under sort order 52 (or the Pref name's 53, which weighs alike).</summary>
         internal bool UsesSortOrder52 => ReferenceEquals(this.table, sortOrder52);
 
+        /// <summary>Whether this body orders by a Unicode table, and which: the <c>_100_</c> one or the unversioned.</summary>
+        internal bool? UsesVersion100Table => ReferenceEquals(this.table, unicode100) ? true : ReferenceEquals(this.table, unicode80) ? false : null;
+
         public override int Compare(string? x, string? y) =>
             x is null ? (y is null ? 0 : -1)
             : y is null ? 1

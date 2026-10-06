@@ -117,7 +117,7 @@ partial class Selection
             destColumns[i] = new HeapColumn(
                 colName,
                 columnType,
-                maxLength: null,
+                maxLength: IntoColumnMaxLength(columnType),
                 nullable: nullable,
                 identity: identity,
                 // A character column keeps its expression's collation, which
@@ -161,6 +161,20 @@ partial class Selection
     {
         Reference r => r,
         NamedExpression named => UnwrapDirectRef(named.Inner),
+        _ => null,
+    };
+
+    /// <summary>
+    /// The declared length a column <c>SELECT … INTO</c> creates holds for
+    /// <paramref name="type"/>, which a later write is cut to (Msg 2628) as a
+    /// declared column's is (probed 2026-10-06 against SQL Server 2025); null
+    /// for a type without one and for <c>max</c>.
+    /// </summary>
+    internal static int? IntoColumnMaxLength(SqlType type) => type switch
+    {
+        VarcharSqlType { length: > 0 } varchar => varchar.length,
+        NVarcharSqlType { length: > 0 } nvarchar => nvarchar.length,
+        VarbinarySqlType { length: > 0 } varbinary => varbinary.length,
         _ => null,
     };
 }

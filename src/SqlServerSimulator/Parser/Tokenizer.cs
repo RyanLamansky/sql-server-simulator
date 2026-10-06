@@ -76,6 +76,8 @@ static class Tokenizer
             '$' when IsDollarWord(command, index, "edge_id") => ParseDollarWord(command, ref index, "edge_id".Length),
             '$' when IsDollarWord(command, index, "from_id") => ParseDollarWord(command, ref index, "from_id".Length),
             '$' when IsDollarWord(command, index, "to_id") => ParseDollarWord(command, ref index, "to_id".Length),
+            '$' when IsDollarWord(command, index, "identity") => ParseDollarWord(command, ref index, "identity".Length),
+            '$' when IsDollarWord(command, index, "rowguid") => ParseDollarWord(command, ref index, "rowguid".Length),
             '$' or '¢' or '£' or '¥' or '฿' or (>= '₠' and <= '₱') => ParseCurrencyLiteral(command, ref index),
             // Non-ASCII BMP letters (fullwidth, accented, Greek, CJK, ...) start identifiers on real SQL Server — probe-confirmed against SQL Server 2025.
             var c when char.IsLetter(c) => ParseUnquotedStringOrReservedKeyword(command, ref index, compatibilityLevel),
@@ -419,7 +421,8 @@ static class Tokenizer
     /// <c>$</c>-words T-SQL has: <c>$action</c> (the MERGE OUTPUT pseudo-column),
     /// <c>$partition</c> (the partition-function qualifier) or one of the four
     /// graph pseudo-columns (<c>$node_id</c> / <c>$edge_id</c> / <c>$from_id</c> /
-    /// <c>$to_id</c>, see <c>GraphColumns</c>), matched without
+    /// <c>$to_id</c>, see <c>GraphColumns</c>) or <c>$identity</c> / <c>$rowguid</c>
+    /// (<see cref="HeapColumn.FindKeyPseudoColumn"/>), matched without
     /// regard to case and not followed by more identifier characters. Any
     /// other <c>$</c> starts a money literal.
     /// </summary>

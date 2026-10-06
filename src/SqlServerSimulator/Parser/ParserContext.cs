@@ -140,6 +140,13 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public bool FoldableArguments;
 
     /// <summary>
+    /// The statement a variable reference is refused in with Msg 112 while
+    /// its column definitions parse — <c>CREATE TABLE</c> or <c>ALTER
+    /// TABLE</c> — and null everywhere a variable reads.
+    /// </summary>
+    public string? VariablesRefusedIn;
+
+    /// <summary>
     /// Set by the SELECT statement's dispatch while <c>SET NO_BROWSETABLE</c>
     /// is on, and consumed by the statement's own query specification, which
     /// then takes on its browse-mode hidden columns and metadata.

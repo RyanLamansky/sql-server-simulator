@@ -235,6 +235,17 @@ internal sealed class FromSource(
     public readonly DerivedTableBinding? DerivedTable = derivedTable;
 
     /// <summary>
+    /// The ordinal of the column a bare <c>$identity</c> or <c>$rowguid</c>
+    /// reads in this source, or -1: a table's own, or one a view or CTE passes
+    /// straight through — but never a derived table's or an <c>APPLY</c>
+    /// body's (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal int KeyPseudoColumn(MultiPartName name) =>
+        this.DerivedTable is not null || (this.LateralPlan is not null && this.BackingView is null && this.Cte is null)
+            ? -1
+            : HeapColumn.FindKeyPseudoColumn(this.Columns, name, passedThrough: true);
+
+    /// <summary>
     /// The view a write through this source passes down: a stored view
     /// (<see cref="BackingView"/>), or a CTE or derived table analyzed as the
     /// unstored view real writes through it as. Null for every other source.

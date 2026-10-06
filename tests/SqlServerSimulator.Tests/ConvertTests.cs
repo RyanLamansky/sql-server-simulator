@@ -870,4 +870,17 @@ public sealed class ConvertTests
     [DataRow("cast('2024-01-15 10:30:00.0000001' as datetime2(7))", 126, "2024-01-15T10:30:00.0000001")]
     public void IsoStyles_DropAllZeroFraction(string source, int style, string expected)
         => AreEqual(expected, ExecuteScalar($"select convert(varchar(40), {source}, {style})"));
+
+    /// <summary>
+    /// Style 2 over an empty string is a zero-length value even into
+    /// <c>binary(n)</c>, where style 1's <c>'0x'</c> and whitespace pad (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void EmptyStringStyle2_IntoBinary_IsEmpty()
+    {
+        AreEqual("0x01", ExecuteScalar("select convert(varchar(10), convert(binary(3), '', 2) + 0x01, 1)"));
+        AreEqual("0x00000001", ExecuteScalar("select convert(varchar(10), convert(binary(3), '0x', 1) + 0x01, 1)"));
+        AreEqual("0x00000001", ExecuteScalar("select convert(varchar(10), convert(binary(3), '  ', 2) + 0x01, 1)"));
+    }
 }

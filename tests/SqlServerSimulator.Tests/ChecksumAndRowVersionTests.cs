@@ -121,4 +121,30 @@ public sealed class ChecksumAndRowVersionTests
     [TestMethod]
     public void BinaryChecksum_OfOnlyUnhashableTypes_RaisesMsg8184()
         => new Simulation().AssertSqlError("create table t (x xml); select binary_checksum(x) from t", 8184, "Error in binarychecksum. There are no comparable columns in the binarychecksum input.");
+
+    /// <summary>
+    /// A string a Latin1-General table compares folds its characters' primary
+    /// sort weights, so case and accents fold away whatever the name's
+    /// sensitivity, a hyphen weighs nothing and trailing spaces drop, under the
+    /// default collation's <c>nvarchar</c> and a Windows name's data of either
+    /// width; a binary collation folds the characters (probed 2026-10-06 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("N'a'", 114)]
+    [DataRow("N'A'", 114)]
+    [DataRow("N'ab'", 151912974)]
+    [DataRow("N'aB' collate Latin1_General_CS_AS", 151912974)]
+    [DataRow("'ab' collate Latin1_General_CI_AS", 151912974)]
+    [DataRow("N'a-b '", 151912974)]
+    [DataRow("N'é'", 81)]
+    [DataRow("N'abc'", 1132495864)]
+    [DataRow("N'aaaaaaaa'", -1912959494)]
+    [DataRow("N'x y'", -2115402921)]
+    [DataRow("N'a  b'", 422974071)]
+    [DataRow("N'a' + nchar(160)", 67568142)]
+    [DataRow("N'æ'", 554566158)]
+    [DataRow("N'ab' collate Latin1_General_BIN2", 1650)]
+    public void Checksum_NationalString_FoldsPrimaryWeights(string operand, int expected)
+        => AreEqual(expected, new Simulation().ExecuteScalar($"select checksum({operand})"));
 }

@@ -132,8 +132,11 @@ partial class Simulation
             graphKind = PeekGraphTableKind(context);
             if (graphKind != GraphTableKind.None)
                 heapColumns.AddRange(GraphColumns.Create(graphKind, tableName.Leaf, context.Batch.Connection.CurrentDatabase.Collation));
-            if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints))
-                return false;
+            using (ParserScope.Enter(ref context.VariablesRefusedIn, "CREATE TABLE"))
+            {
+                if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints))
+                    return false;
+            }
             // A table holds at most 1024 columns (probed 2026-10-01).
             if (heapColumns.Count > 1024)
                 throw SimulatedSqlException.TooManyColumns(heapColumns[1024]?.Name ?? pendingComputed.Find(computed => computed.Index == 1024).Name, tableName.Leaf);

@@ -539,8 +539,13 @@ partial class Simulation
         var pendingKeys = new List<(KeyConstraintKind Kind, string? Name, int[] FullOrdinals, bool? Clustered, IndexOptions Options, bool[] Descending)>();
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)>();
 
-        if (!ParseColumnList(context, fullName, isTableVariable: true, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingIndexes: pendingIndexes))
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        // Real refuses a variable here in its CREATE TABLE's words (probed
+        // 2026-10-06 against SQL Server 2025).
+        using (ParserScope.Enter(ref context.VariablesRefusedIn, "CREATE TABLE"))
+        {
+            if (!ParseColumnList(context, fullName, isTableVariable: true, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingIndexes: pendingIndexes))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
 
         context.MoveNextOptional();
 

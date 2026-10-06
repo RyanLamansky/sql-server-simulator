@@ -466,4 +466,21 @@ public sealed class SelectIntoTests
             select (select string_agg(cast(is_nullable as char(1)), ',') within group (order by column_id) from sys.columns where object_id = object_id('x'))
                 + '|' + (select string_agg(cast(is_nullable as char(1)), ',') within group (order by column_id) from sys.columns where object_id = object_id('y'))
             """));
+
+    /// <summary>
+    /// A string or binary column <c>SELECT … INTO</c> creates holds its type's
+    /// length, which a later write is cut to (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select 'ab' as a into t")]
+    [DataRow("select cast('ab' as varchar(2)) as a into t")]
+    [DataRow("select case when 1 = 1 then 'ab' else 'abcde' end as a into t")]
+    [DataRow("select 'ab' as a into t union all select 'cd'")]
+    public void SelectInto_StringColumn_EnforcesItsLength(string selectInto)
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery(selectInto);
+        _ = sim.AssertSqlError("insert t values ('abcd')", 2628);
+    }
 }

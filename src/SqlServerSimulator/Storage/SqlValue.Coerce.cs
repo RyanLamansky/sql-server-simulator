@@ -359,8 +359,15 @@ internal readonly partial struct SqlValue
                 ? FromBinary(hierarchyToBinary, this.AsHierarchyIdBytes)
                 : throw SimulatedSqlException.HierarchyIdBinaryMismatch(truncated: this.AsHierarchyIdBytes.Length > hierarchyToBinary.length);
         }
+        // The conversion reads the bytes far enough to refuse a trailing zero
+        // byte, which no OrdPath ends in; anything else waits for a method or
+        // the client to decode it (probed 2026-10-06 against SQL Server 2025).
         if (this.Type is VarbinarySqlType or BinarySqlType && target is HierarchyIdSqlType)
-            return FromHierarchyIdBytes(this.AsBytes);
+        {
+            return this.AsBytes is [.., 0]
+                ? throw SimulatedSqlException.HierarchyIdInvalidBinary()
+                : FromHierarchyIdBytes(this.AsBytes);
+        }
 
         // uniqueidentifier crossings: only string ↔ uid and varbinary ↔ uid
         // are allowed. Every other source/target pair surfaces as Msg 529.

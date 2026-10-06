@@ -159,6 +159,13 @@ public sealed partial class SimulatedSqlException : DbException
 
     private int? atAtErrorOverride;
 
+    /// <summary>This exception, with <c>@@ERROR</c> reading its last entry's number rather than its first.</summary>
+    internal SimulatedSqlException ReportingLastToAtAtError()
+    {
+        this.atAtErrorOverride = this.Errors[^1].Number;
+        return this;
+    }
+
     /// <summary>
     /// An informational message that goes out right after this error when it
     /// ends only its statement — a procedure's <c>RETURN</c> whose value

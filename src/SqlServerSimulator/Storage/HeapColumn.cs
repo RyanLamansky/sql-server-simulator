@@ -253,6 +253,32 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// </summary>
     public IdentityState? IdentitySource;
 
+    /// <summary>Whether <paramref name="name"/> is a bare <c>$identity</c> or <c>$rowguid</c>.</summary>
+    public static bool IsKeyPseudoName(MultiPartName name) =>
+        !name.LeafDelimited
+        && (name.Leaf.Equals("$identity", StringComparison.OrdinalIgnoreCase) || name.Leaf.Equals("$rowguid", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The ordinal among <paramref name="columns"/> of the column a bare
+    /// <c>$identity</c> or <c>$rowguid</c> names — the identity column, or
+    /// the <c>ROWGUIDCOL</c> — or -1; a delimited <c>[$identity]</c> is an
+    /// ordinary name. With <paramref name="passedThrough"/> a column passing an
+    /// identity straight through counts too, as a view's or a CTE's does
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    public static int FindKeyPseudoColumn(HeapColumn[] columns, MultiPartName name, bool passedThrough = false)
+    {
+        if (!IsKeyPseudoName(name))
+            return -1;
+        var identity = name.Leaf.Equals("$identity", StringComparison.OrdinalIgnoreCase);
+        for (var i = 0; i < columns.Length; i++)
+        {
+            if (identity ? columns[i].Identity is not null || (passedThrough && columns[i].IdentitySource is not null) : columns[i].IsRowGuidCol)
+                return i;
+        }
+        return -1;
+    }
+
     /// <summary>
     /// The Dynamic Data Masking function the column was declared or altered
     /// <c>MASKED WITH</c>; null when unmasked. Catalog truth

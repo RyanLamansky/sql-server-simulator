@@ -1,5 +1,6 @@
 using SqlServerSimulator.Schemas;
 using SqlServerSimulator.Storage;
+using System.Buffers.Binary;
 using System.Globalization;
 using System.Runtime.InteropServices;
 
@@ -1419,18 +1420,37 @@ internal static partial class BuiltInResources
 
     /// <summary>
     /// The SQL handle of a command's text, in real's 44-byte shape: the
-    /// ad hoc type byte 2, three zero bytes, 20 bytes of a hash of the text
-    /// and 20 zero bytes. Real hashes the batch too, so equal texts share a
-    /// handle, but its hash input isn't documented and the bytes won't match.
+    /// ad hoc type byte 2, three zero bytes, the batch's object id
+    /// (<see cref="AdHocObjectIdOf"/>, little-endian), the MD5 of the text's
+    /// UTF-16 bytes and 20 zero bytes (probed 2026-10-06 against SQL Server
+    /// 2025). The MD5 bytes match real's; the object id doesn't.
     /// </summary>
     internal static byte[] SqlHandleOf(string text)
     {
         var handle = new byte[SqlHandleLength];
         handle[0] = 2;
+        BinaryPrimitives.WriteInt32LittleEndian(handle.AsSpan(4), AdHocObjectIdOf(text));
+        // Real's own derivation, reproduced for the matching bytes rather than for security.
+#pragma warning disable CA5351
+        _ = System.Security.Cryptography.MD5.HashData(MemoryMarshal.AsBytes(text.AsSpan()), handle.AsSpan(8, 16));
+#pragma warning restore CA5351
+        return handle;
+    }
+
+    /// <summary>
+    /// The object id real gives an ad hoc batch, which <c>@@PROCID</c> reads
+    /// outside a module and its SQL handle carries: a hash of the batch text,
+    /// the same for equal texts in any database or session and below 2^30
+    /// (probed 2026-10-06 against SQL Server 2025). Real's hash function isn't
+    /// recovered, so the value here is a stand-in of the same shape — derived
+    /// from the text's SHA-256 — that matches real's in everything but its
+    /// digits.
+    /// </summary>
+    internal static int AdHocObjectIdOf(string text)
+    {
         Span<byte> hash = stackalloc byte[32];
         _ = System.Security.Cryptography.SHA256.HashData(MemoryMarshal.AsBytes(text.AsSpan()), hash);
-        hash[..20].CopyTo(handle.AsSpan(4));
-        return handle;
+        return (BinaryPrimitives.ReadInt32LittleEndian(hash) & 0x3FFFFFFF) is var id and not 0 ? id : 1;
     }
 
     /// <summary>The length of a SQL handle, below which <c>sys.dm_exec_sql_text</c> refuses one as invalid.</summary>

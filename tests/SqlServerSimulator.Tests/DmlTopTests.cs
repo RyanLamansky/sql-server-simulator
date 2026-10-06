@@ -265,4 +265,26 @@ public sealed class DmlTopTests
         AreEqual(1, rowcount.ExecuteScalar());
         AreEqual(new DateTime(2021, 6, 15), simulation.ExecuteScalar<DateTime>("select InvoiceDate from Invoices where InvoiceID = 2"));
     }
+
+    /// <summary>
+    /// <c>INSERT TOP (n) … SELECT</c> and <c>SET ROWCOUNT</c> stop reading the
+    /// source once they have their rows, so a later row's error never raises
+    /// and draws no identity value — an <c>ORDER BY</c>'d source too (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert top (2) t (v) select 10 / (k - 3) from src")]
+    [DataRow("insert top (2) t (v) select 10 / (k - 3) from src order by k")]
+    [DataRow("insert top (2) into t (v) (select 10 / (k - 3) from src)")]
+    [DataRow("set rowcount 2; insert t (v) select 10 / (k - 3) from src; set rowcount 0")]
+    public void InsertTop_StopsReadingTheSource(string insert)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table src (k int); insert src values (1), (2), (3), (4), (5)",
+            "create table t (id int identity, v int)",
+            insert,
+            "insert t (v) values (0)");
+        AreEqual("1:-5,2:-10,3:0", sim.ExecuteScalar("select string_agg(concat(id, ':', v), ',') within group (order by id) from t"));
+    }
 }

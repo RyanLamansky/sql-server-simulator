@@ -53,7 +53,7 @@ Existence checks (probe-confirmed):
 - **`DROP TYPE` while referenced by a procedure or function** → **Msg 3732** ("Cannot drop type 'X' because it is being referenced by object 'Y'.
   There may be other objects that reference this type."), naming the type as the `DROP` wrote it.
   The simulator scans every procedure and function in every schema of the current database and names the first one found (real SQL Server emits a single name even when more than one referencer exists).
-  Real's Msg 3732 ends the batch, where the simulator's runs on (probed 2026-10-04 against SQL Server 2025).
+  It behaves as under `SET XACT_ABORT ON` whatever the option, as real's does: uncaught it ends the batch and rolls back an open transaction, while a `CATCH` takes it (probed 2026-10-06 against SQL Server 2025, an alias type a column uses alike).
 
 ## `DECLARE @t MyType` binding
 

@@ -127,6 +127,14 @@ internal sealed partial class Selection
         var emitOrder = orderBy.Count == 0 ? WindowEmitOrder(sources, windows, perWindowKeys, buffered.Count) : null;
         var projectionSources = ProjectionSourceReferences(expressions);
         var projectedBuffer = new List<(SqlValue[] Projected, SqlValue[] Keys)>(buffered.Count);
+        // With nothing above the select list to hold rows back, real's plan
+        // computes it row by row past the window operators and sends each row
+        // on as it goes, so the rows ahead of a failing one reach the client —
+        // or an INSERT, which draws their identity values and the failing
+        // row's (probed 2026-10-06 against SQL Server 2025).
+        var streams = orderBy.Count == 0 && !distinct && offsetCount is null && fetchCount is null && top.Count is null && top.Percent is null;
+        if (streams)
+            NoteWindowSorts(batch, sources, windows, expressions);
         for (var position = 0; position < buffered.Count; position++)
         {
             var i = emitOrder is null ? position : emitOrder[position];
@@ -135,12 +143,27 @@ internal sealed partial class Selection
 
             currentTuple = buffered[i];
             var projected = new SqlValue[expressions.Count];
-            for (var j = 0; j < expressions.Count; j++)
-                projected[j] = expressions[j].Run(rowRuntime);
+            try
+            {
+                for (var j = 0; j < expressions.Count; j++)
+                    projected[j] = expressions[j].Run(rowRuntime);
+            }
+            catch (SimulatedSqlException projectionError) when (streams)
+            {
+                projectionError.RaisedInRowProjection = true;
+                throw;
+            }
+            if (streams)
+            {
+                yield return projected;
+                continue;
+            }
 
             var keys = orderBy.Count == 0 ? [] : ComputeOrderKeys(orderBy, projected, outputColumnNames, projectionSources, distinct, batch, resolveSource);
             projectedBuffer.Add((projected, keys));
         }
+        if (streams)
+            yield break;
 
         IEnumerable<(SqlValue[] Projected, SqlValue[] Keys)> filtered = projectedBuffer;
         if (distinct)
@@ -150,12 +173,7 @@ internal sealed partial class Selection
             NoteGroupingWorktable(batch, sources, expressions);
         }
 
-        // Each window's partitioning and ordering is a sort of its own.
-        foreach (var window in windows)
-        {
-            List<OrderBySpec> windowOrder = [.. window.PartitionBy.Select(static term => OrderBySpec.FromExpression(term, descending: false)), .. window.OrderBy];
-            NoteSortWorktable(batch, sources, windowOrder, expressions);
-        }
+        NoteWindowSorts(batch, sources, windows, expressions);
 
         var materialized = filtered.ToList();
         if (orderBy.Count > 0)
@@ -183,6 +201,16 @@ internal sealed partial class Selection
 
         foreach (var (projected, _) in windowed)
             yield return projected;
+    }
+
+    /// <summary>Notes each window's partitioning and ordering as the sort of its own it is.</summary>
+    private static void NoteWindowSorts(BatchContext batch, FromSource[] sources, List<WindowExpression> windows, List<Expression> expressions)
+    {
+        foreach (var window in windows)
+        {
+            List<OrderBySpec> windowOrder = [.. window.PartitionBy.Select(static term => OrderBySpec.FromExpression(term, descending: false)), .. window.OrderBy];
+            NoteSortWorktable(batch, sources, windowOrder, expressions);
+        }
     }
 
     /// <summary>

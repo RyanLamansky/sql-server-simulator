@@ -193,4 +193,24 @@ public sealed class ClientIdentityTests
     [DataRow("dbcc inputbuffer(@@spid) with tableresults", 2532, "One or more WITH options specified are not valid for this command.")]
     public void DbccInputBuffer_Refusals(string sql, int number, string message)
         => new Simulation().AssertSqlError(sql, number, message);
+
+    /// <summary>
+    /// An ad hoc batch's SQL handle carries, after its type byte, the batch's
+    /// object id — what <c>@@PROCID</c> reads there — and the MD5 of the
+    /// batch's UTF-16 text (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SqlHandle_CarriesTheAdHocObjectIdAndTheTextsMd5()
+    {
+        const string batch = "select r.sql_handle, @@procid from sys.dm_exec_requests r where r.session_id = @@spid";
+        using var reader = new Simulation().ExecuteReader(batch);
+        IsTrue(reader.Read());
+        var handle = (byte[])reader.GetValue(0);
+        HasCount(44, handle);
+        AreEqual(2, handle[0]);
+        AreEqual(reader.GetInt32(1), BitConverter.ToInt32(handle, 4));
+#pragma warning disable CA5351 // the bytes under test are real's own MD5
+        CollectionAssert.AreEqual(System.Security.Cryptography.MD5.HashData(System.Text.Encoding.Unicode.GetBytes(batch)), handle[8..24]);
+#pragma warning restore CA5351
+    }
 }

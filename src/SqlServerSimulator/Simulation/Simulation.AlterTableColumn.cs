@@ -42,13 +42,47 @@ partial class Simulation
             // A missing table defers the statement there (Msg 4902 is a
             // deferrable name error), so no column is checked before it.
             if (!context.Batch.TryResolveTable(tableName, out var table))
+            {
+                RejectVariableAhead(context);
                 throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
+            }
             this.Table = table;
             this.identityCount = table.IdentityOrdinal >= 0 ? 1 : 0;
             // A table whose clustered index is disabled takes no new column
             // (probed 2026-10-05 against SQL Server 2025).
             if (!context.Batch.IsSkipping && DisabledClusteredIndexName(table) is { } disabled)
                 throw SimulatedSqlException.OperationOnTableWithDisabledClusteredIndex(table.Name, disabled);
+        }
+
+        /// <summary>
+        /// Real refuses a declared variable in what the statement adds while
+        /// it parses, ahead of the missing table that defers the rest — so the
+        /// batch fails as it compiles, its earlier CREATE TABLE never running
+        /// (probed 2026-10-06 against SQL Server 2025). Leaves the cursor where
+        /// it was.
+        /// </summary>
+        private static void RejectVariableAhead(ParserContext context)
+        {
+            if (context.VariablesRefusedIn is not { } statement)
+                return;
+            var checkpoint = context.SaveCheckpoint();
+            var depth = 0;
+            while (context.Token is { } token && (depth > 0 || (token is not Operator { Character: ';' } && !IsStatementBoundary(token))))
+            {
+                switch (token)
+                {
+                    case Operator { Character: '(' }:
+                        depth++;
+                        break;
+                    case Operator { Character: ')' }:
+                        depth--;
+                        break;
+                    case AtPrefixedString variable when context.Batch.Variables.ContainsKey(variable.Value):
+                        throw SimulatedSqlException.VariablesNotAllowed(statement);
+                }
+                context.MoveNextOptional();
+            }
+            context.RestoreCheckpoint(checkpoint);
         }
 
         /// <summary>Parses one column definition, leaving the cursor on the token after it.</summary>

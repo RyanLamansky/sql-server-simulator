@@ -54,6 +54,9 @@ public sealed class CaughtWriteCountWireTests
     [DataRow("begin try insert u values (1); end try begin catch select 'c' c; end catch", "0,0,1")]
     [DataRow("set nocount on; begin try insert t values (1); end try begin catch select 'c' c; end catch", "")]
     [DataRow("insert t values (1); select 'c' c", "1")]
+    // A SELECT INTO is a write too, FROM-less or not (probed 2026-10-06).
+    [DataRow("begin try select 1 / 0 as a into #x; end try begin catch select 'c' c; end catch", "0,1")]
+    [DataRow("begin try select 1 / (id - 1) as a into #x from t; end try begin catch select 'c' c; end catch", "0,1")]
     public async Task CaughtWrite_ReportsAZeroCount(string sql, string completed)
     {
         var (counts, _) = await RunAsync(

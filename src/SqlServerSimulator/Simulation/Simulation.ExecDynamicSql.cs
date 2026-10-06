@@ -276,14 +276,19 @@ partial class Simulation
         // goes on past it (probed 2026-10-04 against SQL Server 2025).
         if (declaresParameters)
         {
+            var committed = new List<SpExecuteSqlParam>();
             try
             {
-                declaredParams = ParseSpExecuteSqlParamDefinitions(paramDefsText, batch.Connection);
+                declaredParams = ParseSpExecuteSqlParamDefinitions(paramDefsText, batch.Connection, committed);
             }
             catch (SimulatedSqlException declarationError)
             {
-                declarationError.EndedCalledBatch = true;
-                throw;
+                var reported = declarationError.Number is 102 or 156 && !sqlValue.IsNull
+                    ? this.WithStatementCompileErrors(batch, sqlValue.AsString, committed, declarationError)
+                    : declarationError;
+                reported.EndedCalledBatch = true;
+                WriteFailedStatus(batch, returnCodeVar, reported);
+                throw reported;
             }
         }
 
@@ -419,6 +424,7 @@ partial class Simulation
         catch (SimulatedSqlException bindingError)
         {
             bindingError.EndedCalledBatch = true;
+            WriteFailedStatus(batch, returnCodeVar, bindingError);
             throw;
         }
 
@@ -482,6 +488,51 @@ partial class Simulation
         if (writebackError is not null)
             throw writebackError;
         batch.CurrentStatement.SuppressErrorReset = true;
+    }
+
+    /// <summary>
+    /// An error in the declarations or the arguments bound to them is the
+    /// status <c>EXEC @rc = sp_executesql</c> returns, as one the batch raises
+    /// is (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    private static void WriteFailedStatus(BatchContext batch, string? returnCodeVar, SimulatedSqlException error)
+    {
+        if (returnCodeVar is null)
+            return;
+        var slot = batch.GetVariableSlot(returnCodeVar);
+        slot.Value = SqlValue.FromInt32(error.AtAtErrorNumber).CoerceTo(slot.DeclaredType);
+    }
+
+    /// <summary>
+    /// A syntax error in the declarations still compiles the statement, against
+    /// the parameters a comma completed before it, and reports what that
+    /// compile raises after it — so <c>N'a int'</c> is Msg 102 then Msg 137
+    /// for the statement's <c>@a</c>, while <c>N'@a int, b int'</c> declares
+    /// <c>@a</c> and <c>N'@a int +'</c> doesn't (probed 2026-10-06 against SQL
+    /// Server 2025). The statement never runs.
+    /// </summary>
+    private SimulatedSqlException WithStatementCompileErrors(BatchContext outerBatch, string sqlText, List<SpExecuteSqlParam> committed, SimulatedSqlException declarationError)
+    {
+        using var command = new SimulatedDbCommand(this, outerBatch.Connection);
+#pragma warning disable CA2100 // dynamic SQL is the application's input; it is compiled, never run
+        command.CommandText = sqlText.Length == 0 ? " " : sqlText;
+#pragma warning restore CA2100
+        var variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
+        var tableVariables = new Dictionary<string, HeapTable>(BatchContext.VariableNameComparer);
+        foreach (var parameter in committed)
+        {
+            if (parameter.TableType is { } tableType)
+                tableVariables[parameter.Name] = CloneTableValuedArgument(tableType, parameter.Name, outerBatch, supplied: null);
+            else
+                variables[parameter.Name] = new VariableSlot(parameter.Type, parameter.DeclaredMaxLength, SqlValue.Null(parameter.Type), parameter: null);
+        }
+        var statementBatch = new BatchContext(command, variables, new ProcFrame("<dynamic-sql>", isDynamicSql: true), tableVariables);
+        if (this.CompileBatch(CompileContextFor(statementBatch, command), key: null, out _) is not { } compileError)
+            return declarationError;
+        // A CATCH reads the declaration's error and @@ERROR the last.
+        var report = SimulatedSqlException.Aggregate([declarationError, compileError]).ReportingLastToAtAtError();
+        report.CatchReadsFirstEntry = true;
+        return report;
     }
 
     /// <summary>
@@ -586,7 +637,7 @@ partial class Simulation
     /// <c>@name type [OUTPUT]</c>. Returns the ordered parameter list used
     /// to seed the dynamic batch.
     /// </summary>
-    private static List<SpExecuteSqlParam> ParseSpExecuteSqlParamDefinitions(string source, SimulatedDbConnection connection)
+    private static List<SpExecuteSqlParam> ParseSpExecuteSqlParamDefinitions(string source, SimulatedDbConnection connection, List<SpExecuteSqlParam>? committed = null)
     {
         if (string.IsNullOrWhiteSpace(source))
             return [];
@@ -595,7 +646,7 @@ partial class Simulation
         // call sits (probed 2026-09-29 against SQL Server 2025).
         try
         {
-            return ParseSpExecuteSqlParamDefinitionsCore(source, connection);
+            return ParseSpExecuteSqlParamDefinitionsCore(source, connection, committed);
         }
         catch (SimulatedSqlException error)
         {
@@ -604,7 +655,7 @@ partial class Simulation
         }
     }
 
-    private static List<SpExecuteSqlParam> ParseSpExecuteSqlParamDefinitionsCore(string source, SimulatedDbConnection connection)
+    private static List<SpExecuteSqlParam> ParseSpExecuteSqlParamDefinitionsCore(string source, SimulatedDbConnection connection, List<SpExecuteSqlParam>? committed)
     {
         // Real parses the definitions as the parenthesized list it prints in
         // Msg 8178 — `(@p int)` — so a list that ends early is a syntax error
@@ -686,6 +737,7 @@ partial class Simulation
                 parameters.Add(new SpExecuteSqlParam(name.Value, SqlType.Int32, null, isOutput: false, defaultValue: null, tableType));
                 if (defContext.Token is Operator { Character: ',' })
                 {
+                    committed?.Add(parameters[^1]);
                     defContext.MoveNextRequired();
                     continue;
                 }
@@ -740,6 +792,7 @@ partial class Simulation
 
             if (defContext.Token is Operator { Character: ',' })
             {
+                committed?.Add(parameters[^1]);
                 defContext.MoveNextRequired();
                 continue;
             }

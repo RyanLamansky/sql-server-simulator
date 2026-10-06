@@ -258,8 +258,19 @@ internal sealed class Checksum : Expression
                 hash = BitOperations.RotateLeft(hash, 4) ^ (isBinary ? (uint)(sbyte)b : Cp1252CiAsChecksumWeight[b]);
             return hash;
         }
-        // An nvarchar's sort weights aren't reproduced; folding the case-folded
-        // characters keeps strings the collation calls equal hashing alike.
+        // Data a Latin1-General table compares folds its primary weights —
+        // a SQL name's varchar data excepted, which its own sort order weighs.
+        if (!isBinary
+            && collation is Collation.Latin1GeneralTableCollation { UsesVersion100Table: { } version100 }
+            && (national || !collation.Name.StartsWith("SQL_", StringComparison.OrdinalIgnoreCase))
+            && ChecksumWeights.TryFold(value.AsString, version100, out var weighed))
+        {
+            return weighed;
+        }
+        // Elsewhere the sort weights aren't reproduced; folding the case-folded
+        // characters keeps strings the collation calls equal hashing alike,
+        // and a binary collation's own fold is the characters' (probed
+        // 2026-10-06 against SQL Server 2025).
         if (!isBinary && !collation.CaseSensitive)
             text = text.ToUpperInvariant();
         foreach (var unit in text)

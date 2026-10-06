@@ -245,4 +245,30 @@ public class CreateTableTests
         var name = (string?)new Simulation().ExecuteScalar($"{sql}; select name from sys.objects where type in ('C', 'D')");
         Assert.AreEqual(prefix, name![..^8]);
     }
+
+    /// <summary>
+    /// A declared variable in a column's <c>DEFAULT</c>, <c>CHECK</c> or
+    /// computed expression is Msg 112 as the batch compiles — a table
+    /// variable's <c>DECLARE</c> in <c>CREATE TABLE</c>'s words, and an
+    /// <c>ALTER TABLE … ADD</c> in its own — while an undeclared one is still
+    /// Msg 137 (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @v int = 1; create table t (a int default @v); select 1", "CREATE TABLE")]
+    [DataRow("declare @v int = 1; create table t (a int check (a > @v))", "CREATE TABLE")]
+    [DataRow("declare @v int = 1; create table t (a int, b as a + @v)", "CREATE TABLE")]
+    [DataRow("declare @v int = 1; declare @t table (a int default @v); select 1", "CREATE TABLE")]
+    [DataRow("create table t (a int); declare @v int = 1; alter table t add constraint d default @v for a", "ALTER TABLE")]
+    [DataRow("create table t (a int); declare @v int = 1; alter table t add b int default @v", "ALTER TABLE")]
+    public void VariableInColumnDefinition_Msg112(string sql, string statement)
+    {
+        var sim = new Simulation();
+        var ex = sim.AssertSqlError(sql, 112);
+        Assert.AreEqual($"Variables are not allowed in the {statement} statement.", ex.Message);
+        Assert.AreEqual(DBNull.Value, sim.ExecuteScalar("select object_id('t')"));
+    }
+
+    [TestMethod]
+    public void UndeclaredVariableInDefault_Msg137()
+        => _ = new Simulation().AssertSqlError("create table t (a int default @x)", 137);
 }

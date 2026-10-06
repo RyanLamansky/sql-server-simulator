@@ -702,6 +702,7 @@ partial class Simulation
         var depth = openedParen ? 1 : 0;
         var lastBodyEnd = context.Token!.EndIndex;
         var afterSetOperator = false;
+        var afterOffsetRows = false;
         // A parenthesized first branch opens a level the loop below closes.
         if (context.Token is Operator { Character: '(' })
             depth++;
@@ -712,6 +713,15 @@ partial class Simulation
             // operation's next branch, not a new statement (probed 2026-09-26
             // against SQL Server 2025).
             var continuesSetOperation = afterSetOperator;
+            // So is a FETCH right after an OFFSET's ROWS: the clause's second
+            // half, where the cursor statement it otherwise starts can't stand.
+            var token = context.Token;
+            var continuesOffset = afterOffsetRows && token is ReservedKeyword { Keyword: Keyword.Fetch };
+            afterOffsetRows = token switch
+            {
+                UnquotedString { ContextualKeyword: ContextualKeyword.Row or ContextualKeyword.Rows } => true,
+                _ => false,
+            };
             afterSetOperator = context.Token switch
             {
                 ReservedKeyword { Keyword: Keyword.Union or Keyword.Except or Keyword.Intersect } => true,
@@ -729,7 +739,7 @@ partial class Simulation
                     depth--;
                     break;
                 default:
-                    if (openedParen || depth != 0 || continuesSetOperation || !IsStatementBoundary(context.Token))
+                    if (openedParen || depth != 0 || continuesSetOperation || continuesOffset || !IsStatementBoundary(context.Token))
                         break;
                     // The query a CTE prefix scopes to is the one statement
                     // keyword that continues the body instead of ending it; a
@@ -960,6 +970,10 @@ partial class Simulation
             typeResolved = false;
         }
         spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
+
+        // As a procedure parameter's (probed 2026-10-06 against SQL Server 2025).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Varying })
+            throw SimulatedSqlException.SyntaxErrorNearText("varying");
 
         Expression? defaultExpression = null;
         if (context.Token is Operator { Character: '=' })

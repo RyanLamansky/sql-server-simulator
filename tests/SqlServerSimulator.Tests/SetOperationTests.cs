@@ -820,4 +820,58 @@ public sealed class SetOperationTests
         AreEqual(state, ex.State);
         AreEqual($"The 'ALL' version of the {operation.ToUpperInvariant()} operator is not supported.", ex.Message);
     }
+
+    /// <summary>
+    /// Where a query nests — a derived table, a CTE, a subquery, an
+    /// <c>APPLY</c> body, a view or inline function body — each branch of a set
+    /// operation may carry an <c>ORDER BY</c> with a <c>TOP</c> or
+    /// <c>OFFSET</c>, which orders that branch alone, so a trailing <c>ORDER
+    /// BY … OFFSET</c> pages the last branch; a statement's own query pages the
+    /// combined rows (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select string_agg(a, ',') within group (order by a) from (select a from t union all select a from u order by a offset 1 rows fetch next 1 rows only) d", "2,5,6,7")]
+    [DataRow("with c as (select a from t union all select a from u order by a offset 1 rows fetch next 1 rows only) select string_agg(a, ',') within group (order by a) from c", "2,5,6,7")]
+    [DataRow("select string_agg(a, ',') within group (order by a) from (select top 1 a from t order by a desc union all select a from u) d", "1,2,3,7")]
+    [DataRow("select string_agg(a, ',') within group (order by a) from (select a from t union all select a from u order by a offset 1 rows fetch next 1 rows only union all select 100) d", "2,5,6,7,100")]
+    [DataRow("select string_agg(a, ',') within group (order by a) from t where a in (select top 1 a from t order by a desc union select 5)", "5,7")]
+    [DataRow("select string_agg(b, ',') within group (order by b) from (select a as b from t union all select b from w order by b offset 1 rows fetch next 1 rows only) d", "2,5,6,7")]
+    [DataRow("select string_agg(a, ',') within group (order by a) from (select a from t union all select a from u order by a offset 1 rows fetch next 1 rows only) d cross apply (select 1 z) x", "2,5,6,7")]
+    public void NestedSetOperation_BranchOrdersItself(string sql, string expected)
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int); insert t values (5), (6), (7)",
+            "create table u (a int); insert u values (3), (1), (2)",
+            "create table w (b int); insert w values (3), (1), (2)");
+        AreEqual(expected, sim.ExecuteScalar(sql));
+    }
+
+    [TestMethod]
+    public void NestedSetOperation_BranchOrdersItself_InViewAndInlineFunctionBodies()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches(
+            "create table t (a int); insert t values (5), (6), (7)",
+            "create table u (a int); insert u values (3), (1), (2)",
+            "create view v as select a from t union all select a from u order by a offset 1 rows fetch next 1 rows only",
+            "create function f() returns table as return select a from t union all select a from u order by a offset 1 rows fetch next 1 rows only",
+            "create function g() returns table as return select a from t order by a offset 1 rows fetch next 1 rows only");
+        AreEqual("2,5,6,7", sim.ExecuteScalar("select string_agg(a, ',') within group (order by a) from v"));
+        AreEqual("2,5,6,7", sim.ExecuteScalar("select string_agg(a, ',') within group (order by a) from f()"));
+        AreEqual(6, sim.ExecuteScalar("select a from g()"));
+        // The statement's own query pages the combined rows.
+        AreEqual(2, sim.ExecuteScalar("select a from t union all select a from u order by a offset 1 rows fetch next 1 rows only"));
+    }
+
+    [TestMethod]
+    public void NestedSetOperation_BranchOrderByWithoutTopOrOffset_Msg1033()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create table t (a int)", "create table u (a int)");
+        _ = sim.AssertSqlError("select * from (select a from t order by a union all select a from u) d", 1033);
+        _ = sim.AssertSqlError("select * from (select top 1 a from t union all select a from u order by a) d", 1033);
+        // A statement's own branch ORDER BY is refused at the operator as written.
+        sim.AssertSqlError("select top 1 a from t order by a UNION all select a from u", 156, "Incorrect syntax near the keyword 'UNION'.");
+    }
 }

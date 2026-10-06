@@ -480,8 +480,17 @@ partial class SimulatedSqlException
         new($"Parameter {parameterNumber} is incorrect for this DBCC statement.", 2560, 16, state);
 
     /// <summary>Mimics SQL Server error 112: a variable in a filtered index's or statistic's <c>WHERE</c>.</summary>
-    internal static SimulatedSqlException VariablesNotAllowedInCreateIndex() =>
-        new("Variables are not allowed in the CREATE INDEX statement.", 112, 15, 4);
+    internal static SimulatedSqlException VariablesNotAllowedInCreateIndex() => VariablesNotAllowed("CREATE INDEX");
+
+    /// <summary>
+    /// Mimics SQL Server error 112: a declared variable in a statement that
+    /// takes none — a column's <c>DEFAULT</c>, <c>CHECK</c> or computed
+    /// expression in <c>CREATE TABLE</c> (a table variable's <c>DECLARE</c>
+    /// included) and <c>ALTER TABLE … ADD</c> (probed 2026-10-06 against SQL
+    /// Server 2025). An undeclared one is still Msg 137.
+    /// </summary>
+    internal static SimulatedSqlException VariablesNotAllowed(string statement) =>
+        new($"Variables are not allowed in the {statement} statement.", 112, 15, 4);
 
     /// <summary>
     /// Mimics SQL Server error 10620: a filtered index's or statistic's
@@ -1118,10 +1127,14 @@ partial class SimulatedSqlException
     /// SQL Server 2025: the error names a single referencing object even
     /// when more than one exists, and the trailing "There may be other
     /// objects that reference this type." line is part of the canonical
-    /// message.
+    /// message. It behaves as under <c>SET XACT_ABORT ON</c> whatever the
+    /// option: uncaught it ends the batch and rolls back an open transaction,
+    /// while a <c>CATCH</c> still takes it (probed 2026-10-06 against SQL
+    /// Server 2025, for a table type a procedure takes and an alias type a
+    /// column uses alike).
     /// </summary>
     internal static SimulatedSqlException CannotDropTypeBecauseReferenced(string typeFullName, string referencingObject) =>
-        new($"Cannot drop type '{typeFullName}' because it is being referenced by object '{referencingObject}'. There may be other objects that reference this type.", 3732, 16, 1);
+        new($"Cannot drop type '{typeFullName}' because it is being referenced by object '{referencingObject}'. There may be other objects that reference this type.", 3732, 16, 1) { AbortsAsUnderXactAbort = true };
 
     // The extended-property procedures raise their target-resolution errors
     // (Msg 15096 / 15135 / 15217 / 15233 / severity-16 15600) from inside the

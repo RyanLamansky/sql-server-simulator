@@ -1302,6 +1302,28 @@ internal abstract class Expression : ExpressionNode
     };
 
     /// <summary>
+    /// The result type of a <c>CASE</c>, <c>IIF</c> or <c>COALESCE</c> whose
+    /// arm real settled while compiling (<paramref name="settledArm"/>, null
+    /// when none is): the arm's own type, in the unified collation, when it is
+    /// a string or binary of the unified type's kind short of <c>max</c> — so
+    /// <c>CASE WHEN 1 = 1 THEN 'ab' ELSE 'abcde' END</c> is <c>varchar(2)</c>
+    /// and <c>IIF(1 = 1, CAST('a' AS char(5)), CAST('b' AS varchar(2)))</c>
+    /// <c>char(5)</c> — and <paramref name="unified"/> otherwise: a number,
+    /// a date, an arm of the other string kind, or one meeting a <c>max</c>
+    /// sibling keeps the unification (probed 2026-10-06 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SqlType SettledArmType(Expression? settledArm, SqlType unified, BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
+    {
+        if (settledArm is null || IsUntypedNullLiteral(settledArm) || SqlType.IsMaxLength(unified))
+            return unified;
+        var armType = settledArm.GetSqlType(batch, resolveColumnType);
+        return armType.PairClass != unified.PairClass || armType.PairClass is not (TypePairClass.AnsiString or TypePairClass.UnicodeString or TypePairClass.Binary) || SqlType.IsMaxLength(armType)
+            ? unified
+            : unified.Collation is { } collation ? armType.WithCollation(collation, unified.Coercibility) : armType;
+    }
+
+    /// <summary>
     /// Joint-envelope common type across a set of value arms — the shared
     /// promotion seam for <c>CASE</c> / <c>COALESCE</c> / <c>IIF</c>. Untyped
     /// NULL arms yield to their typed siblings (all-NULL → <see cref="SqlType.Int32"/>),
@@ -1360,6 +1382,27 @@ internal abstract class Expression : ExpressionNode
     /// </summary>
     private protected static bool ArmConversionIsNullable(Expression arm, SqlType promoted, NullabilityContext context) =>
         !IsUntypedNullLiteral(arm) && !SqlType.ConversionPreservesEveryValue(context.TypeOf(arm), promoted);
+
+    /// <summary>
+    /// Whether a <c>CASE</c>, <c>IIF</c> or <c>COALESCE</c> over constants
+    /// alone, which real folds whole, carries the arm it settled on
+    /// (<paramref name="settledArm"/>) into a <c>max</c> type: real types that
+    /// folded constant nullable, so <c>CASE WHEN 1 = 1 THEN 'ab' ELSE CAST('x'
+    /// AS varchar(max)) END</c> is, where the same arms beside a NOT NULL
+    /// <c>varchar(max)</c> column aren't (probed 2026-10-06 against SQL Server
+    /// 2025).
+    /// </summary>
+    private protected static bool FoldsIntoMaxConstant(Expression? settledArm, ReadOnlySpan<Expression?> arms, SqlType promoted, NullabilityContext context)
+    {
+        if (settledArm is null || !SqlType.IsMaxLength(promoted) || SqlType.IsMaxLength(context.TypeOf(settledArm)))
+            return false;
+        foreach (var arm in arms)
+        {
+            if (arm is not null && !context.TryFold(arm, out _))
+                return false;
+        }
+        return true;
+    }
 
     /// <summary>
     /// Calls <paramref name="visit"/> with the name of every column reference in

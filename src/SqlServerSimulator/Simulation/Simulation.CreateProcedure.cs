@@ -412,6 +412,13 @@ partial class Simulation
         }
         spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
 
+        // VARYING belongs to a cursor parameter alone: straight after another
+        // type real reports it as a plain word, in its own lower case, while
+        // after a default or OUTPUT it is the keyword (probed 2026-10-06
+        // against SQL Server 2025).
+        if (context.Token is ReservedKeyword { Keyword: Keyword.Varying })
+            throw SimulatedSqlException.SyntaxErrorNearText("varying");
+
         Expression? defaultExpression = null;
         if (context.Token is Operator { Character: '=' })
         {

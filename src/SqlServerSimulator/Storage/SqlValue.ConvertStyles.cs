@@ -530,7 +530,11 @@ internal readonly partial struct SqlValue
             2 => ParseHexWithPrefix(s, requirePrefix: false, sourceWord),
             _ => throw SimulatedSqlException.StyleNotSupported(style, sourceWord, "varbinary"),
         };
-        return target is BinarySqlType bin
+        // Style 2 over an empty string is real's one unpadded binary(N): it
+        // stays zero bytes long until a column stores it, where '0x' under
+        // style 1, whitespace under style 2 and style 0 all pad (probed
+        // 2026-10-06 against SQL Server 2025).
+        return target is BinarySqlType bin && !(style == 2 && s.Length == 0)
             ? FromBinaryPadded(bin, bytes)
             : FromVarbinary(bytes);
     }

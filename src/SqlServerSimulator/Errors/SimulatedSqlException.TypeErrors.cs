@@ -966,7 +966,8 @@ partial class SimulatedSqlException
 
     /// <summary>
     /// Bytes that aren't a canonical OrdPath encoding, reported when a method
-    /// first decodes them — a CAST or a comparison reads them without complaint.
+    /// first decodes them — a CAST or a comparison reads them without
+    /// complaint unless they end in a zero byte, which the conversion refuses.
     /// Real's message ends in a space.
     /// </summary>
     internal static SimulatedSqlException HierarchyIdInvalidBinary() =>
@@ -1007,6 +1008,17 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CollateClauseRequiresString(string operandTypeName, byte state = 0) =>
         new($"Expression type {operandTypeName} is invalid for COLLATE clause.", 447, 16, state);
+
+    /// <summary>
+    /// Msg 447 state 1 for a <c>COLLATE</c> on an <c>OPENJSON … WITH</c>
+    /// column that isn't a string, which real follows with an informational
+    /// Msg 2724 state 14 naming the type (probed 2026-10-06 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException OpenJsonColumnNotCollatable(string typeName) =>
+        Aggregate(
+            [CollateClauseRequiresString(typeName, state: 1)],
+            [new SimulatedError(@class: 0, lineNumber: 0, $"Parameter or variable '{typeName}' has an invalid data type.", 2724, procedure: "", server: SimulatedDbConnection.DataSourceName, source: SourceName, state: 14)]);
 
     /// <summary>
     /// Mimics SQL Server error 448: an explicit <c>COLLATE</c> clause names

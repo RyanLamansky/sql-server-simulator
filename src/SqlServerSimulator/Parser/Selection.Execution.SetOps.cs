@@ -326,7 +326,7 @@ internal sealed partial class Selection
                 combinedDestSchema[i] = new HeapColumn(
                     leftDest[i].Name,
                     combinedSchema[i],
-                    maxLength: null,
+                    maxLength: IntoColumnMaxLength(combinedSchema[i]),
                     nullable: leftDest[i].Nullable || combinedNullability is null || combinedNullability[i],
                     identity: null,
                     spelledNumeric: combinedReportsNumeric is { } numeric && numeric[i]);

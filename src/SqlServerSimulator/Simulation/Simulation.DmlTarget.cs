@@ -496,6 +496,7 @@ partial class Simulation
         }
         return RowLocator.IsLocatorName(name) ? ReadTargetRowLocator(batch, table, row, address, name)
             : GraphColumns.FindPseudoColumn(table, name) is var pseudo and >= 0 ? row[pseudo]
+            : HeapColumn.FindKeyPseudoColumn(table.Columns, name) is var key and >= 0 ? row[key]
             : throw SimulatedSqlException.InvalidColumnName(name);
     }
 

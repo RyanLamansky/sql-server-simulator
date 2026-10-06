@@ -31,7 +31,9 @@ partial class Simulation
     /// it declares Msg 8144 (probed 2026-09-25).</item>
     /// <item>Missing required parameter (no default) fires Msg 201, and only
     /// then an unknown parameter name Msg 8145.</item>
-    /// <item>Duplicate named arg fires Msg 8143 (at parse, not here).</item>
+    /// <item>Each argument then binds in the order written: a second one
+    /// for a parameter is Msg 8143, an OUTPUT the parameter doesn't declare
+    /// Msg 8162, a value that won't convert Msg 8114 (probed 2026-10-06).</item>
     /// <item>Recursion past 32 fires Msg 217.</item>
     /// </list>
     /// <para>
@@ -92,8 +94,6 @@ partial class Simulation
         var boundValues = new SqlValue?[procedure.Parameters.Length];
         var boundOutputSlots = new VariableSlot?[procedure.Parameters.Length];
         var boundIsDefault = new bool[procedure.Parameters.Length];
-        var boundIsUntypedNull = new bool[procedure.Parameters.Length];
-        var boundIsNumericLiteral = new bool[procedure.Parameters.Length];
         var boundTableValues = new HeapTable?[procedure.Parameters.Length];
         var boundCursorArgNames = new string?[procedure.Parameters.Length];
         // A binding error reports line 0 and names the procedure as the EXEC
@@ -109,18 +109,20 @@ partial class Simulation
         if (arguments.Count > procedure.Parameters.Length)
             throw BindingError(SimulatedSqlException.TooManyArgumentsToFunction(procedure.Name));
 
+        // Each argument's parameter, -1 for a name matching none. A parameter
+        // counts as supplied for Msg 201 however many arguments name it.
+        var argumentParameters = new int[arguments.Count];
         var positionalIndex = 0;
-        string? unknownArgument = null;
-        foreach (var arg in arguments)
+        for (var a = 0; a < arguments.Count; a++)
         {
-            int paramIndex;
+            var arg = arguments[a];
+            var paramIndex = -1;
             if (arg.Name is null)
             {
                 paramIndex = positionalIndex++;
             }
             else
             {
-                paramIndex = -1;
                 for (var i = 0; i < procedure.Parameters.Length; i++)
                 {
                     if (outerBatch.CurrentDatabase.Collation.Equals(procedure.Parameters[i].Name, arg.Name))
@@ -129,20 +131,13 @@ partial class Simulation
                         break;
                     }
                 }
-                if (paramIndex < 0)
-                {
-                    // An unknown named argument is Msg 8145, but only once
-                    // every required parameter is known to be supplied — a
-                    // missing one reports Msg 201 first.
-                    unknownArgument ??= arg.Name;
-                    continue;
-                }
             }
+            argumentParameters[a] = paramIndex;
+            if (paramIndex < 0 || boundValues[paramIndex] is not null)
+                continue;
             boundValues[paramIndex] = arg.Value;
             boundOutputSlots[paramIndex] = arg.OutputSlot;
             boundIsDefault[paramIndex] = arg.IsDefault;
-            boundIsUntypedNull[paramIndex] = arg.IsUntypedNull;
-            boundIsNumericLiteral[paramIndex] = arg.IsNumericLiteral;
             boundTableValues[paramIndex] = arg.TableValue;
             boundCursorArgNames[paramIndex] = arg.CursorVariableName;
         }
@@ -197,13 +192,59 @@ partial class Simulation
                 throw BindingError(conversion);
             }
         }
+
+        // Then each argument in the order written: a second one for its
+        // parameter is Msg 8143 — unless an unknown name came first, which
+        // stops the duplicate check and leaves Msg 8145 to the end — an OUTPUT
+        // the parameter doesn't declare Msg 8162, and a value that won't
+        // assign or convert Msg 206 / 8114, so `@a = 1, @a = 'x'` is Msg 8143
+        // where `@a = 'x', @a = 1` is Msg 8114 (probed 2026-10-06 against SQL
+        // Server 2025).
+        var coercedValues = new SqlValue?[procedure.Parameters.Length];
+        var firstSpellings = new string?[procedure.Parameters.Length];
+        string? unknownArgument = null;
+        for (var a = 0; a < arguments.Count; a++)
+        {
+            var arg = arguments[a];
+            var i = argumentParameters[a];
+            if (i < 0)
+            {
+                unknownArgument ??= arg.Name;
+                continue;
+            }
+            var param = procedure.Parameters[i];
+            if (firstSpellings[i] is { } firstSpelling)
+            {
+                if (unknownArgument is not null)
+                    continue;
+                throw BindingError(SimulatedSqlException.ParameterSuppliedMultipleTimes(firstSpelling));
+            }
+            firstSpellings[i] = arg.Name ?? param.Name;
+            if (arg.OutputSlot is not null && !param.IsOutput && !param.IsCursor)
+                throw BindingError(SimulatedSqlException.ParameterNotDeclaredOutput(param.Name));
+            if (param.IsCursor || param.TableType is not null || arg.IsDefault)
+                continue;
+            // A supplied value meets the parameter's one-way assignment rule
+            // as the call runs, reported at line 0 under the procedure
+            // (probed 2026-10-06 against SQL Server 2025).
+            if (!arg.IsUntypedNull)
+            {
+                try
+                {
+                    AssignmentRules.RequireAssignable(arg.Value.Type, param.Type);
+                }
+                catch (SimulatedSqlException clash)
+                {
+                    throw BindingError(clash);
+                }
+            }
+            // A CLR procedure's conversion failure carries state 1 (probed
+            // 2026-09-28 against SQL Server 2025).
+            coercedValues[i] = BindParameterValue(arg.Value, param.Type, param.DeclaredMaxLength, attributionName, procedure.ClrEntry is null ? (byte)5 : (byte)1,
+                sourceName: arg.IsNumericLiteral ? "numeric" : null);
+        }
         if (unknownArgument is not null)
             throw BindingError(SimulatedSqlException.NotAParameterForProcedure(unknownArgument, procedure.Name));
-        for (var i = 0; i < procedure.Parameters.Length; i++)
-        {
-            if (boundOutputSlots[i] is not null && !procedure.Parameters[i].IsOutput && !procedure.Parameters[i].IsCursor)
-                throw BindingError(SimulatedSqlException.ParameterNotDeclaredOutput(procedure.Parameters[i].Name));
-        }
 
         // Seed the child batch's variable dictionary with the bound values,
         // coerced to each parameter's declared type. TVP parameters land in
@@ -225,14 +266,8 @@ partial class Simulation
                 tableVariables[param.Name] = CloneTableValuedArgument(tvpType, param.Name, outerBatch, boundTableValues[i]);
                 continue;
             }
-            // A supplied value meets the parameter's one-way assignment rule
-            // as the call runs (probe-confirmed against SQL Server 2025).
-            if (!boundIsDefault[i] && !boundIsUntypedNull[i])
-                AssignmentRules.RequireAssignable(boundValues[i]!.Value.Type, param.Type);
-            // A CLR procedure's conversion failure carries state 1 (probed
-            // 2026-09-28 against SQL Server 2025).
-            var coerced = BindParameterValue(boundValues[i]!.Value, param.Type, param.DeclaredMaxLength, attributionName, procedure.ClrEntry is null ? (byte)5 : (byte)1,
-                sourceName: boundIsNumericLiteral[i] && !boundIsDefault[i] ? "numeric" : null);
+            var coerced = coercedValues[i]
+                ?? BindParameterValue(boundValues[i]!.Value, param.Type, param.DeclaredMaxLength, attributionName, procedure.ClrEntry is null ? (byte)5 : (byte)1);
             variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, coerced, parameter: null) { SpelledNumeric = param.SpelledNumeric };
         }
 

@@ -303,13 +303,17 @@ A shape outside that grammar — an ODBC `{fn …}` escape, an xml or spatial me
 The filtered-index `sys.indexes.filter_definition` has its own, narrower renderer (see [`indexes.md`](indexes.md#filtered-index-filter_definition)).
 The text scans that read a stored definition — the determinism and precision checks behind persisted and indexed computed columns — accept both forms.
 
+## Variables in a column definition
+
+A declared variable in a column's `DEFAULT`, `CHECK` or computed expression is **Msg 112** as the batch compiles, so nothing in it runs: `Variables are not allowed in the CREATE TABLE statement.` for `CREATE TABLE` and a table variable's `DECLARE`, `… ALTER TABLE statement.` for anything `ALTER TABLE … ADD` adds — ahead of a missing table that would defer the rest — while a `SWITCH`'s partition number takes one and an undeclared variable is still Msg 137 (probed 2026-10-06 against SQL Server 2025; `ParserContext.VariablesRefusedIn`).
+A table type's `CREATE TYPE … AS TABLE` accepts one.
+
 ## Fidelity gaps
 
 - **An ODBC escape or a method call in a definition keeps its source text** rather than real's canonical rendering — see [Definition columns](#definition-columns).
 - **`KeyConstraint.IsSystemNamed` is inferred from the name prefix** — `PK__` / `UQ__` → system-named.
   Custom names matching the prefix would report `is_system_named = true` incorrectly.
   Real SQL Server tracks the flag explicitly; the simulator inherits a no-flag pre-bundle storage layout and infers rather than adding a column-mutating change.
-- **A variable in a `CREATE TABLE` column's `DEFAULT`** (`DECLARE @v int = 1; CREATE TABLE t (a int DEFAULT @v)`) is Msg 112 on real (`Variables are not allowed in the CREATE TABLE statement.`) and accepted here (probed 2026-10-03 against SQL Server 2025).
 - **Sparse column sets** (`cs xml COLUMN_SET FOR ALL_SPARSE_COLUMNS`) raise `NotSupportedException` at `CREATE TABLE`; real projects the set in `SELECT *` (`<a>5</a>` for one sparse column holding 5) and writes the sparse columns through it (probed 2026-10-03 against SQL Server 2025).
 
 ## EF Core integration

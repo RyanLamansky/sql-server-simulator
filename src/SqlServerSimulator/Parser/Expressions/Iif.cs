@@ -19,6 +19,9 @@ internal sealed class Iif : Expression
     private Expression falseValue = null!;
     private SqlType? cachedResultType;
 
+    /// <summary>The arm a condition real folds selects while compiling, else null (see <see cref="Expression.SettledArmType"/>).</summary>
+    private Expression? settledArm;
+
     public Iif(ParserContext context)
     {
         // IIF desugars to a searched CASE and shares its ten-level nesting cap
@@ -69,6 +72,10 @@ internal sealed class Iif : Expression
         // satisfies the rule.
         if (IsBareNullLiteral(this.trueValue) && IsBareNullLiteral(this.falseValue))
             throw SimulatedSqlException.AllResultsInCaseAreNull();
+
+        // An UNKNOWN condition takes the false arm, as at run time.
+        if (ConstantFolding.TryFoldPredicate(this.condition, context, out var folded))
+            this.settledArm = folded == true ? this.trueValue : this.falseValue;
     }
 
     internal override bool ParallelSafe => this.condition.ParallelSafe && this.trueValue.ParallelSafe && this.falseValue.ParallelSafe;
@@ -87,7 +94,7 @@ internal sealed class Iif : Expression
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
         this.condition.Bind(batch, resolveColumnType);
-        this.cachedResultType = PromoteValueArms([this.trueValue, this.falseValue], batch, resolveColumnType);
+        this.cachedResultType = SettledArmType(this.settledArm, PromoteValueArms([this.trueValue, this.falseValue], batch, resolveColumnType), batch, resolveColumnType);
         this.namingArm = FirstDecimalArm([this.trueValue, this.falseValue], batch, resolveColumnType);
         return this.cachedResultType;
     }
@@ -103,6 +110,8 @@ internal sealed class Iif : Expression
     internal override bool ResultIsNullable(NullabilityContext context)
     {
         var promoted = context.TypeOf(this);
+        if (FoldsIntoMaxConstant(this.settledArm, this.ValueArms, promoted, context))
+            return true;
         if (context.TryFoldCondition(this.condition, out var branchTaken))
         {
             var taken = branchTaken ? this.trueValue : this.falseValue;

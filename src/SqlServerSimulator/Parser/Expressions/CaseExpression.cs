@@ -69,6 +69,14 @@ internal sealed class CaseExpression : Expression
 
     private SqlType? cachedResultType;
 
+    /// <summary>
+    /// The arm real settled on while compiling — a THEN whose condition folds
+    /// TRUE behind conditions that fold to something else, or the ELSE once
+    /// every condition folds to something else — or null; its type can stand
+    /// for the unified one (<see cref="Expression.SettledArmType"/>).
+    /// </summary>
+    private Expression? settledArm;
+
     private CaseExpression(
         Expression? input,
         BooleanExpression[]? searchedWhens,
@@ -161,7 +169,7 @@ internal sealed class CaseExpression : Expression
         }
 
         var arms = this.elseBranch is null ? this.thens : [.. this.thens, this.elseBranch];
-        this.cachedResultType = PromoteValueArms(arms, batch, resolveColumnType);
+        this.cachedResultType = SettledArmType(this.settledArm, PromoteValueArms(arms, batch, resolveColumnType), batch, resolveColumnType);
         this.namingArm = FirstDecimalArm(arms, batch, resolveColumnType);
         return this.cachedResultType;
     }
@@ -195,6 +203,8 @@ internal sealed class CaseExpression : Expression
     internal override bool ResultIsNullable(NullabilityContext context)
     {
         var promoted = context.TypeOf(this);
+        if (FoldsIntoMaxConstant(this.settledArm, this.ValueArms, promoted, context))
+            return true;
         for (var i = 0; i < this.thens.Length; i++)
         {
             if (TryFoldWhen(context, i, out var branchTaken))
@@ -540,7 +550,10 @@ internal sealed class CaseExpression : Expression
             elseBranch,
             // Real drops the input and the compare values with the arms when it
             // can see none of them matches, and runs the ELSE alone.
-            noArmReachable: input is not null && allDecided && takenArm < 0);
+            noArmReachable: input is not null && allDecided && takenArm < 0)
+        {
+            settledArm = allDecided ? takenArm >= 0 ? thens[takenArm] : elseBranch : null,
+        };
         // Real folds the whole CASE to a constant whenever the arm it settled
         // on is one — even where an arm it dropped reads a column or an
         // aggregate, which is what makes `ORDER BY CASE 1 WHEN 1 THEN 5 ELSE

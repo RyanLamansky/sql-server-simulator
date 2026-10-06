@@ -163,7 +163,7 @@ public sealed class NameComparisonRegimeTests
     public void Regime1_ExecNamedArgs_FullwidthDuplicate_Msg8143EchoesFirstSpelling()
     {
         var sim = new Simulation();
-        sim.ExecuteBatches("create procedure dbo.regime1_fwd @a int as select @a");
+        sim.ExecuteBatches("create procedure dbo.regime1_fwd @a int, @b int = 0 as select @a");
         sim.AssertSqlError(
             "exec dbo.regime1_fwd @a=1, @ａ=2",
             8143,

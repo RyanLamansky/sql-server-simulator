@@ -221,7 +221,8 @@ The plan cache keys on the order too, as real's does.
 ### Not modeled yet
 
 - **Month names in other languages** — only the English names are recognized.
-- **`CONVERT(binary(3), '', 2)`** is an empty `0x` on real, unpadded although the type is fixed-length, and `0x000000` here (probed 2026-10-03 against SQL Server 2025).
+- **`CONVERT(binary(3), '', 2)`** is an empty `0x` on real, unpadded although the type is fixed-length — in a variable too — while `'0x'` under style 1 and whitespace under style 2 pad (probed 2026-10-06 against SQL Server 2025).
+  The conversion yields the empty value here, which an expression over it reads (`… + 0x01` is `0x01`), but a projected column or a variable stores `binary(n)` at its fixed width and pads it.
 
 ## A precision or scale past its type's range
 

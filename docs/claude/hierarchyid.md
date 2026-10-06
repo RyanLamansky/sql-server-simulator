@@ -101,4 +101,6 @@ The text stops at the repeated exception-type line, before the stack frames real
 
 `.Read` / `.Write` raise `NotSupportedException` if encountered.
 
-**Not modeled yet**: a `hierarchyid` built from bytes that aren't a valid OrdPath (`CAST(0x0000 AS hierarchyid)`) is Msg 6522 carrying 24000 on real as it reaches the client, and a value here that a client can't read (probed 2026-10-03 against SQL Server 2025).
+**Not modeled yet**: a written string converted into a `hierarchyid` column of a permanent table (`INSERT t (h) SELECT 'bad'`) fails at state 1 on real, which folds the written constant as the batch compiles, as a spatial or CLR type's `Parse` does ([`clr-assemblies.md`](clr-assemblies.md)); it is state 2 here (probed 2026-10-06 against SQL Server 2025).
+
+The conversion from bytes refuses one ending in a zero byte (`0x00`, `0x0000`, `0x5800`) with that 24000 failure — a variable, a column write, `DATALENGTH` alike — and `TRY_CAST` answers NULL; other malformed bytes (`0xFF`, `0x01`) pass the conversion and fail when a method or the client decodes them (probed 2026-10-06 against SQL Server 2025).

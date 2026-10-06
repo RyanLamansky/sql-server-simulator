@@ -27,6 +27,12 @@ internal sealed class Coalesce : Expression
 
     private SqlType? cachedResultType;
 
+    /// <summary>
+    /// The argument real settles the call on while compiling, or null (see
+    /// <see cref="SettleArgument"/> and <see cref="Expression.SettledArmType"/>).
+    /// </summary>
+    private readonly Expression? settledArm;
+
     public Coalesce(ParserContext context)
     {
         // Where each argument's aggregate registrations start, so the ones a
@@ -55,6 +61,7 @@ internal sealed class Coalesce : Expression
         if (args.TrueForAll(IsUntypedNullLiteral))
             throw SimulatedSqlException.AllCoalesceArgumentsAreNull();
         this.arguments = [.. args];
+        this.settledArm = SettleArgument(this.arguments, context);
         // A constant-NULL argument drops out of the walk; the first constant
         // non-NULL one answers for the call. A fold that raises, or an argument
         // real can't fold, stops the walk — the arguments behind it are then
@@ -75,6 +82,55 @@ internal sealed class Coalesce : Expression
             }
         }
     }
+
+    /// <summary>
+    /// The argument real settles a <c>COALESCE</c> on while compiling, in one
+    /// of two ways (probed 2026-10-06 against SQL Server 2025). A call over
+    /// constants alone folds whole, to its first non-NULL argument, so
+    /// <c>COALESCE(CAST('a' AS char(5)), CAST('b' AS varchar(10)))</c> is
+    /// <c>char(5)</c>. Otherwise each leading <c>IS NOT NULL</c> test of the
+    /// <c>CASE</c> it stands for folds only where the argument is a NULL
+    /// constant, which drops out, or one the metadata types NOT NULL — a
+    /// literal, signed, parenthesized or concatenated with another — which
+    /// settles the call: <c>COALESCE('ab', col)</c> is <c>varchar(2)</c>,
+    /// while a <c>CAST</c>, a function or arithmetic leaves the test standing
+    /// and the arguments unified. Null when nothing settles.
+    /// </summary>
+    private static Expression? SettleArgument(Expression[] arguments, ParserContext context)
+    {
+        var firstNonNull = -1;
+        for (var i = 0; i < arguments.Length; i++)
+        {
+            if (!ConstantFolding.TryFold(arguments[i], context, out var folded))
+            {
+                firstNonNull = -2;
+                break;
+            }
+            if (firstNonNull == -1 && !folded.IsNull)
+                firstNonNull = i;
+        }
+        if (firstNonNull != -2)
+            return firstNonNull >= 0 ? arguments[firstNonNull] : arguments[^1];
+
+        for (var i = 0; i < arguments.Length - 1; i++)
+        {
+            if (IsNullConstant(arguments[i]))
+                continue;
+            return IsNotNullLiteral(arguments[i], context) ? arguments[i] : null;
+        }
+        return arguments[^1];
+    }
+
+    /// <summary>A literal real's metadata types NOT NULL, as <see cref="SettleArgument"/> reads one.</summary>
+    private static bool IsNotNullLiteral(Expression argument, ParserContext context) => argument switch
+    {
+        Value value => value.IsLiteral && !value.Constant.IsNull,
+        Parenthesized parenthesized => IsNotNullLiteral(parenthesized.Wrapped, context),
+        Negate negate => IsNotNullLiteral(negate.Operand, context),
+        Add concatenation => concatenation.BothOperandsMatch(operand => IsNotNullLiteral(operand, context))
+            && ConstantFolding.TryFold(concatenation, context, out var joined) && SqlType.IsStringCategory(joined.Type),
+        _ => false,
+    };
 
     internal override bool ParallelSafe => AllParallelSafe(this.arguments);
 
@@ -97,7 +153,7 @@ internal sealed class Coalesce : Expression
     // by the shared PromoteValueArms seam.
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType)
     {
-        this.cachedResultType = PromoteValueArms(this.arguments, batch, resolveColumnType);
+        this.cachedResultType = SettledArmType(this.settledArm, PromoteValueArms(this.arguments, batch, resolveColumnType), batch, resolveColumnType);
         this.namingArm = FirstDecimalArm(this.arguments, batch, resolveColumnType);
         return this.cachedResultType;
     }
@@ -112,11 +168,13 @@ internal sealed class Coalesce : Expression
     /// NULL when every argument is, where <c>ISNULL</c> needs only one of its
     /// two (the classic ISNULL-vs-COALESCE metadata quirk:
     /// <c>COALESCE(nullable_col, 0)</c> is nullable, <c>ISNULL(nullable_col, 0)</c>
-    /// is not). Real folds each <c>IS NOT NULL</c> test whose argument is a
-    /// written constant first, which drops a constant-NULL argument out of the
-    /// walk and lets a constant non-NULL one answer for the whole call —
+    /// is not). Real folds the <c>IS NOT NULL</c> tests first, which drops a
+    /// constant-NULL argument out of the walk and lets the argument the call
+    /// settles on (<see cref="SettleArgument"/>) answer for the whole call —
     /// <c>COALESCE(NULL, 5)</c> and <c>COALESCE(5, nullable_col)</c> both
-    /// project NOT NULL (probe-confirmed against SQL Server 2025).
+    /// project NOT NULL, while <c>COALESCE(CAST(5 AS int), nullable_col)</c>
+    /// and <c>COALESCE(5 + 0, 7)</c> are nullable on the arm's own account
+    /// (probe-confirmed against SQL Server 2025).
     /// <para>Each surviving argument additionally answers for the conversion
     /// the arm unification put on it, so <c>COALESCE(&lt;decimal(9, 2) col&gt;, 0)</c>
     /// is nullable on the int literal's account alone — see
@@ -125,15 +183,14 @@ internal sealed class Coalesce : Expression
     internal override bool ResultIsNullable(NullabilityContext context)
     {
         var promoted = context.TypeOf(this);
+        if (FoldsIntoMaxConstant(this.settledArm, this.arguments, promoted, context))
+            return true;
+        if (this.settledArm is { } settled)
+            return settled.ResultIsNullable(context) || ArmConversionIsNullable(settled, promoted, context);
         for (var i = 0; i < this.arguments.Length - 1; i++)
         {
-            if (context.TryFold(this.arguments[i], out var folded))
-            {
-                if (!folded.IsNull)
-                    return ArmConversionIsNullable(this.arguments[i], promoted, context);
+            if (IsNullConstant(this.arguments[i]))
                 continue;
-            }
-
             if (this.arguments[i].ResultIsNullable(context) || ArmConversionIsNullable(this.arguments[i], promoted, context))
                 return true;
         }

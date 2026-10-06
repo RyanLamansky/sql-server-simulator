@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using SqlServerSimulator.Parser.Tokens;
 using SqlServerSimulator.Storage;
@@ -65,6 +66,18 @@ internal sealed partial class Selection
             {
                 schema[i] = withColumns[i].Type;
                 columnNames[i] = withColumns[i].Name;
+                // A name written twice is legal here: the name reads the
+                // first, and SELECT * returns both (probed 2026-10-06 against
+                // SQL Server 2025). A later one goes under a name no reference
+                // can spell, which the star expansion shows as written.
+                for (var earlier = 0; earlier < i; earlier++)
+                {
+                    if (BuiltInToken.Equals(withColumns[earlier].Name, withColumns[i].Name))
+                    {
+                        columnNames[i] = ShadowedColumnName(withColumns[i].Name, i);
+                        break;
+                    }
+                }
             }
         }
 
@@ -78,6 +91,20 @@ internal sealed partial class Selection
             ColumnWireFlags = new byte[schema.Length],
         };
     }
+
+    /// <summary>
+    /// The internal name of a column whose written name an earlier column of
+    /// the same source already took; <see cref="ShadowedColumnDisplayName"/>
+    /// recovers the written one.
+    /// </summary>
+    private static string ShadowedColumnName(string written, int ordinal) =>
+        string.Create(CultureInfo.InvariantCulture, $"{written}{ShadowedNameSeparator}{ordinal}");
+
+    private const char ShadowedNameSeparator = '\u0001';
+
+    /// <summary>The written name of a column <see cref="ShadowedColumnName"/> renamed, else null.</summary>
+    internal static string? ShadowedColumnDisplayName(string columnName) =>
+        columnName.LastIndexOf(ShadowedNameSeparator) is var at and >= 0 ? columnName[..at] : null;
 
     private static IEnumerable<byte[]> EnumerateOpenJsonRows(
         Expression jsonInput,
@@ -510,16 +537,29 @@ internal sealed partial class Selection
                 resolvedType = resolvedType.WithCollation(documentCollation, Coercibility.Implicit);
             if (context.Token is ReservedKeyword { Keyword: Keyword.Collate })
             {
+                // Real's grammar takes COLLATE after a type of at most one
+                // argument, and names a float(n) of 24 bits or fewer by the
+                // word written rather than as real (probed 2026-10-06 against
+                // SQL Server 2025).
+                if (declaredScale is not null)
+                    throw SimulatedSqlException.SyntaxErrorNear(context);
                 var collationName = Expressions.CollateExpression.ResolvePseudoCollationName(context.GetNextRequired() switch
                 {
                     UnquotedString us => us.Value,
                     Name n => n.Value,
                     _ => throw SimulatedSqlException.SyntaxErrorNear(context),
                 }, context.Batch);
-                if (!SqlType.IsStringCategory(resolvedType) || resolvedType is XmlSqlType)
-                    throw SimulatedSqlException.CollateClauseRequiresString(resolvedType.SqlServerName, state: 1);
+                // The name is judged first (probed 2026-10-06 against SQL
+                // Server 2025).
                 if (!Collation.IsRecognized(collationName))
                     throw SimulatedSqlException.InvalidCollation(collationName, state: 2);
+                if (!SqlType.IsStringCategory(resolvedType) || resolvedType is XmlSqlType)
+                {
+                    throw SimulatedSqlException.OpenJsonColumnNotCollatable(
+                        resolvedType == SqlType.Real && typeNameToken.Value.Equals("float", StringComparison.OrdinalIgnoreCase)
+                            ? "float"
+                            : resolvedType.SqlServerName);
+                }
                 resolvedType = resolvedType.WithCollation(Collation.Get(collationName), Coercibility.Implicit);
                 context.MoveNextRequired();
             }

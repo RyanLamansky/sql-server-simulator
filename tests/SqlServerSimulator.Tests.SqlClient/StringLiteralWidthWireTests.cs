@@ -88,15 +88,25 @@ public sealed class StringLiteralWidthWireTests
 
     // CASE / COALESCE / IIF / NULLIF / set ops: maximum of arm widths.
     [TestMethod]
-    [DataRow("select case when 1=1 then 'ab' else 'wxyz' end as x", 4)]
+    [DataRow("select case when @@rowcount = 0 then 'ab' else 'wxyz' end as x", 4)]
     [DataRow("select case when 1=1 then 'ab' else null end as x", 2)]
     [DataRow("select case when 1=1 then 'ab' else N'wxyz' end as x", 4)]  // national family, char-count max
-    [DataRow("select coalesce('ab', 'wxyz') as x", 4)]
-    [DataRow("select iif(1=1, 'ab', 'wxyz') as x", 4)]
+    [DataRow("select iif(@@rowcount = 0, 'ab', 'wxyz') as x", 4)]
     [DataRow("select nullif('abcd', 'x') as x", 4)]
     [DataRow("select 'ab' as x union all select 'wxyz'", 4)]
     [DataRow("select 'ab' as x union select 'wxyz'", 4)]
     public async Task Unification_TakesMaxWidth(string sql, int expected)
+        => AreEqual(expected, await ColumnSizeAsync(sql));
+
+    // An arm real settles while compiling types the result as itself, when it
+    // is of the unified type's kind (probed 2026-10-06 against SQL Server 2025).
+    [TestMethod]
+    [DataRow("select case when 1=1 then 'ab' else 'wxyz' end as x", 2)]
+    [DataRow("select case when 1=0 then 'ab' else 'wxyz' end as x", 4)]
+    [DataRow("select coalesce('ab', 'wxyz') as x", 2)]
+    [DataRow("select coalesce(null, 'ab', 'wxyz') as x", 2)]
+    [DataRow("select iif(1=1, 'ab', 'wxyz') as x", 2)]
+    public async Task ConstantCondition_TakesTheSettledArmsWidth(string sql, int expected)
         => AreEqual(expected, await ColumnSizeAsync(sql));
 
     // ISNULL fixes the result to the FIRST argument's width (unlike COALESCE).

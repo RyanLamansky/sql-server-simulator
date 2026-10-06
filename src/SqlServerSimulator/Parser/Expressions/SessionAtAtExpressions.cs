@@ -84,13 +84,15 @@ internal sealed class DbTsExpression : Expression
 /// <summary>
 /// Backs <c>@@PROCID</c>: the executing module's <c>object_id</c>
 /// (<see cref="BatchContext.ModuleObjectId"/>) as <see cref="SqlType.Int32"/>.
-/// Outside a procedure / function / trigger body the simulator returns
-/// <c>0</c> — real SQL Server returns a transient compiled-plan id which
-/// isn't meaningful to reproduce.
+/// Outside a procedure / function / trigger body it is the batch's ad hoc
+/// object id, a hash of the batch's text — <c>EXEC('…')</c>'s or
+/// <c>sp_executesql</c>'s own for a dynamic batch (see
+/// <see cref="BuiltInResources.AdHocObjectIdOf"/>).
 /// </summary>
 internal sealed class ProcIdExpression : Expression
 {
-    public override SqlValue Run(RuntimeContext runtime) => SqlValue.FromInt32(runtime.Batch.ModuleObjectId);
+    public override SqlValue Run(RuntimeContext runtime) =>
+        SqlValue.FromInt32(runtime.Batch.ModuleObjectId is var module and not 0 ? module : BuiltInResources.AdHocObjectIdOf(runtime.Batch.Parser.Command.CommandText));
 
     public override SqlType GetSqlType(BatchContext batch, Func<MultiPartName, SqlType> resolveColumnType) => SqlType.Int32;
 

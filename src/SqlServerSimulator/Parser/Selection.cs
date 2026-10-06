@@ -928,6 +928,7 @@ internal sealed partial class Selection
         var left = ParseIntersectChain(context, scope, isFirstBranch: true);
         while (context.Token is ReservedKeyword { Keyword: Keyword.Union or Keyword.Except } op)
         {
+            SettleBranchOrdering(context, scope, left, op);
             RejectSequenceDrawUnderSetOperator(context, sequenceDrawsBefore);
             SetOpKind kind;
             if (op.Keyword == Keyword.Union)
@@ -951,10 +952,51 @@ internal sealed partial class Selection
             }
 
             var right = ParseIntersectChain(context, scope, isFirstBranch: false);
+            SettleBranchOrdering(context, scope, right, setOperator: null);
             RecordSetOperationShape(context);
             left = CombineSetOps(left, right, kind, scope.NamesOutputCollation);
         }
         return left;
+    }
+
+    /// <summary>
+    /// Whether each branch of a set operation in <paramref name="scope"/> may
+    /// carry an <c>ORDER BY</c> of its own, which then orders that branch alone
+    /// — a derived table's, a CTE's, an <c>APPLY</c> body's, a subquery's, and a
+    /// view or inline function body's — so a trailing <c>ORDER BY … OFFSET …</c>
+    /// there pages the last branch rather than the combined rows: <c>(SELECT
+    /// 3 UNION ALL SELECT 2 UNION ALL SELECT 1 ORDER BY 1 OFFSET 0 ROWS FETCH
+    /// NEXT 1 ROWS ONLY) d</c> is three rows, and <c>SELECT TOP 1 k FROM u
+    /// ORDER BY k UNION SELECT 3</c> reads as two branches. A statement's own
+    /// query, an <c>INSERT</c>'s source and a cursor's query order the combined
+    /// rows (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    private static bool BranchesOrderThemselves(ParserContext context, QueryScope scope) =>
+        scope.Position is QueryPosition.Inlined or QueryPosition.Derived or QueryPosition.Subquery or QueryPosition.Exists
+        || DefinesModuleQuery(context, scope);
+
+    /// <summary>
+    /// Judges the <c>ORDER BY</c> a branch of a set operation carries, once the
+    /// branch is known to be one: where branches order themselves
+    /// (<see cref="BranchesOrderThemselves"/>) it is allowed beside a <c>TOP</c>
+    /// or <c>OFFSET</c> and Msg 1033 without one; elsewhere a set operator after
+    /// it is Msg 156 at the operator as written. <paramref name="setOperator"/>
+    /// is the operator that follows the branch, null for the last branch.
+    /// </summary>
+    private static void SettleBranchOrdering(ParserContext context, QueryScope scope, Selection branch, ReservedKeyword? setOperator)
+    {
+        if (!branch.HasOrderBy || branch.OrdersOwnRows)
+            return;
+        if (BranchesOrderThemselves(context, scope))
+        {
+            if (!branch.HasTopOrOffsetOrFetch)
+                throw SimulatedSqlException.OrderByInvalidInCte();
+            branch.OrdersOwnRows = true;
+        }
+        else if (setOperator is not null)
+        {
+            throw SimulatedSqlException.SyntaxErrorNearKeyword(setOperator);
+        }
     }
 
     /// <summary>
@@ -1003,13 +1045,16 @@ internal sealed partial class Selection
 
     private static Selection ParseIntersectChainCore(ParserContext context, QueryScope scope, bool isFirstBranch, int sequenceDrawsBefore)
     {
-        var left = ParseSetOpBranch(context, scope, allowOrderBy: isFirstBranch);
-        while (context.Token is ReservedKeyword { Keyword: Keyword.Intersect })
+        var ordersBranches = BranchesOrderThemselves(context, scope);
+        var left = ParseSetOpBranch(context, scope, allowOrderBy: isFirstBranch || ordersBranches);
+        while (context.Token is ReservedKeyword { Keyword: Keyword.Intersect } intersect)
         {
+            SettleBranchOrdering(context, scope, left, intersect);
             RejectSequenceDrawUnderSetOperator(context, sequenceDrawsBefore);
             if (context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.All })
                 throw SimulatedSqlException.SetOperatorAllNotSupported("INTERSECT", 1);
-            var right = ParseSetOpBranch(context, scope, allowOrderBy: false);
+            var right = ParseSetOpBranch(context, scope, allowOrderBy: ordersBranches);
+            SettleBranchOrdering(context, scope, right, setOperator: null);
             RecordSetOperationShape(context);
             left = CombineSetOps(left, right, SetOpKind.Intersect, scope.NamesOutputCollation);
         }
@@ -2294,6 +2339,7 @@ internal sealed partial class Selection
                         Simulation.LoadPredicateStatistics(context.Batch, sources, PredicateOperands(fromClause, joins, distinct ? expressions : null));
                     ApplyShortestPath(context, scope, sources, joins, expressions, fromClause);
                     ExpandStars(context.Batch.CurrentDatabase.Collation, expressions, fromClause.Match?.StarOrder(sources) ?? sources);
+                    NameKeyPseudoColumns(expressions, sources);
                     JoinSpec[] joinArray = [.. joins];
                     var plan = BuildSqlProjection(context.Batch, [.. sources], joinArray, expressions, fromClause, distinct, topExpression, topPercent, topWithTies, aggregates, windows, scope, ResolveAssignmentMode(expressions), intoTarget, context.ReadColumnSink);
                     // The decorrelated key plan an enclosing EXISTS / IN can
@@ -3842,6 +3888,23 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Names a select item that is a bare <c>$identity</c> or <c>$rowguid</c>
+    /// after the column it reads, as real's result does (probed 2026-10-06
+    /// against SQL Server 2025).
+    /// </summary>
+    private static void NameKeyPseudoColumns(List<Expression> expressions, List<FromSource> sources)
+    {
+        for (var i = 0; i < expressions.Count; i++)
+        {
+            if (expressions[i] is not Reference { ReferencedName: var name } reference || !HeapColumn.IsKeyPseudoName(name))
+                continue;
+            var (s, c) = FindSourceColumn([.. sources], name);
+            if (s >= 0)
+                expressions[i] = new NamedExpression(reference, sources[s].ColumnNames[c]);
+        }
+    }
+
+    /// <summary>
     /// Expands any <see cref="StarProjection"/> markers in the projection
     /// list into per-column <see cref="Reference"/> expressions, using each
     /// FROM source's <see cref="FromSource.Qualifier"/> to disambiguate
@@ -3897,9 +3960,10 @@ internal sealed partial class Selection
                 if (source.Columns[i].IsHidden)
                     continue;
                 var col = source.ColumnNames[i];
-                destination.Add(source.Qualifier is { } q
+                Expression reference = source.Qualifier is { } q
                     ? new Reference(q, col)
-                    : new Reference(col));
+                    : new Reference(col);
+                destination.Add(ShadowedColumnDisplayName(col) is { } written ? new NamedExpression(reference, written) : reference);
             }
         }
     }

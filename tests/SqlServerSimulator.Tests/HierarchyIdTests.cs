@@ -438,4 +438,26 @@ public sealed class HierarchyIdTests
     [DataRow("/", "/1.1/", "/1.2/", "/1.1.1/")]
     public void GetDescendant_BetweenSiblings_MatchesRealsGenerator(string parent, string child1, string child2, string expected)
         => AreEqual(expected, new Simulation().ExecuteScalar($"declare @h hierarchyid = '{parent}'; select @h.GetDescendant('{child1}', '{child2}').ToString()"));
+
+    /// <summary>
+    /// The conversion from bytes refuses a trailing zero byte, which no
+    /// OrdPath ends in — a variable, a column write and <c>DATALENGTH</c> alike
+    /// — where other malformed bytes wait for a method to decode them, and
+    /// <c>TRY_CAST</c> answers NULL (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("declare @h hierarchyid = 0x0000; select 1")]
+    [DataRow("select datalength(cast(0x5800 as hierarchyid))")]
+    [DataRow("create table t (h hierarchyid); insert t values (0x00)")]
+    public void Cast_TrailingZeroByte_Raises24000(string sql)
+        => Contains("24000", AssertSqlError(sql, 6522).Message);
+
+    [TestMethod]
+    public void Cast_OtherMalformedBytes_WaitForAMethod()
+    {
+        AreEqual(1, ExecuteScalar("declare @h hierarchyid = 0xFF; select 1"));
+        Contains("24000", AssertSqlError("select cast(0xFF as hierarchyid).ToString()", 6522).Message);
+        AreEqual(DBNull.Value, ExecuteScalar("select try_cast(0x5800 as hierarchyid)"));
+        AreEqual("/1/", ExecuteScalar("select cast(0x58 as hierarchyid).ToString()"));
+    }
 }

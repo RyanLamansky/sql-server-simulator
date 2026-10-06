@@ -74,9 +74,22 @@ public sealed class AtAtKeywordExpansionTests
         AreEqual(1, sim.ExecuteScalar("exec dbo.p"));
     }
 
+    /// <summary>
+    /// Outside a module <c>@@PROCID</c> is the batch's ad hoc object id: a
+    /// nonzero hash of the batch text below 2^30, the same for equal texts, and
+    /// a dynamic batch's own (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
     [TestMethod]
-    public void AtAt_ProcId_ReturnsZeroOutsideProc()
-        => AreEqual(0, new Simulation().ExecuteScalar("select @@procid"));
+    public void AtAt_ProcId_IsTheBatchTextsAdHocIdOutsideProc()
+    {
+        var sim = new Simulation();
+        var adHoc = (int)sim.ExecuteScalar("select @@procid")!;
+        IsTrue(adHoc is > 0 and < 1 << 30, $"{adHoc}");
+        AreEqual(adHoc, sim.ExecuteScalar("select @@procid"));
+        AreEqual(adHoc, sim.ExecuteScalar("exec ('select @@procid')"));
+        AreNotEqual(adHoc, sim.ExecuteScalar("select  @@procid"));
+        AreEqual(DBNull.Value, sim.ExecuteScalar("select object_name(@@procid)"));
+    }
 
     [TestMethod]
     public void AtAt_ProcId_ReturnsProcObjectIdInProc()

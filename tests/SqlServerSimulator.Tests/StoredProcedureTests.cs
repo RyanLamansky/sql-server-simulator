@@ -192,8 +192,75 @@ public sealed class StoredProcedureTests
     public void Exec_Duplicate_Named_Arg_Raises_Msg8143()
     {
         using var connection = Open();
+        _ = connection.CreateCommand("create procedure dbo.p @a int, @b int = 0 as select @a").ExecuteNonQuery();
+        var ex = AssertSqlError(connection, "exec dbo.p @a = 1, @a = 2", 8143);
+        AreEqual(0, ex.LineNumber);
+        AreEqual("dbo.p", ex.Procedure);
+        // A positional argument binds the parameter a later name repeats.
+        _ = AssertSqlError(connection, "exec dbo.p 1, @a = 2", 8143);
+    }
+
+    /// <summary>
+    /// Real counts the arguments before it looks at their names, so a repeated
+    /// name to a one-parameter procedure is a surplus argument (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Exec_Duplicate_Named_Arg_Past_The_Parameter_Count_Raises_Msg8144()
+    {
+        using var connection = Open();
         _ = connection.CreateCommand("create procedure dbo.p @a int as select @a").ExecuteNonQuery();
-        _ = AssertSqlError(connection, "exec dbo.p @a = 1, @a = 2", 8143);
+        var ex = AssertSqlError(connection, "exec dbo.p @a = 1, @a = 2", 8144);
+        AreEqual(0, ex.LineNumber);
+        _ = connection.CreateCommand("create procedure dbo.q as select 1").ExecuteNonQuery();
+        _ = AssertSqlError(connection, "exec dbo.q @a = 1, @a = 2", 8146);
+        _ = AssertSqlError(connection, "exec dbo.nosuch @a = 1, @a = 2", 2812);
+        // An untaken branch never binds the call.
+        AreEqual(5, connection.CreateCommand("if 1 = 0 exec dbo.p @a = 1, @a = 2; select 5").ExecuteScalar());
+    }
+
+    /// <summary>
+    /// After the count and Msg 201, each argument binds in the order written:
+    /// a repeated name, an OUTPUT the parameter doesn't declare and a value
+    /// that won't convert are reported as the walk meets them, while an
+    /// unknown name waits for the end and stops the repeated-name check
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec dbo.p @b = 1, @b = 2", 201)]
+    [DataRow("exec dbo.p @a = 1, @a = 'x'", 8143)]
+    [DataRow("exec dbo.p @a = 'x', @a = 1", 8114)]
+    [DataRow("exec dbo.p @a = 1, @z = 2, @z = 3", 8145)]
+    [DataRow("exec dbo.p @z = 1, @a = 'x'", 8114)]
+    [DataRow("exec dbo.p @z = 1, @a = 1, @a = 2", 8145)]
+    [DataRow("exec dbo.p @a = 1, @a = 2, @z = 1", 8143)]
+    [DataRow("declare @v int = 1; exec dbo.p @a = @v output, @b = 'x'", 8162)]
+    [DataRow("declare @v int = 1; exec dbo.p @a = 'x', @b = @v output", 8114)]
+    [DataRow("declare @v int = 1; exec dbo.p @z = 1, @a = @v output", 8162)]
+    [DataRow("declare @d date = '2020-01-01'; exec dbo.p @a = 1, @b = @d, @b = 2", 206)]
+    public void Exec_Argument_Errors_Follow_The_Written_Order(string call, int number)
+    {
+        using var connection = Open();
+        _ = connection.CreateCommand("create procedure dbo.p @a int, @b int = 0, @c int = 0 as select @a").ExecuteNonQuery();
+        var ex = AssertSqlError(connection, call, number);
+        AreEqual(0, ex.LineNumber, call);
+        AreEqual("dbo.p", ex.Procedure, call);
+    }
+
+    /// <summary>
+    /// <c>EXEC</c> of a scalar function finds a one-part name and reports a
+    /// repeated name under the function (probed 2026-10-06 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    public void Exec_Scalar_Function_Duplicate_Named_Arg_Raises_Msg8143()
+    {
+        var sim = new Simulation();
+        sim.ExecuteBatches("create function f (@a int, @b int = 0) returns int as begin return @a + @b end");
+        AreEqual(3, sim.ExecuteScalar("declare @r int; exec @r = f @a = 1, @b = 2; select @r"));
+        var ex = sim.AssertSqlError("declare @r int; exec @r = f @a = 1, @a = 2; select @r", 8143);
+        AreEqual(0, ex.LineNumber);
+        AreEqual("f", ex.Procedure);
     }
 
     [TestMethod]
@@ -1167,5 +1234,62 @@ public sealed class StoredProcedureTests
         _ = sim.AssertSqlError("exec sp_executesql N'select @x', N'@x int, @x int', 1, 2", 134);
         AreEqual("The parameter '@x' has been declared as NOT NULL. NOT NULL parameters are only supported with natively compiled modules, except for inline table-valued functions.",
             sim.AssertSqlError("exec sp_executesql N'select @x', N'@x int not null', 1", 11555).Errors[0].Message);
+    }
+
+    /// <summary>
+    /// <c>VARYING</c> straight after a scalar parameter's type is Msg 102 near
+    /// the word in lower case, a procedure's and a function's alike, while
+    /// after a default it is the keyword (probed 2026-10-06 against SQL Server
+    /// 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("create procedure p @a int VaRyInG output as select 1", "Incorrect syntax near 'varying'.")]
+    [DataRow("create function dbo.f (@a int varying) returns int as begin return 1 end", "Incorrect syntax near 'varying'.")]
+    [DataRow("create procedure p @a int = 1 VARYING output as select 1", "Incorrect syntax near the keyword 'VARYING'.")]
+    public void Varying_On_A_Scalar_Parameter(string sql, string message)
+        => new Simulation().AssertSqlError(sql, sql.Contains("= 1 VARYING", StringComparison.Ordinal) ? 156 : 102, message);
+
+    /// <summary>
+    /// A syntax error in <c>sp_executesql</c>'s declarations still compiles the
+    /// statement against the parameters a comma completed before it, so its
+    /// errors follow — the first one is what a <c>CATCH</c> reads and the last
+    /// what <c>@@ERROR</c> and the return status do (probed 2026-10-06 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SpExecuteSql_DeclarationSyntaxError_CompilesTheStatement()
+    {
+        var sim = new Simulation();
+        var ex = sim.AssertSqlError("exec sp_executesql N'select @a', N'a int', 1", 102);
+        CollectionAssert.AreEqual(new[] { 102, 137 }, TestHelpers.Numbers(ex));
+        ex = sim.AssertSqlError("exec sp_executesql N'select @a, @b', N'@a int, b int', 1, 2", 102);
+        CollectionAssert.AreEqual(new[] { 102, 137 }, TestHelpers.Numbers(ex));
+        Contains("@b", ex.Errors[1].Message);
+        ex = sim.AssertSqlError("exec sp_executesql N'select @a', N'@a int +', 1", 102);
+        Contains("@a", ex.Errors[1].Message);
+        ex = sim.AssertSqlError("exec sp_executesql N'select 1', N'a int'", 102);
+        AreEqual(1, ex.Errors.Count);
+        AreEqual("102|1", sim.ExecuteScalar(
+            "begin try exec sp_executesql N'select @a', N'a int', 1 end try begin catch select cast(error_number() as varchar(10)) + '|' + cast(error_line() as varchar(10)) end catch"));
+    }
+
+    /// <summary>
+    /// A declaration or argument error is the status <c>EXEC @rc =
+    /// sp_executesql</c> returns (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void SpExecuteSql_DeclarationAndBindingErrors_AreTheReturnStatus()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateOpenConnection();
+        _ = connection.CreateCommand("create table #s (n int identity, r int, e int)").ExecuteNonQuery();
+        _ = Throws<SimulatedSqlException>(() => connection.CreateCommand("""
+            declare @r int = 5;
+            exec @r = sp_executesql N'select 1', N'@a int, @a int'; insert #s (r, e) select @r, @@error;
+            exec @r = sp_executesql N'select 1', N'@a int, @b int', 1; insert #s (r, e) select @r, @@error;
+            exec @r = sp_executesql N'select @a', N'a int', 1; insert #s (r, e) select @r, @@error
+            """).ExecuteNonQuery());
+        AreEqual("134/134,8178/8178,137/137", connection.CreateCommand(
+            "select string_agg(concat(r, '/', e), ',') within group (order by n) from #s").ExecuteScalar());
     }
 }

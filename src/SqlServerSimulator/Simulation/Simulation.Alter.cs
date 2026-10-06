@@ -1851,8 +1851,13 @@ partial class Simulation
                     throw SimulatedSqlException.SyntaxErrorNear(context);
                 return TryParseAlterTableSetSystemVersioning(context, tableName);
             case ReservedKeyword { Keyword: Keyword.Add }:
-                // ADD defaults to validate; only explicit WITH NOCHECK skips.
-                return TryParseAlterTableAddConstraint(context, tableName, withNoCheck: withCheckExplicit == false);
+                {
+                    // ADD defaults to validate; only explicit WITH NOCHECK skips.
+                    // A variable in what it adds is Msg 112, where a SWITCH's
+                    // partition number takes one (probed 2026-10-06).
+                    using var refused = ParserScope.Enter(ref context.VariablesRefusedIn, "ALTER TABLE");
+                    return TryParseAlterTableAddConstraint(context, tableName, withNoCheck: withCheckExplicit == false);
+                }
             case ReservedKeyword { Keyword: Keyword.Drop }:
                 if (withCheckExplicit.HasValue)
                     throw SimulatedSqlException.SyntaxErrorNear(context);

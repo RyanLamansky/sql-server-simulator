@@ -459,9 +459,9 @@ partial class Simulation
             RowSecurity.NoteWrite(context.Batch, destinationTable);
             sourceRows = context.Token switch
             {
-                ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable),
+                ReservedKeyword { Keyword: Keyword.Select } => ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, rowLimit: SourceRowLimit(top, context.Batch)),
                 ReservedKeyword { Keyword: Keyword.Exec or Keyword.Execute } => ExecuteExecSource(context, destinationColumns, out endedBody),
-                Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable),
+                Operator { Character: '(' } => ExecuteParenthesizedSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, SourceRowLimit(top, context.Batch)),
                 _ => throw SimulatedSqlException.SyntaxErrorNear(context),
             };
         }
@@ -1454,7 +1454,8 @@ partial class Simulation
         HeapColumn[] destinationColumns,
         bool hasExplicitColumnList,
         HeapColumn? identityColumn = null,
-        HeapTable? destinationTable = null)
+        HeapTable? destinationTable = null,
+        int? rowLimit = null)
     {
         // Only the parentheses wrapping the whole source are the source's own:
         // in `(SELECT 1) UNION ALL (SELECT 2)` they open the first branch.
@@ -1468,7 +1469,7 @@ partial class Simulation
         // closing `)` as its terminator rather than as a stray token, and what
         // refuses the source query's own ORDER BY / FOR clause (Msg 156) while
         // anything nested inside it keeps the ordinary rules.
-        var rows = ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, depth > 0 ? QueryPosition.ParenthesizedInsertSource : QueryPosition.InsertSource);
+        var rows = ExecuteSelectSource(context, destinationColumns, hasExplicitColumnList, identityColumn, destinationTable, depth > 0 ? QueryPosition.ParenthesizedInsertSource : QueryPosition.InsertSource, rowLimit);
 
         while (depth > 0)
         {
@@ -1495,7 +1496,8 @@ partial class Simulation
         bool hasExplicitColumnList,
         HeapColumn? identityColumn = null,
         HeapTable? destinationTable = null,
-        QueryPosition position = QueryPosition.InsertSource)
+        QueryPosition position = QueryPosition.InsertSource,
+        int? rowLimit = null)
     {
         var selection = Selection.Parse(context, new QueryScope(position, null));
 
@@ -1551,8 +1553,14 @@ partial class Simulation
 
         // A projected statement-wide value meets its target column as the plan
         // starts, so one too long for it raises Msg 2628 though no row
-        // qualifies (probed 2026-09-26 against SQL Server 2025).
-        if (destinationTable is not null && (selection.StartsConstants || context.Batch.CurrentStatement.FoldsConstantsAtCompile()) && selection.ProjectionExpressions is { } projections)
+        // qualifies (probed 2026-09-26 against SQL Server 2025). A FROM-less
+        // row converts there only when nothing can filter it out: a WHERE
+        // that doesn't fold TRUE, a HAVING or TOP (0) leaves the conversion to
+        // the row, so `SELECT 'toolong' WHERE 1 = 0` writes nothing and raises
+        // nothing (probed 2026-10-06).
+        if (destinationTable is not null
+            && (selection.StartsConstants || (context.Batch.CurrentStatement.FoldsConstantsAtCompile() && selection.IsBareConstantRow))
+            && selection.ProjectionExpressions is { } projections)
         {
             var startupValues = new List<(HeapColumn Column, Expression Value)>();
             for (var i = 0; i < expectedColumnCount; i++)
@@ -1578,7 +1586,7 @@ partial class Simulation
         var rows = new List<SqlValue[]>();
         try
         {
-            return ReadSelectSourceRows(context, selection, destinationColumns, rows);
+            return ReadSelectSourceRows(context, selection, destinationColumns, rows, rowLimit);
         }
         catch (SimulatedSqlException sourceError) when (destinationTable is not null)
         {
@@ -1588,16 +1596,36 @@ partial class Simulation
     }
 
     /// <summary>
-    /// Runs an <c>INSERT</c>'s source query into <paramref name="rows"/>, which
-    /// holds what it produced if it fails partway.
+    /// How many rows an <c>INSERT</c>'s source query is read for: a
+    /// <c>TOP (n)</c>'s count, or a <c>SET ROWCOUNT</c>'s when lower, after
+    /// which real's plan stops reading, so a later row's error never raises
+    /// (probed 2026-10-06 against SQL Server 2025). Null for no limit, a
+    /// <c>PERCENT</c> one included, which needs every row counted.
     /// </summary>
-    private static List<SqlValue[]> ReadSelectSourceRows(ParserContext context, Selection selection, HeapColumn[] destinationColumns, List<SqlValue[]> rows)
+    private static int? SourceRowLimit(Selection.DmlTopLimit? top, BatchContext batch)
+    {
+        if (batch.IsSkipping)
+            return null;
+        var cap = top is { Percent: false } limit ? Selection.ResolveDmlTopCap(limit, int.MaxValue, batch) : int.MaxValue;
+        if (batch.Connection.RowCountLimit is > 0 and var rowCountLimit && rowCountLimit < cap)
+            cap = (int)rowCountLimit;
+        return cap == int.MaxValue ? null : cap;
+    }
+
+    /// <summary>
+    /// Runs an <c>INSERT</c>'s source query into <paramref name="rows"/>, which
+    /// holds what it produced if it fails partway, reading at most
+    /// <paramref name="rowLimit"/> rows (<see cref="SourceRowLimit"/>).
+    /// </summary>
+    private static List<SqlValue[]> ReadSelectSourceRows(ParserContext context, Selection selection, HeapColumn[] destinationColumns, List<SqlValue[]> rows, int? rowLimit)
     {
         var expectedColumnCount = destinationColumns.Length;
         var resultSet = selection.Execute(context.Batch);
         // A principal without UNMASK writes what it would read (probed
         // 2026-09-27 against SQL Server 2025).
         var masking = DataMasking.Applying(context.Batch, selection.ColumnMasks);
+        if (rowLimit == 0)
+            return rows;
         foreach (var rowBytes in resultSet.RowBytes)
         {
             var row = RowDecoder.DecodeRow(resultSet.Schema, rowBytes);
@@ -1611,6 +1639,10 @@ partial class Simulation
                     row[i] = SqlValue.NameVariantBase(row[i], SqlValue.FromVariant(row[i]), resultSet.ColumnReportsNumeric is { } numeric && numeric[i]);
             }
             rows.Add(row);
+            // Stopping before the next row is pulled keeps its projection
+            // from running.
+            if (rows.Count == rowLimit)
+                break;
         }
         return rows;
     }

@@ -401,4 +401,38 @@ public sealed class OpenJsonTests
         => AreEqual("Latin1_General_BIN2", new Simulation().ExecuteBatchesScalar(
             "create view v as select [key], [value] from openjson('[1,2]')",
             "select collation_name from sys.columns where object_id = object_id('v') and name = 'key'"));
+
+    /// <summary>
+    /// A name written twice in <c>WITH</c> is legal: the name reads the first
+    /// column and <c>SELECT *</c> returns both (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void With_RepeatedColumnName_StarReturnsBoth()
+    {
+        using var reader = new Simulation().ExecuteReader("""select * from openjson('[{"id":1,"x":2}]') with (id int, id int '$.x')""");
+        AreEqual(2, reader.FieldCount);
+        AreEqual("id", reader.GetName(1));
+        IsTrue(reader.Read());
+        AreEqual(1, reader.GetInt32(0));
+        AreEqual(2, reader.GetInt32(1));
+        AreEqual(1, ExecuteScalar("""select id from openjson('[{"id":1,"x":2}]') with (id int, id int '$.x')"""));
+    }
+
+    /// <summary>
+    /// A <c>COLLATE</c> on a non-string column is Msg 447 followed by the
+    /// informational Msg 2724 naming the type as written, an unknown collation
+    /// is judged first, and a two-argument type takes no <c>COLLATE</c> at all
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void With_CollateOnNonStringColumn()
+    {
+        var ex = AssertSqlError("select * from openjson('[1]') with (id float(10) collate Latin1_General_CI_AS)", 447);
+        AreEqual("Expression type float is invalid for COLLATE clause.", ex.Errors[0].Message);
+        AreEqual(2724, ex.Errors[1].Number);
+        AreEqual("Parameter or variable 'float' has an invalid data type.", ex.Errors[1].Message);
+        _ = AssertSqlError("select * from openjson('[1]') with (id int collate Nope_CI_AS)", 448);
+        _ = AssertSqlError("select * from openjson('[1]') with (id decimal(10, 2) collate Latin1_General_CI_AS)", 156);
+    }
 }

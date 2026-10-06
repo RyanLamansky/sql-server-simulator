@@ -116,8 +116,8 @@ Probed 2026-10-01 and 2026-10-03 against SQL Server 2025:
 
 - **Msg 8153 from a quantified comparison.** `id > ANY (SELECT k …)` and `id < ANY (…)` over a subquery holding a NULL send the NULL-elimination warning on real, which runs them as an aggregate over the subquery — over a three-row outer table, though not over a one-row one; `= ANY`, `> ALL`, `0 > ANY` and `IN` don't, so which shapes warn follows real's rewrite rather than a rule the simulator models.
   **Settled — don't re-pitch:** real itself doesn't guarantee the warning — it rides an optimizer rewrite that the outer table's size turns on and off.
-- **Not modeled yet: `TOP … ORDER BY` ahead of a `UNION` in an `IN` subquery.** `WHERE g IN (SELECT TOP 1 k FROM u ORDER BY k UNION SELECT 3)` answers on real and is Msg 156 here.
 
 Set ops (`UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT`) are legal in every subquery context (via `Selection.Parse` → `ParseQueryExpression`), so EF Core 7+'s TPC shape (UNION ALL in a derived table) ships end-to-end.
+A branch's own `TOP … ORDER BY` ahead of a set operator — `WHERE g IN (SELECT TOP 1 k FROM u ORDER BY k UNION SELECT 3)` — orders that branch alone, as in every nested query (see [`query.md`](query.md#pagination-offset--fetch)).
 
 Set-op semantics themselves (dedup rules, NULL-equality in set-op matching, precedence, ORDER BY placement) are covered in [`query.md`](query.md).

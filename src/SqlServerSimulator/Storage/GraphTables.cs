@@ -113,7 +113,7 @@ internal static class GraphColumns
 
     /// <summary>
     /// Rewrites every pseudo-column reference under <paramref name="root"/>
-    /// (<c>inserted.$node_id</c>) to name the internal column it reads, for the
+    /// (<c>inserted.$node_id</c>, <c>inserted.$identity</c>) to name the column it reads, for the
     /// resolvers that match a single table's columns by name — an OUTPUT
     /// clause's.
     /// </summary>
@@ -121,7 +121,8 @@ internal static class GraphColumns
         root.Walk((node, _) =>
         {
             if (node is Reference { ReferencedName: var name } reference && !name.LeafDelimited && name.Leaf.StartsWith('$')
-                && Array.Find(columns, column => IsPseudoColumnFor(column.Name, name.Leaf)) is { } column)
+                && (Array.Find(columns, column => IsPseudoColumnFor(column.Name, name.Leaf))
+                    ?? (HeapColumn.FindKeyPseudoColumn(columns, name) is var key and >= 0 ? columns[key] : null)) is { } column)
             {
                 reference.ReferencedName = name.ImmediateQualifier is { } qualifier
                     ? new Parser.MultiPartName(qualifier).WithAddedPart(column.Name)

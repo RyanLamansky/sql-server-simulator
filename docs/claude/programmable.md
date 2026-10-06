@@ -715,14 +715,15 @@ Probed against SQL Server 2025.
 
 **Error matrix at EXEC**:
 - The argument count is judged first: any argument to a procedure declaring no parameters is **Msg 8146** state 2, and more arguments than parameters **Msg 8144** (`"Procedure or function X has too many arguments specified."`), named ones included (probed 2026-09-25 against SQL Server 2025).
-- **Msg 201** (`"Procedure or function 'X' expects parameter '@Y', which was not supplied."`) for a missing required parameter (no default), state 4, and only then **Msg 8145** for a named argument matching no parameter.
-- **Msg 8143** (`"Parameter '@X' was supplied multiple times."`) for duplicate named args.
-  **Not modeled yet**: real counts the arguments first, so a repeated named argument to a one-parameter procedure (`EXEC p @a = 1, @a = 2`) is Msg 8144 there, at line 0 under the procedure, where the list's parse raises Msg 8143 here (probed 2026-10-03 against SQL Server 2025).
+- **Msg 201** (`"Procedure or function 'X' expects parameter '@Y', which was not supplied."`) for a missing required parameter (no default), state 4, judged over every name the call supplies however often.
+- Then each argument binds in the order written, at line 0 under the procedure: a second argument for a parameter — named, or naming one a positional argument took — is **Msg 8143** (`"Parameter '@X' was supplied multiple times."`, the first spelling), an `OUTPUT` the parameter doesn't declare **Msg 8162**, a value that won't assign or convert **Msg 206** / **8114**; an unknown name stops the repeated-name check and is **Msg 8145** once the walk ends.
+  So a repeated name to a one-parameter procedure is the count's Msg 8144, `@a = 1, @a = 'x'` is Msg 8143 where `@a = 'x', @a = 1` is Msg 8114, and `@z = 1, @a = 1, @a = 2` is Msg 8145 (probed 2026-10-06 against SQL Server 2025).
+  `EXEC @r = f …` of a scalar function finds a one-part name as a procedure call does and reports a repeated name the same way, under the function.
 - **Msg 119** (mixing named-then-positional) — verbatim wording probe-confirmed; its parameter number counts `sp_executesql`'s statement and declaration arguments.
 - `sp_executesql` refuses a declaration naming a parameter twice (**Msg 134**) or declaring one `NOT NULL` (**Msg 11555**) (probed 2026-10-04 against SQL Server 2025).
-- **Not modeled yet**: an `sp_executesql` declaration missing its `@` (`N'a int'`) is Msg 102 on both, which real follows with a Msg 137 for the statement's `@a` (probed 2026-10-03 against SQL Server 2025).
+- A syntax error in `sp_executesql`'s declarations (`N'a int'`, `N'@a int +'`) still compiles the statement, against the parameters a comma completed before the error, so its Msg 137 for `@a` follows the Msg 102; the statement never runs, a `CATCH` reads the Msg 102 and `@@ERROR` and `EXEC @rc =`'s status the last error — a declaration or argument error is the status in general (probed 2026-10-06 against SQL Server 2025).
 - **Msg 8114** state 5 for an argument that won't convert names a written number with a decimal point or past `int`'s range as `numeric`, the type real gives the literal (probed 2026-10-04 against SQL Server 2025).
-- **Not modeled yet**: `@a int VARYING OUTPUT` on a scalar parameter is Msg 102 near `varying` on real and Msg 156 near the keyword here; and `@@PROCID` in an ad hoc batch reads a nonzero id that changes per batch on real and 0 here (probed 2026-10-03 against SQL Server 2025).
+- `VARYING` straight after a scalar parameter's type — a procedure's or a function's — is Msg 102 near `'varying'` in lower case; after a default it is Msg 156 at the keyword (probed 2026-10-06 against SQL Server 2025).
 - **Msg 8162** state 2, at line 0 under the procedure, for a variable passed `OUTPUT` to a parameter not declared `OUTPUT`, and the procedure doesn't run; **Msg 179** for a constant passed `OUTPUT`, as the batch compiles — for `sp_executesql`'s arguments too (probed 2026-10-02).
 
 **OUTPUT parameters**:
@@ -759,7 +760,9 @@ Output parameter values populate AFTER reader close — probe-confirmed: real SQ
 **Recursion**: each proc call increments `SimulatedDbConnection.NestingLevel`; entering a body at the cap raises Msg 217 (verbatim same wording as scalar UDFs / views), which acts as under `XACT_ABORT`: uncaught it ends the batch and rolls the transaction back, caught it dooms it (probed 2026-10-02).
 `@@NESTLEVEL` reads the counter as int; an `EXEC ('…')` batch is one level below its caller and an `sp_executesql` one two, the procedure counting as one (probed 2026-10-02).
 
-**`@@PROCID`**: the `object_id` of the procedure, scalar or multi-statement function, or trigger whose body is running (`BatchContext.ModuleObjectId`), else `0` — so `OBJECT_NAME(@@PROCID)` names each of the four and reads NULL in an inline function, whose body runs inside its caller's statement (probed 2026-09-28 against SQL Server 2025).
+**`@@PROCID`**: the `object_id` of the procedure, scalar or multi-statement function, or trigger whose body is running (`BatchContext.ModuleObjectId`) — so `OBJECT_NAME(@@PROCID)` names each of the four and reads NULL in an inline function, whose body runs inside its caller's statement (probed 2026-09-28 against SQL Server 2025).
+Outside a module it is the batch's ad hoc object id, the one its `sql_handle` carries: a hash of the batch text below 2^30, equal for equal texts in any database, a dynamic batch's its own text's (probed 2026-10-06).
+**Divergence**: real's hash function isn't recovered, so the value is a stand-in of the same shape whose digits differ (`BuiltInResources.AdHocObjectIdOf`).
 Used by tooling that introspects the calling proc from inside its own body (e.g. logging procs that record their own `OBJECT_NAME(@@procid)`).
 
 **A procedure ending in `RETURN`** leaves its caller's `@@ROWCOUNT` at what the `RETURN` counted: one row when it carries a status (`RETURN 0`, `RETURN @x`, `RETURN (SELECT …)`), none when bare, and the last statement's count when the body runs off its end (probed 2026-09-28 against SQL Server 2025).

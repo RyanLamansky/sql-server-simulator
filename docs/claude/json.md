@@ -76,12 +76,15 @@ Specific mappings:
   The exceptions are the two strings that aren't a rendered *value*: `REGEXP_MATCHES`' `substring_matches` column and the property name `JSON_MODIFY` takes from its path's own text, both of which leave `/` literal (all probe-confirmed).
 - **JSON text** — embedded **raw** (not re-quoted).
   Over text, `JSON_QUERY`, `JSON_MODIFY`, the builders, their aggregates and a `FOR JSON` with its array wrapper return `nvarchar` carrying a mark (`NVarcharSqlType.jsonText`), and the mark travels with the type: through a derived table, a view, a CTE, a scalar subquery, `ISNULL` / `NULLIF` (the check's type), `COALESCE` and `CASE` (the unified type), and a set operation's bounded column — so `COALESCE(<nvarchar column>, JSON_QUERY(…))` embeds the column's value raw too, as real does (probed 2026-10-02 against SQL Server 2025).
+  An arm real settles while compiling takes its own type instead, so `COALESCE(N'[0]', JSON_QUERY(…))` and `IIF(1 = 1, N'x', JSON_QUERY(…))` embed quoted and `CASE WHEN 1 = 1 THEN JSON_QUERY(…) ELSE N'x' END` raw (probed 2026-10-06; see [`query.md`](query.md#boolean--set-ops--projection--case)).
   It is lost by `CAST` / `CONVERT`, an operator, a MAX set-operation column (two `JSON_ARRAY` arms `UNION ALL`ed embed quoted), a stored column (`SELECT INTO`), a variable, and `FOR JSON … WITHOUT_ARRAY_WRAPPER`, whose document is a plain string.
   Other strings — including `'{"x":1}'` literals — go through the quote-and-escape path.
 
 `OPENJSON(json [, doc_path]) [WITH (col TYPE [path] [AS JSON], …)]` — rowset-returning, structurally a new FromSource kind.
 The default schema is `key nvarchar(4000)` NOT NULL in `Latin1_General_BIN2` — so it compares and sorts binary, and a longer name is cut to 4000 characters — `value nvarchar(max)` in the document's collation and `type tinyint` NOT NULL, and no OPENJSON column is updatable (probed 2026-09-28 and 2026-10-02 against SQL Server 2025).
 A document of any other type is read as the `nvarchar` it converts to (`OPENJSON(1)` is Msg 13609 at `'1'`, a binary its bytes as UTF-16), and a NULL document path — a literal while binding, a variable when it runs — is Msg 8116 State 9 naming `OPENJSON`.
+A `WITH` list may name a column twice (`WITH (id int, id int)`): the name reads the first, and `SELECT *` returns both, the later one held under a name no reference spells (`Selection.ShadowedColumnName`).
+A `COLLATE` on a non-string `WITH` column is Msg 447 state 1 followed by the informational Msg 2724 state 14 naming the type as written (`float(10)` is `float`), an unknown collation name is judged first (Msg 448), and a type written with two arguments takes no `COLLATE` (Msg 156) (all probed 2026-10-06 against SQL Server 2025).
 Without WITH: default schema `(key nvarchar, value nvarchar, type int)` — type codes 0=null/1=string/2=number/3=bool/4=array/5=object, unfolding the root one row per array element / object property.
 With WITH: column paths are root-relative — an **array root yields one row per element** (paths relative to the element), an **object root yields a single row** (paths relative to the root).
 Each column extracts via `$.<col-name>` (default) or explicit `'$path'`; primitive collections use `'$'`.
@@ -253,12 +256,6 @@ The related strict-mode errors carry State bytes of their own: `JSON_VALUE`'s **
 ### Divergences
 
 A statement that fails partway surfaces as the error alone: real streams the rows a truncated `OPENJSON` got through ahead of the error token, while the simulator's failed statement carries no rows (see [`data-reader.md`](data-reader.md)).
-
-Not modeled yet (probed 2026-10-02, re-checked 2026-10-03 against SQL Server 2025):
-
-- **`OPENJSON … WITH` naming a column twice** (`WITH (id int, id int)`) returns both under `SELECT *` on real; here the star expands by name and the second is Msg 209.
-- **A `COLLATE` on a non-string `OPENJSON … WITH` column** is Msg 447 on both, which real follows with the informational Msg 2724 state 14 (`Parameter or variable 'int' has an invalid data type.`), not sent here.
-- **A constant-folded `COALESCE` / `CASE` / `IIF` over JSON text** — `COALESCE(N'[0]', JSON_QUERY(…))`, `IIF(1 = 1, N'x', JSON_QUERY(…))` — embeds quoted in a JSON builder on real, which types the arm it takes, and raw here, where the unified type keeps the JSON text mark: the JSON face of the written-constant typing note in [`query.md`](query.md#boolean--set-ops--projection--case).
 
 ## `FOR JSON` result serialization
 

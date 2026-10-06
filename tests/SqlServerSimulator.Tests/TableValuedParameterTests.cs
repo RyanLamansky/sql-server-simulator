@@ -924,4 +924,23 @@ public sealed class TableValuedParameterTests
             "create function f (@t tt readonly) returns table as return select a from @t");
         sim.AssertSqlError("drop type tt", 3732, "Cannot drop type 'tt' because it is being referenced by object 'f'. There may be other objects that reference this type.");
     }
+
+    /// <summary>
+    /// Msg 3732 ends the batch and rolls back an open transaction, as under
+    /// <c>SET XACT_ABORT ON</c>, while a <c>CATCH</c> still takes it (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void DropType_StillReferenced_EndsTheBatch()
+    {
+        var sim = new Simulation();
+        using var connection = sim.CreateOpenConnection();
+        foreach (var batch in new[] { "create type tt as table (a int)", "create procedure p @t tt readonly as select 1" })
+            _ = connection.CreateCommand(batch).ExecuteNonQuery();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand("begin tran; drop type tt; select 'after'").ExecuteScalar());
+        AreEqual(3732, ex.Number);
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+        AreEqual("caught 3732|tail", connection.CreateCommand(
+            "declare @r varchar(20); begin try drop type tt; set @r = 'after' end try begin catch set @r = 'caught ' + cast(error_number() as varchar(10)) end catch; select @r + '|tail'").ExecuteScalar());
+    }
 }

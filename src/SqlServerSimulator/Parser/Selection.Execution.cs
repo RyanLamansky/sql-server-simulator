@@ -58,7 +58,7 @@ internal sealed partial class Selection
                 // name is a graph pseudo-column the source carries.
                 return !name.LeafDelimited && name.Leaf.StartsWith('$') && GraphColumns.FindPseudoColumn(sources[s].ColumnNames, name.Leaf) is var pseudo and >= 0
                     ? (s, pseudo)
-                    : (-1, -1);
+                    : sources[s].KeyPseudoColumn(name) is var key and >= 0 ? (s, key) : (-1, -1);
             }
             // No source's qualifier matches the prefix → outer fallthrough.
             return (-1, -1);
@@ -86,7 +86,8 @@ internal sealed partial class Selection
         {
             for (var s = 0; s < sources.Length; s++)
             {
-                if (GraphColumns.FindPseudoColumn(sources[s].ColumnNames, name.Leaf) is var pseudo and >= 0)
+                if ((GraphColumns.FindPseudoColumn(sources[s].ColumnNames, name.Leaf) is var pseudo and >= 0)
+                    || (pseudo = sources[s].KeyPseudoColumn(name)) >= 0)
                 {
                     if (matches++ == 0)
                         (foundSource, foundColumn) = (s, pseudo);
@@ -897,7 +898,7 @@ internal sealed partial class Selection
                 if (collation.Equals(table.Columns[k].Name, name.Leaf))
                     return ColumnTypeWithMaxLength(table.Columns[k]);
             }
-            return GraphColumns.FindPseudoColumn(table, name) is var pseudo and >= 0
+            return (GraphColumns.FindPseudoColumn(table, name) is var pseudo and >= 0) || (pseudo = HeapColumn.FindKeyPseudoColumn(table.Columns, name)) >= 0
                 ? ColumnTypeWithMaxLength(table.Columns[pseudo])
                 : throw SimulatedSqlException.InvalidColumnName(name);
         };

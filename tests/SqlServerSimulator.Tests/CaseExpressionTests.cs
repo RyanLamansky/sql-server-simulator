@@ -261,4 +261,54 @@ public sealed class CaseExpressionTests
         => new Simulation().AssertSqlError(
             "select case when 1=1 then case when 1=1 then null else null end else null end",
             8133);
+
+    /// <summary>
+    /// A condition real settles while compiling types a string or binary
+    /// result as the arm it takes, in the unified collation, where an arm of
+    /// the other string kind, a <c>max</c> sibling or a number keeps the
+    /// unification; <c>COALESCE</c> settles over constants alone, or on a
+    /// leading NOT NULL literal (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("case when 1 = 1 then 'ab' else 'abcde' end", "varchar", 2)]
+    [DataRow("case when 1 = 0 then 'ab' else 'abcde' end", "varchar", 5)]
+    [DataRow("case 1 when 1 then 'ab' else 'abcde' end", "varchar", 2)]
+    [DataRow("case when 1 = 0 then 'x' when 2 = 2 then 'abc' else 'abcdef' end", "varchar", 3)]
+    [DataRow("case when 1 = 1 then 'ab' else N'abcde' end", "nvarchar", 10)]
+    [DataRow("case when 1 = 1 then 'ab' else cast('x' as varchar(max)) end", "varchar", -1)]
+    [DataRow("case when 1 = 1 then 0x01 else 0x010203 end", "varbinary", 1)]
+    [DataRow("case when 1 = 1 then 1 else 2.5 end", "numeric", 5)]
+    [DataRow("iif(1 = 1, cast('a' as char(5)), cast('b' as varchar(2)))", "char", 5)]
+    [DataRow("iif(null = null, 'ab', 'abcde')", "varchar", 5)]
+    [DataRow("coalesce(cast('a' as char(5)), cast('b' as varchar(10)))", "char", 5)]
+    [DataRow("coalesce(N'ab', 'abcde')", "nvarchar", 4)]
+    [DataRow("coalesce(cast(null as varchar(1)), 'abc', 'abcdef')", "varchar", 3)]
+    [DataRow("coalesce(upper('ab'), 'abcde')", "varchar", 5)]
+    public void ConstantCondition_TypesTheResultAsTheSettledArm(string expression, string typeName, int maxLength)
+    {
+        var sim = new Simulation();
+        AreEqual(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{typeName}|{maxLength}"), sim.ExecuteBatchesScalar(
+            $"create view v as select {expression} as x",
+            "select type_name(system_type_id) + '|' + cast(max_length as varchar(10)) from sys.columns where object_id = object_id('v')"));
+    }
+
+    [TestMethod]
+    public void Coalesce_LeadingLiteral_SettlesBesideAColumn()
+    {
+        var sim = new Simulation();
+        AreEqual("varchar|2|varchar|10|varchar|10", sim.ExecuteBatchesScalar(
+            "create table t (s varchar(10) null)",
+            "create view v as select coalesce('ab', s) a, coalesce(cast('ab' as varchar(2)), s) b, coalesce(upper('ab'), s) c from t",
+            "select string_agg(type_name(system_type_id) + '|' + cast(max_length as varchar(10)), '|') within group (order by column_id) from sys.columns where object_id = object_id('v')"));
+        CollectionAssert.AreEqual(new[] { false, true, true }, sim.ColumnNullability("select coalesce('ab', s) a, coalesce(cast('ab' as varchar(2)), s) b, coalesce(5 + 0, 7) c from t"));
+    }
+
+    /// <summary>
+    /// The settled arm's type also decides whether JSON text embeds raw
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void ConstantCondition_JsonTextArm_EmbedsAsTheSettledArm()
+        => AreEqual("""{"k":"[0]"}|{"k":"x"}|{"k":[1]}""", new Simulation().ExecuteScalar(
+            "select json_object('k': coalesce(N'[0]', json_query('[1]'))) + '|' + json_object('k': iif(1 = 1, N'x', json_query('[1]'))) + '|' + json_object('k': case when 1 = 1 then json_query('[1]') else N'x' end)"));
 }

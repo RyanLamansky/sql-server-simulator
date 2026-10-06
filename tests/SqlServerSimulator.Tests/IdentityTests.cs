@@ -663,4 +663,49 @@ public sealed class IdentityTests
         _ = Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery(insert));
         AreEqual(expected, Convert.ToInt32(simulation.ExecuteScalar($"select ident_current('{table}')"), System.Globalization.CultureInfo.InvariantCulture));
     }
+
+    /// <summary>
+    /// A select list over a window function streams past the window, so a
+    /// failing row uses up the values of the rows ahead of it and its own
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("row_number() over (order by k) * 10 / (k - 3)")]
+    [DataRow("sum(k) over () * 10 / (k - 3)")]
+    [DataRow("row_number() over (order by k desc) * 10 / (k - 3)")]
+    public void FailingWindowedSelectList_UsesUpTheRowsItReached(string expression)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table src (k int); insert src values (1), (2), (3), (4), (5)",
+            "create table t (id int identity, v int)");
+        _ = simulation.AssertSqlError($"insert t (v) select {expression} from src", 8134);
+        _ = simulation.ExecuteNonQuery("insert t (v) values (0)");
+        AreEqual(4, simulation.ExecuteScalar("select id from t"));
+    }
+
+    /// <summary>
+    /// A FROM-less source's value meets its column only once the row exists:
+    /// under a WHERE that doesn't fold TRUE, a HAVING or TOP (0) nothing
+    /// converts, while a table source converts it as its plan starts (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("insert t (c) select 'abcdef' where 1 = 0", 0)]
+    [DataRow("insert t (c) select 'abcdef' from s where 1 = 0", 0)]
+    [DataRow("insert t (i) select 'x' where 1 = 0", 0)]
+    [DataRow("declare @v int = 1; insert t (c) select 'abcdef' where @v = 0", 0)]
+    [DataRow("insert t (c) select top 0 'abcdef'", 0)]
+    [DataRow("insert t (c) select 'abcdef' having 1 = 0", 0)]
+    [DataRow("insert t (c) select 'abcdef' from s where k = 0", 2628)]
+    [DataRow("insert t (c) select 'abcdef'", 2628)]
+    public void FromlessSourceUnderAFilter_ConvertsNothing(string insert, int error)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches("create table t (c varchar(2), i int)", "create table s (k int); insert s values (1)");
+        if (error == 0)
+            _ = simulation.ExecuteNonQuery(insert);
+        else
+            _ = simulation.AssertSqlError(insert, error);
+    }
 }

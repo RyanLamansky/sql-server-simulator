@@ -424,7 +424,7 @@ partial class Simulation
         // Args + invocation. Skip-mode runs the arg parser (cursor advance,
         // syntax errors still fire), but suppresses the invocation itself.
         // The trailing WITH option list parses on the same terms.
-        var arguments = ParseExecArguments(context, batch);
+        var arguments = ParseExecArguments(context, batch, bindsDuplicatesAtCall: true);
         var resultSets = ParseExecuteOptions(batch, insertExecSource, out var recompile);
 
         if (batch.IsSkipping)
@@ -444,9 +444,10 @@ partial class Simulation
         if (!batch.TryResolveProcedure(procName, out var procedure))
         {
             // EXEC runs a scalar function as it runs a procedure, its value
-            // the `@rc =` variable's (probed 2026-10-04 against SQL Server
-            // 2025).
-            if (!insertExecSource && resultSets is null && batch.TryResolveFunction(procName, out var scalarCandidate) && scalarCandidate is Schemas.ScalarFunction scalar)
+            // the `@rc =` variable's, and finds a one-part name as it finds a
+            // procedure's (probed 2026-10-04 and 2026-10-06 against SQL
+            // Server 2025).
+            if (!insertExecSource && resultSets is null && batch.TryResolveFunctionName(procName, out var scalarCandidate) && scalarCandidate is Schemas.ScalarFunction scalar)
             {
                 var result = this.InvokeScalarFunctionByExec(batch, scalar, arguments);
                 if (returnCodeVar is not null)
@@ -458,7 +459,7 @@ partial class Simulation
             }
             // An aggregate is the one function kind EXEC names by kind
             // (probed 2026-09-28 against SQL Server 2025).
-            throw batch.TryResolveFunction(procName, out var function) && function is Schemas.ClrAggregateFunction
+            throw batch.TryResolveFunctionName(procName, out var function) && function is Schemas.ClrAggregateFunction
                 ? SimulatedSqlException.ExecOfAggregate(function.Name)
                 : SimulatedSqlException.CouldNotFindStoredProcedure(procName.WithoutOmittedLeading().Written);
         }
@@ -516,6 +517,8 @@ partial class Simulation
         var supplied = new bool[parameters.Length];
         var declaredName = $"{function.Schema.Name}.{function.Name}";
         var position = 0;
+        var spellings = new string?[parameters.Length];
+        string? repeated = null;
         foreach (var argument in arguments)
         {
             int index;
@@ -531,7 +534,13 @@ partial class Simulation
             }
             if (index >= parameters.Length)
                 throw SimulatedSqlException.TooManyArgumentsToFunction(declaredName);
+            if (supplied[index])
+            {
+                repeated ??= spellings[index];
+                continue;
+            }
             supplied[index] = true;
+            spellings[index] = argument.Name ?? parameters[index].Name.TrimStart('@');
             isDefault[index] = argument.IsDefault;
             values[index] = argument.IsDefault ? SqlValue.Null(parameters[index].Type) : argument.Value;
         }
@@ -543,6 +552,14 @@ partial class Simulation
                 throw SimulatedSqlException.ProcedureExpectsParameter(declaredName, parameters[i].Name.TrimStart('@'));
             isDefault[i] = true;
             values[i] = SqlValue.Null(parameters[i].Type);
+        }
+        // A repeated name is reported under the function, at line 0, as a
+        // procedure's is (probed 2026-10-06 against SQL Server 2025).
+        if (repeated is not null)
+        {
+            var error = SimulatedSqlException.ParameterSuppliedMultipleTimes(repeated);
+            error.PreserveDiagnostics(0, function.Name);
+            throw error;
         }
         return this.InvokeScalarFunction(batch, function, values, isDefault);
     }
@@ -570,11 +587,13 @@ partial class Simulation
     /// Parses the EXEC argument list (everything from the first argument
     /// token to the trailing statement boundary). Enforces the positional-
     /// before-named rule (Msg 119) and the no-duplicate-name rule (Msg
-    /// 8143). Cursor on entry: first argument token (or the trailing
+    /// 8143) — save for a call to a procedure or function, which counts its
+    /// arguments first and judges a repeated name as it binds them
+    /// (<paramref name="bindsDuplicatesAtCall"/>). Cursor on entry: first argument token (or the trailing
     /// terminator if the call has no args). Cursor on exit: the trailing
     /// terminator.
     /// </summary>
-    private static List<ProcArgument> ParseExecArguments(ParserContext context, BatchContext batch)
+    private static List<ProcArgument> ParseExecArguments(ParserContext context, BatchContext batch, bool bindsDuplicatesAtCall = false)
     {
         var arguments = new List<ProcArgument>();
         // No args at all — return empty list. The terminator is either `;`,
@@ -604,7 +623,7 @@ partial class Simulation
                     // probe-confirmed (2026-07-13): `@a=1, @ａ=2` (fullwidth
                     // duplicate under the collation's width folding) reports
                     // "Parameter '@a' was supplied multiple times."
-                    if (seenNames.TryGetValue(argName, out var firstSpelling))
+                    if (!bindsDuplicatesAtCall && seenNames.TryGetValue(argName, out var firstSpelling))
                         throw SimulatedSqlException.ParameterSuppliedMultipleTimes(firstSpelling);
                     _ = seenNames.Add(argName);
                     sawNamed = true;
