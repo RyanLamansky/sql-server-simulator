@@ -236,6 +236,212 @@ internal sealed class XmlSchemaCollection(
         }
     }
 
+    private const string SqlTypesNamespace = "http://schemas.microsoft.com/sqlserver/2004/sqltypes";
+
+    /// <summary>
+    /// The compile errors real raises over a schema collection's text, in its
+    /// order: a global name declared twice (Msg 2302), then the first
+    /// reference to a name nothing defines (Msg 2307 / 2308) in document
+    /// order, then a facet whose value isn't a number (Msg 2309) or that its
+    /// base type doesn't take (Msg 2319). <paramref name="existing"/> is what
+    /// an <c>ALTER … ADD</c> adds to. Real predefines no <c>xml:</c>
+    /// attributes and resolves the <c>sqltypes</c> namespace an import names;
+    /// everything else .NET's compiler refuses is left accepted and untyped.
+    /// </summary>
+    public static void RejectUncompilableSchema(string xsdText, System.Xml.Schema.XmlSchemaSet? existing)
+    {
+        var declared = new HashSet<(string Kind, string Namespace, string Name)>();
+        if (existing is not null)
+        {
+            foreach (XmlQualifiedName name in existing.GlobalElements.Names)
+                _ = declared.Add(("element", name.Namespace, name.Name));
+            foreach (XmlQualifiedName name in existing.GlobalAttributes.Names)
+                _ = declared.Add(("attribute", name.Namespace, name.Name));
+            foreach (XmlQualifiedName name in existing.GlobalTypes.Names)
+                _ = declared.Add(("type", name.Namespace, name.Name));
+            foreach (System.Xml.Schema.XmlSchema schema in existing.Schemas())
+            {
+                foreach (var item in schema.Items)
+                {
+                    _ = item switch
+                    {
+                        System.Xml.Schema.XmlSchemaGroup group => declared.Add(("group", schema.TargetNamespace ?? string.Empty, group.Name!)),
+                        System.Xml.Schema.XmlSchemaAttributeGroup group => declared.Add(("attributeGroup", schema.TargetNamespace ?? string.Empty, group.Name!)),
+                        _ => false,
+                    };
+                }
+            }
+        }
+
+        var references = new List<(string Kind, XmlQualifiedName Name)>();
+        var facets = new List<(string Facet, string Value, string Location, int Line, int Position)>();
+        try
+        {
+            using var reader = XmlReader.Create(new System.IO.StringReader(xsdText), new XmlReaderSettings { ConformanceLevel = ConformanceLevel.Fragment });
+            var lineInfo = (IXmlLineInfo)reader;
+            var path = new List<string>();
+            var siblingCounts = new List<Dictionary<string, int>> { new(StringComparer.Ordinal) };
+            var targetNamespace = string.Empty;
+            while (reader.Read())
+            {
+                if (reader.NodeType == XmlNodeType.EndElement)
+                {
+                    path.RemoveAt(path.Count - 1);
+                    siblingCounts.RemoveAt(siblingCounts.Count - 1);
+                    continue;
+                }
+                if (reader.NodeType != XmlNodeType.Element)
+                    continue;
+
+                var counts = siblingCounts[^1];
+                counts[reader.LocalName] = counts.GetValueOrDefault(reader.LocalName) + 1;
+                var step = $"/*:{reader.LocalName}[{counts[reader.LocalName]}]";
+                var depth = reader.Depth;
+                if (reader.NamespaceURI == XsdNamespace)
+                    InspectXsdElement(reader, depth, ref targetNamespace, declared, references, facets, string.Concat(path) + step, lineInfo);
+                if (!reader.IsEmptyElement)
+                {
+                    path.Add(step);
+                    siblingCounts.Add(new(StringComparer.Ordinal));
+                }
+            }
+        }
+        catch (XmlException)
+        {
+            return;
+        }
+
+        foreach (var (kind, name) in references)
+        {
+            if (name.Namespace == XsdNamespace
+                ? kind == "type" && (System.Xml.Schema.XmlSchemaType.GetBuiltInSimpleType(name) is not null || name.Name == "anyType")
+                : name.Namespace == SqlTypesNamespace || declared.Contains((kind, name.Namespace, name.Name)))
+            {
+                continue;
+            }
+            throw SimulatedSqlException.XmlSchemaUndefinedName(name.Name, name.Namespace);
+        }
+
+        foreach (var (facet, value, _, _, _) in facets)
+        {
+            if (facet is "fractionDigits" or "length" or "maxLength" or "minLength" or "totalDigits"
+                && !ulong.TryParse(value.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out _))
+            {
+                throw SimulatedSqlException.XmlSchemaFacetValueNotNumber();
+            }
+        }
+
+        if (facets.Count == 0)
+            return;
+        var set = new System.Xml.Schema.XmlSchemaSet();
+        var refused = new List<System.Xml.Schema.XmlSchemaObject?>();
+        set.ValidationEventHandler += (_, e) => refused.Add(e.Exception.SourceSchemaObject);
+        try
+        {
+            using var reader = XmlReader.Create(new System.IO.StringReader(xsdText), new XmlReaderSettings { ConformanceLevel = ConformanceLevel.Fragment });
+            while (reader.Read())
+            {
+                if (reader.NodeType == XmlNodeType.Element && System.Xml.Schema.XmlSchema.Read(reader.ReadSubtree(), null) is { } schema)
+                    _ = set.Add(schema);
+            }
+            set.Compile();
+        }
+        catch (Exception e) when (e is XmlException or System.Xml.Schema.XmlSchemaException)
+        {
+            refused.Add((e as System.Xml.Schema.XmlSchemaException)?.SourceSchemaObject);
+        }
+        if (refused.OfType<System.Xml.Schema.XmlSchemaFacet>().FirstOrDefault() is not { } refusedFacet)
+            return;
+        foreach (var (facet, _, location, line, position) in facets)
+        {
+            if (line == refusedFacet.LineNumber && position == refusedFacet.LinePosition)
+                throw SimulatedSqlException.XmlSchemaFacetNotAllowed(facet, location);
+        }
+    }
+
+    /// <summary>
+    /// One <c>xsd:</c> element of <see cref="RejectUncompilableSchema"/>'s walk:
+    /// a global declaration joins <paramref name="declared"/> (Msg 2302 when
+    /// already there), each name it references joins
+    /// <paramref name="references"/>, and a facet joins <paramref name="facets"/>.
+    /// </summary>
+    private static void InspectXsdElement(
+        XmlReader reader,
+        int depth,
+        ref string targetNamespace,
+        HashSet<(string Kind, string Namespace, string Name)> declared,
+        List<(string Kind, XmlQualifiedName Name)> references,
+        List<(string Facet, string Value, string Location, int Line, int Position)> facets,
+        string location,
+        IXmlLineInfo lineInfo)
+    {
+        var local = reader.LocalName;
+        if (depth == 0 && local == "schema")
+        {
+            targetNamespace = reader.GetAttribute("targetNamespace") ?? string.Empty;
+            return;
+        }
+
+        if (depth == 1 && reader.GetAttribute("name") is { } declaredName)
+        {
+            var kind = local switch
+            {
+                "attribute" => "attribute",
+                "attributeGroup" => "attributeGroup",
+                "complexType" or "simpleType" => "type",
+                "element" => "element",
+                "group" => "group",
+                _ => null,
+            };
+            if (kind is not null && !declared.Add((kind, targetNamespace, declaredName)))
+                throw SimulatedSqlException.XmlSchemaNameAlreadyDefined(declaredName);
+        }
+
+        void Reference(string kind, string? qualifiedName)
+        {
+            if (qualifiedName is null || qualifiedName.Trim() is not { Length: > 0 } trimmed)
+                return;
+            var colon = trimmed.IndexOf(':', StringComparison.Ordinal);
+            var prefix = colon < 0 ? string.Empty : trimmed[..colon];
+            var name = colon < 0 ? trimmed : trimmed[(colon + 1)..];
+            var ns = prefix == "xml" ? "http://www.w3.org/XML/1998/namespace" : reader.LookupNamespace(prefix) ?? string.Empty;
+            references.Add((kind, new XmlQualifiedName(name, ns)));
+        }
+
+        switch (local)
+        {
+            case "attribute":
+                Reference("attribute", reader.GetAttribute("ref"));
+                Reference("type", reader.GetAttribute("type"));
+                break;
+            case "attributeGroup":
+                Reference("attributeGroup", reader.GetAttribute("ref"));
+                break;
+            case "element":
+                Reference("element", reader.GetAttribute("ref"));
+                Reference("type", reader.GetAttribute("type"));
+                Reference("element", reader.GetAttribute("substitutionGroup"));
+                break;
+            case "extension" or "restriction":
+                Reference("type", reader.GetAttribute("base"));
+                break;
+            case "group":
+                Reference("group", reader.GetAttribute("ref"));
+                break;
+            case "list":
+                Reference("type", reader.GetAttribute("itemType"));
+                break;
+            case "union":
+                foreach (var member in (reader.GetAttribute("memberTypes") ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                    Reference("type", member);
+                break;
+            case "enumeration" or "fractionDigits" or "length" or "maxExclusive" or "maxInclusive" or "maxLength"
+                or "minExclusive" or "minInclusive" or "minLength" or "pattern" or "totalDigits" or "whiteSpace":
+                facets.Add((local, reader.GetAttribute("value") ?? string.Empty, location, lineInfo.LineNumber, lineInfo.LinePosition));
+                break;
+        }
+    }
+
     /// <summary>
     /// Checks the schema documents an <c>ALTER … ADD</c> brings: text that
     /// holds no <c>xsd:schema</c> document is Msg 2378, and a global element,

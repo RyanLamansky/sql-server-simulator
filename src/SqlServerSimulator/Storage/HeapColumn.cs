@@ -235,10 +235,23 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
     /// Non-null when the column was declared with an
     /// <c>xml(schema_collection)</c> type spec. Stores the schema-collection
     /// reference for catalog-view round-trip via
-    /// <c>sys.columns.xml_collection_id</c>. The simulator does not validate
-    /// xml payloads against the schema — the link is metadata only.
+    /// <c>sys.columns.xml_collection_id</c>, and every write validates against it.
     /// </summary>
     public XmlSchemaCollection? XmlSchemaCollection;
+
+    /// <summary>
+    /// For the node column a <c>.nodes()</c> source produces over attributes,
+    /// the static type real gives each row's node
+    /// (<c>attribute(*,xdt:untypedAtomic)</c>), which a method over the column
+    /// compiles against; null for any other column.
+    /// </summary>
+    public string? XmlNodeStaticType;
+
+    /// <summary>
+    /// The column was declared <c>xml(DOCUMENT …)</c>: a write holding anything
+    /// but one top-level element is Msg 6901 (<c>sys.columns.is_xml_document</c>).
+    /// </summary>
+    public bool XmlDocument;
 
     /// <summary>
     /// The user alias type the column was declared with (<c>CREATE TYPE …
@@ -377,6 +390,7 @@ internal sealed class HeapColumn(string name, SqlType type, int? maxLength, bool
             IsColumnSet = this.IsColumnSet,
             DefaultConstraint = this.DefaultConstraint,
             XmlSchemaCollection = this.XmlSchemaCollection,
+            XmlDocument = this.XmlDocument,
             AliasType = this.AliasType,
             BoundDefault = this.BoundDefault,
             BoundRule = this.BoundRule,

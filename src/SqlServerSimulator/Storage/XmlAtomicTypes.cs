@@ -256,6 +256,10 @@ internal static class XmlAtomicTypes
         }
 
         var canonical = XsdCanonical.Render(target, normalized);
+        // An xs:decimal keeps ten fractional digits, rounded (probed 2026-10-06
+        // against SQL Server 2025: xs:decimal("0.00000000005") is 0.0000000001).
+        if (datatype.TypeCode == XmlTypeCode.Decimal && XmlExactDecimal.TryParse(canonical, out var scaled))
+            canonical = XmlExactDecimal.Render(scaled);
         return KindOf(target) switch
         {
             XmlStaticKind.Boolean => (bool)parsed,

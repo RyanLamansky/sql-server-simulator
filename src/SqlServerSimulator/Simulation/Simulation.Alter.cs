@@ -2239,11 +2239,14 @@ partial class Simulation
         context.MoveNextOptional();
         var partitionAll = IsPartitionAll(context);
         var partitionNumber = ParseOptionalIndexPartitionClause(context);
-        var namedPartitionList = ParseOptionalRebuildOptions(context, out var compressionLevel, out var xmlCompression, out var partitionCompressions);
+        var namedPartitionList = ParseOptionalRebuildOptions(context, out var compressionLevel, out var xmlCompression, out var partitionCompressions, out var xmlPartitionCompressions);
         // A rebuild of every partition says so to list some (probed
-        // 2026-10-05 against SQL Server 2025).
-        if (namedPartitionList && !partitionAll && partitionNumber is null)
+        // 2026-10-05 against SQL Server 2025), the data compression's
+        // refusal ahead of the XML compression's (probed 2026-10-06).
+        if (partitionCompressions is not null && !partitionAll && partitionNumber is null)
             throw SimulatedSqlException.CompressionPartitionsWithoutPartitionAll();
+        if (xmlPartitionCompressions is not null && !partitionAll && partitionNumber is null)
+            throw SimulatedSqlException.XmlCompressionPartitionsWithoutPartitionAll();
 
         if (context.Batch.IsSkipping)
             return true;
@@ -2278,7 +2281,7 @@ partial class Simulation
             else if (compressionLevel.Equals("COLUMNSTORE", StringComparison.OrdinalIgnoreCase))
                 columnstore.ColumnstoreArchive = false;
         }
-        else if (compressionLevel is not null || xmlCompression is not null || partitionCompressions is not null)
+        else if (compressionLevel is not null || xmlCompression is not null || partitionCompressions is not null || xmlPartitionCompressions is not null)
         {
             // A rowstore rebuild recompresses the rows: the heap's, or the
             // clustered index's that holds them (probed 2026-10-05), a
@@ -2287,21 +2290,22 @@ partial class Simulation
                 : compressionLevel.Equals("ROW", StringComparison.OrdinalIgnoreCase) ? (byte)1
                 : compressionLevel.Equals("PAGE", StringComparison.OrdinalIgnoreCase) ? (byte)2
                 : (byte)0;
-            var options = new IndexOptions(false, null, null, dataCompression: level, partitionCompressions: partitionCompressions);
+            var options = new IndexOptions(false, null, null, dataCompression: level, xmlCompression: xmlCompression,
+                partitionCompressions: partitionCompressions, xmlPartitionCompressions: xmlPartitionCompressions);
             if (table.KeyConstraints.Find(static key => key.IsClustered) is { } clusteredKey)
             {
-                ApplyRebuildCompression(ref clusteredKey.DataCompression, ref clusteredKey.PartitionDataCompression, options, rebuiltPartition, table.Partitioning, table.Name, "table");
-                clusteredKey.XmlCompression = xmlCompression ?? clusteredKey.XmlCompression;
+                ApplyRebuildCompressions(ref clusteredKey.DataCompression, ref clusteredKey.PartitionDataCompression, ref clusteredKey.XmlCompression, ref clusteredKey.PartitionXmlCompression,
+                    options, rebuiltPartition, table.Partitioning, table.Name, "table");
             }
             else if (table.Indexes.Find(static index => index.IsClustered) is { } clusteredIndex)
             {
-                ApplyRebuildCompression(ref clusteredIndex.DataCompression, ref clusteredIndex.PartitionDataCompression, options, rebuiltPartition, table.Partitioning, table.Name, "table");
-                clusteredIndex.XmlCompression = xmlCompression ?? clusteredIndex.XmlCompression;
+                ApplyRebuildCompressions(ref clusteredIndex.DataCompression, ref clusteredIndex.PartitionDataCompression, ref clusteredIndex.XmlCompression, ref clusteredIndex.PartitionXmlCompression,
+                    options, rebuiltPartition, table.Partitioning, table.Name, "table");
             }
             else
             {
-                ApplyRebuildCompression(ref table.HeapDataCompression, ref table.HeapPartitionDataCompression, options, rebuiltPartition, table.Partitioning, table.Name, "table");
-                table.HeapXmlCompression = xmlCompression ?? table.HeapXmlCompression;
+                ApplyRebuildCompressions(ref table.HeapDataCompression, ref table.HeapPartitionDataCompression, ref table.HeapXmlCompression, ref table.HeapPartitionXmlCompression,
+                    options, rebuiltPartition, table.Partitioning, table.Name, "table");
             }
         }
 
@@ -2315,11 +2319,12 @@ partial class Simulation
     /// caller raises real's refusal once the table has resolved. Cursor on
     /// entry: the token after the PARTITION clause. On exit: past the block.
     /// </summary>
-    private static bool ParseOptionalRebuildOptions(ParserContext context, out string? compressionLevel, out bool? xmlCompression, out List<PartitionCompressionClause>? partitionCompressions)
+    private static bool ParseOptionalRebuildOptions(ParserContext context, out string? compressionLevel, out bool? xmlCompression, out List<PartitionCompressionClause>? partitionCompressions, out List<PartitionCompressionClause>? xmlPartitionCompressions)
     {
         compressionLevel = null;
         xmlCompression = null;
         partitionCompressions = null;
+        xmlPartitionCompressions = null;
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             return false;
         if (context.GetNextRequired() is not Operator { Character: '(' })
@@ -2338,6 +2343,7 @@ partial class Simulation
 
             var value = context.GetNextRequired();
             string? writtenLevel = null;
+            bool? writtenXml = null;
             if (!bareWordValue)
             {
                 if (value is not Numeric)
@@ -2355,7 +2361,7 @@ partial class Simulation
             }
             else if (optionName.Equals("XML_COMPRESSION", StringComparison.OrdinalIgnoreCase))
             {
-                xmlCompression = toggle.Keyword == Keyword.On;
+                writtenXml = toggle.Keyword == Keyword.On;
             }
 
             context.MoveNextRequired();
@@ -2382,6 +2388,15 @@ partial class Simulation
                     (partitionCompressions ??= []).Add(new PartitionCompressionClause(partitionLevel, ranges));
                     writtenLevel = null;
                 }
+                if (writtenXml is { } partitionXml)
+                {
+                    // So is XML_COMPRESSION, Msg 7741 then Msg 1750 state 0 (probed
+                    // 2026-10-06).
+                    if (xmlCompression is not null)
+                        throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.XmlCompressionSpecifiedTwice(state: 1), state: 0);
+                    (xmlPartitionCompressions ??= []).Add(new PartitionCompressionClause(partitionXml ? (byte)1 : (byte)0, ranges));
+                    writtenXml = null;
+                }
                 context.MoveNextRequired();
             }
             if (writtenLevel is not null)
@@ -2389,6 +2404,12 @@ partial class Simulation
                 if (partitionCompressions is not null)
                     throw SimulatedSqlException.DataCompressionSpecifiedTwice();
                 compressionLevel = writtenLevel;
+            }
+            if (writtenXml is not null)
+            {
+                if (xmlCompression is not null || xmlPartitionCompressions is not null)
+                    throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.XmlCompressionSpecifiedTwice(state: 1), state: 0);
+                xmlCompression = writtenXml;
             }
 
             if (context.Token is not Operator { Character: ',' })

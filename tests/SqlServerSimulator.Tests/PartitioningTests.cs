@@ -1015,6 +1015,57 @@ public sealed class PartitioningTests
     }
 
     /// <summary>
+    /// <c>XML_COMPRESSION</c> is kept per partition as <c>DATA_COMPRESSION</c>
+    /// is, beside it, with refusals of its own (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void XmlCompression_PerPartition()
+    {
+        var sim = new Simulation();
+        _ = sim.ExecuteNonQuery("""
+            create partition function pf (int) as range left for values (10);
+            create partition scheme ps as partition pf all to ([primary]);
+            create table t (id int not null, x xml, v int) on ps(id) with (xml_compression = on on partitions (2), data_compression = page on partitions (1));
+            create index ix on t (v) with (xml_compression = on on partitions (1)) on ps(id);
+            """);
+        string Levels(int indexId)
+        {
+            var levels = new List<string>();
+            using var reader = sim.ExecuteReader($"select xml_compression_desc, left(data_compression_desc, 1) from sys.partitions where object_id = object_id('t') and index_id = {indexId} order by partition_number");
+            while (reader.Read())
+                levels.Add(reader.GetString(0) + reader.GetString(1));
+            return string.Join(",", levels);
+        }
+        AreEqual("OFFP,ONN", Levels(0));
+        AreEqual("ONN,OFFN", Levels(2));
+        _ = sim.ExecuteNonQuery("alter table t rebuild partition = all with (xml_compression = off on partitions (2), xml_compression = on on partitions (1))");
+        AreEqual("ONP,OFFN", Levels(0));
+        _ = sim.ExecuteNonQuery("alter table t rebuild partition = 1 with (xml_compression = off)");
+        AreEqual("OFFP,OFFN", Levels(0));
+        _ = sim.ExecuteNonQuery("alter index ix on t rebuild partition = 2 with (xml_compression = on)");
+        AreEqual("ONN,ONN", Levels(2));
+        _ = sim.ExecuteNonQuery("alter table t rebuild partition = 1 with (xml_compression = off on partitions (2))");
+        AreEqual("OFFP,OFFN", Levels(0));
+        _ = sim.ExecuteNonQuery("alter table t rebuild partition = all with (xml_compression = on on partitions (2))");
+        _ = sim.ExecuteNonQuery("alter partition function pf () split range (20)");
+        AreEqual("OFFP,ONN,ONN", Levels(0));
+
+        sim.AssertSqlError("create table t2 (id int, x xml) on ps(id) with (xml_compression = on on partitions (4))", 7722,
+            "Invalid partition number 4 specified for table 't2', partition number can range from 1 to 3.");
+        AreEqual((byte)2, sim.AssertSqlError("create table t2 (id int, x xml) on ps(id) with (xml_compression = on on partitions (1, 1))", 7741).State);
+        var both = sim.AssertSqlError("create table t2 (id int, x xml) on ps(id) with (xml_compression = on, xml_compression = off on partitions (1))", 7741);
+        AreEqual(1750, both.Errors[1].Number);
+        AreEqual((byte)1, sim.AssertSqlError("create index ix2 on t (v) with (xml_compression = on, xml_compression = off on partitions (1)) on ps(id)", 7741).State);
+        sim.AssertSqlError("create table t3 (id int, x xml) with (xml_compression = on on partitions (1))", 7729,
+            "Cannot specify partition number in the create table statement as the table 't3' is not partitioned.");
+        sim.AssertSqlError("alter table t rebuild with (xml_compression = on on partitions (1))", 16209,
+            "The PARTITION=ALL clause must be specified to enable XML compression for the table or index.");
+        _ = sim.AssertSqlError("alter table t rebuild with (data_compression = page on partitions (1), xml_compression = on on partitions (1))", 10737);
+        _ = sim.AssertSqlError("alter index ix on t rebuild with (xml_compression = on on partitions (1))", 16209);
+    }
+
+    /// <summary>
     /// SWITCH refuses what real refuses (probed 2026-10-05 against SQL Server
     /// 2025): an index of a partitioned side not partitioned (ahead even of a
     /// non-empty target), a column's persistence, sparse storage or

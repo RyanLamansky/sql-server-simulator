@@ -187,7 +187,7 @@ All eleven of real's, typed `X` in `sys.all_objects` as real's are, each reporti
 | `sp_query_store_remove_query @query_id` | removes the query, its plans and statistics, its hints, and its text once unshared |
 | `sp_query_store_remove_plan @plan_id` | removes the plan and its statistics, leaving the query |
 | `sp_query_store_reset_exec_stats @plan_id` | removes the plan's runtime and wait statistics |
-| `sp_query_store_set_hints @query_id, @query_hints [, …]` | replaces the query's hints under a new `query_hint_id`; an argument not opening `OPTION (`, or a hint no query hint begins with, is Msg 102 at the word |
+| `sp_query_store_set_hints @query_id, @query_hints [, …]` | replaces the query's hints under a new `query_hint_id`, checking the clause in real's order: an argument not opening `OPTION (`, or a hint no query hint begins with, is Msg 102 at the word; `OPTIMIZE FOR` a variable list is Msg 12455 state 2, then `USE PLAN` and `TABLE HINT` Msg 12455 state 1 naming them; then the clause's own refusals as a statement's `OPTION` clause meets them (Msg 1042, 310, 10715) |
 | `sp_query_store_clear_hints @query_id [, …]` | removes the query's hints, quietly when there are none |
 | `sp_query_store_consistency_check` | Msg 12427 state 3 while the store is on; quiet when OFF |
 | `sp_query_store_clear_message_queues` | nothing to clear; Msg 8144 state 51 for an argument |
@@ -196,7 +196,11 @@ All eleven of real's, typed `X` in `sys.all_objects` as real's are, each reporti
 A query id the store doesn't hold is Msg 12402 class 11 — state 1 from `remove_query`, 2 from `force_plan` / `unforce_plan`, 5 from `set_hints`, 6 from `clear_hints` — and a plan id Msg 12403 class 11 (state 1 from `remove_plan`, 2 from `reset_exec_stats`); a plan that isn't the query's is Msg 12406.
 While the store is OFF, forcing and unforcing are Msg 12405 state 4, `set_hints` state 6 and `clear_hints` state 7, ahead of the id checks; the remove and reset procedures work on an OFF store.
 A missing id is Msg 313 and a NULL one Msg 214, both state 51.
-Forced plans and hints are recorded, not applied: the simulator has one plan per query and no optimizer they could steer.
+
+A query's hints apply the next time a statement that is the query compiles — its identity read off its text as its capture reads it (`Simulation.QueryStoreHintFor`) — so setting or clearing them retires every cached plan (probed 2026-10-06 against SQL Server 2025).
+The hint's `MAXRECURSION` replaces the statement's own (a 50-deep recursive CTE under `OPTION (MAXRECURSION 10)` is Msg 530), its join hints and `FORCE ORDER` steer the plan as an `OPTION` clause's do, without a Msg 8625, and its `RECOMPILE` compiles the statement every run.
+Join hints that leave no plan don't fail the query: it compiles without the hint, and `sys.query_store_query_hints` records `last_query_hint_failure_reason` 8622, `NO_PLAN`, and counts the failure.
+Forced plans are recorded, not applied: the simulator has one plan per query and no optimizer one could steer.
 
 ### Divergences
 
@@ -212,8 +216,8 @@ Forced plans and hints are recorded, not applied: the simulator has one plan per
 
 - Size-based and stale-query cleanup, and `MAX_PLANS_PER_QUERY` (real enforced a `MAX_STORAGE_SIZE_MB` of 0 neither immediately nor by turning read-only in probes) — not chased: cleanup follows real's store size and clock, and the simulator keeps one plan per query for the cap to bite on.
 - The AUTO / CUSTOM compile-CPU threshold, forced parameterization, plan feedback and query variants, the internal statistics queries real records, and an operator tree in `query_plan`.
-- Applying a query's hints: real compiles the next execution under them, so a `sp_query_store_set_hints … N'OPTION (MAXRECURSION 10)'` makes the following run of a 50-deep recursive CTE Msg 530 (probed 2026-10-06 against SQL Server 2025), where the simulator records the hints and runs the query as written.
-  A forced plan steers real's optimizer, which the simulator doesn't have — not chased.
+- A forced plan steers real's optimizer, which the simulator doesn't have — not chased.
+  So do a hint's `MAXDOP`, `FAST`, grant percentages and the rest that have no effect the simulator models.
 
 ## Read-only databases
 

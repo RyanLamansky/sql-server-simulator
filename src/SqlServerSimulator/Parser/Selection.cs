@@ -1316,7 +1316,7 @@ internal sealed partial class Selection
     /// </summary>
     private static bool ReadsPredicateColumns(List<FromSource> sources, FromClause fromClause, List<JoinSpec> joins, bool distinct)
     {
-        if (!sources.Exists(static source => source.BackingTable is { IsTableVariable: false }))
+        if (!sources.Exists(static source => source.BackingTable is { IsTableVariable: false } || source.BackingView is { BaseTable: not null }))
             return false;
         return distinct || fromClause.Excluders.Count > 0 || fromClause.Having is not null || fromClause.GroupByAllFilter is not null
             || fromClause.AllGroupingExpressions.Count > 0 || joins.Exists(static join => join.OnPredicate is not null);
@@ -3747,6 +3747,12 @@ internal sealed partial class Selection
             scope.OuterTypeResolver is not null
                 ? scope.OuterTypeResolver(column)
                 : throw UnresolvedNameError([], column);
+
+        // An enclosing query's .nodes() column is read only through a method.
+        foreach (var expression in expressions)
+            RejectDirectNodesColumnRead(expression, [], parseBatch.Parser.EnclosingScopes);
+        foreach (var excluder in excluders)
+            RejectDirectNodesColumnRead(excluder, [], parseBatch.Parser.EnclosingScopes);
 
         var parseRuntime = new RuntimeContext(column => throw SimulatedSqlException.InvalidColumnName(column), parseBatch);
         // The WHERE binds too, so a comparison real refuses while compiling —

@@ -70,20 +70,27 @@ internal static class XmlSchemaValidation
     }
 
     /// <summary>
-    /// Whether <paramref name="xmlText"/> is a document: exactly one top-level
+    /// Why <paramref name="xmlText"/> isn't a document — exactly one top-level
     /// element and no top-level text, which is what an <c>xml(DOCUMENT …)</c>
-    /// target admits.
+    /// target admits — as the state of real's
+    /// Msg 6901: 0 when it is one, 2 when it holds no element at all — an
+    /// empty or whitespace-only value, a lone comment or processing
+    /// instruction — and 1 for a second top-level element or text beside the
+    /// root (probed 2026-10-06 against SQL Server 2025).
     /// </summary>
-    internal static bool IsDocument(string xmlText)
+    internal static byte DocumentViolation(string xmlText)
     {
         try
         {
             var root = XElement.Parse($"<{FragmentRoot}>{xmlText}</{FragmentRoot}>");
-            return root.Elements().Take(2).Count() == 1 && !root.Nodes().OfType<XText>().Any(text => !string.IsNullOrWhiteSpace(text.Value));
+            var elements = root.Elements().Take(2).Count();
+            return elements == 0 ? (byte)2
+                : elements == 1 && !root.Nodes().OfType<XText>().Any(text => !string.IsNullOrWhiteSpace(text.Value)) ? (byte)0
+                : (byte)1;
         }
         catch (XmlException)
         {
-            return false;
+            return 1;
         }
     }
 

@@ -147,6 +147,8 @@ A partitioned rowset — the heap, an index, a key constraint — keeps a `DATA_
   A rebuild of every partition sets the level of all, or of those its lists name, which need `PARTITION = ALL` written (Msg 10737, ahead of an unpartitioned table's Msg 7729, for `ALTER TABLE` as for `ALTER INDEX`).
 - A `SPLIT RANGE` gives the new partition the level of the one it split; a `MERGE RANGE` keeps the surviving partition's.
 
+`XML_COMPRESSION` keeps a level per partition the same way, beside `DATA_COMPRESSION`'s, with its own refusals (probed 2026-10-06 against SQL Server 2025): naming it for the whole object and for partitions is **Msg 7741** state 1 — followed by Msg 1750 state 0 from `CREATE TABLE` and a rebuild — and a partition twice state 2; a rebuild listing partitions without `PARTITION = ALL` is **Msg 16209**, after `DATA_COMPRESSION`'s Msg 10737.
+
 The levels describe the catalog only: rows are stored the same either way, and a rollback doesn't restore them.
 
 ## Errors end the batch
@@ -174,4 +176,3 @@ The loader creates the functions and schemes and places tables, indexes and key 
 - **An indexed view's index on a scheme** reports `data_space_id` 1 and no `sys.partitions` rows at all, where real reports the scheme and one row per partition counting the view's rows (probed 2026-09-30): the simulator never materializes the view, so it has no row counts to place — storage the simulator doesn't keep, not chased.
 - **Partition-level lock escalation** — `LOCK_ESCALATION = AUTO` still escalates to the table; which lock real escalates to rides its storage engine's per-partition lock counts, not chased.
 - **SWITCH's remaining checks**: reasoning beyond the readable shapes above (functions), and a switch into a `#temp` table, which real meets with an internal Msg 608 naming its own partition and database ids.
-- **Per-partition XML compression**, which `ON PARTITIONS` after `XML_COMPRESSION` still refuses as on an unpartitioned table, where real keeps a level per partition as it does `DATA_COMPRESSION`'s (probed 2026-10-06: `REBUILD PARTITION = ALL WITH (XML_COMPRESSION = ON ON PARTITIONS (1))` leaves partition 2 `OFF`, and `CREATE TABLE … WITH (XML_COMPRESSION = ON ON PARTITIONS (2))` is accepted).

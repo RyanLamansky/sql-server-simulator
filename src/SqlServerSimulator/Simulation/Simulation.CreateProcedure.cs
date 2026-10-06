@@ -397,10 +397,11 @@ partial class Simulation
         SqlType paramType;
         int? declaredMaxLength;
         AliasType? aliasType;
+        (XmlSchemaCollection Collection, bool Document)? xmlType = null;
         var typeResolved = true;
         try
         {
-            (paramType, declaredMaxLength, aliasType) = ParseProcedureParameterType(context, ordinal, "@" + name);
+            (paramType, declaredMaxLength, aliasType) = ParseProcedureParameterType(context, ordinal, "@" + name, out xmlType);
         }
         catch (SimulatedSqlException error) when (error.Number == 2715)
         {
@@ -440,7 +441,13 @@ partial class Simulation
             context.MoveNextRequired();
         }
 
-        return new ProcedureParameter(name, paramType, declaredMaxLength, defaultExpression, isOutput) { SpelledNumeric = spelledNumeric, AliasType = aliasType };
+        return new ProcedureParameter(name, paramType, declaredMaxLength, defaultExpression, isOutput)
+        {
+            SpelledNumeric = spelledNumeric,
+            AliasType = aliasType,
+            XmlSchemaCollection = xmlType?.Collection,
+            XmlDocument = xmlType?.Document ?? false,
+        };
     }
 
     /// <summary>
@@ -533,12 +540,22 @@ partial class Simulation
     /// or <c>(N, S)</c> or <c>(MAX)</c>) — returns both the resolved
     /// <see cref="SqlType"/> and the declared length (passed through to
     /// <see cref="ProcedureParameter.DeclaredMaxLength"/> for catalog-view
-    /// surfaces).
+    /// surfaces), and the collection an <c>xml(…)</c> type names.
     /// </summary>
-    private static (SqlType Type, int? DeclaredMaxLength, AliasType? Alias) ParseProcedureParameterType(ParserContext context, int ordinal, string parameterName)
+    private static (SqlType Type, int? DeclaredMaxLength, AliasType? Alias) ParseProcedureParameterType(ParserContext context, int ordinal, string parameterName, out (XmlSchemaCollection Collection, bool Document)? xmlType)
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
         context.MoveNextRequired();
+        xmlType = null;
+        if (context.Token is Operator { Character: '(' }
+            && qualifiedTypeName.Count == 1
+            && context.Batch.CurrentDatabase.Collation.Equals(typeName.Value, "xml")
+            && PeekIsXmlSchemaArgument(context))
+        {
+            xmlType = ParseXmlSchemaCollectionArgument(context);
+            context.MoveNextRequired();
+            return (SqlType.Xml, null, null);
+        }
 
         int? declaredMaxLength = null;
         int? declaredScale = null;

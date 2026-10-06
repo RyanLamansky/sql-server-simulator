@@ -188,6 +188,8 @@ partial class Simulation
                 // 2026-10-05 against SQL Server 2025).
                 if (rebuildOptions.CompressionOnPartitions && !partitionAll && partitionNumber is null)
                     throw SimulatedSqlException.CompressionPartitionsWithoutPartitionAll();
+                if (rebuildOptions.XmlPartitionCompressions is not null && !partitionAll && partitionNumber is null)
+                    throw SimulatedSqlException.XmlCompressionPartitionsWithoutPartitionAll();
                 break;
         }
 
@@ -388,12 +390,12 @@ partial class Simulation
     /// it, else nothing — and a rebuild of every partition sets the level of
     /// all, or of the partitions its <c>ON PARTITIONS</c> clauses list.
     /// </summary>
-    internal static void ApplyRebuildCompression(ref byte level, ref List<byte>? partitions, IndexOptions options, long? partition, Schemas.PartitionPlacement? placement, string name, string kind)
+    internal static void ApplyRebuildCompression(ref byte level, ref List<byte>? partitions, byte? whole, List<PartitionCompressionClause>? clauses, long? partition, Schemas.PartitionPlacement? placement, string name, string kind, bool xml = false)
     {
         if (partition is { } number && placement is not null)
         {
-            var chosen = options.DataCompression;
-            foreach (var clause in options.PartitionCompressions ?? [])
+            var chosen = whole;
+            foreach (var clause in clauses ?? [])
             {
                 if (clause.Ranges.Exists(range => range.Low <= number && number <= range.High))
                     chosen = clause.Level;
@@ -405,17 +407,39 @@ partial class Simulation
             }
             return;
         }
-        if (options.DataCompression is { } whole)
+        if (whole is { } wholeLevel)
         {
-            level = whole;
+            level = wholeLevel;
             partitions = null;
         }
-        if (options.PartitionCompressions is { } clauses && placement is not null)
+        if (clauses is not null && placement is not null)
         {
             var fanout = placement.Fanout;
             partitions = PartitionCompression.Apply(level, partitions, fanout, clauses,
-                outOfRange => SimulatedSqlException.InvalidPartitionNumber(outOfRange, name, fanout, kind));
+                outOfRange => SimulatedSqlException.InvalidPartitionNumber(outOfRange, name, fanout, kind), xml);
         }
+    }
+
+    /// <summary>
+    /// <see cref="ApplyRebuildCompression(ref byte, ref List{byte}?, byte?, List{PartitionCompressionClause}?, long?, Schemas.PartitionPlacement?, string, string, bool)"/>
+    /// for both of a rowset's compressions, <c>DATA_COMPRESSION</c> and then
+    /// <c>XML_COMPRESSION</c>, whose per-partition levels follow the same rules.
+    /// </summary>
+    internal static void ApplyRebuildCompressions(
+        ref byte dataLevel,
+        ref List<byte>? dataPartitions,
+        ref bool xmlCompressed,
+        ref List<byte>? xmlPartitions,
+        IndexOptions options,
+        long? partition,
+        Schemas.PartitionPlacement? placement,
+        string name,
+        string kind)
+    {
+        ApplyRebuildCompression(ref dataLevel, ref dataPartitions, options.DataCompression, options.PartitionCompressions, partition, placement, name, kind);
+        var xmlLevel = xmlCompressed ? (byte)1 : (byte)0;
+        ApplyRebuildCompression(ref xmlLevel, ref xmlPartitions, options.XmlCompression is { } whole ? (whole ? (byte)1 : (byte)0) : null, options.XmlPartitionCompressions, partition, placement, name, kind, xml: true);
+        xmlCompressed = xmlLevel != 0;
     }
 
     private static string FormName(AlterIndexForm form) => form switch
@@ -504,9 +528,8 @@ partial class Simulation
                 constraint.AllowRowLocks = rebuildOptions.AllowRowLocks ?? constraint.AllowRowLocks;
                 constraint.AllowPageLocks = rebuildOptions.AllowPageLocks ?? constraint.AllowPageLocks;
                 constraint.StatisticsNoRecompute = rebuildOptions.StatisticsNoRecompute ?? constraint.StatisticsNoRecompute;
-                ApplyRebuildCompression(ref constraint.DataCompression, ref constraint.PartitionDataCompression, rebuildOptions, partition,
-                    constraint.IsClustered ? table.Partitioning : constraint.Partitioning, constraint.Name, "index");
-                constraint.XmlCompression = rebuildOptions.XmlCompression ?? constraint.XmlCompression;
+                ApplyRebuildCompressions(ref constraint.DataCompression, ref constraint.PartitionDataCompression, ref constraint.XmlCompression, ref constraint.PartitionXmlCompression,
+                    rebuildOptions, partition, constraint.IsClustered ? table.Partitioning : constraint.Partitioning, constraint.Name, "index");
                 // A rebuild rebuilds the index's statistic from every row.
                 BuildStatistics(batch, table, statistic => ReferenceEquals(statistic.State, constraint.Statistics));
                 break;
@@ -619,9 +642,8 @@ partial class Simulation
                 index.AllowPageLocks = rebuildOptions.AllowPageLocks ?? index.AllowPageLocks;
                 index.StatisticsNoRecompute = rebuildOptions.StatisticsNoRecompute ?? index.StatisticsNoRecompute;
                 index.ColumnstoreArchive = rebuildOptions.ColumnstoreArchive ?? index.ColumnstoreArchive;
-                ApplyRebuildCompression(ref index.DataCompression, ref index.PartitionDataCompression, rebuildOptions, partition,
-                    index.IsClustered ? table.Partitioning : index.Partitioning, index.Name, "index");
-                index.XmlCompression = rebuildOptions.XmlCompression ?? index.XmlCompression;
+                ApplyRebuildCompressions(ref index.DataCompression, ref index.PartitionDataCompression, ref index.XmlCompression, ref index.PartitionXmlCompression,
+                    rebuildOptions, partition, index.IsClustered ? table.Partitioning : index.Partitioning, index.Name, "index");
                 if (!index.IsColumnstore)
                     BuildStatistics(context.Batch, table, statistic => ReferenceEquals(statistic.State, index.Statistics));
                 break;

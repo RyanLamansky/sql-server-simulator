@@ -467,16 +467,25 @@ partial class Simulation
             foreach (var (_, table) in schema.HeapTables)
             {
                 if (OnFunction(table.Partitioning))
+                {
                     PartitionCompression.Reshape(table.HeapPartitionDataCompression, split, slot, splitPartition);
+                    PartitionCompression.Reshape(table.HeapPartitionXmlCompression, split, slot, splitPartition);
+                }
                 foreach (var key in table.KeyConstraints)
                 {
                     if (OnFunction(key.IsClustered ? table.Partitioning : key.Partitioning))
+                    {
                         PartitionCompression.Reshape(key.PartitionDataCompression, split, slot, splitPartition);
+                        PartitionCompression.Reshape(key.PartitionXmlCompression, split, slot, splitPartition);
+                    }
                 }
                 foreach (var index in table.Indexes)
                 {
                     if (OnFunction(index.IsClustered ? table.Partitioning : index.Partitioning))
+                    {
                         PartitionCompression.Reshape(index.PartitionDataCompression, split, slot, splitPartition);
+                        PartitionCompression.Reshape(index.PartitionXmlCompression, split, slot, splitPartition);
+                    }
                 }
             }
         }

@@ -131,6 +131,12 @@ internal sealed class ProcedureParameter(string name, SqlType type, int? declare
     /// <summary>The user alias type the parameter was declared with; see <see cref="HeapColumn.AliasType"/>.</summary>
     public AliasType? AliasType;
 
+    /// <summary>The collection an <c>xml(…)</c> parameter is typed by; see <see cref="HeapColumn.XmlSchemaCollection"/>.</summary>
+    public XmlSchemaCollection? XmlSchemaCollection;
+
+    /// <summary>The parameter was declared <c>xml(DOCUMENT …)</c>; see <see cref="HeapColumn.XmlDocument"/>.</summary>
+    public bool XmlDocument;
+
     /// <summary>
     /// True when the parameter is a cursor parameter (<c>@c CURSOR VARYING
     /// OUTPUT</c>). Cursor parameters are output-only (real SQL Server requires

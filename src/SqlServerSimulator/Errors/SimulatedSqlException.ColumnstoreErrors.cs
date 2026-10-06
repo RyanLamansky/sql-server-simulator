@@ -104,6 +104,14 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException DataCompressionSpecifiedTwice() =>
         new("The DATA_COMPRESSION option was specified more than once for the table, or for at least one of its partitions if the table is partitioned.", 7711, 16, 1);
 
+    /// <summary>
+    /// Msg 7741: <c>XML_COMPRESSION</c> named for the whole object and for
+    /// partitions (state 1), or for one partition twice (state 2) — probed
+    /// 2026-10-06 against SQL Server 2025.
+    /// </summary>
+    internal static SimulatedSqlException XmlCompressionSpecifiedTwice(byte state) =>
+        new("The XML_COMPRESSION option can only be specified once for the table or partition.", 7741, 16, state);
+
     /// <summary>Mimics SQL Server's Msg 35364 — <c>ALTER INDEX … SET (COMPRESSION_DELAY = …)</c> on a rowstore index.</summary>
     internal static SimulatedSqlException CompressionDelayOnRowstoreIndex() =>
         new("ALTER INDEX statement option COMPRESSION_DELAY can only be used with columnstore indexes.", 35364, 16, 1);

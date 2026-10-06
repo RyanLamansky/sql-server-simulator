@@ -57,13 +57,18 @@ CREATE XML INDEX name ON table(col)
 - XSD text stored verbatim; AW's 6 schema-collection payloads (with embedded namespaces, complex types, restrictions, sequences) round-trip byte-identically.
   What is read out of the text: each element declaration's occurrence and each element's and attribute's simple type, which type an XQuery expression over a bound value (see [A schema collection narrows the cardinality](#a-schema-collection-narrows-the-cardinality)), and the compiled schema set a typed write validates against (see [Typed writes](#typed-writes--validation-and-canonical-form)).
 - The identity constraints `xsd:unique`, `xsd:key` and `xsd:keyref` are real's own refusal at `CREATE` and `ADD`: **Msg 9336** `The XML Schema syntax 'unique' is not supported.`, naming the first one written (probed 2026-09-28 against SQL Server 2025).
+- A text that doesn't compile is refused at `CREATE` and `ADD` in real's order (`XmlSchemaCollection.RejectUncompilableSchema`, probed 2026-10-06): a global element, attribute, type, group or attribute group declared twice in a namespace is **Msg 2302**, then the first reference in document order to a name nothing defines is **Msg 2307**, or **Msg 2308** naming its namespace — `xml:` included, since real predefines none of its attributes, while the `sqltypes` namespace an import names resolves — then a length or digits facet whose value isn't a number is **Msg 2309**, and a facet the base type doesn't take **Msg 2319** with its location.
+  Each acts as under `XACT_ABORT`, as Msg 9336 does.
+  Any other XSD error .NET's compiler finds is accepted and leaves the collection's values untyped.
 - `ALTER … ADD` appends schema documents to the collection's text and rolls back with the transaction, as `CREATE` does.
   It admits only components the collection lacks: a global element, type or attribute the collection already declares in that namespace is **Msg 6310** (`… component namespace: '' component name: 'r' component kind:ELEMENT`, two spaces after the first sentence), though a component of another kind by the same name is fine.
   Text holding no `xsd:schema` document is **Msg 2378**, an empty string is a no-op, and a collection that doesn't resolve or that the session can't alter is **Msg 6347** either way (probed 2026-09-28).
 - `WITH (…)` trailing options block parse-and-discards via `SkipBalancedParens`.
 - xml type positions: `xml`, `xml(name)`, `xml(CONTENT name)`, `xml(DOCUMENT name)`.
-  A **column** declaration and a **`DECLARE @x`** take the form, off the same peek (`PeekIsXmlSchemaArgument`) that distinguishes the schema-collection-name form from a length / MAX spec, matched only when the bare 1-part type name is `xml`; there the `CONTENT` / `DOCUMENT` discriminator parse-and-discards, and an unknown collection is Msg 208.
-  A **`CAST` / `CONVERT`** target takes it too (`Simulation.TryParseXmlCastTarget`): `DOCUMENT` is honored — anything but one top-level element is **Msg 6901** — and an unknown collection is **Msg 6314** (probed 2026-09-28).
+  A **column** declaration, a **`DECLARE @x`** and a **procedure parameter** take the form, off the same peek (`PeekIsXmlSchemaArgument`) that distinguishes the schema-collection-name form from a length / MAX spec, matched only when the bare 1-part type name is `xml`, and so does a **`CAST` / `CONVERT`** target (`Simulation.TryParseXmlCastTarget`).
+  `DOCUMENT` is honored on every write: anything but one top-level element is **Msg 6901**, state 2 when it holds no element at all and 1 otherwise (probed 2026-10-06), and `sys.columns` / `sys.parameters` report it as `is_xml_document`.
+  A typed procedure parameter validates its argument as the body begins, so a refusal names the procedure at line 0.
+  The collection resolves while the batch compiles: an unknown one, or one the batch itself creates first, is **Msg 6314** quoting the name as written (`dbo.nosuch`), which stops the whole batch (probed 2026-10-06).
 - Statement dispatch: `Xml` added to `ContextualKeyword` enum; CREATE / DROP routes match `UnquotedString { ContextualKeyword: ContextualKeyword.Xml }` and `ReservedKeyword { Keyword: Keyword.Primary }` (the PRIMARY XML INDEX form).
   `SCHEMA` is reserved, so the sub-keyword check uses `Keyword.Schema`.
   `COLLECTION` is a bare identifier.
@@ -97,7 +102,7 @@ CREATE XML INDEX name ON table(col)
 - **Where a method may not appear**, each settled while compiling so nothing earlier in the batch runs (probed 2026-09-28 against SQL Server 2025): a `PRINT` operand is **Msg 2722**, a `CHECK` constraint **Msg 423** + 1750, a computed column **Msg 435** — **Msg 424** on a table variable or a multi-statement function's return table.
   Each wants a scalar UDF wrapping the call, which is accepted everywhere.
   `SET`, `DECLARE`'s initializer, `IF` / `WHILE`, `RETURN`, `TOP`, `OFFSET` and a `DEFAULT` all take one; `RAISERROR` / `THROW` / `EXEC` arguments, `EXEC (…)` and `WAITFOR` refuse the dotted call as Msg 102 on both engines.
-- A non-literal `xquery` / type argument raises `NotSupportedException` (dynamic XQuery isn't modeled).
+- A non-literal `xquery` / type argument is Msg 8172 while the batch compiles — see [Arguments, outer references and the context node](#arguments-outer-references-and-the-context-node).
 - **XML runtime errors abort as under `XACT_ABORT`**: a well-formedness refusal (Msg 6307 / 6308), a `replace value of` one (Msg 6320 / 6325) and every typed-validation failure end the batch and roll the transaction back uncaught, and doom it caught, whatever the option says (probed 2026-09-28) — the same class as the [parsing family](#well-formedness).
 
 ## XQuery-subset evaluator
@@ -382,11 +387,17 @@ That is what real quotes (`'value()' requires a singleton …, found operand of 
 A `text()` step under a simply typed element is **Msg 9312** (`'text()' is not supported on simple typed or 'http://www.w3.org/2001/XMLSchema#anyType' elements, found 'element(d,xs:decimal) *'.`), in `.modify()`'s paths too, and a typed element marked `xsi:nil` reads as NULL through `.value()`.
 All probed 2026-09-28 against SQL Server 2025.
 
+### Arguments, outer references and the context node
+
+Every XQuery argument, and `value()`'s type, is a string literal — parenthesized or not — and anything else (a variable, an expression, `NULL`) is **Msg 8172** naming the argument's position and the method, which stops the batch as it compiles, a `TRY` around it included (probed 2026-10-06 against SQL Server 2025).
+
+A `.nodes()` row column is read only through a method or `IS [NOT] NULL` from the queries nested in its own as well: an enclosing query's or an `APPLY`'s left side's column named bare in a select list, a `WHERE`, an `EXISTS` or a derived table is **Msg 493**, and converted **Msg 525** (`RejectDirectNodesColumnRead`, through `ParserContext.EnclosingScopes`).
+
+Inside a predicate on a step the collection types, the context item atomizes as that type, so `/r/s[. = 1]` over an `xs:string` element is **Msg 2234** quoting `xs:string` and `xs:integer`.
+A `.nodes()` row standing on an attribute is typed as one (`attribute(*,xdt:untypedAtomic)`, or the attribute's own name), from which an attribute step is **Msg 2219**, a child step **Msg 2261** and `text()` **Msg 2377** — `.` and `..` read on (all probed 2026-10-06).
+
 ### Not modeled yet
 
-- **Dynamic XQuery** — a method argument that isn't a literal raises `NotSupportedException`.
-- **An outer reference to a `.nodes()` row column** from a nested query (`(select c for xml path)` in the select list, `cross apply (select c as z)`) isn't refused with real's Msg 493; the row's reference text reaches the nested query instead.
-- **Static types past the path**: the context item inside a predicate stays untyped (`/r/s[. = 1]` over a typed string is real's Msg 2234), and a step over what real types as an attribute (`c.value('@x', …)` on a `.nodes('/r/a/@*')` row) isn't real's Msg 2219.
 - **User-derived simple types** report the built-in they restrict rather than their own name in a static type, and a complex type with simple content stays untyped.
 
 ### Divergences
@@ -396,7 +407,8 @@ All probed 2026-09-28 against SQL Server 2025.
   Real also splits its generic syntax errors further than the simulator does — a path that ends mid-step is its **Msg 9341** (`Syntax error near '<eof>', expected a step expression.`) where the simulator reports 2209 — and a construct keyword written without the token that identifies it (`for i in …`, `if 1=1 then …`) is real's 2209 near the *keyword* while the simulator names the token it stopped on.
 - **`position()` / `last()` legality is lexical.** The simulator allows them anywhere inside a written predicate, so a FLWOR nested in one can read them; real's rule is its own binder's.
 - `fn:min` / `fn:max` compare numerically; real compares by the operand's own type, so a string sequence orders differently.
-- **Numbers compute in `double`.** The [arithmetic types](#arithmetic-types) decide the rendering and the decimal scale rules, but an integer past 2⁵³ loses its low digits (`12345678901234567890 + 1`), and real's decimal scale follows each operand's own digits where the simulator applies the six-digit rule to every quotient and product.
+- **Exact numbers are `numeric(38, 10)`, as real's are** (probed 2026-10-06 against SQL Server 2025): a decimal literal keeps ten fractional digits rounded half away from zero, more than 28 integer digits is **Msg 2342**, a result past that range is the empty sequence, and an integer keeps every digit (`Storage/XmlExactDecimal.cs`) — a value a `double` can't carry travels as its digits.
+  The [arithmetic types](#arithmetic-types) decide the rendering and the decimal scale rules, and real's decimal scale follows each operand's own digits where the simulator applies the six-digit rule to every quotient and product.
 - **A constructed node re-parses.** Each evaluation splices the enclosed sequences into the literal markup and parses the result, so a value carrying markup-significant text is escaped by position rather than kept as a node identity; the serialized answer matches real for every probed shape.
 ## Typed writes — validation and canonical form
 
@@ -484,9 +496,9 @@ They were exported by real SQL Server and are therefore already in its canonical
 ### Divergences
 
 - **No precision cap on `decimal`.** Real applies an internal one that rejects a 29-digit integer part and truncates a long fractional part (`0.1234567890123456789012345678` stores as `0.123456789`); the simulator canonicalizes the digits as written. Values of the size real data carries are unaffected.
-- **A column or variable declared `xml(DOCUMENT …)`** still admits a fragment; only the `CAST` / `CONVERT` target enforces `DOCUMENT`.
-- **`DECLARE @x xml(<missing collection>)`** is Msg 208 here, where real raises Msg 6314 (probed 2026-10-04 against SQL Server 2025); a collection that exists but whose `EXECUTE` the principal lacks is Msg 229 on both.
-- **An XSD that doesn't compile is accepted** at `CREATE` and `ADD` and leaves its values untyped, where real refuses it — a reference to an undefined type is its Msg 2308, for one.
+- A collection that exists but whose `EXECUTE` the principal lacks is Msg 229 on both, where a missing one is the Msg 6314 above.
+- **An XSD error outside the refusals [the parser section lists](#parsers--simulationsimulationxmlcs)** is accepted and leaves its values untyped.
+- **A batch that alters a collection and then declares a variable typed by it** runs here, where real refuses the variable with Msg 6323 (`The xml schema collection for variable '@x' has been altered while the batch was being executed.`; probed 2026-10-06).
 - Real's expected-element list in a Msg 6965 isn't in declaration order (`'n','f','s','i','dt','b'` for a sequence declared `d, i, s, b, dt, n, f`); the simulator lists the names as declared.
 
 ## `.modify()` — XML-DML
@@ -936,7 +948,7 @@ An `xml`-typed value, in EXPLICIT alone, gets `xmlns=""` on each unprefixed top-
 Divergences:
 
 - **`idrefs` / `nmtokens` always raise Msg 6826.**
-  Real admits one where the column's expression is statically nullable — the shape that feeds one value per row in and merges them into a space-joined attribute — and reports 6826 otherwise; the simulator has no expression-nullability model, so it reports what real gives the non-nullable shape.
+  Real admits some shapes — `cast(null as int) as [e!1!k!nmtokens]` alone emits `<e></e>` — and refuses others that look alike: a nullable column (`r varchar(10) null`), a literal, and a `UNION ALL` feeding the column `NULL` in its element's own branch are all Msg 6826 (probed 2026-10-06 against SQL Server 2025), so the rule is narrower than the column's nullability and isn't pinned yet.
 
 ### XML names — escaped in RAW / AUTO, rejected everywhere else
 
@@ -1108,6 +1120,14 @@ The `XMLSCHEMA` directive raises `NotSupportedException` in RAW / AUTO / PATH (u
 `XMLDATA` isn't parsed at all, so it falls to Msg 102 without the prefix.
 EXPLICIT's `idrefs` / `nmtokens` accept path is under [its divergences](#explicit--the-universal-table).
 
+What real sends for the two, probed 2026-10-06 against SQL Server 2025, for whoever builds them:
+
+- **`XMLSCHEMA`** prefixes the rows with an inline `xsd:schema` whose `targetNamespace` is `urn:schemas-microsoft-com:sql:SqlRowSet<n>` — `n` counting the session's `XMLSCHEMA` queries that name no URI, so `XMLSCHEMA('urn:a')` takes `urn:a` and leaves the count alone — importing the `sqltypes` namespace, and puts each row element in it with `xmlns`.
+  A column maps to `sqltypes:<type>` (`int`, `real`, `date`, `image` …); a string column restricts `sqltypes:varchar` and the like with its collation's `sqltypes:localeId`, `sqltypes:sqlCompareOptions` and, under a SQL collation, `sqltypes:sqlSortId` (`1033`, `IgnoreCase IgnoreKanaType IgnoreWidth`, `52` for `SQL_Latin1_General_CP1_CI_AS`), plus `maxLength` unless `max`; `decimal` takes `totalDigits` / `fractionDigits`, a binary type `maxLength`, `xml` an element of `sqltypes:xml`.
+  A non-nullable attribute is `use="required"`, an element-centric one has no `minOccurs="0"`, `ELEMENTS XSINIL` makes each `nillable="1"`, and AUTO nests a child level as `<xsd:element ref="schema:c" minOccurs="0" maxOccurs="unbounded"/>` declared after its parent, under an extra `xmlns:schema` prefix.
+  An empty rowset still sends the schema; `TYPE` returns it as one `xml` value; PATH is Msg 6855, and a `sql_variant` attribute Msg 6847.
+- **`XMLDATA`** prefixes an XDR `Schema` named `Schema<n>` by its own count, with `ElementType` / `AttributeType` declarations carrying `dt:type` (`i4`, `string` …), and puts the rows in `x-schema:#Schema<n>`; a type XDR has no mapping for (`datetime2`, `date`) is Msg 6848, and a row tag name or `ROOT` Msg 6860.
+
 ## Leading byte-order mark
 
 A string that becomes `xml` loses a leading U+FEFF, wherever the conversion happens — a literal INSERT, a parameter, an explicit `CAST`, `SqlBulkCopy` and a TVP row all behave the same, probe-confirmed against SQL Server 2025 (2026-07-30).
@@ -1142,4 +1162,4 @@ The declaration is dropped, which also keeps SqlClient from refusing a value who
   `.modify()`'s paths, content and values run through the same evaluator, so the subset bounds the mutator too.
   [`OPENXML`](#openxml) is unaffected — its patterns are XPath 1.0 and run through the DOM's own engine.
 - **`SELECTIVE XML INDEX`** variant (SQL Server 2014+).
-- The typed-write residue under [its divergences](#divergences-1): `DOCUMENT` on a column or variable, and an XSD that doesn't compile.
+- The typed-write residue under [its divergences](#divergences-1): an XSD error outside the ones refused, and Msg 6323.

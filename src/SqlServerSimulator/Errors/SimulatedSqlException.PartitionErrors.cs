@@ -408,4 +408,12 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException CompressionPartitionsWithoutPartitionAll() =>
         new("In an ALTER TABLE REBUILD or ALTER INDEX REBUILD statement, when a partition is specified in a DATA_COMPRESSION clause, PARTITION=ALL must be specified. The PARTITION=ALL clause is used to reinforce that all partitions of the table or index will be rebuilt, even if only a subset is specified in the DATA_COMPRESSION clause.", 10737, 15, 1);
+
+    /// <summary>
+    /// Msg 16209: a rebuild listing partitions for <c>XML_COMPRESSION</c>
+    /// without <c>PARTITION = ALL</c>, after the <c>DATA_COMPRESSION</c> list's
+    /// Msg 10737 (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlCompressionPartitionsWithoutPartitionAll() =>
+        new("The PARTITION=ALL clause must be specified to enable XML compression for the table or index.", 16209, 15, 1);
 }

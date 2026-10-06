@@ -1692,22 +1692,22 @@ internal sealed partial class Selection
         // WHERE, GROUP BY, HAVING, ORDER BY or ON reading the column is Msg 493
         // (525 for a conversion) too.
         foreach (var expression in expressions)
-            RejectDirectNodesColumnRead(expression, sources);
+            RejectDirectNodesColumnRead(expression, sources, parseBatch.Parser.EnclosingScopes);
         foreach (var excluder in fromClause.Excluders)
-            RejectDirectNodesColumnRead(excluder, sources);
+            RejectDirectNodesColumnRead(excluder, sources, parseBatch.Parser.EnclosingScopes);
         foreach (var groupingExpression in fromClause.AllGroupingExpressions)
-            RejectDirectNodesColumnRead(groupingExpression, sources);
+            RejectDirectNodesColumnRead(groupingExpression, sources, parseBatch.Parser.EnclosingScopes);
         if (fromClause.Having is { } having)
-            RejectDirectNodesColumnRead(having, sources);
+            RejectDirectNodesColumnRead(having, sources, parseBatch.Parser.EnclosingScopes);
         foreach (var orderSpec in fromClause.OrderBy)
         {
             if (orderSpec.Expr is { } orderExpression)
-                RejectDirectNodesColumnRead(orderExpression, sources);
+                RejectDirectNodesColumnRead(orderExpression, sources, parseBatch.Parser.EnclosingScopes);
         }
         foreach (var join in joins)
         {
             if (join.OnPredicate is { } on)
-                RejectDirectNodesColumnRead(on, sources);
+                RejectDirectNodesColumnRead(on, sources, parseBatch.Parser.EnclosingScopes);
         }
         // A reference to a numeric-spelled column names what reads it
         // numeric, so each is marked against the column it binds to — ahead
@@ -2647,16 +2647,21 @@ internal sealed partial class Selection
 
     /// <summary>
     /// Raises Msg 493 for a <c>.nodes()</c> column <paramref name="expression"/>
-    /// reads outside an xml method's receiver or an <c>IS [NOT] NULL</c> test.
+    /// reads outside an xml method's receiver or an <c>IS [NOT] NULL</c> test —
+    /// one of <paramref name="sources"/>, or an enclosing query's or an
+    /// <c>APPLY</c>'s left side's that the reference correlates to, which real
+    /// refuses the same way (probed 2026-10-06 against SQL Server 2025:
+    /// <c>(SELECT c FOR XML PATH)</c>, <c>CROSS APPLY (SELECT c AS z)</c>,
+    /// <c>EXISTS (SELECT c)</c>).
     /// </summary>
-    private static void RejectDirectNodesColumnRead(ExpressionNode expression, FromSource[] sources) =>
+    private static void RejectDirectNodesColumnRead(ExpressionNode expression, FromSource[] sources, List<FromSource[]> enclosingScopes) =>
         expression.Walk((node, shape) => node switch
         {
-            Reference reference when ReadsNodesColumn(sources, reference)
+            Reference reference when ReadsNodesColumn(sources, enclosingScopes, reference)
                 => throw SimulatedSqlException.NodesColumnUsedDirectly(reference.ReferencedName.Leaf),
             // A conversion of the column is Msg 525 naming the target type
             // (probed 2026-09-25) — its shape reports the type, then the source.
-            Cast or ConvertExpression when shape.ChildNodes[0] is Reference converted && ReadsNodesColumn(sources, converted)
+            Cast or ConvertExpression when shape.ChildNodes[0] is Reference converted && ReadsNodesColumn(sources, enclosingScopes, converted)
                 => throw SimulatedSqlException.NodesColumnCannotConvert((SqlType)shape.Locals[1]!),
             // IS [NOT] NULL may test the column itself, not a conversion of it.
             BooleanExpression.IsNullExpression when shape.ChildNodes[0] is Reference => false,
@@ -2664,8 +2669,18 @@ internal sealed partial class Selection
             _ => true,
         });
 
-    private static bool ReadsNodesColumn(FromSource[] sources, Reference reference) =>
-        TryResolveSourceColumn(sources, reference.ReferencedName) is { } id && sources[id.Source].XmlReceiverName is not null;
+    private static bool ReadsNodesColumn(FromSource[] sources, List<FromSource[]> enclosingScopes, Reference reference)
+    {
+        if (TryResolveSourceColumn(sources, reference.ReferencedName) is { } id)
+            return sources[id.Source].XmlReceiverName is not null;
+        for (var level = enclosingScopes.Count - 1; level >= 0; level--)
+        {
+            var scope = enclosingScopes[level];
+            if (TryResolveSourceColumn(scope, reference.ReferencedName) is { } outer)
+                return scope[outer.Source].XmlReceiverName is not null;
+        }
+        return false;
+    }
 
     /// <summary>Whether <paramref name="operand"/> is a bare reference to a source column with no type.</summary>
     private static bool ReadsUntypedNullColumn(FromSource[] sources, Expression? operand)

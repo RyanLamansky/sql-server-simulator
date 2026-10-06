@@ -28,7 +28,8 @@ internal readonly struct IndexOptions(
     bool compressionOnPartitions = false,
     bool statisticsIncremental = false,
     bool ignoreDupKeyWritten = false,
-    List<PartitionCompressionClause>? partitionCompressions = null)
+    List<PartitionCompressionClause>? partitionCompressions = null,
+    List<PartitionCompressionClause>? xmlPartitionCompressions = null)
 {
     public readonly bool IgnoreDupKey = ignoreDupKey;
 
@@ -95,6 +96,9 @@ internal readonly struct IndexOptions(
     /// </summary>
     public readonly List<PartitionCompressionClause>? PartitionCompressions = partitionCompressions;
 
+    /// <summary>The <c>XML_COMPRESSION … ON PARTITIONS (…)</c> clauses, as <see cref="PartitionCompressions"/>.</summary>
+    public readonly List<PartitionCompressionClause>? XmlPartitionCompressions = xmlPartitionCompressions;
+
     /// <summary><c>STATISTICS_INCREMENTAL = ON</c>, which only a partitioned index takes.</summary>
     public readonly bool StatisticsIncremental = statisticsIncremental;
 
@@ -114,7 +118,7 @@ internal readonly struct IndexOptions(
     public IndexOptions AsHash() =>
         new(this.IgnoreDupKey, this.FillFactor, this.PadIndex, this.DropExisting, this.CompressionDelay, this.ColumnstoreArchive,
             this.AllowRowLocks, this.AllowPageLocks, this.OptimizeForSequentialKey, this.DataSpace, this.StatisticsNoRecompute, this.StatisticsOnly, this.BucketCount, isHash: true,
-            this.DataCompression, this.XmlCompression, this.CompressionOnPartitions, this.StatisticsIncremental, this.IgnoreDupKeyWritten, this.PartitionCompressions);
+            this.DataCompression, this.XmlCompression, this.CompressionOnPartitions, this.StatisticsIncremental, this.IgnoreDupKeyWritten, this.PartitionCompressions, this.XmlPartitionCompressions);
 
     /// <summary>The <c>ON</c> placement clause written after the options, if any.</summary>
     public readonly Schemas.DataSpaceClause? DataSpace = dataSpace;
@@ -123,5 +127,5 @@ internal readonly struct IndexOptions(
     public IndexOptions WithDataSpace(Schemas.DataSpaceClause? clause) =>
         new(this.IgnoreDupKey, this.FillFactor, this.PadIndex, this.DropExisting, this.CompressionDelay, this.ColumnstoreArchive,
             this.AllowRowLocks, this.AllowPageLocks, this.OptimizeForSequentialKey, clause, this.StatisticsNoRecompute, this.StatisticsOnly, this.BucketCount, this.IsHash,
-            this.DataCompression, this.XmlCompression, this.CompressionOnPartitions, this.StatisticsIncremental, this.IgnoreDupKeyWritten, this.PartitionCompressions);
+            this.DataCompression, this.XmlCompression, this.CompressionOnPartitions, this.StatisticsIncremental, this.IgnoreDupKeyWritten, this.PartitionCompressions, this.XmlPartitionCompressions);
 }

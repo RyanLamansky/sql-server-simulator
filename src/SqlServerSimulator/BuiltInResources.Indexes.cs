@@ -1088,7 +1088,7 @@ internal static partial class BuiltInResources
         var census = new PartitionCensus();
         foreach (var (table, indexId, _, _, index, placement) in EnumerateTableIndexIdentities(database, batch))
         {
-            var (level, xmlCompressed, perPartition) = RowstoreCompressionOf(table, indexId, index);
+            var (level, xmlCompressed, perPartition, xmlPerPartition) = RowstoreCompressionOf(table, indexId, index);
             var fixedCompression = index is { IsColumnstore: true } columnstore
                 ? (columnstore.ColumnstoreArchive ? archiveCompression : columnstoreCompression)
                 : table.PageCompressed && indexId <= 1 ? pageCompression
@@ -1102,6 +1102,7 @@ internal static partial class BuiltInResources
                     _ => noneCompression,
                 };
                 var partitionIdValue = SqlValue.FromInt64(unit.PartitionId);
+                var xmlCompressedThere = Storage.PartitionCompression.LevelOf(xmlCompressed ? (byte)1 : (byte)0, xmlPerPartition, unit.Number) != 0;
                 yield return
                 [
                     partitionIdValue,
@@ -1112,8 +1113,8 @@ internal static partial class BuiltInResources
                     SqlValue.FromInt64(unit.Rows),
                     filestreamFg,
                     .. compression,
-                    xmlCompressed ? xmlOn : xmlOff,
-                    xmlCompressed ? xmlOnDesc : xmlOffDesc,
+                    xmlCompressedThere ? xmlOn : xmlOff,
+                    xmlCompressedThere ? xmlOnDesc : xmlOffDesc,
                 ];
             }
         }
@@ -1122,21 +1123,21 @@ internal static partial class BuiltInResources
     /// <summary>
     /// The rowstore <c>DATA_COMPRESSION</c> level and <c>XML_COMPRESSION</c> of
     /// one of <paramref name="table"/>'s rowsets — the heap's own for index 0,
-    /// else the index's or key constraint's — and its per-partition levels
-    /// when its partitions differ.
+    /// else the index's or key constraint's — and each one's per-partition
+    /// levels when its partitions differ.
     /// </summary>
-    private static (byte Level, bool Xml, List<byte>? PerPartition) RowstoreCompressionOf(HeapTable table, int indexId, Storage.Index? index)
+    private static (byte Level, bool Xml, List<byte>? PerPartition, List<byte>? XmlPerPartition) RowstoreCompressionOf(HeapTable table, int indexId, Storage.Index? index)
     {
         if (index is not null)
-            return (index.DataCompression, index.XmlCompression, index.PartitionDataCompression);
+            return (index.DataCompression, index.XmlCompression, index.PartitionDataCompression, index.PartitionXmlCompression);
         if (indexId == 0)
-            return (table.HeapDataCompression, table.HeapXmlCompression, table.HeapPartitionDataCompression);
+            return (table.HeapDataCompression, table.HeapXmlCompression, table.HeapPartitionDataCompression, table.HeapPartitionXmlCompression);
         foreach (var key in table.KeyConstraints)
         {
             if (key.IndexId == indexId)
-                return (key.DataCompression, key.XmlCompression, key.PartitionDataCompression);
+                return (key.DataCompression, key.XmlCompression, key.PartitionDataCompression, key.PartitionXmlCompression);
         }
-        return (0, false, null);
+        return (0, false, null, null);
     }
 
     /// <summary>

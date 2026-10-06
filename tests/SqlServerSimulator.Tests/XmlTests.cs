@@ -121,10 +121,10 @@ public sealed class XmlTests
     }
 
     [TestMethod]
-    public void XmlColumn_WithUnknownCollection_Raises208()
+    public void XmlColumn_WithUnknownCollection_Raises6314()
     {
         var sim = new Simulation();
-        _ = sim.AssertSqlError("create table dbo.doc (id int, body xml(no_such_collection))", 208);
+        _ = sim.AssertSqlError("create table dbo.doc (id int, body xml(no_such_collection))", 6314);
     }
 
     [TestMethod]

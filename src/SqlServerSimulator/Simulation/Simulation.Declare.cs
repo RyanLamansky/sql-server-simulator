@@ -112,6 +112,7 @@ partial class Simulation
             int? declaredMaxLength;
             XmlSchemaCollection? xmlSchemaCollection;
             AliasType? aliasType = null;
+            var xmlDocument = false;
             var spelledNumeric = false;
             try
             {
@@ -122,7 +123,7 @@ partial class Simulation
                 }
 
                 spelledNumeric = IsNumericTypeWord(context.Token);
-                (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName, out aliasType);
+                (declaredType, declaredMaxLength, xmlSchemaCollection) = ParseDeclareTypeSpec(context, variableName, out aliasType, out xmlDocument);
                 spelledNumeric = aliasType?.SpelledNumeric ?? spelledNumeric;
                 // A variable typed by a collection takes EXECUTE on it: Msg
                 // 229, the variable declared NULL and its initializer never
@@ -138,6 +139,7 @@ partial class Simulation
                         context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, SqlValue.Null(declaredType), parameter: null)
                         {
                             XmlSchemaCollection = xmlSchemaCollection,
+                            XmlDocument = xmlDocument,
                         };
                         throw;
                     }
@@ -148,9 +150,10 @@ partial class Simulation
                 legacyLobRefusal ??= legacyLob;
                 (declaredType, declaredMaxLength, xmlSchemaCollection) = (SqlType.SqlVariant, null, null);
             }
-            catch (SimulatedSqlException missingType) when (missingType.Number is 2715 or 2716 or 2717 or 2750 && context.Batch.CreateTimeBindErrors is { } bindErrors)
+            catch (SimulatedSqlException missingType) when (missingType.Number is 2715 or 2716 or 2717 or 2750 or 6314 && context.Batch.CreateTimeBindErrors is { } bindErrors)
             {
-                // Binding without running, real reports the missing type — or
+                // Binding without running, real reports the missing type or
+                // XML schema collection — or
                 // a width or precision the type refuses — and still declares the
                 // variable, so a later reference to it binds rather than
                 // raising Msg 137 (a table-type use raises Msg 1087, since the
@@ -221,6 +224,7 @@ partial class Simulation
                     context.Batch.Variables[variableName] = new VariableSlot(declaredType, declaredMaxLength, SqlValue.Null(declaredType), parameter: null)
                     {
                         XmlSchemaCollection = xmlSchemaCollection,
+                        XmlDocument = xmlDocument,
                         AliasType = aliasType,
                         SpelledNumeric = spelledNumeric,
                     };
@@ -244,6 +248,7 @@ partial class Simulation
                 var slot = new VariableSlot(declaredType, declaredMaxLength, SqlValue.Null(declaredType), parameter: null)
                 {
                     XmlSchemaCollection = xmlSchemaCollection,
+                    XmlDocument = xmlDocument,
                     AliasType = aliasType,
                     SpelledNumeric = spelledNumeric,
                     Mask = context.Batch.UdfFrame is { AnalyzesReturnMask: true } && initExpressionForMask is not null ? DataMask.Of(initExpressionForMask, static _ => null, typeOf: null) : null,
@@ -269,7 +274,7 @@ partial class Simulation
     /// max-length) is captured by length-bearing singleton variants of the
     /// type itself when applicable.
     /// </summary>
-    private static (SqlType Type, int? MaxLength, XmlSchemaCollection? XmlSchemaCollection) ParseDeclareTypeSpec(ParserContext context, string variableName, out AliasType? aliasType)
+    private static (SqlType Type, int? MaxLength, XmlSchemaCollection? XmlSchemaCollection) ParseDeclareTypeSpec(ParserContext context, string variableName, out AliasType? aliasType, out bool xmlDocument)
     {
         var (qualifiedTypeName, typeName) = TypeNameSynonyms.ReadTypeName(context);
 
@@ -281,6 +286,7 @@ partial class Simulation
         int? declaredScale = null;
         XmlSchemaCollection? xmlSchemaCollection = null;
         aliasType = null;
+        xmlDocument = false;
         if (context.Token is Operator { Character: '(' })
         {
             // `DECLARE @x xml(<collection>)` — the parens hold a name, not a
@@ -290,7 +296,7 @@ partial class Simulation
                 && context.Batch.CurrentDatabase.Collation.Equals(typeName.Value, "xml")
                 && PeekIsXmlSchemaArgument(context))
             {
-                xmlSchemaCollection = ParseXmlSchemaCollectionArgument(context);
+                (xmlSchemaCollection, xmlDocument) = ParseXmlSchemaCollectionArgument(context);
                 context.MoveNextOptional();
                 return (SqlType.Xml, null, xmlSchemaCollection);
             }

@@ -100,14 +100,43 @@ partial class Simulation
         var cpu = Math.Max(0, elapsed - (connection.WaitedTicks - capture.WaitedBefore) - (lockWaitMilliseconds * TimeSpan.TicksPerMillisecond));
         var reads = Math.Max(0, (io?.TotalLogicalReads() ?? 0) - capture.ReadsBefore);
 
-        var shape = connection.Simulation.QueryStoreShapeOf(commandText.AsSpan(start, end - start), capture.Database, batch.Parser, tokensFrom);
-        if (!shape.Captured && !(shape.CapturedWhenCallingFunction && batch.CurrentStatement.CallsUserFunction))
+        if (QueryStoreKeyOf(batch, capture.Database, start, end, tokensFrom, out var shape, out var offsetStart, out var offsetEnd) is not { } key)
             return;
+        var execution = new QueryStoreExecution(
+            key,
+            shape,
+            commandText,
+            offsetStart,
+            offsetEnd,
+            DateTime.UtcNow,
+            elapsed / 10,
+            cpu / 10,
+            reads,
+            rowCount,
+            executionType,
+            lockWaitMilliseconds);
+        RecordQueryStoreExecution(capture.Database, execution);
+    }
+
+    /// <summary>
+    /// The store's identity for the statement whose text runs from
+    /// <paramref name="start"/> to <paramref name="end"/> — its stored text,
+    /// context settings, containing module, parameterization type and, for
+    /// one reading a table variable, its batch — or null for a statement real
+    /// doesn't capture; with the text's shape and its offsets in the batch.
+    /// </summary>
+    private static QueryStoreQueryKey? QueryStoreKeyOf(BatchContext batch, Database database, int start, int end, ParserContext.Checkpoint? tokensFrom, out QueryStoreShape shape, out long offsetStart, out long offsetEnd)
+    {
+        var commandText = batch.Parser.Command.CommandText;
+        var connection = batch.Connection;
+        shape = connection.Simulation.QueryStoreShapeOf(commandText.AsSpan(start, end - start), database, batch.Parser, tokensFrom);
+        offsetStart = offsetEnd = 0;
+        if (!shape.Captured && !(shape.CapturedWhenCallingFunction && batch.CurrentStatement.CallsUserFunction))
+            return null;
 
         var isModule = batch.ModuleObjectId != 0 || batch.TriggerFrame is not null || batch.ProcFrame is { IsDynamicSql: false };
         string text;
         byte parameterizationType;
-        long offsetStart, offsetEnd;
         string? tableVariableScope = null;
         if (shape.Parameterized is { } parameterized && !isModule)
         {
@@ -141,20 +170,7 @@ partial class Simulation
             DateFormatCode(connection.DateFormat),
             connection.DateFirst,
             isModule || !shape.UsesDefaultSchema ? -2 : Database.DboSchemaId);
-        var execution = new QueryStoreExecution(
-            new QueryStoreQueryKey(text, context, batch.ModuleObjectId, parameterizationType, tableVariableScope),
-            shape,
-            commandText,
-            offsetStart,
-            offsetEnd,
-            DateTime.UtcNow,
-            elapsed / 10,
-            cpu / 10,
-            reads,
-            rowCount,
-            executionType,
-            lockWaitMilliseconds);
-        RecordQueryStoreExecution(capture.Database, execution);
+        return new QueryStoreQueryKey(text, context, batch.ModuleObjectId, parameterizationType, tableVariableScope);
     }
 
     /// <summary>

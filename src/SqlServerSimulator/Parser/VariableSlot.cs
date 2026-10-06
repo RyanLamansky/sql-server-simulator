@@ -37,6 +37,9 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     /// </summary>
     public Schemas.XmlSchemaCollection? XmlSchemaCollection;
 
+    /// <summary>The declaration wrote <c>xml(DOCUMENT …)</c>; see <c>HeapColumn.XmlDocument</c>.</summary>
+    public bool XmlDocument;
+
     /// <summary>
     /// The variable was declared <c>numeric</c> rather than <c>decimal</c>,
     /// which a reference reports as its type's name (probed 2026-09-24).
@@ -61,7 +64,7 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     /// reads back <c>&lt;c&gt;1.5&lt;/c&gt;</c> (probe-confirmed).
     /// </summary>
     public void Assign(SqlValue value) =>
-        this.Value = this.XmlSchemaCollection is { } collection && !value.IsNull && value.Type is XmlSqlType
-            ? SqlValue.FromXml(XmlSchemaValidation.ValidateAndNormalize(collection, value.AsString))
+        this.Value = value.Type is XmlSqlType
+            ? Expressions.Cast.ValidateTypedXml(value, this.XmlSchemaCollection, this.XmlDocument)
             : value;
 }

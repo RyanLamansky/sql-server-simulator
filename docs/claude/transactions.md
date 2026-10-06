@@ -149,6 +149,7 @@ The batch ends even with no transaction open — the option is not conditional o
 An error raised inside a procedure body ends the **calling** batch, not just the body.
 
 **A statement that changes a table's or index's structure behaves this way whatever the option says** — ALTER TABLE, CREATE / ALTER INDEX, CREATE / UPDATE STATISTICS, DROP TABLE and TRUNCATE TABLE: their severity-16 run-time errors (and ALTER INDEX's severity-11 Msg 2727) end the batch and roll the transaction back, while the two ALTER TABLE raises compiling, Msg 4902 and 2705, end the batch alone, and a severity-11 miss such as DROP INDEX's Msg 3701 carries on (probed 2026-09-26 against SQL Server 2025; `StatementContext.ChangesTableStructure`).
+A statistic's computed key failing to evaluate as CREATE / UPDATE STATISTICS builds it (Msg 8115) is the exception: it ends only its statement, the batch and the transaction going on (probed 2026-10-06).
 The other DDL — roles, synonyms, schema transfers, `GRANT` — doesn't.
 
 **`RAISERROR` is the exemption**, at every severity and with or without `WITH LOG`: uncaught under the option it reports, the batch runs on, and the transaction stays committable at `XACT_STATE()` 1.

@@ -90,4 +90,13 @@ partial class SimulatedSqlException
     /// <summary>Mimics SQL Server error 12469: <c>sp_query_store_remove_plan_feedback</c> given a plan as well. Class 16 state 1.</summary>
     internal static SimulatedSqlException QueryStoreFeedbackForPlanUnsupported() =>
         new("Removing feedback for a specific plan is not supported.", 12469, 16, 1);
+
+    /// <summary>
+    /// Msg 12455: <c>sp_query_store_set_hints</c> given a hint the store won't
+    /// hold — state 2 for <c>OPTIMIZE FOR</c> a variable list, checked first,
+    /// else state 1 naming <c>USE PLAN</c> and <c>TABLE HINT</c> in that order
+    /// (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException QueryStoreHintNotSupported(string hints, byte state) =>
+        new($"Setting query hint(s) '{hints}' in Query Store is not supported.", 12455, 16, state);
 }

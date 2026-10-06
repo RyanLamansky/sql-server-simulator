@@ -23,7 +23,8 @@ internal sealed class XmlQueryParser(
     Dictionary<string, string> prefixes,
     string method,
     XmlStaticTyping? typing = null,
-    XmlSqlAccessorScope? sqlAccessors = null)
+    XmlSqlAccessorScope? sqlAccessors = null,
+    string? contextNodeType = null)
 {
     /// <summary>The XQuery namespace an unprefixed function name lives in.</summary>
     private const string FunctionNamespace = "http://www.w3.org/2004/07/xpath-functions";
@@ -50,6 +51,21 @@ internal sealed class XmlQueryParser(
 
     /// <summary>The <c>$</c>-variable bindings in scope, innermost last.</summary>
     private readonly List<XmlVariableBinding> scope = [];
+
+    /// <summary>
+    /// The static type of the node the expression starts from when real types
+    /// it as an attribute — a <c>.nodes()</c> row over attributes, as
+    /// <c>attribute(*,xdt:untypedAtomic)</c> — which has no children or
+    /// attributes for a step to reach; null for an element or document.
+    /// </summary>
+    private readonly string? contextNodeType = contextNodeType;
+
+    /// <summary>
+    /// The <c>xs:</c> type of the context item inside the predicates being
+    /// parsed — the simply typed element or attribute their step names — or
+    /// null where it is untyped.
+    /// </summary>
+    private string? predicateContextType;
 
     private int index;
     private int slotCount;
@@ -661,7 +677,9 @@ internal sealed class XmlQueryParser(
         else if (this.StartsStep())
         {
             start = new XmlContextItemExpr();
-            steps.Add(this.ParseStep());
+            var first = this.ParseStep();
+            this.RequireStepFromContextNode(first);
+            steps.Add(first);
         }
         else
         {
@@ -689,6 +707,30 @@ internal sealed class XmlQueryParser(
             steps.Add(step);
         }
         return steps.Count == 0 ? start : new XmlPathExpr(start, [.. steps]);
+    }
+
+    /// <summary>
+    /// Msg 2219 / 2261: a child or attribute step from a context node real
+    /// types as an attribute, which holds neither (probed 2026-10-06 against
+    /// SQL Server 2025: <c>c.value('@x', …)</c> and <c>c.value('*[1]', …)</c>
+    /// on a <c>.nodes('/r/a/@*')</c> row), and Msg 2377 for its
+    /// <c>text()</c>, which can only be empty.
+    /// </summary>
+    private void RequireStepFromContextNode(XmlStep step)
+    {
+        if (this.contextNodeType is not { } attributeType || this.predicateDepth > 0
+            || step.Axis is not (XmlAxis.Child or XmlAxis.Attribute))
+        {
+            return;
+        }
+        if (step.Axis == XmlAxis.Child && step.TestKind == XmlNodeTestKind.Text)
+            throw SimulatedSqlException.XQueryStaticallyEmpty(this.method, "text()");
+        if (step.TestKind is not (XmlNodeTestKind.Name or XmlNodeTestKind.Wildcard))
+            return;
+        var written = step.TestKind == XmlNodeTestKind.Wildcard ? "*" : step.LocalName;
+        throw step.Axis == XmlAxis.Attribute
+            ? SimulatedSqlException.XQueryNoSuchAttributeInType(this.method, "@" + written, attributeType)
+            : SimulatedSqlException.XQueryNoSuchElementInType(this.method, written, attributeType);
     }
 
     /// <summary>
@@ -859,7 +901,7 @@ internal sealed class XmlQueryParser(
             ? this.typing?.AttributeTypes.TryGetValue(local, out typeName)
             : this.typing?.ElementTypes.TryGetValue(local, out typeName);
         return new XmlStep(
-            axis, XmlNodeTestKind.Name, local, uri, this.ParsePredicates(),
+            axis, XmlNodeTestKind.Name, local, uri, this.ParsePredicates(typeName),
             axis == XmlAxis.Child && this.typing?.SingletonElements.Contains(local) == true,
             typeName);
     }
@@ -883,7 +925,14 @@ internal sealed class XmlQueryParser(
         _ => throw SimulatedSqlException.XQueryInvalidAxis(this.method, name),
     };
 
-    private XmlQueryExpr[] ParsePredicates()
+    /// <summary>
+    /// The predicates after a step or a primary, inside which the context item
+    /// carries <paramref name="contextType"/> — the simple type the step's
+    /// element or attribute is declared with, so <c>/r/s[. = 1]</c> over an
+    /// <c>xs:string</c> element is Msg 2234 (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    private XmlQueryExpr[] ParsePredicates(string? contextType = null)
     {
         List<XmlQueryExpr>? predicates = null;
         while (true)
@@ -893,7 +942,10 @@ internal sealed class XmlQueryParser(
                 return predicates is null ? [] : [.. predicates];
             this.index++;
             this.predicateDepth++;
+            var enclosingContextType = this.predicateContextType;
+            this.predicateContextType = contextType;
             var predicate = this.ParseExprSingle();
+            this.predicateContextType = enclosingContextType;
             this.predicateDepth--;
             this.SkipWhitespace();
             if (this.Current != ']')
@@ -928,7 +980,7 @@ internal sealed class XmlQueryParser(
         if (c == '.')
         {
             this.index++;
-            return new XmlContextItemExpr();
+            return new XmlContextItemExpr(this.predicateContextType);
         }
         if (c is '"' or '\'')
             return new XmlLiteralExpr(this.ReadQuoted(c), XmlStaticKind.String, "xs:string");
@@ -1176,9 +1228,12 @@ internal sealed class XmlQueryParser(
         var span = this.text.AsSpan(start, this.index - start);
         if (!double.TryParse(span, NumberStyles.Float, CultureInfo.InvariantCulture, out var number))
             throw this.SyntaxError();
-        return exponent
-            ? new XmlLiteralExpr(XmlAtomicTypes.Number(number, "xs:double"), XmlStaticKind.Number, "xs:double")
-            : new XmlLiteralExpr(number, XmlStaticKind.Number, fractional ? "xs:decimal" : "xs:integer");
+        if (exponent)
+            return new XmlLiteralExpr(XmlAtomicTypes.Number(number, "xs:double"), XmlStaticKind.Number, "xs:double");
+        var typeName = fractional ? "xs:decimal" : "xs:integer";
+        return XmlExactDecimal.TryParse(span, out var exact) && XmlExactDecimal.Item(exact, typeName) is { } item
+            ? new XmlLiteralExpr(item, XmlStaticKind.Number, typeName)
+            : throw SimulatedSqlException.XQueryInvalidNumericConstant(this.method);
     }
 
     private string ReadQuoted(char quote)

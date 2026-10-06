@@ -555,6 +555,15 @@ partial class SimulatedSqlException
             : new($"Xml data type methods are not supported in computed column definitions. Create a scalar user-defined function to wrap the method invocation. The error occurred at column \"{columnName}\", table \"{tableName}\", in the {statement} statement.", 435, 16, 16);
 
     /// <summary>
+    /// Msg 8172: an XML method argument that must be a string literal — the
+    /// XQuery expression, or <c>value()</c>'s target type — is a variable, an
+    /// expression or <c>NULL</c>. A parenthesized literal passes. Raised while
+    /// the batch compiles (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlMethodArgumentNotStringLiteral(int position, string methodName) =>
+        new($"The argument {position} of the XML data type method \"{methodName}\" must be a string literal.", 8172, 16, 1);
+
+    /// <summary>
     /// Msg 8137: a mutator XML method (<c>.modify()</c>) appears where a value
     /// is expected — a select list, a predicate, the right-hand side of an
     /// assignment. Probe-confirmed wording against SQL Server 2025.
@@ -1159,6 +1168,29 @@ partial class SimulatedSqlException
         new($"XQuery [{method}()]: There is no element named '{name}' in the type '{staticType}'.", 2261, 16, 1);
 
     /// <summary>
+    /// Msg 2342: a decimal or integer literal past the 28 integer digits real's
+    /// <c>xs:decimal</c> holds (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XQueryInvalidNumericConstant(string method) =>
+        new($"XQuery [{method}()]: Invalid numeric constant.", 2342, 16, 1);
+
+    /// <summary>
+    /// Msg 2377: an expression whose result the static types settle as empty —
+    /// a <c>text()</c> step from an attribute (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XQueryStaticallyEmpty(string method, string expression) =>
+        new($"XQuery [{method}()]: Result of '{expression}' expression is statically 'empty'", 2377, 16, 1);
+
+    /// <summary>
+    /// Msg 2219: an attribute step from a node the static type says can't
+    /// carry one — the attribute a <c>.nodes()</c> row over attributes stands
+    /// on (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XQueryNoSuchAttributeInType(string method, string name, string staticType) =>
+        new($"XQuery [{method}()]: There is no attribute named '{name}' in the type '{staticType}'.", 2219, 16, 1);
+
+    /// <summary>
     /// Msg 9308: an arithmetic operand real types as neither numeric nor
     /// untyped — a string or boolean, a <c>sql:variable</c> over a character
     /// type included.
@@ -1248,9 +1280,9 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException XmlDmlReplaceValueTypeMismatch(string method, string valueType, string expectedType) =>
         new($"XQuery [{method}()]: The value is of type \"{valueType}\", which is not a subtype of the expected type \"{expectedType}\".", 2247, 16, 1);
 
-    /// <summary>Msg 6901: an <c>xml(DOCUMENT …)</c> target given something other than one top-level element.</summary>
-    internal static SimulatedSqlException XmlValidationNotADocument() =>
-        new("XML Validation: XML instance must be a document.", 6901, 16, 1)
+    /// <summary>Msg 6901: an <c>xml(DOCUMENT …)</c> target given something other than one top-level element; the state is <c>XmlSchemaValidation.DocumentViolation</c>'s.</summary>
+    internal static SimulatedSqlException XmlValidationNotADocument(byte state) =>
+        new("XML Validation: XML instance must be a document.", 6901, 16, state)
         {
             AbortsAsUnderXactAbort = true,
         };
@@ -1260,7 +1292,40 @@ partial class SimulatedSqlException
     /// identity constraints <c>key</c>, <c>keyref</c> and <c>unique</c>.
     /// </summary>
     internal static SimulatedSqlException XmlSchemaSyntaxNotSupported(string construct) =>
-        new($"The XML Schema syntax '{construct}' is not supported.", 9336, 16, 1);
+        new($"The XML Schema syntax '{construct}' is not supported.", 9336, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 2302: a schema collection's text declares one global element,
+    /// attribute, type, group or attribute group name twice in a namespace
+    /// (probed 2026-10-06 against SQL Server 2025). This and the rest of the
+    /// collection's compile errors act as under <c>XACT_ABORT</c>, ending the
+    /// batch and rolling the transaction back.
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaNameAlreadyDefined(string name) =>
+        new($"The name \"{name}\" has already been defined in this scope.", 2302, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 2307 / 2308: a <c>type</c>, <c>base</c>, <c>ref</c>, <c>itemType</c>,
+    /// <c>memberTypes</c> or <c>substitutionGroup</c> naming a component the
+    /// collection doesn't define — 2308 when the name is in a namespace, the
+    /// <c>xml:</c> one included (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaUndefinedName(string name, string targetNamespace) =>
+        targetNamespace.Length == 0
+            ? new($"Reference to an undefined name '{name}'", 2307, 16, 1) { AbortsAsUnderXactAbort = true }
+            : new($"Reference to an undefined name '{name}' within namespace '{targetNamespace}'", 2308, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2309: a length or digits facet whose <c>value</c> isn't a number (probed 2026-10-06 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaFacetValueNotNumber() =>
+        new("The value of \"value\" is not a valid number.", 2309, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 2319: a restriction applies a facet its base type doesn't take,
+    /// located as <c>/*:schema[1]/*:simpleType[1]/…</c> (probed 2026-10-06
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaFacetNotAllowed(string facet, string location) =>
+        new($"This type may not have a '{facet}' facet. Location: '{location}'.", 2319, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>Msg 6347: <c>ALTER XML SCHEMA COLLECTION</c> naming a collection that doesn't resolve or can't be altered.</summary>
     internal static SimulatedSqlException XmlSchemaCollectionCannotBeAltered(string name) =>

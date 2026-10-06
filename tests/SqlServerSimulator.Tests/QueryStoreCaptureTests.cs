@@ -354,6 +354,66 @@ public sealed class QueryStoreCaptureTests
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.query_store_query_hints"));
     }
 
+    /// <summary>
+    /// A hint applies the next time a statement that is its query compiles
+    /// (probed 2026-10-06 against SQL Server 2025): MAXRECURSION overriding the
+    /// query's own, and join hints that leave no plan recorded as the hint's
+    /// failure while the query compiles without it.
+    /// </summary>
+    [TestMethod]
+    public void Hints_ApplyAtTheNextCompile()
+    {
+        var sim = CapturingAll();
+        const string Recursive = "with c as (select 1 n union all select n + 1 from c where n < 50) select count(*) from t, c option (maxrecursion 100)";
+        const string NonEqui = "select t.a from t join t u on t.a > u.a";
+        AreEqual(100, sim.ExecuteScalar(Recursive));
+        _ = sim.ExecuteScalar(NonEqui);
+        static string IdOf(string like) => $"(select q.query_id from sys.query_store_query q join sys.query_store_query_text x on x.query_text_id = q.query_text_id where x.query_sql_text like '{like}')";
+        _ = sim.ExecuteNonQuery($"declare @q bigint = {IdOf("with c%")}; exec sp_query_store_set_hints @q, N'OPTION (MAXRECURSION 10)'");
+        _ = sim.ExecuteNonQuery($"declare @q bigint = {IdOf("%t.a > u.a")}; exec sp_query_store_set_hints @q, N'OPTION (HASH JOIN)'");
+        sim.AssertSqlError(Recursive, 530, "The statement terminated. The maximum recursion 10 has been exhausted before statement completion.");
+        AreEqual(3, sim.ExecuteScalar(NonEqui));
+        using (var reader = sim.ExecuteReader("select query_hint_text, last_query_hint_failure_reason, last_query_hint_failure_reason_desc, query_hint_failure_count from sys.query_store_query_hints order by query_hint_text"))
+        {
+            IsTrue(reader.Read());
+            AreEqual("OPTION (HASH JOIN)", reader.GetString(0));
+            AreEqual(8622, reader.GetInt32(1));
+            AreEqual("NO_PLAN", reader.GetString(2));
+            AreEqual(1L, reader.GetInt64(3));
+            IsTrue(reader.Read());
+            AreEqual(0, reader.GetInt32(1));
+            AreEqual("NONE", reader.GetString(2));
+        }
+        _ = sim.ExecuteNonQuery($"declare @q bigint = {IdOf("with c%")}; exec sp_query_store_clear_hints @q");
+        AreEqual(100, sim.ExecuteScalar(Recursive));
+    }
+
+    [TestMethod]
+    [DataRow("OPTION (MAXRECURSION 10, MAXRECURSION 5)", 1042, (byte)1, "Conflicting maxrecursion optimizer hints specified.")]
+    [DataRow("OPTION (MAXRECURSION 40000)", 310, (byte)1, "The value 40000 specified for the MAXRECURSION option exceeds the allowed maximum of 32767.")]
+    [DataRow("OPTION (USE HINT (''FOO''))", 10715, (byte)1, "'FOO' is not a valid hint.")]
+    [DataRow("OPTION (TABLE HINT(t, NOLOCK), USE PLAN N''<x/>'')", 12455, (byte)1, "Setting query hint(s) 'USE PLAN, TABLE HINT' in Query Store is not supported.")]
+    [DataRow("OPTION (MAXDOP 1, TABLE HINT(t, NOLOCK))", 12455, (byte)1, "Setting query hint(s) 'TABLE HINT' in Query Store is not supported.")]
+    [DataRow("OPTION (MAXDOP 1, OPTIMIZE FOR (@a = 1), TABLE HINT(t, NOLOCK))", 12455, (byte)2, "Setting query hint(s) 'OPTIMIZE FOR' in Query Store is not supported.")]
+    public void SetHints_ChecksTheClauseAsAStatementWould(string clause, int number, byte state, string message)
+    {
+        var sim = CapturingAll();
+        _ = sim.ExecuteScalar("select b from t");
+        var ex = sim.AssertSqlError($"exec sp_query_store_set_hints 1, N'{clause}'", number);
+        AreEqual(state, ex.State);
+        AreEqual(message, ex.Errors[0].Message);
+        AreEqual("sp_query_store_set_hints", ex.Procedure);
+    }
+
+    [TestMethod]
+    public void SetHints_TakesOptimizeForUnknown()
+    {
+        var sim = CapturingAll();
+        _ = sim.ExecuteScalar("select b from t");
+        _ = sim.ExecuteNonQuery("exec sp_query_store_set_hints 1, N'OPTION (OPTIMIZE FOR UNKNOWN)'");
+        AreEqual("OPTION (OPTIMIZE FOR UNKNOWN)", sim.ExecuteScalar("select query_hint_text from sys.query_store_query_hints"));
+    }
+
     [TestMethod]
     [DataRow("exec sp_query_store_set_hints 1, N'OPTION (BOGUS)'", "Incorrect syntax near 'BOGUS'.")]
     [DataRow("exec sp_query_store_set_hints 1, N'MAXDOP 1'", "Incorrect syntax near 'MAXDOP'.")]

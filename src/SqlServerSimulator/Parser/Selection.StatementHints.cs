@@ -64,10 +64,11 @@ partial class Selection
     /// SQL Server 2025). <c>MAXRECURSION</c> overrides every in-scope CTE's
     /// recursion limit, <c>RECOMPILE</c> and <c>USE HINT</c> set their
     /// statement flags, and the join, <c>FORCE ORDER</c> and <c>TABLE HINT</c>
-    /// hints are returned for <see cref="SettleStatementHints"/>. Cursor on
-    /// entry: the <c>OPTION</c> keyword; on exit, the token after its <c>)</c>.
+    /// hints are returned for <see cref="SettleStatementHints"/>. A Query
+    /// Store hint clause parses here too. Cursor on entry: the <c>OPTION</c>
+    /// keyword; on exit, the token after its <c>)</c>.
     /// </summary>
-    private static OptionClause ParseOptionClause(ParserContext context)
+    internal static OptionClause ParseOptionClause(ParserContext context)
     {
         if (context.GetNextRequired() is not Operator { Character: '(' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -480,6 +481,8 @@ partial class Selection
         context.JoinHintSites = null;
         var enforced = context.JoinOrderEnforced;
         context.JoinOrderEnforced = false;
+        if (Simulation.QueryStoreHintFor(context.Batch) is { } storeHint)
+            clause = ApplyQueryStoreHint(context, clause, storeHint, sites);
 
         if (clause is { Joins: not JoinAlgorithms.None } && sites is not null)
         {
@@ -506,8 +509,89 @@ partial class Selection
 
         // A TABLE HINT's forced-seek check records its site again.
         context.JoinHintSites = null;
-        if (enforced && clause is not { ForceOrder: true } && !context.Batch.IsSkipping)
-            context.Batch.AppendInfoError(@class: 0, state: 0, SimulatedSqlException.JoinOrderEnforcedMessageNumber, SimulatedSqlException.JoinOrderEnforcedMessage);
+        if (enforced && clause is not { ForceOrder: true })
+            SendJoinOrderEnforced(context.Batch);
+    }
+
+    /// <summary>
+    /// The statement's <c>OPTION</c> clause with the Query Store hint for the
+    /// query it is applied over it, as real compiles the statement (probed
+    /// 2026-10-06 against SQL Server 2025): the hint's <c>MAXRECURSION</c>
+    /// replaces the statement's own, its join hints and <c>FORCE ORDER</c>
+    /// steer the plan, and its <c>RECOMPILE</c> compiles the statement every
+    /// time it runs. Join hints that leave no plan don't fail the statement:
+    /// it compiles without the hint, which records the failure.
+    /// </summary>
+    private static OptionClause? ApplyQueryStoreHint(ParserContext context, OptionClause? clause, QueryStoreHint hint, List<JoinHintSite>? sites)
+    {
+        var hinted = hint.Clause;
+        var joins = hinted.Joins != JoinAlgorithms.None ? hinted.Joins : clause?.Joins ?? JoinAlgorithms.None;
+        if (hinted.Joins != JoinAlgorithms.None && sites is not null && OptimizerChecksRun(context.Batch))
+        {
+            try
+            {
+                foreach (var site in sites)
+                    ValidateJoinAlgorithms(site, joins);
+            }
+            catch (SimulatedSqlException refused) when (refused.Number == 8622)
+            {
+                Simulation.NoteQueryStoreHintFailure(context.Batch, hint, refused.Number);
+                return clause;
+            }
+        }
+
+        if (hinted.MaxRecursion is { } limit && context.CteBindings is { } bindings)
+        {
+            foreach (var binding in bindings.Values)
+                binding.MaxRecursion = limit;
+        }
+        if (hint.Recompiles)
+            context.Batch.CurrentStatement.Recompiles = true;
+        var merged = clause ?? new OptionClause();
+        merged.Joins = joins;
+        merged.ForceOrder |= hinted.ForceOrder;
+        merged.MaxRecursion = hinted.MaxRecursion ?? merged.MaxRecursion;
+        return merged;
+    }
+
+    /// <summary>
+    /// Sends Msg 8625 for the statement <paramref name="batch"/> is settling,
+    /// as real does whenever it compiles one (probed 2026-10-06 against SQL
+    /// Server 2025): a batch's compile sends it ahead of everything the batch
+    /// runs — untaken branches and a <c>SET NOEXEC ON</c> batch included —
+    /// for each hinted statement it compiles, and the statement sends nothing
+    /// as it runs; one the compile deferred, one carrying <c>OPTION
+    /// (RECOMPILE)</c> and one reading a table variable compile as they run
+    /// and send it then; a batch or module body running on a plan compiled
+    /// before sends it only for those last two. A view or function body
+    /// inlined into a statement hands the warning to that statement, which
+    /// sends it on its own line, and a module body binding at <c>CREATE</c>
+    /// sends none.
+    /// </summary>
+    internal static void SendJoinOrderEnforced(BatchContext batch)
+    {
+        if (batch.Connection.InlinedBodyDepth > 0)
+        {
+            batch.Parser.JoinOrderEnforced = true;
+            return;
+        }
+        if ((batch.CreateTimeBinding && !batch.CompilingForRun) || batch.DefiningModuleSchema is not null)
+            return;
+        var statement = batch.CurrentStatement;
+        var compilesAsItRuns = statement.Recompiles || (statement.ReadsTableVariable && batch.CurrentDatabase.CompatibilityLevel >= CompatibilityLevel.Sql150);
+        if (batch.CompilingForRun)
+        {
+            if (!statement.BindsDeferredSource && !compilesAsItRuns)
+            {
+                (batch.CompileMessages ??= []).Add(batch.InfoMessage(@class: 0, state: 0, SimulatedSqlException.JoinOrderEnforcedMessageNumber, SimulatedSqlException.JoinOrderEnforcedMessage));
+                _ = (batch.JoinOrderWarnedStatements ??= []).Add(statement.StartIndex);
+            }
+            return;
+        }
+        if (batch.IsSkipping)
+            return;
+        if (batch.JoinOrderWarnedStatements is { } warned ? !warned.Contains(statement.StartIndex) : compilesAsItRuns)
+            batch.AppendInfoError(@class: 0, state: 0, SimulatedSqlException.JoinOrderEnforcedMessageNumber, SimulatedSqlException.JoinOrderEnforcedMessage);
     }
 
     /// <summary>
@@ -524,12 +608,14 @@ partial class Selection
     /// </summary>
     /// <remarks>
     /// Nothing is recorded for a block whose statement can't need it — no
-    /// inline join hint, no forced access path, and a command text that never
-    /// spells <c>OPTION</c> — since every query block parsed passes here.
+    /// inline join hint, no forced access path, a command text that never
+    /// spells <c>OPTION</c> and no Query Store hint that could apply — since
+    /// every query block parsed passes here.
     /// </remarks>
     private static void RecordJoinHintSite(ParserContext context, FromSource[] sources, JoinSpec[] joins, List<BooleanExpression> filters)
     {
         if (!context.CommandMentionsOption
+            && context.Batch.CurrentDatabase.QueryStoreData.Hints.Count == 0
             && !Array.Exists(joins, static join => join.Algorithm != JoinAlgorithms.None)
             && !Array.Exists(sources, static source => source.ForcedAccessPath is not null))
         {

@@ -154,7 +154,9 @@ partial class Simulation
     /// and a hint name no query hint begins with are Msg 102 at the word,
     /// and a query the store doesn't hold Msg 12402 (state 5, and 6 for
     /// clear); while the store is OFF both are Msg 12405 (states 6 and 7). The
-    /// hints are recorded, not applied.
+    /// next compile of a statement that is the query applies them (see
+    /// <see cref="QueryStoreHintFor"/>), so setting or clearing them retires
+    /// every cached plan.
     /// </summary>
     private static IEnumerable<SimulatedStatementOutcome> InvokeSpQueryStoreHints(BatchContext batch, bool set)
     {
@@ -174,25 +176,33 @@ partial class Simulation
                 throw SimulatedSqlException.QueryStoreQueryNotFound(queryId, database.Id, set ? (byte)5 : (byte)6);
         }
         string? hints = null;
+        Selection.OptionClause? clause = null;
+        var recompiles = false;
         if (set)
         {
             hints = arguments[1]!.Value.CoerceTo(SqlType.NVarcharMax).AsString;
-            CheckQueryHintClause(hints, database);
+            (clause, recompiles) = ParseQueryHintClause(batch, hints, database);
         }
         lock (data.Gate)
         {
             _ = data.Hints.RemoveAll(hint => hint.QueryId == queryId);
-            if (hints is not null)
-                data.Hints.Add(new QueryStoreHint(data.NextHintId++, queryId, hints));
+            if (hints is not null && clause is not null)
+                data.Hints.Add(new QueryStoreHint(data.NextHintId++, queryId, hints, clause, recompiles));
         }
+        batch.Connection.Simulation.BumpSchemaVersion();
     }
 
     /// <summary>
-    /// The syntax check <c>sp_query_store_set_hints</c> runs over its clause:
-    /// <c>OPTION</c>, an opening parenthesis, then hints each beginning with a
-    /// word a query hint begins with.
+    /// The checks <c>sp_query_store_set_hints</c> runs over its clause, in
+    /// real's order (probed 2026-10-06 against SQL Server 2025): <c>OPTION</c>,
+    /// an opening parenthesis, then hints each beginning with a word a query
+    /// hint begins with (Msg 102); then the hints the store won't hold (Msg
+    /// 12455); then the clause as a statement's <c>OPTION</c> clause parses,
+    /// with its refusals — a repeated hint, a value out of range, an unknown
+    /// <c>USE HINT</c> name. Answers the parsed clause and whether it carries
+    /// <c>RECOMPILE</c>.
     /// </summary>
-    private static void CheckQueryHintClause(string clause, Database database)
+    private static (Selection.OptionClause Clause, bool Recompiles) ParseQueryHintClause(BatchContext batch, string clause, Database database)
     {
         var tokens = new List<Token>();
         var index = 0;
@@ -207,13 +217,19 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(tokens.Count < 2 ? tokens[0] : tokens[1]);
         var depth = 0;
         var expectHint = true;
-        for (var i = 2; i < tokens.Count; i++)
+        var closed = false;
+        bool optimizeForVariables = false, usePlan = false, tableHint = false;
+        bool Follows(int at, string word) => at < tokens.Count && tokens[at].Source.Equals(word, StringComparison.OrdinalIgnoreCase);
+        for (var i = 2; i < tokens.Count && !closed; i++)
         {
             var token = tokens[i];
             if (expectHint && depth == 0)
             {
                 if (!IsQueryHintWord(token))
                     throw SimulatedSqlException.SyntaxErrorNear(token);
+                optimizeForVariables |= token.Source.Equals("OPTIMIZE", StringComparison.OrdinalIgnoreCase) && Follows(i + 1, "FOR") && Follows(i + 2, "(");
+                usePlan |= token is ReservedKeyword { Keyword: Keyword.Use } && Follows(i + 1, "PLAN");
+                tableHint |= token is ReservedKeyword { Keyword: Keyword.Table } && Follows(i + 1, "HINT");
                 expectHint = false;
                 continue;
             }
@@ -223,7 +239,8 @@ partial class Simulation
                     depth++;
                     break;
                 case Operator { Character: ')' } when depth == 0:
-                    return;
+                    closed = true;
+                    break;
                 case Operator { Character: ')' }:
                     depth--;
                     break;
@@ -232,7 +249,20 @@ partial class Simulation
                     break;
             }
         }
-        throw SimulatedSqlException.SyntaxErrorNear(tokens[^1]);
+        if (!closed)
+            throw SimulatedSqlException.SyntaxErrorNear(tokens[^1]);
+        if (optimizeForVariables)
+            throw SimulatedSqlException.QueryStoreHintNotSupported("OPTIMIZE FOR", state: 2);
+        if (usePlan || tableHint)
+            throw SimulatedSqlException.QueryStoreHintNotSupported(usePlan && tableHint ? "USE PLAN, TABLE HINT" : usePlan ? "USE PLAN" : "TABLE HINT", state: 1);
+
+        using var command = new SimulatedDbCommand(batch.Connection.Simulation, batch.Connection);
+#pragma warning disable CA2100 // the clause is parsed, never run
+        command.CommandText = clause;
+#pragma warning restore CA2100
+        var hintBatch = new BatchContext(command, new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer));
+        hintBatch.Parser.MoveNextRequired();
+        return (Selection.ParseOptionClause(hintBatch.Parser), hintBatch.CurrentStatement.Recompiles);
     }
 
     /// <summary>Whether <paramref name="token"/> is a word a query hint in an <c>OPTION</c> clause begins with.</summary>

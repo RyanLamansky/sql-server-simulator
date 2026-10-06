@@ -189,7 +189,7 @@ partial class Simulation
             if (batch.Parser.JoinOrderEnforced)
             {
                 batch.Parser.JoinOrderEnforced = false;
-                batch.AppendInfoError(@class: 0, state: 0, SimulatedSqlException.JoinOrderEnforcedMessageNumber, SimulatedSqlException.JoinOrderEnforcedMessage);
+                Selection.SendJoinOrderEnforced(batch);
             }
 
             // Snapshot the statement-start line before parser advance — used as

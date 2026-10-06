@@ -914,9 +914,19 @@ internal sealed partial class Selection
     {
         var boundary = new ApplyAggregateBoundary(leftSources, context.AggregateCollector);
         T parsed;
-        using (ParserScope.Enter(ref context.AggregateCollector, boundary))
+        // The left side encloses the right for what correlates to it — a
+        // `.nodes()` column the right side may read only through a method.
+        context.EnclosingScopes.Add(leftSources);
+        try
         {
-            parsed = parse();
+            using (ParserScope.Enter(ref context.AggregateCollector, boundary))
+            {
+                parsed = parse();
+            }
+        }
+        finally
+        {
+            context.EnclosingScopes.RemoveAt(context.EnclosingScopes.Count - 1);
         }
         foreach (var aggregate in boundary)
         {
@@ -1411,7 +1421,7 @@ internal sealed partial class Selection
                     // 4430 (probed 2026-10-05 against SQL Server 2025).
                     if (ParseOptionalTableHints(context).IndexArguments is not null && !context.Batch.IsSkipping)
                         context.Connection.PendingMessages.Enqueue(SimulatedSqlException.ViewIndexHintsIgnoredMessage(context.Batch, objectName.ToString()));
-                    if (catalogView.EnforcesJoinOrder && !context.Batch.IsSkipping)
+                    if (catalogView.EnforcesJoinOrder)
                         context.JoinOrderEnforced = true;
                     return new FromSource(
                         qualifier: catalogAlias ?? catalogView.Name,
@@ -2258,8 +2268,7 @@ internal sealed partial class Selection
         // A hint fixes the join order, which real reports with Msg 8625 as
         // the statement compiles (probed 2026-10-01 against SQL Server 2025);
         // the statement's end sends it, an OPTION (FORCE ORDER) withholding it.
-        if (!context.Batch.IsSkipping)
-            context.JoinOrderEnforced = true;
+        context.JoinOrderEnforced = true;
     }
 
     private static JoinAlgorithms JoinHintAlgorithm(Token? token, out bool remote)

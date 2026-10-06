@@ -158,12 +158,6 @@ partial class Simulation
             ordinals[i] = ordinal;
         }
 
-        // Building the statistic evaluates a computed column over every row
-        // (probed 2026-10-05 against SQL Server 2025).
-        List<int> computed = [.. ordinals.Where(ordinal => table.Columns[ordinal] is { Computed: not null, IsPersisted: false })];
-        if (computed.Count > 0)
-            EvaluateComputedColumnsOverRows(table, computed, context.Batch, endsColumnRewrite: false);
-
         var created = new UserStatistic(
             statisticsName,
             NextStatisticsId(table),
@@ -175,10 +169,16 @@ partial class Simulation
             filterOrdinals);
         created.Statistics.HasPersistedSample = options.PersistSample;
         created.Statistics.AutoDrop = options.AutoDrop;
-        created.Statistics.Snapshot = BuildStatisticsSnapshot(context.Batch, table, ordinals, ordinals, filter);
         table.UserStatistics.Add(created);
         RecordDdlUndo(context, () => _ = table.UserStatistics.Remove(created));
         table.NoteStatisticsCreated(statisticsName, context.CurrentDatabase.Collation);
+
+        // Building the statistic evaluates a computed column over every row
+        // (probed 2026-10-05 against SQL Server 2025). A row the expression
+        // fails on fails the statement but leaves the statistic, never built
+        // (probed 2026-10-06).
+        EvaluateStatisticsKey(context.Batch, table, ordinals, filter);
+        created.Statistics.Snapshot = BuildStatisticsSnapshot(context.Batch, table, ordinals, ordinals, filter);
         RecordDdlEvent(context, "CREATE_STATISTICS", EventSchemaName(targetTableName), statisticsName, "STATISTICS", table.Name, "TABLE");
         return true;
     }
@@ -246,6 +246,29 @@ partial class Simulation
         for (var i = 1; i < written.Count - 1; i++)
             qualifier = qualifier.WithAddedPart(written[i]);
         return qualifier;
+    }
+
+    /// <summary>
+    /// Evaluates the non-persisted computed columns of a statistic's key over
+    /// the rows its filter admits, as building it does — so a row the
+    /// expression fails on raises (Msg 8115 for an overflow) and ends only the
+    /// statement, the batch and transaction going on (probed 2026-10-06
+    /// against SQL Server 2025 for <c>CREATE</c> and <c>UPDATE STATISTICS</c>).
+    /// </summary>
+    private static void EvaluateStatisticsKey(BatchContext batch, HeapTable table, int[] ordinals, BooleanExpression? filter)
+    {
+        List<int> computed = [.. ordinals.Where(ordinal => table.Columns[ordinal] is { Computed: not null, IsPersisted: false })];
+        if (computed.Count == 0)
+            return;
+        try
+        {
+            EvaluateComputedColumnsOverRows(table, computed, batch, endsColumnRewrite: false, filter);
+        }
+        catch (SimulatedSqlException failure)
+        {
+            failure.RaisedBuildingStatistics = true;
+            throw;
+        }
     }
 
     /// <summary>

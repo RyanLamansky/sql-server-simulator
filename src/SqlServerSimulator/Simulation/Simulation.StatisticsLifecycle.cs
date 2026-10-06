@@ -302,6 +302,19 @@ partial class Simulation
             return;
 
         var column = table.Columns[columnOrdinal];
+        // A predicate on a computed column real doesn't store reads the
+        // columns its expression does, which is where the statistics go
+        // (probed 2026-10-06 against SQL Server 2025).
+        if (column.Computed is { } expression && !column.IsPersisted && !column.IsHidden)
+        {
+            expression.VisitColumnReferences(name =>
+            {
+                var read = Array.FindIndex(table.Columns, candidate => database.Collation.Equals(candidate.Name, name.Leaf));
+                if (read >= 0 && read != columnOrdinal && table.Columns[read].Computed is null)
+                    LoadQueryStatistics(batch, table, read);
+            });
+            return;
+        }
         if (column.IsHidden || (column.Computed is not null && !column.IsPersisted)
             || column.Type is XmlSqlType or SpatialSqlType or VectorSqlType or JsonSqlType or ClrUdtSqlType || column.Type.IsLegacyLob)
         {
@@ -351,8 +364,9 @@ partial class Simulation
     /// Loads statistics for every base-table column the predicates of one query
     /// block read (see <see cref="LoadQueryStatistics"/>). Names resolve the
     /// way the query's own do — qualified to a source, else to the one source
-    /// carrying the column — and anything else (an outer reference, a derived
-    /// table's column) loads nothing.
+    /// carrying the column — a view's column loading its base table's when it
+    /// passes one through, and anything else (an outer reference, a derived
+    /// table's column, a view column computed from base columns) loads nothing.
     /// </summary>
     internal static void LoadPredicateStatistics(BatchContext batch, List<FromSource> sources, List<Expression> predicateOperands)
     {
@@ -360,7 +374,7 @@ partial class Simulation
             return;
         var anyTable = false;
         foreach (var source in sources)
-            anyTable |= source.BackingTable is { IsTableVariable: false };
+            anyTable |= source.BackingTable is { IsTableVariable: false } || source.BackingView is { BaseTable: not null };
         if (!anyTable)
             return;
         var collation = batch.CurrentDatabase.Collation;
@@ -407,15 +421,32 @@ partial class Simulation
         {
             if (name.Count > 1 && !(source.Qualifier is { } qualifier && collation.Equals(qualifier, name.ImmediateQualifier)))
                 continue;
-            if (source.BackingTable is not { } table)
+            HeapTable table;
+            int ordinal;
+            if (source.BackingTable is { } backing)
+            {
+                table = backing;
+                ordinal = Array.FindIndex(table.Columns, column => collation.Equals(column.Name, name.Leaf));
+                if (ordinal < 0)
+                    continue;
+            }
+            else if (source.BackingView is { BaseTable: { } viewBase } view)
+            {
+                // A view column passing a base column through reads that
+                // column (probed 2026-10-06 against SQL Server 2025).
+                var viewOrdinal = Array.FindIndex(source.ColumnNames, column => collation.Equals(column, name.Leaf));
+                if (viewOrdinal < 0)
+                    continue;
+                if (viewOrdinal >= view.BaseColumnOrdinals.Length || view.BaseColumnOrdinals[viewOrdinal] < 0)
+                    return null;
+                (table, ordinal) = (viewBase, view.BaseColumnOrdinals[viewOrdinal]);
+            }
+            else
             {
                 if (name.Count > 1)
                     return null;
                 continue;
             }
-            var ordinal = Array.FindIndex(table.Columns, column => collation.Equals(column.Name, name.Leaf));
-            if (ordinal < 0)
-                continue;
             if (found is not null)
                 return null;
             found = (table, ordinal);

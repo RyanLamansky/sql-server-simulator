@@ -47,7 +47,8 @@ internal static class XmlQueryEngine
         XmlStaticTyping? typing = null,
         string? displayMethod = null,
         XmlSqlAccessorScope? sqlAccessors = null,
-        Parser.ForXmlNamespaces? statementNamespaces = null)
+        Parser.ForXmlNamespaces? statementNamespaces = null,
+        string? contextNodeType = null)
     {
         var (defaultNamespace, prefixes, body) = ParsePrologAndBody(xquery, displayMethod ?? method);
 
@@ -65,7 +66,7 @@ internal static class XmlQueryEngine
         // stays the bare discriminator the rules below switch on, while
         // `display` is what real writes between the diagnostics' brackets.
         var display = displayMethod ?? method;
-        var parser = new XmlQueryParser(body, defaultNamespace, prefixes, display, typing, sqlAccessors);
+        var parser = new XmlQueryParser(body, defaultNamespace, prefixes, display, typing, sqlAccessors, contextNodeType);
         var compiled = parser.ParseBody();
 
         // A node constructor is legal in query() and exist(), which hand the

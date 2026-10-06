@@ -292,6 +292,8 @@ partial class Simulation
             variables[param.Name] = new VariableSlot(param.Type, param.DeclaredMaxLength, SqlValue.Null(param.Type), parameter: null)
             {
                 SpelledNumeric = param.SpelledNumeric,
+                XmlSchemaCollection = param.XmlSchemaCollection,
+                XmlDocument = param.XmlDocument,
             };
         }
 

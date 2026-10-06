@@ -152,6 +152,7 @@ partial class Simulation
                 {
                     continue;
                 }
+                EvaluateStatisticsKey(context.Batch, table, statistic.KeyOrdinals, statistic.Filter);
                 BuildStatistics(context.Batch, table, statistic);
                 if (options.PersistSample is { } persist)
                     statistic.State.HasPersistedSample = persist;

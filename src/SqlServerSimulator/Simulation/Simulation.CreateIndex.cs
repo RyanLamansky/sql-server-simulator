@@ -338,12 +338,17 @@ partial class Simulation
         var filegroup = FilegroupFor(context.Batch, table, index.WrittenDataSpace);
         // Partition-level options need a partitioned index (probed 2026-10-05
         // against SQL Server 2025).
-        if (placement is null && indexOptions.CompressionOnPartitions)
+        if (placement is null && (indexOptions.CompressionOnPartitions || indexOptions.XmlPartitionCompressions is not null))
             throw SimulatedSqlException.PartitionNumberOnUnpartitionedCreate(indexName);
         if (placement is not null && indexOptions.PartitionCompressions is { } compressionClauses)
         {
             index.PartitionDataCompression = PartitionCompression.Apply(index.DataCompression, null, placement.Fanout, compressionClauses,
                 number => SimulatedSqlException.InvalidPartitionNumber(number, indexName, placement.Fanout, kind: "index"));
+        }
+        if (placement is not null && indexOptions.XmlPartitionCompressions is { } xmlClauses)
+        {
+            index.PartitionXmlCompression = PartitionCompression.Apply(index.XmlCompression ? (byte)1 : (byte)0, null, placement.Fanout, xmlClauses,
+                number => SimulatedSqlException.InvalidPartitionNumber(number, indexName, placement.Fanout, kind: "index"), xml: true);
         }
         if (placement is null && indexOptions.StatisticsIncremental)
             throw SimulatedSqlException.StatisticsCannotBeIncremental(state: 9);

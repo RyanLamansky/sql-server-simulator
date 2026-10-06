@@ -11,7 +11,10 @@ Implementation lives in [`src/SqlServerSimulator/Parser/Selection.Hints.cs`](../
 The hint names the physical operator real should use; the simulator picks its own strategy, so it can never change an answer (probe-confirmed — hinted and unhinted forms return identical rows).
 The parser records it on the join (`JoinSpec.Algorithm` / `Remote`) for the checks below.
 A hint does fix the join order, and real says so with the informational Msg 8625 ("Warning: The join order has been enforced because a local join hint is used.") as the statement compiles — once per statement however many joins carry one, and not at all under `OPTION (FORCE ORDER)`.
-The simulator sends it as the statement's outermost query finishes parsing (`SettleStatementHints`), or for a query an `IF` or a `SET` holds as the next statement begins (probed 2026-10-05 against SQL Server 2025).
+That is when a batch compiles, ahead of everything it runs — each hinted statement's on its own line, an untaken branch's and a `SET NOEXEC ON` batch's included — and only then: a loop's statement warns once, a repeated batch text or dynamic SQL text runs on its cached plan and sends none, and a procedure warns at the compile its first call makes, never at `CREATE`, as a view never does (probed 2026-10-06 against SQL Server 2025).
+What compiles as it runs warns as it runs: a statement the batch's compile deferred, and every run of one carrying `OPTION (RECOMPILE)` or reading a table variable.
+A view's hint warns on the line of the statement referencing it.
+`Selection.SendJoinOrderEnforced` holds the rules, the batch's compile recording what it sent in `BatchContext.JoinOrderWarnedStatements`.
 
 Real accepts all four hints against every join type, including combinations that look implausible (`FULL LOOP JOIN`, `RIGHT LOOP JOIN`).
 It does require the type keyword, and refuses these shapes (all probe-confirmed):
@@ -186,6 +189,7 @@ Beside it, `RECOMPILE` and `USE HINT('DISABLE_TSQL_SCALAR_UDF_INLINING')` set th
   `FORCESCAN` beside an `INDEX` naming only nonclustered indexes is refused too when the query reads a column those indexes don't carry, the lookup being a seek.
   It is a compile error: it ends the batch before any statement runs, and a `TRY` in the batch doesn't catch it; a statement over a table the batch creates meets it when it runs, and a procedure body at its execution rather than at `CREATE`; a binder error earlier in the batch keeps it from being reported, and a batch reports only the first.
   `ForceSeekPlanTests` holds the probed shapes both ways.
+- **An `INDEX` hint naming one filtered index the query doesn't confine itself to** — **Msg 8622** (probed 2026-10-06 against SQL Server 2025), settled with `FORCESEEK`'s (`HintsUnimpliedFilteredIndex`): the query's top-level conjuncts over literals have to prove the filter, so `b >= 6` and `b = 6` imply `b > 5` over an integer column, any comparison implies `IS NOT NULL`, and an `IN` list implies a filter listing its values, while a variable, an `OR` or a conjunct on another table's column proves nothing; naming several indexes is planned whatever their filters.
 - **Hint combinations real's optimizer refuses outright** (class 15, raised with the hint list): **Msg 10746** for `FORCESEEK` beside `FORCESCAN`, **Msg 10747** for a nested `FORCESEEK(ix(…))` beside an `INDEX` hint, **Msg 10750** for `FORCESCAN` beside more than one index, and a bare `FORCESEEK(ix)` without its column list is **Msg 102** on the closing parenthesis (probed 2026-09-28).
 - **The legacy no-`WITH` parenthesized form** splits on the alias, matching real.
   With an alias written, the parens are unambiguously a hint list and an unknown name is Msg 321.
@@ -197,11 +201,12 @@ Beside it, `RECOMPILE` and `USE HINT('DISABLE_TSQL_SCALAR_UDF_INLINING')` set th
 ## Not enforced
 
 - **A table hint on a view** — real carries `FORCESEEK` through to the view's base tables, so `SELECT … FROM v WITH (FORCESEEK) WHERE d = 1` over an unindexed `d` is Msg 8622 there (probed 2026-09-28); the simulator doesn't carry a hint into a view body, so the read runs.
-- **An `INDEX` hint on a filtered index the query's predicate doesn't imply** — Msg 8622 on real (probed 2026-10-05); the simulator has no filter-implication test yet, so the read runs.
-- **The order an index-hinted scan returns rows in** — real scans the hinted index and returns its key order (`WITH (INDEX(ix_c))` over `c DESC` comes back by `c` descending); the simulator's scan keeps its own order.
+- **The order an index-hinted scan returns rows in** — real scans the hinted index and returns its key order (`WITH (INDEX(ix_c))` over `c DESC` comes back by `c` descending, a heap's `INDEX(ix)` by `ix`'s key, re-probed 2026-10-06); the simulator's scan keeps its own order.
   So does an unhinted query real answers from a narrower covering index, and an `IN` list seeks its values in written order where real sorts them.
+  Not chased: the order is the physical one of the index real's plan reads.
 - **Join-hint feasibility through `APPLY` and semi-joins** — real refuses `OPTION (HASH JOIN)` over a `CROSS APPLY` or an `EXISTS` whose correlation isn't an equality once decorrelated, and some `RIGHT LOOP JOIN`s, as its decorrelation and join reordering decide; those are left alone here.
-- **Where Msg 8625 lands** — real sends it while the whole batch compiles, so a batch of two hinted statements sends one, ahead of both results, and a `SET NOEXEC ON` batch sends it too; a view body's hint reports line 0 here where real gives the referencing statement's.
+  Not chased: the shapes follow real's rewrites, not the query as written.
+- **Msg 8625 from dynamic SQL run by `sp_executesql`** after `EXEC (…)` ran the same text: real's cached plan sends none, where the simulator's separate compile sends it once more.
 - **Table hints after a table-valued function** (`dbo.f() WITH (NOLOCK)`, Msg 102 / Msg 1018 on real) and `EXEC (…) WITH RECOMPILE` (Msg 102 on real) are accepted.
 - **`INDEX = (value-list)` equals-form** — probe-confirmed that real SQL Server raises `Msg 102` on the equals-with-multiple-values form anyway (the docs notwithstanding), so the simulator's "= takes one literal" rule matches by parsing as well.
 

@@ -41,22 +41,28 @@ partial class Simulation
 
     /// <summary>
     /// Parses the inner argument of <c>xml(...)</c> as a schema-collection
-    /// reference. Forms: <c>xml(name)</c>, <c>xml(CONTENT name)</c>,
-    /// <c>xml(DOCUMENT name)</c>; the CONTENT/DOCUMENT discriminator is
-    /// parsed-and-discarded (AW emits neither — every xml column is the
-    /// default CONTENT form). Cursor enters on the <c>(</c>, exits on the
-    /// matching <c>)</c>. The resolved <see cref="XmlSchemaCollection"/> is
-    /// returned for the caller to attach to the column.
+    /// reference — <c>xml(name)</c>, <c>xml(CONTENT name)</c> or
+    /// <c>xml(DOCUMENT name)</c> — answering the collection and whether
+    /// <c>DOCUMENT</c> was written. Cursor enters on the <c>(</c>, exits on
+    /// the matching <c>)</c>.
     /// </summary>
-    internal static XmlSchemaCollection ParseXmlSchemaCollectionArgument(ParserContext context)
+    /// <remarks>
+    /// Real resolves the collection while the batch compiles, so one the
+    /// batch itself creates first is still Msg 6314, which stops the whole
+    /// batch — a column, a variable, a parameter and a <c>CAST</c> target
+    /// alike, the name quoted as written (probed 2026-10-06 against SQL
+    /// Server 2025).
+    /// </remarks>
+    internal static (XmlSchemaCollection Collection, bool Document) ParseXmlSchemaCollectionArgument(ParserContext context)
     {
         // Cursor on `(`. Advance to the inner content.
         context.MoveNextRequired();
 
-        // Optional CONTENT / DOCUMENT discriminator.
+        var document = false;
         if (context.Token is UnquotedString { Value: var maybeKind }
             && (maybeKind.Equals("CONTENT", StringComparison.OrdinalIgnoreCase) || maybeKind.Equals("DOCUMENT", StringComparison.OrdinalIgnoreCase)))
         {
+            document = maybeKind.Equals("DOCUMENT", StringComparison.OrdinalIgnoreCase);
             context.MoveNextRequired();
         }
 
@@ -68,23 +74,27 @@ partial class Simulation
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
 
-        // Resolve via the schema's XmlSchemaCollections dict, an unqualified
-        // name searching as a type name does.
-        return context.Batch.TryResolveXmlSchemaCollectionSchema(collectionName, out var schema)
+        return (ResolveXmlSchemaCollectionReference(context, collectionName), document);
+    }
+
+    /// <summary>
+    /// The collection an <c>xml(…)</c> type names, an unqualified name
+    /// searching as a type name does; Msg 6314 quoting the name as written
+    /// when nothing matches.
+    /// </summary>
+    private static XmlSchemaCollection ResolveXmlSchemaCollectionReference(ParserContext context, MultiPartName collectionName) =>
+        context.Batch.TryResolveXmlSchemaCollectionSchema(collectionName, out var schema)
             && schema.XmlSchemaCollections.TryGetValue(collectionName.Leaf, out var collection)
             ? collection
-            : throw SimulatedSqlException.InvalidObjectName(collectionName);
-    }
+            : throw SimulatedSqlException.XmlSchemaCollectionNotInMetadata(collectionName.ToString());
 
     /// <summary>
     /// Parses the typed target of a <c>CAST</c> / <c>CONVERT</c> —
     /// <c>xml([CONTENT | DOCUMENT] [schema.]collection)</c> — answering the
     /// collection and whether <c>DOCUMENT</c> was written, or null (with the
     /// cursor untouched) when <paramref name="typeName"/> isn't that form. On
-    /// success the cursor sits on the token after the closing <c>)</c>. A
-    /// collection that doesn't resolve is Msg 6314 here, where a column or
-    /// variable declaration reports Msg 208 (probed 2026-09-28 against SQL
-    /// Server 2025).
+    /// success the cursor sits on the token after the closing <c>)</c>; a
+    /// collection that doesn't resolve is Msg 6314, as for a declaration.
     /// </summary>
     internal static (XmlSchemaCollection Collection, bool Document)? TryParseXmlCastTarget(ParserContext context, Name typeName)
     {
@@ -113,10 +123,7 @@ partial class Simulation
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextRequired();
 
-        return context.Batch.TryResolveXmlSchemaCollectionSchema(collectionName, out var schema)
-            && schema.XmlSchemaCollections.TryGetValue(collectionName.Leaf, out var collection)
-            ? (collection, document)
-            : throw SimulatedSqlException.XmlSchemaCollectionNotInMetadata(collectionName.Leaf);
+        return (ResolveXmlSchemaCollectionReference(context, collectionName), document);
     }
 
     /// <summary>
@@ -227,6 +234,7 @@ partial class Simulation
         }
 
         XmlSchemaCollection.RejectUnsupportedSyntax(xsdText);
+        XmlSchemaCollection.RejectUncompilableSchema(xsdText, existing: null);
         var id = context.CurrentDatabase.AllocateXmlCollectionId();
         ownerSchema.XmlSchemaCollections[name.Leaf] = new XmlSchemaCollection(
             id, name.Leaf, ownerSchema.SchemaId,
@@ -283,6 +291,7 @@ partial class Simulation
             return true;
         XmlSchemaCollection.RejectUnsupportedSyntax(added);
         collection.RejectRedeclaredComponents(added);
+        XmlSchemaCollection.RejectUncompilableSchema(added, collection.GetCompiledSchemas());
 
         var previousText = collection.XsdText;
         var previousModified = collection.ModifyDate;

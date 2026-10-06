@@ -404,6 +404,9 @@ internal sealed class HeapTable : SchemaObject
     /// <summary>The heap's own <c>XML_COMPRESSION</c>, alongside <see cref="HeapDataCompression"/>.</summary>
     public bool HeapXmlCompression;
 
+    /// <summary>Each partition's <c>XML_COMPRESSION</c> (0 or 1) once a partitioned rowset's partitions differ, as <see cref="HeapPartitionDataCompression"/>.</summary>
+    public List<byte>? HeapPartitionXmlCompression;
+
     /// <summary>
     /// Whether some index or key was declared wider than it can hold, so writes
     /// measure each row's key against it — a gate that stays set once raised.

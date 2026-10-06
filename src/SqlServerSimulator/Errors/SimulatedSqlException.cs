@@ -380,6 +380,14 @@ public sealed partial class SimulatedSqlException : DbException
     internal bool EndedColumnRewrite;
 
     /// <summary>
+    /// Raised evaluating a computed column a statistic's key reads while
+    /// <c>CREATE</c> / <c>UPDATE STATISTICS</c> builds it, which ends only its
+    /// statement though the statement changes a table's structure (probed
+    /// 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    internal bool RaisedBuildingStatistics;
+
+    /// <summary>
     /// Set once the innermost dispatch frame has asked whether this error's
     /// statement carries more binder errors (<c>Simulation.ReportEveryBindError</c>),
     /// so an enclosing frame it propagates through doesn't ask again.

@@ -976,6 +976,7 @@ partial class Simulation
             }
             compiled = true;
             innerBatch.StatementsCompiledOnRun = compileContext.StatementsCompiledOnRun;
+            innerBatch.JoinOrderWarnedStatements = compileContext.JoinOrderWarnedStatements;
             outcomes.AddRange(CompileFailuresSent(innerBatch, inliningFailures));
             if (compileClock is not null)
                 outcomes.Add(new SimulatedInfoOutcome(CompileTime(innerBatch, compileClock, compileContext.LastTopLevelStatementLine, innerBatch.ErrorProcedureName)));

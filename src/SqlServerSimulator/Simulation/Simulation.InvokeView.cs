@@ -203,7 +203,10 @@ partial class Simulation
         {
             var parser = innerBatch.Parser;
             parser.MoveNextRequired();
-            return ParseBodyQuery(parser, position: QueryPosition.Inlined);
+            var body = ParseBodyQuery(parser, position: QueryPosition.Inlined);
+            // A join hint in the body warns as the referencing statement compiles.
+            outerBatch.Parser.JoinOrderEnforced |= parser.JoinOrderEnforced;
+            return body;
         }
         finally
         {

@@ -297,9 +297,11 @@ Only a plan whose body isn't known here, or one whose drawn column reads a body 
 `RAND()` needs no gate — both engines freeze it for the statement.
 The declining source's probing execution is discarded; `NEXT VALUE FOR`, the other counter-bumping built-in, is Msg 11719 on real inside any of these bodies, so the discarded execution's only reachable side effect is an unobservable extra `NEWID()` draw.
 
-**Divergences.**
+**Divergences** (both re-probed 2026-10-06 against SQL Server 2025).
 A drawn column reading a body column keeps the body's draw in the leftmost slot, where real re-draws it per output row (`(SELECT CAST(b AS varchar(3)) + CAST(NEWID() AS varchar(36)) AS s FROM m) d CROSS JOIN n` reads 30 distinct values there over 3 × 10 rows, 3 here).
+Not modeled yet: re-drawing it outside the body needs the body columns it reads carried along with the row.
 And an `APPLY` body `TOP 1 … ORDER BY` a non-drawn column draws once on real (`n OUTER APPLY (SELECT TOP 1 NEWID() AS g FROM m ORDER BY b)` reads one value over ten rows) where the simulator re-runs it per row — the same body under `CROSS JOIN` merges on real, so the rule there is the optimizer's choice of plan rather than the body's shape.
+Not chased, for that reason.
 
 Measured on the WWI report shape `Customers JOIN (SELECT CustomerID, SUM(…) FROM Invoices JOIN InvoiceLines … GROUP BY CustomerID) agg ON …`: **77.6 s → 170 ms** (0.8× the live server), the CTE spelling of the same query **78.8 s → 165 ms**, and the same query written derived-table-first unchanged at ~148 ms.
 

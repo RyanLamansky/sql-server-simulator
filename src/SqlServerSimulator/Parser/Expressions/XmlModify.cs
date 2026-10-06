@@ -115,7 +115,7 @@ internal sealed class XmlModify : Expression
         var collection = schemaCollection ?? XmlMethodCall.ResolveTargetSchemaCollection(instance, context);
 
         context.MoveNextRequired();
-        var xquery = XmlMethodCall.ConstantString(Expression.Parse(context), context, "XML method path");
+        var xquery = XmlMethodCall.ConstantString(Expression.Parse(context), methodName, 1);
         if (context.Token is not Operator { Character: ')' })
             throw SimulatedSqlException.SyntaxErrorNear(context);
         context.MoveNextOptional();

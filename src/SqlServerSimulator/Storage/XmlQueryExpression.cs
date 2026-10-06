@@ -255,8 +255,11 @@ internal sealed class XmlLiteralExpr(object value, XmlStaticKind kind, string ty
     public override void Evaluate(in XmlQueryFrame frame, List<object> results) => results.Add(this.Value);
 }
 
-/// <summary>The context item, <c>.</c>.</summary>
-internal sealed class XmlContextItemExpr() : XmlQueryExpr(XmlStaticKind.Node, XmlOccurrence.ExactlyOne, "xdt:untypedAtomic")
+/// <summary>
+/// The context item, <c>.</c> — atomizing as <paramref name="typeName"/> inside
+/// a predicate on a simply typed step, else untyped.
+/// </summary>
+internal sealed class XmlContextItemExpr(string? typeName = null) : XmlQueryExpr(XmlStaticKind.Node, XmlOccurrence.ExactlyOne, typeName ?? "xdt:untypedAtomic")
 {
     public override void Evaluate(in XmlQueryFrame frame, List<object> results) => results.Add(frame.Context.Clone());
 
@@ -752,15 +755,34 @@ internal sealed class XmlArithmeticExpr(XmlQueryExpr left, XmlQueryExpr? right, 
         var leftItems = this.left.Evaluate(frame);
         if (leftItems.Count == 0)
             return;
-        var leftValue = XmlQueryValues.SingleNumber(leftItems);
+        var exact = XmlExactDecimal.IsExactType(this.TypeName);
         if (this.right is null)
         {
-            results.Add(XmlAtomicTypes.Number(-leftValue, this.TypeName));
+            if (exact && XmlExactDecimal.TryOf(XmlQueryValues.Atomize(leftItems[0]), out var negated))
+            {
+                if (XmlExactDecimal.Item(-negated, this.TypeName) is { } item)
+                    results.Add(item);
+                return;
+            }
+            results.Add(XmlAtomicTypes.Number(-XmlQueryValues.SingleNumber(leftItems), this.TypeName));
             return;
         }
         var rightItems = this.right.Evaluate(frame);
         if (rightItems.Count == 0)
             return;
+
+        // An exact pair computes exactly, empty past the type's range.
+        if (exact && XmlExactDecimal.TryOf(XmlQueryValues.Atomize(leftItems[0]), out var leftExact)
+            && XmlExactDecimal.TryOf(XmlQueryValues.Atomize(rightItems[0]), out var rightExact))
+        {
+            if (XmlExactDecimal.Compute(leftExact, this.op, rightExact, this.TypeName == "xs:decimal") is { } computed
+                && XmlExactDecimal.Item(computed, this.TypeName) is { } item)
+            {
+                results.Add(item);
+            }
+            return;
+        }
+        var leftValue = XmlQueryValues.SingleNumber(leftItems);
         var rightValue = XmlQueryValues.SingleNumber(rightItems);
         var value = this.op switch
         {
@@ -1274,6 +1296,16 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
         switch (this.id)
         {
             case XmlFunctionId.Avg:
+                // A sum only its digits carry averages exactly, cut to ten
+                // fractional digits.
+                if (XmlExactDecimal.IsExactType(this.TypeName) && this.ExactSum(frame) is { } exactTotal
+                    && this.arguments[0].Evaluate(frame).Count is > 0 and var exactCount
+                    && XmlExactDecimal.Item(exactTotal, "xs:decimal") is XmlTypedAtomic)
+                {
+                    if (XmlExactDecimal.Item(exactTotal / exactCount, this.TypeName) is { } exactAverage)
+                        results.Add(exactAverage);
+                    return;
+                }
                 var addends = this.Numbers(frame, 0);
                 if (addends.Count > 0)
                 {
@@ -1333,11 +1365,21 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
 #pragma warning restore CA1308
                 return;
             case XmlFunctionId.Max:
+                if (this.ExactExtreme(frame, max: true) is { } exactMax)
+                {
+                    results.Add(exactMax);
+                    return;
+                }
                 var maxima = this.Numbers(frame, 0);
                 if (maxima.Count > 0)
                     results.Add(XmlAtomicTypes.Number(maxima.Max(), this.TypeName));
                 return;
             case XmlFunctionId.Min:
+                if (this.ExactExtreme(frame, max: false) is { } exactMin)
+                {
+                    results.Add(exactMin);
+                    return;
+                }
                 var minima = this.Numbers(frame, 0);
                 if (minima.Count > 0)
                     results.Add(XmlAtomicTypes.Number(minima.Min(), this.TypeName));
@@ -1378,6 +1420,12 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
                     this.arguments.Length > 2 ? this.Number(frame, 2) : double.PositiveInfinity));
                 return;
             case XmlFunctionId.Sum:
+                if (XmlExactDecimal.IsExactType(this.TypeName) && this.ExactSum(frame) is { } exactSum)
+                {
+                    if (XmlExactDecimal.Item(exactSum, this.TypeName) is { } item)
+                        results.Add(item);
+                    return;
+                }
                 results.Add(XmlAtomicTypes.Number(this.Numbers(frame, 0).Sum(), this.TypeName));
                 return;
             case XmlFunctionId.True:
@@ -1426,12 +1474,53 @@ internal sealed class XmlFunctionCallExpr(XmlFunctionId id, XmlQueryExpr[] argum
     private void AddNumber(List<object> results, in XmlQueryFrame frame, Func<double, double> operation)
     {
         var items = this.arguments[0].Evaluate(frame);
-        if (items.Count > 0)
-            results.Add(XmlAtomicTypes.Number(operation(XmlQueryValues.SingleNumber(items)), this.TypeName));
+        if (items.Count == 0)
+            return;
+        // A value only its digits carry rounds exactly.
+        if (XmlQueryValues.Atomize(items[0]) is XmlTypedAtomic exactItem && XmlExactDecimal.TryOf(exactItem, out var exact))
+        {
+            if (XmlExactDecimal.Item(XmlExactDecimal.Whole(exact, operation), this.TypeName) is { } whole)
+                results.Add(whole);
+            return;
+        }
+        results.Add(XmlAtomicTypes.Number(operation(XmlQueryValues.SingleNumber(items)), this.TypeName));
+    }
+
+    /// <summary>
+    /// The item <c>fn:max</c> (<paramref name="max"/>) or <c>fn:min</c> picks
+    /// by exact value when an item carries digits a double can't, else null.
+    /// </summary>
+    private object? ExactExtreme(in XmlQueryFrame frame, bool max)
+    {
+        System.Numerics.BigInteger? best = null;
+        var anyDigits = false;
+        foreach (var item in this.arguments[0].Evaluate(frame))
+        {
+            var atom = XmlQueryValues.Atomize(item);
+            if (!XmlExactDecimal.TryOf(atom, out var value))
+                return null;
+            anyDigits |= atom is XmlTypedAtomic;
+            if (best is not { } current || (max ? value > current : value < current))
+                best = value;
+        }
+        return anyDigits && best is { } chosen ? XmlExactDecimal.Item(chosen, this.TypeName) : null;
     }
 
     private double Number(in XmlQueryFrame frame, int index) =>
         XmlQueryValues.SingleNumber(this.arguments[index].Evaluate(frame));
+
+    /// <summary>The exact sum of the first argument's items, or null when one isn't an exact number.</summary>
+    private System.Numerics.BigInteger? ExactSum(in XmlQueryFrame frame)
+    {
+        var sum = System.Numerics.BigInteger.Zero;
+        foreach (var item in this.arguments[0].Evaluate(frame))
+        {
+            if (!XmlExactDecimal.TryOf(XmlQueryValues.Atomize(item), out var value))
+                return null;
+            sum += value;
+        }
+        return sum;
+    }
 
     private List<double> Numbers(in XmlQueryFrame frame, int index)
     {
@@ -1548,6 +1637,12 @@ internal static class XmlQueryValues
             return Satisfies(EffectiveBoolean([left]).CompareTo(EffectiveBoolean([right])), op);
         if (IsNumeric(left) || IsNumeric(right))
         {
+            // A value only its digits carry compares exactly.
+            if ((left is XmlTypedAtomic || right is XmlTypedAtomic)
+                && XmlExactDecimal.TryOf(left, out var leftExact) && XmlExactDecimal.TryOf(right, out var rightExact))
+            {
+                return Satisfies(leftExact.CompareTo(rightExact), op);
+            }
             var leftNumber = ToNumber(left);
             var rightNumber = ToNumber(right);
             return !double.IsNaN(leftNumber) && !double.IsNaN(rightNumber) && Satisfies(leftNumber.CompareTo(rightNumber), op);

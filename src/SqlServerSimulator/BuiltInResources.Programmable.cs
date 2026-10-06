@@ -1227,9 +1227,9 @@ internal static partial class BuiltInResources
                         // Only a CLR module reports its parameters' defaults
                         // (probed 2026-09-28 against SQL Server 2025).
                         proc.ClrEntry is not null && param.Default is not null ? trueBit : falseBit,
-                        falseBit,
+                        SqlValue.FromBoolean(param.XmlDocument),
                         proc.ClrEntry is not null && param.Default is { } procDefault ? ClrDefaultValue(batch, procDefault) : nullDefault,
-                        zeroInt,
+                        param.XmlSchemaCollection is { } paramCollection ? SqlValue.FromInt32(paramCollection.Id) : zeroInt,
                         SqlValue.FromBoolean(isTvp),
                         trueBit,
                         VectorDims(param.Type),

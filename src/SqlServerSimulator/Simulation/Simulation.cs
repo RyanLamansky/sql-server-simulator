@@ -1460,6 +1460,7 @@ public sealed partial class Simulation
                 yield break;
             }
             batch.StatementsCompiledOnRun = compileContext.StatementsCompiledOnRun;
+            batch.JoinOrderWarnedStatements = compileContext.JoinOrderWarnedStatements;
             foreach (var failure in CompileFailuresSent(batch, inliningFailures))
                 yield return failure;
             if (compileClock is not null)
@@ -2392,7 +2393,7 @@ public sealed partial class Simulation
         // ALTER INDEX's missing index (Msg 2727) does too, though its class
         // is 11.
         var structuralFailure = changesTableStructure && (ex.Class == 16 || ex.Number == 2727) && ex.Number is not (4902 or 2705)
-            && !(ex.Number is 3726 or 3729 or 3705 && connection.CurrentTransaction is null);
+            && !(ex.Number is 3726 or 3729 or 3705 && connection.CurrentTransaction is null) && !ex.RaisedBuildingStatistics;
         // A divide by zero or an arithmetic overflow under ARITHABORT ON with
         // ANSI_WARNINGS OFF ends the batch and rolls the transaction back as
         // under XACT_ABORT, dooming it when caught, from a procedure body too

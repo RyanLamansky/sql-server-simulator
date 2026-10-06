@@ -236,10 +236,7 @@ partial class Simulation
                 _ => coerced,
             };
         }
-        if (column.XmlSchemaCollection is not { } collection || coerced.IsNull)
-            return coerced;
-        var canonical = XmlSchemaValidation.ValidateAndNormalize(collection, coerced.AsString);
-        return ReferenceEquals(canonical, coerced.AsString) ? coerced : SqlValue.FromXml(canonical);
+        return Parser.Expressions.Cast.ValidateTypedXml(coerced, column.XmlSchemaCollection, column.XmlDocument);
     }
 
     /// <summary>
@@ -715,12 +712,15 @@ partial class Simulation
     /// when <paramref name="endsColumnRewrite"/>, which an index build's error
     /// is (Msg 3621 follows it at line 1) and a statistic's isn't.
     /// </summary>
-    internal static void EvaluateComputedColumnsOverRows(HeapTable table, List<int> ordinals, BatchContext batch, bool endsColumnRewrite)
+    internal static void EvaluateComputedColumnsOverRows(HeapTable table, List<int> ordinals, BatchContext batch, bool endsColumnRewrite, BooleanExpression? filter = null)
     {
         SqlValue[]? buffer = null;
         foreach (var rowBytes in table.Heap.EnumerateRows())
         {
             var full = DecodeFullRow(table, rowBytes, ref buffer);
+            // A filter reads no computed column, so it settles the row first.
+            if (filter is not null && EvaluateIndexFilter(filter, table, full, batch) != true)
+                continue;
             foreach (var ordinal in ordinals)
             {
                 try

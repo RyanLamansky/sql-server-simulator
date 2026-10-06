@@ -53,7 +53,7 @@ partial class Selection
         List<BooleanExpression>? conjuncts = null;
         for (var i = 0; i < sources.Length; i++)
         {
-            if (sources[i] is not { ForcedAccessPath: { } hints, BackingTable: { } table } source)
+            if (sources[i] is not { BackingTable: { } table } source || (source.ForcedAccessPath is null && source.WrittenHints?.IndexArguments is null))
                 continue;
             if (conjuncts is null)
             {
@@ -63,6 +63,10 @@ partial class Selection
                 foreach (var join in joins)
                     join.OnPredicate?.CollectConjuncts(conjuncts);
             }
+            if (HintsUnimpliedFilteredIndex(batch, source, i, sources, table, conjuncts))
+                throw SimulatedSqlException.ForceSeekPlanInfeasible();
+            if (source.ForcedAccessPath is not { } hints)
+                continue;
 
             table.SettleIndexIds();
             // INDEX(0) — the heap or clustered scan — beside an index that

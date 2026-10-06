@@ -213,6 +213,9 @@ internal sealed class Index(
     /// <inheritdoc cref="DataCompression"/>
     public bool XmlCompression = options.XmlCompression ?? false;
 
+    /// <summary>Each partition's <c>XML_COMPRESSION</c> (0 or 1) once a partitioned rowset's partitions differ, as <see cref="PartitionDataCompression"/>.</summary>
+    public List<byte>? PartitionXmlCompression;
+
     /// <summary>
     /// Whether the key's declared width passes what the index can hold, so
     /// each written row's key is measured against it (Msg 1946).

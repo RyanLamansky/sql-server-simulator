@@ -268,7 +268,25 @@ partial class Simulation
             }
             var coerced = coercedValues[i]
                 ?? BindParameterValue(boundValues[i]!.Value, param.Type, param.DeclaredMaxLength, attributionName, procedure.ClrEntry is null ? (byte)5 : (byte)1);
-            variables[param.Name] = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, coerced, parameter: null) { SpelledNumeric = param.SpelledNumeric };
+            var slot = new VariableSlot(param.Type, declaredMaxLength: param.DeclaredMaxLength, SqlValue.Null(param.Type), parameter: null)
+            {
+                SpelledNumeric = param.SpelledNumeric,
+                XmlSchemaCollection = param.XmlSchemaCollection,
+                XmlDocument = param.XmlDocument,
+            };
+            try
+            {
+                slot.Assign(coerced);
+            }
+            catch (SimulatedSqlException invalid) when (param.XmlSchemaCollection is not null)
+            {
+                // A typed parameter validates its argument as the body's
+                // first act, so the error names the procedure at line 0
+                // (probed 2026-10-06 against SQL Server 2025).
+                invalid.PreserveDiagnostics(0, attributionName);
+                throw;
+            }
+            variables[param.Name] = slot;
         }
 
         // Synthesize a command wrapping the proc body and a child batch.

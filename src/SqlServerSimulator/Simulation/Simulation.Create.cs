@@ -206,7 +206,7 @@ partial class Simulation
         }
         SystemVersioningOptions? systemVersioning = null;
         var memoryOptimization = default(MemoryOptimizationOptions);
-        (byte? Data, bool? Xml, List<PartitionCompressionClause>? Partitions) tableCompression = default;
+        (byte? Data, bool? Xml, List<PartitionCompressionClause>? Partitions, List<PartitionCompressionClause>? XmlPartitions) tableCompression = default;
         if (context.Token is ReservedKeyword { Keyword: Keyword.With })
             systemVersioning = ParseTableOptions(context, tableDataSpace is not null, out memoryOptimization, out tableCompression);
         var memoryOptimized = memoryOptimization.MemoryOptimized;
@@ -508,7 +508,9 @@ partial class Simulation
         AttachGraphColumns(heapTable);
         PlaceNewTable(context.Batch, heapTable, tableDataSpace, textImageOn, fileStreamOn);
         if (tableCompression.Partitions is { } compressionClauses)
-            ApplyTablePartitionCompression(heapTable, Array.Find(keyConstraints, static key => key.IsClustered), tableCompression.Data, compressionClauses);
+            ApplyTablePartitionCompression(heapTable, Array.Find(keyConstraints, static key => key.IsClustered), tableCompression.Data ?? 0, compressionClauses, xml: false);
+        if (tableCompression.XmlPartitions is { } xmlCompressionClauses)
+            ApplyTablePartitionCompression(heapTable, Array.Find(keyConstraints, static key => key.IsClustered), tableCompression.Xml == true ? (byte)1 : (byte)0, xmlCompressionClauses, xml: true);
         if (isGlobalTempTable)
             heapTable.OwnerSession = context.Batch.Connection.Session;
         if (isLocalTempTable)
@@ -723,7 +725,7 @@ partial class Simulation
     /// closing <c>)</c>. Returns the system-versioning options, or null when
     /// none were given.
     /// </summary>
-    private static SystemVersioningOptions? ParseTableOptions(ParserContext context, bool placed, out MemoryOptimizationOptions memoryOptimization, out (byte? Data, bool? Xml, List<PartitionCompressionClause>? Partitions) compression)
+    private static SystemVersioningOptions? ParseTableOptions(ParserContext context, bool placed, out MemoryOptimizationOptions memoryOptimization, out (byte? Data, bool? Xml, List<PartitionCompressionClause>? Partitions, List<PartitionCompressionClause>? XmlPartitions) compression)
     {
         compression = default;
         if (context.GetNextRequired() is not Operator { Character: '(' })
@@ -769,8 +771,17 @@ partial class Simulation
                 case StringToken name when name.Span.Equals("XML_COMPRESSION", StringComparison.OrdinalIgnoreCase):
                     if (context.GetNextRequired() is not ReservedKeyword { Keyword: Keyword.On or Keyword.Off } xmlToggle)
                         throw SimulatedSqlException.SyntaxErrorNear(context);
-                    compression.Xml = xmlToggle.Keyword == Keyword.On;
-                    RejectOnPartitions(context);
+                    var xmlLevel = xmlToggle.Keyword == Keyword.On ? (byte)1 : (byte)0;
+                    var xmlOnPartitions = FollowedByOnPartitions(context);
+                    // Named for the whole table and for partitions is Msg 7741
+                    // state 1, then Msg 1750 state 0 (probed 2026-10-06 against
+                    // SQL Server 2025).
+                    if (compression.Xml is not null || (!xmlOnPartitions && compression.XmlPartitions is not null))
+                        throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.XmlCompressionSpecifiedTwice(state: 1), state: 0);
+                    if (xmlOnPartitions)
+                        (compression.XmlPartitions ??= []).Add(new PartitionCompressionClause(xmlLevel, ReadOnPartitionsList(context)));
+                    else
+                        compression.Xml = xmlLevel == 1;
                     break;
                 case StringToken name when name.Span.Equals("MEMORY_OPTIMIZED", StringComparison.OrdinalIgnoreCase):
                     memoryOptimized = context.GetNextRequired() is ReservedKeyword { Keyword: Keyword.On or Keyword.Off } toggle
@@ -825,9 +836,11 @@ partial class Simulation
     /// declared with the table: an unpartitioned table refuses them with Msg
     /// 7729 in the create table wording, or for a clustered key the create
     /// index wording followed by Msg 1750, and a number past the partitions is
-    /// Msg 7722 (probed 2026-10-05 against SQL Server 2025).
+    /// Msg 7722 (probed 2026-10-05 against SQL Server 2025). The
+    /// <paramref name="xml"/> clauses of <c>XML_COMPRESSION</c> apply the same
+    /// way (probed 2026-10-06).
     /// </summary>
-    private static void ApplyTablePartitionCompression(HeapTable table, KeyConstraint? clusteredKey, byte? wholeLevel, List<PartitionCompressionClause> clauses)
+    private static void ApplyTablePartitionCompression(HeapTable table, KeyConstraint? clusteredKey, byte wholeLevel, List<PartitionCompressionClause> clauses, bool xml)
     {
         if (table.Partitioning is not { } placement)
         {
@@ -835,27 +848,16 @@ partial class Simulation
                 ? SimulatedSqlException.PartitionNumberOnUnpartitionedCreateTable(table.Name)
                 : SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.PartitionNumberOnUnpartitionedCreate());
         }
-        var levels = PartitionCompression.Apply(wholeLevel ?? 0, null, placement.Fanout, clauses,
-            number => SimulatedSqlException.InvalidPartitionNumber(number, table.Name, placement.Fanout));
-        if (clusteredKey is not null)
-            clusteredKey.PartitionDataCompression = levels;
-        else
+        var levels = PartitionCompression.Apply(wholeLevel, null, placement.Fanout, clauses,
+            number => SimulatedSqlException.InvalidPartitionNumber(number, table.Name, placement.Fanout), xml);
+        if (clusteredKey is null && xml)
+            table.HeapPartitionXmlCompression = levels;
+        else if (clusteredKey is null)
             table.HeapPartitionDataCompression = levels;
-    }
-
-    /// <summary>
-    /// Refuses a storage option's <c>ON PARTITIONS (…)</c> suffix: no table
-    /// here is partitioned, so it is Msg 7729 then Msg 1750 (probed 2026-09-25
-    /// against SQL Server 2025). Cursor on entry: the option's value; on exit,
-    /// when there is no suffix, unchanged.
-    /// </summary>
-    private static void RejectOnPartitions(ParserContext context)
-    {
-        var checkpoint = context.SaveCheckpoint();
-        var followsOn = context.GetNextOptional() is ReservedKeyword { Keyword: Keyword.On };
-        context.RestoreCheckpoint(checkpoint);
-        if (followsOn)
-            throw SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.PartitionNumberOnUnpartitionedCreate());
+        else if (xml)
+            clusteredKey.PartitionXmlCompression = levels;
+        else
+            clusteredKey.PartitionDataCompression = levels;
     }
 
     /// <summary>
@@ -1303,6 +1305,7 @@ partial class Simulation
         bool? xmlCompression = null;
         var compressionOnPartitions = false;
         List<PartitionCompressionClause>? partitionCompressions = null;
+        List<PartitionCompressionClause>? xmlPartitionCompressions = null;
         var statisticsIncremental = false;
         var ignoreDupKeyWritten = false;
         var depth = 1;
@@ -1396,8 +1399,19 @@ partial class Simulation
                             statisticsNoRecompute = on;
                             break;
                         case "XML_COMPRESSION" when depth == 1:
-                            xmlCompression = on;
-                            compressionOnPartitions |= FollowedByOnPartitions(context);
+                            // Named for the whole index and for partitions is
+                            // Msg 7741 state 1 (probed 2026-10-06 against SQL
+                            // Server 2025).
+                            var xmlOnPartitions = FollowedByOnPartitions(context);
+                            if (statement != IndexOptionStatement.Unchecked
+                                && (xmlCompression is not null || (!xmlOnPartitions && xmlPartitionCompressions is not null)))
+                            {
+                                throw XmlCompressionTwice(statement);
+                            }
+                            if (xmlOnPartitions)
+                                (xmlPartitionCompressions ??= []).Add(new PartitionCompressionClause(on ? (byte)1 : (byte)0, ReadOnPartitionsList(context)));
+                            else
+                                xmlCompression = on;
                             break;
                     }
                     break;
@@ -1531,8 +1545,18 @@ partial class Simulation
         return new IndexOptions(ignoreDupKey, fillFactor, padIndex, dropExisting, compressionDelay, columnstoreArchive, allowRowLocks, allowPageLocks, optimizeForSequentialKey,
             statisticsNoRecompute: statisticsNoRecompute, statisticsOnly: statisticsOnly, bucketCount: bucketCount,
             dataCompression: dataCompression, xmlCompression: xmlCompression, compressionOnPartitions: compressionOnPartitions, statisticsIncremental: statisticsIncremental,
-            ignoreDupKeyWritten: ignoreDupKeyWritten, partitionCompressions: partitionCompressions);
+            ignoreDupKeyWritten: ignoreDupKeyWritten, partitionCompressions: partitionCompressions, xmlPartitionCompressions: xmlPartitionCompressions);
     }
+
+    /// <summary>
+    /// Msg 7741 state 1 for <c>XML_COMPRESSION</c> named for the whole object
+    /// and for partitions: alone from <c>CREATE INDEX</c>, followed by Msg 1750 state 0
+    /// from a rebuild (probed 2026-10-06 against SQL Server 2025).
+    /// </summary>
+    private static SimulatedSqlException XmlCompressionTwice(IndexOptionStatement statement) =>
+        statement == IndexOptionStatement.AlterIndexRebuild
+            ? SimulatedSqlException.FollowedByConstraintNotCreated(SimulatedSqlException.XmlCompressionSpecifiedTwice(state: 1), state: 0)
+            : SimulatedSqlException.XmlCompressionSpecifiedTwice(state: 1);
 
     /// <summary>
     /// Reads a hash index's <c>BUCKET_COUNT</c>, which must be a positive
@@ -2354,6 +2378,7 @@ partial class Simulation
         int? declaredMaxLength = null;
         int? declaredScale = null;
         XmlSchemaCollection? xmlSchemaCollection = null;
+        var xmlDocument = false;
         if (context.Token is Operator { Character: '(' })
         {
             // xml(schema_collection) / xml(CONTENT name) / xml(DOCUMENT name)
@@ -2364,7 +2389,7 @@ partial class Simulation
                 && context.Batch.CurrentDatabase.Collation.Equals(typeName.Value, "xml");
             if (isXmlTypeRef && PeekIsXmlSchemaArgument(context))
             {
-                xmlSchemaCollection = ParseXmlSchemaCollectionArgument(context);
+                (xmlSchemaCollection, xmlDocument) = ParseXmlSchemaCollectionArgument(context);
                 context.MoveNextOptional();
             }
             else
@@ -2870,7 +2895,10 @@ partial class Simulation
                 throw SimulatedSqlException.ColumnSetOverExistingSparseColumns(columnName.Value, tableName);
         }
         if (xmlSchemaCollection is not null)
+        {
             newColumn.XmlSchemaCollection = xmlSchemaCollection;
+            newColumn.XmlDocument = xmlDocument;
+        }
         newColumn.AliasType = aliasType;
         newColumn.IsSparse = isSparse;
         if (maskingFunction is not null)
@@ -5209,6 +5237,7 @@ partial class Simulation
             BoundDefault = column.BoundDefault,
             BoundRule = column.BoundRule,
             XmlSchemaCollection = column.XmlSchemaCollection,
+            XmlDocument = column.XmlDocument,
             AliasType = column.AliasType,
             MaskingFunction = column.MaskingFunction,
         };

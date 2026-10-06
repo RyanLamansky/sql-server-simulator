@@ -467,6 +467,16 @@ internal sealed partial class BatchContext
     public StatementsCompiledOnRun? StatementsCompiledOnRun;
 
     /// <summary>
+    /// The statements, by where each starts in the text, whose Msg 8625 this
+    /// batch's compile sent ahead of everything it runs — set to an empty set
+    /// by any compile that walked the text and copied to the batch that runs
+    /// it, so null means the batch runs on a plan compiled before, which sends
+    /// the warning only for a statement compiled again as it runs; see
+    /// <c>Selection.SendJoinOrderEnforced</c>.
+    /// </summary>
+    public HashSet<int>? JoinOrderWarnedStatements;
+
+    /// <summary>
     /// In-flight loop-flow signal. <see cref="LoopControl.Break"/> /
     /// <see cref="LoopControl.Continue"/> set by their dispatch sites;
     /// <see cref="LoopControl.None"/> the default. Only the
@@ -1958,6 +1968,7 @@ internal sealed partial class BatchContext
             snapshot[name] = copy = new VariableSlot(slot.DeclaredType, slot.DeclaredMaxLength, slot.Value, parameter: null)
             {
                 XmlSchemaCollection = slot.XmlSchemaCollection,
+                XmlDocument = slot.XmlDocument,
                 SpelledNumeric = slot.SpelledNumeric,
                 AliasType = slot.AliasType,
             };

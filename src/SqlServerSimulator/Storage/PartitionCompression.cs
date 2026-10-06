@@ -3,7 +3,8 @@ namespace SqlServerSimulator.Storage;
 /// <summary>
 /// One <c>DATA_COMPRESSION = level ON PARTITIONS (…)</c> clause: the level
 /// (0 <c>NONE</c>, 1 <c>ROW</c>, 2 <c>PAGE</c>) and the partition numbers and
-/// <c>n TO m</c> ranges it lists, a single number as a range of one.
+/// <c>n TO m</c> ranges it lists, a single number as a range of one — or an
+/// <c>XML_COMPRESSION</c> one, its level 0 <c>OFF</c> or 1 <c>ON</c>.
 /// </summary>
 internal readonly struct PartitionCompressionClause(byte level, List<(long Low, long High)> ranges)
 {
@@ -18,6 +19,8 @@ internal readonly struct PartitionCompressionClause(byte level, List<(long Low, 
 /// null while every partition shares it (probed 2026-10-05 against SQL Server
 /// 2025). A <c>SPLIT RANGE</c> gives the new partition the level of the one it
 /// split, and a <c>MERGE RANGE</c> keeps the surviving partition's.
+/// <c>XML_COMPRESSION</c> keeps a list of its own the same way (probed
+/// 2026-10-06).
 /// </summary>
 internal static class PartitionCompression
 {
@@ -30,9 +33,10 @@ internal static class PartitionCompression
     /// <paramref name="fanout"/> partitions: each listed partition takes its
     /// clause's level and the rest keep what they had. A number outside the
     /// partitions is <paramref name="outOfRange"/>'s refusal (Msg 7722), a
-    /// reversed range Msg 7728, and a partition listed twice Msg 7711.
+    /// reversed range Msg 7728, and a partition listed twice Msg 7711 — Msg
+    /// 7741 state 2 for <paramref name="xml"/> clauses.
     /// </summary>
-    public static List<byte> Apply(byte level, List<byte>? existing, int fanout, List<PartitionCompressionClause> clauses, Func<long, SimulatedSqlException> outOfRange)
+    public static List<byte> Apply(byte level, List<byte>? existing, int fanout, List<PartitionCompressionClause> clauses, Func<long, SimulatedSqlException> outOfRange, bool xml = false)
     {
         var result = new List<byte>(fanout);
         for (var i = 1; i <= fanout; i++)
@@ -51,7 +55,7 @@ internal static class PartitionCompression
                 for (var number = low; number <= high; number++)
                 {
                     if (listed[number - 1])
-                        throw SimulatedSqlException.DataCompressionSpecifiedTwice();
+                        throw xml ? SimulatedSqlException.XmlCompressionSpecifiedTwice(state: 2) : SimulatedSqlException.DataCompressionSpecifiedTwice();
                     listed[number - 1] = true;
                     result[(int)number - 1] = clause.Level;
                 }

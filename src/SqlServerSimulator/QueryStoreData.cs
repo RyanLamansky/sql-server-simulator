@@ -344,11 +344,23 @@ internal struct QueryStoreMetric
 }
 
 /// <summary>A <c>sys.query_store_query_hints</c> row, set by <c>sp_query_store_set_hints</c>.</summary>
-internal sealed class QueryStoreHint(long id, long queryId, string text)
+internal sealed class QueryStoreHint(long id, long queryId, string text, Parser.Selection.OptionClause clause, bool recompiles)
 {
     public readonly long Id = id;
     public readonly long QueryId = queryId;
     public readonly string Text = text;
+
+    /// <summary>What the clause sets, parsed as a statement's own <c>OPTION</c> clause.</summary>
+    public readonly Parser.Selection.OptionClause Clause = clause;
+
+    /// <summary>The clause carries <c>RECOMPILE</c>.</summary>
+    public readonly bool Recompiles = recompiles;
+
+    /// <summary>The error that last kept the hint from applying — 8622, <c>NO_PLAN</c> — or 0.</summary>
+    public int FailureReason;
+
+    /// <summary>How many compiles the hint failed to apply to.</summary>
+    public long FailureCount;
 }
 
 /// <summary>A <c>sys.query_store_plan_forcing_locations</c> row, left by <c>sp_query_store_force_plan</c>.</summary>

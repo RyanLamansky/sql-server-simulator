@@ -489,7 +489,9 @@ internal sealed class StatementContext
     /// CREATE / ALTER / DROP INDEX, CREATE / UPDATE STATISTICS, DROP TABLE, TRUNCATE
     /// TABLE — whose severity-16 run-time errors end the batch and roll the
     /// transaction back as under <c>SET XACT_ABORT ON</c> (probed 2026-09-26
-    /// against SQL Server 2025). Set at dispatch entry.
+    /// against SQL Server 2025), save a statistic's computed key failing to
+    /// evaluate (<c>SimulatedSqlException.RaisedBuildingStatistics</c>). Set at
+    /// dispatch entry.
     /// </summary>
     public bool ChangesTableStructure;
 

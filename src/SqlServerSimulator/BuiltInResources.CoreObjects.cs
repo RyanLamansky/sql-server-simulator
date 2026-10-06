@@ -372,9 +372,9 @@ internal static partial class BuiltInResources
             new("is_sparse", SqlType.Bit, null, true),
             // Probe-confirmed constants (SQL Server 2025, 2026-07-15) that SMO's
             // SSMS Object-Explorer column / index / key sub-node queries read
-            // off sys.all_columns: no XML documents or dropped ledger columns
-            // are modeled, so is_xml_document / is_dropped_ledger_column are
-            // 0; is_column_set marks a sparse column set; the vector_* columns describe a
+            // off sys.all_columns: is_xml_document marks an xml(DOCUMENT …)
+            // column, no dropped ledger columns are modeled so
+            // is_dropped_ledger_column is 0; is_column_set marks a sparse column set; the vector_* columns describe a
             // vector column and are NULL for any other. xml_collection_id carries the bound schema
             // collection's id for a typed-xml column (0 when untyped / non-xml).
             new("is_xml_document", SqlType.Bit, null, false),
@@ -646,7 +646,7 @@ internal static partial class BuiltInResources
                 declared ? SqlValue.FromBoolean(col.Computed is not null && col.GraphKind == GraphColumnKind.None && !col.IsColumnSet) : falseBit,
                 CollationFor(col),
                 SqlValue.FromBoolean(col.IsSparse),
-                falseBit,
+                SqlValue.FromBoolean(declared && col.XmlDocument),
                 declared ? XmlCollectionIdFor(col) : zeroInt,
                 SqlValue.FromBoolean(declared && col.IsColumnSet),
                 falseBit,

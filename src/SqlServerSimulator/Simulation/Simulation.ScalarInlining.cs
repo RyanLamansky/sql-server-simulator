@@ -132,6 +132,7 @@ partial class Simulation
         }
         var compiledOnRun = compileContext.StatementsCompiledOnRun;
         body.StatementsCompiledOnRun = compiledOnRun;
+        body.JoinOrderWarnedStatements = compileContext.JoinOrderWarnedStatements;
         if (keepsPlan)
         {
             List<SchemaObject> dependencies = parent is null ? [] : [parent];

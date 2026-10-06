@@ -136,8 +136,8 @@ internal sealed class XmlMethodCall : Expression
     /// Parses <c>expr.MethodName(args)</c>. Cursor enters on <c>(</c>; on
     /// return cursor sits on the closing <c>)</c>. The first argument (XQuery
     /// path) and, for <c>value</c>, the second (target SQL type) are captured
-    /// as compile-time string literals; a non-literal argument raises
-    /// <see cref="NotSupportedException"/> (dynamic XQuery isn't modeled).
+    /// as compile-time string literals; anything else — a variable, an
+    /// expression, <c>NULL</c> — is Msg 8172 while the batch compiles.
     /// </summary>
     public static XmlMethodCall Parse(Expression target, string methodName, ParserContext context)
     {
@@ -186,14 +186,14 @@ internal sealed class XmlMethodCall : Expression
             // expression as its first argument; `.modify()`, the one that
             // doesn't, was refused above.
             var firstArg = Expression.Parse(context);
-            xqueryText = ConstantString(firstArg, context, "XML method path");
+            xqueryText = ConstantString(firstArg, methodName, 1);
 
             while (context.Token is Operator { Character: ',' })
             {
                 context.MoveNextRequired();
                 var nextArg = Expression.Parse(context);
                 if (isValue)
-                    (valueType, valueMaxLength) = ResolveValueType(ConstantString(nextArg, context, "value() target type"), context.Batch);
+                    (valueType, valueMaxLength) = ResolveValueType(ConstantString(nextArg, methodName, 2), context.Batch);
             }
             if (context.Token is not Operator { Character: ')' })
                 throw SimulatedSqlException.SyntaxErrorNear(context);
@@ -210,7 +210,7 @@ internal sealed class XmlMethodCall : Expression
         var accessorScope = new XmlSqlAccessorScope((isColumn, name) => ResolveAccessorType(isColumn, name, context, display));
         var xquery = xqueryText is null
             ? null
-            : XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetStaticTyping(), display, accessorScope, context.XmlNamespaces);
+            : XmlQueryEngine.Compile(xqueryText, methodName, collection?.GetStaticTyping(), display, accessorScope, context.XmlNamespaces, ReceiverNodeType(target, context));
         return new XmlMethodCall(target, methodName, method, xqueryText, xquery, valueType, valueMaxLength, collection, receiverName, [.. accessorScope.Accessors]);
     }
 
@@ -308,6 +308,18 @@ internal sealed class XmlMethodCall : Expression
     }
 
     /// <summary>
+    /// The static type of the node a <c>.nodes()</c> row column stands on when
+    /// it is an attribute; null for any other receiver.
+    /// </summary>
+    private static string? ReceiverNodeType(Expression target, ParserContext context)
+    {
+        if (target is not Reference reference || context.ScopeSources is not { } sources)
+            return null;
+        var (sourceIndex, columnIndex) = Selection.FindSourceColumn(sources, reference.ReferencedName);
+        return sourceIndex < 0 ? null : sources[sourceIndex].Columns[columnIndex].XmlNodeStaticType;
+    }
+
+    /// <summary>
     /// Joins a receiver name to a method name the way real's bracket reads —
     /// <c>dbo.xr.d.value</c>, or the bare <c>value</c> for an unnamed receiver.
     /// </summary>
@@ -399,23 +411,17 @@ internal sealed class XmlMethodCall : Expression
     internal override void Describe(NodeShape shape) => shape.Local(this.method).LocalExact(this.xqueryText).Local(this.valueType).Local(this.valueMaxLength).Child(this.Target);
 
     /// <summary>
-    /// Evaluates <paramref name="argument"/> against an empty resolver to pull
-    /// out its compile-time string value; a column / variable / runtime
-    /// reference surfaces as <see cref="NotSupportedException"/>.
+    /// The text of an argument real requires to be a string literal, through
+    /// any parentheses; anything else is Msg 8172 naming the argument's
+    /// <paramref name="position"/>.
     /// </summary>
-    internal static string ConstantString(Expression argument, ParserContext context, string role)
+    internal static string ConstantString(Expression argument, string methodName, int position)
     {
-        try
-        {
-            var value = argument.Run(new RuntimeContext(_ => throw new InvalidOperationException(), context.Batch));
-            if (!value.IsNull && SqlType.IsStringCategory(value.Type))
-                return value.AsString;
-        }
-        catch (InvalidOperationException)
-        {
-            // Falls through to the unsupported-shape throw below.
-        }
-        throw new NotSupportedException($"A non-literal {role} argument to an XML method is not modeled.");
+        while (argument is Parenthesized parenthesized)
+            argument = parenthesized.Wrapped;
+        return argument is Value { IsLiteral: true, Constant: { IsNull: false } constant } && SqlType.IsStringCategory(constant.Type)
+            ? constant.AsString
+            : throw SimulatedSqlException.XmlMethodArgumentNotStringLiteral(position, methodName);
     }
 
     /// <summary>

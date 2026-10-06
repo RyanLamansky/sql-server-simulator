@@ -119,7 +119,12 @@ partial class Simulation
             return optimizerError;
 
         compileBatch.StatementsCompiledOnRun = inlined.CompiledOnRun;
-        if (failures is not null && (!sendsOnce || inlined.RecompilesEveryRun || this.SendsInliningFailures(enteredDatabase, compileBatch.Parser.Command.CommandText)))
+        compileBatch.JoinOrderWarnedStatements ??= [];
+        // A text compiled before under the current schema — dynamic SQL,
+        // whose compile no key remembers — runs on real's cached plan, so
+        // what its compile sends goes out the first time only.
+        bool? firstUnderSchema = null;
+        if (failures is not null && (!sendsOnce || inlined.RecompilesEveryRun || (firstUnderSchema ??= this.SendsInliningFailures(enteredDatabase, compileBatch.Parser.Command.CommandText))))
         {
             inliningFailures = new List<SimulatedSqlException>(failures.Count);
             foreach (var (_, failure) in failures)
@@ -127,7 +132,13 @@ partial class Simulation
         }
 
         foreach (var message in compileBatch.CompileMessages ?? [])
-            connection.PendingMessages.Enqueue(message);
+        {
+            if (message.Number != SimulatedSqlException.JoinOrderEnforcedMessageNumber || key is not null || !sendsOnce
+                || (firstUnderSchema ??= this.SendsInliningFailures(enteredDatabase, compileBatch.Parser.Command.CommandText)))
+            {
+                connection.PendingMessages.Enqueue(message);
+            }
+        }
         if (key is { } compiled && !compileBatch.ResolvedTempTable && !inlined.RecompilesEveryRun)
         {
             if (this.compiledBatches.ContainsKey(compiled))
