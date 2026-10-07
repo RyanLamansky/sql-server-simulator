@@ -365,6 +365,25 @@ public sealed class WithResultSetsTests
         AreEqual(1L, sim.ExecuteScalar("exec dbo.p with result sets ((x bigint)), recompile"));
     }
 
+    /// <summary>
+    /// A character string's EXECUTE takes RESULT SETS alone: RECOMPILE is a
+    /// syntax error on the word, a second option on its comma, where
+    /// sp_executesql takes both (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("exec ('select 1') with recompile", "recompile")]
+    [DataRow("declare @s varchar(20) = 'select 1'; exec (@s) with recompile", "recompile")]
+    [DataRow("exec ('select 1') as user = 'dbo' with recompile", "recompile")]
+    [DataRow("exec ('select 1') with recompile, result sets none", "recompile")]
+    [DataRow("exec ('select 1') with result sets none, recompile", ",")]
+    [DataRow("print 'x'; exec ('select 1') WITH RECOMPILE", "RECOMPILE")]
+    public void CharacterStringExec_TakesNoRecompile(string sql, string near)
+        => new Simulation().ValidateSyntaxError(sql, near);
+
+    [TestMethod]
+    public void SpExecuteSql_TakesRecompile()
+        => AreEqual(1, new Simulation().ExecuteScalar("exec sp_executesql N'select 1' with recompile"));
+
     [TestMethod]
     public void DuplicateResultSetsOption_IsASyntaxError()
         => WithProcedure().ValidateSyntaxError("exec dbo.p with result sets none, result sets none", "result");

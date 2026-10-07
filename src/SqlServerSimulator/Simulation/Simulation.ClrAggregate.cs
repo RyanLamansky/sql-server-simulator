@@ -86,7 +86,7 @@ partial class Simulation
 
         var className = classToken.Value;
         var (assembly, type) = ResolveClrClass(context, assemblyToken.Value, className, forAggregate: true);
-        var (init, accumulate, terminate) = BindAggregateClass(assembly, type, className, aggregateName.Leaf, parameters, returnType);
+        var (init, accumulate, terminate, serialization) = BindAggregateClass(assembly, type, className, aggregateName.Leaf, parameters, returnType);
 
         var aggregate = new ClrAggregateFunction(
             schema,
@@ -98,6 +98,7 @@ partial class Simulation
             init,
             accumulate,
             terminate,
+            serialization,
             context.Batch.CurrentStatement.UtcNow);
         schema.Functions[aggregateName.Leaf] = aggregate;
         RecordSlotUndo(context, schema.Functions, aggregateName.Leaf, previous: null);
@@ -113,7 +114,7 @@ partial class Simulation
         "Trimming",
         "IL2070:DynamicallyAccessedMembers",
         Justification = "The type comes from an assembly registered from bytes at run time, outside the application's static closure, so trimming cannot affect its members.")]
-    private static (MethodInfo Init, MethodInfo Accumulate, MethodInfo Terminate) BindAggregateClass(
+    private static (MethodInfo Init, MethodInfo Accumulate, MethodInfo Terminate, (MethodInfo Write, MethodInfo Read)? Serialization) BindAggregateClass(
         SqlAssembly assembly, Type type, string className, string aggregateName, List<UdfParameter> parameters, SqlType returnType)
     {
         if (ClrAttributes.Find(type, ClrAttributes.SqlUserDefinedAggregate) is not { } attribute)
@@ -165,6 +166,44 @@ partial class Simulation
                 throw SimulatedSqlException.ClrParameterTypeMismatch("CREATE", aggregateName, "@" + parameters[i].Name);
         }
 
-        return (init, accumulate, terminate);
+        return (init, accumulate, terminate, UserDefinedSerialization(type, attribute));
+    }
+
+    /// <summary>
+    /// A <c>Format.UserDefined</c> aggregate's <c>IBinarySerialize.Write</c>
+    /// and <c>Read</c>, through which real passes every group's state before
+    /// <c>Terminate</c>; null for <c>Format.Native</c>, whose field-by-field
+    /// copy loses nothing.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage(
+        "Trimming",
+        "IL2070:DynamicallyAccessedMembers",
+        Justification = "The type comes from an assembly registered from bytes at run time, outside the application's static closure, so trimming cannot affect its members.")]
+    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage(
+        "Trimming",
+        "IL2072:DynamicallyAccessedMembers",
+        Justification = "The interface is the shim's IBinarySerialize, which the registered class implements; neither is in the application's static closure, so trimming cannot affect their methods.")]
+    private static (MethodInfo Write, MethodInfo Read)? UserDefinedSerialization(Type type, CustomAttributeData attribute)
+    {
+        // Format.UserDefined is 2 in the attribute's constructor argument.
+        if (attribute.ConstructorArguments is not [{ Value: 2 }])
+            return null;
+        foreach (var contract in type.GetInterfaces())
+        {
+            if (contract.FullName != "Microsoft.SqlServer.Server.IBinarySerialize")
+                continue;
+            var map = type.GetInterfaceMap(contract);
+            MethodInfo? write = null;
+            MethodInfo? read = null;
+            for (var i = 0; i < map.InterfaceMethods.Length; i++)
+            {
+                if (map.InterfaceMethods[i].Name == "Write")
+                    write = map.TargetMethods[i];
+                else if (map.InterfaceMethods[i].Name == "Read")
+                    read = map.TargetMethods[i];
+            }
+            return write is not null && read is not null ? (write, read) : null;
+        }
+        return null;
     }
 }

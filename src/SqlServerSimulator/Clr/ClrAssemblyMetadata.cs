@@ -36,24 +36,43 @@ internal static class ClrAssemblyMetadata
     private const string NativeStubDetail = "Unverifiable PE Header/native stub.";
 
     /// <summary>
-    /// Assembly simple names a candidate may reference. Real SQL Server
-    /// resolves every <c>AssemblyRef</c> against its own catalog of hosted
-    /// .NET Framework assemblies and raises Msg 6503 for anything else; the
-    /// simulator applies the same rule against the framework it actually runs
-    /// on, which is why the modern .NET assembly names appear alongside the
-    /// Framework ones.
+    /// The .NET Framework assemblies real SQL Server's catalog resolves a
+    /// reference against, by simple name, with the public key token each has
+    /// to carry; anything else is Msg 6503 (probed 2026-10-07 against SQL Server
+    /// 2025). The version is not compared — <c>mscorlib, Version=5.0.0.0</c>
+    /// resolves — save for <c>Microsoft.SqlServer.Types</c>, which resolves
+    /// from 10.0 through 17.x only.
     /// </summary>
     /// <remarks>
-    /// This is a deliberate over-acceptance relative to real SQL Server, which
-    /// rejects a modern-.NET-targeted assembly outright (probe-confirmed: an
-    /// assembly referencing <c>system.data.common, version=10.0.0.0</c> fails
-    /// with Msg 6503). The simulator runs on .NET, so those references
-    /// resolve — accepting them is what lets a test emit a fixture assembly
-    /// without a .NET Framework toolchain.
+    /// So an assembly built for .NET (Core) or .NET Standard — referencing
+    /// <c>System.Runtime</c>, <c>System.Private.CoreLib</c>,
+    /// <c>netstandard</c>, <c>System.Data.Common</c> or the
+    /// <c>Microsoft.SqlServer.Server</c> package — is refused, as on real, and
+    /// so are Framework assemblies outside the list (<c>System.Drawing</c>,
+    /// <c>System.Runtime.Serialization</c>, <c>Microsoft.CSharp</c> …) and an
+    /// unsigned reference to any of them.
     /// </remarks>
-    private static readonly FrozenSet<string> allowedReferencePrefixes = FrozenSet.ToFrozenSet(
-        ["System", "netstandard", "mscorlib", "Microsoft.CSharp", "Microsoft.VisualBasic", "Microsoft.SqlServer.Server", "Microsoft.SqlServer.Types"],
-        StringComparer.OrdinalIgnoreCase);
+    private static readonly FrozenDictionary<string, string> catalogReferences = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["CustomMarshalers"] = "b03f5f7f11d50a3a",
+        ["Microsoft.SqlServer.Types"] = "89845dcd8080cc91",
+        ["Microsoft.VisualBasic"] = "b03f5f7f11d50a3a",
+        ["Microsoft.VisualC"] = "b03f5f7f11d50a3a",
+        ["mscorlib"] = "b77a5c561934e089",
+        ["System"] = "b77a5c561934e089",
+        ["System.Configuration"] = "b03f5f7f11d50a3a",
+        ["System.Core"] = "b77a5c561934e089",
+        ["System.Data"] = "b77a5c561934e089",
+        ["System.Data.OracleClient"] = "b77a5c561934e089",
+        ["System.Data.SqlXml"] = "b77a5c561934e089",
+        ["System.Deployment"] = "b03f5f7f11d50a3a",
+        ["System.Numerics"] = "b77a5c561934e089",
+        ["System.Security"] = "b03f5f7f11d50a3a",
+        ["System.Transactions"] = "b77a5c561934e089",
+        ["System.Web.Services"] = "b03f5f7f11d50a3a",
+        ["System.Xml"] = "b77a5c561934e089",
+        ["System.Xml.Linq"] = "b77a5c561934e089",
+    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Types a <c>SAFE</c> assembly may not reference. Real SQL Server relied
@@ -192,12 +211,12 @@ internal static class ClrAssemblyMetadata
     }
 
     /// <summary>
-    /// Runs the static <c>CREATE ASSEMBLY</c> validation: the candidate must be
-    /// a pure-IL managed assembly, may only reference framework assemblies,
-    /// and — when registered <c>SAFE</c> — may not declare P/Invoke, mutable
-    /// statics, or references into the denied API surface.
+    /// The first half of the static <c>CREATE ASSEMBLY</c> validation, which
+    /// real makes ahead of its duplicate-MVID and <c>clr strict security</c>
+    /// checks: the candidate must be a pure-IL managed assembly whose every
+    /// reference the catalog resolves (Msg 6544, Msg 6503).
     /// </summary>
-    public static void Verify(byte[] content, string assemblyName, AssemblyPermissionSet permissionSet, string verb)
+    public static void VerifyImage(byte[] content, string assemblyName, string verb)
     {
         using var peReader = OpenPortableExecutable(content, verb, assemblyName);
         var metadata = peReader.GetMetadataReader();
@@ -207,16 +226,47 @@ internal static class ClrAssemblyMetadata
 
         foreach (var handle in metadata.AssemblyReferences)
         {
-            var name = metadata.GetString(metadata.GetAssemblyReference(handle).Name);
-            var root = name.Split('.')[0];
-            if (!allowedReferencePrefixes.Contains(name) && !allowedReferencePrefixes.Contains(root))
+            if (!InCatalog(metadata, handle))
                 throw SimulatedSqlException.ReferencedAssemblyNotInCatalog(DescribeReference(metadata, handle));
         }
+    }
 
+    private static bool InCatalog(MetadataReader metadata, AssemblyReferenceHandle handle)
+    {
+        var reference = metadata.GetAssemblyReference(handle);
+        if (!catalogReferences.TryGetValue(metadata.GetString(reference.Name), out var token)
+            || ReferenceToken(metadata, reference) is not { } written
+            || !written.Equals(token, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        return !metadata.StringComparer.Equals(reference.Name, "Microsoft.SqlServer.Types", ignoreCase: true)
+            || reference.Version.Major is >= 10 and <= 17;
+    }
+
+    /// <summary>The public key token a reference carries, in lowercase hex, or null for an unsigned one.</summary>
+    private static string? ReferenceToken(MetadataReader metadata, AssemblyReference reference)
+    {
+        if (reference.PublicKeyOrToken.IsNil)
+            return null;
+        var bytes = metadata.GetBlobBytes(reference.PublicKeyOrToken);
+        return Convert.ToHexStringLower((reference.Flags & AssemblyFlags.PublicKey) != 0 ? ComputePublicKeyToken(bytes) : bytes);
+    }
+
+    /// <summary>
+    /// The second half of the static <c>CREATE ASSEMBLY</c> validation: a
+    /// <c>SAFE</c> assembly may not declare P/Invoke, mutable statics, or
+    /// references into the denied API surface.
+    /// </summary>
+    public static void VerifySafeContent(byte[] content, string assemblyName, AssemblyPermissionSet permissionSet, string verb)
+    {
         // EXTERNAL_ACCESS / UNSAFE opt out of the API restrictions, matching
         // real SQL Server's permission-set ladder.
         if (permissionSet != AssemblyPermissionSet.Safe)
             return;
+
+        using var peReader = OpenPortableExecutable(content, verb, assemblyName);
+        var metadata = peReader.GetMetadataReader();
 
         if (metadata.GetTableRowCount(TableIndex.ImplMap) > 0)
             throw SimulatedSqlException.AssemblyFailedVerification(verb, assemblyName, ": P/Invoke declarations are not allowed in SAFE assemblies.");
@@ -276,14 +326,14 @@ internal static class ClrAssemblyMetadata
     private static string DescribeReference(MetadataReader metadata, AssemblyReferenceHandle handle)
     {
         var reference = metadata.GetAssemblyReference(handle);
-        var token = reference.PublicKeyOrToken.IsNil
-            ? "null"
-            : Convert.ToHexStringLower(metadata.GetBlobBytes(reference.PublicKeyOrToken));
+        // An unsigned reference's version reads 0.0.0.0, as clr_name's does
+        // (probed 2026-10-07 against SQL Server 2025).
+        var token = ReferenceToken(metadata, reference);
         var culture = reference.Culture.IsNil || metadata.GetString(reference.Culture).Length == 0
             ? "neutral"
             : metadata.GetString(reference.Culture).ToLowerInvariant();
 
-        return $"{metadata.GetString(reference.Name).ToLowerInvariant()}, version={reference.Version}, culture={culture}, publickeytoken={token}.";
+        return $"{metadata.GetString(reference.Name).ToLowerInvariant()}, version={(token is null ? new Version(0, 0, 0, 0) : reference.Version)}, culture={culture}, publickeytoken={token ?? "null"}.";
     }
 
     /// <summary>

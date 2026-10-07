@@ -273,6 +273,7 @@ internal sealed class ClrAggregateFunction(
     System.Reflection.MethodInfo init,
     System.Reflection.MethodInfo accumulate,
     System.Reflection.MethodInfo terminate,
+    (System.Reflection.MethodInfo Write, System.Reflection.MethodInfo Read)? serialization,
     DateTime createDate)
     : ClrFunction(schema, name, objectId, parameters, entry, createDate)
 {
@@ -286,6 +287,13 @@ internal sealed class ClrAggregateFunction(
     public readonly System.Reflection.MethodInfo Accumulate = accumulate;
 
     public readonly System.Reflection.MethodInfo Terminate = terminate;
+
+    /// <summary>
+    /// A <c>Format.UserDefined</c> aggregate's <c>IBinarySerialize</c> pair,
+    /// which each group's state passes through before <c>Terminate</c>; null
+    /// for <c>Format.Native</c>.
+    /// </summary>
+    public readonly (System.Reflection.MethodInfo Write, System.Reflection.MethodInfo Read)? Serialization = serialization;
 }
 
 /// <summary>

@@ -100,6 +100,8 @@ Over the TDS endpoint a client that negotiates json support (SqlClient 6+) recei
 ## Divergences
 
 - **The describe surfaces always answer `json`**, as real does to a json-aware client.
+- **Real refused an `append` path beside another `JSON_MODIFY` over json in one select list** with Msg 13656 (`JSON data type cannot be used when its feature switch is off.`), though either call alone worked, and the same Msg 13656 (State 8) met a `SET @j.modify('append …', …)` that followed a `SELECT @j = …` in its batch (probed 2026-09-27); the simulator runs them.
+  The triggering shape isn't pinned down: re-probed 2026-10-07 on CU7 (17.0.4065.4) and RTM-GDR (17.0.1135.8), over sqlcmd and SqlClient, at compatibility levels 150–170, with `PREVIEW_FEATURES` on and off, over variables and a json table column, in SELECT, UPDATE and `.modify`, every form answered — so the 2026-09-27 probe differed in a way this record doesn't capture.
 - **The size model is fitted, not derived**: documents shaped unlike any probed one (very long property names, objects past 64 KB) may report a different `DATALENGTH`.
 - **A JSON index accelerates nothing**: it is catalog metadata, and reads never consult it.
 - **A deferred statement's Msg 8116 / 313 / 8144 from the `modify` method ends only its statement**, where real ends the batch.

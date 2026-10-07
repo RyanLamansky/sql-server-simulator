@@ -14,15 +14,19 @@ namespace SqlServerSimulator.Parser.Aggregators;
 /// <c>DISTINCT</c> passes each distinct argument tuple once.
 /// </summary>
 /// <remarks>
-/// The instance lives in memory for the whole group, so <c>Merge</c> is never
-/// called and a <c>Format.UserDefined</c> aggregate's <c>Read</c> /
-/// <c>Write</c> never run. A throw from any of the three is Msg 6522 state 2
-/// naming the aggregate.
+/// A <c>Format.UserDefined</c> aggregate's state goes through its
+/// <c>Write</c> into a fresh instance's <c>Read</c> exactly once per group,
+/// between the last <c>Accumulate</c> and <c>Terminate</c>, which runs on the
+/// fresh instance — whatever the group's size, an empty one included, grouped,
+/// windowed and at any <c>MAXDOP</c> (probed 2026-10-07 against SQL Server
+/// 2025), so a field <c>Write</c> leaves out reaches <c>Terminate</c> at its
+/// default. <c>Merge</c> was never seen called. A throw from any of the
+/// methods is Msg 6522 state 2 naming the aggregate.
 /// </remarks>
 internal sealed class ClrAggregator : Aggregator
 {
     private readonly ClrAggregateFunction function;
-    private readonly object instance;
+    private object instance;
     private readonly HashSet<SqlValueKey>? seen;
     private readonly ParameterInfo[] parameters;
 
@@ -79,6 +83,8 @@ internal sealed class ClrAggregator : Aggregator
 
     public override SqlValue Result()
     {
+        if (this.function.Serialization is var (write, read))
+            this.instance = this.RoundTrip(write, read);
         var returnType = this.function.ReturnType;
         var result = ClrTypeMarshaller.FromClr(this.Call(this.function.Terminate, []), returnType);
         return ClrTypeMarshaller.OverflowedWidth(result, returnType) is { } width
@@ -86,13 +92,35 @@ internal sealed class ClrAggregator : Aggregator
             : result;
     }
 
-    private object? Call(MethodInfo method, object?[] arguments)
+    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage(
+        "Trimming",
+        "IL2077:DynamicallyAccessedMembers",
+        Justification = "The aggregate's class comes from an assembly registered from bytes at run time, outside the application's static closure, so trimming cannot remove its constructor.")]
+    private object RoundTrip(MethodInfo write, MethodInfo read)
+    {
+        using var state = new MemoryStream();
+        using (var writer = new BinaryWriter(state, System.Text.Encoding.UTF8, leaveOpen: true))
+            _ = this.Call(write, [writer]);
+        state.Position = 0;
+        object fresh;
+        using (CultureScope.Clr())
+        {
+            fresh = Activator.CreateInstance(this.function.Entry.Type)
+                ?? throw new InvalidOperationException($"CLR aggregate type {this.function.Entry.Type.FullName} produced no instance.");
+        }
+        using var reader = new BinaryReader(state, System.Text.Encoding.UTF8);
+        // A struct is boxed once, so Read fills the very box Terminate is called on.
+        _ = this.Call(read, [reader], fresh);
+        return fresh;
+    }
+
+    private object? Call(MethodInfo method, object?[] arguments, object? target = null)
     {
         try
         {
             using (CultureScope.Clr())
             using (this.function.Entry.Assembly.UsesServerContext ? ClrHost.Enter(pipe: null) : default(ClrHost.RoutineScope?))
-                return method.Invoke(this.instance, arguments);
+                return method.Invoke(target ?? this.instance, arguments);
         }
         catch (TargetInvocationException ex) when (ex.InnerException is not null)
         {

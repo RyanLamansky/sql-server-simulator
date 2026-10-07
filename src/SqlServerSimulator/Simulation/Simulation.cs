@@ -459,6 +459,15 @@ public sealed partial class Simulation
     /// not a sandbox.
     /// </para>
     /// <para>
+    /// What registers is what SQL Server on Linux registers: a <c>SAFE</c>
+    /// assembly built for the .NET Framework (one built for .NET or .NET
+    /// Standard is Msg 6503), and — since <c>clr strict security</c> is on as
+    /// SQL Server installs it — only once that option is turned off with
+    /// <c>sp_configure</c> and <c>RECONFIGURE</c>, the assembly's hash is
+    /// trusted with <c>sp_add_trusted_assembly</c>, or the database is
+    /// <c>TRUSTWORTHY</c> (Msg 10343 otherwise).
+    /// </para>
+    /// <para>
     /// Leave it off unless the assembly bytes come from a source you trust as
     /// much as your own application code. It matters most when a
     /// <c>Simulation</c> is exposed over the network endpoint, where any client
@@ -1055,6 +1064,15 @@ public sealed partial class Simulation
     /// differs treats the entry as stale and re-parses.
     /// </summary>
     internal long SchemaVersion;
+
+    /// <summary>
+    /// Monotonic count of <c>ALTER XML SCHEMA COLLECTION … ADD</c>s, written
+    /// via <see cref="Interlocked.Increment(ref long)"/>: each collection
+    /// records the count its last one reached, and each batch the count as it
+    /// began, which together tell a variable typed by a collection altered
+    /// mid-batch (Msg 6323).
+    /// </summary>
+    internal long XmlSchemaCollectionAlterations;
 
     /// <summary>
     /// The cacheable catalog views' rows, kept across statements and indexed

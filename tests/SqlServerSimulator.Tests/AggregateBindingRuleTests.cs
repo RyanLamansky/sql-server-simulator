@@ -136,6 +136,53 @@ public sealed class AggregateBindingRuleTests
         Seeded().AssertSqlError(sql, 164, "Each GROUP BY expression must contain at least one column that is not an outer reference.");
 
     [TestMethod]
+    [DataRow("select (select count(*) from u group by t.a) from t")]
+    [DataRow("select (select top 1 count(*) from u group by a) from t")]
+    [DataRow("select (select count(*) from u group by t.a + 1) from t")]
+    [DataRow("select (select top 1 count(*) from u group by u.x, t.a) from t")]
+    [DataRow("select (select top 1 count(*) from u group by rollup(t.a)) from t")]
+    [DataRow("select (select top 1 count(*) from u group by grouping sets ((t.a), ())) from t")]
+    [DataRow("select (select count(*) group by t.a) from t")]
+    [DataRow("select (select (select count(*) from u group by t.a + u2.x) from u u2) from t")]
+    [DataRow("select * from t where exists (select 1 from u group by t.b)")]
+    [DataRow("select * from t cross apply (select count(*) c from u group by t.a) q")]
+    [DataRow("with c as (select a from t) select (select count(*) from u group by c.a) from c")]
+    [DataRow("update t set b = (select top 1 count(*) from u group by t.a)")]
+    [DataRow("delete t where 5 = (select count(*) from u group by t.a)")]
+    [DataRow("if 1 = 0 select (select count(*) from u group by t.a) from t")]
+    [DataRow("create view v as select (select count(*) from u group by t.a) c from t")]
+    [DataRow("create procedure p as select (select count(*) from u group by t.a) from t")]
+    [DataRow("create trigger tr on t after insert as select (select count(*) from u group by i.a) from inserted i")]
+    public void GroupByItemNamingOnlyOuterColumns_RaisesMsg164(string sql) =>
+        // An enclosing query's column is an outer reference at any depth — the
+        // middle query's `u2.x` as much as the outermost `t.a` — and a trigger's
+        // `inserted` or an UPDATE's target is one too (probed 2026-10-07
+        // against SQL Server 2025, which raises it while compiling, so even an
+        // untaken IF branch fails).
+        Seeded().AssertSqlError(sql, 164, "Each GROUP BY expression must contain at least one column that is not an outer reference.");
+
+    [TestMethod]
+    [DataRow("select (select top 1 count(*) from u group by t.a + u.x) from t")]
+    [DataRow("select (select top 1 count(*) from u group by coalesce(t.a, u.x)) from t")]
+    [DataRow("select (select top 1 count(*) from u t group by t.x) from t")]
+    [DataRow("select (select top 1 count(*) from u group by u.x, ()) from t")]
+    [DataRow("select (select top 1 count(*) from (values (1)) v (y) group by t.a + v.y) from t")]
+    public void GroupByItemWithALocalColumnBesideAnOuterOne_IsAccepted(string sql) =>
+        // One column of the subquery's own is enough, and a local alias
+        // shadowing the outer table's name is local.
+        _ = Seeded().ExecuteScalar(sql);
+
+    [TestMethod]
+    public void GroupByItemOverAMissingTablesColumn_DefersWithTheStatement() =>
+        // A missing table defers the statement's binding, so the procedure
+        // creates (real's first run then reports the table).
+        _ = Seeded().ExecuteNonQuery("create procedure p as select (select count(*) from u group by m.a) from missing m");
+
+    [TestMethod]
+    public void GroupByItemNamingNoColumnAnywhere_IsMsg207RatherThan164() =>
+        Seeded().AssertSqlError("select (select count(*) from u group by zz) from t", 207, "Invalid column name 'zz'.");
+
+    [TestMethod]
     [DataRow("select count(*) from t group by 'a' 'b'")]
     [DataRow("select count(*) from t group by (select max(x) from u) 'b'")]
     [DataRow("select count(*) from t group by a 'b'")]

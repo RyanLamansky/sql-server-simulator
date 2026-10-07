@@ -82,8 +82,11 @@ partial class Simulation
         var pendingChecks = new List<(string? Name, BooleanExpression Predicate, string? InlineColumn, string Definition, bool NotForReplication)>();
 
         var pendingIndexes = new List<PendingInlineIndex>();
-        if (!ParseColumnList(context, typeName.Leaf, isTableVariable: false, isTableType: true, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingIndexes: pendingIndexes))
-            throw SimulatedSqlException.SyntaxErrorNear(context);
+        using (ParserScope.Enter(ref context.ColumnIndexOptions, IndexOptionStatement.CreateType))
+        {
+            if (!ParseColumnList(context, typeName.Leaf, isTableVariable: false, isTableType: true, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingIndexes: pendingIndexes))
+                throw SimulatedSqlException.SyntaxErrorNear(context);
+        }
 
         context.MoveNextOptional();
         var memoryOptimization = context.Token is ReservedKeyword { Keyword: Keyword.With }

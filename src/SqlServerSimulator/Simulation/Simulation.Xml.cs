@@ -233,6 +233,8 @@ partial class Simulation
             throw SimulatedSqlException.TypeAlreadyExists($"{schemaName}.{name.Leaf}");
         }
 
+        // The text is read as XML first, its parse errors real's own.
+        _ = XmlWellFormedness.Canonical(xsdText, SqlType.IsNationalStringCategory(literalValue.Type));
         XmlSchemaCollection.RejectUnsupportedSyntax(xsdText);
         XmlSchemaCollection.RejectUncompilableSchema(xsdText, existing: null);
         var id = context.CurrentDatabase.AllocateXmlCollectionId();
@@ -289,6 +291,7 @@ partial class Simulation
         var added = value.IsNull ? string.Empty : value.AsString;
         if (added.Trim().Length == 0)
             return true;
+        _ = XmlWellFormedness.Canonical(added, SqlType.IsNationalStringCategory(value.Type));
         XmlSchemaCollection.RejectUnsupportedSyntax(added);
         collection.RejectRedeclaredComponents(added);
         XmlSchemaCollection.RejectUncompilableSchema(added, collection.GetCompiledSchemas());
@@ -297,6 +300,7 @@ partial class Simulation
         var previousModified = collection.ModifyDate;
         collection.XsdText = previousText + added;
         collection.ModifyDate = context.Batch.CurrentStatement.UtcNow;
+        collection.AlteredAt = Interlocked.Increment(ref context.Connection.Simulation.XmlSchemaCollectionAlterations);
         RecordDdlUndo(context, () =>
         {
             collection.XsdText = previousText;

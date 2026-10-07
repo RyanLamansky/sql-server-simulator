@@ -44,6 +44,7 @@ partial class Simulation
             if (!context.Batch.TryResolveTable(tableName, out var table))
             {
                 RejectVariableAhead(context);
+                RejectIndexOptionsAhead(context);
                 throw SimulatedSqlException.CannotFindObjectForAlterTable(tableName.ToString());
             }
             this.Table = table;
@@ -80,6 +81,60 @@ partial class Simulation
                     case AtPrefixedString variable when context.Batch.Variables.ContainsKey(variable.Value):
                         throw SimulatedSqlException.VariablesNotAllowed(statement);
                 }
+                context.MoveNextOptional();
+            }
+            context.RestoreCheckpoint(checkpoint);
+        }
+
+        /// <summary>
+        /// Real checks a key's <c>WITH (…)</c> option names as the statement
+        /// parses, so one ALTER TABLE doesn't take fails the batch even where
+        /// the missing table defers the rest (probed 2026-10-07 against SQL
+        /// Server 2025: the CREATE TABLE ahead of it in the batch never runs).
+        /// Leaves the cursor where it was.
+        /// </summary>
+        private static void RejectIndexOptionsAhead(ParserContext context)
+        {
+            var checkpoint = context.SaveCheckpoint();
+            var hash = false;
+            Token? previous = null;
+            while (context.Token is { } token)
+            {
+                switch (token)
+                {
+                    // A mask's or an encryption's own WITH list.
+                    case ReservedKeyword { Keyword: Keyword.With } when previous is UnquotedString { Span: var word }
+                        && (word.Equals("MASKED", StringComparison.OrdinalIgnoreCase) || word.Equals("ENCRYPTED", StringComparison.OrdinalIgnoreCase)):
+                        break;
+                    // A type's length, a key's column list, a CHECK's predicate.
+                    case Operator { Character: '(' }:
+                        Selection.SkipBalancedParens(context);
+                        break;
+                    case Operator { Character: ',' }:
+                        hash = false;
+                        break;
+                    case UnquotedString { Span: var word } when word.Equals("HASH", StringComparison.OrdinalIgnoreCase):
+                        hash = true;
+                        break;
+                    // WITH would read as a statement boundary, a CTE's opener.
+                    case ReservedKeyword { Keyword: Keyword.With }:
+                        var withAt = context.SaveCheckpoint();
+                        var options = context.GetNextOptional() is Operator { Character: '(' };
+                        context.RestoreCheckpoint(withAt);
+                        if (!options)
+                        {
+                            context.RestoreCheckpoint(checkpoint);
+                            return;
+                        }
+                        _ = ParseOptionalIndexWithClause(context, IndexOptionStatement.AlterTable, rangeIndex: !hash);
+                        previous = null;
+                        continue;
+                    case Operator { Character: ';' }:
+                    case var _ when IsStatementBoundary(token):
+                        context.RestoreCheckpoint(checkpoint);
+                        return;
+                }
+                previous = token;
                 context.MoveNextOptional();
             }
             context.RestoreCheckpoint(checkpoint);

@@ -439,6 +439,9 @@ internal sealed partial class Selection
             ColumnWireFlags = new byte[combinedSchema.Length],
         };
         combined.OutputKeys = ConstantBranchKeys(combined.UnionAllBranches, combinedSchema.Length);
+        // A predicate on a union's column reaches both branches.
+        if (kind is SetOpKind.Union or SetOpKind.UnionAll && left.SeekShape is { } leftShape && right.SeekShape is { } rightShape)
+            combined.SeekShape = new SeekBodyShape([leftShape, rightShape]);
         left.SetOperationParent = right.SetOperationParent = combined;
         return combined;
     }

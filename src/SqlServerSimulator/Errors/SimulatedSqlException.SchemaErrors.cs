@@ -2678,6 +2678,15 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException CompressionDelayRequiresColumnstore() =>
         new("The COMPRESSION_DELAY option is allowed only with CREATE or ALTER COLUMNSTORE INDEX syntax.", 122, 15, 1);
 
+    /// <summary>
+    /// Msg 1758: an <c>ALTER TABLE … ADD</c> building a constraint with
+    /// <c>ONLINE = ON</c> beside anything else it adds, a column the
+    /// constraint is declared on included (probed 2026-10-07 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException OnlineConstraintNotAlone() =>
+        new("Only a single constraint can be added or dropped online with no other operations in the same statement.", 1758, 16, 1);
+
     /// <summary>Msg 11431: <c>MAX_DURATION</c> without <c>RESUMABLE = ON</c>.</summary>
     internal static SimulatedSqlException MaxDurationRequiresResumable() =>
         new("The MAX_DURATION option is not permitted as the RESUMABLE option is not turned 'ON'.", 11431, 15, 1);

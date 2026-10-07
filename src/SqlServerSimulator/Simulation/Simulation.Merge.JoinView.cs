@@ -345,7 +345,7 @@ partial class Simulation
             }
             StampUpdatedRow(table, newValues, batch);
             EnforceNotNull(table, newValues, "UPDATE");
-            EnforceCheckConstraints(table, newValues, batch, "UPDATE", reportedVerb: "MERGE");
+            EnforceCheckConstraints(table, newValues, batch, "UPDATE", reportedVerb: "MERGE", deferFunctionChecks: true);
             if (plan.ChecksOption && !PathRowRemainsVisible(batch, plan.Chain, plan.Path, table, newValues))
                 throw SimulatedSqlException.ViewCheckOptionViolation();
             baseUpdates.Add((address.Page, address.Slot, oldValues, newValues, sourceValues));

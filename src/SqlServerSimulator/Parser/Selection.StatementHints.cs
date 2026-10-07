@@ -42,6 +42,9 @@ partial class Selection
 
         /// <summary>The <c>TABLE HINT</c> clauses, each with its object as written.</summary>
         public List<(string Written, TableHintInfo Hints)>? TableHints;
+
+        /// <summary><c>HASH GROUP</c>, which a grouped CLR aggregate can't be planned under (Msg 8622).</summary>
+        public bool HashGroup;
     }
 
     /// <summary>
@@ -133,7 +136,7 @@ partial class Selection
                 context.MoveNextRequired();
                 return;
             case "HASH":
-                ReadJoinSecondWord(context, hint, clause, JoinAlgorithms.Hash, alsoUnion: true, alsoGroup: true);
+                clause.HashGroup |= ReadJoinSecondWord(context, hint, clause, JoinAlgorithms.Hash, alsoUnion: true, alsoGroup: true);
                 return;
             case "IGNORE_NONCLUSTERED_COLUMNSTORE_INDEX":
                 context.MoveNextRequired();
@@ -160,7 +163,7 @@ partial class Selection
                 context.MoveNextRequired();
                 return;
             case "LOOP":
-                ReadJoinSecondWord(context, hint, clause, JoinAlgorithms.Loop, alsoUnion: false, alsoGroup: false);
+                _ = ReadJoinSecondWord(context, hint, clause, JoinAlgorithms.Loop, alsoUnion: false, alsoGroup: false);
                 return;
             case "MAXDOP":
                 var maxDop = ReadOptionInteger(context, hint);
@@ -185,7 +188,7 @@ partial class Selection
                 clause.MaxGrantPercent = ReadGrantPercent(context, hint, clause.MaxGrantPercent, "max_grant_percent");
                 return;
             case "MERGE":
-                ReadJoinSecondWord(context, hint, clause, JoinAlgorithms.Merge, alsoUnion: true, alsoGroup: false);
+                _ = ReadJoinSecondWord(context, hint, clause, JoinAlgorithms.Merge, alsoUnion: true, alsoGroup: false);
                 return;
             case "MIN_GRANT_PERCENT":
                 clause.MinGrantPercent = ReadGrantPercent(context, hint, clause.MinGrantPercent, "min_grant_percent");
@@ -246,15 +249,17 @@ partial class Selection
         context.MoveNextRequired();
     }
 
-    /// <summary>The <c>JOIN</c>, <c>UNION</c> or <c>GROUP</c> after a hint's algorithm word.</summary>
-    private static void ReadJoinSecondWord(ParserContext context, Token hint, OptionClause clause, JoinAlgorithms algorithm, bool alsoUnion, bool alsoGroup)
+    /// <summary>The <c>JOIN</c>, <c>UNION</c> or <c>GROUP</c> after a hint's algorithm word, answering whether it was <c>GROUP</c>.</summary>
+    private static bool ReadJoinSecondWord(ParserContext context, Token hint, OptionClause clause, JoinAlgorithms algorithm, bool alsoUnion, bool alsoGroup)
     {
         var second = context.GetNextRequired();
+        var group = alsoGroup && IsWord(second, "GROUP");
         if (IsWord(second, "JOIN"))
             clause.Joins |= algorithm;
-        else if (!(alsoUnion && IsWord(second, "UNION")) && !(alsoGroup && IsWord(second, "GROUP")))
+        else if (!(alsoUnion && IsWord(second, "UNION")) && !group)
             throw SimulatedSqlException.SyntaxErrorNear(hint);
         context.MoveNextRequired();
+        return group;
     }
 
     /// <summary>
@@ -479,6 +484,16 @@ partial class Selection
     {
         var sites = context.JoinHintSites;
         context.JoinHintSites = null;
+        var groupsClrAggregate = context.GroupsClrAggregate;
+        context.GroupsClrAggregate = false;
+        // A view body binding inside the statement settles its own query
+        // first; what its holders keep is the enclosing statement's to judge.
+        if (context.BodySeekShapeHolders is { } holders && !context.Batch.BindsModuleDefinition)
+        {
+            foreach (var holder in holders)
+                holder.BodySeekShape = null;
+            context.BodySeekShapeHolders = null;
+        }
         var enforced = context.JoinOrderEnforced;
         context.JoinOrderEnforced = false;
         if (Simulation.QueryStoreHintFor(context.Batch) is { } storeHint)
@@ -500,6 +515,11 @@ partial class Selection
 
         if (clause?.TableHints is { } tableHints)
             ValidateOptionTableHints(context, tableHints, sites);
+
+        // A CLR aggregate under GROUP BY can't be hashed — a scalar or a
+        // windowed one can (probed 2026-10-07 against SQL Server 2025).
+        if (clause is { HashGroup: true } && groupsClrAggregate && OptimizerChecksRun(context.Batch))
+            throw SimulatedSqlException.ForceSeekPlanInfeasible();
 
         if (sites is not null && OptimizerChecksRun(context.Batch))
         {

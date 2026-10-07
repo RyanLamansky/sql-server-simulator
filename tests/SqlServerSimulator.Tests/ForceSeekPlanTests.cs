@@ -226,4 +226,88 @@ public sealed class ForceSeekPlanTests
     [TestMethod]
     public void ForceSeek_ADisabledIndexSeeksNothing()
         => _ = new Simulation().AssertSqlError(Setup + "alter index ia on t disable; alter index iab on t disable; select count(*) from t with (forceseek) where a = 1", 8622);
+
+    private static Simulation Views()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            """
+            create table h1 (id int primary key, d int, e int, index ix_e (e));
+            create table h2 (id int, d int);
+            create table h3 (id int primary key, x int);
+            insert h1 values (1, 1, 1), (2, 2, 2); insert h2 values (1, 1); insert h3 values (1, 5), (2, 6);
+            """,
+            "create view v1 as select id, d, e from h1",
+            "create view v2 as select id, d from h2",
+            "create view v4 as select * from v1",
+            "create view v5 as select id, d, e from h1 where id = 1",
+            "create view j1 as select h1.id, h1.d, h3.x from h1 join h3 on h3.id = h1.id",
+            "create view u1 as select id, d from h1 union all select id, x from h3",
+            "create view g1 as select d, count(*) c from h1 group by d",
+            "create view t1 as select top 5 id, d from h1 order by id",
+            "create view w1 as select id, d, row_number() over (partition by id order by d) rn from h1",
+            "create view w2 as select id, d, sum(d) over () s from h1");
+        return simulation;
+    }
+
+    /// <summary>
+    /// A FORCESEEK on a view or CTE reaches every table the body reads, at any
+    /// depth, each of which must seek on the body's own predicates or on the
+    /// reading query's through a column the body passes on (probed 2026-10-07
+    /// against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select * from v1 with (forceseek) where d = 1")]
+    [DataRow("select * from v1 x with (forceseek) where x.d = 1")]
+    [DataRow("select * from v1 x (forceseek) where x.d = 1")]
+    [DataRow("select * from v1 with (forceseek)")]
+    [DataRow("select * from v2 with (forceseek) where id = 1")]
+    [DataRow("select * from v4 with (forceseek) where d = 1")]
+    [DataRow("select * from j1 with (forceseek) where d = 1")]
+    [DataRow("select * from j1 with (forceseek) where x = 5")]
+    [DataRow("select * from u1 with (forceseek) where d = 1")]
+    [DataRow("select * from g1 with (forceseek) where d = 1")]
+    [DataRow("select * from t1 with (forceseek) where id = 1")]
+    [DataRow("select * from w1 with (forceseek) where d = 1")]
+    [DataRow("select * from w2 with (forceseek) where id = 1")]
+    [DataRow("select * from h3 where id in (select d from j1 with (forceseek))")]
+    [DataRow("select * from j1 with (forceseek) where cast(id as varchar(9)) like '1%'")]
+    [DataRow("with c as (select * from h1) select * from c with (forceseek) where d = 1")]
+    [DataRow("with c as (select id, d from h1), c2 as (select * from c) select * from c2 with (forceseek) where d = 1")]
+    [DataRow("if 1 = 0 select * from v1 with (forceseek) where d = 1")]
+    public void ForceSeekThroughAView_UnseekableShapes_RaiseMsg8622(string query)
+        => Views().AssertSqlError(query, 8622, "Query processor could not produce a query plan because of the hints defined in this query. Resubmit the query without specifying any hints and without using SET FORCEPLAN.");
+
+    [TestMethod]
+    [DataRow("select * from v1 with (forceseek) where id = 1")]
+    [DataRow("select * from v1 with (forceseek) where e = 1")]
+    [DataRow("select * from v4 with (forceseek) where id = 1")]
+    [DataRow("select * from v5 with (forceseek)")]
+    [DataRow("select * from h1 join v1 with (forceseek) on v1.id = h1.id")]
+    [DataRow("select * from j1 with (forceseek) where id = 1")]
+    [DataRow("select * from j1 with (forceseek) where id between 1 and 2")]
+    [DataRow("select * from j1 with (forceseek) where id = 1 or id = 2")]
+    [DataRow("select * from u1 with (forceseek) where id = 1")]
+    [DataRow("select * from w1 with (forceseek) where id = 1")]
+    [DataRow("select * from h3 where id in (select id from j1 with (forceseek))")]
+    [DataRow("select * from h3 cross apply (select * from j1 with (forceseek) where j1.id = h3.id) q")]
+    [DataRow("select * from v1 with (forcescan) where id = 1")]
+    [DataRow("with c as (select h1.id, h3.x from h1 join h3 on h3.id = h1.id) select * from c with (forceseek) where id = 1")]
+    public void ForceSeekThroughAView_SeekableShapes_Run(string query)
+        => _ = Views().ExecuteNonQuery(query);
+
+    [TestMethod]
+    public void ForceSeekThroughAView_IsACompileError()
+    {
+        // The batch never starts, so neither the PRINT nor a CATCH runs.
+        var ex = Views().AssertSqlError("print 'x'; begin try select * from v1 with (forceseek) where d = 1 end try begin catch print 'caught' end catch", 8622);
+        AreEqual(1, ex.Errors.Count);
+    }
+
+    [TestMethod]
+    public void ForceSeekNamingAnIndexOnAView_RaisesMsg364()
+        => Views().AssertSqlError(
+            "select * from v1 with (forceseek(ix_e(e))) where e = 1",
+            364,
+            "The query processor could not produce a query plan because the FORCESEEK hint on view 'v1' is used without a NOEXPAND hint. Resubmit the query with the NOEXPAND hint or remove the FORCESEEK hint on the view.");
 }

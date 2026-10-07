@@ -1336,8 +1336,10 @@ internal sealed partial class Selection
                     var cteAlias = ConsumeOptionalAlias(context);
                     // A WITH and a name after a CTE reference is the start of
                     // another CTE the statement ran into (Msg 336); a WITH and
-                    // a hint list is taken and discarded, the hints reaching
-                    // no table (probed 2026-10-05 against SQL Server 2025).
+                    // a hint list is taken, the hints reaching no table save a
+                    // FORCESEEK, which reaches the body's (probed 2026-10-05
+                    // and 2026-10-07 against SQL Server 2025).
+                    TableHintInfo? cteHints = null;
                     if (context.Token is ReservedKeyword { Keyword: Keyword.With })
                     {
                         var afterWith = context.SaveCheckpoint();
@@ -1346,7 +1348,7 @@ internal sealed partial class Selection
                         var hintList = context.Token is Operator { Character: '(' };
                         context.RestoreCheckpoint(afterWith);
                         if (hintList)
-                            _ = ParseOptionalTableHints(context);
+                            cteHints = ParseOptionalTableHints(context);
                     }
                     // A parenthesized list after it is the legacy hint form
                     // once an alias is written, and an argument list (Msg 215)
@@ -1356,7 +1358,7 @@ internal sealed partial class Selection
                     {
                         if (cteAlias is null)
                             RefuseArgumentList(context, cteBinding.Name, reportsNames: false);
-                        _ = ParseOptionalTableHints(context, commitOnLegacyParen: true);
+                        cteHints = ParseOptionalTableHints(context, commitOnLegacyParen: true);
                     }
 
                     return new FromSource(
@@ -1377,6 +1379,7 @@ internal sealed partial class Selection
                         cte: cteBinding)
                     {
                         BrowseBody = context.BrowseFlattenFrom ? cteBinding.Plan : null,
+                        ForcedSeekThrough = cteHints is { ForceSeek: true } ? cteHints : null,
                     };
                 }
 
@@ -1494,7 +1497,7 @@ internal sealed partial class Selection
                     var viewSynonym = RecordSecurableRead(context, resolvedView, objectName, viewBody);
                     var viewPlan = Selection.ForView(resolvedView, viewColumns, systemTime: viewSystemTime, browseFlatten: viewFlattens);
                     viewPlan.OutputKeys = viewBody?.OutputKeys;
-                    return new FromSource(
+                    var viewSource = new FromSource(
                         qualifier: viewAlias ?? resolvedView.Name,
                         columnNames: viewColumnNames,
                         columns: viewColumns,
@@ -1510,7 +1513,12 @@ internal sealed partial class Selection
                         unaliasedName: viewAlias is null ? FromSource.Resolved(objectName, context.Batch.CurrentDatabase) : null)
                     {
                         BrowseBody = viewFlattens ? viewBody : null,
+                        BodySeekShape = viewBody?.SeekShape,
+                        ForcedSeekThrough = viewHints is { ForceSeek: true, NoExpand: false } ? viewHints : null,
                     };
+                    if (viewSource.BodySeekShape is not null)
+                        (context.BodySeekShapeHolders ??= []).Add(viewSource);
+                    return viewSource;
                 }
 
                 // TVF call from FROM clause: `FROM schema.fn(args) [alias]`.

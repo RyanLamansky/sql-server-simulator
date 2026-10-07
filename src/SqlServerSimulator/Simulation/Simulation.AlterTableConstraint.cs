@@ -56,8 +56,11 @@ partial class Simulation
         List<ParserContext.Checkpoint> constraintStarts = [];
         List<string>? primaryKeyColumns = null;
         List<string>? constraintNames = null;
+        var onlineBefore = context.OnlineIndexBuildsParsed;
+        var items = 0;
         while (true)
         {
+            items++;
             if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Period })
             {
                 // A period declared beside the columns it pairs, as CREATE
@@ -103,6 +106,11 @@ partial class Simulation
         // Msg 102 / 156 there — `UNIQUE (w) WHERE …` names the WHERE (probed
         // 2026-09-25 against SQL Server 2025).
         context.RejectTrailingToken();
+        // An online constraint is added alone (probed 2026-10-07 against SQL
+        // Server 2025: beside a column, its own or another, or a second
+        // constraint), refused as the batch compiles.
+        if ((items > 1 || columns is not null) && context.OnlineIndexBuildsParsed > onlineBefore)
+            throw SimulatedSqlException.OnlineConstraintNotAlone();
         if (batch.IsSkipping)
             return true;
 
@@ -476,7 +484,7 @@ partial class Simulation
         // (PAD_INDEX = OFF, …) ON [PRIMARY]`. The placement trailer matters
         // only for a partition scheme; of the index options only
         // IGNORE_DUP_KEY lands.
-        var indexOptions = ParseOptionalIndexWithClause(context, IndexOptionStatement.AlterTable)
+        var indexOptions = ParseOptionalIndexWithClause(context, IndexOptionStatement.AlterTable, rangeIndex: !modifiers.IsHash)
             .WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
         if (modifiers.IsHash)
             indexOptions = indexOptions.AsHash();

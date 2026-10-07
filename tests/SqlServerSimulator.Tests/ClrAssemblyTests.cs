@@ -5,7 +5,7 @@ namespace SqlServerSimulator;
 [TestClass]
 public class ClrAssemblyTests
 {
-    private static Simulation ClrSimulation() => new() { EnableClr = true };
+    private static Simulation ClrSimulation() => ClrAssemblyFixture.TrustingSimulation();
 
     private static string CreateSafeAssembly(string name = "sim_safe") =>
         $"CREATE ASSEMBLY {name} FROM {ClrAssemblyFixture.HexLiteral(ClrAssemblyFixture.Safe(name))} WITH PERMISSION_SET = SAFE";
@@ -76,13 +76,15 @@ public class ClrAssemblyTests
     }
 
     [TestMethod]
-    [Description("EXTERNAL_ACCESS opts out of the SAFE API restrictions, matching real's permission ladder.")]
-    public void CreateAssembly_FileIo_AllowedUnderExternalAccess()
+    [DataRow("EXTERNAL_ACCESS")]
+    [DataRow("UNSAFE")]
+    [Description("The Linux server loads SAFE assemblies alone, refusing another permission set ahead of everything else (probed 2026-10-07 against SQL Server 2025).")]
+    public void CreateAssembly_NotSafe_RaisesMsg10342(string permissionSet)
     {
-        var bytes = ClrAssemblyFixture.WithFileIo();
-        var sim = ClrSimulation();
-        _ = sim.ExecuteNonQuery($"CREATE ASSEMBLY sim_fileio FROM {ClrAssemblyFixture.HexLiteral(bytes)} WITH PERMISSION_SET = EXTERNAL_ACCESS");
-        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.assemblies where name = 'sim_fileio'"));
+        var ex = ClrSimulation().AssertSqlError(
+            $"CREATE ASSEMBLY sim_net FROM {ClrAssemblyFixture.HexLiteral(ClrAssemblyFixture.NetTargeted())} WITH PERMISSION_SET = {permissionSet}", 10342);
+        AreEqual("Assembly 'sim_net' cannot be loaded because this edition of SQL Server only supports SAFE assemblies.", ex.Errors[0].Message);
+        AreEqual(100, ex.State);
     }
 
     [TestMethod]
@@ -690,5 +692,145 @@ public class ClrAssemblyTests
         _ = sim.ExecuteNonQuery("drop aggregate dbo.sumsq");
         _ = sim.AssertSqlError("drop aggregate dbo.sumsq", 3701);
         _ = sim.ExecuteNonQuery("drop aggregate if exists dbo.sumsq; drop assembly simclr");
+    }
+
+    /// <summary>
+    /// Real resolves every reference against a fixed catalog of .NET Framework
+    /// assemblies, by name and public key token, so an assembly built for .NET
+    /// is refused, naming its first reference (probed 2026-10-07 against SQL
+    /// Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void CreateAssembly_NetTargeted_RaisesMsg6503()
+    {
+        var ex = ClrSimulation().AssertSqlError($"CREATE ASSEMBLY sim_net FROM {ClrAssemblyFixture.HexLiteral(ClrAssemblyFixture.NetTargeted())}", 6503);
+        StartsWith("Assembly 'system.", ex.Errors[0].Message);
+        EndsWith(".' was not found in the SQL catalog.", ex.Errors[0].Message);
+        AreEqual(12, ex.State);
+    }
+
+    [TestMethod]
+    [DataRow("netstandard", "2.0.0.0", "cc7b13ffcd2ddd51", "netstandard, version=2.0.0.0, culture=neutral, publickeytoken=cc7b13ffcd2ddd51.")]
+    [DataRow("System.Runtime", "10.0.0.0", "b03f5f7f11d50a3a", "system.runtime, version=10.0.0.0, culture=neutral, publickeytoken=b03f5f7f11d50a3a.")]
+    [DataRow("Microsoft.SqlServer.Server", "1.0.0.0", "cc7b13ffcd2ddd51", "microsoft.sqlserver.server, version=1.0.0.0, culture=neutral, publickeytoken=cc7b13ffcd2ddd51.")]
+    [DataRow("System.Drawing", "4.0.0.0", "b03f5f7f11d50a3a", "system.drawing, version=4.0.0.0, culture=neutral, publickeytoken=b03f5f7f11d50a3a.")]
+    [DataRow("Microsoft.CSharp", "4.0.0.0", "b03f5f7f11d50a3a", "microsoft.csharp, version=4.0.0.0, culture=neutral, publickeytoken=b03f5f7f11d50a3a.")]
+    [DataRow("System.Data", "4.0.0.0", "b03f5f7f11d50a3a", "system.data, version=4.0.0.0, culture=neutral, publickeytoken=b03f5f7f11d50a3a.")]
+    [DataRow("System.Data", "4.0.0.0", null, "system.data, version=0.0.0.0, culture=neutral, publickeytoken=null.")]
+    [DataRow("Microsoft.SqlServer.Types", "18.0.0.0", "89845dcd8080cc91", "microsoft.sqlserver.types, version=18.0.0.0, culture=neutral, publickeytoken=89845dcd8080cc91.")]
+    [DataRow("MyLib", "1.0.0.0", null, "mylib, version=0.0.0.0, culture=neutral, publickeytoken=null.")]
+    public void CreateAssembly_ReferenceOutsideTheCatalog_RaisesMsg6503(string name, string version, string? token, string described)
+        => ClrSimulation().AssertSqlError(
+            $"CREATE ASSEMBLY refs FROM {ClrAssemblyFixture.HexLiteral(ClrAssemblyFixture.WithReferences("refs", (name, version, token)))}",
+            6503,
+            $"Assembly '{described}' was not found in the SQL catalog.");
+
+    [TestMethod]
+    [DataRow("System", "4.0.0.0", "b77a5c561934e089")]
+    [DataRow("System.Data", "4.0.0.1", "b77a5c561934e089")]
+    [DataRow("System.Xml.Linq", "4.0.0.0", "b77a5c561934e089")]
+    [DataRow("System.Security", "4.0.0.0", "b03f5f7f11d50a3a")]
+    [DataRow("Microsoft.VisualBasic", "10.0.0.0", "b03f5f7f11d50a3a")]
+    [DataRow("System.Numerics", "4.0.0.0", "b77a5c561934e089")]
+    [DataRow("Microsoft.SqlServer.Types", "16.0.0.0", "89845dcd8080cc91")]
+    [DataRow("Microsoft.SqlServer.Types", "10.0.0.0", "89845dcd8080cc91")]
+    public void CreateAssembly_ReferenceInTheCatalog_Registers(string name, string version, string token)
+    {
+        var sim = ClrSimulation();
+        _ = sim.ExecuteNonQuery($"CREATE ASSEMBLY refs FROM {ClrAssemblyFixture.HexLiteral(ClrAssemblyFixture.WithReferences("refs", (name, version, token)))}");
+        AreEqual(1, sim.ExecuteScalar("select count(*) from sys.assemblies where name = 'refs'"));
+    }
+
+    private const string Msg10343 = "CREATE or ALTER ASSEMBLY for assembly 'sim_safe' with the SAFE or EXTERNAL_ACCESS option failed because the 'clr strict security' option of sp_configure is set to 1. Microsoft recommends that you sign the assembly with a certificate or asymmetric key that has a corresponding login with UNSAFE ASSEMBLY permission. Alternatively, you can trust the assembly using sp_add_trusted_assembly.";
+
+    /// <summary>
+    /// <c>clr strict security</c> is on as real installs it, refusing an
+    /// assembly the server doesn't trust with a severity-14 Msg 10343 that ends
+    /// only its statement (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void StrictSecurity_IsOnByDefault_AndRefusesAnUntrustedAssembly()
+    {
+        var sim = new Simulation { EnableClr = true };
+        AreEqual(1, sim.ExecuteScalar("select cast(value_in_use as int) from sys.configurations where name = 'clr strict security'"));
+        sim.AssertSqlError(CreateSafeAssembly(), 10343, Msg10343);
+        AreEqual(10343, sim.ExecuteScalar($"begin try {CreateSafeAssembly()} end try begin catch select error_number() end catch"));
+        AreEqual(2, sim.ExecuteScalar($"declare @n int = 1; begin try {CreateSafeAssembly()} end try begin catch set @n = 2 end catch select @n"));
+    }
+
+    [TestMethod]
+    public void StrictSecurity_TurnedOff_Registers()
+    {
+        var sim = new Simulation { EnableClr = true };
+        _ = sim.ExecuteNonQuery(ClrAssemblyFixture.TrustAllAssemblies);
+        AreEqual(0, sim.ExecuteScalar("select cast(value_in_use as int) from sys.configurations where name = 'clr strict security'"));
+        _ = sim.ExecuteNonQuery(CreateSafeAssembly());
+    }
+
+    [TestMethod]
+    public void StrictSecurity_ATrustworthyDatabase_Registers()
+    {
+        var sim = new Simulation { EnableClr = true };
+        _ = sim.ExecuteNonQuery("alter database simulated set trustworthy on");
+        _ = sim.ExecuteNonQuery(CreateSafeAssembly());
+    }
+
+    [TestMethod]
+    public void StrictSecurity_ATrustedHash_Registers()
+    {
+        var sim = new Simulation { EnableClr = true };
+        var hash = "0x" + Convert.ToHexString(System.Security.Cryptography.SHA512.HashData(ClrAssemblyFixture.Safe()));
+        _ = sim.ExecuteNonQuery($"exec sys.sp_add_trusted_assembly {hash}, N'the fixture'");
+        AreEqual("the fixture", sim.ExecuteScalar("select description from sys.trusted_assemblies"));
+        AreEqual(1, sim.ExecuteScalar($"select count(*) from sys.trusted_assemblies where hash = {hash} and created_by = N'sa'"));
+        _ = sim.ExecuteNonQuery(CreateSafeAssembly());
+
+        sim.AssertSqlError($"exec sys.sp_add_trusted_assembly {hash}", 10345, $"The assembly hash '{hash}' is already trusted.");
+        _ = sim.ExecuteNonQuery($"exec sp_drop_trusted_assembly {hash}");
+        sim.AssertSqlError($"exec sys.sp_drop_trusted_assembly {hash}", 10346, $"The assembly hash '{hash}' is not currently trusted. No action was taken.");
+        sim.AssertSqlError("exec sys.sp_add_trusted_assembly 0x1234", 214, "Procedure expects parameter 'hash' of type 'binary(64)/varbinary(64)'.");
+        AreEqual(0, sim.ExecuteScalar("select count(*) from sys.trusted_assemblies"));
+    }
+
+    /// <summary>
+    /// A <c>Format.UserDefined</c> aggregate's state passes through
+    /// <c>Write</c> and a fresh instance's <c>Read</c> once per group before
+    /// <c>Terminate</c>, so a field <c>Write</c> leaves out is lost — whatever
+    /// the group's size, an empty input and a window included (probed
+    /// 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select dbo.leaky(v) from (values (5)) t (v)", "sum=0 accumulated=1 reads=1 writes=1")]
+    [DataRow("select dbo.leaky(v) from (values (5), (7)) t (v)", "sum=0 accumulated=2 reads=1 writes=1")]
+    [DataRow("select dbo.leaky(v) from (values (5)) t (v) where v < 0", "sum=0 accumulated=0 reads=1 writes=1")]
+    [DataRow("select top 1 dbo.leaky(v) from (values (1, 5), (1, 7), (2, 9)) t (g, v) group by g order by g", "sum=0 accumulated=2 reads=1 writes=1")]
+    [DataRow("select top 1 dbo.leaky(v) over (partition by g) from (values (1, 5), (1, 7)) t (g, v)", "sum=0 accumulated=2 reads=1 writes=1")]
+    public void UserDefinedAggregate_StateRoundTripsBeforeTerminate(string query, string expected)
+        => AreEqual(expected, ClrFrameworkFixture.Simulation("create aggregate dbo.leaky (@v int) returns nvarchar(200) external name simclr.Leaky").ExecuteScalar(query));
+
+    /// <summary>
+    /// A CLR aggregate under GROUP BY can't be planned as a hash aggregate, so
+    /// <c>OPTION (HASH GROUP)</c> is Msg 8622 as the batch compiles; a scalar
+    /// or windowed one, or the statement's built-ins alone, take it (probed
+    /// 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("select g, dbo.sumsq(v) from t group by g option (hash group)", true)]
+    [DataRow("select g, count(*), dbo.leaky(v) from t group by g option (hash group)", true)]
+    [DataRow("select g, dbo.leaky(distinct v) from t group by g option (hash group)", true)]
+    [DataRow("select dbo.sumsq(v) from t option (hash group)", false)]
+    [DataRow("select dbo.leaky(v) over (partition by g) from t option (hash group)", false)]
+    [DataRow("select g, count(*) from t group by g option (hash group)", false)]
+    [DataRow("select g, dbo.sumsq(v) from t group by g option (order group)", false)]
+    public void HashGroup_OverAGroupedClrAggregate_RaisesMsg8622(string query, bool refused)
+    {
+        var sim = ClrFrameworkFixture.Simulation(
+            "create aggregate dbo.sumsq (@v int) returns bigint external name simclr.SumSquares",
+            "create aggregate dbo.leaky (@v int) returns nvarchar(200) external name simclr.Leaky",
+            "create table t (g int, v int); insert t values (1, 1), (1, 2), (2, 3)");
+        if (refused)
+            _ = sim.AssertSqlError("print 'ran'; " + query, 8622);
+        else
+            _ = sim.ExecuteNonQuery(query);
     }
 }

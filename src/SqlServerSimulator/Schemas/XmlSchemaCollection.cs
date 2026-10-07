@@ -46,6 +46,13 @@ internal sealed class XmlSchemaCollection(
 
     public DateTime ModifyDate = createDate;
 
+    /// <summary>
+    /// <see cref="Simulation.XmlSchemaCollectionAlterations"/> as of this
+    /// collection's last <c>ALTER … ADD</c>, 0 before one; see
+    /// <see cref="Parser.BatchContext.XmlSchemaAlterationsAtStart"/>.
+    /// </summary>
+    public long AlteredAt;
+
     private string? namesReadFrom;
     private FrozenSet<string>? singletonElementNames;
     private string? simpleContentNamesReadFrom;
@@ -210,9 +217,10 @@ internal sealed class XmlSchemaCollection(
     /// <summary>
     /// Msg 9336 for the XSD constructs SQL Server's schema collections refuse
     /// outright — the identity constraints <c>unique</c>, <c>key</c> and
-    /// <c>keyref</c> — naming the first one in document order (probed
-    /// 2026-09-28 against SQL Server 2025). Text the reader can't get through
-    /// is left to whatever reads it next.
+    /// <c>keyref</c>, <c>include</c> and <c>notation</c> — and Msg 2391 for
+    /// <c>redefine</c>, naming the first one in document order (probed
+    /// 2026-09-28 and 2026-10-07 against SQL Server 2025). Text the reader
+    /// can't get through is left to whatever reads it next.
     /// </summary>
     public static void RejectUnsupportedSyntax(string xsdText)
     {
@@ -222,12 +230,16 @@ internal sealed class XmlSchemaCollection(
             using var reader = XmlReader.Create(new System.IO.StringReader(xsdText), settings);
             while (reader.Read())
             {
-                if (reader.NodeType == XmlNodeType.Element
-                    && reader.NamespaceURI == XsdNamespace
-                    && reader.LocalName is "key" or "keyref" or "unique")
-                {
+                if (reader.NodeType != XmlNodeType.Element || reader.NamespaceURI != XsdNamespace)
+                    continue;
+                if (reader.LocalName is "key" or "keyref" or "unique")
                     throw SimulatedSqlException.XmlSchemaSyntaxNotSupported(reader.LocalName);
-                }
+                // The two below are named as written, prefix and brackets
+                // included (probed 2026-10-07 against SQL Server 2025).
+                if (reader.LocalName is "include" or "notation")
+                    throw SimulatedSqlException.XmlSchemaSyntaxNotSupported($"<{reader.Name}>");
+                if (reader.LocalName == "redefine")
+                    throw SimulatedSqlException.XmlSchemaRedefineNotSupported();
             }
         }
         catch (XmlException)
@@ -313,6 +325,10 @@ internal sealed class XmlSchemaCollection(
 
         foreach (var (kind, name) in references)
         {
+            // A reference that isn't an XML name at all is Msg 2379 (probed
+            // 2026-10-07 against SQL Server 2025).
+            if (!IsNcName(name.Name))
+                throw SimulatedSqlException.XmlSchemaNameNotValid(name.Name);
             if (name.Namespace == XsdNamespace
                 ? kind == "type" && (System.Xml.Schema.XmlSchemaType.GetBuiltInSimpleType(name) is not null || name.Name == "anyType")
                 : name.Namespace == SqlTypesNamespace || declared.Contains((kind, name.Namespace, name.Name)))
@@ -322,17 +338,22 @@ internal sealed class XmlSchemaCollection(
             throw SimulatedSqlException.XmlSchemaUndefinedName(name.Name, name.Namespace);
         }
 
-        foreach (var (facet, value, _, _, _) in facets)
-        {
-            if (facet is "fractionDigits" or "length" or "maxLength" or "minLength" or "totalDigits"
-                && !ulong.TryParse(value.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out _))
-            {
-                throw SimulatedSqlException.XmlSchemaFacetValueNotNumber();
-            }
-        }
+        if (FirstStructuralError(xsdText) is { } structural)
+            throw structural;
 
-        if (facets.Count == 0)
-            return;
+        if (facets.Count != 0)
+            RejectFacetsTheBaseRefuses(xsdText, facets);
+
+        if (FirstTypeDefinitionError(xsdText) is { } definition)
+            throw definition;
+    }
+
+    /// <summary>
+    /// Msg 2319 for the first facet .NET's compiler finds its base type
+    /// doesn't take, located as the walk recorded it.
+    /// </summary>
+    private static void RejectFacetsTheBaseRefuses(string xsdText, List<(string Facet, string Value, string Location, int Line, int Position)> facets)
+    {
         var set = new System.Xml.Schema.XmlSchemaSet();
         var refused = new List<System.Xml.Schema.XmlSchemaObject?>();
         set.ValidationEventHandler += (_, e) => refused.Add(e.Exception.SourceSchemaObject);
@@ -358,6 +379,358 @@ internal sealed class XmlSchemaCollection(
                 throw SimulatedSqlException.XmlSchemaFacetNotAllowed(facet, location);
         }
     }
+
+    /// <summary>The XSD namespace's element names; any other is Msg 2297.</summary>
+    private static readonly FrozenSet<string> XsdElementNames = new[]
+    {
+        "all", "annotation", "any", "anyAttribute", "appinfo", "attribute", "attributeGroup", "choice", "complexContent",
+        "complexType", "documentation", "element", "enumeration", "extension", "field", "fractionDigits", "group", "import",
+        "include", "key", "keyref", "length", "list", "maxExclusive", "maxInclusive", "maxLength", "minExclusive",
+        "minInclusive", "minLength", "notation", "pattern", "redefine", "restriction", "schema", "selector", "sequence",
+        "simpleContent", "simpleType", "totalDigits", "union", "unique", "whiteSpace",
+    }.ToFrozenSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The unqualified attributes each XSD element takes, by local name — a
+    /// global and a local <c>element</c> or <c>attribute</c> differ — as real
+    /// reads them (probed 2026-10-07 against SQL Server 2025: real takes
+    /// <c>abstract</c> and <c>mixed</c> on a <c>simpleType</c> and <c>form</c>
+    /// on a global element, beyond the XSD recommendation). An element missing
+    /// here goes unchecked.
+    /// </summary>
+    private static readonly FrozenDictionary<string, FrozenSet<string>> XsdAttributes = new Dictionary<string, string[]>
+    {
+        ["all"] = ["id", "maxOccurs", "minOccurs"],
+        ["annotation"] = ["id"],
+        ["any"] = ["id", "maxOccurs", "minOccurs", "namespace", "processContents"],
+        ["anyAttribute"] = ["id", "namespace", "processContents"],
+        ["appinfo"] = ["source"],
+        ["attribute"] = ["default", "fixed", "form", "id", "name", "ref", "type", "use"],
+        ["attributeGroup"] = ["id", "ref"],
+        ["choice"] = ["id", "maxOccurs", "minOccurs"],
+        ["complexContent"] = ["id", "mixed"],
+        ["complexType"] = ["abstract", "block", "final", "id", "mixed", "name"],
+        ["documentation"] = ["source"],
+        ["element"] = ["abstract", "block", "default", "final", "fixed", "form", "id", "maxOccurs", "minOccurs", "name", "nillable", "ref", "substitutionGroup", "type"],
+        ["enumeration"] = ["id", "value"],
+        ["extension"] = ["base", "id"],
+        ["fractionDigits"] = ["fixed", "id", "value"],
+        ["global attribute"] = ["default", "fixed", "form", "id", "name", "ref", "type"],
+        ["global element"] = ["abstract", "block", "default", "final", "fixed", "form", "id", "name", "nillable", "ref", "substitutionGroup", "type"],
+        ["global attributeGroup"] = ["id", "name"],
+        ["global group"] = ["abstract", "id", "mixed", "name"],
+        ["import"] = ["id", "namespace", "schemaLocation"],
+        ["length"] = ["fixed", "id", "value"],
+        ["group"] = ["id", "maxOccurs", "minOccurs", "ref"],
+        ["list"] = ["id", "itemType"],
+        ["local element"] = ["block", "default", "fixed", "form", "id", "maxOccurs", "minOccurs", "name", "nillable", "ref", "type"],
+        ["maxExclusive"] = ["fixed", "id", "value"],
+        ["maxInclusive"] = ["fixed", "id", "value"],
+        ["maxLength"] = ["fixed", "id", "value"],
+        ["minExclusive"] = ["fixed", "id", "value"],
+        ["minInclusive"] = ["fixed", "id", "value"],
+        ["minLength"] = ["fixed", "id", "value"],
+        ["pattern"] = ["id", "value"],
+        ["restriction"] = ["base", "id"],
+        ["schema"] = ["attributeFormDefault", "blockDefault", "elementFormDefault", "finalDefault", "id", "targetNamespace", "version"],
+        ["sequence"] = ["id", "maxOccurs", "minOccurs"],
+        ["simpleContent"] = ["id"],
+        ["simpleType"] = ["abstract", "final", "id", "mixed", "name"],
+        ["totalDigits"] = ["fixed", "id", "value"],
+        ["union"] = ["id", "memberTypes"],
+        ["whiteSpace"] = ["fixed", "id", "value"],
+    }.ToFrozenDictionary(static pair => pair.Key, static pair => pair.Value.ToFrozenSet(StringComparer.Ordinal), StringComparer.Ordinal);
+
+    /// <summary>
+    /// The first refusal real's reading of the schema documents raises once
+    /// every name resolves, in document order (probed 2026-10-07 against SQL
+    /// Server 2025): an element the XSD namespace lacks (Msg 2297), an
+    /// attribute its element doesn't take (2298), an occurrence or a length
+    /// facet's value that isn't a number (2309), a <c>totalDigits</c> of 0
+    /// (2386), a boolean or an enumerated
+    /// attribute given another value (2312 / 2313), a global declaration
+    /// without its name (2299), a name beside a <c>ref</c> (2360),
+    /// <c>minOccurs</c> above <c>maxOccurs</c> (2382), a type named and
+    /// declared inline at once (2305), and an attribute declared twice in one
+    /// complex type or attribute group (2310). Null when there is none.
+    /// </summary>
+    private static SimulatedSqlException? FirstStructuralError(string xsdText)
+    {
+        try
+        {
+            using var reader = XmlReader.Create(new System.IO.StringReader(xsdText), new XmlReaderSettings { ConformanceLevel = ConformanceLevel.Fragment });
+            var path = new List<string>();
+            var siblingCounts = new List<Dictionary<string, int>> { new(StringComparer.Ordinal) };
+            // Per open element: whether it names a type, and the attribute
+            // names a complex type or attribute group has declared.
+            var namesType = new List<bool>();
+            var declaredAttributes = new List<HashSet<string>?>();
+            while (reader.Read())
+            {
+                if (reader.NodeType == XmlNodeType.EndElement)
+                {
+                    path.RemoveAt(path.Count - 1);
+                    siblingCounts.RemoveAt(siblingCounts.Count - 1);
+                    namesType.RemoveAt(namesType.Count - 1);
+                    declaredAttributes.RemoveAt(declaredAttributes.Count - 1);
+                    continue;
+                }
+                if (reader.NodeType != XmlNodeType.Element)
+                    continue;
+
+                var counts = siblingCounts[^1];
+                counts[reader.LocalName] = counts.GetValueOrDefault(reader.LocalName) + 1;
+                var step = $"/*:{reader.LocalName}[{counts[reader.LocalName]}]";
+                var location = string.Concat(path) + step;
+                var local = reader.LocalName;
+                var isXsd = reader.NamespaceURI == XsdNamespace;
+                // An attribute of a complex type's content element is located
+                // at the type itself (probed 2026-10-07 against SQL Server 2025).
+                var attributeLocation = isXsd && local is "complexContent" or "simpleContent" ? string.Concat(path) : location;
+                var error = isXsd ? StructuralErrorAt(reader, local, location, attributeLocation, namesType, declaredAttributes) : null;
+                if (error is not null)
+                    return error;
+
+                if (!reader.IsEmptyElement)
+                {
+                    path.Add(step);
+                    siblingCounts.Add(new(StringComparer.Ordinal));
+                    namesType.Add(isXsd && local is "element" or "attribute" && reader.GetAttribute("type") is not null);
+                    declaredAttributes.Add(isXsd && local is "complexType" or "attributeGroup" ? new(StringComparer.Ordinal) : null);
+                }
+            }
+        }
+        catch (XmlException)
+        {
+        }
+        return null;
+    }
+
+    private static SimulatedSqlException? StructuralErrorAt(XmlReader reader, string local, string location, string attributeLocation, List<bool> namesType, List<HashSet<string>?> declaredAttributes)
+    {
+        if (!XsdElementNames.Contains(local))
+            return SimulatedSqlException.XmlSchemaElementNotValid(local, location);
+
+        var depth = reader.Depth;
+        var listKey = local switch
+        {
+            "attribute" or "attributeGroup" or "element" or "group" when depth == 1 => "global " + local,
+            "element" => "local element",
+            _ => local,
+        };
+        if (XsdAttributes.TryGetValue(listKey, out var allowed) && reader.MoveToFirstAttribute())
+        {
+            do
+            {
+                // Namespace declarations and attributes of another namespace
+                // ride along, and xml:lang is taken everywhere but appinfo.
+                var attribute = reader.LocalName;
+                if (reader.Prefix == "xmlns" || (reader.Prefix.Length == 0 && attribute == "xmlns"))
+                    continue;
+                var refused = reader.NamespaceURI.Length == 0
+                    ? allowed.Contains(attribute) ? null : attribute
+                    : reader.Prefix == "xml" && attribute == "lang" && local is "appinfo" or "import" ? attribute : null;
+                var error = refused is not null
+                    ? SimulatedSqlException.XmlSchemaAttributeNotValid(refused, attributeLocation)
+                    : reader.NamespaceURI.Length == 0 ? AttributeValueError(local, attribute, reader.Value)
+                    : reader.Prefix == "xml" && attribute == "lang" && local == "documentation" && !IsLanguageTag(reader.Value) ? SimulatedSqlException.XmlSchemaAttributeValueNotAllowed(attribute, reader.Value)
+                    : null;
+                if (error is not null)
+                {
+                    _ = reader.MoveToElement();
+                    return error;
+                }
+            }
+            while (reader.MoveToNextAttribute());
+            _ = reader.MoveToElement();
+        }
+
+        if (local == "element" && reader.GetAttribute("fixed") is not null && reader.GetAttribute("default") is not null)
+            return SimulatedSqlException.XmlSchemaAttributeNotValid("fixed", location);
+        if (local == "choice" && reader.IsEmptyElement && (reader.GetAttribute("minOccurs")?.Trim() ?? "1") != "0")
+            return SimulatedSqlException.XmlSchemaEmptyChoice(location);
+        var name = reader.GetAttribute("name");
+        var reference = reader.GetAttribute("ref");
+        if (depth == 1 && name is null && local is "attribute" or "attributeGroup" or "complexType" or "element" or "group" or "simpleType")
+            return SimulatedSqlException.XmlSchemaRequiredAttributeMissing("name", local);
+        if (name is not null && reference is not null && local is "attribute" or "element")
+            return SimulatedSqlException.XmlSchemaNameAndRef(location);
+        if (reader.GetAttribute("minOccurs") is { } minText && reader.GetAttribute("maxOccurs") is { } maxText && maxText.Trim() != "unbounded"
+            && ulong.TryParse(minText.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var minOccurs)
+            && ulong.TryParse(maxText.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var maxOccurs)
+            && minOccurs > maxOccurs)
+        {
+            return SimulatedSqlException.XmlSchemaOccursOutOfOrder(location);
+        }
+        if (local is "complexType" or "simpleType" && namesType.Count > 0 && namesType[^1])
+            return SimulatedSqlException.XmlSchemaTypeSpecifiedTwice(location);
+        if (local == "attribute" && declaredAttributes.Count > 0 && declaredAttributes[^1] is { } declared
+            && (name ?? LocalPart(reference)) is { } attributeName && !declared.Add(attributeName))
+        {
+            return SimulatedSqlException.XmlSchemaAttributeDeclaredTwice(attributeName);
+        }
+        return null;
+    }
+
+    /// <summary>The value refusals of <see cref="FirstStructuralError"/>'s attributes: Msg 2309, 2312 and 2313.</summary>
+    private static SimulatedSqlException? AttributeValueError(string element, string attribute, string value)
+    {
+        var trimmed = value.Trim();
+        switch (attribute)
+        {
+            case "abstract" or "mixed" or "nillable":
+            case "fixed" when element is not ("attribute" or "element"):
+                return trimmed is "0" or "1" or "false" or "true" ? null : SimulatedSqlException.XmlSchemaAttributeNotBoolean(attribute, value);
+            case "block" or "blockDefault" or "final" or "finalDefault":
+                // #all, or a list of the derivations the attribute names.
+                return trimmed == "#all" || Array.TrueForAll(
+                    trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries),
+                    static token => token is "extension" or "list" or "restriction" or "substitution" or "union")
+                    ? null
+                    : SimulatedSqlException.XmlSchemaAttributeValueNotAllowed(attribute, value);
+            case "attributeFormDefault" or "elementFormDefault" or "form":
+                return trimmed is "qualified" or "unqualified" ? null : SimulatedSqlException.XmlSchemaAttributeValueNotAllowed(attribute, value);
+            case "maxOccurs" when trimmed == "unbounded":
+                return null;
+            case "maxOccurs" or "minOccurs":
+                return ulong.TryParse(trimmed, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out _)
+                    ? null
+                    : SimulatedSqlException.XmlSchemaFacetValueNotNumber(attribute);
+            case "processContents":
+                return trimmed is "lax" or "skip" or "strict" ? null : SimulatedSqlException.XmlSchemaAttributeValueNotAllowed(attribute, value);
+            case "use":
+                return trimmed is "optional" or "prohibited" or "required" ? null : SimulatedSqlException.XmlSchemaAttributeValueNotAllowed(attribute, value);
+            case "value" when element is "fractionDigits" or "length" or "maxLength" or "minLength" or "totalDigits":
+                return !ulong.TryParse(trimmed, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var count)
+                    ? SimulatedSqlException.XmlSchemaFacetValueNotNumber()
+                    : count == 0 && element == "totalDigits" ? SimulatedSqlException.XmlSchemaTotalDigitsOutOfRange() : null;
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// The first contradiction in a named simple type's own restriction, in
+    /// document order, once the facets each base takes have been judged
+    /// (probed 2026-10-07 against SQL Server 2025): a restriction chain
+    /// returning to the type (Msg 2366),
+    /// <c>fractionDigits</c> over <c>totalDigits</c> (6950), <c>minLength</c>
+    /// over <c>maxLength</c> (6946), and a numeric lower bound over its upper
+    /// one (6951 / 6952). Null when there is none; an anonymous type, whose
+    /// name real spells as a path, is left unjudged.
+    /// </summary>
+    private static SimulatedSqlException? FirstTypeDefinitionError(string xsdText)
+    {
+        var bases = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var restrictions = new List<(string Type, Dictionary<string, string> Facets, string? Base)>();
+        try
+        {
+            using var reader = XmlReader.Create(new System.IO.StringReader(xsdText), new XmlReaderSettings { ConformanceLevel = ConformanceLevel.Fragment });
+            string? type = null;
+            Dictionary<string, string>? facets = null;
+            while (reader.Read())
+            {
+                if (reader.NodeType != XmlNodeType.Element || reader.NamespaceURI != XsdNamespace)
+                    continue;
+                switch (reader.LocalName)
+                {
+                    case "simpleType" when reader.Depth == 1:
+                        type = reader.GetAttribute("name");
+                        facets = null;
+                        break;
+                    case "complexType" or "element" or "attribute" when reader.Depth == 1:
+                        type = null;
+                        facets = null;
+                        break;
+                    case "restriction" when reader.Depth == 2 && type is not null:
+                        var restrictionBase = reader.GetAttribute("base");
+                        _ = bases.TryAdd(type, restrictionBase);
+                        facets = new(StringComparer.Ordinal);
+                        restrictions.Add((type, facets, restrictionBase));
+                        break;
+                    case "fractionDigits" or "maxExclusive" or "maxInclusive" or "maxLength" or "minExclusive" or "minInclusive" or "minLength" or "totalDigits"
+                        when reader.Depth == 3 && facets is not null:
+                        _ = facets.TryAdd(reader.LocalName, (reader.GetAttribute("value") ?? string.Empty).Trim());
+                        break;
+                }
+            }
+        }
+        catch (XmlException)
+        {
+            return null;
+        }
+
+        foreach (var (type, facets, restrictionBase) in restrictions)
+        {
+            // A chain of bases in no namespace that leads back to the type.
+            var seen = new HashSet<string>(StringComparer.Ordinal) { type };
+            for (var next = restrictionBase; next is not null && !next.Contains(':', StringComparison.Ordinal); next = bases.GetValueOrDefault(next))
+            {
+                if (!seen.Add(next))
+                {
+                    if (next == type)
+                        return SimulatedSqlException.XmlSchemaCircularDefinition(type);
+                    break;
+                }
+            }
+
+            static bool Count(Dictionary<string, string> facets, string facet, out ulong value) =>
+                ulong.TryParse(facets.GetValueOrDefault(facet), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out value);
+            static bool Bound(Dictionary<string, string> facets, string facet, out decimal value) =>
+                decimal.TryParse(facets.GetValueOrDefault(facet), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out value);
+
+            if (Count(facets, "fractionDigits", out var fractionDigits) && Count(facets, "totalDigits", out var totalDigits) && fractionDigits > totalDigits)
+                return SimulatedSqlException.XmlSchemaFacetsContradict(type, 6950);
+            if (Count(facets, "minLength", out var minLength) && Count(facets, "maxLength", out var maxLength) && minLength > maxLength)
+                return SimulatedSqlException.XmlSchemaFacetsContradict(type, 6946);
+            if (!IsNumericBuiltIn(restrictionBase))
+                continue;
+            if (Bound(facets, "minInclusive", out var minInclusive)
+                && ((Bound(facets, "maxInclusive", out var maxInclusive) && minInclusive > maxInclusive)
+                    || (Bound(facets, "maxExclusive", out var maxExclusiveOfInclusive) && minInclusive >= maxExclusiveOfInclusive)))
+            {
+                return SimulatedSqlException.XmlSchemaFacetsContradict(type, 6951);
+            }
+            if (Bound(facets, "minExclusive", out var minExclusive)
+                && ((Bound(facets, "maxExclusive", out var maxExclusive) && minExclusive > maxExclusive)
+                    || (Bound(facets, "maxInclusive", out var maxInclusiveOfExclusive) && minExclusive >= maxInclusiveOfExclusive)))
+            {
+                return SimulatedSqlException.XmlSchemaFacetsContradict(type, 6952);
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Whether <paramref name="value"/> is an <c>xs:language</c>: letters, then hyphenated letter-or-digit runs, each of one to eight.</summary>
+    private static bool IsLanguageTag(string value)
+    {
+        var parts = value.Trim().Split('-');
+        for (var i = 0; i < parts.Length; i++)
+        {
+            if (parts[i].Length is 0 or > 8 || !parts[i].All(c => char.IsAsciiLetter(c) || (i > 0 && char.IsAsciiDigit(c))))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool IsNcName(string name)
+    {
+        try
+        {
+            _ = XmlConvert.VerifyNCName(name);
+            return true;
+        }
+        catch (XmlException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Whether <paramref name="qualifiedName"/> names one of the XSD namespace's numeric types, by its usual prefix's local part.</summary>
+    private static bool IsNumericBuiltIn(string? qualifiedName) =>
+        LocalPart(qualifiedName) is "byte" or "decimal" or "int" or "integer" or "long" or "negativeInteger" or "nonNegativeInteger"
+            or "nonPositiveInteger" or "positiveInteger" or "short" or "unsignedByte" or "unsignedInt" or "unsignedLong" or "unsignedShort"
+        && qualifiedName!.Contains(':', StringComparison.Ordinal);
 
     /// <summary>
     /// One <c>xsd:</c> element of <see cref="RejectUncompilableSchema"/>'s walk:
@@ -465,9 +838,15 @@ internal sealed class XmlSchemaCollection(
                     added.Add(schema);
             }
         }
-        catch (Exception e) when (e is XmlException or System.Xml.Schema.XmlSchemaException)
+        catch (XmlException)
         {
             throw SimulatedSqlException.XmlSchemaDocumentExpected();
+        }
+        catch (System.Xml.Schema.XmlSchemaException)
+        {
+            // A schema document the object model can't read is left to the
+            // compile checks, whose refusals real raises for it.
+            return;
         }
         if (added.Count == 0)
             throw SimulatedSqlException.XmlSchemaDocumentExpected();

@@ -1865,6 +1865,7 @@ partial class Simulation
                     // A variable in what it adds is Msg 112, where a SWITCH's
                     // partition number takes one (probed 2026-10-06).
                     using var refused = ParserScope.Enter(ref context.VariablesRefusedIn, "ALTER TABLE");
+                    using var options = ParserScope.Enter(ref context.ColumnIndexOptions, IndexOptionStatement.AlterTable);
                     return TryParseAlterTableAddConstraint(context, tableName, withNoCheck: withCheckExplicit == false);
                 }
             case ReservedKeyword { Keyword: Keyword.Drop }:

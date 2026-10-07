@@ -148,6 +148,7 @@ partial class Simulation
             if (graphKind != GraphTableKind.None)
                 heapColumns.AddRange(GraphColumns.Create(graphKind, tableName.Leaf, context.Batch.Connection.CurrentDatabase.Collation));
             using (ParserScope.Enter(ref context.VariablesRefusedIn, "CREATE TABLE"))
+            using (ParserScope.Enter(ref context.ColumnIndexOptions, IndexOptionStatement.CreateTable))
             {
                 if (!ParseColumnList(context, tableName.Leaf, isTableVariable: false, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingPeriod, pendingForeignKeys, pendingIndexes, pendingEdgeConstraints))
                     return false;
@@ -1245,7 +1246,7 @@ partial class Simulation
     /// No-op when the cursor isn't on <c>WITH</c>. Cursor on exit: first token
     /// past the closing <c>)</c>, or unchanged when no clause was present.
     /// </summary>
-    internal static IndexOptions ParseOptionalIndexWithClause(ParserContext context, IndexOptionStatement statement = IndexOptionStatement.Unchecked, string? indexName = null, JsonRebuildRefusal? jsonRefusal = null)
+    internal static IndexOptions ParseOptionalIndexWithClause(ParserContext context, IndexOptionStatement statement = IndexOptionStatement.Unchecked, string? indexName = null, JsonRebuildRefusal? jsonRefusal = null, bool rangeIndex = false)
     {
         if (context.Token is not ReservedKeyword { Keyword: Keyword.With })
             return default;
@@ -1339,10 +1340,12 @@ partial class Simulation
                 {
                     CheckIndexOptionName(name, statement, indexName);
                 }
-                // CREATE INDEX follows an unknown option given a number with
-                // Msg 153 (probed 2026-09-26 against SQL Server 2025).
+                // Every statement but a rebuild follows an option no index
+                // takes, given a number, with Msg 153 (probed 2026-09-26 and
+                // 2026-10-07 against SQL Server 2025).
                 catch (SimulatedSqlException unknown) when (unknown.Number == 155 && valueToken is Numeric
-                    && statement is IndexOptionStatement.CreateIndex or IndexOptionStatement.CreateColumnstoreIndex)
+                    && !IndexOptionNames.Contains(name) && !name.Equals("STATISTICS_ONLY", StringComparison.OrdinalIgnoreCase)
+                    && statement is not (IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.RebuildColumnstoreIndex or IndexOptionStatement.RebuildJsonIndex))
                 {
                     throw SimulatedSqlException.Aggregate([unknown, SimulatedSqlException.InvalidUsageOfIndexOption(name)]);
                 }
@@ -1422,6 +1425,11 @@ partial class Simulation
                     bucketCount = ReadBucketCount(context);
                     break;
                 case StringToken name when depth == 1 && name.Span.Equals("BUCKET_COUNT", StringComparison.OrdinalIgnoreCase):
+                    // A key or index a table's definition declares without
+                    // HASH refuses it as the batch compiles, memory-optimized
+                    // table or not (probed 2026-10-07 against SQL Server 2025).
+                    if (rangeIndex && statement is IndexOptionStatement.CreateTable or IndexOptionStatement.CreateType or IndexOptionStatement.AlterTable)
+                        throw SimulatedSqlException.BucketCountOnRangeIndexWhileCompiling(name.Span.ToString());
                     namedOption = "BUCKET_COUNT";
                     continue;
                 case Numeric or Operator { Character: '-' } when sawEquals && namedOption == "STATISTICS_ONLY":
@@ -1528,11 +1536,13 @@ partial class Simulation
             sawEquals = false;
         }
 
+        if (online)
+            context.OnlineIndexBuildsParsed++;
         if (maxDuration && !resumable)
             throw SimulatedSqlException.MaxDurationRequiresResumable();
         // A resumable build has to be an online one, and a columnstore index
         // can't be resumable at all (probed 2026-09-26 against SQL Server 2025).
-        if (resumable && statement is IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.RebuildJsonIndex && !online)
+        if (resumable && statement is IndexOptionStatement.AlterIndexRebuild or IndexOptionStatement.RebuildJsonIndex or IndexOptionStatement.CreateTable or IndexOptionStatement.AlterTable && !online)
             throw SimulatedSqlException.ResumableRequiresOnline();
         if (resumable && statement is IndexOptionStatement.CreateIndex or IndexOptionStatement.CreateColumnstoreIndex)
         {
@@ -1645,9 +1655,39 @@ partial class Simulation
                 }
                 break;
             case IndexOptionStatement.AlterTable:
+                RefuseStatisticsOnly(name, "ALTER TABLE");
                 if ((!known && !name.Equals("BUCKET_COUNT", StringComparison.OrdinalIgnoreCase)) || name.Equals("DROP_EXISTING", StringComparison.OrdinalIgnoreCase))
                     throw SimulatedSqlException.UnrecognizedIndexOption(name, "ALTER TABLE");
                 break;
+            case IndexOptionStatement.CreateTable:
+                // A table's keys and inline indexes are built with the table,
+                // so the options of a build on its own don't apply.
+                RefuseStatisticsOnly(name, "CREATE TABLE");
+                if ((!known && !name.Equals("BUCKET_COUNT", StringComparison.OrdinalIgnoreCase))
+                    || name.Equals("DROP_EXISTING", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("MAXDOP", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("ONLINE", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("SORT_IN_TEMPDB", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw SimulatedSqlException.UnrecognizedIndexOption(name, "CREATE TABLE");
+                }
+                break;
+            case IndexOptionStatement.CreateType:
+                // A table type's keys take IGNORE_DUP_KEY alone, real naming
+                // three of the others in lower case whatever was written.
+                RefuseStatisticsOnly(name, "CREATE TYPE");
+                if (name.Equals("COMPRESSION_DELAY", StringComparison.OrdinalIgnoreCase))
+                    throw SimulatedSqlException.Aggregate([SimulatedSqlException.CompressionDelayRequiresColumnstore(), SimulatedSqlException.UnrecognizedIndexOption(name, "CREATE TYPE")]);
+                if (!name.Equals("IGNORE_DUP_KEY", StringComparison.OrdinalIgnoreCase) && !name.Equals("BUCKET_COUNT", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw SimulatedSqlException.UnrecognizedIndexOption(
+                        name.Equals("FILLFACTOR", StringComparison.OrdinalIgnoreCase) ? "fillfactor"
+                            : name.Equals("DATA_COMPRESSION", StringComparison.OrdinalIgnoreCase) ? "data_compression"
+                            : name.Equals("XML_COMPRESSION", StringComparison.OrdinalIgnoreCase) ? "xml_compression"
+                            : name,
+                        "CREATE TYPE");
+                }
+                return;
             case IndexOptionStatement.CreateColumnstoreIndex or IndexOptionStatement.RebuildColumnstoreIndex:
                 var creating = statement == IndexOptionStatement.CreateColumnstoreIndex;
                 if (!known)
@@ -1665,6 +1705,17 @@ partial class Simulation
         }
         if (name.Equals("COMPRESSION_DELAY", StringComparison.OrdinalIgnoreCase))
             throw SimulatedSqlException.CompressionDelayRequiresColumnstore();
+    }
+
+    /// <summary>
+    /// <c>STATISTICS_ONLY</c>, a hypothetical <c>CREATE INDEX</c>'s option,
+    /// anywhere else: a syntax error on the name followed by its Msg 155
+    /// (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    private static void RefuseStatisticsOnly(string name, string statementName)
+    {
+        if (name.Equals("STATISTICS_ONLY", StringComparison.OrdinalIgnoreCase))
+            throw SimulatedSqlException.Aggregate([SimulatedSqlException.SyntaxErrorNear(name, state: 1), SimulatedSqlException.UnrecognizedIndexOption(name, statementName)]);
     }
 
     /// <summary>
@@ -1701,6 +1752,12 @@ partial class Simulation
         CreateIndex,
         AlterIndexRebuild,
         AlterTable,
+
+        /// <summary>A key or inline index in a <c>CREATE TABLE</c>, a table variable's or a function's return table included.</summary>
+        CreateTable,
+
+        /// <summary>A key or inline index in a <c>CREATE TYPE … AS TABLE</c>.</summary>
+        CreateType,
         CreateColumnstoreIndex,
         RebuildColumnstoreIndex,
         RebuildJsonIndex,
@@ -3703,7 +3760,7 @@ partial class Simulation
             context.MoveNextOptional();
         }
         // A column-level key takes its own ON clause as a table-level one does.
-        var options = ParseOptionalIndexWithClause(context).WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
+        var options = ParseOptionalIndexWithClause(context, context.ColumnIndexOptions, rangeIndex: !hash).WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
         return (kind, clustered, hash ? options.AsHash() : options);
     }
 
@@ -3789,7 +3846,7 @@ partial class Simulation
         // SSMS emits `… PRIMARY KEY CLUSTERED (cols) WITH (PAD_INDEX = OFF, …)
         // ON [PRIMARY]` for inline table-level PK / UNIQUE constraints; the
         // ON clause places the key's index.
-        var indexOptions = ParseOptionalIndexWithClause(context).WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
+        var indexOptions = ParseOptionalIndexWithClause(context, context.ColumnIndexOptions, rangeIndex: !modifiers.IsHash).WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
         if (modifiers.IsHash)
             indexOptions = indexOptions.AsHash();
 
@@ -4369,7 +4426,7 @@ partial class Simulation
             columns = [.. keyList];
         }
 
-        var (includeColumnNames, filter, filterDefinition, options) = ParseIndexTail(context, indexName, tableName, acceptsInclude: columnLevelKey is null);
+        var (includeColumnNames, filter, filterDefinition, options) = ParseIndexTail(context, indexName, tableName, acceptsInclude: columnLevelKey is null, context.ColumnIndexOptions, rangeIndex: !isHash);
         if (isHash)
             options = options.AsHash();
         if (isClustered && includeColumnNames.Count > 0)

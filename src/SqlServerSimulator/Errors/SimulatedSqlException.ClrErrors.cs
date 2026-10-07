@@ -48,6 +48,34 @@ partial class SimulatedSqlException
         new($"Assembly '{referenceName}' was not found in the SQL catalog.", 6503, 16, 12);
 
     /// <summary>
+    /// Msg 10342: an <c>EXTERNAL_ACCESS</c> or <c>UNSAFE</c> assembly, which
+    /// SQL Server on Linux refuses outright (probed 2026-10-07 against SQL
+    /// Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AssemblyNotSafeOnThisEdition(string assemblyName) =>
+        new($"Assembly '{assemblyName}' cannot be loaded because this edition of SQL Server only supports SAFE assemblies.", 10342, 16, 100);
+
+    /// <summary>
+    /// Msg 10343: <c>CREATE ASSEMBLY</c> of an assembly the server doesn't
+    /// trust while <c>clr strict security</c> is 1 — severity 14, ending only
+    /// its statement (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException AssemblyRefusedByStrictSecurity(string assemblyName) =>
+        new($"CREATE or ALTER ASSEMBLY for assembly '{assemblyName}' with the SAFE or EXTERNAL_ACCESS option failed because the 'clr strict security' option of sp_configure is set to 1. Microsoft recommends that you sign the assembly with a certificate or asymmetric key that has a corresponding login with UNSAFE ASSEMBLY permission. Alternatively, you can trust the assembly using sp_add_trusted_assembly.", 10343, 14, 1);
+
+    /// <summary>Msg 10345: <c>sp_add_trusted_assembly</c> of a hash already trusted (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException AssemblyHashAlreadyTrusted(string hash) =>
+        new($"The assembly hash '{hash}' is already trusted.", 10345, 16, 1);
+
+    /// <summary>Msg 10346: <c>sp_drop_trusted_assembly</c> of a hash not trusted (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException AssemblyHashNotTrusted(string hash) =>
+        new($"The assembly hash '{hash}' is not currently trusted. No action was taken.", 10346, 16, 1);
+
+    /// <summary>Msg 214 state 191: a trusted-assembly procedure's hash that isn't 64 bytes of binary (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException TrustedAssemblyHashExpected() =>
+        new("Procedure expects parameter 'hash' of type 'binary(64)/varbinary(64)'.", 214, 16, 191);
+
+    /// <summary>
     /// Mimics SQL Server error 6246: <c>CREATE ASSEMBLY</c> named an assembly
     /// that is already registered in the database.
     /// </summary>

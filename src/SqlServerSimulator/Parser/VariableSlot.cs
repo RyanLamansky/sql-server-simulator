@@ -41,6 +41,13 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     public bool XmlDocument;
 
     /// <summary>
+    /// For a <c>DECLARE</c>d <c>xml(&lt;collection&gt;)</c> variable, its name
+    /// and its batch's <see cref="BatchContext.XmlSchemaAlterationsAtStart"/>,
+    /// which <see cref="Assign"/> holds the collection against; null otherwise.
+    /// </summary>
+    public TypedXmlDeclaration? XmlBinding;
+
+    /// <summary>
     /// The variable was declared <c>numeric</c> rather than <c>decimal</c>,
     /// which a reference reports as its type's name (probed 2026-09-24).
     /// </summary>
@@ -63,8 +70,26 @@ internal sealed class VariableSlot(SqlType declaredType, int? declaredMaxLength,
     /// write to a typed column, so <c>DECLARE @x xml(c) = '&lt;c&gt;1.500&lt;/c&gt;'</c>
     /// reads back <c>&lt;c&gt;1.5&lt;/c&gt;</c> (probe-confirmed).
     /// </summary>
-    public void Assign(SqlValue value) =>
+    /// <remarks>
+    /// A variable whose collection was altered after its batch began refuses
+    /// any assignment, a NULL included, with Msg 6323 — which rolls the
+    /// transaction back and ends the batch past any <c>TRY</c> — while merely
+    /// declaring one is fine (probed 2026-10-07 against SQL Server 2025, the
+    /// alteration in the batch's own text or in an <c>EXEC</c> it ran).
+    /// </remarks>
+    public void Assign(SqlValue value)
+    {
+        if (this.XmlBinding is { } binding && this.XmlSchemaCollection is { } collection && collection.AlteredAt > binding.AlterationsAtStart)
+            throw SimulatedSqlException.XmlSchemaCollectionAlteredDuringBatch(binding.VariableName);
         this.Value = value.Type is XmlSqlType
             ? Expressions.Cast.ValidateTypedXml(value, this.XmlSchemaCollection, this.XmlDocument)
             : value;
+    }
+}
+
+/// <summary>What <see cref="VariableSlot.XmlBinding"/> records of a typed xml variable's declaration.</summary>
+internal sealed class TypedXmlDeclaration(string variableName, long alterationsAtStart)
+{
+    public readonly string VariableName = variableName;
+    public readonly long AlterationsAtStart = alterationsAtStart;
 }

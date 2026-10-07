@@ -155,6 +155,23 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     public string? VariablesRefusedIn;
 
     /// <summary>
+    /// The statement whose option names a key's or inline index's
+    /// <c>WITH (…)</c> list is checked against while column and constraint
+    /// definitions parse — <c>CREATE TABLE</c> (a table variable's and a
+    /// function's return table too), <c>CREATE TYPE</c>, <c>ALTER TABLE …
+    /// ADD</c> — and unchecked elsewhere.
+    /// </summary>
+    public Simulation.IndexOptionStatement ColumnIndexOptions;
+
+    /// <summary>
+    /// Monotonic count of index option lists that turned <c>ONLINE</c> on, read
+    /// as a difference across one parse like <see cref="AggregatesParsed"/>:
+    /// an <c>ALTER TABLE … ADD</c> adding anything beside an online constraint
+    /// is Msg 1758.
+    /// </summary>
+    public int OnlineIndexBuildsParsed;
+
+    /// <summary>
     /// Set while a multi-statement function's return table parses, whose
     /// grammar, like a table type's, has no <c>SPARSE</c> (Msg 102 at it,
     /// probed 2026-10-06 against SQL Server 2025) where a table variable's
@@ -226,6 +243,21 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// as each statement begins.
     /// </summary>
     public List<Selection.JoinHintSite>? JoinHintSites;
+
+    /// <summary>
+    /// Set once the statement parses a query whose <c>GROUP BY</c> computes a
+    /// CLR aggregate, which its <c>OPTION (HASH GROUP)</c> can't plan; read
+    /// and cleared as the statement settles its hints.
+    /// </summary>
+    public bool GroupsClrAggregate;
+
+    /// <summary>
+    /// The view references this statement parsed whose
+    /// <see cref="FromSource.BodySeekShape"/> is set. A view's body is bound
+    /// in a batch of its own, which the shape reaches, so the statement's
+    /// settling clears them before a plan the cache keeps can carry it.
+    /// </summary>
+    public List<FromSource>? BodySeekShapeHolders;
 
     /// <summary>
     /// An inline join hint was written in the statement, which fixes the join
@@ -469,11 +501,9 @@ internal sealed class ParserContext(SimulatedDbCommand command, BatchContext bat
     /// column references, which is what Msg 164 needs.
     /// </summary>
     /// <remarks>
-    /// An <em>outer</em> column reference counts the same as a local one, so a
-    /// grouping item naming only an outer column (<c>GROUP BY o.a</c> inside a
-    /// correlated subquery) stays accepted where real raises Msg 164. That
-    /// residual is the permissive direction and matches the pre-existing
-    /// behavior; closing it needs source-resolution, not a parse-time count.
+    /// An <em>outer</em> column reference counts the same as a local one; a
+    /// GROUP BY item that names only outer columns is told apart by resolving
+    /// the finished item's references (<c>Selection.NamesOnlyOuterColumns</c>).
     /// </remarks>
     public int ColumnReferencesParsed;
 

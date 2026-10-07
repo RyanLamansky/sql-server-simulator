@@ -83,7 +83,7 @@ A hint name arrives as a slice of the command text and is looked up through `Tab
 `NOLOCK`, `READPAST`, `READUNCOMMITTED`, `READCOMMITTED`, `READCOMMITTEDLOCK`, `REPEATABLEREAD`, `SERIALIZABLE`, `SNAPSHOT`, `HOLDLOCK`, `UPDLOCK`, `XLOCK`, `TABLOCK`, `TABLOCKX`, `ROWLOCK`, `PAGLOCK`, `NOWAIT`, `KEEPIDENTITY`, `KEEPDEFAULTS`, `NOEXPAND`, `IGNORE_CONSTRAINTS`, `IGNORE_TRIGGERS`, `FORCESEEK`, `FORCESCAN`, `INDEX`, `SPATIAL_WINDOW_MAX_CELLS`, `REMOTE`.
 
 Unknown hint name → **Msg 321** verbatim: `"<name>" is not a recognized table hints option.` (probe-confirmed against SQL Server 2025) — `READONLY`, a table-valued parameter's keyword, among them.
-Real takes a hint written straight after another without the comma (`WITH (INDEX(ix) NOLOCK)`), and a CTE reference takes a `WITH (…)` list and discards it (probed 2026-10-05).
+Real takes a hint written straight after another without the comma (`WITH (INDEX(ix) NOLOCK)`), and a CTE reference takes a `WITH (…)` list and discards it save a `FORCESEEK`, which reaches the body's tables (probed 2026-10-05 and 2026-10-07).
 An `INDEX` hint on a catalog view is ignored with the view warning **Msg 4430**, as on a user view read without `NOEXPAND`.
 
 `NOWAIT` zeroes the lock timeout for the table it names, so a conflicting acquisition raises **Msg 1222** rather than waiting — real documents it as "equivalent to specifying `SET LOCK_TIMEOUT 0` for a specific table", and the scoping is per table, not per statement.
@@ -163,6 +163,8 @@ Beside it, `RECOMPILE` and `USE HINT('DISABLE_TSQL_SCALAR_UDF_INLINING')` set th
 
 ## Enforced rejections
 
+- **`EXEC (…) WITH RECOMPILE`** — a character string's `EXECUTE` takes `RESULT SETS` alone: `RECOMPILE` is **Msg 102** on the word and a second option Msg 102 on its comma, where a procedure call and `sp_executesql` take both (probed 2026-10-07 against SQL Server 2025).
+
 - **Conflicting lock hints** — the whole pair matrix probed 2026-10-05 against SQL Server 2025, raised at parse inside `ValidateHintCombinations`:
   **Msg 1047** ("Conflicting locking hints specified.", fixed wording) for two isolation levels (`NOLOCK` / `READUNCOMMITTED`, `READCOMMITTED`, `READCOMMITTEDLOCK`, `REPEATABLEREAD`, `SERIALIZABLE` / `HOLDLOCK`, `SNAPSHOT`), two granularities (`ROWLOCK`, `PAGLOCK`, `TABLOCK`, `TABLOCKX` — `TABLOCK` beside `TABLOCKX` included), `UPDLOCK` beside `XLOCK`, and a dirty read beside `UPDLOCK`, `XLOCK` or any granularity;
   **Msg 650** for `READPAST` beside a dirty read or `SERIALIZABLE`, and — once the table resolves — `READPAST` in a READ UNCOMMITTED, SERIALIZABLE or SNAPSHOT session without a hint naming a level it takes (ahead of the snapshot refusal Msg 3952).
@@ -189,6 +191,9 @@ Beside it, `RECOMPILE` and `USE HINT('DISABLE_TSQL_SCALAR_UDF_INLINING')` set th
   `FORCESCAN` beside an `INDEX` naming only nonclustered indexes is refused too when the query reads a column those indexes don't carry, the lookup being a seek.
   It is a compile error: it ends the batch before any statement runs, and a `TRY` in the batch doesn't catch it; a statement over a table the batch creates meets it when it runs, and a procedure body at its execution rather than at `CREATE`; a binder error earlier in the batch keeps it from being reported, and a batch reports only the first.
   `ForceSeekPlanTests` holds the probed shapes both ways.
+- **`FORCESEEK` on a view or CTE reference** — real carries it to every table the body reads, at any depth of views, CTEs, derived tables and `UNION` branches, so each needs a seek of its own (probed 2026-10-07 against SQL Server 2025), and **Msg 8622** is raised as for a table (`BodySeeksAreFeasible`).
+  A body table seeks on a predicate of its own block, on a join's only once the table on the other side seeks, or on the reading query's predicate over a column the body passes the key through as — not past a `TOP`, an `OFFSET` or a window function the column isn't a partition key of; a heap or an unindexed column is refused, as is a view read with no predicate.
+  `FORCESEEK(ix(…))` naming an index on a view without `NOEXPAND` is **Msg 364**.
 - **An `INDEX` hint naming one filtered index the query doesn't confine itself to** — **Msg 8622** (probed 2026-10-06 against SQL Server 2025), settled with `FORCESEEK`'s (`HintsUnimpliedFilteredIndex`): the query's top-level conjuncts over literals have to prove the filter, so `b >= 6` and `b = 6` imply `b > 5` over an integer column, any comparison implies `IS NOT NULL`, and an `IN` list implies a filter listing its values, while a variable, an `OR` or a conjunct on another table's column proves nothing; naming several indexes is planned whatever their filters.
 - **Hint combinations real's optimizer refuses outright** (class 15, raised with the hint list): **Msg 10746** for `FORCESEEK` beside `FORCESCAN`, **Msg 10747** for a nested `FORCESEEK(ix(…))` beside an `INDEX` hint, **Msg 10750** for `FORCESCAN` beside more than one index, and a bare `FORCESEEK(ix)` without its column list is **Msg 102** on the closing parenthesis (probed 2026-09-28).
 - **The legacy no-`WITH` parenthesized form** splits on the alias, matching real.
@@ -200,14 +205,15 @@ Beside it, `RECOMPILE` and `USE HINT('DISABLE_TSQL_SCALAR_UDF_INLINING')` set th
 
 ## Not enforced
 
-- **A table hint on a view** — real carries `FORCESEEK` through to the view's base tables, so `SELECT … FROM v WITH (FORCESEEK) WHERE d = 1` over an unindexed `d` is Msg 8622 there (probed 2026-09-28); the simulator doesn't carry a hint into a view body, so the read runs.
+- **`FORCESEEK` through an inline table-valued function** a view or CTE reads, and through a set operation other than `UNION`: real carries the hint into it, the simulator leaves the body unjudged and runs the read.
+- **Two tables `FORCESEEK` joins outside a view, each seeking only on the join** (`a WITH (FORCESEEK) JOIN b WITH (FORCESEEK) ON a.k = b.k`) are accepted, where through a view the join seeks one side only once the other side seeks.
+- **Msg 364's companion warning**: real follows it with the view's Msg 4430, which the simulator, raising Msg 364 as the batch compiles, doesn't send.
 - **The order an index-hinted scan returns rows in** — real scans the hinted index and returns its key order (`WITH (INDEX(ix_c))` over `c DESC` comes back by `c` descending, a heap's `INDEX(ix)` by `ix`'s key, re-probed 2026-10-06); the simulator's scan keeps its own order.
   So does an unhinted query real answers from a narrower covering index, and an `IN` list seeks its values in written order where real sorts them.
   Not chased: the order is the physical one of the index real's plan reads.
 - **Join-hint feasibility through `APPLY` and semi-joins** — real refuses `OPTION (HASH JOIN)` over a `CROSS APPLY` or an `EXISTS` whose correlation isn't an equality once decorrelated, and some `RIGHT LOOP JOIN`s, as its decorrelation and join reordering decide; those are left alone here.
   Not chased: the shapes follow real's rewrites, not the query as written.
 - **Msg 8625 from dynamic SQL run by `sp_executesql`** after `EXEC (…)` ran the same text: real's cached plan sends none, where the simulator's separate compile sends it once more.
-- **`EXEC (…) WITH RECOMPILE`** runs here, where real raises Msg 102 at `recompile` (re-probed 2026-10-07 against SQL Server 2025).
 - **Table hints after a table-valued function** are refused, not always with real's message: `dbo.f() WITH (NOLOCK)`, and the hint written ahead of an alias, are Msg 319 here and Msg 102 near `)` on real, and `dbo.f() (NOLOCK)` is Msg 102 near `nolock` here and real's Msg 317 (probed 2026-10-07 against SQL Server 2025).
 - **`INDEX = (value-list)` equals-form** — probe-confirmed that real SQL Server raises `Msg 102` on the equals-with-multiple-values form anyway (the docs notwithstanding), so the simulator's "= takes one literal" rule matches by parsing as well.
 

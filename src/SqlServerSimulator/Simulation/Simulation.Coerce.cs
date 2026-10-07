@@ -474,8 +474,11 @@ partial class Simulation
     /// <paramref name="verb"/> writes; <paramref name="reportedVerb"/> is the
     /// statement Msg 547 names where it isn't that verb — a MERGE's actions
     /// report <c>MERGE</c> (probed 2026-10-01 against SQL Server 2025).
+    /// A writer that judges the CHECKs calling a user function after the row
+    /// lands (<see cref="EnforceLandedRowChecks"/>) passes
+    /// <paramref name="deferFunctionChecks"/> so they're left for then.
     /// </summary>
-    private static void EnforceCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch, string verb = "INSERT", string? reportedVerb = null)
+    private static void EnforceCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch, string verb = "INSERT", string? reportedVerb = null, bool deferFunctionChecks = false)
     {
         // An INSERT writes every column, so every bound rule judges its value;
         // an UPDATE's rules judge only the columns it sets, at the assignment.
@@ -485,7 +488,27 @@ partial class Simulation
                 EnforceRule(destinationTable, rowValues, ordinal, batch);
         }
         if (destinationTable.CheckConstraints.Count > 0)
-            JudgeCheckConstraints(destinationTable, rowValues, batch, reportedVerb ?? verb);
+            JudgeCheckConstraints(destinationTable, rowValues, batch, reportedVerb ?? verb, deferFunctionChecks ? CheckTiming.BeforeWrite : CheckTiming.All);
+    }
+
+    /// <summary>
+    /// Judges the CHECK constraints calling a user function against a row
+    /// just written, which the function can now read (see
+    /// <see cref="CheckConstraint.CallsUserFunction"/>); the statement's undo
+    /// takes the row back out when one refuses it.
+    /// </summary>
+    private static void EnforceLandedRowChecks(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch, string verb)
+    {
+        if (destinationTable.CheckConstraints.Count > 0 && !batch.IsSkipping)
+            JudgeCheckConstraints(destinationTable, rowValues, batch, verb, CheckTiming.AfterWrite);
+    }
+
+    /// <summary>Which of a table's CHECK constraints one judgment covers.</summary>
+    private enum CheckTiming
+    {
+        All,
+        BeforeWrite,
+        AfterWrite,
     }
 
     // Apart from EnforceCheckConstraints so the closure the resolver captures
@@ -500,7 +523,7 @@ partial class Simulation
     /// matches the row's column ordinals via case-insensitive name compare,
     /// the same shape <see cref="EvaluateComputedColumns"/> uses.
     /// </summary>
-    private static void JudgeCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch, string verb)
+    private static void JudgeCheckConstraints(HeapTable destinationTable, SqlValue[] rowValues, BatchContext batch, string verb, CheckTiming timing)
     {
         SqlValue ResolveByName(MultiPartName reference)
         {
@@ -515,7 +538,7 @@ partial class Simulation
         var runtime = new RuntimeContext(ResolveByName, batch);
         foreach (var check in destinationTable.CheckConstraints)
         {
-            if (check.IsDisabled)
+            if (check.IsDisabled || (timing != CheckTiming.All && check.CallsUserFunction != (timing == CheckTiming.AfterWrite)))
                 continue;
             if (check.Predicate.Run(runtime) == false)
             {

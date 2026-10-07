@@ -279,4 +279,57 @@ public sealed class XmlTypedSchemaTests
             alter xml schema collection sc add '<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"><xsd:complexType name="r"><xsd:sequence/></xsd:complexType></xsd:schema>';
             select 1
             """));
+
+    private const string AddQ = """alter xml schema collection sc add '<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"><xsd:element name="q" type="xsd:string"/></xsd:schema>'""";
+
+    private const string Msg6323 = "The xml schema collection for variable '@x' has been altered while the batch was being executed. Remove all XML schema collection DDL operations it is dependent on from the batch, and re-run the batch.";
+
+    /// <summary>
+    /// A variable typed by a collection the batch altered refuses every
+    /// assignment, whether it was declared before the alteration or after,
+    /// and the batch's own EXEC altering it counts (probed 2026-10-07 against
+    /// SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow($"{AddQ}; declare @x xml(sc) = '<q/>'")]
+    [DataRow($"declare @x xml(sc); {AddQ}; set @x = '<r/>'")]
+    [DataRow($"{AddQ}; declare @x xml(sc); select @x = '<r/>'")]
+    [DataRow($"{AddQ}; declare @x xml(sc); set @x = null")]
+    [DataRow("""exec('alter xml schema collection sc add ''<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema"><xsd:element name="q" type="xsd:string"/></xsd:schema>'''); declare @x xml(sc); set @x = '<r/>'""")]
+    public void AlterAdd_ThenAssigningAVariableItTypes_RaisesMsg6323(string batch) =>
+        Error(batch, 6323, Msg6323);
+
+    [TestMethod]
+    public void Msg6323_RollsTheTransactionBack_PastATry()
+    {
+        using var connection = Typed().CreateOpenConnection();
+        var ex = Throws<SimulatedSqlException>(() => connection.CreateCommand($"""
+            begin tran;
+            {AddQ};
+            declare @x xml(sc);
+            begin try set @x = '<r/>' end try begin catch print 'caught' end catch
+            print 'after'
+            """).ExecuteNonQuery());
+        AreEqual(6323, ex.Number);
+        AreEqual(1, ex.Errors.Count);
+        AreEqual(0, connection.CreateCommand("select @@trancount").ExecuteScalar());
+    }
+
+    [TestMethod]
+    [DataRow($"{AddQ}; declare @x xml(sc)")]
+    [DataRow($"declare @x xml(sc) = '<r/>'; {AddQ}")]
+    [DataRow($"{AddQ}; declare @x xml; set @x = '<r/>'")]
+    [DataRow($"{AddQ}; declare @t table (x xml(sc)); insert @t values ('<q/>')")]
+    [DataRow($"{AddQ}; select cast('<q/>' as xml(sc))")]
+    [DataRow($"if 1 = 0 {AddQ}; declare @x xml(sc); set @x = '<r/>'")]
+    public void AlterAdd_NeighborsOfMsg6323_Run(string batch) =>
+        _ = Typed().ExecuteNonQuery(batch);
+
+    [TestMethod]
+    public void AlterAdd_ALaterBatch_AssignsFreely()
+    {
+        var simulation = Typed();
+        _ = simulation.ExecuteNonQuery(AddQ);
+        AreEqual("<q>1</q>", simulation.ExecuteScalar("declare @x xml(sc) = '<q>1</q>'; select convert(nvarchar(max), @x)"));
+    }
 }

@@ -248,6 +248,7 @@ partial class Simulation
                 var slot = new VariableSlot(declaredType, declaredMaxLength, SqlValue.Null(declaredType), parameter: null)
                 {
                     XmlSchemaCollection = xmlSchemaCollection,
+                    XmlBinding = xmlSchemaCollection is null ? null : new TypedXmlDeclaration(variableName, context.Batch.XmlSchemaAlterationsAtStart),
                     XmlDocument = xmlDocument,
                     AliasType = aliasType,
                     SpelledNumeric = spelledNumeric,
@@ -255,8 +256,10 @@ partial class Simulation
                 };
                 // Through Assign rather than the constructor so an initializer
                 // against an xml(<collection>) declaration is validated and
-                // canonicalized, as it is on every later assignment.
-                slot.Assign(initialValue);
+                // canonicalized, as it is on every later assignment; without
+                // one there is nothing to assign.
+                if (hasInitializer)
+                    slot.Assign(initialValue);
                 context.Batch.Variables[variableName] = slot;
             }
             sawScalar = true;
@@ -559,6 +562,7 @@ partial class Simulation
         // Real refuses a variable here in its CREATE TABLE's words (probed
         // 2026-10-06 against SQL Server 2025).
         using (ParserScope.Enter(ref context.VariablesRefusedIn, "CREATE TABLE"))
+        using (ParserScope.Enter(ref context.ColumnIndexOptions, IndexOptionStatement.CreateTable))
         {
             if (!ParseColumnList(context, fullName, isTableVariable: true, isTableType: false, heapColumns, pendingKeys, pendingChecks, pendingComputed, pendingIndexes: pendingIndexes))
                 throw SimulatedSqlException.SyntaxErrorNear(context);

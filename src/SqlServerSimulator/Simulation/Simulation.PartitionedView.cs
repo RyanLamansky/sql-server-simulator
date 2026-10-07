@@ -714,7 +714,7 @@ partial class Simulation
             if (!movesRows || plan.Route(viewRow) == m)
             {
                 EnforceNotNull(member.Table, newValues, "UPDATE");
-                EnforceCheckConstraints(member.Table, newValues, batch, "UPDATE");
+                EnforceCheckConstraints(member.Table, newValues, batch, "UPDATE", deferFunctionChecks: true);
             }
             return newValues;
         });

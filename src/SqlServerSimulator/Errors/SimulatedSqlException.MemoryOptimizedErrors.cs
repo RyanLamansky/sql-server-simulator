@@ -37,6 +37,16 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException BucketCountOnRangeIndex() =>
         new("The option 'BUCKET_COUNT' can be specified only for hash indexes.", 10790, 16, 4);
 
+    /// <summary>
+    /// Msg 10790 state 1: <c>BUCKET_COUNT</c>, named as written, on a key or
+    /// inline index a table's or table type's definition declares without
+    /// <c>HASH</c> — a compile error, where an <c>ALTER INDEX</c> of a range
+    /// index raises state 4 as it runs (probed 2026-10-07 against SQL Server
+    /// 2025).
+    /// </summary>
+    internal static SimulatedSqlException BucketCountOnRangeIndexWhileCompiling(string writtenName) =>
+        new($"The option '{writtenName}' can be specified only for hash indexes.", 10790, 15, 1);
+
     /// <summary>Msg 10794 state 1: a filtered index on a memory-optimized table.</summary>
     internal static SimulatedSqlException FilteredIndexOnMemoryOptimized() =>
         new("The feature 'WHERE' is not supported with indexes on memory optimized tables.", 10794, 16, 1);

@@ -122,13 +122,8 @@ public sealed class TypedXmlCardinalityTests
     public void GlobalElementDeclaration_DoesNotNarrow()
         => _ = WithTypedColumn().AssertSqlError($"select x.value('{Prolog}/t:r', 'nvarchar(50)') from tt", 2389);
 
-    /// <summary>An XSD the reader can't get through leaves the value untyped rather than failing the query.</summary>
+    /// <summary>An XSD text that isn't XML is refused as real's XML parser refuses it (probed 2026-10-07 against SQL Server 2025).</summary>
     [TestMethod]
-    public void UnparseableSchemaText_FallsBackToUntyped()
-    {
-        var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create xml schema collection bad as N'<xsd:schema'");
-        _ = sim.ExecuteNonQuery("create table bt (x xml(bad)); insert bt values (N'<r><a><b>hi</b></a></r>');");
-        _ = sim.AssertSqlError("select x.value('(/r/a)[1]/b', 'nvarchar(50)') from bt", 2389);
-    }
+    public void UnparseableSchemaText_IsAParseError() =>
+        new Simulation().AssertSqlError("create xml schema collection bad as N'<xsd:schema'", 9400, "XML parsing: line 1, character 11, unexpected end of input");
 }

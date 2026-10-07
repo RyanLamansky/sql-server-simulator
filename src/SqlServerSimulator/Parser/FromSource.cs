@@ -95,6 +95,21 @@ internal sealed class FromSource(
     public Selection.TableHintInfo? WrittenHints;
 
     /// <summary>
+    /// A <c>FORCESEEK</c> written on a view or CTE reference, which real
+    /// carries to every table the body reads, so each must seek on some
+    /// predicate of the body's or of the reading query's (see
+    /// <see cref="Selection.SeekShape"/>); null for any other source.
+    /// </summary>
+    public Selection.TableHintInfo? ForcedSeekThrough;
+
+    /// <summary>
+    /// A view reference's body's <see cref="Selection.SeekShape"/>, its body
+    /// being re-parsed per execution rather than held; null for any other
+    /// source.
+    /// </summary>
+    public Selection.SeekBodyShape? BodySeekShape;
+
+    /// <summary>
     /// The object this source names, spelled as the FROM clause wrote it and
     /// with any alias ignored — <c>g1</c>, <c>dbo.g1</c>, <c>@t</c>. Null for a
     /// source that has no object of its own (a derived table, a CTE, a table

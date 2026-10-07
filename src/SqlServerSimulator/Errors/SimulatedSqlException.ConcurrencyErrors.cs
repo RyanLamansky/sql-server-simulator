@@ -250,7 +250,8 @@ partial class SimulatedSqlException
     /// no predicate of the query can seek on: no predicate at all, one on an
     /// unindexed or non-leading column, one wrapping the column in a function,
     /// a <c>LIKE</c> leading with a wildcard, an <c>OR</c> with an unseekable
-    /// branch, a heap or columnstore table. Raised while the batch compiles, so
+    /// branch, a heap or columnstore table — and an <c>OPTION (HASH GROUP)</c>
+    /// over a grouped CLR aggregate. Raised while the batch compiles, so
     /// no statement runs and no <c>TRY</c> in the batch catches it (probed
     /// 2026-09-28 against SQL Server 2025).
     /// </summary>
@@ -261,6 +262,15 @@ partial class SimulatedSqlException
     /// </param>
     internal static SimulatedSqlException ForceSeekPlanInfeasible(byte state = 1) =>
         new("Query processor could not produce a query plan because of the hints defined in this query. Resubmit the query without specifying any hints and without using SET FORCEPLAN.", 8622, 16, state);
+
+    /// <summary>
+    /// Msg 364 — a <c>FORCESEEK</c> naming an index and its seek columns on a
+    /// view read without <c>NOEXPAND</c>, whose index it can't name (probed
+    /// 2026-10-07 against SQL Server 2025). Raised while the batch compiles,
+    /// as Msg 8622 is.
+    /// </summary>
+    internal static SimulatedSqlException ForceSeekOnViewWithoutNoExpand(string viewName) =>
+        new($"The query processor could not produce a query plan because the FORCESEEK hint on view '{viewName}' is used without a NOEXPAND hint. Resubmit the query with the NOEXPAND hint or remove the FORCESEEK hint on the view.", 364, 16, 1);
 
     /// <summary>
     /// Msg 10749 — <c>FORCESEEK(0 (col))</c>, the seek naming the heap or

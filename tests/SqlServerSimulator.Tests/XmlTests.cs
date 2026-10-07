@@ -58,7 +58,7 @@ public sealed class XmlTests
     {
         var sim = new Simulation();
         _ = sim.ExecuteNonQuery("create schema audit");
-        _ = sim.ExecuteNonQuery("create xml schema collection audit.xsc1 as N'<xsd:schema/>'");
+        _ = sim.ExecuteNonQuery("create xml schema collection audit.xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''/>'");
         var schemaId = sim.ExecuteScalar("select schema_id from sys.xml_schema_collections where name = 'xsc1'");
         var auditId = sim.ExecuteScalar("select schema_id from sys.schemas where name = 'audit'");
         AreEqual(auditId, schemaId);
@@ -68,18 +68,17 @@ public sealed class XmlTests
     public void CreateXmlSchemaCollection_DuplicateName_Raises219()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema/>'");
-        _ = sim.AssertSqlError("create xml schema collection xsc1 as N'<xsd:schema/>'", 219);
+        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''/>'");
+        _ = sim.AssertSqlError("create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''/>'", 219);
     }
 
     [TestMethod]
     public void XmlColumn_WithSchemaCollection_Binds()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema/>'");
+        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''><xsd:element name=''hi''/></xsd:schema>'");
         _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml(xsc1))");
-        // The binding round-trips through INSERT/SELECT — payload still stores
-        // as raw text since no XSD validation runs.
+        // The binding round-trips through INSERT/SELECT.
         _ = sim.ExecuteNonQuery("insert into dbo.doc values (1, N'<hi/>')");
         AreEqual("<hi />", sim.ExecuteScalar("select body from dbo.doc"));
     }
@@ -88,7 +87,7 @@ public sealed class XmlTests
     public void TypedXmlColumn_SysColumnsXmlCollectionId_JoinsBackToCollection()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema/>'");
+        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''/>'");
         _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml(xsc1))");
         // The typed column's sys.columns.xml_collection_id resolves to the
         // collection through sys.xml_schema_collections (the join DacFx's
@@ -106,7 +105,7 @@ public sealed class XmlTests
     public void XmlColumn_WithContentDiscriminator_Parses()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema/>'");
+        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''/>'");
         _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml(content xsc1))");
         AreEqual(1, sim.ExecuteScalar("select count(*) from sys.tables where name = 'doc'"));
     }
@@ -115,7 +114,7 @@ public sealed class XmlTests
     public void XmlColumn_WithDocumentDiscriminator_Parses()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema/>'");
+        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''/>'");
         _ = sim.ExecuteNonQuery("create table dbo.doc (id int, body xml(document xsc1))");
         AreEqual(1, sim.ExecuteScalar("select count(*) from sys.tables where name = 'doc'"));
     }
@@ -131,7 +130,7 @@ public sealed class XmlTests
     public void DropXmlSchemaCollection_Removes()
     {
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema/>'");
+        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''/>'");
         _ = sim.ExecuteNonQuery("drop xml schema collection xsc1");
         AreEqual(0, sim.ExecuteScalar("select count(*) from sys.xml_schema_collections"));
     }
@@ -577,7 +576,7 @@ public sealed class XmlTests
     {
         // Probe-confirmed: SQL Server's first user xml_collection_id is 65536.
         var sim = new Simulation();
-        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema/>'");
+        _ = sim.ExecuteNonQuery("create xml schema collection xsc1 as N'<xsd:schema xmlns:xsd=''http://www.w3.org/2001/XMLSchema''/>'");
         AreEqual(65536, sim.ExecuteScalar("select xml_collection_id from sys.xml_schema_collections where name = 'xsc1'"));
     }
 

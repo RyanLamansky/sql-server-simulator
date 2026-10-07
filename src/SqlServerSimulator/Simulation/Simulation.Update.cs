@@ -1534,6 +1534,9 @@ partial class Simulation
                 Storage.VersionStore.CaptureWrite(context.Batch, table, (pageIndex, slotIndex), (pageIndex, slotIndex), oldBytesPerAffected[i], Storage.VersionWriteKind.Update);
             UpdateCheckedRow(context.Batch, table, affected, i, newImage, storedNew, undoLog, ReclaimSuperseded(table, context), keyGuard);
             ClusteredScan.NoteKeyAssignment(table, updatedColumnOrdinals, (pageIndex, slotIndex), undoLog);
+            // Row by row, as real's pipeline judges them: a function the
+            // CHECK calls sees this row's new image and the rows before it.
+            EnforceLandedRowChecks(table, fullNew, context.Batch, "UPDATE");
         }
         tracking?.RecordKeyMoves(context.Batch, table, keyMoves);
         table.NoteColumnsUpdated(updatedColumnOrdinals, affected.Count);
@@ -2450,7 +2453,8 @@ partial class Simulation
         if (enforceConstraints)
         {
             EnforceNotNull(table, newValues, "UPDATE");
-            EnforceCheckConstraints(table, newValues, context.Batch, "UPDATE");
+            // The CHECKs calling a user function wait for CommitUpdate's write.
+            EnforceCheckConstraints(table, newValues, context.Batch, "UPDATE", deferFunctionChecks: true);
             RowSecurity.EnforceBlock(context.Batch, table, BlockOperation.AfterUpdate, newValues);
         }
 

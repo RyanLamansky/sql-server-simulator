@@ -14,6 +14,9 @@ partial class Simulation
     /// <summary><c>configuration_id</c> of <c>show advanced options</c>.</summary>
     private const int ShowAdvancedOptionsConfigurationId = 518;
 
+    /// <summary><c>configuration_id</c> of <c>clr strict security</c>.</summary>
+    private const int ClrStrictSecurityConfigurationId = 1587;
+
     private static readonly SqlType[] SpConfigureSchema =
     [
         SqlType.NVarchar, SqlType.Int32, SqlType.Int32, SqlType.Int32, SqlType.Int32,
@@ -47,6 +50,14 @@ partial class Simulation
     /// is an AFTER trigger running under an AFTER trigger.
     /// </summary>
     internal bool NestedTriggersEnabled => this.ConfigurationInUse(NestedTriggersConfigurationId) != 0;
+
+    /// <summary>
+    /// The installed value of <c>clr strict security</c>, 1 unless
+    /// <c>sp_configure</c> and <c>RECONFIGURE</c> turned it off: while on,
+    /// <c>CREATE ASSEMBLY</c> takes only an assembly the server trusts (Msg
+    /// 10343).
+    /// </summary>
+    internal bool ClrStrictSecurity => this.ConfigurationInUse(ClrStrictSecurityConfigurationId) != 0;
 
     /// <summary>
     /// The installed value of <paramref name="configurationId"/>, falling back

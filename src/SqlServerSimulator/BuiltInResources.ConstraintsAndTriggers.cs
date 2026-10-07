@@ -483,6 +483,17 @@ internal static partial class BuiltInResources
             new("event_group_type_desc", nvarchar128Catalog, 128, true),
         ], static (_, _) => EmptyCatalogRows);
 
+        // sys.trusted_assemblies: the server's list sp_add_trusted_assembly
+        // fills, the same from every database (probed 2026-10-07 against SQL
+        // Server 2025).
+        Sys("trusted_assemblies",
+        [
+            new("hash", SqlType.Varbinary, 8000, true),
+            new("description", SqlType.NVarchar, 4000, true),
+            new("create_date", SqlType.GetDateTime2(7), null, false),
+            new("created_by", SqlType.SystemName, 128, false),
+        ], static (batch, _) => EnumerateTrustedAssemblies(batch));
+
         // sys.assembly_files: one row per registered assembly, carrying the
         // verbatim bytes CREATE ASSEMBLY supplied. Probe-confirmed shape (SQL
         // Server 2025); the system Microsoft.SqlServer.Types row real carries is
@@ -497,6 +508,20 @@ internal static partial class BuiltInResources
             new("sha2_256", SqlType.Varbinary, 8000, true),
             new("sha2_512", SqlType.Varbinary, 8000, true),
         ], static (_, database) => EnumerateAssemblyFiles(database));
+    }
+
+    private static IEnumerable<SqlValue[]> EnumerateTrustedAssemblies(Parser.BatchContext batch)
+    {
+        foreach (var (_, trusted) in batch.Connection.Simulation.TrustedAssemblies)
+        {
+            yield return
+            [
+                SqlValue.FromVarbinary(trusted.Hash),
+                trusted.Description is null ? SqlValue.Null(SqlType.NVarchar) : SqlValue.FromNVarchar(trusted.Description),
+                SqlValue.FromDateTime2(SqlType.GetDateTime2(7), trusted.CreateDate),
+                SqlValue.FromNVarchar(trusted.CreatedBy),
+            ];
+        }
     }
 
     /// <summary>

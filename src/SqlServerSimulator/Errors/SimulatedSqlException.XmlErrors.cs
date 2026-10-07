@@ -1294,6 +1294,18 @@ partial class SimulatedSqlException
     internal static SimulatedSqlException XmlSchemaSyntaxNotSupported(string construct) =>
         new($"The XML Schema syntax '{construct}' is not supported.", 9336, 16, 1) { AbortsAsUnderXactAbort = true };
 
+    /// <summary>Msg 2379: a <c>type</c>, <c>ref</c> or <c>base</c> that isn't an XML name (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaNameNotValid(string name) =>
+        new($"The name specified is not a valid XML name :'{name}'", 2379, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2293: an empty <c>xsd:choice</c> whose <c>minOccurs</c> isn't 0 (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaEmptyChoice(string location) =>
+        new($"Choice cannot be empty unless minOccurs is 0. Location: '{location}'.", 2293, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2391: an <c>xsd:redefine</c> (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaRedefineNotSupported() =>
+        new("Redefining XSD schemas is not supported", 2391, 16, 1) { AbortsAsUnderXactAbort = true };
+
     /// <summary>
     /// Msg 2302: a schema collection's text declares one global element,
     /// attribute, type, group or attribute group name twice in a namespace
@@ -1316,8 +1328,77 @@ partial class SimulatedSqlException
             : new($"Reference to an undefined name '{name}' within namespace '{targetNamespace}'", 2308, 16, 1) { AbortsAsUnderXactAbort = true };
 
     /// <summary>Msg 2309: a length or digits facet whose <c>value</c> isn't a number (probed 2026-10-06 against SQL Server 2025).</summary>
-    internal static SimulatedSqlException XmlSchemaFacetValueNotNumber() =>
-        new("The value of \"value\" is not a valid number.", 2309, 16, 1) { AbortsAsUnderXactAbort = true };
+    internal static SimulatedSqlException XmlSchemaFacetValueNotNumber(string attribute = "value") =>
+        new($"The value of \"{attribute}\" is not a valid number.", 2309, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 2297: an element of the XSD namespace the schema language doesn't
+    /// have, located as <c>/*:schema[1]/…/*:name[n]</c> (probed 2026-10-07
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaElementNotValid(string name, string location) =>
+        new($"Element <{name}> is not valid at location '{location}'.", 2297, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2298: an attribute an XSD element doesn't take (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaAttributeNotValid(string name, string location) =>
+        new($"Attribute '{name}' is not valid at location '{location}'.", 2298, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2299: a global declaration without its <c>name</c> (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaRequiredAttributeMissing(string attribute, string element) =>
+        new($"Required attribute \"{attribute}\" of XSD element \"{element}\" is missing.", 2299, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 2305: an element or attribute naming a <c>type</c> and declaring
+    /// one inline too, located at the inline one (probed 2026-10-07 against
+    /// SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaTypeSpecifiedTwice(string location) =>
+        new($"Element or attribute type specified more than once. Location: '{location}'.", 2305, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2310: one attribute declared twice in a complex type or attribute group (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaAttributeDeclaredTwice(string name) =>
+        new($"The attribute \"{name}\" is declared more than once.", 2310, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2312: a boolean XSD attribute whose value isn't one (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaAttributeNotBoolean(string attribute, string value) =>
+        new($"The value of attribute '{attribute}' does not conform to the type definition 'http://www.w3.org/2001/XMLSchema#boolean': '{value}'.", 2312, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2313: an enumerated XSD attribute — <c>use</c>, <c>form</c>, <c>processContents</c> … — given another value (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaAttributeValueNotAllowed(string attribute, string value) =>
+        new($"The attribute \"{attribute}\" cannot have a value of \"{value}\".", 2313, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2360: a declaration with both a <c>name</c> and a <c>ref</c> (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaNameAndRef(string location) =>
+        new($"Cannot have both a 'name' and 'ref' attribute. Location: '{location}'.", 2360, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2366: a simple type whose restriction chain returns to itself (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaCircularDefinition(string name) =>
+        new($"\"{name}\" has a circular definition.", 2366, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2382: a particle whose <c>minOccurs</c> exceeds its <c>maxOccurs</c> (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaOccursOutOfOrder(string location) =>
+        new($"Invalid combination of minOccurs and maxOccurs values, minOccurs has to be less than or equal to maxOccurs. Location: '{location}'.", 2382, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>Msg 2386: a <c>totalDigits</c> facet of 0 (probed 2026-10-07 against SQL Server 2025).</summary>
+    internal static SimulatedSqlException XmlSchemaTotalDigitsOutOfRange() =>
+        new("The value of 'totalDigits' facet is outside of the allowed range", 2386, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 6946 / 6950 / 6951 / 6952: a named simple type's facets that
+    /// contradict each other within its own restriction (probed 2026-10-07
+    /// against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaFacetsContradict(string typeName, int number)
+    {
+        var rule = number switch
+        {
+            6946 => "'minLength' can not be greater than 'maxLength'",
+            6950 => "'fractionDigits' can not be greater than 'totalDigits'",
+            6951 => "'minInclusive' must be less than or equal to 'maxInclusive' and less than 'maxExclusive'",
+            _ => "'minExclusive' must be less than or equal to 'maxExclusive' and less than 'maxInclusive'",
+        };
+        return new($"Invalid type definition for type '{typeName}', {rule}", number, 16, 1) { AbortsAsUnderXactAbort = true };
+    }
 
     /// <summary>
     /// Msg 2319: a restriction applies a facet its base type doesn't take,
@@ -1326,6 +1407,19 @@ partial class SimulatedSqlException
     /// </summary>
     internal static SimulatedSqlException XmlSchemaFacetNotAllowed(string facet, string location) =>
         new($"This type may not have a '{facet}' facet. Location: '{location}'.", 2319, 16, 1) { AbortsAsUnderXactAbort = true };
+
+    /// <summary>
+    /// Msg 6323: an assignment to a variable typed by a collection altered
+    /// since the batch began. Transaction-aborting: real rolls the transaction
+    /// back, a <c>TRY</c> never reaches its <c>CATCH</c> and the batch ends
+    /// (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    internal static SimulatedSqlException XmlSchemaCollectionAlteredDuringBatch(string variableName) =>
+        new($"The xml schema collection for variable '@{variableName}' has been altered while the batch was being executed. Remove all XML schema collection DDL operations it is dependent on from the batch, and re-run the batch.", 6323, 16, 1)
+        {
+            AbortsTransaction = true,
+            TerminatesBatch = true,
+        };
 
     /// <summary>Msg 6347: <c>ALTER XML SCHEMA COLLECTION</c> naming a collection that doesn't resolve or can't be altered.</summary>
     internal static SimulatedSqlException XmlSchemaCollectionCannotBeAltered(string name) =>

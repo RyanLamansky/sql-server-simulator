@@ -469,4 +469,84 @@ public sealed class CheckConstraintTests
         var ex = Assert.Throws<SimulatedSqlException>(() => simulation.ExecuteNonQuery(statement));
         Assert.AreEqual(3729, ex.Number);
     }
+
+    /// <summary>
+    /// A CHECK is judged once its row has landed, so a function it calls reads
+    /// the row — and, in a multi-row write, the rows before it but not after
+    /// (probed 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    public void Check_FunctionReadingItsTable_SeesTheRowBeingInserted()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (id int)",
+            "create function dbo.cnt() returns int as begin return (select count(*) from dbo.t) end",
+            "alter table t add constraint ck check (dbo.cnt() < 3)",
+            "insert t values (1); insert t values (2)");
+        simulation.AssertSqlError("insert t values (3)", 547, "The INSERT statement conflicted with the CHECK constraint \"ck\". The conflict occurred in database \"simulated\", table \"dbo.t\".");
+        Assert.AreEqual(2, simulation.ExecuteScalar("select count(*) from t"));
+        _ = simulation.ExecuteNonQuery("delete t; insert t values (1), (2)");
+        _ = simulation.AssertSqlError("delete t; insert t values (1), (2), (3)", 547);
+        Assert.AreEqual(0, simulation.ExecuteScalar("select count(*) from t"));
+    }
+
+    [TestMethod]
+    [DataRow("insert t values (1), (2), (3)", true)]
+    [DataRow("insert t values (3), (2), (1)", false)]
+    [DataRow("insert t select v from (values (1), (2), (3)) x (v) order by v", true)]
+    public void Check_FunctionReadingItsTable_SeesTheRowsWrittenBeforeIt(string insert, bool admitted)
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (id int)",
+            "create function dbo.mx() returns int as begin return (select max(id) from dbo.t) end",
+            "alter table t add constraint ck check (dbo.mx() = id)");
+        if (admitted)
+            Assert.AreEqual(3, simulation.ExecuteNonQuery(insert));
+        else
+            _ = simulation.AssertSqlError(insert, 547);
+    }
+
+    [TestMethod]
+    [DataRow("insert t values (3, 10)", "INSERT")]
+    [DataRow("insert t values (4, 30), (5, 30)", "INSERT")]
+    [DataRow("update t set k = 20 where id = 1", "UPDATE")]
+    [DataRow("update t set k = case k when 10 then 20 else 10 end", "UPDATE")]
+    [DataRow("merge t using (values (3, 10)) s (id, k) on t.id = s.id when not matched then insert values (s.id, s.k);", "MERGE")]
+    [DataRow("merge t using (values (1, 20)) s (id, k) on t.id = s.id when matched then update set k = s.k;", "MERGE")]
+    public void Check_FunctionCountingDuplicates_RefusesTheDuplicate(string statement, string verb)
+    {
+        // The swap fails too: the first row's new key meets the second's old
+        // one before the second is rewritten, as real's row-by-row plan does.
+        var simulation = DuplicateCheckedTable();
+        simulation.AssertSqlError(statement, 547, $"The {verb} statement conflicted with the CHECK constraint \"ck\". The conflict occurred in database \"simulated\", table \"dbo.t\", column 'k'.");
+        Assert.AreEqual(30, simulation.ExecuteScalar("select sum(k) from t"));
+    }
+
+    [TestMethod]
+    [DataRow("insert t values (3, 30)")]
+    [DataRow("update t set id = id")]
+    [DataRow("update t set k = 30 where id = 1")]
+    [DataRow("merge t using (values (1, 40)) s (id, k) on t.id = s.id when matched then update set k = s.k;")]
+    public void Check_FunctionCountingDuplicates_AdmitsTheRowItCounts(string statement) =>
+        // The row counts itself once, so `= 1` holds for a distinct key.
+        _ = DuplicateCheckedTable().ExecuteNonQuery(statement);
+
+    [TestMethod]
+    public void Check_FunctionReadingItsTable_IsCaughtByTry() =>
+        Assert.AreEqual(547, DuplicateCheckedTable().ExecuteScalar("""
+            begin try insert t values (9, 10) end try begin catch select error_number() end catch
+            """));
+
+    private static Simulation DuplicateCheckedTable()
+    {
+        var simulation = new Simulation();
+        simulation.ExecuteBatches(
+            "create table t (id int, k int)",
+            "create function dbo.dup(@k int) returns int as begin return (select count(*) from dbo.t where k = @k) end",
+            "alter table t add constraint ck check (dbo.dup(k) = 1)",
+            "insert t values (1, 10); insert t values (2, 20)");
+        return simulation;
+    }
 }

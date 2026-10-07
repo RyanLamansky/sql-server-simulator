@@ -779,7 +779,8 @@ Probe-confirmed; oracle `AggregateBindingRuleTests`.
   The rule is purely about column presence, **not determinism** — `GROUP BY a + DATEPART(year, GETDATE())` and even a `NEWID()`-derived expression are legal because they contain `a`, while `GROUP BY 1` / `'x'` / `@v` / `GETDATE()` / `RAND()` are not.
   (`GROUP BY 1` is a constant, not an ordinal; SQL Server has no ordinal GROUP BY.)
   The empty grouping set is exempt — `GROUP BY ()`, `GROUPING SETS (())`, `GROUPING SETS ((a),())` and `GROUP BY (), a` all return rows on real, and contribute no expression for the rule to apply to.
-  **Not modeled yet**: a subquery's item naming only the *enclosing* query's column (`SELECT (SELECT COUNT(*) FROM u GROUP BY t.a) FROM t`) is Msg 164 on real and runs here (probed 2026-10-03 against SQL Server 2025).
+  An *outer* column is no column of the item's own: a subquery's item naming only enclosing queries' columns (`SELECT (SELECT COUNT(*) FROM u GROUP BY t.a) FROM t`), at any depth and through `APPLY`, a CTE, an `UPDATE`'s target or a trigger's `inserted`, is Msg 164, while one local column beside it (`GROUP BY t.a + u.c`) is enough (probed 2026-10-07 against SQL Server 2025).
+  A name binding nowhere reports its own Msg 207 instead, and a missing table defers the statement with the rest of its binding.
 
 Msg 144 and Msg 164 are **held rather than thrown**: real parses a batch before binding any of it, so a stray token after the clause reports Msg 102 instead (`GROUP BY 'a' 'b'` → `near 'b'`, where `GROUP BY 'a'` alone is Msg 164 — probe-confirmed).
 The held message is raised once the statement's outermost query expression has parsed; see the trailing-token section of [`grammar.md`](grammar.md#trailing-token-tightening).
@@ -795,8 +796,7 @@ Counting at construction is complete by construction instead.
 The one wrinkle: a bare name is built as a `Reference` before the parser knows whether `(` follows, so `GETDATE()` briefly looks like a column.
 `Expression.ParseCallArguments` — the single funnel for every `<reference>(` shape — decrements on entry to cancel that, leaving a net count of genuine column references.
 
-Residual permissiveness: an *outer* column reference counts like a local one, so a grouping item naming only an outer column inside a correlated subquery stays accepted where real raises Msg 164.
-Closing that needs source resolution, not a parse-time count.
+The count alone can't tell an outer column from a local one, so an item that counted columns has them resolved against the query's own sources once it has parsed (`Selection.NamesOnlyOuterColumns`), through `ExpressionNode.Walk`, which reaches every node kind.
 Also, `STRING_AGG`'s `WITHIN GROUP (ORDER BY …)` and the JSON aggregates' key expression are parsed *after* the aggregate registers, so an aggregate or subquery hidden there escapes the Msg 130 bracket.
 
 ## GROUP BY containment

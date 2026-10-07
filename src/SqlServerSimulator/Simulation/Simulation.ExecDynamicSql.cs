@@ -118,7 +118,7 @@ partial class Simulation
         {
             throw SimulatedSqlException.ExecuteArgumentsWithoutServer();
         }
-        var resultSets = ParseExecuteOptions(batch, insertExecSource);
+        var resultSets = ParseExecuteOptions(batch, insertExecSource, characterStringForm: true);
 
         if (batch.IsSkipping)
             yield break;

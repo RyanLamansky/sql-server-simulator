@@ -835,7 +835,7 @@ partial class Simulation
     /// <c>IGNORE_DUP_KEY</c>, the one with a semantic here, is discarded.
     /// </summary>
     private static (List<string> IncludeColumnNames, BooleanExpression? Filter, string? FilterDefinition, IndexOptions Options) ParseIndexTail(
-        ParserContext context, string indexName, string tableLeaf, bool acceptsInclude, IndexOptionStatement statement = IndexOptionStatement.Unchecked, string? optionIndexName = null, bool refuseFilter = false)
+        ParserContext context, string indexName, string tableLeaf, bool acceptsInclude, IndexOptionStatement statement = IndexOptionStatement.Unchecked, string? optionIndexName = null, bool refuseFilter = false, bool rangeIndex = false)
     {
         var includeColumnNames = new List<string>();
         if (acceptsInclude && context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Include })
@@ -874,7 +874,7 @@ partial class Simulation
             filterDefinition = filter.RenderFilterDefinition(context.Batch);
         }
 
-        var options = ParseOptionalIndexWithClause(context, statement, optionIndexName)
+        var options = ParseOptionalIndexWithClause(context, statement, optionIndexName, rangeIndex: rangeIndex)
             .WithDataSpace(ParseOptionalDataSpaceClause(context, out _));
         // An index's FILESTREAM_ON names where FILESTREAM data goes, which no
         // table here has (Msg 1716 state 2, probed 2026-10-05).

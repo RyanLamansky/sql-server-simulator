@@ -17,13 +17,13 @@ namespace SqlServerSimulator;
 /// </summary>
 /// <remarks>
 /// The repo keeps no binary fixtures, so the bytes are compiled once per test
-/// run from <see cref="Source"/>. <see cref="ClrAssemblyFixture"/> covers the
-/// scalar binding with emitted .NET-targeted assemblies; this one covers the
-/// surface only a Framework-shaped assembly exercises.
+/// run from <see cref="Source"/>. <see cref="ClrAssemblyFixture"/> compiles its
+/// smaller assemblies for the scalar binding and the static verification the
+/// same way.
 /// </remarks>
 internal static class ClrFrameworkFixture
 {
-    private static readonly Lazy<byte[]> assembly = new(Compile);
+    private static readonly Lazy<byte[]> assembly = new(() => Compile("simclr", Source));
 
     /// <summary><c>CREATE ASSEMBLY simclr …</c> over the compiled fixture.</summary>
     public static string CreateAssembly => $"create assembly simclr from {ClrAssemblyFixture.HexLiteral(assembly.Value)} with permission_set = safe";
@@ -31,18 +31,19 @@ internal static class ClrFrameworkFixture
     /// <summary>A CLR-enabled simulation with the fixture registered, and <paramref name="batches"/> run after it.</summary>
     public static Simulation Simulation(params ReadOnlySpan<string> batches)
     {
-        var simulation = new Simulation { EnableClr = true };
+        var simulation = ClrAssemblyFixture.TrustingSimulation();
         _ = simulation.ExecuteNonQuery(CreateAssembly);
         simulation.ExecuteBatches(batches);
         return simulation;
     }
 
-    private static byte[] Compile()
+    /// <summary>Compiles <paramref name="source"/> as the assembly <paramref name="name"/>, against the .NET Framework 4.8 reference assemblies.</summary>
+    public static byte[] Compile(string name, string source)
     {
         var referenceDirectory = Path.Combine(AppContext.BaseDirectory, "net48ref");
         var compilation = CSharpCompilation.Create(
-            "simclr",
-            [CSharpSyntaxTree.ParseText(Source, new CSharpParseOptions(LanguageVersion.CSharp7_3))],
+            name,
+            [CSharpSyntaxTree.ParseText(source, new CSharpParseOptions(LanguageVersion.CSharp7_3))],
             new[] { "mscorlib.dll", "System.dll", "System.Data.dll", "System.Xml.dll" }.Select(file => MetadataReference.CreateFromFile(Path.Combine(referenceDirectory, file))),
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, optimizationLevel: OptimizationLevel.Release, deterministic: true));
         using var image = new MemoryStream();
@@ -233,6 +234,19 @@ internal static class ClrFrameworkFixture
             public SqlString Terminate() { return new SqlString(sb.ToString()); }
             public void Read(BinaryReader r) { sb = new StringBuilder(r.ReadString()); }
             public void Write(BinaryWriter w) { w.Write(sb.ToString()); }
+        }
+
+        [Serializable]
+        [SqlUserDefinedAggregate(Format.UserDefined, MaxByteSize = 8000)]
+        public struct Leaky : IBinarySerialize
+        {
+            private int accumulated, sum, reads, writes;
+            public void Init() { sum = 0; }
+            public void Accumulate(SqlInt32 v) { accumulated++; if (!v.IsNull) sum += v.Value; }
+            public void Merge(Leaky other) { sum += other.sum; }
+            public SqlString Terminate() { return new SqlString("sum=" + sum + " accumulated=" + accumulated + " reads=" + reads + " writes=" + writes); }
+            public void Read(BinaryReader r) { accumulated = r.ReadInt32(); reads = r.ReadInt32() + 1; writes = r.ReadInt32(); }
+            public void Write(BinaryWriter w) { w.Write(accumulated); w.Write(reads); w.Write(writes + 1); }
         }
 
         [Serializable]

@@ -17,7 +17,7 @@ partial class Simulation
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The bytes are validated by <see cref="ClrAssemblyMetadata.Verify"/>
+    /// The bytes are validated by <see cref="ClrAssemblyMetadata.VerifyImage"/> and <see cref="ClrAssemblyMetadata.VerifySafeContent"/>
     /// before anything is loaded, so a rejected candidate never gets to run a
     /// module initializer. Registration itself does not load the assembly at
     /// all — that happens lazily on first invocation.
@@ -111,11 +111,16 @@ partial class Simulation
                 $"CREATE ASSEMBLY is disabled. Registering '{assemblyName}' would load and run its code inside this process, so it requires an explicit opt-in: set EnableClr on the Simulation (new Simulation {{ EnableClr = true }}).");
         }
 
+        // The Linux server loads SAFE assemblies alone, refused ahead of
+        // everything else (probed 2026-10-07 against SQL Server 2025).
+        if (permissionSet != AssemblyPermissionSet.Safe)
+            throw SimulatedSqlException.AssemblyNotSafeOnThisEdition(assemblyName);
+
         var database = context.CurrentDatabase;
         if (database.Assemblies.ContainsKey(assemblyName))
             throw SimulatedSqlException.AssemblyAlreadyExists(assemblyName, database.Name);
 
-        ClrAssemblyMetadata.Verify(content, assemblyName, permissionSet, "CREATE");
+        ClrAssemblyMetadata.VerifyImage(content, assemblyName, "CREATE");
 
         var identity = ClrAssemblyMetadata.ReadIdentity(content, "CREATE", assemblyName);
         foreach (var (_, existing) in database.Assemblies)
@@ -123,6 +128,20 @@ partial class Simulation
             if (ClrAssemblyMetadata.ReadIdentity(existing.Content, "CREATE", existing.Name).Mvid == identity.Mvid)
                 throw SimulatedSqlException.AssemblyDuplicateMvid("CREATE", existing.Name);
         }
+
+        // Under clr strict security the server takes an assembly it trusts:
+        // its hash added by sp_add_trusted_assembly, or any assembly of a
+        // TRUSTWORTHY database whose owner holds UNSAFE ASSEMBLY (probed
+        // 2026-10-07 against SQL Server 2025). Signing isn't modeled.
+        var simulation = context.Batch.Connection.Simulation;
+        if (simulation.ClrStrictSecurity
+            && !simulation.TrustedAssemblies.ContainsKey(TrustedAssemblyKey(System.Security.Cryptography.SHA512.HashData(content)))
+            && !(database.Trustworthy && simulation.HoldsServerPermission(database.OwnerLoginName, Permission.UnsafeAssembly)))
+        {
+            throw SimulatedSqlException.AssemblyRefusedByStrictSecurity(assemblyName);
+        }
+
+        ClrAssemblyMetadata.VerifySafeContent(content, assemblyName, permissionSet, "CREATE");
 
         _ = database.Assemblies.TryAdd(assemblyName, new SqlAssembly(
             assemblyName,

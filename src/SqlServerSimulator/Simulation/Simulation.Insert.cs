@@ -884,7 +884,7 @@ partial class Simulation
             if (!insteadOfActive)
             {
                 EnforceNotNull(destinationTable, rowValues, plan.Verb);
-                EnforceCheckConstraints(destinationTable, rowValues, context.Batch, plan.Verb);
+                EnforceCheckConstraints(destinationTable, rowValues, context.Batch, plan.Verb, deferFunctionChecks: true);
                 if (!context.Batch.IsSkipping)
                     RowSecurity.EnforceBlock(context.Batch, destinationTable, BlockOperation.AfterInsert, rowValues);
             }
@@ -926,6 +926,7 @@ partial class Simulation
                     // reader for the whole wait.
                     if (!InsertCheckedRow(context.Batch, destinationTable, rowValues, storedValues, image, destinationTable.IsTableVariable ? context.Batch.CurrentTableVarUndoLog : context.Batch.CurrentUndoLog, keyGuard))
                         continue;
+                    EnforceLandedRowChecks(destinationTable, rowValues, context.Batch, plan.Verb);
                     context.Connection.StatementIo?.CountWrite(destinationTable);
                     destinationTable.ChangeTracking?.RecordRow(context.Batch, destinationTable, rowValues, Storage.ChangeTrackingOperation.Insert);
                     selfReferencingRows?.Add(rowValues);

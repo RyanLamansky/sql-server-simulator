@@ -37,6 +37,19 @@ internal sealed class CheckConstraint(string name, BooleanExpression predicate, 
     public readonly BooleanExpression Predicate = predicate;
 
     /// <summary>
+    /// Whether <see cref="Predicate"/> calls a user-defined function, T-SQL or
+    /// CLR, which can read the table being written. Real judges a CHECK once
+    /// the row has landed, so such a function sees the row it judges — and,
+    /// in a multi-row write, the rows written before it but not after
+    /// (probed 2026-10-07 against SQL Server 2025: <c>CHECK (dbo.cnt() &lt; 3)</c>
+    /// over <c>SELECT COUNT(*)</c> refuses the third row, and
+    /// <c>CHECK (dbo.maxid() = id)</c> admits <c>VALUES (1), (2), (3)</c> but
+    /// not <c>(3), (2), (1)</c>). Only these wait for the write; the rest are
+    /// judged before it, where their verdict can't differ.
+    /// </summary>
+    public readonly bool CallsUserFunction = CallsAnyUserFunction(predicate);
+
+    /// <summary>
     /// The column a column-level CHECK belongs to — the declaring column of an
     /// inline <c>col int CHECK (...)</c>, or the one column a table-level CHECK
     /// reads, which real files the same way. Msg 547 ends <c>column 'X'</c>
@@ -92,4 +105,15 @@ internal sealed class CheckConstraint(string name, BooleanExpression predicate, 
     /// doc's Definition columns section).
     /// </summary>
     public string? Definition;
+
+    private static bool CallsAnyUserFunction(BooleanExpression predicate)
+    {
+        var calls = false;
+        predicate.Walk((node, _) =>
+        {
+            calls |= node is Parser.Expressions.UserFunctionCall or Parser.Expressions.ClrFunctionCall;
+            return !calls;
+        });
+        return calls;
+    }
 }

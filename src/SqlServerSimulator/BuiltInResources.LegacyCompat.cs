@@ -50,6 +50,10 @@ internal static partial class BuiltInResources
         "sp_tables_ex",
         "sp_columns_ex",
         "sp_set_session_context",
+        // Server-level trust of an assembly by its SHA2_512 hash, which
+        // CREATE ASSEMBLY asks under clr strict security.
+        "sp_add_trusted_assembly",
+        "sp_drop_trusted_assembly",
         "sp_getapplock",
         "sp_releaseapplock",
         // Reserves a range of a sequence's values through OUTPUT parameters.

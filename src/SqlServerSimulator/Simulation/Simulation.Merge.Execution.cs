@@ -827,7 +827,7 @@ partial class Simulation
 
         StampUpdatedRow(destinationTable, newValues, context.Batch);
         EnforceNotNull(destinationTable, newValues, "UPDATE");
-        EnforceCheckConstraints(destinationTable, newValues, context.Batch, "UPDATE", reportedVerb: "MERGE");
+        EnforceCheckConstraints(destinationTable, newValues, context.Batch, "UPDATE", reportedVerb: "MERGE", deferFunctionChecks: true);
         RowSecurity.EnforceBlock(context.Batch, destinationTable, BlockOperation.AfterUpdate, newValues);
 
         // WITH CHECK OPTION: post-update row must still satisfy the view's
@@ -970,7 +970,7 @@ partial class Simulation
             // A MERGE's insert reports Msg 515 as "UPDATE fails." and Msg 547
             // as the MERGE statement's (probed 2026-10-01 against SQL Server 2025).
             EnforceNotNull(destinationTable, rowValues, "UPDATE");
-            EnforceCheckConstraints(destinationTable, rowValues, context.Batch, reportedVerb: "MERGE");
+            EnforceCheckConstraints(destinationTable, rowValues, context.Batch, reportedVerb: "MERGE", deferFunctionChecks: true);
             EnforceEdgeConstraints(destinationTable, rowValues, context, "MERGE");
             RowSecurity.EnforceBlock(context.Batch, destinationTable, BlockOperation.AfterInsert, rowValues);
         }
@@ -1164,6 +1164,7 @@ partial class Simulation
                 }
                 UpdateCheckedRow(context.Batch, destinationTable, pseudoAffected!, u, rewritten, storedNew, undoLog, ReclaimSuperseded(destinationTable, context), keyGuard);
                 ClusteredScan.NoteKeyAssignment(destinationTable, updatedColumnOrdinals, (page, slot), undoLog);
+                EnforceLandedRowChecks(destinationTable, newValues, context.Batch, "MERGE");
             }
             tracking?.RecordKeyMoves(context.Batch, destinationTable, keyMoves);
             destinationTable.NoteColumnsUpdated(updatedColumnOrdinals, pendingUpdates.Count);
@@ -1180,6 +1181,7 @@ partial class Simulation
                 var guard = keyGuard;
                 while (InsertRow(context.Batch, destinationTable, image, undoLog, guard: guard, storedValues: storedNew).PageIndex < 0)
                     guard = RecheckAffectedRow(context.Batch, destinationTable, pseudoAffected!, firstInsert + n);
+                EnforceLandedRowChecks(destinationTable, newValues, context.Batch, "MERGE");
                 context.Connection.StatementIo?.CountWrite(destinationTable);
             }
         }

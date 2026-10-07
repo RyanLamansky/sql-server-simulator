@@ -2308,7 +2308,7 @@ internal sealed partial class Selection
                 // ORDER BY after it — never an alias, even where one could
                 // stand (probed 2026-09-29 against SQL Server 2025).
                 case Name when IsWindowClauseAhead(context):
-                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope);
+                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, []);
                     goto ExitWhileTokenLoop;
 
                 // `name:` is a GOTO label ending the statement, never an alias.
@@ -2388,6 +2388,16 @@ internal sealed partial class Selection
                         distinct, topExpression, aggregates, windows, scope.OuterTypeResolver);
                     context.Batch.InlinedCalls?.SettleBlock(context.InliningBlock, distinct && fromClause.OrderBy.Count > 0);
                     plan.IntoDataSpace = intoDataSpace;
+                    if (fromClause.GroupingSets.Count > 0 && aggregates.Exists(static aggregate => aggregate.ClrArguments is not null))
+                        context.GroupsClrAggregate = true;
+                    if (sources.Count > 0)
+                    {
+                        plan.SeekShape = new SeekBodyShape(
+                            [.. sources],
+                            joinArray,
+                            fromClause.Having is { } seekHaving ? [.. fromClause.Excluders, seekHaving] : fromClause.Excluders,
+                            SeekReachableProjections(context.Batch.CurrentDatabase.Collation, expressions, windows, topExpression is not null || fromClause.OffsetExpression is not null));
+                    }
                     return plan;
 
                 // SELECT projection INTO target [FROM ...] — captures the
@@ -2411,12 +2421,12 @@ internal sealed partial class Selection
                 // ConsumeWhereAndOrderBy already reads them in grammar order
                 // from whichever of the three the cursor sits on.
                 case ReservedKeyword { Keyword: Keyword.Where or Keyword.Group or Keyword.Having }:
-                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope);
+                    ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, []);
                     goto ExitWhileTokenLoop;
 
                 case ReservedKeyword { Keyword: Keyword.Order }:
                     if (allowOrderBy || scope.RefusesTrailingClauses)
-                        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope);
+                        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, []);
                     // When this branch is part of a set-op chain, leave
                     // the cursor on ORDER for the top-level driver to
                     // consume (or for the outer caller to error on, per
@@ -2842,7 +2852,7 @@ internal sealed partial class Selection
         // against these same sources, as does a MATCH, which reads the joins too.
         using var scopeSources = ParserScope.Enter(ref context.ScopeSources, sources);
         using var scopeJoins = ParserScope.Enter(ref context.ScopeJoins, joins);
-        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope);
+        ConsumeWhereAndOrderBy(context, fromClause, allowOrderBy, scope, sources);
     }
 
     /// <summary>
@@ -2861,7 +2871,7 @@ internal sealed partial class Selection
     /// the lookahead contract, and an extra advance here would silently swallow
     /// the next clause's opening keyword.
     /// </remarks>
-    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy, QueryScope scope)
+    private static void ConsumeWhereAndOrderBy(ParserContext context, FromClause fromClause, bool allowOrderBy, QueryScope scope, FromSource[] localSources)
     {
         using var clause = ParserScope.Enter(ref context.InliningClause, InliningClause.Other);
         // A parenthesized INSERT source's own query may not carry an ORDER BY
@@ -2913,7 +2923,7 @@ internal sealed partial class Selection
                     context.RestoreCheckpoint(beforeAll);
                 else if (context.SchemaBoundBody != SchemaBoundBody.None)
                     throw SimulatedSqlException.SyntaxNotAllowedInSchemaBoundObject("ALL", 8);
-                ParseGroupByList(context, fromClause);
+                ParseGroupByList(context, fromClause, localSources, scope.OuterTypeResolver);
                 if (fromClause.GroupByAll && fromClause.Excluders.Count > 0)
                 {
                     fromClause.GroupByAllFilter = [.. fromClause.Excluders];
@@ -3111,6 +3121,56 @@ internal sealed partial class Selection
     }
 
     /// <summary>
+    /// Whether every column a GROUP BY item names binds to an enclosing query
+    /// rather than to <paramref name="localSources"/>: Msg 164's "outer
+    /// reference" — the enclosing query's columns at any depth, a trigger's
+    /// <c>inserted</c>, an <c>UPDATE</c>'s target alike (probed 2026-10-07
+    /// against SQL Server 2025). A name binding nowhere answers false, leaving
+    /// it to its own Msg 207, which real reports instead; so does a placeholder
+    /// source, whose missing table defers the statement's binding.
+    /// </summary>
+    private static bool NamesOnlyOuterColumns(List<Expression[]> item, FromSource[] localSources, Func<MultiPartName, SqlType>? outerTypeResolver)
+    {
+        if (outerTypeResolver is null || AnyPlaceholderSource(localSources))
+            return false;
+        // The walk reaches every column the item names and none inside a
+        // nested subquery, which binds in its own scope (and is Msg 144 here
+        // anyway).
+        var namesOnlyOuter = true;
+        foreach (var fragment in item)
+        {
+            foreach (var expression in fragment)
+            {
+                expression.Walk((_, shape) =>
+                {
+                    if (namesOnlyOuter && shape.Column is { } column)
+                        namesOnlyOuter = BindsOnlyOutside(column, localSources, outerTypeResolver);
+                    return namesOnlyOuter;
+                });
+            }
+        }
+        return namesOnlyOuter;
+    }
+
+    private static bool BindsOnlyOutside(MultiPartName column, FromSource[] localSources, Func<MultiPartName, SqlType> outerTypeResolver)
+    {
+        if (FindSourceColumnOfAnyKind(localSources, column).SourceIndex >= 0
+            || (column.ImmediateQualifier is not null && QualifiesAnySource(localSources, column)))
+        {
+            return false;
+        }
+        try
+        {
+            _ = outerTypeResolver(column);
+            return true;
+        }
+        catch (SimulatedSqlException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Parses the comma-separated GROUP BY list (entered with cursor one
     /// token before the first item — caller has just consumed <c>BY</c>;
     /// next call advances onto the item). Each item is either a regular
@@ -3122,7 +3182,7 @@ internal sealed partial class Selection
     /// <see cref="FromClause.AllGroupingExpressions"/> list is populated as a
     /// union (in first-seen order) for GROUPING()/GROUPING_ID() validation.
     /// </summary>
-    private static void ParseGroupByList(ParserContext context, FromClause fromClause)
+    private static void ParseGroupByList(ParserContext context, FromClause fromClause, FromSource[] localSources, Func<MultiPartName, SqlType>? outerTypeResolver)
     {
         using var clause = ParserScope.Enter(ref context.InliningClause, InliningClause.GroupBy);
         var itemContributions = new List<List<Expression[]>>();
@@ -3164,8 +3224,11 @@ internal sealed partial class Selection
             foreach (var fragment in contribution)
                 contributesAnExpression |= fragment.Length > 0;
 
-            if (contributesAnExpression && context.ColumnReferencesParsed == columnsBefore)
+            if (contributesAnExpression
+                && (context.ColumnReferencesParsed == columnsBefore || NamesOnlyOuterColumns(contribution, localSources, outerTypeResolver)))
+            {
                 context.PendingBindError ??= SimulatedSqlException.GroupByExpressionHasNoLocalColumn();
+            }
         } while (context.Token is Operator { Character: ',' });
 
         // GROUP BY ALL takes plain items only: a ROLLUP / CUBE / GROUPING SETS

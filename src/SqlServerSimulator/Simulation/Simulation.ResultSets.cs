@@ -33,14 +33,20 @@ partial class Simulation
     /// fails at the first column name.
     /// </para>
     /// </remarks>
-    private static ResultSetsContract? ParseExecuteOptions(BatchContext batch, bool insertExecSource) =>
-        ParseExecuteOptions(batch, insertExecSource, out _);
+    private static ResultSetsContract? ParseExecuteOptions(BatchContext batch, bool insertExecSource, bool characterStringForm = false) =>
+        ParseExecuteOptions(batch, insertExecSource, out _, characterStringForm);
 
-    /// <inheritdoc cref="ParseExecuteOptions(BatchContext, bool)"/>
+    /// <inheritdoc cref="ParseExecuteOptions(BatchContext, bool, bool)"/>
     /// <param name="batch">The batch whose parser stands after the call's arguments.</param>
     /// <param name="insertExecSource">Whether the EXECUTE is an <c>INSERT … EXEC</c> source.</param>
     /// <param name="recompile">Whether the list carries <c>RECOMPILE</c>.</param>
-    private static ResultSetsContract? ParseExecuteOptions(BatchContext batch, bool insertExecSource, out bool recompile)
+    /// <param name="characterStringForm">
+    /// Whether the EXECUTE runs a character string (<c>EXEC ('…')</c>), whose
+    /// one option is <c>RESULT SETS</c>: <c>RECOMPILE</c> is Msg 102 on the
+    /// word and a second option Msg 102 on its comma (probed 2026-10-07
+    /// against SQL Server 2025), where <c>sp_executesql</c> takes both.
+    /// </param>
+    private static ResultSetsContract? ParseExecuteOptions(BatchContext batch, bool insertExecSource, out bool recompile, bool characterStringForm = false)
     {
         recompile = false;
         var context = batch.Parser;
@@ -58,7 +64,7 @@ partial class Simulation
         ResultSetsContract? contract = null;
         while (true)
         {
-            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Recompile })
+            if (context.Token is UnquotedString { ContextualKeyword: ContextualKeyword.Recompile } && !characterStringForm)
             {
                 recompile = true;
                 context.MoveNextOptional();
@@ -82,6 +88,8 @@ partial class Simulation
 
             if (context.Token is not Operator { Character: ',' })
                 break;
+            if (characterStringForm)
+                throw SimulatedSqlException.SyntaxErrorNear(context);
             context.MoveNextRequired();
         }
 

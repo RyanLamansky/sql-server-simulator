@@ -1087,23 +1087,17 @@ internal static partial class BuiltInResources
     /// currently reports: whatever <c>sp_configure</c> staged and
     /// <c>RECONFIGURE</c> installed, else the stock default.
     /// <para>
-    /// The two CLR rows are the exception, and report the simulation's
+    /// <c>clr enabled</c> is the exception, and reports the simulation's
     /// <see cref="Simulation.EnableClr"/> opt-in whatever <c>sp_configure</c>
-    /// wrote: <c>clr enabled</c> mirrors the opt-in and <c>clr strict
-    /// security</c> drops to 0 once CLR is on, because the simulator gates
-    /// assembly registration on the host opt-in rather than on assembly
-    /// signing — reporting real's default of 1 would describe an enforcement it
-    /// does not perform.
+    /// wrote.
     /// </para>
     /// </summary>
     internal static (int Configured, int InUse) EffectiveConfigurationValues(Simulation simulation, int index)
     {
         var (id, name, value, _, _, valueInUse, _, _, _) = ConfigurationData[index];
-        if (name is "clr enabled" or "clr strict security")
+        if (name == "clr enabled")
         {
-            var clr = !simulation.EnableClr ? value
-                : name == "clr enabled" ? 1
-                : 0;
+            var clr = simulation.EnableClr ? 1 : value;
             return (clr, clr);
         }
 

@@ -167,4 +167,68 @@ public sealed class XmlCollectionBindingTests
     [TestMethod]
     public void TheSqlTypesNamespace_Resolves() =>
         _ = new Simulation().ExecuteNonQuery("""create xml schema collection x as N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:s="http://schemas.microsoft.com/sqlserver/2004/sqltypes"><xs:import namespace="http://schemas.microsoft.com/sqlserver/2004/sqltypes"/><xs:element name="a" type="s:varchar"/></xs:schema>'""");
+
+    /// <summary>
+    /// The refusals real's reading of a schema raises once its names resolve,
+    /// in document order, and the type definitions after them (probed
+    /// 2026-10-07 against SQL Server 2025).
+    /// </summary>
+    [TestMethod]
+    [DataRow("""<xs:element name="r"><xs:complexType><xs:sequence><xs:element name="a" minOccurs="3" maxOccurs="2"/></xs:sequence></xs:complexType></xs:element>""", 2382, "Invalid combination of minOccurs and maxOccurs values, minOccurs has to be less than or equal to maxOccurs. Location: '/*:schema[1]/*:element[1]/*:complexType[1]/*:sequence[1]/*:element[1]'.")]
+    [DataRow("""<xs:element name="r"><xs:complexType><xs:sequence><xs:element name="a" maxOccurs="many"/></xs:sequence></xs:complexType></xs:element>""", 2309, "The value of \"maxOccurs\" is not a valid number.")]
+    [DataRow("""<xs:element name="r" type="xs:string"><xs:complexType/></xs:element>""", 2305, "Element or attribute type specified more than once. Location: '/*:schema[1]/*:element[1]/*:complexType[1]'.")]
+    [DataRow("""<xs:element name="r" foo="1" type="xs:string"/>""", 2298, "Attribute 'foo' is not valid at location '/*:schema[1]/*:element[1]'.")]
+    [DataRow("""<xs:element name="r" type="xs:int" default="1" fixed="2"/>""", 2298, "Attribute 'fixed' is not valid at location '/*:schema[1]/*:element[1]'.")]
+    [DataRow("""<xs:complexType name="b"/><xs:complexType name="c"><xs:complexContent bogus="1"><xs:extension base="b"/></xs:complexContent></xs:complexType>""", 2298, "Attribute 'bogus' is not valid at location '/*:schema[1]/*:complexType[2]'.")]
+    [DataRow("""<xs:element name="r"><xs:complexType><xs:attribute name="a" use="sometimes"/></xs:complexType></xs:element>""", 2313, "The attribute \"use\" cannot have a value of \"sometimes\".")]
+    [DataRow("""<xs:complexType name="c" block="1"/>""", 2313, "The attribute \"block\" cannot have a value of \"1\".")]
+    [DataRow("""<xs:element name="r" abstract="maybe" type="xs:string"/>""", 2312, "The value of attribute 'abstract' does not conform to the type definition 'http://www.w3.org/2001/XMLSchema#boolean': 'maybe'.")]
+    [DataRow("""<xs:element type="xs:string"/>""", 2299, "Required attribute \"name\" of XSD element \"element\" is missing.")]
+    [DataRow("""<xs:foo/>""", 2297, "Element <foo> is not valid at location '/*:schema[1]/*:foo[1]'.")]
+    [DataRow("""<xs:element name="q" type="xs:string"/><xs:element name="r"><xs:complexType><xs:sequence><xs:element ref="q" name="z"/></xs:sequence></xs:complexType></xs:element>""", 2360, "Cannot have both a 'name' and 'ref' attribute. Location: '/*:schema[1]/*:element[2]/*:complexType[1]/*:sequence[1]/*:element[1]'.")]
+    [DataRow("""<xs:element name="r"><xs:complexType><xs:attribute name="a"/><xs:attribute name="a"/></xs:complexType></xs:element>""", 2310, "The attribute \"a\" is declared more than once.")]
+    [DataRow("""<xs:complexType name="c"><xs:choice/></xs:complexType>""", 2293, "Choice cannot be empty unless minOccurs is 0. Location: '/*:schema[1]/*:complexType[1]/*:choice[1]'.")]
+    [DataRow("""<xs:element name="r" type="1"/>""", 2379, "The name specified is not a valid XML name :'1'")]
+    [DataRow("""<xs:simpleType name="t"><xs:restriction base="xs:decimal"><xs:totalDigits value="0"/></xs:restriction></xs:simpleType>""", 2386, "The value of 'totalDigits' facet is outside of the allowed range")]
+    [DataRow("""<xs:simpleType name="t1"><xs:restriction base="t2"/></xs:simpleType><xs:simpleType name="t2"><xs:restriction base="t1"/></xs:simpleType>""", 2366, "\"t1\" has a circular definition.")]
+    [DataRow("""<xs:simpleType name="t"><xs:restriction base="xs:decimal"><xs:totalDigits value="2"/><xs:fractionDigits value="5"/></xs:restriction></xs:simpleType>""", 6950, "Invalid type definition for type 't', 'fractionDigits' can not be greater than 'totalDigits'")]
+    [DataRow("""<xs:simpleType name="t"><xs:restriction base="xs:int"><xs:minInclusive value="10"/><xs:maxInclusive value="5"/></xs:restriction></xs:simpleType>""", 6951, "Invalid type definition for type 't', 'minInclusive' must be less than or equal to 'maxInclusive' and less than 'maxExclusive'")]
+    [DataRow("""<xs:simpleType name="t"><xs:restriction base="xs:int"><xs:minExclusive value="10"/><xs:maxExclusive value="5"/></xs:restriction></xs:simpleType>""", 6952, "Invalid type definition for type 't', 'minExclusive' must be less than or equal to 'maxExclusive' and less than 'maxInclusive'")]
+    [DataRow("""<xs:simpleType name="t"><xs:restriction base="xs:string"><xs:minLength value="10"/><xs:maxLength value="5"/></xs:restriction></xs:simpleType>""", 6946, "Invalid type definition for type 't', 'minLength' can not be greater than 'maxLength'")]
+    [DataRow("""<xs:notation name="n" public="p"/>""", 9336, "The XML Schema syntax '<xs:notation>' is not supported.")]
+    [DataRow("""<xs:include schemaLocation="x"/>""", 9336, "The XML Schema syntax '<xs:include>' is not supported.")]
+    [DataRow("""<xs:redefine schemaLocation="x"/>""", 2391, "Redefining XSD schemas is not supported")]
+    [DataRow("""<xs:element name="r" bogus="1" type="nosuch"/>""", 2307, "Reference to an undefined name 'nosuch'")]
+    public void AStructurallyInvalidSchema_IsRefused(string body, int number, string message) =>
+        new Simulation().AssertSqlError($"create xml schema collection x as N'<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">{body}</xs:schema>'", number, message);
+
+    [TestMethod]
+    [DataRow("""<xs:element name="r"><xs:complexType><xs:sequence><xs:element name="a" minOccurs="0" maxOccurs="unbounded"/><xs:element name="b" minOccurs="0" maxOccurs="0"/></xs:sequence></xs:complexType></xs:element>""")]
+    [DataRow("""<xs:element name="r" type="xs:int" fixed="2" nillable="1" block="#all" final="extension restriction" form="qualified" id="e1"/>""")]
+    [DataRow("""<xs:element xmlns:z="urn:z" z:foo="1" name="r" type="xs:int"/>""")]
+    [DataRow("""<xs:simpleType name="s" abstract="true" mixed="false"><xs:restriction base="xs:string"><xs:maxLength value="5" fixed="true"/></xs:restriction></xs:simpleType>""")]
+    [DataRow("""<xs:annotation><xs:documentation xml:lang="en-GB" source="x">d</xs:documentation><xs:appinfo source="y"/></xs:annotation><xs:element name="r" xml:lang="1"/>""")]
+    [DataRow("""<xs:element name="r"><xs:complexType mixed="true"><xs:sequence><xs:any namespace="##other" processContents="lax" minOccurs="0"/></xs:sequence><xs:attribute name="a" type="xs:int" default="1"/><xs:attribute name="b" use="required"/><xs:anyAttribute processContents="skip"/></xs:complexType></xs:element>""")]
+    [DataRow("""<xs:group name="g" abstract="false"><xs:sequence><xs:element name="a"/></xs:sequence></xs:group><xs:element name="r"><xs:complexType><xs:choice minOccurs="0"/><xs:group ref="g" minOccurs="0"/></xs:complexType></xs:element>""")]
+    [DataRow("""<xs:simpleType name="t"><xs:restriction base="xs:decimal"><xs:totalDigits value="5"/><xs:fractionDigits value="5"/><xs:minInclusive value="5"/><xs:maxInclusive value="5"/></xs:restriction></xs:simpleType>""")]
+    public void ASchemaRealReads_IsAccepted(string body) =>
+        _ = new Simulation().ExecuteNonQuery($"create xml schema collection x as N'<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\">{body}</xs:schema>'");
+
+    [TestMethod]
+    public void ASchemaThatIsNotWellFormedXml_IsAParseError() =>
+        new Simulation().AssertSqlError(
+            """create xml schema collection x as N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="r"/></xs:schema'""",
+            9412,
+            "XML parsing: line 1, character 88, '>' expected");
+
+    [TestMethod]
+    public void AnAddedDocument_IsReadAsACreatedOneIs()
+    {
+        var simulation = new Simulation();
+        _ = simulation.ExecuteNonQuery(Collection);
+        simulation.AssertSqlError(
+            """alter xml schema collection c add N'<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"><xs:element name="q" bogus="1"/></xs:schema>'""",
+            2298,
+            "Attribute 'bogus' is not valid at location '/*:schema[1]/*:element[1]'.");
+    }
 }

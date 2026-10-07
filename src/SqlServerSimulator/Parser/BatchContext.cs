@@ -1435,6 +1435,13 @@ internal sealed partial class BatchContext
     public SimulatedDbConnection Connection => this.Parser.Connection;
 
     /// <summary>
+    /// <see cref="Simulation.XmlSchemaCollectionAlterations"/> as this batch
+    /// began: a variable typed by a collection altered since refuses every
+    /// assignment (Msg 6323, see <see cref="VariableSlot.Assign"/>).
+    /// </summary>
+    public readonly long XmlSchemaAlterationsAtStart;
+
+    /// <summary>
     /// What a row operation stamps into a table's <c>GENERATED ALWAYS AS
     /// TRANSACTION_ID</c> / <c>SEQUENCE_NUMBER</c> columns: the writing
     /// transaction's id and the operation's number within it.
@@ -1627,6 +1634,7 @@ internal sealed partial class BatchContext
         this.NoExecActive = command.Connection!.NoExec;
         this.Variables = SeedVariables(command);
         this.Parser = new ParserContext(command, this);
+        this.XmlSchemaAlterationsAtStart = Volatile.Read(ref this.Connection.Simulation.XmlSchemaCollectionAlterations);
         SeedTableVariablesFromStructuredParameters(this, command);
     }
 
@@ -1647,6 +1655,7 @@ internal sealed partial class BatchContext
         this.Variables = variables;
         this.UdfFrame = udfFrame;
         this.Parser = new ParserContext(udfBodyCommand, this);
+        this.XmlSchemaAlterationsAtStart = Volatile.Read(ref this.Connection.Simulation.XmlSchemaCollectionAlterations);
     }
 
     /// <summary>
@@ -1664,6 +1673,7 @@ internal sealed partial class BatchContext
         this.Variables = variables;
         this.ProcFrame = procFrame;
         this.Parser = new ParserContext(procBodyCommand, this);
+        this.XmlSchemaAlterationsAtStart = Volatile.Read(ref this.Connection.Simulation.XmlSchemaCollectionAlterations);
         if (tableVariables is not null)
         {
             foreach (var kvp in tableVariables)
@@ -1691,6 +1701,7 @@ internal sealed partial class BatchContext
     {
         this.Variables = variables;
         this.Parser = new ParserContext(multiStatementTvfBodyCommand, this);
+        this.XmlSchemaAlterationsAtStart = Volatile.Read(ref this.Connection.Simulation.XmlSchemaCollectionAlterations);
     }
 
     /// <summary>
@@ -1711,6 +1722,7 @@ internal sealed partial class BatchContext
         this.Variables = new Dictionary<string, VariableSlot>(BatchContext.VariableNameComparer);
         this.TriggerFrame = triggerFrame;
         this.Parser = new ParserContext(triggerBodyCommand, this);
+        this.XmlSchemaAlterationsAtStart = Volatile.Read(ref this.Connection.Simulation.XmlSchemaCollectionAlterations);
     }
 
     /// <summary>
@@ -1730,6 +1742,7 @@ internal sealed partial class BatchContext
         this.IsContextConnectionCommand = true;
         this.ForceTempTableScope = true;
         this.Parser = new ParserContext(contextCommand, this);
+        this.XmlSchemaAlterationsAtStart = Volatile.Read(ref this.Connection.Simulation.XmlSchemaCollectionAlterations);
     }
 
     /// <summary>
@@ -2018,6 +2031,7 @@ internal sealed partial class BatchContext
             snapshot[name] = copy = new VariableSlot(slot.DeclaredType, slot.DeclaredMaxLength, slot.Value, parameter: null)
             {
                 XmlSchemaCollection = slot.XmlSchemaCollection,
+                XmlBinding = slot.XmlBinding,
                 XmlDocument = slot.XmlDocument,
                 SpelledNumeric = slot.SpelledNumeric,
                 AliasType = slot.AliasType,

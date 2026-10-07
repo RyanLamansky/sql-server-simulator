@@ -803,6 +803,7 @@ Probed against SQL Server 2025 (2026-07-31).
 
 **Grammar**: `WITH <option> [, …]`, where an option is `RECOMPILE` (accepted and discarded — the simulator has no plan-reuse decision to override) or one of the three `RESULT SETS` forms.
 Order is free (`WITH RECOMPILE, RESULT SETS …` and the reverse both parse), a second `RESULT SETS` is Msg 102, and a stray token after the clause is Msg 102 naming it.
+A character string's `EXEC (…)` takes `RESULT SETS` alone: `RECOMPILE` is Msg 102 on the word and a second option Msg 102 on its comma (probed 2026-10-07 against SQL Server 2025).
 The `WITH` is claimed only when an execute option follows it, so a CTE behind an `EXEC` still dispatches as its own statement.
 
 **The three forms**:

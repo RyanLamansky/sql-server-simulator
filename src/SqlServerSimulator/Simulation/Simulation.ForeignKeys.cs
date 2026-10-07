@@ -529,7 +529,7 @@ partial class Simulation
             // move with them — a PERSISTED computed column otherwise keeps the
             // pre-cascade value on disk (probe-confirmed: real recomputes).
             StampUpdatedRow(childTable, newRow, context.Batch);
-            EnforceCheckConstraints(childTable, newRow, context.Batch, "UPDATE", reportedVerb: verb);
+            EnforceCheckConstraints(childTable, newRow, context.Batch, "UPDATE", reportedVerb: verb, deferFunctionChecks: true);
             rewrites.Add((pageIndex, slotIndex, newRow, (SqlValue[])full.Clone()));
         }
         EnforceKeysForUpdate(childTable, rewrites, context.Batch);
@@ -546,6 +546,7 @@ partial class Simulation
             tracking?.RecordUpdate(context.Batch, childTable, keyOrdinals, oldRow, newRow, trackedColumns, setsKey, ref keyMoves);
             RewriteRowAt(context, childTable, pageIndex, slotIndex, rewritten, undoLog);
             ClusteredScan.NoteKeyAssignment(childTable, fk.ChildColumnOrdinals, (pageIndex, slotIndex), undoLog);
+            EnforceLandedRowChecks(childTable, newRow, context.Batch, verb);
             newPairs.Add((oldRow, newRow));
         }
         if (mode == CascadeWriteMode.SetDefault)

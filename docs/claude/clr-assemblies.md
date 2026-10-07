@@ -16,8 +16,22 @@ The gate exists because a `Simulation` reachable over the network endpoint would
 
 The gate is deliberately stricter than real: probe-confirmed, real SQL Server's `clr enabled` option does **not** gate `CREATE ASSEMBLY` at all — registration succeeds with the option set to 0, and only *execution* raises Msg 6263.
 
-`sys.configurations` reports `clr enabled` as `EnableClr ? 1 : 0`, and `clr strict security` drops from real's default of 1 to 0 once CLR is enabled (the simulator gates on the host opt-in, not on assembly signing, so reporting 1 would claim an enforcement it does not perform).
-That pairing is what lets mssql-django's `enable_clr()` run: it reads `clr enabled` from `sys.configurations` and only falls through to `sp_configure` when the value is 0, so no configuration-write model is needed.
+`sys.configurations` reports `clr enabled` as `EnableClr ? 1 : 0`, which is what lets mssql-django's `enable_clr()` run: it reads `clr enabled` from `sys.configurations` and only falls through to `sp_configure` when the value is 0.
+
+## What the server takes: the edition, the catalog and `clr strict security`
+
+**These three rules refuse what the simulator used to register, and a simulator user upgrading meets them first** (probed 2026-10-07 against SQL Server 2025):
+
+- **Only `SAFE` loads.** The simulator models the Linux server, which refuses `PERMISSION_SET = EXTERNAL_ACCESS` and `UNSAFE` outright with **Msg 10342** state 100, ahead of every other check.
+- **Only a .NET Framework assembly loads.** Real resolves every `AssemblyRef` against a fixed catalog of Framework assemblies — `mscorlib`, `System`, `System.Data`, `System.Xml`, `System.Core`, `System.Xml.Linq`, `System.Transactions`, `System.Security`, `System.Configuration`, `System.Numerics`, `System.Data.SqlXml`, `System.Data.OracleClient`, `System.Deployment`, `System.Web.Services`, `Microsoft.VisualBasic`, `Microsoft.VisualC`, `CustomMarshalers`, and `Microsoft.SqlServer.Types` 10.0 through 17.x — by name and public key token, the version otherwise ignored (`ClrAssemblyMetadata.catalogReferences`).
+  Anything else is **Msg 6503** naming the reference, an unsigned one with version `0.0.0.0`: so an assembly built for .NET (Core) or .NET Standard (`System.Runtime`, `System.Private.CoreLib`, `netstandard`), one built against the `Microsoft.SqlServer.Server` NuGet package, and a Framework assembly outside the list (`System.Drawing`, `System.Runtime.Serialization`, `Microsoft.CSharp`) are refused.
+  An assembly has to target `net4x` to load, here as on real; the tests compile theirs with Roslyn against the Framework 4.8 reference assemblies (`ClrFrameworkFixture.Compile`).
+- **`clr strict security` is on, as real installs it.** While its value in use is 1 — the default, and whatever `sp_configure` and `RECONFIGURE` last installed — `CREATE ASSEMBLY` takes only an assembly the server trusts and refuses the rest with **Msg 10343**, a severity-14 error ending only its statement.
+  Trusted is an assembly whose SHA2_512 hash `sys.sp_add_trusted_assembly` added (`sp_drop_trusted_assembly` and `sys.trusted_assemblies` alongside, server-scoped, Msg 10345 / 10346 / 214 state 191 for a repeated, missing or malformed hash), or any assembly of a `TRUSTWORTHY` database whose owner holds `UNSAFE ASSEMBLY`.
+  Signing with a certificate or asymmetric key isn't modeled, so an assembly real would trust for its signature is refused here.
+  The usual way through on a development server — `sp_configure 'show advanced options', 1`, then `sp_configure 'clr strict security', 0` and `RECONFIGURE` — works as on real.
+
+The order real checks in: Msg 10342, a taken name (6246), a malformed image (6544), the catalog (6503), a duplicate MVID (6285), Msg 10343, then the simulator's own SAFE verification below.
 
 ## Grammar
 
@@ -57,7 +71,7 @@ A .NET Framework SQLCLR assembly references `System.Data, Version=4.0.0.0` for b
 So every registered assembly loads into a `SqlAssemblyLoadContext` (`Clr/ClrHost.cs`) that answers two names itself:
 
 - **`Microsoft.SqlServer.Server`** is the `SqlServerSimulator.ClrShim` project: `SqlContext`, `SqlPipe`, `SqlDataRecord`, `SqlMetaData`, `SqlTriggerContext`, the routine attributes and their enums (`TriggerAction` with Framework's whole DDL roster), `IBinarySerialize` and `InvalidUdtException`, and the in-process provider's `System.Data.SqlClient` types — `SqlConnection`, `SqlCommand`, `SqlParameter` and its collection, `SqlDataReader`, `SqlTransaction`, `SqlException` / `SqlError` and `SqlInfoMessageEventArgs` — with Framework's member signatures for everything it carries (see Not modeled yet for what it doesn't).
-  The simulator embeds its build as a resource and never references it, so none of its public types reach a consumer; its name matches the NuGet package's, so a .NET-targeted assembly built against that package lands on the same types.
+  The simulator embeds its build as a resource and never references it, so none of its public types reach a consumer.
 - **`System.Data`** is generated at first use: a manifest-only assembly whose every type is a forwarder — the runtime facade's own list, each entry pointed at the assembly it really resolves to, plus one per public type of the shim, which is what sends a Framework assembly's `System.Data.SqlClient` references there rather than to the client assembly the facade names.
   Forwarding rather than copying is what keeps `SqlInt32` and friends the very types `ClrTypeMarshaller` handles.
 
@@ -67,7 +81,7 @@ The shim reaches the simulator through one internal bridge (`SimulatorBridge.Ent
 With the attribute types resolvable, binding reads `SqlFunction(FillRowMethodName = …)`, `SqlUserDefinedAggregate(Format.…)`, `SqlUserDefinedType(…)` and `SqlMethod(IsMutator = …)` as `CustomAttributeData`, matched by full name and never instantiated.
 
 The tests reach this path with a real Framework-shaped assembly: `ClrFrameworkFixture` compiles its C# 7.3 source through Roslyn against the .NET Framework 4.8 reference assemblies the test project copies into `net48ref/`, the same source the probes registered on SQL Server.
-`ClrAssemblyFixture`'s emitted .NET-targeted assemblies cover the scalar binding and the static verification.
+`ClrAssemblyFixture` compiles its smaller assemblies for the scalar binding and the static verification the same way, and emits the ones the catalog refuses.
 
 ## Static verification
 
@@ -76,7 +90,7 @@ The tests reach this path with a real Framework-shaped assembly: `ClrFrameworkFi
 | Check | Error |
 | --- | --- |
 | Not a managed PE / not an assembly / not IL-only | **Msg 6544** — `… is malformed or not a pure .NET assembly. Unverifiable PE Header/native stub.` |
-| `AssemblyRef` outside the framework allow-list | **Msg 6503** — `Assembly '<lowercase identity>.' was not found in the SQL catalog.` |
+| `AssemblyRef` outside real's catalog (above) | **Msg 6503** — `Assembly '<lowercase identity>.' was not found in the SQL catalog.` |
 | P/Invoke declaration (`ImplMap` rows), SAFE only | **Msg 6218** — failed verification |
 | Reference to a denied type or namespace, SAFE only | **Msg 6218** — failed verification |
 | Mutable (non-`initonly`, non-`literal`) static field, SAFE only | **Msg 6211** |
@@ -85,7 +99,7 @@ The tests reach this path with a real Framework-shaped assembly: `ClrFrameworkFi
 
 The C# compiler's lambda cache — `<>c.<>9__0_0`, a static field it never marks `initonly` — is exempt from Msg 6211: real registers a SAFE assembly holding one (probed 2026-09-28).
 
-`EXTERNAL_ACCESS` and `UNSAFE` opt out of the API restrictions, matching real's permission ladder; the malformed / reference / MVID / duplicate-name checks apply at every permission set.
+The SAFE-only checks are the simulator's own: real registers a `SAFE` assembly referencing `System.IO.File` (probed 2026-10-07), so they refuse what real takes, as the host-trust rationale below accepts.
 
 The denylist is **type-level, not namespace-level**, for `System.IO` / `System.Reflection` / `System.Runtime.InteropServices`: every compiled assembly carries `System.Reflection.Assembly*Attribute` and `ComVisibleAttribute` type references from its own custom attributes, so denying those namespaces wholesale would reject ordinary assemblies — including `regex_clr.dll`.
 Whole-namespace prefixes are denied only where no attribute traffic exists (`System.Net`, `System.Reflection.Emit`, `System.Runtime.Loader`, `Microsoft.Win32`, `System.Diagnostics.Process`, `System.Security.Permissions`).
@@ -166,6 +180,8 @@ Msgs 6556 and 6558 are followed by **Msg 6597**; a parameter default is **Msg 10
 An aggregate lives among the schema's functions — one namespace, Msg 2714 on a clash — but answers only to `DROP AGGREGATE` (`DROP FUNCTION` is Msg 3705 either way round, a missing name Msg 3701 as `aggregate function`) and `EXEC` of it is **Msg 2809**.
 A call must be schema-qualified (a one-part name is Msg 195) and take the declared argument count (Msg 174); it may lead with `DISTINCT` or `ALL`, runs under `GROUP BY` and `HAVING` and in a window of `PARTITION BY` alone (an `ORDER BY` there is Msg 156), and obeys the ordinary aggregate binding rules (Msg 130, 147, 8120).
 Each group gets a fresh instance, `Init`, one `Accumulate` per row — NULLs included, with no Msg 8153 — and `Terminate`, which an empty input still reaches.
+A `Format.UserDefined` aggregate's state goes through its `Write` into a fresh instance's `Read` exactly once per group, just before `Terminate`, which runs on that instance — whatever the group's size, an empty one included, grouped or windowed, at any `MAXDOP` — so a field `Write` leaves out reaches `Terminate` at its default; `Merge` was never seen called (probed 2026-10-07 against SQL Server 2025).
+`OPTION (HASH GROUP)` over a `GROUP BY` computing a CLR aggregate is **Msg 8622** as the batch compiles; a scalar or windowed one takes it.
 
 ## User-defined types
 
@@ -290,13 +306,7 @@ The strong-named case is unprobed.
 
 ## Divergences
 
-- **Only .NET Framework-targeted assemblies load on real; the simulator accepts any framework target.**
-  Real resolves every `AssemblyRef` against a fixed catalog of .NET Framework assemblies and raises Msg 6503 for anything else — probe-confirmed for .NET 10 (`system.data.common, version=10.0.0.0`) *and* for .NET Standard 2.0 (`netstandard, version=2.0.0.0, culture=neutral, publickeytoken=cc7b13ffcd2ddd51`).
-  netstandard is not rejected for being new: the catalog simply has no `netstandard.dll`, so the reference fails before any IL is considered.
-  Authoring an assembly real will accept therefore still means targeting `net4x` — which is why `regex_clr.dll` is a Framework 2.0 binary that has never needed re-targeting.
-  The simulator runs on .NET, so all three resolve and the allow-list admits them.
-  This is the over-permissive direction, and it is what lets the tests emit a fixture assembly without a .NET Framework toolchain.
-- **`PERMISSION_SET` is recorded, not enforced at run time.** It selects which static checks run at registration; it cannot confine a loaded assembly (see above).
+- **A `SAFE` assembly isn't confined at run time.** The permission set selects which static checks run at registration; it cannot confine a loaded assembly (see above).
 - **A reported stack holds only the frames the simulator can see as the author's.**
   Real also shows its own internal frames — `SqlMetaData.Construct`, `System.Data.SqlServer.Internal.ClrLevelContext` — which have no counterpart, and the shim's public frames are named after its own members, which match Framework's only where the member is the one that throws.
 - **An exception .NET's base library raises shows only the author's frames, and some carry .NET's wording.**
@@ -305,8 +315,6 @@ The strong-named case is unprobed.
   Real's own marshalling frames (`SqlBytes.Write`, `XmlSerializer` internals) never show.
 - **A routine may set its thread's culture.**
   Real's `SAFE` host refuses both `CultureInfo.CurrentCulture` and `Thread.CurrentThread.CurrentCulture` assignments with a `SecurityException` (`Request for the permission of type 'System.Security.Permissions.SecurityPermission, mscorlib, …' failed.` at `System.Threading.Thread.set_CurrentCulture`, probed 2026-10-04 and 2026-10-06 against SQL Server 2025); here the assignment succeeds and lasts until the call returns, since .NET's setter offers no point to refuse it at.
-- **An aggregate's state never leaves memory.**
-  One instance accumulates each whole group, so `Merge` is never called and a `Format.UserDefined` aggregate's `Read` / `Write` never run; real may serialize state between rows, which an aggregate that loses a field in `Write` would show.
 - **A context-connection error's report shows the provider's public frames only.**
   Real's names `SqlConnection.OnError`, `SqlInternalConnectionSmi` and the rest of the in-process plumbing, which has no counterpart here.
 - **A command's result sets are read to the end when it runs**, so a routine that writes between two `Read` calls can't change what the reader returns, as it could on real.
@@ -325,7 +333,7 @@ The strong-named case is unprobed.
 - The `SqlUserDefinedAggregate` flags `IsNullIfEmpty` / `IsInvariantTo*` and `MaxByteSize` — read by real's optimizer and serializer, ignored here.
 - `INSERT` into a CLR table-valued function reports Msg 208 where real reports its "derived table is not updatable" error, a gap shared with the T-SQL kinds.
 - Plain-CLR parameter and return forms real also accepts (`string`, `int?`, `SqlChars`, `SqlBytes`) — only the `System.Data.SqlTypes` family binds, save a procedure's `int` / `int?` status.
-- `ALTER ASSEMBLY`, `CREATE ASSEMBLY … FROM '<path>'`, assembly `AUTHORIZATION`, `sp_add_trusted_assembly`, and assembly signing / `clr strict security` enforcement.
+- `ALTER ASSEMBLY`, `CREATE ASSEMBLY … FROM '<path>'`, assembly `AUTHORIZATION`, assembly signing (a signed assembly isn't trusted for its signature), `sp_add_trusted_assembly`'s `CONTROL SERVER` gate, and a reference to another assembly registered in the database (real resolves it by name, with `sys.assembly_references` and Msg 6589 on `DROP`; here it is Msg 6503).
 - BACPAC round-trip of `SqlAssembly` model elements.
 - Out-of-process execution.
   Measured cost of a cross-process round trip is ~56 µs versus ~0.12 µs for an in-process cached delegate — roughly 470× — and a child process is not a sandbox without per-OS restriction work (seccomp/namespaces, restricted tokens, `sandbox_init`), so it is only worth building together with that.

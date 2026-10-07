@@ -265,6 +265,7 @@ partial class Simulation
         var systemProc = systemProcName switch
         {
             null => null,
+            "sp_add_trusted_assembly" => InvokeSpAddTrustedAssembly(batch),
             "sp_addextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Add),
             "sp_addlinkedserver" => InvokeSpAddLinkedServer(batch),
             "sp_addlogin" => this.InvokeSpAddLogin(batch, calledAs),
@@ -303,6 +304,7 @@ partial class Simulation
             "sp_describe_undeclared_parameters" => this.InvokeSpDescribeUndeclaredParameters(batch),
             "sp_defaultdb" => this.InvokeSpDefaultDb(batch, calledAs),
             "sp_defaultlanguage" => this.InvokeSpDefaultLanguage(batch, calledAs),
+            "sp_drop_trusted_assembly" => InvokeSpDropTrustedAssembly(batch),
             "sp_dropextendedproperty" => InvokeSpExtendedProperty(batch, ExtendedPropertyOp.Drop),
             "sp_droplogin" => this.InvokeSpDropLogin(batch, calledAs),
             "sp_dropmessage" => InvokeSpDropMessage(batch, calledAs),

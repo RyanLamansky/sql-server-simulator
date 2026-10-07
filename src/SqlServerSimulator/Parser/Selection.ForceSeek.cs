@@ -53,16 +53,18 @@ partial class Selection
         List<BooleanExpression>? conjuncts = null;
         for (var i = 0; i < sources.Length; i++)
         {
+            if (sources[i].ForcedSeekThrough is { } through)
+            {
+                conjuncts ??= CollectConjuncts(excluders, joins);
+                if (through.ForceSeekColumns is not null && sources[i].BackingView is { } view)
+                    throw SimulatedSqlException.ForceSeekOnViewWithoutNoExpand(view.Name);
+                if (!BodySeeksAreFeasible(batch, sources[i], i, sources, conjuncts, soleSubqueryColumn))
+                    throw SimulatedSqlException.ForceSeekPlanInfeasible();
+                continue;
+            }
             if (sources[i] is not { BackingTable: { } table } source || (source.ForcedAccessPath is null && source.WrittenHints?.IndexArguments is null))
                 continue;
-            if (conjuncts is null)
-            {
-                conjuncts = [];
-                foreach (var excluder in excluders)
-                    excluder.CollectConjuncts(conjuncts);
-                foreach (var join in joins)
-                    join.OnPredicate?.CollectConjuncts(conjuncts);
-            }
+            conjuncts ??= CollectConjuncts(excluders, joins);
             if (HintsUnimpliedFilteredIndex(batch, source, i, sources, table, conjuncts))
                 throw SimulatedSqlException.ForceSeekPlanInfeasible();
             if (source.ForcedAccessPath is not { } hints)
@@ -87,21 +89,27 @@ partial class Selection
         }
     }
 
-    private static bool ForcedSeekIsFeasible(
-        BatchContext batch,
-        FromSource source,
-        int sourceIndex,
-        FromSource[] all,
-        HeapTable table,
-        TableHintInfo hints,
-        List<BooleanExpression> conjuncts,
-        Expression? soleSubqueryColumn)
+    private static List<BooleanExpression> CollectConjuncts(List<BooleanExpression> excluders, JoinSpec[] joins)
+    {
+        var conjuncts = new List<BooleanExpression>();
+        foreach (var excluder in excluders)
+            excluder.CollectConjuncts(conjuncts);
+        foreach (var join in joins)
+            join.OnPredicate?.CollectConjuncts(conjuncts);
+        return conjuncts;
+    }
+
+    /// <summary>
+    /// The stored ordinals leading a key of <paramref name="table"/> that
+    /// <paramref name="hints"/> leave a seek — every enabled one unless an
+    /// index is named. A disabled index seeks nothing (probed 2026-10-05
+    /// against SQL Server 2025).
+    /// </summary>
+    private static HashSet<int> SeekableLeads(BatchContext batch, HeapTable table, TableHintInfo hints)
     {
         var leads = new HashSet<int>();
         foreach (var owner in EnumerateKeyOwners(table))
         {
-            // A disabled index seeks nothing (probed 2026-10-05 against SQL
-            // Server 2025).
             (string Name, int[] Ordinals, int IndexId, bool Disabled) described = owner switch
             {
                 KeyConstraint key => (key.Name, key.StorageOrdinals, key.IndexId, key.IsDisabled),
@@ -112,6 +120,143 @@ partial class Selection
             if (!disabled && ordinals.Length != 0 && ordinals[0] >= 0 && NamedByIndexHint(batch, hints, name, indexId))
                 _ = leads.Add(ordinals[0]);
         }
+        return leads;
+    }
+
+    /// <summary>
+    /// Whether a <c>FORCESEEK</c> on a view or CTE reference can be honored:
+    /// real carries it to every table the body reads, at any depth of views,
+    /// CTEs, derived tables and <c>UNION</c> branches, and each must seek on a
+    /// predicate of its own block — a join's only once the table on its other
+    /// side seeks — or on one the reading query writes on a column the body
+    /// passes the key through as (probed 2026-10-07 against SQL Server 2025).
+    /// A body whose shape went unrecorded is given the benefit of the doubt.
+    /// </summary>
+    private static bool BodySeeksAreFeasible(
+        BatchContext batch,
+        FromSource source,
+        int sourceIndex,
+        FromSource[] all,
+        List<BooleanExpression> conjuncts,
+        Expression? soleSubqueryColumn)
+    {
+        return NestedBody(source) is not { } body || ShapeCanSeek(batch, body, source.ForcedSeekThrough!.Value, ReaderSeeks);
+
+        bool ReaderSeeks(HashSet<int> columns)
+        {
+            var probe = new ForceSeekProbe(batch, source, sourceIndex, all, columns);
+            return (soleSubqueryColumn is not null && probe.IsSeekColumn(soleSubqueryColumn))
+                || conjuncts.Exists(conjunct => conjunct.OffersSeek(probe, negated: false));
+        }
+    }
+
+    /// <summary>The shape of the query body a view, CTE or derived-table source reads, or null for any other source or an unrecorded one.</summary>
+    private static SeekBodyShape? NestedBody(FromSource source) =>
+        source.BodySeekShape ?? (source.LateralIsQueryBody ? source.LateralPlan?.SeekShape : null);
+
+    /// <summary>
+    /// Whether every table <paramref name="shape"/> reads can seek, given
+    /// <paramref name="readerSeeks"/>, which answers whether the reading query
+    /// seeks on one of a set of the shape's output columns. A <c>UNION</c>
+    /// needs each branch to.
+    /// </summary>
+    private static bool ShapeCanSeek(BatchContext batch, SeekBodyShape shape, TableHintInfo hints, Func<HashSet<int>, bool> readerSeeks)
+    {
+        if (shape.Branches is { } branches)
+            return Array.TrueForAll(branches, branch => ShapeCanSeek(batch, branch, hints, readerSeeks));
+        var sources = shape.Sources;
+        var conjuncts = CollectConjuncts(shape.Filters, shape.Joins);
+        var leads = new HashSet<int>?[sources.Length];
+        var seeking = new bool[sources.Length];
+        var remaining = 0;
+        for (var i = 0; i < sources.Length; i++)
+        {
+            if (sources[i].BackingTable is { } table)
+            {
+                // A heap or a table with no enabled key has nothing to seek.
+                table.SettleIndexIds();
+                leads[i] = SeekableLeads(batch, table, hints);
+                if (leads[i]!.Count == 0)
+                    return false;
+                remaining++;
+            }
+            else if (NestedBody(sources[i]) is not null)
+            {
+                remaining++;
+            }
+            else
+            {
+                seeking[i] = true;
+            }
+        }
+
+        // A join's predicate seeks one side only once the other side's rows
+        // come from a seek of their own, so seeking spreads from the tables
+        // a constant or the reading query anchors.
+        bool progressed;
+        do
+        {
+            progressed = false;
+            for (var i = 0; i < sources.Length; i++)
+            {
+                if (seeking[i])
+                    continue;
+                var source = i;
+                if (leads[i] is { } own ? ColumnsSeek(source, own) : ShapeCanSeek(batch, NestedBody(sources[i])!, hints, columns => ColumnsSeek(source, columns)))
+                {
+                    seeking[i] = true;
+                    progressed = true;
+                    remaining--;
+                }
+            }
+        }
+        while (progressed && remaining > 0);
+        return remaining == 0;
+
+        bool ColumnsSeek(int sourceIndex, HashSet<int> columns)
+        {
+            var probe = new ForceSeekProbe(batch, sources[sourceIndex], sourceIndex, sources, columns);
+            foreach (var conjunct in conjuncts)
+            {
+                if (conjunct.OffersSeek(probe, negated: false) && ReadsOnlySeekingSources(conjunct, sourceIndex))
+                    return true;
+            }
+            var outward = new HashSet<int>();
+            for (var p = 0; p < shape.Projections.Length; p++)
+            {
+                if (shape.Projections[p] is { } projection && probe.IsSeekColumn(projection))
+                    _ = outward.Add(p);
+            }
+            return outward.Count > 0 && readerSeeks(outward);
+        }
+
+        bool ReadsOnlySeekingSources(BooleanExpression conjunct, int sourceIndex)
+        {
+            var only = true;
+            conjunct.Walk((_, node) =>
+            {
+                if (only && node.Column is { } column)
+                {
+                    var read = FindSourceColumnOfAnyKind(sources, column).SourceIndex;
+                    only = read < 0 || read == sourceIndex || seeking[read];
+                }
+                return only;
+            });
+            return only;
+        }
+    }
+
+    private static bool ForcedSeekIsFeasible(
+        BatchContext batch,
+        FromSource source,
+        int sourceIndex,
+        FromSource[] all,
+        HeapTable table,
+        TableHintInfo hints,
+        List<BooleanExpression> conjuncts,
+        Expression? soleSubqueryColumn)
+    {
+        var leads = SeekableLeads(batch, table, hints);
         if (leads.Count == 0)
             return false;
 
@@ -213,6 +358,75 @@ partial class Selection
         }
         return false;
     }
+
+    /// <summary>
+    /// What a query block hands a <c>FORCESEEK</c> on a view or CTE reading it
+    /// (<see cref="Selection.SeekShape"/>): the block's sources and joins, its
+    /// WHERE and HAVING conjunct roots, and the select-list expressions a
+    /// predicate outside can reach, whose ordinals are the reading source's
+    /// columns.
+    /// </summary>
+    internal sealed class SeekBodyShape
+    {
+        public readonly FromSource[] Sources;
+        public readonly JoinSpec[] Joins;
+        public readonly List<BooleanExpression> Filters;
+
+        /// <summary>The select list by ordinal, null where a predicate outside can't reach the column.</summary>
+        public readonly Expression?[] Projections;
+
+        /// <summary>A <c>UNION</c>'s two branches, the shape's other fields then empty; null for a query block.</summary>
+        public readonly SeekBodyShape[]? Branches;
+
+        public SeekBodyShape(FromSource[] sources, JoinSpec[] joins, List<BooleanExpression> filters, Expression?[] projections)
+        {
+            this.Sources = sources;
+            this.Joins = joins;
+            this.Filters = filters;
+            this.Projections = projections;
+        }
+
+        public SeekBodyShape(SeekBodyShape[] branches)
+        {
+            this.Sources = [];
+            this.Joins = [];
+            this.Filters = [];
+            this.Projections = [];
+            this.Branches = branches;
+        }
+    }
+
+    /// <summary>
+    /// The select list a predicate outside the block can reach: none past a
+    /// row limit, and past a window function only a column every window
+    /// partitions by (probed 2026-10-07 against SQL Server 2025: a view's
+    /// <c>ROW_NUMBER() OVER (PARTITION BY id …)</c> passes <c>id = 1</c> to
+    /// the seek, an <c>OVER ()</c> passes nothing).
+    /// </summary>
+    private static Expression?[] SeekReachableProjections(Collation collation, List<Expression> expressions, List<Expressions.WindowExpression> windows, bool rowLimited)
+    {
+        if (rowLimited)
+            return [];
+        var reachable = new Expression?[expressions.Count];
+        for (var p = 0; p < reachable.Length; p++)
+        {
+            var expression = expressions[p] is Expressions.NamedExpression named ? named.Inner : expressions[p];
+            if (windows.TrueForAll(window => expression is Expressions.Reference column
+                && Array.Exists(window.PartitionBy, key => key is Expressions.Reference partition && collation.Equals(partition.ReferencedName.ToString(), column.ReferencedName.ToString()))))
+            {
+                reachable[p] = expressions[p];
+            }
+        }
+        return reachable;
+    }
+
+    /// <summary>
+    /// This query's <see cref="SeekBodyShape"/>, across which a view, CTE or
+    /// derived-table reference's <c>FORCESEEK</c> is judged; null for a block
+    /// reading no source, and for a set operation other than a <c>UNION</c>
+    /// of recorded branches, which is left unjudged.
+    /// </summary>
+    internal SeekBodyShape? SeekShape;
 
     /// <summary>
     /// What <see cref="BooleanExpression.OffersSeek"/> asks of one hinted
